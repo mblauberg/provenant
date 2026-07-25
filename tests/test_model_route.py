@@ -609,6 +609,64 @@ def test_malformed_override_in_one_family_does_not_reject_another_family(
     assert route["status"] == "ok"
 
 
+def test_fixed_family_adapter_fails_closed_on_an_alias_route(
+    tmp_path, monkeypatch, capsys
+):
+    """The fixed-family guard is what covers alias routes, which name no model.
+
+    Mutation testing found this guard unpinned: deleting it left every test
+    green. An alias route never reaches the model-family validation, because
+    there is no model to infer a family from, so only this guard stands between
+    a malformed catalogue and a routed alias.
+    """
+    router = load_router()
+    catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    for tier in catalog["families"]["anthropic"]["risk_tier_overrides"].values():
+        tier["models"] = "fable"
+    catalog_path = tmp_path / "model-routing.json"
+    catalog_path.write_text(json.dumps(catalog))
+    monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
+
+    result = router.main([
+        "resolve", "--adapter", "claude", "--alias", "flagship", "--role", "worker",
+    ])
+
+    route = json.loads(capsys.readouterr().out)
+    assert result == 2
+    assert route["status"] == "risk_tier_config_invalid"
+
+
+@pytest.mark.parametrize("adapter", ["cursor", "agy", "opencode"])
+def test_malformed_override_fails_closed_without_a_fixed_model_family(
+    tmp_path, monkeypatch, capsys, adapter
+):
+    """The occupant stays reserved for adapters that declare no fixed family.
+
+    The catalogue validation keyed off the adapter's ``fixed_model_family`` while
+    the reservation scan keys off the family inferred from the requested model.
+    An adapter without a fixed family therefore validated nothing at all, yet
+    still scanned the model's own family, so a malformed ``models`` value
+    unreserved the occupant and resolved it at exit 0.
+    """
+    router = load_router()
+    catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    for tier in catalog["families"]["anthropic"]["risk_tier_overrides"].values():
+        tier["models"] = "fable"
+    catalog_path = tmp_path / "model-routing.json"
+    catalog_path.write_text(json.dumps(catalog))
+    monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
+
+    result = router.main([
+        "resolve", "--adapter", adapter, "--model", "fable",
+        "--alias", "flagship", "--role", "worker",
+    ])
+
+    route = json.loads(capsys.readouterr().out)
+    assert result == 2
+    assert route["status"] == "risk_tier_config_invalid"
+    assert route.get("resolved_model") is None
+
+
 def test_openai_aliases_resolve_to_account_default_dispatch():
     # The Codex account is a ChatGPT subscription: explicit model ids are
     # rejected by the runtime (HTTP 400), so codex routes dispatch on the

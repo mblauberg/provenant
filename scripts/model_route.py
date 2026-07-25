@@ -234,6 +234,25 @@ def risk_tier_overrides_are_valid(
     return True
 
 
+def override_scan_families(model: str, catalog: dict[str, Any]) -> dict[str, Any]:
+    """The families whose risk-tier overrides can reserve an occupant for ``model``.
+
+    The reservation scan and the catalogue validation pass must agree on this set.
+    While they disagreed, a malformed override in a family the scan consulted but
+    the validation skipped silently unreserved its occupant: an adapter with no
+    ``fixed_model_family`` skipped validation entirely, yet still scanned the
+    model's own family and routed against its broken overrides.
+    """
+    families = catalog.get("families", {})
+    if not isinstance(families, dict):
+        return {}
+    family = infer_family(model, catalog) if model else None
+    configured = families.get(family) if family else None
+    if isinstance(configured, dict) and configured:
+        return {family: configured}
+    return families
+
+
 def emit(record: dict[str, Any], code: int) -> int:
     print(json.dumps(record, sort_keys=True))
     return code
@@ -586,12 +605,7 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
                 },
                 1,
             )
-        configured_family = catalog.get("families", {}).get(family, {})
-        override_families = (
-            (configured_family,)
-            if isinstance(configured_family, dict) and configured_family
-            else catalog.get("families", {}).values()
-        )
+        override_families = tuple(override_scan_families(model, catalog).values())
         configured_override_models = [
             candidate
             for override_family in override_families
@@ -918,6 +932,18 @@ def main(argv: list[str] | None = None) -> int:
             adapter_family, catalog.get("families", {}).get(adapter_family, {}), catalog
         ):
             return reject("risk_tier_config_invalid", alias=args.alias)
+        # Validate exactly the families the reservation scan will consult, and only
+        # when there is a model for it to scan against. An adapter without a fixed
+        # model family validates nothing above, so without this a malformed
+        # override was routed against instead of failing closed.
+        if args.model:
+            for scanned_family, scanned_config in override_scan_families(
+                args.model, catalog
+            ).items():
+                if not risk_tier_overrides_are_valid(
+                    scanned_family, scanned_config, catalog
+                ):
+                    return reject("risk_tier_config_invalid", alias=args.alias)
         if args.task_class:
             policy = TASK_CLASS_POLICY.get(args.task_class)
             route = catalog.get("task_class_routes", {}).get(args.task_class)
