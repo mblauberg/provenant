@@ -472,10 +472,21 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
                 1,
             )
         model = args.model
+        family = infer_family(model, catalog)
+        identity_source = "model-pattern"
+        if not family:
+            return emit_route(
+                {
+                    **base,
+                    "status": "model_family_unknown",
+                    "endpoint_provider": endpoint,
+                    "resolved_model": model,
+                },
+                1,
+            )
+        configured_family = catalog.get("families", {}).get(family, {})
         configured_override_models = [
             candidate
-            for configured_family in catalog.get("families", {}).values()
-            if isinstance(configured_family, dict)
             for configured_overrides in (configured_family.get("risk_tier_overrides"),)
             if isinstance(configured_overrides, dict)
             for configured_override in configured_overrides.values()
@@ -489,24 +500,12 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
             model_has_alias(model, candidate) for candidate in configured_override_models
         )
         if is_risk_override_model and not args.risk_override:
-            return emit_route({**base, "status": "fable_requires_risk_tier_override"}, 1)
+            return emit_route({**base, "status": "risk_tier_override_required"}, 1)
         selected_override_model = (
             args.risk_override.get("models", [""])[0] if args.risk_override else ""
         )
         if args.risk_override and not model_has_alias(model, selected_override_model):
             return emit_route({**base, "status": "risk_tier_model_mismatch"}, 1)
-        family = infer_family(model, catalog)
-        identity_source = "model-pattern"
-        if not family:
-            return emit_route(
-                {
-                    **base,
-                    "status": "model_family_unknown",
-                    "endpoint_provider": endpoint,
-                    "resolved_model": model,
-                },
-                1,
-            )
         if fixed_family and family != fixed_family:
             return emit_route(
                 {
@@ -796,6 +795,53 @@ def main(argv: list[str] | None = None) -> int:
 
         args.task_class_effort = ""
         args.risk_override = {}
+        for family_config in catalog.get("families", {}).values():
+            if not isinstance(family_config, dict):
+                continue
+            aliases = family_config.get("aliases", {})
+            alias_candidates = {
+                candidate
+                for candidates in (
+                    aliases.values() if isinstance(aliases, dict) else ()
+                )
+                if isinstance(candidates, list)
+                for candidate in candidates
+                if isinstance(candidate, str)
+            }
+            role_overrides = family_config.get("role_overrides", {})
+            alias_candidates.update(
+                candidate
+                for role_aliases in (
+                    role_overrides.values()
+                    if isinstance(role_overrides, dict)
+                    else ()
+                )
+                if isinstance(role_aliases, dict)
+                for candidates in role_aliases.values()
+                if isinstance(candidates, list)
+                for candidate in candidates
+                if isinstance(candidate, str)
+            )
+            overrides = family_config.get("risk_tier_overrides", {})
+            if not isinstance(overrides, dict):
+                continue
+            for override in overrides.values():
+                if not isinstance(override, dict):
+                    continue
+                models = override.get("models")
+                if (
+                    isinstance(models, list)
+                    and len(models) == 1
+                    and isinstance(models[0], str)
+                    and (
+                        models[0] in ALIAS_ORDER
+                        or any(
+                            model_has_alias(candidate, models[0])
+                            for candidate in alias_candidates
+                        )
+                    )
+                ):
+                    return reject("risk_tier_config_invalid", alias=args.alias)
         if args.task_class and args.risk_tier:
             return reject("route_input_conflict")
         if bool(args.alias) == bool(args.task_class):
@@ -854,7 +900,12 @@ def main(argv: list[str] | None = None) -> int:
                 or EFFORT_ORDER[default_effort] > EFFORT_ORDER[maximum_effort]
                 or not isinstance(roles, list)
                 or len(roles) != 2
-                or any(not isinstance(role, str) or not role.strip() for role in roles)
+                or any(
+                    not isinstance(role, str)
+                    or not role.strip()
+                    or role != role.strip()
+                    for role in roles
+                )
                 or len(set(roles)) != 2
                 or not isinstance(alias, str)
                 or alias not in ALIAS_ORDER
@@ -862,6 +913,7 @@ def main(argv: list[str] | None = None) -> int:
                 or len(models) != 1
                 or not isinstance(models[0], str)
                 or not models[0].strip()
+                or models[0] != models[0].strip()
             ):
                 return reject("risk_tier_config_invalid", alias=args.alias)
             if args.role not in roles:
