@@ -328,6 +328,8 @@ for a vendor. Opus is the default Claude flagship; Fable is reserved for an
 explicit `crucial`-tier or terminal synthesis/adjudication override. GPT-5.6 supports
 `ultra` where runtime discovery proves it. Model catalogues are dated caches,
 not assertions about current availability.
+The Claude capability probe derives its model from the adapter family's catalogue
+aliases; a task class may override it with a valid `capability_probe_alias`.
 
 ## Review as a council, not a vote
 

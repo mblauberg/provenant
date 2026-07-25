@@ -187,6 +187,40 @@ jobs:
         uses: ./.github/actions/setup-node-workspace
       - name: Build workspace in dependency order
         run: npm run build
+      - name: Assert deterministic adapter build artifacts
+        run: |
+          comparison_root="$(mktemp -d)"
+          npx tsc --build runtime/agent-fabric/tsconfig.build.json --force
+          cp -R runtime/agent-fabric/dist/adapters "$comparison_root/first"
+          npx tsc --build runtime/agent-fabric/tsconfig.build.json --force
+          diff -qr "$comparison_root/first" runtime/agent-fabric/dist/adapters
+          echo "Adapter build artifacts are byte-identical across two forced builds."
+      - name: Verify adapter artifact digest agreement
+        run: |
+          set -euo pipefail
+          node --import tsx runtime/agent-fabric/scripts/verify-primary-compatibility.ts \
+            --compatibility-only
+
+          mismatch_root="$(mktemp -d)"
+          mkdir -p "$mismatch_root/config"
+          mkdir -p "$mismatch_root/node_modules/@anthropic-ai/claude-agent-sdk"
+          cp config/adapter-compatibility.yaml "$mismatch_root/config/adapter-compatibility.yaml"
+          cp node_modules/@anthropic-ai/claude-agent-sdk/sdk.mjs \
+            "$mismatch_root/node_modules/@anthropic-ai/claude-agent-sdk/sdk.mjs"
+          printf '\n// deliberate CI digest mismatch\n' >> \
+            "$mismatch_root/node_modules/@anthropic-ai/claude-agent-sdk/sdk.mjs"
+
+          if mismatch_output="$(
+            node --import tsx runtime/agent-fabric/scripts/verify-primary-compatibility.ts \
+              --compatibility-only \
+              --compatibility "$mismatch_root/config/adapter-compatibility.yaml" 2>&1
+          )"; then
+            echo "Seeded adapter digest mismatch unexpectedly passed."
+            exit 1
+          fi
+          printf '%s\n' "$mismatch_output"
+          printf '%s\n' "$mismatch_output" | grep -Fq '"code":"ADAPTER_HASH_MISMATCH"'
+          echo "Seeded adapter digest mismatch failed with ADAPTER_HASH_MISMATCH."
       - name: Run protocol tests
         run: npm run test --workspace=@local/agent-fabric-protocol
       - name: Run fabric typecheck, build and tests

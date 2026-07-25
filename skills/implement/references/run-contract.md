@@ -47,7 +47,9 @@ production promotion remain separate gates.
 
 For a pull-request delivery, retain the complete ignored run directory until
 the merge commit and its `ci-status` check exist. Copy that directory into the
-synced primary checkout before removing the implementation worktree, then run
+synced primary checkout before pruning the implementation worktree and its
+merged branch ([post-merge pruning](../../../docs/worktrees.md#post-merge-pruning)
+— retention wins, so copy first, prune second), then run
 `scripts/bind_merged_delivery.py` there with the pre-existing typed exact-head
 review artifacts. The binder reads PR and `ci-status` truth through the
 authenticated GitHub API, holds an exclusive receipt lock, keeps the receipt

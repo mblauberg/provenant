@@ -12,7 +12,7 @@ import sys
 from typing import Any
 
 
-EFFORTS = {"low", "medium", "high", "xhigh", "max", "ultra"}
+EFFORTS = {"low", "medium", "high", "xhigh", "max"}
 
 
 def load_json(raw: str) -> Any:

@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { writeFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { promisify } from "node:util";
 
@@ -38,11 +38,11 @@ function nonEmptyString(record: Record<string, unknown>, key: string): boolean {
 
 const aliasRank = new Map([["scout", 0], ["workhorse", 1], ["flagship", 2]]);
 const effortRank = new Map([["low", 0], ["medium", 1], ["high", 2], ["xhigh", 3], ["max", 4], ["ultra", 5]]);
-const taskClassPolicy = new Map([
-  ["mechanical", { minimumAlias: "scout", minimumEffort: "low", role: "worker", claudeAlias: "haiku" }],
-  ["legwork", { minimumAlias: "workhorse", minimumEffort: "medium", role: "worker", claudeAlias: "sonnet" }],
-  ["critical-review", { minimumAlias: "flagship", minimumEffort: "high", role: "critical-review", claudeAlias: "opus" }],
-  ["orchestration", { minimumAlias: "flagship", minimumEffort: "high", role: "orchestrator", claudeAlias: "fable" }],
+export const taskClassPolicy = new Map([
+  ["mechanical", { minimumAlias: "scout", minimumEffort: "low", role: "worker" }],
+  ["legwork", { minimumAlias: "workhorse", minimumEffort: "medium", role: "worker" }],
+  ["critical-review", { minimumAlias: "flagship", minimumEffort: "high", role: "critical-review" }],
+  ["orchestration", { minimumAlias: "flagship", minimumEffort: "high", role: "orchestrator" }],
 ]);
 
 function isValidReceipt(receipt: Record<string, unknown>, request: ModelRouteRequest): boolean {
@@ -120,13 +120,58 @@ export async function resolveModelRouteReceipt(input: {
   if (input.request.adapter === "claude" && input.request.taskClass !== undefined && capabilitiesFile === undefined) {
     const policy = taskClassPolicy.get(input.request.taskClass);
     if (policy !== undefined) {
+      const cataloguePath = resolve(dirname(input.routerPath), "../config/model-routing.json");
+      let catalogue: unknown;
+      try {
+        catalogue = JSON.parse(await readFile(cataloguePath, "utf8"));
+      } catch (error: unknown) {
+        throw new TypeError("Claude capability probe requires a readable model routing catalogue", { cause: error });
+      }
+      const adapters = isRecord(catalogue) && isRecord(catalogue.adapters) ? catalogue.adapters : undefined;
+      const adapter = adapters?.[input.request.adapter];
+      const fixedFamily = isRecord(adapter) ? adapter.fixed_model_family : undefined;
+      const taskClassRoutes = isRecord(catalogue) && isRecord(catalogue.task_class_routes)
+        ? catalogue.task_class_routes
+        : undefined;
+      const route = taskClassRoutes?.[input.request.taskClass];
+      const routeAlias = isRecord(route) ? route.alias : undefined;
+      const families = isRecord(catalogue) && isRecord(catalogue.families) ? catalogue.families : undefined;
+      const family = typeof fixedFamily === "string" ? families?.[fixedFamily] : undefined;
+      const aliases = isRecord(family) && isRecord(family.aliases) ? family.aliases : undefined;
+      if (
+        typeof fixedFamily !== "string" || fixedFamily.trim().length === 0 ||
+        !isRecord(route) || typeof routeAlias !== "string" || routeAlias.trim().length === 0 ||
+        !isRecord(family) || aliases === undefined
+      ) {
+        throw new TypeError("model routing catalogue does not provide a valid Claude capability probe alias");
+      }
+      const candidates = typeof routeAlias === "string" ? aliases?.[routeAlias] : undefined;
+      const configuredProbeAlias = route.capability_probe_alias;
+      let probeAlias: unknown;
+      if (configuredProbeAlias !== undefined) {
+        const knownFamilyAlias = typeof configuredProbeAlias === "string" &&
+          configuredProbeAlias.trim().length > 0 &&
+          aliases !== undefined &&
+          Object.values(aliases).some(
+            (aliasCandidates) => Array.isArray(aliasCandidates) && aliasCandidates.includes(configuredProbeAlias),
+          );
+        if (!knownFamilyAlias) {
+          throw new TypeError("model routing catalogue does not provide a valid Claude capability probe alias");
+        }
+        probeAlias = configuredProbeAlias;
+      } else {
+        probeAlias = Array.isArray(candidates) ? candidates[0] : undefined;
+      }
+      if (typeof probeAlias !== "string" || probeAlias.trim().length === 0) {
+        throw new TypeError("model routing catalogue does not provide a valid Claude capability probe alias");
+      }
       capabilitiesFile = `${input.receiptPath}.claude-capabilities.json`;
       const producerPath = input.testClaudeCapabilitiesPath ?? resolve(
         dirname(input.routerPath), "../skills/orchestrate/scripts/claude_capabilities.py",
       );
       await execFileAsync(producerPath, [
         "--out", capabilitiesFile,
-        "--alias", policy.claudeAlias,
+        "--alias", probeAlias,
         "--effort", policy.minimumEffort,
       ], { encoding: "utf8", timeout: 40_000, maxBuffer: 1024 * 1024 });
     }

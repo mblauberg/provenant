@@ -85,3 +85,19 @@ def test_subscription_canary_rejects_unproven_or_ambiguous_results(tmp_path, kwa
         "--alias", "opus", "--effort", "medium",
     ]) == 1
     assert not output.exists()
+
+
+def test_ultra_effort_is_rejected_before_claude_subprocess(monkeypatch, tmp_path):
+    module = load_module()
+
+    def fail_subprocess(*args, **kwargs):
+        pytest.fail("claude subprocess should not be called")
+
+    monkeypatch.setattr(module.subprocess, "run", fail_subprocess)
+    with pytest.raises(SystemExit) as exc_info:
+        module.main([
+            "--out", str(tmp_path / "capabilities.json"),
+            "--alias", "opus", "--effort", "ultra",
+        ])
+
+    assert exc_info.value.code != 0
