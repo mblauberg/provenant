@@ -937,6 +937,11 @@ def main(argv: list[str] | None = None) -> int:
         # model family validates nothing above, so without this a malformed
         # override was routed against instead of failing closed.
         if args.model:
+            # A families table that is not a mapping reserves nothing, so the scan
+            # would find no occupant and route the reserved model. Reject instead:
+            # an unusable catalogue must fail closed, never fall open.
+            if not isinstance(catalog.get("families"), dict):
+                return reject("risk_tier_config_invalid", alias=args.alias)
             for scanned_family, scanned_config in override_scan_families(
                 args.model, catalog
             ).items():

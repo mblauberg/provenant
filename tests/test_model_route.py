@@ -609,6 +609,37 @@ def test_malformed_override_in_one_family_does_not_reject_another_family(
     assert route["status"] == "ok"
 
 
+@pytest.mark.parametrize(
+    "families", [None, [], "anthropic", {"anthropic": None}], ids=str
+)
+def test_unusable_families_table_fails_closed(
+    tmp_path, monkeypatch, capsys, families
+):
+    """An unusable families table must reject, not route the reserved occupant.
+
+    The reservation derives entirely from the families table, so a table that is
+    not a usable mapping reserves nothing and the occupant routes freely. That is
+    fail-open on malformed configuration, the same class of defect this issue
+    exists to close, so the catalogue is rejected instead.
+    """
+    router = load_router()
+    catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    catalog["families"] = families
+    catalog_path = tmp_path / "model-routing.json"
+    catalog_path.write_text(json.dumps(catalog))
+    monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
+
+    result = router.main([
+        "resolve", "--adapter", "cursor", "--model", "fable",
+        "--alias", "flagship", "--role", "worker", "--adapter-gate", "direct-cli",
+    ])
+
+    route = json.loads(capsys.readouterr().out)
+    assert result == 2
+    assert route["status"] == "risk_tier_config_invalid"
+    assert route.get("resolved_model") is None
+
+
 def test_fixed_family_adapter_fails_closed_on_an_alias_route(
     tmp_path, monkeypatch, capsys
 ):
