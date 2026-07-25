@@ -485,9 +485,16 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
                 1,
             )
         configured_family = catalog.get("families", {}).get(family, {})
+        override_families = (
+            (configured_family,)
+            if isinstance(configured_family, dict) and configured_family
+            else catalog.get("families", {}).values()
+        )
         configured_override_models = [
             candidate
-            for configured_overrides in (configured_family.get("risk_tier_overrides"),)
+            for override_family in override_families
+            if isinstance(override_family, dict)
+            for configured_overrides in (override_family.get("risk_tier_overrides"),)
             if isinstance(configured_overrides, dict)
             for configured_override in configured_overrides.values()
             if isinstance(configured_override, dict)
@@ -795,7 +802,20 @@ def main(argv: list[str] | None = None) -> int:
 
         args.task_class_effort = ""
         args.risk_override = {}
-        for family_config in catalog.get("families", {}).values():
+        if args.task_class and args.risk_tier:
+            return reject("route_input_conflict")
+        if bool(args.alias) == bool(args.task_class):
+            return reject("route_input_conflict" if args.alias else "route_input_missing")
+        adapter_config = catalog.get("adapters", {}).get(args.adapter, {})
+        adapter_family = (
+            adapter_config.get("fixed_model_family")
+            if isinstance(adapter_config, dict)
+            else None
+        )
+        family_config = catalog.get("families", {}).get(adapter_family, {})
+        for family, family_config in (
+            ((adapter_family, family_config),) if adapter_family else ()
+        ):
             if not isinstance(family_config, dict):
                 continue
             aliases = family_config.get("aliases", {})
@@ -822,6 +842,17 @@ def main(argv: list[str] | None = None) -> int:
                 for candidate in candidates
                 if isinstance(candidate, str)
             )
+            adapter_prefixes = {
+                adapter_name
+                for adapter_name, adapter_config in catalog.get("adapters", {}).items()
+                if isinstance(adapter_config, dict)
+                and adapter_config.get("fixed_model_family") == family
+            }
+            alias_candidates.update(
+                f"{adapter_prefix}-{candidate}"
+                for adapter_prefix in adapter_prefixes
+                for candidate in tuple(alias_candidates)
+            )
             overrides = family_config.get("risk_tier_overrides", {})
             if not isinstance(overrides, dict):
                 continue
@@ -835,17 +866,15 @@ def main(argv: list[str] | None = None) -> int:
                     and isinstance(models[0], str)
                     and (
                         models[0] in ALIAS_ORDER
+                        or infer_family(models[0], catalog) is None
                         or any(
                             model_has_alias(candidate, models[0])
+                            or model_has_alias(models[0], candidate)
                             for candidate in alias_candidates
                         )
                     )
                 ):
                     return reject("risk_tier_config_invalid", alias=args.alias)
-        if args.task_class and args.risk_tier:
-            return reject("route_input_conflict")
-        if bool(args.alias) == bool(args.task_class):
-            return reject("route_input_conflict" if args.alias else "route_input_missing")
         if args.task_class:
             policy = TASK_CLASS_POLICY.get(args.task_class)
             route = catalog.get("task_class_routes", {}).get(args.task_class)

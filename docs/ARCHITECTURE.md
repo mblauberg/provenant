@@ -325,9 +325,9 @@ The router separates policy from execution:
 
 `flagship`, `workhorse` and `scout` are capability aliases, not permanent jobs
 for a vendor. Opus is the default Claude flagship. The catalogue may configure
-one bounded override occupant per risk tier, each available only through
-explicit selection and within that tier's configured roles, alias and effort
-ceiling; Fable currently occupies both configured tiers. GPT-5.6 supports
+one bounded override occupant per risk tier. Each configured occupant is
+reserved for that tier's roles, alias and effort ceiling; Fable currently
+occupies both configured tiers. GPT-5.6 supports
 `ultra` where runtime discovery proves it. Model catalogues are dated caches,
 not assertions about current availability.
 
