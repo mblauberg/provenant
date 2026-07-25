@@ -34,7 +34,7 @@
           "adapterClass": "equal-primary",
           "adapterId": "claude-agent-sdk",
           "providerFamily": "anthropic",
-          "model": "claude-opus-4-8",
+          "model": "claude-opus-5",
           "requiredActualEndpointProvider": "anthropic",
           "requestedEffort": "xhigh",
           "resolvedEffort": {
@@ -109,7 +109,7 @@
           "adapterClass": "primary-native",
           "adapterId": "claude-agent-sdk",
           "providerFamily": "anthropic",
-          "model": "claude-opus-4-8",
+          "model": "claude-opus-5",
           "requiredActualEndpointProvider": "anthropic",
           "requestedEffort": "xhigh",
           "resolvedEffort": {
