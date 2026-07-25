@@ -363,10 +363,14 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
     if args.task_class:
         base.update({"task_class": args.task_class, "route_source": "task-class"})
     elif args.risk_tier:
+        override_models = args.risk_override.get("models", [])
+        override_roles = args.risk_override.get("roles", [])
         base.update({
             "risk_tier": args.risk_tier,
             "route_source": "risk-tier-override",
-            "policy_override": f"{args.risk_tier}-fable-synthesis-adjudication",
+            "policy_override": (
+                f"{args.risk_tier}-{override_models[0]}-{'-'.join(override_roles)}"
+            ),
         })
     if not adapter:
         return emit({**base, "status": "unknown_adapter"}, 2)
@@ -468,10 +472,28 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
                 1,
             )
         model = args.model
-        is_fable = model_has_alias(model, "fable")
-        if is_fable and not args.risk_override:
+        configured_override_models = [
+            candidate
+            for configured_family in catalog.get("families", {}).values()
+            if isinstance(configured_family, dict)
+            for configured_overrides in (configured_family.get("risk_tier_overrides"),)
+            if isinstance(configured_overrides, dict)
+            for configured_override in configured_overrides.values()
+            if isinstance(configured_override, dict)
+            for candidates in (configured_override.get("models"),)
+            if isinstance(candidates, list)
+            for candidate in candidates
+            if isinstance(candidate, str) and candidate.strip()
+        ]
+        is_risk_override_model = any(
+            model_has_alias(model, candidate) for candidate in configured_override_models
+        )
+        if is_risk_override_model and not args.risk_override:
             return emit_route({**base, "status": "fable_requires_risk_tier_override"}, 1)
-        if args.risk_override and not is_fable:
+        selected_override_model = (
+            args.risk_override.get("models", [""])[0] if args.risk_override else ""
+        )
+        if args.risk_override and not model_has_alias(model, selected_override_model):
             return emit_route({**base, "status": "risk_tier_model_mismatch"}, 1)
         family = infer_family(model, catalog)
         identity_source = "model-pattern"
@@ -823,17 +845,23 @@ def main(argv: list[str] | None = None) -> int:
             maximum_effort = override.get("maximum_effort")
             models = override.get("models")
             roles = override.get("roles")
+            alias = override.get("alias")
             if (
-                default_effort not in EFFORT_ORDER
+                not isinstance(default_effort, str)
+                or default_effort not in EFFORT_ORDER
+                or not isinstance(maximum_effort, str)
                 or maximum_effort not in EFFORT_ORDER
                 or EFFORT_ORDER[default_effort] > EFFORT_ORDER[maximum_effort]
-                or maximum_effort != "medium"
                 or not isinstance(roles, list)
-                or set(roles) != {"synthesis", "adjudication"}
                 or len(roles) != 2
-                or override.get("alias") != "flagship"
+                or any(not isinstance(role, str) or not role.strip() for role in roles)
+                or len(set(roles)) != 2
+                or not isinstance(alias, str)
+                or alias not in ALIAS_ORDER
                 or not isinstance(models, list)
-                or models != ["fable"]
+                or len(models) != 1
+                or not isinstance(models[0], str)
+                or not models[0].strip()
             ):
                 return reject("risk_tier_config_invalid", alias=args.alias)
             if args.role not in roles:
