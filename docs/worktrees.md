@@ -57,6 +57,49 @@ path and branch/detached state.
   commands and results. Do not guess the package manager or install mode.
 - Before removal, confirm a clean status, no live agent/pane and no unconsumed
   handoff. Use `git worktree remove`, never filesystem deletion.
-- Force removal, pruning and branch deletion require separate user authority.
+- Force removal of a dirty worktree, and deletion of an unmerged branch, require
+  separate user authority. Post-merge cleanup does not; see below.
 - `.worktrees/` is protected infrastructure: context cleaners, broad backups
   and scratch pruning must skip it.
+
+## Post-merge pruning
+
+A merge is the authority-bearing event for cleaning up after itself. Once a
+branch is merged into the integration branch, the agent that observed the merge
+prunes that branch's own artefacts without a further user gate. This is standing
+across every project the harness is loaded into: a merged worktree left behind
+is stale state that later agents mistake for live work, and each one carries its
+own uninherited dependency tree — in this repository roughly 400 MB apiece.
+
+Prune immediately after the merge, in this order:
+
+```sh
+git -C <primary-root> fetch origin
+git -C <primary-root> merge --ff-only origin/<integration-branch>
+git -C <primary-root> branch --merged <integration-branch>   # confirm before deleting
+scripts/worktree remove <name> --human-authorised
+git -C <primary-root> branch -d <merged-branch>
+git -C <primary-root> worktree prune
+git -C <primary-root> remote prune origin
+```
+
+Constraints that keep this narrow:
+
+- **Confirm the merge first.** `git branch --merged` must list the branch, or
+  `gh pr view <n> --json state` must report `MERGED`. Never infer a merge from a
+  green pull request or a passing suite.
+- **Only that branch's artefacts.** The authority covers the worktree created
+  for the merged branch, that branch's local ref, and stale remote-tracking refs
+  for branches the forge already deleted. It does not extend to any other
+  worktree, branch or checkout.
+- **`-d`, never `-D`.** If Git refuses the delete, the branch is not fully
+  merged: stop and report rather than forcing. `git worktree remove` likewise
+  stays unforced — a dirty worktree is unconsumed work, not debris.
+- **Retention beats reclamation.** Where a repository requires a run directory,
+  receipt or artifact to survive the merge, that requirement wins; prune only
+  after it is satisfied. Check the repository's own workflow runbook.
+- **The primary checkout stays on the integration branch.** Pruning never leaves
+  it on a deleted or detached ref.
+
+Pruning is not conditional on disk pressure. Do it as the last step of the merge,
+not as a later sweep.

@@ -270,17 +270,28 @@ Afterwards:
    scripts/agent-fabric-warm
    ```
 
-4. Remove the worktree once `git status` in it is clean and no live agent,
-   pane or unconsumed handoff remains:
+4. Prune the merged branch's artefacts. This is the last step of the merge, not
+   a later sweep — see [Post-merge
+   pruning](../worktrees.md#post-merge-pruning) for the standing authority and
+   its limits. Confirm the merge landed, then remove the worktree once
+   `git status` in it is clean and no live agent, pane or unconsumed handoff
+   remains, and delete the merged local branch:
 
    ```sh
+   git branch --merged main | grep issue-148-runbook-mechanics
    scripts/worktree remove impl-148 --human-authorised
+   git branch -d issue-148-runbook-mechanics
+   git worktree prune
    ```
+
+   One repository-specific retention rule overrides this: a substantial software
+   change's canonical `delivery-run` receipt directory must survive the merge
+   (see [Merge](#merge)). Satisfy that first.
 
 5. The user-authorised repository setting `delete_branch_on_merge=true`
    (enabled 2026-07-19) automatically deletes a merged pull request's remote
-   head branch. This automatic merged-head cleanup needs no separate per-branch
-   authority. Manual or forced deletion outside that case, including deletion
-   of an unmerged remote branch or any local branch, remains an explicit user
-   gate. After GitHub performs the automatic remote deletion, run
-   `git fetch --prune`.
+   head branch, so the remote ref is usually already gone by the time you prune;
+   `git remote prune origin` clears the stale remote-tracking ref. This
+   automatic merged-head cleanup needs no separate per-branch authority. Forced
+   deletion, and deletion of an unmerged branch on either side, remains an
+   explicit user gate.
