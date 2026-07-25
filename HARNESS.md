@@ -36,8 +36,8 @@ approver; delegation only narrows it, and host access, credentials or subscripti
 permission. A standing user-approved envelope covers routine version control: implementation
 branches and linked worktrees (parallel included) need no per-instance approval, one writer
 each; merge authority is repo-based, agent merges following the repository's own workflow
-surface. Deletion, force-removal, history rewrites and shared-branch pushes outside authorised
-merges stay gated. Route every dispatch by task class to `flagship`, `workhorse` or `scout`,
+surface. An authorised merge prunes its own worktree and merged refs; other deletion,
+force-removal, history rewrites and shared-branch pushes outside authorised merges stay gated. Route every dispatch by task class to `flagship`, `workhorse` or `scout`,
 binding identity, effort and receipt; runtime governs, catalogues cache, mechanics live in
 `orchestrate`. Durable knowledge belongs in project state, specs, ADRs and runbooks;
 harness-private memory holds only cross-project preferences. Objective evidence outranks
