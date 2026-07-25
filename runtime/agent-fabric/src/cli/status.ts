@@ -1,9 +1,12 @@
 import Database from "better-sqlite3";
 import { lstat, readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { parse } from "yaml";
 
 import { verifyAdapterCompatibility } from "../adapters/compatibility.js";
 import { verifyProviderConformance } from "../adapters/provider-conformance.js";
+import { verifyProviderExecutableIdentity } from "../adapters/provider-identity.js";
+import { ADAPTER_INTERFACE_PROBE_INCOMPLETE, probeProviderInterface } from "../adapters/provider-interface.js";
 import { loadAdapterModelConstraints } from "../adapters/model-selection.js";
 import { loadFabricConfig } from "../config/index.js";
 import { assertDatabaseIntegrity } from "../persistence/invariants.js";
@@ -16,11 +19,28 @@ import { MCP_SEATS, resolveSeatPaths, type SeatMetadata } from "./seat-store.js"
 import { trustedWorkspaceRoots } from "./workspace-trust.js";
 
 type Check = { id: string; status: "pass" | "idle" | "fail"; code: string; detail: string };
+type ProviderIdentityResult = Awaited<ReturnType<typeof verifyProviderExecutableIdentity>>;
+type ProviderInterfaceResult = Awaited<ReturnType<typeof probeProviderInterface>>;
+type ProviderObservation = { adapterId: string; requiredIdentity: string; identity?: ProviderIdentityResult; providerInterface?: ProviderInterfaceResult; identityError?: unknown; interfaceError?: unknown };
+type ProviderIdentityState = "clean" | "drifted" | "unknown";
+type ProviderIdentityObservation = { adapterId: string; state: ProviderIdentityState; detail: string };
+type DateStaleness = { field: "verification_date" | "catalog_date"; date: string | null; ageDays: number | null; stale: boolean | null };
+type DoctorDependencies = { verifyProvider?: typeof verifyProviderConformance; verifyProviderIdentity?: typeof verifyProviderExecutableIdentity; probeProviderInterface?: typeof probeProviderInterface; providerProbeTimeoutMs?: number; now?: () => number };
 
 type DoctorDaemonState =
   | { status: "live"; code: "DAEMON_LIVE"; detail: string; pid: number; socketPath: string }
   | { status: "idle"; code: "DAEMON_ON_DEMAND_IDLE"; detail: string; pid: null; socketPath: null }
   | { status: "failed"; code: string; detail: string; pid: number | null; socketPath: string | null };
+
+const PRIMARY_ADAPTER_IDS = ["claude-agent-sdk", "codex-app-server"] as const;
+const PROVIDER_PROBE_TIMEOUT_MS = 16_000;
+const STALENESS_THRESHOLD_DAYS = 30;
+const REPAIR_COMMAND = "npm run compatibility:pin";
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
 
 function option(arguments_: string[], name: string): string | undefined {
   const index = arguments_.indexOf(name);
@@ -57,14 +77,107 @@ function agentsHome(arguments_: string[]): string {
   return resolve(option(arguments_, "--agents-home") ?? process.env.AGENTS_HOME ?? process.cwd());
 }
 
-function pathsFor(arguments_: string[]): { agentsHome: string; config: string; compatibility: string; compatibilitySchema: string } {
+function pathsFor(arguments_: string[]): { agentsHome: string; config: string; compatibility: string; compatibilitySchema: string; modelRouting: string } {
   const home = agentsHome(arguments_);
   return {
     agentsHome: home,
     config: resolve(option(arguments_, "--trusted-config") ?? join(home, "config", "agent-fabric.yaml")),
     compatibility: resolve(option(arguments_, "--compatibility") ?? join(home, "config", "adapter-compatibility.yaml")),
     compatibilitySchema: resolve(option(arguments_, "--compatibility-schema") ?? join(home, "runtime", "agent-fabric", "schemas", "adapter-compatibility.schema.json")),
+    modelRouting: join(home, "config", "model-routing.json"),
   };
+}
+
+async function bounded<T>(operation: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  return await new Promise<T>((resolvePromise, reject) => {
+    const timer = setTimeout(() => reject(new Error(`${label} timed out after ${String(timeoutMs)}ms`)), timeoutMs);
+    operation.then(
+      (value) => { clearTimeout(timer); resolvePromise(value); },
+      (error: unknown) => { clearTimeout(timer); reject(error); },
+    );
+  });
+}
+
+function probeFailure(error: unknown): { state: "drifted" | "unknown"; detail: string } {
+  const messages: string[] = [];
+  const codes: string[] = [];
+  const seen = new Set<Error>();
+  let current = error;
+  while (current instanceof Error && !seen.has(current)) {
+    seen.add(current);
+    messages.push(current.message);
+    if ("code" in current && typeof current.code === "string") codes.push(current.code);
+    current = current.cause;
+  }
+  const mismatch = codes.some((code) =>
+    ["ADAPTER_IDENTITY_MISMATCH", "ADAPTER_INTERFACE_MISMATCH", "ADAPTER_PATH_UNSAFE"].includes(code));
+  const incomplete = codes.includes(ADAPTER_INTERFACE_PROBE_INCOMPLETE);
+  return {
+    state: mismatch && !incomplete ? "drifted" : "unknown",
+    detail: [...new Set(messages)].join(": ") || errorDetail(error),
+  };
+}
+
+function primaryProviderState(observation: ProviderObservation, executableSha256: string | undefined): ProviderIdentityObservation {
+  const drift: string[] = [];
+  const unknown: string[] = [];
+  for (const [probe, error] of [["identity", observation.identityError], ["interface", observation.interfaceError]] as const) {
+    if (error === undefined) continue;
+    const failure = probeFailure(error);
+    (failure.state === "drifted" ? drift : unknown).push(`${probe} probe ${failure.state === "drifted" ? "mismatch" : "unavailable"}: ${failure.detail}`);
+  }
+  if (observation.identity !== undefined) {
+    if (executableSha256 !== undefined && observation.identity.sha256 !== executableSha256) {
+      drift.push(`executable_sha256 expected ${executableSha256} observed ${observation.identity.sha256}`);
+    }
+    if (observation.requiredIdentity === "apple-designated" &&
+        observation.identity.assurance !== "full-vendor-identity") {
+      drift.push(`provider_identity apple-designated observed assurance ${observation.identity.assurance}`);
+    }
+  } else if (observation.identityError === undefined) unknown.push("identity probe did not complete");
+  if (observation.providerInterface === undefined && observation.interfaceError === undefined) unknown.push("interface probe did not complete");
+  if (drift.length > 0) {
+    return { adapterId: observation.adapterId, state: "drifted", detail: `${drift.join("; ")}; repair with ${REPAIR_COMMAND}` };
+  }
+  if (unknown.length > 0) return { adapterId: observation.adapterId, state: "unknown", detail: unknown.join("; ") };
+  const matchedPin = executableSha256 === undefined ? "" : "executable_sha256 matched; ";
+  return {
+    adapterId: observation.adapterId,
+    state: "clean",
+    detail: `${matchedPin}identity assurance ${observation.identity!.assurance}; interface ${observation.providerInterface!.probe} conformant`,
+  };
+}
+
+function dateStaleness(field: DateStaleness["field"], date: unknown, now: number): DateStaleness {
+  if (typeof date !== "string" || !/^\d{4}-\d{2}-\d{2}$/u.test(date)) {
+    return { field, date: null, ageDays: null, stale: null };
+  }
+  const timestamp = Date.parse(`${date}T00:00:00Z`);
+  if (!Number.isFinite(timestamp)) return { field, date, ageDays: null, stale: null };
+  const ageDays = Math.floor((now - timestamp) / DAY_MS);
+  return { field, date, ageDays, stale: ageDays > STALENESS_THRESHOLD_DAYS };
+}
+
+async function readDoctorMetadata(compatibilityPath: string, modelRoutingPath: string, adapterIds: readonly string[]): Promise<{ executablePins: Map<string, string>; verificationDate: unknown; catalogDate: unknown }> {
+  const executablePins = new Map<string, string>();
+  let document: unknown;
+  try {
+    document = parse(await readFile(compatibilityPath, "utf8"));
+  } catch {}
+  if (isRecord(document) && isRecord(document.adapters)) {
+    for (const adapterId of adapterIds) {
+      const adapter = document.adapters[adapterId];
+      if (!isRecord(adapter) || !isRecord(adapter.implementation)) continue;
+      const pin = adapter.implementation.executable_sha256;
+      if (typeof pin === "string") executablePins.set(adapterId, pin);
+    }
+  }
+  let catalogDate: unknown;
+  try {
+    const routing: unknown = JSON.parse(await readFile(modelRoutingPath, "utf8"));
+    if (isRecord(routing)) catalogDate = routing.catalog_date;
+  } catch {}
+  return { executablePins, verificationDate: isRecord(document) ? document.verification_date : undefined, catalogDate };
 }
 
 async function daemonState(paths: FabricPaths): Promise<{ reachable: boolean; pid: number | null; socketPath: string; protocolVersion: 1; activeAdapters: string[] }> {
@@ -327,11 +440,13 @@ async function doctorDaemonState(paths: FabricPaths): Promise<DoctorDaemonState>
 export async function fabricDoctor(
   arguments_: string[],
   paths: FabricPaths,
-  dependencies: { verifyProvider?: typeof verifyProviderConformance } = {},
+  dependencies: DoctorDependencies = {},
 ): Promise<Record<string, unknown>> {
   const selected = pathsFor(arguments_);
   let adapterIds: string[] = [];
   let adapterCommands: string[][] = [];
+  let compatibilityVerification: Awaited<ReturnType<typeof verifyAdapterCompatibility>> | undefined;
+  const providerObservations: ProviderObservation[] = [];
   const checks: Check[] = [];
   checks.push(await check("configuration", async () => {
     const config = await loadFabricConfig({ globalPath: selected.config, agentsHome: selected.agentsHome });
@@ -354,13 +469,13 @@ export async function fabricDoctor(
     return loaderParts.length === 0 ? "no tsx wrapper commands configured" : "tsx loader present";
   }));
   checks.push(await check("adapter-compatibility", async () => {
-    const verification = await verifyAdapterCompatibility({ compatibilityPath: selected.compatibility, schemaPath: selected.compatibilitySchema, adapterIds, requireEnabled: true });
-    return verification.wrapperProvenance
+    compatibilityVerification = await verifyAdapterCompatibility({ compatibilityPath: selected.compatibility, schemaPath: selected.compatibilitySchema, adapterIds, requireEnabled: true });
+    return compatibilityVerification.wrapperProvenance
       .map((item) => `${item.adapterId}=${item.repositoryCommit}:${item.wrapperPath}`)
       .join(" ");
   }));
   checks.push(await check("provider-conformance", async () => {
-    const verification = await verifyAdapterCompatibility({ compatibilityPath: selected.compatibility, schemaPath: selected.compatibilitySchema, adapterIds, requireEnabled: true });
+    const verification = compatibilityVerification ?? await verifyAdapterCompatibility({ compatibilityPath: selected.compatibility, schemaPath: selected.compatibilitySchema, adapterIds, requireEnabled: true });
     const observations = [];
     for (const adapterId of adapterIds) {
       const executable = verification.resolvedExecutables[adapterId];
@@ -371,16 +486,62 @@ export async function fabricDoctor(
         adapterId,
       });
       if (policy.providerIdentity === undefined) continue;
-      const observation = await (dependencies.verifyProvider ?? verifyProviderConformance)({
+      const input = {
         adapterId,
         executable,
         ...(policy.cursorInstallRoot === undefined ? {} : { cursorInstallRoot: policy.cursorInstallRoot }),
         ...(policy.providerInstallRoot === undefined ? {} : { providerInstallRoot: policy.providerInstallRoot }),
-      });
+      };
+      if (PRIMARY_ADAPTER_IDS.some((primaryId) => primaryId === adapterId)) {
+        const timeoutMs = dependencies.providerProbeTimeoutMs ?? PROVIDER_PROBE_TIMEOUT_MS;
+        const [identity, providerInterface] = await Promise.allSettled([
+          bounded(Promise.resolve().then(async () => await (dependencies.verifyProviderIdentity ?? verifyProviderExecutableIdentity)(input)), timeoutMs, `${adapterId} provider identity probe`),
+          bounded(Promise.resolve().then(async () => await (dependencies.probeProviderInterface ?? probeProviderInterface)(input)), timeoutMs, `${adapterId} provider interface probe`),
+        ]);
+        providerObservations.push({
+          adapterId,
+          requiredIdentity: policy.providerIdentity,
+          ...(identity.status === "fulfilled" ? { identity: identity.value } : { identityError: identity.reason }),
+          ...(providerInterface.status === "fulfilled"
+            ? { providerInterface: providerInterface.value }
+            : { interfaceError: providerInterface.reason }),
+        });
+        if (identity.status === "fulfilled" && providerInterface.status === "fulfilled") {
+          observations.push(`${adapterId}=${providerInterface.value.version}:${identity.value.sha256}:${identity.value.assurance}`);
+        }
+        continue;
+      }
+      const observation = await (dependencies.verifyProvider ?? verifyProviderConformance)(input);
       observations.push(`${adapterId}=${observation.interface.version}:${observation.identity.sha256}:${observation.identity.assurance}`);
     }
     return observations.join(" ");
   }));
+  const metadata = await readDoctorMetadata(selected.compatibility, selected.modelRouting, PRIMARY_ADAPTER_IDS);
+  const providerIdentity = providerObservations.map((observation) =>
+    primaryProviderState(observation, metadata.executablePins.get(observation.adapterId)));
+  const drifted = providerIdentity.some((item) => item.state === "drifted");
+  const unknown = providerIdentity.some((item) => item.state === "unknown");
+  checks.push({
+    id: "provider-identity",
+    status: drifted ? "fail" : unknown ? "idle" : "pass",
+    code: drifted ? "PROVIDER_IDENTITY_DRIFT" : unknown ? "PROVIDER_IDENTITY_UNKNOWN" : "PROVIDER_IDENTITY_OK",
+    detail: providerIdentity.map((item) => `${item.adapterId}=${item.state}: ${item.detail}`).join(" "),
+  });
+  const now = (dependencies.now ?? Date.now)();
+  const staleness = {
+    compatibility: dateStaleness("verification_date", metadata.verificationDate, now),
+    modelRouting: dateStaleness("catalog_date", metadata.catalogDate, now),
+  };
+  checks.push({
+    id: "pin-staleness",
+    status: "pass",
+    code: "PIN_STALENESS_ADVISORY",
+    detail: [
+      `verification_date=${staleness.compatibility.date ?? "unknown"} age_days=${String(staleness.compatibility.ageDays)}`,
+      `catalog_date=${staleness.modelRouting.date ?? "unknown"} age_days=${String(staleness.modelRouting.ageDays)}`,
+      `threshold_days=${String(STALENESS_THRESHOLD_DAYS)}`,
+    ].join(" "),
+  });
   for (const [id, path, expectedKind] of [
     ["state-directory", paths.stateDirectory, "directory"],
     ["runtime-directory", paths.runtimeDirectory, "directory"],
@@ -411,6 +572,13 @@ export async function fabricDoctor(
       status: daemon.status,
       pid: daemon.pid,
       socketPath: daemon.socketPath,
+    },
+    providerIdentity: { adapters: providerIdentity },
+    staleness: {
+      advisory: true,
+      thresholdDays: STALENESS_THRESHOLD_DAYS,
+      compatibility: staleness.compatibility,
+      modelRouting: staleness.modelRouting,
     },
     checks,
   };

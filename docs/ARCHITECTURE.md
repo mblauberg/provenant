@@ -330,6 +330,8 @@ reserved for that tier's roles, alias and effort ceiling; Fable currently
 occupies both configured tiers. GPT-5.6 supports
 `ultra` where runtime discovery proves it. Model catalogues are dated caches,
 not assertions about current availability.
+The Claude capability probe derives its model from the adapter family's catalogue
+aliases; a task class may override it with a valid `capability_probe_alias`.
 
 ## Review as a council, not a vote
 

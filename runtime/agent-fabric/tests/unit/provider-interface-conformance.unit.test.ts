@@ -32,13 +32,68 @@ describe("provider non-answer interface conformance", () => {
       exitCode: 0,
     }));
     await expect(probeProviderInterface({ adapterId: "agy", executable: "/agy" }, run))
-      .rejects.toMatchObject({ code: "ADAPTER_INTERFACE_MISMATCH" });
+      .rejects.toMatchObject({ code: "ADAPTER_INTERFACE_PROBE_INCOMPLETE" });
   });
 
   it("proves the Codex app-server initialize handshake", async () => {
     const run = vi.fn(async () => ({ stdout: '{"id":1,"result":{"userAgent":"probe"}}\n', stderr: "", exitCode: 0 }));
     await expect(probeProviderInterface({ adapterId: "codex-app-server", executable: "/codex" }, run))
       .resolves.toMatchObject({ adapterId: "codex-app-server", conformant: true, probe: "app-server-initialize" });
+  });
+
+  it("classifies a Codex authentication response as an incomplete probe", async () => {
+    const run = vi.fn(async () => ({
+      stdout: '{"id":1,"error":{"message":"authentication required"}}\n',
+      stderr: "",
+      exitCode: 0,
+    }));
+    await expect(probeProviderInterface({ adapterId: "codex-app-server", executable: "/codex" }, run))
+      .rejects.toMatchObject({
+        code: "ADAPTER_INTERFACE_PROBE_INCOMPLETE",
+        cause: { message: "authentication required" },
+      });
+  });
+
+  it("classifies a Codex protocol error response as an interface mismatch", async () => {
+    const run = vi.fn(async () => ({
+      stdout: '{"id":1,"error":{"code":-32601,"message":"method not found"}}\n',
+      stderr: "",
+      exitCode: 0,
+    }));
+    await expect(probeProviderInterface({ adapterId: "codex-app-server", executable: "/codex" }, run))
+      .rejects.toMatchObject({
+        code: "ADAPTER_INTERFACE_MISMATCH",
+        cause: { code: -32601, message: "method not found" },
+      });
+  });
+
+  it("classifies an auth-shaped response with the wrong request id as an interface mismatch", async () => {
+    const run = vi.fn(async () => ({
+      stdout: '{"id":2,"error":{"message":"authentication required"}}\n',
+      stderr: "",
+      exitCode: 0,
+    }));
+    await expect(probeProviderInterface({ adapterId: "codex-app-server", executable: "/codex" }, run))
+      .rejects.toMatchObject({
+        code: "ADAPTER_INTERFACE_MISMATCH",
+        cause: { message: "authentication required" },
+      });
+  });
+
+  it("classifies a malformed Codex initialize result as an interface mismatch", async () => {
+    const run = vi.fn(async () => ({ stdout: '{"id":1,"result":null}\n', stderr: "", exitCode: 0 }));
+    await expect(probeProviderInterface({ adapterId: "codex-app-server", executable: "/codex" }, run))
+      .rejects.toMatchObject({
+        code: "ADAPTER_INTERFACE_MISMATCH",
+        cause: expect.objectContaining({ message: "Codex initialize response is invalid" }),
+      });
+  });
+
+  it("classifies a runner failure as an incomplete probe and preserves its cause", async () => {
+    const cause = Object.assign(new Error("spawn failed"), { code: "ENOENT" });
+    const run = vi.fn(async () => await Promise.reject(cause));
+    await expect(probeProviderInterface({ adapterId: "codex-app-server", executable: "/missing" }, run))
+      .rejects.toMatchObject({ code: "ADAPTER_INTERFACE_PROBE_INCOMPLETE", cause });
   });
 
   it("proves the Kiro ACP v1 initialize handshake", async () => {
@@ -71,12 +126,12 @@ describe("provider non-answer interface conformance", () => {
       ? { stdout: "--model <MODEL> --agent-engine <ENGINE>", stderr: "", exitCode: 0 }
       : { stdout: '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}\n', stderr: "", exitCode: 0 });
     await expect(probeProviderInterface({ adapterId: "kiro-acp", executable: "/kiro" }, run))
-      .rejects.toMatchObject({ code: "ADAPTER_INTERFACE_MISMATCH" });
+      .rejects.toMatchObject({ code: "ADAPTER_INTERFACE_PROBE_INCOMPLETE" });
   });
 
   it("fails closed when a required interface disappears", async () => {
     const run = vi.fn(async () => ({ stdout: "--print --model", stderr: "", exitCode: 0 }));
     await expect(probeProviderInterface({ adapterId: "agy", executable: "/agy" }, run))
-      .rejects.toMatchObject({ code: "ADAPTER_INTERFACE_MISMATCH" });
+      .rejects.toMatchObject({ code: "ADAPTER_INTERFACE_PROBE_INCOMPLETE" });
   });
 });

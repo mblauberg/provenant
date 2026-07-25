@@ -74,9 +74,10 @@ repository:
 
 - Whether agents may merge directly once tier-appropriate review and CI are
   green on the exact head, or whether every merge needs a user click.
-- The standing user gates that never move regardless of automation: branch
-  deletion, history rewrites, credential/connector setup, pushes to shared
-  branches outside authorised merges, and risk-tier downgrades.
+- The standing user gates that never move regardless of automation: unmerged or
+  forced branch deletion, history rewrites, credential/connector setup, pushes
+  to shared branches outside authorised merges, and risk-tier downgrades.
+  Pruning a *merged* branch's own refs and worktree is carried by the merge.
 
 Provenant's own choice (agents merge directly once gates pass, user gate only
 when the agent is stuck) is a proven default worth offering, but the new
