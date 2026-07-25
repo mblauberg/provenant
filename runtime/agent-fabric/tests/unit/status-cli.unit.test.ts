@@ -1,10 +1,8 @@
-import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
-import { parse, stringify } from "yaml";
 
 import { fabricDoctor as realFabricDoctor, fabricStatus } from "../../src/cli/status.ts";
 import type { FabricPaths } from "../../src/cli/paths.ts";
@@ -15,13 +13,7 @@ import { createPortableActivatedPrimaryFixture } from "../support/primary-adapte
 const cleanup: string[] = [];
 afterEach(async () => Promise.all(cleanup.splice(0).map((path) => rm(path, { recursive: true, force: true }))));
 
-type DoctorDependencies = NonNullable<Parameters<typeof realFabricDoctor>[2]>;
-
-async function fabricDoctor(
-  arguments_: string[],
-  value: FabricPaths,
-  dependencies: Partial<DoctorDependencies> = {},
-): ReturnType<typeof realFabricDoctor> {
+async function fabricDoctor(arguments_: string[], value: FabricPaths): ReturnType<typeof realFabricDoctor> {
   return realFabricDoctor(arguments_, value, {
     verifyProvider: async ({ adapterId, executable }) => ({
       identity: {
@@ -37,24 +29,6 @@ async function fabricDoctor(
       },
       interface: { adapterId, conformant: true, probe: "fixture", version: "fixture" },
     }),
-    verifyProviderIdentity: async ({ adapterId, executable }) => ({
-      adapterId,
-      canonicalPath: executable,
-      regularFile: true,
-      ownerUid: process.getuid?.() ?? 0,
-      mode: 0o755,
-      sha256: createHash("sha256").update(await readFile(executable)).digest("hex"),
-      assurance: "full-vendor-identity",
-      signing: [],
-    }),
-    probeProviderInterface: async ({ adapterId }) => ({
-      adapterId,
-      conformant: true,
-      probe: "fixture",
-      version: "1.0.0-fixture",
-    }),
-    now: () => Date.parse("2026-07-25T00:00:00Z"),
-    ...dependencies,
   });
 }
 
@@ -140,213 +114,12 @@ describe("machine status and doctor", () => {
       state: "idle",
       code: "DAEMON_ON_DEMAND_IDLE",
       daemon: { status: "idle", pid: null, socketPath: null },
-      providerIdentity: {
-        repairCommand: "npm run compatibility:pin",
-        adapters: [
-          { adapterId: "claude-agent-sdk", state: "clean" },
-          { adapterId: "codex-app-server", state: "clean" },
-        ],
-      },
-      staleness: {
-        advisory: true,
-        thresholdDays: 30,
-        compatibility: { field: "verification_date", date: "2026-07-10", ageDays: 15, stale: false },
-      },
     });
     const checks = result.checks as Array<{ id: string; status: string }>;
     expect(checks.find((item) => item.id === "configuration")?.status).toBe("pass");
     expect(checks.find((item) => item.id === "adapter-compatibility")?.status).toBe("pass");
-    expect(checks.find((item) => item.id === "provider-identity")?.status).toBe("pass");
-    expect(checks.find((item) => item.id === "pin-staleness")?.status).toBe("pass");
     expect(checks.find((item) => item.id === "database-integrity")?.status).toBe("pass");
     expect(checks.find((item) => item.id === "daemon-socket")?.status).toBe("idle");
-  });
-
-  it("reports an unprobeable provider as unknown, never clean, without hiding other adapters", async () => {
-    const value = await paths();
-    const fixture = await createPortableActivatedPrimaryFixture();
-    cleanup.push(fixture.directory);
-    const result = await fabricDoctor([
-      "--agents-home", fixture.directory,
-      "--trusted-config", fixture.configPath,
-      "--compatibility", fixture.compatibilityPath,
-      "--compatibility-schema", fixture.schemaPath,
-    ], value, {
-      probeProviderInterface: async ({ adapterId }) => {
-        if (adapterId === "codex-app-server") {
-          throw Object.assign(new Error("provider executable is unavailable"), { code: "ENOENT" });
-        }
-        return { adapterId, conformant: true, probe: "fixture", version: "1.0.0-fixture" };
-      },
-    });
-
-    expect(result).toMatchObject({
-      healthy: false,
-      providerIdentity: {
-        adapters: [
-          { adapterId: "claude-agent-sdk", state: "clean" },
-          { adapterId: "codex-app-server", state: "unknown" },
-        ],
-      },
-    });
-    const adapters = (result.providerIdentity as { adapters: Array<{ adapterId: string; state: string }> }).adapters;
-    expect(adapters.find((item) => item.adapterId === "codex-app-server")?.state).not.toBe("clean");
-  });
-
-  it("bounds a timed-out provider probe and still reports every primary adapter", async () => {
-    const value = await paths();
-    const fixture = await createPortableActivatedPrimaryFixture();
-    cleanup.push(fixture.directory);
-    const result = await fabricDoctor([
-      "--agents-home", fixture.directory,
-      "--trusted-config", fixture.configPath,
-      "--compatibility", fixture.compatibilityPath,
-      "--compatibility-schema", fixture.schemaPath,
-    ], value, {
-      providerProbeTimeoutMs: 5,
-      probeProviderInterface: async ({ adapterId }) => {
-        if (adapterId === "codex-app-server") return await new Promise(() => {});
-        return { adapterId, conformant: true, probe: "fixture", version: "1.0.0-fixture" };
-      },
-    });
-
-    expect(result).toMatchObject({
-      healthy: false,
-      providerIdentity: {
-        adapters: [
-          { adapterId: "claude-agent-sdk", state: "clean" },
-          {
-            adapterId: "codex-app-server",
-            state: "unknown",
-            detail: expect.stringContaining("timed out after 5ms"),
-          },
-        ],
-      },
-    });
-  });
-
-  it("keeps partial mismatching evidence unknown when another provider probe fails", async () => {
-    const value = await paths();
-    const fixture = await createPortableActivatedPrimaryFixture();
-    cleanup.push(fixture.directory);
-    const result = await fabricDoctor([
-      "--agents-home", fixture.directory,
-      "--trusted-config", fixture.configPath,
-      "--compatibility", fixture.compatibilityPath,
-      "--compatibility-schema", fixture.schemaPath,
-    ], value, {
-      verifyProviderIdentity: async (input) => {
-        if (input.adapterId === "codex-app-server") throw new Error("identity probe failed");
-        return {
-          adapterId: input.adapterId,
-          canonicalPath: input.executable,
-          regularFile: true,
-          ownerUid: process.getuid?.() ?? 0,
-          mode: 0o755,
-          sha256: createHash("sha256").update(await readFile(input.executable)).digest("hex"),
-          assurance: "full-vendor-identity",
-          signing: [],
-        };
-      },
-      probeProviderInterface: async ({ adapterId }) => ({
-        adapterId,
-        conformant: true,
-        probe: "fixture",
-        version: adapterId === "codex-app-server" ? "definitely-not-the-pin" : "1.0.0-fixture",
-      }),
-    });
-
-    expect(result).toMatchObject({
-      healthy: false,
-      providerIdentity: {
-        adapters: [
-          { adapterId: "claude-agent-sdk", state: "clean" },
-          { adapterId: "codex-app-server", state: "unknown" },
-        ],
-      },
-    });
-  });
-
-  it("reports pinned executable and version mismatches as drifted with the exact repair command", async () => {
-    const value = await paths();
-    const fixture = await createPortableActivatedPrimaryFixture();
-    cleanup.push(fixture.directory);
-    const result = await fabricDoctor([
-      "--agents-home", fixture.directory,
-      "--trusted-config", fixture.configPath,
-      "--compatibility", fixture.compatibilityPath,
-      "--compatibility-schema", fixture.schemaPath,
-    ], value, {
-      verifyProviderIdentity: async ({ adapterId, executable }) => ({
-        adapterId,
-        canonicalPath: executable,
-        regularFile: true,
-        ownerUid: process.getuid?.() ?? 0,
-        mode: 0o755,
-        sha256: adapterId === "codex-app-server"
-          ? "0".repeat(64)
-          : createHash("sha256").update(await readFile(executable)).digest("hex"),
-        assurance: "full-vendor-identity",
-        signing: [],
-      }),
-      probeProviderInterface: async ({ adapterId }) => ({
-        adapterId,
-        conformant: true,
-        probe: "fixture",
-        version: adapterId === "codex-app-server" ? "2.0.0-drifted" : "1.0.0-fixture",
-      }),
-    });
-
-    expect(result).toMatchObject({
-      healthy: false,
-      providerIdentity: {
-        repairCommand: "npm run compatibility:pin",
-        adapters: [
-          { adapterId: "claude-agent-sdk", state: "clean" },
-          {
-            adapterId: "codex-app-server",
-            state: "drifted",
-            detail: expect.stringMatching(
-              /executable_sha256 expected .* installed_version expected .* repair with npm run compatibility:pin/u,
-            ),
-          },
-        ],
-      },
-    });
-  });
-
-  it("reports both dated sources against one advisory threshold without failing doctor", async () => {
-    const value = await paths();
-    const fixture = await createPortableActivatedPrimaryFixture();
-    cleanup.push(fixture.directory);
-    const compatibility: unknown = parse(await readFile(fixture.compatibilityPath, "utf8"));
-    if (typeof compatibility !== "object" || compatibility === null) throw new TypeError("fixture YAML is invalid");
-    Reflect.set(compatibility, "verification_date", "2026-06-01");
-    await writeFile(fixture.compatibilityPath, stringify(compatibility));
-    await mkdir(join(fixture.directory, "config"), { recursive: true });
-    await writeFile(
-      join(fixture.directory, "config", "model-routing.json"),
-      `${JSON.stringify({ schema_version: 1, catalog_date: "2026-06-24" })}\n`,
-    );
-
-    const result = await fabricDoctor([
-      "--agents-home", fixture.directory,
-      "--trusted-config", fixture.configPath,
-      "--compatibility", fixture.compatibilityPath,
-      "--compatibility-schema", fixture.schemaPath,
-    ], value);
-    expect(result).toMatchObject({
-      healthy: true,
-      staleness: {
-        advisory: true,
-        thresholdDays: 30,
-        compatibility: { field: "verification_date", date: "2026-06-01", ageDays: 54, stale: true },
-        modelRouting: { field: "catalog_date", date: "2026-06-24", ageDays: 31, stale: true },
-      },
-      checks: expect.arrayContaining([
-        expect.objectContaining({ id: "pin-staleness", status: "pass", code: "PIN_STALENESS_ADVISORY" }),
-      ]),
-    });
   });
 
   it("does not call a live unrelated PID plus stale socket metadata reachable", async () => {

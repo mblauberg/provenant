@@ -1,12 +1,9 @@
 import Database from "better-sqlite3";
 import { lstat, readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { parse } from "yaml";
 
 import { verifyAdapterCompatibility } from "../adapters/compatibility.js";
 import { verifyProviderConformance } from "../adapters/provider-conformance.js";
-import { verifyProviderExecutableIdentity } from "../adapters/provider-identity.js";
-import { probeProviderInterface } from "../adapters/provider-interface.js";
 import { loadAdapterModelConstraints } from "../adapters/model-selection.js";
 import { loadFabricConfig } from "../config/index.js";
 import { assertDatabaseIntegrity } from "../persistence/invariants.js";
@@ -19,42 +16,11 @@ import { MCP_SEATS, resolveSeatPaths, type SeatMetadata } from "./seat-store.js"
 import { trustedWorkspaceRoots } from "./workspace-trust.js";
 
 type Check = { id: string; status: "pass" | "idle" | "fail"; code: string; detail: string };
-type ProviderConformanceObservation = Awaited<ReturnType<typeof verifyProviderConformance>>;
-type ProviderObservation = {
-  adapterId: string;
-  identity?: ProviderConformanceObservation["identity"];
-  providerInterface?: ProviderConformanceObservation["interface"];
-  error?: unknown;
-};
-type ProviderDriftState = "clean" | "drifted" | "unknown";
-type ProviderDriftObservation = {
-  adapterId: string;
-  state: ProviderDriftState;
-  expected: { executableSha256: string | null; installedVersion: string | null };
-  observed: { executableSha256: string | null; installedVersion: string | null };
-  detail: string;
-};
-type DateStaleness = {
-  field: "verification_date" | "catalog_date";
-  date: string | null;
-  ageDays: number | null;
-  stale: boolean | null;
-};
 
 type DoctorDaemonState =
   | { status: "live"; code: "DAEMON_LIVE"; detail: string; pid: number; socketPath: string }
   | { status: "idle"; code: "DAEMON_ON_DEMAND_IDLE"; detail: string; pid: null; socketPath: null }
   | { status: "failed"; code: string; detail: string; pid: number | null; socketPath: string | null };
-
-const PRIMARY_ADAPTER_IDS = ["claude-agent-sdk", "codex-app-server"] as const;
-const PROVIDER_PROBE_TIMEOUT_MS = 16_000;
-const STALENESS_THRESHOLD_DAYS = 30;
-const REPAIR_COMMAND = "npm run compatibility:pin";
-const DAY_MS = 24 * 60 * 60 * 1000;
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function option(arguments_: string[], name: string): string | undefined {
   const index = arguments_.indexOf(name);
@@ -91,157 +57,14 @@ function agentsHome(arguments_: string[]): string {
   return resolve(option(arguments_, "--agents-home") ?? process.env.AGENTS_HOME ?? process.cwd());
 }
 
-function pathsFor(arguments_: string[]): {
-  agentsHome: string;
-  config: string;
-  compatibility: string;
-  compatibilitySchema: string;
-  modelRouting: string;
-} {
+function pathsFor(arguments_: string[]): { agentsHome: string; config: string; compatibility: string; compatibilitySchema: string } {
   const home = agentsHome(arguments_);
   return {
     agentsHome: home,
     config: resolve(option(arguments_, "--trusted-config") ?? join(home, "config", "agent-fabric.yaml")),
     compatibility: resolve(option(arguments_, "--compatibility") ?? join(home, "config", "adapter-compatibility.yaml")),
     compatibilitySchema: resolve(option(arguments_, "--compatibility-schema") ?? join(home, "runtime", "agent-fabric", "schemas", "adapter-compatibility.schema.json")),
-    modelRouting: join(home, "config", "model-routing.json"),
   };
-}
-
-async function bounded<T>(operation: Promise<T>, timeoutMs: number, label: string): Promise<T> {
-  return await new Promise<T>((resolvePromise, reject) => {
-    const timer = setTimeout(() => reject(new Error(`${label} timed out after ${String(timeoutMs)}ms`)), timeoutMs);
-    operation.then(
-      (value) => {
-        clearTimeout(timer);
-        resolvePromise(value);
-      },
-      (error: unknown) => {
-        clearTimeout(timer);
-        reject(error);
-      },
-    );
-  });
-}
-
-function versionMatches(observed: string, expected: string): boolean {
-  if (observed === expected) return true;
-  const escaped = expected.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
-  return new RegExp(`(?:^|[^0-9A-Za-z])${escaped}(?:$|[^0-9A-Za-z])`, "u").test(observed);
-}
-
-function providerDriftObservation(
-  adapterId: string,
-  pins: { executableSha256: string | null; installedVersion: string | null },
-  outcome: ProviderObservation | undefined,
-): ProviderDriftObservation {
-  const identity = outcome?.identity;
-  const providerInterface = outcome?.providerInterface;
-  const observed = {
-    executableSha256: identity?.sha256 ?? null,
-    installedVersion: providerInterface?.version ?? null,
-  };
-  const unknown: string[] = [];
-  if (pins.executableSha256 === null) unknown.push("executable_sha256 pin is absent");
-  if (pins.installedVersion === null) unknown.push("installed_version pin is absent");
-  if (outcome?.error !== undefined) unknown.push(errorDetail(outcome.error));
-  if (identity === undefined && outcome?.error === undefined) unknown.push("provider identity was not observed");
-  if (providerInterface === undefined && outcome?.error === undefined) unknown.push("provider interface was not observed");
-  if (unknown.length > 0) {
-    return {
-      adapterId,
-      state: "unknown",
-      expected: pins,
-      observed,
-      detail: unknown.join("; "),
-    };
-  }
-  const mismatches: string[] = [];
-  if (pins.executableSha256 !== null && observed.executableSha256 !== null &&
-      pins.executableSha256 !== observed.executableSha256) {
-    mismatches.push(`executable_sha256 expected ${pins.executableSha256} observed ${observed.executableSha256}`);
-  }
-  if (pins.installedVersion !== null && observed.installedVersion !== null &&
-      !versionMatches(observed.installedVersion, pins.installedVersion)) {
-    mismatches.push(`installed_version expected ${pins.installedVersion} observed ${observed.installedVersion}`);
-  }
-  if (mismatches.length > 0) {
-    return {
-      adapterId,
-      state: "drifted",
-      expected: pins,
-      observed,
-      detail: `${mismatches.join("; ")}; repair with ${REPAIR_COMMAND}`,
-    };
-  }
-  return {
-    adapterId,
-    state: "clean",
-    expected: pins,
-    observed,
-    detail: "pinned executable digest and installed version match",
-  };
-}
-
-function dateStaleness(field: DateStaleness["field"], date: unknown, now: number): DateStaleness {
-  if (typeof date !== "string" || !/^\d{4}-\d{2}-\d{2}$/u.test(date)) {
-    return { field, date: null, ageDays: null, stale: null };
-  }
-  const timestamp = Date.parse(`${date}T00:00:00Z`);
-  if (!Number.isFinite(timestamp)) return { field, date, ageDays: null, stale: null };
-  const ageDays = Math.floor((now - timestamp) / DAY_MS);
-  return { field, date, ageDays, stale: ageDays > STALENESS_THRESHOLD_DAYS };
-}
-
-async function readStaleness(input: {
-  compatibilityPath: string;
-  modelRoutingPath: string;
-  now: number;
-}): Promise<{ compatibility: DateStaleness; modelRouting: DateStaleness }> {
-  let verificationDate: unknown;
-  let catalogDate: unknown;
-  try {
-    const compatibility: unknown = parse(await readFile(input.compatibilityPath, "utf8"));
-    if (isRecord(compatibility)) verificationDate = compatibility.verification_date;
-  } catch {
-    verificationDate = undefined;
-  }
-  try {
-    const modelRouting: unknown = JSON.parse(await readFile(input.modelRoutingPath, "utf8"));
-    if (isRecord(modelRouting)) catalogDate = modelRouting.catalog_date;
-  } catch {
-    catalogDate = undefined;
-  }
-  return {
-    compatibility: dateStaleness("verification_date", verificationDate, input.now),
-    modelRouting: dateStaleness("catalog_date", catalogDate, input.now),
-  };
-}
-
-async function readProviderPins(
-  compatibilityPath: string,
-  adapterIds: readonly string[],
-): Promise<Map<string, { executableSha256: string | null; installedVersion: string | null }>> {
-  const pins = new Map<string, { executableSha256: string | null; installedVersion: string | null }>();
-  try {
-    const document: unknown = parse(await readFile(compatibilityPath, "utf8"));
-    if (!isRecord(document) || !isRecord(document.adapters)) return pins;
-    for (const adapterId of adapterIds) {
-      const adapter = document.adapters[adapterId];
-      if (!isRecord(adapter) || adapter.enabled !== true || !isRecord(adapter.implementation)) continue;
-      pins.set(adapterId, {
-        executableSha256: typeof adapter.implementation.executable_sha256 === "string"
-          ? adapter.implementation.executable_sha256
-          : null,
-        installedVersion: typeof adapter.implementation.installed_version === "string"
-          ? adapter.implementation.installed_version
-          : null,
-      });
-    }
-  } catch {
-    return pins;
-  }
-  return pins;
 }
 
 async function daemonState(paths: FabricPaths): Promise<{ reachable: boolean; pid: number | null; socketPath: string; protocolVersion: 1; activeAdapters: string[] }> {
@@ -504,19 +327,11 @@ async function doctorDaemonState(paths: FabricPaths): Promise<DoctorDaemonState>
 export async function fabricDoctor(
   arguments_: string[],
   paths: FabricPaths,
-  dependencies: {
-    verifyProvider?: typeof verifyProviderConformance;
-    verifyProviderIdentity?: typeof verifyProviderExecutableIdentity;
-    probeProviderInterface?: typeof probeProviderInterface;
-    now?: () => number;
-    providerProbeTimeoutMs?: number;
-  } = {},
+  dependencies: { verifyProvider?: typeof verifyProviderConformance } = {},
 ): Promise<Record<string, unknown>> {
   const selected = pathsFor(arguments_);
   let adapterIds: string[] = [];
   let adapterCommands: string[][] = [];
-  let compatibilityVerification: Awaited<ReturnType<typeof verifyAdapterCompatibility>> | undefined;
-  let providerObservations: ProviderObservation[] = [];
   const checks: Check[] = [];
   checks.push(await check("configuration", async () => {
     const config = await loadFabricConfig({ globalPath: selected.config, agentsHome: selected.agentsHome });
@@ -539,102 +354,15 @@ export async function fabricDoctor(
     return loaderParts.length === 0 ? "no tsx wrapper commands configured" : "tsx loader present";
   }));
   checks.push(await check("adapter-compatibility", async () => {
-    compatibilityVerification = await verifyAdapterCompatibility({
-      compatibilityPath: selected.compatibility,
-      schemaPath: selected.compatibilitySchema,
-      adapterIds,
-      requireEnabled: true,
-    });
-    return compatibilityVerification.wrapperProvenance
+    const verification = await verifyAdapterCompatibility({ compatibilityPath: selected.compatibility, schemaPath: selected.compatibilitySchema, adapterIds, requireEnabled: true });
+    return verification.wrapperProvenance
       .map((item) => `${item.adapterId}=${item.repositoryCommit}:${item.wrapperPath}`)
       .join(" ");
   }));
   checks.push(await check("provider-conformance", async () => {
-    const verification = compatibilityVerification ?? await verifyAdapterCompatibility({
-      compatibilityPath: selected.compatibility,
-      schemaPath: selected.compatibilitySchema,
-      adapterIds,
-      requireEnabled: true,
-    });
-    const timeoutMs = dependencies.providerProbeTimeoutMs ?? PROVIDER_PROBE_TIMEOUT_MS;
-    const observePrimary = async (adapterId: string): Promise<ProviderObservation> => {
-      const executable = verification.resolvedExecutables[adapterId];
-      if (executable === undefined) throw new Error(`provider executable is missing: ${adapterId}`);
-      const policy = await loadAdapterModelConstraints({
-        compatibilityPath: selected.compatibility,
-        schemaPath: selected.compatibilitySchema,
-        adapterId,
-      });
-      if (policy.providerIdentity === undefined) return { adapterId };
-      const providerInput = {
-        adapterId,
-        executable,
-        ...(policy.cursorInstallRoot === undefined ? {} : { cursorInstallRoot: policy.cursorInstallRoot }),
-        ...(policy.providerInstallRoot === undefined ? {} : { providerInstallRoot: policy.providerInstallRoot }),
-      };
-      try {
-        if (
-          dependencies.verifyProvider !== undefined &&
-          dependencies.verifyProviderIdentity === undefined &&
-          dependencies.probeProviderInterface === undefined
-        ) {
-          const observation = await bounded(
-            Promise.resolve().then(async () => await dependencies.verifyProvider!(providerInput)),
-            timeoutMs,
-            `${adapterId} provider conformance probe`,
-          );
-          return {
-            adapterId,
-            identity: observation.identity,
-            providerInterface: observation.interface,
-          };
-        }
-        const [identity, providerInterface] = await Promise.allSettled([
-          bounded(
-            Promise.resolve().then(async () => await (
-              dependencies.verifyProviderIdentity ?? verifyProviderExecutableIdentity
-            )(providerInput)),
-            timeoutMs,
-            `${adapterId} provider identity probe`,
-          ),
-          bounded(
-            Promise.resolve().then(async () => await (
-              dependencies.probeProviderInterface ?? probeProviderInterface
-            )(providerInput)),
-            timeoutMs,
-            `${adapterId} provider interface probe`,
-          ),
-        ]);
-        const firstError = identity.status === "rejected"
-          ? identity.reason
-          : providerInterface.status === "rejected"
-            ? providerInterface.reason
-            : undefined;
-        return {
-          adapterId,
-          ...(identity.status === "fulfilled" ? { identity: identity.value } : {}),
-          ...(providerInterface.status === "fulfilled" ? { providerInterface: providerInterface.value } : {}),
-          ...(firstError === undefined ? {} : { error: firstError }),
-        };
-      } catch (error: unknown) {
-        return { adapterId, error };
-      }
-    };
-    providerObservations = await Promise.all(
-      PRIMARY_ADAPTER_IDS.filter((adapterId) => adapterIds.includes(adapterId)).map(observePrimary),
-    );
-    let failure = providerObservations.find((item) => item.error !== undefined)?.error;
+    const verification = await verifyAdapterCompatibility({ compatibilityPath: selected.compatibility, schemaPath: selected.compatibilitySchema, adapterIds, requireEnabled: true });
     const observations = [];
     for (const adapterId of adapterIds) {
-      if (PRIMARY_ADAPTER_IDS.some((primaryId) => primaryId === adapterId)) {
-        const outcome = providerObservations.find((item) => item.adapterId === adapterId);
-        const identity = outcome?.identity;
-        const providerInterface = outcome?.providerInterface;
-        if (identity !== undefined && providerInterface !== undefined) {
-          observations.push(`${adapterId}=${providerInterface.version}:${identity.sha256}:${identity.assurance}`);
-        }
-        continue;
-      }
       const executable = verification.resolvedExecutables[adapterId];
       if (executable === undefined) throw new Error(`provider executable is missing: ${adapterId}`);
       const policy = await loadAdapterModelConstraints({
@@ -643,58 +371,16 @@ export async function fabricDoctor(
         adapterId,
       });
       if (policy.providerIdentity === undefined) continue;
-      try {
-        const observation = await (dependencies.verifyProvider ?? verifyProviderConformance)({
-          adapterId,
-          executable,
-          ...(policy.cursorInstallRoot === undefined ? {} : { cursorInstallRoot: policy.cursorInstallRoot }),
-          ...(policy.providerInstallRoot === undefined ? {} : { providerInstallRoot: policy.providerInstallRoot }),
-        });
-        observations.push(
-          `${adapterId}=${observation.interface.version}:${observation.identity.sha256}:${observation.identity.assurance}`,
-        );
-      } catch (error: unknown) {
-        failure ??= error;
-      }
+      const observation = await (dependencies.verifyProvider ?? verifyProviderConformance)({
+        adapterId,
+        executable,
+        ...(policy.cursorInstallRoot === undefined ? {} : { cursorInstallRoot: policy.cursorInstallRoot }),
+        ...(policy.providerInstallRoot === undefined ? {} : { providerInstallRoot: policy.providerInstallRoot }),
+      });
+      observations.push(`${adapterId}=${observation.interface.version}:${observation.identity.sha256}:${observation.identity.assurance}`);
     }
-    if (failure !== undefined) throw failure;
     return observations.join(" ");
   }));
-  const providerPins = await readProviderPins(selected.compatibility, PRIMARY_ADAPTER_IDS);
-  const providerIdentity = PRIMARY_ADAPTER_IDS
-    .filter((adapterId) => adapterIds.includes(adapterId) && providerPins.has(adapterId))
-    .map((adapterId) => providerDriftObservation(
-      adapterId,
-      providerPins.get(adapterId)!,
-      providerObservations.find((item) => item.adapterId === adapterId),
-    ));
-  const drifted = providerIdentity.find((item) => item.state === "drifted");
-  const unknown = providerIdentity.find((item) => item.state === "unknown");
-  checks.push({
-    id: "provider-identity",
-    status: drifted === undefined && unknown === undefined ? "pass" : "fail",
-    code: drifted !== undefined
-      ? "PROVIDER_IDENTITY_DRIFT"
-      : unknown !== undefined
-        ? "PROVIDER_IDENTITY_UNKNOWN"
-        : "PROVIDER_IDENTITY_OK",
-    detail: providerIdentity.map((item) => `${item.adapterId}=${item.state}: ${item.detail}`).join(" "),
-  });
-  const staleness = await readStaleness({
-    compatibilityPath: selected.compatibility,
-    modelRoutingPath: selected.modelRouting,
-    now: (dependencies.now ?? Date.now)(),
-  });
-  checks.push({
-    id: "pin-staleness",
-    status: "pass",
-    code: "PIN_STALENESS_ADVISORY",
-    detail: [
-      `verification_date=${staleness.compatibility.date ?? "unknown"} age_days=${String(staleness.compatibility.ageDays)}`,
-      `catalog_date=${staleness.modelRouting.date ?? "unknown"} age_days=${String(staleness.modelRouting.ageDays)}`,
-      `threshold_days=${String(STALENESS_THRESHOLD_DAYS)}`,
-    ].join(" "),
-  });
   for (const [id, path, expectedKind] of [
     ["state-directory", paths.stateDirectory, "directory"],
     ["runtime-directory", paths.runtimeDirectory, "directory"],
@@ -725,16 +411,6 @@ export async function fabricDoctor(
       status: daemon.status,
       pid: daemon.pid,
       socketPath: daemon.socketPath,
-    },
-    providerIdentity: {
-      repairCommand: REPAIR_COMMAND,
-      adapters: providerIdentity,
-    },
-    staleness: {
-      advisory: true,
-      thresholdDays: STALENESS_THRESHOLD_DAYS,
-      compatibility: staleness.compatibility,
-      modelRouting: staleness.modelRouting,
     },
     checks,
   };
