@@ -132,6 +132,108 @@ def model_has_alias(model: str, alias: str) -> bool:
     return alias.casefold() in model.casefold()
 
 
+def risk_tier_override_is_well_formed(override: Any) -> bool:
+    """Structural validity of one risk-tier override block, independent of catalogue context.
+
+    The single source of the shape rules. Both the catalogue-wide validation pass and
+    the ``--risk-tier`` selection branch consult this, so a block can never be usable
+    in one and malformed in the other.
+    """
+    if not isinstance(override, dict):
+        return False
+    alias = override.get("alias")
+    default_effort = override.get("default_effort")
+    maximum_effort = override.get("maximum_effort")
+    roles = override.get("roles")
+    models = override.get("models")
+    return (
+        isinstance(alias, str)
+        and alias in ALIAS_ORDER
+        and isinstance(default_effort, str)
+        and default_effort in EFFORT_ORDER
+        and isinstance(maximum_effort, str)
+        and maximum_effort in EFFORT_ORDER
+        and EFFORT_ORDER[default_effort] <= EFFORT_ORDER[maximum_effort]
+        and isinstance(roles, list)
+        and len(roles) == 2
+        and all(
+            isinstance(role, str) and role.strip() and role == role.strip() for role in roles
+        )
+        and len(set(roles)) == 2
+        and isinstance(models, list)
+        and len(models) == 1
+        and isinstance(models[0], str)
+        and bool(models[0].strip())
+        and models[0] == models[0].strip()
+    )
+
+
+def family_alias_candidates(family: str, family_config: dict[str, Any], catalog: dict[str, Any]) -> set[str]:
+    """Every model name alias routing can reach within one family, including adapter-prefixed forms."""
+    aliases = family_config.get("aliases", {})
+    candidates = {
+        candidate
+        for candidate_list in (aliases.values() if isinstance(aliases, dict) else ())
+        if isinstance(candidate_list, list)
+        for candidate in candidate_list
+        if isinstance(candidate, str)
+    }
+    role_overrides = family_config.get("role_overrides", {})
+    candidates.update(
+        candidate
+        for role_aliases in (role_overrides.values() if isinstance(role_overrides, dict) else ())
+        if isinstance(role_aliases, dict)
+        for candidate_list in role_aliases.values()
+        if isinstance(candidate_list, list)
+        for candidate in candidate_list
+        if isinstance(candidate, str)
+    )
+    adapter_prefixes = {
+        adapter_name
+        for adapter_name, adapter_config in catalog.get("adapters", {}).items()
+        if isinstance(adapter_config, dict)
+        and adapter_config.get("fixed_model_family") == family
+    }
+    candidates.update(
+        f"{adapter_prefix}-{candidate}"
+        for adapter_prefix in adapter_prefixes
+        for candidate in tuple(candidates)
+    )
+    return candidates
+
+
+def risk_tier_overrides_are_valid(
+    family: str, family_config: Any, catalog: dict[str, Any]
+) -> bool:
+    """Every risk-tier override under ``family`` is well-formed and outside alias reach.
+
+    An occupant that alias routing can also resolve would be simultaneously gated and
+    freely reachable, so the catalogue is rejected rather than routed against.
+    """
+    if not isinstance(family_config, dict):
+        return False
+    overrides = family_config.get("risk_tier_overrides", {})
+    if not isinstance(overrides, dict):
+        return False
+    if not overrides:
+        return True
+    candidates = family_alias_candidates(family, family_config, catalog)
+    for override in overrides.values():
+        if not risk_tier_override_is_well_formed(override):
+            return False
+        occupant = override["models"][0]
+        if (
+            occupant in ALIAS_ORDER
+            or infer_family(occupant, catalog) is None
+            or any(
+                model_has_alias(candidate, occupant) or model_has_alias(occupant, candidate)
+                for candidate in candidates
+            )
+        ):
+            return False
+    return True
+
+
 def emit(record: dict[str, Any], code: int) -> int:
     print(json.dumps(record, sort_keys=True))
     return code
@@ -812,69 +914,10 @@ def main(argv: list[str] | None = None) -> int:
             if isinstance(adapter_config, dict)
             else None
         )
-        family_config = catalog.get("families", {}).get(adapter_family, {})
-        for family, family_config in (
-            ((adapter_family, family_config),) if adapter_family else ()
+        if adapter_family and not risk_tier_overrides_are_valid(
+            adapter_family, catalog.get("families", {}).get(adapter_family, {}), catalog
         ):
-            if not isinstance(family_config, dict):
-                continue
-            aliases = family_config.get("aliases", {})
-            alias_candidates = {
-                candidate
-                for candidates in (
-                    aliases.values() if isinstance(aliases, dict) else ()
-                )
-                if isinstance(candidates, list)
-                for candidate in candidates
-                if isinstance(candidate, str)
-            }
-            role_overrides = family_config.get("role_overrides", {})
-            alias_candidates.update(
-                candidate
-                for role_aliases in (
-                    role_overrides.values()
-                    if isinstance(role_overrides, dict)
-                    else ()
-                )
-                if isinstance(role_aliases, dict)
-                for candidates in role_aliases.values()
-                if isinstance(candidates, list)
-                for candidate in candidates
-                if isinstance(candidate, str)
-            )
-            adapter_prefixes = {
-                adapter_name
-                for adapter_name, adapter_config in catalog.get("adapters", {}).items()
-                if isinstance(adapter_config, dict)
-                and adapter_config.get("fixed_model_family") == family
-            }
-            alias_candidates.update(
-                f"{adapter_prefix}-{candidate}"
-                for adapter_prefix in adapter_prefixes
-                for candidate in tuple(alias_candidates)
-            )
-            overrides = family_config.get("risk_tier_overrides", {})
-            if not isinstance(overrides, dict):
-                continue
-            for override in overrides.values():
-                if not isinstance(override, dict):
-                    continue
-                models = override.get("models")
-                if (
-                    isinstance(models, list)
-                    and len(models) == 1
-                    and isinstance(models[0], str)
-                    and (
-                        models[0] in ALIAS_ORDER
-                        or infer_family(models[0], catalog) is None
-                        or any(
-                            model_has_alias(candidate, models[0])
-                            or model_has_alias(models[0], candidate)
-                            for candidate in alias_candidates
-                        )
-                    )
-                ):
-                    return reject("risk_tier_config_invalid", alias=args.alias)
+            return reject("risk_tier_config_invalid", alias=args.alias)
         if args.task_class:
             policy = TASK_CLASS_POLICY.get(args.task_class)
             route = catalog.get("task_class_routes", {}).get(args.task_class)
@@ -916,35 +959,10 @@ def main(argv: list[str] | None = None) -> int:
             override = family_config.get("risk_tier_overrides", {}).get(args.risk_tier)
             if not isinstance(override, dict):
                 return reject("risk_tier_override_unavailable", alias=args.alias)
-            default_effort = override.get("default_effort")
-            maximum_effort = override.get("maximum_effort")
-            models = override.get("models")
-            roles = override.get("roles")
-            alias = override.get("alias")
-            if (
-                not isinstance(default_effort, str)
-                or default_effort not in EFFORT_ORDER
-                or not isinstance(maximum_effort, str)
-                or maximum_effort not in EFFORT_ORDER
-                or EFFORT_ORDER[default_effort] > EFFORT_ORDER[maximum_effort]
-                or not isinstance(roles, list)
-                or len(roles) != 2
-                or any(
-                    not isinstance(role, str)
-                    or not role.strip()
-                    or role != role.strip()
-                    for role in roles
-                )
-                or len(set(roles)) != 2
-                or not isinstance(alias, str)
-                or alias not in ALIAS_ORDER
-                or not isinstance(models, list)
-                or len(models) != 1
-                or not isinstance(models[0], str)
-                or not models[0].strip()
-                or models[0] != models[0].strip()
-            ):
+            if not risk_tier_override_is_well_formed(override):
                 return reject("risk_tier_config_invalid", alias=args.alias)
+            maximum_effort = override["maximum_effort"]
+            roles = override["roles"]
             if args.role not in roles:
                 return reject("risk_tier_role_mismatch", alias=args.alias)
             if args.alias != override.get("alias"):

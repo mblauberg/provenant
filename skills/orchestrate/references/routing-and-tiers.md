@@ -56,9 +56,11 @@ override occupant. Validation prevents it from being an alias or alias
 candidate. Callers must select the override explicitly and stay within that
 tier's configured roles, alias and effort ceiling. Retargeting a tier removes
 that tier's special treatment from its former occupant; a model no configured
-tier names is no longer override-only. Fable currently occupies both configured
-tiers. Sol leads
-for Codex. Eligible Sol lead/orchestrator routes may use Ultra; runtime model
+tier names is no longer override-only. A malformed override block fails the
+whole family closed — every route on that family is rejected with
+`risk_tier_config_invalid` rather than quietly leaving its occupant
+dispatchable. Fable currently occupies both configured tiers. Sol leads for
+Codex. Eligible Sol lead/orchestrator routes may use Ultra; runtime model
 capabilities decide the effective effort and every fallback is recorded. Claude
 and Codex are equal primary families.
 

@@ -512,7 +512,9 @@ def test_risk_tier_override_configuration_is_closed_and_bounded(
     assert route["status"] == "risk_tier_config_invalid"
 
 
-def test_non_dict_risk_tier_override_is_unavailable(tmp_path, monkeypatch, capsys):
+def test_non_dict_risk_tier_override_is_rejected_as_malformed(tmp_path, monkeypatch, capsys):
+    # A tier that is present but not a mapping is a malformed catalogue, not an
+    # absent tier: it must be reported as such rather than as `unavailable`.
     router = load_router()
     catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
     catalog["families"]["anthropic"]["risk_tier_overrides"]["crucial"] = []
@@ -528,7 +530,83 @@ def test_non_dict_risk_tier_override_is_unavailable(tmp_path, monkeypatch, capsy
 
     route = json.loads(capsys.readouterr().out)
     assert result == 2
+    assert route["status"] == "risk_tier_config_invalid"
+
+
+def test_absent_risk_tier_is_still_reported_unavailable(tmp_path, monkeypatch, capsys):
+    # The `unavailable` status stays reachable for the case it actually names.
+    router = load_router()
+    catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    catalog["families"]["anthropic"]["risk_tier_overrides"].pop("crucial")
+    catalog_path = tmp_path / "model-routing.json"
+    catalog_path.write_text(json.dumps(catalog))
+    monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
+
+    result = router.main([
+        "resolve", "--adapter", "claude", "--alias", "flagship",
+        "--role", "synthesis", "--risk-tier", "crucial",
+        "--adapter-gate", "direct-cli",
+    ])
+
+    route = json.loads(capsys.readouterr().out)
+    assert result == 2
     assert route["status"] == "risk_tier_override_unavailable"
+
+
+@pytest.mark.parametrize(
+    "malformed_models",
+    [
+        pytest.param("fable", id="string-instead-of-list"),
+        pytest.param(["fable", "opus"], id="two-element-list"),
+        pytest.param([], id="empty-list"),
+        pytest.param([["fable"]], id="nested-list"),
+        pytest.param(None, id="null"),
+    ],
+)
+def test_malformed_override_models_never_unreserve_the_occupant(
+    tmp_path, monkeypatch, capsys, malformed_models
+):
+    # Regression: a malformed shape used to be skipped by the catalogue-wide pass,
+    # which left the tier unusable AND its occupant freely dispatchable — strictly
+    # worse than either failure alone. It must fail closed instead.
+    router = load_router()
+    catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    catalog["families"]["anthropic"]["risk_tier_overrides"]["crucial"]["models"] = malformed_models
+    catalog_path = tmp_path / "model-routing.json"
+    catalog_path.write_text(json.dumps(catalog))
+    monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
+
+    result = router.main([
+        "resolve", "--adapter", "claude", "--alias", "flagship",
+        "--role", "worker", "--model", "fable",
+        "--adapter-gate", "direct-cli",
+    ])
+
+    route = json.loads(capsys.readouterr().out)
+    assert result == 2
+    assert route["status"] == "risk_tier_config_invalid"
+
+
+def test_malformed_override_in_one_family_does_not_reject_another_family(
+    tmp_path, monkeypatch, capsys
+):
+    # The catalogue-wide pass is scoped to the adapter's own family, so an
+    # Anthropic misconfiguration must not take OpenAI routing down with it.
+    router = load_router()
+    catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    catalog["families"]["anthropic"]["risk_tier_overrides"]["crucial"]["models"] = "fable"
+    catalog_path = tmp_path / "model-routing.json"
+    catalog_path.write_text(json.dumps(catalog))
+    monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
+
+    result = router.main([
+        "resolve", "--adapter", "codex", "--alias", "workhorse",
+        "--role", "worker", "--adapter-gate", "direct-cli",
+    ])
+
+    route = json.loads(capsys.readouterr().out)
+    assert result == 0
+    assert route["status"] == "ok"
 
 
 def test_openai_aliases_resolve_to_account_default_dispatch():
