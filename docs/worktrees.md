@@ -74,10 +74,19 @@ own uninherited dependency tree — in this repository roughly 400 MB apiece.
 Prune immediately after the merge, in this order:
 
 ```sh
+# 1. Establish where you are. Both must match before anything mutates.
+test "$(git -C <primary-root> rev-parse --show-toplevel)" = "<primary-root>"
+test "$(git -C <primary-root> symbolic-ref --quiet --short HEAD)" = "<integration-branch>"
+
+# 2. Sync the integration branch.
 git -C <primary-root> fetch origin
 git -C <primary-root> merge --ff-only origin/<integration-branch>
-git -C <primary-root> branch --merged <integration-branch>   # confirm before deleting
-scripts/worktree remove <name> --human-authorised
+
+# 3. Prove the merge by ancestry. This exiting 0 is the gate.
+git -C <primary-root> merge-base --is-ancestor <merged-branch> <integration-branch>
+
+# 4. Prune only that branch's artefacts.
+scripts/worktree remove <name> --repo <primary-root> --human-authorised
 git -C <primary-root> branch -d <merged-branch>
 git -C <primary-root> worktree prune
 git -C <primary-root> remote prune origin
@@ -85,16 +94,38 @@ git -C <primary-root> remote prune origin
 
 Constraints that keep this narrow:
 
-- **Confirm the merge first.** `git branch --merged` must list the branch, or
-  `gh pr view <n> --json state` must report `MERGED`. Never infer a merge from a
-  green pull request or a passing suite.
+- **Establish the repository and branch before mutating.** `merge --ff-only`
+  fast-forwards whatever `<primary-root>` currently has checked out, and the
+  helper acts on its own current repository unless given `--repo`. A prune run
+  from the wrong checkout, or against a detached HEAD, silently moves the wrong
+  ref. Step 1 is not optional.
+- **Prove the merge by ancestry, not by status.**
+  `git merge-base --is-ancestor <merged-branch> <integration-branch>` exiting 0
+  is the proof, because it names both refs explicitly. `gh pr view <n> --json
+  state` reporting `MERGED` is not sufficient alone: it says nothing about which
+  repository the pull request belongs to, nor whether its head and base refs are
+  the branches in front of you. If you use it, verify `headRefName` and
+  `baseRefName` too. Never infer a merge from a green pull request or a passing
+  suite.
 - **Only that branch's artefacts.** The authority covers the worktree created
   for the merged branch, that branch's local ref, and stale remote-tracking refs
   for branches the forge already deleted. It does not extend to any other
   worktree, branch or checkout.
-- **`-d`, never `-D`.** If Git refuses the delete, the branch is not fully
-  merged: stop and report rather than forcing. `git worktree remove` likewise
-  stays unforced — a dirty worktree is unconsumed work, not debris.
+- **`git branch -d` is not a merge check.** Git deletes a branch that is merged
+  into *its upstream*, even when it is not merged into HEAD, warning and exiting
+  0. Every pushed implementation branch has an upstream, so this is the common
+  case, not the exotic one. Verified directly:
+
+  ```text
+  warning: deleting branch 'feat' that has been merged to
+           'refs/remotes/origin/feat', but not yet merged to HEAD
+  Deleted branch feat (was 95ef3c3).
+  ```
+
+  So step 3 is the safeguard and `-d` is only a second line of defence. Still
+  `-d`, never `-D`: if Git refuses despite step 3 passing, something disagrees
+  with your model of the repository, so stop and report. `git worktree remove`
+  likewise stays unforced — a dirty worktree is unconsumed work, not debris.
 - **Retention beats reclamation.** Where a repository requires a run directory,
   receipt or artifact to survive the merge, that requirement wins; prune only
   after it is satisfied. Check the repository's own workflow runbook.

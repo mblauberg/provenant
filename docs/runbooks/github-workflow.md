@@ -192,10 +192,12 @@ means exactly this one context; no other check is required.
 
 The user review/merge gate applies only when the agent is stuck: split review
 verdicts it cannot settle with primary-source evidence, an exhausted repair
-budget, or a decision outside its granted authority. Standing user gates are
-unchanged: manual or forced branch deletion outside the repository's automatic
-merged-head cleanup, history rewrites, credential or connector setup, pushes to
-shared branches outside authorised merges, and risk-tier downgrades.
+budget, or a decision outside its granted authority. Standing user gates are:
+forced branch deletion, deletion of a branch that is not merged, history
+rewrites, credential or connector setup, pushes to shared branches outside
+authorised merges, and risk-tier downgrades. Deleting a *merged* branch's own
+local ref and worktree is carried by the merge itself, under
+[post-merge pruning](../worktrees.md#post-merge-pruning).
 
 Branch protection requires the head to be strictly up to date with `main`, so
 concurrent pull requests still integrate as a serialised merge train: merge

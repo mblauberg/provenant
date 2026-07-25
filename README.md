@@ -240,8 +240,9 @@ The canonical ladder lives in [`HARNESS.md`](HARNESS.md).
 - access and credentials never grant authority;
 - creating branches and worktrees for implementation is pre-authorised;
   merge authority comes from the owning repository (this repo grants it through
-  its [GitHub runbook](docs/runbooks/github-workflow.md)); deletion,
-  force-removal and unauthorised shared-branch pushes stay gated;
+  its [GitHub runbook](docs/runbooks/github-workflow.md)); deletion beyond
+  post-merge pruning, force-removal and unauthorised shared-branch pushes stay
+  gated;
 - no two agents write one source surface at once; and
 - specification approval, acceptance and release stay separate user decisions
   ([`HARNESS.md`](HARNESS.md)).
