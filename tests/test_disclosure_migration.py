@@ -218,7 +218,7 @@ def test_disclosure_migration_manifest_is_complete_and_anchored():
 
     orchestrate = manifest["orchestrate"]
     assert orchestrate == approved_orchestrate
-    assert len(orchestrate) == 17
+    assert len(orchestrate) == 18
     assert all(set(row) == {"file", "verdict", "notes"} for row in orchestrate)
     assert all(all(isinstance(value, str) and value for value in row.values()) for row in orchestrate)
     files = [row["file"] for row in orchestrate]
@@ -236,7 +236,7 @@ def test_disclosure_migration_manifest_is_complete_and_anchored():
     merged = [
         row["file"] for row in orchestrate if row["verdict"] == "merge-then-delete"
     ]
-    assert len(retained) == 15
+    assert len(retained) == 16
     assert len(archived) == len(merged) == 1
 
     orchestrate_root = ROOT / "skills" / "orchestrate"
@@ -338,7 +338,7 @@ def test_disclosure_migration_manifest_is_complete_and_anchored():
         ),
         (
             lambda manifest: manifest["orchestrate"].pop(),
-            "must have 17 orchestrate rows",
+            "must have 18 orchestrate rows",
         ),
     ),
 )
