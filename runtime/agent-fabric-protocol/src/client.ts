@@ -62,6 +62,8 @@ import type {
   OperatorDetailReadResult,
   OperatorViewPageRequest,
   OperatorViewPageResult,
+  RunProjectionPageRequest,
+  RunProjectionPageResult,
   ProjectDiscoveryRequest,
   ProjectDiscoveryResult,
   ProjectionPageRequest,
@@ -220,6 +222,7 @@ type OperatorConsoleReadSurface = {
   gates: { read(input: ScopedGateReadRequest): Promise<ScopedGateReadResult> };
   projection: {
     viewPage(input: OperatorViewPageRequest): Promise<OperatorViewPageResult>;
+    runPage(input: RunProjectionPageRequest): Promise<RunProjectionPageResult>;
     readDetail(input: OperatorDetailReadRequest): Promise<OperatorDetailReadResult>;
   };
 };
@@ -396,6 +399,7 @@ function operatorConsole(transport: ProtocolRpcTransport): OperatorConsoleClient
     gates: { read: (input) => transport.call(FABRIC_OPERATIONS.scopedGateRead, input) },
     projection: {
       viewPage: (input) => transport.call(FABRIC_OPERATIONS.projectionViewPage, input),
+      runPage: (input) => transport.call(FABRIC_OPERATIONS.projectionRunPage, input),
       readDetail: (input) => transport.call(FABRIC_OPERATIONS.projectionDetailRead, input),
     },
   };
@@ -492,9 +496,13 @@ export function createOperatorClient(transport: ProtocolRpcTransport): Negotiate
       : {}),
     ...(hasFeature(transport, "scoped-gate-read.v1") &&
       hasFeature(transport, "operator-projection.v2") &&
+      hasFeature(transport, "run-scoped-projection.v1") &&
+      hasFeature(transport, "agent-topology-projection.v1") &&
+      hasFeature(transport, "work-facts-projection.v1") &&
       hasOperations(transport, [
         FABRIC_OPERATIONS.scopedGateRead,
         FABRIC_OPERATIONS.projectionViewPage,
+        FABRIC_OPERATIONS.projectionRunPage,
         FABRIC_OPERATIONS.projectionDetailRead,
       ])
       ? { console: operatorConsole(transport) }

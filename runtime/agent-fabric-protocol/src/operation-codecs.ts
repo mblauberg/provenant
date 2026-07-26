@@ -120,7 +120,39 @@ export function parseOperationResultForInput<Operation extends ProtocolOperation
   validateProviderActionResultForInput(operation, input, result);
   validateLifecycleResultForInput(operation, input, result, principal);
   validateRunPlanResultForInput(operation, input, result, principal);
+  validateRunProjectionResultForInput(operation, input, result);
   return result;
+}
+
+function validateRunProjectionResultForInput<Operation extends ProtocolOperation>(
+  operation: Operation,
+  input: OperationInputMap[Operation],
+  result: OperationResultMap[Operation],
+): void {
+  if (operation !== FABRIC_OPERATIONS.projectionRunPage) return;
+  const request = input as unknown as Record<string, unknown>;
+  const response = result as unknown as Record<string, unknown>;
+  const requestTarget = request.target as Record<string, unknown>;
+  const responseTarget = response.target as Record<string, unknown>;
+  const sameTarget = requestTarget.kind === responseTarget.kind &&
+    requestTarget.coordinationRunId === responseTarget.coordinationRunId &&
+    (
+      requestTarget.kind !== "delivery-workstream" ||
+      (
+        requestTarget.deliveryRunId === responseTarget.deliveryRunId &&
+        requestTarget.workstreamId === responseTarget.workstreamId
+      )
+    );
+  if (
+    response.projectSessionId !== request.projectSessionId ||
+    response.section !== request.section ||
+    !sameTarget
+  ) {
+    throw new TypeError("run projection result addressing does not match request");
+  }
+  if (response.status === "page" && response.snapshotRevision !== request.snapshotRevision) {
+    throw new TypeError("run projection page snapshot revision does not match request");
+  }
 }
 
 export function assertCodecRegistryExhaustive(): void {

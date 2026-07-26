@@ -84,6 +84,230 @@ describe("renderer component boundaries", () => {
     expect(hitRegions).toStrictEqual([]);
   });
 
+  it("renders the exact labelled run composition in compact and wide detail panes", () => {
+    const presentation = {
+      activeView: "runs",
+      masterRows: [],
+      detail: {
+        stableId: "run-1",
+        revision: "1",
+        lines: [],
+      },
+      focusId: null,
+    } as unknown as FabricConsolePresentation;
+    const target = {
+      kind: "coordination-run",
+      coordinationRunId: "run-1",
+    };
+    const dataset = {
+      inspection: {
+        kind: "run",
+        state: "current",
+        binding: {
+          view: "runs",
+          itemId: "run-1",
+          itemRevision: "1",
+          projectionRevision: "1",
+          projectSessionId: "session-1",
+          runTarget: target,
+        },
+        result: {
+          projectSessionId: "session-1",
+          target,
+          readTransactionId: "run-read-1",
+          composition: {
+            projectSessionId: "session-1",
+            target,
+            identity: {
+              freshness: "live",
+              source: "fabric",
+              revision: 1,
+              observedAt: "2026-07-26T00:00:00.000Z",
+              value: {
+                acceptedScope: { observation: "Unobserved" },
+                currentPlan: { observation: "Unobserved" },
+                lead: { observation: "Observed", value: "chair-1" },
+                phase: { observation: "Observed", value: "active" },
+                health: { observation: "Observed", value: "healthy" },
+                currentMilestone: { observation: "Unobserved" },
+                nextMilestone: { observation: "Observed", value: "quiescing" },
+                lastEventAt: { observation: "Unobserved" },
+              },
+            },
+            declaredProgress: {
+              freshness: "live",
+              source: "fabric",
+              revision: 1,
+              observedAt: "2026-07-26T00:00:00.000Z",
+              value: {
+                observation: "Observed",
+                value: {
+                  plan: "open",
+                  counts: {
+                    blocked: 1,
+                    ready: 2,
+                    active: 3,
+                    complete: 4,
+                    cancelled: 0,
+                    degraded: 0,
+                  },
+                },
+              },
+            },
+          },
+          work: [],
+          agents: [],
+          evidence: [],
+          activity: [{
+            itemId: "activity-group-1",
+            itemRevision: 5,
+            fact: {
+              freshness: "live",
+              source: "fabric",
+              revision: 5,
+              observedAt: "2026-07-26T00:00:00.000Z",
+              value: {
+                summary: {
+                  kind: "activity",
+                  summary: "task activity",
+                  occurredAt: "2026-07-26T00:00:00.000Z",
+                  group: {
+                    groupId: "activity-group-1",
+                    ordinal: 1,
+                    kind: "task",
+                    actorIds: ["chair-1"],
+                    target: { kind: "task", id: "task-1" },
+                    eventKinds: ["task-updated"],
+                    occurredAtRange: {
+                      first: "2026-07-26T00:00:00.000Z",
+                      last: "2026-07-26T00:00:00.000Z",
+                    },
+                    sourceRange: { first: 5, last: 5 },
+                    count: 1,
+                    evidenceLinkCount: 0,
+                    evidenceLinksDigest: `sha256:${"b".repeat(64)}`,
+                    evidenceLinksTruncated: false,
+                    evidenceLinks: [],
+                    members: [{
+                      ordinal: 1,
+                      eventId: "event-1",
+                      eventKind: "task-updated",
+                      actorId: "chair-1",
+                      target: { kind: "task", id: "task-1" },
+                      occurredAt: "2026-07-26T00:00:00.000Z",
+                      sourceRevision: 5,
+                      detailAvailability: "available",
+                      evidenceLinkCount: 0,
+                      evidenceLinksDigest: `sha256:${"b".repeat(64)}`,
+                    }],
+                  },
+                },
+                detailRef: {
+                  kind: "activity",
+                  groupId: "activity-group-1",
+                  expectedRevision: 5,
+                },
+                actionAvailability: {
+                  state: "read-only",
+                  reason: "state-ineligible",
+                },
+              },
+            },
+          }],
+          issues: [{
+            kind: "task",
+            scope: target,
+            taskId: "task-blocked",
+            taskRevision: 2,
+            state: "blocked",
+            detailRef: { kind: "task", taskId: "task-blocked", expectedRevision: 2 },
+          }],
+          evidencePaths: [{
+            path: "reports/result.md",
+            digest: `sha256:${"a".repeat(64)}`,
+          }],
+          evidencePathObservation: "Observed",
+        },
+      },
+    } as unknown as FabricConsoleDataset;
+
+    const render = (columns: number, height: number): readonly string[] => {
+      const rows = Array.from({ length: height }, () => " ".repeat(columns));
+      renderFabricDetail(
+        rows,
+        columns,
+        presentation,
+        dataset,
+        createFabricUiState(),
+        "geometry",
+        [],
+        { x1: 1, y1: 1, x2: columns, y2: height },
+      );
+      return rows;
+    };
+
+    expect(render(44, 8).join("\n")).toContain("Target: SESSION session-1 | coordination");
+    const wide = render(120, 24).join("\n");
+    expect(wide).toContain("Lead: chair-1");
+    expect(wide).toContain("Current milestone: Unobserved");
+    expect(wide).toContain("Work states (server): blocked 1 | ready 2 | active 3 | complete 4");
+    expect(wide).toContain("Activity group: activity-group-1 | task | count 1");
+    expect(wide).toContain("Blocking issue: task task-blocked r2 | blocked");
+    expect(wide).toContain("Evidence path: reports/result.md");
+
+    const result = (dataset.inspection as {
+      result: {
+        composition: Record<string, unknown>;
+        evidencePathObservation: string;
+      };
+    }).result;
+    result.composition.identity = {
+      freshness: "unavailable",
+      source: "fabric",
+      revision: 2,
+      observedAt: "2026-07-26T00:00:00.000Z",
+      reason: "not observed",
+    };
+    result.composition.declaredProgress = {
+      freshness: "conflict",
+      source: "fabric",
+      revision: 2,
+      observedAt: "2026-07-26T00:00:00.000Z",
+      candidates: [{ observation: "Unobserved" }, { observation: "Unobserved" }],
+    };
+    result.evidencePathObservation = "Unknown";
+    (result as unknown as { issues: unknown[] }).issues.push({
+      kind: "task-fact-conflict",
+      scope: target,
+      taskId: "task-conflict",
+      taskRevision: 3,
+      detailRef: { kind: "task", taskId: "task-conflict", expectedRevision: 3 },
+    });
+    const unavailable = render(120, 24).join("\n");
+    expect(unavailable).toContain("Lead: Unobserved");
+    expect(unavailable).toContain("Work states: Unknown");
+    expect(unavailable).toContain("Evidence path: Unknown");
+    expect(unavailable).toContain("Blocking issue: task task-conflict | Unknown");
+
+    result.composition.identity = {
+      freshness: "conflict",
+      source: "fabric",
+      revision: 3,
+      observedAt: "2026-07-26T00:00:00.000Z",
+      candidates: [{}, {}],
+    };
+    result.composition.declaredProgress = {
+      freshness: "unavailable",
+      source: "fabric",
+      revision: 3,
+      observedAt: "2026-07-26T00:00:00.000Z",
+      reason: "not observed",
+    };
+    const contradictory = render(120, 24).join("\n");
+    expect(contradictory).toContain("Lead: Unknown");
+    expect(contradictory).toContain("Work states: Unobserved");
+  });
+
   it("preserves logical review anchors through the review surface seam", () => {
     const wrapped = wrapFabricReviewContent(
       { lines: ["abcdef", "xy"], requiredContextLineCount: 1 },

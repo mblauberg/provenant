@@ -731,6 +731,9 @@ describe("production Console package-root bootstrap", () => {
         "declared-run-progress.v2",
         "run-identity-projection.v2",
         "activity-narrative-grouping.v1",
+        "agent-topology-projection.v1",
+        "work-facts-projection.v1",
+        "run-scoped-projection.v1",
         "artifact-content-read.v1",
       ],
       projection: {
@@ -756,6 +759,7 @@ describe("production Console package-root bootstrap", () => {
         gates: { read: async () => { throw new Error("not called"); } },
         projection: {
           viewPage: async () => { throw new Error("not called"); },
+          runPage: async () => { throw new Error("not called"); },
           readDetail: async () => { throw new Error("not called"); },
         },
       },
@@ -836,6 +840,9 @@ describe("production Console package-root bootstrap", () => {
               "declared-run-progress.v2",
               "run-identity-projection.v2",
               "activity-narrative-grouping.v1",
+              "agent-topology-projection.v1",
+              "work-facts-projection.v1",
+              "run-scoped-projection.v1",
               "artifact-content-read.v1",
             ],
             projection: {
@@ -900,6 +907,7 @@ describe("production Console package-root bootstrap", () => {
                   snapshotRevision: 11,
                   readTransactionId: "filtered_actions",
                 }),
+                runPage: async () => { throw new Error("unused"); },
                 readDetail: async () => { throw new Error("unused"); },
               },
             },
@@ -971,6 +979,9 @@ describe("production Console package-root bootstrap", () => {
         "declared-run-progress.v2",
         "run-identity-projection.v2",
         "activity-narrative-grouping.v1",
+        "agent-topology-projection.v1",
+        "work-facts-projection.v1",
+        "run-scoped-projection.v1",
         "artifact-content-read.v1",
       ],
       projection: {
@@ -991,6 +1002,7 @@ describe("production Console package-root bootstrap", () => {
         gates: { read: async () => { throw new Error("unused"); } },
         projection: {
           viewPage: async () => { throw new Error("unused"); },
+          runPage: async () => { throw new Error("unused"); },
           readDetail: async () => { throw new Error("unused"); },
         },
       },

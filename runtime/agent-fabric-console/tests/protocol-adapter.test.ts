@@ -15,6 +15,7 @@ import type {
   MessageBodyReadResult,
   ProjectId,
   ProjectionEventsResult,
+  RunProjectionPageResult,
   Sha256Digest,
   Timestamp,
 } from "@local/agent-fabric-protocol";
@@ -115,6 +116,9 @@ function fakePort(
     viewPage: vi.fn(async (request) =>
       emptyPage(request.view, request.snapshotRevision),
     ),
+    runPage: vi.fn(async () => {
+      throw new Error("unused run page");
+    }),
     readDetail: vi.fn(async (): Promise<OperatorDetailReadResult> => ({
       status: "resnapshot-required",
       reason: "snapshot-mismatch",
@@ -143,6 +147,152 @@ function binding(port: ConsoleProtocolPort): ConsoleProtocolBinding {
 }
 
 describe("public protocol adapter", () => {
+  it("opens one exact run without replacing server counts with the current page length", async () => {
+    const projectSessionId = "session-1" as never;
+    const target = {
+      kind: "coordination-run",
+      coordinationRunId: "run-1" as never,
+    } as const;
+    const composition = {
+      projectSessionId,
+      target,
+      identity: {
+        freshness: "live",
+        source: "fabric",
+        revision: 1,
+        observedAt,
+        value: {
+          acceptedScope: { observation: "Unobserved" },
+          currentPlan: { observation: "Unobserved" },
+          lead: { observation: "Observed", value: "chair-1" },
+          phase: { observation: "Observed", value: "active" },
+          health: { observation: "Observed", value: "healthy" },
+          currentMilestone: { observation: "Unobserved" },
+          nextMilestone: { observation: "Observed", value: "quiescing" },
+          lastEventAt: { observation: "Unobserved" },
+        },
+      },
+      declaredProgress: {
+        freshness: "live",
+        source: "fabric",
+        revision: 1,
+        observedAt,
+        value: {
+          observation: "Observed",
+          value: {
+            plan: "open",
+            counts: {
+              blocked: 0,
+              ready: 1,
+              active: 3,
+              complete: 4,
+              cancelled: 0,
+              degraded: 0,
+            },
+          },
+        },
+      },
+    } as const;
+    const workRow = {
+      itemId: "task-1",
+      itemRevision: 1,
+      fact: {
+        freshness: "live",
+        source: "fabric",
+        revision: 1,
+        observedAt,
+        value: {
+          summary: {
+            kind: "work",
+            state: "active",
+            checkState: "passing",
+            workflow: {
+              workflowRevision: 1,
+              objective: { observation: "Observed", value: "Implement drill-down" },
+              dependencies: { observation: "Observed", dependencyRevision: 1, taskIds: [] },
+              coordinationRun: {
+                observation: "Observed",
+                projectSessionId,
+                coordinationRunId: "run-1",
+              },
+              workstream: { observation: "Unobserved" },
+              parentTask: { observation: "Unobserved" },
+              plan: { observation: "Unobserved" },
+              task: {
+                observation: "Observed",
+                state: "active",
+                owner: {
+                  observation: "Observed",
+                  agentId: "chair-1",
+                  ownerLeaseGeneration: 1,
+                },
+              },
+              checks: { observation: "Observed", items: [] },
+              barriers: { observation: "Observed", items: [] },
+              declaredWriteScopes: { observation: "Observed", leases: [] },
+              runTaskStates: {
+                observation: "Observed",
+                counts: composition.declaredProgress.value.value.counts,
+              },
+            },
+          },
+          detailRef: { kind: "task", taskId: "task-1", expectedRevision: 1 },
+          actionAvailability: { state: "read-only", reason: "state-ineligible" },
+        },
+      },
+    } as const;
+    const runPage = vi.fn(async (request): Promise<RunProjectionPageResult> => ({
+      status: "page",
+      projectSessionId,
+      target,
+      section: request.section,
+      entries: request.section === "work"
+        ? [{ runScope: target, value: workRow }]
+        : [],
+      nextCursor: request.section === "work" ? 1 : 0,
+      hasMore: false,
+      snapshotRevision: request.snapshotRevision,
+      readTransactionId: "run-read-1",
+      composition,
+    }) as unknown as RunProjectionPageResult);
+    const port = fakePort({ runPage });
+    const adapter = new ConsoleProtocolAdapter({
+      binding: binding(port),
+      credential,
+      projectId,
+      projectSessionId,
+    });
+    await adapter.open();
+
+    const inspection = await adapter.inspect({
+      view: "runs",
+      itemId: "run-1",
+      itemRevision: revisionFromProtocol(1),
+      projectionRevision: revisionFromProtocol(1),
+      projectSessionId,
+      runTarget: target,
+    });
+
+    expect(inspection).toMatchObject({
+      kind: "run",
+      state: "current",
+      result: {
+        projectSessionId: "session-1",
+        work: [{ itemId: "task-1" }],
+        composition: {
+          declaredProgress: {
+            value: {
+              value: {
+                counts: { active: 3, complete: 4 },
+              },
+            },
+          },
+        },
+      },
+    });
+    expect(runPage).toHaveBeenCalledTimes(5);
+  });
+
   it("maps a current Attention page without the optional notification feature to unavailable", async () => {
     const port = fakePort({
       viewPage: vi.fn(async (request): Promise<OperatorViewPageResult> => {
@@ -738,6 +888,9 @@ describe("public protocol adapter", () => {
         "declared-run-progress.v2",
         "run-identity-projection.v2",
         "activity-narrative-grouping.v1",
+        "agent-topology-projection.v1",
+        "work-facts-projection.v1",
+        "run-scoped-projection.v1",
         "artifact-content-read.v1",
       ],
     });
@@ -758,6 +911,9 @@ describe("public protocol adapter", () => {
           "declared-run-progress.v2",
           "run-identity-projection.v2",
           "activity-narrative-grouping.v1",
+          "agent-topology-projection.v1",
+          "work-facts-projection.v1",
+          "run-scoped-projection.v1",
           "artifact-content-read.v1",
         ],
       },
@@ -779,7 +935,7 @@ describe("public protocol adapter", () => {
       console: {
         readOnly: true,
         gates: { read: vi.fn() },
-        projection: { viewPage: vi.fn(), readDetail: vi.fn() },
+        projection: { viewPage: vi.fn(), runPage: vi.fn(), readDetail: vi.fn() },
       },
       artifacts: { readContent: vi.fn() },
     } as never);
@@ -791,6 +947,9 @@ describe("public protocol adapter", () => {
         "declared-run-progress.v2",
         "run-identity-projection.v2",
         "activity-narrative-grouping.v1",
+        "agent-topology-projection.v1",
+        "work-facts-projection.v1",
+        "run-scoped-projection.v1",
       ],
     });
   });
@@ -814,6 +973,9 @@ describe("public protocol adapter", () => {
         "declared-run-progress.v2",
         "run-identity-projection.v2",
         "activity-narrative-grouping.v1",
+        "agent-topology-projection.v1",
+        "work-facts-projection.v1",
+        "run-scoped-projection.v1",
         "artifact-content-read.v1",
         "message-body-read.v1",
         "operator-repository-read.v1",
@@ -829,7 +991,7 @@ describe("public protocol adapter", () => {
       console: {
         readOnly: true,
         gates: { read: vi.fn() },
-        projection: { viewPage: vi.fn(), readDetail: vi.fn() },
+        projection: { viewPage: vi.fn(), runPage: vi.fn(), readDetail: vi.fn() },
       },
       messages: { read: messageRead },
       repository: { read: repositoryRead },
@@ -859,6 +1021,9 @@ describe("public protocol adapter", () => {
         "declared-run-progress.v2",
         "run-identity-projection.v2",
         "activity-narrative-grouping.v1",
+        "agent-topology-projection.v1",
+        "work-facts-projection.v1",
+        "run-scoped-projection.v1",
         "artifact-content-read.v1",
       ],
       projection: {},
@@ -866,7 +1031,7 @@ describe("public protocol adapter", () => {
       console: {
         readOnly: true,
         gates: { read: vi.fn() },
-        projection: { viewPage: vi.fn(), readDetail: vi.fn() },
+        projection: { viewPage: vi.fn(), runPage: vi.fn(), readDetail: vi.fn() },
       },
       artifacts: { readContent: artifactRead },
     } as never);

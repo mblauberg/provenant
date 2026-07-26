@@ -58,6 +58,8 @@ import type {
   OperatorDetailReadResult,
   OperatorViewPageRequest,
   OperatorViewPageResult,
+  RunProjectionPageRequest,
+  RunProjectionPageResult,
   ProjectDiscoveryRequest,
   ProjectDiscoveryResult,
   ProjectionPageRequest,
@@ -258,6 +260,7 @@ type ExtensionOperationInputMap = {
   [FABRIC_OPERATIONS.projectionEvents]: ProjectionEventsRequest;
   [FABRIC_OPERATIONS.projectionViewPage]: OperatorViewPageRequest;
   [FABRIC_OPERATIONS.projectionDetailRead]: OperatorDetailReadRequest;
+  [FABRIC_OPERATIONS.projectionRunPage]: RunProjectionPageRequest;
   [FABRIC_OPERATIONS.operatorActionPreview]: OperatorActionPreviewRequest;
   [FABRIC_OPERATIONS.operatorActionCommit]: OperatorActionCommitRequest;
   [FABRIC_OPERATIONS.operatorActionStatus]: OperatorActionStatusRequest;
@@ -349,6 +352,7 @@ type ExtensionOperationResultMap = {
   [FABRIC_OPERATIONS.projectionEvents]: ProjectionEventsResult;
   [FABRIC_OPERATIONS.projectionViewPage]: OperatorViewPageResult;
   [FABRIC_OPERATIONS.projectionDetailRead]: OperatorDetailReadResult;
+  [FABRIC_OPERATIONS.projectionRunPage]: RunProjectionPageResult;
   [FABRIC_OPERATIONS.operatorActionPreview]: OperatorActionPreview;
   [FABRIC_OPERATIONS.operatorActionCommit]: OperatorActionReceipt;
   [FABRIC_OPERATIONS.operatorActionStatus]: OperatorActionStatus;

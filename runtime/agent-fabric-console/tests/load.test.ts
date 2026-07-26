@@ -377,6 +377,7 @@ describe("Console bounded load gates", () => {
         readTransactionId: "events",
       }),
       viewPage,
+      runPage: async () => { throw new Error("unused run page"); },
       readDetail: async () => ({
         status: "resnapshot-required",
         reason: "snapshot-mismatch",
@@ -511,6 +512,7 @@ describe("Console bounded load gates", () => {
           readTransactionId: `churn-attention-${String(revision)}`,
         };
       },
+      runPage: async () => { throw new Error("unused run page"); },
       readDetail: async () => ({
         status: "resnapshot-required",
         reason: "snapshot-mismatch",

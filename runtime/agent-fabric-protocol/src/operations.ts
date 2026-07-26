@@ -14,6 +14,7 @@ export type OperationFeature =
   | "chair-takeover.v1"
   | "operator-projection.v1"
   | "operator-projection.v2"
+  | "run-scoped-projection.v1"
   | "operator-actions.v1"
   | "launch-custody.v1"
   | "launch-attestation.v1"
@@ -147,6 +148,7 @@ const DEFINITIONS = defineOperations({
   projectionEvents: { operation: "fabric.v1.operator-projection.events", feature: "operator-projection.v1", principals: ["operator"], kind: "extension" },
   projectionViewPage: { operation: "fabric.v1.operator-projection.view-page", feature: "operator-projection.v2", principals: ["operator"], kind: "extension" },
   projectionDetailRead: { operation: "fabric.v1.operator-projection.detail.read", feature: "operator-projection.v2", principals: ["operator"], kind: "extension" },
+  projectionRunPage: { operation: "fabric.v1.operator-projection.run-page", feature: "run-scoped-projection.v1", principals: ["operator"], kind: "extension" },
   operatorActionPreview: { operation: "fabric.v1.operator-action.preview", feature: "operator-actions.v1", principals: ["operator"], kind: "extension" },
   operatorActionCommit: { operation: "fabric.v1.operator-action.commit", feature: "operator-actions.v1", principals: ["operator"], kind: "extension" },
   operatorActionStatus: { operation: "fabric.v1.operator-action.status", feature: "operator-actions.v1", principals: ["operator"], kind: "extension" },

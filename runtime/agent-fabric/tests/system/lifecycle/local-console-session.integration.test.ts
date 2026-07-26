@@ -691,6 +691,9 @@ describe("public local operator Console session", () => {
       expect(selected.attachableProjectSessions.map(({ projectSessionId }) => projectSessionId)).toEqual([
         "session_pagination_active",
       ]);
+      expect(selected.projectSessionId).toBeUndefined();
+      expect(selected.client).toBe(selected.projectClient);
+      await selected.selectProjectSession("session_pagination_active" as never);
       expect(selected.projectSessionId).toBe("session_pagination_active");
       const selectedSessionId = selected.projectSessionId;
       if (selectedSessionId === undefined) throw new Error("pagination session was not selected");

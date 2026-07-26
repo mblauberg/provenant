@@ -191,7 +191,7 @@ function client(
         reconcile: vi.fn(),
       },
       gates: { read },
-      projection: { viewPage: vi.fn(), readDetail: vi.fn() },
+      projection: { viewPage: vi.fn(), runPage: vi.fn(), readDetail: vi.fn() },
     },
     close: async () => {},
   };

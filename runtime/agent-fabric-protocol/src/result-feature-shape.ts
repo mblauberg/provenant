@@ -14,6 +14,7 @@ import type {
   OperatorViewSummaryMap,
   ProjectionFact,
   ProjectionPageResult,
+  RunProjectionPageResult,
 } from "./projection.js";
 import type { OperationResultMap, ProtocolOperation } from "./rpc-contract.js";
 
@@ -24,6 +25,7 @@ export const DECLARED_RUN_PROGRESS_FEATURE = "declared-run-progress.v2" as const
 export const RUN_IDENTITY_PROJECTION_FEATURE = "run-identity-projection.v2" as const;
 export const AGENT_TOPOLOGY_PROJECTION_FEATURE = "agent-topology-projection.v1" as const;
 export const WORK_FACTS_PROJECTION_FEATURE = "work-facts-projection.v1" as const;
+export const RUN_SCOPED_PROJECTION_FEATURE = "run-scoped-projection.v1" as const;
 export const MCP_BOOTSTRAP_CREDENTIALS_FEATURE =
   "mcp-bootstrap-credentials.v2" as const;
 
@@ -233,6 +235,13 @@ function agentTopologyPresence(
       detail.kind === "agent" ? [detail.topology !== undefined] : []
     ));
   }
+  if (operation === FABRIC_OPERATIONS.projectionRunPage) {
+    const page = result as RunProjectionPageResult;
+    if (page.status !== "page" || page.section !== "agents") return [];
+    const agents = page as Extract<RunProjectionPageResult<"agents">, { status: "page" }>;
+    return agents.entries.flatMap((entry) => factValues(entry.value.fact)
+      .map((value) => value.summary.topology !== undefined));
+  }
   return [];
 }
 
@@ -253,6 +262,13 @@ function workFactsPresence(
     return factValues(read.detail).flatMap((detail) => (
       detail.kind === "task" ? [detail.workflow !== undefined] : []
     ));
+  }
+  if (operation === FABRIC_OPERATIONS.projectionRunPage) {
+    const page = result as RunProjectionPageResult;
+    if (page.status !== "page" || page.section !== "work") return [];
+    const work = page as Extract<RunProjectionPageResult<"work">, { status: "page" }>;
+    return work.entries.flatMap((entry) => factValues(entry.value.fact)
+      .map((value) => value.summary.workflow !== undefined));
   }
   return [];
 }
@@ -281,6 +297,20 @@ function activityNarrativeGroupingPresence(
       ])
     );
   }
+  if (operation === FABRIC_OPERATIONS.projectionRunPage) {
+    const page = result as RunProjectionPageResult;
+    if (page.status !== "page" || page.section !== "activity") return [];
+    const activity = page as Extract<
+      RunProjectionPageResult<"activity">,
+      { status: "page" }
+    >;
+    return activity.entries.flatMap((entry) =>
+      factValues(entry.value.fact).flatMap((value) => [
+        "group" in value.summary,
+        "groupId" in value.detailRef,
+      ])
+    );
+  }
   if (operation === FABRIC_OPERATIONS.projectionDetailRead) {
     const read = result as OperatorDetailReadResult;
     if (read.status !== "current" || read.detailRef.kind !== "activity") return [];
@@ -296,6 +326,19 @@ function activityNarrativeGroupingPresence(
     );
   }
   return [];
+}
+
+function runScopedProjectionPresence(
+  operation: ProtocolOperation,
+  result: OperationResultMap[ProtocolOperation],
+): readonly boolean[] {
+  if (operation !== FABRIC_OPERATIONS.projectionRunPage) return [];
+  const page = result as RunProjectionPageResult;
+  if (page.status !== "page") return [];
+  return [
+    page.composition !== undefined,
+    ...page.entries.map((entry) => entry.runScope !== undefined),
+  ];
 }
 
 function assertUniformFeaturePresence(
@@ -384,6 +427,11 @@ export function assertOperationResultFeatureShape<Operation extends ProtocolOper
       operation,
       result as OperationResultMap[ProtocolOperation],
     ),
+  );
+  assertUniformFeaturePresence(
+    operation,
+    features.includes(RUN_SCOPED_PROJECTION_FEATURE),
+    runScopedProjectionPresence(operation, result as OperationResultMap[ProtocolOperation]),
   );
   return result;
 }

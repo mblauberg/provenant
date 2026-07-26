@@ -51,7 +51,58 @@ function bindingFor(
         itemId: row.stableId,
         itemRevision: row.revision,
         projectionRevision: dataset.snapshotRevision,
+        ...(row.view === "runs"
+          ? (() => {
+              const source = dataset.pages.runs.rows.find(
+                (candidate) =>
+                  candidate.stableId === row.stableId &&
+                  candidate.revision === row.revision,
+              );
+              return source?.summary?.kind === "run" &&
+                source.summary.projectSessionId !== undefined &&
+                source.detailRef?.kind === "run"
+                ? {
+                    projectSessionId: source.summary.projectSessionId,
+                    runTarget: {
+                      kind: "coordination-run" as const,
+                      coordinationRunId: source.detailRef.coordinationRunId,
+                    },
+                  }
+                : {};
+            })()
+          : {}),
       };
+}
+
+function deckBinding(
+  dataset: FabricConsoleDataset,
+  row: PresentedDeckRow,
+): FabricHitBinding | null {
+  if (
+    row.sourceRow === null ||
+    row.projectSessionId === null ||
+    row.coordinationRunId === null
+  ) {
+    return null;
+  }
+  const base = bindingFor(dataset, row.sourceRow);
+  if (base === null) return null;
+  return {
+    ...base,
+    projectSessionId: row.projectSessionId as never,
+    runTarget: row.kind === "workstream" &&
+      row.deliveryRunId !== null
+      ? {
+          kind: "delivery-workstream",
+          coordinationRunId: row.coordinationRunId as never,
+          deliveryRunId: row.deliveryRunId as never,
+          workstreamId: row.entityId as never,
+        }
+      : {
+          kind: "coordination-run",
+          coordinationRunId: row.coordinationRunId as never,
+        },
+  };
 }
 
 function rowText(row: PresentedRow, focused: boolean, pinned: boolean): string {
@@ -157,7 +208,7 @@ function renderCompactRemainder(input: AttentionDeckRenderInput, bounds: Rect): 
       rect: { x1: bounds.x1, y1: y, x2: bounds.x2, y2: y },
       enabled: true,
       geometryKey,
-      binding: item.sourceRow === null ? null : bindingFor(dataset, item.sourceRow),
+      binding: deckBinding(dataset, item),
       scrollMaximum: maximumOffset,
     });
     y += 1;
@@ -261,7 +312,7 @@ function renderRoster(input: AttentionDeckRenderInput, bounds: Rect): void {
       rect: { x1: bounds.x1, y1: y, x2: bounds.x2, y2: y },
       enabled: true,
       geometryKey,
-      binding: item.sourceRow === null ? null : bindingFor(dataset, item.sourceRow),
+      binding: deckBinding(dataset, item),
       scrollMaximum: maximumOffset,
     });
   }

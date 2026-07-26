@@ -21,6 +21,7 @@ export const OPERATION_FEATURES = [
   "chair-takeover.v1",
   "operator-projection.v1",
   "operator-projection.v2",
+  "run-scoped-projection.v1",
   "operator-actions.v1",
   "launch-custody.v1",
   "launch-attestation.v1",

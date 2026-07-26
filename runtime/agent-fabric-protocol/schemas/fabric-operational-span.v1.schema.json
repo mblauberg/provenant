@@ -214,6 +214,7 @@
         "fabric.v1.operator-projection.events",
         "fabric.v1.operator-projection.view-page",
         "fabric.v1.operator-projection.detail.read",
+        "fabric.v1.operator-projection.run-page",
         "fabric.v1.operator-action.preview",
         "fabric.v1.operator-action.commit",
         "fabric.v1.operator-action.status",

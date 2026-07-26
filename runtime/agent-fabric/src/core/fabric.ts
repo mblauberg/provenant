@@ -8,8 +8,8 @@ import {
   ACTIVITY_NARRATIVE_GROUPING_FEATURE, AGENT_TOPOLOGY_PROJECTION_FEATURE, GATE_SYSTEM_SUPERSESSION_FEATURE, WORK_FACTS_PROJECTION_FEATURE,
   DECLARED_RUN_PROGRESS_FEATURE, RUN_IDENTITY_PROJECTION_FEATURE,
   NATIVE_NOTIFICATION_PROJECTION_FEATURE, RUN_SESSION_PROJECTION_FEATURE,
-  authorityEnvelopeV2Contained,
-  parseAuthorityEnvelopeV2,
+  authorityEnvelopeV2Contained, parseAuthorityEnvelopeV2,
+  parseEvidenceArtifactRegistration,
   type AgentCustodyResult,
   type EvidenceArtifactRegistration,
   type EvidencePublishRequest,
@@ -22,7 +22,6 @@ import {
   type ProtocolOperation,
   type VerifiedProtocolCredential,
 } from "@local/agent-fabric-protocol";
-import { parseEvidenceArtifactRegistration } from "@local/agent-fabric-protocol";
 
 import { readStoredAuthority } from "../authority/stored-authority.js";
 
@@ -3242,6 +3241,7 @@ export class Fabric {
           context.features.includes(RUN_IDENTITY_PROJECTION_FEATURE) ? "include" : "omit", context.features.includes(AGENT_TOPOLOGY_PROJECTION_FEATURE) ? "include" : "omit", context.features.includes(WORK_FACTS_PROJECTION_FEATURE) ? "include" : "omit", context.features.includes(ACTIVITY_NARRATIVE_GROUPING_FEATURE) ? "include" : "omit",
         );
       }
+      case FABRIC_OPERATIONS.projectionRunPage: operatorCommand(operatorCredential(), { credential: (input as OperationInputMap[typeof FABRIC_OPERATIONS.projectionRunPage]).credential }); return this.#operatorProjections.runPage(input as OperationInputMap[typeof FABRIC_OPERATIONS.projectionRunPage], context.features.includes(ACTIVITY_NARRATIVE_GROUPING_FEATURE) ? "include" : "omit");
       case FABRIC_OPERATIONS.projectionDetailRead: {
         const request = input as OperationInputMap[typeof FABRIC_OPERATIONS.projectionDetailRead];
         const credential = operatorCredential();

@@ -181,7 +181,7 @@ export function presentDeckRows(
             { label: "last event", value: null },
             { label: "updated", value: workstream.updatedAt },
           ]),
-          sourceRow: null,
+          sourceRow: presented,
         });
       }
     }

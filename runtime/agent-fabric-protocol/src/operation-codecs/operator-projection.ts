@@ -30,6 +30,7 @@ import {
   type OperationShapeFragment,
 } from "./common.js";
 import { createActivityNarrativeCodecs } from "./activity-narrative.js";
+import { createRunProjectionCodecs } from "./run-projection.js";
 
 export const OPERATOR_PROJECTION_INPUT_SHAPES = {
   [FABRIC_OPERATIONS.projectDiscover]: object(["credential", "projectId", "after", "limit"]),
@@ -38,6 +39,7 @@ export const OPERATOR_PROJECTION_INPUT_SHAPES = {
   [FABRIC_OPERATIONS.projectionEvents]: object(["credential", "projectId", "after", "limit"], ["projectSessionId"]),
   [FABRIC_OPERATIONS.projectionViewPage]: object(["credential", "projectId", "view", "snapshotRevision", "cursor", "limit"], ["projectSessionId"]),
   [FABRIC_OPERATIONS.projectionDetailRead]: object(["credential", "projectId", "snapshotRevision", "detailRef"], ["projectSessionId"]),
+  [FABRIC_OPERATIONS.projectionRunPage]: object(["credential", "projectId", "projectSessionId", "target", "snapshotRevision", "section", "cursor", "limit"]),
 } as const satisfies OperationShapeFragment;
 
 export const OPERATOR_PROJECTION_RESULT_SHAPES = {
@@ -47,6 +49,7 @@ export const OPERATOR_PROJECTION_RESULT_SHAPES = {
   [FABRIC_OPERATIONS.projectionEvents]: object(["status"], ["events", "nextCursor", "hasMore", "snapshotRevision", "readTransactionId", "reason", "currentSnapshotRevision", "snapshotCursor"]),
   [FABRIC_OPERATIONS.projectionViewPage]: object(["status", "view"], ["rows", "nextCursor", "hasMore", "snapshotRevision", "readTransactionId", "reason", "currentSnapshotRevision", "snapshotCursor"]),
   [FABRIC_OPERATIONS.projectionDetailRead]: object(["status"], ["detailRef", "detail", "snapshotRevision", "readTransactionId", "reason", "currentSnapshotRevision"]),
+  [FABRIC_OPERATIONS.projectionRunPage]: object(["status", "projectSessionId", "target", "section"], ["entries", "nextCursor", "hasMore", "snapshotRevision", "readTransactionId", "composition", "reason", "currentSnapshotRevision", "snapshotCursor"]),
 } as const satisfies OperationShapeFragment;
 
 export function createOperatorProjectionOperationCodecFragment(dependencies: Readonly<{
@@ -533,6 +536,18 @@ export function createOperatorProjectionOperationCodecFragment(dependencies: Rea
   const evidenceRowCodec = operatorViewRowCodec(evidenceSummaryCodec, evidenceDetailRefCodec);
   const activityRowCodec = operatorViewRowCodec(activitySummaryCodec, activityDetailRefCodec);
   const systemRowCodec = operatorViewRowCodec(systemSummaryCodec, systemDetailRefCodec);
+  const runProjectionCodecs = createRunProjectionCodecs({
+    declaredRunProgressCodec,
+    workRowCodec,
+    agentRowCodec: agentRowCodecV2,
+    evidenceRowCodec,
+    activityRowCodec,
+    taskDetailRefCodec,
+    evidenceDetailRefCodec,
+    factCandidates,
+    validateWorkWorkflow,
+    validateAgentTopology,
+  });
 
   function operatorViewPageVariant(view: string, row: Codec<unknown>): Codec<unknown> {
     return objectCodec({
@@ -993,6 +1008,10 @@ export function createOperatorProjectionOperationCodecFragment(dependencies: Rea
     [FABRIC_OPERATIONS.projectionDetailRead]: {
       input: operatorDetailReadInputCodec,
       result: operatorDetailReadResultCodec,
+    },
+    [FABRIC_OPERATIONS.projectionRunPage]: {
+      input: runProjectionCodecs.input,
+      result: runProjectionCodecs.result,
     },
   } satisfies OperationCodecFragment;
 }

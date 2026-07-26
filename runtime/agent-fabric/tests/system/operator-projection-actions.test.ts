@@ -2,6 +2,9 @@ import Database from "better-sqlite3";
 
 import {
   PROTOCOL_LIMITS,
+  FABRIC_OPERATIONS,
+  assertOperationResultFeatureShape,
+  parseOperationResult,
   parseIdentifier,
   parseArtifactRef,
   parseOperatorCapabilityGrant,
@@ -2088,6 +2091,279 @@ describe("operator work facts projection", () => {
         objective: "Implement projection",
         workflow: { workflowRevision: snapshot.snapshotRevision, plan: { planRevision: 1 } },
       } },
+    });
+  });
+
+  it("pages an exact run target while retaining cursor-independent server counts", () => {
+    const fixture = setupProjection();
+    fixture.database.exec(`
+      INSERT INTO tasks(
+        run_id, task_id, authority_id, objective, base_revision, state,
+        owner_agent_id, revision, owner_lease_generation, created_by
+      ) VALUES (
+        'run_01', 'task_02', 'authority_01', 'Completed dependency', 'base_01', 'complete',
+        'chair_01', 2, 1, 'chair_01'
+      )
+    `);
+    const projectId = identifier<"ProjectId">("project_01");
+    const projectSessionId = identifier<"ProjectSessionId">("session_01");
+    const snapshot = fixture.projections.snapshot({
+      credential: fixture.credential,
+      projectId,
+      projectSessionId,
+    }, "include");
+    const page = fixture.projections.runPage({
+      credential: fixture.credential,
+      projectId,
+      projectSessionId,
+      target: { kind: "coordination-run", coordinationRunId: identifier<"CoordinationRunId">("run_01") },
+      snapshotRevision: snapshot.snapshotRevision,
+      section: "work",
+      cursor: 0,
+      limit: 1,
+    });
+
+    expect(page).toMatchObject({
+      status: "page",
+      projectSessionId: "session_01",
+      target: { kind: "coordination-run", coordinationRunId: "run_01" },
+      section: "work",
+      hasMore: true,
+      entries: [{
+        runScope: { kind: "coordination-run", coordinationRunId: "run_01" },
+        value: { itemId: "task_01" },
+      }],
+      composition: {
+        identity: { value: {
+          lead: { observation: "Observed", value: "chair_01" },
+          currentMilestone: { observation: "Unobserved" },
+        } },
+        declaredProgress: { value: {
+          observation: "Observed",
+          value: {
+            plan: "open",
+            counts: {
+              blocked: 0,
+              ready: 0,
+              active: 1,
+              complete: 1,
+              cancelled: 0,
+              degraded: 0,
+            },
+          },
+        } },
+      },
+    });
+    const encoded = parseOperationResult(FABRIC_OPERATIONS.projectionRunPage, page);
+    expect(assertOperationResultFeatureShape(
+      FABRIC_OPERATIONS.projectionRunPage,
+      [
+        "operator-projection.v2",
+        "run-scoped-projection.v1",
+        "work-facts-projection.v1",
+      ],
+      encoded,
+    )).toBe(encoded);
+  });
+
+  it("retains deterministic activity groups in an exact run page", () => {
+    const fixture = setupProjection();
+    const projectId = identifier<"ProjectId">("project_01");
+    const projectSessionId = identifier<"ProjectSessionId">("session_01");
+    const snapshot = fixture.projections.snapshot({
+      credential: fixture.credential,
+      projectId,
+      projectSessionId,
+    }, "include");
+    const page = fixture.projections.runPage({
+      credential: fixture.credential,
+      projectId,
+      projectSessionId,
+      target: {
+        kind: "coordination-run",
+        coordinationRunId: identifier<"CoordinationRunId">("run_01"),
+      },
+      snapshotRevision: snapshot.snapshotRevision,
+      section: "activity",
+      cursor: 0,
+      limit: 10,
+    }, "include");
+
+    expect(page).toMatchObject({
+      status: "page",
+      section: "activity",
+      entries: [{
+        runScope: {
+          kind: "coordination-run",
+          coordinationRunId: "run_01",
+        },
+        value: {
+          fact: {
+            value: {
+              summary: {
+                group: {
+                  count: 1,
+                  members: [{ eventId: "event_01" }],
+                },
+              },
+            },
+          },
+        },
+      }],
+    });
+  });
+
+  it("keeps a delivery-workstream target exact and leaves absent lifecycle facts unobserved", () => {
+    const fixture = setupProjection();
+    fixture.database.exec(`
+      INSERT INTO agents(
+        run_id, agent_id, parent_agent_id, authority_id, provider_session_ref, lifecycle
+      ) VALUES (
+        'run_01', 'worker_idle_01', 'chair_01', 'authority_01', NULL, 'ready'
+      );
+      INSERT INTO teams(
+        run_id, team_id, parent_team_id, depth, leader_agent_id, original_leader_agent_id,
+        successor_agent_id, root_task_id, authority_id, budget_id, state, generation,
+        handoff_evidence, created_at
+      ) VALUES (
+        'run_01', 'team_ws_01', NULL, 1, 'chair_01', 'chair_01',
+        NULL, 'task_01', 'authority_01', 'budget_ws_01', 'active', 1,
+        NULL, ${String(now)}
+      );
+      INSERT INTO team_members(run_id, team_id, agent_id)
+      VALUES
+        ('run_01', 'team_ws_01', 'chair_01'),
+        ('run_01', 'team_ws_01', 'worker_idle_01');
+      INSERT INTO resource_scopes(
+        scope_id, project_id, project_session_id, coordination_run_id, parent_scope_id,
+        scope_kind, owner_ref, state, revision
+      ) VALUES
+        ('scope_run_ws_01', 'project_01', 'session_01', 'run_01', 'scope_session_01',
+         'coordination-run', 'run_01', 'active', 1),
+        ('scope_team_ws_01', 'project_01', 'session_01', 'run_01', 'scope_run_ws_01',
+         'team', 'team_ws_01', 'active', 1);
+      INSERT INTO workstreams(
+        workstream_id, project_session_id, coordination_run_id, fabric_task_id,
+        lead_agent_id, delivery_run_id, revision, state, created_at, updated_at
+      ) VALUES (
+        'ws_01', 'session_01', 'run_01', 'task_01',
+        'chair_01', 'delivery_01', 2, 'active', ${String(now)}, ${String(now)}
+      );
+      INSERT INTO workstream_custody(
+        workstream_id, input_digest, launch_packet_artifact_id, launch_packet_path,
+        launch_packet_digest, team_id, root_task_id, authority_id, budget_id,
+        run_scope_id, team_scope_id, created_at
+      ) VALUES (
+        'ws_01', '${digest}', 'artifact_01', 'launch/packet.json',
+        '${digest}', 'team_ws_01', 'task_01', 'authority_01', 'budget_ws_01',
+        'scope_run_ws_01', 'scope_team_ws_01', ${String(now)}
+      )
+    `);
+    const projectId = identifier<"ProjectId">("project_01");
+    const projectSessionId = identifier<"ProjectSessionId">("session_01");
+    const snapshot = fixture.projections.snapshot({
+      credential: fixture.credential,
+      projectId,
+      projectSessionId,
+    }, "include");
+    const page = fixture.projections.runPage({
+      credential: fixture.credential,
+      projectId,
+      projectSessionId,
+      target: {
+        kind: "delivery-workstream",
+        coordinationRunId: identifier<"CoordinationRunId">("run_01"),
+        deliveryRunId: identifier<"DeliveryRunId">("delivery_01"),
+        workstreamId: identifier<"WorkstreamId">("ws_01"),
+      },
+      snapshotRevision: snapshot.snapshotRevision,
+      section: "work",
+      cursor: 0,
+      limit: 5,
+    });
+
+    expect(page).toMatchObject({
+      status: "page",
+      projectSessionId: "session_01",
+      target: {
+        kind: "delivery-workstream",
+        coordinationRunId: "run_01",
+        deliveryRunId: "delivery_01",
+        workstreamId: "ws_01",
+      },
+      entries: [{
+        runScope: {
+          kind: "delivery-workstream",
+          coordinationRunId: "run_01",
+          deliveryRunId: "delivery_01",
+          workstreamId: "ws_01",
+        },
+        value: { itemId: "task_01" },
+      }],
+      composition: {
+        identity: { value: {
+          acceptedScope: { observation: "Unobserved" },
+          currentPlan: { observation: "Unobserved" },
+          lead: { observation: "Observed", value: "chair_01" },
+          phase: { observation: "Unobserved" },
+          health: { observation: "Unobserved" },
+          currentMilestone: { observation: "Unobserved" },
+          nextMilestone: { observation: "Unobserved" },
+          lastEventAt: { observation: "Unobserved" },
+        } },
+        declaredProgress: { value: { observation: "Unobserved" } },
+      },
+    });
+    expect(fixture.projections.runPage({
+      credential: fixture.credential,
+      projectId,
+      projectSessionId,
+      target: {
+        kind: "delivery-workstream",
+        coordinationRunId: identifier<"CoordinationRunId">("run_01"),
+        deliveryRunId: identifier<"DeliveryRunId">("delivery_01"),
+        workstreamId: identifier<"WorkstreamId">("ws_01"),
+      },
+      snapshotRevision: snapshot.snapshotRevision,
+      section: "agents",
+      cursor: 0,
+      limit: 10,
+    })).toMatchObject({
+      status: "page",
+      entries: [
+        { value: { itemId: "chair_01" } },
+        { value: { itemId: "worker_idle_01" } },
+      ],
+    });
+    expect(fixture.projections.runPage({
+      credential: fixture.credential,
+      projectId,
+      projectSessionId,
+      target: {
+        kind: "delivery-workstream",
+        coordinationRunId: identifier<"CoordinationRunId">("run_01"),
+        deliveryRunId: identifier<"DeliveryRunId">("delivery_01"),
+        workstreamId: identifier<"WorkstreamId">("ws_01"),
+      },
+      snapshotRevision: snapshot.snapshotRevision,
+      section: "activity",
+      cursor: 0,
+      limit: 10,
+    }, "include")).toMatchObject({
+      status: "page",
+      entries: [{
+        value: {
+          fact: {
+            value: {
+              summary: {
+                group: {
+                  members: [{ eventId: "event_01" }],
+                },
+              },
+            },
+          },
+        },
+      }],
     });
   });
 

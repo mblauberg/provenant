@@ -82,6 +82,7 @@ describe("launch contract schema and fixtures", () => {
 const readOperations = [
   FABRIC_OPERATIONS.scopedGateRead,
   FABRIC_OPERATIONS.projectionViewPage,
+  FABRIC_OPERATIONS.projectionRunPage,
   FABRIC_OPERATIONS.projectionDetailRead,
 ] as const;
 const actionOperations = [
@@ -91,7 +92,15 @@ const actionOperations = [
   FABRIC_OPERATIONS.operatorActionReconcile,
 ] as const;
 
-function operatorClient(features: readonly ("scoped-gate-read.v1" | "operator-projection.v2" | "operator-actions.v1" | "launch-custody.v1")[]) {
+function operatorClient(features: readonly (
+  "scoped-gate-read.v1" |
+  "operator-projection.v2" |
+  "run-scoped-projection.v1" |
+  "agent-topology-projection.v1" |
+  "work-facts-projection.v1" |
+  "operator-actions.v1" |
+  "launch-custody.v1"
+)[]) {
   return createOperatorClient({
     features,
     principal: {
@@ -112,11 +121,17 @@ describe("launch custody feature availability", () => {
     expect(operatorClient([
       "scoped-gate-read.v1",
       "operator-projection.v2",
+      "run-scoped-projection.v1",
+      "agent-topology-projection.v1",
+      "work-facts-projection.v1",
       "operator-actions.v1",
     ]).console).toMatchObject({ readOnly: false, launchAvailable: false });
     expect(operatorClient([
       "scoped-gate-read.v1",
       "operator-projection.v2",
+      "run-scoped-projection.v1",
+      "agent-topology-projection.v1",
+      "work-facts-projection.v1",
       "operator-actions.v1",
       "launch-custody.v1",
     ]).console).toMatchObject({ readOnly: false, launchAvailable: true });

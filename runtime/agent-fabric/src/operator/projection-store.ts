@@ -32,6 +32,7 @@ import type {
   ProjectionEventsResult,
   ProjectionEvent,
   RunProjection,
+  RunProjectionPageRequest, RunProjectionPageResult, RunProjectionSection,
   Timestamp,
 } from "@local/agent-fabric-protocol";
 import {
@@ -56,6 +57,8 @@ import { projectDeclaredRunProgress } from "./declared-run-progress-projection.j
 import { agentTopologyProjectionField, type AgentTopologyProjection } from "./agent-topology-projection.js";
 import { projectTaskCheckState, workFactsProjectionField, type WorkFactsProjection } from "./work-facts-projection.js";
 import { activityItems, activityRows, boundedOperatorActivityRows, boundedProjectionActivityItems, loadActivityDetail, type ActivityNarrativeGroupingProjection } from "./activity-projection.js";
+import { projectRunPage } from "./run-projection-store.js";
+import { projectedRunHealth, projectedRunNextMilestone } from "./run-lifecycle-projection.js";
 
 export type OperatorProjectionStoreOptions = CoreServiceOptions & {
   operatorStore: OperatorStore;
@@ -262,7 +265,20 @@ export class OperatorProjectionStore {
       default: return assertNever(request.view);
     }
   }
-
+  runPage<Section extends RunProjectionSection>(request: RunProjectionPageRequest<Section>, activityNarrativeGroupingProjection: ActivityNarrativeGroupingProjection = "omit"): RunProjectionPageResult<Section> {
+    const authenticated = this.#authoriseRead(request.credential, request.projectId, request.projectSessionId);
+    this.#selectedSessionId(authenticated, request.projectSessionId);
+    return projectRunPage({
+      database: this.#database,
+      clock: this.#clock,
+      globalRevision: () => this.#globalRevision(),
+      eventCursor: (projectId, projectSessionId) => this.#eventCursor(projectId, projectSessionId),
+      workRows: (projectId, sessionId, operator) => this.#workRows(projectId, sessionId, operator, "include"),
+      agentRows: (projectId, sessionId, operator) => this.#agentRows(projectId, sessionId, operator, "include"),
+      evidenceRows: (projectId, sessionId, operator) => this.#evidenceRows(projectId, sessionId, operator),
+      activityRows: (projectId, sessionId, operator) => this.#activityRows(projectId, sessionId, operator, activityNarrativeGroupingProjection),
+    }, request, authenticated);
+  }
   page<View extends ConsoleView>(
     request: ProjectionPageRequest<View>,
     nativeNotificationProjection: NativeNotificationProjection,
@@ -620,8 +636,8 @@ export class OperatorProjectionStore {
         runId: parseIdentifier<"CoordinationRunId">(text(run, "run_id"), "projectionSnapshot.runId"),
         phase,
         chairAgentId: parseIdentifier<"AgentId">(text(run, "chair_agent_id"), "projectionSnapshot.chairAgentId"),
-        nextMilestone: nextMilestone(phase),
-        health: runHealth(phase),
+        nextMilestone: projectedRunNextMilestone(phase),
+        health: projectedRunHealth(phase),
       };
     });
   }
@@ -1263,8 +1279,8 @@ export class OperatorProjectionStore {
               ? { projectSessionId: runProjectSessionId }
               : {}),
             phase,
-            health: runHealth(phase),
-            nextMilestone: nextMilestone(phase),
+            health: projectedRunHealth(phase),
+            nextMilestone: projectedRunNextMilestone(phase),
             ...(declaredRunProgressProjection === "include"
               ? { declaredProgress: projectDeclaredRunProgress(this.#database, runId) }
               : {}),
@@ -1632,7 +1648,7 @@ export class OperatorProjectionStore {
         phase,
         chairAgentId: parseIdentifier<"AgentId">(text(stored, "chair_agent_id"), "runDetail.chairAgentId"),
         chairGeneration: integer(stored, "chair_generation"),
-        health: runHealth(phase),
+        health: projectedRunHealth(phase),
         ...(declaredRunProgressProjection === "include"
           ? { declaredProgress: projectDeclaredRunProgress(this.#database, detailRef.coordinationRunId) }
           : {}),
@@ -1866,22 +1882,6 @@ function assertPageBounds(after: number, limit: number): void {
 
 function readTransactionId(projectId: ProjectId, projectSessionId: ProjectSessionId | undefined, revision: number): string {
   return `projection:${projectId}:${projectSessionId ?? "project"}:${String(revision)}`;
-}
-
-function runHealth(phase: string): RunProjection["health"] {
-  if (phase === "active" || phase === "awaiting_acceptance") return "healthy";
-  if (phase === "quarantined") return "quarantined";
-  if (phase === "recovery_required" || phase === "launch_ambiguous") return "blocked";
-  if (phase === "visibility_degraded" || phase === "reconciling") return "degraded";
-  return "unknown";
-}
-
-function nextMilestone(phase: string): string {
-  if (phase === "active") return "quiescing";
-  if (phase === "quiescing") return "awaiting_acceptance";
-  if (phase === "awaiting_acceptance") return "closed";
-  if (phase === "reconciling" || phase === "launch_ambiguous") return "reconciled state";
-  return "next valid lifecycle transition";
 }
 
 function maximumRevision(revisions: readonly number[]): number {

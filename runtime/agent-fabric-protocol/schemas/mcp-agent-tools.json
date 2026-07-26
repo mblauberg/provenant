@@ -24366,6 +24366,7 @@
                   "fabric.v1.operator-projection.events",
                   "fabric.v1.operator-projection.view-page",
                   "fabric.v1.operator-projection.detail.read",
+                  "fabric.v1.operator-projection.run-page",
                   "fabric.v1.operator-action.preview",
                   "fabric.v1.operator-action.commit",
                   "fabric.v1.operator-action.status",
@@ -24503,7 +24504,7 @@
           }
         }
       },
-      "inputCodecDigest": "sha256:74beae7eb4b51eea78a213b893653315e9407b71e137a66a8e6be0bb8368c008",
+      "inputCodecDigest": "sha256:7293cf47b710179bcb93a2f992b7e482400cddaa46153818cbb830d403bf21e0",
       "outputCodecDigest": "sha256:1a9ee6767166f5f96ee5be2fbca40d47d2e7e46080ce4af47949c460bbe5c373"
     },
     {
@@ -24763,6 +24764,7 @@
                     "fabric.v1.operator-projection.events",
                     "fabric.v1.operator-projection.view-page",
                     "fabric.v1.operator-projection.detail.read",
+                    "fabric.v1.operator-projection.run-page",
                     "fabric.v1.operator-action.preview",
                     "fabric.v1.operator-action.commit",
                     "fabric.v1.operator-action.status",
@@ -25366,7 +25368,7 @@
           }
         }
       },
-      "inputCodecDigest": "sha256:53ac7328df22ffffda334995ce48d0200f32cdef672062d930a9c30a7dc62f4d",
+      "inputCodecDigest": "sha256:3febc0f8b874d68f08e55e84a2b4ee4925fc7f871abd9f93fd6f264480d9be05",
       "outputCodecDigest": "sha256:e3992f43b189bc13c82f3f427051462f757f9bb664ab3b5545b66dfe805b8d0e"
     },
     {

@@ -468,25 +468,54 @@ export class FabricConsoleApplication {
       return;
     }
     if (
-      activation.regionId.startsWith("row:") &&
+      (
+        activation.regionId.startsWith("row:") ||
+        activation.regionId.startsWith("deck:")
+      ) &&
       activation.binding !== null &&
       this.#adapter !== null
     ) {
-      const selected = this.dataset.pages[activation.binding.view].rows.find(
+      let inspectionBinding: ConsoleInspectionBinding = activation.binding;
+      let selected = this.dataset.pages[activation.binding.view].rows.find(
         (candidate) =>
           candidate.stableId === activation.binding?.itemId &&
           candidate.revision === activation.binding.itemRevision,
       );
+      const requestedProjectSessionId = activation.binding.projectSessionId ??
+        (
+          activation.binding.view === "runs" &&
+          selected?.detailRef?.kind === "run"
+            ? selected.detailRef.projectSessionId
+            : undefined
+        );
       if (
-        this.#connected?.projectSessionId === undefined &&
-        activation.binding.view === "runs" &&
-        selected?.detailRef?.kind === "run" &&
-        selected.detailRef.projectSessionId !== undefined
+        requestedProjectSessionId !== undefined &&
+        this.#connected?.projectSessionId !== requestedProjectSessionId
       ) {
-        await this.#switchProjectSession(selected.detailRef.projectSessionId);
-        return;
+        await this.#switchProjectSession(requestedProjectSessionId);
+        selected = this.dataset.pages[activation.binding.view].rows.find(
+          (candidate) => candidate.stableId === activation.binding?.itemId,
+        );
+        if (selected === undefined || this.dataset.snapshotRevision === null) {
+          throw Object.assign(new Error("run target changed during project-session selection"), {
+            code: "STALE_RUN_TARGET",
+          });
+        }
+        inspectionBinding = {
+          ...activation.binding,
+          itemRevision: selected.revision,
+          projectionRevision: this.dataset.snapshotRevision,
+          projectSessionId: requestedProjectSessionId,
+        };
       }
-      const inspection = await this.#adapter.inspect(activation.binding);
+      if (
+        activation.regionId.startsWith("deck:") &&
+        inspectionBinding.runTarget !== undefined
+      ) {
+        this.#controller.activateView("runs");
+        this.#controller.select("runs", inspectionBinding.itemId);
+      }
+      const inspection = await this.#adapter.inspect(inspectionBinding);
       if (inspection !== null) {
         this.#runtime.updateDataset({ ...this.dataset, inspection });
       }
