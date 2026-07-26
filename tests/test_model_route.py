@@ -610,10 +610,13 @@ def test_malformed_override_in_one_family_does_not_reject_another_family(
 
 
 @pytest.mark.parametrize(
+    "adapter", ["claude", "codex", "opencode", "cursor", "agy"]
+)
+@pytest.mark.parametrize(
     "families", [None, [], "anthropic", {"anthropic": None}], ids=str
 )
 def test_unusable_families_table_fails_closed(
-    tmp_path, monkeypatch, capsys, families
+    tmp_path, monkeypatch, capsys, families, adapter
 ):
     """An unusable families table must reject, not route the reserved occupant.
 
@@ -621,6 +624,9 @@ def test_unusable_families_table_fails_closed(
     not a usable mapping reserves nothing and the occupant routes freely. That is
     fail-open on malformed configuration, the same class of defect this issue
     exists to close, so the catalogue is rejected instead.
+
+    Parametrised over adapters with and without a ``fixed_model_family``: the two
+    take different validation paths, and the first fix guarded only the second.
     """
     router = load_router()
     catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
@@ -630,8 +636,170 @@ def test_unusable_families_table_fails_closed(
     monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
 
     result = router.main([
-        "resolve", "--adapter", "cursor", "--model", "fable",
+        "resolve", "--adapter", adapter, "--model", "fable",
         "--alias", "flagship", "--role", "worker", "--adapter-gate", "direct-cli",
+    ])
+
+    route = json.loads(capsys.readouterr().out)
+    assert result == 2
+    assert route["status"] == "risk_tier_config_invalid"
+    assert route.get("resolved_model") is None
+
+
+def test_adapter_pinned_to_an_undefined_family_requires_an_explicit_model(capsys):
+    """OpenCode has no alias table to route against, so an alias route rejects.
+
+    ``generic-open`` is deliberately absent from the families table: OpenCode
+    routes on explicit account-catalogue models. Resolving an alias against it
+    dereferenced a family that was never there and crashed with no JSON at all,
+    on the production catalogue, with no catalogue edit needed to reach it.
+    """
+    router = load_router()
+
+    result = router.main([
+        "resolve", "--adapter", "opencode", "--alias", "flagship",
+        "--role", "worker", "--adapter-gate", "direct-cli",
+    ])
+
+    route = json.loads(capsys.readouterr().out)
+    assert result == 2
+    assert route["status"] == "model_required_for_broker"
+    assert route.get("resolved_model") is None
+
+
+@pytest.mark.parametrize(
+    "mutate, status",
+    [
+        (lambda families: families.pop("openai"), "model_required_for_broker"),
+        # A family present but not a mapping is caught earlier still, by the
+        # fixed-family override validation, which cannot read it either.
+        (lambda families: families.__setitem__("openai", None), "risk_tier_config_invalid"),
+        (lambda families: families["openai"].pop("aliases"), "model_required_for_broker"),
+        (
+            lambda families: families["openai"].__setitem__("aliases", []),
+            "model_required_for_broker",
+        ),
+    ],
+    ids=["family-absent", "family-null", "aliases-absent", "aliases-not-a-mapping"],
+)
+def test_unroutable_pinned_family_rejects_with_a_receipt(
+    tmp_path, monkeypatch, capsys, mutate, status
+):
+    """A pinned family that cannot serve an alias rejects, and says so in JSON.
+
+    These lookups were unguarded, so the router crashed part-way down with no
+    output at all. A caller cannot act on a traceback: every rejection has to
+    arrive as a receipt, whatever the catalogue looks like.
+    """
+    router = load_router()
+    catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    mutate(catalog["families"])
+    catalog_path = tmp_path / "model-routing.json"
+    catalog_path.write_text(json.dumps(catalog))
+    monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
+
+    result = router.main([
+        "resolve", "--adapter", "codex", "--alias", "flagship",
+        "--role", "worker", "--adapter-gate", "direct-cli",
+    ])
+
+    route = json.loads(capsys.readouterr().out)
+    assert result == 2
+    assert route["status"] == status
+    assert route.get("resolved_model") is None
+
+
+def test_empty_routed_family_validates_every_family_the_scan_consults(
+    tmp_path, monkeypatch, capsys
+):
+    """An empty routed family narrows nothing, so validation must widen with the scan.
+
+    ``override_scan_families`` only narrows to the model's own family when that
+    family actually configures something. When it is empty the reservation scan
+    falls back to every family, so a malformed override anywhere is one the scan
+    reads. Validating the empty family alone would put the two back out of
+    agreement, which is the disagreement this issue exists to close.
+    """
+    router = load_router()
+    catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    catalog["families"]["openai"] = {}
+    catalog["families"]["anthropic"]["risk_tier_overrides"]["crucial"]["models"] = "fable"
+    catalog_path = tmp_path / "model-routing.json"
+    catalog_path.write_text(json.dumps(catalog))
+    monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
+
+    assert list(router.override_scan_families("gpt-5.6-sol", catalog)) == [
+        "anthropic", "openai",
+    ]
+
+    result = router.main([
+        "resolve", "--adapter", "cursor", "--alias", "flagship", "--role", "worker",
+        "--model", "gpt-5.6-sol", "--adapter-gate", "direct-cli",
+    ])
+
+    route = json.loads(capsys.readouterr().out)
+    assert result == 2
+    assert route["status"] == "risk_tier_config_invalid"
+
+
+@pytest.mark.parametrize("aliases", ["x", [], None], ids=str)
+def test_unusable_alias_table_rejects_on_an_explicit_model_route(
+    tmp_path, monkeypatch, capsys, aliases
+):
+    """The explicit-model path reads the alias table too, and must survive a bad one.
+
+    Guarding only the alias-only route left this one dereferencing the same
+    unusable table, so it still crashed without JSON. Both readers are now fed
+    from one normalised load site.
+    """
+    router = load_router()
+    catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    catalog["families"]["openai"]["aliases"] = aliases
+    catalog_path = tmp_path / "model-routing.json"
+    catalog_path.write_text(json.dumps(catalog))
+    monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
+
+    result = router.main([
+        "resolve", "--adapter", "codex", "--alias", "flagship", "--role", "worker",
+        "--model", "gpt-5.6-sol", "--adapter-gate", "direct-cli",
+    ])
+
+    route = json.loads(capsys.readouterr().out)
+    assert result == 1
+    assert route["status"] == "adapter_account_default_only"
+
+
+@pytest.mark.parametrize(
+    "field, value",
+    [
+        ("roles", "ab"),
+        ("alias", ["flagship"]),
+        ("default_effort", ["high"]),
+        ("maximum_effort", {"high": True}),
+    ],
+    ids=["roles-string", "alias-list", "default-effort-list", "maximum-effort-dict"],
+)
+def test_override_field_of_the_wrong_type_fails_closed(
+    tmp_path, monkeypatch, capsys, field, value
+):
+    """Each type check in the override validator is load-bearing on its own.
+
+    Without them these shapes do not merely slip through, they duck the whole
+    validator: ``roles`` as a two-character string satisfies every downstream
+    length, membership and uniqueness check, and an unhashable alias or effort
+    raises out of the ``in`` test rather than failing closed.
+    """
+    router = load_router()
+    catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    catalog["families"]["anthropic"]["risk_tier_overrides"]["crucial"][field] = value
+    catalog_path = tmp_path / "model-routing.json"
+    catalog_path.write_text(json.dumps(catalog))
+    monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
+
+    result = router.main([
+        "resolve", "--adapter", "claude", "--alias", "flagship", "--role", "a",
+        "--risk-tier", "crucial", "--model", "fable", "--available-model", "fable",
+        "--adapter-gate", "direct-cli",
     ])
 
     route = json.loads(capsys.readouterr().out)

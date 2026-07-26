@@ -443,6 +443,14 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
     adapter = catalog["adapters"].get(args.adapter)
     fixed_family = adapter.get("fixed_model_family") if adapter else None
     family_config = catalog["families"].get(fixed_family, {}) if fixed_family else {}
+    # Normalise the alias table once, at its single load site, so no reader further
+    # down dereferences a table that is not one. Several did, and each crashed with
+    # no JSON for the caller instead of rejecting. Whether an absent alias table is
+    # fatal depends on the route, and is decided below where that is known.
+    # ``family_config`` itself needs no guard: a pinned family that is not a mapping
+    # is rejected by the fixed-family validation in ``main`` before this runs.
+    if not isinstance(family_config.get("aliases"), dict):
+        family_config = {**family_config, "aliases": {}}
     role_effort = family_config.get("role_effort_defaults", {}).get(args.role, {}).get(args.alias)
     task_class_effort = args.task_class_effort
     if role_effort and role_effort not in EFFORT_ORDER:
@@ -641,13 +649,21 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
                 1,
             )
     else:
-        if not fixed_family:
+        # An adapter whose pinned family the catalogue leaves undefined, or defines
+        # without an alias table, has no alias to resolve against and must be given
+        # an explicit model, exactly as a broker must. OpenCode is pinned to
+        # ``generic-open``, which the catalogue deliberately omits: this path
+        # crashed on the production catalogue rather than saying so.
+        family_aliases = catalog["families"].get(fixed_family, {}) if fixed_family else {}
+        family_aliases = (
+            family_aliases.get("aliases") if isinstance(family_aliases, dict) else None
+        )
+        if not fixed_family or not isinstance(family_aliases, dict):
             return emit_route(
                 {**base, "status": "model_required_for_broker", "endpoint_provider": endpoint},
                 2,
             )
         family = fixed_family
-        family_config = catalog["families"][family]
         candidates = args.risk_override.get("models")
         candidates = candidates or family_config.get("role_overrides", {}).get(args.role, {}).get(args.alias)
         candidates = candidates or family_config["aliases"].get(args.alias)
@@ -922,6 +938,14 @@ def main(argv: list[str] | None = None) -> int:
             return reject("route_input_conflict")
         if bool(args.alias) == bool(args.task_class):
             return reject("route_input_conflict" if args.alias else "route_input_missing")
+        # A families table that is not a mapping reserves nothing, so a reservation
+        # scan finds no occupant and would route a reserved model. It is also the
+        # first thing every family lookup below dereferences. Reject it here, ahead
+        # of those lookups: an unusable catalogue must fail closed with the router's
+        # structured rejection, never fall open and never crash without one.
+        families = catalog.get("families")
+        if not isinstance(families, dict):
+            return reject("risk_tier_config_invalid", alias=args.alias)
         adapter_config = catalog.get("adapters", {}).get(args.adapter, {})
         adapter_family = (
             adapter_config.get("fixed_model_family")
@@ -929,7 +953,7 @@ def main(argv: list[str] | None = None) -> int:
             else None
         )
         if adapter_family and not risk_tier_overrides_are_valid(
-            adapter_family, catalog.get("families", {}).get(adapter_family, {}), catalog
+            adapter_family, families.get(adapter_family, {}), catalog
         ):
             return reject("risk_tier_config_invalid", alias=args.alias)
         # Validate exactly the families the reservation scan will consult, and only
@@ -937,11 +961,6 @@ def main(argv: list[str] | None = None) -> int:
         # model family validates nothing above, so without this a malformed
         # override was routed against instead of failing closed.
         if args.model:
-            # A families table that is not a mapping reserves nothing, so the scan
-            # would find no occupant and route the reserved model. Reject instead:
-            # an unusable catalogue must fail closed, never fall open.
-            if not isinstance(catalog.get("families"), dict):
-                return reject("risk_tier_config_invalid", alias=args.alias)
             for scanned_family, scanned_config in override_scan_families(
                 args.model, catalog
             ).items():
