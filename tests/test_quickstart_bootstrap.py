@@ -22,8 +22,20 @@ def test_documented_fresh_checkout_sequence_produces_runnable_doctor(tmp_path):
     checkout = tmp_path / "fresh-checkout"
     scripts = checkout / "scripts"
     scripts.mkdir(parents=True)
-    for name in ("agent-fabric", "agent-fabric-warm", "provenant"):
+    for name in (
+        "agent-fabric",
+        "agent-fabric-protocol-build",
+        "agent-fabric-protocol-preflight",
+        "agent-fabric-warm",
+        "provenant",
+    ):
         shutil.copy2(ROOT / "scripts" / name, scripts / name)
+    freshness_library = scripts / "lib" / "agent-fabric-workspace-freshness.sh"
+    freshness_library.parent.mkdir()
+    shutil.copy2(
+        ROOT / "scripts" / "lib" / "agent-fabric-workspace-freshness.sh",
+        freshness_library,
+    )
 
     for workspace in (
         "agent-fabric-protocol",

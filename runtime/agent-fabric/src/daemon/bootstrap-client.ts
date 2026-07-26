@@ -77,6 +77,7 @@ export type AttachOrStartOptions<Client> = {
   requiredFeatures: readonly string[];
   election: BootstrapElection;
   handshake(): Promise<DaemonHandshakeResult<Client>>;
+  preflight?(): Promise<void>;
   preBootstrap?(): Promise<void>;
   reconcile?(result: Extract<DaemonHandshakeResult<Client>, {
     status: "unavailable";
@@ -215,6 +216,7 @@ function typedFailureCode(error: unknown): string | undefined {
 export async function attachOrStartDaemon<Client>(options: AttachOrStartOptions<Client>): Promise<AttachedDaemon<Client>> {
   const initial = await options.handshake();
   if (initial.status === "compatible") return compatibleDaemon(initial, options, null, false);
+  await options.preflight?.();
   let preBootstrapComplete = false;
   const preBootstrap = async (): Promise<void> => {
     if (preBootstrapComplete) return;

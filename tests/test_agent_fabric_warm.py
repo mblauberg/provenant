@@ -5,9 +5,12 @@ from pathlib import Path
 import shutil
 import subprocess
 
+import pytest
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 WARM_SCRIPT = REPO_ROOT / "scripts" / "agent-fabric-warm"
+FRESHNESS_LIBRARY = REPO_ROOT / "scripts" / "lib" / "agent-fabric-workspace-freshness.sh"
 
 
 def _write(path: Path, content: str = "fixture\n") -> None:
@@ -21,6 +24,10 @@ def _fixture(tmp_path: Path) -> tuple[Path, Path, Path]:
     script.parent.mkdir(parents=True)
     shutil.copy2(WARM_SCRIPT, script)
     script.chmod(0o755)
+    if FRESHNESS_LIBRARY.exists():
+        library = root / "scripts/lib/agent-fabric-workspace-freshness.sh"
+        library.parent.mkdir(parents=True)
+        shutil.copy2(FRESHNESS_LIBRARY, library)
 
     # The wrapper treats node_modules as the installation readiness gate.
     (root / "node_modules").mkdir()
@@ -82,3 +89,66 @@ def test_protocol_only_staleness_rebuilds_then_fresh_workspace_is_noop(
     assert fresh.returncode == 0, fresh.stderr
     assert "agent-fabric dist fresh:" in fresh.stdout
     assert marker.read_text(encoding="utf-8").splitlines() == ["run build"]
+
+
+@pytest.mark.parametrize(
+    "relative_input",
+    [
+        "runtime/agent-fabric-protocol/package.json",
+        "runtime/agent-fabric-protocol/tsconfig.json",
+        "runtime/agent-fabric-protocol/tsconfig.build.json",
+        "runtime/agent-fabric-protocol/scripts/write-schema.mjs",
+        "package.json",
+        "package-lock.json",
+        "tsconfig.json",
+    ],
+)
+def test_shared_predicate_keeps_every_protocol_build_input(
+    tmp_path: Path,
+    relative_input: str,
+) -> None:
+    root, _, marker = _fixture(tmp_path)
+    now = 1_700_000_000
+    build_input = root / relative_input
+    _write(build_input)
+    os.utime(build_input, (now + 10, now + 10))
+
+    result = _run(root, marker, now=now)
+
+    assert result.returncode == 0, result.stderr
+    assert "agent-fabric dist stale; rebuilding workspace" in result.stdout
+    assert marker.read_text(encoding="utf-8").splitlines() == ["run build"]
+
+
+def test_schema_generator_rule_does_not_broaden_to_other_workspaces(
+    tmp_path: Path,
+) -> None:
+    root, protocol_source, marker = _fixture(tmp_path)
+    now = 1_700_000_000
+    os.utime(protocol_source, (now - 10, now - 10))
+    unrelated_script = root / "runtime/agent-fabric/scripts/unrelated.mjs"
+    _write(unrelated_script)
+    os.utime(unrelated_script, (now + 10, now + 10))
+
+    result = _run(root, marker, now=now)
+
+    assert result.returncode == 0, result.stderr
+    assert "agent-fabric dist fresh:" in result.stdout
+    assert not marker.exists()
+
+
+def test_freshness_predicate_has_one_owner_and_two_callers() -> None:
+    library = FRESHNESS_LIBRARY.read_text(encoding="utf-8")
+    launcher = (REPO_ROOT / "scripts" / "agent-fabric").read_text(encoding="utf-8")
+    preflight = (REPO_ROOT / "scripts" / "agent-fabric-protocol-preflight").read_text(
+        encoding="utf-8",
+    )
+    warm = WARM_SCRIPT.read_text(encoding="utf-8")
+
+    assert library.count("workspace_is_stale() {") == 1
+    assert "workspace_is_stale() {" not in launcher
+    assert "workspace_is_stale() {" not in preflight
+    assert "workspace_is_stale() {" not in warm
+    assert '"$script_dir/agent-fabric-protocol-preflight"' in launcher
+    assert 'lib/agent-fabric-workspace-freshness.sh"' in preflight
+    assert 'lib/agent-fabric-workspace-freshness.sh"' in warm
