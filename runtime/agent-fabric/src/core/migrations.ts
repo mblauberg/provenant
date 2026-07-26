@@ -253,10 +253,10 @@ function userSchemaObjectCount(database: Database.Database): number {
   return value.count;
 }
 
-const SQLITE_SOURCE_SUFFIXES = ["", "-wal", "-shm", "-journal"] as const;
-type SqliteSourceSuffix = typeof SQLITE_SOURCE_SUFFIXES[number];
+export const SQLITE_SOURCE_SUFFIXES = ["", "-wal", "-shm", "-journal"] as const;
+export type SqliteSourceSuffix = typeof SQLITE_SOURCE_SUFFIXES[number];
 
-type StableFileIdentity = Readonly<{
+export type StableFileIdentity = Readonly<{
   dev: string;
   ino: string;
   mode: string;
@@ -273,12 +273,12 @@ type StableFileIdentity = Readonly<{
   sha256: string;
 }>;
 
-type StableSourceFile = Readonly<{
+export type StableSourceFile = Readonly<{
   bytes: Buffer;
   identity: StableFileIdentity;
 }>;
 
-type StableSourceSet = ReadonlyMap<SqliteSourceSuffix, StableSourceFile>;
+export type StableSourceSet = ReadonlyMap<SqliteSourceSuffix, StableSourceFile>;
 
 function errno(error: unknown, code: string): boolean {
   return error instanceof Error && "code" in error && error.code === code;
@@ -341,7 +341,7 @@ function stableSourceFile(path: string, required: boolean): StableSourceFile | u
   }
 }
 
-function stableSourceSet(databasePath: string): StableSourceSet {
+export function stableSourceSet(databasePath: string): StableSourceSet {
   const sources = new Map<SqliteSourceSuffix, StableSourceFile>();
   for (const suffix of SQLITE_SOURCE_SUFFIXES) {
     const source = stableSourceFile(`${databasePath}${suffix}`, suffix === "");
@@ -350,7 +350,7 @@ function stableSourceSet(databasePath: string): StableSourceSet {
   return sources;
 }
 
-function assertSameSourceSet(expected: StableSourceSet, actual: StableSourceSet): void {
+export function assertSameSourceSet(expected: StableSourceSet, actual: StableSourceSet): void {
   for (const suffix of SQLITE_SOURCE_SUFFIXES) {
     const before = expected.get(suffix);
     const after = actual.get(suffix);
@@ -360,9 +360,34 @@ function assertSameSourceSet(expected: StableSourceSet, actual: StableSourceSet)
       JSON.stringify(before.identity) !== JSON.stringify(after.identity)
     ) {
       if (before === undefined && after === undefined) continue;
-      throw cutover("database source set changed during read-only schema inspection");
+      const summary = (source: StableSourceFile | undefined): unknown => (
+        source === undefined
+          ? { present: false }
+          : {
+            present: true,
+            dev: source.identity.dev,
+            ino: source.identity.ino,
+            mode: source.identity.mode,
+            size: source.identity.size,
+            mtimeNs: source.identity.mtimeNs,
+            ctimeNs: source.identity.ctimeNs,
+            sha256: source.identity.sha256,
+          }
+      );
+      throw cutover(
+        `database source set changed during read-only schema inspection at suffix ${JSON.stringify(suffix)}: ` +
+        `expected ${JSON.stringify(summary(before))}, actual ${JSON.stringify(summary(after))}`,
+      );
     }
   }
+}
+
+export function stableSourceSetSha256(sources: StableSourceSet): string {
+  const identities = SQLITE_SOURCE_SUFFIXES.flatMap((suffix) => {
+    const source = sources.get(suffix);
+    return source === undefined ? [] : [[suffix, source.identity] as const];
+  });
+  return `sha256:${sha256(canonicalJson(identities))}`;
 }
 
 function createPrivateDatabaseClone(databasePath: string): Readonly<{
@@ -432,6 +457,149 @@ export function applyMigrations(
 export type FabricDatabaseInspection = Readonly<{
   state: "absent" | "current";
 }>;
+
+export type SchemaCutoverFieldMismatch = Readonly<{
+  field:
+    | "databaseFormat"
+    | "epoch"
+    | "baselineSha256"
+    | "recordedCatalogSha256"
+    | "catalogSha256"
+    | "objectCount";
+  expected: string | number;
+  actual: string | number | null;
+}>;
+
+export type FabricDatabaseCutoverInspection =
+  | Readonly<{ state: "absent" }>
+  | Readonly<{ state: "empty"; sources: StableSourceSet }>
+  | Readonly<{ state: "current"; sources: StableSourceSet }>
+  | Readonly<{
+    state: "incompatible";
+    sources: StableSourceSet;
+    mismatch: Readonly<{
+      code: "SCHEMA_CUTOVER_REQUIRED";
+      message: string;
+      fields: readonly SchemaCutoverFieldMismatch[];
+    }>;
+  }>;
+
+function schemaMetadataRows(database: Database.Database): unknown[] | undefined {
+  try {
+    return database.prepare(`
+      SELECT epoch,baseline_sha256,catalog_sha256 FROM fabric_schema
+    `).all() as unknown[];
+  } catch {
+    return undefined;
+  }
+}
+
+function observedSchemaValue(value: unknown): string | number | null {
+  if (value === null || typeof value === "string" || typeof value === "number") return value;
+  if (typeof value === "bigint") return `bigint:${String(value)}`;
+  if (Buffer.isBuffer(value)) return `blob:${value.toString("hex")}`;
+  return `${typeof value}:${JSON.stringify(value)}`;
+}
+
+/**
+ * Classifies a cutover candidate through the same private-clone boundary as the
+ * runtime gate while retaining the exact expected/observed schema mismatch.
+ */
+export function inspectFabricDatabaseForCutover(
+  databasePath: string,
+): FabricDatabaseCutoverInspection {
+  try {
+    lstatSync(databasePath);
+  } catch (error: unknown) {
+    if (errno(error, "ENOENT")) return { state: "absent" };
+    throw error;
+  }
+
+  let database: Database.Database | undefined;
+  let clone: ReturnType<typeof createPrivateDatabaseClone> | undefined;
+  try {
+    clone = createPrivateDatabaseClone(databasePath);
+    try {
+      database = new BetterSqlite3(clone.clonePath);
+      database.pragma("trusted_schema = OFF");
+      const objectCount = userSchemaObjectCount(database);
+      if (objectCount === 0) {
+        assertSameSourceSet(clone.sources, stableSourceSet(databasePath));
+        return { state: "empty", sources: clone.sources };
+      }
+
+      try {
+        assertCurrentSchema(database);
+        assertSameSourceSet(clone.sources, stableSourceSet(databasePath));
+        return { state: "current", sources: clone.sources };
+      } catch (error: unknown) {
+        if (
+          !(error instanceof SchemaBaselineError) ||
+          error.code !== "SCHEMA_CUTOVER_REQUIRED"
+        ) throw error;
+        const { manifest } = loadSchemaArtifacts();
+        const rows = schemaMetadataRows(database);
+        const row = rows?.length === 1 && typeof rows[0] === "object" && rows[0] !== null
+          ? rows[0] as Record<string, unknown>
+          : undefined;
+        const absentRow = rows === undefined
+          ? "metadata-table-unreadable"
+          : `metadata-row-count:${rows.length}`;
+        const observed = (field: string): string | number | null => (
+          row === undefined
+            ? absentRow
+            : field in row
+              ? observedSchemaValue(row[field])
+              : "metadata-column-missing"
+        );
+        const catalogSha256 = currentSchemaCatalogFingerprint(database);
+        const fields: SchemaCutoverFieldMismatch[] = [];
+        const comparisons = [
+          ["epoch", manifest.epoch, observed("epoch")],
+          ["baselineSha256", manifest.baselineSha256, observed("baseline_sha256")],
+          ["recordedCatalogSha256", manifest.catalogSha256, observed("catalog_sha256")],
+          ["catalogSha256", manifest.catalogSha256, catalogSha256],
+          ["objectCount", manifest.objectCount, objectCount],
+        ] as const;
+        for (const [field, expected, observed] of comparisons) {
+          if (expected !== observed) fields.push({ field, expected, actual: observed });
+        }
+        assertSameSourceSet(clone.sources, stableSourceSet(databasePath));
+        return {
+          state: "incompatible",
+          sources: clone.sources,
+          mismatch: {
+            code: "SCHEMA_CUTOVER_REQUIRED",
+            message: error.message,
+            fields,
+          },
+        };
+      }
+    } catch (error: unknown) {
+      if (error instanceof SchemaBaselineError) throw error;
+      assertSameSourceSet(clone.sources, stableSourceSet(databasePath));
+      return {
+        state: "incompatible",
+        sources: clone.sources,
+        mismatch: {
+          code: "SCHEMA_CUTOVER_REQUIRED",
+          message: "database format or schema fingerprint is not current; existing database preserved",
+          fields: [{
+            field: "databaseFormat",
+            expected: "SQLite 3 current schema",
+            actual: error instanceof Error ? error.message : String(error),
+          }],
+        },
+      };
+    }
+  } finally {
+    try {
+      database?.close();
+    } finally {
+      if (clone !== undefined) rmSync(clone.cloneDirectory, { recursive: true, force: true });
+    }
+  }
+}
 
 /** Read-only cutover gate used before any daemon/runtime mutation. */
 export function inspectFabricDatabase(databasePath: string): FabricDatabaseInspection {

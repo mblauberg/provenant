@@ -672,6 +672,77 @@ as one team.
 - Interactive pane/TUI loss suspends the principal and freezes delivery until explicit reattach/rotation.
 - Agents request compact or rotate with a revision-bound checkpoint. The lead closes stage/run barriers only after tasks, evidence, messages, leases, provider actions, handoffs and gates reconcile.
 
+## Database archive-and-fresh cutover
+
+Use this deliberate operator command only after `SCHEMA_CUTOVER_REQUIRED`.
+It archives incompatible pre-release state and creates a fresh current
+baseline. It does not import, migrate or automatically restore archived state.
+First run the read-only preview without confirmation:
+
+```sh
+archive_directory="$HOME/.local/state/agent-harness/fabric/backups/cutover-$(date -u +%Y%m%dT%H%M%SZ)"
+scripts/agent-fabric database archive-and-fresh \
+  --archive "$archive_directory"
+```
+
+The JSON result is `confirmation-required` and reports the exact expected and
+observed schema fields, every existing source member's identity, mode and
+SHA-256, and a `confirmation.sourceSetSha256`. An absent, empty or already
+current database instead returns a typed `no-op`; neither result creates the
+archive directory or changes the database.
+
+Before confirmation, stop Fabric through its owning supervision surface and
+ensure every direct SQLite writer is quiescent. The command does not inspect,
+list or signal operating-system processes. It re-reads the complete source set
+and fails closed on a race, but this last-moment check is not a lifetime writer
+lock. Confirm the exact previewed bytes without a TTY:
+
+```sh
+scripts/agent-fabric database archive-and-fresh \
+  --archive "$archive_directory" \
+  --confirm-source-set 'sha256:<digest from preview>'
+```
+
+Confirmation is digest-bound. A changed source set, stale digest, symlink,
+archive collision, partial WAL/SHM pair or mixed rollback-journal/WAL set
+returns a typed conflict or failure without displacing the source. The archive
+destination must be an absolute, wholly absent directory. The command stages
+and fsyncs the complete payload, rejects any destination beneath a canonical
+source-member path after resolving existing destination ancestors, claims the
+final archive directory without overwrite, and atomically publishes
+`source-set/`. Only after that durable recovery boundary does it atomically
+claim the exact confirmed source files into a private same-directory holding
+area and verify their identities before removal. The archive contains the main database
+and every existing canonical sidecar (`-wal`, `-shm`, `-journal`) plus
+`source-set/receipt.json`. Modes are preserved and the receipt records the
+source identity and SHA-256 of each member without database rows, environment,
+capabilities or credentials.
+
+`-shm` is included deliberately. A working private inspection clone omits it so
+SQLite can rebuild process-shared lock/index state, but an archive is immutable
+custody of the exact observed source set. Reconstructibility is not permission
+to omit observed evidence.
+
+The rollback boundary is archive publication. All archive-preparation failures
+leave the original source paths in place. After a complete archive is durable,
+the verified private source claim is removed and the existing current-baseline
+initializer runs. Any failure after publication exits
+`4` with an explicit `archive-complete` recovery result; it never claims that
+the source was preserved. If source-claim cleanup fails the fresh baseline
+remains pending. If the baseline is current but completion-receipt finalisation
+fails, do not repeat the cutover: preserve the archive and reconcile
+`receipt.json` before starting Fabric.
+If a writer wins a race after archive publication but before the source claim,
+preserve both the archive and every live/private-claim path. Do not blindly
+restore over the live paths: compare their identities and hashes with the
+receipt and manually reconcile any newer or unarchived state.
+If that initializer fails, the command exits `4` with
+`archive-complete-fresh-init-failed`, the receipt path and one recovery action.
+Do not start Fabric. Preserve the archive, move aside any incomplete fresh
+source set, restore **every** member named by `receipt.json` to the original
+database basename with its recorded mode, verify every SHA-256, then retry; do
+not restore only the main file. The command itself is not a restore utility.
+
 ## Retention and archive
 
 Retention is report-only. It never deletes data:
