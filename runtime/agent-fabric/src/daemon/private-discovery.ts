@@ -92,11 +92,8 @@ function positiveInteger(value: unknown, label: string): number {
   return value;
 }
 
-function parseCapabilityReceipt(value: unknown, socketPath: string): PrivateDiscoveryCapabilityReceipt {
+export function parseCapabilityReceipt(value: unknown, socketPath: string): PrivateDiscoveryCapabilityReceipt {
   const receipt = record(value, "daemon discovery receipt");
-  const legacyFields = [
-    "schemaVersion", "socketPath", "pid", "bootstrapCapability", "lifecycleReceiptAuthorityId",
-  ];
   const hasProtocolVersion = Object.hasOwn(receipt, "protocolVersion");
   const hasFeatures = Object.hasOwn(receipt, "features");
   if (hasProtocolVersion !== hasFeatures) {
@@ -105,11 +102,6 @@ function parseCapabilityReceipt(value: unknown, socketPath: string): PrivateDisc
       "daemon discovery protocol evidence is incomplete",
     );
   }
-  exactKeys(
-    receipt,
-    hasProtocolVersion ? [...legacyFields, "protocolVersion", "features"] : legacyFields,
-    "daemon discovery receipt",
-  );
   if (receipt.schemaVersion !== 1 || receipt.socketPath !== socketPath) {
     throw new PrivateDiscoveryError("DAEMON_DISCOVERY_INVALID", "daemon discovery receipt does not match the trusted socket");
   }

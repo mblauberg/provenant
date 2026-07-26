@@ -7,6 +7,7 @@ import { Duplex } from "node:stream";
 
 import { afterEach, describe, expect, it } from "vitest";
 import { parse, stringify } from "yaml";
+import { MCP_BOOTSTRAP_CREDENTIALS_FEATURE } from "@local/agent-fabric-protocol";
 
 import { fabricDoctor as realFabricDoctor, fabricStatus } from "../../src/cli/status.ts";
 import type { FabricPaths } from "../../src/cli/paths.ts";
@@ -24,7 +25,10 @@ afterEach(async () => Promise.all(cleanup.splice(0).map((path) => rm(path, { rec
 class DoctorFixtureDaemonSocket extends Duplex {
   readonly methods: string[] = [];
 
-  constructor(private readonly dropProbe = false) {
+  constructor(
+    private readonly dropProbe = false,
+    private readonly capabilities: readonly string[] = ["rpc"],
+  ) {
     super();
     queueMicrotask(() => this.emit("connect"));
   }
@@ -44,7 +48,7 @@ class DoctorFixtureDaemonSocket extends Duplex {
         result: {
           protocolVersion: 1,
           daemonVersion: "pre-0636854",
-          capabilities: ["rpc"],
+          capabilities: this.capabilities,
           limits: FABRIC_PROTOCOL_LIMITS,
           activeAdapters: [],
         },
@@ -601,7 +605,7 @@ describe("machine status and doctor", () => {
     });
     expect((result.checks as Array<{ detail: string }>).find(({ detail }) =>
       detail.includes("mcp-bootstrap-credentials.v2"))?.detail).toContain("retry provenant doctor");
-    expect(socket?.methods).toEqual(["initialize", "eventsAfter"]);
+    expect(socket?.methods).toEqual(["initialize"]);
     expect(socket?.destroyed).toBe(true);
   });
 
@@ -622,7 +626,10 @@ describe("machine status and doctor", () => {
         uid: process.getuid?.() ?? 0,
       }),
       connectDaemon: async () => {
-        socket = new DoctorFixtureDaemonSocket(true);
+        socket = new DoctorFixtureDaemonSocket(
+          true,
+          ["rpc", MCP_BOOTSTRAP_CREDENTIALS_FEATURE],
+        );
         return FabricDaemonClient.connect(
           value.socketPath,
           `afb_${"A".repeat(43)}`,

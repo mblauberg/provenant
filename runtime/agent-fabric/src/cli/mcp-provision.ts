@@ -5,6 +5,10 @@ import { join } from "node:path";
 import { MCP_BOOTSTRAP_CREDENTIALS_FEATURE } from "@local/agent-fabric-protocol";
 import { connectFabricDaemon } from "../daemon/client.js";
 import { currentMcpSeatGeneration } from "../core/mcp-seat-generation.js";
+import {
+  parseCapabilityReceipt,
+  type PrivateDiscoveryCapabilityReceipt,
+} from "../daemon/private-discovery.js";
 import type { FabricPaths } from "./paths.js";
 import {
   parseMcpSeat,
@@ -18,13 +22,7 @@ import {
 
 const MAXIMUM_SEAT_LIFETIME_MS = 31 * 24 * 60 * 60 * 1_000;
 
-export type DiscoveryReceipt = {
-  schemaVersion: 1;
-  socketPath: string;
-  pid: number;
-  bootstrapCapability: string;
-  lifecycleReceiptAuthorityId: string | null;
-};
+export type DiscoveryReceipt = PrivateDiscoveryCapabilityReceipt;
 
 export type McpProvisionOutput = {
   schemaVersion: 1;
@@ -57,10 +55,6 @@ type ParsedSeatBinding = {
   agentId: string;
   expectedPrincipalGeneration: number;
 };
-
-function record(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function assertExactOptions(arguments_: string[], names: readonly string[], command: string): void {
   if (arguments_.length !== names.length * 2) {
@@ -151,24 +145,11 @@ export async function readDiscoveryReceipt(paths: FabricPaths): Promise<Discover
   } catch {
     throw new Error(`fabric discovery receipt is not valid JSON: ${discoveryPath}`);
   }
-  if (
-    !record(value) ||
-    Object.keys(value).sort().join(",") !==
-      "bootstrapCapability,lifecycleReceiptAuthorityId,pid,schemaVersion,socketPath" ||
-    value.schemaVersion !== 1 ||
-    value.socketPath !== paths.socketPath ||
-    typeof value.pid !== "number" ||
-    !Number.isSafeInteger(value.pid) ||
-    value.pid <= 0 ||
-    typeof value.bootstrapCapability !== "string" ||
-    !/^afb_[A-Za-z0-9_-]{43}$/u.test(value.bootstrapCapability) ||
-    (value.lifecycleReceiptAuthorityId !== null &&
-      (typeof value.lifecycleReceiptAuthorityId !== "string" ||
-        value.lifecycleReceiptAuthorityId.trim().length === 0))
-  ) {
+  try {
+    return parseCapabilityReceipt(value, paths.socketPath);
+  } catch {
     throw new Error(`fabric discovery receipt is invalid or does not match the configured socket: ${discoveryPath}`);
   }
-  return value as DiscoveryReceipt;
 }
 
 function boundedExpiry(value: string): string {

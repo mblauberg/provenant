@@ -428,11 +428,13 @@ async function doctorDaemonState(
         capability: discovery.receipt.bootstrapCapability,
       });
       try {
-        await client.probeBootstrapContract();
+        // Negotiation pins the credential result contract without another RPC.
+        // The probe only confirms bootstrap-scope dispatch and connection liveness.
         assertRequiredResultShapeFeatures(
           client.initializeResult.capabilities,
           [MCP_BOOTSTRAP_CREDENTIALS_FEATURE],
         );
+        await client.probeBootstrapContract();
       } finally {
         await client.close();
       }

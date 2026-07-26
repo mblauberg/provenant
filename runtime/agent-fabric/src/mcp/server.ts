@@ -102,6 +102,7 @@ const agentFeatures = Object.freeze([...new Set(
       .filter(isDaemonGrantableOperation)
       .map((operation) => OPERATION_REGISTRY[operation].feature),
     ...AGENT_RESULT_SHAPE_FEATURES,
+    MCP_BOOTSTRAP_CREDENTIALS_FEATURE,
   ],
 )].sort()) as readonly ProtocolFeature[];
 
