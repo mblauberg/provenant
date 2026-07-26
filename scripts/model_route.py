@@ -613,25 +613,6 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
                 },
                 1,
             )
-        override_families = tuple(override_scan_families(model, catalog).values())
-        configured_override_models = [
-            candidate
-            for override_family in override_families
-            if isinstance(override_family, dict)
-            for configured_overrides in (override_family.get("risk_tier_overrides"),)
-            if isinstance(configured_overrides, dict)
-            for configured_override in configured_overrides.values()
-            if isinstance(configured_override, dict)
-            for candidates in (configured_override.get("models"),)
-            if isinstance(candidates, list)
-            for candidate in candidates
-            if isinstance(candidate, str) and candidate.strip()
-        ]
-        is_risk_override_model = any(
-            model_has_alias(model, candidate) for candidate in configured_override_models
-        )
-        if is_risk_override_model and not args.risk_override:
-            return emit_route({**base, "status": "risk_tier_override_required"}, 1)
         selected_override_model = (
             args.risk_override.get("models", [""])[0] if args.risk_override else ""
         )
@@ -700,6 +681,25 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
                 fallback_model = candidates[1] if len(candidates) > 1 else ""
                 identity_source = "dated-catalog"
 
+    override_families = tuple(override_scan_families(model, catalog).values())
+    configured_override_models = [
+        candidate
+        for override_family in override_families
+        if isinstance(override_family, dict)
+        for configured_overrides in (override_family.get("risk_tier_overrides"),)
+        if isinstance(configured_overrides, dict)
+        for configured_override in configured_overrides.values()
+        if isinstance(configured_override, dict)
+        for candidates in (configured_override.get("models"),)
+        if isinstance(candidates, list)
+        for candidate in candidates
+        if isinstance(candidate, str) and candidate.strip()
+    ]
+    is_risk_override_model = any(
+        model_has_alias(model, candidate) for candidate in configured_override_models
+    )
+    if is_risk_override_model and not args.risk_override:
+        return emit_route({**base, "status": "risk_tier_override_required"}, 1)
     compatibility_family = ""
     if compatibility:
         if args.adapter_gate == "fabric" and not compatibility["enabled"]:
