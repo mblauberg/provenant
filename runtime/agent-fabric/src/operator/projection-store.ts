@@ -3,7 +3,6 @@ import type {
   ArtifactRef,
   ConsoleView,
   JsonValue,
-  MessageBodyRef,
   MessageBodyReadRequest,
   MessageBodyReadResult,
   NativeNotificationDeliverySummary,
@@ -56,6 +55,7 @@ import { projectRunIdentity } from "./run-identity-projection.js";
 import { projectDeclaredRunProgress } from "./declared-run-progress-projection.js";
 import { agentTopologyProjectionField, type AgentTopologyProjection } from "./agent-topology-projection.js";
 import { projectTaskCheckState, workFactsProjectionField, type WorkFactsProjection } from "./work-facts-projection.js";
+import { activityItems, activityRows, boundedOperatorActivityRows, boundedProjectionActivityItems, loadActivityDetail, type ActivityNarrativeGroupingProjection } from "./activity-projection.js";
 
 export type OperatorProjectionStoreOptions = CoreServiceOptions & {
   operatorStore: OperatorStore;
@@ -65,6 +65,7 @@ export type NativeNotificationProjection = "include" | "omit";
 export type RunSessionProjection = "include" | "omit";
 export type DeclaredRunProgressProjection = "include" | "omit";
 export type RunIdentityProjection = "include" | "omit";
+export type { ActivityNarrativeGroupingProjection } from "./activity-projection.js";
 type LoadedOperatorDetail = {
   revision: number;
   observedAt: Timestamp;
@@ -215,6 +216,7 @@ export class OperatorProjectionStore {
     runSessionProjection: RunSessionProjection = "include",
     declaredRunProgressProjection: DeclaredRunProgressProjection = "include",
     runIdentityProjection: RunIdentityProjection = "include", agentTopologyProjection: AgentTopologyProjection = "include", workFactsProjection: WorkFactsProjection = "include",
+    activityNarrativeGroupingProjection: ActivityNarrativeGroupingProjection = "omit",
   ): OperatorViewPageResult {
     const authenticated = this.#authoriseRead(request.credential, request.projectId, request.projectSessionId);
     const selectedSessionId = this.#selectedSessionId(authenticated, request.projectSessionId);
@@ -252,8 +254,8 @@ export class OperatorProjectionStore {
         this.#evidenceRows(request.projectId, selectedSessionId, authenticated)
       ), selectedSessionId);
       case "activity": return this.#viewPage(request, "activity", () => (
-        this.#activityRows(request.projectId, selectedSessionId, authenticated)
-      ), selectedSessionId);
+        this.#activityRows(request.projectId, selectedSessionId, authenticated, activityNarrativeGroupingProjection)
+      ), selectedSessionId, activityNarrativeGroupingProjection === "include");
       case "system": return this.#viewPage(request, "system", () => (
         this.#systemRows(request.projectId, authenticated)
       ), selectedSessionId);
@@ -265,6 +267,7 @@ export class OperatorProjectionStore {
     request: ProjectionPageRequest<View>,
     nativeNotificationProjection: NativeNotificationProjection,
     runSessionProjection: RunSessionProjection = "include",
+    activityNarrativeGroupingProjection: ActivityNarrativeGroupingProjection = "omit",
   ): ProjectionPageResult<View> {
     const authenticated = this.#authoriseRead(request.credential, request.projectId, request.projectSessionId);
     const selectedSessionId = this.#selectedSessionId(authenticated, request.projectSessionId);
@@ -276,15 +279,23 @@ export class OperatorProjectionStore {
         selectedSessionId,
         nativeNotificationProjection,
         runSessionProjection,
+        activityNarrativeGroupingProjection,
       );
+      const observedAt = toTimestamp(this.#clock(), "projectionPage.observedAt");
+      const revision = this.#globalRevision();
       // The closed view switch above preserves the View-to-item correlation that
       // TypeScript cannot retain through an indexed conditional return type.
-      const items = allItems.slice(request.after, request.after + request.limit) as unknown as
+      const requestedItems = allItems.slice(request.after, request.after + request.limit) as unknown as
         readonly ProjectionViewItemMap[View][];
-      const observedAt = toTimestamp(this.#clock(), "projectionPage.observedAt");
+      const items = request.view === "activity" &&
+          activityNarrativeGroupingProjection === "include"
+        ? boundedProjectionActivityItems(requestedItems, {
+            view: request.view, after: request.after, totalItems: allItems.length, revision, observedAt,
+          })
+        : requestedItems;
       const result = {
         view: request.view,
-        page: liveFact(this.#globalRevision(), observedAt, {
+        page: liveFact(revision, observedAt, {
           items,
           nextCursor: request.after + items.length,
           hasMore: request.after + items.length < allItems.length,
@@ -300,6 +311,7 @@ export class OperatorProjectionStore {
     view: View,
     loadRows: () => readonly OperatorViewRow<View>[],
     selectedSessionId: ProjectSessionId | undefined,
+    byteBounded = false,
   ): ConcreteOperatorViewPageResult<View> {
     const read = this.#database.transaction((): ConcreteOperatorViewPageResult<View> => {
       const currentSnapshotRevision = this.#globalRevision();
@@ -313,7 +325,14 @@ export class OperatorProjectionStore {
         };
       }
       const allRows = loadRows();
-      const rows = allRows.slice(request.cursor, request.cursor + request.limit);
+      const requestedRows = allRows.slice(request.cursor, request.cursor + request.limit);
+      const transactionId = readTransactionId(request.projectId, selectedSessionId, currentSnapshotRevision);
+      const rows = byteBounded
+        ? boundedOperatorActivityRows(requestedRows, {
+            view, cursor: request.cursor, totalRows: allRows.length, snapshotRevision: currentSnapshotRevision,
+            readTransactionId: transactionId,
+          })
+        : requestedRows;
       return {
         status: "page",
         view,
@@ -321,7 +340,7 @@ export class OperatorProjectionStore {
         nextCursor: request.cursor + rows.length,
         hasMore: request.cursor + rows.length < allRows.length,
         snapshotRevision: currentSnapshotRevision,
-        readTransactionId: readTransactionId(request.projectId, selectedSessionId, currentSnapshotRevision),
+        readTransactionId: transactionId,
       };
     });
     return read();
@@ -332,6 +351,7 @@ export class OperatorProjectionStore {
     runSessionProjection: RunSessionProjection = "include",
     declaredRunProgressProjection: DeclaredRunProgressProjection = "include",
     runIdentityProjection: RunIdentityProjection = "include", agentTopologyProjection: AgentTopologyProjection = "include", workFactsProjection: WorkFactsProjection = "include",
+    activityNarrativeGroupingProjection: ActivityNarrativeGroupingProjection = "omit",
   ): OperatorDetailReadResult {
     const authenticated = this.#authoriseRead(request.credential, request.projectId, request.projectSessionId);
     const selectedSessionId = this.#selectedSessionId(authenticated, request.projectSessionId);
@@ -349,6 +369,7 @@ export class OperatorProjectionStore {
         runIdentityProjection,
         agentTopologyProjection,
         workFactsProjection,
+        activityNarrativeGroupingProjection,
       );
       if (request.detailRef.expectedRevision !== loaded.revision) {
         return {
@@ -648,6 +669,7 @@ export class OperatorProjectionStore {
     projectSessionId: ProjectSessionId | undefined,
     nativeNotificationProjection: NativeNotificationProjection,
     runSessionProjection: RunSessionProjection,
+    activityNarrativeGroupingProjection: ActivityNarrativeGroupingProjection,
   ): readonly ProjectionViewItemMap[ConsoleView][] {
     switch (view) {
       case "attention": return this.#attention(projectId, projectSessionId, nativeNotificationProjection);
@@ -656,7 +678,11 @@ export class OperatorProjectionStore {
       case "work": return this.#workItems(projectId, projectSessionId);
       case "agents": return this.#agentItems(projectId, projectSessionId);
       case "evidence": return this.#evidenceItems(projectId, projectSessionId);
-      case "activity": return this.#activityItems(projectId, projectSessionId);
+      case "activity": return this.#activityItems(
+        projectId,
+        projectSessionId,
+        activityNarrativeGroupingProjection,
+      );
       case "system": return this.#systemItems(projectId);
       default: return assertNever(view);
     }
@@ -909,6 +935,7 @@ export class OperatorProjectionStore {
   #activityItems(
     projectId: ProjectId,
     projectSessionId: ProjectSessionId | undefined,
+    activityNarrativeGroupingProjection: ActivityNarrativeGroupingProjection,
   ): ProjectionViewItemMap["activity"][] {
     const values = this.#sessionQuery(
       projectId,
@@ -918,25 +945,7 @@ export class OperatorProjectionStore {
          JOIN runs r ON r.run_id=e.run_id`,
       "ORDER BY seq.sequence DESC",
     );
-    return values.map((event): ProjectionViewItemMap["activity"] => {
-      const payload = jsonObject(text(event, "payload_json"), "activity page payload");
-      const taskId = typeof payload.taskId === "string"
-        ? parseIdentifier<"TaskId">(payload.taskId, "activityPage.taskId")
-        : null;
-      const occurredAt = toTimestamp(integer(event, "created_at"), "activityPage.occurredAt");
-      const kind = activityKind(text(event, "type"));
-      const base = {
-        eventId: text(event, "event_id"),
-        actorId: nullableText(event, "actor_agent_id"),
-        taskId,
-        summary: text(event, "type"),
-        occurredAt,
-        sourceRevision: integer(event, "sequence"),
-      };
-      return kind === "message"
-        ? { ...base, kind, messageBodyRef: this.#messageBodyRef(event) }
-        : { ...base, kind };
-    });
+    return activityItems(this.#database, values, activityNarrativeGroupingProjection);
   }
 
   #systemItems(projectId: ProjectId): ProjectionViewItemMap["system"][] {
@@ -1432,6 +1441,7 @@ export class OperatorProjectionStore {
     projectId: ProjectId,
     projectSessionId: ProjectSessionId | undefined,
     authenticated: AuthenticatedOperatorCredential,
+    activityNarrativeGroupingProjection: ActivityNarrativeGroupingProjection,
   ): OperatorViewRow<"activity">[] {
     const values = this.#sessionQuery(
       projectId,
@@ -1441,35 +1451,7 @@ export class OperatorProjectionStore {
          JOIN runs r ON r.run_id=e.run_id`,
       "ORDER BY seq.sequence DESC",
     );
-    return values.map((event): OperatorViewRow<"activity"> => {
-      const sequence = integer(event, "sequence");
-      const eventId = text(event, "event_id");
-      const kind = activityKind(text(event, "type"));
-      const occurredAt = toTimestamp(integer(event, "created_at"), "activityRow.occurredAt");
-      const summary = kind === "message"
-        ? {
-            kind: "activity" as const,
-            activityKind: "message" as const,
-            summary: text(event, "type"),
-            occurredAt,
-            messageBodyRef: this.#messageBodyRef(event),
-          }
-        : {
-            kind: "activity" as const,
-            activityKind: kind,
-            summary: text(event, "type"),
-            occurredAt,
-          };
-      return {
-        itemId: eventId,
-        itemRevision: sequence,
-        fact: liveFact(sequence, occurredAt, {
-          summary,
-          detailRef: { kind: "activity", eventId, expectedRevision: sequence },
-          actionAvailability: actionAvailability(authenticated),
-        }),
-      };
-    });
+    return activityRows(this.#database, values, actionAvailability(authenticated), activityNarrativeGroupingProjection);
   }
 
   #systemRows(projectId: ProjectId, authenticated: AuthenticatedOperatorCredential): OperatorViewRow<"system">[] {
@@ -1534,6 +1516,7 @@ export class OperatorProjectionStore {
     runSessionProjection: RunSessionProjection,
     declaredRunProgressProjection: DeclaredRunProgressProjection,
     runIdentityProjection: RunIdentityProjection, agentTopologyProjection: AgentTopologyProjection, workFactsProjection: WorkFactsProjection,
+    activityNarrativeGroupingProjection: ActivityNarrativeGroupingProjection,
   ): LoadedOperatorDetail {
     switch (detailRef.kind) {
       case "project": return this.#loadProjectDetail(detailRef, projectId);
@@ -1549,7 +1532,12 @@ export class OperatorProjectionStore {
       case "task": return this.#loadTaskDetail(detailRef, projectId, projectSessionId, workFactsProjection);
       case "agent": return this.#loadAgentDetail(detailRef, projectId, projectSessionId, agentTopologyProjection);
       case "evidence": return this.#loadEvidenceDetail(detailRef, projectId, projectSessionId);
-      case "activity": return this.#loadActivityDetail(detailRef, projectId, projectSessionId);
+      case "activity": return this.#loadActivityDetail(
+        detailRef,
+        projectId,
+        projectSessionId,
+        activityNarrativeGroupingProjection,
+      );
       case "system": return this.#loadSystemDetail(detailRef, projectId);
       default: return assertNever(detailRef);
     }
@@ -1768,58 +1756,22 @@ export class OperatorProjectionStore {
     detailRef: Extract<OperatorDetailRef, { kind: "activity" }>,
     projectId: ProjectId,
     projectSessionId: ProjectSessionId | undefined,
+    activityNarrativeGroupingProjection: ActivityNarrativeGroupingProjection,
   ): LoadedOperatorDetail {
-    const event = row(this.#database.prepare(`
-      SELECT e.*, seq.sequence, r.project_session_id FROM events e
-      JOIN observer_event_sequence seq ON seq.event_id=e.event_id
-      JOIN runs r ON r.run_id=e.run_id
-      JOIN project_sessions s ON s.project_session_id=r.project_session_id
-      WHERE e.event_id=? AND s.project_id=?
-        AND (? IS NULL OR r.project_session_id=?)
-    `).get(detailRef.eventId, projectId, projectSessionId ?? null, projectSessionId ?? null), "activity detail");
-    const occurredAt = toTimestamp(integer(event, "created_at"), "activityDetail.occurredAt");
-    const kind = activityKind(text(event, "type"));
-    const detail: OperatorDetail = kind === "message"
-      ? {
-          kind: "activity",
-          eventId: detailRef.eventId,
-          activityKind: "message",
-          summary: text(event, "type"),
-          occurredAt,
-          messageBodyRef: this.#messageBodyRef(event),
-        }
-      : {
-          kind: "activity",
-          eventId: detailRef.eventId,
-          activityKind: kind,
-          summary: text(event, "type"),
-          occurredAt,
-        };
-    return {
-      revision: integer(event, "sequence"),
-      observedAt: occurredAt,
-      detail,
-    };
-  }
-
-  #messageBodyRef(event: Row): MessageBodyRef {
-    const payload = jsonObject(text(event, "payload_json"), "message activity payload");
-    if (typeof payload.messageId !== "string") {
-      throw new Error("message activity has no exact message ID binding");
-    }
-    if (!isRow(this.#database.prepare(`
-      SELECT message_id FROM messages WHERE run_id=? AND message_id=?
-    `).get(text(event, "run_id"), payload.messageId))) {
-      throw new Error("message activity references a message outside its run");
-    }
-    return {
-      projectSessionId: parseIdentifier<"ProjectSessionId">(
-        text(event, "project_session_id"),
-        "messageBodyRef.projectSessionId",
-      ),
-      messageId: parseIdentifier<"MessageId">(payload.messageId, "messageBodyRef.messageId"),
-      expectedRevision: 1,
-    };
+    const values = this.#sessionQuery(
+      projectId,
+      projectSessionId,
+      `SELECT e.*, seq.sequence, r.project_session_id FROM events e
+         JOIN observer_event_sequence seq ON seq.event_id=e.event_id
+         JOIN runs r ON r.run_id=e.run_id`,
+      "ORDER BY seq.sequence DESC",
+    );
+    return loadActivityDetail(
+      this.#database,
+      values,
+      detailRef,
+      activityNarrativeGroupingProjection,
+    );
   }
 
   #loadSystemDetail(
@@ -1984,19 +1936,6 @@ function actionAvailability(authenticated: AuthenticatedOperatorCredential): Ope
   return actions.length === 0
     ? { state: "read-only", reason: "authority-insufficient" }
     : { state: "available", actions, requiresPreview: true };
-}
-
-function activityKind(type: string): "message" | "decision" | "lifecycle" | "operation" {
-  if (type.includes("message")) return "message";
-  if (type.includes("decision") || type.includes("gate") || type.includes("approval")) return "decision";
-  if (
-    type.includes("lifecycle") ||
-    type.includes("launch") ||
-    type.includes("quiesc") ||
-    type.includes("closed") ||
-    type.includes("cancel")
-  ) return "lifecycle";
-  return "operation";
 }
 
 function systemState(state: string): "healthy" | "stale" | "unavailable" {

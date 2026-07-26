@@ -24,6 +24,16 @@ export type InertArtifactTextResult =
       credentialValuesRedacted: true;
     };
 
+export type RedactedArtifactTextResult =
+  | { safe: false }
+  | {
+      safe: true;
+      content: string;
+      transformation: ArtifactContentTransformation;
+      capabilityValuesRedacted: true;
+      credentialValuesRedacted: true;
+    };
+
 function escapeRegex(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
 }
@@ -42,12 +52,15 @@ function neutraliseTerminal(value: string): string {
     .replace(/\p{Cf}/gu, "");
 }
 
-export function inertArtifactText(raw: string, runtimeKnownSecrets: readonly string[] = []): InertArtifactTextResult {
+function redactArtifactText(
+  raw: string,
+  terminalSafe: string,
+  runtimeKnownSecrets: readonly string[],
+): RedactedArtifactTextResult {
   if (/-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----/u.test(raw) && !PRIVATE_KEY.test(raw)) return { safe: false };
   PRIVATE_KEY.lastIndex = 0;
   if (/^(?:\s*(?:authorization|proxy-authorization)\s*:\s*)$/imu.test(raw)) return { safe: false };
 
-  const terminalSafe = neutraliseTerminal(raw);
   const terminalChanged = terminalSafe !== raw;
   let content = terminalSafe;
   let capabilityChanged = false;
@@ -87,10 +100,30 @@ export function inertArtifactText(raw: string, runtimeKnownSecrets: readonly str
     safe: true,
     content,
     transformation,
-    terminalNeutralised: true,
     capabilityValuesRedacted: true,
     credentialValuesRedacted: true,
   };
+}
+
+export function inertArtifactText(
+  raw: string,
+  runtimeKnownSecrets: readonly string[] = [],
+): InertArtifactTextResult {
+  const protectedText = redactArtifactText(
+    raw,
+    neutraliseTerminal(raw),
+    runtimeKnownSecrets,
+  );
+  return protectedText.safe
+    ? { ...protectedText, terminalNeutralised: true }
+    : protectedText;
+}
+
+export function redactArtifactTextPreservingControls(
+  raw: string,
+  runtimeKnownSecrets: readonly string[] = [],
+): RedactedArtifactTextResult {
+  return redactArtifactText(raw, raw, runtimeKnownSecrets);
 }
 
 function digest(value: string): `sha256:${string}` {

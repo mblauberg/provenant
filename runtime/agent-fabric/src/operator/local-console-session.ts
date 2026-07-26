@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { createConnection } from "node:net";
 
 import {
+  ACTIVITY_NARRATIVE_GROUPING_FEATURE,
   DECLARED_RUN_PROGRESS_FEATURE,
   GATE_SYSTEM_SUPERSESSION_FEATURE,
   NATIVE_NOTIFICATION_PROJECTION_FEATURE,
@@ -58,6 +59,7 @@ const REQUIRED_FEATURES: readonly ProtocolFeature[] = Object.freeze([
   RUN_SESSION_PROJECTION_FEATURE,
   DECLARED_RUN_PROGRESS_FEATURE,
   RUN_IDENTITY_PROJECTION_FEATURE,
+  ACTIVITY_NARRATIVE_GROUPING_FEATURE,
   "artifact-content-read.v1",
 ] as const satisfies readonly ProtocolFeature[]);
 export const CURRENT_CONSOLE_OPTIONAL_FEATURES: readonly ProtocolFeature[] = Object.freeze([

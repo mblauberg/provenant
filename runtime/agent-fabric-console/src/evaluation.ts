@@ -1,5 +1,4 @@
 import stringWidth from "string-width";
-import { splitGraphemes } from "unicode-segmenter/grapheme";
 
 import type {
   AgentId,
@@ -15,6 +14,7 @@ import type {
 
 import type { ConsoleControllerState } from "./controller.js";
 import { fixtureRunIdentity } from "./evaluation-fixtures.js";
+import { frameHasEnabledVisibleFocus } from "./evaluation-frame.js";
 import type { FabricConsoleFrame } from "./index.js";
 import {
   FABRIC_VIEWS,
@@ -791,13 +791,35 @@ function fixtureDataset(fixture: UsabilityFixture): FabricConsoleDataset {
       freshness: freshness("live", index * 10),
       summary: {
         kind: "activity" as const,
-        activityKind: "lifecycle" as const,
         summary: `Evaluation activity ${String(index + 1)}`,
         occurredAt: timestamp,
+        group: {
+          groupId: `activity-evaluation-${String(index + 1)}`,
+          ordinal: index + 1,
+          kind: "event" as const,
+          actorIds: [],
+          target: null,
+          eventKinds: ["evaluation-observed"],
+          occurredAtRange: { first: timestamp, last: timestamp },
+          sourceRange: { first: revision + index, last: revision + index },
+          count: 1, evidenceLinkCount: 0, evidenceLinksTruncated: false, evidenceLinks: [],
+          evidenceLinksDigest: "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945" as never,
+          members: [{
+            ordinal: 1,
+            eventId: `event-evaluation-${String(index + 1)}`,
+            eventKind: "evaluation-observed",
+            actorId: null,
+            target: null,
+            occurredAt: timestamp,
+            sourceRevision: revision + index,
+            detailAvailability: "available" as const,
+            evidenceLinkCount: 0, evidenceLinksDigest: "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945" as never,
+          }],
+        },
       },
       detailRef: {
         kind: "activity" as const,
-        eventId: `activity-evaluation-${String(index + 1)}`,
+        groupId: `activity-evaluation-${String(index + 1)}`,
         expectedRevision: revision + index,
       },
       actionAvailability: {
@@ -1406,31 +1428,6 @@ async function exerciseInteractionCoverage(
     keyboardActionIds: [...keyboardActions].sort(),
     mouseActionIds: [...mouseActions].sort(),
   };
-}
-
-function cellSlice(value: string, start: number, end: number): string {
-  let column = 0;
-  let output = "";
-  for (const grapheme of splitGraphemes(value)) {
-    const nextColumn = column + stringWidth(grapheme);
-    if (nextColumn > start && column < end) output += grapheme;
-    column = nextColumn;
-    if (column >= end) break;
-  }
-  return output;
-}
-
-function frameHasEnabledVisibleFocus(frame: FabricConsoleFrame): boolean {
-  if (frame.mode === "inert") return false;
-  const focusId = frame.presentation.focusId;
-  if (focusId === null) return false;
-  const region = frame.hitRegions.find(
-    ({ enabled, id }) => enabled && id === focusId,
-  );
-  if (region === undefined) return false;
-  const firstRow = frame.rows[region.rect.y1 - 1];
-  return firstRow !== undefined &&
-    cellSlice(firstRow, region.rect.x1 - 1, region.rect.x1) === ">";
 }
 
 function spec17ProjectionGeometrySafe(

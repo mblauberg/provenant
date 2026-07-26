@@ -5,12 +5,14 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 
 import type {
+  ActivityNarrativeGroup,
   ArtifactContentReadRequest,
   ArtifactContentReadResult,
   OperatorCapabilityCredential,
   OperatorDetailReadResult,
   OperatorProjectionSnapshot,
   OperatorViewPageResult,
+  MessageBodyReadResult,
   ProjectId,
   ProjectionEventsResult,
   Sha256Digest,
@@ -735,6 +737,7 @@ describe("public protocol adapter", () => {
         "run-session-projection.v1",
         "declared-run-progress.v2",
         "run-identity-projection.v2",
+        "activity-narrative-grouping.v1",
         "artifact-content-read.v1",
       ],
     });
@@ -754,6 +757,7 @@ describe("public protocol adapter", () => {
           "run-session-projection.v1",
           "declared-run-progress.v2",
           "run-identity-projection.v2",
+          "activity-narrative-grouping.v1",
           "artifact-content-read.v1",
         ],
       },
@@ -782,7 +786,12 @@ describe("public protocol adapter", () => {
 
     expect(result).toStrictEqual({
       ok: false,
-      missingFeatures: ["run-session-projection.v1", "declared-run-progress.v2", "run-identity-projection.v2"],
+      missingFeatures: [
+        "run-session-projection.v1",
+        "declared-run-progress.v2",
+        "run-identity-projection.v2",
+        "activity-narrative-grouping.v1",
+      ],
     });
   });
 
@@ -804,6 +813,7 @@ describe("public protocol adapter", () => {
         "run-session-projection.v1",
         "declared-run-progress.v2",
         "run-identity-projection.v2",
+        "activity-narrative-grouping.v1",
         "artifact-content-read.v1",
         "message-body-read.v1",
         "operator-repository-read.v1",
@@ -848,6 +858,7 @@ describe("public protocol adapter", () => {
         "run-session-projection.v1",
         "declared-run-progress.v2",
         "run-identity-projection.v2",
+        "activity-narrative-grouping.v1",
         "artifact-content-read.v1",
       ],
       projection: {},
@@ -1127,7 +1138,135 @@ describe("public protocol adapter", () => {
     expect(artifactRead).toHaveBeenCalledTimes(2);
   });
 
-  it("does not misrepresent a non-message Activity row as a failed message read", async () => {
+  it("drills into every grouped member and labels unavailable message detail", async () => {
+    const group: ActivityNarrativeGroup = {
+      groupId: "activity_group_01",
+      ordinal: 1,
+      kind: "task",
+      actorIds: ["agent_01"],
+      target: { kind: "task", id: "task_01" },
+      eventKinds: ["message-persisted", "tool-invoked"],
+      occurredAtRange: { first: observedAt, last: observedAt },
+      sourceRange: { first: 3, last: 4 },
+      count: 2,
+      evidenceLinkCount: 0,
+      evidenceLinksDigest:
+        "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945" as never,
+      evidenceLinksTruncated: false,
+      evidenceLinks: [],
+      members: [
+        {
+          ordinal: 1,
+          eventId: "event_message",
+          eventKind: "message-persisted",
+          actorId: "agent_01",
+          target: { kind: "task", id: "task_01" },
+          occurredAt: observedAt,
+          sourceRevision: 3,
+          messageBodyRef: {
+            projectSessionId: "session_01" as never,
+            messageId: "message_01" as never,
+            expectedRevision: 1,
+          },
+          detailAvailability: "available",
+          evidenceLinkCount: 0,
+          evidenceLinksDigest:
+            "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945" as never,
+        },
+        {
+          ordinal: 2,
+          eventId: "event_tool",
+          eventKind: "tool-invoked",
+          actorId: "agent_01",
+          target: { kind: "task", id: "task_01" },
+          occurredAt: observedAt,
+          sourceRevision: 4,
+          detailAvailability: "available",
+          evidenceLinkCount: 0,
+          evidenceLinksDigest:
+            "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945" as never,
+        },
+      ],
+    };
+    const toolContent = '{"tool":"read"}';
+    const toolDigest =
+      `sha256:${createHash("sha256").update(toolContent).digest("hex")}`;
+    let memberDetailMode: "success" | "resnapshot" | "zero-progress" =
+      "success";
+    const readDetail = vi.fn(async (request) => (
+      "eventId" in request.detailRef
+        ? memberDetailMode === "resnapshot"
+          ? {
+              status: "resnapshot-required",
+              reason: "detail-revision-changed",
+              currentSnapshotRevision: 2,
+            }
+          : {
+              status: "current",
+              detailRef: request.detailRef,
+              detail: {
+                freshness: "live",
+                source: "fabric",
+                revision: 4,
+                observedAt,
+                value: {
+                  kind: "activity",
+                  groupId: group.groupId,
+                  eventId: "event_tool",
+                  sourceRevision: 4,
+                  contentOffset: 0,
+                  content: memberDetailMode === "zero-progress"
+                    ? ""
+                    : toolContent,
+                  contentBytes: Buffer.byteLength(toolContent),
+                  contentDigest: toolDigest,
+                  transformation: "none",
+                  nextDetailRef: memberDetailMode === "zero-progress"
+                    ? request.detailRef
+                    : null,
+                },
+              },
+              snapshotRevision: 1,
+              readTransactionId: "activity-member-detail",
+            }
+        : {
+            status: "current",
+            detailRef: request.detailRef,
+            detail: {
+              freshness: "live",
+              source: "fabric",
+              revision: 4,
+              observedAt,
+              value: {
+                kind: "activity",
+                group,
+                memberDetails: [
+                  {
+                    eventId: "event_message",
+                    status: "available",
+                    content: '{"messageId":"message_01"}',
+                    transformation: "none",
+                  },
+                  {
+                    eventId: "event_tool",
+                    status: "referenced",
+                    contentBytes: Buffer.byteLength(toolContent),
+                    contentDigest: toolDigest,
+                    detailRef: {
+                      kind: "activity",
+                      groupId: group.groupId,
+                      eventId: "event_tool",
+                      expectedRevision: 4,
+                      contentOffset: 0,
+                    },
+                  },
+                ],
+              },
+            },
+            snapshotRevision: 1,
+            readTransactionId: "activity-group-detail",
+          }
+    ) as unknown as OperatorDetailReadResult);
     const port = fakePort({
       viewPage: vi.fn(async (request) => {
         if (request.view !== "activity") {
@@ -1137,7 +1276,7 @@ describe("public protocol adapter", () => {
           status: "page",
           view: "activity",
           rows: [{
-            itemId: "activity-lifecycle",
+            itemId: group.groupId,
             itemRevision: 4,
             fact: {
               freshness: "live",
@@ -1147,13 +1286,13 @@ describe("public protocol adapter", () => {
               value: {
                 summary: {
                   kind: "activity",
-                  activityKind: "lifecycle",
-                  summary: "Run completed",
+                  summary: "task activity",
                   occurredAt: observedAt,
+                  group,
                 },
                 detailRef: {
                   kind: "activity",
-                  eventId: "activity-lifecycle",
+                  groupId: group.groupId,
                   expectedRevision: 4,
                 },
                 actionAvailability: {
@@ -1166,9 +1305,16 @@ describe("public protocol adapter", () => {
           nextCursor: 1,
           hasMore: false,
           snapshotRevision: request.snapshotRevision,
-          readTransactionId: "activity-lifecycle-read",
-        } as OperatorViewPageResult;
+          readTransactionId: "activity-group-read",
+        } as unknown as OperatorViewPageResult;
       }),
+      readDetail,
+      readMessageBody: vi.fn(async (): Promise<MessageBodyReadResult> => ({
+        available: false,
+        messageId: "message_01" as never,
+        revision: 1,
+        reason: "expired",
+      })),
     });
     const adapter = new ConsoleProtocolAdapter({
       binding: binding(port),
@@ -1179,12 +1325,74 @@ describe("public protocol adapter", () => {
 
     const inspection = await adapter.inspect({
       view: "activity",
-      itemId: "activity-lifecycle",
+      itemId: group.groupId,
       itemRevision: revisionFromProtocol(4),
       projectionRevision: revisionFromProtocol(1),
     });
 
-    expect(inspection).toBeNull();
+    expect(inspection).toMatchObject({
+      kind: "activity",
+      state: "current",
+      detail: {
+        group: {
+          count: 2,
+          sourceRange: { first: 3, last: 4 },
+        },
+        memberDetails: [
+          { eventId: "event_message", status: "available" },
+          {
+            eventId: "event_tool",
+            status: "available",
+            content: '{"tool":"read"}',
+          },
+        ],
+      },
+      messages: [{
+        eventId: "event_message",
+        state: "unavailable",
+        reason: "message-expired",
+      }],
+    });
+    memberDetailMode = "resnapshot";
+    await expect(adapter.inspect({
+      view: "activity",
+      itemId: group.groupId,
+      itemRevision: revisionFromProtocol(4),
+      projectionRevision: revisionFromProtocol(1),
+    })).resolves.toMatchObject({
+      kind: "activity",
+      state: "current",
+      detail: {
+        memberDetails: [
+          { eventId: "event_message", status: "available" },
+          {
+            eventId: "event_tool",
+            status: "unavailable",
+            reason: "projection-changed",
+          },
+        ],
+      },
+    });
+    memberDetailMode = "zero-progress";
+    await expect(adapter.inspect({
+      view: "activity",
+      itemId: group.groupId,
+      itemRevision: revisionFromProtocol(4),
+      projectionRevision: revisionFromProtocol(1),
+    })).resolves.toMatchObject({
+      kind: "activity",
+      state: "current",
+      detail: {
+        memberDetails: [
+          { eventId: "event_message", status: "available" },
+          {
+            eventId: "event_tool",
+            status: "unavailable",
+            reason: "contract-invalid",
+          },
+        ],
+      },
+    });
   });
 
   it("renders a truthful System detail and remediation for every bootstrap reason", () => {

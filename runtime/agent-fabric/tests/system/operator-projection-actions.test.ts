@@ -1,6 +1,7 @@
 import Database from "better-sqlite3";
 
 import {
+  PROTOCOL_LIMITS,
   parseIdentifier,
   parseArtifactRef,
   parseOperatorCapabilityGrant,
@@ -971,6 +972,266 @@ describe("operator projection store", () => {
         });
       }
     }
+  });
+
+  it("projects exact activity groups only for the negotiated result shape", () => {
+    const fixture = setupProjection();
+    const projectId = identifier<"ProjectId">("project_01");
+    const projectSessionId = identifier<"ProjectSessionId">("session_01");
+    const toolPayload = JSON.stringify({
+      taskId: "task_01",
+      tool: "read",
+      detail: `a${"😀".repeat(75_000)}`,
+    });
+    fixture.database.prepare(`
+      INSERT INTO events(event_id, run_id, type, actor_agent_id, payload_json, created_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(
+      "event_tool_01",
+      "run_01",
+      "tool-invoked",
+      "chair_01",
+      toolPayload,
+      now - 250,
+    );
+    fixture.database.exec(
+      "INSERT INTO observer_event_sequence(event_id) VALUES ('event_tool_01')",
+    );
+    const snapshot = fixture.projections.snapshot({
+      credential: fixture.credential,
+      projectId,
+      projectSessionId,
+    }, "include");
+    const request = {
+      credential: fixture.credential,
+      projectId,
+      projectSessionId,
+      view: "activity" as const,
+      snapshotRevision: snapshot.snapshotRevision,
+      cursor: 0,
+      limit: 10,
+    };
+
+    const grouped = fixture.projections.viewPage(
+      request,
+      "include",
+      "include",
+      "include",
+      "include",
+      "include",
+      "include",
+      "include",
+    );
+    if (grouped.status !== "page") throw new Error("expected grouped activity page");
+    expect(grouped.rows).toHaveLength(1);
+    const fact = grouped.rows[0]?.fact;
+    if (fact?.freshness !== "live") throw new Error("expected live activity group");
+    const summary = fact.value.summary;
+    if (summary.kind !== "activity" || !("group" in summary)) {
+      throw new Error("expected grouped activity summary");
+    }
+    expect(summary).toMatchObject({
+      group: {
+        ordinal: 1,
+        kind: "task",
+        target: { kind: "task", id: "task_01" },
+        count: 2,
+        sourceRange: { first: 1, last: 2 },
+        members: [
+          {
+            ordinal: 1,
+            eventId: "event_01",
+            messageBodyRef: { messageId: "message_01" },
+          },
+          { ordinal: 2, eventId: "event_tool_01" },
+        ],
+      },
+    });
+    expect(fact.value.detailRef).toMatchObject({
+      kind: "activity",
+      groupId: summary.group.groupId,
+      expectedRevision: 2,
+    });
+
+    const detail = fixture.projections.detail(
+      {
+        credential: fixture.credential,
+        projectId,
+        projectSessionId,
+        snapshotRevision: snapshot.snapshotRevision,
+        detailRef: fact.value.detailRef,
+      },
+      "include",
+      "include",
+      "include",
+      "include",
+      "include",
+      "include",
+    );
+    expect(detail).toMatchObject({
+      status: "current",
+      detail: {
+        value: {
+          group: { groupId: summary.group.groupId, count: 2 },
+          memberDetails: [
+            { eventId: "event_01", status: "referenced" },
+            {
+              eventId: "event_tool_01",
+              status: "referenced",
+              contentBytes: Buffer.byteLength(toolPayload),
+            },
+          ],
+        },
+      },
+    });
+    if (
+      detail.status !== "current" ||
+      detail.detail.freshness !== "live" ||
+      detail.detail.value.kind !== "activity" ||
+      !("group" in detail.detail.value)
+    ) {
+      throw new Error("expected grouped activity detail");
+    }
+    const toolDetail = detail.detail.value.memberDetails[1];
+    if (toolDetail?.status !== "referenced") {
+      throw new Error("expected referenced tool detail");
+    }
+    const pages: string[] = [];
+    let memberRef = toolDetail.detailRef;
+    for (;;) {
+      const memberPage = fixture.projections.detail(
+        {
+          credential: fixture.credential,
+          projectId,
+          projectSessionId,
+          snapshotRevision: snapshot.snapshotRevision,
+          detailRef: memberRef,
+        },
+        "include",
+        "include",
+        "include",
+        "include",
+        "include",
+        "include",
+      );
+      if (
+        memberPage.status !== "current" ||
+        memberPage.detail.freshness !== "live" ||
+        memberPage.detail.value.kind !== "activity" ||
+        !("contentOffset" in memberPage.detail.value)
+      ) {
+        throw new Error("expected activity member content page");
+      }
+      pages.push(memberPage.detail.value.content);
+      const next = memberPage.detail.value.nextDetailRef;
+      if (next === null) break;
+      memberRef = next;
+    }
+    expect(pages).toHaveLength(2);
+    expect(Buffer.byteLength(pages[0] ?? "")).toBeGreaterThanOrEqual(
+      256 * 1024 - 3,
+    );
+    expect(Buffer.byteLength(pages[0] ?? "")).toBeLessThan(256 * 1024);
+    expect(pages.join("")).toBe(toolPayload);
+
+    const legacy = fixture.projections.viewPage(request, "include");
+    if (legacy.status !== "page") throw new Error("expected legacy activity page");
+    expect(legacy.rows).toHaveLength(2);
+    for (const row of legacy.rows) {
+      if (row.fact.freshness !== "live") throw new Error("expected live legacy row");
+      expect(row.fact.value.summary).not.toHaveProperty("group");
+      expect(row.fact.value.detailRef).toHaveProperty("eventId");
+    }
+  });
+
+  it("byte-bounds grouped view and projection pages with deterministic cursors", () => {
+    const fixture = setupProjection();
+    const projectId = identifier<"ProjectId">("project_01");
+    const projectSessionId = identifier<"ProjectSessionId">("session_01");
+    const insertEvent = fixture.database.prepare(`
+      INSERT INTO events(event_id, run_id, type, actor_agent_id, payload_json, created_at)
+      VALUES (?, 'run_01', 'task-updated', 'chair_01', ?, ?)
+    `);
+    const insertSequence = fixture.database.prepare(`
+      INSERT INTO observer_event_sequence(event_id) VALUES (?)
+    `);
+    fixture.database.transaction(() => {
+      for (let groupIndex = 0; groupIndex < 100; groupIndex += 1) {
+        for (let memberIndex = 0; memberIndex < 32; memberIndex += 1) {
+          const eventId =
+            `event_batch_${String(groupIndex).padStart(3, "0")}_${
+              String(memberIndex).padStart(2, "0")
+            }`;
+          insertEvent.run(
+            eventId,
+            JSON.stringify({ taskId: `task_batch_${String(groupIndex).padStart(3, "0")}` }),
+            now - 500 + groupIndex,
+          );
+          insertSequence.run(eventId);
+        }
+      }
+    })();
+    const snapshot = fixture.projections.snapshot({
+      credential: fixture.credential,
+      projectId,
+      projectSessionId,
+    }, "include");
+    const groupedView = fixture.projections.viewPage(
+      {
+        credential: fixture.credential,
+        projectId,
+        projectSessionId,
+        view: "activity",
+        snapshotRevision: snapshot.snapshotRevision,
+        cursor: 0,
+        limit: 100,
+      },
+      "include",
+      "include",
+      "include",
+      "include",
+      "include",
+      "include",
+      "include",
+    );
+    if (groupedView.status !== "page") throw new Error("expected grouped view page");
+    expect(groupedView.rows.length).toBeGreaterThan(0);
+    expect(groupedView.rows.length).toBeLessThan(100);
+    expect(groupedView.nextCursor).toBe(groupedView.rows.length);
+    expect(groupedView.hasMore).toBe(true);
+    expect(Buffer.byteLength(JSON.stringify({
+      jsonrpc: "2.0",
+      id: "grouped-view-page",
+      result: groupedView,
+    }))).toBeLessThan(PROTOCOL_LIMITS.maximumFrameBytes);
+
+    const groupedProjection = fixture.projections.page(
+      {
+        credential: fixture.credential,
+        projectId,
+        projectSessionId,
+        view: "activity",
+        after: 0,
+        limit: 100,
+      },
+      "include",
+      "include",
+      "include",
+    );
+    if (groupedProjection.page.freshness !== "live") {
+      throw new Error("expected grouped projection page");
+    }
+    expect(groupedProjection.page.value.items.length).toBeGreaterThan(0);
+    expect(groupedProjection.page.value.items.length).toBeLessThan(100);
+    expect(groupedProjection.page.value.nextCursor).toBe(
+      groupedProjection.page.value.items.length,
+    );
+    expect(groupedProjection.page.value.hasMore).toBe(true);
+    expect(Buffer.byteLength(JSON.stringify({
+      jsonrpc: "2.0",
+      id: "grouped-projection-page",
+      result: groupedProjection,
+    }))).toBeLessThan(PROTOCOL_LIMITS.maximumFrameBytes);
   });
 
   it("keeps an omitted session selector inside the credential's exact session scope", () => {

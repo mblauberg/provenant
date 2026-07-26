@@ -730,6 +730,7 @@ describe("production Console package-root bootstrap", () => {
         "run-session-projection.v1",
         "declared-run-progress.v2",
         "run-identity-projection.v2",
+        "activity-narrative-grouping.v1",
         "artifact-content-read.v1",
       ],
       projection: {
@@ -834,6 +835,7 @@ describe("production Console package-root bootstrap", () => {
               "run-session-projection.v1",
               "declared-run-progress.v2",
               "run-identity-projection.v2",
+              "activity-narrative-grouping.v1",
               "artifact-content-read.v1",
             ],
             projection: {
@@ -968,6 +970,7 @@ describe("production Console package-root bootstrap", () => {
         "run-session-projection.v1",
         "declared-run-progress.v2",
         "run-identity-projection.v2",
+        "activity-narrative-grouping.v1",
         "artifact-content-read.v1",
       ],
       projection: {

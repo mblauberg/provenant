@@ -217,6 +217,7 @@ function activityMessagePage(
     messageId: MessageId;
   }>,
 ): OperatorViewPageResult {
+  const group = activityMessageGroup(input);
   if (request.view !== "activity") {
     return {
       status: "page",
@@ -232,7 +233,7 @@ function activityMessagePage(
     status: "page",
     view: "activity",
     rows: [{
-      itemId: "event-must-not-be-derived",
+      itemId: group.groupId,
       itemRevision: 9,
       fact: {
         freshness: "live",
@@ -242,18 +243,13 @@ function activityMessagePage(
         value: {
           summary: {
             kind: "activity",
-            activityKind: "message",
             summary: "Message preview",
             occurredAt: timestamp,
-            messageBodyRef: {
-              projectSessionId: input.projectSessionId,
-              messageId: input.messageId,
-              expectedRevision: 4,
-            },
+            group,
           },
           detailRef: {
             kind: "activity",
-            eventId: "event-must-not-be-derived",
+            groupId: group.groupId,
             expectedRevision: 9,
           },
           actionAvailability: { state: "read-only", reason: "state-ineligible" },
@@ -265,6 +261,83 @@ function activityMessagePage(
     snapshotRevision: request.snapshotRevision,
     readTransactionId: "page-activity",
   } as OperatorViewPageResult;
+}
+
+function activityMessageGroup(
+  input: Readonly<{
+    projectSessionId: ProjectSessionId;
+    messageId: MessageId;
+  }>,
+) {
+  return {
+    groupId: "activity-group-must-not-be-derived",
+    ordinal: 1,
+    kind: "message",
+    actorIds: ["agent-message"],
+    target: { kind: "message", id: input.messageId },
+    eventKinds: ["message-persisted"],
+    occurredAtRange: { first: timestamp, last: timestamp },
+    sourceRange: { first: 9, last: 9 },
+    count: 1,
+    evidenceLinkCount: 0,
+    evidenceLinksDigest:
+      "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945" as never,
+    evidenceLinksTruncated: false,
+    evidenceLinks: [],
+    members: [{
+      ordinal: 1,
+      eventId: "event-must-not-be-derived",
+      eventKind: "message-persisted",
+      actorId: "agent-message",
+      target: { kind: "message", id: input.messageId },
+      occurredAt: timestamp,
+      sourceRevision: 9,
+      messageBodyRef: {
+        projectSessionId: input.projectSessionId,
+        messageId: input.messageId,
+        expectedRevision: 4,
+      },
+      detailAvailability: "available",
+      evidenceLinkCount: 0,
+      evidenceLinksDigest:
+        "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945" as never,
+    }],
+  } as const;
+}
+
+function activityMessageDetail(
+  input: Readonly<{
+    projectSessionId: ProjectSessionId;
+    messageId: MessageId;
+  }>,
+): OperatorDetailReadResult {
+  const group = activityMessageGroup(input);
+  return {
+    status: "current",
+    detailRef: {
+      kind: "activity",
+      groupId: group.groupId,
+      expectedRevision: 9,
+    },
+    detail: {
+      freshness: "live",
+      source: "fabric",
+      revision: 9,
+      observedAt: timestamp,
+      value: {
+        kind: "activity",
+        group,
+        memberDetails: [{
+          eventId: "event-must-not-be-derived",
+          status: "available",
+          content: '{"messageId":"message-exact"}',
+          transformation: "none",
+        }],
+      },
+    },
+    snapshotRevision: 1,
+    readTransactionId: "activity-group-detail",
+  };
 }
 
 const runtimeDependencies = {
@@ -1295,6 +1368,9 @@ describe("typed Console application bootstrap boundary", () => {
     const port: ConsoleProtocolPort = {
       ...protocolPort(),
       readMessageBody,
+      readDetail: vi.fn(async () =>
+        activityMessageDetail({ projectSessionId, messageId })
+      ),
       viewPage: vi.fn(async (request) =>
         activityMessagePage(request, { projectSessionId, messageId }),
       ),
@@ -1333,10 +1409,10 @@ describe("typed Console application bootstrap boundary", () => {
     });
     expect(application.frame.rows.join("\n")).toContain("Full ordinary body line one.");
     expect(application.frame.presentation.focusId).toBe(
-      "detail:activity:event-must-not-be-derived",
+      "detail:activity:activity-group-must-not-be-derived",
     );
     expect(application.frame.rows.join("\n")).toContain(
-      ">Message: message-exact r4",
+      "Message: message-exact r4",
     );
     expect(JSON.stringify(readMessageBody.mock.calls)).not.toContain("event-must-not-be-derived");
 
@@ -1345,9 +1421,12 @@ describe("typed Console application bootstrap boundary", () => {
     await application.handleInput({ kind: "key", key: "shift-tab" });
     await application.handleInput({ kind: "key", key: "enter" });
     expect(application.dataset.inspection).toMatchObject({
-      kind: "message",
-      state: "unavailable",
-      reason: "projection-changed",
+      kind: "activity",
+      state: "current",
+      messages: [{
+        state: "unavailable",
+        reason: "projection-changed",
+      }],
     });
     await application.close("operator");
   });
@@ -1358,6 +1437,9 @@ describe("typed Console application bootstrap boundary", () => {
     const port: ConsoleProtocolPort = {
       ...protocolPort(),
       readMessageBody: null,
+      readDetail: vi.fn(async () =>
+        activityMessageDetail({ projectSessionId, messageId })
+      ),
       viewPage: vi.fn(async (request) =>
         activityMessagePage(request, { projectSessionId, messageId }),
       ),
@@ -1388,9 +1470,12 @@ describe("typed Console application bootstrap boundary", () => {
     await application.handleInput({ kind: "key", key: "enter" });
 
     expect(application.dataset.inspection).toMatchObject({
-      kind: "message",
-      state: "unavailable",
-      reason: "feature-unavailable",
+      kind: "activity",
+      state: "current",
+      messages: [{
+        state: "unavailable",
+        reason: "feature-unavailable",
+      }],
     });
     expect(application.dataset.connection).toStrictEqual({
       state: "live",

@@ -5,7 +5,7 @@ import { basename, dirname, isAbsolute, join, normalize, posix, relative, resolv
 import type Database from "better-sqlite3";
 import { v7 as uuidv7 } from "uuid";
 import {
-  AGENT_TOPOLOGY_PROJECTION_FEATURE, GATE_SYSTEM_SUPERSESSION_FEATURE, WORK_FACTS_PROJECTION_FEATURE,
+  ACTIVITY_NARRATIVE_GROUPING_FEATURE, AGENT_TOPOLOGY_PROJECTION_FEATURE, GATE_SYSTEM_SUPERSESSION_FEATURE, WORK_FACTS_PROJECTION_FEATURE,
   DECLARED_RUN_PROGRESS_FEATURE, RUN_IDENTITY_PROJECTION_FEATURE,
   NATIVE_NOTIFICATION_PROJECTION_FEATURE, RUN_SESSION_PROJECTION_FEATURE,
   authorityEnvelopeV2Contained,
@@ -3221,7 +3221,7 @@ export class Fabric {
         return this.#operatorProjections.page(
           request,
           context.features.includes(NATIVE_NOTIFICATION_PROJECTION_FEATURE) ? "include" : "omit",
-          context.features.includes(RUN_SESSION_PROJECTION_FEATURE) ? "include" : "omit",
+          context.features.includes(RUN_SESSION_PROJECTION_FEATURE) ? "include" : "omit", context.features.includes(ACTIVITY_NARRATIVE_GROUPING_FEATURE) ? "include" : "omit",
         );
       }
       case FABRIC_OPERATIONS.projectionEvents: {
@@ -3239,7 +3239,7 @@ export class Fabric {
           context.features.includes(NATIVE_NOTIFICATION_PROJECTION_FEATURE) ? "include" : "omit",
           context.features.includes(RUN_SESSION_PROJECTION_FEATURE) ? "include" : "omit",
           context.features.includes(DECLARED_RUN_PROGRESS_FEATURE) ? "include" : "omit",
-          context.features.includes(RUN_IDENTITY_PROJECTION_FEATURE) ? "include" : "omit", context.features.includes(AGENT_TOPOLOGY_PROJECTION_FEATURE) ? "include" : "omit", context.features.includes(WORK_FACTS_PROJECTION_FEATURE) ? "include" : "omit",
+          context.features.includes(RUN_IDENTITY_PROJECTION_FEATURE) ? "include" : "omit", context.features.includes(AGENT_TOPOLOGY_PROJECTION_FEATURE) ? "include" : "omit", context.features.includes(WORK_FACTS_PROJECTION_FEATURE) ? "include" : "omit", context.features.includes(ACTIVITY_NARRATIVE_GROUPING_FEATURE) ? "include" : "omit",
         );
       }
       case FABRIC_OPERATIONS.projectionDetailRead: {
@@ -3250,7 +3250,7 @@ export class Fabric {
           request,
           context.features.includes(RUN_SESSION_PROJECTION_FEATURE) ? "include" : "omit",
           context.features.includes(DECLARED_RUN_PROGRESS_FEATURE) ? "include" : "omit",
-          context.features.includes(RUN_IDENTITY_PROJECTION_FEATURE) ? "include" : "omit", context.features.includes(AGENT_TOPOLOGY_PROJECTION_FEATURE) ? "include" : "omit", context.features.includes(WORK_FACTS_PROJECTION_FEATURE) ? "include" : "omit",
+          context.features.includes(RUN_IDENTITY_PROJECTION_FEATURE) ? "include" : "omit", context.features.includes(AGENT_TOPOLOGY_PROJECTION_FEATURE) ? "include" : "omit", context.features.includes(WORK_FACTS_PROJECTION_FEATURE) ? "include" : "omit", context.features.includes(ACTIVITY_NARRATIVE_GROUPING_FEATURE) ? "include" : "omit",
         );
       }
       case FABRIC_OPERATIONS.messageBodyRead: {
