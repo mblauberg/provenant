@@ -5,8 +5,10 @@ import { dirname, isAbsolute, join, relative } from "node:path";
 import { promisify } from "node:util";
 
 import { FabricError } from "../errors.js";
+import { ADAPTER_INTERFACE_PROBE_INCOMPLETE } from "./provider-interface.js";
 
 const execFileAsync = promisify(execFile);
+const CODESIGN_PROBE_TIMEOUT_MS = 15_000;
 
 const VENDORS = {
   "claude-agent-sdk": { teamId: "Q6L2SF6YDW", identifier: "com.anthropic.claude-code" },
@@ -37,6 +39,29 @@ export type ProviderIdentityObservation = ProviderPathObservation & {
   signing: Array<{ path: string; teamId: string; identifier: string }>;
 };
 
+function codesignProbeTimedOut(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "killed" in error && error.killed === true;
+}
+
+async function runCodesign(arguments_: string[], path: string): Promise<{ stdout: string; stderr: string }> {
+  try {
+    return await execFileAsync("/usr/bin/codesign", [...arguments_, path], {
+      encoding: "utf8",
+      timeout: CODESIGN_PROBE_TIMEOUT_MS,
+      killSignal: "SIGKILL",
+    });
+  } catch (error: unknown) {
+    if (codesignProbeTimedOut(error)) {
+      throw new FabricError(
+        ADAPTER_INTERFACE_PROBE_INCOMPLETE,
+        `provider codesign probe did not complete: ${path}`,
+        { cause: error },
+      );
+    }
+    throw error;
+  }
+}
+
 async function inspectPath(path: string): Promise<ProviderPathObservation> {
   let canonicalPath: string;
   try {
@@ -57,21 +82,23 @@ async function inspectPath(path: string): Promise<ProviderPathObservation> {
 
 async function signingIdentity(path: string): Promise<{ teamId: string; identifier: string }> {
   try {
-    const result = await execFileAsync("/usr/bin/codesign", ["-dv", "--verbose=4", path]);
+    const result = await runCodesign(["-dv", "--verbose=4"], path);
     const output = `${result.stdout}\n${result.stderr}`;
     const teamId = /^TeamIdentifier=(.+)$/mu.exec(output)?.[1];
     const identifier = /^Identifier=(.+)$/mu.exec(output)?.[1];
     if (teamId === undefined || identifier === undefined) throw new Error("codesign identity fields are missing");
     return { teamId, identifier };
   } catch (error: unknown) {
+    if (error instanceof FabricError) throw error;
     throw new FabricError("ADAPTER_IDENTITY_MISMATCH", `provider signing identity is unavailable: ${path}`, { cause: error });
   }
 }
 
 async function verifySignature(path: string): Promise<void> {
   try {
-    await execFileAsync("/usr/bin/codesign", ["--verify", "--strict", path]);
+    await runCodesign(["--verify", "--strict"], path);
   } catch (error: unknown) {
+    if (error instanceof FabricError) throw error;
     throw new FabricError("ADAPTER_IDENTITY_MISMATCH", `provider signature is invalid: ${path}`, { cause: error });
   }
 }
