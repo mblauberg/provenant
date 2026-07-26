@@ -426,7 +426,18 @@ describe("S1 ORCH: deferred pump FIFO and stale-head drop", () => {
       expect.objectContaining({ actionId: "issue-354:orch:fifo:2", status: "prepared" }),
       expect.objectContaining({ actionId: "issue-354:orch:fifo:3", status: "prepared" }),
     ]));
-    expect(actionSnapshot(fixture.databasePath, { runId: fixture.runId, adapterId: "fake-lifecycle", actionId: "issue-354:orch:fifo:1" })).toMatchObject({ status: "dispatched" });
+    // What this line proves is that enqueuing 2 and 3 did not move the head
+    // backwards. It must not also require the head to have stood still: the
+    // fixture's spawnDelayMs is 100ms and the two dispatches above take real
+    // time, so under load the head legitimately reaches `terminal` before this
+    // executes. Asserting `dispatched` asserted that a transient state
+    // persisted, which is why this failed intermittently in CI while passing in
+    // isolation. Assert the invariant that actually holds -- the head never
+    // returns to `prepared` -- and leave FIFO ordering to the journal check
+    // below, which is what genuinely evidences it.
+    expect(["dispatched", "terminal"]).toContain(
+      actionSnapshot(fixture.databasePath, { runId: fixture.runId, adapterId: "fake-lifecycle", actionId: "issue-354:orch:fifo:1" }).status,
+    );
     await eventually(async () => {
       const database = new Database(fixture.databasePath, { readonly: true });
       try {
