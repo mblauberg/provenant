@@ -87,6 +87,7 @@ const PRECONDITIONS: Readonly<Record<string, string>> = {
   "provider-conformance": "each configured provider executable answers its conformance probe",
   "provider-identity": "each primary provider matches its pinned executable identity",
   "pin-staleness": "compatibility and catalogue pin dates are within the advisory threshold",
+  "review-profile-pins": "each certifying-profile model pin matches current alias resolution",
   "state-directory": "the state directory is a private non-symlink directory",
   "runtime-directory": "the runtime directory is a private non-symlink directory",
   "database-integrity": "the Fabric database is current-schema and passes its invariants",
@@ -706,6 +707,7 @@ export async function fabricDoctor(
   const pinOutcome = reviewProfilePinOutcome(pinReport);
   checks.push({
     id: "review-profile-pins",
+    precondition: precondition("review-profile-pins"),
     ...pinOutcome,
     detail: [
       ...pinReport.compared.map((pin) =>
