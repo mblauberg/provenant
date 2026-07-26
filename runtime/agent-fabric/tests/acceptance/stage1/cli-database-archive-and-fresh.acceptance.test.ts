@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -146,6 +146,29 @@ describe("database archive-and-fresh CLI", () => {
       status: "conflict",
       code: "CUTOVER_CONFIRMATION_MISMATCH",
       sourcePreserved: true,
+    });
+  });
+
+  it("returns hidden claim residue as named recovery JSON and a non-zero exit", async () => {
+    const value = await fixture();
+    const claimDirectory = join(value.root, ".fabric.sqlite3.cutover-claim-crash");
+    await mkdir(claimDirectory, { mode: 0o700 });
+    await rename(value.databasePath, join(claimDirectory, "fabric.sqlite3"));
+
+    const recovery = await runSourceCli([
+      "database", "archive-and-fresh",
+      "--database", value.databasePath,
+      "--archive", value.archiveDirectory,
+    ]);
+
+    expect(recovery).toMatchObject({ exitCode: 4, stderr: "" });
+    expect(JSON.parse(recovery.stdout)).toMatchObject({
+      status: "recovery-required",
+      code: "CUTOVER_RESIDUE_DETECTED",
+      claimDirectories: [claimDirectory],
+      recovery: {
+        action: expect.stringContaining("Do not start Fabric or rerun the cutover"),
+      },
     });
   });
 });
