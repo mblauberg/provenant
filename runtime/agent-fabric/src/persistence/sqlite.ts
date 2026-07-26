@@ -18,6 +18,7 @@ import {
   assertCurrentSchema,
   inspectFabricDatabase,
   registerFabricSqlFunctions,
+  SQLITE_SOURCE_SUFFIXES,
 } from "../core/migrations.js";
 import {
   assertDatabaseIntegrity,
@@ -36,12 +37,12 @@ function syncPath(path: string): void {
 }
 
 function removeCreationFiles(path: string): void {
-  for (const candidate of [path, `${path}-journal`, `${path}-wal`, `${path}-shm`]) {
-    rmSync(candidate, { force: true });
+  for (const suffix of SQLITE_SOURCE_SUFFIXES) {
+    rmSync(`${path}${suffix}`, { force: true });
   }
 }
 
-function initialiseCurrentDatabase(databasePath: string): void {
+export function initialiseCurrentDatabase(databasePath: string): void {
   const temporaryPath = `${databasePath}.creating-${process.pid}-${randomBytes(12).toString("hex")}`;
   let database: Database.Database | undefined;
   try {

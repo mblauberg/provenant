@@ -325,8 +325,21 @@ async function main(arguments_: string[]): Promise<void> {
     process.stdout.write(`${JSON.stringify(output, null, 2)}\n`);
     return;
   }
+  if (arguments_[0] === "database" && arguments_[1] === "archive-and-fresh") {
+    const [{ runDatabaseArchiveAndFreshCli }, { resolveFabricPaths }] = await Promise.all([
+      import("./database-archive-and-fresh.js"),
+      import("./paths.js"),
+    ]);
+    const output = await runDatabaseArchiveAndFreshCli(
+      arguments_.slice(2),
+      resolveFabricPaths({ createDirectories: false }).databasePath,
+    );
+    process.stdout.write(`${JSON.stringify(output.result, null, 2)}\n`);
+    if (output.exitCode !== 0) process.exitCode = output.exitCode;
+    return;
+  }
   throw new Error(
-    "usage: agent-fabric status|doctor [--project PATH] [--agents-home PATH] [--trusted-config PATH] [--compatibility PATH] [--compatibility-schema PATH] | bootstrap --seat claude|codex [--inspect] | inspect [--database PATH] [--runtime-directory PATH] [--json] | adapter executable --adapter ID [--agents-home PATH] [--config PATH] [--compatibility PATH] [--compatibility-schema PATH] | workspace trust|inspect|status|list|revoke [PATH] | retention status|preview [--database PATH] | retention archive --run-id ID --output ABSOLUTE_DIRECTORY [--database PATH] | receipt verify --run-receipt PATH | daemon run (...) | observe --socket PATH --capability-file PATH --run-id ID --cursor PATH [--once] [--interval-ms N] | herdr steer (...) | mcp provision --project PATH --project-session-id ID --session-revision N --session-generation N --run-id ID --run-revision N --chair-seat SEAT --chair-agent-id ID --chair-generation N --chair-lease-id ID --seat-bindings SEAT=AGENT@GENERATION,... --expires-at ISO_TIMESTAMP | mcp seat-path --project PATH --seat SEAT",
+    "usage: agent-fabric status|doctor [--project PATH] [--agents-home PATH] [--trusted-config PATH] [--compatibility PATH] [--compatibility-schema PATH] | bootstrap --seat claude|codex [--inspect] | inspect [--database PATH] [--runtime-directory PATH] [--json] | adapter executable --adapter ID [--agents-home PATH] [--config PATH] [--compatibility PATH] [--compatibility-schema PATH] | workspace trust|inspect|status|list|revoke [PATH] | retention status|preview [--database PATH] | retention archive --run-id ID --output ABSOLUTE_DIRECTORY [--database PATH] | database archive-and-fresh [--database PATH] --archive ABSOLUTE_NEW_DIRECTORY [--confirm-source-set sha256:DIGEST] | receipt verify --run-receipt PATH | daemon run (...) | observe --socket PATH --capability-file PATH --run-id ID --cursor PATH [--once] [--interval-ms N] | herdr steer (...) | mcp provision --project PATH --project-session-id ID --session-revision N --session-generation N --run-id ID --run-revision N --chair-seat SEAT --chair-agent-id ID --chair-generation N --chair-lease-id ID --seat-bindings SEAT=AGENT@GENERATION,... --expires-at ISO_TIMESTAMP | mcp seat-path --project PATH --seat SEAT",
   );
 }
 
