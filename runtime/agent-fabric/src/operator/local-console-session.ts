@@ -130,7 +130,10 @@ export function daemonStartUnavailableReason(
     : null;
   if (code === "SCHEMA_CUTOVER_REQUIRED") return "schema-cutover-required";
   if (code === "BOOTSTRAP_SOCKET_MISMATCH") return "socket-unavailable";
-  if (code === "BOOTSTRAP_INCOMPATIBLE_INCUMBENT") return "daemon-incompatible";
+  if (
+    code === "BOOTSTRAP_INCOMPATIBLE_INCUMBENT" ||
+    code === "PROTOCOL_INCOMPATIBLE"
+  ) return "daemon-incompatible";
   if (
     code === "BOOTSTRAP_HANDSHAKE_INVALID" ||
     code === "BOOTSTRAP_ACTION_MISMATCH" ||

@@ -21,6 +21,28 @@ export const DECLARED_RUN_PROGRESS_FEATURE = "declared-run-progress.v2" as const
 export const RUN_IDENTITY_PROJECTION_FEATURE = "run-identity-projection.v2" as const;
 export const AGENT_TOPOLOGY_PROJECTION_FEATURE = "agent-topology-projection.v1" as const;
 export const WORK_FACTS_PROJECTION_FEATURE = "work-facts-projection.v1" as const;
+export const MCP_BOOTSTRAP_CREDENTIALS_FEATURE =
+  "mcp-bootstrap-credentials.v2" as const;
+
+export class ProtocolResultShapeFeatureError extends TypeError {
+  readonly code = "PROTOCOL_INCOMPATIBLE" as const;
+  readonly missingFeatures: readonly string[];
+
+  constructor(missingFeatures: readonly string[]) {
+    super(`protocol is missing required result-shape features: ${missingFeatures.join(", ")}`);
+    this.name = "ProtocolResultShapeFeatureError";
+    this.missingFeatures = [...missingFeatures];
+  }
+}
+
+export function assertRequiredResultShapeFeatures(
+  features: readonly string[],
+  requiredFeatures: readonly string[],
+): void {
+  const available = new Set(features);
+  const missing = requiredFeatures.filter((feature) => !available.has(feature));
+  if (missing.length > 0) throw new ProtocolResultShapeFeatureError(missing);
+}
 
 export type ProtocolResultShapeFailureReason =
   | "missing-negotiated-field"

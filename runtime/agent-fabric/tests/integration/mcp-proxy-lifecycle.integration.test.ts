@@ -12,6 +12,7 @@ import {
   FABRIC_OPERATIONS,
   PROTOCOL_FEATURES,
   PROTOCOL_LIMITS,
+  ProtocolResultShapeFeatureError,
   createProtocolInitializeResult,
   parseProtocolInitializeRequest,
   type ProtocolLimits,
@@ -23,7 +24,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { describe, expect, it } from "vitest";
 
 import { startFabricDaemon } from "../../src/index.ts";
-import { createFabricMcpServer } from "../../src/mcp/server.ts";
+import { createFabricMcpServer, createUnprovisionedMcpServer } from "../../src/mcp/server.ts";
 import { createDaemonFixture } from "../support/daemon-testkit.ts";
 import {
   callTool,
@@ -497,6 +498,34 @@ describe("MCP proxy lifecycle", () => {
       });
     } finally {
       await fixture.cleanup();
+    }
+  });
+
+  it("keeps normal tools hidden when bootstrap credential negotiation is incompatible", async () => {
+    const handle = createUnprovisionedMcpServer({
+      bootstrap: async () => {
+        throw new ProtocolResultShapeFeatureError(["mcp-bootstrap-credentials.v2"]);
+      },
+    });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "legacy-bootstrap-contract", version: "0.1.0" });
+    try {
+      await Promise.all([handle.server.connect(serverTransport), client.connect(clientTransport)]);
+      await expect(client.listTools()).resolves.toMatchObject({
+        tools: [{ name: "fabric_bootstrap" }],
+      });
+      await expect(callTool(client, "fabric_bootstrap", {})).resolves.toMatchObject({
+        isError: true,
+        structured: {
+          code: "PROTOCOL_INCOMPATIBLE",
+          message: expect.stringContaining("mcp-bootstrap-credentials.v2"),
+        },
+      });
+      await expect(client.listTools()).resolves.toMatchObject({
+        tools: [{ name: "fabric_bootstrap" }],
+      });
+    } finally {
+      await Promise.allSettled([client.close(), handle.close()]);
     }
   });
 

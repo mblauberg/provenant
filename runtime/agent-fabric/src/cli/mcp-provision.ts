@@ -2,6 +2,7 @@ import { constants } from "node:fs";
 import { lstat, open } from "node:fs/promises";
 import { join } from "node:path";
 
+import { MCP_BOOTSTRAP_CREDENTIALS_FEATURE } from "@local/agent-fabric-protocol";
 import { connectFabricDaemon } from "../daemon/client.js";
 import { currentMcpSeatGeneration } from "../core/mcp-seat-generation.js";
 import type { FabricPaths } from "./paths.js";
@@ -245,6 +246,7 @@ export async function provisionMcpSeats(arguments_: string[], paths: FabricPaths
   const bootstrap = await connectFabricDaemon({
     socketPath: discovery.socketPath,
     capability: discovery.bootstrapCapability,
+    requiredCapabilities: [MCP_BOOTSTRAP_CREDENTIALS_FEATURE],
   });
   try {
     const bound = await bootstrap.bindCurrentMcpSeats({

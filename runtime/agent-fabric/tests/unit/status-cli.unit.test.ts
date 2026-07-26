@@ -1,7 +1,9 @@
 import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import type { Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { Duplex } from "node:stream";
 
 import { afterEach, describe, expect, it } from "vitest";
 import { parse, stringify } from "yaml";
@@ -10,12 +12,68 @@ import { fabricDoctor as realFabricDoctor, fabricStatus } from "../../src/cli/st
 import type { FabricPaths } from "../../src/cli/paths.ts";
 import { probeProviderInterface as realProbeProviderInterface } from "../../src/adapters/provider-interface.ts";
 import { FLOCK_ELECTION_LOCK_PORT } from "../../src/daemon/bootstrap-election.ts";
+import { FabricDaemonClient } from "../../src/daemon/rpc-client.ts";
 import { FabricError } from "../../src/errors.ts";
 import { openFabric, startFabricDaemon } from "../../src/index.ts";
+import { FABRIC_PROTOCOL_LIMITS } from "../../src/transport/bounded-ndjson.ts";
 import { createPortableActivatedPrimaryFixture } from "../support/primary-adapter-testkit.ts";
 
 const cleanup: string[] = [];
 afterEach(async () => Promise.all(cleanup.splice(0).map((path) => rm(path, { recursive: true, force: true }))));
+
+class DoctorFixtureDaemonSocket extends Duplex {
+  readonly methods: string[] = [];
+
+  constructor(private readonly dropProbe = false) {
+    super();
+    queueMicrotask(() => this.emit("connect"));
+  }
+
+  override _read(): void {}
+
+  override _write(
+    chunk: Buffer,
+    _encoding: BufferEncoding,
+    callback: (error?: Error | null) => void,
+  ): void {
+    const request = JSON.parse(chunk.toString("utf8")) as { id: string; method: string };
+    this.methods.push(request.method);
+    if (request.method === "initialize") {
+      this.push(`${JSON.stringify({
+        id: request.id,
+        result: {
+          protocolVersion: 1,
+          daemonVersion: "pre-0636854",
+          capabilities: ["rpc"],
+          limits: FABRIC_PROTOCOL_LIMITS,
+          activeAdapters: [],
+        },
+      })}\n`);
+      callback();
+      return;
+    }
+    if (this.dropProbe) {
+      this.destroy();
+      callback();
+      return;
+    }
+    this.push(`${JSON.stringify({
+      id: request.id,
+      error: {
+        name: "DaemonProtocolError",
+        code: "BOOTSTRAP_SCOPE_VIOLATION",
+        message: "bootstrap capability is limited to private local bootstrap control methods",
+      },
+    })}\n`);
+    callback();
+  }
+
+  override _final(callback: (error?: Error | null) => void): void {
+    this.push(null);
+    this.destroy();
+    callback();
+  }
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -105,6 +163,53 @@ async function writeStoppedGeneration(
   await writeFile(join(value.runtimeDirectory, "daemon-election.ready.json"), `${JSON.stringify({
     schemaVersion: 1,
     actionId: "stopped-action",
+    electionGeneration: 1,
+    daemonInstanceGeneration: 1,
+    socketPath: value.socketPath,
+    protocolVersion: 1,
+    features: ["rpc"],
+    readyAt: 2,
+    evidence: { databaseOwned: true, migrationsComplete: true, recoveryComplete: true, socketBound: true },
+  })}\n`, { mode: 0o600 });
+}
+
+async function writeActiveGeneration(value: FabricPaths): Promise<void> {
+  const actionId = "active-doctor-action";
+  const bootstrapCapability = `afb_${"A".repeat(43)}`;
+  const bootstrapCapabilityHash = createHash("sha256").update(bootstrapCapability).digest("hex");
+  await writeFile(join(value.runtimeDirectory, "fabric-v1.discovery.json"), `${JSON.stringify({
+    schemaVersion: 1,
+    socketPath: value.socketPath,
+    pid: process.pid,
+    bootstrapCapability,
+    lifecycleReceiptAuthorityId: null,
+  })}\n`, { mode: 0o600 });
+  await writeFile(join(value.runtimeDirectory, "fabric-v1.discovery-owner.json"), `${JSON.stringify({
+    schemaVersion: 1,
+    state: "active",
+    actionId,
+    electionGeneration: 1,
+    daemonInstanceGeneration: 1,
+    socketPath: value.socketPath,
+    pid: process.pid,
+    bootstrapCapabilityHash,
+    updatedAt: 1,
+    exitCode: null,
+    signal: null,
+  })}\n`, { mode: 0o600 });
+  await writeFile(join(value.runtimeDirectory, "daemon-election.lease.json"), `${JSON.stringify({
+    schemaVersion: 1,
+    actionId,
+    electionGeneration: 1,
+    status: "succeeded",
+    acquiredAt: 1,
+    terminalAt: 2,
+    code: "BOOTSTRAP_READY",
+    message: "generation reached ready",
+  })}\n`, { mode: 0o600 });
+  await writeFile(join(value.runtimeDirectory, "daemon-election.ready.json"), `${JSON.stringify({
+    schemaVersion: 1,
+    actionId,
     electionGeneration: 1,
     daemonInstanceGeneration: 1,
     socketPath: value.socketPath,
@@ -451,6 +556,90 @@ describe("machine status and doctor", () => {
       code: "DAEMON_DISCOVERY_AMBIGUOUS",
       daemon: { status: "failed", pid: process.pid, socketPath: value.socketPath },
     });
+  });
+
+  it("reports a responsive legacy credential contract as typed protocol incompatibility", async () => {
+    const value = await paths();
+    await writeActiveGeneration(value);
+    const fixture = await createPortableActivatedPrimaryFixture();
+    cleanup.push(fixture.directory);
+    let socket: DoctorFixtureDaemonSocket | undefined;
+    const result = await fabricDoctor([
+      "--agents-home", fixture.directory,
+      "--trusted-config", fixture.configPath,
+      "--compatibility", fixture.compatibilityPath,
+      "--compatibility-schema", fixture.schemaPath,
+    ], value, {
+      inspectDaemonSocket: async () => ({
+        isSocket: () => true,
+        uid: process.getuid?.() ?? 0,
+      }),
+      connectDaemon: async () => {
+        socket = new DoctorFixtureDaemonSocket();
+        return FabricDaemonClient.connect(
+          value.socketPath,
+          `afb_${"A".repeat(43)}`,
+          [],
+          { connect: () => socket as unknown as Socket },
+        );
+      },
+    });
+
+    expect(result).toMatchObject({
+      healthy: false,
+      state: "failed",
+      code: "PROTOCOL_INCOMPATIBLE",
+      daemon: { status: "failed", pid: process.pid, socketPath: value.socketPath },
+      checks: expect.arrayContaining([
+        expect.objectContaining({
+          id: "daemon-socket",
+          status: "fail",
+          code: "PROTOCOL_INCOMPATIBLE",
+          detail: expect.stringContaining("mcp-bootstrap-credentials.v2"),
+        }),
+      ]),
+    });
+    expect((result.checks as Array<{ detail: string }>).find(({ detail }) =>
+      detail.includes("mcp-bootstrap-credentials.v2"))?.detail).toContain("retry provenant doctor");
+    expect(socket?.methods).toEqual(["initialize", "eventsAfter"]);
+    expect(socket?.destroyed).toBe(true);
+  });
+
+  it("reports a dropped contract probe as a handshake failure, not protocol incompatibility", async () => {
+    const value = await paths();
+    await writeActiveGeneration(value);
+    const fixture = await createPortableActivatedPrimaryFixture();
+    cleanup.push(fixture.directory);
+    let socket: DoctorFixtureDaemonSocket | undefined;
+    const result = await fabricDoctor([
+      "--agents-home", fixture.directory,
+      "--trusted-config", fixture.configPath,
+      "--compatibility", fixture.compatibilityPath,
+      "--compatibility-schema", fixture.schemaPath,
+    ], value, {
+      inspectDaemonSocket: async () => ({
+        isSocket: () => true,
+        uid: process.getuid?.() ?? 0,
+      }),
+      connectDaemon: async () => {
+        socket = new DoctorFixtureDaemonSocket(true);
+        return FabricDaemonClient.connect(
+          value.socketPath,
+          `afb_${"A".repeat(43)}`,
+          [],
+          { connect: () => socket as unknown as Socket },
+        );
+      },
+    });
+
+    expect(result).toMatchObject({
+      healthy: false,
+      state: "failed",
+      code: "DAEMON_HANDSHAKE_FAILED",
+      daemon: { status: "failed" },
+    });
+    expect(result.code).not.toBe("PROTOCOL_INCOMPATIBLE");
+    expect(socket?.methods).toEqual(["initialize", "eventsAfter"]);
   });
 
   it("keeps a recorded bootstrap failure unhealthy instead of calling it idle", async () => {

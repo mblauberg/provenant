@@ -20,6 +20,7 @@ describe("daemonStartUnavailableReason", () => {
     [{ code: "SCHEMA_CUTOVER_REQUIRED" }, "schema-cutover-required"],
     [{ code: "BOOTSTRAP_SOCKET_MISMATCH" }, "socket-unavailable"],
     [{ code: "BOOTSTRAP_INCOMPATIBLE_INCUMBENT" }, "daemon-incompatible"],
+    [{ code: "PROTOCOL_INCOMPATIBLE" }, "daemon-incompatible"],
     [{ code: "BOOTSTRAP_HANDSHAKE_INVALID" }, "bootstrap-receipt-invalid"],
     [{ code: "BOOTSTRAP_ACTION_MISMATCH" }, "bootstrap-receipt-invalid"],
     [{ code: "BOOTSTRAP_RECEIPT_INVALID" }, "bootstrap-receipt-invalid"],

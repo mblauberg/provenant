@@ -4,6 +4,7 @@ import { chmod, open, readFile, rename, rm, rmdir } from "node:fs/promises";
 import { basename, dirname, join, normalize, resolve } from "node:path";
 
 import Database from "better-sqlite3";
+import { MCP_BOOTSTRAP_CREDENTIALS_FEATURE } from "@local/agent-fabric-protocol";
 
 import type { FabricOpenOptions } from "../domain/types.js";
 import { inspectFabricDatabase } from "../core/migrations.js";
@@ -400,6 +401,21 @@ async function privateDaemonHandshake(
   if (initialized.protocolVersion !== FABRIC_PROTOCOL_VERSION || !initialized.capabilities.includes("rpc")) {
     return { status: "incompatible", responsive: true, message: "daemon private protocol is incompatible" };
   }
+  if (
+    discovery.receipt.protocolVersion !== undefined &&
+    (
+      discovery.receipt.protocolVersion !== initialized.protocolVersion ||
+      discovery.receipt.features === undefined ||
+      discovery.receipt.features.length !== initialized.capabilities.length ||
+      discovery.receipt.features.some((feature) => !initialized.capabilities.includes(feature))
+    )
+  ) {
+    return {
+      status: "incompatible",
+      responsive: true,
+      message: "daemon private protocol does not match its discovery receipt",
+    };
+  }
 
   const provisionallyOwned = provisional !== undefined
     && identityMatchesOwner(provisional, discovery.owner);
@@ -497,6 +513,8 @@ async function spawnProductionDaemon(input: {
       pid: child.pid,
       bootstrapCapability: child.bootstrapCapability,
       lifecycleReceiptAuthorityId: prepared.lifecycleReceiptAuthorityId ?? null,
+      protocolVersion: FABRIC_PROTOCOL_VERSION,
+      features: ["rpc", MCP_BOOTSTRAP_CREDENTIALS_FEATURE],
     });
   })();
   const publishedIdentity = identity.then(
@@ -613,7 +631,7 @@ export async function startFabricDaemon(options: DaemonStartOptions): Promise<Fa
       actionId,
       socketPath: normalized.socketPath,
       requiredProtocolVersion: FABRIC_PROTOCOL_VERSION,
-      requiredFeatures: ["rpc"],
+      requiredFeatures: ["rpc", MCP_BOOTSTRAP_CREDENTIALS_FEATURE],
       election,
       handshake: async () => {
         if (!bootstrapDirectoriesPrepared && !existsSync(normalized.runtimeDirectory)) {
@@ -666,7 +684,7 @@ export async function startFabricDaemon(options: DaemonStartOptions): Promise<Fa
               daemonInstanceGeneration: provisional.daemonInstanceGeneration,
               socketPath: provisional.socketPath,
               protocolVersion: FABRIC_PROTOCOL_VERSION,
-              features: ["rpc"],
+              features: ["rpc", MCP_BOOTSTRAP_CREDENTIALS_FEATURE],
               evidence: {
                 databaseOwned: true,
                 migrationsComplete: true,

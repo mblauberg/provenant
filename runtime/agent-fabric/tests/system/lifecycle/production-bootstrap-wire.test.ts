@@ -885,8 +885,13 @@ describe("production daemon bootstrap wiring", () => {
     expect(contenders.filter((handle) => handle.ownsProcess)).toHaveLength(1);
     const discovery = JSON.parse(await readFile(join(runtimeDirectory, "fabric-v1.discovery.json"), "utf8")) as Record<string, unknown>;
     expect(Object.keys(discovery).sort()).toEqual([
-      "bootstrapCapability", "lifecycleReceiptAuthorityId", "pid", "schemaVersion", "socketPath",
+      "bootstrapCapability", "features", "lifecycleReceiptAuthorityId", "pid",
+      "protocolVersion", "schemaVersion", "socketPath",
     ]);
+    expect(discovery).toMatchObject({
+      protocolVersion: 1,
+      features: ["rpc", "mcp-bootstrap-credentials.v2"],
+    });
     expect((await stat(join(runtimeDirectory, "fabric-v1.discovery.json"))).mode & 0o777).toBe(0o600);
     expect([
       ...await readdir(stateDirectory),

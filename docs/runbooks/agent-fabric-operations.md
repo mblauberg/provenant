@@ -89,7 +89,7 @@ operating modes:
 | `state` | `code` | `healthy` | Meaning |
 | --- | --- | --- | --- |
 | `idle` | `DAEMON_ON_DEMAND_IDLE` | `true` | Configuration, compatibility, private paths, database and election state pass; no daemon is expected to be running. `daemon.pid` and `daemon.socketPath` are `null`. |
-| `live` | `DAEMON_LIVE` | `true` | Generation-bound discovery, bootstrap election, process, owned Unix socket and authenticated handshake agree. |
+| `live` | `DAEMON_LIVE` | `true` | Generation-bound discovery, bootstrap election, process, owned Unix socket, authenticated negotiation and a non-mutating bootstrap-scope contract probe agree. |
 | `failed` | causal failure code | `false` | A preflight, election, discovery, process, socket or handshake failed. The command exits non-zero. |
 
 In the idle case the `daemon-socket` check has status `idle`, not `pass` or
@@ -106,6 +106,12 @@ lock and retains it until terminal discovery is durable. Only absent discovery
 or an exact, generation-matched `stopped` owner with exit `0` and no signal can
 be idle. Forced, non-zero, unknown, crashed and otherwise non-clean owners fail
 closed.
+
+`PROTOCOL_INCOMPATIBLE` means the incumbent answered the contract probe but did
+not negotiate a result shape required by the current client. Do not attempt MCP
+bootstrap or seat renewal against it, delete discovery files, compare source
+commits or replace the database. Stop the incumbent through its owning Fabric
+lifecycle, then rerun `provenant doctor` before retrying bootstrap or renewal.
 
 Each global project-dynamic client registry contains the proxy command and
 exactly three environment variables:

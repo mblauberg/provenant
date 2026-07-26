@@ -1,6 +1,7 @@
 import { realpath } from "node:fs/promises";
 
 import Database from "better-sqlite3";
+import { MCP_BOOTSTRAP_CREDENTIALS_FEATURE } from "@local/agent-fabric-protocol";
 
 import { connectFabricDaemon, startFabricDaemon } from "../daemon/client.js";
 import type { BootstrapMcpSeatResult } from "../core/contracts.js";
@@ -163,6 +164,7 @@ export async function bootstrapMcpSeat(input: {
     daemon = await connectFabricDaemon({
       socketPath: daemonHandle.address.path,
       capability: daemonHandle.bootstrapCapability,
+      requiredCapabilities: [MCP_BOOTSTRAP_CREDENTIALS_FEATURE],
     });
     const result = await daemon.bootstrapMcpSeat({
       canonicalRoot: identity.canonicalRoot,

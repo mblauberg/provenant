@@ -24,7 +24,11 @@ import type {
   LocalOperatorTakeoverCapabilityInput,
   LocalOperatorTakeoverCapabilityResult,
 } from "../operator/store.js";
-import { TimedNdjsonTransport } from "../transport/ndjson-rpc.js";
+import {
+  FabricRemoteError,
+  TimedNdjsonTransport,
+  type TimedNdjsonTransportDependencies,
+} from "../transport/ndjson-rpc.js";
 import { isRecord, type DaemonInitializeResult } from "./protocol.js";
 
 function isMessageKind(value: unknown): value is MessageInput["kind"] {
@@ -313,8 +317,17 @@ export class FabricDaemonClient {
     this.#transport = transport;
   }
 
-  static async connect(socketPath: string, capability: string): Promise<FabricDaemonClient> {
-    return new FabricDaemonClient(await TimedNdjsonTransport.connect({ socketPath, capability }));
+  static async connect(
+    socketPath: string,
+    capability: string,
+    requiredCapabilities: readonly string[] = [],
+    transportDependencies?: TimedNdjsonTransportDependencies,
+  ): Promise<FabricDaemonClient> {
+    return new FabricDaemonClient(await TimedNdjsonTransport.connect({
+      socketPath,
+      capability,
+      requiredCapabilities,
+    }, transportDependencies));
   }
 
   get initializeResult(): DaemonInitializeResult {
@@ -327,6 +340,19 @@ export class FabricDaemonClient {
 
   async close(): Promise<void> {
     await this.#transport.close();
+  }
+
+  async probeBootstrapContract(): Promise<void> {
+    try {
+      await this.#call("eventsAfter", { cursor: 0, limit: 1 });
+    } catch (error: unknown) {
+      if (error instanceof FabricRemoteError && error.code === "BOOTSTRAP_SCOPE_VIOLATION") return;
+      throw error;
+    }
+    throw new FabricRemoteError(
+      "DAEMON_PROTOCOL_MISMATCH",
+      "daemon bootstrap capability unexpectedly admitted an operational observer call",
+    );
   }
 
   async bindCurrentMcpSeats(input: CurrentMcpSeatBindingInput): Promise<CurrentMcpSeatBindingResult> {
@@ -672,6 +698,14 @@ export class FabricDaemonClient {
   }
 }
 
-export async function connectFabricDaemon(options: { socketPath: string; capability: string }): Promise<FabricDaemonClient> {
-  return FabricDaemonClient.connect(options.socketPath, options.capability);
+export async function connectFabricDaemon(options: {
+  socketPath: string;
+  capability: string;
+  requiredCapabilities?: readonly string[];
+}): Promise<FabricDaemonClient> {
+  return FabricDaemonClient.connect(
+    options.socketPath,
+    options.capability,
+    options.requiredCapabilities,
+  );
 }
