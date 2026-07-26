@@ -31,7 +31,14 @@ import type { FabricPaths } from "./paths.js";
 import { MCP_SEATS, resolveSeatPaths, type SeatMetadata } from "./seat-store.js";
 import { trustedWorkspaceRoots } from "./workspace-trust.js";
 
-type Check = { id: string; status: "pass" | "idle" | "fail"; code: string; detail: string };
+type Check = {
+  id: string;
+  status: "pass" | "idle" | "fail";
+  code: string;
+  detail: string;
+  /** The condition this check asserts, named so a state can say why it holds. */
+  precondition: string;
+};
 type ProviderIdentityResult = Awaited<ReturnType<typeof verifyProviderExecutableIdentity>>;
 type ProviderInterfaceResult = Awaited<ReturnType<typeof probeProviderInterface>>;
 type ProviderObservation = { adapterId: string; requiredIdentity: string; identity?: ProviderIdentityResult; providerInterface?: ProviderInterfaceResult; identityError?: unknown; interfaceError?: unknown };
@@ -60,6 +67,65 @@ type DoctorDaemonState =
   | { status: "live"; code: "DAEMON_LIVE"; detail: string; pid: number; socketPath: string }
   | { status: "idle"; code: "DAEMON_ON_DEMAND_IDLE"; detail: string; pid: null; socketPath: null }
   | { status: "failed"; code: string; detail: string; pid: number | null; socketPath: string | null };
+
+/**
+ * Causal lifecycle vocabulary. `current` and `idle` are the two healthy modes;
+ * a failing precondition is `recovering` when the next ordinary bootstrap
+ * reconciles it under existing authority, and `blocked` otherwise. Unknown
+ * codes fail closed to `blocked`: this lifecycle never claims that a condition
+ * it does not recognise will repair itself.
+ */
+export type DoctorLifecycleState = "current" | "idle" | "recovering" | "blocked";
+
+const PRECONDITIONS: Readonly<Record<string, string>> = {
+  configuration: "the trusted Fabric configuration loads and names its adapters",
+  "wrapper-loader": "every configured adapter wrapper loader is installed",
+  "adapter-compatibility": "adapter compatibility pins verify against the pinned schema",
+  "provider-conformance": "each configured provider executable answers its conformance probe",
+  "provider-identity": "each primary provider matches its pinned executable identity",
+  "pin-staleness": "compatibility and catalogue pin dates are within the advisory threshold",
+  "state-directory": "the state directory is a private non-symlink directory",
+  "runtime-directory": "the runtime directory is a private non-symlink directory",
+  "database-integrity": "the Fabric database is current-schema and passes its invariants",
+  "daemon-socket": "daemon discovery, election, process, socket and bootstrap contract agree",
+};
+
+/**
+ * The only failures an ordinary bootstrap reconciles locally and reversibly:
+ * a transition another owner is already converging, or unreachable-daemon
+ * residue that `reconcileUnreachablePrivateDaemon` clears before re-electing.
+ *
+ * Everything else is `blocked`, including an incompatible incumbent, an
+ * ambiguous generation and any schema mismatch: those need user authority, an
+ * out-of-lifecycle repair, or material state displacement. Unrecognised codes
+ * fail closed to `blocked` rather than promising a repair that does not exist.
+ */
+const RECOVERABLE_CODES: ReadonlySet<string> = new Set([
+  "BOOTSTRAP_IN_PROGRESS",
+  "DAEMON_SHUTDOWN_IN_PROGRESS",
+  "DAEMON_DISCOVERY_MISSING",
+  "DAEMON_SOCKET_STALE",
+  "DAEMON_SOCKET_UNAVAILABLE",
+  "DAEMON_PROCESS_UNAVAILABLE",
+  "DAEMON_PROCESS_CRASHED",
+  "DAEMON_PROCESS_UNCLEAN_STOP",
+]);
+
+/**
+ * Preconditions `doctor` structurally cannot observe. `scripts/agent-fabric`
+ * gates on protocol-build freshness (#399) and exits 78 before `doctor`
+ * starts, so `doctor` can never reach a `blocked` state naming a stale
+ * protocol dist. Tracked as #439; the launcher, not `doctor`, reports it.
+ */
+const UNOBSERVABLE_PRECONDITIONS = [
+  {
+    precondition: "the local protocol build is newer than its TypeScript sources",
+    code: "AGENT_FABRIC_PROTOCOL_BUILD_STALE",
+    owner: "scripts/agent-fabric-protocol-preflight",
+    reason: "the launcher preflight exits 78 before doctor starts, so doctor cannot classify this precondition",
+    issue: "#439",
+  },
+] as const;
 
 const PRIMARY_ADAPTER_IDS = ["claude-agent-sdk", "codex-app-server"] as const;
 const PROVIDER_PROBE_TIMEOUT_MS = 16_000;
@@ -285,12 +351,16 @@ export async function fabricStatus(arguments_: string[], paths: FabricPaths): Pr
   };
 }
 
+function precondition(id: string): string {
+  return PRECONDITIONS[id] ?? id;
+}
+
 async function check(id: string, operation: () => string | undefined | Promise<string | undefined>): Promise<Check> {
   try {
     const detail = await operation();
-    return { id, status: "pass", code: checkCode(id, "OK"), detail: detail === undefined || detail.length === 0 ? "ok" : detail };
+    return { id, status: "pass", code: checkCode(id, "OK"), detail: detail === undefined || detail.length === 0 ? "ok" : detail, precondition: precondition(id) };
   } catch (error: unknown) {
-    return { id, status: "fail", code: errorCode(error, checkCode(id, "FAILED")), detail: errorDetail(error) };
+    return { id, status: "fail", code: errorCode(error, checkCode(id, "FAILED")), detail: errorDetail(error), precondition: precondition(id) };
   }
 }
 
@@ -604,6 +674,7 @@ export async function fabricDoctor(
     status: drifted ? "fail" : unknown ? "idle" : "pass",
     code: drifted ? "PROVIDER_IDENTITY_DRIFT" : unknown ? "PROVIDER_IDENTITY_UNKNOWN" : "PROVIDER_IDENTITY_OK",
     detail: providerIdentity.map((item) => `${item.adapterId}=${item.state}: ${item.detail}`).join(" "),
+    precondition: precondition("provider-identity"),
   });
   const pinReport = await reviewProfilePins(
     selected.reviewProfile,
@@ -645,6 +716,7 @@ export async function fabricDoctor(
       `review_profile_observed_on=${staleness.reviewProfile.date ?? "unknown"} age_days=${String(staleness.reviewProfile.ageDays)}`,
       `threshold_days=${String(STALENESS_THRESHOLD_DAYS)}`,
     ].join(" "),
+    precondition: precondition("pin-staleness"),
   });
   for (const [id, path, expectedKind] of [
     ["state-directory", paths.stateDirectory, "directory"],
@@ -665,13 +737,30 @@ export async function fabricDoctor(
     status: daemon.status === "live" ? "pass" : daemon.status === "idle" ? "idle" : "fail",
     code: daemon.code,
     detail: daemon.detail,
+    precondition: precondition("daemon-socket"),
   });
   const failed = checks.find((item) => item.status === "fail");
+  const healthy = failed === undefined;
+  const state: DoctorLifecycleState = healthy
+    ? daemon.status === "live" ? "current" : "idle"
+    : RECOVERABLE_CODES.has(failed.code) ? "recovering" : "blocked";
+  const holds = failed ?? checks.find((item) => item.id === "daemon-socket");
   return {
     schemaVersion: 1,
-    healthy: failed === undefined,
-    state: failed === undefined ? daemon.status : "failed",
+    healthy,
+    state,
     code: failed?.code ?? daemon.code,
+    // Why the state holds, not merely which state it is: the exact check whose
+    // precondition decided it, and whether this lifecycle may repair it.
+    cause: {
+      checkId: holds?.id ?? "daemon-socket",
+      precondition: holds?.precondition ?? precondition("daemon-socket"),
+      satisfied: healthy,
+      code: holds?.code ?? daemon.code,
+      detail: holds?.detail ?? daemon.detail,
+      recoverable: !healthy && state === "recovering",
+    },
+    unobservable: UNOBSERVABLE_PRECONDITIONS,
     daemon: {
       status: daemon.status,
       pid: daemon.pid,

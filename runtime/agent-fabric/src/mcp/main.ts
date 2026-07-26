@@ -63,6 +63,7 @@ try {
         socketPath,
         capability: bootstrapped.credential,
         refreshCapability: resolveCurrentCapability,
+        lifecycleReceipt: bootstrapped.receipt,
         ...(process.env.AGENT_FABRIC_CLIENT_LABEL === undefined
           ? {}
           : { clientLabel: process.env.AGENT_FABRIC_CLIENT_LABEL }),

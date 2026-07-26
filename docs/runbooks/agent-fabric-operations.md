@@ -89,13 +89,28 @@ operating modes:
 | `state` | `code` | `healthy` | Meaning |
 | --- | --- | --- | --- |
 | `idle` | `DAEMON_ON_DEMAND_IDLE` | `true` | Configuration, compatibility, private paths, database and election state pass; no daemon is expected to be running. `daemon.pid` and `daemon.socketPath` are `null`. |
-| `live` | `DAEMON_LIVE` | `true` | Generation-bound discovery, bootstrap election, process, owned Unix socket, authenticated negotiation and a non-mutating bootstrap-scope contract probe agree. |
-| `failed` | causal failure code | `false` | A preflight, election, discovery, process, socket or handshake failed. The command exits non-zero. |
+| `current` | `DAEMON_LIVE` | `true` | Generation-bound discovery, bootstrap election, process, owned Unix socket, authenticated negotiation and a non-mutating bootstrap-scope contract probe agree. |
+| `recovering` | converging transition or unreachable-daemon residue | `false` | The next ordinary bootstrap reconciles this locally and reversibly under existing authority. The command exits non-zero. |
+| `blocked` | every other causal failure code | `false` | Repair needs user authority, material state displacement, or an action outside this lifecycle. The command exits non-zero. |
+
+Every state is causal: `cause` names the deciding check, the precondition that
+check asserts, whether that precondition is satisfied, and whether this
+lifecycle may repair it. `recovering` is deliberately narrow — an active
+bootstrap or shutdown transition, or discovery, socket and process residue that
+`reconcileUnreachablePrivateDaemon` clears before re-electing. An incompatible
+incumbent, an ambiguous generation, a schema mismatch and any unrecognised code
+fail closed to `blocked`; `doctor` never promises a repair that does not exist.
+
+`doctor` also reports `unobservable`: preconditions it structurally cannot
+classify. The only current entry is a stale protocol build. `scripts/agent-fabric`
+runs the freshness preflight and exits 78 before `doctor` starts, so no `doctor`
+state can carry `AGENT_FABRIC_PROTOCOL_BUILD_STALE`. The launcher reports that
+condition; #439 tracks the gap.
 
 In the idle case the `daemon-socket` check has status `idle`, not `pass` or
 `fail`. This does not weaken preflight: for example, an intact idle daemon
 state alongside an incompatible database still produces overall `state:
-"failed"` and a non-zero exit. A failed or in-progress bootstrap, ambiguous or
+"blocked"` and a non-zero exit. A failed or in-progress bootstrap, ambiguous or
 stale discovery, crashed process, orphan socket and failed handshake are never
 relabelled idle. `doctor` diagnoses only; it does not start the on-demand
 daemon. Concurrent doctors share one non-blocking inspection fence and may
@@ -271,6 +286,36 @@ denies secrets, deployment, irreversible actions and tool egress. An untrusted
 root fails closed. The local fallback is `provenant fabric bootstrap --seat
 claude|codex`; it invokes the same composition. Public `mcp provision` retains
 its full-roster requirement.
+
+Bootstrap returns one machine-readable action receipt covering every automatic
+action it took, on both the CLI and the `fabric_bootstrap` tool result:
+
+| `action` | `outcome` | `mutated` |
+| --- | --- | --- |
+| `workspace-trust` | `resolved` | always `false`; resolution only reads the trust record |
+| `daemon` | `started` or `attached` | `true` only when this call spawned the daemon |
+| `seat-generation` | `installed` or `replayed` | `true` only when the active generation changed |
+| `identity-smoke` | `passed` or `failed` | always `false`; `whoami` and `mailbox.read` only read |
+
+The receipt's top-level `mutated` is the idempotency surface: a converged
+repeat invocation reports `false`, which means the healthy seat was not
+rotated, the compatible daemon was not restarted and current artifacts were not
+rebuilt. It carries no bearer capability. The identity/mailbox smoke is bounded
+by a whole-smoke wall-clock deadline covering connect, `whoami` and
+`mailbox.read`; on expiry the receipt reports `healthy: false` with a failed
+smoke and the installed seat still stands, because an unbounded health check is
+a hang rather than a diagnosis.
+
+If the machine database is not current-schema, bootstrap raises
+`SCHEMA_CUTOVER_GATE_REQUIRED` instead of starting. The gate carries the schema
+mismatch, a per-table census of the coordination rows that exist today, the
+consequences of approval, and the exact `database archive-and-fresh` command
+including its `--confirm-source-set` digest. Nothing is displaced: the SQLite
+source set is byte-identical afterwards. Report counts and consequences, obtain
+exactly one user decision, and only then run the command in
+[Database archive-and-fresh cutover](#database-archive-and-fresh-cutover).
+Automatic, unattended archive-and-fresh is prohibited however recoverable it
+looks.
 
 After bootstrap, call `fabric_whoami` before constructing any request. It
 returns the authenticated seat, agent, run, authority, active seat generation
