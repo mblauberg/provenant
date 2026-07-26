@@ -390,6 +390,81 @@ def test_explicit_override_occupant_stays_reserved_for_broker_adapters():
     assert route["status"] == "risk_tier_override_required"
 
 
+@pytest.mark.parametrize(
+    "route",
+    (
+        ("--alias", "flagship", "--role", "worker"),
+        ("--task-class", "critical-review", "--role", "critical-review"),
+    ),
+    ids=("alias", "task-class"),
+)
+def test_capability_resolved_override_occupant_requires_explicit_risk_tier(
+    tmp_path, monkeypatch, capsys, route
+):
+    router = load_router()
+    catalog_path = Path(ROOT / "config" / "model-routing.json")
+    monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
+    snapshot = capability_snapshot({
+        "opus": {
+            "resolved_model": f"claude-opus-4-6-{RISK_OVERRIDE_MODEL}",
+            "supported_efforts": ["high"],
+        },
+    }, source="claude subscription canary")
+    snapshot["provenance"] = {
+        "kind": "subscription_runtime_canary",
+        "auth_method": "claude.ai",
+        "subscription_type": "pro",
+    }
+    snapshot_path = tmp_path / "claude-caps.json"
+    snapshot_path.write_text(json.dumps(snapshot))
+
+    result = router.main([
+        "resolve", "--adapter", "claude", *route,
+        "--capabilities-file", str(snapshot_path), "--adapter-gate", "direct-cli",
+    ])
+
+    receipt = json.loads(capsys.readouterr().out)
+    assert router.CATALOG_PATH == catalog_path
+    assert result == 1
+    assert receipt["status"] == "risk_tier_override_required"
+
+
+def test_capability_resolved_override_occupant_records_explicit_risk_tier(
+    tmp_path, monkeypatch, capsys
+):
+    router = load_router()
+    catalog_path = Path(ROOT / "config" / "model-routing.json")
+    monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
+    resolved_model = f"claude-opus-4-6-{RISK_OVERRIDE_MODEL}"
+    snapshot = capability_snapshot({
+        RISK_OVERRIDE_MODEL: {
+            "resolved_model": resolved_model,
+            "supported_efforts": [CRUCIAL_RISK_OVERRIDE["default_effort"]],
+        },
+    }, source="claude subscription canary")
+    snapshot["provenance"] = {
+        "kind": "subscription_runtime_canary",
+        "auth_method": "claude.ai",
+        "subscription_type": "pro",
+    }
+    snapshot_path = tmp_path / "claude-caps.json"
+    snapshot_path.write_text(json.dumps(snapshot))
+
+    result = router.main([
+        "resolve", "--adapter", "claude", "--alias", CRUCIAL_RISK_OVERRIDE["alias"],
+        "--role", CRUCIAL_RISK_OVERRIDE["roles"][0], "--risk-tier", "crucial",
+        "--capabilities-file", str(snapshot_path), "--adapter-gate", "direct-cli",
+    ])
+
+    receipt = json.loads(capsys.readouterr().out)
+    assert router.CATALOG_PATH == catalog_path
+    assert result == 0
+    assert receipt["status"] == "ok"
+    assert receipt["resolved_model"] == resolved_model
+    assert receipt["risk_tier"] == "crucial"
+    assert receipt["route_source"] == "risk-tier-override"
+
+
 def test_unconfigured_inferred_family_cannot_bypass_override_gate():
     result, route = resolve(
         "--adapter", "opencode", "--alias", "flagship", "--role", "worker",
