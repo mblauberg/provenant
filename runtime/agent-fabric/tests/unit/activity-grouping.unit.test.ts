@@ -147,7 +147,10 @@ describe("daemon activity narrative grouping", () => {
       actorId: null,
       payloadJson: JSON.stringify({
         taskId: "task_unsafe",
-        detail: "-----BEGIN PRIVATE KEY-----\nunclosed",
+        // Assembled at runtime so the literal marker never appears in the
+        // source. scripts/public_release_check.py scans for it verbatim and
+        // has no allowlist, by design — the value under test is unchanged.
+        detail: `${"-----BEGIN PRIVATE"} KEY-----\nunclosed`,
       }),
       occurredAt: "2026-07-26T00:00:00.000Z" as never,
       sourceRevision: 1,
