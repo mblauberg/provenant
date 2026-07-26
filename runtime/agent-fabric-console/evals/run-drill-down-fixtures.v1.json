@@ -1,0 +1,117 @@
+{
+  "schemaVersion": 1,
+  "repetitions": 3,
+  "maximumIdentificationMs": 20000,
+  "minimumFieldSuccessRate": 0.9,
+  "fixtures": [
+    {
+      "id": "coordination-active",
+      "session": "session-coordinated",
+      "target": {
+        "kind": "coordination-run",
+        "coordinationRunId": "run-coordinated"
+      },
+      "lead": "chair-coordinated",
+      "phase": "active",
+      "health": "healthy",
+      "currentMilestone": null,
+      "nextMilestone": "quiescing",
+      "counts": {
+        "blocked": 1,
+        "ready": 1,
+        "active": 1,
+        "complete": 2,
+        "cancelled": 0,
+        "degraded": 0
+      },
+      "task": {
+        "taskId": "task-implement",
+        "state": "active",
+        "objective": "Implement run drill-down",
+        "dependencies": ["task-addressing"]
+      },
+      "blockingTaskId": "task-blocked",
+      "evidencePath": "reports/run-drill-down.md",
+      "expectedAnswers": {
+        "lead": "chair-coordinated",
+        "currentMilestone": "Unobserved",
+        "currentTask": "task-implement",
+        "remainingWork": "blocked 1 | ready 1 | active 1",
+        "nextDependency": "task-addressing",
+        "blockingIssue": "task-blocked",
+        "evidencePath": "reports/run-drill-down.md"
+      }
+    },
+    {
+      "id": "delivery-workstream",
+      "session": "session-coordinated",
+      "target": {
+        "kind": "delivery-workstream",
+        "coordinationRunId": "run-coordinated",
+        "deliveryRunId": "delivery-console",
+        "workstreamId": "workstream-console"
+      },
+      "lead": "lead-console",
+      "phase": null,
+      "health": null,
+      "currentMilestone": null,
+      "nextMilestone": null,
+      "counts": null,
+      "task": {
+        "taskId": "task-console",
+        "state": "ready",
+        "objective": "Render the delivery workstream",
+        "dependencies": ["task-protocol"]
+      },
+      "blockingTaskId": "task-delivery-blocked",
+      "evidencePath": "reports/console-workstream.md",
+      "expectedAnswers": {
+        "lead": "lead-console",
+        "currentMilestone": "Unobserved",
+        "currentTask": "task-console",
+        "remainingWork": "Unobserved",
+        "nextDependency": "task-protocol",
+        "blockingIssue": "task-delivery-blocked",
+        "evidencePath": "reports/console-workstream.md"
+      }
+    },
+    {
+      "id": "independent-session",
+      "session": "session-independent",
+      "target": {
+        "kind": "coordination-run",
+        "coordinationRunId": "run-independent"
+      },
+      "lead": "chair-independent",
+      "phase": "active",
+      "health": "healthy",
+      "currentMilestone": null,
+      "nextMilestone": "awaiting_acceptance",
+      "counts": {
+        "blocked": 0,
+        "ready": 0,
+        "active": 1,
+        "complete": 1,
+        "cancelled": 0,
+        "degraded": 0
+      },
+      "task": {
+        "taskId": "task-independent",
+        "state": "active",
+        "objective": "Verify independent delivery",
+        "dependencies": []
+      },
+      "blockingTaskId": null,
+      "evidencePath": "receipts/independent.json",
+      "expectedAnswers": {
+        "lead": "chair-independent",
+        "currentMilestone": "Unobserved",
+        "currentTask": "task-independent",
+        "remainingWork": "blocked 0 | ready 0 | active 1",
+        "nextDependency": "None declared",
+        "blockingIssue": "None observed",
+        "evidencePath": "receipts/independent.json"
+      }
+    }
+  ]
+}

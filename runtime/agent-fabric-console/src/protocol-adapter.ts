@@ -2,7 +2,6 @@ import { createHash } from "node:crypto";
 
 import {
   ACTIVITY_NARRATIVE_GROUPING_FEATURE,
-  type ActivityNarrativeGroup,
   FABRIC_OPERATIONS,
   NATIVE_NOTIFICATION_PROJECTION_FEATURE,
   type AgentId,
@@ -10,17 +9,12 @@ import {
   type ArtifactContentReadResult,
   type ArtifactContentTransformation,
   type ArtifactLineFragment,
-  type ArtifactMediaType,
   type ArtifactRef,
   type CoordinationRunId,
-  type EvidenceKind,
-  type EvidenceSourceKind,
   type NegotiatedOperatorClient,
   type GitRepositoryReadClient,
   type GitRepositoryReadRequest,
-  type GitRepositoryProjection,
   type MessageBodyClient,
-  type MessageBodyReadResult,
   type OperatorActionClient,
   type OperatorCapabilityCredential,
   type OperatorDetailReadRequest,
@@ -31,6 +25,8 @@ import {
   type ProjectId,
   type ProjectSessionDiscovery,
   type ProjectSessionId,
+  type RunProjectionPageRequest,
+  type RunProjectionPageResult,
   type ProviderActionRefV1,
   type ProviderContextPressureReadRequestV1,
   type ProviderContextPressureReadV1,
@@ -45,7 +41,6 @@ import {
   type Sha256Digest,
   type SystemViewItem,
   type TaskId,
-  type Timestamp,
   type TopologyWaveCurrentReadRequestV1,
   type TopologyWaveCurrentReadV1,
   type ReviewCompletionReadRequestV1,
@@ -59,6 +54,23 @@ import {
 import { parseArtifactContentReadResult } from "@local/agent-fabric-protocol";
 
 import { inspectNarrativeActivity } from "./activity-inspection.js";
+import {
+  inspectRunProjection,
+} from "./run-projection-adapter.js";
+
+export type { ConsoleRunProjection } from "./run-projection-adapter.js";
+import type {
+  ConsoleArtifactContentPage,
+  ConsoleArtifactContentResult,
+  ConsoleInspectionBinding,
+  ConsoleReadInspection,
+} from "./protocol-adapter-inspection.js";
+export type {
+  ConsoleArtifactContentPage,
+  ConsoleArtifactContentResult,
+  ConsoleInspectionBinding,
+  ConsoleReadInspection,
+} from "./protocol-adapter-inspection.js";
 
 import {
   BOOTSTRAP_FAILURE_DETAILS,
@@ -99,6 +111,9 @@ export type ConsoleProtocolPort = Readonly<{
   viewPage(
     request: OperatorViewPageRequest,
   ): Promise<OperatorViewPageResult>;
+  runPage(
+    request: RunProjectionPageRequest,
+  ): Promise<RunProjectionPageResult>;
   readDetail(
     request: OperatorDetailReadRequest,
   ): Promise<OperatorDetailReadResult>;
@@ -124,44 +139,6 @@ export type ConsoleProtocolPort = Readonly<{
   topologyWaveCurrentRead?:
     | ((request: TopologyWaveCurrentReadRequestV1) => Promise<TopologyWaveCurrentReadV1>)
     | null;
-}>;
-
-export type ConsoleArtifactContentPage = Readonly<{
-  pageIndex: number;
-  lineFragment: ArtifactLineFragment;
-  pageContentDigest: Sha256Digest;
-  bytes: number;
-}>;
-
-export type ConsoleArtifactContentResult = Readonly<{
-  artifactRef: ArtifactRef;
-  evidenceRevision: number;
-  evidenceKind: EvidenceKind;
-  sourceKind: EvidenceSourceKind;
-  publisherKind: "agent" | "operator" | "fabric" | "project" | "migration";
-  publisherRef: string;
-  projectSessionId: ProjectSessionId | null;
-  coordinationRunId: CoordinationRunId | null;
-  taskId: TaskId | null;
-  createdAt: Timestamp;
-  mediaType: ArtifactMediaType;
-  content: string;
-  totalBytes: number;
-  totalLines: number;
-  renderedTotalBytes: number;
-  renderedTotalLines: number;
-  renderedArtifactDigest: Sha256Digest;
-  transformation: ArtifactContentTransformation;
-  terminalNeutralised: true;
-  capabilityValuesRedacted: true;
-  credentialValuesRedacted: true;
-  pages: readonly ConsoleArtifactContentPage[];
-  coverage: Readonly<{
-    complete: true;
-    verified: true;
-    pageCount: number;
-  }>;
-  reviewDisposition: "eligible" | "confirm-terminal-neutralised" | "blocked-redacted";
 }>;
 
 export type ConsoleProtocolBinding =
@@ -198,6 +175,9 @@ export function bindConsoleProtocolClient(
     "declared-run-progress.v2",
     "run-identity-projection.v2",
     ACTIVITY_NARRATIVE_GROUPING_FEATURE,
+    "agent-topology-projection.v1",
+    "work-facts-projection.v1",
+    "run-scoped-projection.v1",
     "artifact-content-read.v1",
   ].filter((feature) => !available.has(feature));
   if (missingFeatures.length > 0) {
@@ -233,6 +213,7 @@ export function bindConsoleProtocolClient(
       snapshot: (request) => projection.snapshot(request),
       events: (request) => projection.events(request),
       viewPage: (request) => consoleClient.projection.viewPage(request),
+      runPage: (request) => consoleClient.projection.runPage(request),
       readDetail: (request) => consoleClient.projection.readDetail(request),
       readGate: (request) => consoleClient.gates.read(request),
       readMessageBody: client.messages?.read ?? null,
@@ -276,122 +257,6 @@ export type ConsoleConnection =
       operation: string | null;
       closedReason: string | null;
       primary: Readonly<{ code: string; message: string }>;
-    }>;
-
-export type ConsoleInspectionBinding = Readonly<{
-  view: FabricView;
-  itemId: string;
-  itemRevision: Revision;
-  projectionRevision: Revision;
-}>;
-
-export type ConsoleReadInspection =
-  | Readonly<{
-      kind: "message";
-      state: "current";
-      binding: ConsoleInspectionBinding;
-      result: Extract<MessageBodyReadResult, { available: true }>;
-    }>
-  | Readonly<{
-      kind: "message";
-      state: "unavailable";
-      binding: ConsoleInspectionBinding;
-      reason:
-        | "feature-unavailable"
-        | "message-not-found"
-        | "message-forbidden"
-        | "message-expired"
-        | "projection-changed"
-        | "contract-invalid"
-        | "transport-failure";
-    }>
-  | Readonly<{
-      kind: "repository";
-      state: "current";
-      binding: ConsoleInspectionBinding;
-      readTransactionId: string;
-      repository: GitRepositoryProjection;
-    }>
-  | Readonly<{
-      kind: "repository";
-      state: "unavailable";
-      binding: ConsoleInspectionBinding;
-      reason:
-        | "feature-unavailable"
-        | "projection-changed"
-        | "detail-unavailable"
-        | "detail-conflict"
-        | "detail-invalid"
-        | "repository-resnapshot-required"
-        | "contract-invalid"
-        | "transport-failure";
-    }>
-  | Readonly<{
-      kind: "artifact";
-      state: "current";
-      binding: ConsoleInspectionBinding;
-      readTransactionId: string;
-      result: ConsoleArtifactContentResult;
-    }>
-  | Readonly<{
-      kind: "artifact";
-      state: "unavailable";
-      binding: ConsoleInspectionBinding;
-      reason:
-        | "feature-unavailable"
-        | "projection-changed"
-        | "detail-unavailable"
-        | "detail-conflict"
-        | "detail-invalid"
-        | "artifact-not-found"
-        | "artifact-forbidden"
-        | "artifact-unsupported-media"
-        | "artifact-unsafe-content"
-        | "artifact-stale"
-        | "artifact-oversized"
-        | "contract-invalid"
-        | "transport-failure";
-    }>
-  | Readonly<{
-      kind: "activity";
-      state: "current";
-      binding: ConsoleInspectionBinding;
-      readTransactionId: string;
-      detail: Extract<
-        import("@local/agent-fabric-protocol").OperatorDetail,
-        { kind: "activity"; group: ActivityNarrativeGroup }
-      >;
-      messages: readonly (
-        | Readonly<{
-            eventId: string;
-            state: "current";
-            result: Extract<MessageBodyReadResult, { available: true }>;
-          }>
-        | Readonly<{
-            eventId: string;
-            state: "unavailable";
-            reason:
-              | "feature-unavailable"
-              | "message-not-found"
-              | "message-forbidden"
-              | "message-expired" | "projection-changed"
-              | "contract-invalid"
-              | "transport-failure";
-          }>
-      )[];
-    }>
-  | Readonly<{
-      kind: "activity";
-      state: "unavailable";
-      binding: ConsoleInspectionBinding;
-      reason:
-        | "feature-unavailable"
-        | "projection-changed"
-        | "detail-unavailable"
-        | "detail-conflict"
-        | "detail-invalid"
-        | "contract-invalid"
-        | "transport-failure";
     }>;
 
 function unavailableRepository(
@@ -824,6 +689,21 @@ export class ConsoleProtocolAdapter {
 
   async inspect(binding: ConsoleInspectionBinding): Promise<ConsoleReadInspection | null> {
     const dataset = this.#lastGood;
+    if (binding.runTarget !== undefined) {
+      const run = await inspectRunProjection({
+        currentSnapshotRevision: dataset?.snapshotRevision ?? null,
+        selectedProjectSessionId: this.#projectSessionId,
+        bindingProjectSessionId: binding.projectSessionId,
+        bindingTarget: binding.runTarget,
+        bindingRevision: binding.projectionRevision,
+        protocolSnapshotRevision: revisionToProtocol(binding.projectionRevision),
+        port: this.#binding.ok ? this.#binding.port : null,
+        readScope: this.#readScope(),
+        pageLimit: this.#pageLimit,
+        maximumPagesPerSection: this.#maxPagesPerView,
+      });
+      return { kind: "run", binding, ...run };
+    }
     if (binding.view === "evidence") {
       const row = dataset?.pages.evidence.rows.find(
         (candidate) => candidate.stableId === binding.itemId,

@@ -31,6 +31,7 @@ const operatorActionOperationBundles: Readonly<Record<OperatorAction, readonly F
     FABRIC_OPERATIONS.projectionPage,
     FABRIC_OPERATIONS.projectionEvents,
     FABRIC_OPERATIONS.projectionViewPage,
+    FABRIC_OPERATIONS.projectionRunPage,
     FABRIC_OPERATIONS.projectionDetailRead,
     FABRIC_OPERATIONS.operatorActionStatus,
     FABRIC_OPERATIONS.messageBodyRead,

@@ -4,10 +4,13 @@ import { createConnection } from "node:net";
 import {
   ACTIVITY_NARRATIVE_GROUPING_FEATURE,
   DECLARED_RUN_PROGRESS_FEATURE,
+  AGENT_TOPOLOGY_PROJECTION_FEATURE,
   GATE_SYSTEM_SUPERSESSION_FEATURE,
   NATIVE_NOTIFICATION_PROJECTION_FEATURE,
   RUN_IDENTITY_PROJECTION_FEATURE,
+  RUN_SCOPED_PROJECTION_FEATURE,
   RUN_SESSION_PROJECTION_FEATURE,
+  WORK_FACTS_PROJECTION_FEATURE,
   NdjsonRpcTransport,
   ProtocolRemoteError,
   ProtocolResultShapeError,
@@ -60,6 +63,9 @@ const REQUIRED_FEATURES: readonly ProtocolFeature[] = Object.freeze([
   DECLARED_RUN_PROGRESS_FEATURE,
   RUN_IDENTITY_PROJECTION_FEATURE,
   ACTIVITY_NARRATIVE_GROUPING_FEATURE,
+  AGENT_TOPOLOGY_PROJECTION_FEATURE,
+  WORK_FACTS_PROJECTION_FEATURE,
+  RUN_SCOPED_PROJECTION_FEATURE,
   "artifact-content-read.v1",
 ] as const satisfies readonly ProtocolFeature[]);
 export const CURRENT_CONSOLE_OPTIONAL_FEATURES: readonly ProtocolFeature[] = Object.freeze([
@@ -633,6 +639,11 @@ export async function openLocalOperatorConsoleSession(
       canonicalRoot: identity.canonicalRoot,
     });
     let attachableProjectSessions = attachableSessions(discoveredProjectSessions);
+    // Spec item 35 forbids auto-selecting when a project has *multiple*
+    // attachable sessions; the single-session case is the documented attach
+    // path and is covered by "selects an existing session ... never creates a
+    // session implicitly". Selecting nothing unconditionally would make every
+    // ordinary one-session project require a manual pick.
     const selected = options.projectSessionId === undefined
       ? attachableProjectSessions.length === 1
         ? attachableProjectSessions[0]

@@ -352,7 +352,7 @@ describe("versioned Console usability evaluation", () => {
         launchAvailable: false,
         actions,
         gates: { read: gateRead },
-        projection: { viewPage: vi.fn(), readDetail: vi.fn() },
+        projection: { viewPage: vi.fn(), runPage: vi.fn(), readDetail: vi.fn() },
       },
     };
     const workflow = createProductionConsoleWorkflowPlanner({

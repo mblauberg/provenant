@@ -16,7 +16,10 @@ import {
   type FabricConsolePresentation,
   type FabricConsoleUiState,
 } from "./presenter.js";
-import type { FabricConsoleDataset } from "./protocol-adapter.js";
+import type {
+  ConsoleRunProjection,
+  FabricConsoleDataset,
+} from "./protocol-adapter.js";
 import {
   presentedBinding,
   setFabricRow,
@@ -44,6 +47,32 @@ export function renderFabricDetail(
   let detailScrollMaximum = 0;
   let lines: readonly string[];
   if (
+    inspection?.kind === "run" &&
+    inspection.binding.view === presentation.activeView &&
+    inspection.binding.itemId === presentation.detail?.stableId
+  ) {
+    if (inspection.state === "current") {
+      const window = presentSafeTextWindow(
+        runProjectionDetailLines(inspection.result).join("\n"),
+        {
+          columns: Math.max(1, bounds.x2 - bounds.x1),
+          rows: Math.max(1, height),
+          offset: Math.max(
+            0,
+            Math.trunc(ui.detailScrollOffsetByView[presentation.activeView] ?? 0),
+          ),
+        },
+        { sanitizeDisplayText, graphemes, cellWidth },
+      );
+      detailScrollMaximum = Math.max(0, window.totalLines - 1);
+      lines = window.lines;
+    } else {
+      lines = [
+        `Run: ${inspection.binding.itemId}`,
+        `Read: unavailable | ${inspection.reason}`,
+      ];
+    }
+  } else if (
     inspection?.kind === "activity" &&
     inspection.binding.view === presentation.activeView &&
     inspection.binding.itemId === presentation.detail?.stableId
@@ -277,6 +306,176 @@ export function renderFabricDetail(
       scrollMaximum: detailScrollMaximum,
     });
   }
+}
+
+function observationText(
+  observation: Readonly<{
+    observation: "Observed" | "Unobserved" | "Unknown";
+    value?: unknown;
+  }>,
+  render: (value: unknown) => string = String,
+): string {
+  if (observation.observation === "Unobserved") return "Unobserved";
+  if (observation.observation === "Unknown") return "Unknown";
+  return render(observation.value);
+}
+
+export function runProjectionDetailLines(result: ConsoleRunProjection): readonly string[] {
+  const target = result.target.kind === "coordination-run"
+    ? `coordination ${result.target.coordinationRunId}`
+    : `delivery ${result.target.deliveryRunId} | workstream ${result.target.workstreamId} | coordination ${result.target.coordinationRunId}`;
+  const identity = result.composition.identity;
+  const identityValue = identity.freshness === "unavailable" || identity.freshness === "conflict"
+    ? null
+    : identity.value;
+  const identityFallback = identity.freshness === "unavailable" ? "Unobserved" : "Unknown";
+  const progress = result.composition.declaredProgress;
+  const progressValue = progress.freshness === "unavailable" || progress.freshness === "conflict"
+    ? null
+    : progress.value;
+  const progressFallback = progress.freshness === "unavailable" ? "Unobserved" : "Unknown";
+  const lines: string[] = [
+    `Target: SESSION ${result.projectSessionId} | ${target}`,
+    `Freshness: identity ${identity.freshness} r${String(identity.revision)} @ ${identity.observedAt} | progress ${progress.freshness} r${String(progress.revision)} @ ${progress.observedAt}`,
+    `Lead: ${identityValue === null ? identityFallback : observationText(identityValue.lead)}`,
+    `Phase: ${identityValue === null ? identityFallback : observationText(identityValue.phase)}`,
+    `Health: ${identityValue === null ? identityFallback : observationText(identityValue.health)}`,
+    `Accepted scope: ${identityValue === null
+      ? identityFallback
+      : observationText(identityValue.acceptedScope, (value) =>
+          (value as { path: string }).path
+        )}`,
+    `Current plan: ${identityValue === null
+      ? identityFallback
+      : observationText(identityValue.currentPlan, (value) => {
+          const plan = value as { artifactRef: { path: string }; planRevision: number };
+          return `${plan.artifactRef.path} r${String(plan.planRevision)}`;
+        })}`,
+    `Current milestone: ${identityValue === null
+      ? identityFallback
+      : observationText(identityValue.currentMilestone)}`,
+    `Next milestone: ${identityValue === null
+      ? identityFallback
+      : observationText(identityValue.nextMilestone)}`,
+  ];
+  if (progressValue === null) {
+    lines.push(`Work states: ${progressFallback}`);
+  } else if (progressValue.observation !== "Observed") {
+    lines.push(`Work states: ${observationText(progressValue)}`);
+  } else if (progressValue.value.plan === "unknown") {
+    lines.push(`Work states: Unknown | ${progressValue.value.reason}`);
+  } else {
+    const counts = progressValue.value.counts;
+    lines.push(
+      `Work states (server): blocked ${String(counts.blocked)} | ready ${String(counts.ready)} | active ${String(counts.active)} | complete ${String(counts.complete)} | cancelled ${String(counts.cancelled)} | degraded ${String(counts.degraded)}`,
+    );
+  }
+  lines.push("--- WORKFLOW TASK LEDGER ---");
+  for (const work of result.work) {
+    if (work.fact.freshness === "unavailable") {
+      lines.push(`Task ${work.itemId}: Unobserved`);
+      continue;
+    }
+    if (work.fact.freshness === "conflict") {
+      lines.push(`Task ${work.itemId}: Unknown | contradictory facts`);
+      continue;
+    }
+    const summary = work.fact.value.summary;
+    const workflow = summary.workflow;
+    lines.push(
+      `Task ${work.itemId}: ${summary.state} | ${workflow?.objective.value ?? "Unobserved"}`,
+    );
+    lines.push(
+      `Dependency ${work.itemId}: ${workflow === undefined
+        ? "Unobserved"
+        : workflow.dependencies.taskIds.length === 0
+          ? "None declared"
+          : workflow.dependencies.taskIds.join(", ")}`,
+    );
+  }
+  // An observed-empty section is not an unobserved one. The server returns
+  // every negotiated section, so zero rows means zero were observed -- the same
+  // distinction the issues section already draws with "None observed". Saying
+  // "Unobserved" here contradicts the server work-state counts rendered above.
+  if (result.work.length === 0) lines.push("Task ledger: None observed");
+  lines.push("--- TOPOLOGY ---");
+  for (const agent of result.agents) {
+    if (agent.fact.freshness === "unavailable") {
+      lines.push(`Agent ${agent.itemId}: Unobserved`);
+    } else if (agent.fact.freshness === "conflict") {
+      lines.push(`Agent ${agent.itemId}: Unknown | contradictory facts`);
+    } else {
+      const summary = agent.fact.value.summary;
+      const role = summary.role === "worker"
+        ? "member | worker/reviewer role Unobserved"
+        : summary.role;
+      lines.push(`Agent ${agent.itemId}: ${role} | ${summary.lifecycle}`);
+    }
+  }
+  if (result.agents.length === 0) lines.push("Topology: None observed");
+  lines.push("--- ACTIVITY ---");
+  for (const activity of result.activity) {
+    if (activity.fact.freshness === "unavailable") {
+      lines.push(`Activity ${activity.itemId}: Unobserved`);
+      continue;
+    }
+    if (activity.fact.freshness === "conflict") {
+      lines.push(`Activity ${activity.itemId}: Unknown | contradictory facts`);
+      continue;
+    }
+    const summary = activity.fact.value.summary;
+    if (!("group" in summary)) {
+      lines.push(`Activity ${activity.itemId}: ${summary.activityKind} | ${summary.summary}`);
+      continue;
+    }
+    const group = summary.group;
+    lines.push(
+      `Activity group: ${group.groupId} | ${group.kind} | count ${String(group.count)}`,
+      `Activity target: ${group.target === null ? "Unobserved" : `${group.target.kind}:${group.target.id}`} | source ${String(group.sourceRange.first)}-${String(group.sourceRange.last)}`,
+      ...group.members.map((member) =>
+        `Activity member ${String(member.ordinal)}: ${member.eventId} | ${member.eventKind} | ${member.occurredAt}`
+      ),
+    );
+  }
+  // Left as "Unobserved" deliberately: this branch's observed-empty rule was
+  // written before the activity section existed, so extending it here would be
+  // a new decision rather than a merge. #434 tracks the remaining facts.
+  if (result.activity.length === 0) lines.push("Activity: Unobserved");
+  lines.push("--- ISSUES ---");
+  for (const issue of result.issues) {
+    switch (issue.kind) {
+      case "gate":
+        lines.push(`Blocking issue: gate ${issue.gateId} r${String(issue.gateRevision)} | ${issue.status}`);
+        break;
+      case "task":
+        lines.push(`Blocking issue: task ${issue.taskId} r${String(issue.taskRevision)} | ${issue.state}`);
+        break;
+      case "failed-check":
+        lines.push(`Blocking issue: failed check ${issue.checkId} | task ${issue.taskId}`);
+        break;
+      case "task-fact-conflict":
+        lines.push(`Blocking issue: task ${issue.taskId} | Unknown | contradictory facts`);
+        break;
+      case "evidence-conflict":
+        lines.push(`Blocking issue: evidence conflict ${issue.evidenceId} r${String(issue.evidenceRevision)}`);
+        break;
+    }
+  }
+  if (result.issues.length === 0) lines.push("Blocking issue: None observed");
+  lines.push("--- EVIDENCE ---");
+  for (const artifactRef of result.evidencePaths) {
+    lines.push(`Evidence path: ${artifactRef.path} | ${artifactRef.digest}`);
+  }
+  if (result.evidencePathObservation === "Unknown") {
+    lines.push("Evidence path: Unknown");
+  } else if (result.evidencePaths.length === 0 && result.evidencePathsUnobserved === 0) {
+    lines.push("Evidence path: None observed");
+  }
+  // Rows dropped as unavailable would otherwise leave a complete-looking list.
+  if (result.evidencePathsUnobserved > 0) {
+    lines.push(`Evidence path: Unobserved x${String(result.evidencePathsUnobserved)}`);
+  }
+  return lines;
 }
 
 function gitPathLines(label: string, page: GitPathPage): readonly string[] {

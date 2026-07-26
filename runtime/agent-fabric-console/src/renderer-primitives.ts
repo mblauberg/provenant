@@ -1,3 +1,8 @@
+import type {
+  ProjectSessionId,
+  RunProjectionTarget,
+} from "@local/agent-fabric-protocol";
+
 import type { ConsoleControllerState } from "./controller.js";
 import {
   chromeText,
@@ -17,6 +22,8 @@ export type FabricHitBinding = Readonly<{
   itemId: string;
   itemRevision: Revision;
   projectionRevision: Revision;
+  projectSessionId?: ProjectSessionId;
+  runTarget?: RunProjectionTarget;
 }>;
 
 export type FabricHitRegion = Readonly<{
@@ -85,7 +92,35 @@ export function presentedBinding(
         itemId: row.stableId,
         itemRevision: row.revision,
         projectionRevision: dataset.snapshotRevision,
+        ...runBindingFields(dataset, row),
       };
+}
+
+function runBindingFields(
+  dataset: FabricConsoleDataset,
+  row: PresentedRow,
+): Readonly<{
+  projectSessionId?: ProjectSessionId;
+  runTarget?: RunProjectionTarget;
+}> {
+  if (row.view !== "runs") return {};
+  const source = dataset.pages.runs.rows.find(
+    (candidate) => candidate.stableId === row.stableId && candidate.revision === row.revision,
+  );
+  if (
+    source?.summary?.kind !== "run" ||
+    source.summary.projectSessionId === undefined ||
+    source.detailRef?.kind !== "run"
+  ) {
+    return {};
+  }
+  return {
+    projectSessionId: source.summary.projectSessionId,
+    runTarget: {
+      kind: "coordination-run",
+      coordinationRunId: source.detailRef.coordinationRunId,
+    },
+  };
 }
 
 export function reviewBinding(

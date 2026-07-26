@@ -791,6 +791,144 @@ export type OperatorViewPageResult<View extends ConsoleView = ConsoleView> = Vie
         }
   : never;
 
+export type RunProjectionTarget =
+  | {
+      kind: "coordination-run";
+      coordinationRunId: CoordinationRunId;
+    }
+  | {
+      kind: "delivery-workstream";
+      coordinationRunId: CoordinationRunId;
+      deliveryRunId: DeliveryRunId;
+      workstreamId: WorkstreamId;
+    };
+
+export type RunScopedObservation<Value> =
+  | { observation: "Observed"; value: Value }
+  | { observation: "Unobserved" }
+  | { observation: "Unknown"; reason: "ContradictoryFacts" };
+
+export type RunScopedIdentity = {
+  acceptedScope: RunScopedObservation<ArtifactRef>;
+  currentPlan: RunScopedObservation<{ artifactRef: ArtifactRef; planRevision: number }>;
+  lead: RunScopedObservation<AgentId>;
+  phase: RunScopedObservation<string>;
+  health: RunScopedObservation<RunProjection["health"]>;
+  currentMilestone: RunScopedObservation<string>;
+  nextMilestone: RunScopedObservation<string>;
+  lastEventAt: RunScopedObservation<Timestamp>;
+};
+
+export type RunScopedComposition = {
+  projectSessionId: ProjectSessionId;
+  target: RunProjectionTarget;
+  identity: ProjectionFact<RunScopedIdentity>;
+  declaredProgress: ProjectionFact<RunScopedObservation<DeclaredRunProgress>>;
+};
+
+export type RunIssueReference =
+  | {
+      kind: "gate";
+      scope: Extract<RunProjectionTarget, { kind: "coordination-run" }>;
+      gateId: GateId;
+      gateRevision: number;
+      status: "pending" | "deferred";
+    }
+  | {
+      kind: "task";
+      scope: RunProjectionTarget;
+      taskId: TaskId;
+      taskRevision: number;
+      state: "blocked" | "degraded";
+      detailRef: Extract<OperatorDetailRef, { kind: "task" }>;
+    }
+  | {
+      kind: "failed-check";
+      scope: RunProjectionTarget;
+      taskId: TaskId;
+      taskRevision: number;
+      checkId: string;
+      detailRef: Extract<OperatorDetailRef, { kind: "task" }>;
+    }
+  | {
+      kind: "task-fact-conflict";
+      scope: RunProjectionTarget;
+      taskId: TaskId;
+      taskRevision: number;
+      detailRef: Extract<OperatorDetailRef, { kind: "task" }>;
+    }
+  | {
+      kind: "evidence-conflict";
+      scope: RunProjectionTarget;
+      evidenceId: string;
+      evidenceRevision: number;
+      detailRef: Extract<OperatorDetailRef, { kind: "evidence" }>;
+    };
+
+export type RunProjectionSection =
+  | "work"
+  | "agents"
+  | "evidence"
+  | "activity"
+  | "issues";
+
+export type RunProjectionEntryValueMap = {
+  work: OperatorViewRow<"work">;
+  agents: OperatorViewRow<"agents">;
+  evidence: OperatorViewRow<"evidence">;
+  activity: OperatorViewRow<"activity">;
+  issues: RunIssueReference;
+};
+
+export type RunProjectionPageEntry<
+  Section extends RunProjectionSection = RunProjectionSection,
+> = Section extends RunProjectionSection
+  ? {
+      runScope?: RunProjectionTarget;
+      value: RunProjectionEntryValueMap[Section];
+    }
+  : never;
+
+export type RunProjectionPageRequest<
+  Section extends RunProjectionSection = RunProjectionSection,
+> = {
+  credential: OperatorCapabilityCredential;
+  projectId: ProjectId;
+  projectSessionId: ProjectSessionId;
+  target: RunProjectionTarget;
+  snapshotRevision: number;
+  section: Section;
+  cursor: number;
+  limit: number;
+};
+
+export type RunProjectionPageResult<
+  Section extends RunProjectionSection = RunProjectionSection,
+> = Section extends RunProjectionSection
+  ?
+      | {
+          status: "page";
+          projectSessionId: ProjectSessionId;
+          target: RunProjectionTarget;
+          section: Section;
+          entries: readonly RunProjectionPageEntry<Section>[];
+          nextCursor: number;
+          hasMore: boolean;
+          snapshotRevision: number;
+          readTransactionId: string;
+          composition?: RunScopedComposition;
+        }
+      | {
+          status: "resnapshot-required";
+          projectSessionId: ProjectSessionId;
+          target: RunProjectionTarget;
+          section: Section;
+          reason: "snapshot-mismatch";
+          currentSnapshotRevision: number;
+          snapshotCursor: number;
+        }
+  : never;
+
 export type OperatorDetail =
   | {
       kind: "project";

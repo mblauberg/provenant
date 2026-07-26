@@ -26,10 +26,11 @@ const operatorCommand = {
 } as const;
 
 describe("closed operator Console surface", () => {
-  it("publishes the seven additive operator-only operations", () => {
+  it("publishes the eight additive operator-only operations", () => {
     expect(FABRIC_OPERATIONS).toMatchObject({
       scopedGateRead: "fabric.v1.scoped-gate.read",
       projectionViewPage: "fabric.v1.operator-projection.view-page",
+      projectionRunPage: "fabric.v1.operator-projection.run-page",
       projectionDetailRead: "fabric.v1.operator-projection.detail.read",
       operatorActionPreview: "fabric.v1.operator-action.preview",
       operatorActionCommit: "fabric.v1.operator-action.commit",
@@ -42,6 +43,7 @@ describe("closed operator Console surface", () => {
     const operations = [
       FABRIC_OPERATIONS.scopedGateRead,
       FABRIC_OPERATIONS.projectionViewPage,
+      FABRIC_OPERATIONS.projectionRunPage,
       FABRIC_OPERATIONS.projectionDetailRead,
       FABRIC_OPERATIONS.operatorActionPreview,
       FABRIC_OPERATIONS.operatorActionCommit,
@@ -1060,6 +1062,7 @@ describe("complete-grant Console facade", () => {
   const reads = [
     FABRIC_OPERATIONS.scopedGateRead,
     FABRIC_OPERATIONS.projectionViewPage,
+    FABRIC_OPERATIONS.projectionRunPage,
     FABRIC_OPERATIONS.projectionDetailRead,
   ] as const;
   const mutations = [
@@ -1068,14 +1071,20 @@ describe("complete-grant Console facade", () => {
     FABRIC_OPERATIONS.operatorActionStatus,
     FABRIC_OPERATIONS.operatorActionReconcile,
   ] as const;
+  const projectionFeatures = [
+    "scoped-gate-read.v1",
+    "operator-projection.v2",
+    "run-scoped-projection.v1",
+    "agent-topology-projection.v1",
+    "work-facts-projection.v1",
+  ] as const;
 
   it("degrades honestly to read-only when mutation grants are absent or partial", () => {
-    const readOnly = consoleClient(reads, ["scoped-gate-read.v1", "operator-projection.v2"]);
+    const readOnly = consoleClient(reads, projectionFeatures);
     expect(readOnly.console).toMatchObject({ readOnly: true });
     expect(readOnly.console).not.toHaveProperty("actions");
     const partial = consoleClient([...reads, mutations[0]], [
-      "scoped-gate-read.v1",
-      "operator-projection.v2",
+      ...projectionFeatures,
       "operator-actions.v1",
     ]);
     expect(partial.console).toMatchObject({ readOnly: true });
@@ -1084,8 +1093,7 @@ describe("complete-grant Console facade", () => {
 
   it("exposes mutations only after all four action operations are granted", () => {
     const full = consoleClient([...reads, ...mutations], [
-      "scoped-gate-read.v1",
-      "operator-projection.v2",
+      ...projectionFeatures,
       "operator-actions.v1",
     ]);
     expect(full.console).toMatchObject({ readOnly: false });
@@ -1096,9 +1104,22 @@ describe("complete-grant Console facade", () => {
   });
 
   it("omits the Console facade when any canonical read operation is missing", () => {
-    expect(consoleClient(reads.slice(0, 2), ["scoped-gate-read.v1", "operator-projection.v2"])).not.toHaveProperty(
+    expect(consoleClient(reads.slice(0, 3), projectionFeatures)).not.toHaveProperty(
       "console",
     );
+  });
+
+  it("rejects a peer that does not negotiate the run-scoped result shape", () => {
+    for (const missing of [
+      "run-scoped-projection.v1",
+      "agent-topology-projection.v1",
+      "work-facts-projection.v1",
+    ]) {
+      expect(consoleClient(
+        reads,
+        projectionFeatures.filter((feature) => feature !== missing),
+      )).not.toHaveProperty("console");
+    }
   });
 });
 

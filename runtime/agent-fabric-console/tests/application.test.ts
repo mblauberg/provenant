@@ -196,6 +196,9 @@ function protocolPort(): ConsoleProtocolPort {
       snapshotRevision: request.snapshotRevision,
       readTransactionId: `page-${request.view}`,
     }) as never),
+    runPage: vi.fn(async () => {
+      throw new Error("unused run page");
+    }),
     readDetail: vi.fn(async (): Promise<OperatorDetailReadResult> => ({
       status: "resnapshot-required",
       reason: "snapshot-mismatch",

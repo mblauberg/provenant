@@ -115,6 +115,25 @@ function activityPage(rows: readonly unknown[]) {
   };
 }
 
+function runActivityPage(rows: readonly unknown[]) {
+  const target = {
+    kind: "coordination-run",
+    coordinationRunId: "run_01",
+  } as const;
+  return {
+    status: "page",
+    projectSessionId: "session_01",
+    target,
+    section: "activity",
+    entries: rows.map((value) => ({ runScope: target, value })),
+    nextCursor: rows.length,
+    hasMore: false,
+    snapshotRevision: 11,
+    readTransactionId: "read_run_activity_groups",
+    composition: {},
+  };
+}
+
 const legacySummary = {
   kind: "activity",
   activityKind: "operation",
@@ -194,6 +213,36 @@ describe("activity-narrative-grouping.v1 closed result shape", () => {
       ["operator-projection.v2", ACTIVITY_NARRATIVE_GROUPING_FEATURE],
       mixed,
     )).toThrow(expect.objectContaining({ reason: "mixed-presence" }));
+  });
+
+  it("enforces grouping presence on exact run activity pages", () => {
+    const grouped = runActivityPage([activityRow(groupedSummary)]);
+    const legacy = runActivityPage([activityRow(legacySummary, {
+      kind: "activity",
+      eventId: "event_tool",
+      expectedRevision: 8,
+    })]);
+    const groupedFeatures = [
+      "operator-projection.v2",
+      "run-scoped-projection.v1",
+      ACTIVITY_NARRATIVE_GROUPING_FEATURE,
+    ] as const;
+
+    expect(assertOperationResultFeatureShape(
+      FABRIC_OPERATIONS.projectionRunPage,
+      groupedFeatures,
+      grouped as never,
+    )).toBe(grouped);
+    expect(() => assertOperationResultFeatureShape(
+      FABRIC_OPERATIONS.projectionRunPage,
+      groupedFeatures,
+      legacy as never,
+    )).toThrow(expect.objectContaining({ reason: "missing-negotiated-field" }));
+    expect(() => assertOperationResultFeatureShape(
+      FABRIC_OPERATIONS.projectionRunPage,
+      ["operator-projection.v2", "run-scoped-projection.v1"],
+      grouped as never,
+    )).toThrow(expect.objectContaining({ reason: "unnegotiated-field" }));
   });
 
   it("pins a vocabulary that cannot claim lifecycle, progress, or completion", () => {
