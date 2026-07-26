@@ -10,6 +10,7 @@ import {
   mkdtempSync,
   openSync,
   realpathSync,
+  readdirSync,
   renameSync,
   rmdirSync,
   rmSync,
@@ -70,6 +71,15 @@ export type DatabaseArchiveAndFreshResult =
     sourcePreserved: true;
   }>
   | DatabaseCutoverBase & Readonly<{
+    status: "recovery-required";
+    code: "CUTOVER_RESIDUE_DETECTED";
+    archiveDirectory: string;
+    claimDirectories: readonly string[];
+    stagingDirectories: readonly string[];
+    sourcePreserved: true;
+    recovery: Readonly<{ action: string }>;
+  }>
+  | DatabaseCutoverBase & Readonly<{
     status: "conflict";
     code: "PARTIAL_SQLITE_SOURCE_SET";
     confirmation: Readonly<{ sourceSetSha256: string; confirmed: false }>;
@@ -113,6 +123,8 @@ export type DatabaseArchiveAndFreshResult =
     confirmation: Readonly<{ sourceSetSha256: string; confirmed: true }>;
     source: Readonly<{ disposition: "archived"; members: readonly SourceMemberReceipt[] }>;
     freshBaseline: Readonly<{ status: "pending" | "current"; currentVersion?: 1 }>;
+    claimDirectory?: string;
+    claimDirectoryDisposition?: "preserved" | "removed-after-rollback" | "removed-empty";
     message: string;
     recovery: Readonly<{
       boundary: "archive-complete";
@@ -143,7 +155,9 @@ export type DatabaseArchiveAndFreshDependencies = Readonly<{
   ) => void;
   writeArchiveFile?: (path: string, bytes: Buffer, mode: number) => void;
   beforeSourceClaim?: () => void;
+  prepareClaimDirectory?: (claimedDirectory: string) => void;
   claimSourceFile?: (sourcePath: string, claimedPath: string) => void;
+  claimedSourceExists?: (claimedPath: string) => boolean;
   removeClaimedSource?: (claimedDirectory: string) => void;
   initialiseFreshDatabase?: (databasePath: string) => void;
   finaliseReceipt?: (receiptPath: string, receipt: Record<string, unknown>) => void;
@@ -162,7 +176,7 @@ function isCompleteSqliteSourceShape(sources: StableSourceSet): boolean {
   const hasWal = sources.has("-wal");
   const hasShm = sources.has("-shm");
   const hasJournal = sources.has("-journal");
-  return hasWal === hasShm && !(hasJournal && (hasWal || hasShm));
+  return (!hasShm || hasWal) && !(hasJournal && (hasWal || hasShm));
 }
 
 function inspectionResult(
@@ -329,6 +343,23 @@ type ClaimedSourceSet = Readonly<{
   databasePath: string;
 }>;
 
+class SourceClaimError extends Error {
+  readonly claimDirectory: string;
+  readonly claimDirectoryDisposition: "preserved" | "removed-after-rollback" | "removed-empty";
+
+  constructor(
+    message: string,
+    cause: unknown,
+    claimDirectory: string,
+    claimDirectoryDisposition: SourceClaimError["claimDirectoryDisposition"],
+  ) {
+    super(message, { cause });
+    this.name = "SourceClaimError";
+    this.claimDirectory = claimDirectory;
+    this.claimDirectoryDisposition = claimDirectoryDisposition;
+  }
+}
+
 function assertClaimedSourceSet(expected: StableSourceSet, actual: StableSourceSet): void {
   const stableClaimFields = [
     "dev",
@@ -410,15 +441,17 @@ function restoreClaimedSourceSet(
 function claimSourceSet(
   databasePath: string,
   expected: StableSourceSet,
+  prepareClaimDirectory: (claimedDirectory: string) => void,
   claimSourceFile: (sourcePath: string, claimedPath: string) => void,
+  claimedSourceExists: (claimedPath: string) => boolean,
 ): ClaimedSourceSet {
   const directory = mkdtempSync(join(
     dirname(databasePath),
     `.${basename(databasePath)}.cutover-claim-`,
   ));
-  chmodSync(directory, 0o700);
   const claimed = { directory, databasePath: join(directory, basename(databasePath)) };
   try {
+    prepareClaimDirectory(directory);
     for (const suffix of SQLITE_SOURCE_SUFFIXES) {
       if (!expected.has(suffix)) continue;
       claimSourceFile(`${databasePath}${suffix}`, `${claimed.databasePath}${suffix}`);
@@ -429,18 +462,114 @@ function claimSourceSet(
     syncPath(dirname(databasePath));
     return claimed;
   } catch (error: unknown) {
+    let claimedAnySource: boolean;
+    try {
+      claimedAnySource = SQLITE_SOURCE_SUFFIXES.some((suffix) =>
+        claimedSourceExists(`${claimed.databasePath}${suffix}`)
+      );
+    } catch (classificationError: unknown) {
+      throw new SourceClaimError(
+        `database source claim failed and claim-state classification also failed: ${
+          classificationError instanceof Error
+            ? classificationError.message
+            : String(classificationError)
+        }`,
+        error,
+        claimed.directory,
+        "preserved",
+      );
+    }
+    if (!claimedAnySource) {
+      try {
+        rmdirSync(claimed.directory);
+        syncPath(dirname(databasePath));
+      } catch (cleanupError: unknown) {
+        throw new SourceClaimError(
+          `database source claim failed before any source file was claimed, and its empty private claim directory could not be removed: ${
+            cleanupError instanceof Error ? cleanupError.message : String(cleanupError)
+          }`,
+          error,
+          claimed.directory,
+          "preserved",
+        );
+      }
+      const emptyClaimMessage =
+        error instanceof Error && "code" in error && error.code === "ENOENT"
+          ? "database source claim failed before any source files were claimed; another cutover may have claimed the source set first"
+          : `database source claim failed before any source files were claimed; no rollback was required: ${
+            error instanceof Error ? error.message : String(error)
+          }`;
+      throw new SourceClaimError(
+        emptyClaimMessage,
+        error,
+        claimed.directory,
+        "removed-empty",
+      );
+    }
     try {
       restoreClaimedSourceSet(databasePath, claimed, expected);
     } catch (restoreError: unknown) {
-      throw new Error(
+      throw new SourceClaimError(
         `database source claim failed and exact rollback also failed: ${
           restoreError instanceof Error ? restoreError.message : String(restoreError)
         }`,
-        { cause: error },
+        error,
+        claimed.directory,
+        "preserved",
       );
     }
+    throw new SourceClaimError(
+      `database source claim failed after a partial claim; exact rollback restored the source set: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+      error,
+      claimed.directory,
+      "removed-after-rollback",
+    );
+  }
+}
+
+function matchingHiddenDirectories(parent: string, prefix: string): string[] {
+  try {
+    return readdirSync(parent, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() && entry.name.startsWith(prefix))
+      .map((entry) => join(parent, entry.name))
+      .sort();
+  } catch (error: unknown) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") return [];
     throw error;
   }
+}
+
+function cutoverResidueResult(
+  options: DatabaseArchiveAndFreshOptions,
+): Extract<DatabaseArchiveAndFreshResult, { status: "recovery-required" }> | undefined {
+  const claimDirectories = matchingHiddenDirectories(
+    dirname(options.databasePath),
+    `.${basename(options.databasePath)}.cutover-claim-`,
+  );
+  const stagingDirectories = isAbsolute(options.archiveDirectory)
+    ? matchingHiddenDirectories(
+      dirname(options.archiveDirectory),
+      `.${basename(options.archiveDirectory)}.staging-`,
+    )
+    : [];
+  if (claimDirectories.length === 0 && stagingDirectories.length === 0) return undefined;
+  return {
+    schemaVersion: 1,
+    kind: "agent-fabric-database-archive-and-fresh",
+    status: "recovery-required",
+    code: "CUTOVER_RESIDUE_DETECTED",
+    databasePath: options.databasePath,
+    archiveDirectory: options.archiveDirectory,
+    claimDirectories,
+    stagingDirectories,
+    sourcePreserved: true,
+    recovery: {
+      action:
+        "Do not start Fabric or rerun the cutover. Preserve every listed directory and compare its members, identities and sha256 values with any live source set and archive receipt. Manually restore or archive unique state; remove an empty residue directory only after verifying it contains no source data.",
+    },
+  };
 }
 
 function publishArchive(
@@ -534,6 +663,18 @@ export function archiveAndFreshDatabase(
 ): DatabaseArchiveAndFreshResult {
   const inspection = inspectFabricDatabaseForCutover(options.databasePath);
   const preview = inspectionResult(options.databasePath, inspection);
+  // Residue detection is scoped to the no-op verdicts, which are the ones that
+  // would otherwise hide it: an interrupted cutover leaves the live database
+  // absent while the complete original set sits in the hidden claim directory,
+  // and the caller sees `no-op`/exit 0. Scanning on every path instead would
+  // read a *live* concurrent cutover's claim directory as crash residue and
+  // answer an ordinary preview with "do not start Fabric" -- the same alarming
+  // wording for a benign outcome that the race-loser message above exists to
+  // stop. The claim race already handles concurrency safely on those paths.
+  if (preview.status === "no-op") {
+    const residue = cutoverResidueResult(options);
+    if (residue !== undefined) return residue;
+  }
   if (inspection.state !== "incompatible" || preview.status !== "confirmation-required") {
     return preview;
   }
@@ -579,7 +720,9 @@ export function archiveAndFreshDatabase(
     claimed = claimSourceSet(
       options.databasePath,
       inspection.sources,
+      dependencies.prepareClaimDirectory ?? ((path) => chmodSync(path, 0o700)),
       dependencies.claimSourceFile ?? renameSync,
+      dependencies.claimedSourceExists ?? pathExists,
     );
   } catch (error: unknown) {
     return {
@@ -596,6 +739,12 @@ export function archiveAndFreshDatabase(
         members: sourceMembers(options.databasePath, inspection.sources),
       },
       freshBaseline: { status: "pending" },
+      ...(error instanceof SourceClaimError
+        ? {
+          claimDirectory: error.claimDirectory,
+          claimDirectoryDisposition: error.claimDirectoryDisposition,
+        }
+        : {}),
       message: error instanceof Error ? error.message : String(error),
       recovery: { boundary: "archive-complete", action: displacementRecoveryAction },
     };
@@ -618,6 +767,8 @@ export function archiveAndFreshDatabase(
         members: sourceMembers(options.databasePath, inspection.sources),
       },
       freshBaseline: { status: "pending" },
+      claimDirectory: claimed.directory,
+      claimDirectoryDisposition: "preserved",
       message: error instanceof Error ? error.message : String(error),
       recovery: { boundary: "archive-complete", action: recoveryAction },
     };
@@ -794,7 +945,8 @@ export function runDatabaseArchiveAndFreshCli(
     return {
       result,
       exitCode: result.status === "archive-complete-fresh-init-failed" ||
-          result.status === "archive-complete-cutover-failed"
+          result.status === "archive-complete-cutover-failed" ||
+          result.status === "recovery-required"
         ? 4
         : result.status === "failed" || result.status === "conflict"
           ? 1
