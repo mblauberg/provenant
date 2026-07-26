@@ -32,7 +32,7 @@ fs.writeFileSync(${JSON.stringify(argumentsPath)}, JSON.stringify(process.argv.s
 fs.writeFileSync(out, JSON.stringify({
   schema_version: 1, source: "claude subscription canary", observed_at: new Date().toISOString(),
   provenance: { kind: "subscription_runtime_canary", auth_method: "claude.ai", subscription_type: "pro" },
-  models: { [alias]: { resolved_model: "claude-" + alias + "-5", supported_efforts: [effort] } }
+  models: { [alias]: { resolved_model: "claude-" + alias + "-5", requested_effort: effort, effort_verified: false } }
 }));
 `, { mode: 0o700 });
 
@@ -111,7 +111,7 @@ fs.writeFileSync(${JSON.stringify(argumentsPath)}, JSON.stringify(process.argv.s
 fs.writeFileSync(out, JSON.stringify({
   schema_version: 1, source: "claude subscription canary", observed_at: new Date().toISOString(),
   provenance: { kind: "subscription_runtime_canary", auth_method: "claude.ai", subscription_type: "pro" },
-  models: { [alias]: { resolved_model: "claude-" + alias + "-5", supported_efforts: [effort] } }
+  models: { [alias]: { resolved_model: "claude-" + alias + "-5", requested_effort: effort, effort_verified: false } }
 }));
 `, { mode: 0o700 });
 

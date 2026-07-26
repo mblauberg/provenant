@@ -17,7 +17,10 @@ def load_module():
     return module
 
 
-def fake_claude(tmp_path, *, auth_method="claude.ai", model_usage=None, is_error=False):
+def fake_claude(
+    tmp_path, *, auth_method="claude.ai", model_usage=None, is_error=False,
+    effort_warning=False,
+):
     path = tmp_path / "claude"
     path.write_text(f'''#!/usr/bin/env python3
 import json
@@ -30,6 +33,9 @@ if sys.argv[1:3] == ["auth", "status"]:
 else:
     required = ["-p", "--safe-mode", "--no-session-persistence", "--permission-mode", "plan", "--tools", "", "--model", "opus", "--effort", "medium", "--output-format", "json"]
     assert all(item in sys.argv[1:] for item in required)
+    if {effort_warning!r}:
+        print("Warning: Unknown --effort value 'medium' - ignoring it and using the default effort.", file=sys.stderr)
+        print("Valid values: low, medium, high, xhigh, max.", file=sys.stderr)
     print(json.dumps({{
         "type": "result", "subtype": "success", "is_error": {is_error!r},
         "result": "OK", "modelUsage": {model_usage or {
@@ -60,7 +66,11 @@ def test_subscription_canary_emits_scrubbed_runtime_capability(tmp_path):
         "subscription_type": "pro",
     }
     assert snapshot["models"] == {
-        "opus": {"resolved_model": "claude-opus-4-8", "supported_efforts": ["medium"]}
+        "opus": {
+            "resolved_model": "claude-opus-4-8",
+            "requested_effort": "medium",
+            "effort_verified": False,
+        }
     }
     encoded = output.read_text()
     assert "secret@example.com" not in encoded
@@ -79,6 +89,18 @@ def test_subscription_canary_rejects_unproven_or_ambiguous_results(tmp_path, kwa
     module = load_module()
     output = tmp_path / "capabilities.json"
     executable = fake_claude(tmp_path, **kwargs)
+
+    assert module.main([
+        "--out", str(output), "--claude-bin", str(executable),
+        "--alias", "opus", "--effort", "medium",
+    ]) == 1
+    assert not output.exists()
+
+
+def test_subscription_canary_rejects_unknown_effort_warning(tmp_path):
+    module = load_module()
+    output = tmp_path / "capabilities.json"
+    executable = fake_claude(tmp_path, effort_warning=True)
 
     assert module.main([
         "--out", str(output), "--claude-bin", str(executable),
