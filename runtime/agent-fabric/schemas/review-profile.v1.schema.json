@@ -2,13 +2,25 @@
   "$schema":"https://json-schema.org/draft/2020-12/schema",
   "$id":"https://agent-fabric.local/schemas/review-profile.v1.schema.json",
   "type":"object","additionalProperties":false,
-  "required":["schemaVersion","profileId","chairProfiles"],
+  "required":["schemaVersion","profileId","chairProfiles","pinObservations"],
   "properties":{
     "schemaVersion":{"const":1},"profileId":{"const":"certifying-review-four-slot-v1"},
-    "chairProfiles":{"type":"array","minItems":2,"maxItems":2,"prefixItems":[{"$ref":"#/$defs/openaiProfile"},{"$ref":"#/$defs/anthropicProfile"}],"items":false}
+    "chairProfiles":{"type":"array","minItems":2,"maxItems":2,"prefixItems":[{"$ref":"#/$defs/openaiProfile"},{"$ref":"#/$defs/anthropicProfile"}],"items":false},
+    "pinObservations":{"type":"array","minItems":1,"maxItems":8,"uniqueItems":true,"items":{"$ref":"#/$defs/pinObservation"}}
   },
   "$defs":{
     "digest":{"type":"string","pattern":"^sha256:[0-9a-f]{64}$"},
+    "pinObservation":{"type":"object","additionalProperties":false,
+      "required":["providerFamily","model","routeAlias","observedOn","observedVia"],
+      "properties":{
+        "providerFamily":{"enum":["openai","anthropic","xai","google"]},"model":{"type":"string","minLength":1},
+        "routeAlias":{"type":"string","minLength":1},"observedOn":{"type":"string","pattern":"^[0-9]{4}-[0-9]{2}-[0-9]{2}$"},
+        "observedVia":{"enum":["claude-subscription-canary","codex-model-catalogue","manual-attestation"]}
+      },"allOf":[
+        {"if":{"required":["providerFamily"],"properties":{"providerFamily":{"const":"anthropic"}}},"then":{"properties":{"observedVia":{"const":"claude-subscription-canary"}}}},
+        {"if":{"required":["providerFamily"],"properties":{"providerFamily":{"const":"openai"}}},"then":{"properties":{"observedVia":{"const":"codex-model-catalogue"}}}},
+        {"if":{"required":["providerFamily"],"properties":{"providerFamily":{"enum":["xai","google"]}}},"then":{"properties":{"observedVia":{"const":"manual-attestation"}}}}
+      ]},
     "effort":{"oneOf":[
       {"type":"object","additionalProperties":false,"required":["kind","value"],"properties":{"kind":{"const":"applied"},"value":{"type":"string","minLength":1}}},
       {"type":"object","additionalProperties":false,"required":["kind"],"properties":{"kind":{"const":"inapplicable"}}}

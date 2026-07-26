@@ -34,6 +34,42 @@ describe("Agent Fabric review schemas and checked-in catalogues", () => {
     expect(validate(crossedRisk)).toBe(false);
   });
 
+  it("dates every pinned identity against the observer its family actually has", () => {
+    const ajv = new Ajv2020({ allErrors: true, strict: true });
+    const validate = ajv.compile(read("runtime/agent-fabric/schemas/review-profile.v1.schema.json"));
+    const profile = read("config/review-profiles/certifying-review-four-slot-v1.json");
+    const slots = profile.chairProfiles.flatMap((chair: any) => chair.slots);
+    const pinned = new Set(slots.map((slot: any) => `${slot.providerFamily} ${slot.model}`));
+    const observed = profile.pinObservations.map((entry: any) => `${entry.providerFamily} ${entry.model}`);
+    // Exactly one dated record per distinct pin: no pin is silent, none is orphaned.
+    expect(new Set(observed)).toStrictEqual(pinned);
+    expect(observed).toHaveLength(pinned.size);
+    for (const entry of profile.pinObservations) {
+      const declaring = slots.filter((slot: any) =>
+        slot.providerFamily === entry.providerFamily && slot.model === entry.model);
+      expect(declaring.every((slot: any) => slot.routeAliases.includes(entry.routeAlias)), entry.model).toBe(true);
+    }
+    expect(profile.pinObservations.map((entry: any) => [entry.providerFamily, entry.observedVia])).toStrictEqual([
+      ["openai", "codex-model-catalogue"],
+      ["anthropic", "claude-subscription-canary"],
+      ["xai", "manual-attestation"],
+      ["google", "manual-attestation"],
+    ]);
+    expect(validate(profile), JSON.stringify(validate.errors)).toBe(true);
+
+    // A family with an observer cannot be downgraded to a manual attestation to
+    // silence its own drift comparison, and no pin may go undated at all.
+    const downgraded = structuredClone(profile);
+    downgraded.pinObservations[1].observedVia = "manual-attestation";
+    expect(validate(downgraded)).toBe(false);
+    const undated = structuredClone(profile);
+    delete undated.pinObservations;
+    expect(validate(undated)).toBe(false);
+    const malformedDate = structuredClone(profile);
+    malformedDate.pinObservations[0].observedOn = "26 July 2026";
+    expect(validate(malformedDate)).toBe(false);
+  });
+
   it("catalogues every Agent Fabric v1.13 acceptance ID under the current semantic review gates", () => {
     const ajv = new Ajv2020({ allErrors: true, strict: true });
     const validate = ajv.compile(read("runtime/agent-fabric/schemas/console-acceptance-delivery-requirements.v1.schema.json"));

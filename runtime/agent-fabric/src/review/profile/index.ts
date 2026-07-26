@@ -8,6 +8,22 @@ export type ResolvedEffort = { kind: "applied"; value: string } | { kind: "inapp
 export interface ReviewProfileCatalogue {
   schemaVersion: 1;
   profileId: "certifying-review-four-slot-v1";
+  /**
+   * Dated evidence that each pinned identity was observed to be what the slots
+   * declare. Deliberately a sibling of `chairProfiles`, never a slot field:
+   * `resolveReviewProfile` spreads slots into `ResolvedReviewProfileSlot`, whose
+   * schema is closed and which certifying evidence byte-matches, so a slot-level
+   * observation field would change what a certifying receipt asserts. It still
+   * lives inside the digest-bound catalogue document, so a refresh is a
+   * deliberate, reviewable commit.
+   */
+  pinObservations?: readonly {
+    providerFamily: ModelFamily;
+    model: string;
+    routeAlias: string;
+    observedOn: string;
+    observedVia: "claude-subscription-canary" | "codex-model-catalogue" | "manual-attestation";
+  }[];
   chairProfiles: readonly {
     targetChairFamily: "openai" | "anthropic";
     slots: readonly {

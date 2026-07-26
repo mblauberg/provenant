@@ -138,6 +138,20 @@ async function paths(): Promise<FabricPaths> {
   return { stateDirectory, runtimeDirectory, databasePath, socketPath: join(runtimeDirectory, "fabric-v1.sock") };
 }
 
+/** Copy the repository's certifying profile and routing catalogue into a fixture home. */
+async function writeReviewProfileFixture(directory: string): Promise<void> {
+  const root = resolve(import.meta.dirname, "../../../..");
+  await mkdir(join(directory, "config", "review-profiles"), { recursive: true });
+  await writeFile(
+    join(directory, "config", "review-profiles", "certifying-review-four-slot-v1.json"),
+    await readFile(join(root, "config", "review-profiles", "certifying-review-four-slot-v1.json"), "utf8"),
+  );
+  await writeFile(
+    join(directory, "config", "model-routing.json"),
+    await readFile(join(root, "config", "model-routing.json"), "utf8"),
+  );
+}
+
 async function writeStoppedGeneration(
   value: FabricPaths,
   outcome: { exitCode: number | null; signal: NodeJS.Signals | null },
@@ -262,11 +276,108 @@ describe("machine status and doctor", () => {
         ],
       },
     });
-    const checks = result.checks as Array<{ id: string; status: string }>;
+    const checks = result.checks as Array<{ id: string; status: string; detail: string }>;
     expect(checks.find((item) => item.id === "configuration")?.status).toBe("pass");
     expect(checks.find((item) => item.id === "adapter-compatibility")?.status).toBe("pass");
     expect(checks.find((item) => item.id === "database-integrity")?.status).toBe("pass");
     expect(checks.find((item) => item.id === "daemon-socket")?.status).toBe("idle");
+    // No certifying profile declares a pin here, so nothing is compared and
+    // nothing is unknown: an absent expectation is not evidence.
+    expect(checks.find((item) => item.id === "review-profile-pins")).toMatchObject({
+      status: "pass",
+      detail: "no certifying profile pins in the comparison set",
+    });
+  });
+
+  it.each([
+    {
+      label: "clean",
+      observed: "claude-opus-5",
+      status: "pass",
+      code: "REVIEW_PROFILE_PIN_OK",
+      healthy: true,
+    },
+    {
+      label: "drifted",
+      observed: "claude-opus-6",
+      status: "fail",
+      code: "REVIEW_PROFILE_PIN_DRIFT",
+      healthy: false,
+    },
+  ])("reports the certifying profile pin comparison as $label", async ({ observed, status, code, healthy }) => {
+    const value = await paths();
+    const fixture = await createPortableActivatedPrimaryFixture();
+    cleanup.push(fixture.directory);
+    await writeReviewProfileFixture(fixture.directory);
+    const result = await fabricDoctor([
+      "--agents-home", fixture.directory,
+      "--trusted-config", fixture.configPath,
+      "--compatibility", fixture.compatibilityPath,
+      "--compatibility-schema", fixture.schemaPath,
+    ], value, {
+      observeReviewProfilePin: async ({ providerFamily }) => ({
+        status: "observed",
+        model: providerFamily === "anthropic" ? observed : "gpt-5.6-sol",
+        detail: "fixture",
+      }),
+    });
+    const checks = result.checks as Array<{ id: string; status: string; code: string; detail: string }>;
+    const check = checks.find((item) => item.id === "review-profile-pins")!;
+    expect(result.healthy).toBe(healthy);
+    expect(check).toMatchObject({ status, code });
+    expect(check.detail.includes("npm run profile:pin")).toBe(status === "fail");
+    expect(result.reviewProfilePins).toMatchObject({
+      repairCommand: "npm run profile:pin",
+      attested: [
+        expect.objectContaining({ providerFamily: "xai", observedOn: "2026-07-16" }),
+        expect.objectContaining({ providerFamily: "google", observedOn: "2026-07-16" }),
+      ],
+    });
+  });
+
+  it("never writes the certifying profile it reports on, even when it is drifted", async () => {
+    const value = await paths();
+    const fixture = await createPortableActivatedPrimaryFixture();
+    cleanup.push(fixture.directory);
+    await writeReviewProfileFixture(fixture.directory);
+    const profilePath = join(fixture.directory, "config", "review-profiles", "certifying-review-four-slot-v1.json");
+    const before = await readFile(profilePath, "utf8");
+    // A refresh moves the digest-bound catalogue, so it must never be a side
+    // effect of a report: only an explicit repair may write.
+    await fabricDoctor([
+      "--agents-home", fixture.directory,
+      "--trusted-config", fixture.configPath,
+      "--compatibility", fixture.compatibilityPath,
+      "--compatibility-schema", fixture.schemaPath,
+    ], value, {
+      observeReviewProfilePin: async () => ({ status: "observed", model: "some-newer-model", detail: "fixture" }),
+    });
+    expect(await readFile(profilePath, "utf8")).toBe(before);
+  });
+
+  it("reports an unobservable provider as unknown without failing doctor or naming a repair", async () => {
+    const value = await paths();
+    const fixture = await createPortableActivatedPrimaryFixture();
+    cleanup.push(fixture.directory);
+    await writeReviewProfileFixture(fixture.directory);
+    const result = await fabricDoctor([
+      "--agents-home", fixture.directory,
+      "--trusted-config", fixture.configPath,
+      "--compatibility", fixture.compatibilityPath,
+      "--compatibility-schema", fixture.schemaPath,
+    ], value, {
+      observeReviewProfilePin: async () => ({
+        status: "unobservable",
+        detail: "Claude subscription authentication is unavailable",
+      }),
+    });
+    const checks = result.checks as Array<{ id: string; status: string; code: string; detail: string }>;
+    const check = checks.find((item) => item.id === "review-profile-pins")!;
+    expect(result.healthy).toBe(true);
+    expect(check).toMatchObject({ status: "idle", code: "REVIEW_PROFILE_PIN_UNKNOWN" });
+    expect(check.detail).not.toContain("npm run profile:pin");
+    const compared = (result.reviewProfilePins as { compared: Array<{ state: string }> }).compared;
+    expect(compared.map((pin) => pin.state)).toStrictEqual(["unknown", "unknown"]);
   });
 
   it("treats an absent executable pin as clean and never compares the package version", async () => {
