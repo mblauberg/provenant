@@ -13,7 +13,16 @@ source_size_ceilings:
   runtime/agent-fabric/src/operator/git-repository-read.ts: 1244
   runtime/agent-fabric/src/results/store.ts: 1232
   runtime/agent-fabric/src/gates/store.ts: 1184
+  # Crossed 1000 when the exact run drill-down (#410) and deterministic activity
+  # grouping (#411) both landed codecs in these two files. Each addition is small
+  # and neither feature owns the file, so splitting them inside the merge that
+  # crossed the cap would trade a real regression risk for a cosmetic one -- the
+  # same reasoning that filed #422 rather than splitting model_route.py during
+  # #405. Ceilings are pinned at the current size, so they cannot drift further;
+  # #452 owns the split.
+  runtime/agent-fabric-protocol/src/projection.ts: 1057
   runtime/agent-fabric/src/integrations/herdr-fabric-ports.ts: 1044
+  runtime/agent-fabric-protocol/src/operation-codecs/operator-projection.ts: 1017
 
 import_allowances:
   - file: runtime/agent-fabric/src/index.ts
