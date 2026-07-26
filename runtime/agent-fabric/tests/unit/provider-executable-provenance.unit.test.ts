@@ -1,6 +1,57 @@
+import type { ChildProcess, ExecFileException, ExecFileOptionsWithStringEncoding } from "node:child_process";
+
 import { describe, expect, it, vi } from "vitest";
 
+type ExecFileCallback = (error: ExecFileException | null, stdout: string, stderr: string) => void;
+
+const codesignFixture = vi.hoisted(() => ({
+  invocations: [] as Array<{
+    child: ChildProcess;
+    closed: Promise<{ code: number | null; signal: NodeJS.Signals | null }>;
+    timeout: number | undefined;
+    killSignal: NodeJS.Signals | number | undefined;
+  }>,
+}));
+
+vi.mock("node:child_process", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:child_process")>();
+  const fixtureExecFile = ((
+    file: string,
+    _arguments: readonly string[],
+    optionsOrCallback: ExecFileOptionsWithStringEncoding | ExecFileCallback,
+    callback?: ExecFileCallback,
+  ): ChildProcess => {
+    if (file !== "/usr/bin/codesign") throw new Error(`unexpected executable: ${file}`);
+    const options = typeof optionsOrCallback === "function"
+      ? { encoding: "utf8" as const }
+      : optionsOrCallback;
+    const completion = typeof optionsOrCallback === "function" ? optionsOrCallback : callback;
+    if (completion === undefined) throw new Error("codesign fixture requires a completion callback");
+    const fixtureOptions = {
+      ...options,
+      ...(options.timeout === undefined ? {} : { timeout: 50 }),
+    };
+    const child = actual.execFile(process.execPath, [
+      "-e",
+      "process.on('SIGTERM', () => {}); setInterval(() => {}, 1_000);",
+    ], fixtureOptions, completion);
+    const closed = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
+      child.once("close", (code, signal) => resolve({ code, signal }));
+    });
+    codesignFixture.invocations.push({
+      child,
+      closed,
+      timeout: options.timeout,
+      killSignal: options.killSignal,
+    });
+    return child;
+  }) as typeof actual.execFile;
+
+  return { ...actual, execFile: fixtureExecFile };
+});
+
 import {
+  SYSTEM_PORT,
   verifyProviderExecutableIdentity,
   type ProviderIdentityPort,
 } from "../../src/adapters/provider-identity.ts";
@@ -28,6 +79,45 @@ function port(overrides: Partial<ProviderIdentityPort> = {}): ProviderIdentityPo
 }
 
 describe("provider executable identity", () => {
+  it("terminates a codesign child at its deadline and reports an incomplete probe", async () => {
+    const result = await Promise.race([
+      verifyProviderExecutableIdentity({
+        adapterId: "claude-agent-sdk",
+        executable: "/opt/homebrew/bin/claude",
+      }, port({
+        // Keep the real signature probe: it is what spawns codesign, which this
+        // test exists to bound. Only the path inspection is stubbed, because
+        // inspecting a real binary is platform-dependent.
+        verifySignature: SYSTEM_PORT.verifySignature,
+      })).then(
+        () => ({ outcome: "resolved" as const }),
+        (error: unknown) => ({ outcome: "rejected" as const, error }),
+      ),
+      new Promise<{ outcome: "fixture-timeout" }>((resolve) => {
+        setTimeout(() => resolve({ outcome: "fixture-timeout" }), 500);
+      }),
+    ]);
+    const invocation = codesignFixture.invocations[0];
+
+    try {
+      expect(result).toMatchObject({
+        outcome: "rejected",
+        error: { code: "ADAPTER_INTERFACE_PROBE_INCOMPLETE" },
+      });
+      expect(invocation).toBeDefined();
+      expect(invocation?.timeout).toBe(15_000);
+      expect(invocation?.killSignal).toBe("SIGKILL");
+      await expect(invocation?.closed).resolves.toEqual({ code: null, signal: "SIGKILL" });
+      expect(invocation?.child.exitCode).toBeNull();
+      expect(invocation?.child.signalCode).toBe("SIGKILL");
+    } finally {
+      if (invocation?.child.exitCode === null && invocation.child.signalCode === null) {
+        invocation.child.kill("SIGKILL");
+        await invocation.closed;
+      }
+    }
+  });
+
   it("accepts changed bytes when vendor identity and safe path still conform", async () => {
     const first = await verifyProviderExecutableIdentity({
       adapterId: "claude-agent-sdk",
