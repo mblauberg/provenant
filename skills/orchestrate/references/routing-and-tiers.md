@@ -27,13 +27,14 @@ defaults. An explicit role override may raise effort; an unavailable effort may
 substitute only when the receipt records requested and effective values. Alias
 routing remains a compatibility surface. Chair inheritance is exceptional: it
 must be explicit and recorded, never inferred from an omitted binding.
-Task-class dispatch rejects a mismatched role and requires a fresh, adapter-bound
-runtime capability snapshot that verifies the effective model and effort. Codex
-account-default transport still omits the literal model; its snapshot verifies
-effort while the receipt retains policy identity. Claude task-class dispatch
-uses a no-tools, no-session subscription canary and rejects caller-authored
-source labels without its scrubbed provenance. The canary has a small provider
-cost; reuse its snapshot only within the router's five-minute freshness window.
+Task-class dispatch rejects mismatched roles and requires a fresh, adapter-bound
+runtime snapshot. Codex snapshots verify model availability and supported effort.
+Account-default transport omits the literal model, so receipts retain policy
+identity. Claude's no-tools, no-session subscription canary verifies the effective
+model but records requested effort as unverified, so task-class dispatch fails
+closed. It rejects caller-authored source labels without scrubbed provenance.
+Canaries cost a little; reuse them only within the router's five-minute freshness
+window.
 
 ## Tiers (relative, family-agnostic)
 

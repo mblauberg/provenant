@@ -38,6 +38,8 @@ def run_json(command: list[str], timeout: int) -> Any:
     )
     if result.returncode != 0:
         raise ValueError(f"command exited {result.returncode}")
+    if "Warning: Unknown --effort value" in result.stderr:
+        raise ValueError("Claude CLI rejected the requested effort")
     return load_json(result.stdout)
 
 
@@ -97,7 +99,8 @@ def discover(claude_bin: str, alias: str, effort: str) -> dict[str, Any]:
         "models": {
             alias.casefold(): {
                 "resolved_model": resolved_model,
-                "supported_efforts": [effort],
+                "requested_effort": effort,
+                "effort_verified": False,
             },
         },
     }

@@ -407,7 +407,8 @@ def test_capability_resolved_override_occupant_requires_explicit_risk_tier(
     snapshot = capability_snapshot({
         "opus": {
             "resolved_model": f"claude-opus-4-6-{RISK_OVERRIDE_MODEL}",
-            "supported_efforts": ["high"],
+            "requested_effort": "high",
+            "effort_verified": False,
         },
     }, source="claude subscription canary")
     snapshot["provenance"] = {
@@ -439,7 +440,8 @@ def test_capability_resolved_override_occupant_records_explicit_risk_tier(
     snapshot = capability_snapshot({
         RISK_OVERRIDE_MODEL: {
             "resolved_model": resolved_model,
-            "supported_efforts": [CRUCIAL_RISK_OVERRIDE["default_effort"]],
+            "requested_effort": CRUCIAL_RISK_OVERRIDE["default_effort"],
+            "effort_verified": False,
         },
     }, source="claude subscription canary")
     snapshot["provenance"] = {
@@ -1028,10 +1030,14 @@ def test_claude_task_class_rejects_caller_authored_capability_claim(tmp_path):
     assert route["status"] == "capability_snapshot_untrusted"
 
 
-def test_claude_task_class_accepts_subscription_canary_provenance(tmp_path):
+def test_claude_task_class_rejects_subscription_canary_with_unverified_effort(tmp_path):
     snapshot = tmp_path / "claude-caps.json"
     value = capability_snapshot({
-        "opus": {"resolved_model": "claude-opus-4-8", "supported_efforts": ["high"]},
+        "opus": {
+            "resolved_model": "claude-opus-4-8",
+            "requested_effort": "high",
+            "effort_verified": False,
+        },
     }, source="claude subscription canary")
     value["provenance"] = {
         "kind": "subscription_runtime_canary",
@@ -1045,9 +1051,69 @@ def test_claude_task_class_accepts_subscription_canary_provenance(tmp_path):
         "--role", "critical-review", "--capabilities-file", str(snapshot),
     )
 
+    assert result.returncode == 1
+    assert route["status"] == "task_class_capability_unverified"
+    assert route["resolved_model"] == "claude-opus-4-8"
+    assert route["requested_effort"] == "high"
+    assert route["effort"] == ""
+    assert route["effort_capability_source"] == "provider-unverified"
+
+
+def test_claude_alias_route_uses_verified_model_without_claiming_effort_support(tmp_path):
+    snapshot = tmp_path / "claude-caps.json"
+    value = capability_snapshot({
+        "opus": {
+            "resolved_model": "claude-opus-4-8",
+            "requested_effort": "high",
+            "effort_verified": False,
+        },
+    }, source="claude subscription canary")
+    value["provenance"] = {
+        "kind": "subscription_runtime_canary",
+        "auth_method": "claude.ai",
+        "subscription_type": "pro",
+    }
+    snapshot.write_text(json.dumps(value))
+
+    result, route = resolve(
+        "--adapter", "claude", "--alias", "flagship",
+        "--role", "critical-review", "--effort", "high",
+        "--capabilities-file", str(snapshot),
+    )
+
     assert result.returncode == 0
+    assert route["status"] == "ok"
     assert route["resolved_model"] == "claude-opus-4-8"
     assert route["requested_effort"] == route["effort"] == "high"
+    assert route["effort_capability_source"] == "provider-unverified"
+
+
+def test_claude_unverified_effort_snapshot_does_not_cover_another_effort(tmp_path):
+    snapshot = tmp_path / "claude-caps.json"
+    value = capability_snapshot({
+        "opus": {
+            "resolved_model": "claude-opus-4-8",
+            "requested_effort": "high",
+            "effort_verified": False,
+        },
+    }, source="claude subscription canary")
+    value["provenance"] = {
+        "kind": "subscription_runtime_canary",
+        "auth_method": "claude.ai",
+        "subscription_type": "pro",
+    }
+    snapshot.write_text(json.dumps(value))
+
+    result, route = resolve(
+        "--adapter", "claude", "--alias", "flagship",
+        "--role", "critical-review", "--effort", "medium",
+        "--capabilities-file", str(snapshot),
+    )
+
+    assert result.returncode == 1
+    assert route["status"] == "effort_capability_unverified"
+    assert route["effort"] == ""
+    assert route["effort_capability_source"] == "provider-unverified"
 
 
 def test_task_class_without_trusted_capability_evidence_fails_closed():

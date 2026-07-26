@@ -317,22 +317,28 @@ def load_capabilities(path: str | None, adapter: str) -> tuple[dict[str, Any], s
         if (
             not isinstance(resolved_model, str)
             or not resolved_model.strip()
-            or not isinstance(efforts, list)
-            or not efforts
         ):
             return {}, "capability_discovery_failed"
         if adapter == "claude":
             if (
                 not resolved_model.casefold().startswith("claude-")
                 or normalized_key not in resolved_model.casefold().split("-")
+                or "supported_efforts" in item
+                or not isinstance(item.get("requested_effort"), str)
+                or not item["requested_effort"].strip()
+                or item.get("effort_verified") is not False
             ):
                 return {}, "capability_discovery_failed"
             normalized_models[resolved_model.casefold()] = item
-        elif resolved_model.casefold() != normalized_key:
-            return {}, "capability_discovery_failed"
+        else:
+            if (
+                resolved_model.casefold() != normalized_key
+                or not isinstance(efforts, list)
+                or not efforts
+                or any(not isinstance(effort, str) or not effort.strip() for effort in efforts)
+            ):
+                return {}, "capability_discovery_failed"
         normalized_models[normalized_key] = item
-        if any(not isinstance(effort, str) or not effort.strip() for effort in efforts):
-            return {}, "capability_discovery_failed"
     return normalized_models, ""
 
 
@@ -394,6 +400,10 @@ def resolve_effort(
         item = capability_models.get(model.lower())
         if not item:
             return None, "", "capability_model_unavailable", "runtime-model-catalog"
+        if args.adapter == "claude" and item.get("effort_verified") is False:
+            if item["requested_effort"].lower() != requested_effort:
+                return None, "", "effort_capability_unverified", "provider-unverified"
+            return requested_effort, "", "", "provider-unverified"
         supported = {value.lower() for value in item["supported_efforts"]}
         capability_source = "runtime-model-catalog"
     elif args.available_effort:
