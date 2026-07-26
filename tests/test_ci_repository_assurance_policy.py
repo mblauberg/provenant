@@ -91,10 +91,15 @@ FILTER_HELPER_KEYS = frozenset({"ci-contract", "node-workspace"})
 # module skipped the fabric job that runs it. This allowlist is exact by
 # design: adding an executed dependency means adding it here deliberately,
 # and nothing else in docs/ or skills/ may path-trigger a non-harness job.
+# PR #446 added scripts/model_route_catalog.py, which model_route.py loads and
+# executes at import: a change to it alone reaches the fabric suite at runtime,
+# so it must retrigger the job that runs it for the same reason cycle 3 added
+# model_route.py itself.
 FABRIC_EXECUTED_DEPENDENCIES = frozenset(
     {
         "scripts/model-route",
         "scripts/model_route.py",
+        "scripts/model_route_catalog.py",
         "skills/deliver/scripts/**",
     }
 )
@@ -415,6 +420,7 @@ def test_ci_gates_build_jobs_behind_path_filters_and_one_aggregate_check() -> No
     assert FABRIC_EXECUTED_DEPENDENCIES == {
         "scripts/model-route",
         "scripts/model_route.py",
+        "scripts/model_route_catalog.py",
         "skills/deliver/scripts/**",
     }
     assert FABRIC_EXECUTED_DEPENDENCIES <= set(flattened["fabric"])

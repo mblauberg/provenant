@@ -77,6 +77,24 @@ def load_router():
     return module
 
 
+def test_repeated_router_loads_share_one_catalogue_module():
+    # `load_router` executes scripts/model_route.py once per test, so the
+    # catalogue module it loads by path must be reused rather than re-executed.
+    # Creating a fresh module on every load while `sys.modules` keeps the first
+    # leaves the router bound to functions whose globals belong to a different
+    # object than the cached one: rebinding a name on one is then invisible to
+    # callers resolving it through the other, which a normal `import` never does.
+    first = load_router()
+    second = load_router()
+    cached = sys.modules["model_route_catalog"]
+
+    assert first.infer_family is cached.infer_family
+    assert second.infer_family is cached.infer_family
+    assert first.override_scan_families is second.override_scan_families
+    assert first.ALIAS_ORDER is second.ALIAS_ORDER
+    assert first.EFFORT_ORDER is cached.EFFORT_ORDER
+
+
 def test_risk_tier_override_catalogue_retargets_single_model(
     tmp_path, monkeypatch, capsys
 ):
