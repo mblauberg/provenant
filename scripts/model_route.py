@@ -71,6 +71,8 @@ EFFORT_ORDER = _catalog_validation.EFFORT_ORDER
 ALIAS_ORDER = _catalog_validation.ALIAS_ORDER
 infer_family = _catalog_validation.infer_family
 model_has_alias = _catalog_validation.model_has_alias
+capability_key_matches_model = _catalog_validation.capability_key_matches_model
+ultra_eligible_roles_are_valid = _catalog_validation.ultra_eligible_roles_are_valid
 risk_tier_override_is_well_formed = _catalog_validation.risk_tier_override_is_well_formed
 family_alias_candidates = _catalog_validation.family_alias_candidates
 risk_tier_overrides_are_valid = _catalog_validation.risk_tier_overrides_are_valid
@@ -172,7 +174,7 @@ def load_json(raw: str) -> Any:
     return json.loads(raw, object_pairs_hook=reject_duplicate_members)
 
 
-def load_capabilities(path: str | None, adapter: str) -> tuple[dict[str, Any], str]:
+def load_capabilities(path: str | None, adapter: str, catalog: dict[str, Any]) -> tuple[dict[str, Any], str]:
     if not path:
         return {}, ""
     try:
@@ -205,6 +207,12 @@ def load_capabilities(path: str | None, adapter: str) -> tuple[dict[str, Any], s
     models = data["models"]
     if not models:
         return {}, "capability_discovery_failed"
+    adapter_config = catalog.get("adapters", {}).get(adapter, {})
+    family = adapter_config.get("fixed_model_family") if isinstance(adapter_config, dict) else None
+    family_config = catalog.get("families", {}).get(family, {}) if family else {}
+    alias_candidates = family_alias_candidates(family, family_config, catalog) \
+        if family and isinstance(family_config, dict) else set()
+    alias_keys = {candidate.casefold() for candidate in alias_candidates}
     normalized_keys: set[str] = set()
     normalized_models: dict[str, Any] = {}
     for key, item in models.items():
@@ -215,31 +223,35 @@ def load_capabilities(path: str | None, adapter: str) -> tuple[dict[str, Any], s
         efforts = item.get("supported_efforts")
         if normalized_key in normalized_keys:
             return {}, "capability_discovery_failed"
-        normalized_keys.add(normalized_key)
         if (
             not isinstance(resolved_model, str)
             or not resolved_model.strip()
+            or not capability_key_matches_model(
+                adapter, normalized_key, resolved_model, is_alias=normalized_key in alias_keys
+            )
         ):
             return {}, "capability_discovery_failed"
         if adapter == "claude":
             if (
-                not resolved_model.casefold().startswith("claude-")
-                or normalized_key not in resolved_model.casefold().split("-")
-                or "supported_efforts" in item
+                "supported_efforts" in item
                 or not isinstance(item.get("requested_effort"), str)
                 or not item["requested_effort"].strip()
                 or item.get("effort_verified") is not False
             ):
                 return {}, "capability_discovery_failed"
-            normalized_models[resolved_model.casefold()] = item
         else:
             if (
-                resolved_model.casefold() != normalized_key
-                or not isinstance(efforts, list)
+                not isinstance(efforts, list)
                 or not efforts
                 or any(not isinstance(effort, str) or not effort.strip() for effort in efforts)
             ):
                 return {}, "capability_discovery_failed"
+        normalized_resolved_model = resolved_model.casefold()
+        entry_keys = {normalized_key, normalized_resolved_model}
+        if any(entry_key in normalized_keys for entry_key in entry_keys):
+            return {}, "capability_discovery_failed"
+        normalized_keys.update(entry_keys)
+        normalized_models[normalized_resolved_model] = item
         normalized_models[normalized_key] = item
     return normalized_models, ""
 
@@ -286,7 +298,8 @@ def resolve_effort(
         if openai_codex and not fallback:
             return None, "", "no_effort_available", capability_source
         fallback = fallback or "high"
-        return fallback, f"ultra unavailable (route is not ultra-eligible); used {fallback}", "", "policy"
+        fallback_source = capability_source if supported is not None else "policy"
+        return fallback, f"ultra unavailable (route is not ultra-eligible); used {fallback}", "", fallback_source
 
     if args.effort_transport == "model-id":
         normalized_model = re.sub(r"(?:^|[-_])extra[-_]high(?=$|[-_])", "-xhigh", model.lower())
@@ -330,7 +343,12 @@ def resolve_effort(
     if args.effort:
         return None, "", "effort_unsupported", capability_source
     fallback = next(
-        (item for item in family_config.get("effort_fallback_order", []) if item in supported),
+        (
+            item
+            for item in family_config.get("effort_fallback_order", [])
+            if item in supported
+            and EFFORT_ORDER[item] <= EFFORT_ORDER[requested_effort]
+        ),
         None,
     )
     if not fallback:
@@ -345,7 +363,9 @@ def resolve_effort(
 
 
 def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
-    capability_models, capability_error = load_capabilities(args.capabilities_file, args.adapter)
+    capability_models, capability_error = load_capabilities(
+        args.capabilities_file, args.adapter, catalog
+    )
     args.capability_models = capability_models
     adapter = catalog["adapters"].get(args.adapter)
     fixed_family = adapter.get("fixed_model_family") if adapter else None
@@ -834,7 +854,7 @@ def main(argv: list[str] | None = None) -> int:
     args = argument_parser.parse_args(argv)
     catalog = load_catalog()
     if args.command == "resolve":
-        def reject(status: str, *, alias: str = "", effort: str = "") -> int:
+        def reject(status: str, *, alias: str = "", effort: str = "", message: str = "") -> int:
             record = {
                 "schema_version": 1,
                 "catalog_date": catalog.get("catalog_date", ""),
@@ -849,6 +869,8 @@ def main(argv: list[str] | None = None) -> int:
             }
             if args.task_class:
                 record.update({"task_class": args.task_class, "route_source": "task-class"})
+            if message:
+                record["message"] = message
             return emit(record, 2)
 
         args.task_class_effort = ""
@@ -875,6 +897,17 @@ def main(argv: list[str] | None = None) -> int:
             adapter_family, families.get(adapter_family, {}), catalog
         ):
             return reject("risk_tier_config_invalid", alias=args.alias)
+        if adapter_family and not ultra_eligible_roles_are_valid(
+            families.get(adapter_family, {})
+        ):
+            return reject(
+                "effort_policy_config_invalid",
+                alias=args.alias,
+                message=(
+                    "configuration error: ultra_eligible_roles must be a list "
+                    "of non-empty role names"
+                ),
+            )
         # Validate exactly the families the reservation scan will consult, and only
         # when there is a model for it to scan against. An adapter without a fixed
         # model family validates nothing above, so without this a malformed
@@ -901,13 +934,24 @@ def main(argv: list[str] | None = None) -> int:
                 route_alias not in ALIAS_ORDER
                 or route_effort not in EFFORT_ORDER
                 or ALIAS_ORDER[route_alias] < ALIAS_ORDER[policy["minimum_alias"]]
-                or EFFORT_ORDER[route_effort] < EFFORT_ORDER[policy["minimum_effort"]]
                 or route_role != policy["role"]
             ):
                 return reject(
                     "task_class_config_invalid",
                     alias=route_alias if isinstance(route_alias, str) else "",
                     effort=route_effort if isinstance(route_effort, str) else "",
+                )
+            if route_effort != policy["minimum_effort"]:
+                return reject(
+                    "task_class_config_invalid",
+                    alias=route_alias,
+                    effort=route_effort,
+                    message=(
+                        "configuration error: "
+                        f"task_class_routes.{args.task_class}.effort {route_effort!r} "
+                        "must equal probe policy minimum_effort "
+                        f"{policy['minimum_effort']!r}"
+                    ),
                 )
             if args.effort:
                 return reject("task_class_effort_conflict", alias=route_alias, effort=route_effort)

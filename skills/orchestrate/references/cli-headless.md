@@ -50,7 +50,8 @@ as `capability_discovery_failed`, a stale snapshot fails as
 `capability_snapshot_stale`, and a fresh snapshot that omits the candidate fails
 as `capability_model_unavailable`. Explicit unsupported requests fail as
 `effort_unsupported`; a role default may degrade with `effort_substitution`
-using the declared fallback order over the runtime-supported efforts.
+using the declared fallback order over runtime-supported efforts at or below
+the request, or fail as `no_effort_available` when none exists.
 Claude task-class routing captures one alias-and-effort capability through
 `claude_capabilities.py`. The producer requires logged-in `claude.ai`
 subscription auth and runs a bounded `--safe-mode`, no-tools,

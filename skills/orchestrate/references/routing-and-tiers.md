@@ -62,7 +62,13 @@ that tier's special treatment from its former occupant; a model no configured
 tier names is no longer override-only. A malformed override block fails the
 whole family closed — every route on that family is rejected with
 `risk_tier_config_invalid` rather than quietly leaving its occupant
-dispatchable. Fable currently occupies both configured tiers. Sol leads for
+dispatchable. A family whose `ultra_eligible_roles` is not a list of role names
+fails the same way with `effort_policy_config_invalid`, because `in` over a
+string silently degrades an eligibility gate into a substring test. A task-class
+route whose effort differs from its probe policy's `minimum_effort` fails as
+`task_class_config_invalid`: the probe evidences exactly one effort, so a
+divergence is a configuration error and must not surface as the provider fault
+`effort_capability_unverified`. Fable currently occupies both configured tiers. Sol leads for
 Codex. Eligible Sol lead/orchestrator routes may use Ultra; runtime model
 capabilities decide the effective effort and every fallback is recorded. Claude
 and Codex are equal primary families.
