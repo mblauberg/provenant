@@ -13,6 +13,15 @@ import { verifyProviderExecutableIdentity } from "../adapters/provider-identity.
 import { ADAPTER_INTERFACE_PROBE_INCOMPLETE, probeProviderInterface } from "../adapters/provider-interface.js";
 import { loadAdapterModelConstraints } from "../adapters/model-selection.js";
 import { loadFabricConfig } from "../config/index.js";
+import type { ReviewProfileCatalogue } from "../review/profile/index.js";
+import {
+  evaluateReviewProfilePinDrift,
+  readPinObservations,
+  reviewProfilePinOutcome,
+  type PinRouteObserver,
+  type ReviewProfilePinReport,
+} from "../review/profile/pin-drift.js";
+import { createCapabilityPinObserver } from "../review/profile/pin-observer.js";
 import { assertDatabaseIntegrity } from "../persistence/invariants.js";
 import { BootstrapElection, FLOCK_ELECTION_LOCK_PORT } from "../daemon/bootstrap-election.js";
 import { connectFabricDaemon } from "../daemon/client.js";
@@ -28,7 +37,7 @@ type ProviderInterfaceResult = Awaited<ReturnType<typeof probeProviderInterface>
 type ProviderObservation = { adapterId: string; requiredIdentity: string; identity?: ProviderIdentityResult; providerInterface?: ProviderInterfaceResult; identityError?: unknown; interfaceError?: unknown };
 type ProviderIdentityState = "clean" | "drifted" | "unknown";
 type ProviderIdentityObservation = { adapterId: string; state: ProviderIdentityState; detail: string };
-type DateStaleness = { field: "verification_date" | "catalog_date"; date: string | null; ageDays: number | null; stale: boolean | null };
+type DateStaleness = { field: "verification_date" | "catalog_date" | "observed_on"; date: string | null; ageDays: number | null; stale: boolean | null };
 type DoctorDaemonConnection = Pick<
   Awaited<ReturnType<typeof connectFabricDaemon>>,
   "initializeResult" | "probeBootstrapContract" | "close"
@@ -37,6 +46,7 @@ type DoctorDependencies = {
   verifyProvider?: typeof verifyProviderConformance;
   verifyProviderIdentity?: typeof verifyProviderExecutableIdentity;
   probeProviderInterface?: typeof probeProviderInterface;
+  observeReviewProfilePin?: PinRouteObserver;
   providerProbeTimeoutMs?: number;
   now?: () => number;
   connectDaemon?: (input: {
@@ -55,6 +65,7 @@ const PRIMARY_ADAPTER_IDS = ["claude-agent-sdk", "codex-app-server"] as const;
 const PROVIDER_PROBE_TIMEOUT_MS = 16_000;
 const STALENESS_THRESHOLD_DAYS = 30;
 const REPAIR_COMMAND = "npm run compatibility:pin";
+const PROFILE_PIN_REPAIR_COMMAND = "npm run profile:pin";
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -96,7 +107,7 @@ function agentsHome(arguments_: string[]): string {
   return resolve(option(arguments_, "--agents-home") ?? process.env.AGENTS_HOME ?? process.cwd());
 }
 
-function pathsFor(arguments_: string[]): { agentsHome: string; config: string; compatibility: string; compatibilitySchema: string; modelRouting: string } {
+function pathsFor(arguments_: string[]): { agentsHome: string; config: string; compatibility: string; compatibilitySchema: string; modelRouting: string; reviewProfile: string } {
   const home = agentsHome(arguments_);
   return {
     agentsHome: home,
@@ -104,6 +115,8 @@ function pathsFor(arguments_: string[]): { agentsHome: string; config: string; c
     compatibility: resolve(option(arguments_, "--compatibility") ?? join(home, "config", "adapter-compatibility.yaml")),
     compatibilitySchema: resolve(option(arguments_, "--compatibility-schema") ?? join(home, "runtime", "agent-fabric", "schemas", "adapter-compatibility.schema.json")),
     modelRouting: join(home, "config", "model-routing.json"),
+    reviewProfile: resolve(option(arguments_, "--review-profile")
+      ?? join(home, "config", "review-profiles", "certifying-review-four-slot-v1.json")),
   };
 }
 
@@ -177,7 +190,7 @@ function dateStaleness(field: DateStaleness["field"], date: unknown, now: number
   return { field, date, ageDays, stale: ageDays > STALENESS_THRESHOLD_DAYS };
 }
 
-async function readDoctorMetadata(compatibilityPath: string, modelRoutingPath: string, adapterIds: readonly string[]): Promise<{ executablePins: Map<string, string>; verificationDate: unknown; catalogDate: unknown }> {
+async function readDoctorMetadata(compatibilityPath: string, modelRoutingPath: string, adapterIds: readonly string[]): Promise<{ executablePins: Map<string, string>; verificationDate: unknown; catalogDate: unknown; modelRouting: unknown }> {
   const executablePins = new Map<string, string>();
   let document: unknown;
   try {
@@ -192,11 +205,38 @@ async function readDoctorMetadata(compatibilityPath: string, modelRoutingPath: s
     }
   }
   let catalogDate: unknown;
+  let modelRouting: unknown;
   try {
-    const routing: unknown = JSON.parse(await readFile(modelRoutingPath, "utf8"));
-    if (isRecord(routing)) catalogDate = routing.catalog_date;
+    modelRouting = JSON.parse(await readFile(modelRoutingPath, "utf8"));
+    if (isRecord(modelRouting)) catalogDate = modelRouting.catalog_date;
   } catch {}
-  return { executablePins, verificationDate: isRecord(document) ? document.verification_date : undefined, catalogDate };
+  return { executablePins, verificationDate: isRecord(document) ? document.verification_date : undefined, catalogDate, modelRouting };
+}
+
+/**
+ * Report the certifying profile's pinned identities against current alias
+ * resolution. An unreadable or absent catalogue declares no expectation, so it
+ * yields an empty comparison set rather than a false unknown, exactly as an
+ * absent executable pin sits outside the provider-identity comparison set.
+ */
+async function reviewProfilePins(
+  reviewProfilePath: string,
+  modelRouting: unknown,
+  observe: PinRouteObserver,
+): Promise<ReviewProfilePinReport> {
+  let catalogue: unknown;
+  try {
+    catalogue = JSON.parse(await readFile(reviewProfilePath, "utf8"));
+  } catch {
+    return { compared: [], attested: [] };
+  }
+  if (!isRecord(catalogue) || !Array.isArray(catalogue.chairProfiles)) return { compared: [], attested: [] };
+  return await evaluateReviewProfilePinDrift({
+    catalogue: catalogue as unknown as ReviewProfileCatalogue,
+    observations: readPinObservations(catalogue),
+    routing: modelRouting,
+    observe,
+  });
 }
 
 async function daemonState(paths: FabricPaths): Promise<{ reachable: boolean; pid: number | null; socketPath: string; protocolVersion: 1; activeAdapters: string[] }> {
@@ -565,10 +605,35 @@ export async function fabricDoctor(
     code: drifted ? "PROVIDER_IDENTITY_DRIFT" : unknown ? "PROVIDER_IDENTITY_UNKNOWN" : "PROVIDER_IDENTITY_OK",
     detail: providerIdentity.map((item) => `${item.adapterId}=${item.state}: ${item.detail}`).join(" "),
   });
+  const pinReport = await reviewProfilePins(
+    selected.reviewProfile,
+    metadata.modelRouting,
+    dependencies.observeReviewProfilePin ?? createCapabilityPinObserver({
+      agentsHome: selected.agentsHome,
+      cacheDirectory: paths.stateDirectory,
+      ...(dependencies.now === undefined ? {} : { now: dependencies.now }),
+    }),
+  );
+  const pinOutcome = reviewProfilePinOutcome(pinReport);
+  checks.push({
+    id: "review-profile-pins",
+    ...pinOutcome,
+    detail: [
+      ...pinReport.compared.map((pin) =>
+        `${pin.providerFamily}/${pin.model}=${pin.state}: ${pin.detail}`),
+      ...pinReport.attested.map((pin) =>
+        `${pin.providerFamily}/${pin.model}=attested observed_on=${pin.observedOn}: ${pin.detail}`),
+      ...(pinOutcome.status === "fail" ? [`repair with ${PROFILE_PIN_REPAIR_COMMAND}`] : []),
+    ].join(" ") || "no certifying profile pins in the comparison set",
+  });
   const now = (dependencies.now ?? Date.now)();
+  const observedDates = [...pinReport.compared.map((pin) => pin.observedOn), ...pinReport.attested.map((pin) => pin.observedOn)]
+    .filter((value): value is string => value !== null)
+    .sort();
   const staleness = {
     compatibility: dateStaleness("verification_date", metadata.verificationDate, now),
     modelRouting: dateStaleness("catalog_date", metadata.catalogDate, now),
+    reviewProfile: dateStaleness("observed_on", observedDates[0], now),
   };
   checks.push({
     id: "pin-staleness",
@@ -577,6 +642,7 @@ export async function fabricDoctor(
     detail: [
       `verification_date=${staleness.compatibility.date ?? "unknown"} age_days=${String(staleness.compatibility.ageDays)}`,
       `catalog_date=${staleness.modelRouting.date ?? "unknown"} age_days=${String(staleness.modelRouting.ageDays)}`,
+      `review_profile_observed_on=${staleness.reviewProfile.date ?? "unknown"} age_days=${String(staleness.reviewProfile.ageDays)}`,
       `threshold_days=${String(STALENESS_THRESHOLD_DAYS)}`,
     ].join(" "),
   });
@@ -612,11 +678,13 @@ export async function fabricDoctor(
       socketPath: daemon.socketPath,
     },
     providerIdentity: { adapters: providerIdentity },
+    reviewProfilePins: { repairCommand: PROFILE_PIN_REPAIR_COMMAND, ...pinReport },
     staleness: {
       advisory: true,
       thresholdDays: STALENESS_THRESHOLD_DAYS,
       compatibility: staleness.compatibility,
       modelRouting: staleness.modelRouting,
+      reviewProfile: staleness.reviewProfile,
     },
     checks,
   };

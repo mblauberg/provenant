@@ -61,7 +61,17 @@ describe("certifying-review-four-slot-v1 profile", () => {
       profileSchemaDigest: digest("profile-schema"),
       availability: rows,
     })).toStrictEqual(resolved);
+    // Pin observation metadata is a sibling of chairProfiles, never a slot
+    // field, so a refresh cannot change what a certifying receipt asserts.
+    expect(catalogue.pinObservations).toBeDefined();
     for (const slot of resolved.slots) {
+      expect(Object.keys(slot).sort()).toStrictEqual([
+        "adapterClass", "adapterContractDigest", "adapterId", "explorationReadBytes", "explorationReadOps",
+        "internalStepCeiling", "mandatoryReadBytes", "mandatoryReadOps", "model", "platformIdentityDigest",
+        "providerFamily", "providerTurnCeiling", "requestedEffort", "requiredActualEndpointProvider",
+        "requiredActualModel", "requiredActualProviderFamily", "resolvedEffort", "reviewerFamilyRelation",
+        "riskReadMapDigest", "routeAliases", "runtimeIdentityDigest", "schemaVersion", "slot", "sourceMode",
+      ]);
       expect(slot.riskReadMapDigest).toBe(REVIEW_RISK_RULES_DIGEST);
       if (slot.sourceMode === "direct-portal") {
         expect(slot.providerTurnCeiling).toBe(128);
