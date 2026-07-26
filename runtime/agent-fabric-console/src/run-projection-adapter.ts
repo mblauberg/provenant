@@ -25,6 +25,10 @@ export type ConsoleRunProjection = Readonly<{
   issues: readonly RunIssueReference[];
   evidencePaths: readonly ArtifactRef[];
   evidencePathObservation: "Observed" | "Unobserved" | "Unknown";
+  // An unavailable evidence row is dropped from `evidencePaths`, so without
+  // this the pane renders a complete-looking list marked `Observed` while
+  // silently omitting facts it could not observe.
+  evidencePathsUnobserved: number;
 }>;
 
 export class RunProjectionInvalidError extends Error {}
@@ -144,12 +148,14 @@ export async function loadRunProjection(options: Readonly<{
   const evidence = collected.evidence as OperatorViewRow<"evidence">[];
   const evidencePaths: ArtifactRef[] = [];
   let evidencePathObservation: ConsoleRunProjection["evidencePathObservation"] = "Unobserved";
+  let evidencePathsUnobserved = 0;
   for (const evidenceRow of evidence) {
     if (evidenceRow.fact.freshness === "conflict") {
       evidencePathObservation = "Unknown";
       continue;
     }
     if (evidenceRow.fact.freshness === "unavailable") {
+      evidencePathsUnobserved += 1;
       continue;
     }
     const detailRef = evidenceRow.fact.value.detailRef;
@@ -175,7 +181,10 @@ export async function loadRunProjection(options: Readonly<{
       evidencePathObservation = "Unknown";
       continue;
     }
-    if (detail.detail.freshness === "unavailable") continue;
+    if (detail.detail.freshness === "unavailable") {
+      evidencePathsUnobserved += 1;
+      continue;
+    }
     if (detail.detail.value.kind !== "evidence") {
       throw new RunProjectionInvalidError("run evidence detail is not exact");
     }
@@ -194,6 +203,7 @@ export async function loadRunProjection(options: Readonly<{
     issues: collected.issues as RunIssueReference[],
     evidencePaths,
     evidencePathObservation,
+    evidencePathsUnobserved,
   };
 }
 

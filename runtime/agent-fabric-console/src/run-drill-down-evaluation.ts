@@ -356,6 +356,7 @@ export function projectionForRunDrillDownFixture(
       digest: `sha256:${"a".repeat(64)}` as never,
     }],
     evidencePathObservation: "Observed",
+    evidencePathsUnobserved: 0,
   };
 }
 

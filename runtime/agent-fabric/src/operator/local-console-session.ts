@@ -639,8 +639,15 @@ export async function openLocalOperatorConsoleSession(
       canonicalRoot: identity.canonicalRoot,
     });
     let attachableProjectSessions = attachableSessions(discoveredProjectSessions);
+    // Spec item 35 forbids auto-selecting when a project has *multiple*
+    // attachable sessions; the single-session case is the documented attach
+    // path and is covered by "selects an existing session ... never creates a
+    // session implicitly". Selecting nothing unconditionally would make every
+    // ordinary one-session project require a manual pick.
     const selected = options.projectSessionId === undefined
-      ? undefined
+      ? attachableProjectSessions.length === 1
+        ? attachableProjectSessions[0]
+        : undefined
       : selectableSession(discoveredProjectSessions, options.projectSessionId);
     if (options.projectSessionId !== undefined && selected === undefined) {
       throw new LocalOperatorConsoleUnavailableError("authority-unavailable");

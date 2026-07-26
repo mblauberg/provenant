@@ -65,6 +65,47 @@ describe("run drill-down timed fixture", () => {
     expect(scoreRunDrillDownAnswers(fixture, fixture.expectedAnswers)).toBe(1);
   });
 
+  it("separates an observed-empty section from an unobserved one", async () => {
+    // The server returns every negotiated section, so zero rows means zero were
+    // observed. Rendering that as "Unobserved" asserts the section was not
+    // observed at all, on the same screen that reports server work-state counts
+    // for it -- the three-state collapse this projection exists to prevent.
+    const fixture = (await manifest()).fixtures[0]!;
+    const lines = runProjectionDetailLines({
+      ...projectionForRunDrillDownFixture(fixture),
+      work: [],
+      agents: [],
+      evidencePaths: [],
+      evidencePathObservation: "Observed",
+      evidencePathsUnobserved: 0,
+    });
+
+    expect(lines).toContain("Task ledger: None observed");
+    expect(lines).toContain("Topology: None observed");
+    expect(lines).toContain("Evidence path: None observed");
+    // Other fields may legitimately be Unobserved; these three sections were
+    // observed and empty, so none of them may claim otherwise.
+    expect(lines.filter((line) =>
+      /^(?:Task ledger|Topology|Evidence path): /u.test(line) && line.includes("Unobserved")
+    )).toStrictEqual([]);
+  });
+
+  it("marks evidence facts it could not observe instead of shortening the list", async () => {
+    // A dropped unavailable row would otherwise leave a complete-looking list
+    // marked Observed, with the missing facts invisible.
+    const fixture = (await manifest()).fixtures[0]!;
+    const base = projectionForRunDrillDownFixture(fixture);
+    const lines = runProjectionDetailLines({
+      ...base,
+      evidencePathObservation: "Observed",
+      evidencePathsUnobserved: 2,
+    });
+
+    expect(lines).toContain("Evidence path: Unobserved x2");
+    expect(lines.some((line) => line.startsWith("Evidence path: ") &&
+      !line.includes("Unobserved"))).toBe(true);
+  });
+
   it("scores answers only against their labelled field", async () => {
     const value = await manifest();
     const changed = {

@@ -393,7 +393,11 @@ export function runProjectionDetailLines(result: ConsoleRunProjection): readonly
           : workflow.dependencies.taskIds.join(", ")}`,
     );
   }
-  if (result.work.length === 0) lines.push("Task ledger: Unobserved");
+  // An observed-empty section is not an unobserved one. The server returns
+  // every negotiated section, so zero rows means zero were observed -- the same
+  // distinction the issues section already draws with "None observed". Saying
+  // "Unobserved" here contradicts the server work-state counts rendered above.
+  if (result.work.length === 0) lines.push("Task ledger: None observed");
   lines.push("--- TOPOLOGY ---");
   for (const agent of result.agents) {
     if (agent.fact.freshness === "unavailable") {
@@ -408,7 +412,7 @@ export function runProjectionDetailLines(result: ConsoleRunProjection): readonly
       lines.push(`Agent ${agent.itemId}: ${role} | ${summary.lifecycle}`);
     }
   }
-  if (result.agents.length === 0) lines.push("Topology: Unobserved");
+  if (result.agents.length === 0) lines.push("Topology: None observed");
   lines.push("--- ACTIVITY ---");
   for (const activity of result.activity) {
     if (activity.fact.freshness === "unavailable") {
@@ -433,6 +437,9 @@ export function runProjectionDetailLines(result: ConsoleRunProjection): readonly
       ),
     );
   }
+  // Left as "Unobserved" deliberately: this branch's observed-empty rule was
+  // written before the activity section existed, so extending it here would be
+  // a new decision rather than a merge. #434 tracks the remaining facts.
   if (result.activity.length === 0) lines.push("Activity: Unobserved");
   lines.push("--- ISSUES ---");
   for (const issue of result.issues) {
@@ -461,8 +468,12 @@ export function runProjectionDetailLines(result: ConsoleRunProjection): readonly
   }
   if (result.evidencePathObservation === "Unknown") {
     lines.push("Evidence path: Unknown");
-  } else if (result.evidencePaths.length === 0) {
-    lines.push("Evidence path: Unobserved");
+  } else if (result.evidencePaths.length === 0 && result.evidencePathsUnobserved === 0) {
+    lines.push("Evidence path: None observed");
+  }
+  // Rows dropped as unavailable would otherwise leave a complete-looking list.
+  if (result.evidencePathsUnobserved > 0) {
+    lines.push(`Evidence path: Unobserved x${String(result.evidencePathsUnobserved)}`);
   }
   return lines;
 }
