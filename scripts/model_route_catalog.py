@@ -37,6 +37,33 @@ def model_has_alias(model: str, alias: str) -> bool:
     return alias.casefold() in model.casefold()
 
 
+def capability_key_matches_model(
+    adapter: str, key: str, resolved_model: str, *, is_alias: bool
+) -> bool:
+    """Bind a snapshot key to the resolved identity using the adapter's ID shape."""
+    normalized_key = key.casefold()
+    normalized_model = resolved_model.casefold()
+    if adapter == "claude":
+        if is_alias:
+            return normalized_model.startswith(f"claude-{normalized_key}-")
+        return (
+            normalized_model.startswith("claude-")
+            and normalized_key in normalized_model.split("-")
+        )
+    return normalized_model == normalized_key
+
+
+def ultra_eligible_roles_are_valid(family_config: Any) -> bool:
+    """Validate the role collection before routing uses membership as a gate."""
+    if not isinstance(family_config, dict):
+        return False
+    roles = family_config.get("ultra_eligible_roles", [])
+    return isinstance(roles, list) and all(
+        isinstance(role, str) and bool(role.strip()) and role == role.strip()
+        for role in roles
+    )
+
+
 def risk_tier_override_is_well_formed(override: Any) -> bool:
     """Structural validity of one risk-tier override block, independent of catalogue context.
 
