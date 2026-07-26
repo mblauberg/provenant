@@ -1,12 +1,14 @@
 import { createHash } from "node:crypto";
 import {
   chmodSync,
+  mkdirSync,
   readFileSync,
   renameSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
 import {
+  copyFile,
   lstat,
   mkdir,
   mkdtemp,
@@ -14,6 +16,7 @@ import {
   readdir,
   readlink,
   rm,
+  unlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -96,6 +99,16 @@ async function walFixture(): Promise<Readonly<{
     databasePath,
     archiveDirectory: join(root, "archive"),
   };
+}
+
+async function walWithoutShmFixture(): Promise<Readonly<{
+  root: string;
+  databasePath: string;
+  archiveDirectory: string;
+}>> {
+  const fixture = await walFixture();
+  await unlink(`${fixture.databasePath}-shm`);
+  return fixture;
 }
 
 async function sourceHashes(databasePath: string): Promise<Readonly<Record<string, string>>> {
@@ -231,6 +244,47 @@ describe("database archive-and-fresh cutover", () => {
       expect(createHash("sha256").update(await readFile(archivedPath)).digest("hex")).toBe(before[suffix]);
       expect((await lstat(archivedPath)).mode & 0o777).toBe(0o620);
     }
+  });
+
+  it("cuts over a readable WAL without SHM and preserves its rows in the archive", async () => {
+    const fixture = await walWithoutShmFixture();
+    const before = await sourceHashes(fixture.databasePath);
+    expect(Object.keys(before)).toEqual(["", "-wal"]);
+    const preview = inspectDatabaseArchiveAndFresh(fixture.databasePath);
+    expect(preview).toMatchObject({
+      status: "confirmation-required",
+      source: { members: [{ suffix: "" }, { suffix: "-wal" }] },
+    });
+    if (preview.status !== "confirmation-required") throw new TypeError("expected confirmation preview");
+
+    const result = archiveAndFreshDatabase({
+      databasePath: fixture.databasePath,
+      archiveDirectory: fixture.archiveDirectory,
+      confirmSourceSetSha256: preview.confirmation.sourceSetSha256,
+    });
+
+    expect(result.status).toBe("completed");
+    const verificationDirectory = join(fixture.root, "archive-verification");
+    await mkdir(verificationDirectory);
+    const verificationPath = join(verificationDirectory, "fabric.sqlite3");
+    await copyFile(
+      join(fixture.archiveDirectory, "source-set", "fabric.sqlite3"),
+      verificationPath,
+    );
+    await copyFile(
+      join(fixture.archiveDirectory, "source-set", "fabric.sqlite3-wal"),
+      `${verificationPath}-wal`,
+    );
+    const archivedDatabase = new Database(verificationPath);
+    try {
+      expect(archivedDatabase.prepare("SELECT value FROM legacy_sentinel").all()).toEqual([
+        { value: "preserve-wal-and-shm" },
+      ]);
+    } finally {
+      archivedDatabase.close();
+    }
+    expect(await sourceHashes(join(fixture.archiveDirectory, "source-set", "fabric.sqlite3")))
+      .toEqual(before);
   });
 
   it("reports the computed catalogue digest when current metadata masks catalogue drift", async () => {
@@ -463,6 +517,62 @@ describe("database archive-and-fresh cutover", () => {
     )).digest("hex")).toBe(beforeMain);
   });
 
+  it("reports claim and archive staging crash residue instead of a clean no-op", async () => {
+    const fixture = await legacyFixture();
+    const claimDirectory = join(fixture.root, ".fabric.sqlite3.cutover-claim-crash");
+    const claimedDatabasePath = join(claimDirectory, "fabric.sqlite3");
+    await mkdir(claimDirectory, { mode: 0o700 });
+    renameSync(fixture.databasePath, claimedDatabasePath);
+    const stagingDirectory = join(fixture.root, ".archive.staging-crash");
+    await mkdir(stagingDirectory, { mode: 0o700 });
+    await writeFile(join(stagingDirectory, "fabric.sqlite3"), "partial archive\n");
+    const beforeClaim = createHash("sha256").update(await readFile(claimedDatabasePath)).digest("hex");
+
+    const result = archiveAndFreshDatabase({
+      databasePath: fixture.databasePath,
+      archiveDirectory: fixture.archiveDirectory,
+    });
+
+    expect(result).toEqual({
+      schemaVersion: 1,
+      kind: "agent-fabric-database-archive-and-fresh",
+      status: "recovery-required",
+      code: "CUTOVER_RESIDUE_DETECTED",
+      databasePath: fixture.databasePath,
+      archiveDirectory: fixture.archiveDirectory,
+      claimDirectories: [claimDirectory],
+      stagingDirectories: [stagingDirectory],
+      sourcePreserved: true,
+      recovery: {
+        action: expect.stringContaining("Do not start Fabric or rerun the cutover"),
+      },
+    });
+    await expect(readFile(fixture.databasePath)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(createHash("sha256").update(await readFile(claimedDatabasePath)).digest("hex"))
+      .toBe(beforeClaim);
+    expect(await readFile(join(stagingDirectory, "fabric.sqlite3"), "utf8"))
+      .toBe("partial archive\n");
+  });
+
+  it("previews a live legacy database while another cutover holds a claim directory", async () => {
+    const fixture = await legacyFixture();
+    // A cutover in flight owns a claim directory that is indistinguishable on
+    // disk from crash residue. It must not turn this invocation's ordinary
+    // preview into "do not start Fabric": the live source set is still here, so
+    // the claim race -- not residue recovery -- is what governs this path.
+    const claimDirectory = join(fixture.root, ".fabric.sqlite3.cutover-claim-inflight");
+    await mkdir(claimDirectory, { mode: 0o700 });
+    const before = await sourceHashes(fixture.databasePath);
+
+    const result = archiveAndFreshDatabase({
+      databasePath: fixture.databasePath,
+      archiveDirectory: fixture.archiveDirectory,
+    });
+
+    expect(result).toMatchObject({ status: "confirmation-required" });
+    expect(await sourceHashes(fixture.databasePath)).toEqual(before);
+  });
+
   it.each(SQLITE_SOURCE_SUFFIXES)(
     "rejects a symbolic link at source suffix %j without changing the source paths",
     async (suffix) => {
@@ -487,7 +597,6 @@ describe("database archive-and-fresh cutover", () => {
   );
 
   it.each([
-    { suffixes: ["-wal"] },
     { suffixes: ["-shm"] },
     { suffixes: ["-wal", "-journal"] },
     { suffixes: ["-shm", "-journal"] },
@@ -511,6 +620,114 @@ describe("database archive-and-fresh cutover", () => {
       expect(await sourceHashes(fixture.databasePath)).toEqual(before);
     },
   );
+
+  it("cleans an empty claim directory and accurately reports an ordinary claim race loss", async () => {
+    const fixture = await legacyFixture();
+    const preview = inspectDatabaseArchiveAndFresh(fixture.databasePath);
+    if (preview.status !== "confirmation-required") throw new TypeError("expected confirmation preview");
+    const competingClaimDirectory = join(
+      fixture.root,
+      ".fabric.sqlite3.cutover-claim-competing-winner",
+    );
+
+    const result = archiveAndFreshDatabase({
+      databasePath: fixture.databasePath,
+      archiveDirectory: fixture.archiveDirectory,
+      confirmSourceSetSha256: preview.confirmation.sourceSetSha256,
+    }, {
+      claimSourceFile: (sourcePath) => {
+        mkdirSync(competingClaimDirectory, { mode: 0o700 });
+        renameSync(sourcePath, join(competingClaimDirectory, "fabric.sqlite3"));
+        const error = new Error("source disappeared before claim");
+        Object.assign(error, { code: "ENOENT" });
+        throw error;
+      },
+    });
+
+    expect(result).toMatchObject({
+      status: "archive-complete-cutover-failed",
+      code: "SOURCE_DISPLACEMENT_FAILED",
+      claimDirectory: expect.stringMatching(/\.fabric\.sqlite3\.cutover-claim-/u),
+      claimDirectoryDisposition: "removed-empty",
+      message: expect.stringContaining(
+        "before any source files were claimed; another cutover may have claimed the source set first",
+      ),
+    });
+    if (
+      result.status !== "archive-complete-cutover-failed" ||
+      !("claimDirectory" in result) ||
+      result.claimDirectory === undefined
+    ) throw new TypeError("empty claim race omitted its claim directory");
+    await expect(readdir(result.claimDirectory)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await readFile(join(competingClaimDirectory, "fabric.sqlite3")))
+      .toEqual(await readFile(join(fixture.archiveDirectory, "source-set", "fabric.sqlite3")));
+  });
+
+  it("reports and removes its empty claim directory when private setup fails", async () => {
+    const fixture = await legacyFixture();
+    const preview = inspectDatabaseArchiveAndFresh(fixture.databasePath);
+    if (preview.status !== "confirmation-required") throw new TypeError("expected confirmation preview");
+
+    const result = archiveAndFreshDatabase({
+      databasePath: fixture.databasePath,
+      archiveDirectory: fixture.archiveDirectory,
+      confirmSourceSetSha256: preview.confirmation.sourceSetSha256,
+    }, {
+      prepareClaimDirectory: () => {
+        throw new Error("injected private claim setup failure");
+      },
+    });
+
+    expect(result).toMatchObject({
+      status: "archive-complete-cutover-failed",
+      code: "SOURCE_DISPLACEMENT_FAILED",
+      claimDirectory: expect.stringMatching(/\.fabric\.sqlite3\.cutover-claim-/u),
+      claimDirectoryDisposition: "removed-empty",
+      message: expect.stringContaining("injected private claim setup failure"),
+    });
+    if (
+      result.status !== "archive-complete-cutover-failed" ||
+      !("claimDirectory" in result) ||
+      result.claimDirectory === undefined
+    ) throw new TypeError("private claim setup failure omitted its claim directory");
+    await expect(readdir(result.claimDirectory)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("preserves and reports the claim directory when claim-state classification fails", async () => {
+    const fixture = await legacyFixture();
+    const preview = inspectDatabaseArchiveAndFresh(fixture.databasePath);
+    if (preview.status !== "confirmation-required") throw new TypeError("expected confirmation preview");
+    const before = await readFile(fixture.databasePath);
+
+    const result = archiveAndFreshDatabase({
+      databasePath: fixture.databasePath,
+      archiveDirectory: fixture.archiveDirectory,
+      confirmSourceSetSha256: preview.confirmation.sourceSetSha256,
+    }, {
+      claimSourceFile: (sourcePath, claimedPath) => {
+        renameSync(sourcePath, claimedPath);
+        throw new Error("injected source claim failure");
+      },
+      claimedSourceExists: () => {
+        throw new Error("injected claim-state classification failure");
+      },
+    });
+
+    expect(result).toMatchObject({
+      status: "archive-complete-cutover-failed",
+      code: "SOURCE_DISPLACEMENT_FAILED",
+      claimDirectory: expect.stringMatching(/\.fabric\.sqlite3\.cutover-claim-/u),
+      claimDirectoryDisposition: "preserved",
+      message: expect.stringContaining("claim-state classification also failed"),
+    });
+    if (
+      result.status !== "archive-complete-cutover-failed" ||
+      !("claimDirectory" in result) ||
+      result.claimDirectory === undefined
+    ) throw new TypeError("claim-state classification failure omitted its claim directory");
+    await expect(readFile(fixture.databasePath)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await readFile(join(result.claimDirectory, "fabric.sqlite3"))).toEqual(before);
+  });
 
   it("cleans a midway archive-write failure without changing any source hash", async () => {
     const fixture = await legacyFixture();
@@ -559,8 +776,16 @@ describe("database archive-and-fresh cutover", () => {
       status: "archive-complete-cutover-failed",
       code: "SOURCE_DISPLACEMENT_FAILED",
       freshBaseline: { status: "pending" },
+      claimDirectory: expect.stringMatching(/\.fabric\.sqlite3\.cutover-claim-/u),
+      claimDirectoryDisposition: "removed-after-rollback",
       recovery: { boundary: "archive-complete" },
     });
+    if (
+      result.status !== "archive-complete-cutover-failed" ||
+      !("claimDirectory" in result) ||
+      result.claimDirectory === undefined
+    ) throw new TypeError("partial claim rollback omitted its claim directory");
+    await expect(readdir(result.claimDirectory)).rejects.toMatchObject({ code: "ENOENT" });
     expect(await sourceHashes(fixture.databasePath)).toEqual(before);
     expect(createHash("sha256").update(await readFile(
       join(fixture.archiveDirectory, "source-set", "fabric.sqlite3"),
@@ -599,7 +824,13 @@ describe("database archive-and-fresh cutover", () => {
     expect(result).toMatchObject({
       status: "archive-complete-cutover-failed",
       code: "SOURCE_DISPLACEMENT_FAILED",
+      claimDirectory: expect.stringMatching(/\.fabric\.sqlite3\.cutover-claim-/u),
+      claimDirectoryDisposition: "preserved",
     });
+    if (
+      result.status !== "archive-complete-cutover-failed" ||
+      !("claimDirectory" in result)
+    ) throw new TypeError("failed source displacement omitted its claim directory");
     const after = await sourceHashes(fixture.databasePath);
     // The intruder's file is untouched and, critically, stands alone: no
     // original sidecar was linked next to it.
@@ -609,6 +840,7 @@ describe("database archive-and-fresh cutover", () => {
     expect(createHash("sha256").update(await readFile(
       join(fixture.archiveDirectory, "source-set", "fabric.sqlite3"),
     )).digest("hex")).toBe(before[""]);
+    expect(await sourceHashes(join(result.claimDirectory, "fabric.sqlite3"))).toEqual(before);
   });
 
   it("retains a complete hash-identical archive when fresh initialisation fails", async () => {
@@ -665,13 +897,20 @@ describe("database archive-and-fresh cutover", () => {
     expect(result).toMatchObject({
       status: "archive-complete-cutover-failed",
       code: "SOURCE_DISPLACEMENT_CLEANUP_FAILED",
+      claimDirectory: expect.stringMatching(/\.fabric\.sqlite3\.cutover-claim-/u),
+      claimDirectoryDisposition: "preserved",
       freshBaseline: { status: "pending" },
       recovery: { boundary: "archive-complete" },
     });
+    if (
+      result.status !== "archive-complete-cutover-failed" ||
+      !("claimDirectory" in result)
+    ) throw new TypeError("claimed-source cleanup failure omitted its claim directory");
     await expect(readFile(fixture.databasePath)).rejects.toMatchObject({ code: "ENOENT" });
     expect(createHash("sha256").update(await readFile(
       join(fixture.archiveDirectory, "source-set", "fabric.sqlite3"),
     )).digest("hex")).toBe(before[""]);
+    expect(await sourceHashes(join(result.claimDirectory, "fabric.sqlite3"))).toEqual(before);
   });
 
   it("never reports completion if its durable completion receipt cannot be finalised", async () => {
