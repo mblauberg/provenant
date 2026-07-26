@@ -106,6 +106,7 @@ orchestrate `SKILL.md`; verdict unchanged):
 | system-design-patterns.md | archive to `docs/research/` | orphaned survey; loader entry removed; research index entry added |
 | evaluation-and-observability.md | keep | distinct angle |
 | memory-scratchpad.md | keep | canonical run-dir schema |
+| worker-liveness.md | keep | read-only worker liveness guidance and threshold owner |
 | cli-headless.md | keep | routing section becomes a pointer; load-bearing for cross-verify |
 | autonomous-implementation.md | keep | consumed by autopilot |
 

@@ -25,6 +25,9 @@ Decompose -> waves -> reduce -> gate.
   `FABRIC-ROUNDTRIP-UNAVAILABLE` and collect an artifact.
 - Record worker cwd; never assume repository.
 - **Workers write full output to files**; return a digest/path.
+- **Liveness: size proves nothing.** Compare CPU and session-log mtime; see
+  `worker-liveness.md`. A detached task is not dead: check the PID before
+  reusing a worktree.
 - **Cross-family follows the HARNESS risk ladder.** Targeted lenses plus other
   primary; distinct family when available; record terminal skips.
 - **Objective checks outrank opinions. You own the final call.**
@@ -32,14 +35,10 @@ Decompose -> waves -> reduce -> gate.
 
 ## When This Pays
 
-Before parallel dispatch, require:
-
-- independent information or artefacts;
-- stable interfaces and dependencies;
-- non-overlapping writes;
-- independently checkable return contracts; and
-- expected information gain greater than coordination, shared-state and
-  tool-density cost.
+Before parallel dispatch, require independent information or artefacts; stable
+interfaces and dependencies; non-overlapping writes; independently checkable
+return contracts; and expected information gain **greater than** coordination,
+shared-state and tool-density cost.
 
 If the gate fails, keep serial ownership with the chair or one specialist;
 shared-error or tightly coupled work stays serial. Choose the smallest
@@ -57,22 +56,21 @@ passing topology.
    review**, or **Document update wave**.
 6. **Final gate:** no untriaged P0/P1, missing anchors, unresolved doc drift,
    unrecorded family status or user gate. Record `CROSS-FAMILY-NOT-RUN` when
-   disclosure or availability prevents dispatch.
+   unavailable.
 
 ## Worker Contract
 
 Every worker gets task class, route (`tier`, `model`, `effort`, route receipt),
 identity, objective, authority, paths, output, checks, stop and budget;
-validate payloads, never infer permission.
-See [orchestration-contract.md](references/orchestration-contract.md) for the
-full contract, gates and recovery transitions.
+validate payloads, never infer permission. See
+[orchestration-contract.md](references/orchestration-contract.md).
 
 ## Autonomous-implementation mode
 
-Pulls **accepted/ready** issues through `implement` unattended. Merge stays
-user-controlled by default, deferring to the nearest repository merge policy.
-Lower authority than autopilot's run-until-STOP loop. See [autonomous-implementation.md](references/autonomous-implementation.md)
-for the entry gate, loop, receipt contract and the autopilot distinction.
+Pulls **accepted/ready** issues through `implement` unattended; merge stays
+user-controlled, deferring to the nearest repository merge policy. Lower
+authority than autopilot's run-until-STOP loop. See
+[autonomous-implementation.md](references/autonomous-implementation.md).
 
 ## References
 
@@ -81,13 +79,13 @@ Load relevant [references](references/) only:
 `orchestration-contract.md`, `dynamic-workflows.md`, `paired-primary.md`,
 `herdr-panes.md`, `layering-and-context.md`, `retrieval-and-tool-routing.md`,
 `verification.md`, `cli-headless.md`,
-`memory-scratchpad.md`, `evaluation-and-observability.md`,
-`domain-adaptation.md`, and `autonomous-implementation.md`. `scripts/` and
+`memory-scratchpad.md`, `evaluation-and-observability.md`, `domain-adaptation.md`,
+`worker-liveness.md`, and `autonomous-implementation.md`. `scripts/` and
 `evals/` hold helpers/guards;
 `cf_dispatch.sh` is degraded fallback/preflight only.
 
 ## Adapter-absent path
 
 Without Console, Herdr or GitHub, emit the skill-owned
-[portable kind](portable-workflow.v1.json) from canonical project artifacts. It
+[portable kind](portable-workflow.v1.json). It
 grants no Fabric authority or second task owner.

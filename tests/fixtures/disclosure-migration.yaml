@@ -84,6 +84,9 @@ orchestrate:
   - file: memory-scratchpad.md
     verdict: keep
     notes: "canonical run-dir schema"
+  - file: worker-liveness.md
+    verdict: keep
+    notes: "read-only worker liveness guidance and threshold owner"
   - file: cli-headless.md
     verdict: keep
     notes: "routing section becomes a pointer; load-bearing for cross-verify"

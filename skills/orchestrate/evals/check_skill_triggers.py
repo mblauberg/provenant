@@ -50,8 +50,8 @@ def required_refs_from_manifest(path=MANIFEST):
     if not isinstance(raw, dict) or raw.get("schema") != "disclosure-migration.v1":
         raise ValueError("disclosure migration manifest identity is invalid")
     rows = raw.get("orchestrate")
-    if not isinstance(rows, list) or len(rows) != 17:
-        raise ValueError("disclosure migration manifest must have 17 orchestrate rows")
+    if not isinstance(rows, list) or len(rows) != 18:
+        raise ValueError("disclosure migration manifest must have 18 orchestrate rows")
     required = set()
     filenames = set()
     verdicts = {"keep", "slim", "archive", "merge-then-delete"}
