@@ -921,7 +921,15 @@ fn custody_crash_after_claim_helper() {
     )
     .expect("helper claim transition");
     assert_eq!(phase, CustodyRemovalPhase::Claimed);
-    fs::write(phase_marker, b"claimed").expect("persist claimed phase marker");
+    // The parent waits on this path existing and then kills this process, so the
+    // marker has to become visible already complete. `fs::write` creates the file
+    // empty and fills it afterwards, which leaves a window where the parent sees
+    // the path, kills the helper mid-write, and reads back an empty marker --
+    // reported as a durability failure the production code never had. Publish it
+    // by rename instead, which is atomic within the directory.
+    let pending = phase_marker.with_extension("pending");
+    fs::write(&pending, b"claimed").expect("stage claimed phase marker");
+    fs::rename(&pending, &phase_marker).expect("publish claimed phase marker");
     loop {
         thread::park();
     }
