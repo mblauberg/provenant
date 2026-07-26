@@ -1030,7 +1030,7 @@ def test_claude_task_class_rejects_caller_authored_capability_claim(tmp_path):
     assert route["status"] == "capability_snapshot_untrusted"
 
 
-def test_claude_task_class_rejects_subscription_canary_with_unverified_effort(tmp_path):
+def test_claude_task_class_admits_probed_effort_without_laundering_provenance(tmp_path):
     snapshot = tmp_path / "claude-caps.json"
     value = capability_snapshot({
         "opus": {
@@ -1051,12 +1051,42 @@ def test_claude_task_class_rejects_subscription_canary_with_unverified_effort(tm
         "--role", "critical-review", "--capabilities-file", str(snapshot),
     )
 
-    assert result.returncode == 1
-    assert route["status"] == "task_class_capability_unverified"
+    assert result.returncode == 0
+    assert route["status"] == "ok"
     assert route["resolved_model"] == "claude-opus-4-8"
-    assert route["requested_effort"] == "high"
-    assert route["effort"] == ""
+    assert route["requested_effort"] == route["effort"] == "high"
+    # The model identity is genuinely runtime-verified; only the effort is not.
+    assert route["identity_source"] == "runtime-capability+catalog"
+    # The weaker provenance must survive into the receipt. If this ever reads
+    # "runtime-model-catalog" the router is claiming effort evidence it lacks.
     assert route["effort_capability_source"] == "provider-unverified"
+
+
+def test_claude_task_class_snapshot_probed_at_another_effort_fails_closed(tmp_path):
+    """The task-class effort is `high`; a snapshot probed at `low` is not evidence for it."""
+    snapshot = tmp_path / "claude-caps.json"
+    value = capability_snapshot({
+        "opus": {
+            "resolved_model": "claude-opus-4-8",
+            "requested_effort": "low",
+            "effort_verified": False,
+        },
+    }, source="claude subscription canary")
+    value["provenance"] = {
+        "kind": "subscription_runtime_canary",
+        "auth_method": "claude.ai",
+        "subscription_type": "pro",
+    }
+    snapshot.write_text(json.dumps(value))
+
+    result, route = resolve(
+        "--adapter", "claude", "--task-class", "critical-review",
+        "--role", "critical-review", "--capabilities-file", str(snapshot),
+    )
+
+    assert result.returncode == 1
+    assert route["status"] == "effort_capability_unverified"
+    assert route["effort"] == ""
 
 
 def test_claude_alias_route_uses_verified_model_without_claiming_effort_support(tmp_path):

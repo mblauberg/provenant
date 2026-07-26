@@ -818,6 +818,18 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
     effort, effort_substitution, effort_status, capability_source = resolve_effort(
         args, family, model, family_config, requested_effort, account_default
     )
+    # A Claude snapshot cannot evidence the effective effort, but its existence
+    # does evidence that the CLI accepted the requested value: the canary fails
+    # closed on the unknown-effort warning. Paired with runtime-verified model
+    # identity that is enough to admit a task-class route at exactly the probed
+    # effort. The receipt keeps the weaker `provider-unverified` provenance, and
+    # resolve_effort has already rejected any other effort.
+    claude_effort_unverified = (
+        args.adapter == "claude"
+        and capability_source == "provider-unverified"
+        and isinstance(capability_models.get(model.lower()), dict)
+        and capability_models[model.lower()].get("effort_verified") is False
+    )
     if effort_status:
         return emit_route(
             {
@@ -836,7 +848,7 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
 
     if args.task_class and (
         (not account_default and identity_source != "runtime-capability+catalog")
-        or capability_source != "runtime-model-catalog"
+        or (capability_source != "runtime-model-catalog" and not claude_effort_unverified)
     ):
         return emit_route(
             {

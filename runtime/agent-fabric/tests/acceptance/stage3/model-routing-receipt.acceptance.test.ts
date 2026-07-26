@@ -11,7 +11,7 @@ import {
 } from "../../support/primary-adapter-testkit.ts";
 
 describe("FR-015 controlled model routing receipt", () => {
-  it("produces authoritative Claude capability evidence before task-class routing", async () => {
+  it("admits a Claude task-class route at the probed effort and records unverified effort provenance", async () => {
     const resolveRoute = requirePublicFunction("resolveModelRouteReceipt");
     const directory = await mkdtemp(join(tmpdir(), "agent-fabric-claude-capability-"));
     const receiptPath = join(directory, "model-route.json");
@@ -24,7 +24,7 @@ const effort = process.argv[process.argv.indexOf("--effort") + 1];
 fs.writeFileSync(out, JSON.stringify({
   schema_version: 1, source: "claude subscription canary", observed_at: new Date().toISOString(),
   provenance: { kind: "subscription_runtime_canary", auth_method: "claude.ai", subscription_type: "pro" },
-  models: { [alias]: { resolved_model: "claude-opus-4-8", supported_efforts: [effort] } }
+  models: { [alias]: { resolved_model: "claude-opus-4-8", requested_effort: effort, effort_verified: false } }
 }));
 `, { mode: 0o700 });
 
@@ -44,6 +44,10 @@ fs.writeFileSync(out, JSON.stringify({
     expect(resolution.receipt).toMatchObject({
       status: "ok", task_class: "critical-review", alias: "flagship",
       resolved_model: "claude-opus-4-8", requested_effort: "high", effort: "high",
+      // The model is runtime-verified; the effort is only accepted-not-observed,
+      // and the receipt must never launder that into runtime-model-catalog.
+      identity_source: "runtime-capability+catalog",
+      effort_capability_source: "provider-unverified",
     });
   });
 

@@ -31,8 +31,10 @@ Task-class dispatch rejects mismatched roles and requires a fresh, adapter-bound
 runtime snapshot. Codex snapshots verify model availability and supported effort.
 Account-default transport omits the literal model, so receipts retain policy
 identity. Claude's no-tools, no-session subscription canary verifies the effective
-model but records requested effort as unverified, so task-class dispatch fails
-closed. It rejects caller-authored source labels without scrubbed provenance.
+model and fails closed on the CLI's unknown-effort warning, but cannot observe
+effort. Task-class dispatch admits only the probed effort, marked
+`provider-unverified`; any other effort is rejected. The canary also rejects
+caller-authored source labels without scrubbed provenance.
 Canaries cost a little; reuse them only within the router's five-minute freshness
 window.
 
