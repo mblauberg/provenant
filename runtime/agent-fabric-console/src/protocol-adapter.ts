@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 
 import {
+  ACTIVITY_NARRATIVE_GROUPING_FEATURE,
+  type ActivityNarrativeGroup,
   FABRIC_OPERATIONS,
   NATIVE_NOTIFICATION_PROJECTION_FEATURE,
   type AgentId,
@@ -19,7 +21,6 @@ import {
   type GitRepositoryProjection,
   type MessageBodyClient,
   type MessageBodyReadResult,
-  type MessageBodyRef,
   type OperatorActionClient,
   type OperatorCapabilityCredential,
   type OperatorDetailReadRequest,
@@ -57,7 +58,7 @@ import {
 } from "@local/agent-fabric-protocol";
 import { parseArtifactContentReadResult } from "@local/agent-fabric-protocol";
 
-import { readConsoleMessageBody } from "./message.js";
+import { inspectNarrativeActivity } from "./activity-inspection.js";
 
 import {
   BOOTSTRAP_FAILURE_DETAILS,
@@ -196,6 +197,7 @@ export function bindConsoleProtocolClient(
     "run-session-projection.v1",
     "declared-run-progress.v2",
     "run-identity-projection.v2",
+    ACTIVITY_NARRATIVE_GROUPING_FEATURE,
     "artifact-content-read.v1",
   ].filter((feature) => !available.has(feature));
   if (missingFeatures.length > 0) {
@@ -349,14 +351,48 @@ export type ConsoleReadInspection =
         | "artifact-oversized"
         | "contract-invalid"
         | "transport-failure";
+    }>
+  | Readonly<{
+      kind: "activity";
+      state: "current";
+      binding: ConsoleInspectionBinding;
+      readTransactionId: string;
+      detail: Extract<
+        import("@local/agent-fabric-protocol").OperatorDetail,
+        { kind: "activity"; group: ActivityNarrativeGroup }
+      >;
+      messages: readonly (
+        | Readonly<{
+            eventId: string;
+            state: "current";
+            result: Extract<MessageBodyReadResult, { available: true }>;
+          }>
+        | Readonly<{
+            eventId: string;
+            state: "unavailable";
+            reason:
+              | "feature-unavailable"
+              | "message-not-found"
+              | "message-forbidden"
+              | "message-expired" | "projection-changed"
+              | "contract-invalid"
+              | "transport-failure";
+          }>
+      )[];
+    }>
+  | Readonly<{
+      kind: "activity";
+      state: "unavailable";
+      binding: ConsoleInspectionBinding;
+      reason:
+        | "feature-unavailable"
+        | "projection-changed"
+        | "detail-unavailable"
+        | "detail-conflict"
+        | "detail-invalid"
+        | "contract-invalid"
+        | "transport-failure";
     }>;
-
-function unavailableMessage(
-  binding: ConsoleInspectionBinding,
-  reason: Extract<ConsoleReadInspection, { kind: "message"; state: "unavailable" }>["reason"],
-): ConsoleReadInspection {
-  return { kind: "message", state: "unavailable", binding, reason };
-}
 
 function unavailableRepository(
   binding: ConsoleInspectionBinding,
@@ -1105,51 +1141,12 @@ export class ConsoleProtocolAdapter {
       }
     }
     if (binding.view !== "activity") return null;
-    const row = dataset?.pages.activity.rows.find(
-      (candidate) => candidate.stableId === binding.itemId,
-    );
-    if (
-      dataset === null ||
-      dataset?.snapshotRevision !== binding.projectionRevision ||
-      row?.revision !== binding.itemRevision
-    ) {
-      return unavailableMessage(binding, "projection-changed");
-    }
-    if (
-      row.summary?.kind !== "activity" ||
-      row.summary.activityKind !== "message"
-    ) {
-      return null;
-    }
-    const reference: MessageBodyRef = row.summary.messageBodyRef;
-    const read = this.#binding.ok ? this.#binding.port.readMessageBody : null;
-    if (read === null) return unavailableMessage(binding, "feature-unavailable");
-    try {
-      const result = await readConsoleMessageBody(
-        { read },
-        { credential: this.#credential, ...reference },
-      );
-      if (!result.available) {
-        const reason = {
-          "not-found": "message-not-found",
-          forbidden: "message-forbidden",
-          expired: "message-expired",
-        } as const;
-        return unavailableMessage(binding, reason[result.reason]);
-      }
-      return { kind: "message", state: "current", binding, result };
-    } catch (error: unknown) {
-      const code = failureCode(error);
-      return unavailableMessage(
-        binding,
-        error instanceof Error && error.message.startsWith("message body contract")
-          ? "contract-invalid"
-          : code === "STALE_REVISION" ||
-              code === "PROJECTION_RESNAPSHOT_REQUIRED"
-            ? "projection-changed"
-          : "transport-failure",
-      );
-    }
+    return inspectNarrativeActivity({
+      binding,
+      dataset,
+      port: this.#binding.ok ? this.#binding.port : null,
+      readScope: this.#readScope(),
+    });
   }
 
   #readScope(): ProjectionSnapshotRequest {

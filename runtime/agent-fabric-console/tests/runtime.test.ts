@@ -2536,7 +2536,7 @@ describe("Fabric Console runtime routing", () => {
     const controller = new FakeController();
     const messageRow: ConsoleRow<"activity"> = {
       view: "activity",
-      stableId: "event-message",
+      stableId: "activity-group-message",
       revision: revisionFromProtocol(4),
       urgency: "normal",
       freshness: {
@@ -2548,16 +2548,48 @@ describe("Fabric Console runtime routing", () => {
       },
       summary: {
         kind: "activity",
-        activityKind: "message",
         summary: "Long message",
         occurredAt: timestamp,
-        messageBodyRef: {
-          projectSessionId: "session-1" as never,
-          messageId: "message-1" as never,
-          expectedRevision: 4,
+        group: {
+          groupId: "activity-group-message",
+          ordinal: 1,
+          kind: "message",
+          actorIds: ["agent-message"],
+          target: { kind: "message", id: "message-1" },
+          eventKinds: ["message-persisted"],
+          occurredAtRange: { first: timestamp, last: timestamp },
+          sourceRange: { first: 4, last: 4 },
+          count: 1,
+          evidenceLinkCount: 0,
+          evidenceLinksDigest:
+            "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945" as never,
+          evidenceLinksTruncated: false,
+          evidenceLinks: [],
+          members: [{
+            ordinal: 1,
+            eventId: "event-message",
+            eventKind: "message-persisted",
+            actorId: "agent-message",
+            target: { kind: "message", id: "message-1" },
+            occurredAt: timestamp,
+            sourceRevision: 4,
+            messageBodyRef: {
+              projectSessionId: "session-1" as never,
+              messageId: "message-1" as never,
+              expectedRevision: 4,
+            },
+            detailAvailability: "available",
+            evidenceLinkCount: 0,
+            evidenceLinksDigest:
+              "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945" as never,
+          }],
         },
       },
-      detailRef: { kind: "activity", eventId: "event-message", expectedRevision: 4 },
+      detailRef: {
+        kind: "activity",
+        groupId: "activity-group-message",
+        expectedRevision: 4,
+      },
       actionAvailability: { state: "read-only", reason: "state-ineligible" },
     };
     controller.dataset = {
@@ -2578,7 +2610,7 @@ describe("Fabric Console runtime routing", () => {
         state: "current",
         binding: {
           view: "activity",
-          itemId: "event-message",
+          itemId: "activity-group-message",
           itemRevision: revisionFromProtocol(4),
           projectionRevision: revisionFromProtocol(11),
         },
@@ -2598,7 +2630,7 @@ describe("Fabric Console runtime routing", () => {
       activeView: "activity",
       selectionByView: {
         ...controller.state.selectionByView,
-        activity: { stableId: "event-message", revision: revisionFromProtocol(4) },
+        activity: { stableId: "activity-group-message", revision: revisionFromProtocol(4) },
       },
     };
     const runtime = new FabricConsoleRuntime({
@@ -2622,7 +2654,7 @@ describe("Fabric Console runtime routing", () => {
     expect(runtime.ui.scrollOffsetByView.activity).toBeUndefined();
 
     const detail = runtime.frame.hitRegions.find(
-      ({ id }) => id === "detail:activity:event-message",
+      ({ id }) => id === "detail:activity:activity-group-message",
     );
     expect(detail).toBeDefined();
     if (detail === undefined) return;

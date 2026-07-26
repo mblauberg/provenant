@@ -131,9 +131,9 @@ export type ConsoleAttentionSummary = Readonly<
 
 /**
  * The Console maps rows only from a peer that negotiated
- * `declared-run-progress.v2` and `run-identity-projection.v2`, so past the
- * mapping boundary the declared progress and run identity facts are
- * invariants, never optional fields.
+ * `declared-run-progress.v2`, `run-identity-projection.v2`, and
+ * `activity-narrative-grouping.v1`, so past the mapping boundary these facts
+ * are invariants, never optional fields.
  */
 export type ConsoleRunSummary = Readonly<
   Omit<OperatorViewSummaryMap["runs"], "declaredProgress" | "identity"> & {
@@ -235,6 +235,12 @@ function consoleSummary<View extends FabricView>(
     (summary as OperatorViewSummaryMap["runs"]).identity === undefined
   ) {
     throw new TypeError("exact run projection has no run identity");
+  }
+  if (
+    view === "activity" &&
+    !("group" in (summary as OperatorViewSummaryMap["activity"]))
+  ) {
+    throw new TypeError("exact activity projection has no narrative group");
   }
   if (view !== "attention") return summary as ConsoleViewSummaryMap[View];
   const attention = summary as OperatorViewSummaryMap["attention"];
@@ -341,6 +347,16 @@ export function rankConsoleRows<View extends FabricView>(
   rows: readonly ConsoleRow<View>[],
 ): readonly ConsoleRow<View>[] {
   return [...rows].sort((left, right) => {
+    if (
+      left.view === "activity" &&
+      right.view === "activity" &&
+      left.summary?.kind === "activity" &&
+      right.summary?.kind === "activity" &&
+      "group" in left.summary &&
+      "group" in right.summary
+    ) {
+      return left.summary.group.ordinal - right.summary.group.ordinal;
+    }
     const urgency = URGENCY_ORDER[left.urgency] - URGENCY_ORDER[right.urgency];
     if (urgency !== 0) {
       return urgency;

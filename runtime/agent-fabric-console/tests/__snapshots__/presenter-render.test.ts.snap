@@ -93,7 +93,7 @@ exports[`structured presenter and responsive Fabric renderer > characterises the
     },
     {
       "enabled": true,
-      "id": "row:activity:event-1",
+      "id": "row:activity:activity-group-1",
       "kind": "row",
       "rect": {
         "x1": 1,
@@ -131,7 +131,7 @@ exports[`structured presenter and responsive Fabric renderer > characterises the
     "Phase:implement          |Owner:codex-chair  |Health:blocked    |Attn:1 |Runs:1 ",
     "Next:Console GREEN                                  |Capacity:tasks:3+1/8       ",
     "1:Attn 2:Proj 3:Runs 4:Work 5:Agents 6:Evid 7:Act* 8:Sys                        ",
-    "    Certifying review approved | decision | 2026-07-11T12:00:00.000Z | LIVE 5s ~",
+    "    Review decision context | task | x3 | source 11-13 | task:task-1 | LIVE 5s ~",
     "                                                                                ",
     "                                                                                ",
     "                                                                                ",

@@ -1,4 +1,7 @@
-import { GATE_SYSTEM_SUPERSESSION_FEATURE } from "./features.js";
+import {
+  ACTIVITY_NARRATIVE_GROUPING_FEATURE,
+  GATE_SYSTEM_SUPERSESSION_FEATURE,
+} from "./features.js";
 import type { ScopedGate } from "./gates.js";
 import { FABRIC_OPERATIONS } from "./operations.js";
 import type {
@@ -254,6 +257,47 @@ function workFactsPresence(
   return [];
 }
 
+function activityNarrativeGroupingPresence(
+  operation: ProtocolOperation,
+  result: OperationResultMap[ProtocolOperation],
+): readonly boolean[] {
+  if (operation === FABRIC_OPERATIONS.projectionPage) {
+    const page = result as ProjectionPageResult;
+    if (page.view !== "activity") return [];
+    return factValues((page as ProjectionPageResult<"activity">).page)
+      .flatMap((value) => value.items.map((item) => item.group !== undefined));
+  }
+  if (operation === FABRIC_OPERATIONS.projectionViewPage) {
+    const page = result as OperatorViewPageResult;
+    if (page.status !== "page" || page.view !== "activity") return [];
+    const activity = page as Extract<
+      OperatorViewPageResult<"activity">,
+      { status: "page" }
+    >;
+    return activity.rows.flatMap((row) =>
+      factValues(row.fact).flatMap((value) => [
+        "group" in value.summary,
+        "groupId" in value.detailRef,
+      ])
+    );
+  }
+  if (operation === FABRIC_OPERATIONS.projectionDetailRead) {
+    const read = result as OperatorDetailReadResult;
+    if (read.status !== "current" || read.detailRef.kind !== "activity") return [];
+    if ("eventId" in read.detailRef && "groupId" in read.detailRef) {
+      return factValues(read.detail).flatMap((detail) =>
+        detail.kind === "activity"
+          ? ["groupId" in detail && "eventId" in detail]
+          : []
+      );
+    }
+    return factValues(read.detail).flatMap((detail) =>
+      detail.kind === "activity" ? ["group" in detail] : []
+    );
+  }
+  return [];
+}
+
 function assertUniformFeaturePresence(
   operation: ProtocolOperation,
   featureNegotiated: boolean,
@@ -332,6 +376,14 @@ export function assertOperationResultFeatureShape<Operation extends ProtocolOper
     operation,
     features.includes(WORK_FACTS_PROJECTION_FEATURE),
     workFactsPresence(operation, result as OperationResultMap[ProtocolOperation]),
+  );
+  assertUniformFeaturePresence(
+    operation,
+    features.includes(ACTIVITY_NARRATIVE_GROUPING_FEATURE),
+    activityNarrativeGroupingPresence(
+      operation,
+      result as OperationResultMap[ProtocolOperation],
+    ),
   );
   return result;
 }

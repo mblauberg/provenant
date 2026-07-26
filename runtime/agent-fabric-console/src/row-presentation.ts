@@ -19,6 +19,11 @@ import type {
 } from "./presenter-model.js";
 import { urgencyMarkerFor } from "./theme.js";
 import { isNeedsYouRow, recordAttentionLane } from "./attention-classification.js";
+import {
+  activityGroupDetailLines,
+  activityGroupSecondary,
+} from "./activity-presentation.js";
+import { capacityLabel } from "./header-presentation.js";
 export { isNeedsYouRow, isNeedsYouUrgency } from "./attention-classification.js";
 export function titleCase(view: FabricView): string {
   return `${view.slice(0, 1).toUpperCase()}${view.slice(1)}`;
@@ -58,34 +63,6 @@ function headerFreshness(
   ];
   if (dataset.connection.state !== "live") states.push("stale");
   return states.sort((left, right) => FACT_SEVERITY[right] - FACT_SEVERITY[left])[0] ?? "unavailable";
-}
-
-function capacityLabel(dataset: FabricConsoleDataset): string {
-  const value = factValue(dataset.snapshot?.capacity);
-  if (value === null) {
-    return "unknown";
-  }
-  return Object.entries(value)
-    .map(([name, capacity]) => {
-      if (
-        typeof capacity === "object" &&
-        capacity !== null &&
-        !Array.isArray(capacity)
-      ) {
-        const used = Reflect.get(capacity, "used");
-        const reserved = Reflect.get(capacity, "reserved");
-        const limit = Reflect.get(capacity, "limit");
-        if (
-          typeof used === "number" &&
-          typeof reserved === "number" &&
-          typeof limit === "number"
-        ) {
-          return `${name}:${String(used)}+${String(reserved)}/${String(limit)}`;
-        }
-      }
-      return `${name}:declared`;
-    })
-    .join(" ") || "declared";
 }
 
 export function presentHeader(
@@ -230,7 +207,7 @@ function summaryText(
     case "evidence":
       return [summary.evidenceKind, `${summary.status} | ${summary.provenance}`];
     case "activity":
-      return [summary.summary, `${summary.activityKind} | ${summary.occurredAt}`];
+      return [summary.summary, activityGroupSecondary(summary)];
     case "system":
       return [summary.systemKind, `${summary.state} | ${summary.detail}`];
   }
@@ -877,6 +854,9 @@ export function detailLines(
   }
   if (row.summary?.kind === "run") {
     lines.push(...runDetailLines(row.summary));
+  }
+  if (row.summary?.kind === "activity") {
+    lines.push(...activityGroupDetailLines(row.summary));
   }
   lines.push(
     ...reviewRunDetailLines(row, dataset),

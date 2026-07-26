@@ -44,6 +44,80 @@ export function renderFabricDetail(
   let detailScrollMaximum = 0;
   let lines: readonly string[];
   if (
+    inspection?.kind === "activity" &&
+    inspection.binding.view === presentation.activeView &&
+    inspection.binding.itemId === presentation.detail?.stableId
+  ) {
+    if (inspection.state === "current") {
+      const group = inspection.detail.group;
+      const detailByEvent = new Map(
+        inspection.detail.memberDetails.map((detail) => [detail.eventId, detail]),
+      );
+      const messageByEvent = new Map(
+        inspection.messages.map((message) => [message.eventId, message]),
+      );
+      const unavailableEvidence = group.members.some((member) => {
+        if (member.evidenceLinkCount === 0) return false;
+        return detailByEvent.get(member.eventId)?.status !== "available";
+      });
+      const detailText = [
+        `Activity group: ${group.groupId} | ${group.kind} | ordinal ${String(group.ordinal)}`,
+        `Count: ${String(group.count)} | source ${String(group.sourceRange.first)}-${String(group.sourceRange.last)} inclusive`,
+        `Time: ${group.occurredAtRange.first} - ${group.occurredAtRange.last}`,
+        `Target: ${group.target === null ? "unavailable | no exact target" : `${group.target.kind}:${group.target.id}`}`,
+        `Actors: ${group.actorIds.join(", ") || "unavailable | no exact actor"}`,
+        `Evidence: ${String(group.evidenceLinkCount)} total${
+          group.evidenceLinksTruncated
+            ? unavailableEvidence
+              ? " | inline summary truncated | some full links unavailable | evidence-bearing member detail unavailable"
+              : " | inline summary truncated | full links in member detail"
+            : ""
+        }`,
+        ...group.members.flatMap((member) => {
+          const detail = detailByEvent.get(member.eventId);
+          const message = messageByEvent.get(member.eventId);
+          return [
+            `Member ${String(member.ordinal)}: ${member.eventId} | ${member.eventKind} | source ${String(member.sourceRevision)} | ${member.occurredAt}`,
+            ...(member.messageBodyRef === undefined
+              ? []
+              : message === undefined || message.state === "unavailable"
+                ? [`Message: unavailable | ${message?.reason ?? "not-returned"}`]
+                : [
+                    `Message: ${message.result.messageId} r${String(message.result.revision)} | ${message.result.body}`,
+                  ]),
+            detail === undefined || detail.status !== "available"
+              ? `Detail: unavailable | ${
+                detail === undefined
+                  ? "not-returned"
+                  : detail.status === "unavailable"
+                    ? detail.reason
+                    : "unresolved-reference"
+              }`
+              : `Detail: ${detail.content}`,
+          ];
+        }),
+      ].join("\n");
+      const window = presentSafeTextWindow(
+        detailText,
+        {
+          columns: Math.max(1, bounds.x2 - bounds.x1),
+          rows: Math.max(1, height),
+          offset: Math.max(
+            0,
+            Math.trunc(ui.detailScrollOffsetByView[presentation.activeView] ?? 0),
+          ),
+        },
+        { sanitizeDisplayText, graphemes, cellWidth },
+      );
+      detailScrollMaximum = Math.max(0, window.totalLines - 1);
+      lines = window.lines;
+    } else {
+      lines = [
+        `Activity group: ${inspection.binding.itemId}`,
+        `Detail: unavailable | ${inspection.reason}`,
+      ];
+    }
+  } else if (
     inspection?.kind === "message" &&
     inspection.binding.view === presentation.activeView &&
     inspection.binding.itemId === presentation.detail?.stableId

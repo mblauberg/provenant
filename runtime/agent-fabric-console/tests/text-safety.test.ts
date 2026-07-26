@@ -38,4 +38,15 @@ describe("pinned Unicode and terminal-neutral text", () => {
     expect(sanitized).toContain("<BIDI-U+2066>");
     expect(sanitized).toContain("<LF>");
   });
+
+  it("uses the same visible neutralisation for grouped activity text", () => {
+    const grouped = Console.sanitizeDisplayText(
+      "task group\u001b[31m | member\u202e | detail\u0007",
+      { lineBreaks: "visible" },
+    );
+
+    expect(grouped).toBe(
+      "task group<ESC>[31m | member<BIDI-U+202E> | detail<BEL>",
+    );
+  });
 });

@@ -35,6 +35,7 @@ import {
 } from "../src/model.js";
 import { presentFabricConsole } from "../src/presenter.js";
 import type { FabricConsoleDataset } from "../src/protocol-adapter.js";
+import { activityGroupDetailLines } from "../src/activity-presentation.js";
 import { renderConsoleSnapshot } from "../src/snapshot.js";
 import type { ConsoleWorkflowReview } from "../src/workflow.js";
 
@@ -225,11 +226,67 @@ function richDataset(
       }),
     ],
     activity: [
-      row("activity", "event-1", {
+      row("activity", "activity-group-1", {
         kind: "activity",
-        activityKind: "decision",
-        summary: "Certifying review approved",
+        summary: "Review decision context",
         occurredAt: timestamp,
+        group: {
+          groupId: "activity-group-1",
+          ordinal: 1,
+          kind: "task",
+          actorIds: ["codex-chair"],
+          target: { kind: "task", id: "task-1" },
+          eventKinds: ["message-persisted", "tool-invoked", "gate-resolved"],
+          occurredAtRange: { first: timestamp, last: timestamp },
+          sourceRange: { first: 11, last: 13 },
+          count: 3,
+          evidenceLinkCount: 0,
+          evidenceLinksDigest:
+            "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945" as never,
+          evidenceLinksTruncated: false,
+          evidenceLinks: [],
+          members: [
+            {
+              ordinal: 1,
+              eventId: "event-1",
+              eventKind: "message-persisted",
+              actorId: "codex-chair",
+              target: { kind: "task", id: "task-1" },
+              occurredAt: timestamp,
+              sourceRevision: 11,
+              detailAvailability: "available",
+              evidenceLinkCount: 0,
+              evidenceLinksDigest:
+                "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945" as never,
+            },
+            {
+              ordinal: 2,
+              eventId: "event-2",
+              eventKind: "tool-invoked",
+              actorId: "codex-chair",
+              target: { kind: "task", id: "task-1" },
+              occurredAt: timestamp,
+              sourceRevision: 12,
+              detailAvailability: "available",
+              evidenceLinkCount: 0,
+              evidenceLinksDigest:
+                "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945" as never,
+            },
+            {
+              ordinal: 3,
+              eventId: "event-3",
+              eventKind: "gate-resolved",
+              actorId: "codex-chair",
+              target: { kind: "task", id: "task-1" },
+              occurredAt: timestamp,
+              sourceRevision: 13,
+              detailAvailability: "available",
+              evidenceLinkCount: 0,
+              evidenceLinksDigest:
+                "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945" as never,
+            },
+          ],
+        },
       }),
     ],
     system: [
@@ -884,6 +941,197 @@ function review(stage: ActionReview["stage"] = "review"): ActionReview {
 }
 
 describe("structured presenter and responsive Fabric renderer", () => {
+  it("renders daemon grouping count and source range without adding a lifecycle claim", () => {
+    const dataset = richDataset();
+    const activity = dataset.pages.activity.rows[0];
+    if (
+      activity?.summary?.kind !== "activity" ||
+      !("group" in activity.summary)
+    ) {
+      throw new Error("activity grouping fixture unavailable");
+    }
+    const base = controllerState();
+    const controller: ConsoleControllerState = {
+      ...base,
+      activeView: "activity",
+      selectionByView: {
+        ...base.selectionByView,
+        activity: {
+          stableId: activity.stableId,
+          revision: activity.revision,
+        },
+      },
+    };
+    const presented = presentFabricConsole(
+      dataset,
+      controller,
+      createFabricUiState(),
+      { columns: 120, rows: 32 },
+    );
+
+    expect(presented.masterRows[0]).toMatchObject({
+      primary: "Review decision context",
+      secondary: "task | x3 | source 11-13 | task:task-1",
+    });
+    expect(presented.detail?.lines).toEqual(expect.arrayContaining([
+      { label: "Group count", value: "3" },
+      { label: "Group source range", value: "11-13 inclusive" },
+      {
+        label: "Member 2",
+        value: `event-2 | tool-invoked | source 12 | ${timestamp}`,
+      },
+      {
+        label: "Member 2 detail",
+        value: "available | 0 evidence link(s)",
+      },
+    ]));
+    expect(
+      JSON.stringify({
+        primary: presented.masterRows[0]?.primary,
+        secondary: presented.masterRows[0]?.secondary,
+        detail: presented.detail?.lines,
+      }),
+    ).not.toMatch(/\b(?:completed|done|progress|succeeded)\b/iu);
+    const unsafeEvidenceSummary = {
+      ...activity.summary,
+      group: {
+        ...activity.summary.group,
+        evidenceLinkCount: 2,
+        evidenceLinksTruncated: true,
+        evidenceLinks: [{ path: "evidence/a.txt" as never, digest: digestA }],
+        members: activity.summary.group.members.map((member, index) =>
+          index === 0
+            ? {
+                ...member,
+                detailAvailability: "unavailable" as const,
+                evidenceLinkCount: 2,
+              }
+            : member
+        ) as unknown as typeof activity.summary.group.members,
+      },
+    };
+    expect(
+      activityGroupDetailLines(unsafeEvidenceSummary).find(
+        (line) => line.label === "Group evidence",
+      )?.value,
+    ).toContain(
+      "some full links unavailable | evidence-bearing member detail unavailable",
+    );
+  });
+
+  it("renders grouped row and drill-down controls as visible inert tokens", () => {
+    const baseDataset = richDataset();
+    const baseActivity = baseDataset.pages.activity.rows[0];
+    if (
+      baseActivity?.summary?.kind !== "activity" ||
+      !("group" in baseActivity.summary) ||
+      baseDataset.snapshotRevision === null
+    ) {
+      throw new Error("activity grouping fixture unavailable");
+    }
+    const member = {
+      ...baseActivity.summary.group.members[0],
+      eventKind: "message\u2066-persisted",
+      messageBodyRef: {
+        projectSessionId: sessionId,
+        messageId: "message-hostile" as never,
+        expectedRevision: 1,
+      },
+    };
+    const group = {
+      ...baseActivity.summary.group,
+      actorIds: ["codex\u202e-chair"],
+      eventKinds: [member.eventKind],
+      count: 1,
+      sourceRange: { first: 11, last: 11 },
+      members: [member] as [typeof member],
+    };
+    const activity = {
+      ...baseActivity,
+      summary: {
+        ...baseActivity.summary,
+        summary: "Review\u001b[31m context",
+        group,
+      },
+      detailRef: {
+        kind: "activity" as const,
+        groupId: group.groupId,
+        expectedRevision: 11,
+      },
+    };
+    const dataset: FabricConsoleDataset = {
+      ...baseDataset,
+      pages: {
+        ...baseDataset.pages,
+        activity: {
+          ...baseDataset.pages.activity,
+          rows: [activity],
+        },
+      },
+      inspection: {
+        kind: "activity",
+        state: "current",
+        binding: {
+          view: "activity",
+          itemId: activity.stableId,
+          itemRevision: activity.revision,
+          projectionRevision: baseDataset.snapshotRevision,
+        },
+        readTransactionId: "read-hostile-group",
+        detail: {
+          kind: "activity",
+          group,
+          memberDetails: [{
+            eventId: member.eventId,
+            status: "available",
+            content: "tool detail\u202e",
+            transformation: "none",
+          }],
+        },
+        messages: [{
+          eventId: member.eventId,
+          state: "current",
+          result: {
+            available: true,
+            messageId: "message-hostile" as never,
+            revision: 1,
+            body: "ordinary body\u0007",
+            terminalNeutralised: true,
+            capabilityValuesRedacted: true,
+            artifactRefs: [],
+          },
+        }],
+      },
+    };
+    const base = controllerState();
+    const frame = renderFabricConsoleFrame(
+      dataset,
+      {
+        ...base,
+        activeView: "activity",
+        selectionByView: {
+          ...base.selectionByView,
+          activity: {
+            stableId: activity.stableId,
+            revision: activity.revision,
+          },
+        },
+      },
+      createFabricUiState(),
+      { columns: 140, rows: 36 },
+    );
+    const output = frame.rows.join("\n");
+
+    expect(output).not.toContain("\u001b");
+    expect(output).not.toContain("\u202e");
+    expect(output).not.toContain("\u2066");
+    expect(output).not.toContain("\u0007");
+    expect(output).toContain("<ESC>");
+    expect(output).toContain("<BIDI-U+202E>");
+    expect(output).toContain("<BIDI-U+2066>");
+    expect(output).toContain("<BEL>");
+  });
+
   it("shows the exact registered accepted scope in Project row and detail", () => {
     const dataset = richDataset();
     const projectRow = dataset.pages.project.rows[0];

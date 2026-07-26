@@ -29,6 +29,7 @@ import {
   type OperationCodecFragment,
   type OperationShapeFragment,
 } from "./common.js";
+import { createActivityNarrativeCodecs } from "./activity-narrative.js";
 
 export const OPERATOR_PROJECTION_INPUT_SHAPES = {
   [FABRIC_OPERATIONS.projectDiscover]: object(["credential", "projectId", "after", "limit"]),
@@ -124,6 +125,8 @@ export function createOperatorProjectionOperationCodecFragment(dependencies: Rea
     objectCodec({ kind: literal("agent"), agentId: identifier, expectedRevision: positiveInteger }),
     objectCodec({ kind: literal("evidence"), evidenceId: identifier, expectedRevision: positiveInteger }),
     objectCodec({ kind: literal("activity"), eventId: identifier, expectedRevision: positiveInteger }),
+    objectCodec({ kind: literal("activity"), groupId: identifier, expectedRevision: positiveInteger }),
+    objectCodec({ kind: literal("activity"), groupId: identifier, eventId: identifier, expectedRevision: positiveInteger, contentOffset: integer({ minimum: 0 }) }),
     objectCodec({ kind: literal("system"), componentId: identifier, expectedRevision: positiveInteger }),
   ]);
   const projectDetailRefCodec = objectCodec({
@@ -143,11 +146,11 @@ export function createOperatorProjectionOperationCodecFragment(dependencies: Rea
     evidenceId: identifier,
     expectedRevision: positiveInteger,
   });
-  const activityDetailRefCodec = objectCodec({
-    kind: literal("activity"),
-    eventId: identifier,
-    expectedRevision: positiveInteger,
-  });
+  const activityDetailRefCodec = unionOf([
+    objectCodec({ kind: literal("activity"), eventId: identifier, expectedRevision: positiveInteger }),
+    objectCodec({ kind: literal("activity"), groupId: identifier, expectedRevision: positiveInteger }),
+    objectCodec({ kind: literal("activity"), groupId: identifier, eventId: identifier, expectedRevision: positiveInteger, contentOffset: integer({ minimum: 0 }) }),
+  ]);
   const systemDetailRefCodec = objectCodec({
     kind: literal("system"),
     componentId: identifier,
@@ -158,6 +161,8 @@ export function createOperatorProjectionOperationCodecFragment(dependencies: Rea
     messageId: identifier,
     expectedRevision: positiveInteger,
   });
+  const { activityNarrativeGroupCodec, groupedActivityDetailCodec, activityNarrativeMemberContentDetailCodec } =
+    createActivityNarrativeCodecs({ artifactRefCodec, messageBodyRefCodec });
 
   const attentionSummaryCodec = objectCodec({
     kind: literal("attention"),
@@ -503,6 +508,7 @@ export function createOperatorProjectionOperationCodecFragment(dependencies: Rea
       ...activitySummaryFields,
       activityKind: enumeration(["decision", "lifecycle", "operation"]),
     }),
+    objectCodec({ ...activitySummaryFields, group: activityNarrativeGroupCodec }),
   ]);
   const systemSummaryCodec = objectCodec({
     kind: literal("system"),
@@ -598,6 +604,24 @@ export function createOperatorProjectionOperationCodecFragment(dependencies: Rea
               `operatorViewPage.rows[${String(index)}].fact.workflow`,
             );
           }
+          if (view === "activity" && "group" in summary) {
+            const group = summary.group as Record<string, unknown>;
+            const detailRef = candidate.detailRef as Record<string, unknown>;
+            const sourceRange = group.sourceRange as Record<string, unknown>;
+            const occurredAtRange =
+              group.occurredAtRange as Record<string, unknown>;
+            if (
+              row.itemId !== group.groupId ||
+              row.itemRevision !== sourceRange.last ||
+              detailRef.groupId !== group.groupId ||
+              detailRef.expectedRevision !== sourceRange.last ||
+              summary.occurredAt !== occurredAtRange.last
+            ) {
+              throw new TypeError(
+                `operatorViewPage.rows[${String(index)}] activity group bindings do not match`,
+              );
+            }
+          }
         }
       }
       return value;
@@ -684,6 +708,8 @@ export function createOperatorProjectionOperationCodecFragment(dependencies: Rea
       summary: text,
       occurredAt: timestamp,
     }),
+    groupedActivityDetailCodec,
+    activityNarrativeMemberContentDetailCodec,
     objectCodec({
       kind: literal("system"),
       componentId: identifier,
@@ -753,6 +779,28 @@ export function createOperatorProjectionOperationCodecFragment(dependencies: Rea
             "operatorDetailRead.detail.workflow",
           );
         }
+        if (detail.kind === "activity" && "group" in detail) {
+          const group = detail.group as Record<string, unknown>;
+          const sourceRange = group.sourceRange as Record<string, unknown>;
+          if (
+            detailRef.groupId !== group.groupId ||
+            detailRef.expectedRevision !== sourceRange.last ||
+            fact.revision !== sourceRange.last
+          ) {
+            throw new TypeError("operatorDetailRead activity group bindings do not match");
+          }
+        }
+        if (detail.kind === "activity" && "groupId" in detail && "eventId" in detail) {
+          if (
+            detailRef.groupId !== detail.groupId ||
+            detailRef.eventId !== detail.eventId ||
+            detailRef.contentOffset !== detail.contentOffset ||
+            detailRef.expectedRevision !== detail.sourceRevision ||
+            fact.revision !== detail.sourceRevision
+          ) {
+            throw new TypeError("operatorDetailRead activity member bindings do not match");
+          }
+        }
         if (detail.kind !== "run" || detail.identity === undefined) continue;
         const identity = detail.identity as Record<string, unknown>;
         if (identity.chairAgentId !== detail.chairAgentId) {
@@ -814,8 +862,14 @@ export function createOperatorProjectionOperationCodecFragment(dependencies: Rea
 
   };
   const activityViewItemCodec = unionOf([
-    objectCodec({ ...activityViewItemFields, kind: literal("message"), messageBodyRef: messageBodyRefCodec }),
-    objectCodec({ ...activityViewItemFields, kind: enumeration(["decision", "lifecycle", "operation"]) }),
+    objectCodec(
+      { ...activityViewItemFields, kind: literal("message"), messageBodyRef: messageBodyRefCodec },
+      { group: activityNarrativeGroupCodec },
+    ),
+    objectCodec(
+      { ...activityViewItemFields, kind: enumeration(["decision", "lifecycle", "operation"]) },
+      { group: activityNarrativeGroupCodec },
+    ),
   ]);
   const systemViewItemCodec = objectCodec({
     componentId: identifier,

@@ -24,6 +24,16 @@ export type InertArtifactTextResult =
       credentialValuesRedacted: true;
     };
 
+export type RedactedArtifactTextResult =
+  | { safe: false }
+  | {
+      safe: true;
+      content: string;
+      transformation: ArtifactContentTransformation;
+      capabilityValuesRedacted: true;
+      credentialValuesRedacted: true;
+    };
+
 function escapeRegex(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
 }
@@ -42,12 +52,15 @@ function neutraliseTerminal(value: string): string {
     .replace(/\p{Cf}/gu, "");
 }
 
-export function inertArtifactText(raw: string, runtimeKnownSecrets: readonly string[] = []): InertArtifactTextResult {
+function redactArtifactText(
+  raw: string,
+  terminalSafe: string,
+  runtimeKnownSecrets: readonly string[],
+): RedactedArtifactTextResult {
   if (/-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----/u.test(raw) && !PRIVATE_KEY.test(raw)) return { safe: false };
   PRIVATE_KEY.lastIndex = 0;
   if (/^(?:\s*(?:authorization|proxy-authorization)\s*:\s*)$/imu.test(raw)) return { safe: false };
 
-  const terminalSafe = neutraliseTerminal(raw);
   const terminalChanged = terminalSafe !== raw;
   let content = terminalSafe;
   let capabilityChanged = false;
@@ -87,10 +100,44 @@ export function inertArtifactText(raw: string, runtimeKnownSecrets: readonly str
     safe: true,
     content,
     transformation,
-    terminalNeutralised: true,
     capabilityValuesRedacted: true,
     credentialValuesRedacted: true,
   };
+}
+
+export function inertArtifactText(
+  raw: string,
+  runtimeKnownSecrets: readonly string[] = [],
+): InertArtifactTextResult {
+  const protectedText = redactArtifactText(
+    raw,
+    neutraliseTerminal(raw),
+    runtimeKnownSecrets,
+  );
+  return protectedText.safe
+    ? { ...protectedText, terminalNeutralised: true }
+    : protectedText;
+}
+
+export function redactArtifactTextPreservingControls(
+  raw: string,
+  runtimeKnownSecrets: readonly string[] = [],
+): RedactedArtifactTextResult {
+  // Detection has to run on the neutralised text. Every credential pattern and
+  // the final withholding gate match against whatever is passed as
+  // `terminalSafe`, so detecting on `raw` lets a single zero-width or bidi
+  // control inside a token defeat all of them: `afb_<U+200B>LIVE…` matches
+  // nothing, is neither redacted nor withheld, and renders as a usable token in
+  // the Console, whose own sanitiser visualises C0/C1 and bidi but not U+200B.
+  const inert = redactArtifactText(raw, neutraliseTerminal(raw), runtimeKnownSecrets);
+  if (!inert.safe) return inert;
+  // Controls may only be preserved for text the neutralised pass found nothing
+  // to hide in. Once anything was redacted, returning the control-preserving
+  // rendering would hand back the very bytes that were just redacted.
+  if (inert.transformation !== "none" && inert.transformation !== "terminal-neutralised") {
+    return inert;
+  }
+  return redactArtifactText(raw, raw, runtimeKnownSecrets);
 }
 
 function digest(value: string): `sha256:${string}` {

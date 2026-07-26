@@ -1,12 +1,12 @@
 source_size_ceilings:
   runtime/agent-fabric/src/core/fabric.ts: 5834
   runtime/agent-fabric/src/operator/action-store.ts: 1640
-  runtime/agent-fabric/src/operator/projection-store.ts: 2019
+  runtime/agent-fabric/src/operator/projection-store.ts: 1958
   runtime/agent-fabric/src/operator/typed-git-service.ts: 2004
-  runtime/agent-fabric-console/src/evaluation.ts: 1947
+  runtime/agent-fabric-console/src/evaluation.ts: 1944
   runtime/agent-fabric/src/project-session/store.ts: 1757
   runtime/agent-fabric-console/src/workflow.ts: 1678
-  runtime/agent-fabric-console/src/protocol-adapter.ts: 1631
+  runtime/agent-fabric-console/src/protocol-adapter.ts: 1628
   runtime/agent-fabric/src/operator/store.ts: 1532
   runtime/agent-fabric-protocol/src/provider-review.ts: 1448
   runtime/agent-fabric-console/src/runtime.ts: 1320
