@@ -15,7 +15,20 @@ case "$agents_home" in /*) ;; *) echo "AGENTS_HOME must be absolute" >&2; exit 2
 export AGENTS_HOME=$agents_home
 package_root="$agents_home/runtime/agent-fabric"
 
-"$script_dir/agent-fabric-protocol-preflight"
+unset AGENT_FABRIC_PROTOCOL_BUILD_VERDICT AGENT_FABRIC_PROTOCOL_BUILD_REPAIR
+if [ "${1:-}" = doctor ]; then
+  protocol_repair=$(
+    AGENT_FABRIC_PROTOCOL_PREFLIGHT_MODE=doctor \
+      "$script_dir/agent-fabric-protocol-preflight"
+  )
+  if [ -n "$protocol_repair" ]; then
+    AGENT_FABRIC_PROTOCOL_BUILD_VERDICT=stale
+    AGENT_FABRIC_PROTOCOL_BUILD_REPAIR=$protocol_repair
+    export AGENT_FABRIC_PROTOCOL_BUILD_VERDICT AGENT_FABRIC_PROTOCOL_BUILD_REPAIR
+  fi
+else
+  "$script_dir/agent-fabric-protocol-preflight"
+fi
 
 dist_cli="$package_root/dist/cli/main.js"
 if [ -f "$dist_cli" ] && ! find "$package_root/src" -type f -name '*.ts' -newer "$dist_cli" -print -quit | grep -q .; then

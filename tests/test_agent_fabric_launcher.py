@@ -14,6 +14,7 @@ MCP_WRAPPER = REPO_ROOT / "scripts" / "agent-fabric-mcp"
 FRESHNESS_LIBRARY = REPO_ROOT / "scripts" / "lib" / "agent-fabric-workspace-freshness.sh"
 PREFLIGHT = REPO_ROOT / "scripts" / "agent-fabric-protocol-preflight"
 PROTOCOL_BUILD = REPO_ROOT / "scripts" / "agent-fabric-protocol-build"
+ROOT_MANIFEST_STAMP = ".root-manifests.sha256"
 
 
 def _write(path: Path, content: str = "fixture\n") -> None:
@@ -48,6 +49,13 @@ def _fixture(
     _write(protocol_source)
     _write(root / "node_modules/tsx/dist/loader.mjs")
     now = 1_700_000_000
+    for manifest, content in {
+        "package.json": '{"type":"module"}\n',
+        "package-lock.json": '{"lockfileVersion":3}\n',
+        "tsconfig.json": '{"files":[]}\n',
+    }.items():
+        _write(root / manifest, content)
+        os.utime(root / manifest, (now, now))
     os.utime(fabric_source, (now, now))
     os.utime(protocol_source, (now, now))
     if launcher_mode == "packaged":
@@ -60,7 +68,16 @@ def _fixture(
 
     marker = tmp_path / "daemon-election-attempt"
     fake_node = tmp_path / "bin" / "node"
-    _write(fake_node, "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$LAUNCHER_TEST_MARKER\"\n")
+    _write(
+        fake_node,
+        "#!/bin/sh\n"
+        '[ "${1:-}" != "--input-type=module" ] || exit 0\n'
+        "printf '%s\\n' \"$@\" > \"$LAUNCHER_TEST_MARKER\"\n"
+        "if [ -n \"${LAUNCHER_TEST_ENV_MARKER:-}\" ]; then\n"
+        "  printf '%s\\n%s\\n' \"${AGENT_FABRIC_PROTOCOL_BUILD_VERDICT:-}\" "
+        "\"${AGENT_FABRIC_PROTOCOL_BUILD_REPAIR:-}\" > \"$LAUNCHER_TEST_ENV_MARKER\"\n"
+        "fi\n",
+    )
     fake_node.chmod(0o755)
     return root, marker, fake_node
 
@@ -73,6 +90,7 @@ def _run(root: Path, marker: Path, fake_node: Path) -> subprocess.CompletedProce
             **os.environ,
             "AGENTS_HOME": str(root),
             "LAUNCHER_TEST_MARKER": str(marker),
+            "LAUNCHER_TEST_ENV_MARKER": str(marker.with_name("launcher-environment")),
             "PATH": f"{fake_node.parent}:{os.environ['PATH']}",
         },
         text=True,
@@ -136,7 +154,7 @@ def test_source_launcher_requires_current_protocol_dist_before_start(
 
     result = _run(root, marker, fake_node)
 
-    if protocol_dist == "current":
+    if protocol_dist in {"current", "stale"}:
         assert result.returncode == 0, result.stderr
         assert marker.read_text(encoding="utf-8").splitlines() == [
             "--import",
@@ -144,6 +162,16 @@ def test_source_launcher_requires_current_protocol_dist_before_start(
             str(root / "runtime/agent-fabric/src/cli/main.ts"),
             "doctor",
         ]
+        environment = marker.with_name("launcher-environment").read_text(
+            encoding="utf-8",
+        ).splitlines()
+        if protocol_dist == "stale":
+            assert environment == [
+                "stale",
+                f'AGENTS_HOME="{root}" "{root / "scripts/agent-fabric-protocol-build"}"',
+            ]
+        else:
+            assert environment == ["", ""]
     else:
         assert result.returncode == 78
         assert "AGENT_FABRIC_PROTOCOL_BUILD_STALE" in result.stderr
@@ -190,7 +218,7 @@ def test_packaged_launcher_accepts_current_protocol_dist(tmp_path: Path) -> None
     ]
 
 
-@pytest.mark.parametrize("protocol_dist", ["missing", "stale"])
+@pytest.mark.parametrize("protocol_dist", ["missing"])
 def test_packaged_launcher_reports_stale_protocol_before_election(
     tmp_path: Path,
     protocol_dist: str,
@@ -210,6 +238,132 @@ def test_packaged_launcher_reports_stale_protocol_before_election(
         f'"{root / "scripts/agent-fabric-protocol-build"}"'
     ) in result.stderr
     assert not marker.exists(), "stale protocol dist must fail before daemon election"
+
+
+def test_packaged_doctor_runs_with_stale_protocol_verdict_and_exact_repair(
+    tmp_path: Path,
+) -> None:
+    root, marker, fake_node = _fixture(
+        tmp_path,
+        launcher_mode="packaged",
+        protocol_dist="stale",
+    )
+
+    result = _run(root, marker, fake_node)
+
+    assert result.returncode == 0, result.stderr
+    assert marker.read_text(encoding="utf-8").splitlines() == [
+        str(root / "runtime/agent-fabric/dist/cli/main.js"),
+        "doctor",
+    ]
+    assert marker.with_name("launcher-environment").read_text(
+        encoding="utf-8",
+    ).splitlines() == [
+        "stale",
+        f'AGENTS_HOME="{root}" "{root / "scripts/agent-fabric-protocol-build"}"',
+    ]
+
+
+def test_doctor_hard_blocks_when_protocol_dist_is_unloadable(tmp_path: Path) -> None:
+    root, marker, _fake_node = _fixture(
+        tmp_path,
+        launcher_mode="packaged",
+        protocol_dist="current",
+    )
+    _write(
+        root / "runtime/agent-fabric-protocol/dist/index.js",
+        'export * from "./missing.js";\n',
+    )
+
+    result = subprocess.run(
+        [str(root / "scripts/agent-fabric"), "doctor"],
+        cwd=root,
+        env={**os.environ, "AGENTS_HOME": str(root)},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 78
+    assert "AGENT_FABRIC_PROTOCOL_BUILD_STALE" in result.stderr
+    assert "repair:" in result.stderr
+    assert not marker.exists(), "an unloadable protocol dist must block doctor"
+
+
+def test_non_doctor_entrypoints_do_not_pay_for_the_loadability_probe(
+    tmp_path: Path,
+) -> None:
+    """The probe is scoped to `doctor`, the caller that cannot run without it.
+
+    Charging every entrypoint a Node start-up on the path that runs before each
+    `agent-fabric` invocation buys nothing their own import does not establish a
+    moment later, so a current-but-unloadable dist keeps its pre-#439 behaviour
+    here: the preflight passes and the command's own import reports the fault.
+    """
+    root, marker, _fake_node = _fixture(
+        tmp_path,
+        launcher_mode="packaged",
+        protocol_dist="current",
+    )
+    _write(
+        root / "runtime/agent-fabric-protocol/dist/index.js",
+        'export * from "./missing.js";\n',
+    )
+
+    ordinary = subprocess.run(
+        [str(root / "scripts/agent-fabric-protocol-preflight")],
+        cwd=root,
+        env={**os.environ, "AGENTS_HOME": str(root)},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    doctor = subprocess.run(
+        [str(root / "scripts/agent-fabric-protocol-preflight")],
+        cwd=root,
+        env={
+            **os.environ,
+            "AGENTS_HOME": str(root),
+            "AGENT_FABRIC_PROTOCOL_PREFLIGHT_MODE": "doctor",
+        },
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert ordinary.returncode == 0, ordinary.stderr
+    assert "AGENT_FABRIC_PROTOCOL_BUILD_STALE" not in ordinary.stderr
+    assert doctor.returncode == 78
+    assert "AGENT_FABRIC_PROTOCOL_BUILD_STALE" in doctor.stderr
+    assert not marker.exists()
+
+
+def test_non_doctor_subcommand_still_hard_blocks_on_stale_protocol(
+    tmp_path: Path,
+) -> None:
+    root, marker, fake_node = _fixture(
+        tmp_path,
+        launcher_mode="packaged",
+        protocol_dist="stale",
+    )
+
+    result = subprocess.run(
+        [str(root / "scripts/agent-fabric"), "status"],
+        cwd=root,
+        env={
+            **os.environ,
+            "AGENTS_HOME": str(root),
+            "LAUNCHER_TEST_MARKER": str(marker),
+            "PATH": f"{fake_node.parent}:{os.environ['PATH']}",
+        },
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 78
+    assert "AGENT_FABRIC_PROTOCOL_BUILD_STALE" in result.stderr
+    assert not marker.exists(), "non-doctor commands must stop before daemon election"
 
 
 @pytest.mark.parametrize("protocol_dist", ["missing", "stale"])
@@ -313,6 +467,142 @@ def test_reported_protocol_repair_clears_staleness_without_root_build(
     ]
     assert launched.returncode == 0, launched.stderr
     assert marker.exists()
+
+
+def _run_preflight(root: Path) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [str(root / "scripts/agent-fabric-protocol-preflight")],
+        cwd=root,
+        env={**os.environ, "AGENTS_HOME": str(root)},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+
+def _successful_protocol_build(tmp_path: Path, root: Path) -> subprocess.CompletedProcess[str]:
+    _write(root / "node_modules/.keep")
+    _npm_marker, env = _repair_fixture(
+        tmp_path,
+        root,
+        'mkdir -p "$dist"\n'
+        "printf 'export const fixtureValue = \"dist\";\\n' > \"$dist/index.js\"\n",
+    )
+    return subprocess.run(
+        [str(root / "scripts/agent-fabric-protocol-build")],
+        cwd=tmp_path,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+
+def test_unchanged_root_manifest_touch_does_not_block_entrypoints(
+    tmp_path: Path,
+) -> None:
+    root, marker, fake_node = _fixture(
+        tmp_path,
+        launcher_mode="packaged",
+        protocol_dist="current",
+    )
+    _write(root / "runtime/agent-fabric/dist/mcp/main.js")
+    _write(root / "runtime/agent-fabric/src/mcp/main.ts")
+    built = _successful_protocol_build(tmp_path, root)
+    before_touch = _run_preflight(root)
+
+    (root / "package-lock.json").touch()
+    protocol_dist = root / "runtime/agent-fabric-protocol/dist/index.js"
+    touched_time = protocol_dist.stat().st_mtime + 10
+    os.utime(root / "package-lock.json", (touched_time, touched_time))
+
+    after_touch = _run_preflight(root)
+    launcher = subprocess.run(
+        [str(root / "scripts/agent-fabric"), "status"],
+        cwd=root,
+        env={
+            **os.environ,
+            "AGENTS_HOME": str(root),
+            "LAUNCHER_TEST_MARKER": str(marker),
+            "PATH": f"{fake_node.parent}:{os.environ['PATH']}",
+        },
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    marker.unlink(missing_ok=True)
+    mcp = subprocess.run(
+        [str(root / "scripts/agent-fabric-mcp")],
+        cwd=root,
+        env={
+            **os.environ,
+            "AGENTS_HOME": str(root),
+            "LAUNCHER_TEST_MARKER": str(marker),
+            "PATH": f"{fake_node.parent}:{os.environ['PATH']}",
+        },
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert built.returncode == 0, built.stderr
+    assert before_touch.returncode == 0, before_touch.stderr
+    assert after_touch.returncode == 0, (
+        "touching unchanged package-lock.json must not stale a byte-current protocol dist: "
+        f"{after_touch.stderr}"
+    )
+    assert launcher.returncode == 0, launcher.stderr
+    assert mcp.returncode == 0, mcp.stderr
+
+
+def test_root_manifest_content_change_stales_even_when_its_mtime_is_older(
+    tmp_path: Path,
+) -> None:
+    root, _marker, _fake_node = _fixture(
+        tmp_path,
+        launcher_mode="packaged",
+        protocol_dist="current",
+    )
+    built = _successful_protocol_build(tmp_path, root)
+    protocol_dist = root / "runtime/agent-fabric-protocol/dist/index.js"
+    lockfile = root / "package-lock.json"
+    _write(lockfile, "genuine dependency change\n")
+    dist_time = protocol_dist.stat().st_mtime
+    os.utime(lockfile, (dist_time - 10, dist_time - 10))
+
+    result = _run_preflight(root)
+
+    assert built.returncode == 0, built.stderr
+    assert result.returncode == 78, (
+        "changed root-manifest bytes must stale the protocol dist independently of mtime"
+    )
+    assert "AGENT_FABRIC_PROTOCOL_BUILD_STALE" in result.stderr
+
+
+def test_missing_root_manifest_stamp_falls_back_to_mtime_rule(
+    tmp_path: Path,
+) -> None:
+    root, _marker, _fake_node = _fixture(
+        tmp_path,
+        launcher_mode="packaged",
+        protocol_dist="current",
+    )
+    built = _successful_protocol_build(tmp_path, root)
+    stamp = root / "runtime/agent-fabric-protocol/dist" / ROOT_MANIFEST_STAMP
+    assert built.returncode == 0, built.stderr
+    assert stamp.exists(), "a successful protocol build must record its root-manifest digest"
+    stamp.unlink()
+    (root / "package-lock.json").touch()
+    protocol_dist = root / "runtime/agent-fabric-protocol/dist/index.js"
+    touched_time = protocol_dist.stat().st_mtime + 10
+    os.utime(root / "package-lock.json", (touched_time, touched_time))
+
+    result = _run_preflight(root)
+
+    assert result.returncode == 78, (
+        "a missing digest stamp must fail safe to the root-manifest mtime rule"
+    )
+    assert "AGENT_FABRIC_PROTOCOL_BUILD_STALE" in result.stderr
 
 
 @pytest.mark.parametrize(

@@ -1117,19 +1117,68 @@ describe("machine status and doctor", () => {
         });
       },
     });
-    // The package bin points straight at dist/cli/main.js, so doctor must reach
-    // this state on its own; only the wrapper preempts it by exiting 78 first.
+    // The package bin points straight at dist/cli/main.js, so doctor must also
+    // reach and classify this state without a launcher-provided verdict.
     expect(result).toMatchObject({
       healthy: false,
       state: "blocked",
       code: "AGENT_FABRIC_PROTOCOL_BUILD_STALE",
       cause: {
         checkId: "protocol-build",
-        precondition: "the local protocol build is newer than its TypeScript sources",
+        precondition: "the local protocol dist is present and current for its build inputs",
         satisfied: false,
         recoverable: false,
       },
     });
+  });
+
+  it("reports the stale verdict and exact repair handed down by the launcher", async () => {
+    const value = await paths();
+    const fixture = await createPortableActivatedPrimaryFixture();
+    cleanup.push(fixture.directory);
+    const previousVerdict = process.env.AGENT_FABRIC_PROTOCOL_BUILD_VERDICT;
+    const previousRepair = process.env.AGENT_FABRIC_PROTOCOL_BUILD_REPAIR;
+    process.env.AGENT_FABRIC_PROTOCOL_BUILD_VERDICT = "stale";
+    process.env.AGENT_FABRIC_PROTOCOL_BUILD_REPAIR =
+      'AGENTS_HOME="/fixture/agents" "/fixture/agents/scripts/agent-fabric-protocol-build"';
+    try {
+      const result = await fabricDoctor([
+        "--agents-home", fixture.directory,
+        "--trusted-config", fixture.configPath,
+        "--compatibility", fixture.compatibilityPath,
+        "--compatibility-schema", fixture.schemaPath,
+      ], value, {
+        preflightProtocolBuild: async () => {
+          throw new Error("doctor must consume the launcher verdict without rerunning a blocking preflight");
+        },
+      });
+
+      expect(result).toMatchObject({
+        healthy: false,
+        state: "blocked",
+        code: "AGENT_FABRIC_PROTOCOL_BUILD_STALE",
+        cause: {
+          checkId: "protocol-build",
+          precondition: "the local protocol dist is present and current for its build inputs",
+          satisfied: false,
+        },
+      });
+      expect(result.checks).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          id: "protocol-build",
+          status: "fail",
+          code: "AGENT_FABRIC_PROTOCOL_BUILD_STALE",
+          detail: expect.stringContaining(
+            'repair: AGENTS_HOME="/fixture/agents" "/fixture/agents/scripts/agent-fabric-protocol-build"',
+          ),
+        }),
+      ]));
+    } finally {
+      if (previousVerdict === undefined) delete process.env.AGENT_FABRIC_PROTOCOL_BUILD_VERDICT;
+      else process.env.AGENT_FABRIC_PROTOCOL_BUILD_VERDICT = previousVerdict;
+      if (previousRepair === undefined) delete process.env.AGENT_FABRIC_PROTOCOL_BUILD_REPAIR;
+      else process.env.AGENT_FABRIC_PROTOCOL_BUILD_REPAIR = previousRepair;
+    }
   });
 
   it("names the unsatisfied precondition and refuses to call a blocked cause recoverable", async () => {
@@ -1181,7 +1230,7 @@ describe("machine status and doctor", () => {
     }
   });
 
-  it("declares which entrypoint intercepts the protocol-build precondition", async () => {
+  it("does not declare the doctor wrapper as intercepting its protocol-build check", async () => {
     const value = await paths();
     const fixture = await createPortableActivatedPrimaryFixture();
     cleanup.push(fixture.directory);
@@ -1191,17 +1240,7 @@ describe("machine status and doctor", () => {
       "--compatibility", fixture.compatibilityPath,
       "--compatibility-schema", fixture.schemaPath,
     ], value);
-    // The interception is entrypoint-specific, not structural: doctor owns the
-    // check, and only scripts/agent-fabric preempts it by exiting 78 first.
-    expect(result.wrapperIntercepted).toEqual([
-      expect.objectContaining({
-        code: "AGENT_FABRIC_PROTOCOL_BUILD_STALE",
-        check: "protocol-build",
-        observedByDoctor: true,
-        interceptedBy: "scripts/agent-fabric",
-        issue: "#439",
-      }),
-    ]);
+    expect(result.wrapperIntercepted).toEqual([]);
     expect((result.checks as Array<{ id: string }>).map(({ id }) => id)).toContain("protocol-build");
   });
 
