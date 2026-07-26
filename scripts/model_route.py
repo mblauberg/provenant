@@ -351,30 +351,39 @@ def resolve_effort(
     account_default: bool,
 ) -> tuple[str | None, str, str, str]:
     """Return effective effort, substitution, failure status, capability source."""
-    capability_model_available = model.lower() in args.capability_models
-    catalog_model_missing = bool(
-        account_default
-        and args.capability_models
-        and not capability_model_available
-    )
-    if args.capability_models and not account_default and not capability_model_available:
+    openai_codex = args.adapter == "codex" and family == "openai"
+    supported: set[str] | None = None
+    capability_source = ""
+    if openai_codex:
+        if not args.capability_models:
+            return None, "", "capability_discovery_failed", "runtime-discovery-failed"
+        item = args.capability_models.get(model.lower())
+        if not item:
+            return None, "", "capability_model_unavailable", "runtime-model-catalog"
+        supported = {value.lower() for value in item["supported_efforts"]}
+        capability_source = "runtime-model-catalog"
+    elif args.capability_models and model.lower() not in args.capability_models:
         return None, "", "capability_model_unavailable", "runtime-model-catalog"
 
     ultra_eligible = (
-        args.adapter == "codex"
-        and family == "openai"
+        openai_codex
         and args.alias == "flagship"
         and args.role in family_config.get("ultra_eligible_roles", [])
-        and model.lower() in {item.lower() for item in family_config.get("ultra_eligible_models", [])}
     )
     if requested_effort == "ultra" and not ultra_eligible:
         if args.effort:
             return None, "", "effort_unsupported", "policy"
-        policy_efforts = set(family_config.get("supported_efforts", {}).get(model.lower(), []))
         fallback = next(
-            (item for item in family_config.get("effort_fallback_order", []) if item in policy_efforts),
-            "high",
+            (
+                item
+                for item in family_config.get("effort_fallback_order", [])
+                if supported is not None and item in supported
+            ),
+            None,
         )
+        if openai_codex and not fallback:
+            return None, "", "no_effort_available", capability_source
+        fallback = fallback or "high"
         return fallback, f"ultra unavailable (route is not ultra-eligible); used {fallback}", "", "policy"
 
     if args.effort_transport == "model-id":
@@ -396,7 +405,9 @@ def resolve_effort(
         return "", "adapter does not expose effort control", "", "adapter-no-effort-control"
 
     capability_models = args.capability_models
-    if capability_models and not catalog_model_missing:
+    if supported is not None:
+        pass
+    elif capability_models:
         item = capability_models.get(model.lower())
         if not item:
             return None, "", "capability_model_unavailable", "runtime-model-catalog"
@@ -409,22 +420,11 @@ def resolve_effort(
     elif args.available_effort:
         supported = {item.lower() for item in args.available_effort}
         capability_source = "caller-runtime"
-    elif family == "openai" and args.adapter == "codex":
-        supported = {
-            item.lower()
-            for item in family_config.get("supported_efforts", {}).get(model.lower(), [])
-        }
-        capability_source = "dated-catalog"
     else:
         return requested_effort, "", "", "provider-unverified"
 
     if requested_effort in supported:
-        substitution = (
-            "catalog model absent from runtime snapshot; used dated-catalog effort support"
-            if catalog_model_missing
-            else ""
-        )
-        return requested_effort, substitution, "", capability_source
+        return requested_effort, "", "", capability_source
     if args.effort:
         return None, "", "effort_unsupported", capability_source
     fallback = next(
@@ -439,11 +439,6 @@ def resolve_effort(
     ):
         return None, "", "task_class_effort_below_floor", capability_source
     substitution = f"{requested_effort} unavailable (runtime/model capability); used {fallback}"
-    if catalog_model_missing:
-        substitution = (
-            "catalog model absent from runtime snapshot; used dated-catalog effort support; "
-            + substitution
-        )
     return fallback, substitution, "", capability_source
 
 

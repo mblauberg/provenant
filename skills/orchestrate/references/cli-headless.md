@@ -41,17 +41,16 @@ The receipt's resolved `effort` is authoritative for the adapter invocation.
 GPT-5.6 efforts are capability-gated per model. The Codex execution adapter
 captures `codex debug models` through `codex_capabilities.py` and supplies the
 snapshot to the resolver. The ChatGPT-subscription Codex route is
-`account-default`: it selects the dated catalogue candidate for effort and
+`account-default`: it selects the dated catalogue candidate for identity and
 audit independently of the runtime-selectable model list, records that ID as
 `catalog_model`, records `model_selection: account-default`, leaves
-`resolved_model` empty and omits `-m` from `codex exec`. If a valid runtime
-snapshot omits the catalogue candidate, the resolver uses dated-catalogue
-effort support and records that fallback in `effort_capability_source` and
-`effort_substitution`. Explicit unsupported requests fail as
-`effort_unsupported`; a role default may degrade with `effort_substitution`.
-Discovery/schema failure is `capability_discovery_failed` and cannot certify an
-advanced-effort execution. Direct planning-only resolution without a snapshot
-is visibly marked `effort_capability_source: dated-catalog`.
+`resolved_model` empty and omits `-m` from `codex exec`. Effort support comes
+only from a fresh runtime snapshot entry for that candidate. No snapshot fails
+as `capability_discovery_failed`, a stale snapshot fails as
+`capability_snapshot_stale`, and a fresh snapshot that omits the candidate fails
+as `capability_model_unavailable`. Explicit unsupported requests fail as
+`effort_unsupported`; a role default may degrade with `effort_substitution`
+using the declared fallback order over the runtime-supported efforts.
 Claude task-class routing captures one alias-and-effort capability through
 `claude_capabilities.py`. The producer requires logged-in `claude.ai`
 subscription auth and runs a bounded `--safe-mode`, no-tools,
