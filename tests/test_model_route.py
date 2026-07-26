@@ -1,5 +1,5 @@
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import importlib.util
 from pathlib import Path
 import subprocess
@@ -41,6 +41,30 @@ def capability_snapshot(models, source="codex debug models"):
         "observed_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "models": models,
     }
+
+
+def write_codex_capability_snapshot(tmp_path, *, observed_at=None, models=None):
+    if models is None:
+        models = {
+            "gpt-5.6-sol": {
+                "resolved_model": "gpt-5.6-sol",
+                "supported_efforts": ["low", "medium", "high", "xhigh", "max", "ultra"],
+            },
+            "gpt-5.6-terra": {
+                "resolved_model": "gpt-5.6-terra",
+                "supported_efforts": ["low", "medium", "high", "xhigh", "max", "ultra"],
+            },
+            "gpt-5.6-luna": {
+                "resolved_model": "gpt-5.6-luna",
+                "supported_efforts": ["low", "medium", "high", "xhigh", "max"],
+            },
+        }
+    value = capability_snapshot(models)
+    if observed_at is not None:
+        value["observed_at"] = observed_at
+    snapshot = tmp_path / "codex-capabilities.json"
+    snapshot.write_text(json.dumps(value))
+    return snapshot
 
 
 def load_router():
@@ -293,11 +317,13 @@ def test_foreign_family_override_collision_does_not_reject_adapter_route(
     ]
     catalog_path = tmp_path / "model-routing.json"
     catalog_path.write_text(json.dumps(catalog))
+    snapshot = write_codex_capability_snapshot(tmp_path)
     monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
 
     result = router.main([
         "resolve", "--adapter", "codex", "--alias", "workhorse",
-        "--role", "worker", "--adapter-gate", "direct-cli",
+        "--role", "worker", "--capabilities-file", str(snapshot),
+        "--adapter-gate", "direct-cli",
     ])
 
     route = json.loads(capsys.readouterr().out)
@@ -674,11 +700,13 @@ def test_malformed_override_in_one_family_does_not_reject_another_family(
     catalog["families"]["anthropic"]["risk_tier_overrides"]["crucial"]["models"] = "fable"
     catalog_path = tmp_path / "model-routing.json"
     catalog_path.write_text(json.dumps(catalog))
+    snapshot = write_codex_capability_snapshot(tmp_path)
     monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
 
     result = router.main([
         "resolve", "--adapter", "codex", "--alias", "workhorse",
-        "--role", "worker", "--adapter-gate", "direct-cli",
+        "--role", "worker", "--capabilities-file", str(snapshot),
+        "--adapter-gate", "direct-cli",
     ])
 
     route = json.loads(capsys.readouterr().out)
@@ -943,7 +971,7 @@ def test_malformed_override_fails_closed_without_a_fixed_model_family(
     assert route.get("resolved_model") is None
 
 
-def test_openai_aliases_resolve_to_account_default_dispatch():
+def test_openai_aliases_resolve_to_account_default_dispatch(tmp_path):
     # The Codex account is a ChatGPT subscription: explicit model ids are
     # rejected by the runtime (HTTP 400), so codex routes dispatch on the
     # account default while retaining the catalog id for effort/audit (#190).
@@ -952,8 +980,12 @@ def test_openai_aliases_resolve_to_account_default_dispatch():
         "workhorse": "gpt-5.6-terra",
         "scout": "gpt-5.6-luna",
     }
+    snapshot = write_codex_capability_snapshot(tmp_path)
     for alias, model in expected.items():
-        result, route = resolve("--adapter", "codex", "--alias", alias, "--role", "worker")
+        result, route = resolve(
+            "--adapter", "codex", "--alias", alias, "--role", "worker",
+            "--capabilities-file", str(snapshot),
+        )
         assert result.returncode == 0
         assert route["resolved_model"] == ""
         assert route["catalog_model"] == model
@@ -962,10 +994,12 @@ def test_openai_aliases_resolve_to_account_default_dispatch():
         assert route["model_family"] == "openai"
 
 
-def test_account_default_codex_ignores_runtime_selectable_model_list():
+def test_account_default_codex_ignores_runtime_selectable_model_list(tmp_path):
+    snapshot = write_codex_capability_snapshot(tmp_path)
     result, route = resolve(
         "--adapter", "codex", "--alias", "flagship", "--role", "worker",
         "--available-model", "gpt-5.6-terra",
+        "--capabilities-file", str(snapshot),
     )
     assert result.returncode == 0
     assert route["resolved_model"] == ""
@@ -973,10 +1007,14 @@ def test_account_default_codex_ignores_runtime_selectable_model_list():
     assert route["model_selection"] == "account-default"
 
 
-def test_aliases_supply_proportionate_default_effort():
+def test_aliases_supply_proportionate_default_effort(tmp_path):
     expected = {"flagship": "high", "workhorse": "medium", "scout": "low"}
+    snapshot = write_codex_capability_snapshot(tmp_path)
     for alias, effort in expected.items():
-        result, route = resolve("--adapter", "codex", "--alias", alias, "--role", "worker")
+        result, route = resolve(
+            "--adapter", "codex", "--alias", alias, "--role", "worker",
+            "--capabilities-file", str(snapshot),
+        )
         assert result.returncode == 0
         assert route["effort"] == effort
 
@@ -1165,9 +1203,11 @@ def test_critical_review_task_class_rejects_worker_role_before_model_resolution(
     assert route["task_class"] == "critical-review"
 
 
-def test_legacy_alias_route_does_not_claim_task_class_binding():
+def test_legacy_alias_route_does_not_claim_task_class_binding(tmp_path):
+    snapshot = write_codex_capability_snapshot(tmp_path)
     result, route = resolve(
-        "--adapter", "codex", "--alias", "scout", "--role", "worker"
+        "--adapter", "codex", "--alias", "scout", "--role", "worker",
+        "--capabilities-file", str(snapshot),
     )
     assert result.returncode == 0
     assert "task_class" not in route
@@ -1308,23 +1348,97 @@ def test_role_default_cannot_lower_task_class_effort(tmp_path, monkeypatch, caps
     assert route["effort_source"] == "task-class"
 
 
-def test_codex_lead_uses_ultra_orchestration_effort():
-    result, route = resolve("--adapter", "codex", "--alias", "flagship", "--role", "lead")
-    assert result.returncode == 0
+def test_openai_route_without_runtime_snapshot_fails_closed(
+    monkeypatch, capsys
+):
+    router = load_router()
+    monkeypatch.setattr(router, "CATALOG_PATH", ROOT / "config" / "model-routing.json")
+
+    result = router.main([
+        "resolve", "--adapter", "codex", "--alias", "flagship", "--role", "lead",
+        "--adapter-gate", "direct-cli",
+    ])
+
+    route = json.loads(capsys.readouterr().out)
+    assert result == 1
+    assert route["status"] == "capability_discovery_failed"
+    assert route["requested_effort"] == "ultra"
+    assert route["effort"] == ""
+
+
+def test_stale_openai_capability_snapshot_fails_closed(
+    tmp_path, monkeypatch, capsys
+):
+    router = load_router()
+    monkeypatch.setattr(router, "CATALOG_PATH", ROOT / "config" / "model-routing.json")
+    observed_at = (
+        datetime.now(timezone.utc) - timedelta(minutes=6)
+    ).isoformat().replace("+00:00", "Z")
+    snapshot = write_codex_capability_snapshot(tmp_path, observed_at=observed_at)
+
+    result = router.main([
+        "resolve", "--adapter", "codex", "--alias", "flagship", "--role", "lead",
+        "--capabilities-file", str(snapshot), "--adapter-gate", "direct-cli",
+    ])
+
+    route = json.loads(capsys.readouterr().out)
+    assert result == 1
+    assert route["status"] == "capability_snapshot_stale"
+    assert route["requested_effort"] == "ultra"
+    assert route["effort"] == ""
+
+
+def test_openai_catalog_declares_effort_policy_only():
+    family = CATALOG["families"]["openai"]
+
+    assert "supported_efforts" not in family
+    assert "ultra_eligible_models" not in family
+    assert family["ultra_eligible_roles"] == ["lead", "orchestrator"]
+    assert family["role_effort_defaults"] == {
+        "lead": {"flagship": "ultra"},
+        "orchestrator": {"flagship": "ultra"},
+        "critical-review": {"flagship": "max"},
+    }
+    assert family["effort_fallback_order"] == ["max", "xhigh", "high", "medium", "low"]
+
+
+def test_fresh_openai_snapshot_accepts_ultra_role_default(
+    tmp_path, monkeypatch, capsys
+):
+    router = load_router()
+    monkeypatch.setattr(router, "CATALOG_PATH", ROOT / "config" / "model-routing.json")
+    snapshot = write_codex_capability_snapshot(tmp_path)
+
+    result = router.main([
+        "resolve", "--adapter", "codex", "--alias", "flagship", "--role", "lead",
+        "--capabilities-file", str(snapshot), "--adapter-gate", "direct-cli",
+    ])
+
+    route = json.loads(capsys.readouterr().out)
+    assert result == 0
+    assert route["requested_effort"] == "ultra"
     assert route["effort"] == "ultra"
+    assert route["effort_capability_source"] == "runtime-model-catalog"
+    assert route["effort_substitution"] == ""
 
 
-def test_explicit_effort_overrides_codex_ultra_default():
+def test_explicit_effort_overrides_codex_ultra_default(tmp_path):
+    snapshot = write_codex_capability_snapshot(tmp_path)
     result, route = resolve(
-        "--adapter", "codex", "--alias", "flagship", "--role", "lead", "--effort", "high"
+        "--adapter", "codex", "--alias", "flagship", "--role", "lead", "--effort", "high",
+        "--capabilities-file", str(snapshot),
     )
     assert result.returncode == 0
     assert route["effort"] == "high"
 
 
-def test_explicit_ultra_fails_for_noneligible_routes():
+def test_explicit_ultra_fails_for_noneligible_routes(tmp_path):
+    snapshot = write_codex_capability_snapshot(tmp_path)
     cases = [
-        ("--adapter", "codex", "--alias", "workhorse", "--role", "worker"),
+        (
+            "--adapter", "codex", "--alias", "workhorse", "--role", "worker",
+            "--capabilities-file", str(snapshot),
+        ),
         ("--adapter", "claude", "--alias", "flagship", "--role", "worker"),
     ]
     for route_args in cases:
@@ -1335,12 +1449,14 @@ def test_explicit_ultra_fails_for_noneligible_routes():
         assert route["effort"] == ""
 
 
-def test_codex_failure_records_never_expose_a_dispatchable_model():
+def test_codex_failure_records_never_expose_a_dispatchable_model(tmp_path):
     # Non-ok records must not present the catalog id as resolved_model:
     # a consumer keying on resolved_model would dispatch an id the
     # subscription runtime rejects (#190).
+    snapshot = write_codex_capability_snapshot(tmp_path)
     result, route = resolve(
-        "--adapter", "codex", "--alias", "workhorse", "--role", "worker", "--effort", "ultra"
+        "--adapter", "codex", "--alias", "workhorse", "--role", "worker",
+        "--effort", "ultra", "--capabilities-file", str(snapshot),
     )
     assert result.returncode == 1
     assert route["status"] == "effort_unsupported"
@@ -1365,7 +1481,7 @@ def test_codex_rejects_explicit_model_for_account_default_adapter():
     assert route["model_family"] == "openai"
 
 
-def test_ultra_role_default_uses_runtime_effort_fallback():
+def test_caller_efforts_do_not_replace_openai_capability_snapshot():
     result, route = resolve(
         "--adapter",
         "codex",
@@ -1378,12 +1494,17 @@ def test_ultra_role_default_uses_runtime_effort_fallback():
         "--available-effort",
         "high",
     )
-    assert result.returncode == 0
-    assert route["effort"] == "max"
-    assert "runtime/model capability" in route["effort_substitution"]
+    assert result.returncode == 1
+    assert route["status"] == "capability_discovery_failed"
+    assert route["requested_effort"] == "ultra"
+    assert route["effort"] == ""
 
 
-def test_capability_snapshot_controls_default_fallback(tmp_path):
+def test_capability_snapshot_controls_default_fallback(
+    tmp_path, monkeypatch, capsys
+):
+    router = load_router()
+    monkeypatch.setattr(router, "CATALOG_PATH", ROOT / "config" / "model-routing.json")
     snapshot = tmp_path / "caps.json"
     snapshot.write_text(json.dumps(capability_snapshot({
             "gpt-5.6-sol": {
@@ -1391,17 +1512,26 @@ def test_capability_snapshot_controls_default_fallback(tmp_path):
                 "supported_efforts": ["high", "xhigh", "max"],
             }
         })))
-    result, route = resolve(
-        "--adapter", "codex", "--alias", "flagship", "--role", "lead",
+    result = router.main([
+        "resolve", "--adapter", "codex", "--alias", "flagship", "--role", "lead",
         "--capabilities-file", str(snapshot),
-    )
-    assert result.returncode == 0
+        "--adapter-gate", "direct-cli",
+    ])
+    route = json.loads(capsys.readouterr().out)
+    assert result == 0
     assert route["requested_effort"] == "ultra"
     assert route["effort"] == "max"
     assert route["effort_capability_source"] == "runtime-model-catalog"
+    assert route["effort_substitution"] == (
+        "ultra unavailable (runtime/model capability); used max"
+    )
 
 
-def test_account_default_missing_catalog_model_uses_audited_dated_efforts(tmp_path):
+def test_fresh_openai_snapshot_missing_catalog_model_fails_closed(
+    tmp_path, monkeypatch, capsys
+):
+    router = load_router()
+    monkeypatch.setattr(router, "CATALOG_PATH", ROOT / "config" / "model-routing.json")
     snapshot = tmp_path / "caps.json"
     snapshot.write_text(json.dumps(capability_snapshot({
             "gpt-5.6-terra": {
@@ -1409,16 +1539,19 @@ def test_account_default_missing_catalog_model_uses_audited_dated_efforts(tmp_pa
                 "supported_efforts": ["high", "xhigh", "max"],
             }
         })))
-    result, route = resolve(
-        "--adapter", "codex", "--alias", "flagship", "--role", "lead",
+    result = router.main([
+        "resolve", "--adapter", "codex", "--alias", "flagship", "--role", "lead",
         "--capabilities-file", str(snapshot),
-    )
-    assert result.returncode == 0
+        "--adapter-gate", "direct-cli",
+    ])
+    route = json.loads(capsys.readouterr().out)
+    assert result == 1
+    assert route["status"] == "capability_model_unavailable"
     assert route["catalog_model"] == "gpt-5.6-sol"
     assert route["resolved_model"] == ""
-    assert route["effort"] == "ultra"
-    assert route["effort_capability_source"] == "dated-catalog"
-    assert "catalog model absent from runtime snapshot" in route["effort_substitution"]
+    assert route["requested_effort"] == "ultra"
+    assert route["effort"] == ""
+    assert route["effort_capability_source"] == "runtime-model-catalog"
 
 
 def test_explicit_unsupported_effort_fails_against_runtime_snapshot(tmp_path):
@@ -1786,14 +1919,20 @@ def test_activated_optional_reviewers_route_through_fabric_with_exact_identity(
     assert route["adapter_unresolved_pins"] == []
 
 
-def test_primary_adapters_honour_fabric_activation_gate():
+def test_primary_adapters_honour_fabric_activation_gate(tmp_path):
+    snapshot = write_codex_capability_snapshot(tmp_path)
     for adapter in ("claude", "codex"):
+        capability_args = (
+            ("--capabilities-file", str(snapshot)) if adapter == "codex" else ()
+        )
         fabric, fabric_route = resolve(
             "--adapter", adapter, "--alias", "flagship", "--role", "lead",
+            *capability_args,
             adapter_gate="fabric",
         )
         direct, direct_route = resolve(
             "--adapter", adapter, "--alias", "flagship", "--role", "lead",
+            *capability_args,
             "--adapter-gate", "direct-cli",
         )
 

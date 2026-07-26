@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "catalog_date": "2026-07-21",
+  "catalog_date": "2026-07-26",
   "task_class_routes": {
     "mechanical": {"alias": "scout", "effort": "low", "role": "worker"},
     "legwork": {"alias": "workhorse", "effort": "medium", "role": "worker"},
@@ -51,14 +51,8 @@
         "orchestrator": {"flagship": "ultra"},
         "critical-review": {"flagship": "max"}
       },
-      "ultra_eligible_models": ["gpt-5.6-sol"],
       "ultra_eligible_roles": ["lead", "orchestrator"],
-      "effort_fallback_order": ["max", "xhigh", "high", "medium", "low"],
-      "supported_efforts": {
-        "gpt-5.6-sol": ["low", "medium", "high", "xhigh", "max", "ultra"],
-        "gpt-5.6-terra": ["low", "medium", "high", "xhigh", "max", "ultra"],
-        "gpt-5.6-luna": ["low", "medium", "high", "xhigh", "max"]
-      }
+      "effort_fallback_order": ["max", "xhigh", "high", "medium", "low"]
     }
   },
   "adapters": {
