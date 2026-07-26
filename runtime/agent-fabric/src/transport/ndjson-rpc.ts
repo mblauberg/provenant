@@ -1,5 +1,6 @@
 import { connect as connectSocket, type Socket } from "node:net";
 
+import { assertRequiredResultShapeFeatures } from "@local/agent-fabric-protocol";
 import { v7 as uuidv7 } from "uuid";
 
 import {
@@ -21,6 +22,7 @@ type Pending = {
 export type TimedNdjsonTransportOptions = {
   socketPath: string;
   capability: string;
+  requiredCapabilities?: readonly string[];
   connectTimeoutMs?: number;
   requestTimeoutMs?: number;
 };
@@ -117,11 +119,15 @@ export class TimedNdjsonTransport {
       const initialized = await transport.#callInternal("initialize", {
         protocolVersion: FABRIC_PROTOCOL_VERSION,
         client: { name: "agent-fabric", version: FABRIC_DAEMON_VERSION },
-        capabilities: ["rpc"],
+        capabilities: ["rpc", ...(options.requiredCapabilities ?? [])],
       });
       if (!isDaemonInitializeResult(initialized)) {
         throw new FabricRemoteError("DAEMON_PROTOCOL_MISMATCH", "daemon initialize response is incompatible");
       }
+      assertRequiredResultShapeFeatures(
+        initialized.capabilities,
+        options.requiredCapabilities ?? [],
+      );
       transport.#initializeResult = initialized;
       return transport;
     } catch (error: unknown) {

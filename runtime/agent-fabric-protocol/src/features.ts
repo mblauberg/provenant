@@ -44,6 +44,7 @@ export const RESULT_SHAPE_FEATURES = [
   "run-identity-projection.v2",
   "agent-topology-projection.v1",
   "work-facts-projection.v1",
+  "mcp-bootstrap-credentials.v2",
 ] as const;
 
 export const GATE_SYSTEM_SUPERSESSION_FEATURE = "gate-system-supersession.v1" as const;

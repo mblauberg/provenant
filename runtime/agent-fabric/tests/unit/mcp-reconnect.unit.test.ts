@@ -1,4 +1,8 @@
-import { FABRIC_OPERATIONS, ProtocolTransportError } from "@local/agent-fabric-protocol";
+import {
+  FABRIC_OPERATIONS,
+  ProtocolResultShapeFeatureError,
+  ProtocolTransportError,
+} from "@local/agent-fabric-protocol";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -8,6 +12,22 @@ import {
 } from "../../src/mcp/server.ts";
 
 describe("MCP recovered protocol retry", () => {
+  it("exposes only the typed result-shape incompatibility before generic TypeError handling", () => {
+    expect(errorPayload(
+      new ProtocolResultShapeFeatureError(["mcp-bootstrap-credentials.v2"]),
+    )).toMatchObject({
+      code: "PROTOCOL_INCOMPATIBLE",
+      message: expect.stringContaining("mcp-bootstrap-credentials.v2"),
+    });
+
+    const unrelated = new TypeError("internal argument detail") as TypeError & { code: string };
+    unrelated.code = "ERR_INTERNAL_ARGUMENT";
+    expect(errorPayload(unrelated)).toEqual({
+      code: "MCP_INPUT_INVALID",
+      message: "internal argument detail",
+    });
+  });
+
   it("recognizes a queued saturation timeout as proven unsubmitted while the transport remains open", () => {
     const timeout = new ProtocolTransportError(
       "PROTOCOL_TIMEOUT",

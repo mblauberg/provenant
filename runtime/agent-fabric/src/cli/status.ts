@@ -2,6 +2,10 @@ import Database from "better-sqlite3";
 import { lstat, readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { parse } from "yaml";
+import {
+  MCP_BOOTSTRAP_CREDENTIALS_FEATURE,
+  assertRequiredResultShapeFeatures,
+} from "@local/agent-fabric-protocol";
 
 import { verifyAdapterCompatibility } from "../adapters/compatibility.js";
 import { verifyProviderConformance } from "../adapters/provider-conformance.js";
@@ -25,7 +29,22 @@ type ProviderObservation = { adapterId: string; requiredIdentity: string; identi
 type ProviderIdentityState = "clean" | "drifted" | "unknown";
 type ProviderIdentityObservation = { adapterId: string; state: ProviderIdentityState; detail: string };
 type DateStaleness = { field: "verification_date" | "catalog_date"; date: string | null; ageDays: number | null; stale: boolean | null };
-type DoctorDependencies = { verifyProvider?: typeof verifyProviderConformance; verifyProviderIdentity?: typeof verifyProviderExecutableIdentity; probeProviderInterface?: typeof probeProviderInterface; providerProbeTimeoutMs?: number; now?: () => number };
+type DoctorDaemonConnection = Pick<
+  Awaited<ReturnType<typeof connectFabricDaemon>>,
+  "initializeResult" | "probeBootstrapContract" | "close"
+>;
+type DoctorDependencies = {
+  verifyProvider?: typeof verifyProviderConformance;
+  verifyProviderIdentity?: typeof verifyProviderExecutableIdentity;
+  probeProviderInterface?: typeof probeProviderInterface;
+  providerProbeTimeoutMs?: number;
+  now?: () => number;
+  connectDaemon?: (input: {
+    socketPath: string;
+    capability: string;
+  }) => Promise<DoctorDaemonConnection>;
+  inspectDaemonSocket?: (path: string) => Promise<{ isSocket(): boolean; uid: number }>;
+};
 
 type DoctorDaemonState =
   | { status: "live"; code: "DAEMON_LIVE"; detail: string; pid: number; socketPath: string }
@@ -245,7 +264,10 @@ async function socketIsAbsent(socketPath: string): Promise<boolean> {
   }
 }
 
-async function doctorDaemonState(paths: FabricPaths): Promise<DoctorDaemonState> {
+async function doctorDaemonState(
+  paths: FabricPaths,
+  dependencies: DoctorDependencies,
+): Promise<DoctorDaemonState> {
   try {
     return await new BootstrapElection({ runtimeDirectory: paths.runtimeDirectory }).inspectCurrentWith(async (election) => {
       if (election.status === "active") {
@@ -381,7 +403,7 @@ async function doctorDaemonState(paths: FabricPaths): Promise<DoctorDaemonState>
     }
     let info;
     try {
-      info = await lstat(discovery.receipt.socketPath);
+      info = await (dependencies.inspectDaemonSocket ?? lstat)(discovery.receipt.socketPath);
     } catch (error: unknown) {
       return {
         status: "failed",
@@ -401,16 +423,32 @@ async function doctorDaemonState(paths: FabricPaths): Promise<DoctorDaemonState>
       };
     }
     try {
-      const client = await connectFabricDaemon({
+      const client = await (dependencies.connectDaemon ?? connectFabricDaemon)({
         socketPath: discovery.receipt.socketPath,
         capability: discovery.receipt.bootstrapCapability,
       });
-      await client.close();
+      try {
+        // Negotiation pins the credential result contract without another RPC.
+        // The probe only confirms bootstrap-scope dispatch and connection liveness.
+        assertRequiredResultShapeFeatures(
+          client.initializeResult.capabilities,
+          [MCP_BOOTSTRAP_CREDENTIALS_FEATURE],
+        );
+        await client.probeBootstrapContract();
+      } finally {
+        await client.close();
+      }
     } catch (error: unknown) {
+      const errorCodeValue = errorCode(error, "DAEMON_HANDSHAKE_FAILED");
+      const code = errorCodeValue === "PROTOCOL_INCOMPATIBLE"
+        ? errorCodeValue
+        : "DAEMON_HANDSHAKE_FAILED";
       return {
         status: "failed",
-        code: "DAEMON_HANDSHAKE_FAILED",
-        detail: errorDetail(error),
+        code,
+        detail: code === "PROTOCOL_INCOMPATIBLE"
+          ? `${errorDetail(error)}; stop the incumbent through its owning Fabric lifecycle, then retry provenant doctor`
+          : errorDetail(error),
         pid: discovery.receipt.pid,
         socketPath: discovery.receipt.socketPath,
       };
@@ -418,7 +456,7 @@ async function doctorDaemonState(paths: FabricPaths): Promise<DoctorDaemonState>
     return {
       status: "live",
       code: "DAEMON_LIVE",
-      detail: "daemon discovery, process, socket and handshake are healthy",
+      detail: "daemon discovery, process, socket, negotiation and bootstrap contract probe are healthy",
       pid: discovery.receipt.pid,
       socketPath: discovery.receipt.socketPath,
     };
@@ -555,7 +593,7 @@ export async function fabricDoctor(
     const database = new Database(paths.databasePath, { readonly: true, fileMustExist: true });
     try { assertDatabaseIntegrity(database); } finally { database.close(); }
   }));
-  const daemon = await doctorDaemonState(paths);
+  const daemon = await doctorDaemonState(paths, dependencies);
   checks.push({
     id: "daemon-socket",
     status: daemon.status === "live" ? "pass" : daemon.status === "idle" ? "idle" : "fail",

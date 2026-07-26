@@ -10,8 +10,11 @@ import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
 import {
   FABRIC_OPERATIONS,
+  MCP_BOOTSTRAP_CREDENTIALS_FEATURE,
+  NdjsonRpcTransport,
   PROTOCOL_FEATURES,
   PROTOCOL_LIMITS,
+  ProtocolResultShapeFeatureError,
   createProtocolInitializeResult,
   parseProtocolInitializeRequest,
   type ProtocolLimits,
@@ -20,10 +23,10 @@ import {
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { startFabricDaemon } from "../../src/index.ts";
-import { createFabricMcpServer } from "../../src/mcp/server.ts";
+import { createFabricMcpServer, createUnprovisionedMcpServer } from "../../src/mcp/server.ts";
 import { createDaemonFixture } from "../support/daemon-testkit.ts";
 import {
   callTool,
@@ -248,6 +251,41 @@ async function createDelayedDaemonProxy(upstreamSocketPath: string) {
 }
 
 describe("MCP proxy lifecycle", () => {
+  it("requires the bootstrap credential result shape in the agent protocol handshake", async () => {
+    const connect = vi.spyOn(NdjsonRpcTransport, "connect").mockImplementation(async (socket) => {
+      socket.on("error", () => {});
+      return {
+        principal: {
+          kind: "agent",
+          agentId: "agent_feature_requirement",
+          projectSessionId: "session_feature_requirement",
+          runId: "run-feature-requirement",
+          principalGeneration: 1,
+        },
+        allowedOperations: [],
+        closed: false,
+        close: async () => {},
+      } as never;
+    });
+    let handle: Awaited<ReturnType<typeof createFabricMcpServer>> | undefined;
+    try {
+      handle = await createFabricMcpServer({
+        socketPath: "/unused/fabric.sock",
+        capability: `afc_${"a".repeat(43)}`,
+      });
+      expect(connect).toHaveBeenCalledOnce();
+      expect(connect.mock.calls[0]?.[1]).toMatchObject({
+        requiredFeatures: [
+          "fabric-core.v1",
+          MCP_BOOTSTRAP_CREDENTIALS_FEATURE,
+        ],
+      });
+    } finally {
+      await handle?.close();
+      connect.mockRestore();
+    }
+  });
+
   it("reconnects before dispatch after a review outlives the negotiated idle timeout", async () => {
     let dispatches = 0;
     const fixture = await createTimeoutMcpFixture({
@@ -497,6 +535,34 @@ describe("MCP proxy lifecycle", () => {
       });
     } finally {
       await fixture.cleanup();
+    }
+  });
+
+  it("keeps normal tools hidden when bootstrap credential negotiation is incompatible", async () => {
+    const handle = createUnprovisionedMcpServer({
+      bootstrap: async () => {
+        throw new ProtocolResultShapeFeatureError(["mcp-bootstrap-credentials.v2"]);
+      },
+    });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "legacy-bootstrap-contract", version: "0.1.0" });
+    try {
+      await Promise.all([handle.server.connect(serverTransport), client.connect(clientTransport)]);
+      await expect(client.listTools()).resolves.toMatchObject({
+        tools: [{ name: "fabric_bootstrap" }],
+      });
+      await expect(callTool(client, "fabric_bootstrap", {})).resolves.toMatchObject({
+        isError: true,
+        structured: {
+          code: "PROTOCOL_INCOMPATIBLE",
+          message: expect.stringContaining("mcp-bootstrap-credentials.v2"),
+        },
+      });
+      await expect(client.listTools()).resolves.toMatchObject({
+        tools: [{ name: "fabric_bootstrap" }],
+      });
+    } finally {
+      await Promise.allSettled([client.close(), handle.close()]);
     }
   });
 

@@ -4,6 +4,7 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { MCP_BOOTSTRAP_CREDENTIALS_FEATURE } from "@local/agent-fabric-protocol";
 import { attachOrStartDaemon } from "../../../src/daemon/bootstrap-client.ts";
 import { BootstrapElection } from "../../../src/daemon/bootstrap-election.ts";
 
@@ -154,6 +155,37 @@ describe("attachOrStartDaemon", () => {
       spawn,
     })).rejects.toMatchObject({ code: "BOOTSTRAP_INCOMPATIBLE_INCUMBENT" });
     expect(spawn).not.toHaveBeenCalled();
+  });
+
+  it("rejects a v1 rpc incumbent before MCP bootstrap or seat rotation when the credential token is absent", async () => {
+    const root = await mkdtemp(join(tmpdir(), "fabric-bootstrap-legacy-credentials-"));
+    cleanup.push(root);
+    const runtimeDirectory = join(root, "runtime");
+    const socketPath = join(runtimeDirectory, "fabric.sock");
+    const preBootstrap = vi.fn();
+    const spawn = vi.fn();
+
+    await expect(attachOrStartDaemon({
+      actionId: "bootstrap_legacy_credentials_01",
+      socketPath,
+      requiredProtocolVersion: 1,
+      requiredFeatures: ["rpc", MCP_BOOTSTRAP_CREDENTIALS_FEATURE],
+      election: new BootstrapElection({ runtimeDirectory }),
+      handshake: async () => ({
+        status: "compatible",
+        client: { legacyCredentialShape: "pre-0636854" },
+        protocolVersion: 1,
+        daemonInstanceGeneration: 5,
+        features: ["rpc"],
+      }),
+      preBootstrap,
+      spawn,
+    })).rejects.toMatchObject({
+      code: "BOOTSTRAP_INCOMPATIBLE_INCUMBENT",
+      message: expect.stringContaining(MCP_BOOTSTRAP_CREDENTIALS_FEATURE),
+    });
+    expect({ preBootstrapCalls: preBootstrap.mock.calls.length, spawnCalls: spawn.mock.calls.length })
+      .toEqual({ preBootstrapCalls: 0, spawnCalls: 0 });
   });
 
   it("preserves a typed child startup failure instead of classifying it as ambiguous", async () => {

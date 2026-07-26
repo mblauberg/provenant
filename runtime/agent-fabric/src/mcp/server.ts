@@ -12,9 +12,11 @@ import {
 import {
   AGENT_RESULT_SHAPE_FEATURES,
   FABRIC_OPERATIONS,
+  MCP_BOOTSTRAP_CREDENTIALS_FEATURE,
   NdjsonRpcTransport,
   OPERATION_REGISTRY,
   ProtocolRemoteError,
+  ProtocolResultShapeFeatureError,
   ProtocolTransportError,
   buildMcpDescriptorSet,
   isDaemonGrantableOperation,
@@ -100,6 +102,7 @@ const agentFeatures = Object.freeze([...new Set(
       .filter(isDaemonGrantableOperation)
       .map((operation) => OPERATION_REGISTRY[operation].feature),
     ...AGENT_RESULT_SHAPE_FEATURES,
+    MCP_BOOTSTRAP_CREDENTIALS_FEATURE,
   ],
 )].sort()) as readonly ProtocolFeature[];
 
@@ -117,6 +120,9 @@ export function errorPayload(error: unknown): McpErrorPayload {
   if (error instanceof ProtocolRemoteError) return { code: error.code, message: error.message };
   if (error instanceof ProtocolTransportError) {
     return { code: error.code, message: "Agent Fabric protocol request failed" };
+  }
+  if (error instanceof ProtocolResultShapeFeatureError) {
+    return { code: error.code, message: error.message };
   }
   if (error instanceof TypeError) return { code: "MCP_INPUT_INVALID", message: error.message };
   if (isRecord(error) && typeof error.code === "string" && typeof error.message === "string") {
@@ -243,8 +249,10 @@ async function connectAgentProtocol(options: FabricMcpServerOptions, capability:
       clientNonce: `mcp_${randomUUID()}`,
     },
     expectedPrincipalKind: "agent",
-    requiredFeatures: ["fabric-core.v1"],
-    optionalFeatures: agentFeatures.filter((feature) => feature !== "fabric-core.v1"),
+    requiredFeatures: ["fabric-core.v1", MCP_BOOTSTRAP_CREDENTIALS_FEATURE],
+    optionalFeatures: agentFeatures.filter((feature) =>
+      feature !== "fabric-core.v1" &&
+      feature !== MCP_BOOTSTRAP_CREDENTIALS_FEATURE),
   });
   if (protocol.principal.kind !== "agent") {
     await protocol.close();

@@ -14,6 +14,8 @@ export type PrivateDiscoveryCapabilityReceipt = {
   pid: number;
   bootstrapCapability: string;
   lifecycleReceiptAuthorityId: string | null;
+  protocolVersion?: number;
+  features?: readonly string[];
 };
 
 export type PrivateDiscoveryOwner = {
@@ -90,17 +92,42 @@ function positiveInteger(value: unknown, label: string): number {
   return value;
 }
 
-function parseCapabilityReceipt(value: unknown, socketPath: string): PrivateDiscoveryCapabilityReceipt {
+export function parseCapabilityReceipt(value: unknown, socketPath: string): PrivateDiscoveryCapabilityReceipt {
   const receipt = record(value, "daemon discovery receipt");
-  exactKeys(receipt, [
-    "schemaVersion", "socketPath", "pid", "bootstrapCapability", "lifecycleReceiptAuthorityId",
-  ], "daemon discovery receipt");
+  const hasProtocolVersion = Object.hasOwn(receipt, "protocolVersion");
+  const hasFeatures = Object.hasOwn(receipt, "features");
+  if (hasProtocolVersion !== hasFeatures) {
+    throw new PrivateDiscoveryError(
+      "DAEMON_DISCOVERY_INVALID",
+      "daemon discovery protocol evidence is incomplete",
+    );
+  }
   if (receipt.schemaVersion !== 1 || receipt.socketPath !== socketPath) {
     throw new PrivateDiscoveryError("DAEMON_DISCOVERY_INVALID", "daemon discovery receipt does not match the trusted socket");
   }
   const bootstrapCapability = nonEmptyString(receipt.bootstrapCapability, "daemon discovery capability", 256);
   if (!/^afb_[A-Za-z0-9_-]{43}$/u.test(bootstrapCapability)) {
     throw new PrivateDiscoveryError("DAEMON_DISCOVERY_INVALID", "daemon discovery capability is invalid");
+  }
+  let protocolEvidence: Pick<PrivateDiscoveryCapabilityReceipt, "protocolVersion" | "features"> = {};
+  if (hasProtocolVersion) {
+    if (
+      typeof receipt.protocolVersion !== "number" ||
+      !Number.isSafeInteger(receipt.protocolVersion) ||
+      receipt.protocolVersion < 1 ||
+      !Array.isArray(receipt.features) ||
+      !receipt.features.every((feature) => typeof feature === "string" && feature.length > 0) ||
+      new Set(receipt.features).size !== receipt.features.length
+    ) {
+      throw new PrivateDiscoveryError(
+        "DAEMON_DISCOVERY_INVALID",
+        "daemon discovery protocol evidence is invalid",
+      );
+    }
+    protocolEvidence = {
+      protocolVersion: receipt.protocolVersion,
+      features: [...receipt.features],
+    };
   }
   return {
     schemaVersion: 1,
@@ -110,6 +137,7 @@ function parseCapabilityReceipt(value: unknown, socketPath: string): PrivateDisc
     lifecycleReceiptAuthorityId: receipt.lifecycleReceiptAuthorityId === null
       ? null
       : nonEmptyString(receipt.lifecycleReceiptAuthorityId, "lifecycle receipt authority ID"),
+    ...protocolEvidence,
   };
 }
 
@@ -346,6 +374,8 @@ export async function publishPrivateDiscovery(input: {
   pid: number;
   bootstrapCapability: string;
   lifecycleReceiptAuthorityId: string | null;
+  protocolVersion: number;
+  features: readonly string[];
 }): Promise<PrivateDiscoveryIdentity> {
   await ensurePrivateDirectory(input.paths.runtimeDirectory);
   const current = await readPrivateDiscovery(input.paths, input.socketPath);
@@ -377,6 +407,8 @@ export async function publishPrivateDiscovery(input: {
     pid: input.pid,
     bootstrapCapability: input.bootstrapCapability,
     lifecycleReceiptAuthorityId: input.lifecycleReceiptAuthorityId,
+    protocolVersion: input.protocolVersion,
+    features: [...input.features],
   };
   await atomicPrivateJson(input.paths.ownerPath, owner);
   await atomicPrivateJson(input.paths.receiptPath, receipt);
