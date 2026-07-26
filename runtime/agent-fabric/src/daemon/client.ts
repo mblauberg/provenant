@@ -28,6 +28,7 @@ import {
   type PrivateDiscoveryPaths,
 } from "./private-discovery.js";
 import { FABRIC_PROTOCOL_VERSION, isRecord } from "./protocol.js";
+import { preflightProtocolBuild } from "./protocol-build-preflight.js";
 import { FabricDaemonClient } from "./rpc-client.js";
 import { composeDaemonConfiguration } from "./composition.js";
 import type { HerdrDaemonProcessConfiguration } from "./herdr-composition.js";
@@ -633,6 +634,7 @@ export async function startFabricDaemon(options: DaemonStartOptions): Promise<Fa
       requiredProtocolVersion: FABRIC_PROTOCOL_VERSION,
       requiredFeatures: ["rpc", MCP_BOOTSTRAP_CREDENTIALS_FEATURE],
       election,
+      preflight: preflightProtocolBuild,
       handshake: async () => {
         if (!bootstrapDirectoriesPrepared && !existsSync(normalized.runtimeDirectory)) {
           return {

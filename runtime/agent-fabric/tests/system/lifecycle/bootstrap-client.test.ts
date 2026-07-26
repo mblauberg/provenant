@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { lstat, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -15,6 +15,35 @@ afterEach(async () => {
 });
 
 describe("attachOrStartDaemon", () => {
+  it("fails typed build preflight before election or spawn", async () => {
+    const root = await mkdtemp(join(tmpdir(), "fabric-bootstrap-preflight-"));
+    cleanup.push(root);
+    const runtimeDirectory = join(root, "runtime");
+    const preflightError = Object.assign(new Error("protocol build is stale"), {
+      code: "AGENT_FABRIC_PROTOCOL_BUILD_STALE",
+    });
+    const preflight = vi.fn().mockRejectedValue(preflightError);
+    const spawn = vi.fn();
+
+    await expect(attachOrStartDaemon({
+      actionId: "bootstrap_preflight_01",
+      socketPath: join(runtimeDirectory, "fabric.sock"),
+      requiredProtocolVersion: 1,
+      requiredFeatures: ["project-sessions.v1"],
+      election: new BootstrapElection({ runtimeDirectory }),
+      handshake: vi.fn().mockResolvedValue({
+        status: "unavailable",
+        reason: "absent",
+        message: "missing",
+      }),
+      preflight,
+      spawn,
+    })).rejects.toBe(preflightError);
+    expect(preflight).toHaveBeenCalledOnce();
+    expect(spawn).not.toHaveBeenCalled();
+    await expect(lstat(runtimeDirectory)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it("returns a compatible initialized daemon without entering election or spawning", async () => {
     const root = await mkdtemp(join(tmpdir(), "fabric-bootstrap-client-"));
     cleanup.push(root);

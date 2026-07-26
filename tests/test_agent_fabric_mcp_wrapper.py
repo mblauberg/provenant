@@ -24,6 +24,18 @@ def run_launcher_fixture(
     loader.write_text("// loader\n")
     fake_node.write_text("#!/bin/sh\nprintf '%s\\n' \"$@\"\n")
     fake_node.chmod(0o755)
+    # These cases are about dist-vs-source selection, so give the fixture a
+    # current protocol build; the stale-protocol path is covered separately in
+    # tests/test_agent_fabric_launcher.py.
+    protocol = agents_home / "runtime" / "agent-fabric-protocol"
+    protocol_source = protocol / "src" / "index.ts"
+    protocol_dist = protocol / "dist" / "index.js"
+    protocol_source.parent.mkdir(parents=True)
+    protocol_dist.parent.mkdir(parents=True)
+    protocol_source.write_text("// protocol source\n")
+    protocol_dist.write_text("// protocol dist\n")
+    os.utime(protocol_source, ns=(1_000_000_000, 1_000_000_000))
+    os.utime(protocol_dist, ns=(9_000_000_000, 9_000_000_000))
     if source_mtime_ns is not None:
         source.parent.mkdir(parents=True)
         source.write_text("// source\n")

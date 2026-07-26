@@ -27,48 +27,13 @@ herdr_dist="$herdr_root/dist/bin.js"
 console_root="$agents_home/runtime/agent-fabric-console"
 console_dist="$console_root/dist/bin.js"
 
-workspace_is_stale() {
-  workspace=$1
-  shift
-
-  for output do
-    [ -f "$output" ] || return 0
-
-    if [ -d "$workspace/src" ] && find "$workspace/src" -type f -name '*.ts' -newer "$output" -print -quit | grep -q .; then
-      return 0
-    fi
-
-    for input in "$workspace/package.json" "$workspace/tsconfig.json" "$workspace/tsconfig.build.json"; do
-      [ ! -f "$input" ] || [ ! "$input" -nt "$output" ] || return 0
-    done
-  done
-
-  return 1
-}
+. "$script_dir/lib/agent-fabric-workspace-freshness.sh"
 
 workspace_stale=false
 if workspace_is_stale "$protocol_root" "$protocol_dist" \
   || workspace_is_stale "$package_root" "$dist_cli" "$dist_mcp" \
   || workspace_is_stale "$herdr_root" "$herdr_dist" \
   || workspace_is_stale "$console_root" "$console_dist"; then
-  workspace_stale=true
-fi
-
-# Root manifests define the project-reference build graph. A newer manifest
-# invalidates the warm result even when no workspace source file changed.
-for input in "$agents_home/package.json" "$agents_home/package-lock.json" "$agents_home/tsconfig.json"; do
-  [ -f "$input" ] || continue
-  for output in "$protocol_dist" "$dist_cli" "$dist_mcp" "$herdr_dist" "$console_dist"; do
-    if [ ! -f "$output" ] || [ "$input" -nt "$output" ]; then
-      workspace_stale=true
-    fi
-  done
-done
-
-# Protocol schema generation is part of the root build but its generator lives
-# outside src, so include it explicitly in the freshness boundary.
-if [ -f "$protocol_dist" ] && [ -d "$protocol_root/scripts" ] \
-  && find "$protocol_root/scripts" -type f -name '*.mjs' -newer "$protocol_dist" -print -quit | grep -q .; then
   workspace_stale=true
 fi
 

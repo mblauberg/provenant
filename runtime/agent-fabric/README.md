@@ -87,6 +87,15 @@ scripts/agent-fabric doctor --json
 scripts/agent-fabric retention preview
 ```
 
+Fabric source, Fabric tests, and the compiled Fabric CLI all resolve the
+protocol package's `import` export to dist. The launcher and source daemon API
+verify that local protocol dist is current before daemon election. A missing or
+stale build reports `AGENT_FABRIC_PROTOCOL_BUILD_STALE` and the exact repair:
+
+```sh
+scripts/agent-fabric-protocol-build
+```
+
 ## Runtime locations
 
 Resolved by `src/cli/paths.ts` under the user data/runtime directories:
