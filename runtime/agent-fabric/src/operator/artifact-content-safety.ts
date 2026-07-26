@@ -123,6 +123,20 @@ export function redactArtifactTextPreservingControls(
   raw: string,
   runtimeKnownSecrets: readonly string[] = [],
 ): RedactedArtifactTextResult {
+  // Detection has to run on the neutralised text. Every credential pattern and
+  // the final withholding gate match against whatever is passed as
+  // `terminalSafe`, so detecting on `raw` lets a single zero-width or bidi
+  // control inside a token defeat all of them: `afb_<U+200B>LIVE…` matches
+  // nothing, is neither redacted nor withheld, and renders as a usable token in
+  // the Console, whose own sanitiser visualises C0/C1 and bidi but not U+200B.
+  const inert = redactArtifactText(raw, neutraliseTerminal(raw), runtimeKnownSecrets);
+  if (!inert.safe) return inert;
+  // Controls may only be preserved for text the neutralised pass found nothing
+  // to hide in. Once anything was redacted, returning the control-preserving
+  // rendering would hand back the very bytes that were just redacted.
+  if (inert.transformation !== "none" && inert.transformation !== "terminal-neutralised") {
+    return inert;
+  }
   return redactArtifactText(raw, raw, runtimeKnownSecrets);
 }
 

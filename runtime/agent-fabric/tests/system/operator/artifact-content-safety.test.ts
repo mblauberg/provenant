@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import {
   inertArtifactText,
   pageArtifactText,
+  redactArtifactTextPreservingControls,
 } from "../../../src/operator/artifact-content-safety.ts";
 
 const digest = (value: string): string =>
@@ -143,6 +144,40 @@ describe("artifact content safety and paging", () => {
     ]);
     expect(pages.map(({ content }) => content).join("")).toBe(rendered);
     expect(pages.every(({ content }) => Buffer.byteLength(content, "utf8") <= 4)).toBe(true);
+  });
+
+  it("never lets the control-preserving path expose what the inert path hides", () => {
+    // Every credential pattern and the final withholding gate match against the
+    // terminal-safe text, so detecting on the raw string lets one invisible
+    // character inside a token defeat all of them. The Console's own sanitiser
+    // visualises C0/C1 and bidi but not U+200B/U+00AD, so such a token would
+    // render on screen as a readable, copyable capability.
+    const split: Record<string, string> = {
+      zeroWidth: "capability=afb_​LIVECAPABILITY123456",
+      softHyphen: "capability=afb_­LIVECAPABILITY123456",
+      bidi: "token=sk-‮ABCDEFGHIJKLMNOPQRSTUVWX",
+      joiner: "capability=afb_‍LIVECAPABILITY123456",
+    };
+    for (const [name, raw] of Object.entries(split)) {
+      const inert = inertArtifactText(raw);
+      const preserving = redactArtifactTextPreservingControls(raw);
+      if (!inert.safe) {
+        expect(preserving.safe, name).toBe(false);
+        continue;
+      }
+      // Compare with invisibles stripped: that is what a reader actually sees.
+      const visible = preserving.safe
+        ? preserving.content.replace(/[​-‏­‪-‮]/gu, "")
+        : "";
+      expect(/afb_[A-Za-z0-9]|sk-[A-Za-z0-9]/u.test(visible), name).toBe(false);
+    }
+  });
+
+  it("still preserves controls for text with nothing to redact", () => {
+    const result = redactArtifactTextPreservingControls("left‮right");
+
+    expect(result).toMatchObject({ safe: true, transformation: "none" });
+    expect(result.safe ? result.content : "").toContain("‮");
   });
 
   it("honours exact byte and line bounds and rejects invalid continuation offsets", () => {
