@@ -46,14 +46,26 @@ TASK_CLASS_POLICY = {
 # is only true when this file runs as `__main__`. Path-loading here keeps
 # both loading modes identical (see skills/engineering-writing/scripts/
 # check_engineering_style.py for the same pattern).
+#
+# This router is itself loaded by path more than once per process (the tests
+# reload it per case), so the catalogue must be reused rather than re-executed.
+# `setdefault` followed by an unconditional `exec_module` does the opposite: the
+# second load leaves the first module in `sys.modules` but executes and binds a
+# second one, so the names below and `sys.modules["model_route_catalog"]` come
+# from different module objects. Their function globals then diverge -- rebinding
+# `infer_family` on one is invisible to `override_scan_families` on the other --
+# which a normal `import` would never do. Reuse the cached module instead, so
+# there is exactly one object and one execution per process.
 _CATALOG_VALIDATION_PATH = Path(__file__).resolve().parent / "model_route_catalog.py"
-_catalog_validation_spec = importlib.util.spec_from_file_location(
-    "model_route_catalog", _CATALOG_VALIDATION_PATH
-)
-assert _catalog_validation_spec is not None and _catalog_validation_spec.loader is not None
-_catalog_validation = importlib.util.module_from_spec(_catalog_validation_spec)
-sys.modules.setdefault("model_route_catalog", _catalog_validation)
-_catalog_validation_spec.loader.exec_module(_catalog_validation)
+_catalog_validation = sys.modules.get("model_route_catalog")
+if _catalog_validation is None:
+    _catalog_validation_spec = importlib.util.spec_from_file_location(
+        "model_route_catalog", _CATALOG_VALIDATION_PATH
+    )
+    assert _catalog_validation_spec is not None and _catalog_validation_spec.loader is not None
+    _catalog_validation = importlib.util.module_from_spec(_catalog_validation_spec)
+    sys.modules["model_route_catalog"] = _catalog_validation
+    _catalog_validation_spec.loader.exec_module(_catalog_validation)
 
 EFFORT_ORDER = _catalog_validation.EFFORT_ORDER
 ALIAS_ORDER = _catalog_validation.ALIAS_ORDER
