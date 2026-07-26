@@ -51,11 +51,18 @@ Current durable aliases (verify against runtime before execution):
 | OpenAI GPT-5.6 | Sol | Terra | Luna |
 
 Opus is Claude's default flagship and high-effort critical reviewer. Sonnet is
-the low-to-high workhorse. Fable is not a default alias or fallback: an explicit
-`crucial` or `terminal` synthesis/adjudication route may select it at low or
-medium effort, with the override recorded. Sol leads for Codex. Eligible Sol lead/orchestrator routes may use Ultra;
-runtime model capabilities decide the effective effort and every fallback is
-recorded. Claude and Codex are equal primary families.
+the low-to-high workhorse. Each catalogue-configured risk tier has one bounded
+override occupant. Validation prevents it from being an alias or alias
+candidate. Callers must select the override explicitly and stay within that
+tier's configured roles, alias and effort ceiling. Retargeting a tier removes
+that tier's special treatment from its former occupant; a model no configured
+tier names is no longer override-only. A malformed override block fails the
+whole family closed — every route on that family is rejected with
+`risk_tier_config_invalid` rather than quietly leaving its occupant
+dispatchable. Fable currently occupies both configured tiers. Sol leads for
+Codex. Eligible Sol lead/orchestrator routes may use Ultra; runtime model
+capabilities decide the effective effort and every fallback is recorded. Claude
+and Codex are equal primary families.
 
 Effort rule: **medium by default**; **high for verification, adversarial, and high-stakes** calls
 (that's where subtle errors hide); reserve the very highest effort for isolated single-shot calls —
