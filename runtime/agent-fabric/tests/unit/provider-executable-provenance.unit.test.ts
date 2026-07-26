@@ -51,6 +51,7 @@ vi.mock("node:child_process", async (importOriginal) => {
 });
 
 import {
+  SYSTEM_PORT,
   verifyProviderExecutableIdentity,
   type ProviderIdentityPort,
 } from "../../src/adapters/provider-identity.ts";
@@ -82,8 +83,13 @@ describe("provider executable identity", () => {
     const result = await Promise.race([
       verifyProviderExecutableIdentity({
         adapterId: "claude-agent-sdk",
-        executable: process.execPath,
-      }).then(
+        executable: "/opt/homebrew/bin/claude",
+      }, port({
+        // Keep the real signature probe: it is what spawns codesign, which this
+        // test exists to bound. Only the path inspection is stubbed, because
+        // inspecting a real binary is platform-dependent.
+        verifySignature: SYSTEM_PORT.verifySignature,
+      })).then(
         () => ({ outcome: "resolved" as const }),
         (error: unknown) => ({ outcome: "rejected" as const, error }),
       ),

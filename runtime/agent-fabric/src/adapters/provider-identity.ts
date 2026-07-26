@@ -103,7 +103,11 @@ async function verifySignature(path: string): Promise<void> {
   }
 }
 
-const SYSTEM_PORT: ProviderIdentityPort = {
+// Exported so a test can keep the real signature probe, which is what spawns
+// codesign, while making the path checks deterministic. Inspecting a real
+// on-disk binary is platform-dependent: CI's node is group-writable and fails
+// assertSafeFile before codesign is ever reached.
+export const SYSTEM_PORT: ProviderIdentityPort = {
   inspectPath,
   inspectDirectory: async (path) => {
     const canonicalPath = await realpath(path);
