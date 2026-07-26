@@ -261,6 +261,9 @@ async function main(arguments_: string[]): Promise<void> {
       credentials: credentials.map(({ capability: _capability, ...metadata }) => metadata),
     };
     process.stdout.write(`${JSON.stringify(publicOutput, null, 2)}\n`);
+    // The seat is installed and durable either way; an unhealthy smoke is
+    // reported in the receipt and must still fail the process boundary.
+    if (!output.receipt.healthy) process.exitCode = 1;
     return;
   }
   if (
@@ -346,6 +349,13 @@ async function main(arguments_: string[]): Promise<void> {
 try {
   await main(process.argv.slice(2));
 } catch (error: unknown) {
+  // A schema cutover gate is a user decision, not a failure report: emit the
+  // machine-readable gate on stdout so the agent can relay counts and
+  // consequences without displacing anything.
+  const { McpBootstrapSchemaCutoverGateError } = await import("./mcp-bootstrap.js");
+  if (error instanceof McpBootstrapSchemaCutoverGateError) {
+    process.stdout.write(`${JSON.stringify(error.gate, null, 2)}\n`);
+  }
   process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
   process.exitCode = 1;
 }

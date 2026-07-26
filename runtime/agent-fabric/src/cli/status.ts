@@ -26,12 +26,20 @@ import { assertDatabaseIntegrity } from "../persistence/invariants.js";
 import { BootstrapElection, FLOCK_ELECTION_LOCK_PORT } from "../daemon/bootstrap-election.js";
 import { connectFabricDaemon } from "../daemon/client.js";
 import { privateDiscoveryPaths, readPrivateDiscovery } from "../daemon/private-discovery.js";
+import { preflightProtocolBuild } from "../daemon/protocol-build-preflight.js";
 import { readDiscoveryReceipt } from "./mcp-provision.js";
 import type { FabricPaths } from "./paths.js";
 import { MCP_SEATS, resolveSeatPaths, type SeatMetadata } from "./seat-store.js";
 import { trustedWorkspaceRoots } from "./workspace-trust.js";
 
-type Check = { id: string; status: "pass" | "idle" | "fail"; code: string; detail: string };
+type Check = {
+  id: string;
+  status: "pass" | "idle" | "fail";
+  code: string;
+  detail: string;
+  /** The condition this check asserts, named so a state can say why it holds. */
+  precondition: string;
+};
 type ProviderIdentityResult = Awaited<ReturnType<typeof verifyProviderExecutableIdentity>>;
 type ProviderInterfaceResult = Awaited<ReturnType<typeof probeProviderInterface>>;
 type ProviderObservation = { adapterId: string; requiredIdentity: string; identity?: ProviderIdentityResult; providerInterface?: ProviderInterfaceResult; identityError?: unknown; interfaceError?: unknown };
@@ -48,6 +56,7 @@ type DoctorDependencies = {
   probeProviderInterface?: typeof probeProviderInterface;
   observeReviewProfilePin?: PinRouteObserver;
   providerProbeTimeoutMs?: number;
+  preflightProtocolBuild?: typeof preflightProtocolBuild;
   now?: () => number;
   connectDaemon?: (input: {
     socketPath: string;
@@ -60,6 +69,76 @@ type DoctorDaemonState =
   | { status: "live"; code: "DAEMON_LIVE"; detail: string; pid: number; socketPath: string }
   | { status: "idle"; code: "DAEMON_ON_DEMAND_IDLE"; detail: string; pid: null; socketPath: null }
   | { status: "failed"; code: string; detail: string; pid: number | null; socketPath: string | null };
+
+/**
+ * Causal lifecycle vocabulary. `current` and `idle` are the two healthy modes;
+ * a failing precondition is `recovering` when the next ordinary bootstrap
+ * reconciles it under existing authority, and `blocked` otherwise. Unknown
+ * codes fail closed to `blocked`: this lifecycle never claims that a condition
+ * it does not recognise will repair itself.
+ */
+export type DoctorLifecycleState = "current" | "idle" | "recovering" | "blocked";
+
+const PRECONDITIONS: Readonly<Record<string, string>> = {
+  "protocol-build": "the local protocol build is newer than its TypeScript sources",
+  configuration: "the trusted Fabric configuration loads and names its adapters",
+  "wrapper-loader": "every configured adapter wrapper loader is installed",
+  "adapter-compatibility": "adapter compatibility pins verify against the pinned schema",
+  "provider-conformance": "each configured provider executable answers its conformance probe",
+  "provider-identity": "each primary provider matches its pinned executable identity",
+  "pin-staleness": "compatibility and catalogue pin dates are within the advisory threshold",
+  "review-profile-pins": "each certifying-profile model pin matches current alias resolution",
+  "state-directory": "the state directory is a private non-symlink directory",
+  "runtime-directory": "the runtime directory is a private non-symlink directory",
+  "database-integrity": "the Fabric database is current-schema and passes its invariants",
+  "daemon-socket": "daemon discovery, election, process, socket and bootstrap contract agree",
+};
+
+/**
+ * The only failures an ordinary bootstrap actually converges, each traced to
+ * the code path that converges it:
+ *
+ * - `BOOTSTRAP_IN_PROGRESS` and `DAEMON_SHUTDOWN_IN_PROGRESS`: another owner
+ *   holds the transition and is completing it; no work is required here.
+ * - `DAEMON_PROCESS_UNAVAILABLE`: active discovery whose PID is dead, the one
+ *   shape `reconcileUnreachablePrivateDaemon` marks terminal and re-elects.
+ * - `DAEMON_PROCESS_CRASHED` and `DAEMON_PROCESS_UNCLEAN_STOP`: terminal
+ *   discovery carrying evidence that matches its ready receipt, which the
+ *   ordinary spawn path replaces.
+ *
+ * Everything else is `blocked` and reported as needing a decision rather than
+ * a retry. That deliberately excludes absent discovery, a stale socket and an
+ * unreachable socket under a live PID: reconciliation returns false for all
+ * three, so bootstrap raises `BOOTSTRAP_RECONCILIATION_REQUIRED` or
+ * `BOOTSTRAP_READY_UNREACHABLE` and a zero-touch caller would retry forever.
+ * Unrecognised codes fail closed to `blocked` for the same reason.
+ */
+const RECOVERABLE_CODES: ReadonlySet<string> = new Set([
+  "BOOTSTRAP_IN_PROGRESS",
+  "DAEMON_SHUTDOWN_IN_PROGRESS",
+  "DAEMON_PROCESS_UNAVAILABLE",
+  "DAEMON_PROCESS_CRASHED",
+  "DAEMON_PROCESS_UNCLEAN_STOP",
+]);
+
+/**
+ * Preconditions another entrypoint reports before `doctor` can. This is an
+ * entrypoint-specific interception, not a structural blind spot: `doctor`
+ * evaluates the `protocol-build` check itself, so the package bin and
+ * in-process callers do classify a stale dist. Only the `scripts/agent-fabric`
+ * wrapper preempts it, by exiting 78 before `doctor` starts (#399, gap #439).
+ */
+const WRAPPER_INTERCEPTED_PRECONDITIONS = [
+  {
+    precondition: "the local protocol build is newer than its TypeScript sources",
+    code: "AGENT_FABRIC_PROTOCOL_BUILD_STALE",
+    check: "protocol-build",
+    observedByDoctor: true,
+    interceptedBy: "scripts/agent-fabric",
+    reason: "the launcher preflight exits 78 before doctor starts, so the wrapper path reports this instead of doctor; the package bin and in-process callers reach the protocol-build check",
+    issue: "#439",
+  },
+] as const;
 
 const PRIMARY_ADAPTER_IDS = ["claude-agent-sdk", "codex-app-server"] as const;
 const PROVIDER_PROBE_TIMEOUT_MS = 16_000;
@@ -285,12 +364,16 @@ export async function fabricStatus(arguments_: string[], paths: FabricPaths): Pr
   };
 }
 
+function precondition(id: string): string {
+  return PRECONDITIONS[id] ?? id;
+}
+
 async function check(id: string, operation: () => string | undefined | Promise<string | undefined>): Promise<Check> {
   try {
     const detail = await operation();
-    return { id, status: "pass", code: checkCode(id, "OK"), detail: detail === undefined || detail.length === 0 ? "ok" : detail };
+    return { id, status: "pass", code: checkCode(id, "OK"), detail: detail === undefined || detail.length === 0 ? "ok" : detail, precondition: precondition(id) };
   } catch (error: unknown) {
-    return { id, status: "fail", code: errorCode(error, checkCode(id, "FAILED")), detail: errorDetail(error) };
+    return { id, status: "fail", code: errorCode(error, checkCode(id, "FAILED")), detail: errorDetail(error), precondition: precondition(id) };
   }
 }
 
@@ -526,6 +609,12 @@ export async function fabricDoctor(
   let compatibilityVerification: Awaited<ReturnType<typeof verifyAdapterCompatibility>> | undefined;
   const providerObservations: ProviderObservation[] = [];
   const checks: Check[] = [];
+  // Evaluated by doctor itself so the package bin and in-process callers still
+  // classify a stale dist; only the wrapper preempts it by exiting 78 first.
+  checks.push(await check("protocol-build", async () => {
+    await (dependencies.preflightProtocolBuild ?? preflightProtocolBuild)();
+    return "protocol dist is newer than its build inputs";
+  }));
   checks.push(await check("configuration", async () => {
     const config = await loadFabricConfig({ globalPath: selected.config, agentsHome: selected.agentsHome });
     adapterIds = config.adapterIds;
@@ -604,6 +693,7 @@ export async function fabricDoctor(
     status: drifted ? "fail" : unknown ? "idle" : "pass",
     code: drifted ? "PROVIDER_IDENTITY_DRIFT" : unknown ? "PROVIDER_IDENTITY_UNKNOWN" : "PROVIDER_IDENTITY_OK",
     detail: providerIdentity.map((item) => `${item.adapterId}=${item.state}: ${item.detail}`).join(" "),
+    precondition: precondition("provider-identity"),
   });
   const pinReport = await reviewProfilePins(
     selected.reviewProfile,
@@ -617,6 +707,7 @@ export async function fabricDoctor(
   const pinOutcome = reviewProfilePinOutcome(pinReport);
   checks.push({
     id: "review-profile-pins",
+    precondition: precondition("review-profile-pins"),
     ...pinOutcome,
     detail: [
       ...pinReport.compared.map((pin) =>
@@ -645,6 +736,7 @@ export async function fabricDoctor(
       `review_profile_observed_on=${staleness.reviewProfile.date ?? "unknown"} age_days=${String(staleness.reviewProfile.ageDays)}`,
       `threshold_days=${String(STALENESS_THRESHOLD_DAYS)}`,
     ].join(" "),
+    precondition: precondition("pin-staleness"),
   });
   for (const [id, path, expectedKind] of [
     ["state-directory", paths.stateDirectory, "directory"],
@@ -665,13 +757,40 @@ export async function fabricDoctor(
     status: daemon.status === "live" ? "pass" : daemon.status === "idle" ? "idle" : "fail",
     code: daemon.code,
     detail: daemon.detail,
+    precondition: precondition("daemon-socket"),
   });
   const failed = checks.find((item) => item.status === "fail");
+  const healthy = failed === undefined;
+  const state: DoctorLifecycleState = healthy
+    ? daemon.status === "live" ? "current" : "idle"
+    : RECOVERABLE_CODES.has(failed.code) ? "recovering" : "blocked";
+  const daemonCheck = checks.find((item) => item.id === "daemon-socket");
+  // The deciding check, worst first. An unknown precondition is surfaced ahead
+  // of the daemon summary even when the lifecycle is healthy, so `cause` never
+  // reports a satisfied precondition while a declared one is unresolved.
+  const holds = failed
+    ?? checks.find((item) => item.status === "idle" && item.id !== "daemon-socket")
+    ?? daemonCheck;
   return {
     schemaVersion: 1,
-    healthy: failed === undefined,
-    state: failed === undefined ? daemon.status : "failed",
+    healthy,
+    state,
     code: failed?.code ?? daemon.code,
+    // Why the state holds, not merely which state it is: the exact check whose
+    // precondition decided it, and whether this lifecycle may repair it.
+    // `satisfied` reports that check's own precondition and is independent of
+    // `healthy`: a healthy idle lifecycle has no daemon by design, and an
+    // unknown provider probe stays advisory (#406) without being called
+    // satisfied. Only a `pass` check reports a satisfied precondition.
+    cause: {
+      checkId: holds?.id ?? "daemon-socket",
+      precondition: holds?.precondition ?? precondition("daemon-socket"),
+      satisfied: holds?.status === "pass",
+      code: holds?.code ?? daemon.code,
+      detail: holds?.detail ?? daemon.detail,
+      recoverable: !healthy && state === "recovering",
+    },
+    wrapperIntercepted: WRAPPER_INTERCEPTED_PRECONDITIONS,
     daemon: {
       status: daemon.status,
       pid: daemon.pid,

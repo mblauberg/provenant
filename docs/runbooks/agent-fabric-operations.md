@@ -89,13 +89,43 @@ operating modes:
 | `state` | `code` | `healthy` | Meaning |
 | --- | --- | --- | --- |
 | `idle` | `DAEMON_ON_DEMAND_IDLE` | `true` | Configuration, compatibility, private paths, database and election state pass; no daemon is expected to be running. `daemon.pid` and `daemon.socketPath` are `null`. |
-| `live` | `DAEMON_LIVE` | `true` | Generation-bound discovery, bootstrap election, process, owned Unix socket, authenticated negotiation and a non-mutating bootstrap-scope contract probe agree. |
-| `failed` | causal failure code | `false` | A preflight, election, discovery, process, socket or handshake failed. The command exits non-zero. |
+| `current` | `DAEMON_LIVE` | `true` | Generation-bound discovery, bootstrap election, process, owned Unix socket, authenticated negotiation and a non-mutating bootstrap-scope contract probe agree. |
+| `recovering` | converging transition or unreachable-daemon residue | `false` | The next ordinary bootstrap reconciles this locally and reversibly under existing authority. The command exits non-zero. |
+| `blocked` | every other causal failure code | `false` | Repair needs user authority, material state displacement, or an action outside this lifecycle. The command exits non-zero. |
+
+Every state is causal: `cause` names the deciding check, the precondition that
+check asserts, whether that precondition is satisfied, and whether this
+lifecycle may repair it. The deciding check is the worst one — a failure first,
+otherwise an unresolved check, otherwise the daemon summary. `cause.satisfied`
+reports that check alone and is independent of `healthy`: only a `pass` check
+is satisfied, so a healthy idle lifecycle reports an unsatisfied daemon
+precondition (no daemon is expected), and an unknown provider probe stays
+advisory without being called satisfied.
+
+`recovering` is deliberately narrow, and covers only states an ordinary
+bootstrap actually converges: an active bootstrap or shutdown transition
+another owner is completing, active discovery whose PID is dead, and terminal
+crashed or unclean-stop discovery that the ordinary spawn path replaces. Absent
+discovery, a stale socket and an unreachable socket under a live PID are
+`blocked`, because reconciliation returns false for all three and bootstrap
+then raises `BOOTSTRAP_RECONCILIATION_REQUIRED` or `BOOTSTRAP_READY_UNREACHABLE`
+— reporting them as `recovering` would send a zero-touch caller into an
+infinite retry. An incompatible incumbent, an ambiguous generation, a schema
+mismatch and any unrecognised code fail closed to `blocked` for the same
+reason; `doctor` never promises a repair that does not exist.
+
+`doctor` evaluates protocol-build freshness itself, as the `protocol-build`
+check, and reports `AGENT_FABRIC_PROTOCOL_BUILD_STALE` as `blocked`. It also
+reports `wrapperIntercepted`, which records that `scripts/agent-fabric` runs the
+same freshness preflight and exits 78 *before* `doctor` starts, so through the
+wrapper the launcher reports the condition instead. The package bin
+(`dist/cli/main.js`) and in-process `fabricDoctor` callers do not go through the
+wrapper and reach the check. #439 tracks closing the wrapper gap.
 
 In the idle case the `daemon-socket` check has status `idle`, not `pass` or
 `fail`. This does not weaken preflight: for example, an intact idle daemon
 state alongside an incompatible database still produces overall `state:
-"failed"` and a non-zero exit. A failed or in-progress bootstrap, ambiguous or
+"blocked"` and a non-zero exit. A failed or in-progress bootstrap, ambiguous or
 stale discovery, crashed process, orphan socket and failed handshake are never
 relabelled idle. `doctor` diagnoses only; it does not start the on-demand
 daemon. Concurrent doctors share one non-blocking inspection fence and may
@@ -271,6 +301,47 @@ denies secrets, deployment, irreversible actions and tool egress. An untrusted
 root fails closed. The local fallback is `provenant fabric bootstrap --seat
 claude|codex`; it invokes the same composition. Public `mcp provision` retains
 its full-roster requirement.
+
+Bootstrap returns one machine-readable action receipt covering every automatic
+action it took, on both the CLI and the `fabric_bootstrap` tool result:
+
+| `action` | `outcome` | `mutated` |
+| --- | --- | --- |
+| `workspace-trust` | `resolved` | always `false`; resolution only reads the trust record |
+| `daemon` | `started` or `attached` | `true` only when this call spawned the daemon |
+| `seat-generation` | `installed` or `replayed` | `true` only when the active generation changed |
+| `identity-smoke` | `passed` or `failed` | always `false`; `whoami` and `mailbox.read` only read |
+
+The receipt's top-level `mutated` is the idempotency surface, and it means one
+specific thing: no logical custody state changed — the healthy seat was not
+rotated, the compatible daemon was not restarted, and the active generation and
+its rows are the ones that were already there. It is not a claim that no bytes
+were written: a replay still stages the roster through a private temporary tree
+and re-verifies the installed files before discarding it, which touches
+directory metadata. Reason about disk effects by observing the filesystem, not
+from this field. The receipt carries no bearer capability.
+
+The identity/mailbox smoke is bounded by a whole-smoke wall-clock deadline
+covering connect, `whoami` and `mailbox.read`. Settling is bounded under a
+responsive event loop, by a timer that aborts the connect or the pending RPCs.
+The reported outcome is bounded unconditionally: elapsed time is measured and
+an overrun is failed even when the work resolved, because a synchronous frame
+parse can outlive the timer it then clears. On either bound the receipt reports
+`healthy: false` with a failed smoke and the installed seat still stands, since
+an unbounded health check is a hang rather than a diagnosis.
+
+If the machine database is not current-schema, bootstrap raises
+`SCHEMA_CUTOVER_GATE_REQUIRED` instead of starting. The gate carries the schema
+mismatch, a per-table census of the coordination rows that exist today, the
+consequences of approval, and the exact `database archive-and-fresh` command
+including its `--confirm-source-set` digest. Bootstrap and its retry paths never
+invoke the cutover: the SQLite source set is byte-identical after the gate.
+Report counts and consequences, obtain exactly one user decision, and only then
+run the command in
+[Database archive-and-fresh cutover](#database-archive-and-fresh-cutover). The
+cutover entrypoint is separately invocable and confirms only a source-set
+digest, so it does not itself verify that a user decision happened; treat
+running it as the approval, and never script it unattended.
 
 After bootstrap, call `fabric_whoami` before constructing any request. It
 returns the authenticated seat, agent, run, authority, active seat generation

@@ -1,23 +1,136 @@
+import { randomUUID } from "node:crypto";
 import { realpath } from "node:fs/promises";
+import { createConnection } from "node:net";
 
 import Database from "better-sqlite3";
-import { MCP_BOOTSTRAP_CREDENTIALS_FEATURE } from "@local/agent-fabric-protocol";
+import {
+  FABRIC_OPERATIONS,
+  MCP_BOOTSTRAP_CREDENTIALS_FEATURE,
+  NdjsonRpcTransport,
+} from "@local/agent-fabric-protocol";
 
 import { connectFabricDaemon, startFabricDaemon } from "../daemon/client.js";
 import type { BootstrapMcpSeatResult } from "../core/contracts.js";
+import {
+  inspectFabricDatabaseForCutover,
+  inspectRetainedWork,
+  stableSourceSetSha256,
+  type RetainedWorkCensus,
+  type SchemaCutoverFieldMismatch,
+} from "../core/migrations.js";
 import { defaultDaemonStartOptions } from "./default-daemon-options.js";
 import type { FabricPaths } from "./paths.js";
 import {
   installSeatGeneration,
   markLegacyBootstrapSeatGeneration,
   parseMcpSeat,
+  readActiveSeatGeneration,
   resolveSeatProject,
   type SeatMetadata,
 } from "./seat-store.js";
 import { trustedWorkspaceIdentity } from "./workspace-trust.js";
 
+/**
+ * Whole-smoke wall-clock budget covering connect, `whoami` and `mailbox.read`.
+ *
+ * The smoke runs immediately after this same call completed a bootstrap RPC on
+ * the same Unix socket, so it is two loopback round trips against an already
+ * warm daemon. Two seconds is roughly two orders of magnitude above the
+ * observed local round trip yet an order of magnitude below the transport's
+ * 30s request timeout, so the smoke does not inherit a transport stall.
+ *
+ * The budget bounds two different things, and only one of them absolutely.
+ * Settling is bounded under a responsive event loop: a timer aborts the
+ * connect or the pending RPCs. The reported outcome is bounded
+ * unconditionally, because elapsed time is measured and a smoke that overran
+ * is failed even if its work resolved — a synchronous frame parse can outlive
+ * the timer it then clears. An unbounded health check is a hang, so neither
+ * bound is left to the daemon answering.
+ */
+export const IDENTITY_SMOKE_DEADLINE_MS = 2_000;
+
+export type LifecycleAction =
+  | Readonly<{
+    action: "workspace-trust";
+    outcome: "resolved";
+    mutated: false;
+    trustRecordDigest: string;
+  }>
+  | Readonly<{
+    action: "daemon";
+    outcome: "attached" | "started";
+    mutated: boolean;
+    pid: number;
+    socketPath: string;
+  }>
+  | Readonly<{
+    action: "seat-generation";
+    outcome: "installed" | "replayed";
+    mutated: boolean;
+    generation: string;
+    previousGeneration: string | null;
+  }>
+  | Readonly<{
+    action: "identity-smoke";
+    outcome: "passed" | "failed";
+    mutated: false;
+    deadlineMs: number;
+    elapsedMs: number;
+    agentId: string | null;
+    mailboxWatermark: number | null;
+    code: string | null;
+  }>;
+
+/**
+ * One concise machine-readable record of every automatic action this lifecycle
+ * call took.
+ *
+ * `mutated` is the idempotency assertion surface, and it means exactly one
+ * thing: no logical custody state changed. That is the daemon process
+ * identity, the active seat generation and its installed roster, and the
+ * database rows behind them. A converged repeat invocation reports `false`.
+ *
+ * It is deliberately not a claim that no bytes were written. A replay still
+ * stages the roster through a private temporary tree and re-verifies the
+ * installed files before discarding it, which touches directory metadata.
+ * Callers reasoning about disk effects must observe the filesystem; callers
+ * reasoning about whether a seat rotated or a daemon restarted read this.
+ */
+export type LifecycleActionReceipt = Readonly<{
+  schemaVersion: 1;
+  kind: "agent-fabric-lifecycle-action";
+  canonicalRoot: string;
+  seat: "claude" | "codex";
+  generation: string;
+  mutated: boolean;
+  healthy: boolean;
+  actions: readonly LifecycleAction[];
+}>;
+
+/**
+ * Material state displacement is one user decision, never an automatic action.
+ * The gate reports what exists and what would move, and displaces nothing.
+ */
+export type SchemaCutoverGate = Readonly<{
+  schemaVersion: 1;
+  kind: "agent-fabric-schema-cutover-gate";
+  decision: "archive-and-fresh";
+  databasePath: string;
+  mismatch: Readonly<{
+    code: "SCHEMA_CUTOVER_REQUIRED";
+    message: string;
+    fields: readonly SchemaCutoverFieldMismatch[];
+  }>;
+  retained: RetainedWorkCensus;
+  sourceSetSha256: string | null;
+  consequences: readonly string[];
+  command: string;
+  displaced: false;
+}>;
+
 export type InstalledBootstrapMcpSeat = BootstrapMcpSeatResult & {
   credential: string;
+  receipt: LifecycleActionReceipt;
 };
 
 export type BootstrapMcpSeatIdentity = {
@@ -45,8 +158,133 @@ export class McpBootstrapError extends Error {
   }
 }
 
+/** Raised instead of displacing state; the caller must obtain one user decision. */
+export class McpBootstrapSchemaCutoverGateError extends Error {
+  readonly code = "SCHEMA_CUTOVER_GATE_REQUIRED";
+
+  constructor(readonly gate: SchemaCutoverGate, options?: ErrorOptions) {
+    super(
+      `Fabric cannot start against this database without displacing local coordination state; ` +
+      `report the gate and obtain one user decision before running: ${gate.command}`,
+      options,
+    );
+    this.name = "McpBootstrapSchemaCutoverGateError";
+  }
+}
+
 function shellQuote(value: string): string {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
+}
+
+function isSchemaCutoverRefusal(error: unknown): boolean {
+  return typeof error === "object" && error !== null &&
+    "code" in error && error.code === "SCHEMA_CUTOVER_REQUIRED" &&
+    "preserved" in error && error.preserved === true;
+}
+
+function schemaCutoverGate(databasePath: string, cause: unknown): SchemaCutoverGate {
+  const inspection = inspectFabricDatabaseForCutover(databasePath);
+  const mismatch = inspection.state === "incompatible"
+    ? inspection.mismatch
+    : {
+      code: "SCHEMA_CUTOVER_REQUIRED" as const,
+      message: cause instanceof Error ? cause.message : String(cause),
+      fields: [],
+    };
+  const retained = inspectRetainedWork(databasePath);
+  const total = retained.tables.reduce<number>((sum, { rows }) => sum + (rows ?? 0), 0);
+  // Digested once: the confirmation the cutover will demand must be the exact
+  // digest reported here, and each recomputation reclones the source set.
+  const sourceSetSha256 = inspection.state === "absent"
+    ? null
+    : stableSourceSetSha256(inspection.sources);
+  return {
+    schemaVersion: 1,
+    kind: "agent-fabric-schema-cutover-gate",
+    decision: "archive-and-fresh",
+    databasePath,
+    mismatch,
+    retained,
+    sourceSetSha256,
+    consequences: [
+      `${String(total)} coordination rows are currently in ${databasePath} and stay there until approval.`,
+      "Approval moves the whole SQLite source set into a new archive directory and starts an empty current-schema database.",
+      "Runs, tasks, agents and messages in the archive are no longer visible to Fabric; only the archive receipt links them.",
+      "Nothing is deleted: the archive keeps every source byte, and the cutover refuses if the source set changed since this report.",
+    ],
+    command: `"$HOME/.agents/scripts/agent-fabric" database archive-and-fresh --archive ABSOLUTE_NEW_DIRECTORY` +
+      (sourceSetSha256 === null ? "" : ` --confirm-source-set ${sourceSetSha256}`),
+    displaced: false,
+  };
+}
+
+/**
+ * Bounded identity/mailbox smoke over the seat credential the caller just
+ * installed. It only reads, so it never appears as a mutation, and it reports
+ * its own failure as a receipt outcome rather than discarding the receipt.
+ */
+async function identityMailboxSmoke(input: {
+  socketPath: string;
+  credential: string;
+  deadlineMs: number;
+}): Promise<Extract<LifecycleAction, { action: "identity-smoke" }>> {
+  const startedAt = Date.now();
+  const socket = createConnection(input.socketPath);
+  let transport: NdjsonRpcTransport | undefined;
+  let timer: NodeJS.Timeout | undefined;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`identity/mailbox smoke exceeded its ${String(input.deadlineMs)}ms deadline`)),
+      input.deadlineMs,
+    );
+  });
+  const base = { action: "identity-smoke" as const, mutated: false as const, deadlineMs: input.deadlineMs };
+  try {
+    transport = await Promise.race([
+      NdjsonRpcTransport.connect(socket, {
+        protocolVersion: 1,
+        client: { name: "agent-fabric-lifecycle-smoke", version: "1.0.0" },
+        authentication: {
+          scheme: "capability",
+          credential: input.credential,
+          clientNonce: `lifecycle_smoke_${randomUUID()}`,
+        },
+        expectedPrincipalKind: "agent",
+        requiredFeatures: ["fabric-core.v1"],
+        optionalFeatures: [],
+      }),
+      deadline,
+    ]);
+    const identity = await Promise.race([transport.call(FABRIC_OPERATIONS.whoami, {}), deadline]);
+    const mailbox = await Promise.race([transport.call(FABRIC_OPERATIONS.getMailboxState, {}), deadline]);
+    // The timer alone does not bound the outcome: a socket callback can begin
+    // just before expiry, parse a frame synchronously past the deadline,
+    // resolve, and clear the overdue timer before it ever fires. Measuring
+    // elapsed time makes the deadline a real bound on what the receipt may
+    // report, whatever the event loop did in between.
+    const elapsedMs = Date.now() - startedAt;
+    if (elapsedMs > input.deadlineMs) {
+      return { ...base, outcome: "failed", elapsedMs, agentId: null, mailboxWatermark: null, code: "IDENTITY_SMOKE_DEADLINE_EXCEEDED" };
+    }
+    return {
+      ...base,
+      outcome: "passed",
+      elapsedMs,
+      agentId: identity.agentId,
+      mailboxWatermark: mailbox.contiguousWatermark,
+      code: null,
+    };
+  } catch (error: unknown) {
+    const code = typeof error === "object" && error !== null && "code" in error &&
+      typeof error.code === "string" && error.code.length > 0
+      ? error.code
+      : "IDENTITY_SMOKE_DEADLINE_EXCEEDED";
+    return { ...base, outcome: "failed", elapsedMs: Date.now() - startedAt, agentId: null, mailboxWatermark: null, code };
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+    if (transport === undefined) socket.destroy();
+    else await transport.close().catch(() => undefined);
+  }
 }
 
 function identityFromBootstrapResult(
@@ -139,6 +377,7 @@ export async function bootstrapMcpSeat(input: {
   cwd: string;
   paths: FabricPaths;
   now?: Date;
+  smokeDeadlineMs?: number;
 }): Promise<InstalledBootstrapMcpSeat> {
   const seat = parseMcpSeat(input.environment.AGENT_FABRIC_SEAT ?? "");
   if (seat !== "claude" && seat !== "codex") throw new Error("MCP bootstrap supports only claude or codex seats");
@@ -156,9 +395,25 @@ export async function bootstrapMcpSeat(input: {
       { cause },
     );
   }
-  const daemonHandle = await startFabricDaemon(
-    defaultDaemonStartOptions(input.paths, input.environment.AGENTS_HOME),
-  );
+  // Read before the daemon can rotate anything: comparing this pointer with the
+  // generation the daemon replays is what distinguishes an installed roster
+  // from a replayed one without inferring it from timing or file mtimes.
+  const generationBefore = await readActiveSeatGeneration({
+    stateDirectory: input.paths.stateDirectory,
+    projectPath: identity.canonicalRoot,
+  }).catch(() => null);
+  let daemonHandle: Awaited<ReturnType<typeof startFabricDaemon>>;
+  try {
+    daemonHandle = await startFabricDaemon(
+      defaultDaemonStartOptions(input.paths, input.environment.AGENTS_HOME),
+    );
+  } catch (cause: unknown) {
+    if (!isSchemaCutoverRefusal(cause)) throw cause;
+    throw new McpBootstrapSchemaCutoverGateError(
+      schemaCutoverGate(input.paths.databasePath, cause),
+      { cause },
+    );
+  }
   let daemon: Awaited<ReturnType<typeof connectFabricDaemon>> | undefined;
   try {
     daemon = await connectFabricDaemon({
@@ -248,7 +503,49 @@ export async function bootstrapMcpSeat(input: {
     const selected = installed.find((candidate) => candidate.seat === seat);
     const selectedCredential = result.credentials.find((candidate) => candidate.seat === seat)?.capability;
     if (selected === undefined || selectedCredential === undefined) throw new Error("bootstrap did not install the caller seat");
-    return { ...result, credential: selectedCredential };
+    const smoke = await identityMailboxSmoke({
+      socketPath: daemonHandle.address.path,
+      credential: selectedCredential,
+      deadlineMs: input.smokeDeadlineMs ?? IDENTITY_SMOKE_DEADLINE_MS,
+    });
+    const replayed = generationBefore?.generation === result.generation;
+    const actions: LifecycleAction[] = [
+      {
+        action: "workspace-trust",
+        outcome: "resolved",
+        mutated: false,
+        trustRecordDigest: identity.trustRecordDigest,
+      },
+      {
+        action: "daemon",
+        outcome: daemonHandle.ownsProcess ? "started" : "attached",
+        mutated: daemonHandle.ownsProcess,
+        pid: daemonHandle.pid,
+        socketPath: daemonHandle.address.path,
+      },
+      {
+        action: "seat-generation",
+        outcome: replayed ? "replayed" : "installed",
+        mutated: !replayed,
+        generation: result.generation,
+        previousGeneration: result.expectedPreviousGeneration,
+      },
+      smoke,
+    ];
+    return {
+      ...result,
+      credential: selectedCredential,
+      receipt: {
+        schemaVersion: 1,
+        kind: "agent-fabric-lifecycle-action",
+        canonicalRoot: result.canonicalRoot,
+        seat,
+        generation: result.generation,
+        mutated: actions.some((action) => action.mutated),
+        healthy: actions.every((action) => action.outcome !== "failed"),
+        actions,
+      },
+    };
   } finally {
     try {
       await daemon?.close();

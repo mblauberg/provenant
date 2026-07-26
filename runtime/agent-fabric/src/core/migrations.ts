@@ -601,6 +601,62 @@ export function inspectFabricDatabaseForCutover(
   }
 }
 
+/**
+ * Coordination tables whose rows a schema cutover would move out of the live
+ * database. The list is fixed rather than derived so an incompatible schema
+ * cannot widen what a gate prompt reads, and every entry degrades to `null`
+ * when that epoch never defined the table.
+ */
+export const RETAINED_WORK_TABLES = [
+  "projects",
+  "project_sessions",
+  "runs",
+  "agents",
+  "tasks",
+  "messages",
+  "receipts",
+] as const;
+
+export type RetainedWorkCensus = Readonly<{
+  /** `rows` is null when the table is absent or unreadable at this epoch. */
+  tables: readonly Readonly<{ table: string; rows: number | null }>[];
+}>;
+
+/**
+ * Counts the coordination rows a cutover would displace, through the same
+ * read-only private-clone boundary as the cutover inspection. It never opens
+ * the live database and never reports a count it could not read.
+ */
+export function inspectRetainedWork(databasePath: string): RetainedWorkCensus {
+  let database: Database.Database | undefined;
+  let clone: ReturnType<typeof createPrivateDatabaseClone> | undefined;
+  try {
+    clone = createPrivateDatabaseClone(databasePath);
+    database = new BetterSqlite3(clone.clonePath, { readonly: true });
+    database.pragma("trusted_schema = OFF");
+    const reader = database;
+    return {
+      tables: RETAINED_WORK_TABLES.map((table) => {
+        try {
+          const row: unknown = reader.prepare(`SELECT count(*) AS rows FROM "${table}"`).get();
+          const rows = typeof row === "object" && row !== null && "rows" in row ? row.rows : undefined;
+          return { table, rows: Number.isSafeInteger(rows) ? rows as number : null };
+        } catch {
+          return { table, rows: null };
+        }
+      }),
+    };
+  } catch {
+    return { tables: RETAINED_WORK_TABLES.map((table) => ({ table, rows: null })) };
+  } finally {
+    try {
+      database?.close();
+    } finally {
+      if (clone !== undefined) rmSync(clone.cloneDirectory, { recursive: true, force: true });
+    }
+  }
+}
+
 /** Read-only cutover gate used before any daemon/runtime mutation. */
 export function inspectFabricDatabase(databasePath: string): FabricDatabaseInspection {
   let before;

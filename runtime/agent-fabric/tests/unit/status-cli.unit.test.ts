@@ -565,7 +565,7 @@ describe("machine status and doctor", () => {
     });
     expect(result).toMatchObject({
       healthy: false,
-      state: "failed",
+      state: "blocked",
       code: "PROVIDER_IDENTITY_DRIFT",
       providerIdentity: {
         adapters: [
@@ -667,7 +667,7 @@ describe("machine status and doctor", () => {
       "--compatibility-schema", fixture.schemaPath,
     ], value)).resolves.toMatchObject({
       healthy: false,
-      state: "failed",
+      state: "blocked",
       code: "DAEMON_DISCOVERY_AMBIGUOUS",
       daemon: { status: "failed", pid: process.pid, socketPath: value.socketPath },
     });
@@ -702,7 +702,7 @@ describe("machine status and doctor", () => {
 
     expect(result).toMatchObject({
       healthy: false,
-      state: "failed",
+      state: "blocked",
       code: "PROTOCOL_INCOMPATIBLE",
       daemon: { status: "failed", pid: process.pid, socketPath: value.socketPath },
       checks: expect.arrayContaining([
@@ -752,7 +752,7 @@ describe("machine status and doctor", () => {
 
     expect(result).toMatchObject({
       healthy: false,
-      state: "failed",
+      state: "blocked",
       code: "DAEMON_HANDSHAKE_FAILED",
       daemon: { status: "failed" },
     });
@@ -781,7 +781,7 @@ describe("machine status and doctor", () => {
       "--compatibility-schema", fixture.schemaPath,
     ], value)).resolves.toMatchObject({
       healthy: false,
-      state: "failed",
+      state: "blocked",
       code: "BOOTSTRAP_TEST_FAILURE",
       daemon: { status: "failed", pid: null, socketPath: null },
     });
@@ -801,7 +801,7 @@ describe("machine status and doctor", () => {
         "--compatibility-schema", fixture.schemaPath,
       ], value)).resolves.toMatchObject({
         healthy: false,
-        state: "failed",
+        state: "recovering",
         code: "BOOTSTRAP_IN_PROGRESS",
         daemon: { status: "failed", pid: null, socketPath: null },
       });
@@ -848,7 +848,7 @@ describe("machine status and doctor", () => {
         "--compatibility-schema", fixture.schemaPath,
       ], value)).resolves.toMatchObject({
         healthy: false,
-        state: "failed",
+        state: "recovering",
         code: "BOOTSTRAP_IN_PROGRESS",
       });
     } finally {
@@ -875,7 +875,7 @@ describe("machine status and doctor", () => {
         "--compatibility-schema", fixture.schemaPath,
       ], value)).resolves.toMatchObject({
         healthy: false,
-        state: "failed",
+        state: "recovering",
         code: "DAEMON_SHUTDOWN_IN_PROGRESS",
       });
     } finally {
@@ -929,16 +929,16 @@ describe("machine status and doctor", () => {
       "--compatibility-schema", fixture.schemaPath,
     ], value)).resolves.toMatchObject({
       healthy: false,
-      state: "failed",
+      state: "blocked",
       code: "DAEMON_ELECTION_INCONSISTENT",
       daemon: { status: "failed", pid: process.pid, socketPath: null },
     });
   });
 
   it.each([
-    ["crashed", "DAEMON_PROCESS_CRASHED"],
-    ["unknown", "DAEMON_DISCOVERY_INVALID"],
-  ] as const)("never reports %s terminal discovery as idle", async (state, code) => {
+    ["crashed", "DAEMON_PROCESS_CRASHED", "recovering"],
+    ["unknown", "DAEMON_DISCOVERY_INVALID", "blocked"],
+  ] as const)("never reports %s terminal discovery as idle", async (state, code, lifecycleState) => {
     const value = await paths();
     await writeFile(join(value.runtimeDirectory, "fabric-v1.discovery-owner.json"), `${JSON.stringify({
       schemaVersion: 1,
@@ -963,7 +963,7 @@ describe("machine status and doctor", () => {
       "--compatibility-schema", fixture.schemaPath,
     ], value)).resolves.toMatchObject({
       healthy: false,
-      state: "failed",
+      state: lifecycleState,
       code,
       daemon: { status: "failed" },
     });
@@ -984,7 +984,7 @@ describe("machine status and doctor", () => {
       "--compatibility-schema", fixture.schemaPath,
     ], value)).resolves.toMatchObject({
       healthy: false,
-      state: "failed",
+      state: "recovering",
       code: "DAEMON_PROCESS_UNCLEAN_STOP",
       daemon: { status: "failed", pid: process.pid, socketPath: null },
     });
@@ -1001,7 +1001,7 @@ describe("machine status and doctor", () => {
       "--compatibility", fixture.compatibilityPath,
       "--compatibility-schema", fixture.schemaPath,
     ], value);
-    expect(result).toMatchObject({ healthy: false, state: "failed", daemon: { status: "failed" } });
+    expect(result).toMatchObject({ healthy: false, state: "blocked", daemon: { status: "failed" } });
     expect(result.checks).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: `${directory}-directory`, status: "fail" }),
     ]));
@@ -1023,7 +1023,7 @@ describe("machine status and doctor", () => {
       "--compatibility-schema", fixture.schemaPath,
     ], value)).resolves.toMatchObject({
       healthy: true,
-      state: "live",
+      state: "current",
       code: "DAEMON_LIVE",
       daemon: { status: "live", pid: daemon.pid, socketPath: value.socketPath },
     });
@@ -1044,6 +1044,167 @@ describe("machine status and doctor", () => {
     });
   });
 
+  it("names the satisfied precondition that makes an idle lifecycle idle", async () => {
+    const value = await paths();
+    const fixture = await createPortableActivatedPrimaryFixture();
+    cleanup.push(fixture.directory);
+    const result = await fabricDoctor([
+      "--agents-home", fixture.directory,
+      "--trusted-config", fixture.configPath,
+      "--compatibility", fixture.compatibilityPath,
+      "--compatibility-schema", fixture.schemaPath,
+    ], value);
+    expect(result).toMatchObject({
+      state: "idle",
+      healthy: true,
+      cause: {
+        checkId: "daemon-socket",
+        precondition: "daemon discovery, election, process, socket and bootstrap contract agree",
+        // An idle lifecycle is healthy precisely because no daemon is expected;
+        // the daemon precondition is genuinely not met, and saying so is the
+        // causal report. `satisfied` tracks the check, never the health rollup.
+        satisfied: false,
+        code: "DAEMON_ON_DEMAND_IDLE",
+        recoverable: false,
+      },
+    });
+    for (const check of result.checks as Array<{ id: string; precondition: string }>) {
+      expect(check.precondition.length).toBeGreaterThan(0);
+      expect(check.precondition).not.toBe(check.id);
+    }
+  });
+
+  it("never reports an unknown precondition as satisfied while staying healthy", async () => {
+    const value = await paths();
+    const fixture = await createPortableActivatedPrimaryFixture();
+    cleanup.push(fixture.directory);
+    const result = await fabricDoctor([
+      "--agents-home", fixture.directory,
+      "--trusted-config", fixture.configPath,
+      "--compatibility", fixture.compatibilityPath,
+      "--compatibility-schema", fixture.schemaPath,
+    ], value, {
+      providerProbeTimeoutMs: 250,
+      probeProviderInterface: async () => await new Promise(() => undefined),
+    });
+    // The idle-on-unknown mapping is #406's design and is preserved.
+    expect(result).toMatchObject({
+      healthy: true,
+      state: "idle",
+      cause: {
+        checkId: "provider-identity",
+        precondition: "each primary provider matches its pinned executable identity",
+        satisfied: false,
+        code: "PROVIDER_IDENTITY_UNKNOWN",
+        recoverable: false,
+      },
+    });
+  });
+
+  it("classifies a stale protocol build itself rather than declaring it unobservable", async () => {
+    const value = await paths();
+    const fixture = await createPortableActivatedPrimaryFixture();
+    cleanup.push(fixture.directory);
+    const result = await fabricDoctor([
+      "--agents-home", fixture.directory,
+      "--trusted-config", fixture.configPath,
+      "--compatibility", fixture.compatibilityPath,
+      "--compatibility-schema", fixture.schemaPath,
+    ], value, {
+      preflightProtocolBuild: async () => {
+        throw Object.assign(new Error("local @local/agent-fabric-protocol dist is missing or older than its build inputs"), {
+          code: "AGENT_FABRIC_PROTOCOL_BUILD_STALE",
+        });
+      },
+    });
+    // The package bin points straight at dist/cli/main.js, so doctor must reach
+    // this state on its own; only the wrapper preempts it by exiting 78 first.
+    expect(result).toMatchObject({
+      healthy: false,
+      state: "blocked",
+      code: "AGENT_FABRIC_PROTOCOL_BUILD_STALE",
+      cause: {
+        checkId: "protocol-build",
+        precondition: "the local protocol build is newer than its TypeScript sources",
+        satisfied: false,
+        recoverable: false,
+      },
+    });
+  });
+
+  it("names the unsatisfied precondition and refuses to call a blocked cause recoverable", async () => {
+    const value = await paths();
+    await rm(value.databasePath);
+    const fixture = await createPortableActivatedPrimaryFixture();
+    cleanup.push(fixture.directory);
+    await expect(fabricDoctor([
+      "--agents-home", fixture.directory,
+      "--trusted-config", fixture.configPath,
+      "--compatibility", fixture.compatibilityPath,
+      "--compatibility-schema", fixture.schemaPath,
+    ], value)).resolves.toMatchObject({
+      state: "blocked",
+      cause: {
+        checkId: "database-integrity",
+        precondition: "the Fabric database is current-schema and passes its invariants",
+        satisfied: false,
+        recoverable: false,
+      },
+    });
+  });
+
+  it("names a converging transition as the recoverable cause of a recovering lifecycle", async () => {
+    const value = await paths();
+    await writeFile(value.socketPath, "stale\n", { mode: 0o600 });
+    const lock = await FLOCK_ELECTION_LOCK_PORT.tryAcquire(join(value.runtimeDirectory, "daemon-election.lock"));
+    expect(lock).toBeDefined();
+    const fixture = await createPortableActivatedPrimaryFixture();
+    cleanup.push(fixture.directory);
+    try {
+      await expect(fabricDoctor([
+        "--agents-home", fixture.directory,
+        "--trusted-config", fixture.configPath,
+        "--compatibility", fixture.compatibilityPath,
+        "--compatibility-schema", fixture.schemaPath,
+      ], value)).resolves.toMatchObject({
+        state: "recovering",
+        cause: {
+          checkId: "daemon-socket",
+          code: "BOOTSTRAP_IN_PROGRESS",
+          satisfied: false,
+          recoverable: true,
+          detail: "bootstrap election is active",
+        },
+      });
+    } finally {
+      await lock?.release();
+    }
+  });
+
+  it("declares which entrypoint intercepts the protocol-build precondition", async () => {
+    const value = await paths();
+    const fixture = await createPortableActivatedPrimaryFixture();
+    cleanup.push(fixture.directory);
+    const result = await fabricDoctor([
+      "--agents-home", fixture.directory,
+      "--trusted-config", fixture.configPath,
+      "--compatibility", fixture.compatibilityPath,
+      "--compatibility-schema", fixture.schemaPath,
+    ], value);
+    // The interception is entrypoint-specific, not structural: doctor owns the
+    // check, and only scripts/agent-fabric preempts it by exiting 78 first.
+    expect(result.wrapperIntercepted).toEqual([
+      expect.objectContaining({
+        code: "AGENT_FABRIC_PROTOCOL_BUILD_STALE",
+        check: "protocol-build",
+        observedByDoctor: true,
+        interceptedBy: "scripts/agent-fabric",
+        issue: "#439",
+      }),
+    ]);
+    expect((result.checks as Array<{ id: string }>).map(({ id }) => id)).toContain("protocol-build");
+  });
+
   it("keeps database preflight failure unhealthy while the daemon is idle", async () => {
     const value = await paths();
     await rm(value.databasePath);
@@ -1057,7 +1218,7 @@ describe("machine status and doctor", () => {
     ], value);
     expect(result).toMatchObject({
       healthy: false,
-      state: "failed",
+      state: "blocked",
       daemon: { status: "idle", pid: null, socketPath: null },
     });
     expect(result.checks).toEqual(expect.arrayContaining([

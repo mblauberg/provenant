@@ -36,6 +36,11 @@ export type FabricMcpServerOptions = {
   capability: string;
   clientLabel?: string;
   refreshCapability?: () => Promise<string>;
+  /**
+   * Machine-readable receipt for the automatic actions that produced this
+   * activation. The proxy only relays it; it never interprets its contents.
+   */
+  lifecycleReceipt?: Readonly<{ schemaVersion: 1; kind: string; mutated: boolean; healthy: boolean }>;
 };
 
 export type FabricMcpServerHandle = {
@@ -79,7 +84,10 @@ export function createUnprovisionedMcpServer(options?: {
       await server.sendToolListChanged();
       return {
         content: [{ type: "text", text: "Agent Fabric bootstrap complete; normal Fabric tools are now active." }],
-        structuredContent: { bootstrapped: true },
+        structuredContent: {
+          bootstrapped: true,
+          ...(activated.lifecycleReceipt === undefined ? {} : { receipt: activated.lifecycleReceipt }),
+        },
       };
     } catch (error: unknown) {
       const payload = errorPayload(error);

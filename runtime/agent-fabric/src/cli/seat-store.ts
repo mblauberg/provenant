@@ -260,6 +260,10 @@ export async function markLegacyBootstrapSeatGeneration(input: {
     if (active?.generation !== input.generation) {
       throw new Error("active MCP seat generation changed before legacy bootstrap marking");
     }
+    // Replaying an already-marked generation must not rewrite the marker: the
+    // lifecycle reports such a replay as unmutated, and an unconditional write
+    // would contradict that on every repeat invocation.
+    if (await readLegacyBootstrapSeatGeneration(input) === input.generation) return;
     const marker: LegacyBootstrapGenerationMarker = {
       schemaVersion: 1,
       projectKey: root.projectKey,
