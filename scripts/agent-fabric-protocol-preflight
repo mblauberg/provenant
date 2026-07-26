@@ -13,12 +13,23 @@ script_dir=$(CDPATH= cd -- "$(dirname -- "$script_path")" && pwd)
 agents_home=${AGENTS_HOME:-"$(dirname -- "$script_dir")"}
 case "$agents_home" in /*) ;; *) echo "AGENTS_HOME must be absolute" >&2; exit 2 ;; esac
 
+# This preflight now sits in front of every entrypoint, so a partial install
+# that omits scripts/lib would otherwise take them all out with a bare
+# "No such file or directory" and exit 1 -- neither typed nor repairable.
+if [ ! -f "$script_dir/lib/agent-fabric-workspace-freshness.sh" ]; then
+  echo "AGENT_FABRIC_PREFLIGHT_INCOMPLETE: missing \"$script_dir/lib/agent-fabric-workspace-freshness.sh\"" >&2
+  echo "repair: reinstall the harness scripts directory, including scripts/lib" >&2
+  exit 78
+fi
 . "$script_dir/lib/agent-fabric-workspace-freshness.sh"
 
 protocol_root="$agents_home/runtime/agent-fabric-protocol"
 protocol_dist="$protocol_root/dist/index.js"
 if workspace_is_stale "$protocol_root" "$protocol_dist"; then
   echo "AGENT_FABRIC_PROTOCOL_BUILD_STALE: local @local/agent-fabric-protocol dist is missing or older than its build inputs" >&2
-  echo "repair: \"$script_dir/agent-fabric-protocol-build\"" >&2
+  # The verdict is about $agents_home, which is not always the tree this script
+  # lives in. Naming the bare script would send an operator to rebuild a
+  # different checkout and leave the diagnosed one stale.
+  echo "repair: AGENTS_HOME=\"$agents_home\" \"$script_dir/agent-fabric-protocol-build\"" >&2
   exit 78
 fi

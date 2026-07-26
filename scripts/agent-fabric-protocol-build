@@ -13,11 +13,42 @@ script_dir=$(CDPATH= cd -- "$(dirname -- "$script_path")" && pwd)
 agents_home=${AGENTS_HOME:-"$(dirname -- "$script_dir")"}
 case "$agents_home" in /*) ;; *) echo "AGENTS_HOME must be absolute" >&2; exit 2 ;; esac
 
-protocol_dist="$agents_home/runtime/agent-fabric-protocol/dist/index.js"
-cd "$agents_home"
-npm run build --workspace=@local/agent-fabric-protocol
-[ -f "$protocol_dist" ] || {
-  echo "agent-fabric protocol build succeeded without producing $protocol_dist" >&2
+protocol_root="$agents_home/runtime/agent-fabric-protocol"
+protocol_dist="$protocol_root/dist/index.js"
+
+[ -d "$agents_home/node_modules" ] || {
+  echo "agent-fabric protocol build needs dependencies: run 'npm ci' in \"$agents_home\" first" >&2
   exit 1
 }
-touch "$protocol_dist"
+
+cd "$agents_home"
+# An incremental compile neither restores a deleted output nor reports its
+# absence: it exits 0 and leaves the hole. A partial dist therefore survives an
+# apparently successful rebuild. Clearing the output tree makes the emit total,
+# so either every module is written or the build fails and the absent sentinel
+# keeps the workspace honestly stale.
+rm -rf "$protocol_root/dist"
+
+# Every failure below must leave the output tree absent rather than merely
+# incomplete. A type error does not stop `tsc` emitting JavaScript, and the
+# build's `&&` means the schema generator is skipped, so a failed build still
+# advances every mtime the preflight consults. Leaving that behind would report
+# a build that never finished as fresh -- the exact signal-laundering this
+# script exists to avoid.
+abort() {
+  rm -rf "$protocol_root/dist"
+  echo "$1" >&2
+  exit 1
+}
+
+npm run build --workspace=@local/agent-fabric-protocol \
+  || abort "agent-fabric protocol build failed; dist removed so the workspace stays honestly stale"
+[ -f "$protocol_dist" ] \
+  || abort "agent-fabric protocol build succeeded without producing $protocol_dist"
+# `dist/index.js` is a barrel over its siblings, so its own presence and mtime
+# say nothing about whether the package loads. This script is what the preflight
+# tells operators to run, and the preflight trusts mtime; stamping an artifact
+# that cannot be imported would convert a detectable stale build into an
+# undetectable one. Load it here so the freshness signal rests on evidence.
+node --input-type=module -e 'await import(process.argv[1]);' "$protocol_dist" \
+  || abort "agent-fabric protocol build produced a dist that does not load: $protocol_dist"

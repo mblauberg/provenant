@@ -7,6 +7,12 @@ const execFileAsync = promisify(execFile);
 const preflightPath = fileURLToPath(
   new URL("../../../../scripts/agent-fabric-protocol-preflight", import.meta.url),
 );
+// The dist this process will import is the one beside this module, which is not
+// necessarily the tree named by an ambient AGENTS_HOME: that variable selects a
+// config/state home and callers legitimately point it at a synthetic one. The
+// preflight defaults agents_home to AGENTS_HOME, so leaving it inherited judges
+// a tree whose freshness says nothing about the code already loaded here.
+const installRoot = fileURLToPath(new URL("../../../../", import.meta.url)).replace(/\/$/u, "");
 
 export class ProtocolBuildPreflightError extends Error {
   readonly code = "AGENT_FABRIC_PROTOCOL_BUILD_STALE";
@@ -29,7 +35,7 @@ export async function preflightProtocolBuild(): Promise<void> {
     throw error;
   }
   try {
-    await execFileAsync(preflightPath);
+    await execFileAsync(preflightPath, { env: { ...process.env, AGENTS_HOME: installRoot } });
   } catch (error: unknown) {
     if (
       error instanceof Error &&
