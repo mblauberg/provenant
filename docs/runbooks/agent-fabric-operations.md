@@ -758,9 +758,9 @@ scripts/agent-fabric database archive-and-fresh \
 
 The JSON result is `confirmation-required` and reports the exact expected and
 observed schema fields, every existing source member's identity, mode and
-SHA-256, and a `confirmation.sourceSetSha256`. An absent, empty or already
-current database instead returns a typed `no-op`; neither result creates the
-archive directory or changes the database.
+SHA-256, and a `confirmation.sourceSetSha256`. With no matching cutover
+residue, an absent, empty or already current database instead returns a typed
+`no-op`; neither result creates the archive directory or changes the database.
 
 Before confirmation, stop Fabric through its owning supervision surface and
 ensure every direct SQLite writer is quiescent. The command does not inspect,
@@ -774,9 +774,16 @@ scripts/agent-fabric database archive-and-fresh \
   --confirm-source-set 'sha256:<digest from preview>'
 ```
 
-Confirmation is digest-bound. A changed source set, stale digest, symlink,
-archive collision, partial WAL/SHM pair or mixed rollback-journal/WAL set
-returns a typed conflict or failure without displacing the source. The archive
+Confirmation is digest-bound. The token is a correctness interlock: it proves
+the destructive invocation still targets exactly the bytes inspected by the
+preview. It is not a user-authority gate because the preview itself reports the
+token. Explicit user authority for the destructive step is enforced by the
+permission gate outside this command; [issue #450](https://github.com/mblauberg/provenant/issues/450)
+owns the deeper interlock follow-up. A changed source set, stale digest,
+symlink, archive collision,
+SHM without WAL or a rollback journal mixed with WAL/SHM returns a typed
+conflict or failure without displacing the source. A readable database plus WAL
+without SHM is valid because SQLite rebuilds the missing wal-index. The archive
 destination must be an absolute, wholly absent directory. The command stages
 and fsyncs the complete payload, rejects any destination beneath a canonical
 source-member path after resolving existing destination ancestors, claims the
@@ -806,7 +813,16 @@ fails, do not repeat the cutover: preserve the archive and reconcile
 If a writer wins a race after archive publication but before the source claim,
 preserve both the archive and every live/private-claim path. Do not blindly
 restore over the live paths: compare their identities and hashes with the
-receipt and manually reconcile any newer or unarchived state.
+receipt and manually reconcile any newer or unarchived state. Source-claim
+failure results name the private `claimDirectory` and whether it was preserved,
+removed after exact rollback or removed empty. Where a later invocation would
+otherwise report a `no-op` — an absent, empty or already current database — it
+first reports any matching private claim directory or archive `.staging-*`
+directory as `CUTOVER_RESIDUE_DETECTED` with exit `4`, so an interrupted
+cutover cannot read as a clean exit `0`. Preserve and reconcile this residue;
+remove an empty directory only after verifying that it contains no source data.
+A live source set is governed by the claim race instead, so a cutover already in
+flight does not make an ordinary preview report residue.
 If that initializer fails, the command exits `4` with
 `archive-complete-fresh-init-failed`, the receipt path and one recovery action.
 Do not start Fabric. Preserve the archive, move aside any incomplete fresh
