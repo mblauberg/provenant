@@ -373,7 +373,27 @@ function restoreClaimedSourceSet(
   claimed: ClaimedSourceSet,
   expected: StableSourceSet,
 ): void {
-  for (const suffix of [...SQLITE_SOURCE_SUFFIXES].reverse()) {
+  // Prove every target is free before linking anything, and restore main-first.
+  //
+  // A WAL is bound to its database by filename alone -- frame checksums are
+  // seeded from the WAL header salt, not from the database -- so SQLite applies
+  // whatever self-consistent WAL sits beside a database file. Reverse order
+  // linked -journal, -shm and -wal successfully and only then hit EEXIST on the
+  // main file, which left the original WAL beside a fresh database created by
+  // whichever process won the race. Since `openFabricDatabase` auto-initialises
+  // when the file is absent, that racing process is typically Fabric itself,
+  // which then applies the foreign WAL at its next open and silently replaces
+  // the new schema. Failing before the first link leaves the intruder untouched
+  // and the complete original set in the claim directory.
+  for (const suffix of SQLITE_SOURCE_SUFFIXES) {
+    if (!pathExists(`${claimed.databasePath}${suffix}`)) continue;
+    if (!pathExists(`${databasePath}${suffix}`)) continue;
+    throw new Error(
+      `cannot restore the claimed database source set: ${databasePath}${suffix} was recreated by another process. ` +
+        `The complete original set is preserved in ${claimed.directory}; do not start Fabric until it is restored by hand.`,
+    );
+  }
+  for (const suffix of SQLITE_SOURCE_SUFFIXES) {
     const claimedPath = `${claimed.databasePath}${suffix}`;
     if (!pathExists(claimedPath)) continue;
     const sourcePath = `${databasePath}${suffix}`;

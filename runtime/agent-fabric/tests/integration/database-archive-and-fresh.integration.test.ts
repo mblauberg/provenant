@@ -567,6 +567,50 @@ describe("database archive-and-fresh cutover", () => {
     )).digest("hex")).toBe(before[""]);
   });
 
+  it("never leaves the original sidecars beside a database it did not restore", async () => {
+    // A WAL is bound to its database by filename alone, so linking the original
+    // -wal beside a database created by whichever process won the race hands
+    // SQLite a foreign WAL to apply. `openFabricDatabase` auto-initialises when
+    // the file is absent, so that racing process is typically Fabric itself,
+    // which would then replace the new schema at its next open. Rollback must
+    // fail before its first link rather than part-way through.
+    const fixture = await walFixture();
+    const preview = inspectDatabaseArchiveAndFresh(fixture.databasePath);
+    if (preview.status !== "confirmation-required") throw new TypeError("expected confirmation preview");
+    const before = await sourceHashes(fixture.databasePath);
+    let claims = 0;
+
+    const result = archiveAndFreshDatabase({
+      databasePath: fixture.databasePath,
+      archiveDirectory: fixture.archiveDirectory,
+      confirmSourceSetSha256: preview.confirmation.sourceSetSha256,
+    }, {
+      claimSourceFile: (sourcePath, claimedPath) => {
+        renameSync(sourcePath, claimedPath);
+        claims += 1;
+        // Occupy the freed main path the instant it is claimed, exactly as an
+        // auto-initialising open would.
+        if (claims === 1) {
+          writeFileSync(fixture.databasePath, "intruder database\n", { mode: 0o640 });
+        }
+      },
+    });
+
+    expect(result).toMatchObject({
+      status: "archive-complete-cutover-failed",
+      code: "SOURCE_DISPLACEMENT_FAILED",
+    });
+    const after = await sourceHashes(fixture.databasePath);
+    // The intruder's file is untouched and, critically, stands alone: no
+    // original sidecar was linked next to it.
+    expect(after[""]).toBe(createHash("sha256").update("intruder database\n").digest("hex"));
+    expect(Object.keys(after)).toStrictEqual([""]);
+    // The complete original set is still recoverable, and the archive is intact.
+    expect(createHash("sha256").update(await readFile(
+      join(fixture.archiveDirectory, "source-set", "fabric.sqlite3"),
+    )).digest("hex")).toBe(before[""]);
+  });
+
   it("retains a complete hash-identical archive when fresh initialisation fails", async () => {
     const fixture = await legacyFixture();
     const preview = inspectDatabaseArchiveAndFresh(fixture.databasePath);
