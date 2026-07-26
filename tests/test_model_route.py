@@ -1118,6 +1118,65 @@ def test_claude_task_class_admits_probed_effort_without_laundering_provenance(tm
     assert route["effort_capability_source"] == "provider-unverified"
 
 
+def test_claude_capability_alias_must_anchor_the_resolved_model_identity(tmp_path):
+    snapshot = tmp_path / "claude-caps.json"
+    value = capability_snapshot({
+        "opus": {
+            "resolved_model": "claude-haiku-4-5-opus",
+            "requested_effort": "high",
+            "effort_verified": False,
+        },
+    }, source="claude subscription canary")
+    value["provenance"] = {
+        "kind": "subscription_runtime_canary",
+        "auth_method": "claude.ai",
+        "subscription_type": "pro",
+    }
+    snapshot.write_text(json.dumps(value))
+
+    result, route = resolve(
+        "--adapter", "claude", "--task-class", "critical-review",
+        "--role", "critical-review", "--capabilities-file", str(snapshot),
+    )
+
+    assert route["status"] == "capability_discovery_failed"
+    assert result.returncode == 1
+    assert route["effort"] == ""
+
+
+def test_capability_snapshot_rejects_alias_key_collision_with_a_resolved_model_key(
+    tmp_path
+):
+    snapshot = tmp_path / "claude-caps.json"
+    value = capability_snapshot({
+        "opus": {
+            "resolved_model": "claude-opus-4-8-fable",
+            "requested_effort": "high",
+            "effort_verified": False,
+        },
+        "fable": {
+            "resolved_model": "claude-opus-4-8-fable",
+            "requested_effort": "low",
+            "effort_verified": False,
+        },
+    }, source="claude subscription canary")
+    value["provenance"] = {
+        "kind": "subscription_runtime_canary",
+        "auth_method": "claude.ai",
+        "subscription_type": "pro",
+    }
+    snapshot.write_text(json.dumps(value))
+
+    result, route = resolve(
+        "--adapter", "claude", "--task-class", "critical-review",
+        "--role", "critical-review", "--capabilities-file", str(snapshot),
+    )
+
+    assert route["status"] == "capability_discovery_failed"
+    assert result.returncode == 1
+    assert route["effort"] == ""
+
+
 def test_claude_task_class_snapshot_probed_at_another_effort_fails_closed(tmp_path):
     """The task-class effort is `high`; a snapshot probed at `low` is not evidence for it."""
     snapshot = tmp_path / "claude-caps.json"
@@ -1295,8 +1354,8 @@ def test_invalid_task_class_effort_vocabulary_fails_closed(tmp_path, monkeypatch
     ])
 
     route = json.loads(capsys.readouterr().out)
-    assert result == 2
     assert route["status"] == "task_class_config_invalid"
+    assert result == 2
     assert route["effort"] == ""
 
 
@@ -1314,8 +1373,8 @@ def test_task_class_role_policy_cannot_be_reconfigured_to_worker(tmp_path, monke
     ])
 
     route = json.loads(capsys.readouterr().out)
-    assert result == 2
     assert route["status"] == "task_class_config_invalid"
+    assert result == 2
 
 
 @pytest.mark.parametrize(
@@ -1340,6 +1399,28 @@ def test_critical_review_policy_rejects_valid_vocabulary_downgrade(
     route = json.loads(capsys.readouterr().out)
     assert result == 2
     assert route["status"] == "task_class_config_invalid"
+
+
+def test_task_class_effort_must_equal_the_capability_probe_effort(
+    tmp_path, monkeypatch, capsys
+):
+    router = load_router()
+    catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    catalog["task_class_routes"]["critical-review"]["effort"] = "max"
+    catalog_path = tmp_path / "model-routing.json"
+    catalog_path.write_text(json.dumps(catalog))
+    monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
+
+    result = router.main([
+        "resolve", "--adapter", "claude", "--task-class", "critical-review",
+        "--role", "critical-review", "--adapter-gate", "direct-cli",
+    ])
+
+    route = json.loads(capsys.readouterr().out)
+    assert route["status"] == "task_class_config_invalid"
+    assert result == 2
+    assert "configuration error" in route["message"]
+    assert "must equal probe policy minimum_effort 'high'" in route["message"]
 
 
 def test_role_default_cannot_lower_task_class_effort(tmp_path, monkeypatch, capsys):
@@ -1420,6 +1501,16 @@ def test_openai_catalog_declares_effort_policy_only():
     assert family["effort_fallback_order"] == ["max", "xhigh", "high", "medium", "low"]
 
 
+def test_cli_headless_enumerates_no_effort_available():
+    reference = (
+        ROOT / "skills" / "orchestrate" / "references" / "cli-headless.md"
+    ).read_text()
+
+    assert "`no_effort_available`" in reference, (
+        "CLI headless status guidance omits no_effort_available"
+    )
+
+
 def test_fresh_openai_snapshot_accepts_ultra_role_default(
     tmp_path, monkeypatch, capsys
 ):
@@ -1438,6 +1529,62 @@ def test_fresh_openai_snapshot_accepts_ultra_role_default(
     assert route["effort"] == "ultra"
     assert route["effort_capability_source"] == "runtime-model-catalog"
     assert route["effort_substitution"] == ""
+
+
+def test_noneligible_ultra_fallback_reports_runtime_capability_source(
+    tmp_path, monkeypatch, capsys
+):
+    router = load_router()
+    catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    catalog["families"]["openai"]["role_effort_defaults"]["worker"] = {
+        "flagship": "ultra"
+    }
+    catalog_path = tmp_path / "model-routing.json"
+    catalog_path.write_text(json.dumps(catalog))
+    snapshot = write_codex_capability_snapshot(
+        tmp_path,
+        models={
+            "gpt-5.6-sol": {
+                "resolved_model": "gpt-5.6-sol",
+                "supported_efforts": ["max"],
+            },
+        },
+    )
+    monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
+
+    result = router.main([
+        "resolve", "--adapter", "codex", "--alias", "flagship", "--role", "worker",
+        "--capabilities-file", str(snapshot), "--adapter-gate", "direct-cli",
+    ])
+
+    route = json.loads(capsys.readouterr().out)
+    assert result == 0
+    assert route["requested_effort"] == "ultra"
+    assert route["effort"] == "max"
+    assert route["effort_capability_source"] == "runtime-model-catalog"
+
+
+def test_ultra_eligible_roles_must_be_a_list_of_role_names(
+    tmp_path, monkeypatch, capsys
+):
+    router = load_router()
+    catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    catalog["families"]["openai"]["ultra_eligible_roles"] = "lead"
+    catalog_path = tmp_path / "model-routing.json"
+    catalog_path.write_text(json.dumps(catalog))
+    snapshot = write_codex_capability_snapshot(tmp_path)
+    monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
+
+    result = router.main([
+        "resolve", "--adapter", "codex", "--alias", "flagship", "--role", "lead",
+        "--capabilities-file", str(snapshot), "--adapter-gate", "direct-cli",
+    ])
+
+    route = json.loads(capsys.readouterr().out)
+    assert route["status"] == "effort_policy_config_invalid"
+    assert result == 2
+    assert "configuration error" in route["message"]
+    assert "ultra_eligible_roles must be a list" in route["message"]
 
 
 def test_explicit_effort_overrides_codex_ultra_default(tmp_path):
@@ -1543,6 +1690,57 @@ def test_capability_snapshot_controls_default_fallback(
     assert route["effort_substitution"] == (
         "ultra unavailable (runtime/model capability); used max"
     )
+
+
+def test_default_effort_fallback_chooses_highest_supported_effort_at_or_below_request(
+    tmp_path
+):
+    snapshot = write_codex_capability_snapshot(
+        tmp_path,
+        models={
+            "gpt-5.6-sol": {
+                "resolved_model": "gpt-5.6-sol",
+                "supported_efforts": ["max", "medium"],
+            },
+        },
+    )
+
+    result, route = resolve(
+        "--adapter", "codex", "--alias", "flagship", "--role", "worker",
+        "--capabilities-file", str(snapshot),
+    )
+
+    assert result.returncode == 0
+    assert route["requested_effort"] == "high"
+    assert route["effort"] == "medium"
+    assert route["effort_substitution"] == (
+        "high unavailable (runtime/model capability); used medium"
+    )
+
+
+def test_task_class_effort_fallback_never_escalates_when_only_higher_effort_is_supported(
+    tmp_path
+):
+    snapshot = write_codex_capability_snapshot(
+        tmp_path,
+        models={
+            "gpt-5.6-luna": {
+                "resolved_model": "gpt-5.6-luna",
+                "supported_efforts": ["max"],
+            },
+        },
+    )
+
+    result, route = resolve(
+        "--adapter", "codex", "--task-class", "mechanical", "--role", "worker",
+        "--capabilities-file", str(snapshot),
+    )
+
+    assert route["status"] == "no_effort_available"
+    assert result.returncode == 1
+    assert route["requested_effort"] == "low"
+    assert route["effort"] == ""
+    assert route["effort_substitution"] == ""
 
 
 def test_fresh_openai_snapshot_missing_catalog_model_fails_closed(
