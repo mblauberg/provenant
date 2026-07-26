@@ -10,6 +10,15 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "model-route"
+CATALOG = json.loads((ROOT / "config" / "model-routing.json").read_text())
+CRUCIAL_RISK_OVERRIDE = CATALOG["families"]["anthropic"]["risk_tier_overrides"]["crucial"]
+RISK_OVERRIDE_MODEL = CRUCIAL_RISK_OVERRIDE["models"][0]
+NON_OCCUPANT_MODELS = tuple(
+    model
+    for models in CATALOG["families"]["anthropic"]["aliases"].values()
+    for model in models
+    if RISK_OVERRIDE_MODEL.casefold() not in model.casefold()
+)
 
 
 def resolve(*args, adapter_gate="direct-cli"):
@@ -44,6 +53,281 @@ def load_router():
     return module
 
 
+def test_risk_tier_override_catalogue_retargets_single_model(
+    tmp_path, monkeypatch, capsys
+):
+    router = load_router()
+    catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    override = catalog["families"]["anthropic"]["risk_tier_overrides"]["crucial"]
+    override["models"] = ["claude-retargeted-model"]
+    override["roles"] = ["reviewer-one", "reviewer-two"]
+    override["alias"] = "workhorse"
+    override["default_effort"] = "low"
+    override["maximum_effort"] = "high"
+    catalog_path = tmp_path / "model-routing.json"
+    catalog_path.write_text(json.dumps(catalog))
+    monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
+
+    result = router.main([
+        "resolve", "--adapter", "claude", "--alias", override["alias"],
+        "--role", override["roles"][0], "--risk-tier", "crucial",
+        "--model", override["models"][0], "--effort", "high",
+        "--adapter-gate", "direct-cli",
+    ])
+
+    route = json.loads(capsys.readouterr().out)
+    assert result == 0
+    assert route["status"] == "ok"
+    assert route["resolved_model"] == "claude-retargeted-model"
+    assert route["route_source"] == "risk-tier-override"
+    assert route["policy_override"] == "crucial-claude-retargeted-model-reviewer-one-reviewer-two"
+    assert route["effort"] == "high"
+
+
+def test_retargeted_override_occupant_requires_explicit_risk_tier(
+    tmp_path, monkeypatch, capsys
+):
+    router = load_router()
+    catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    override = catalog["families"]["anthropic"]["risk_tier_overrides"]["crucial"]
+    override["models"] = ["claude-newcomer"]
+    catalog_path = tmp_path / "model-routing.json"
+    catalog_path.write_text(json.dumps(catalog))
+    monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
+
+    result = router.main([
+        "resolve", "--adapter", "claude", "--alias", "flagship",
+        "--role", "worker", "--model", "claude-newcomer",
+        "--adapter-gate", "direct-cli",
+    ])
+
+    route = json.loads(capsys.readouterr().out)
+    assert result == 1
+    assert route["status"] == "risk_tier_override_required"
+
+
+def test_retargeting_override_occupant_ungates_previous_occupant(
+    tmp_path, monkeypatch, capsys
+):
+    router = load_router()
+    catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    overrides = catalog["families"]["anthropic"]["risk_tier_overrides"]
+    for override in overrides.values():
+        override["models"] = ["claude-newcomer"]
+    catalog_path = tmp_path / "model-routing.json"
+    catalog_path.write_text(json.dumps(catalog))
+    monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
+
+    result = router.main([
+        "resolve", "--adapter", "claude", "--alias", "flagship",
+        "--role", "worker", "--model", "fable",
+        "--adapter-gate", "direct-cli",
+    ])
+
+    route = json.loads(capsys.readouterr().out)
+    assert result == 0
+    assert route["status"] == "ok"
+    assert route["resolved_model"] == "fable"
+
+
+def test_retargeting_one_tier_keeps_occupant_gated_by_another_tier(
+    tmp_path, monkeypatch, capsys
+):
+    router = load_router()
+    catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    catalog["families"]["anthropic"]["risk_tier_overrides"]["crucial"]["models"] = [
+        "claude-newcomer"
+    ]
+    catalog_path = tmp_path / "model-routing.json"
+    catalog_path.write_text(json.dumps(catalog))
+    monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
+
+    result = router.main([
+        "resolve", "--adapter", "claude", "--alias", "flagship",
+        "--role", "worker", "--model", "fable",
+        "--adapter-gate", "direct-cli",
+    ])
+
+    route = json.loads(capsys.readouterr().out)
+    assert result == 1
+    assert route["status"] == "risk_tier_override_required"
+
+
+def test_foreign_family_risk_override_does_not_gate_explicit_model(
+    tmp_path, monkeypatch, capsys
+):
+    router = load_router()
+    catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    catalog["families"]["openai"]["risk_tier_overrides"] = {
+        "crucial": {
+            "roles": ["synthesis", "adjudication"],
+            "alias": "flagship",
+            "models": ["opus"],
+            "default_effort": "medium",
+            "maximum_effort": "medium",
+        },
+    }
+    catalog_path = tmp_path / "model-routing.json"
+    catalog_path.write_text(json.dumps(catalog))
+    monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
+
+    result = router.main([
+        "resolve", "--adapter", "claude", "--alias", "flagship",
+        "--role", "worker", "--model", "claude-opus-4-6",
+        "--adapter-gate", "direct-cli",
+    ])
+
+    route = json.loads(capsys.readouterr().out)
+    assert result == 0
+    assert route["status"] == "ok"
+    assert route["resolved_model"] == "claude-opus-4-6"
+
+
+@pytest.mark.parametrize("occupant", ("flagship", "opus"))
+def test_risk_tier_override_occupant_cannot_be_reached_by_alias(
+    tmp_path, monkeypatch, capsys, occupant
+):
+    router = load_router()
+    catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    catalog["families"]["anthropic"]["risk_tier_overrides"]["crucial"]["models"] = [
+        occupant
+    ]
+    catalog_path = tmp_path / "model-routing.json"
+    catalog_path.write_text(json.dumps(catalog))
+    monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
+
+    result = router.main([
+        "resolve", "--adapter", "claude", "--alias", "flagship",
+        "--role", "worker", "--adapter-gate", "direct-cli",
+    ])
+
+    route = json.loads(capsys.readouterr().out)
+    assert result == 2
+    assert route["status"] == "risk_tier_config_invalid"
+
+
+def test_risk_tier_override_occupant_cannot_match_versioned_alias_candidate(
+    tmp_path, monkeypatch, capsys
+):
+    router = load_router()
+    catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    family = catalog["families"]["anthropic"]
+    family["aliases"]["flagship"] = ["claude-opus-4-6"]
+    family["role_overrides"] = {}
+    family["risk_tier_overrides"]["crucial"]["models"] = ["opus"]
+    catalog_path = tmp_path / "model-routing.json"
+    catalog_path.write_text(json.dumps(catalog))
+    monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
+
+    result = router.main([
+        "resolve", "--adapter", "claude", "--alias", "flagship",
+        "--role", "worker", "--adapter-gate", "direct-cli",
+    ])
+
+    route = json.loads(capsys.readouterr().out)
+    assert result == 2
+    assert route["status"] == "risk_tier_config_invalid"
+
+
+@pytest.mark.parametrize(
+    ("occupant", "explicit_model"),
+    (
+        ("opus-4", "claude-opus-4-6"),
+        ("claude", "claude-opus-4-6"),
+        ("anthropic", "anthropic/claude-opus-4-6"),
+        ("4", "claude-opus-4-6"),
+    ),
+)
+def test_risk_tier_override_occupant_cannot_partially_match_explicit_model(
+    tmp_path, monkeypatch, capsys, occupant, explicit_model
+):
+    router = load_router()
+    catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    catalog["families"]["anthropic"]["risk_tier_overrides"]["crucial"]["models"] = [
+        occupant
+    ]
+    catalog_path = tmp_path / "model-routing.json"
+    catalog_path.write_text(json.dumps(catalog))
+    monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
+
+    result = router.main([
+        "resolve", "--adapter", "claude", "--alias", "flagship",
+        "--role", "worker", "--model", explicit_model,
+        "--adapter-gate", "direct-cli",
+    ])
+
+    route = json.loads(capsys.readouterr().out)
+    assert result == 2
+    assert route["status"] == "risk_tier_config_invalid"
+
+
+def test_risk_tier_override_occupant_cannot_be_reached_by_role_alias_override(
+    tmp_path, monkeypatch, capsys
+):
+    router = load_router()
+    catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    family = catalog["families"]["anthropic"]
+    family["role_overrides"]["worker"] = {"flagship": ["claude-role-model"]}
+    family["risk_tier_overrides"]["crucial"]["models"] = ["claude-role-model"]
+    catalog_path = tmp_path / "model-routing.json"
+    catalog_path.write_text(json.dumps(catalog))
+    monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
+
+    result = router.main([
+        "resolve", "--adapter", "claude", "--alias", "flagship",
+        "--role", "worker", "--adapter-gate", "direct-cli",
+    ])
+
+    route = json.loads(capsys.readouterr().out)
+    assert result == 2
+    assert route["status"] == "risk_tier_config_invalid"
+
+
+def test_foreign_family_override_collision_does_not_reject_adapter_route(
+    tmp_path, monkeypatch, capsys
+):
+    router = load_router()
+    catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    catalog["families"]["anthropic"]["risk_tier_overrides"]["crucial"]["models"] = [
+        "opus"
+    ]
+    catalog_path = tmp_path / "model-routing.json"
+    catalog_path.write_text(json.dumps(catalog))
+    monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
+
+    result = router.main([
+        "resolve", "--adapter", "codex", "--alias", "workhorse",
+        "--role", "worker", "--adapter-gate", "direct-cli",
+    ])
+
+    route = json.loads(capsys.readouterr().out)
+    assert result == 0
+    assert route["status"] == "ok"
+    assert route["model_family"] == "openai"
+
+
+def test_missing_route_input_precedes_risk_tier_configuration_validation(
+    tmp_path, monkeypatch, capsys
+):
+    router = load_router()
+    catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    catalog["families"]["anthropic"]["risk_tier_overrides"]["crucial"]["models"] = [
+        "opus"
+    ]
+    catalog_path = tmp_path / "model-routing.json"
+    catalog_path.write_text(json.dumps(catalog))
+    monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
+
+    result = router.main([
+        "resolve", "--adapter", "claude", "--role", "worker",
+        "--adapter-gate", "direct-cli",
+    ])
+
+    route = json.loads(capsys.readouterr().out)
+    assert result == 2
+    assert route["status"] == "route_input_missing"
+
+
 def test_claude_flagship_and_critical_review_default_to_opus():
     lead, lead_route = resolve("--adapter", "claude", "--alias", "flagship", "--role", "lead")
     review, review_route = resolve(
@@ -62,7 +346,7 @@ def test_claude_other_primary_uses_opus():
     assert route["resolved_model"] == "opus"
 
 
-def test_opus_unavailable_has_no_implicit_fable_fallback():
+def test_opus_unavailable_has_no_implicit_risk_override_fallback():
     result, route = resolve(
         "--adapter",
         "claude",
@@ -71,68 +355,112 @@ def test_opus_unavailable_has_no_implicit_fable_fallback():
         "--role",
         "lead",
         "--available-model",
-        "fable",
+        RISK_OVERRIDE_MODEL,
     )
     assert result.returncode == 1
     assert route["status"] == "no_candidate_available"
 
 
 @pytest.mark.parametrize(
-    "model",
+    "model_template",
     (
-        "fable", "claude-fable-5", "anthropic/claude-fable-5",
-        "claude.fable.5", "Claude Fable 5", "claude:fable:5", "fable5", "claudefable5",
+        "{occupant}", "claude-{occupant}-5", "anthropic/claude-{occupant}-5",
+        "claude.{occupant}.5", "Claude {occupant} 5", "claude:{occupant}:5",
+        "{occupant}5", "claude{occupant}5",
     ),
 )
-def test_explicit_fable_identifiers_require_the_bounded_risk_override(model):
+def test_explicit_override_occupant_identifiers_require_the_bounded_risk_override(
+    model_template
+):
+    model = model_template.format(occupant=RISK_OVERRIDE_MODEL)
     result, route = resolve(
         "--adapter", "claude", "--alias", "flagship", "--role", "worker",
         "--model", model, "--effort", "high",
     )
     assert result.returncode == 1
-    assert route["status"] == "fable_requires_risk_tier_override"
+    assert route["status"] == "risk_tier_override_required"
+
+
+def test_explicit_override_occupant_stays_reserved_for_broker_adapters():
+    result, route = resolve(
+        "--adapter", "cursor", "--alias", "flagship", "--role", "worker",
+        "--model", RISK_OVERRIDE_MODEL, "--effort", "high",
+    )
+    assert result.returncode == 1
+    assert route["status"] == "risk_tier_override_required"
+
+
+def test_unconfigured_inferred_family_cannot_bypass_override_gate():
+    result, route = resolve(
+        "--adapter", "opencode", "--alias", "flagship", "--role", "worker",
+        "--model", "opencode/fable",
+    )
+
+    assert result.returncode == 1
+    assert route["status"] == "risk_tier_override_required"
 
 
 @pytest.mark.parametrize(
-    ("risk_tier", "role", "effort"),
-    (("crucial", "synthesis", "medium"), ("terminal", "adjudication", "low")),
+    ("risk_tier", "role_index", "effort"),
+    (("crucial", 0, "medium"), ("terminal", 1, "low")),
 )
-def test_fable_requires_explicit_risk_tier_synthesis_or_adjudication(risk_tier, role, effort):
+def test_override_occupant_requires_explicit_bounded_risk_route(
+    risk_tier, role_index, effort
+):
+    override = CATALOG["families"]["anthropic"]["risk_tier_overrides"][risk_tier]
+    role = override["roles"][role_index]
+    model = override["models"][0]
     result, route = resolve(
-        "--adapter", "claude", "--alias", "flagship", "--role", role,
-        "--risk-tier", risk_tier, "--effort", effort, "--available-model", "fable",
+        "--adapter", "claude", "--alias", override["alias"], "--role", role,
+        "--risk-tier", risk_tier, "--effort", effort, "--available-model", model,
     )
     assert result.returncode == 0
-    assert route["resolved_model"] == "fable"
+    assert route["resolved_model"] == model
     assert route["risk_tier"] == risk_tier
     assert route["route_source"] == "risk-tier-override"
-    assert route["policy_override"] == f"{risk_tier}-fable-synthesis-adjudication"
+    assert route["policy_override"] == (
+        f"{risk_tier}-{model}-{'-'.join(override['roles'])}"
+    )
     assert route["effort"] == effort
 
 
 @pytest.mark.parametrize(
-    "arguments",
+    ("arguments", "expected_status"),
     (
-        ("--role", "synthesis", "--risk-tier", "substantial"),
-        ("--role", "worker", "--risk-tier", "crucial"),
-        ("--role", "synthesis", "--risk-tier", "crucial", "--effort", "high"),
+        (
+            ("--alias", "flagship", "--role", "synthesis", "--risk-tier", "substantial"),
+            "risk_tier_override_unavailable",
+        ),
+        (
+            ("--alias", "flagship", "--role", "worker", "--risk-tier", "crucial"),
+            "risk_tier_role_mismatch",
+        ),
+        (
+            ("--alias", "workhorse", "--role", "synthesis", "--risk-tier", "crucial"),
+            "risk_tier_alias_mismatch",
+        ),
+        (
+            (
+                "--alias", "flagship", "--role", "synthesis", "--risk-tier", "crucial",
+                "--effort", "high",
+            ),
+            "risk_tier_effort_above_ceiling",
+        ),
     ),
 )
-def test_fable_risk_override_fails_closed_outside_bounded_role_tier_and_effort(arguments):
+def test_risk_override_fails_closed_outside_bounded_role_tier_and_effort(
+    arguments, expected_status
+):
     result, route = resolve(
-        "--adapter", "claude", "--alias", "flagship", *arguments,
-        "--available-model", "fable",
+        "--adapter", "claude", *arguments,
+        "--available-model", RISK_OVERRIDE_MODEL,
     )
     assert result.returncode != 0
-    assert route["status"] in {
-        "risk_tier_override_unavailable",
-        "risk_tier_role_mismatch",
-        "risk_tier_effort_above_ceiling",
-    }
+    assert route["status"] == expected_status
 
 
-@pytest.mark.parametrize("model", ("opus", "sonnet", "claude-opus-4-8"))
-def test_fable_risk_override_rejects_non_fable_explicit_models(model):
+@pytest.mark.parametrize("model", NON_OCCUPANT_MODELS)
+def test_risk_override_rejects_non_occupant_explicit_models(model):
     result, route = resolve(
         "--adapter", "claude", "--alias", "flagship", "--role", "synthesis",
         "--risk-tier", "crucial", "--model", model, "--effort", "medium",
@@ -144,17 +472,52 @@ def test_fable_risk_override_rejects_non_fable_explicit_models(model):
 @pytest.mark.parametrize(
     ("field", "value"),
     (
-        ("roles", "synthesis"),
-        ("roles", ["synthesis"]),
-        ("models", ["fable", "opus"]),
-        ("maximum_effort", "high"),
+        ("models", RISK_OVERRIDE_MODEL),
+        ("models", [RISK_OVERRIDE_MODEL, "opus"]),
+        ("models", []),
+        ("models", [""]),
+        ("models", ["  fable  "]),
+        ("roles", CRUCIAL_RISK_OVERRIDE["roles"][0]),
+        ("roles", [*CRUCIAL_RISK_OVERRIDE["roles"], "third-role"]),
+        ("roles", ["synthesis", "adjudication", "synthesis"]),
+        ("roles", []),
+        ("roles", [CRUCIAL_RISK_OVERRIDE["roles"][0]]),
+        ("roles", [CRUCIAL_RISK_OVERRIDE["roles"][0]] * 2),
+        ("roles", [CRUCIAL_RISK_OVERRIDE["roles"][0], ""]),
+        ("roles", ["synthesis", " synthesis"]),
         ("default_effort", "high"),
+        ("default_effort", "unknown"),
+        ("maximum_effort", "unknown"),
+        ("alias", "unknown"),
     ),
 )
-def test_fable_risk_override_configuration_is_closed_and_bounded(tmp_path, monkeypatch, capsys, field, value):
+def test_risk_tier_override_configuration_is_closed_and_bounded(
+    tmp_path, monkeypatch, capsys, field, value
+):
     router = load_router()
     catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
     catalog["families"]["anthropic"]["risk_tier_overrides"]["crucial"][field] = value
+    catalog_path = tmp_path / "model-routing.json"
+    catalog_path.write_text(json.dumps(catalog))
+    monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
+
+    result = router.main([
+        "resolve", "--adapter", "claude", "--alias", CRUCIAL_RISK_OVERRIDE["alias"],
+        "--role", CRUCIAL_RISK_OVERRIDE["roles"][0], "--risk-tier", "crucial",
+        "--adapter-gate", "direct-cli",
+    ])
+
+    route = json.loads(capsys.readouterr().out)
+    assert result == 2
+    assert route["status"] == "risk_tier_config_invalid"
+
+
+def test_non_dict_risk_tier_override_is_rejected_as_malformed(tmp_path, monkeypatch, capsys):
+    # A tier that is present but not a mapping is a malformed catalogue, not an
+    # absent tier: it must be reported as such rather than as `unavailable`.
+    router = load_router()
+    catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    catalog["families"]["anthropic"]["risk_tier_overrides"]["crucial"] = []
     catalog_path = tmp_path / "model-routing.json"
     catalog_path.write_text(json.dumps(catalog))
     monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
@@ -168,6 +531,339 @@ def test_fable_risk_override_configuration_is_closed_and_bounded(tmp_path, monke
     route = json.loads(capsys.readouterr().out)
     assert result == 2
     assert route["status"] == "risk_tier_config_invalid"
+
+
+def test_absent_risk_tier_is_still_reported_unavailable(tmp_path, monkeypatch, capsys):
+    # The `unavailable` status stays reachable for the case it actually names.
+    router = load_router()
+    catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    catalog["families"]["anthropic"]["risk_tier_overrides"].pop("crucial")
+    catalog_path = tmp_path / "model-routing.json"
+    catalog_path.write_text(json.dumps(catalog))
+    monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
+
+    result = router.main([
+        "resolve", "--adapter", "claude", "--alias", "flagship",
+        "--role", "synthesis", "--risk-tier", "crucial",
+        "--adapter-gate", "direct-cli",
+    ])
+
+    route = json.loads(capsys.readouterr().out)
+    assert result == 2
+    assert route["status"] == "risk_tier_override_unavailable"
+
+
+@pytest.mark.parametrize(
+    "malformed_models",
+    [
+        pytest.param("fable", id="string-instead-of-list"),
+        pytest.param(["fable", "opus"], id="two-element-list"),
+        pytest.param([], id="empty-list"),
+        pytest.param([["fable"]], id="nested-list"),
+        pytest.param(None, id="null"),
+    ],
+)
+def test_malformed_override_models_never_unreserve_the_occupant(
+    tmp_path, monkeypatch, capsys, malformed_models
+):
+    # Regression: a malformed shape used to be skipped by the catalogue-wide pass,
+    # which left the tier unusable AND its occupant freely dispatchable — strictly
+    # worse than either failure alone. It must fail closed instead.
+    router = load_router()
+    catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    catalog["families"]["anthropic"]["risk_tier_overrides"]["crucial"]["models"] = malformed_models
+    catalog_path = tmp_path / "model-routing.json"
+    catalog_path.write_text(json.dumps(catalog))
+    monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
+
+    result = router.main([
+        "resolve", "--adapter", "claude", "--alias", "flagship",
+        "--role", "worker", "--model", "fable",
+        "--adapter-gate", "direct-cli",
+    ])
+
+    route = json.loads(capsys.readouterr().out)
+    assert result == 2
+    assert route["status"] == "risk_tier_config_invalid"
+
+
+def test_malformed_override_in_one_family_does_not_reject_another_family(
+    tmp_path, monkeypatch, capsys
+):
+    # The catalogue-wide pass is scoped to the adapter's own family, so an
+    # Anthropic misconfiguration must not take OpenAI routing down with it.
+    router = load_router()
+    catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    catalog["families"]["anthropic"]["risk_tier_overrides"]["crucial"]["models"] = "fable"
+    catalog_path = tmp_path / "model-routing.json"
+    catalog_path.write_text(json.dumps(catalog))
+    monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
+
+    result = router.main([
+        "resolve", "--adapter", "codex", "--alias", "workhorse",
+        "--role", "worker", "--adapter-gate", "direct-cli",
+    ])
+
+    route = json.loads(capsys.readouterr().out)
+    assert result == 0
+    assert route["status"] == "ok"
+
+
+@pytest.mark.parametrize(
+    "adapter", ["claude", "codex", "opencode", "cursor", "agy"]
+)
+@pytest.mark.parametrize(
+    "families", [None, [], "anthropic", {"anthropic": None}], ids=str
+)
+def test_unusable_families_table_fails_closed(
+    tmp_path, monkeypatch, capsys, families, adapter
+):
+    """An unusable families table must reject, not route the reserved occupant.
+
+    The reservation derives entirely from the families table, so a table that is
+    not a usable mapping reserves nothing and the occupant routes freely. That is
+    fail-open on malformed configuration, the same class of defect this issue
+    exists to close, so the catalogue is rejected instead.
+
+    Parametrised over adapters with and without a ``fixed_model_family``: the two
+    take different validation paths, and the first fix guarded only the second.
+    """
+    router = load_router()
+    catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    catalog["families"] = families
+    catalog_path = tmp_path / "model-routing.json"
+    catalog_path.write_text(json.dumps(catalog))
+    monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
+
+    result = router.main([
+        "resolve", "--adapter", adapter, "--model", "fable",
+        "--alias", "flagship", "--role", "worker", "--adapter-gate", "direct-cli",
+    ])
+
+    route = json.loads(capsys.readouterr().out)
+    assert result == 2
+    assert route["status"] == "risk_tier_config_invalid"
+    assert route.get("resolved_model") is None
+
+
+def test_adapter_pinned_to_an_undefined_family_requires_an_explicit_model(capsys):
+    """OpenCode has no alias table to route against, so an alias route rejects.
+
+    ``generic-open`` is deliberately absent from the families table: OpenCode
+    routes on explicit account-catalogue models. Resolving an alias against it
+    dereferenced a family that was never there and crashed with no JSON at all,
+    on the production catalogue, with no catalogue edit needed to reach it.
+    """
+    router = load_router()
+
+    result = router.main([
+        "resolve", "--adapter", "opencode", "--alias", "flagship",
+        "--role", "worker", "--adapter-gate", "direct-cli",
+    ])
+
+    route = json.loads(capsys.readouterr().out)
+    assert result == 2
+    assert route["status"] == "model_required_for_broker"
+    assert route.get("resolved_model") is None
+
+
+@pytest.mark.parametrize(
+    "mutate, status",
+    [
+        (lambda families: families.pop("openai"), "model_required_for_broker"),
+        # A family present but not a mapping is caught earlier still, by the
+        # fixed-family override validation, which cannot read it either.
+        (lambda families: families.__setitem__("openai", None), "risk_tier_config_invalid"),
+        (lambda families: families["openai"].pop("aliases"), "model_required_for_broker"),
+        (
+            lambda families: families["openai"].__setitem__("aliases", []),
+            "model_required_for_broker",
+        ),
+    ],
+    ids=["family-absent", "family-null", "aliases-absent", "aliases-not-a-mapping"],
+)
+def test_unroutable_pinned_family_rejects_with_a_receipt(
+    tmp_path, monkeypatch, capsys, mutate, status
+):
+    """A pinned family that cannot serve an alias rejects, and says so in JSON.
+
+    These lookups were unguarded, so the router crashed part-way down with no
+    output at all. A caller cannot act on a traceback: every rejection has to
+    arrive as a receipt, whatever the catalogue looks like.
+    """
+    router = load_router()
+    catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    mutate(catalog["families"])
+    catalog_path = tmp_path / "model-routing.json"
+    catalog_path.write_text(json.dumps(catalog))
+    monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
+
+    result = router.main([
+        "resolve", "--adapter", "codex", "--alias", "flagship",
+        "--role", "worker", "--adapter-gate", "direct-cli",
+    ])
+
+    route = json.loads(capsys.readouterr().out)
+    assert result == 2
+    assert route["status"] == status
+    assert route.get("resolved_model") is None
+
+
+def test_empty_routed_family_validates_every_family_the_scan_consults(
+    tmp_path, monkeypatch, capsys
+):
+    """An empty routed family narrows nothing, so validation must widen with the scan.
+
+    ``override_scan_families`` only narrows to the model's own family when that
+    family actually configures something. When it is empty the reservation scan
+    falls back to every family, so a malformed override anywhere is one the scan
+    reads. Validating the empty family alone would put the two back out of
+    agreement, which is the disagreement this issue exists to close.
+    """
+    router = load_router()
+    catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    catalog["families"]["openai"] = {}
+    catalog["families"]["anthropic"]["risk_tier_overrides"]["crucial"]["models"] = "fable"
+    catalog_path = tmp_path / "model-routing.json"
+    catalog_path.write_text(json.dumps(catalog))
+    monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
+
+    assert list(router.override_scan_families("gpt-5.6-sol", catalog)) == [
+        "anthropic", "openai",
+    ]
+
+    result = router.main([
+        "resolve", "--adapter", "cursor", "--alias", "flagship", "--role", "worker",
+        "--model", "gpt-5.6-sol", "--adapter-gate", "direct-cli",
+    ])
+
+    route = json.loads(capsys.readouterr().out)
+    assert result == 2
+    assert route["status"] == "risk_tier_config_invalid"
+
+
+@pytest.mark.parametrize("aliases", ["x", [], None], ids=str)
+def test_unusable_alias_table_rejects_on_an_explicit_model_route(
+    tmp_path, monkeypatch, capsys, aliases
+):
+    """The explicit-model path reads the alias table too, and must survive a bad one.
+
+    Guarding only the alias-only route left this one dereferencing the same
+    unusable table, so it still crashed without JSON. Both readers are now fed
+    from one normalised load site.
+    """
+    router = load_router()
+    catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    catalog["families"]["openai"]["aliases"] = aliases
+    catalog_path = tmp_path / "model-routing.json"
+    catalog_path.write_text(json.dumps(catalog))
+    monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
+
+    result = router.main([
+        "resolve", "--adapter", "codex", "--alias", "flagship", "--role", "worker",
+        "--model", "gpt-5.6-sol", "--adapter-gate", "direct-cli",
+    ])
+
+    route = json.loads(capsys.readouterr().out)
+    assert result == 1
+    assert route["status"] == "adapter_account_default_only"
+
+
+@pytest.mark.parametrize(
+    "field, value",
+    [
+        ("roles", "ab"),
+        ("alias", ["flagship"]),
+        ("default_effort", ["high"]),
+        ("maximum_effort", {"high": True}),
+    ],
+    ids=["roles-string", "alias-list", "default-effort-list", "maximum-effort-dict"],
+)
+def test_override_field_of_the_wrong_type_fails_closed(
+    tmp_path, monkeypatch, capsys, field, value
+):
+    """Each type check in the override validator is load-bearing on its own.
+
+    Without them these shapes do not merely slip through, they duck the whole
+    validator: ``roles`` as a two-character string satisfies every downstream
+    length, membership and uniqueness check, and an unhashable alias or effort
+    raises out of the ``in`` test rather than failing closed.
+    """
+    router = load_router()
+    catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    catalog["families"]["anthropic"]["risk_tier_overrides"]["crucial"][field] = value
+    catalog_path = tmp_path / "model-routing.json"
+    catalog_path.write_text(json.dumps(catalog))
+    monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
+
+    result = router.main([
+        "resolve", "--adapter", "claude", "--alias", "flagship", "--role", "a",
+        "--risk-tier", "crucial", "--model", "fable", "--available-model", "fable",
+        "--adapter-gate", "direct-cli",
+    ])
+
+    route = json.loads(capsys.readouterr().out)
+    assert result == 2
+    assert route["status"] == "risk_tier_config_invalid"
+    assert route.get("resolved_model") is None
+
+
+def test_fixed_family_adapter_fails_closed_on_an_alias_route(
+    tmp_path, monkeypatch, capsys
+):
+    """The fixed-family guard is what covers alias routes, which name no model.
+
+    Mutation testing found this guard unpinned: deleting it left every test
+    green. An alias route never reaches the model-family validation, because
+    there is no model to infer a family from, so only this guard stands between
+    a malformed catalogue and a routed alias.
+    """
+    router = load_router()
+    catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    for tier in catalog["families"]["anthropic"]["risk_tier_overrides"].values():
+        tier["models"] = "fable"
+    catalog_path = tmp_path / "model-routing.json"
+    catalog_path.write_text(json.dumps(catalog))
+    monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
+
+    result = router.main([
+        "resolve", "--adapter", "claude", "--alias", "flagship", "--role", "worker",
+    ])
+
+    route = json.loads(capsys.readouterr().out)
+    assert result == 2
+    assert route["status"] == "risk_tier_config_invalid"
+
+
+@pytest.mark.parametrize("adapter", ["cursor", "agy", "opencode"])
+def test_malformed_override_fails_closed_without_a_fixed_model_family(
+    tmp_path, monkeypatch, capsys, adapter
+):
+    """The occupant stays reserved for adapters that declare no fixed family.
+
+    The catalogue validation keyed off the adapter's ``fixed_model_family`` while
+    the reservation scan keys off the family inferred from the requested model.
+    An adapter without a fixed family therefore validated nothing at all, yet
+    still scanned the model's own family, so a malformed ``models`` value
+    unreserved the occupant and resolved it at exit 0.
+    """
+    router = load_router()
+    catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    for tier in catalog["families"]["anthropic"]["risk_tier_overrides"].values():
+        tier["models"] = "fable"
+    catalog_path = tmp_path / "model-routing.json"
+    catalog_path.write_text(json.dumps(catalog))
+    monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
+
+    result = router.main([
+        "resolve", "--adapter", adapter, "--model", "fable",
+        "--alias", "flagship", "--role", "worker",
+    ])
+
+    route = json.loads(capsys.readouterr().out)
+    assert result == 2
+    assert route["status"] == "risk_tier_config_invalid"
+    assert route.get("resolved_model") is None
 
 
 def test_openai_aliases_resolve_to_account_default_dispatch():
