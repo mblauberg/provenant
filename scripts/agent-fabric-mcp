@@ -22,6 +22,11 @@ case "$AGENTS_ROOT" in /*) ;; *) echo "AGENTS_HOME must be absolute" >&2; exit 2
 FABRIC_ROOT="$AGENTS_ROOT/runtime/agent-fabric"
 DIST_MCP="$FABRIC_ROOT/dist/mcp/main.js"
 
+# A stale protocol dist surfaces here as a SyntaxError about a missing export,
+# which the wrapper's caller reports as a JSON parse failure naming nothing
+# about builds. Gate on the same predicate the launcher uses.
+AGENTS_HOME="$AGENTS_ROOT" "$SCRIPT_DIR/agent-fabric-protocol-preflight"
+
 if [ -f "$DIST_MCP" ]; then
   if [ ! -d "$FABRIC_ROOT/src" ]; then
     echo "agent-fabric-mcp: Fabric source tree is unavailable: $FABRIC_ROOT/src" >&2

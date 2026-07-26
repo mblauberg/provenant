@@ -10,6 +10,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 LAUNCHER = REPO_ROOT / "scripts" / "agent-fabric"
+MCP_WRAPPER = REPO_ROOT / "scripts" / "agent-fabric-mcp"
 FRESHNESS_LIBRARY = REPO_ROOT / "scripts" / "lib" / "agent-fabric-workspace-freshness.sh"
 PREFLIGHT = REPO_ROOT / "scripts" / "agent-fabric-protocol-preflight"
 PROTOCOL_BUILD = REPO_ROOT / "scripts" / "agent-fabric-protocol-build"
@@ -23,7 +24,7 @@ def _write(path: Path, content: str = "fixture\n") -> None:
 def _copy_launcher_scripts(root: Path) -> None:
     scripts = root / "scripts"
     scripts.mkdir(parents=True)
-    for source in (LAUNCHER, PREFLIGHT, PROTOCOL_BUILD):
+    for source in (LAUNCHER, MCP_WRAPPER, PREFLIGHT, PROTOCOL_BUILD):
         shutil.copy2(source, scripts / source.name)
     library = scripts / "lib/agent-fabric-workspace-freshness.sh"
     library.parent.mkdir()
@@ -206,6 +207,46 @@ def test_packaged_launcher_reports_stale_protocol_before_election(
     assert "AGENT_FABRIC_PROTOCOL_BUILD_STALE" in result.stderr
     assert f'repair: "{root / "scripts/agent-fabric-protocol-build"}"' in result.stderr
     assert not marker.exists(), "stale protocol dist must fail before daemon election"
+
+
+@pytest.mark.parametrize("protocol_dist", ["missing", "stale"])
+def test_mcp_wrapper_reports_stale_protocol_before_proxying(
+    tmp_path: Path,
+    protocol_dist: str,
+) -> None:
+    """The MCP wrapper is where a stale protocol dist actually bites.
+
+    It surfaces there as a SyntaxError about a missing export, which the
+    wrapper's Python caller reports as `JSONDecodeError: Expecting value`
+    naming nothing about builds. The wrapper must fail with the typed,
+    repairable error instead of proxying.
+    """
+    root, marker, fake_node = _fixture(
+        tmp_path,
+        launcher_mode="packaged",
+        protocol_dist=protocol_dist,
+    )
+    _write(root / "runtime/agent-fabric/dist/mcp/main.js")
+    _write(root / "runtime/agent-fabric/src/mcp/main.ts")
+
+    result = subprocess.run(
+        [str(root / "scripts/agent-fabric-mcp")],
+        cwd=root,
+        env={
+            **os.environ,
+            "AGENTS_HOME": str(root),
+            "LAUNCHER_TEST_MARKER": str(marker),
+            "PATH": f"{fake_node.parent}:{os.environ['PATH']}",
+        },
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 78
+    assert "AGENT_FABRIC_PROTOCOL_BUILD_STALE" in result.stderr
+    assert f'repair: "{root / "scripts/agent-fabric-protocol-build"}"' in result.stderr
+    assert not marker.exists(), "stale protocol dist must fail before the proxy starts"
 
 
 def test_reported_protocol_repair_clears_staleness_without_root_build(
