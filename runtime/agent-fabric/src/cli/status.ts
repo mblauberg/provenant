@@ -26,6 +26,7 @@ import { assertDatabaseIntegrity } from "../persistence/invariants.js";
 import { BootstrapElection, FLOCK_ELECTION_LOCK_PORT } from "../daemon/bootstrap-election.js";
 import { connectFabricDaemon } from "../daemon/client.js";
 import { privateDiscoveryPaths, readPrivateDiscovery } from "../daemon/private-discovery.js";
+import { preflightProtocolBuild } from "../daemon/protocol-build-preflight.js";
 import { readDiscoveryReceipt } from "./mcp-provision.js";
 import type { FabricPaths } from "./paths.js";
 import { MCP_SEATS, resolveSeatPaths, type SeatMetadata } from "./seat-store.js";
@@ -55,6 +56,7 @@ type DoctorDependencies = {
   probeProviderInterface?: typeof probeProviderInterface;
   observeReviewProfilePin?: PinRouteObserver;
   providerProbeTimeoutMs?: number;
+  preflightProtocolBuild?: typeof preflightProtocolBuild;
   now?: () => number;
   connectDaemon?: (input: {
     socketPath: string;
@@ -78,6 +80,7 @@ type DoctorDaemonState =
 export type DoctorLifecycleState = "current" | "idle" | "recovering" | "blocked";
 
 const PRECONDITIONS: Readonly<Record<string, string>> = {
+  "protocol-build": "the local protocol build is newer than its TypeScript sources",
   configuration: "the trusted Fabric configuration loads and names its adapters",
   "wrapper-loader": "every configured adapter wrapper loader is installed",
   "adapter-compatibility": "adapter compatibility pins verify against the pinned schema",
@@ -91,38 +94,47 @@ const PRECONDITIONS: Readonly<Record<string, string>> = {
 };
 
 /**
- * The only failures an ordinary bootstrap reconciles locally and reversibly:
- * a transition another owner is already converging, or unreachable-daemon
- * residue that `reconcileUnreachablePrivateDaemon` clears before re-electing.
+ * The only failures an ordinary bootstrap actually converges, each traced to
+ * the code path that converges it:
  *
- * Everything else is `blocked`, including an incompatible incumbent, an
- * ambiguous generation and any schema mismatch: those need user authority, an
- * out-of-lifecycle repair, or material state displacement. Unrecognised codes
- * fail closed to `blocked` rather than promising a repair that does not exist.
+ * - `BOOTSTRAP_IN_PROGRESS` and `DAEMON_SHUTDOWN_IN_PROGRESS`: another owner
+ *   holds the transition and is completing it; no work is required here.
+ * - `DAEMON_PROCESS_UNAVAILABLE`: active discovery whose PID is dead, the one
+ *   shape `reconcileUnreachablePrivateDaemon` marks terminal and re-elects.
+ * - `DAEMON_PROCESS_CRASHED` and `DAEMON_PROCESS_UNCLEAN_STOP`: terminal
+ *   discovery carrying evidence that matches its ready receipt, which the
+ *   ordinary spawn path replaces.
+ *
+ * Everything else is `blocked` and reported as needing a decision rather than
+ * a retry. That deliberately excludes absent discovery, a stale socket and an
+ * unreachable socket under a live PID: reconciliation returns false for all
+ * three, so bootstrap raises `BOOTSTRAP_RECONCILIATION_REQUIRED` or
+ * `BOOTSTRAP_READY_UNREACHABLE` and a zero-touch caller would retry forever.
+ * Unrecognised codes fail closed to `blocked` for the same reason.
  */
 const RECOVERABLE_CODES: ReadonlySet<string> = new Set([
   "BOOTSTRAP_IN_PROGRESS",
   "DAEMON_SHUTDOWN_IN_PROGRESS",
-  "DAEMON_DISCOVERY_MISSING",
-  "DAEMON_SOCKET_STALE",
-  "DAEMON_SOCKET_UNAVAILABLE",
   "DAEMON_PROCESS_UNAVAILABLE",
   "DAEMON_PROCESS_CRASHED",
   "DAEMON_PROCESS_UNCLEAN_STOP",
 ]);
 
 /**
- * Preconditions `doctor` structurally cannot observe. `scripts/agent-fabric`
- * gates on protocol-build freshness (#399) and exits 78 before `doctor`
- * starts, so `doctor` can never reach a `blocked` state naming a stale
- * protocol dist. Tracked as #439; the launcher, not `doctor`, reports it.
+ * Preconditions another entrypoint reports before `doctor` can. This is an
+ * entrypoint-specific interception, not a structural blind spot: `doctor`
+ * evaluates the `protocol-build` check itself, so the package bin and
+ * in-process callers do classify a stale dist. Only the `scripts/agent-fabric`
+ * wrapper preempts it, by exiting 78 before `doctor` starts (#399, gap #439).
  */
-const UNOBSERVABLE_PRECONDITIONS = [
+const WRAPPER_INTERCEPTED_PRECONDITIONS = [
   {
     precondition: "the local protocol build is newer than its TypeScript sources",
     code: "AGENT_FABRIC_PROTOCOL_BUILD_STALE",
-    owner: "scripts/agent-fabric-protocol-preflight",
-    reason: "the launcher preflight exits 78 before doctor starts, so doctor cannot classify this precondition",
+    check: "protocol-build",
+    observedByDoctor: true,
+    interceptedBy: "scripts/agent-fabric",
+    reason: "the launcher preflight exits 78 before doctor starts, so the wrapper path reports this instead of doctor; the package bin and in-process callers reach the protocol-build check",
     issue: "#439",
   },
 ] as const;
@@ -596,6 +608,12 @@ export async function fabricDoctor(
   let compatibilityVerification: Awaited<ReturnType<typeof verifyAdapterCompatibility>> | undefined;
   const providerObservations: ProviderObservation[] = [];
   const checks: Check[] = [];
+  // Evaluated by doctor itself so the package bin and in-process callers still
+  // classify a stale dist; only the wrapper preempts it by exiting 78 first.
+  checks.push(await check("protocol-build", async () => {
+    await (dependencies.preflightProtocolBuild ?? preflightProtocolBuild)();
+    return "protocol dist is newer than its build inputs";
+  }));
   checks.push(await check("configuration", async () => {
     const config = await loadFabricConfig({ globalPath: selected.config, agentsHome: selected.agentsHome });
     adapterIds = config.adapterIds;
@@ -744,7 +762,13 @@ export async function fabricDoctor(
   const state: DoctorLifecycleState = healthy
     ? daemon.status === "live" ? "current" : "idle"
     : RECOVERABLE_CODES.has(failed.code) ? "recovering" : "blocked";
-  const holds = failed ?? checks.find((item) => item.id === "daemon-socket");
+  const daemonCheck = checks.find((item) => item.id === "daemon-socket");
+  // The deciding check, worst first. An unknown precondition is surfaced ahead
+  // of the daemon summary even when the lifecycle is healthy, so `cause` never
+  // reports a satisfied precondition while a declared one is unresolved.
+  const holds = failed
+    ?? checks.find((item) => item.status === "idle" && item.id !== "daemon-socket")
+    ?? daemonCheck;
   return {
     schemaVersion: 1,
     healthy,
@@ -752,15 +776,19 @@ export async function fabricDoctor(
     code: failed?.code ?? daemon.code,
     // Why the state holds, not merely which state it is: the exact check whose
     // precondition decided it, and whether this lifecycle may repair it.
+    // `satisfied` reports that check's own precondition and is independent of
+    // `healthy`: a healthy idle lifecycle has no daemon by design, and an
+    // unknown provider probe stays advisory (#406) without being called
+    // satisfied. Only a `pass` check reports a satisfied precondition.
     cause: {
       checkId: holds?.id ?? "daemon-socket",
       precondition: holds?.precondition ?? precondition("daemon-socket"),
-      satisfied: healthy,
+      satisfied: holds?.status === "pass",
       code: holds?.code ?? daemon.code,
       detail: holds?.detail ?? daemon.detail,
       recoverable: !healthy && state === "recovering",
     },
-    unobservable: UNOBSERVABLE_PRECONDITIONS,
+    wrapperIntercepted: WRAPPER_INTERCEPTED_PRECONDITIONS,
     daemon: {
       status: daemon.status,
       pid: daemon.pid,

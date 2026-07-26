@@ -88,18 +88,29 @@ function action<Name extends LifecycleAction["action"]>(
   return found as Extract<LifecycleAction, { action: Name }>;
 }
 
-/** Every byte and inode timestamp of the installed generation and its pointer. */
+/**
+ * Every byte and inode timestamp under the project's seat root: the pointer,
+ * the installed generation, the legacy marker if one exists, and the set of
+ * sibling entries under `generations/` so an abandoned credential-bearing
+ * staging tree cannot hide behind an unchanged generation directory.
+ */
 async function seatFootprint(paths: FabricPaths, projectRoot: string): Promise<Record<string, string>> {
   const seatRoot = join(paths.stateDirectory, "seats", projectKey(projectRoot));
-  const pointer = await readFile(join(seatRoot, "current.json"), "utf8");
-  const generation = (JSON.parse(pointer) as { generation: string }).generation;
-  const generationDirectory = join(seatRoot, "generations", generation);
-  const footprint: Record<string, string> = { "current.json": pointer };
-  const pointerInfo = await lstat(join(seatRoot, "current.json"));
-  footprint["current.json:mtime"] = String(pointerInfo.mtimeMs);
-  for (const entry of (await readdir(generationDirectory)).sort()) {
-    footprint[entry] = await readFile(join(generationDirectory, entry), "utf8");
-    footprint[`${entry}:mtime`] = String((await lstat(join(generationDirectory, entry))).mtimeMs);
+  const footprint: Record<string, string> = {};
+  for (const name of (await readdir(seatRoot)).sort()) {
+    if (name === "generations" || name === "current.lock") continue;
+    footprint[name] = await readFile(join(seatRoot, name), "utf8");
+    footprint[`${name}:mtime`] = String((await lstat(join(seatRoot, name))).mtimeMs);
+  }
+  const generationsDirectory = join(seatRoot, "generations");
+  const siblings = (await readdir(generationsDirectory)).sort();
+  footprint["generations:entries"] = siblings.join(",");
+  for (const sibling of siblings) {
+    for (const entry of (await readdir(join(generationsDirectory, sibling))).sort()) {
+      const path = join(generationsDirectory, sibling, entry);
+      footprint[`${sibling}/${entry}`] = await readFile(path, "utf8");
+      footprint[`${sibling}/${entry}:mtime`] = String((await lstat(path)).mtimeMs);
+    }
   }
   return footprint;
 }
@@ -209,6 +220,8 @@ describe("zero-touch lifecycle action receipt", () => {
     const second = await bootstrap(value);
 
     // Not merely "exited zero": each action independently reports no mutation.
+    // `mutated` claims no logical custody change, so the assertions below prove
+    // that claim, and separately prove no abandoned staging tree was left.
     expect(second.receipt.mutated).toBe(false);
     expect(second.receipt.actions.every(({ mutated }) => !mutated)).toBe(true);
     expect(action(second.receipt, "daemon")).toMatchObject({
@@ -222,11 +235,41 @@ describe("zero-touch lifecycle action receipt", () => {
       generation: first.generation,
     });
     expect(action(second.receipt, "identity-smoke").outcome).toBe("passed");
-    // The healthy seat was not rotated: same bytes, same inode timestamps.
-    await expect(seatFootprint(value.paths, value.projectRoot)).resolves.toEqual(footprintBefore);
+    // The healthy seat was not rotated: same bytes, same inode timestamps, and
+    // the same set of entries under generations/ — a replay that abandoned a
+    // credential-bearing .staging-* tree would change that set.
+    const footprintAfter = await seatFootprint(value.paths, value.projectRoot);
+    expect(footprintAfter).toEqual(footprintBefore);
+    expect(footprintAfter["generations:entries"]).toBe(first.generation);
     // No compatible daemon restart and no rebuilt custody rows.
     expect(custodyCounts(value.paths.databasePath)).toEqual(countsBefore);
     expect(second.credential).toBe(first.credential);
+  });
+
+  it("does not rewrite the legacy bootstrap marker when replaying a marked generation", async () => {
+    const value = await fixture();
+    const first = await bootstrap(value);
+    const seatRoot = join(value.paths.stateDirectory, "seats", projectKey(value.projectRoot));
+    const metadataPath = join(seatRoot, "generations", first.generation, "codex.json");
+    // Age the roster into the legacy shape the replay path marks, exactly as
+    // an installation predating originKind would present it.
+    const legacy = JSON.parse(await readFile(metadataPath, "utf8")) as Record<string, unknown>;
+    delete legacy.originKind;
+    await writeFile(metadataPath, `${JSON.stringify(legacy, null, 2)}\n`, { mode: 0o600 });
+
+    const marked = await bootstrap(value);
+    const markerPath = join(seatRoot, "legacy-bootstrap.json");
+    const markerBefore = await readFile(markerPath, "utf8");
+    const markerMtimeBefore = (await lstat(markerPath)).mtimeMs;
+
+    const replayed = await bootstrap(value);
+
+    expect(marked.generation).toBe(first.generation);
+    expect(replayed.receipt.mutated).toBe(false);
+    // An unconditional marker rewrite would contradict `mutated: false` on
+    // every repeat invocation.
+    await expect(readFile(markerPath, "utf8")).resolves.toBe(markerBefore);
+    expect((await lstat(markerPath)).mtimeMs).toBe(markerMtimeBefore);
   });
 
   it("renews an expiring roster on the next ordinary invocation and reports it as a mutation", async () => {
@@ -315,5 +358,8 @@ describe("zero-touch lifecycle action receipt", () => {
     // and no archive directory was created anywhere under the state directory.
     await expect(readFile(value.paths.databasePath)).resolves.toEqual(before);
     expect((await readdir(value.paths.stateDirectory)).sort()).not.toContain("archive");
-  });
+    // Unlike its siblings this scenario builds the whole current schema
+    // in-process rather than in a daemon child, then reclones it for the
+    // cutover inspection and the census, so it needs more than the 15s default.
+  }, 45_000);
 });

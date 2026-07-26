@@ -37,9 +37,15 @@ import { trustedWorkspaceIdentity } from "./workspace-trust.js";
  * the same Unix socket, so it is two loopback round trips against an already
  * warm daemon. Two seconds is roughly two orders of magnitude above the
  * observed local round trip yet an order of magnitude below the transport's
- * 30s request timeout, so the smoke always terminates on its own deadline
- * rather than inheriting a transport stall. An unbounded health check is a
- * hang, so the budget is enforced even when the daemon never answers.
+ * 30s request timeout, so the smoke does not inherit a transport stall.
+ *
+ * The budget bounds two different things, and only one of them absolutely.
+ * Settling is bounded under a responsive event loop: a timer aborts the
+ * connect or the pending RPCs. The reported outcome is bounded
+ * unconditionally, because elapsed time is measured and a smoke that overran
+ * is failed even if its work resolved — a synchronous frame parse can outlive
+ * the timer it then clears. An unbounded health check is a hang, so neither
+ * bound is left to the daemon answering.
  */
 export const IDENTITY_SMOKE_DEADLINE_MS = 2_000;
 
@@ -77,8 +83,18 @@ export type LifecycleAction =
 
 /**
  * One concise machine-readable record of every automatic action this lifecycle
- * call took. `mutated` is the idempotency assertion surface: a converged repeat
- * invocation reports `false` because no individual action changed state.
+ * call took.
+ *
+ * `mutated` is the idempotency assertion surface, and it means exactly one
+ * thing: no logical custody state changed. That is the daemon process
+ * identity, the active seat generation and its installed roster, and the
+ * database rows behind them. A converged repeat invocation reports `false`.
+ *
+ * It is deliberately not a claim that no bytes were written. A replay still
+ * stages the roster through a private temporary tree and re-verifies the
+ * installed files before discarding it, which touches directory metadata.
+ * Callers reasoning about disk effects must observe the filesystem; callers
+ * reasoning about whether a seat rotated or a daemon restarted read this.
  */
 export type LifecycleActionReceipt = Readonly<{
   schemaVersion: 1;
@@ -177,6 +193,11 @@ function schemaCutoverGate(databasePath: string, cause: unknown): SchemaCutoverG
     };
   const retained = inspectRetainedWork(databasePath);
   const total = retained.tables.reduce<number>((sum, { rows }) => sum + (rows ?? 0), 0);
+  // Digested once: the confirmation the cutover will demand must be the exact
+  // digest reported here, and each recomputation reclones the source set.
+  const sourceSetSha256 = inspection.state === "absent"
+    ? null
+    : stableSourceSetSha256(inspection.sources);
   return {
     schemaVersion: 1,
     kind: "agent-fabric-schema-cutover-gate",
@@ -184,9 +205,7 @@ function schemaCutoverGate(databasePath: string, cause: unknown): SchemaCutoverG
     databasePath,
     mismatch,
     retained,
-    sourceSetSha256: inspection.state === "absent"
-      ? null
-      : stableSourceSetSha256(inspection.sources),
+    sourceSetSha256,
     consequences: [
       `${String(total)} coordination rows are currently in ${databasePath} and stay there until approval.`,
       "Approval moves the whole SQLite source set into a new archive directory and starts an empty current-schema database.",
@@ -194,7 +213,7 @@ function schemaCutoverGate(databasePath: string, cause: unknown): SchemaCutoverG
       "Nothing is deleted: the archive keeps every source byte, and the cutover refuses if the source set changed since this report.",
     ],
     command: `"$HOME/.agents/scripts/agent-fabric" database archive-and-fresh --archive ABSOLUTE_NEW_DIRECTORY` +
-      (inspection.state === "absent" ? "" : ` --confirm-source-set ${stableSourceSetSha256(inspection.sources)}`),
+      (sourceSetSha256 === null ? "" : ` --confirm-source-set ${sourceSetSha256}`),
     displaced: false,
   };
 }
@@ -238,10 +257,19 @@ async function identityMailboxSmoke(input: {
     ]);
     const identity = await Promise.race([transport.call(FABRIC_OPERATIONS.whoami, {}), deadline]);
     const mailbox = await Promise.race([transport.call(FABRIC_OPERATIONS.getMailboxState, {}), deadline]);
+    // The timer alone does not bound the outcome: a socket callback can begin
+    // just before expiry, parse a frame synchronously past the deadline,
+    // resolve, and clear the overdue timer before it ever fires. Measuring
+    // elapsed time makes the deadline a real bound on what the receipt may
+    // report, whatever the event loop did in between.
+    const elapsedMs = Date.now() - startedAt;
+    if (elapsedMs > input.deadlineMs) {
+      return { ...base, outcome: "failed", elapsedMs, agentId: null, mailboxWatermark: null, code: "IDENTITY_SMOKE_DEADLINE_EXCEEDED" };
+    }
     return {
       ...base,
       outcome: "passed",
-      elapsedMs: Date.now() - startedAt,
+      elapsedMs,
       agentId: identity.agentId,
       mailboxWatermark: mailbox.contiguousWatermark,
       code: null,

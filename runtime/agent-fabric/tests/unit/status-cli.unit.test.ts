@@ -1056,10 +1056,14 @@ describe("machine status and doctor", () => {
     ], value);
     expect(result).toMatchObject({
       state: "idle",
+      healthy: true,
       cause: {
         checkId: "daemon-socket",
         precondition: "daemon discovery, election, process, socket and bootstrap contract agree",
-        satisfied: true,
+        // An idle lifecycle is healthy precisely because no daemon is expected;
+        // the daemon precondition is genuinely not met, and saying so is the
+        // causal report. `satisfied` tracks the check, never the health rollup.
+        satisfied: false,
         code: "DAEMON_ON_DEMAND_IDLE",
         recoverable: false,
       },
@@ -1068,6 +1072,64 @@ describe("machine status and doctor", () => {
       expect(check.precondition.length).toBeGreaterThan(0);
       expect(check.precondition).not.toBe(check.id);
     }
+  });
+
+  it("never reports an unknown precondition as satisfied while staying healthy", async () => {
+    const value = await paths();
+    const fixture = await createPortableActivatedPrimaryFixture();
+    cleanup.push(fixture.directory);
+    const result = await fabricDoctor([
+      "--agents-home", fixture.directory,
+      "--trusted-config", fixture.configPath,
+      "--compatibility", fixture.compatibilityPath,
+      "--compatibility-schema", fixture.schemaPath,
+    ], value, {
+      providerProbeTimeoutMs: 250,
+      probeProviderInterface: async () => await new Promise(() => undefined),
+    });
+    // The idle-on-unknown mapping is #406's design and is preserved.
+    expect(result).toMatchObject({
+      healthy: true,
+      state: "idle",
+      cause: {
+        checkId: "provider-identity",
+        precondition: "each primary provider matches its pinned executable identity",
+        satisfied: false,
+        code: "PROVIDER_IDENTITY_UNKNOWN",
+        recoverable: false,
+      },
+    });
+  });
+
+  it("classifies a stale protocol build itself rather than declaring it unobservable", async () => {
+    const value = await paths();
+    const fixture = await createPortableActivatedPrimaryFixture();
+    cleanup.push(fixture.directory);
+    const result = await fabricDoctor([
+      "--agents-home", fixture.directory,
+      "--trusted-config", fixture.configPath,
+      "--compatibility", fixture.compatibilityPath,
+      "--compatibility-schema", fixture.schemaPath,
+    ], value, {
+      preflightProtocolBuild: async () => {
+        throw Object.assign(new Error("local @local/agent-fabric-protocol dist is missing or older than its build inputs"), {
+          code: "AGENT_FABRIC_PROTOCOL_BUILD_STALE",
+        });
+      },
+    });
+    // The package bin points straight at dist/cli/main.js, so doctor must reach
+    // this state on its own; only the wrapper preempts it by exiting 78 first.
+    expect(result).toMatchObject({
+      healthy: false,
+      state: "blocked",
+      code: "AGENT_FABRIC_PROTOCOL_BUILD_STALE",
+      cause: {
+        checkId: "protocol-build",
+        precondition: "the local protocol build is newer than its TypeScript sources",
+        satisfied: false,
+        recoverable: false,
+      },
+    });
   });
 
   it("names the unsatisfied precondition and refuses to call a blocked cause recoverable", async () => {
@@ -1119,7 +1181,7 @@ describe("machine status and doctor", () => {
     }
   });
 
-  it("declares the protocol-build precondition it structurally cannot observe", async () => {
+  it("declares which entrypoint intercepts the protocol-build precondition", async () => {
     const value = await paths();
     const fixture = await createPortableActivatedPrimaryFixture();
     cleanup.push(fixture.directory);
@@ -1129,14 +1191,18 @@ describe("machine status and doctor", () => {
       "--compatibility", fixture.compatibilityPath,
       "--compatibility-schema", fixture.schemaPath,
     ], value);
-    // The launcher preflight exits 78 before doctor starts, so no doctor state
-    // can ever carry AGENT_FABRIC_PROTOCOL_BUILD_STALE. Declaring the boundary
-    // keeps the state machine honest instead of implying the gap is healthy.
-    expect(result.unobservable).toEqual([
-      expect.objectContaining({ code: "AGENT_FABRIC_PROTOCOL_BUILD_STALE", issue: "#439" }),
+    // The interception is entrypoint-specific, not structural: doctor owns the
+    // check, and only scripts/agent-fabric preempts it by exiting 78 first.
+    expect(result.wrapperIntercepted).toEqual([
+      expect.objectContaining({
+        code: "AGENT_FABRIC_PROTOCOL_BUILD_STALE",
+        check: "protocol-build",
+        observedByDoctor: true,
+        interceptedBy: "scripts/agent-fabric",
+        issue: "#439",
+      }),
     ]);
-    expect((result.checks as Array<{ code: string }>).map(({ code }) => code))
-      .not.toContain("AGENT_FABRIC_PROTOCOL_BUILD_STALE");
+    expect((result.checks as Array<{ id: string }>).map(({ id }) => id)).toContain("protocol-build");
   });
 
   it("keeps database preflight failure unhealthy while the daemon is idle", async () => {
