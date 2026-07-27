@@ -509,7 +509,7 @@ A terminal failure is terminal, not ambiguous. Every proved-effect terminal -- s
 provider-terminal-failure -- settles complete authenticated usage exactly. If usage is absent or partial, the same
 transaction conservatively consumes the full remaining spendable reservation. Each releases terminal concurrency
 capacity. Proved no-effect releases the reservation; ambiguity retains it. No retry or redispatch occurs. Raw answers,
-raw errors, diagnostics and adapter results stay private. result_digest uses the exact six-arm the Agent Fabric contract canonical domain,
+raw errors, diagnostics and adapter results stay private. result_digest uses the exact six-arm Agent Fabric contract canonical domain,
 including the stable run terminal sequence and coverage-summary digest where applicable, and excludes usage. Generated
 golden vectors reject generic terminal-state or cross-arm fields.
 
@@ -920,7 +920,7 @@ retired-unknown use their exact receipt-v2 disposition arm and a non-null settle
 provider I/O, marks the action noncertifying while unresolved and freezes only that reservation's dimensions. All
 certifying route/action rows are excluded from generic startup recovery and prepared-action re-enqueue.
 
-The indexed public read by scoped canonical pair returns the exact the Agent Fabric contract providerRouteIntegrityRecoveryProjectionV1,
+The indexed public read by scoped canonical pair returns the exact Agent Fabric contract providerRouteIntegrityRecoveryProjectionV1,
 including target/slot/attempt, recovery generation/state/reason, reservation digest, route/lookup/settlement/ evidence
 fields and derived retirement eligibility. Operator Evidence emits its closed recovery-action arm. Receipt recovery rows
 are watermark audit only and are never accepted as mutation authority.

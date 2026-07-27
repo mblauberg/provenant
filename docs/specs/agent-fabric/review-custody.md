@@ -241,7 +241,7 @@ config and implements exact-content rename pairing plus the closed Myers/binary 
 Triggers enforce arm nullability, path/status ordering and equality between the bundle's stored codec/rules/set digests
 and the complete child set.
 
-Generated canonicalisers own the exact the Agent Fabric contract preimages for requirement-map, evidence-closure, repository-source-state,
+Generated canonicalisers own the exact Agent Fabric contract preimages for requirement-map, evidence-closure, repository-source-state,
 coverage and mandatory-read-set digests. Stored map/evidence/source/object digests equality-copy their registered bytes.
 Child tables enforce every body ordinal plus changed-file, evidence, object, finding-page and mandatory-entry
 order/uniqueness. Golden vectors and permutation negatives cover every domain. Startup/prepare must compare the
@@ -308,7 +308,7 @@ slot heads, then transitions `built -> succeeded` and stores the target ref. The
 conflicted or failed; no partial target is visible.
 
 The only preparation edges are `prepared -> building`, `building -> built| failed` and `built ->
-succeeded|conflicted|failed`. State, terminal code/evidence and target-ref triggers enforce the exact the Agent Fabric contract union.
+succeeded|conflicted|failed`. State, terminal code/evidence and target-ref triggers enforce the exact Agent Fabric contract union.
 Conflicts are only target-generation, chair-binding, task-or-authority, delivery-basis, repository- source, profile,
 predecessor-head or predecessor-action change. Failures are only bundle-too-large, unsupported-repository-state,
 source-read-failed, content-integrity-failed or certifying-capability-unavailable. Succeeded carries only target ref;
@@ -346,7 +346,7 @@ active pointer and advances by one CAS. A different agent or any non-generation 
 the target stale.
 
 `review_target_rebind_receipts` is insert-only and unique by run/target/exact agent/custody/revision ref plus command
-replay. It stores the exact the Agent Fabric contract receipt and digest, prior/new binding generations/digests, immutable
+replay. It stores the exact Agent Fabric contract receipt and digest, prior/new binding generations/digests, immutable
 subject/bundle/profile digests and before/after head/open/repair set digests. Both tables equality-copy the exact target
 `review_subject_digest`; triggers reject any receipt or binding whose immutable target fields do not reproduce that
 digest. The public `review-target.rebind` transaction authenticates the current chair, derives the
@@ -420,7 +420,7 @@ resolvedReviewProfileSlotV1: adapter
 class/ID/ contract, family/model, requested/tagged resolved effort, aliases, source/runtime/platform identity,
 provider/internal-step/read ceilings and explicit reviewer-family relation. Publisher eligibility remains the separate
 proved lineage/family-equals-target predicate. The baseline requires exactly native, other-primary, cursor-grok and
-agy-gemini and enforces the exact the Agent Fabric contract mapping. Native is exempt; all three external slots require reviewer family
+agy-gemini and enforces the exact Agent Fabric contract mapping. Native is exempt; all three external slots require reviewer family
 distinct from target-chair family. No publisher-independence column/blocker exists. Missing or extra slots prevent
 target commit.
 

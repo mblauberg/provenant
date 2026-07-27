@@ -686,7 +686,7 @@ adapter contract, route policy, discovery surface, dataset or expired record is
 not current route evidence. Capability and safety constraints remain hard gates
 regardless of an evaluation result.
 
-Every topology-bearing evaluation references the exact the Agent Fabric contract
+Every topology-bearing evaluation references the exact Agent Fabric contract
 `topologyWavePlanV1` row through the closed the Agent Fabric contract
 `topologyWavePlanRefV1`; the ref equality-binds session/run/task/wave/revision/
 digest to the current or historical plan row. That plan already owns

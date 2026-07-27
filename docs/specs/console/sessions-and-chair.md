@@ -95,7 +95,7 @@ specialise this Console behaviour; they do not create another specification or
 state owner.
 
 Each coordination run still has exactly one accountable chair. Before a
-topology wave starts, Runs consumes only the exact the Agent Fabric contract
+topology wave starts, Runs consumes only the exact Agent Fabric contract
 `topologyWavePlanV1` plus `topologyWavePlanCurrentV1` projection. It shows
 run/task/wave/revision/predecessor, dependency and decomposability evidence,
 topology mode, current chair, every stage owner and write partition, contention,
