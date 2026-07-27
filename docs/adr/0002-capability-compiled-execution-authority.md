@@ -46,8 +46,8 @@ requested/effective profile, compiler version and exact native settings.
 The architecture decision does not authorise either execution slice. W010-A
 requires separate human approval of the crucial-scope profile/compiler change
 and thin recorder. W010-B requires a separate human grant naming the exact live
-tuple, calls, cost, time and host. Until those gates are granted,
-`workspace-write-offline` remains unavailable.
+tuple, calls, cost, time and host. Those gates govern the grant; this ADR does
+not record whether `workspace-write-offline` is currently available.
 
 **Direct cutover, no legacy bridge** (human directive, overriding codex-pair's
 proposed `LegacyAuthorityInputV1` quarantine): the repo is pre-release with no

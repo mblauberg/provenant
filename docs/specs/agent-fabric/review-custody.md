@@ -75,7 +75,7 @@ other sequences able to alter or disguise the operator display. Newline and ordi
 within page bounds. The source, complete rendered and page digests are calculated over their explicitly named byte
 domains after the closed transformation order.
 
-Migration 0010 rebuilds `artifacts` as the one evidence metadata registry while leaving all bytes with their existing
+The baseline schema defines `artifacts` as the one evidence metadata registry while leaving all bytes with their existing
 owners. Additive closed columns are exact `project_id`, nullable `project_session_id`/`run_id`/`task_id`, publisher kind
 and ref, source kind, evidence kind, canonical prefixed SHA-256, registry state, quarantine reason and positive
 revision. Active source/scope/path/digest are immutable. Partial unique indexes enforce one project-, session- or

@@ -44,7 +44,7 @@ A provider TUI runs in a terminal the operator controls: either the terminal whe
 - `verified-boundary-inject` requires an integration that returns the delivered
   message IDs to the fabric;
 - `cooperative-pull` requires the agent to call `fabric_message_receive` and
-  `fabric_message_ack` at instructed turn boundaries;
+  `fabric_delivery_acknowledge` at instructed turn boundaries;
 - `notify-only` surfaces unread state but cannot satisfy a bounded automatic
   response requirement.
 

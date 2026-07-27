@@ -25,7 +25,8 @@ discovery; it is never a source of truth.
 ## Consequences
 
 - The skill-count case is already fixed this way on merged `main`
-  (README reports 33 with an equality test in `tests/test_harness_contract.py`).
+  (README reports the generated total with an equality test in
+  `tests/test_harness_contract.py`).
 - No proposal manifest is retained in the live tree. The rejected design and
   its rationale remain in this ADR and Git history, without a live
   cross-reference dependency.
