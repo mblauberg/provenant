@@ -119,8 +119,12 @@ not read an absent `Watch out for` as an endorsement.
 
 ### Gemini 3.1 Pro (Google)
 
-- **Good at:** UI and UX review. Acceptable at reviewing writing style.
-- **Watch out for:** nothing recorded.
+- **Good at:** UI and UX review. The owner's first choice for the natural,
+  human voice on human-facing prose, and so the preferred final polishing
+  writer — see [Human-facing final polish](#human-facing-final-polish). Recorded
+  as the owner's stated preference, not a measured result.
+- **Watch out for:** a polish pass is where substance quietly drifts. The chair
+  keeps the last word on meaning; take the voice, re-check the facts.
 - **Cost:** not recorded.
 - **Reach:** `agy` adapter (preferred), `cursor` as fallback; `google` family.
 
@@ -149,6 +153,25 @@ Reach for the cheapest *diverse* family — Luna, Sonnet at low effort, Gemini
 Flash, or the open models behind `kiro` — and confine it to objective fields.
 Cheap minds are worth their price on extraction and classification and are a
 poor bet on judgement.
+
+### Human-facing final polish
+
+For prose a person will actually read — an email, a document going out for
+review, a public README, a release note — consider one last pass by a model
+chosen for voice rather than for reasoning. Gemini 3.1 Pro is the current
+preference. Ask it for rewrite advice or a full suggested rewrite.
+
+This is a suggestion, never a required leg. Three bounds keep it safe:
+
+- **The chair owns substance.** Treat the return as a proposal. Adopt the
+  phrasing, then diff it against the source for changed facts, numbers, names,
+  citations, hedging and scope. A polish pass that alters meaning is rejected,
+  not negotiated.
+- **Human-facing work only.** Skip it for skills, specs, receipts, commit
+  messages and other agent-facing files. Their readers are machines and the
+  overhead buys nothing.
+- **Last, not instead.** It follows the owning writing skill rather than
+  replacing it; `natural-writing` and its specialists still own the doctrine.
 
 ### Effort as a substitute for tier
 
