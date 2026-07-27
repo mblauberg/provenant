@@ -14,7 +14,11 @@ import {
   connectFabricDaemon,
   deriveTrustedGitExecutionProfileDigest,
 } from "../../../src/index.ts";
-import { startFabricDaemon, type FabricDaemonHandle } from "../../../src/daemon/client.ts";
+import {
+  preflightFabricDaemonStart,
+  startFabricDaemon,
+  type FabricDaemonHandle,
+} from "../../../src/daemon/client.ts";
 import { MCP_ROOT_AUTHORITY } from "../../support/mcp-testkit.ts";
 import { createCurrentSessionRun } from "../../support/current-session-testkit.ts";
 
@@ -211,6 +215,51 @@ afterEach(async () => {
 });
 
 describe("production daemon bootstrap wiring", () => {
+  it("accepts the authoritative review catalogue at production startup preflight", async () => {
+    await expect(preflightFabricDaemonStart()).resolves.toBeUndefined();
+  });
+
+  it("verifies the code-adjacent review catalogue instead of a deployment-home copy", async () => {
+    const root = await mkdtemp(join(tmpdir(), "fabric-review-catalogue-"));
+    roots.push(root);
+    const agentsHome = join(root, "agents-home");
+    const profilePath = join(agentsHome, "config/review-profiles/certifying-review-four-slot-v1.json");
+    const schemaPath = join(agentsHome, "runtime/agent-fabric/schemas/review-profile.v1.schema.json");
+    await Promise.all([
+      mkdir(join(agentsHome, "config/review-profiles"), { recursive: true }),
+      mkdir(join(agentsHome, "runtime/agent-fabric/schemas"), { recursive: true }),
+    ]);
+    const profile = JSON.parse(await readFile(
+      new URL("../../../../../config/review-profiles/certifying-review-four-slot-v1.json", import.meta.url),
+      "utf8",
+    )) as { profileId: string };
+    profile.profileId = "silently-rewritten-profile";
+    await Promise.all([
+      writeFile(profilePath, `${JSON.stringify(profile)}\n`, "utf8"),
+      writeFile(schemaPath, await readFile(
+        new URL("../../../schemas/review-profile.v1.schema.json", import.meta.url),
+        "utf8",
+      ), "utf8"),
+    ]);
+    const configPath = join(root, "agent-fabric.json");
+    await writeFile(configPath, `${JSON.stringify({
+      schemaVersion: 1,
+      allowedAdapters: [],
+      activeAdapters: [],
+      allowedProfiles: ["headless"],
+      workspaceRoots: [root],
+    })}\n`, "utf8");
+
+    await expect(preflightFabricDaemonStart({
+      configuration: {
+        globalConfigPath: configPath,
+        compatibilityPath: fileURLToPath(new URL("../../../../../config/adapter-compatibility.yaml", import.meta.url)),
+        compatibilitySchemaPath: fileURLToPath(new URL("../../../schemas/adapter-compatibility.schema.json", import.meta.url)),
+        agentsHome,
+      },
+    })).resolves.toBeUndefined();
+  });
+
   it("opens and owns the configured local lifecycle receipt authority", async () => {
     const root = await mkdtemp(join(tmpdir(), "f-pra-"));
     roots.push(root);

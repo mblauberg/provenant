@@ -34,6 +34,7 @@ import { composeDaemonConfiguration } from "./composition.js";
 import type { HerdrDaemonProcessConfiguration } from "./herdr-composition.js";
 import type { OptionalGitHubHostedChecksConfiguration } from "../operator/github-hosted-checks.js";
 import type { TrustedGitConfiguration } from "../operator/trusted-git-registry.js";
+import { verifyReviewProfileCatalogueDigest } from "../review/profile/catalogue-digest.js";
 
 export { FabricRemoteError } from "../transport/ndjson-rpc.js";
 export { connectFabricDaemon, FabricDaemonClient } from "./rpc-client.js";
@@ -230,6 +231,16 @@ type PrivateDaemonAttachment = {
   receipt: PrivateDiscoveryCapabilityReceipt;
   owner: PrivateDiscoveryOwner;
 };
+
+export async function preflightFabricDaemonStart(
+  _options: Pick<DaemonStartOptions, "configuration"> = {},
+): Promise<void> {
+  // The pin is compiled from this package tree, so verify the verifier's
+  // code-adjacent tree too. `agentsHome` may be a fixture, deployment home, or
+  // another worktree and is not the authority for this source artefact.
+  await verifyReviewProfileCatalogueDigest();
+  await preflightProtocolBuild();
+}
 
 function normalizedStartOptions(options: DaemonStartOptions): DaemonStartOptions {
   return {
@@ -634,7 +645,11 @@ export async function startFabricDaemon(options: DaemonStartOptions): Promise<Fa
       requiredProtocolVersion: FABRIC_PROTOCOL_VERSION,
       requiredFeatures: ["rpc", MCP_BOOTSTRAP_CREDENTIALS_FEATURE],
       election,
-      preflight: preflightProtocolBuild,
+      preflight: async () => {
+        // This runs only when no compatible incumbent is attached: the
+        // catalogue is a daemon-start invariant, not a per-client handshake.
+        await preflightFabricDaemonStart(normalized);
+      },
       handshake: async () => {
         if (!bootstrapDirectoriesPrepared && !existsSync(normalized.runtimeDirectory)) {
           return {

@@ -890,7 +890,7 @@ reviewTargetV1:
   initialChairBindingDigest: sha256-prefixed-reviewTargetChairBindingV1-digest
   completionProfile:
     profileId: certifying-review-four-slot-v1
-    profileSchemaDigest: sha256-prefixed-checked-in-schema
+    profileSchemaDigest: sha256-prefixed-checked-in-schema-profile-catalogue
     resolvedProfileDigest: sha256-prefixed-target-snapshot
     slots: exact-four-resolved-slots
 ~~~

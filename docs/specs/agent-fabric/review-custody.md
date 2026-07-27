@@ -408,7 +408,15 @@ change appends a revision, CAS-advances its head and global revision in one tran
 and completion use this same table; neither infers capability from a missing target or raw adapter error.
 
 review_profile_snapshots and review_profile_slots normalise the exact four-slot target snapshot. The checked-in
-schema/profile catalogue digest is verified at startup. Slot rows byte-match resolvedReviewProfileSlotV1: adapter
+schema/profile catalogue digest covers, in fixed order, `runtime/agent-fabric/schemas/review-profile.v1.schema.json`
+then `config/review-profiles/certifying-review-four-slot-v1.json`, represented as repository-canonical JSON with their
+stable relative paths. Before spawning a new daemon, startup verifies those on-disk documents against the checked-in
+digest and fails closed on mismatch, invalid JSON or absence. The caller-supplied `profileSchemaDigest` remains the
+wire claim and availability foreign key, but profile resolution accepts it only when it equals that authoritative
+checked-in digest; resolution also verifies the caller-supplied profile object against its generated member digest,
+so it cannot resolve different content under that catalogue digest. `npm run profile:catalogue:pin` is the deliberate
+regeneration command. Slot rows byte-match
+resolvedReviewProfileSlotV1: adapter
 class/ID/ contract, family/model, requested/tagged resolved effort, aliases, source/runtime/platform identity,
 provider/internal-step/read ceilings and explicit reviewer-family relation. Publisher eligibility remains the separate
 proved lineage/family-equals-target predicate. The baseline requires exactly native, other-primary, cursor-grok and
