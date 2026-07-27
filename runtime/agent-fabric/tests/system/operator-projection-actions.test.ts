@@ -18,6 +18,7 @@ import {
   type OperatorActionReconcileRequest,
   type OperatorCapabilityCredential,
   type OperatorDetailReadRequest,
+  type OperatorViewRow,
   type OperatorViewPageRequest,
   type ProjectDiscoveryRequest,
   type ProjectionEventsRequest,
@@ -40,6 +41,7 @@ import {
   type OperatorLifecycleRecoveryCustodyPort,
   type OperatorChairLiveHandoffCustodyPort,
 } from "../../src/operator/action-store.ts";
+import { boundedOperatorActivityRows } from "../../src/operator/activity-projection.ts";
 import { OperatorProjectionStore } from "../../src/operator/projection-store.ts";
 import { OperatorStore } from "../../src/operator/store.ts";
 import { ScopedGateStore } from "../../src/gates/store.ts";
@@ -55,14 +57,16 @@ function identifier<Kind extends string>(value: string): ReturnType<typeof parse
   return parseIdentifier<Kind>(value, "test.identifier");
 }
 
-function setupProjection(): {
+function setupProjection(options: Readonly<{
+  verbose?: (message?: unknown, ...additionalArgs: unknown[]) => void;
+}> = {}): {
   database: Database.Database;
   projections: OperatorProjectionStore;
   operatorStore: OperatorStore;
   context: AuthenticatedOperatorContext;
   credential: OperatorCapabilityCredential;
 } {
-  const database = new Database(":memory:");
+  const database = new Database(":memory:", { verbose: options.verbose });
   databases.push(database);
   applyMigrations(database);
   database.exec(`
@@ -1087,6 +1091,7 @@ describe("operator projection store", () => {
         },
       },
     });
+    parseOperationResult(FABRIC_OPERATIONS.projectionDetailRead, detail);
     if (
       detail.status !== "current" ||
       detail.detail.freshness !== "live" ||
@@ -1125,6 +1130,10 @@ describe("operator projection store", () => {
       ) {
         throw new Error("expected activity member content page");
       }
+      parseOperationResult(
+        FABRIC_OPERATIONS.projectionDetailRead,
+        memberPage,
+      );
       pages.push(memberPage.detail.value.content);
       const next = memberPage.detail.value.nextDetailRef;
       if (next === null) break;
@@ -1147,6 +1156,233 @@ describe("operator projection store", () => {
     }
   });
 
+  it("uses the indexed event lookup for ungrouped activity detail", () => {
+    const statements: string[] = [];
+    const fixture = setupProjection({
+      verbose: (message) => {
+        if (typeof message === "string") statements.push(message);
+      },
+    });
+    const projectId = identifier<"ProjectId">("project_01");
+    const projectSessionId = identifier<"ProjectSessionId">("session_01");
+    const snapshot = fixture.projections.snapshot({
+      credential: fixture.credential,
+      projectId,
+      projectSessionId,
+    }, "include");
+    statements.length = 0;
+
+    const detail = fixture.projections.detail({
+      credential: fixture.credential,
+      projectId,
+      projectSessionId,
+      snapshotRevision: snapshot.snapshotRevision,
+      detailRef: {
+        kind: "activity",
+        eventId: identifier<"EventId">("event_01"),
+        expectedRevision: 1,
+      },
+    });
+
+    expect(detail).toMatchObject({
+      status: "current",
+      detail: { value: { kind: "activity", eventId: "event_01" } },
+    });
+    const activityReads = statements.filter((statement) =>
+      statement.includes("FROM events e") &&
+      statement.includes("JOIN observer_event_sequence")
+    );
+    expect(activityReads).toHaveLength(1);
+    expect(activityReads[0]).toMatch(/WHERE e\.event_id='event_01' AND s\.project_id='project_01'/u);
+  });
+
+  it("reuses one revision-bound activity projection for a group and all member reads", () => {
+    const statements: string[] = [];
+    const fixture = setupProjection({
+      verbose: (message) => {
+        if (typeof message === "string") statements.push(message);
+      },
+    });
+    const insertEvent = fixture.database.prepare(`
+      INSERT INTO events(event_id, run_id, type, actor_agent_id, payload_json, created_at)
+      VALUES (?, 'run_01', 'tool-invoked', 'chair_01', '{"taskId":"task_01"}', ?)
+    `);
+    const insertSequence = fixture.database.prepare(`
+      INSERT INTO observer_event_sequence(event_id) VALUES (?)
+    `);
+    fixture.database.transaction(() => {
+      for (let index = 1; index < 32; index += 1) {
+        const eventId = `event_group_${String(index).padStart(2, "0")}`;
+        insertEvent.run(eventId, now - 300 + index);
+        insertSequence.run(eventId);
+      }
+    })();
+    const projectId = identifier<"ProjectId">("project_01");
+    const projectSessionId = identifier<"ProjectSessionId">("session_01");
+    const snapshot = fixture.projections.snapshot({
+      credential: fixture.credential,
+      projectId,
+      projectSessionId,
+    }, "include");
+    statements.length = 0;
+    const grouped = fixture.projections.viewPage(
+      {
+        credential: fixture.credential,
+        projectId,
+        projectSessionId,
+        view: "activity",
+        snapshotRevision: snapshot.snapshotRevision,
+        cursor: 0,
+        limit: 10,
+      },
+      "include",
+      "include",
+      "include",
+      "include",
+      "include",
+      "include",
+      "include",
+    );
+    if (grouped.status !== "page") throw new Error("expected grouped activity page");
+    const groupRef = grouped.rows[0]?.fact.freshness === "live"
+      ? grouped.rows[0].fact.value.detailRef
+      : undefined;
+    if (groupRef?.kind !== "activity" || !("groupId" in groupRef)) {
+      throw new Error("expected grouped activity reference");
+    }
+    const detail = fixture.projections.detail(
+      {
+        credential: fixture.credential,
+        projectId,
+        projectSessionId,
+        snapshotRevision: snapshot.snapshotRevision,
+        detailRef: groupRef,
+      },
+      "include",
+      "include",
+      "include",
+      "include",
+      "include",
+      "include",
+    );
+    if (
+      detail.status !== "current" ||
+      detail.detail.freshness !== "live" ||
+      detail.detail.value.kind !== "activity" ||
+      !("group" in detail.detail.value)
+    ) {
+      throw new Error("expected grouped activity detail");
+    }
+    expect(detail.detail.value.group.count).toBe(32);
+    for (const member of detail.detail.value.memberDetails) {
+      if (member.status !== "referenced") continue;
+      expect(fixture.projections.detail(
+        {
+          credential: fixture.credential,
+          projectId,
+          projectSessionId,
+          snapshotRevision: snapshot.snapshotRevision,
+          detailRef: member.detailRef,
+        },
+        "include",
+        "include",
+        "include",
+        "include",
+        "include",
+        "include",
+      )).toMatchObject({
+        status: "current",
+        detail: { value: { eventId: member.eventId, contentOffset: 0 } },
+      });
+    }
+    const fullSessionActivityReads = statements.filter((statement) =>
+      statement.includes("FROM events e") &&
+      statement.includes("JOIN observer_event_sequence") &&
+      !statement.includes("WHERE e.event_id=")
+    );
+    expect(fullSessionActivityReads).toHaveLength(1);
+  });
+
+  it("discards a cached activity projection when the snapshot revision advances", () => {
+    const fixture = setupProjection();
+    const projectId = identifier<"ProjectId">("project_01");
+    const projectSessionId = identifier<"ProjectSessionId">("session_01");
+    const firstSnapshot = fixture.projections.snapshot({
+      credential: fixture.credential,
+      projectId,
+      projectSessionId,
+    }, "include");
+    const firstPage = fixture.projections.viewPage(
+      {
+        credential: fixture.credential,
+        projectId,
+        projectSessionId,
+        view: "activity",
+        snapshotRevision: firstSnapshot.snapshotRevision,
+        cursor: 0,
+        limit: 10,
+      },
+      "include",
+      "include",
+      "include",
+      "include",
+      "include",
+      "include",
+      "include",
+    );
+    if (
+      firstPage.status !== "page" ||
+      firstPage.rows[0]?.fact.freshness !== "live" ||
+      !("group" in firstPage.rows[0].fact.value.summary)
+    ) {
+      throw new Error("expected first grouped activity page");
+    }
+    expect(firstPage.rows[0].fact.value.summary.group.count).toBe(1);
+
+    fixture.database.exec(`
+      INSERT INTO events(event_id, run_id, type, actor_agent_id, payload_json, created_at)
+      VALUES (
+        'event_revision_02', 'run_01', 'tool-invoked', 'chair_01',
+        '{"taskId":"task_01"}', ${now - 250}
+      );
+      INSERT INTO observer_event_sequence(event_id) VALUES ('event_revision_02');
+    `);
+    const secondSnapshot = fixture.projections.snapshot({
+      credential: fixture.credential,
+      projectId,
+      projectSessionId,
+    }, "include");
+    expect(secondSnapshot.snapshotRevision).toBeGreaterThan(
+      firstSnapshot.snapshotRevision,
+    );
+    const secondPage = fixture.projections.viewPage(
+      {
+        credential: fixture.credential,
+        projectId,
+        projectSessionId,
+        view: "activity",
+        snapshotRevision: secondSnapshot.snapshotRevision,
+        cursor: 0,
+        limit: 10,
+      },
+      "include",
+      "include",
+      "include",
+      "include",
+      "include",
+      "include",
+      "include",
+    );
+    if (
+      secondPage.status !== "page" ||
+      secondPage.rows[0]?.fact.freshness !== "live" ||
+      !("group" in secondPage.rows[0].fact.value.summary)
+    ) {
+      throw new Error("expected revised grouped activity page");
+    }
+    expect(secondPage.rows[0].fact.value.summary.group.count).toBe(2);
+  });
+
   it("byte-bounds grouped view and projection pages with deterministic cursors", () => {
     const fixture = setupProjection();
     const projectId = identifier<"ProjectId">("project_01");
@@ -1159,7 +1395,7 @@ describe("operator projection store", () => {
       INSERT INTO observer_event_sequence(event_id) VALUES (?)
     `);
     fixture.database.transaction(() => {
-      for (let groupIndex = 0; groupIndex < 100; groupIndex += 1) {
+      for (let groupIndex = 0; groupIndex < 20; groupIndex += 1) {
         for (let memberIndex = 0; memberIndex < 32; memberIndex += 1) {
           const eventId =
             `event_batch_${String(groupIndex).padStart(3, "0")}_${
@@ -1187,7 +1423,7 @@ describe("operator projection store", () => {
         view: "activity",
         snapshotRevision: snapshot.snapshotRevision,
         cursor: 0,
-        limit: 100,
+        limit: 20,
       },
       "include",
       "include",
@@ -1198,15 +1434,15 @@ describe("operator projection store", () => {
       "include",
     );
     if (groupedView.status !== "page") throw new Error("expected grouped view page");
-    expect(groupedView.rows.length).toBeGreaterThan(0);
-    expect(groupedView.rows.length).toBeLessThan(100);
-    expect(groupedView.nextCursor).toBe(groupedView.rows.length);
+    expect(groupedView.rows).toHaveLength(8);
+    expect(groupedView.nextCursor).toBe(8);
     expect(groupedView.hasMore).toBe(true);
     expect(Buffer.byteLength(JSON.stringify({
       jsonrpc: "2.0",
       id: "grouped-view-page",
       result: groupedView,
     }))).toBeLessThan(PROTOCOL_LIMITS.maximumFrameBytes);
+    parseOperationResult(FABRIC_OPERATIONS.projectionViewPage, groupedView);
 
     const groupedProjection = fixture.projections.page(
       {
@@ -1215,7 +1451,7 @@ describe("operator projection store", () => {
         projectSessionId,
         view: "activity",
         after: 0,
-        limit: 100,
+        limit: 20,
       },
       "include",
       "include",
@@ -1224,17 +1460,291 @@ describe("operator projection store", () => {
     if (groupedProjection.page.freshness !== "live") {
       throw new Error("expected grouped projection page");
     }
-    expect(groupedProjection.page.value.items.length).toBeGreaterThan(0);
-    expect(groupedProjection.page.value.items.length).toBeLessThan(100);
-    expect(groupedProjection.page.value.nextCursor).toBe(
-      groupedProjection.page.value.items.length,
-    );
+    expect(groupedProjection.page.value.items).toHaveLength(8);
+    expect(groupedProjection.page.value.nextCursor).toBe(8);
     expect(groupedProjection.page.value.hasMore).toBe(true);
     expect(Buffer.byteLength(JSON.stringify({
       jsonrpc: "2.0",
       id: "grouped-projection-page",
       result: groupedProjection,
     }))).toBeLessThan(PROTOCOL_LIMITS.maximumFrameBytes);
+    parseOperationResult(
+      FABRIC_OPERATIONS.projectionPage,
+      groupedProjection,
+    );
+
+    const groupedRun = fixture.projections.runPage({
+      credential: fixture.credential,
+      projectId,
+      projectSessionId,
+      target: {
+        kind: "coordination-run",
+        coordinationRunId: identifier<"CoordinationRunId">("run_01"),
+      },
+      snapshotRevision: snapshot.snapshotRevision,
+      section: "activity",
+      cursor: 0,
+      limit: 20,
+    }, "include");
+    if (groupedRun.status !== "page") {
+      throw new Error("expected grouped run activity page");
+    }
+    expect(groupedRun.entries).toHaveLength(8);
+    expect(groupedRun.nextCursor).toBe(8);
+    expect(groupedRun.hasMore).toBe(true);
+    parseOperationResult(FABRIC_OPERATIONS.projectionRunPage, groupedRun);
+  });
+
+  it("uses the codec rows-node budget for a fifty-row grouped page", () => {
+    const fixture = setupProjection();
+    const projectId = identifier<"ProjectId">("project_01");
+    const projectSessionId = identifier<"ProjectSessionId">("session_01");
+    const insertEvent = fixture.database.prepare(`
+      INSERT INTO events(event_id, run_id, type, actor_agent_id, payload_json, created_at)
+      VALUES (?, 'run_01', 'task-updated', 'chair_01', ?, ?)
+    `);
+    const insertSequence = fixture.database.prepare(`
+      INSERT INTO observer_event_sequence(event_id) VALUES (?)
+    `);
+    fixture.database.transaction(() => {
+      for (let groupIndex = 0; groupIndex < 50; groupIndex += 1) {
+        for (let memberIndex = 0; memberIndex < 4; memberIndex += 1) {
+          const eventId =
+            `event_four_${String(groupIndex).padStart(2, "0")}_${
+              String(memberIndex).padStart(2, "0")
+            }`;
+          insertEvent.run(
+            eventId,
+            JSON.stringify({ taskId: `task_four_${String(groupIndex).padStart(2, "0")}` }),
+            now - 500 + groupIndex,
+          );
+          insertSequence.run(eventId);
+        }
+      }
+    })();
+    const snapshot = fixture.projections.snapshot({
+      credential: fixture.credential,
+      projectId,
+      projectSessionId,
+    }, "include");
+    const grouped = fixture.projections.viewPage(
+      {
+        credential: fixture.credential,
+        projectId,
+        projectSessionId,
+        view: "activity",
+        snapshotRevision: snapshot.snapshotRevision,
+        cursor: 0,
+        limit: 50,
+      },
+      "include",
+      "include",
+      "include",
+      "include",
+      "include",
+      "include",
+      "include",
+    );
+
+    if (grouped.status !== "page") throw new Error("expected grouped view page");
+    expect(grouped.rows).toHaveLength(37);
+    expect(grouped.nextCursor).toBe(37);
+    expect(Buffer.byteLength(JSON.stringify({
+      jsonrpc: "2.0",
+      id: "fifty-grouped-rows",
+      result: grouped,
+    }))).toBeLessThan(PROTOCOL_LIMITS.maximumFrameBytes);
+    parseOperationResult(FABRIC_OPERATIONS.projectionViewPage, grouped);
+  });
+
+  it("labels an individually over-budget activity group instead of throwing", () => {
+    const fixture = setupProjection();
+    const projectId = identifier<"ProjectId">("project_01");
+    const projectSessionId = identifier<"ProjectSessionId">("session_01");
+    fixture.database.prepare(`
+      UPDATE events SET type=? WHERE event_id='event_01'
+    `).run(`oversized-${"x".repeat(600_000)}`);
+    const snapshot = fixture.projections.snapshot({
+      credential: fixture.credential,
+      projectId,
+      projectSessionId,
+    }, "include");
+    const request = {
+      credential: fixture.credential,
+      projectId,
+      projectSessionId,
+      view: "activity" as const,
+      snapshotRevision: snapshot.snapshotRevision,
+      cursor: 0,
+      limit: 1,
+    };
+
+    const groupedView = fixture.projections.viewPage(
+      request,
+      "include",
+      "include",
+      "include",
+      "include",
+      "include",
+      "include",
+      "include",
+    );
+    expect(groupedView).toMatchObject({
+      status: "page",
+      rows: [{
+        itemRevision: 1,
+        fact: {
+          freshness: "unavailable",
+          reason: "activity-group-frame-budget-exceeded",
+        },
+      }],
+      nextCursor: 1,
+      hasMore: false,
+    });
+    parseOperationResult(FABRIC_OPERATIONS.projectionViewPage, groupedView);
+
+    const groupedProjection = fixture.projections.page(
+      {
+        credential: fixture.credential,
+        projectId,
+        projectSessionId,
+        view: "activity",
+        after: 0,
+        limit: 1,
+      },
+      "include",
+      "include",
+      "include",
+    );
+    expect(groupedProjection.page).toMatchObject({
+      freshness: "unavailable",
+      reason: "activity-group-frame-budget-exceeded",
+    });
+    parseOperationResult(
+      FABRIC_OPERATIONS.projectionPage,
+      groupedProjection,
+    );
+
+    const groupedRun = fixture.projections.runPage({
+      credential: fixture.credential,
+      projectId,
+      projectSessionId,
+      target: {
+        kind: "coordination-run",
+        coordinationRunId: identifier<"CoordinationRunId">("run_01"),
+      },
+      snapshotRevision: snapshot.snapshotRevision,
+      section: "activity",
+      cursor: 0,
+      limit: 1,
+    }, "include");
+    expect(groupedRun).toMatchObject({
+      status: "page",
+      entries: [{
+        value: {
+          itemRevision: 1,
+          fact: {
+            freshness: "unavailable",
+            reason: "activity-group-frame-budget-exceeded",
+          },
+        },
+      }],
+      nextCursor: 1,
+      hasMore: false,
+    });
+    parseOperationResult(FABRIC_OPERATIONS.projectionRunPage, groupedRun);
+  });
+
+  it("labels an individually node-over-budget activity group instead of throwing", () => {
+    const fixture = setupProjection();
+    const insertEvent = fixture.database.prepare(`
+      INSERT INTO events(event_id, run_id, type, actor_agent_id, payload_json, created_at)
+      VALUES (?, 'run_01', 'tool-invoked', 'chair_01', '{"taskId":"task_01"}', ?)
+    `);
+    const insertSequence = fixture.database.prepare(`
+      INSERT INTO observer_event_sequence(event_id) VALUES (?)
+    `);
+    fixture.database.transaction(() => {
+      for (let index = 1; index < 32; index += 1) {
+        const eventId = `event_node_${String(index).padStart(2, "0")}`;
+        insertEvent.run(eventId, now - 300 + index);
+        insertSequence.run(eventId);
+      }
+    })();
+    const projectId = identifier<"ProjectId">("project_01");
+    const projectSessionId = identifier<"ProjectSessionId">("session_01");
+    const snapshot = fixture.projections.snapshot({
+      credential: fixture.credential,
+      projectId,
+      projectSessionId,
+    }, "include");
+    const grouped = fixture.projections.viewPage(
+      {
+        credential: fixture.credential,
+        projectId,
+        projectSessionId,
+        view: "activity",
+        snapshotRevision: snapshot.snapshotRevision,
+        cursor: 0,
+        limit: 1,
+      },
+      "include",
+      "include",
+      "include",
+      "include",
+      "include",
+      "include",
+      "include",
+    );
+    if (grouped.status !== "page") {
+      throw new Error("expected one live grouped activity row");
+    }
+    const liveRow = grouped.rows[0] as
+      | OperatorViewRow<"activity">
+      | undefined;
+    if (liveRow?.fact.freshness !== "live") {
+      throw new Error("expected one live grouped activity row");
+    }
+    const candidate = liveRow.fact.value;
+    const candidates = Array.from(
+      { length: 16 },
+      () => candidate,
+    ) as [typeof candidate, typeof candidate, ...typeof candidate[]];
+    const nodeHeavyRow = {
+      ...liveRow,
+      fact: {
+        freshness: "conflict" as const,
+        source: liveRow.fact.source,
+        revision: liveRow.itemRevision,
+        observedAt: liveRow.fact.observedAt,
+        candidates,
+      },
+    };
+    const rows = boundedOperatorActivityRows([nodeHeavyRow], {
+      view: "activity",
+      cursor: 0,
+      totalRows: 1,
+      snapshotRevision: snapshot.snapshotRevision,
+      readTransactionId: "projection:project_01:session_01:node-budget",
+    });
+    const emitted = {
+      status: "page" as const,
+      view: "activity" as const,
+      rows,
+      nextCursor: 1,
+      hasMore: false,
+      snapshotRevision: snapshot.snapshotRevision,
+      readTransactionId: "projection:project_01:session_01:node-budget",
+    };
+
+    parseOperationResult(FABRIC_OPERATIONS.projectionViewPage, emitted);
+    expect(rows).toMatchObject([{
+      itemRevision: 32,
+      fact: {
+        freshness: "unavailable",
+        reason: "activity-group-frame-budget-exceeded",
+      },
+    }]);
   });
 
   it("keeps an omitted session selector inside the credential's exact session scope", () => {
