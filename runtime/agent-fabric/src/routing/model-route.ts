@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { promisify } from "node:util";
 
@@ -210,5 +210,275 @@ export async function resolveModelRouteReceipt(input: {
   }
   await writeFile(input.receiptPath, `${JSON.stringify(parsed, null, 2)}\n`, { mode: 0o600 });
   if (parsed.status !== "ok") throw new ModelRouteRejectedError(parsed, invocation);
+  return { receipt: parsed, invocation };
+}
+
+type AvailabilityFact =
+  | { observation: "Observed"; value: "available" | "unavailable" }
+  | { observation: "Unobserved" }
+  | { observation: "Unknown"; reason: string };
+
+type PreferredRouteCandidate = {
+  candidateId: string;
+  request: ModelRouteRequest;
+  availability: AvailabilityFact;
+};
+
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (isRecord(value)) {
+    return `{${Object.keys(value).sort().map(
+      (key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`,
+    ).join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "undefined";
+}
+
+function isAvailabilityFact(value: unknown): value is AvailabilityFact {
+  if (!isRecord(value)) return false;
+  if (value.observation === "Unobserved") return true;
+  if (value.observation === "Unknown") return nonEmptyString(value, "reason");
+  return value.observation === "Observed" &&
+    (value.value === "available" || value.value === "unavailable");
+}
+
+function isSpreadState(value: unknown): value is {
+  schema_version: 1;
+  assignments: Record<string, number>;
+  selection_count: number;
+} {
+  if (
+    !isRecord(value) ||
+    value.schema_version !== 1 ||
+    !isRecord(value.assignments) ||
+    !Number.isSafeInteger(value.selection_count) ||
+    Number(value.selection_count) < 0
+  ) return false;
+  const counts: unknown[] = Object.values(value.assignments);
+  return counts.every(
+    (count) => Number.isSafeInteger(count) && Number(count) >= 0,
+  ) && counts.reduce<number>(
+    (total, count) => total + Number(count),
+    0,
+  ) === value.selection_count;
+}
+
+function isValidSelectionReceipt(
+  receipt: Record<string, unknown>,
+  taskClass: string,
+  role: string,
+  hardCandidates: Array<{
+    candidateId: string;
+    route: Record<string, unknown>;
+    availability: AvailabilityFact;
+  }>,
+): boolean {
+  const policy = taskClassPolicy.get(taskClass);
+  if (
+    policy === undefined ||
+    receipt.schema_version !== 1 ||
+    receipt.status !== "ok" ||
+    receipt.task_class !== taskClass ||
+    receipt.role !== role ||
+    receipt.selection_source !== "hard-admissible-preference" ||
+    !nonEmptyString(receipt, "chosen_candidate_id") ||
+    !isRecord(receipt.chosen_route) ||
+    !Array.isArray(receipt.candidates) ||
+    !isRecord(receipt.preference) ||
+    !Array.isArray(receipt.preference.applied) ||
+    !Array.isArray(receipt.preference.not_honoured) ||
+    !Array.isArray(receipt.preference.ignored) ||
+    !isRecord(receipt.spreading) ||
+    receipt.spreading.policy !== "fair-round-robin" ||
+    !isSpreadState(receipt.spreading.state_before) ||
+    !isSpreadState(receipt.spreading.state_after)
+  ) return false;
+  const chosen = receipt.chosen_route;
+  const chosenAlias = aliasRank.get(String(chosen.alias));
+  const chosenRequestedEffort = effortRank.get(String(chosen.requested_effort));
+  const chosenEffort = effortRank.get(String(chosen.effort));
+  if (
+    chosen.schema_version !== 1 ||
+    chosen.status !== "ok" ||
+    chosen.task_class !== taskClass ||
+    chosen.route_source !== "task-class" ||
+    chosen.role !== role ||
+    role !== policy.role ||
+    chosenAlias === undefined ||
+    chosenAlias < aliasRank.get(policy.minimumAlias)! ||
+    chosenRequestedEffort === undefined ||
+    chosenRequestedEffort < effortRank.get(policy.minimumEffort)! ||
+    chosenEffort === undefined ||
+    chosenEffort < effortRank.get(policy.minimumEffort)!
+  ) return false;
+  const receiptCandidates = receipt.candidates as unknown[];
+  const selected = receiptCandidates.filter(
+    (candidate: unknown): candidate is Record<string, unknown> =>
+      isRecord(candidate) && candidate.selected === true,
+  );
+  const hardCandidate = hardCandidates.find(
+    (candidate) => candidate.candidateId === receipt.chosen_candidate_id,
+  );
+  const candidatesMatch = receiptCandidates.length === hardCandidates.length &&
+    hardCandidates.every((hardCandidate) => {
+      const candidate = receiptCandidates.find(
+        (value: unknown) => isRecord(value) && value.candidate_id === hardCandidate.candidateId,
+      );
+      if (
+        !isRecord(candidate) ||
+        !isAvailabilityFact(candidate.availability) ||
+        canonicalJson(candidate.route) !== canonicalJson(hardCandidate.route) ||
+        canonicalJson(candidate.availability) !== canonicalJson(hardCandidate.availability)
+      ) return false;
+      const observedUnavailable = candidate.availability.observation === "Observed" &&
+        candidate.availability.value === "unavailable";
+      const candidateAlias = aliasRank.get(String(hardCandidate.route.alias));
+      const candidateRequestedEffort = effortRank.get(String(hardCandidate.route.requested_effort));
+      const candidateEffort = effortRank.get(String(hardCandidate.route.effort));
+      const expectedAdmissible = hardCandidate.route.schema_version === 1 &&
+        hardCandidate.route.status === "ok" &&
+        hardCandidate.route.task_class === taskClass &&
+        hardCandidate.route.route_source === "task-class" &&
+        hardCandidate.route.role === role &&
+        role === policy.role &&
+        candidateAlias !== undefined &&
+        candidateAlias >= aliasRank.get(policy.minimumAlias)! &&
+        candidateRequestedEffort !== undefined &&
+        candidateRequestedEffort >= effortRank.get(policy.minimumEffort)! &&
+        candidateEffort !== undefined &&
+        candidateEffort >= effortRank.get(policy.minimumEffort)! &&
+        !observedUnavailable;
+      return candidate.admissible === expectedAdmissible &&
+        typeof candidate.disposition === "string";
+    });
+  const before = receipt.spreading.state_before;
+  const after = receipt.spreading.state_after;
+  const chosenFamily = String(chosen.model_family);
+  const familyKeys = new Set([
+    ...Object.keys(before.assignments),
+    ...Object.keys(after.assignments),
+  ]);
+  const stateTransition = after.selection_count === before.selection_count + 1 &&
+    [...familyKeys].every((family) =>
+      Number(after.assignments[family] ?? 0) ===
+      Number(before.assignments[family] ?? 0) + (family === chosenFamily ? 1 : 0)
+    );
+  const admissibleFamilies = new Set(receiptCandidates.flatMap((candidate) =>
+    isRecord(candidate) &&
+    candidate.admissible === true &&
+    typeof candidate.model_family === "string"
+      ? [candidate.model_family]
+      : []
+  ));
+  const minimumCount = Math.min(
+    ...[...admissibleFamilies].map((family) => Number(before.assignments[family] ?? 0)),
+  );
+  const fairFamily = admissibleFamilies.has(chosenFamily) &&
+    Number(before.assignments[chosenFamily] ?? 0) === minimumCount;
+  return candidatesMatch &&
+    stateTransition &&
+    fairFamily &&
+    chosenFamily.length > 0 &&
+    selected.length === 1 &&
+    hardCandidate !== undefined &&
+    selected[0]?.candidate_id === receipt.chosen_candidate_id &&
+    selected[0]?.admissible === true &&
+    selected[0]?.disposition === "selected" &&
+    canonicalJson(selected[0]?.route) === canonicalJson(chosen) &&
+    canonicalJson(hardCandidate.route) === canonicalJson(chosen);
+}
+
+export async function selectPreferredModelRouteReceipt(input: {
+  routerPath: string;
+  receiptPath: string;
+  preferencesPath: string;
+  spreadStatePath: string;
+  taskClass: string;
+  role: string;
+  candidates: PreferredRouteCandidate[];
+}): Promise<{
+  receipt: Record<string, unknown>;
+  invocation: { executable: string; arguments: string[] };
+}> {
+  const candidatesPath = `${input.receiptPath}.candidates.json`;
+  const hardCandidates = await Promise.all(input.candidates.map(async (candidate, index) => {
+    const hardReceiptPath = `${input.receiptPath}.hard-${index}.json`;
+    try {
+      try {
+        const result = await resolveModelRouteReceipt({
+          routerPath: input.routerPath,
+          receiptPath: hardReceiptPath,
+          request: candidate.request,
+        });
+        return {
+          candidateId: candidate.candidateId,
+          route: result.receipt,
+          availability: candidate.availability,
+        };
+      } catch (error: unknown) {
+        if (!(error instanceof ModelRouteRejectedError)) throw error;
+        return {
+          candidateId: candidate.candidateId,
+          route: error.receipt,
+          availability: candidate.availability,
+        };
+      }
+    } finally {
+      await Promise.all([
+        rm(hardReceiptPath, { force: true }),
+        rm(`${hardReceiptPath}.claude-capabilities.json`, { force: true }),
+      ]);
+    }
+  }));
+  await writeFile(candidatesPath, `${JSON.stringify({
+    schema_version: 1,
+    candidates: hardCandidates.map((candidate) => ({
+      candidate_id: candidate.candidateId,
+      route: candidate.route,
+      availability: candidate.availability,
+    })),
+  }, null, 2)}\n`, { mode: 0o600 });
+  const argumentsList = [
+    "select",
+    "--task-class", input.taskClass,
+    "--role", input.role,
+    "--candidates-file", candidatesPath,
+    "--preferences-file", input.preferencesPath,
+    "--spread-state-file", input.spreadStatePath,
+  ];
+  const invocation = { executable: input.routerPath, arguments: argumentsList };
+  let stdout: string;
+  try {
+    try {
+      ({ stdout } = await execFileAsync(input.routerPath, argumentsList, {
+        encoding: "utf8",
+        timeout: 50_000,
+        maxBuffer: 4 * 1024 * 1024,
+      }));
+    } catch (error: unknown) {
+      if (!isRecord(error) || typeof error.stdout !== "string") throw error;
+      stdout = error.stdout;
+    }
+  } finally {
+    await rm(candidatesPath, { force: true });
+  }
+  const parsed: unknown = JSON.parse(stdout);
+  if (
+    !isRecord(parsed) ||
+    parsed.schema_version !== 1 ||
+    typeof parsed.status !== "string" ||
+    parsed.task_class !== input.taskClass ||
+    parsed.role !== input.role
+  ) {
+    throw new TypeError("model preference selector returned an invalid receipt");
+  }
+  if (parsed.status !== "ok") {
+    await writeFile(input.receiptPath, `${JSON.stringify(parsed, null, 2)}\n`, { mode: 0o600 });
+    throw new ModelRouteRejectedError(parsed, invocation);
+  }
+  if (!isValidSelectionReceipt(parsed, input.taskClass, input.role, hardCandidates)) {
+    throw new TypeError("model preference selector returned an invalid receipt");
+  }
+  await writeFile(input.receiptPath, `${JSON.stringify(parsed, null, 2)}\n`, { mode: 0o600 });
   return { receipt: parsed, invocation };
 }

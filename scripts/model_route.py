@@ -40,22 +40,11 @@ TASK_CLASS_POLICY = {
     "orchestration": {"minimum_alias": "flagship", "minimum_effort": "high", "role": "orchestrator"},
 }
 
-# Loaded by path, not by name: this file is itself loaded by path (see
-# tests/test_model_route.py, scripts/model-route), so a bare `import
-# model_route_catalog` would depend on `scripts/` being on `sys.path`, which
-# is only true when this file runs as `__main__`. Path-loading here keeps
-# both loading modes identical (see skills/engineering-writing/scripts/
-# check_engineering_style.py for the same pattern).
-#
-# This router is itself loaded by path more than once per process (the tests
-# reload it per case), so the catalogue must be reused rather than re-executed.
-# `setdefault` followed by an unconditional `exec_module` does the opposite: the
-# second load leaves the first module in `sys.modules` but executes and binds a
-# second one, so the names below and `sys.modules["model_route_catalog"]` come
-# from different module objects. Their function globals then diverge -- rebinding
-# `infer_family` on one is invisible to `override_scan_families` on the other --
-# which a normal `import` would never do. Reuse the cached module instead, so
-# there is exactly one object and one execution per process.
+# Path-loading avoids depending on `scripts/` being on `sys.path`. Tests reload
+# this router by path, so each sibling must be reused rather than re-executed.
+# Registering one module but binding names from another makes their globals
+# diverge: rebinding `infer_family` on one would be invisible to functions on
+# the other. Reuse each cached module for normal import-like identity.
 _CATALOG_VALIDATION_PATH = Path(__file__).resolve().parent / "model_route_catalog.py"
 _catalog_validation = sys.modules.get("model_route_catalog")
 if _catalog_validation is None:
@@ -66,6 +55,17 @@ if _catalog_validation is None:
     _catalog_validation = importlib.util.module_from_spec(_catalog_validation_spec)
     sys.modules["model_route_catalog"] = _catalog_validation
     _catalog_validation_spec.loader.exec_module(_catalog_validation)
+
+_PREFERENCES_PATH = Path(__file__).resolve().parent / "model_route_preferences.py"
+_preferences = sys.modules.get("model_route_preferences")
+if _preferences is None:
+    _preferences_spec = importlib.util.spec_from_file_location(
+        "model_route_preferences", _PREFERENCES_PATH
+    )
+    assert _preferences_spec is not None and _preferences_spec.loader is not None
+    _preferences = importlib.util.module_from_spec(_preferences_spec)
+    sys.modules["model_route_preferences"] = _preferences
+    _preferences_spec.loader.exec_module(_preferences)
 
 EFFORT_ORDER = _catalog_validation.EFFORT_ORDER
 ALIAS_ORDER = _catalog_validation.ALIAS_ORDER
@@ -846,12 +846,15 @@ def parser() -> argparse.ArgumentParser:
         default=str(FABRIC_CONFIG_PATH),
         help=argparse.SUPPRESS,
     )
+    _preferences.add_selection_parser(commands, ROOT / "config" / "model-preferences.json")
     return root
 
 
 def main(argv: list[str] | None = None) -> int:
     argument_parser = parser()
     args = argument_parser.parse_args(argv)
+    if args.command == "select":
+        return _preferences.select(args, TASK_CLASS_POLICY, ALIAS_ORDER, EFFORT_ORDER)
     catalog = load_catalog()
     if args.command == "resolve":
         def reject(status: str, *, alias: str = "", effort: str = "", message: str = "") -> int:

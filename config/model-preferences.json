@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "task_classes": {},
+  "roles": {},
+  "deprioritise": {
+    "families": [],
+    "models": [],
+    "adapters": []
+  },
+  "spreading": {
+    "policy": "fair-round-robin"
+  }
+}

@@ -94,12 +94,14 @@ FILTER_HELPER_KEYS = frozenset({"ci-contract", "node-workspace"})
 # PR #446 added scripts/model_route_catalog.py, which model_route.py loads and
 # executes at import: a change to it alone reaches the fabric suite at runtime,
 # so it must retrigger the job that runs it for the same reason cycle 3 added
-# model_route.py itself.
+# model_route.py itself. Issue #445 adds model_route_preferences.py under the
+# same path-loaded execution convention.
 FABRIC_EXECUTED_DEPENDENCIES = frozenset(
     {
         "scripts/model-route",
         "scripts/model_route.py",
         "scripts/model_route_catalog.py",
+        "scripts/model_route_preferences.py",
         "skills/deliver/scripts/**",
     }
 )
@@ -421,6 +423,7 @@ def test_ci_gates_build_jobs_behind_path_filters_and_one_aggregate_check() -> No
         "scripts/model-route",
         "scripts/model_route.py",
         "scripts/model_route_catalog.py",
+        "scripts/model_route_preferences.py",
         "skills/deliver/scripts/**",
     }
     assert FABRIC_EXECUTED_DEPENDENCIES <= set(flattened["fabric"])
@@ -548,6 +551,15 @@ def test_model_route_python_change_selects_the_fabric_job() -> None:
     # job that executes it.
     document = _workflow()
     selected = _jobs_for_changed_paths(document, ["scripts/model_route.py"])
+    assert "fabric" in selected
+
+
+def test_model_route_preferences_change_selects_the_fabric_job() -> None:
+    document = _workflow()
+    selected = _jobs_for_changed_paths(
+        document,
+        ["scripts/model_route_preferences.py"],
+    )
     assert "fabric" in selected
 
 
