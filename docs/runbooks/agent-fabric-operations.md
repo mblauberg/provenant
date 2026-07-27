@@ -328,6 +328,7 @@ action it took, on both the CLI and the `fabric_bootstrap` tool result:
 | `workspace-trust` | `resolved` | always `false`; resolution only reads the trust record |
 | `daemon` | `started` or `attached` | `true` only when this call spawned the daemon |
 | `seat-generation` | `installed` or `replayed` | `true` only when the active generation changed |
+| `legacy-bootstrap-provenance` | `recorded` | always `false`; emitted only when this call first records durable provenance for a legacy bootstrap generation |
 | `identity-smoke` | `passed` or `failed` | always `false`; `whoami` and `mailbox.read` only read |
 
 The receipt's top-level `mutated` is the idempotency surface, and it means one
