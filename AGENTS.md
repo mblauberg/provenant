@@ -12,8 +12,8 @@ which discloses its own references. Skill names are binding, not advisory.
   cross-project preferences only.
 - **Git:** implementation branches and linked worktrees are pre-authorised,
   including parallel work; one writer per worktree. An authorised merge prunes
-  its own worktree and merged refs; other deletion, force-removal, history
-  rewrites and shared-branch pushes outside authorised merges need user authority.
+  its own worktree and merged refs; other deletion, force-removal, rewrites and
+  shared-branch pushes need user authority.
 - **Fabric trust:** before first use, explicitly trust only the exact canonical
   repository root (or current non-Git directory) with
   `provenant fabric workspace trust`; never trust a parent, wildcard, home or

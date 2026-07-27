@@ -18,9 +18,9 @@ Require:
 
 If missing, use `scope`; never infer owner decisions.
 
-For active service or safety impact, user-approved containment work may
-parallelise verification and review rather than running them in sequence. Gates
-and authority still apply; name a reconciliation run.
+For active service or safety impact, approved containment may parallelise
+verification and review. Gates and authority still apply; name a
+reconciliation run.
 
 ## Loop
 
@@ -41,10 +41,9 @@ and authority still apply; name a reconciliation run.
 4. Invoke read-only `code-review` under the current `HARNESS.md` risk ladder.
    Its adaptive topology load-bears. Record adapter, actual family, omissions
    and substitutions.
-5. Repair blockers, then repeat verification and review. Stop at the repair
-   budget of at most two cycles (a guardrail against unbounded loops, not a
-   target; see `references/run-contract.md`) or on scope/design drift;
-   return evidence to the user or `scope`.
+5. Repair blockers, then repeat verification and review. Stop after at most two
+   repair cycles (a guardrail, not a target; see `references/run-contract.md`)
+   or on scope/design drift; return evidence to the user or `scope`.
 6. Update owned docs for behavioural, architectural, operational or decision
    change. For substantial+ apply `session`: refresh the recovery checkpoint,
    audit context, graduate durable findings and classify retained/ephemeral
@@ -65,8 +64,8 @@ and authority still apply; name a reconciliation run.
 - Reviewed source stays immutable; separately authorised artifacts and Fabric
   communication stay bounded.
 - Record missing legs as failed/unavailable; never filter them. Review coverage
-  blocks whenever the current HARNESS ladder remains unsatisfied; missing
-  other-primary coverage is a blocking omission from `substantial` up.
+  blocks whenever the HARNESS ladder is unsatisfied; missing other-primary
+  coverage blocks from `substantial` up.
 - Objective evidence outranks reviewer confidence; adjudicate conclusions,
   never vote.
 - Substantial+ starts a fresh implementation session bound to approved digests.

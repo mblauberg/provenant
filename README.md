@@ -11,18 +11,6 @@ without notice and support is best effort. Propose changes through
 [GitHub issues](https://github.com/mblauberg/provenant/issues); report
 vulnerabilities privately through [`SECURITY.md`](SECURITY.md).
 
-## Contents
-
-- [Why Provenant](#why-provenant)
-- [How it fits together](#how-it-fits-together)
-- [Quick start](#quick-start)
-- [Providers](#providers)
-- [Core workflows](#core-workflows)
-- [Lifecycle](#lifecycle)
-- [What the harness guarantees](#what-the-harness-guarantees)
-- [Skill library](#skill-library)
-- [Documentation and help](#documentation-and-help)
-
 ## Why Provenant
 
 A bare coding agent will write and "finish" a change in one pass, with its own
@@ -213,15 +201,11 @@ flowchart TB
     class G1,G2,G3 gate
 ```
 
-Gold hexagons are user gates. Every gate can stop progression; specification
-approval and acceptance can return work for revision. Scoping itself is usually a
-conversation: a decision packet with choices and a recommendation, owner
-calls parked as named questions rather than guesses, and the
-[`grill-me`](skills/grill-me/SKILL.md) interview, one question per round,
-on request or while material decisions stay unresolved. `review` runs in a fresh
-context that never wrote the diff. From the `substantial` tier up it requires
-multiple targeted lenses plus the other primary; a receipt missing that leg cannot
-reach acceptance.
+Gold hexagons are user gates; specification approval and acceptance can also
+return work for revision. Scoping is usually a conversation: a decision packet
+with choices and a recommendation, owner calls parked as named questions rather
+than guesses, and the [`grill-me`](skills/grill-me/SKILL.md) interview, one
+question per round, while material decisions stay unresolved.
 
 The loop is [`deliver`](skills/deliver/SKILL.md), the kernel binding one run to one receipt;
 [`implement`](skills/implement/SKILL.md) is its software front door, and the
