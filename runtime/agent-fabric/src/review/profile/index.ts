@@ -1,5 +1,9 @@
 import { canonicalString, digestCanonical, type Sha256Digest } from "../canonical/index.js";
 import { REVIEW_BUNDLE_LIMITS, REVIEW_RISK_RULES_DIGEST } from "../bundle/index.js";
+import {
+  REVIEW_PROFILE_CATALOGUE_DIGEST,
+  REVIEW_PROFILE_DOCUMENT_DIGEST,
+} from "./catalogue-digest.generated.js";
 
 export type ReviewSlot = "native" | "other-primary" | "cursor-grok" | "agy-gemini";
 export type ModelFamily = "openai" | "anthropic" | "xai" | "google";
@@ -110,6 +114,13 @@ export function resolveReviewProfile(_input: Readonly<{
   availability: readonly SlotAvailabilityIdentity[];
 }>): ResolvedReviewProfile {
   const input = _input;
+  // Startup verifies the on-disk schema/profile catalogue against this
+  // checked-in digest. The wire field remains the caller's claim and the
+  // availability foreign key, but it is authoritative only when it equals
+  // that startup-verified value.
+  if (input.profileSchemaDigest !== REVIEW_PROFILE_CATALOGUE_DIGEST) {
+    throw new TypeError("profileSchemaDigest differs from the authoritative checked-in catalogue digest");
+  }
   if (input.catalogue.schemaVersion !== 1 || input.catalogue.profileId !== "certifying-review-four-slot-v1") {
     throw new TypeError("review profile catalogue identity is invalid");
   }
@@ -177,6 +188,13 @@ export function resolveReviewProfile(_input: Readonly<{
       reviewerFamilyRelation,
     };
   });
+  // The combined digest above is the authoritative wire/availability foreign
+  // key. After the detailed validation errors, this member pin additionally
+  // binds the caller-supplied object used for resolution to the profile
+  // document that startup verified on disk.
+  if (digestCanonical(input.catalogue) !== REVIEW_PROFILE_DOCUMENT_DIGEST) {
+    throw new TypeError("caller-supplied catalogue differs from the pinned profile member");
+  }
   const withoutDigest = {
     schemaVersion: 1 as const,
     profileId: "certifying-review-four-slot-v1" as const,
