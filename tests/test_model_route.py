@@ -1,4 +1,5 @@
 import json
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 import importlib.util
 from pathlib import Path
@@ -77,7 +78,665 @@ def load_router():
     return module
 
 
-def test_repeated_router_loads_share_one_catalogue_module():
+def route_candidate(
+    candidate_id,
+    *,
+    adapter,
+    family,
+    model,
+    status="ok",
+    alias="flagship",
+    effort="high",
+    availability=None,
+):
+    route = {
+        "schema_version": 1,
+        "status": status,
+        "adapter": adapter,
+        "task_class": "critical-review",
+        "route_source": "task-class",
+        "role": "critical-review",
+        "alias": alias,
+        "requested_effort": effort,
+        "effort": effort,
+        "model_family": family,
+        "resolved_model": model,
+    }
+    return {
+        "candidate_id": candidate_id,
+        "route": route,
+        "availability": availability or {
+            "observation": "Observed",
+            "value": "available",
+        },
+    }
+
+
+def select_route(
+    tmp_path,
+    candidates,
+    preferences,
+    *,
+    state_name="spread-state.json",
+    candidates_name="candidates.json",
+):
+    candidates_path = tmp_path / candidates_name
+    preferences_path = tmp_path / f"{candidates_name}.preferences.json"
+    state_path = tmp_path / state_name
+    candidates_path.write_text(json.dumps({"schema_version": 1, "candidates": candidates}))
+    preferences_path.write_text(
+        preferences if isinstance(preferences, str) else json.dumps(preferences)
+    )
+    result = subprocess.run(
+        [
+            str(SCRIPT),
+            "select",
+            "--task-class",
+            "critical-review",
+            "--role",
+            "critical-review",
+            "--candidates-file",
+            str(candidates_path),
+            "--preferences-file",
+            str(preferences_path),
+            "--spread-state-file",
+            str(state_path),
+        ],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    return result, json.loads(result.stdout) if result.stdout else None, state_path
+
+
+def test_critical_review_preference_cannot_lower_tier_or_effort(tmp_path):
+    candidates = [
+        route_candidate(
+            "anthropic-flagship",
+            adapter="claude",
+            family="anthropic",
+            model="opus",
+        ),
+        route_candidate(
+            "openai-cheaper",
+            adapter="codex",
+            family="openai",
+            model="gpt-5.6-terra",
+            status="task_class_effort_below_floor",
+            alias="workhorse",
+            effort="medium",
+        ),
+    ]
+    result, receipt, _ = select_route(tmp_path, candidates, {
+        "schema_version": 1,
+        "task_classes": {
+            "critical-review": {"family_affinity": ["openai"]},
+        },
+        "spreading": {"policy": "fair-round-robin"},
+    })
+
+    assert result.returncode == 0
+    assert receipt["chosen_candidate_id"] == "anthropic-flagship"
+    assert receipt["chosen_route"]["alias"] == "flagship"
+    assert receipt["chosen_route"]["effort"] == "high"
+    assert {
+        "kind": "family_affinity",
+        "scope": "task_class",
+        "value": "openai",
+        "reason": "no_admissible_candidate",
+    } in receipt["preference"]["not_honoured"]
+
+
+def test_disabled_adapter_and_outside_model_preferences_are_reported(tmp_path):
+    candidates = [
+        route_candidate(
+            "anthropic-flagship",
+            adapter="claude",
+            family="anthropic",
+            model="opus",
+        ),
+        route_candidate(
+            "disabled-google",
+            adapter="agy",
+            family="google",
+            model="gemini-pro",
+            status="adapter_disabled",
+        ),
+    ]
+    result, receipt, _ = select_route(tmp_path, candidates, {
+        "schema_version": 1,
+        "roles": {
+            "critical-review": {
+                "adapter_affinity": ["agy"],
+                "model_affinity": ["gemini-pro"],
+            },
+        },
+        "avoid": {
+            "adapters": ["agy"],
+            "models": ["gemini-pro"],
+        },
+    })
+
+    assert result.returncode == 0
+    assert receipt["chosen_candidate_id"] == "anthropic-flagship"
+    assert {
+        "kind": "adapter_affinity",
+        "scope": "role",
+        "value": "agy",
+        "reason": "adapter_disabled",
+    } in receipt["preference"]["not_honoured"]
+    assert {
+        "kind": "model_affinity",
+        "scope": "role",
+        "value": "gemini-pro",
+        "reason": "outside_admissible_set",
+    } in receipt["preference"]["not_honoured"]
+    assert {
+        "kind": "adapter_deprioritise",
+        "scope": "avoid",
+        "value": "agy",
+    } in receipt["preference"]["applied"]
+    assert {
+        "kind": "model_deprioritise",
+        "scope": "avoid",
+        "value": "gemini-pro",
+    } in receipt["preference"]["applied"]
+
+
+def test_fair_spreading_is_reproducible_from_persisted_state(tmp_path):
+    candidates = [
+        route_candidate(
+            "anthropic-flagship",
+            adapter="claude",
+            family="anthropic",
+            model="opus",
+        ),
+        route_candidate(
+            "openai-flagship",
+            adapter="codex",
+            family="openai",
+            model="gpt-5.6-sol",
+        ),
+    ]
+    preferences = {
+        "schema_version": 1,
+        "task_classes": {
+            "critical-review": {"family_affinity": ["openai", "anthropic"]},
+        },
+        "spreading": {"policy": "fair-round-robin"},
+    }
+
+    first = []
+    for index in range(8):
+        result, receipt, state_path = select_route(
+            tmp_path,
+            candidates,
+            preferences,
+            state_name="first-state.json",
+            candidates_name=f"first-{index}.json",
+        )
+        assert result.returncode == 0
+        first.append(receipt["chosen_route"]["model_family"])
+    persisted = json.loads(state_path.read_text())
+
+    second = []
+    for index in range(8):
+        result, receipt, second_state_path = select_route(
+            tmp_path,
+            list(reversed(candidates)),
+            preferences,
+            state_name="second-state.json",
+            candidates_name=f"second-{index}.json",
+        )
+        assert result.returncode == 0
+        second.append(receipt["chosen_route"]["model_family"])
+
+    assert first == second
+    assert first.count("anthropic") == 4
+    assert first.count("openai") == 4
+    assert persisted == json.loads(second_state_path.read_text())
+    assert persisted["assignments"] == {"anthropic": 4, "openai": 4}
+
+
+def test_concurrent_fan_out_serialises_persisted_spread_state(tmp_path):
+    candidates = [
+        route_candidate(
+            "anthropic-flagship",
+            adapter="claude",
+            family="anthropic",
+            model="opus",
+        ),
+        route_candidate(
+            "openai-flagship",
+            adapter="codex",
+            family="openai",
+            model="gpt-5.6-sol",
+        ),
+    ]
+    preferences = {
+        "schema_version": 1,
+        "spreading": {"policy": "fair-round-robin"},
+    }
+
+    def choose(index):
+        result, receipt, state_path = select_route(
+            tmp_path,
+            candidates,
+            preferences,
+            state_name="concurrent-state.json",
+            candidates_name=f"concurrent-{index}.json",
+        )
+        return result, receipt, state_path
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        selections = list(executor.map(choose, range(16)))
+
+    assert all(result.returncode == 0 for result, _, _ in selections)
+    families = [receipt["chosen_route"]["model_family"] for _, receipt, _ in selections]
+    assert families.count("anthropic") == families.count("openai") == 8
+    persisted = json.loads(selections[-1][2].read_text())
+    assert persisted == {
+        "schema_version": 1,
+        "assignments": {"anthropic": 8, "openai": 8},
+        "selection_count": 16,
+    }
+
+
+def test_unknown_availability_is_distinct_from_observed_unavailable(tmp_path):
+    candidates = [
+        route_candidate(
+            "anthropic-flagship",
+            adapter="claude",
+            family="anthropic",
+            model="opus",
+        ),
+        route_candidate(
+            "openai-unobserved",
+            adapter="codex",
+            family="openai",
+            model="gpt-5.6-sol",
+            availability={
+                "observation": "Unknown",
+                "reason": "AvailabilityNotObserved",
+            },
+        ),
+        route_candidate(
+            "google-unavailable",
+            adapter="agy",
+            family="google",
+            model="gemini-pro",
+            availability={
+                "observation": "Observed",
+                "value": "unavailable",
+            },
+        ),
+    ]
+    result, receipt, _ = select_route(tmp_path, candidates, {
+        "schema_version": 1,
+        "task_classes": {
+            "critical-review": {"family_affinity": ["openai"]},
+        },
+    })
+
+    assert result.returncode == 0
+    by_id = {candidate["candidate_id"]: candidate for candidate in receipt["candidates"]}
+    assert by_id["openai-unobserved"]["availability"] == {
+        "observation": "Unknown",
+        "reason": "AvailabilityNotObserved",
+    }
+    assert by_id["openai-unobserved"]["admissible"] is True
+    assert by_id["openai-unobserved"]["disposition"] == "selected"
+    assert by_id["google-unavailable"]["availability"] == {
+        "observation": "Observed",
+        "value": "unavailable",
+    }
+    assert by_id["google-unavailable"]["disposition"] == "observed_unavailable"
+
+
+@pytest.mark.parametrize(
+    "availability",
+    [
+        {"observation": "Observed", "value": "Unavailable"},
+        {"observation": "observed", "value": "unavailable"},
+    ],
+)
+def test_malformed_observed_availability_rejects_candidate_set(
+    tmp_path,
+    availability,
+):
+    result, receipt, state_path = select_route(
+        tmp_path,
+        [
+            route_candidate(
+                "malformed-observation",
+                adapter="claude",
+                family="anthropic",
+                model="opus",
+                availability=availability,
+            ),
+        ],
+        {"schema_version": 1},
+    )
+
+    assert result.returncode == 2
+    assert receipt["status"] == "candidate_set_invalid"
+    assert not state_path.exists()
+
+
+def test_unknown_preference_entries_load_without_changing_route(tmp_path):
+    candidates = [
+        route_candidate(
+            "anthropic-flagship",
+            adapter="claude",
+            family="anthropic",
+            model="opus",
+        ),
+        route_candidate(
+            "openai-flagship",
+            adapter="codex",
+            family="openai",
+            model="gpt-5.6-sol",
+        ),
+    ]
+    baseline_result, baseline, _ = select_route(
+        tmp_path,
+        candidates,
+        {"schema_version": 1},
+        state_name="baseline-state.json",
+        candidates_name="baseline.json",
+    )
+    result, receipt, _ = select_route(
+        tmp_path,
+        list(reversed(candidates)),
+        {
+            "schema_version": 1,
+            "task_classes": {
+                "critical-review": {
+                    "family_affinity": ["future-provider"],
+                    "model_affinity": ["future-model"],
+                    "adapter_affinity": ["future-adapter"],
+                    "future_key": {"anything": True},
+                },
+            },
+            "future_top_level_key": "ignored",
+        },
+        state_name="unknown-state.json",
+        candidates_name="unknown.json",
+    )
+
+    assert baseline_result.returncode == result.returncode == 0
+    assert receipt["chosen_candidate_id"] == baseline["chosen_candidate_id"]
+    assert {item["reason"] for item in receipt["preference"]["ignored"]} == {
+        "unknown_adapter",
+        "unknown_family",
+        "unknown_key",
+        "unknown_model",
+    }
+    assert {
+        "kind": "future_key",
+        "scope": "task_class",
+        "value": "future_key",
+        "reason": "unknown_key",
+    } in receipt["preference"]["ignored"]
+    assert {
+        "kind": "future_top_level_key",
+        "scope": "top_level",
+        "value": "future_top_level_key",
+        "reason": "unknown_key",
+    } in receipt["preference"]["ignored"]
+
+
+def test_unknown_preference_keys_are_recorded_in_ignored(tmp_path):
+    result, receipt, _ = select_route(
+        tmp_path,
+        [
+            route_candidate(
+                "anthropic-flagship",
+                adapter="claude",
+                family="anthropic",
+                model="opus",
+            ),
+        ],
+        {
+            "schema_version": 1,
+            "task_classes": {
+                "critical-review": {"family_affinty": ["openai"]},
+            },
+            "depriotitise": {"families": ["anthropic"]},
+        },
+    )
+
+    assert result.returncode == 0
+    assert receipt["preference"] == {
+        "file_status": "loaded",
+        "applied": [],
+        "not_honoured": [],
+        "ignored": [
+            {
+                "kind": "depriotitise",
+                "scope": "top_level",
+                "value": "depriotitise",
+                "reason": "unknown_key",
+            },
+            {
+                "kind": "family_affinty",
+                "scope": "task_class",
+                "value": "family_affinty",
+                "reason": "unknown_key",
+            },
+        ],
+    }
+
+
+def test_corrupt_preferences_file_has_distinct_receipt_status(tmp_path):
+    result, receipt, _ = select_route(
+        tmp_path,
+        [
+            route_candidate(
+                "anthropic-flagship",
+                adapter="claude",
+                family="anthropic",
+                model="opus",
+            ),
+        ],
+        '{"schema_version":1,,,',
+    )
+
+    assert result.returncode == 0
+    assert receipt["preference"]["file_status"] == "corrupt"
+
+
+def test_unsupported_spreading_policy_is_recorded_as_ignored(tmp_path):
+    result, receipt, _ = select_route(
+        tmp_path,
+        [
+            route_candidate(
+                "anthropic-flagship",
+                adapter="claude",
+                family="anthropic",
+                model="opus",
+            ),
+        ],
+        {
+            "schema_version": 1,
+            "spreading": {"policy": "weighted-by-cost"},
+        },
+    )
+
+    assert result.returncode == 0
+    assert receipt["spreading"]["policy"] == "fair-round-robin"
+    assert {
+        "kind": "spreading_policy",
+        "scope": "spreading",
+        "value": "weighted-by-cost",
+        "reason": "unsupported_policy",
+    } in receipt["preference"]["ignored"]
+
+
+def test_deprioritise_preference_changes_tie_break_and_is_recorded(tmp_path):
+    candidates = [
+        route_candidate(
+            "anthropic-flagship",
+            adapter="claude",
+            family="anthropic",
+            model="opus",
+        ),
+        route_candidate(
+            "openai-flagship",
+            adapter="codex",
+            family="openai",
+            model="gpt-5.6-sol",
+        ),
+    ]
+    result, receipt, _ = select_route(tmp_path, candidates, {
+        "schema_version": 1,
+        "deprioritise": {"families": ["anthropic"]},
+    })
+
+    assert result.returncode == 0
+    assert receipt["chosen_candidate_id"] == "openai-flagship"
+    assert {
+        "kind": "family_deprioritise",
+        "scope": "deprioritise",
+        "value": "anthropic",
+    } in receipt["preference"]["applied"]
+
+
+def test_not_honoured_reason_distinguishes_higher_preference(tmp_path):
+    candidates = [
+        route_candidate(
+            "anthropic-flagship",
+            adapter="claude",
+            family="anthropic",
+            model="opus",
+        ),
+        route_candidate(
+            "openai-flagship",
+            adapter="codex",
+            family="openai",
+            model="gpt-5.6-sol",
+        ),
+    ]
+    result, receipt, _ = select_route(tmp_path, candidates, {
+        "schema_version": 1,
+        "task_classes": {
+            "critical-review": {"family_affinity": ["openai", "anthropic"]},
+        },
+    })
+
+    assert result.returncode == 0
+    assert receipt["chosen_candidate_id"] == "openai-flagship"
+    assert {
+        "kind": "family_affinity",
+        "scope": "task_class",
+        "value": "anthropic",
+        "reason": "lost_to_higher_preference",
+    } in receipt["preference"]["not_honoured"]
+
+
+def test_not_honoured_reason_distinguishes_fair_spreading(tmp_path):
+    openai = route_candidate(
+        "openai-flagship",
+        adapter="codex",
+        family="openai",
+        model="gpt-5.6-sol",
+    )
+    initial_result, _, _ = select_route(
+        tmp_path,
+        [openai],
+        {"schema_version": 1},
+        state_name="reason-state.json",
+        candidates_name="reason-initial.json",
+    )
+    result, receipt, _ = select_route(
+        tmp_path,
+        [
+            route_candidate(
+                "anthropic-flagship",
+                adapter="claude",
+                family="anthropic",
+                model="opus",
+            ),
+            openai,
+        ],
+        {
+            "schema_version": 1,
+            "task_classes": {
+                "critical-review": {"family_affinity": ["openai"]},
+            },
+        },
+        state_name="reason-state.json",
+        candidates_name="reason-spread.json",
+    )
+
+    assert initial_result.returncode == result.returncode == 0
+    assert receipt["chosen_candidate_id"] == "anthropic-flagship"
+    assert {
+        "kind": "family_affinity",
+        "scope": "task_class",
+        "value": "openai",
+        "reason": "fair_spreading",
+    } in receipt["preference"]["not_honoured"]
+
+
+def test_deprioritise_only_admissible_candidate_reports_why_not_honoured(tmp_path):
+    result, receipt, _ = select_route(
+        tmp_path,
+        [
+            route_candidate(
+                "anthropic-flagship",
+                adapter="claude",
+                family="anthropic",
+                model="opus",
+            ),
+        ],
+        {
+            "schema_version": 1,
+            "deprioritise": {"families": ["anthropic"]},
+        },
+    )
+
+    assert result.returncode == 0
+    assert {
+        "kind": "family_deprioritise",
+        "scope": "deprioritise",
+        "value": "anthropic",
+        "reason": "sole_admissible_candidate",
+    } in receipt["preference"]["not_honoured"]
+
+
+def test_selector_rejects_forged_ok_route_below_hard_floor(tmp_path):
+    candidates = [
+        route_candidate(
+            "anthropic-flagship",
+            adapter="claude",
+            family="anthropic",
+            model="opus",
+        ),
+        route_candidate(
+            "forged-cheap",
+            adapter="codex",
+            family="openai",
+            model="gpt-5.6-terra",
+            alias="workhorse",
+            effort="medium",
+        ),
+    ]
+    result, receipt, _ = select_route(tmp_path, candidates, {
+        "schema_version": 1,
+        "task_classes": {
+            "critical-review": {"family_affinity": ["openai"]},
+        },
+    })
+
+    assert result.returncode == 0
+    assert receipt["chosen_candidate_id"] == "anthropic-flagship"
+    by_id = {candidate["candidate_id"]: candidate for candidate in receipt["candidates"]}
+    assert by_id["forged-cheap"]["admissible"] is False
+    assert by_id["forged-cheap"]["disposition"] == "hard_policy_mismatch"
+
+
+def test_repeated_router_loads_share_path_loaded_sibling_modules():
     # `load_router` executes scripts/model_route.py once per test, so the
     # catalogue module it loads by path must be reused rather than re-executed.
     # Creating a fresh module on every load while `sys.modules` keeps the first
@@ -87,12 +746,16 @@ def test_repeated_router_loads_share_one_catalogue_module():
     first = load_router()
     second = load_router()
     cached = sys.modules["model_route_catalog"]
+    cached_preferences = sys.modules["model_route_preferences"]
 
     assert first.infer_family is cached.infer_family
     assert second.infer_family is cached.infer_family
     assert first.override_scan_families is second.override_scan_families
     assert first.ALIAS_ORDER is second.ALIAS_ORDER
     assert first.EFFORT_ORDER is cached.EFFORT_ORDER
+    assert first._preferences is cached_preferences
+    assert second._preferences is cached_preferences
+    assert first._preferences.select is second._preferences.select
 
 
 def test_risk_tier_override_catalogue_retargets_single_model(

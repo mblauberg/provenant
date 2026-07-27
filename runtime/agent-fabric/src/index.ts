@@ -123,7 +123,10 @@ export { startOptionalAdapterLeg } from "./adapters/optional-leg.js";
 export { assessAdapterModelPolicy, resolveProviderAdapterSelection, validateAdapterModelSelection } from "./adapters/model-selection.js";
 export { resolveExecutionProfile, ExecutionProfileError } from "./profiles/execution.js";
 export { createVisibilityCoordinator, VisibilityCoordinator } from "./visibility/coordinator.js";
-export { resolveModelRouteReceipt } from "./routing/model-route.js";
+export {
+  resolveModelRouteReceipt,
+  selectPreferredModelRouteReceipt,
+} from "./routing/model-route.js";
 export { FabricReceiptError, verifyFabricReceiptLink } from "./exports/receipt.js";
 export { resolveFabricPaths } from "./cli/paths.js";
 export { MESSAGE_POLICY } from "./domain/types.js";
