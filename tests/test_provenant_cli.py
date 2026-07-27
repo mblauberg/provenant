@@ -133,15 +133,15 @@ def test_every_delegated_command_preserves_each_supported_caller_cwd(
     assert json.loads(result.stdout)["cwd"] == str(caller_cwd)
 
 
-def test_doctor_is_owned_by_agent_fabric_with_fixed_doctor_argument(tmp_path):
+def test_doctor_is_owned_by_agent_fabric_and_forwards_explicit_arguments(tmp_path):
     _, command = make_checkout(tmp_path)
 
-    result = invoke(command, "doctor", cwd=tmp_path)
+    result = invoke(command, "doctor", "--help", "--consume-provider-quota", cwd=tmp_path)
 
     assert result.returncode == 0
     payload = json.loads(result.stdout)
     assert payload["argv"][0].endswith("/scripts/agent-fabric")
-    assert payload["argv"][1:] == ["doctor"]
+    assert payload["argv"][1:] == ["doctor", "--help", "--consume-provider-quota"]
 
 
 def test_check_and_fabric_delegate_without_reinterpreting_arguments(tmp_path):
@@ -157,7 +157,7 @@ def test_check_and_fabric_delegate_without_reinterpreting_arguments(tmp_path):
 def test_missing_or_unknown_command_prints_usage_to_stderr_and_exits_2(tmp_path):
     _, command = make_checkout(tmp_path)
 
-    for args in ((), ("unknown",), ("doctor", "extra")):
+    for args in ((), ("unknown",)):
         result = invoke(command, *args, cwd=tmp_path)
         assert result.returncode == 2
         assert result.stdout == ""
@@ -172,6 +172,6 @@ def test_help_is_concise_and_names_existing_command_owners(tmp_path):
     assert result.returncode == 0
     assert result.stderr == ""
     assert "route" in result.stdout and "scripts/model-route" in result.stdout
-    assert "doctor" in result.stdout and "scripts/agent-fabric doctor" in result.stdout
+    assert "doctor ...     scripts/agent-fabric doctor ..." in result.stdout
     assert "Kiro: optional subscription-native provider (ACP v1)." in result.stdout
     assert "OpenCode: optional provider for explicit opencode/* account models (ACP v1)." in result.stdout

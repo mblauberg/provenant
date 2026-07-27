@@ -24,7 +24,7 @@ Thin front door; each command delegates to its existing owner:
   worktree ...   scripts/worktree ...
   check ...      scripts/check-harness ...
   fabric ...     scripts/agent-fabric ...
-  doctor         scripts/agent-fabric doctor
+  doctor ...     scripts/agent-fabric doctor ...
 
 Fabric clients and providers are separate roles.
 Kiro: optional subscription-native provider (ACP v1).
@@ -54,8 +54,7 @@ case "$command" in
     exec "$script_dir/agent-fabric" "$@"
     ;;
   doctor)
-    [ "$#" -eq 0 ] || { usage; exit 2; }
-    exec "$script_dir/agent-fabric" doctor
+    exec "$script_dir/agent-fabric" doctor "$@"
     ;;
   *)
     usage
