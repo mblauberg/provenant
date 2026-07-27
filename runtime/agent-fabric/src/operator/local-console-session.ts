@@ -41,6 +41,8 @@ import {
 import { resolveFabricPaths, type FabricPaths } from "../cli/paths.js";
 import { defaultDaemonStartOptions } from "../cli/default-daemon-options.js";
 import { trustedWorkspaceIdentity } from "../cli/workspace-trust.js";
+import { FabricError } from "../errors.js";
+import { REVIEW_PROFILE_CATALOGUE_MEMBERS } from "../review/profile/catalogue-digest.js";
 
 const PROJECT_ACTIONS = ["launch", "read"] as const;
 const SESSION_ACTIONS = [
@@ -105,6 +107,7 @@ export type LocalOperatorConsoleUnavailableReason =
   | "daemon-election-conflict"
   | "daemon-spawn-failed"
   | "bootstrap-receipt-invalid"
+  | "review-profile-catalogue-invalid"
   | "start-failed";
 
 const CONSOLE_UNAVAILABLE_CODES = {
@@ -117,6 +120,7 @@ const CONSOLE_UNAVAILABLE_CODES = {
   "daemon-election-conflict": "CONSOLE_DAEMON_ELECTION_CONFLICT",
   "daemon-spawn-failed": "CONSOLE_DAEMON_SPAWN_FAILED",
   "bootstrap-receipt-invalid": "CONSOLE_BOOTSTRAP_RECEIPT_INVALID",
+  "review-profile-catalogue-invalid": "CONSOLE_REVIEW_PROFILE_CATALOGUE_INVALID",
   "start-failed": "CONSOLE_START_FAILED",
 } as const satisfies Record<LocalOperatorConsoleUnavailableReason, string>;
 
@@ -137,6 +141,14 @@ export function daemonStartUnavailableReason(
     ? error.code
     : null;
   if (code === "SCHEMA_CUTOVER_REQUIRED") return "schema-cutover-required";
+  if (
+    error instanceof FabricError &&
+    (code === "ARTIFACT_DIGEST_INVALID" || code === "NOT_FOUND") &&
+    error.field !== undefined &&
+    REVIEW_PROFILE_CATALOGUE_MEMBERS.some((member) => member === error.field)
+  ) {
+    return "review-profile-catalogue-invalid";
+  }
   if (code === "BOOTSTRAP_SOCKET_MISMATCH") return "socket-unavailable";
   if (
     code === "BOOTSTRAP_INCOMPATIBLE_INCUMBENT" ||
@@ -167,7 +179,9 @@ export class LocalOperatorConsoleUnavailableError extends Error {
   constructor(reason: LocalOperatorConsoleUnavailableReason) {
     super(reason === "schema-cutover-required"
       ? "CUTOVER REQUIRED — existing database preserved"
-      : `local Console ${reason}`);
+      : reason === "review-profile-catalogue-invalid"
+        ? "local Console review-profile-catalogue-invalid. Run: npm run profile:catalogue:pin"
+        : `local Console ${reason}`);
     this.name = "LocalOperatorConsoleUnavailableError";
     this.reason = reason;
     this.code = CONSOLE_UNAVAILABLE_CODES[reason];
