@@ -47,6 +47,17 @@ protocol_build_lock_release() {
   _afpbl_held=false
 }
 
+protocol_build_lock_is_present() {
+  _afpbl_probe_dist_requested=${1%/}
+  case "$_afpbl_probe_dist_requested" in /*) ;; *) return 1 ;; esac
+  _afpbl_probe_parent=$(
+    CDPATH= cd -- "${_afpbl_probe_dist_requested%/*}" && pwd -P
+  ) || return 1
+  _afpbl_probe_name=${_afpbl_probe_dist_requested##*/}
+  _afpbl_probe_lock="$_afpbl_probe_parent/.${_afpbl_probe_name}.agent-fabric-protocol-build.lock"
+  [ -d "$_afpbl_probe_lock" ]
+}
+
 protocol_build_lock_acquire() {
   _afpbl_dist_requested=${1%/}
   _afpbl_repair_command=$2
@@ -77,6 +88,7 @@ protocol_build_lock_acquire() {
 
   while :; do
     if mkdir "$_afpbl_lock_directory" 2>/dev/null; then
+      protocol_build_lock_test_pause "owner-publish"
       if ! printf '%s\n' "$$" > "$_afpbl_lock_directory/owner"; then
         rmdir "$_afpbl_lock_directory" 2>/dev/null || :
         protocol_build_lock_failure
