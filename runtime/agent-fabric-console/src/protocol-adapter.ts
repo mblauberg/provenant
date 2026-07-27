@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 
 import {
-  ACTIVITY_NARRATIVE_GROUPING_FEATURE,
+  ACTIVITY_NARRATIVE_GROUPING_FEATURE, RUN_LIFECYCLE_FACTS_FEATURE,
   FABRIC_OPERATIONS,
   NATIVE_NOTIFICATION_PROJECTION_FEATURE,
   type AgentId,
@@ -177,7 +177,7 @@ export function bindConsoleProtocolClient(
     ACTIVITY_NARRATIVE_GROUPING_FEATURE,
     "agent-topology-projection.v1",
     "work-facts-projection.v1",
-    "run-scoped-projection.v1",
+    "run-scoped-projection.v1", RUN_LIFECYCLE_FACTS_FEATURE,
     "artifact-content-read.v1",
   ].filter((feature) => !available.has(feature));
   if (missingFeatures.length > 0) {

@@ -497,6 +497,7 @@ export function createOperatorClient(transport: ProtocolRpcTransport): Negotiate
     ...(hasFeature(transport, "scoped-gate-read.v1") &&
       hasFeature(transport, "operator-projection.v2") &&
       hasFeature(transport, "run-scoped-projection.v1") &&
+      hasFeature(transport, "run-lifecycle-facts.v1") &&
       hasFeature(transport, "agent-topology-projection.v1") &&
       hasFeature(transport, "work-facts-projection.v1") &&
       hasOperations(transport, [

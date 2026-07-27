@@ -6,7 +6,7 @@ import type Database from "better-sqlite3";
 import { v7 as uuidv7 } from "uuid";
 import {
   ACTIVITY_NARRATIVE_GROUPING_FEATURE, AGENT_TOPOLOGY_PROJECTION_FEATURE, GATE_SYSTEM_SUPERSESSION_FEATURE, WORK_FACTS_PROJECTION_FEATURE,
-  DECLARED_RUN_PROGRESS_FEATURE, RUN_IDENTITY_PROJECTION_FEATURE,
+  DECLARED_RUN_PROGRESS_FEATURE, RUN_IDENTITY_PROJECTION_FEATURE, RUN_LIFECYCLE_FACTS_FEATURE,
   NATIVE_NOTIFICATION_PROJECTION_FEATURE, RUN_SESSION_PROJECTION_FEATURE,
   authorityEnvelopeV2Contained, parseAuthorityEnvelopeV2,
   parseEvidenceArtifactRegistration,
@@ -3241,7 +3241,7 @@ export class Fabric {
           context.features.includes(RUN_IDENTITY_PROJECTION_FEATURE) ? "include" : "omit", context.features.includes(AGENT_TOPOLOGY_PROJECTION_FEATURE) ? "include" : "omit", context.features.includes(WORK_FACTS_PROJECTION_FEATURE) ? "include" : "omit", context.features.includes(ACTIVITY_NARRATIVE_GROUPING_FEATURE) ? "include" : "omit",
         );
       }
-      case FABRIC_OPERATIONS.projectionRunPage: operatorCommand(operatorCredential(), { credential: (input as OperationInputMap[typeof FABRIC_OPERATIONS.projectionRunPage]).credential }); return this.#operatorProjections.runPage(input as OperationInputMap[typeof FABRIC_OPERATIONS.projectionRunPage], context.features.includes(ACTIVITY_NARRATIVE_GROUPING_FEATURE) ? "include" : "omit");
+      case FABRIC_OPERATIONS.projectionRunPage: operatorCommand(operatorCredential(), { credential: (input as OperationInputMap[typeof FABRIC_OPERATIONS.projectionRunPage]).credential }); return this.#operatorProjections.runPage(input as OperationInputMap[typeof FABRIC_OPERATIONS.projectionRunPage], context.features.includes(ACTIVITY_NARRATIVE_GROUPING_FEATURE) ? "include" : "omit", context.features.includes(RUN_LIFECYCLE_FACTS_FEATURE) ? "include" : "omit");
       case FABRIC_OPERATIONS.projectionDetailRead: {
         const request = input as OperationInputMap[typeof FABRIC_OPERATIONS.projectionDetailRead];
         const credential = operatorCredential();
@@ -3666,7 +3666,7 @@ export class Fabric {
     this.#database.transaction(() => {
       this.#database
         .prepare(
-          "INSERT INTO agents(run_id, agent_id, parent_agent_id, authority_id, provider_session_ref) VALUES (?, ?, ?, ?, ?)",
+          "INSERT INTO agents(run_id, agent_id, parent_agent_id, authority_id, provider_session_ref, classification) VALUES (?, ?, ?, ?, ?, 'worker')",
         )
         .run(runId, input.agentId, actorAgentId, input.authorityId, input.providerSessionRef ?? null);
       this.#database.prepare("INSERT INTO mailbox_state(run_id, recipient_id) VALUES (?, ?)").run(runId, input.agentId);
@@ -3719,7 +3719,7 @@ export class Fabric {
       return;
     }
     this.#database.prepare(
-      "INSERT INTO agents(run_id, agent_id, parent_agent_id, authority_id, provider_session_ref) VALUES (?, ?, ?, ?, NULL)",
+      "INSERT INTO agents(run_id, agent_id, parent_agent_id, authority_id, provider_session_ref, classification) VALUES (?, ?, ?, ?, NULL, 'worker')",
     ).run(runId, input.agentId, actorAgentId, input.authorityId);
     this.#database.prepare("INSERT INTO mailbox_state(run_id, recipient_id) VALUES (?, ?)")
       .run(runId, input.agentId);

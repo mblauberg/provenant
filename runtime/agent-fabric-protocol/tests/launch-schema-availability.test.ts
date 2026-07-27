@@ -96,6 +96,7 @@ function operatorClient(features: readonly (
   "scoped-gate-read.v1" |
   "operator-projection.v2" |
   "run-scoped-projection.v1" |
+  "run-lifecycle-facts.v1" |
   "agent-topology-projection.v1" |
   "work-facts-projection.v1" |
   "operator-actions.v1" |
@@ -122,6 +123,7 @@ describe("launch custody feature availability", () => {
       "scoped-gate-read.v1",
       "operator-projection.v2",
       "run-scoped-projection.v1",
+      "run-lifecycle-facts.v1",
       "agent-topology-projection.v1",
       "work-facts-projection.v1",
       "operator-actions.v1",
@@ -130,6 +132,7 @@ describe("launch custody feature availability", () => {
       "scoped-gate-read.v1",
       "operator-projection.v2",
       "run-scoped-projection.v1",
+      "run-lifecycle-facts.v1",
       "agent-topology-projection.v1",
       "work-facts-projection.v1",
       "operator-actions.v1",

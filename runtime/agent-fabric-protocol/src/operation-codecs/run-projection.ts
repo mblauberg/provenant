@@ -77,6 +77,9 @@ export function createRunProjectionCodecs(dependencies: Readonly<{
     currentMilestone: observation(text),
     nextMilestone: observation(text),
     lastEventAt: observation(timestamp),
+  }, {
+    lifecycleRevision: positiveInteger,
+    progressRevision: positiveInteger,
   });
   const composition = objectCodec({
     projectSessionId: identifier,
@@ -123,9 +126,17 @@ export function createRunProjectionCodecs(dependencies: Readonly<{
       detailRef: dependencies.evidenceDetailRefCodec,
     }),
   ]);
-  const entry = (valueCodec: Codec<unknown>): Codec<unknown> => objectCodec(
+  const entry = (
+    valueCodec: Codec<unknown>,
+    agentClassification = false,
+  ): Codec<unknown> => objectCodec(
     { value: valueCodec },
-    { runScope: target },
+    {
+      runScope: target,
+      ...(agentClassification
+        ? { classification: observation(enumeration(["worker", "reviewer"])) }
+        : {}),
+    },
   );
   const sameTarget = (
     left: Record<string, unknown>,
@@ -187,7 +198,7 @@ export function createRunProjectionCodecs(dependencies: Readonly<{
     projectSessionId: identifier,
     target,
     section: literal(section),
-    entries: arrayOf(entry(valueCodec), { maximum: 256 }),
+    entries: arrayOf(entry(valueCodec, section === "agents"), { maximum: 256 }),
     nextCursor: integer(),
     hasMore: boolean,
     snapshotRevision: positiveInteger,

@@ -278,7 +278,7 @@ export class OperatorProjectionStore {
       default: return assertNever(request.view);
     }
   }
-  runPage<Section extends RunProjectionSection>(request: RunProjectionPageRequest<Section>, activityNarrativeGroupingProjection: ActivityNarrativeGroupingProjection = "omit"): RunProjectionPageResult<Section> {
+  runPage<Section extends RunProjectionSection>(request: RunProjectionPageRequest<Section>, activityNarrativeGroupingProjection: ActivityNarrativeGroupingProjection = "omit", lifecycleFactsProjection: "include" | "omit" = "include"): RunProjectionPageResult<Section> {
     const authenticated = this.#authoriseRead(request.credential, request.projectId, request.projectSessionId);
     this.#selectedSessionId(authenticated, request.projectSessionId);
     return projectRunPage({
@@ -295,7 +295,7 @@ export class OperatorProjectionStore {
         activityNarrativeGroupingProjection,
         this.#globalRevision(),
       ),
-    }, request, authenticated);
+    }, request, authenticated, lifecycleFactsProjection);
   }
   page<View extends ConsoleView>(
     request: ProjectionPageRequest<View>,

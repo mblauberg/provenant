@@ -2645,8 +2645,11 @@ describe("operator work facts projection", () => {
       }],
       composition: {
         identity: { value: {
+          lifecycleRevision: expect.any(Number),
+          progressRevision: snapshot.snapshotRevision,
           lead: { observation: "Observed", value: "chair_01" },
-          currentMilestone: { observation: "Unobserved" },
+          currentMilestone: { observation: "Observed", value: "active" },
+          nextMilestone: { observation: "Observed", value: "quiescing" },
         } },
         declaredProgress: { value: {
           observation: "Observed",
@@ -2670,6 +2673,7 @@ describe("operator work facts projection", () => {
       [
         "operator-projection.v2",
         "run-scoped-projection.v1",
+        "run-lifecycle-facts.v1",
         "work-facts-projection.v1",
       ],
       encoded,
@@ -2709,19 +2713,16 @@ describe("operator work facts projection", () => {
     return identity;
   }
 
-  it("observes a mapped run health and leaves both milestones unobserved", () => {
-    // `health` is a total decode of the observed lifecycle state, so a mapped
-    // state establishes it. Milestones are not a fabric-emitted fact at all:
-    // the phase map only names one happy-path successor the lifecycle machine
-    // is free not to take, so `nextMilestone` must stay `Unobserved` beside the
-    // `currentMilestone` deferred to #434 rather than be stamped `Observed`.
+  it("emits daemon-owned lifecycle milestones and their source revisions", () => {
     const identity = coordinationRunIdentity(setupProjection());
 
     expect(identity.value).toMatchObject({
+      lifecycleRevision: identity.revision,
+      progressRevision: expect.any(Number),
       phase: { observation: "Observed", value: "active" },
       health: { observation: "Observed", value: "healthy" },
-      currentMilestone: { observation: "Unobserved" },
-      nextMilestone: { observation: "Unobserved" },
+      currentMilestone: { observation: "Observed", value: "active" },
+      nextMilestone: { observation: "Observed", value: "quiescing" },
     });
   });
 
@@ -2740,7 +2741,7 @@ describe("operator work facts projection", () => {
     expect(identity.value).toMatchObject({
       phase: { observation: "Observed", value: "quiescing" },
       health: { observation: "Unobserved" },
-      nextMilestone: { observation: "Unobserved" },
+      nextMilestone: { observation: "Observed", value: "awaiting_acceptance" },
     });
     expect(identity.value.health).not.toHaveProperty("value");
   });
@@ -2814,13 +2815,14 @@ describe("operator work facts projection", () => {
     });
   });
 
-  it("keeps a delivery-workstream target exact and leaves absent lifecycle facts unobserved", () => {
+  it("keeps a delivery-workstream target exact and emits lifecycle/progress facts", () => {
     const fixture = setupProjection();
     fixture.database.exec(`
       INSERT INTO agents(
-        run_id, agent_id, parent_agent_id, authority_id, provider_session_ref, lifecycle
+        run_id, agent_id, parent_agent_id, authority_id, provider_session_ref, lifecycle,
+        classification
       ) VALUES (
-        'run_01', 'worker_idle_01', 'chair_01', 'authority_01', NULL, 'ready'
+        'run_01', 'worker_idle_01', 'chair_01', 'authority_01', NULL, 'ready', 'worker'
       );
       INSERT INTO teams(
         run_id, team_id, parent_team_id, depth, leader_agent_id, original_leader_agent_id,
@@ -2903,19 +2905,34 @@ describe("operator work facts projection", () => {
       }],
       composition: {
         identity: { value: {
+          lifecycleRevision: expect.any(Number),
+          progressRevision: snapshot.snapshotRevision,
           acceptedScope: { observation: "Unobserved" },
           currentPlan: { observation: "Unobserved" },
           lead: { observation: "Observed", value: "chair_01" },
-          phase: { observation: "Unobserved" },
+          phase: { observation: "Observed", value: "active" },
           health: { observation: "Unobserved" },
           currentMilestone: { observation: "Unobserved" },
           nextMilestone: { observation: "Unobserved" },
           lastEventAt: { observation: "Unobserved" },
         } },
-        declaredProgress: { value: { observation: "Unobserved" } },
+        declaredProgress: { value: {
+          observation: "Observed",
+          value: {
+            plan: "open",
+            counts: {
+              blocked: 0,
+              ready: 0,
+              active: 1,
+              complete: 0,
+              cancelled: 0,
+              degraded: 0,
+            },
+          },
+        } },
       },
     });
-    expect(fixture.projections.runPage({
+    const agentPage = fixture.projections.runPage({
       credential: fixture.credential,
       projectId,
       projectSessionId,
@@ -2929,13 +2946,29 @@ describe("operator work facts projection", () => {
       section: "agents",
       cursor: 0,
       limit: 10,
-    })).toMatchObject({
+    });
+    expect(agentPage).toMatchObject({
       status: "page",
       entries: [
         { value: { itemId: "chair_01" } },
-        { value: { itemId: "worker_idle_01" } },
+        { value: {
+          itemId: "worker_idle_01",
+        }, classification: { observation: "Observed", value: "worker" } },
       ],
     });
+    const encodedAgentPage = parseOperationResult(
+      FABRIC_OPERATIONS.projectionRunPage,
+      agentPage,
+    );
+    expect(assertOperationResultFeatureShape(
+      FABRIC_OPERATIONS.projectionRunPage,
+      [
+        "run-scoped-projection.v1",
+        "run-lifecycle-facts.v1",
+        "agent-topology-projection.v1",
+      ],
+      encodedAgentPage,
+    )).toBe(encodedAgentPage);
     expect(fixture.projections.runPage({
       credential: fixture.credential,
       projectId,
@@ -2965,6 +2998,87 @@ describe("operator work facts projection", () => {
           },
         },
       }],
+    });
+  });
+
+  it("dates delivery progress from the latest persisted task progress write", () => {
+    const fixture = setupProjection();
+    fixture.database.exec(`
+      INSERT INTO workstreams(
+        workstream_id, project_session_id, coordination_run_id, fabric_task_id,
+        lead_agent_id, delivery_run_id, revision, state, created_at, updated_at
+      ) VALUES (
+        'ws_progress', 'session_01', 'run_01', 'task_01',
+        'chair_01', 'delivery_progress', 1, 'active', ${String(now - 200)}, ${String(now - 100)}
+      );
+      INSERT INTO events(event_id, run_id, type, actor_agent_id, payload_json, created_at)
+      VALUES (
+        'event_progress', 'run_01', 'task-transitioned', 'chair_01',
+        '{"taskId":"task_01"}', ${String(now + 1_000)}
+      );
+      INSERT INTO observer_event_sequence(event_id) VALUES ('event_progress');
+      INSERT INTO messages(
+        message_id, run_id, sender_id, dedupe_key, payload_hash, audience_json, kind,
+        body, requires_ack, conversation_id, hop_count, created_at
+      ) VALUES (
+        'message_progress_reply', 'run_01', 'chair_01', 'message:progress:reply',
+        '${"d".repeat(64)}', '{"kind":"agent","agentId":"chair_01"}', 'event',
+        'Task complete', 0, 'conversation_progress', 0, ${String(now + 2_000)}
+      );
+      INSERT INTO task_requests(
+        request_id, project_session_id, run_id, task_id, requester_agent_id,
+        request_revision, conversation_id, request_message_id, target_agent_id,
+        target_provider_session, expected_artifacts_json, acknowledgement_required,
+        dedupe_key, response_deadline, callback_id, callback_generation,
+        dependent_barrier_id, state, payload_digest, created_at, updated_at
+      ) VALUES (
+        'request_progress', 'session_01', 'run_01', 'task_01', 'chair_01',
+        1, 'conversation_progress', 'message_01', 'chair_01',
+        'provider_session_01', '[]', 0, 'request:progress', ${String(now + 10_000)},
+        'callback_progress', 1, 'barrier_progress', 'answered', '${digest}',
+        ${String(now + 500)}, ${String(now + 2_000)}
+      );
+      INSERT INTO task_results(
+        result_id, request_id, project_session_id, run_id, task_id, task_revision,
+        reply_message_id, reply_revision, payload_digest, artifacts_json,
+        terminal_state, summary, created_at
+      ) VALUES (
+        'result_progress', 'request_progress', 'session_01', 'run_01', 'task_01', 4,
+        'message_progress_reply', 1, '${digest}', '[]',
+        'complete', 'Done', ${String(now + 2_000)}
+      );
+    `);
+    const projectId = identifier<"ProjectId">("project_01");
+    const projectSessionId = identifier<"ProjectSessionId">("session_01");
+    const snapshot = fixture.projections.snapshot({
+      credential: fixture.credential,
+      projectId,
+      projectSessionId,
+    }, "include");
+    const page = fixture.projections.runPage({
+      credential: fixture.credential,
+      projectId,
+      projectSessionId,
+      target: {
+        kind: "delivery-workstream",
+        coordinationRunId: identifier<"CoordinationRunId">("run_01"),
+        deliveryRunId: identifier<"DeliveryRunId">("delivery_progress"),
+        workstreamId: identifier<"WorkstreamId">("ws_progress"),
+      },
+      snapshotRevision: snapshot.snapshotRevision,
+      section: "work",
+      cursor: 0,
+      limit: 5,
+    });
+
+    expect(page).toMatchObject({
+      status: "page",
+      composition: {
+        declaredProgress: {
+          observedAt: new Date(now + 2_000).toISOString(),
+          value: { observation: "Observed" },
+        },
+      },
     });
   });
 

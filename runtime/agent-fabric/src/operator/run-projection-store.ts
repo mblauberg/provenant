@@ -15,6 +15,7 @@ import { parseIdentifier, parseTimestamp } from "@local/agent-fabric-protocol";
 import type Database from "better-sqlite3";
 
 import { ProjectFabricCoreError } from "../project-session/contracts.js";
+import { projectRunLifecycleFacts } from "../project-session/lifecycle-facts.js";
 import {
   integer,
   isRow,
@@ -23,9 +24,15 @@ import {
   text,
   type Row,
 } from "../project-session/store-support.js";
-import { projectDeclaredRunProgress } from "./declared-run-progress-projection.js";
+import {
+  deliveryWorkstreamProgressObservedAt,
+  projectDeclaredRunProgress,
+  projectDeliveryWorkstreamProgress,
+} from "./declared-run-progress-projection.js";
 import { projectRunIdentity } from "./run-identity-projection.js";
-import { observedRunHealth } from "./run-lifecycle-projection.js";
+import {
+  observedRunHealth,
+} from "./run-lifecycle-projection.js";
 import type { AuthenticatedOperatorCredential } from "./store.js";
 import {
   activityBudgetExceededRow,
@@ -67,6 +74,7 @@ export function projectRunPage<Section extends RunProjectionSection>(
   context: RunProjectionStoreContext,
   request: RunProjectionPageRequest<Section>,
   authenticated: AuthenticatedOperatorCredential,
+  lifecycleFactsProjection: "include" | "omit" = "include",
 ): RunProjectionPageResult<Section> {
   assertPageBounds(request.cursor, request.limit);
   const read = context.database.transaction((): RunProjectionPageResult<Section> => {
@@ -84,7 +92,13 @@ export function projectRunPage<Section extends RunProjectionSection>(
     }
     const run = runTargetRow(context.database, request);
     const workRows = runScopedWorkRows(context, request, authenticated);
-    const values = runSectionValues(context, request, run, workRows, authenticated);
+    const values = runSectionValues(
+      context,
+      request,
+      run,
+      workRows,
+      authenticated,
+    );
     const requestedValues = values.slice(
       request.cursor,
       request.cursor + request.limit,
@@ -94,11 +108,21 @@ export function projectRunPage<Section extends RunProjectionSection>(
       request,
       run,
       currentSnapshotRevision,
+      lifecycleFactsProjection,
     );
     const entriesFor = (selected: readonly unknown[]) =>
       selected.map((value) => ({
         runScope: request.target,
         value,
+        ...(request.section === "agents" && lifecycleFactsProjection === "include"
+          ? {
+              classification: runAgentClassification(
+                context.database,
+                request.target.coordinationRunId,
+                value as OperatorViewRow<"agents">,
+              ),
+            }
+          : {}),
       })) as unknown as readonly RunProjectionPageEntry<Section>[];
     const resultFor = (selected: readonly unknown[]) => ({
       status: "page",
@@ -158,6 +182,7 @@ function runScopedComposition(
   request: RunProjectionPageRequest,
   run: Row,
   snapshotRevision: number,
+  lifecycleFactsProjection: "include" | "omit",
 ): RunScopedComposition {
   const runRevision = integer(run, "revision");
   const identity = projectRunIdentity(context.database, run);
@@ -174,26 +199,57 @@ function runScopedComposition(
       );
     }
     const workstream = matches[0]!;
+    const workstreamRow = oneScopedRow(context.database, `
+      SELECT revision FROM workstreams
+      WHERE project_session_id=? AND coordination_run_id=?
+        AND delivery_run_id=? AND workstream_id=?
+    `, [
+      request.projectSessionId,
+      target.coordinationRunId,
+      target.deliveryRunId,
+      target.workstreamId,
+    ], "delivery workstream lifecycle revision");
+    const lifecycleRevision = integer(workstreamRow, "revision");
+    const progressEventAt = deliveryWorkstreamProgressObservedAt(context.database, target);
+    const progressObservedAt = progressEventAt === null
+      ? workstream.updatedAt
+      : toTimestamp(
+          Math.max(Date.parse(workstream.updatedAt), progressEventAt),
+          "runScopedComposition.deliveryProgressObservedAt",
+        );
     return {
       projectSessionId: request.projectSessionId,
       target: request.target,
-      identity: liveFact(snapshotRevision, workstream.updatedAt, {
+      identity: liveFact(lifecycleRevision, workstream.updatedAt, {
+        ...(lifecycleFactsProjection === "include"
+          ? { lifecycleRevision, progressRevision: snapshotRevision }
+          : {}),
         acceptedScope: { observation: "Unobserved" },
         currentPlan: { observation: "Unobserved" },
         lead: { observation: "Observed", value: workstream.leadAgentId },
-        phase: { observation: "Unobserved" },
+        phase: lifecycleFactsProjection === "include"
+          ? { observation: "Observed", value: workstream.state }
+          : { observation: "Unobserved" },
         health: { observation: "Unobserved" },
         currentMilestone: { observation: "Unobserved" },
         nextMilestone: { observation: "Unobserved" },
         lastEventAt: { observation: "Unobserved" },
       }),
-      declaredProgress: liveFact(snapshotRevision, workstream.updatedAt, {
-        observation: "Unobserved",
-      }),
+      declaredProgress: liveFact(
+        snapshotRevision,
+        progressObservedAt,
+        lifecycleFactsProjection === "include"
+          ? {
+              observation: "Observed",
+              value: projectDeliveryWorkstreamProgress(context.database, target),
+            }
+          : { observation: "Unobserved" },
+      ),
     };
   }
   const phase = text(run, "lifecycle_state");
   const health = observedRunHealth(phase);
+  const milestones = projectRunLifecycleFacts(phase);
   // `observedAt` states when the fabric last recorded a fact about this run, not
   // when the Console read it. Fabric-owned `runs` rows carry no write timestamp,
   // so the newest recorded event bounds every fact composed below, and a run
@@ -207,6 +263,9 @@ function runScopedComposition(
     projectSessionId: request.projectSessionId,
     target: request.target,
     identity: liveFact(runRevision, observedAt, {
+      ...(lifecycleFactsProjection === "include"
+        ? { lifecycleRevision: runRevision, progressRevision: snapshotRevision }
+        : {}),
       acceptedScope: identity.acceptedScopeRef === null
         ? { observation: "Unobserved" }
         : { observation: "Observed", value: identity.acceptedScopeRef },
@@ -227,19 +286,19 @@ function runScopedComposition(
       health: health === null
         ? { observation: "Unobserved" }
         : { observation: "Observed", value: health },
-      // Neither milestone is a fabric-emitted fact. `projectedRunNextMilestone`
-      // names one happy-path successor of the lifecycle state -- which the
-      // machine is free not to take -- and otherwise returns the prose
-      // placeholder "next valid lifecycle transition". Both stay `Unobserved`
-      // until #434 emits milestones daemon-side; do not fill either from the
-      // phase map.
-      currentMilestone: { observation: "Unobserved" },
-      nextMilestone: { observation: "Unobserved" },
+      // These are values from the daemon's closed lifecycle fact projection,
+      // never Console-derived defaults.
+      currentMilestone: lifecycleFactsProjection === "include" && milestones !== null
+        ? { observation: "Observed", value: milestones.current }
+        : { observation: "Unobserved" },
+      nextMilestone: lifecycleFactsProjection === "include" && milestones?.next != null
+        ? { observation: "Observed", value: milestones.next }
+        : { observation: "Unobserved" },
       lastEventAt: identity.lastEventAt === null
         ? { observation: "Unobserved" }
         : { observation: "Observed", value: identity.lastEventAt },
     }),
-    declaredProgress: liveFact(runRevision, observedAt, {
+    declaredProgress: liveFact(snapshotRevision, observedAt, {
       observation: "Observed",
       value: projectDeclaredRunProgress(context.database, request.target.coordinationRunId),
     }),
@@ -282,7 +341,13 @@ function runSectionValues<Section extends RunProjectionSection>(
 ): readonly unknown[] {
   switch (request.section) {
     case "work": return workRows;
-    case "agents": return runScopedAgentRows(context, request, run, workRows, authenticated);
+    case "agents": return runScopedAgentRows(
+      context,
+      request,
+      run,
+      workRows,
+      authenticated,
+    );
     case "evidence": return runScopedEvidenceRows(context, request, workRows, authenticated);
     case "activity": return runScopedActivityRows(context, request, workRows, authenticated);
     case "issues": return runIssueReferences(context, request, workRows, authenticated);
@@ -370,6 +435,24 @@ function runScopedAgentRows(
     const rightRole = rightValue?.summary.role ?? "worker";
     return roleOrder[leftRole] - roleOrder[rightRole] || left.itemId.localeCompare(right.itemId);
   });
+}
+
+function runAgentClassification(
+  database: Database.Database,
+  runId: string,
+  agent: OperatorViewRow<"agents">,
+): RunProjectionPageEntry<"agents">["classification"] {
+  if (agent.fact.freshness === "conflict") {
+    return { observation: "Unknown", reason: "ContradictoryFacts" };
+  }
+  if (agent.fact.freshness === "unavailable") return { observation: "Unobserved" };
+  const stored = oneScopedRow(database, `
+    SELECT classification FROM agents WHERE run_id=? AND agent_id=?
+  `, [runId, agent.itemId], "run agent classification");
+  const classification = nullableText(stored, "classification");
+  return classification === "worker" || classification === "reviewer"
+    ? { observation: "Observed", value: classification }
+    : { observation: "Unobserved" };
 }
 
 function runScopedEvidenceRows(

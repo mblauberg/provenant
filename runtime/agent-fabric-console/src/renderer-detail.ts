@@ -334,9 +334,18 @@ export function runProjectionDetailLines(result: ConsoleRunProjection): readonly
     ? null
     : progress.value;
   const progressFallback = progress.freshness === "unavailable" ? "Unobserved" : "Unknown";
+  const lifecycleRevision = identityValue?.lifecycleRevision === undefined
+    ? identityFallback
+    : `r${String(identityValue.lifecycleRevision)}`;
+  const progressRevision = identityValue?.progressRevision === undefined
+    ? identityFallback
+    : `r${String(identityValue.progressRevision)}`;
+  const sharedObservedAt = identity.observedAt === progress.observedAt
+    ? ` @ ${identity.observedAt}`
+    : "";
   const lines: string[] = [
     `Target: SESSION ${result.projectSessionId} | ${target}`,
-    `Freshness: identity ${identity.freshness} r${String(identity.revision)} @ ${identity.observedAt} | progress ${progress.freshness} r${String(progress.revision)} @ ${progress.observedAt}`,
+    `Lifecycle revisions: ${lifecycleRevision} ${identity.freshness} | progress ${progressRevision} ${progress.freshness}${sharedObservedAt}`,
     `Lead: ${identityValue === null ? identityFallback : observationText(identityValue.lead)}`,
     `Phase: ${identityValue === null ? identityFallback : observationText(identityValue.phase)}`,
     `Health: ${identityValue === null ? identityFallback : observationText(identityValue.health)}`,
@@ -406,8 +415,8 @@ export function runProjectionDetailLines(result: ConsoleRunProjection): readonly
       lines.push(`Agent ${agent.itemId}: Unknown | contradictory facts`);
     } else {
       const summary = agent.fact.value.summary;
-      const role = summary.role === "worker"
-        ? "member | worker/reviewer role Unobserved"
+      const role = summary.role === "worker" || summary.role === "reviewer"
+        ? `member | ${observationText(agent.classification)}`
         : summary.role;
       lines.push(`Agent ${agent.itemId}: ${role} | ${summary.lifecycle}`);
     }

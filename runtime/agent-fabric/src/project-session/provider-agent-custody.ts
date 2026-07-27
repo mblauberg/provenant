@@ -335,8 +335,9 @@ export class ProviderAgentCustodyAdapter {
       }
     } else {
       this.#database.prepare(`
-        INSERT INTO agents(run_id, agent_id, parent_agent_id, authority_id, provider_session_ref)
-        VALUES (?, ?, ?, ?, NULL)
+        INSERT INTO agents(
+          run_id, agent_id, parent_agent_id, authority_id, provider_session_ref, classification
+        ) VALUES (?, ?, ?, ?, NULL, 'worker')
       `).run(input.runId, input.agentId, input.actorAgentId, input.authorityId);
       this.#database.prepare("INSERT INTO mailbox_state(run_id, recipient_id) VALUES (?, ?)")
         .run(input.runId, input.agentId);

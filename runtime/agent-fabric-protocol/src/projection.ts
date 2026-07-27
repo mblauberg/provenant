@@ -699,6 +699,8 @@ export type RunScopedObservation<Value> =
   | { observation: "Unknown"; reason: "ContradictoryFacts" };
 
 export type RunScopedIdentity = {
+  lifecycleRevision?: number;
+  progressRevision?: number;
   acceptedScope: RunScopedObservation<ArtifactRef>;
   currentPlan: RunScopedObservation<{ artifactRef: ArtifactRef; planRevision: number }>;
   lead: RunScopedObservation<AgentId>;
@@ -776,7 +778,9 @@ export type RunProjectionPageEntry<
   ? {
       runScope?: RunProjectionTarget;
       value: RunProjectionEntryValueMap[Section];
-    }
+    } & (Section extends "agents"
+      ? { classification?: RunScopedObservation<"worker" | "reviewer"> }
+      : {})
   : never;
 
 export type RunProjectionPageRequest<
