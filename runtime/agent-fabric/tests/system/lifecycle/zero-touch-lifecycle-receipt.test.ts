@@ -246,7 +246,7 @@ describe("zero-touch lifecycle action receipt", () => {
     expect(second.credential).toBe(first.credential);
   });
 
-  it("does not rewrite the legacy bootstrap marker when replaying a marked generation", async () => {
+  it("reports first legacy bootstrap provenance exactly once without changing custody mutation semantics", async () => {
     const value = await fixture();
     const first = await bootstrap(value);
     const seatRoot = join(value.paths.stateDirectory, "seats", projectKey(value.projectRoot));
@@ -261,11 +261,21 @@ describe("zero-touch lifecycle action receipt", () => {
     const markerPath = join(seatRoot, "legacy-bootstrap.json");
     const markerBefore = await readFile(markerPath, "utf8");
     const markerMtimeBefore = (await lstat(markerPath)).mtimeMs;
+    expect(marked.receipt.mutated).toBe(false);
+    expect(marked.receipt.actions.every(({ mutated }) => !mutated)).toBe(true);
+    expect(action(marked.receipt, "legacy-bootstrap-provenance")).toEqual({
+      action: "legacy-bootstrap-provenance",
+      outcome: "recorded",
+      mutated: false,
+      generation: first.generation,
+    });
 
     const replayed = await bootstrap(value);
 
     expect(marked.generation).toBe(first.generation);
     expect(replayed.receipt.mutated).toBe(false);
+    expect(replayed.receipt.actions.every(({ mutated }) => !mutated)).toBe(true);
+    expect(replayed.receipt.actions.some(({ action: name }) => name === "legacy-bootstrap-provenance")).toBe(false);
     // An unconditional marker rewrite would contradict `mutated: false` on
     // every repeat invocation.
     await expect(readFile(markerPath, "utf8")).resolves.toBe(markerBefore);
