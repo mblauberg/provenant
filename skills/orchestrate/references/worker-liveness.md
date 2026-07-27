@@ -3,7 +3,7 @@
 Run the read-only helper as one command:
 
 ```bash
-python3 skills/orchestrate/scripts/worker_liveness.py
+python3 "${AGENTS_HOME:-$HOME/.agents}/skills/orchestrate/scripts/worker_liveness.py"
 ```
 
 By default it reports one row per dispatched `codex exec` worker in the current

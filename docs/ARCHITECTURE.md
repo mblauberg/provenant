@@ -298,11 +298,13 @@ Solid legs can block a run; dashed legs cannot. The targeted and other-primary
 requirements are load-bearing from the substantial tier upwards:
 `validate_delivery.py` rejects a receipt that reaches acceptance without multiple
 targeted lenses *and* passing other-primary review, on a distinct primary family
-with distinct evidence. The independence rule
-is written into the nodes rather than drawn as an edge: the chair decides and its
-authoring subagents write, so neither may certify. Blue marks exactly those
-participants disqualified from certifying their own work, while independent
-targeted reviewers remain eligible. Herdr sits outside the decision path entirely. Terminal work adds stronger
+with distinct evidence. It also requires each review row to declare
+`independent_of_authorship: true`, but does not bind the certifier's agent
+identity to authorship or decision custody. Validator success therefore proves
+declared topology and family separation, not actor-level independence. Policy
+still disqualifies the chair and authoring subagents from certifying their own
+work. Blue marks exactly those participants, while independent targeted
+reviewers remain eligible. Herdr sits outside the decision path entirely. Terminal work adds stronger
 targeted and adversarial pressure; a distinct-family skip is recorded when it is
 not warranted.
 

@@ -232,18 +232,20 @@ noncertifying. Triggers reject result insertion beyond reservation. Physical min
 typed operator gate; no referenced finding row is deleted or overwritten.
 
 Changed-file rows additionally store exact status, old/new UTF-8 paths, before/after mode, object and byte-length arms
-plus `diff_object_digest` under the review-diff.v1 codec in the Agent Fabric contract. Startup verifies the checked-in codec and rules
-digests and the immutable conformance fixture manifest, which binds full base/head object IDs, object format,
-source-object-set digest, exact expected counts/bytes and diff-set digest. The fixed Git reader disables mutable config
-and implements exact-content rename pairing plus the closed Myers/binary arms; it never parses porcelain output.
+plus `diff_object_digest` under the review-diff.v1 codec in the Agent Fabric contract. Target preparation must compare
+the checked-in codec and rules digests and immutable conformance fixture manifest before a worker claim. That
+startup/prepare gate is not yet wired: the current review-diff builder accepts caller-supplied syntactically valid
+digests and verifies only the set's internal consistency. The fixture manifest binds full base/head object IDs, object
+format, source-object-set digest, exact expected counts/bytes and diff-set digest. The fixed Git reader disables mutable
+config and implements exact-content rename pairing plus the closed Myers/binary arms; it never parses porcelain output.
 Triggers enforce arm nullability, path/status ordering and equality between the bundle's stored codec/rules/set digests
-and the complete child set. A codec/rules/fixture mismatch disables target preparation before a worker claim.
+and the complete child set.
 
 Generated canonicalisers own the exact the Agent Fabric contract preimages for requirement-map, evidence-closure, repository-source-state,
 coverage and mandatory-read-set digests. Stored map/evidence/source/object digests equality-copy their registered bytes.
 Child tables enforce every body ordinal plus changed-file, evidence, object, finding-page and mandatory-entry
-order/uniqueness. Startup golden vectors and permutation negatives cover every domain; a generated-code/schema/vector
-digest mismatch disables seal/prepare before filesystem work.
+order/uniqueness. Golden vectors and permutation negatives cover every domain. Startup/prepare must compare the
+generated-code, schema and vector digests and disable seal/prepare before filesystem work; that gate is not yet wired.
 
 Digest construction follows the Agent Fabric contract's acyclic order: JCS manifest body with no self/later digest -> raw body pages ->
 JCS root -> JCS final bundle ref; each digest is stored outside its own bytes. The mandatory set is root + every

@@ -60,6 +60,20 @@ The current pre-release tree includes:
   topology projection and work-facts projection.
 - The `setup-repo` skill, extending the former `github-setup` owner with
   inspect-first repository process, tracker and documentation setup.
+- Typed zero-touch Agent Fabric bootstrap receipts covering trust resolution,
+  daemon start-or-attach, seat install-or-replay and a bounded identity/mailbox
+  smoke, plus a schema-cutover gate that leaves incompatible state untouched.
+- `database archive-and-fresh`, with a digest-bound read-only preview,
+  byte-correctness confirmation interlock, durable exact-source archive,
+  typed conflict and recovery results, and distinct exit `4` recovery handling.
+- Certifying-profile pin observation in `doctor` and the separate uncached
+  `npm run profile:pin` live-provider repair command. Doctor caches successful
+  capability observations for six hours; the repair command edits the
+  digest-bound profile and must be reviewed like any other repository change.
+- A read-only worker-liveness helper that reports worker CPU, session-log age
+  and worktree state without signalling or supervising the process.
+- CI checks for deterministic adapter builds, seeded adapter-digest mismatch
+  rejection and the extracted model-routing catalogue validator.
 
 ### Changed
 
@@ -77,13 +91,52 @@ The current pre-release tree includes:
   cross-skill reference boundaries and conditional comparative evaluations.
 - Landed the implemented #141 Attention Deck slices through phases A, B1, B2,
   B3 and C: renderer extraction, session-local filters and pins, declared run
-  plans, topology and workflow facts, and adaptive grouping. Later phases
-  remain tracked by issue #141.
+  plans, topology and workflow facts, deterministic adaptive activity grouping
+  and exact run-scoped drill-down across work, agents, evidence, activity and
+  issues. Remaining work stays tracked by issue #141.
+- `doctor` now reports causal lifecycle state, provider identity
+  drift/staleness and certifying-profile pin drift or unknown observations. Its
+  profile check may consume provider quota and update a private observation
+  cache even though it does not start the daemon.
+- Provider routing now derives OpenAI effort capabilities at runtime, rejects
+  unsupported Claude `ultra`, records Claude effort as `provider-unverified`,
+  derives the Claude probe alias from the catalogue and applies general
+  risk-tier overrides only to the resolved model.
+- Stale protocol builds now fail before daemon election with exit `78`, and
+  bootstrap, seat renewal and Console attachment reject stale daemon result
+  shapes instead of accepting an older contract.
+- Authorised post-merge cleanup now proves the implementation branch is an
+  ancestor of the named integration branch before pruning its worktree and
+  local or stale remote-tracking refs.
 
 ### Fixed
 
 - Prevented `scripts/configure-agent-fabric-mcp.py` from crashing under Python
   3.14 when its standard-output stream is already closed (#396).
+- Accepted a readable SQLite database plus WAL source set without SHM, while
+  still rejecting SHM without WAL and mixed rollback/WAL state. Recovery
+  results now name the private claim directory and its disposition, interrupted
+  cutover residue reports `CUTOVER_RESIDUE_DETECTED` at exit `4`, and
+  `--confirm-source-set` is documented as a byte-correctness interlock rather
+  than a user-authority gate (#441).
+- Degraded an effort shortfall only to the highest supported effort at or below
+  the request, anchored Claude alias-to-model identity, rejected colliding
+  alias/resolved-model snapshot keys, and rejected task-class effort that
+  diverges from its probe policy's `minimum_effort` (#440).
+- Content-addressed the protocol freshness preflight's root-manifest arm with a
+  build-time digest stamp, so unchanged manifest rewrites no longer block
+  `agent-fabric` or `agent-fabric-mcp`; `doctor` now reports a stale build and
+  its exact repair instead of being blocked by the wrapper (#438, #439).
+- Killed and reported incomplete macOS codesign probes that exceed the
+  15-second bound instead of leaving a provider-identity check hung (#423).
+- Rejected stale daemon result shapes before bootstrap, seat renewal or Console
+  attachment rather than continuing against an older protocol contract (#428).
+- Removed four test flakes by mechanism rather than by retrying or raising a
+  timeout: the portal crash-helper phase marker is published atomically (#444),
+  the orchestration FIFO oracle no longer requires a transient dispatch state to
+  persist (#449), a synchronous SQL invariant no longer stands behind a daemon
+  and socket fixture, and an MCP restart no longer assumes daemon exit proves a
+  separate proxy process observed the close (#429).
 
 ### Notes
 
