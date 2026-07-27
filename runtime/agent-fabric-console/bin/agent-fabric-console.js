@@ -1,3 +1,5 @@
 #!/usr/bin/env node
 
-await import("../dist/bin.js");
+import { protocolBuildPreflightPassed } from "../../agent-fabric-protocol/bin/protocol-build-preflight.js";
+
+if (protocolBuildPreflightPassed()) await import("../dist/bin.js");
