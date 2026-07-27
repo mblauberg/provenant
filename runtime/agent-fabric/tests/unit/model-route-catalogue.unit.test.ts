@@ -5,7 +5,10 @@ import { fileURLToPath } from "node:url";
 
 import { expect, it } from "vitest";
 
-import { resolveModelRouteReceipt } from "../../src/routing/model-route.ts";
+import {
+  resolveModelRouteReceipt,
+  selectPreferredModelRouteReceipt,
+} from "../../src/routing/model-route.ts";
 
 function repositoryPath(relativePath: string): string {
   return fileURLToPath(new URL(`../../../../${relativePath}`, import.meta.url));
@@ -52,6 +55,157 @@ fs.writeFileSync(out, JSON.stringify({
 
     const producerArguments = JSON.parse(await readFile(argumentsPath, "utf8")) as string[];
     expect(producerArguments[producerArguments.indexOf("--alias") + 1]).toBe(expectedAlias);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+it("selects through the Python preference stage without changing the hard route", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "agent-fabric-model-preference-"));
+  const receiptPath = join(directory, "selection.json");
+  const preferencesPath = join(directory, "preferences.json");
+  const spreadStatePath = join(directory, "spread-state.json");
+  const capabilitiesPath = join(directory, "codex-capabilities.json");
+  await writeFile(preferencesPath, `${JSON.stringify({
+    schema_version: 1,
+    task_classes: {
+      "critical-review": { family_affinity: ["openai"] },
+    },
+    spreading: { policy: "fair-round-robin" },
+  })}\n`);
+  await writeFile(capabilitiesPath, `${JSON.stringify({
+    schema_version: 1,
+    source: "codex debug models",
+    observed_at: new Date().toISOString(),
+    models: {
+      "gpt-5.6-sol": {
+        resolved_model: "gpt-5.6-sol",
+        supported_efforts: ["high", "max"],
+      },
+    },
+  })}\n`);
+
+  try {
+    const result = await selectPreferredModelRouteReceipt({
+      routerPath: fileURLToPath(new URL("../../../../scripts/model-route", import.meta.url)),
+      receiptPath,
+      preferencesPath,
+      spreadStatePath,
+      taskClass: "critical-review",
+      role: "critical-review",
+      candidates: [{
+        candidateId: "openai-flagship",
+        request: {
+          adapter: "codex",
+          taskClass: "critical-review",
+          role: "critical-review",
+          capabilitiesFile: capabilitiesPath,
+          leadFamily: "anthropic",
+          requireDistinct: true,
+        },
+        availability: { observation: "Unknown", reason: "AvailabilityNotObserved" },
+      }],
+    });
+
+    expect(result.receipt.chosen_route).toEqual(expect.objectContaining({
+      status: "ok",
+      adapter: "codex",
+      task_class: "critical-review",
+      alias: "flagship",
+      requested_effort: "max",
+      effort: "max",
+      model_family: "openai",
+      resolved_model: "",
+      catalog_model: "gpt-5.6-sol",
+    }));
+    expect(result.receipt.candidates).toEqual([
+      expect.objectContaining({
+        candidate_id: "openai-flagship",
+        selected: true,
+        availability: {
+          observation: "Unknown",
+          reason: "AvailabilityNotObserved",
+        },
+      }),
+    ]);
+    expect(JSON.parse(await readFile(spreadStatePath, "utf8"))).toEqual({
+      schema_version: 1,
+      assignments: { openai: 1 },
+      selection_count: 1,
+    });
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+it("passes over a policy-mismatched task-class candidate without rejecting the receipt", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "agent-fabric-model-preference-floor-"));
+  const receiptPath = join(directory, "selection.json");
+  const preferencesPath = join(directory, "preferences.json");
+  const spreadStatePath = join(directory, "spread-state.json");
+  const capabilitiesPath = join(directory, "codex-capabilities.json");
+  await writeFile(preferencesPath, `${JSON.stringify({ schema_version: 1 })}\n`);
+  await writeFile(capabilitiesPath, `${JSON.stringify({
+    schema_version: 1,
+    source: "codex debug models",
+    observed_at: new Date().toISOString(),
+    models: {
+      "gpt-5.6-sol": {
+        resolved_model: "gpt-5.6-sol",
+        supported_efforts: ["high", "max"],
+      },
+      "gpt-5.6-terra": {
+        resolved_model: "gpt-5.6-terra",
+        supported_efforts: ["medium"],
+      },
+    },
+  })}\n`);
+
+  try {
+    const result = await selectPreferredModelRouteReceipt({
+      routerPath: repositoryPath("scripts/model-route"),
+      receiptPath,
+      preferencesPath,
+      spreadStatePath,
+      taskClass: "critical-review",
+      role: "critical-review",
+      candidates: [
+        {
+          candidateId: "critical-review",
+          request: {
+            adapter: "codex",
+            taskClass: "critical-review",
+            role: "critical-review",
+            capabilitiesFile: capabilitiesPath,
+            leadFamily: "anthropic",
+            requireDistinct: true,
+          },
+          availability: { observation: "Observed", value: "available" },
+        },
+        {
+          candidateId: "legwork",
+          request: {
+            adapter: "codex",
+            taskClass: "legwork",
+            role: "worker",
+            capabilitiesFile: capabilitiesPath,
+            leadFamily: "anthropic",
+            requireDistinct: true,
+          },
+          availability: { observation: "Observed", value: "available" },
+        },
+      ],
+    });
+
+    expect(result.receipt.chosen_candidate_id).toBe("critical-review");
+    expect(result.receipt.candidates).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        candidate_id: "legwork",
+        admissible: false,
+        selected: false,
+        disposition: "hard_policy_mismatch",
+      }),
+    ]));
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

@@ -32,3 +32,18 @@ it("keeps the independent task-class verification policy aligned with the routin
     });
   }
 });
+
+it("keeps soft preferences in a separate catalogue without hard routing authority", async () => {
+  const preferencesPath = fileURLToPath(
+    new URL("../../../../config/model-preferences.json", import.meta.url),
+  );
+  const preferences: unknown = JSON.parse(await readFile(preferencesPath, "utf8"));
+  if (!isRecord(preferences)) {
+    throw new TypeError("model preferences are malformed");
+  }
+
+  expect(preferences).not.toHaveProperty("task_class_routes");
+  expect(preferences).not.toHaveProperty("families");
+  expect(preferences).not.toHaveProperty("adapters");
+  expect(preferences).not.toHaveProperty("risk_tier_overrides");
+});
