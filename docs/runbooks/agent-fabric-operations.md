@@ -182,6 +182,44 @@ absent discovery or an exact, generation-matched `stopped` owner with exit `0`
 and no signal can be idle. Forced, non-zero, unknown, crashed and otherwise
 non-clean owners fail closed.
 
+### Verify the deployed certifying-profile catalogue
+
+The certifying profile that `doctor` reads is the deployed copy under
+`$AGENTS_HOME/config/review-profiles/`. Its provenance is deployment-owned and
+separate from the compiled source-catalogue pin used by daemon startup. Deploy
+or repair the copy and its adjacent digest record together:
+
+```sh
+npm run profile:catalogue:deploy -- --agents-home "$AGENTS_HOME"
+```
+
+`doctor.reviewProfilePins.catalogueDeployment` reports `verified` only when the
+canonical digest of the exact deployed document matches that deployment
+record. A present but malformed or crossed record, or a deployed profile
+edited after deployment, fails closed with typed
+`ARTIFACT_DIGEST_INVALID` and points to the deploy command above. Profile
+invalidity or digest mismatch names the deployed profile in `field`; record
+invalidity names the adjacent deployment record. The optional
+`--review-profile` argument may only name that exact canonical deployed path;
+alternate or symlinked paths are rejected rather than being given ambiguous
+deployment provenance. `npm run profile:catalogue:pin` is not a repair for
+these conditions: it advances the separate source-catalogue pin and does not
+redeploy the copy that `doctor` reads.
+
+An absent deployment record reports `unverified` and `doctor` continues its
+diagnosis. This is the deliberate compatibility path for installations that
+predate the deployment record. Absence is never called verified, but refusing
+to run would make `doctor` unavailable on the exact older or incomplete
+installations it is intended to diagnose. Only the record may be absent: the
+required deployed profile must still exist and parse as canonical JSON. Once a
+deployment record exists, its invalidity or disagreement is evidence of drift
+and therefore fails closed.
+
+Daemon startup remains a separate gate. It verifies the source catalogue
+against the compiled pin using the package root resolved from
+`import.meta.dirname`; `agentsHome` may be a deployment home, fixture or
+another worktree and is not substituted as the startup authority.
+
 ### Repair certifying-profile pin drift
 
 When `doctor` reports `REVIEW_PROFILE_PIN_DRIFT`, it names `npm run profile:pin`

@@ -48,6 +48,16 @@ def _wait_for_path(path: Path, *, timeout: float = 10) -> None:
     raise AssertionError(f"timed out waiting for test handshake: {path}")
 
 
+def _wait_for_glob(directory: Path, pattern: str, *, timeout: float = 10) -> Path:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        match = next(directory.glob(pattern), None)
+        if match is not None:
+            return match
+        time.sleep(0.01)
+    raise AssertionError(f"timed out waiting for test handshake: {directory / pattern}")
+
+
 def _copy_launcher_scripts(root: Path) -> None:
     scripts = root / "scripts"
     scripts.mkdir(parents=True)
@@ -190,6 +200,32 @@ def _copy_protocol_consumer(root: Path, package: str) -> tuple[Path, Path]:
         'writeFile(process.env.CONSUMER_TEST_MARKER, "started\\n"));\n',
     )
     return executable, marker
+
+
+def _stale_refusal(agents_home: Path, script_root: Path | None = None) -> str:
+    scripts = script_root or agents_home
+    return (
+        "AGENT_FABRIC_PROTOCOL_BUILD_STALE: local "
+        "@local/agent-fabric-protocol dist is missing, unloadable, or stale "
+        "against its build inputs\n"
+        f'repair: AGENTS_HOME="{agents_home}" '
+        f'"{scripts / "scripts/agent-fabric-protocol-build"}"\n'
+    )
+
+
+def _mark_install_root(root: Path) -> None:
+    (root / ".git").mkdir()
+
+
+def _use_derived_agents_home(env: dict[str, str]) -> None:
+    for name in (
+        "AGENTS_HOME",
+        "AGENT_FABRIC_PROTOCOL_NO_AUTOBUILD",
+        "AGENT_FABRIC_PROTOCOL_PREFLIGHT_MODE",
+        "AGENT_FABRIC_PROTOCOL_AUTOBUILD",
+        "AGENT_FABRIC_PROTOCOL_AUTOBUILD_WAIT_ONLY",
+    ):
+        env.pop(name, None)
 
 
 @pytest.mark.parametrize("protocol_dist", ["missing", "current", "stale"])
@@ -453,6 +489,424 @@ def test_non_doctor_subcommand_still_hard_blocks_on_stale_protocol(
     assert not marker.exists(), "non-doctor commands must stop before daemon election"
 
 
+def test_unrelated_project_autobuilds_stale_install_root_once(
+    tmp_path: Path,
+) -> None:
+    root, marker, fake_node = _fixture(
+        tmp_path,
+        launcher_mode="packaged",
+        protocol_dist="stale",
+    )
+    _mark_install_root(root)
+    unrelated = tmp_path / "unrelated-project"
+    unrelated.mkdir()
+    npm_marker, env = _repair_fixture(
+        tmp_path,
+        root,
+        'mkdir -p "$dist"\n'
+        "printf 'export const fixtureValue = \"dist\";\\n' > \"$dist/index.js\"\n",
+    )
+    _use_derived_agents_home(env)
+    env.update(
+        {
+            "LAUNCHER_TEST_MARKER": str(marker),
+            "PATH": f"{fake_node.parent}:{env['PATH']}",
+        },
+    )
+
+    result = subprocess.run(
+        [str(root / "scripts/agent-fabric"), "status"],
+        cwd=unrelated,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == ""
+    assert result.stderr == (
+        f'agent-fabric protocol autobuild: stale dist at "{root}"; rebuilding\n'
+    )
+    assert npm_marker.read_text(encoding="utf-8").splitlines() == [
+        "run build --workspace=@local/agent-fabric-protocol",
+    ]
+    assert marker.exists(), "the command must continue after the self-repair"
+
+
+@pytest.mark.parametrize("disabled_value", ["1", ""], ids=["one", "empty"])
+def test_no_autobuild_preserves_the_exact_stale_refusal(
+    tmp_path: Path,
+    disabled_value: str,
+) -> None:
+    root, marker, fake_node = _fixture(
+        tmp_path,
+        launcher_mode="packaged",
+        protocol_dist="stale",
+    )
+    _mark_install_root(root)
+    npm_marker, env = _repair_fixture(
+        tmp_path,
+        root,
+        'mkdir -p "$dist"\n'
+        "printf 'export const fixtureValue = \"dist\";\\n' > \"$dist/index.js\"\n",
+    )
+    _use_derived_agents_home(env)
+    env.update(
+        {
+            "AGENT_FABRIC_PROTOCOL_NO_AUTOBUILD": disabled_value,
+            "LAUNCHER_TEST_MARKER": str(marker),
+            "PATH": f"{fake_node.parent}:{env['PATH']}",
+        },
+    )
+
+    result = subprocess.run(
+        [str(root / "scripts/agent-fabric"), "status"],
+        cwd=tmp_path,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 78
+    assert result.stdout == ""
+    assert result.stderr == _stale_refusal(root)
+    assert not npm_marker.exists(), "NO_AUTOBUILD must prevent the build"
+    assert not marker.exists(), "the refused command must not start"
+
+
+def test_missing_dist_does_not_start_a_new_autobuild(
+    tmp_path: Path,
+) -> None:
+    root, marker, fake_node = _fixture(
+        tmp_path,
+        launcher_mode="packaged",
+        protocol_dist="missing",
+    )
+    _mark_install_root(root)
+    npm_marker, env = _repair_fixture(
+        tmp_path,
+        root,
+        'mkdir -p "$dist"\n'
+        "printf 'export const fixtureValue = \"dist\";\\n' > \"$dist/index.js\"\n",
+    )
+    _use_derived_agents_home(env)
+    env.update(
+        {
+            "LAUNCHER_TEST_MARKER": str(marker),
+            "PATH": f"{fake_node.parent}:{env['PATH']}",
+        },
+    )
+
+    result = subprocess.run(
+        [str(root / "scripts/agent-fabric"), "status"],
+        cwd=tmp_path,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 78
+    assert result.stdout == ""
+    assert result.stderr == _stale_refusal(root)
+    assert not npm_marker.exists()
+    assert not marker.exists()
+
+
+def test_missing_build_lock_library_does_not_autobuild(
+    tmp_path: Path,
+) -> None:
+    root, marker, fake_node = _fixture(
+        tmp_path,
+        launcher_mode="packaged",
+        protocol_dist="stale",
+    )
+    _mark_install_root(root)
+    (root / "scripts/lib/agent-fabric-protocol-build-lock.sh").unlink()
+    npm_marker, env = _repair_fixture(
+        tmp_path,
+        root,
+        'mkdir -p "$dist"\n'
+        "printf 'export const fixtureValue = \"dist\";\\n' > \"$dist/index.js\"\n",
+    )
+    _use_derived_agents_home(env)
+    env.update(
+        {
+            "LAUNCHER_TEST_MARKER": str(marker),
+            "PATH": f"{fake_node.parent}:{env['PATH']}",
+        },
+    )
+
+    result = subprocess.run(
+        [str(root / "scripts/agent-fabric"), "status"],
+        cwd=tmp_path,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 78
+    assert result.stdout == ""
+    assert result.stderr == _stale_refusal(root)
+    assert not npm_marker.exists()
+    assert not marker.exists()
+
+
+def test_linked_worktree_stale_dist_keeps_the_exact_refusal(
+    tmp_path: Path,
+) -> None:
+    root, marker, fake_node = _fixture(
+        tmp_path,
+        launcher_mode="packaged",
+        protocol_dist="stale",
+    )
+    _write(root / ".git", "gitdir: /external/common/worktrees/fixture\n")
+    npm_marker, env = _repair_fixture(
+        tmp_path,
+        root,
+        'mkdir -p "$dist"\n'
+        "printf 'export const fixtureValue = \"dist\";\\n' > \"$dist/index.js\"\n",
+    )
+    _use_derived_agents_home(env)
+    env.update(
+        {
+            "LAUNCHER_TEST_MARKER": str(marker),
+            "PATH": f"{fake_node.parent}:{env['PATH']}",
+        },
+    )
+
+    result = subprocess.run(
+        [str(root / "scripts/agent-fabric"), "status"],
+        cwd=tmp_path,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 78
+    assert result.stdout == ""
+    assert result.stderr == _stale_refusal(root)
+    assert not npm_marker.exists(), "a linked worktree must never autobuild"
+    assert not marker.exists()
+
+
+def test_inherited_agents_home_stale_dist_keeps_the_exact_refusal(
+    tmp_path: Path,
+) -> None:
+    script_root, marker, fake_node = _fixture(
+        tmp_path,
+        launcher_mode="packaged",
+        protocol_dist="current",
+    )
+    diagnosed = tmp_path / "other-tree"
+    protocol_root = diagnosed / "runtime/agent-fabric-protocol"
+    _write(protocol_root / "src/index.ts")
+    _write(protocol_root / "dist/index.js", "export {};\n")
+    now = 1_700_000_000
+    os.utime(protocol_root / "dist/index.js", (now - 20, now - 20))
+    os.utime(protocol_root / "src/index.ts", (now, now))
+    for manifest, content in {
+        "package.json": '{"type":"module"}\n',
+        "package-lock.json": '{"lockfileVersion":3}\n',
+        "tsconfig.json": '{"files":[]}\n',
+    }.items():
+        _write(diagnosed / manifest, content)
+        os.utime(diagnosed / manifest, (now, now))
+    _mark_install_root(diagnosed)
+    _write(diagnosed / "node_modules/.keep")
+    npm_marker, env = _repair_fixture(
+        tmp_path,
+        diagnosed,
+        'mkdir -p "$dist"\n'
+        "printf 'export const fixtureValue = \"dist\";\\n' > \"$dist/index.js\"\n",
+    )
+    env.update(
+        {
+            "LAUNCHER_TEST_MARKER": str(marker),
+            "PATH": f"{fake_node.parent}:{env['PATH']}",
+        },
+    )
+
+    result = subprocess.run(
+        [str(script_root / "scripts/agent-fabric"), "status"],
+        cwd=tmp_path,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 78
+    assert result.stdout == ""
+    assert result.stderr == _stale_refusal(diagnosed, script_root)
+    assert not npm_marker.exists(), "an inherited AGENTS_HOME must never autobuild"
+    assert not marker.exists()
+
+
+def test_doctor_reports_stale_owned_root_without_autobuilding(
+    tmp_path: Path,
+) -> None:
+    root, _marker, _fake_node = _fixture(
+        tmp_path,
+        launcher_mode="packaged",
+        protocol_dist="stale",
+    )
+    _mark_install_root(root)
+    protocol_dist = root / "runtime/agent-fabric-protocol/dist/index.js"
+    _write(protocol_dist, "export {};\n")
+    os.utime(protocol_dist, (1_699_999_980, 1_699_999_980))
+    npm_marker, env = _repair_fixture(
+        tmp_path,
+        root,
+        'mkdir -p "$dist"\n'
+        "printf 'export const fixtureValue = \"dist\";\\n' > \"$dist/index.js\"\n",
+    )
+    _use_derived_agents_home(env)
+    env["AGENT_FABRIC_PROTOCOL_PREFLIGHT_MODE"] = "doctor"
+
+    result = subprocess.run(
+        [str(root / "scripts/agent-fabric-protocol-preflight")],
+        cwd=tmp_path,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stderr == ""
+    assert result.stdout == (
+        f'AGENTS_HOME="{root}" '
+        f'"{root / "scripts/agent-fabric-protocol-build"}"\n'
+    )
+    assert not npm_marker.exists(), "doctor reports; it does not repair"
+
+
+def test_doctor_unloadable_owned_root_remains_a_hard_refusal(
+    tmp_path: Path,
+) -> None:
+    root, _marker, _fake_node = _fixture(
+        tmp_path,
+        launcher_mode="packaged",
+        protocol_dist="current",
+    )
+    _mark_install_root(root)
+    _write(
+        root / "runtime/agent-fabric-protocol/dist/index.js",
+        'export * from "./missing.js";\n',
+    )
+    npm_marker, env = _repair_fixture(
+        tmp_path,
+        root,
+        'mkdir -p "$dist"\n'
+        "printf 'export const fixtureValue = \"dist\";\\n' > \"$dist/index.js\"\n",
+    )
+    _use_derived_agents_home(env)
+    env["AGENT_FABRIC_PROTOCOL_PREFLIGHT_MODE"] = "doctor"
+
+    result = subprocess.run(
+        [str(root / "scripts/agent-fabric-protocol-preflight")],
+        cwd=tmp_path,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 78
+    assert result.stdout == ""
+    assert result.stderr == _stale_refusal(root)
+    assert not npm_marker.exists()
+
+
+def test_mcp_wrapper_autobuilds_when_agents_home_was_not_inherited(
+    tmp_path: Path,
+) -> None:
+    root, marker, fake_node = _fixture(
+        tmp_path,
+        launcher_mode="packaged",
+        protocol_dist="stale",
+    )
+    _mark_install_root(root)
+    _write(root / "runtime/agent-fabric/dist/mcp/main.js")
+    _write(root / "runtime/agent-fabric/src/mcp/main.ts")
+    npm_marker, env = _repair_fixture(
+        tmp_path,
+        root,
+        'mkdir -p "$dist"\n'
+        "printf 'export const fixtureValue = \"dist\";\\n' > \"$dist/index.js\"\n",
+    )
+    _use_derived_agents_home(env)
+    env.update(
+        {
+            "LAUNCHER_TEST_MARKER": str(marker),
+            "PATH": f"{fake_node.parent}:{env['PATH']}",
+        },
+    )
+
+    result = subprocess.run(
+        [str(root / "scripts/agent-fabric-mcp")],
+        cwd=tmp_path,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == ""
+    assert result.stderr == (
+        f'agent-fabric protocol autobuild: stale dist at "{root}"; rebuilding\n'
+    )
+    assert npm_marker.read_text(encoding="utf-8").splitlines() == [
+        "run build --workspace=@local/agent-fabric-protocol",
+    ]
+    assert marker.exists()
+
+
+def test_node_bin_consumer_autobuilds_when_agents_home_was_not_inherited(
+    tmp_path: Path,
+) -> None:
+    root, _launcher_marker, _fake_node = _fixture(
+        tmp_path,
+        launcher_mode="packaged",
+        protocol_dist="stale",
+    )
+    _mark_install_root(root)
+    executable, marker = _copy_protocol_consumer(root, "agent-fabric-herdr")
+    npm_marker, env = _repair_fixture(
+        tmp_path,
+        root,
+        'mkdir -p "$dist"\n'
+        "printf 'export const fixtureValue = \"dist\";\\n' > \"$dist/index.js\"\n",
+    )
+    _use_derived_agents_home(env)
+    env["CONSUMER_TEST_MARKER"] = str(marker)
+
+    result = subprocess.run(
+        [str(executable)],
+        cwd=tmp_path,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == ""
+    assert result.stderr == (
+        f'agent-fabric protocol autobuild: stale dist at "{root}"; rebuilding\n'
+    )
+    assert npm_marker.read_text(encoding="utf-8").splitlines() == [
+        "run build --workspace=@local/agent-fabric-protocol",
+    ]
+    assert marker.exists()
+
+
 @pytest.mark.parametrize("protocol_dist", ["missing", "stale"])
 def test_mcp_wrapper_reports_stale_protocol_before_proxying(
     tmp_path: Path,
@@ -587,6 +1041,48 @@ def _concurrent_repair_fixture(
     }
 
 
+def _concurrent_autobuild_fixture(
+    tmp_path: Path,
+    root: Path,
+    *,
+    emit: str = (
+        'mkdir -p "$dist"\n'
+        "printf 'export const fixtureValue = \"dist\";\\n' > \"$dist/index.js\""
+    ),
+) -> tuple[Path, Path, dict[str, str]]:
+    npm_marker = tmp_path / "autobuild-npm-invocations"
+    release = tmp_path / "release-autobuild"
+    npm_bin = tmp_path / "autobuild-npm-bin"
+    npm_bin.mkdir()
+    fake_npm = npm_bin / "npm"
+    _write(
+        fake_npm,
+        "#!/bin/sh\n"
+        "set -eu\n"
+        "printf '%s\\n' \"$*\" >> \"$NPM_TEST_MARKER\"\n"
+        'dist="$AGENTS_HOME/runtime/agent-fabric-protocol/dist"\n'
+        'mkdir -p "$dist"\n'
+        "printf 'export {};\\n' > \"$dist/index.js\"\n"
+        "attempts=0\n"
+        'while [ ! -f "$AUTOBUILD_TEST_RELEASE" ] && [ "$attempts" -lt 500 ]; do\n'
+        "  sleep 0.01\n"
+        "  attempts=$((attempts + 1))\n"
+        "done\n"
+        f"{emit}\n",
+    )
+    fake_npm.chmod(0o755)
+    env = dict(os.environ)
+    _use_derived_agents_home(env)
+    env.update(
+        {
+            "NPM_TEST_MARKER": str(npm_marker),
+            "AUTOBUILD_TEST_RELEASE": str(release),
+            "PATH": f"{npm_bin}:{os.environ['PATH']}",
+        },
+    )
+    return npm_marker, release, env
+
+
 def _make_all_non_protocol_outputs_current(root: Path) -> None:
     now = 1_700_000_100
     for workspace, outputs in {
@@ -655,6 +1151,388 @@ def test_protocol_build_and_warm_serialize_non_atomic_emit_and_loser_rechecks(
         check=False,
     )
     assert loaded.returncode == 0, loaded.stderr
+
+
+def test_racing_entrypoints_share_one_autobuild_and_both_succeed(
+    tmp_path: Path,
+) -> None:
+    root, marker, fake_node = _fixture(
+        tmp_path,
+        launcher_mode="packaged",
+        protocol_dist="stale",
+    )
+    _mark_install_root(root)
+    npm_marker, release, env = _concurrent_autobuild_fixture(tmp_path, root)
+    env.update(
+        {
+            "LAUNCHER_TEST_MARKER": str(marker),
+            "PATH": f"{fake_node.parent}:{env['PATH']}",
+        },
+    )
+
+    first = subprocess.Popen(
+        [str(root / "scripts/agent-fabric"), "status"],
+        cwd=tmp_path,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    second: subprocess.Popen[str] | None = None
+    try:
+        _wait_for_path(npm_marker)
+        second = subprocess.Popen(
+            [str(root / "scripts/agent-fabric"), "status"],
+            cwd=tmp_path,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        time.sleep(0.1)
+        assert first.poll() is None
+        assert second.poll() is None, "the contender must wait while the build lock is held"
+        _write(release)
+        first_stdout, first_stderr = first.communicate(timeout=15)
+        second_stdout, second_stderr = second.communicate(timeout=15)
+    finally:
+        release.touch()
+        for process in (first, second):
+            if process is not None and process.poll() is None:
+                process.terminate()
+                process.communicate(timeout=5)
+
+    assert first.returncode == 0, first_stderr
+    assert second is not None
+    assert second.returncode == 0, second_stderr
+    assert first_stdout == second_stdout == ""
+    assert npm_marker.read_text(encoding="utf-8").splitlines() == [
+        "run build --workspace=@local/agent-fabric-protocol",
+    ]
+    assert (first_stderr + second_stderr).splitlines() == [
+        f'agent-fabric protocol autobuild: stale dist at "{root}"; rebuilding',
+    ]
+
+
+def test_no_autobuild_refuses_during_an_in_progress_partial_emit(
+    tmp_path: Path,
+) -> None:
+    root, marker, fake_node = _fixture(
+        tmp_path,
+        launcher_mode="packaged",
+        protocol_dist="stale",
+    )
+    _mark_install_root(root)
+    npm_marker, release, env = _concurrent_autobuild_fixture(tmp_path, root)
+    env.update(
+        {
+            "LAUNCHER_TEST_MARKER": str(marker),
+            "PATH": f"{fake_node.parent}:{env['PATH']}",
+        },
+    )
+    strict_env = dict(env)
+    strict_env["AGENT_FABRIC_PROTOCOL_NO_AUTOBUILD"] = "1"
+
+    builder = subprocess.Popen(
+        [str(root / "scripts/agent-fabric"), "status"],
+        cwd=tmp_path,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        _wait_for_path(npm_marker)
+        _wait_for_path(root / "runtime/agent-fabric-protocol/dist/index.js")
+        strict = subprocess.run(
+            [str(root / "scripts/agent-fabric"), "status"],
+            cwd=tmp_path,
+            env=strict_env,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=5,
+        )
+        assert builder.poll() is None
+        _write(release)
+        builder_stdout, builder_stderr = builder.communicate(timeout=15)
+    finally:
+        release.touch()
+        if builder.poll() is None:
+            builder.terminate()
+            builder.communicate(timeout=5)
+
+    assert strict.returncode == 78
+    assert strict.stdout == ""
+    assert strict.stderr == _stale_refusal(root)
+    assert builder.returncode == 0, builder_stderr
+    assert builder_stdout == ""
+    assert npm_marker.read_text(encoding="utf-8").splitlines() == [
+        "run build --workspace=@local/agent-fabric-protocol",
+    ]
+
+
+def test_failed_autobuild_refuses_and_leaves_no_partial_dist(
+    tmp_path: Path,
+) -> None:
+    root, marker, fake_node = _fixture(
+        tmp_path,
+        launcher_mode="packaged",
+        protocol_dist="stale",
+    )
+    _mark_install_root(root)
+    npm_marker, env = _repair_fixture(
+        tmp_path,
+        root,
+        'mkdir -p "$dist"\n'
+        "printf 'export const partial = ' > \"$dist/index.js\"\n"
+        "exit 1",
+    )
+    _use_derived_agents_home(env)
+    env.update(
+        {
+            "LAUNCHER_TEST_MARKER": str(marker),
+            "PATH": f"{fake_node.parent}:{env['PATH']}",
+        },
+    )
+
+    result = subprocess.run(
+        [str(root / "scripts/agent-fabric"), "status"],
+        cwd=tmp_path,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 78
+    assert result.stdout == ""
+    assert result.stderr.endswith(_stale_refusal(root))
+    assert (
+        f'agent-fabric protocol autobuild: stale dist at "{root}"; rebuilding\n'
+        in result.stderr
+    )
+    assert (
+        "agent-fabric protocol build failed; dist removed so the workspace "
+        "stays honestly stale\n"
+        in result.stderr
+    )
+    assert npm_marker.read_text(encoding="utf-8").splitlines() == [
+        "run build --workspace=@local/agent-fabric-protocol",
+    ]
+    assert not (root / "runtime/agent-fabric-protocol/dist").exists()
+    assert not marker.exists()
+
+
+def test_interrupted_autobuild_removes_partial_dist_before_refusing(
+    tmp_path: Path,
+) -> None:
+    root, marker, fake_node = _fixture(
+        tmp_path,
+        launcher_mode="packaged",
+        protocol_dist="stale",
+    )
+    _mark_install_root(root)
+    npm_marker, env = _repair_fixture(
+        tmp_path,
+        root,
+        'mkdir -p "$dist"\n'
+        "printf 'export const partial = ' > \"$dist/index.js\"\n"
+        'kill -TERM "$PPID"\n'
+        "sleep 0.1\n"
+        "exit 1",
+    )
+    _use_derived_agents_home(env)
+    env.update(
+        {
+            "LAUNCHER_TEST_MARKER": str(marker),
+            "PATH": f"{fake_node.parent}:{env['PATH']}",
+        },
+    )
+
+    interrupted = subprocess.run(
+        [str(root / "scripts/agent-fabric"), "status"],
+        cwd=tmp_path,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=10,
+    )
+    retried = subprocess.run(
+        [str(root / "scripts/agent-fabric-protocol-preflight")],
+        cwd=tmp_path,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=5,
+    )
+
+    assert interrupted.returncode == 78
+    assert interrupted.stdout == ""
+    assert interrupted.stderr.endswith(_stale_refusal(root))
+    assert retried.returncode == 78
+    assert retried.stdout == ""
+    assert retried.stderr == _stale_refusal(root)
+    assert npm_marker.read_text(encoding="utf-8").splitlines() == [
+        "run build --workspace=@local/agent-fabric-protocol",
+    ]
+    assert not (root / "runtime/agent-fabric-protocol/dist").exists()
+    assert not (
+        root
+        / "runtime/agent-fabric-protocol"
+        / ".dist.agent-fabric-protocol-build.lock"
+    ).exists()
+    assert not marker.exists()
+
+
+def test_waiter_does_not_retry_a_failed_autobuild(
+    tmp_path: Path,
+) -> None:
+    root, marker, fake_node = _fixture(
+        tmp_path,
+        launcher_mode="packaged",
+        protocol_dist="stale",
+    )
+    _mark_install_root(root)
+    npm_marker, release, env = _concurrent_autobuild_fixture(
+        tmp_path,
+        root,
+        emit=(
+            'mkdir -p "$dist"\n'
+            "printf 'export const partial = ' > \"$dist/index.js\"\n"
+            "exit 1"
+        ),
+    )
+    env.update(
+        {
+            "LAUNCHER_TEST_MARKER": str(marker),
+            "PATH": f"{fake_node.parent}:{env['PATH']}",
+        },
+    )
+
+    first = subprocess.Popen(
+        [str(root / "scripts/agent-fabric"), "status"],
+        cwd=tmp_path,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    second: subprocess.Popen[str] | None = None
+    try:
+        _wait_for_path(npm_marker)
+        second = subprocess.Popen(
+            [str(root / "scripts/agent-fabric"), "status"],
+            cwd=tmp_path,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        time.sleep(0.1)
+        assert second.poll() is None
+        _write(release)
+        first_stdout, first_stderr = first.communicate(timeout=15)
+        second_stdout, second_stderr = second.communicate(timeout=15)
+    finally:
+        release.touch()
+        for process in (first, second):
+            if process is not None and process.poll() is None:
+                process.terminate()
+                process.communicate(timeout=5)
+
+    assert first.returncode == 78
+    assert second is not None
+    assert second.returncode == 78
+    assert first_stdout == second_stdout == ""
+    assert first_stderr.endswith(_stale_refusal(root))
+    assert second_stderr == _stale_refusal(root)
+    assert npm_marker.read_text(encoding="utf-8").splitlines() == [
+        "run build --workspace=@local/agent-fabric-protocol",
+    ]
+    assert not (root / "runtime/agent-fabric-protocol/dist").exists()
+    assert not marker.exists()
+
+
+def test_waiter_before_owner_publication_does_not_retry_failed_build(
+    tmp_path: Path,
+) -> None:
+    root, marker, fake_node = _fixture(
+        tmp_path,
+        launcher_mode="packaged",
+        protocol_dist="stale",
+    )
+    _mark_install_root(root)
+    npm_marker, first_env = _repair_fixture(
+        tmp_path,
+        root,
+        'mkdir -p "$dist"\n'
+        "printf 'export const partial = ' > \"$dist/index.js\"\n"
+        "exit 1",
+    )
+    _use_derived_agents_home(first_env)
+    hooks = tmp_path / "owner-publication-hooks"
+    hooks.mkdir()
+    first_env.update(
+        {
+            "AGENT_FABRIC_PROTOCOL_BUILD_LOCK_TEST_HOOK_DIRECTORY": str(hooks),
+            "LAUNCHER_TEST_MARKER": str(marker),
+            "PATH": f"{fake_node.parent}:{first_env['PATH']}",
+        },
+    )
+    second_env = dict(first_env)
+    second_env.pop("AGENT_FABRIC_PROTOCOL_BUILD_LOCK_TEST_HOOK_DIRECTORY")
+
+    first = subprocess.Popen(
+        [str(root / "scripts/agent-fabric"), "status"],
+        cwd=tmp_path,
+        env=first_env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    second: subprocess.Popen[str] | None = None
+    try:
+        ready = _wait_for_glob(hooks, "*.owner-publish.ready")
+        lock = (
+            root
+            / "runtime/agent-fabric-protocol"
+            / ".dist.agent-fabric-protocol-build.lock"
+        )
+        assert lock.is_dir()
+        assert not (lock / "owner").exists()
+        second = subprocess.Popen(
+            [str(root / "scripts/agent-fabric"), "status"],
+            cwd=tmp_path,
+            env=second_env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        time.sleep(0.1)
+        assert second.poll() is None
+        _write(ready.with_name(ready.name.replace(".ready", ".continue")))
+        first_stdout, first_stderr = first.communicate(timeout=15)
+        second_stdout, second_stderr = second.communicate(timeout=15)
+    finally:
+        for process in (first, second):
+            if process is not None and process.poll() is None:
+                process.terminate()
+                process.communicate(timeout=5)
+
+    assert first.returncode == 78
+    assert second is not None
+    assert second.returncode == 78
+    assert first_stdout == second_stdout == ""
+    assert first_stderr.endswith(_stale_refusal(root))
+    assert second_stderr == _stale_refusal(root)
+    assert npm_marker.read_text(encoding="utf-8").splitlines() == [
+        "run build --workspace=@local/agent-fabric-protocol",
+    ]
+    assert not (root / "runtime/agent-fabric-protocol/dist").exists()
+    assert not marker.exists()
 
 
 def test_protocol_build_recovers_a_crashed_holders_stale_lock(

@@ -1,12 +1,12 @@
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
-import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
 import type { Socket } from "node:net";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { Duplex } from "node:stream";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { parse, stringify } from "yaml";
 import { MCP_BOOTSTRAP_CREDENTIALS_FEATURE } from "@local/agent-fabric-protocol";
 
@@ -18,6 +18,8 @@ import { FabricDaemonClient } from "../../src/daemon/rpc-client.ts";
 import { FabricError } from "../../src/errors.ts";
 import { openFabric, startFabricDaemon } from "../../src/index.ts";
 import { PIN_OBSERVATION_CACHE_FILE } from "../../src/review/profile/pin-observer.ts";
+import { digestCanonical } from "../../src/review/canonical/index.ts";
+import { deployReviewProfileCatalogue } from "../../scripts/deploy-review-profile-catalogue.ts";
 import { FABRIC_PROTOCOL_LIMITS } from "../../src/transport/bounded-ndjson.ts";
 import { createPortableActivatedPrimaryFixture } from "../support/primary-adapter-testkit.ts";
 import { runSourceCli } from "../support/cli-process.ts";
@@ -152,6 +154,19 @@ async function writeReviewProfileFixture(directory: string): Promise<void> {
   await writeFile(
     join(directory, "config", "model-routing.json"),
     await readFile(join(root, "config", "model-routing.json"), "utf8"),
+  );
+}
+
+async function writeReviewProfileDeploymentRecord(directory: string): Promise<void> {
+  const relativeProfile = "config/review-profiles/certifying-review-four-slot-v1.json";
+  const profile: unknown = JSON.parse(await readFile(join(directory, relativeProfile), "utf8"));
+  await writeFile(
+    join(directory, "config", "review-profiles", "certifying-review-four-slot-v1.deployment-digest.json"),
+    `${JSON.stringify({
+      schemaVersion: 1,
+      profile: relativeProfile,
+      digest: digestCanonical(profile),
+    }, null, 2)}\n`,
   );
 }
 
@@ -422,6 +437,380 @@ describe("machine status and doctor", () => {
         ],
       },
     });
+  });
+
+  it("derives the pin report from a deployed profile matching its deployment-owned digest", async () => {
+    const value = await paths();
+    const fixture = await createPortableActivatedPrimaryFixture();
+    cleanup.push(fixture.directory);
+    await writeReviewProfileFixture(fixture.directory);
+    await writeReviewProfileDeploymentRecord(fixture.directory);
+
+    const result = await fabricDoctor([
+      "--consume-provider-quota",
+      "--agents-home", fixture.directory,
+      "--trusted-config", fixture.configPath,
+      "--compatibility", fixture.compatibilityPath,
+      "--compatibility-schema", fixture.schemaPath,
+    ], value, {
+      preflightProtocolBuild: async () => undefined,
+      observeReviewProfilePin: async ({ providerFamily }) => ({
+        status: "observed",
+        model: providerFamily === "anthropic" ? "claude-opus-5" : "gpt-5.6-sol",
+        detail: "fixture",
+      }),
+    });
+
+    expect(result.healthy, JSON.stringify(result.checks, null, 2)).toBe(true);
+    expect(result).toMatchObject({
+      reviewProfilePins: {
+        catalogueDeployment: {
+          status: "verified",
+          profile: "config/review-profiles/certifying-review-four-slot-v1.json",
+        },
+        compared: [
+          { providerFamily: "openai", state: "clean" },
+          { providerFamily: "anthropic", state: "clean" },
+        ],
+      },
+    });
+  });
+
+  it("rejects a deployed profile edited after deployment with a typed repairable digest error", async () => {
+    const value = await paths();
+    const fixture = await createPortableActivatedPrimaryFixture();
+    cleanup.push(fixture.directory);
+    await writeReviewProfileFixture(fixture.directory);
+    await writeReviewProfileDeploymentRecord(fixture.directory);
+    const profilePath = join(
+      fixture.directory,
+      "config",
+      "review-profiles",
+      "certifying-review-four-slot-v1.json",
+    );
+    const profile = JSON.parse(await readFile(profilePath, "utf8")) as { profileId: string };
+    profile.profileId = "edited-after-deployment";
+    await writeFile(profilePath, `${JSON.stringify(profile)}\n`);
+
+    await expect(fabricDoctor([
+      "--agents-home", fixture.directory,
+      "--trusted-config", fixture.configPath,
+      "--compatibility", fixture.compatibilityPath,
+      "--compatibility-schema", fixture.schemaPath,
+    ], value, {
+      preflightProtocolBuild: async () => undefined,
+    })).rejects.toMatchObject({
+      name: "FabricError",
+      code: "ARTIFACT_DIGEST_INVALID",
+      field: "config/review-profiles/certifying-review-four-slot-v1.json",
+      message: expect.stringContaining("npm run profile:catalogue:deploy -- --agents-home"),
+    });
+  });
+
+  it("reports a pre-deployment install without a deployment record as unverified and keeps diagnosing", async () => {
+    const value = await paths();
+    const fixture = await createPortableActivatedPrimaryFixture();
+    cleanup.push(fixture.directory);
+    await writeReviewProfileFixture(fixture.directory);
+
+    const result = await fabricDoctor([
+      "--consume-provider-quota",
+      "--agents-home", fixture.directory,
+      "--trusted-config", fixture.configPath,
+      "--compatibility", fixture.compatibilityPath,
+      "--compatibility-schema", fixture.schemaPath,
+    ], value, {
+      preflightProtocolBuild: async () => undefined,
+      observeReviewProfilePin: async ({ providerFamily }) => ({
+        status: "observed",
+        model: providerFamily === "anthropic" ? "claude-opus-5" : "gpt-5.6-sol",
+        detail: "fixture",
+      }),
+    });
+
+    expect(result.healthy, JSON.stringify(result.checks, null, 2)).toBe(true);
+    expect(result).toMatchObject({
+      reviewProfilePins: {
+        catalogueDeployment: {
+          status: "unverified",
+          profile: "config/review-profiles/certifying-review-four-slot-v1.json",
+          record: "config/review-profiles/certifying-review-four-slot-v1.deployment-digest.json",
+          repairCommand: expect.stringContaining("npm run profile:catalogue:deploy -- --agents-home"),
+        },
+        compared: [
+          { providerFamily: "openai", state: "clean" },
+          { providerFamily: "anthropic", state: "clean" },
+        ],
+      },
+    });
+  });
+
+  it("does not let an absent deployment record hide an absent required profile", async () => {
+    const value = await paths();
+    const fixture = await createPortableActivatedPrimaryFixture();
+    cleanup.push(fixture.directory);
+    await rm(
+      join(
+        fixture.directory,
+        "config",
+        "review-profiles",
+        "certifying-review-four-slot-v1.json",
+      ),
+    );
+
+    await expect(fabricDoctor([
+      "--agents-home", fixture.directory,
+      "--trusted-config", fixture.configPath,
+      "--compatibility", fixture.compatibilityPath,
+      "--compatibility-schema", fixture.schemaPath,
+    ], value, {
+      preflightProtocolBuild: async () => undefined,
+    })).rejects.toMatchObject({
+      name: "FabricError",
+      code: "NOT_FOUND",
+      field: "config/review-profiles/certifying-review-four-slot-v1.json",
+    });
+  });
+
+  it("rejects a noncanonical in-home review-profile override", async () => {
+    const value = await paths();
+    const fixture = await createPortableActivatedPrimaryFixture();
+    cleanup.push(fixture.directory);
+    const customDirectory = join(fixture.directory, "config", "review-profiles", "custom");
+    const customProfilePath = join(customDirectory, "selected.json");
+    await mkdir(customDirectory, { recursive: true });
+    await writeFile(customProfilePath, "{}\n");
+
+    await expect(fabricDoctor([
+      "--agents-home", fixture.directory,
+      "--review-profile", customProfilePath,
+      "--trusted-config", fixture.configPath,
+      "--compatibility", fixture.compatibilityPath,
+      "--compatibility-schema", fixture.schemaPath,
+    ], value, {
+      preflightProtocolBuild: async () => undefined,
+    })).rejects.toMatchObject({
+      name: "FabricError",
+      code: "ARTIFACT_PATH_FORBIDDEN",
+      field: customProfilePath,
+    });
+  });
+
+  it("rejects a crossed deployment record before invoking a pin observer", async () => {
+    const value = await paths();
+    const fixture = await createPortableActivatedPrimaryFixture();
+    cleanup.push(fixture.directory);
+    await writeReviewProfileFixture(fixture.directory);
+    await writeReviewProfileDeploymentRecord(fixture.directory);
+    const recordPath = join(
+      fixture.directory,
+      "config",
+      "review-profiles",
+      "certifying-review-four-slot-v1.deployment-digest.json",
+    );
+    const record = JSON.parse(await readFile(recordPath, "utf8")) as { profile: string };
+    record.profile = "config/review-profiles/crossed.json";
+    await writeFile(recordPath, `${JSON.stringify(record)}\n`);
+    const observe = vi.fn(async () => ({ status: "observed" as const, model: "unused", detail: "unused" }));
+
+    await expect(fabricDoctor([
+      "--consume-provider-quota",
+      "--agents-home", fixture.directory,
+      "--trusted-config", fixture.configPath,
+      "--compatibility", fixture.compatibilityPath,
+      "--compatibility-schema", fixture.schemaPath,
+    ], value, {
+      preflightProtocolBuild: async () => undefined,
+      observeReviewProfilePin: observe,
+    })).rejects.toMatchObject({
+      name: "FabricError",
+      code: "ARTIFACT_DIGEST_INVALID",
+      field: "config/review-profiles/certifying-review-four-slot-v1.deployment-digest.json",
+    });
+    expect(observe).not.toHaveBeenCalled();
+  });
+
+  it("rejects a review-profile override outside agentsHome as outside the deployed catalogue", async () => {
+    const value = await paths();
+    const fixture = await createPortableActivatedPrimaryFixture();
+    cleanup.push(fixture.directory);
+    const externalDirectory = await mkdtemp(join(tmpdir(), "fabric-external-profile-"));
+    cleanup.push(externalDirectory);
+    const externalProfile = join(externalDirectory, "profile.json");
+    await writeFile(externalProfile, "{}\n");
+
+    await expect(fabricDoctor([
+      "--agents-home", fixture.directory,
+      "--review-profile", externalProfile,
+      "--trusted-config", fixture.configPath,
+      "--compatibility", fixture.compatibilityPath,
+      "--compatibility-schema", fixture.schemaPath,
+    ], value, {
+      preflightProtocolBuild: async () => undefined,
+    })).rejects.toMatchObject({
+      name: "FabricError",
+      code: "ARTIFACT_PATH_FORBIDDEN",
+      field: externalProfile,
+    });
+  });
+
+  it("refuses to deploy the canonical source to a noncanonical custom path", async () => {
+    const agentsHome = await mkdtemp(join(tmpdir(), "fabric-custom-deployed-profile-"));
+    cleanup.push(agentsHome);
+    const profilePath = join(agentsHome, "config", "review-profiles", "custom", "selected.json");
+    await expect(deployReviewProfileCatalogue({ agentsHome, profilePath })).rejects.toMatchObject({
+      name: "FabricError",
+      code: "ARTIFACT_PATH_FORBIDDEN",
+      field: profilePath,
+    });
+  });
+
+  it("rejects a deployed profile path that escapes agentsHome through a symlink", async () => {
+    const value = await paths();
+    const fixture = await createPortableActivatedPrimaryFixture();
+    cleanup.push(fixture.directory);
+    const externalDirectory = await mkdtemp(join(tmpdir(), "fabric-symlinked-profile-"));
+    cleanup.push(externalDirectory);
+    await writeFile(
+      join(externalDirectory, "certifying-review-four-slot-v1.json"),
+      "{}\n",
+    );
+    await mkdir(join(fixture.directory, "config"), { recursive: true });
+    await rm(join(fixture.directory, "config", "review-profiles"), { recursive: true });
+    await symlink(externalDirectory, join(fixture.directory, "config", "review-profiles"));
+    const selected = join(
+      fixture.directory,
+      "config",
+      "review-profiles",
+      "certifying-review-four-slot-v1.json",
+    );
+
+    await expect(fabricDoctor([
+      "--agents-home", fixture.directory,
+      "--trusted-config", fixture.configPath,
+      "--compatibility", fixture.compatibilityPath,
+      "--compatibility-schema", fixture.schemaPath,
+    ], value, {
+      preflightProtocolBuild: async () => undefined,
+    })).rejects.toMatchObject({
+      name: "FabricError",
+      code: "ARTIFACT_PATH_FORBIDDEN",
+      field: selected,
+    });
+  });
+
+  it("does not deploy through a symlinked directory outside agentsHome", async () => {
+    const agentsHome = await mkdtemp(join(tmpdir(), "fabric-symlink-deploy-home-"));
+    const externalDirectory = await mkdtemp(join(tmpdir(), "fabric-symlink-deploy-target-"));
+    cleanup.push(agentsHome, externalDirectory);
+    await mkdir(join(agentsHome, "config"), { recursive: true });
+    await symlink(externalDirectory, join(agentsHome, "config", "review-profiles"));
+    const externalProfile = join(externalDirectory, "certifying-review-four-slot-v1.json");
+    await writeFile(externalProfile, "preserved\n");
+    const selected = join(
+      agentsHome,
+      "config",
+      "review-profiles",
+      "certifying-review-four-slot-v1.json",
+    );
+
+    await expect(deployReviewProfileCatalogue({ agentsHome })).rejects.toMatchObject({
+      name: "FabricError",
+      code: "ARTIFACT_PATH_FORBIDDEN",
+      field: selected,
+    });
+    expect(await readFile(externalProfile, "utf8")).toBe("preserved\n");
+  });
+
+  it("validates source JSON before replacing an existing deployed profile", async () => {
+    const repositoryRoot = await mkdtemp(join(tmpdir(), "fabric-malformed-source-"));
+    const agentsHome = await mkdtemp(join(tmpdir(), "fabric-preserved-deployment-"));
+    cleanup.push(repositoryRoot, agentsHome);
+    const sourcePath = join(
+      repositoryRoot,
+      "config",
+      "review-profiles",
+      "certifying-review-four-slot-v1.json",
+    );
+    const profilePath = join(
+      agentsHome,
+      "config",
+      "review-profiles",
+      "certifying-review-four-slot-v1.json",
+    );
+    await mkdir(dirname(sourcePath), { recursive: true });
+    await mkdir(dirname(profilePath), { recursive: true });
+    await writeFile(sourcePath, "{invalid\n");
+    await writeFile(profilePath, "preserved\n");
+
+    await expect(deployReviewProfileCatalogue({
+      agentsHome,
+      repositoryRoot,
+    })).rejects.toThrow();
+    expect(await readFile(profilePath, "utf8")).toBe("preserved\n");
+  });
+
+  it("deploys the profile and its digest record to a distinct agentsHome through the repair command", async () => {
+    const agentsHome = await mkdtemp(join(tmpdir(), "fabric-deployed-profile-"));
+    cleanup.push(agentsHome);
+    const repositoryRoot = resolve(import.meta.dirname, "../../../..");
+    const deployedDirectory = join(agentsHome, "config", "review-profiles");
+    await mkdir(deployedDirectory, { recursive: true });
+    await writeFile(
+      join(deployedDirectory, "certifying-review-four-slot-v1.json"),
+      `${JSON.stringify({ handEdited: true })}\n`,
+    );
+    await writeFile(
+      join(deployedDirectory, "certifying-review-four-slot-v1.deployment-digest.json"),
+      `${JSON.stringify({
+        schemaVersion: 1,
+        profile: "config/review-profiles/certifying-review-four-slot-v1.json",
+        digest: digestCanonical({ handEdited: true }),
+      })}\n`,
+    );
+    const child = spawn("npm", [
+      "run",
+      "profile:catalogue:deploy",
+      "--",
+      "--agents-home",
+      agentsHome,
+    ], {
+      cwd: repositoryRoot,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout?.setEncoding("utf8");
+    child.stderr?.setEncoding("utf8");
+    child.stdout?.on("data", (chunk: string) => { stdout += chunk; });
+    child.stderr?.on("data", (chunk: string) => { stderr += chunk; });
+    const exitCode = await new Promise<number | null>((resolvePromise, reject) => {
+      child.once("error", reject);
+      child.once("exit", resolvePromise);
+    });
+
+    expect({ exitCode, stderr }).toStrictEqual({ exitCode: 0, stderr: "" });
+    expect(stdout).toContain("config/review-profiles/certifying-review-four-slot-v1.json");
+    const profile: unknown = JSON.parse(await readFile(join(
+      agentsHome,
+      "config",
+      "review-profiles",
+      "certifying-review-four-slot-v1.json",
+    ), "utf8"));
+    const record = JSON.parse(await readFile(join(
+      agentsHome,
+      "config",
+      "review-profiles",
+      "certifying-review-four-slot-v1.deployment-digest.json",
+    ), "utf8")) as { digest: string };
+    const sourceProfile: unknown = JSON.parse(await readFile(join(
+      repositoryRoot,
+      "config",
+      "review-profiles",
+      "certifying-review-four-slot-v1.json",
+    ), "utf8"));
+    expect(profile).toStrictEqual(sourceProfile);
+    expect(record.digest).toBe(digestCanonical(profile));
   });
 
   it("checks a private recovery clone of a hot rollback journal without changing the source state", async () => {

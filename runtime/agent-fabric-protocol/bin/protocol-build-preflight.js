@@ -29,7 +29,12 @@ export function protocolBuildPreflightPassed() {
   const preflightPath = fileURLToPath(preflightUrl);
   const installRoot = dirname(dirname(preflightPath));
   const result = spawnSync(preflightPath, {
-    env: { ...process.env, AGENTS_HOME: installRoot },
+    // An absent AGENTS_HOME must remain absent so preflight can derive and own
+    // this install root. When one was genuinely inherited, retain the previous
+    // loaded-tree override; its presence keeps autobuild disabled.
+    env: process.env.AGENTS_HOME === undefined
+      ? process.env
+      : { ...process.env, AGENTS_HOME: installRoot },
     stdio: "inherit",
   });
   if (result.error !== undefined) throw result.error;
