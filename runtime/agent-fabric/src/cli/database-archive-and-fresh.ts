@@ -31,6 +31,11 @@ import {
   type StableSourceSet,
 } from "../core/migrations.js";
 import { initialiseCurrentDatabase } from "../persistence/sqlite.js";
+import {
+  consumeApproval,
+  type DatabaseArchiveAndFreshApproval,
+  type DatabaseArchiveAndFreshApprovalReceipt,
+} from "./database-cutover-approval.js";
 
 type SourceMemberReceipt = Readonly<{
   suffix: typeof SQLITE_SOURCE_SUFFIXES[number];
@@ -58,6 +63,20 @@ export type DatabaseArchiveAndFreshResult =
     }>;
     confirmation: Readonly<{ sourceSetSha256: string; confirmed: false }>;
     source: Readonly<{ members: readonly SourceMemberReceipt[] }>;
+  }>
+  | DatabaseCutoverBase & Readonly<{
+    status: "approval-required";
+    code:
+      | "CUTOVER_APPROVAL_REQUIRED"
+      | "CUTOVER_INTERACTIVE_CONFIRMATION_REQUIRED"
+      | "CUTOVER_INTERACTIVE_CONFIRMATION_MISMATCH";
+    message: string;
+    archiveDirectory: string;
+    approval: Readonly<{
+      required: "verified-interactive-confirmation";
+      satisfied: false;
+    }>;
+    sourcePreserved: true;
   }>
   | DatabaseCutoverBase & Readonly<{
     status: "conflict";
@@ -147,6 +166,7 @@ export type DatabaseArchiveAndFreshOptions = Readonly<{
   databasePath: string;
   archiveDirectory: string;
   confirmSourceSetSha256?: string;
+  approval?: DatabaseArchiveAndFreshApproval;
 }>;
 
 export type DatabaseArchiveAndFreshDependencies = Readonly<{
@@ -309,6 +329,7 @@ function assertStagedArchive(
 function archiveReceipt(
   databasePath: string,
   sourceSetSha256: string,
+  approval: DatabaseArchiveAndFreshApprovalReceipt,
   inspection: Extract<FabricDatabaseCutoverInspection, { state: "incompatible" }>,
   status: "archive-complete" | "completed",
 ): Record<string, unknown> {
@@ -318,6 +339,7 @@ function archiveReceipt(
     status,
     databaseName: basename(databasePath),
     confirmation: { sourceSetSha256, confirmed: true },
+    approval,
     mismatch: {
       code: inspection.mismatch.code,
       fields: inspection.mismatch.fields.map(({ field }) => ({ field })),
@@ -576,6 +598,7 @@ function publishArchive(
   databasePath: string,
   archiveDirectory: string,
   sourceSetSha256: string,
+  approval: DatabaseArchiveAndFreshApprovalReceipt,
   inspection: Extract<FabricDatabaseCutoverInspection, { state: "incompatible" }>,
   writeArchiveFile: (path: string, bytes: Buffer, mode: number) => void,
 ): string {
@@ -604,6 +627,7 @@ function publishArchive(
       receiptBytes(archiveReceipt(
         databasePath,
         sourceSetSha256,
+        approval,
         inspection,
         "archive-complete",
       )),
@@ -700,12 +724,31 @@ export function archiveAndFreshDatabase(
     throw new Error("database archive-and-fresh requires an absolute --archive directory");
   }
   assertArchivePathDisjoint(options.databasePath, options.archiveDirectory);
+  if (options.approval === undefined) {
+    return {
+      schemaVersion: 1,
+      kind: "agent-fabric-database-archive-and-fresh",
+      status: "approval-required",
+      code: "CUTOVER_APPROVAL_REQUIRED",
+      message:
+        "cutover requires verified interactive confirmation or an explicit recorded unattended approval assertion",
+      databasePath: options.databasePath,
+      archiveDirectory: options.archiveDirectory,
+      approval: {
+        required: "verified-interactive-confirmation",
+        satisfied: false,
+      },
+      sourcePreserved: true,
+    };
+  }
+  const recordedApproval = consumeApproval(options.approval);
   dependencies.afterInspection?.(inspection);
 
   const receiptPath = publishArchive(
     options.databasePath,
     options.archiveDirectory,
     sourceSetSha256,
+    recordedApproval,
     inspection,
     dependencies.writeArchiveFile ?? writeExclusiveFile,
   );
@@ -795,6 +838,7 @@ export function archiveAndFreshDatabase(
       ...archiveReceipt(
         options.databasePath,
         sourceSetSha256,
+        recordedApproval,
         inspection,
         "archive-complete",
       ),
@@ -834,6 +878,7 @@ export function archiveAndFreshDatabase(
   const receipt = archiveReceipt(
     options.databasePath,
     sourceSetSha256,
+    recordedApproval,
     inspection,
     "completed",
   );
@@ -876,83 +921,4 @@ export function archiveAndFreshDatabase(
     },
     freshBaseline: { status: "current", currentVersion: 1 },
   };
-}
-
-function cliOption(arguments_: string[], name: string): string | undefined {
-  const indexes = arguments_.flatMap((value, index) => value === name ? [index] : []);
-  if (indexes.length > 1) throw new Error(`${name} may be provided only once`);
-  const index = indexes[0];
-  if (index === undefined) return undefined;
-  const value = arguments_[index + 1];
-  if (value === undefined || value.startsWith("--")) throw new Error(`${name} requires a value`);
-  return value;
-}
-
-function cutoverFailure(databasePath: string, error: unknown): DatabaseArchiveAndFreshResult {
-  const message = error instanceof Error ? error.message : String(error);
-  let code: Extract<DatabaseArchiveAndFreshResult, { status: "failed" }>["code"] =
-    "ARCHIVE_WRITE_FAILED";
-  if (error instanceof Error && "code" in error && error.code === "EEXIST") {
-    code = "ARCHIVE_DESTINATION_EXISTS";
-  } else if (/option|requires|absolute --archive/iu.test(message)) {
-    code = "INVALID_ARGUMENT";
-  } else if (/changed|disappeared/iu.test(message)) {
-    code = "SOURCE_SET_CHANGED";
-  } else if (
-    /symbolic link|single-link regular file|not a regular non-symlink|archive destination must not/iu
-      .test(message)
-  ) {
-    code = "SOURCE_SET_INVALID";
-  }
-  return {
-    schemaVersion: 1,
-    kind: "agent-fabric-database-archive-and-fresh",
-    status: "failed",
-    code,
-    databasePath,
-    message,
-    sourcePreserved: true,
-  };
-}
-
-export function runDatabaseArchiveAndFreshCli(
-  arguments_: string[],
-  defaultDatabasePath: string,
-): Readonly<{ result: DatabaseArchiveAndFreshResult; exitCode: 0 | 1 | 4 }> {
-  let databasePath = defaultDatabasePath;
-  try {
-    const allowed = new Set(["--database", "--archive", "--confirm-source-set"]);
-    for (let index = 0; index < arguments_.length; index += 2) {
-      const name = arguments_[index];
-      if (name === undefined || !allowed.has(name)) {
-        throw new Error(`unknown database archive-and-fresh option: ${name ?? ""}`);
-      }
-      if (arguments_[index + 1] === undefined) throw new Error(`${name} requires a value`);
-    }
-    databasePath = cliOption(arguments_, "--database") ?? defaultDatabasePath;
-    const archiveDirectory = cliOption(arguments_, "--archive");
-    if (archiveDirectory === undefined) {
-      throw new Error("database archive-and-fresh requires --archive ABSOLUTE_NEW_DIRECTORY");
-    }
-    const confirmSourceSetSha256 = cliOption(arguments_, "--confirm-source-set");
-    const result = archiveAndFreshDatabase({
-      databasePath,
-      archiveDirectory,
-      ...(confirmSourceSetSha256 === undefined
-        ? {}
-        : { confirmSourceSetSha256 }),
-    });
-    return {
-      result,
-      exitCode: result.status === "archive-complete-fresh-init-failed" ||
-          result.status === "archive-complete-cutover-failed" ||
-          result.status === "recovery-required"
-        ? 4
-        : result.status === "failed" || result.status === "conflict"
-          ? 1
-          : 0,
-    };
-  } catch (error: unknown) {
-    return { result: cutoverFailure(databasePath, error), exitCode: 1 };
-  }
 }

@@ -24,8 +24,10 @@ DIST_MCP="$FABRIC_ROOT/dist/mcp/main.js"
 
 # A stale protocol dist surfaces here as a SyntaxError about a missing export,
 # which the wrapper's caller reports as a JSON parse failure naming nothing
-# about builds. Gate on the same predicate the launcher uses.
-AGENTS_HOME="$AGENTS_ROOT" "$SCRIPT_DIR/agent-fabric-protocol-preflight"
+# about builds. Gate on the same predicate the launcher uses. Preserve whether
+# AGENTS_HOME was genuinely inherited: when it was unset, preflight must derive
+# the owned install root from its own location before considering autobuild.
+"$SCRIPT_DIR/agent-fabric-protocol-preflight"
 
 if [ -f "$DIST_MCP" ]; then
   if [ ! -d "$FABRIC_ROOT/src" ]; then

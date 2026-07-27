@@ -40,17 +40,37 @@ describe("run drill-down timed fixture", () => {
     });
   });
 
-  it("passes all three proxy repetitions without making a human timing claim", async () => {
+  it("meets the field-correctness arm of clause 47 and reports its timing arm unmeasured", async () => {
     const value = await manifest();
     const report = evaluateRunDrillDownProxy(value);
 
     expect(report).toMatchObject({
       observations: 9,
       fieldSuccessRate: 1,
-      proxyPassed: true,
+      fieldCorrectnessPassed: true,
+      timingArm: "not-measured",
       humanTimingClaim: false,
     });
-    expect(report.maximumDurationMs).toBeLessThanOrEqual(20_000);
+    // The narrowed report must not carry a field a reader could mistake for the
+    // met 20-second identification criterion.
+    expect(report).not.toHaveProperty("proxyPassed");
+    expect(report).not.toHaveProperty("maximumDurationMs");
+  });
+
+  it("never lets the render it times stand in for the 20-second identification arm", async () => {
+    // `runProjectionDetailLines` is a pure string builder, so its own duration
+    // is unrelated to how long a user takes to read the screen. An
+    // identification bound the render cannot exceed would make the timing arm
+    // unfailable; an identification bound of zero proves the bound is not
+    // consulted at all.
+    const value = await manifest();
+    const report = evaluateRunDrillDownProxy({ ...value, maximumIdentificationMs: 0 });
+
+    // The premise of the assertion below: the render really did take time, so a
+    // zero bound would fail a report that consulted it.
+    expect(report.maximumRenderMs).toBeGreaterThan(0);
+    expect(report.fieldCorrectnessPassed).toBe(true);
+    expect(report.timingArm).toBe("not-measured");
   });
 
   it("renders every required answer and scores an exact manual response", async () => {

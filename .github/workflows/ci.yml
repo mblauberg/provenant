@@ -107,13 +107,14 @@ jobs:
               # runs scripts/model-route, a bash wrapper that execs
               # scripts/model_route.py where the routing logic lives, and the
               # delivery-run fixture runs skills/deliver/scripts/*.py. Both the
-              # wrapper, the Python module it execs, and the catalogue module
-              # that module loads must all retrigger fabric.
+              # wrapper, the Python module it execs, and the catalogue and
+              # preference modules that module loads must all retrigger fabric.
               # Exact executed dependencies only — the policy test rejects
               # broader docs/skills globs.
               - 'scripts/model-route'
               - 'scripts/model_route.py'
               - 'scripts/model_route_catalog.py'
+              - 'scripts/model_route_preferences.py'
               - 'skills/deliver/scripts/**'
             console:
               - *ci-contract

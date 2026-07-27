@@ -16,6 +16,12 @@ assert SPEC.loader
 sys.modules[SPEC.name] = run_dir_finalize
 SPEC.loader.exec_module(run_dir_finalize)
 
+from _shared.review_ladder import (
+    REVIEW_PLAN_COMPLETE_STATUS,
+    REVIEW_PLAN_STATUSES,
+    SKIPPED_STATUSES,
+)
+
 
 def init_run(tmp_path):
     run = tmp_path / "run"
@@ -304,6 +310,47 @@ def test_recorded_distinct_family_skip_counts_regardless_of_tier():
         review("invalid-extra", "primary", "terminal-challenge", "google", tier="workhorse", status="omitted", substitution_for="additional-distinct-family", wave=0)
     )
     assert run_dir_finalize._validate_review_plan(plan) == []
+
+
+def test_review_plan_status_vocabulary_matches_the_shared_ladder():
+    shared_statuses = SKIPPED_STATUSES | {REVIEW_PLAN_COMPLETE_STATUS}
+
+    for status in shared_statuses:
+        plan = {
+            "risk_tier": "routine",
+            "chair_family": "",
+            "concurrency_ceiling": 1,
+            "reviews": [
+                review(
+                    f"shared-{status}",
+                    "targeted",
+                    "status-vocabulary",
+                    "openai",
+                    status=status,
+                )
+            ],
+        }
+
+        assert not any(
+            ".status is invalid" in error
+            for error in run_dir_finalize._validate_review_plan(plan)
+        ), status
+
+    assert REVIEW_PLAN_STATUSES == shared_statuses
+
+    excluded_status = "skipped"
+    assert excluded_status not in REVIEW_PLAN_STATUSES
+    plan["reviews"][0] = review(
+        f"excluded-{excluded_status}",
+        "targeted",
+        "status-vocabulary",
+        "openai",
+        status=excluded_status,
+    )
+    assert any(
+        ".status is invalid" in error
+        for error in run_dir_finalize._validate_review_plan(plan)
+    )
 
 
 @pytest.mark.parametrize(("field", "value"), (("risk_tier", []), ("chair_family", [])))

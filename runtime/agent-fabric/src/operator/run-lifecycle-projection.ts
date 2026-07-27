@@ -8,6 +8,20 @@ export function projectedRunHealth(phase: string): RunProjection["health"] {
   return "unknown";
 }
 
+/**
+ * The health one observed lifecycle state establishes, or `null` when the state
+ * is outside the mapped set. `projectedRunHealth` answers every phase because
+ * its plain-field callers require a total function; its `"unknown"` fallback is
+ * a default, not an observation. A three-state projection must render that
+ * absence as `Unobserved` rather than stamp `Observed` on the default -- the
+ * rendered `unknown` differs from the `Unknown`/`ContradictoryFacts` arm by one
+ * character of case and asserts something entirely different.
+ */
+export function observedRunHealth(phase: string): RunProjection["health"] | null {
+  const health = projectedRunHealth(phase);
+  return health === "unknown" ? null : health;
+}
+
 export function projectedRunNextMilestone(phase: string): string {
   if (phase === "active") return "quiescing";
   if (phase === "quiescing") return "awaiting_acceptance";

@@ -283,7 +283,6 @@ export class OperatorProjectionStore {
     this.#selectedSessionId(authenticated, request.projectSessionId);
     return projectRunPage({
       database: this.#database,
-      clock: this.#clock,
       globalRevision: () => this.#globalRevision(),
       eventCursor: (projectId, projectSessionId) => this.#eventCursor(projectId, projectSessionId),
       workRows: (projectId, sessionId, operator) => this.#workRows(projectId, sessionId, operator, "include"),

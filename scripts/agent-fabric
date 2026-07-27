@@ -12,7 +12,6 @@ done
 script_dir=$(CDPATH= cd -- "$(dirname -- "$script_path")" && pwd)
 agents_home=${AGENTS_HOME:-"$(dirname -- "$script_dir")"}
 case "$agents_home" in /*) ;; *) echo "AGENTS_HOME must be absolute" >&2; exit 2 ;; esac
-export AGENTS_HOME=$agents_home
 package_root="$agents_home/runtime/agent-fabric"
 
 unset AGENT_FABRIC_PROTOCOL_BUILD_VERDICT AGENT_FABRIC_PROTOCOL_BUILD_REPAIR
@@ -30,6 +29,7 @@ else
   "$script_dir/agent-fabric-protocol-preflight"
 fi
 
+export AGENTS_HOME=$agents_home
 dist_cli="$package_root/dist/cli/main.js"
 if [ -f "$dist_cli" ] && ! find "$package_root/src" -type f -name '*.ts' -newer "$dist_cli" -print -quit | grep -q .; then
   exec node "$package_root/dist/cli/main.js" "$@"
