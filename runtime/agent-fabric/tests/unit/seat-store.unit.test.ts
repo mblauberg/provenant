@@ -1,10 +1,15 @@
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import { installSeatGeneration, projectKey, resolveSeatPaths } from "../../src/cli/seat-store.ts";
+import {
+  installSeatGeneration,
+  markLegacyBootstrapSeatGeneration,
+  projectKey,
+  resolveSeatPaths,
+} from "../../src/cli/seat-store.ts";
 
 const CAPABILITY_A = `afc_${"a".repeat(43)}`;
 const CAPABILITY_B = `afc_${"b".repeat(43)}`;
@@ -13,6 +18,45 @@ const GENERATION_TWO = "2".repeat(64);
 const GENERATION_THREE = "3".repeat(64);
 
 describe("MCP seat generation store", () => {
+  it("reports only the first durable recording of legacy bootstrap provenance", async () => {
+    const root = await mkdtemp(join(tmpdir(), "fabric-seat-legacy-provenance-"));
+    try {
+      const stateDirectory = join(root, "state");
+      const requestedProjectPath = join(root, "project");
+      await mkdir(stateDirectory, { mode: 0o700 });
+      await mkdir(requestedProjectPath);
+      const projectPath = await realpath(requestedProjectPath);
+      const key = projectKey(projectPath);
+      const seatRoot = join(stateDirectory, "seats", key);
+      const markerPath = join(seatRoot, "legacy-bootstrap.json");
+      await mkdir(seatRoot, { recursive: true, mode: 0o700 });
+      await writeFile(join(seatRoot, "current.json"), `${JSON.stringify({
+        schemaVersion: 1,
+        projectKey: key,
+        previousGeneration: null,
+        generation: GENERATION_ONE,
+      })}\n`, { mode: 0o600 });
+
+      await expect(markLegacyBootstrapSeatGeneration({
+        stateDirectory,
+        projectPath,
+        generation: GENERATION_ONE,
+      })).resolves.toBe("recorded");
+      const markerBefore = await readFile(markerPath, "utf8");
+      const markerMtimeBefore = (await lstat(markerPath)).mtimeMs;
+
+      await expect(markLegacyBootstrapSeatGeneration({
+        stateDirectory,
+        projectPath,
+        generation: GENERATION_ONE,
+      })).resolves.toBe("already-recorded");
+      await expect(readFile(markerPath, "utf8")).resolves.toBe(markerBefore);
+      expect((await lstat(markerPath)).mtimeMs).toBe(markerMtimeBefore);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("rejects flat seat files when the active generation pointer is absent", async () => {
     const root = await mkdtemp(join(tmpdir(), "fabric-seat-flat-rejection-"));
     try {

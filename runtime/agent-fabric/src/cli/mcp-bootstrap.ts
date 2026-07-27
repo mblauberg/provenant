@@ -71,6 +71,12 @@ export type LifecycleAction =
     previousGeneration: string | null;
   }>
   | Readonly<{
+    action: "legacy-bootstrap-provenance";
+    outcome: "recorded";
+    mutated: false;
+    generation: string;
+  }>
+  | Readonly<{
     action: "identity-smoke";
     outcome: "passed" | "failed";
     mutated: false;
@@ -470,17 +476,18 @@ export async function bootstrapMcpSeat(input: {
       allowMissingPreviousGeneration: true,
     });
     let installed: Awaited<ReturnType<typeof installSeatGeneration>>;
+    let legacyBootstrapProvenanceRecorded = false;
     try {
       installed = await install(stagedSeats(true));
     } catch (cause: unknown) {
       if (cause instanceof Error && cause.message.includes("existing MCP seat generation differs")) {
         try {
           installed = await install(stagedSeats(false));
-          await markLegacyBootstrapSeatGeneration({
+          legacyBootstrapProvenanceRecorded = await markLegacyBootstrapSeatGeneration({
             stateDirectory: input.paths.stateDirectory,
             projectPath: result.canonicalRoot,
             generation: result.generation,
-          });
+          }) === "recorded";
         } catch (legacyCause: unknown) {
           if (!(legacyCause instanceof Error) || !legacyCause.message.includes("active MCP seat generation changed")) {
             throw legacyCause;
@@ -530,6 +537,14 @@ export async function bootstrapMcpSeat(input: {
         generation: result.generation,
         previousGeneration: result.expectedPreviousGeneration,
       },
+      ...(legacyBootstrapProvenanceRecorded
+        ? [{
+          action: "legacy-bootstrap-provenance" as const,
+          outcome: "recorded" as const,
+          mutated: false as const,
+          generation: result.generation,
+        }]
+        : []),
       smoke,
     ];
     return {
