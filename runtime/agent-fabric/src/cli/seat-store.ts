@@ -252,10 +252,10 @@ export async function markLegacyBootstrapSeatGeneration(input: {
   stateDirectory: string;
   projectPath: string;
   generation: string;
-}): Promise<void> {
+}): Promise<"recorded" | "already-recorded"> {
   if (!GENERATION_PATTERN.test(input.generation)) throw new Error("legacy bootstrap generation is invalid");
   const root = await resolveSeatProject({ stateDirectory: input.stateDirectory, project: input.projectPath });
-  await withPointerLock(root.directory, async () => {
+  return await withPointerLock(root.directory, async () => {
     const active = await readActiveSeatGeneration(input);
     if (active?.generation !== input.generation) {
       throw new Error("active MCP seat generation changed before legacy bootstrap marking");
@@ -263,7 +263,7 @@ export async function markLegacyBootstrapSeatGeneration(input: {
     // Replaying an already-marked generation must not rewrite the marker: the
     // lifecycle reports such a replay as unmutated, and an unconditional write
     // would contradict that on every repeat invocation.
-    if (await readLegacyBootstrapSeatGeneration(input) === input.generation) return;
+    if (await readLegacyBootstrapSeatGeneration(input) === input.generation) return "already-recorded";
     const marker: LegacyBootstrapGenerationMarker = {
       schemaVersion: 1,
       projectKey: root.projectKey,
@@ -274,6 +274,7 @@ export async function markLegacyBootstrapSeatGeneration(input: {
       `${JSON.stringify(marker, null, 2)}\n`,
     );
     await syncDirectory(root.directory);
+    return "recorded";
   });
 }
 
