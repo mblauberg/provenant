@@ -29,9 +29,9 @@ agent's own mistakes.
 
 ## How it fits together
 
-Three parts bear on every request at once: the constitution sets the rules,
-a skill supplies the procedure, and Agent Fabric executes and cross-reviews
-the work. None of them is a stage the work passes through.
+Three parts act on every request at once: the constitution sets the rules, a
+skill supplies the procedure, and Agent Fabric runs and cross-reviews the work.
+None of them is a stage the work passes through.
 
 ```mermaid
 flowchart TB
@@ -60,13 +60,13 @@ flowchart TB
 
 Requirements:
 
-- Git and Python 3.11+;
-- a subscription-authenticated Claude Code or Codex installation for each
-  installed primary client;
-- Node.js `>=24.15.0 <25` and npm `>=11.12.1 <12` to run repository
-  verification (the suite shells out to `node`); and
-- PyYAML and pytest for harness checks (`uv sync --only-group test` installs
-  the locked versions; `scripts/check-harness` honours `HARNESS_PYTHON`).
+- **Git** and **Python 3.11+**
+- **Claude Code** or **Codex**, subscription-authenticated, per primary client
+- **Node.js** `>=24.15.0 <25` and **npm** `>=11.12.1 <12` for repository
+  verification (the suite shells out to `node`)
+- **PyYAML** and **pytest** for harness checks (`uv sync --only-group test`
+  installs the locked versions; `scripts/check-harness` honours
+  `HARNESS_PYTHON`)
 
 Install either platform independently, or both:
 
@@ -75,7 +75,7 @@ git clone https://github.com/mblauberg/provenant.git "$HOME/.agents"
 export AGENTS_HOME="$HOME/.agents"   # optional override; the installed harness defaults here
 cd "$AGENTS_HOME"
 
-# install the pinned workspace dependencies and compile Fabric before its first use
+# install the pinned workspace dependencies and compile Fabric
 npm ci
 "$AGENTS_HOME/scripts/agent-fabric-warm"
 
@@ -160,8 +160,8 @@ each before `provenant doctor`.
 
 Provider CLI versions and digests are diagnostic observations, not admission
 locks. Provenant revalidates vendor identity, wrapper provenance and each
-bounded provider interface at point of use, so an ordinary signed CLI update
-does not require a compatibility-table edit.
+bounded provider interface at point of use, so a signed CLI update needs no
+compatibility-table edit.
 
 ## Core workflows
 
