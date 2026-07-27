@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import type { Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -16,8 +17,10 @@ import { FLOCK_ELECTION_LOCK_PORT } from "../../src/daemon/bootstrap-election.ts
 import { FabricDaemonClient } from "../../src/daemon/rpc-client.ts";
 import { FabricError } from "../../src/errors.ts";
 import { openFabric, startFabricDaemon } from "../../src/index.ts";
+import { PIN_OBSERVATION_CACHE_FILE } from "../../src/review/profile/pin-observer.ts";
 import { FABRIC_PROTOCOL_LIMITS } from "../../src/transport/bounded-ndjson.ts";
 import { createPortableActivatedPrimaryFixture } from "../support/primary-adapter-testkit.ts";
+import { runSourceCli } from "../support/cli-process.ts";
 
 const cleanup: string[] = [];
 afterEach(async () => Promise.all(cleanup.splice(0).map((path) => rm(path, { recursive: true, force: true }))));
@@ -150,6 +153,85 @@ async function writeReviewProfileFixture(directory: string): Promise<void> {
     join(directory, "config", "model-routing.json"),
     await readFile(join(root, "config", "model-routing.json"), "utf8"),
   );
+}
+
+async function writeCapabilityProducer(
+  directory: string,
+  name: "claude_capabilities.py" | "codex_capabilities.py",
+  body: string,
+): Promise<void> {
+  const scripts = join(directory, "skills", "orchestrate", "scripts");
+  await mkdir(scripts, { recursive: true });
+  await writeFile(join(scripts, name), body, { mode: 0o700 });
+}
+
+async function writePoisonedCapabilityProducers(directory: string, callLog: string): Promise<void> {
+  const body = `#!/bin/sh
+printf '%s\\n' POISONED_CAPABILITY_PRODUCER_INVOKED >> ${JSON.stringify(callLog)}
+printf '%s\\n' POISONED_CAPABILITY_PRODUCER_INVOKED >&2
+exit 97
+`;
+  await Promise.all([
+    writeCapabilityProducer(directory, "claude_capabilities.py", body),
+    writeCapabilityProducer(directory, "codex_capabilities.py", body),
+  ]);
+}
+
+async function directoryByteSnapshot(directory: string): Promise<Record<string, string>> {
+  const snapshot: Record<string, string> = {};
+  const visit = async (current: string, relative: string): Promise<void> => {
+    const entries = await readdir(current, { withFileTypes: true });
+    entries.sort((left, right) => left.name.localeCompare(right.name));
+    for (const entry of entries) {
+      const entryRelative = relative.length === 0 ? entry.name : `${relative}/${entry.name}`;
+      if (entry.isDirectory()) {
+        snapshot[`${entryRelative}/`] = "directory";
+        await visit(join(current, entry.name), entryRelative);
+      } else {
+        snapshot[entryRelative] = createHash("sha256")
+          .update(await readFile(join(current, entry.name)))
+          .digest("hex");
+      }
+    }
+  };
+  await visit(directory, "");
+  return snapshot;
+}
+
+async function leaveHotRollbackJournal(databasePath: string): Promise<void> {
+  const child = spawn(process.execPath, ["-e", `
+const Database = require("better-sqlite3");
+const database = new Database(process.argv[1]);
+database.pragma("journal_mode = DELETE");
+database.pragma("synchronous = FULL");
+database.pragma("cache_size = 1");
+database.exec("BEGIN IMMEDIATE");
+database.prepare("UPDATE fabric_schema SET baseline_sha256 = ?").run("f".repeat(64));
+database.exec("CREATE TABLE hot_journal_spill(value BLOB)");
+const insert = database.prepare("INSERT INTO hot_journal_spill(value) VALUES (?)");
+for (let index = 0; index < 256; index += 1) insert.run(Buffer.alloc(8192, index % 251));
+process.stdout.write("ready\\n");
+setInterval(() => {}, 1000);
+`, databasePath], {
+    cwd: resolve(import.meta.dirname, "../.."),
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  if (child.stdout === null || child.stderr === null) throw new Error("hot-journal fixture stdio unavailable");
+  let stderr = "";
+  child.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString("utf8"); });
+  await new Promise<void>((resolvePromise, reject) => {
+    const timeout = setTimeout(() => reject(new Error("hot-journal fixture did not become ready")), 5_000);
+    child.stdout!.once("data", (chunk: Buffer) => {
+      clearTimeout(timeout);
+      chunk.toString("utf8").includes("ready") ? resolvePromise() : reject(new Error(`unexpected fixture output: ${chunk.toString("utf8")}`));
+    });
+    child.once("exit", (code) => {
+      clearTimeout(timeout);
+      reject(new Error(`hot-journal fixture exited early with ${String(code)}: ${stderr}`));
+    });
+  });
+  child.kill("SIGKILL");
+  await new Promise<void>((resolvePromise) => child.once("exit", () => resolvePromise()));
 }
 
 async function writeStoppedGeneration(
@@ -289,6 +371,271 @@ describe("machine status and doctor", () => {
     });
   });
 
+  it("uses cache-only pin evidence by default without invoking a producer or changing any state byte", async () => {
+    const value = await paths();
+    const fixture = await createPortableActivatedPrimaryFixture();
+    cleanup.push(fixture.directory);
+    await writeReviewProfileFixture(fixture.directory);
+    const producerCallLog = join(fixture.directory, "producer-calls.log");
+    await writePoisonedCapabilityProducers(fixture.directory, producerCallLog);
+    const before = await directoryByteSnapshot(value.stateDirectory);
+
+    const result = await fabricDoctor([
+      "--agents-home", fixture.directory,
+      "--trusted-config", fixture.configPath,
+      "--compatibility", fixture.compatibilityPath,
+      "--compatibility-schema", fixture.schemaPath,
+    ], value);
+
+    await expect(readFile(producerCallLog, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await directoryByteSnapshot(value.stateDirectory)).toStrictEqual(before);
+    const check = (result.checks as Array<{
+      id: string;
+      status: string;
+      code: string;
+      detail: string;
+      precondition: string;
+    }>).find((item) => item.id === "review-profile-pins")!;
+    expect(check).toStrictEqual({
+      id: "review-profile-pins",
+      status: "idle",
+      code: "REVIEW_PROFILE_PIN_UNKNOWN",
+      precondition: "each certifying-profile model pin in the automated comparison set matches a provider capability result cached within the last six hours",
+      detail: [
+        "openai/gpt-5.6-sol=unknown: no provider capability result cached within the last six hours; live provider capability probe was not run",
+        "anthropic/claude-opus-5=unknown: no provider capability result cached within the last six hours; live provider capability probe was not run",
+        "xai/cursor-grok-4.5-high=attested observed_on=2026-07-16: xai has no capability observer; identity is attested, not compared",
+        "google/Gemini 3.1 Pro (High)=attested observed_on=2026-07-16: google has no capability observer; identity is attested, not compared",
+      ].join(" "),
+    });
+    expect(result).toMatchObject({
+      healthy: true,
+      cause: {
+        checkId: "review-profile-pins",
+        satisfied: false,
+        code: "REVIEW_PROFILE_PIN_UNKNOWN",
+      },
+      reviewProfilePins: {
+        compared: [
+          { providerFamily: "openai", state: "unknown" },
+          { providerFamily: "anthropic", state: "unknown" },
+        ],
+      },
+    });
+  });
+
+  it("checks a private recovery clone of a hot rollback journal without changing the source state", async () => {
+    const value = await paths();
+    const fixture = await createPortableActivatedPrimaryFixture();
+    cleanup.push(fixture.directory);
+    await leaveHotRollbackJournal(value.databasePath);
+    const before = await directoryByteSnapshot(value.stateDirectory);
+    expect(Object.keys(before)).toContain("fabric-v1.sqlite3-journal");
+
+    const result = await fabricDoctor([
+      "--agents-home", fixture.directory,
+      "--trusted-config", fixture.configPath,
+      "--compatibility", fixture.compatibilityPath,
+      "--compatibility-schema", fixture.schemaPath,
+    ], value);
+
+    expect((result.checks as Array<{ id: string; status: string }>)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "database-integrity", status: "pass" }),
+    ]));
+    expect(await directoryByteSnapshot(value.stateDirectory)).toStrictEqual(before);
+  });
+
+  it("documents the provider-quota opt-in in doctor help without running doctor", async () => {
+    const value = await paths();
+    const fixture = await createPortableActivatedPrimaryFixture();
+    cleanup.push(fixture.directory);
+    const result = await runSourceCli([
+      "doctor", "--help",
+      "--agents-home", fixture.directory,
+      "--trusted-config", fixture.configPath,
+      "--compatibility", fixture.compatibilityPath,
+      "--compatibility-schema", fixture.schemaPath,
+    ], {
+      environment: {
+        AGENT_FABRIC_STATE_DIRECTORY: value.stateDirectory,
+        AGENT_FABRIC_RUNTIME_DIRECTORY: value.runtimeDirectory,
+        AGENT_FABRIC_DATABASE_PATH: value.databasePath,
+      },
+    });
+    expect(result).toMatchObject({ exitCode: 0, signal: null, stderr: "" });
+    expect(result.stdout).toContain("--consume-provider-quota");
+    expect(result.stdout).toContain("run live provider capability probes and refresh the private cache");
+  });
+
+  it("does not create an absent state tree at the source CLI boundary", async () => {
+    const root = await mkdtemp(join(tmpdir(), "fabric-doctor-absent-state-"));
+    cleanup.push(root);
+    const stateDirectory = join(root, "missing-state");
+    const runtimeDirectory = join(stateDirectory, "runtime");
+    const databasePath = join(stateDirectory, "fabric-v1.sqlite3");
+    const fixture = await createPortableActivatedPrimaryFixture();
+    cleanup.push(fixture.directory);
+    await writeReviewProfileFixture(fixture.directory);
+    const producerCallLog = join(fixture.directory, "producer-calls.log");
+    await writePoisonedCapabilityProducers(fixture.directory, producerCallLog);
+
+    const result = await runSourceCli([
+      "doctor",
+      "--agents-home", fixture.directory,
+      "--trusted-config", fixture.configPath,
+      "--compatibility", fixture.compatibilityPath,
+      "--compatibility-schema", fixture.schemaPath,
+    ], {
+      environment: {
+        AGENT_FABRIC_STATE_DIRECTORY: stateDirectory,
+        AGENT_FABRIC_RUNTIME_DIRECTORY: runtimeDirectory,
+        AGENT_FABRIC_DATABASE_PATH: databasePath,
+      },
+    });
+
+    expect(result.exitCode).toBe(1);
+    await expect(stat(stateDirectory)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(readFile(producerCallLog, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("does not chmod or add entries to pre-existing state directories at the source CLI boundary", async () => {
+    const root = await mkdtemp(join(tmpdir(), "fabric-doctor-existing-state-"));
+    cleanup.push(root);
+    const stateDirectory = join(root, "state");
+    const runtimeDirectory = join(stateDirectory, "runtime");
+    const databasePath = join(stateDirectory, "fabric-v1.sqlite3");
+    await mkdir(runtimeDirectory, { recursive: true, mode: 0o750 });
+    const fixture = await createPortableActivatedPrimaryFixture();
+    cleanup.push(fixture.directory);
+    const before = {
+      state: await stat(stateDirectory, { bigint: true }),
+      runtime: await stat(runtimeDirectory, { bigint: true }),
+      entries: await readdir(stateDirectory),
+    };
+
+    const result = await runSourceCli([
+      "doctor",
+      "--agents-home", fixture.directory,
+      "--trusted-config", fixture.configPath,
+      "--compatibility", fixture.compatibilityPath,
+      "--compatibility-schema", fixture.schemaPath,
+    ], {
+      environment: {
+        AGENT_FABRIC_STATE_DIRECTORY: stateDirectory,
+        AGENT_FABRIC_RUNTIME_DIRECTORY: runtimeDirectory,
+        AGENT_FABRIC_DATABASE_PATH: databasePath,
+      },
+    });
+    const after = {
+      state: await stat(stateDirectory, { bigint: true }),
+      runtime: await stat(runtimeDirectory, { bigint: true }),
+      entries: await readdir(stateDirectory),
+    };
+
+    expect(result.exitCode).toBe(1);
+    expect(after.state.mode).toBe(before.state.mode);
+    expect(after.state.mtimeNs).toBe(before.state.mtimeNs);
+    expect(after.state.ctimeNs).toBe(before.state.ctimeNs);
+    expect(after.runtime.mode).toBe(before.runtime.mode);
+    expect(after.runtime.mtimeNs).toBe(before.runtime.mtimeNs);
+    expect(after.runtime.ctimeNs).toBe(before.runtime.ctimeNs);
+    expect(after.entries).toStrictEqual(before.entries);
+  });
+
+  it("reports fresh cached pin results as checked and clean without invoking a producer or changing state", async () => {
+    const value = await paths();
+    const fixture = await createPortableActivatedPrimaryFixture();
+    cleanup.push(fixture.directory);
+    await writeReviewProfileFixture(fixture.directory);
+    const producerCallLog = join(fixture.directory, "producer-calls.log");
+    await writePoisonedCapabilityProducers(fixture.directory, producerCallLog);
+    const now = Date.parse("2026-07-25T00:00:00Z");
+    await writeFile(join(value.stateDirectory, PIN_OBSERVATION_CACHE_FILE), `${JSON.stringify({
+      schemaVersion: 1,
+      entries: {
+        "openai/flagship/gpt-5.6-sol": { observedModel: "gpt-5.6-sol", observedAtMs: now },
+        "anthropic/flagship/opus": { observedModel: "claude-opus-5", observedAtMs: now },
+      },
+    }, null, 2)}\n`);
+    const before = await directoryByteSnapshot(value.stateDirectory);
+
+    const result = await fabricDoctor([
+      "--agents-home", fixture.directory,
+      "--trusted-config", fixture.configPath,
+      "--compatibility", fixture.compatibilityPath,
+      "--compatibility-schema", fixture.schemaPath,
+    ], value, { now: () => now });
+
+    await expect(readFile(producerCallLog, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await directoryByteSnapshot(value.stateDirectory)).toStrictEqual(before);
+    const check = (result.checks as Array<{
+      id: string;
+      status: string;
+      code: string;
+      detail: string;
+      precondition: string;
+    }>).find((item) => item.id === "review-profile-pins")!;
+    expect(check).toMatchObject({
+      status: "pass",
+      code: "REVIEW_PROFILE_PIN_OK",
+      precondition: "each certifying-profile model pin in the automated comparison set matches a provider capability result cached within the last six hours",
+    });
+    expect(check.detail).toContain("openai/gpt-5.6-sol=clean: flagship resolves to gpt-5.6-sol; cached 0m ago");
+    expect(check.detail).toContain("anthropic/claude-opus-5=clean: flagship resolves to claude-opus-5; cached 0m ago");
+  });
+
+  it("bypasses a fresh pin cache, invokes stub producers and refreshes the cache only with the quota flag", async () => {
+    const value = await paths();
+    const fixture = await createPortableActivatedPrimaryFixture();
+    cleanup.push(fixture.directory);
+    await writeReviewProfileFixture(fixture.directory);
+    const producerCallLog = join(fixture.directory, "producer-calls.log");
+    await writeCapabilityProducer(fixture.directory, "codex_capabilities.py", `#!/bin/sh
+printf 'codex\\n' >> ${JSON.stringify(producerCallLog)}
+printf '%s\\n' '{"schema_version":1,"source":"codex debug models","observed_at":"2026-07-25T00:00:00Z","models":{"gpt-5.6-sol":{"resolved_model":"gpt-5.6-sol"}}}'
+`);
+    await writeCapabilityProducer(fixture.directory, "claude_capabilities.py", `#!/bin/sh
+printf 'claude\\n' >> ${JSON.stringify(producerCallLog)}
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--out" ]; then out=$2; shift 2; continue; fi
+  shift
+done
+printf '%s\\n' '{"schema_version":1,"source":"claude subscription canary","observed_at":"2026-07-25T00:00:00Z","provenance":{"kind":"subscription_runtime_canary","auth_method":"claude.ai","subscription_type":"fixture"},"models":{"opus":{"resolved_model":"claude-opus-5"}}}' > "$out"
+`);
+    const now = Date.parse("2026-07-25T00:00:00Z");
+    const cachePath = join(value.stateDirectory, PIN_OBSERVATION_CACHE_FILE);
+    await writeFile(cachePath, `${JSON.stringify({
+      schemaVersion: 1,
+      entries: {
+        "openai/flagship/gpt-5.6-sol": { observedModel: "stale-cache-value", observedAtMs: now },
+        "anthropic/flagship/opus": { observedModel: "stale-cache-value", observedAtMs: now },
+      },
+    }, null, 2)}\n`);
+
+    const result = await fabricDoctor([
+      "--consume-provider-quota",
+      "--agents-home", fixture.directory,
+      "--trusted-config", fixture.configPath,
+      "--compatibility", fixture.compatibilityPath,
+      "--compatibility-schema", fixture.schemaPath,
+    ], value, { now: () => now });
+
+    expect(await readFile(producerCallLog, "utf8")).toBe("codex\nclaude\n");
+    const cache = JSON.parse(await readFile(cachePath, "utf8")) as {
+      entries: Record<string, { observedModel: string | null }>;
+    };
+    expect(cache.entries["openai/flagship/gpt-5.6-sol"]?.observedModel).toBe("gpt-5.6-sol");
+    expect(cache.entries["anthropic/flagship/opus"]?.observedModel).toBe("claude-opus-5");
+    expect(result.checks).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: "review-profile-pins",
+        status: "pass",
+        precondition: "each certifying-profile model pin in the automated comparison set matches alias resolution checked by a live provider capability probe",
+        detail: expect.stringContaining("observed live via claude_capabilities.py"),
+      }),
+    ]));
+  });
+
   it.each([
     {
       label: "clean",
@@ -310,6 +657,7 @@ describe("machine status and doctor", () => {
     cleanup.push(fixture.directory);
     await writeReviewProfileFixture(fixture.directory);
     const result = await fabricDoctor([
+      "--consume-provider-quota",
       "--agents-home", fixture.directory,
       "--trusted-config", fixture.configPath,
       "--compatibility", fixture.compatibilityPath,
@@ -321,10 +669,14 @@ describe("machine status and doctor", () => {
         detail: "fixture",
       }),
     });
-    const checks = result.checks as Array<{ id: string; status: string; code: string; detail: string }>;
+    const checks = result.checks as Array<{ id: string; status: string; code: string; detail: string; precondition: string }>;
     const check = checks.find((item) => item.id === "review-profile-pins")!;
     expect(result.healthy).toBe(healthy);
-    expect(check).toMatchObject({ status, code });
+    expect(check).toMatchObject({
+      status,
+      code,
+      precondition: "each certifying-profile model pin in the automated comparison set matches alias resolution checked by a live provider capability probe",
+    });
     expect(check.detail.includes("npm run profile:pin")).toBe(status === "fail");
     expect(result.reviewProfilePins).toMatchObject({
       repairCommand: "npm run profile:pin",
@@ -345,6 +697,7 @@ describe("machine status and doctor", () => {
     // A refresh moves the digest-bound catalogue, so it must never be a side
     // effect of a report: only an explicit repair may write.
     await fabricDoctor([
+      "--consume-provider-quota",
       "--agents-home", fixture.directory,
       "--trusted-config", fixture.configPath,
       "--compatibility", fixture.compatibilityPath,
@@ -361,6 +714,7 @@ describe("machine status and doctor", () => {
     cleanup.push(fixture.directory);
     await writeReviewProfileFixture(fixture.directory);
     const result = await fabricDoctor([
+      "--consume-provider-quota",
       "--agents-home", fixture.directory,
       "--trusted-config", fixture.configPath,
       "--compatibility", fixture.compatibilityPath,
@@ -1195,7 +1549,7 @@ describe("machine status and doctor", () => {
       state: "blocked",
       cause: {
         checkId: "database-integrity",
-        precondition: "the Fabric database is current-schema and passes its invariants",
+        precondition: "a byte-stable copy of the Fabric database is current-schema and passes its invariants",
         satisfied: false,
         recoverable: false,
       },

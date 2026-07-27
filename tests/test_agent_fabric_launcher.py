@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import time
 
 import pytest
 
@@ -11,9 +12,25 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 LAUNCHER = REPO_ROOT / "scripts" / "agent-fabric"
 MCP_WRAPPER = REPO_ROOT / "scripts" / "agent-fabric-mcp"
+WARM = REPO_ROOT / "scripts" / "agent-fabric-warm"
 FRESHNESS_LIBRARY = REPO_ROOT / "scripts" / "lib" / "agent-fabric-workspace-freshness.sh"
+BUILD_LOCK_LIBRARY = REPO_ROOT / "scripts" / "lib" / "agent-fabric-protocol-build-lock.sh"
 PREFLIGHT = REPO_ROOT / "scripts" / "agent-fabric-protocol-preflight"
 PROTOCOL_BUILD = REPO_ROOT / "scripts" / "agent-fabric-protocol-build"
+PROTOCOL_BIN_PREFLIGHT = (
+    REPO_ROOT
+    / "runtime/agent-fabric-protocol/bin/protocol-build-preflight.js"
+)
+CONSUMER_BINS = {
+    "agent-fabric-herdr": (
+        REPO_ROOT
+        / "runtime/agent-fabric-herdr/bin/agent-fabric-herdr.js"
+    ),
+    "agent-fabric-console": (
+        REPO_ROOT
+        / "runtime/agent-fabric-console/bin/agent-fabric-console.js"
+    ),
+}
 ROOT_MANIFEST_STAMP = ".root-manifests.sha256"
 
 
@@ -22,14 +39,25 @@ def _write(path: Path, content: str = "fixture\n") -> None:
     path.write_text(content, encoding="utf-8")
 
 
+def _wait_for_path(path: Path, *, timeout: float = 10) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if path.exists():
+            return
+        time.sleep(0.01)
+    raise AssertionError(f"timed out waiting for test handshake: {path}")
+
+
 def _copy_launcher_scripts(root: Path) -> None:
     scripts = root / "scripts"
     scripts.mkdir(parents=True)
-    for source in (LAUNCHER, MCP_WRAPPER, PREFLIGHT, PROTOCOL_BUILD):
+    for source in (LAUNCHER, MCP_WRAPPER, WARM, PREFLIGHT, PROTOCOL_BUILD):
         shutil.copy2(source, scripts / source.name)
-    library = scripts / "lib/agent-fabric-workspace-freshness.sh"
-    library.parent.mkdir()
-    shutil.copy2(FRESHNESS_LIBRARY, library)
+    library_dir = scripts / "lib"
+    library_dir.mkdir()
+    for source in (FRESHNESS_LIBRARY, BUILD_LOCK_LIBRARY):
+        if source.exists():
+            shutil.copy2(source, library_dir / source.name)
 
 
 def _fixture(
@@ -141,6 +169,29 @@ def _real_source_fixture(tmp_path: Path, protocol_dist: str) -> Path:
     return root
 
 
+def _copy_protocol_consumer(root: Path, package: str) -> tuple[Path, Path]:
+    source = CONSUMER_BINS[package]
+    executable = root / "runtime" / package / "bin" / source.name
+    executable.parent.mkdir(parents=True)
+    shutil.copy2(source, executable)
+    executable.chmod(0o755)
+    if PROTOCOL_BIN_PREFLIGHT.exists():
+        destination = (
+            root
+            / "runtime/agent-fabric-protocol/bin"
+            / PROTOCOL_BIN_PREFLIGHT.name
+        )
+        destination.parent.mkdir(parents=True)
+        shutil.copy2(PROTOCOL_BIN_PREFLIGHT, destination)
+    marker = root / f"{package}-started"
+    _write(
+        root / "runtime" / package / "dist/bin.js",
+        'await import("node:fs/promises").then(({ writeFile }) => '
+        'writeFile(process.env.CONSUMER_TEST_MARKER, "started\\n"));\n',
+    )
+    return executable, marker
+
+
 @pytest.mark.parametrize("protocol_dist", ["missing", "current", "stale"])
 def test_source_launcher_requires_current_protocol_dist_before_start(
     tmp_path: Path,
@@ -216,6 +267,42 @@ def test_packaged_launcher_accepts_current_protocol_dist(tmp_path: Path) -> None
         str(root / "runtime/agent-fabric/dist/cli/main.js"),
         "doctor",
     ]
+
+
+@pytest.mark.parametrize("package", sorted(CONSUMER_BINS))
+@pytest.mark.parametrize("protocol_dist", ["missing", "stale"])
+def test_node_bin_consumers_preflight_protocol_before_import(
+    tmp_path: Path,
+    package: str,
+    protocol_dist: str,
+) -> None:
+    root, _launcher_marker, _fake_node = _fixture(
+        tmp_path,
+        launcher_mode="packaged",
+        protocol_dist=protocol_dist,
+    )
+    executable, marker = _copy_protocol_consumer(root, package)
+
+    result = subprocess.run(
+        [str(executable)],
+        cwd=root,
+        env={
+            **os.environ,
+            "AGENTS_HOME": str(root),
+            "CONSUMER_TEST_MARKER": str(marker),
+        },
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 78
+    assert "AGENT_FABRIC_PROTOCOL_BUILD_STALE" in result.stderr
+    assert (
+        f'repair: AGENTS_HOME="{root}" '
+        f'"{root / "scripts/agent-fabric-protocol-build"}"'
+    ) in result.stderr
+    assert not marker.exists(), "consumer dist must not import before preflight"
 
 
 @pytest.mark.parametrize("protocol_dist", ["missing"])
@@ -433,6 +520,300 @@ def _repair_fixture(tmp_path: Path, root: Path, emit: str) -> tuple[Path, dict[s
         "NPM_TEST_MARKER": str(npm_marker),
         "PATH": f"{npm_bin}:{os.environ['PATH']}",
     }
+
+
+def _concurrent_repair_fixture(
+    tmp_path: Path,
+    root: Path,
+) -> tuple[Path, Path, dict[str, str]]:
+    """Fake a non-atomic tsc emit and record any overlapping observer.
+
+    The first npm process deliberately leaves protocol dist half-written while
+    it gives an unlocked contender time to enter. A contender probes those
+    bytes and records the raw SyntaxError condition that the repair lock exists
+    to prevent.
+    """
+    npm_marker = tmp_path / "npm-invocations"
+    overlap_marker = tmp_path / "half-written-observed"
+    active = tmp_path / "npm-active"
+    contender_observed = tmp_path / "npm-contender-observed"
+    npm_bin = tmp_path / "concurrent-npm-bin"
+    npm_bin.mkdir()
+    fake_npm = npm_bin / "npm"
+    _write(
+        fake_npm,
+        "#!/bin/sh\n"
+        "set -eu\n"
+        "printf '%s\\n' \"$*\" >> \"$NPM_TEST_MARKER\"\n"
+        'dist="$AGENTS_HOME/runtime/agent-fabric-protocol/dist"\n'
+        'if mkdir "$RACE_TEST_ACTIVE" 2>/dev/null; then\n'
+        "  trap 'rmdir \"$RACE_TEST_ACTIVE\" 2>/dev/null || :' EXIT HUP INT TERM\n"
+        '  mkdir -p "$dist"\n'
+        "  printf 'export const fixtureValue = \"' > \"$dist/index.js\"\n"
+        "  attempts=0\n"
+        '  while [ ! -f "$RACE_TEST_CONTENDER_OBSERVED" ] && [ "$attempts" -lt 100 ]; do\n'
+        "    sleep 0.02\n"
+        "    attempts=$((attempts + 1))\n"
+        "  done\n"
+        "  printf 'dist\";\\n' >> \"$dist/index.js\"\n"
+        "else\n"
+        "  if ! node --input-type=module -e 'await import(process.argv[1]);' "
+        '"$dist/index.js" >/dev/null 2>&1; then\n'
+        '    : > "$RACE_TEST_OVERLAP_MARKER"\n'
+        "  fi\n"
+        '  : > "$RACE_TEST_CONTENDER_OBSERVED"\n'
+        '  mkdir -p "$dist"\n'
+        "  printf 'export const fixtureValue = \"dist\";\\n' > \"$dist/index.js\"\n"
+        "fi\n"
+        "for output in \\\n"
+        '  "$AGENTS_HOME/runtime/agent-fabric/dist/cli/main.js" \\\n'
+        '  "$AGENTS_HOME/runtime/agent-fabric/dist/mcp/main.js" \\\n'
+        '  "$AGENTS_HOME/runtime/agent-fabric-herdr/dist/bin.js" \\\n'
+        '  "$AGENTS_HOME/runtime/agent-fabric-console/dist/bin.js"\n'
+        "do\n"
+        '  mkdir -p "${output%/*}"\n'
+        "  printf 'export {};\\n' > \"$output\"\n"
+        "done\n",
+    )
+    fake_npm.chmod(0o755)
+    return npm_marker, overlap_marker, {
+        **os.environ,
+        "AGENTS_HOME": str(root),
+        "NPM_TEST_MARKER": str(npm_marker),
+        "RACE_TEST_ACTIVE": str(active),
+        "RACE_TEST_CONTENDER_OBSERVED": str(contender_observed),
+        "RACE_TEST_OVERLAP_MARKER": str(overlap_marker),
+        "PATH": f"{npm_bin}:{os.environ['PATH']}",
+    }
+
+
+def _make_all_non_protocol_outputs_current(root: Path) -> None:
+    now = 1_700_000_100
+    for workspace, outputs in {
+        "agent-fabric": ["dist/cli/main.js", "dist/mcp/main.js"],
+        "agent-fabric-herdr": ["dist/bin.js"],
+        "agent-fabric-console": ["dist/bin.js"],
+    }.items():
+        source = root / "runtime" / workspace / "src/index.ts"
+        _write(source)
+        os.utime(source, (now, now))
+        for relative in outputs:
+            output = root / "runtime" / workspace / relative
+            _write(output, "export {};\n")
+            os.utime(output, (now + 20, now + 20))
+
+
+def test_protocol_build_and_warm_serialize_non_atomic_emit_and_loser_rechecks(
+    tmp_path: Path,
+) -> None:
+    root, _marker, _fake_node = _fixture(
+        tmp_path,
+        launcher_mode="packaged",
+        protocol_dist="stale",
+    )
+    _write(root / "node_modules/.keep")
+    _make_all_non_protocol_outputs_current(root)
+    npm_marker, overlap_marker, env = _concurrent_repair_fixture(tmp_path, root)
+
+    build = subprocess.Popen(
+        [str(root / "scripts/agent-fabric-protocol-build")],
+        cwd=root,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    warm = subprocess.Popen(
+        [str(root / "scripts/agent-fabric-warm")],
+        cwd=root,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    build_stdout, build_stderr = build.communicate(timeout=15)
+    warm_stdout, warm_stderr = warm.communicate(timeout=15)
+
+    assert not overlap_marker.exists(), (
+        "the waiting repair must never enter npm while dist/index.js is half-written"
+    )
+    assert build.returncode == 0, f"{build_stdout}\n{build_stderr}"
+    assert warm.returncode == 0, f"{warm_stdout}\n{warm_stderr}"
+    assert len(npm_marker.read_text(encoding="utf-8").splitlines()) == 1, (
+        "the loser must re-check the completed stamped dist instead of rebuilding"
+    )
+    loaded = subprocess.run(
+        [
+            "node",
+            "--input-type=module",
+            "-e",
+            "await import(process.argv[1]);",
+            str(root / "runtime/agent-fabric-protocol/dist/index.js"),
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert loaded.returncode == 0, loaded.stderr
+
+
+def test_protocol_build_recovers_a_crashed_holders_stale_lock(
+    tmp_path: Path,
+) -> None:
+    root, _marker, _fake_node = _fixture(
+        tmp_path,
+        launcher_mode="packaged",
+        protocol_dist="stale",
+    )
+    _write(root / "node_modules/.keep")
+    npm_marker, env = _repair_fixture(
+        tmp_path,
+        root,
+        'mkdir -p "$dist"\n'
+        "printf 'export const fixtureValue = \"dist\";\\n' > \"$dist/index.js\"\n",
+    )
+    lock = (
+        root
+        / "runtime/agent-fabric-protocol"
+        / ".dist.agent-fabric-protocol-build.lock"
+    )
+    _write(lock / "owner", "99999999\n")
+    env["AGENT_FABRIC_PROTOCOL_BUILD_LOCK_TIMEOUT_SECONDS"] = "1"
+
+    repaired = subprocess.run(
+        [str(root / "scripts/agent-fabric-protocol-build")],
+        cwd=root,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=10,
+    )
+
+    assert repaired.returncode == 0, repaired.stderr
+    assert npm_marker.read_text(encoding="utf-8").splitlines() == [
+        "run build --workspace=@local/agent-fabric-protocol",
+    ]
+    assert not lock.exists(), "the recovered lock must be released after repair"
+
+
+def test_dead_owner_reclaim_cannot_destroy_a_new_live_lock(
+    tmp_path: Path,
+) -> None:
+    root, _marker, _fake_node = _fixture(
+        tmp_path,
+        launcher_mode="packaged",
+        protocol_dist="stale",
+    )
+    _write(root / "node_modules/.keep")
+    _npm_marker, env = _repair_fixture(
+        tmp_path,
+        root,
+        'mkdir -p "$dist"\n'
+        "printf 'export const fixtureValue = \"dist\";\\n' > \"$dist/index.js\"\n",
+    )
+    lock = (
+        root
+        / "runtime/agent-fabric-protocol"
+        / ".dist.agent-fabric-protocol-build.lock"
+    )
+    _write(lock / "owner", "99999999\n")
+    hooks = tmp_path / "reclaim-hooks"
+    hooks.mkdir()
+    env["AGENT_FABRIC_PROTOCOL_BUILD_LOCK_TEST_HOOK_DIRECTORY"] = str(hooks)
+    env["AGENT_FABRIC_PROTOCOL_BUILD_LOCK_TIMEOUT_SECONDS"] = "20"
+
+    waiters = [
+        subprocess.Popen(
+            [str(root / "scripts/agent-fabric-protocol-build")],
+            cwd=root,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        for _ in range(2)
+    ]
+    first, second = waiters
+    try:
+        for waiter in waiters:
+            _wait_for_path(hooks / f"{waiter.pid}.dead-owner-observed.ready")
+
+        _write(hooks / f"{first.pid}.dead-owner-observed.continue")
+        _wait_for_path(hooks / f"{first.pid}.dead-owner-remove.ready")
+        _write(hooks / f"{second.pid}.dead-owner-observed.continue")
+
+        second_remove = hooks / f"{second.pid}.dead-owner-remove.ready"
+        second_lost = hooks / f"{second.pid}.dead-owner-reclaim-lost.ready"
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if second_remove.exists() or second_lost.exists():
+                break
+            time.sleep(0.01)
+        else:
+            raise AssertionError("second waiter neither reached removal nor lost reclaim")
+
+        _write(hooks / f"{first.pid}.dead-owner-remove.continue")
+        _wait_for_path(hooks / f"{first.pid}.dead-owner-removed.ready")
+        _write(lock / "owner", f"{os.getpid()}\n")
+
+        if second_remove.exists():
+            _write(hooks / f"{second.pid}.dead-owner-remove.continue")
+            _wait_for_path(hooks / f"{second.pid}.dead-owner-removed.ready")
+
+        assert lock.is_dir(), "a stale waiter destroyed the replacement live lock"
+        assert (lock / "owner").read_text(encoding="utf-8") == f"{os.getpid()}\n"
+    finally:
+        for waiter in waiters:
+            waiter.terminate()
+        for waiter in waiters:
+            waiter.communicate(timeout=5)
+
+
+def test_protocol_build_lock_wait_is_bounded_and_typed(
+    tmp_path: Path,
+) -> None:
+    root, _marker, _fake_node = _fixture(
+        tmp_path,
+        launcher_mode="packaged",
+        protocol_dist="stale",
+    )
+    _write(root / "node_modules/.keep")
+    npm_marker, env = _repair_fixture(
+        tmp_path,
+        root,
+        'mkdir -p "$dist"\n'
+        "printf 'export const fixtureValue = \"dist\";\\n' > \"$dist/index.js\"\n",
+    )
+    holder = subprocess.Popen(["sleep", "10"])
+    lock = (
+        root
+        / "runtime/agent-fabric-protocol"
+        / ".dist.agent-fabric-protocol-build.lock"
+    )
+    _write(lock / "owner", f"{holder.pid}\n")
+    env["AGENT_FABRIC_PROTOCOL_BUILD_LOCK_TIMEOUT_SECONDS"] = "1"
+    try:
+        result = subprocess.run(
+            [str(root / "scripts/agent-fabric-protocol-build")],
+            cwd=root,
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=5,
+        )
+    finally:
+        holder.terminate()
+        holder.wait(timeout=5)
+
+    assert result.returncode == 78
+    assert "AGENT_FABRIC_PROTOCOL_BUILD_LOCK_TIMEOUT" in result.stderr
+    assert (
+        f'repair: AGENTS_HOME="{root}" '
+        f'"{root / "scripts/agent-fabric-protocol-build"}"'
+    ) in result.stderr
+    assert not npm_marker.exists(), "a timed-out waiter must not enter the build"
 
 
 def test_reported_protocol_repair_clears_staleness_without_root_build(
