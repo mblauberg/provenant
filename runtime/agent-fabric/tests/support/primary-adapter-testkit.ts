@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -174,6 +174,20 @@ export async function createPortableActivatedPrimaryFixture(): Promise<{
     workspaceRoots: [fixture.directory],
     limits: { maximumConcurrentProviderTurns: 2 },
   }));
+  await mkdir(join(fixture.directory, "config", "review-profiles"), { recursive: true });
+  await writeFile(
+    join(
+      fixture.directory,
+      "config",
+      "review-profiles",
+      "certifying-review-four-slot-v1.json",
+    ),
+    `${JSON.stringify({
+      schemaVersion: 1,
+      profileId: "portable-activated-primary-fixture",
+      chairProfiles: [],
+    }, null, 2)}\n`,
+  );
   return {
     ...fixture,
     configPath,

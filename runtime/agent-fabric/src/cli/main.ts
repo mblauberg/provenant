@@ -4,10 +4,11 @@ import { createConnection } from "node:net";
 import { dirname } from "node:path";
 import type { HerdrSteerDispatchResult } from "@local/agent-fabric-protocol";
 
-const DOCTOR_USAGE = `usage: agent-fabric doctor [--consume-provider-quota] [--project PATH] [--agents-home PATH] [--trusted-config PATH] [--compatibility PATH] [--compatibility-schema PATH] [--review-profile PATH] [--json]
+const DOCTOR_USAGE = `usage: agent-fabric doctor [--consume-provider-quota] [--project PATH] [--agents-home PATH] [--trusted-config PATH] [--compatibility PATH] [--compatibility-schema PATH] [--review-profile EXACT_DEPLOYED_PATH] [--json]
 
 Options:
   --consume-provider-quota  run live provider capability probes and refresh the private cache
+  --review-profile PATH     must name agentsHome/config/review-profiles/certifying-review-four-slot-v1.json
   --help, -h                show this help`;
 
 function option(arguments_: string[], name: string): string | undefined {

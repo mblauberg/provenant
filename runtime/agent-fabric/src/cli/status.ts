@@ -23,6 +23,10 @@ import {
   type ReviewProfilePinReport,
 } from "../review/profile/pin-drift.js";
 import { createCapabilityPinObserver } from "../review/profile/pin-observer.js";
+import {
+  verifyDeployedReviewProfileCatalogue,
+  type DeployedReviewProfileCatalogueReport,
+} from "../review/profile/deployed-catalogue.js";
 import { assertDatabaseIntegrity } from "../persistence/invariants.js";
 import { BootstrapElection, FLOCK_ELECTION_LOCK_PORT } from "../daemon/bootstrap-election.js";
 import { connectFabricDaemon } from "../daemon/client.js";
@@ -279,28 +283,42 @@ async function readDoctorMetadata(compatibilityPath: string, modelRoutingPath: s
 
 /**
  * Report the certifying profile's pinned identities against current alias
- * resolution. An unreadable or absent catalogue declares no expectation, so it
- * yields an empty comparison set rather than a false unknown, exactly as an
- * absent executable pin sits outside the provider-identity comparison set.
+ * resolution. A pre-record install remains diagnosable and is explicitly
+ * unverified; once a deployment record exists, its exact deployed document is
+ * digest-bound before any pin report is derived.
  */
 async function reviewProfilePins(
+  agentsHome: string,
   reviewProfilePath: string,
   modelRouting: unknown,
   observe: PinRouteObserver,
-): Promise<ReviewProfilePinReport> {
-  let catalogue: unknown;
-  try {
-    catalogue = JSON.parse(await readFile(reviewProfilePath, "utf8"));
-  } catch {
-    return { compared: [], attested: [] };
+): Promise<ReviewProfilePinReport & {
+  catalogueDeployment: DeployedReviewProfileCatalogueReport;
+}> {
+  const deployment = await verifyDeployedReviewProfileCatalogue({
+    agentsHome,
+    profilePath: reviewProfilePath,
+  });
+  const catalogue = deployment.catalogue;
+  const catalogueDeployment: DeployedReviewProfileCatalogueReport = deployment.status === "verified"
+    ? {
+        status: deployment.status,
+        profile: deployment.profile,
+        record: deployment.record,
+        digest: deployment.digest,
+        repairCommand: deployment.repairCommand,
+      }
+    : deployment;
+  if (!isRecord(catalogue) || !Array.isArray(catalogue.chairProfiles)) {
+    return { compared: [], attested: [], catalogueDeployment };
   }
-  if (!isRecord(catalogue) || !Array.isArray(catalogue.chairProfiles)) return { compared: [], attested: [] };
-  return await evaluateReviewProfilePinDrift({
+  const report = await evaluateReviewProfilePinDrift({
     catalogue: catalogue as unknown as ReviewProfileCatalogue,
     observations: readPinObservations(catalogue),
     routing: modelRouting,
     observe,
   });
+  return { ...report, catalogueDeployment };
 }
 
 async function daemonState(paths: FabricPaths): Promise<{ reachable: boolean; pid: number | null; socketPath: string; protocolVersion: 1; activeAdapters: string[] }> {
@@ -698,6 +716,7 @@ export async function fabricDoctor(
     precondition: precondition("provider-identity"),
   });
   const pinReport = await reviewProfilePins(
+    selected.agentsHome,
     selected.reviewProfile,
     metadata.modelRouting,
     consumeProviderQuota
