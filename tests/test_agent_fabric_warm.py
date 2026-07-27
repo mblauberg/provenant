@@ -11,6 +11,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 WARM_SCRIPT = REPO_ROOT / "scripts" / "agent-fabric-warm"
 FRESHNESS_LIBRARY = REPO_ROOT / "scripts" / "lib" / "agent-fabric-workspace-freshness.sh"
+BUILD_LOCK_LIBRARY = REPO_ROOT / "scripts" / "lib" / "agent-fabric-protocol-build-lock.sh"
 
 
 def _write(path: Path, content: str = "fixture\n") -> None:
@@ -25,9 +26,16 @@ def _fixture(tmp_path: Path) -> tuple[Path, Path, Path]:
     shutil.copy2(WARM_SCRIPT, script)
     script.chmod(0o755)
     if FRESHNESS_LIBRARY.exists():
-        library = root / "scripts/lib/agent-fabric-workspace-freshness.sh"
-        library.parent.mkdir(parents=True)
-        shutil.copy2(FRESHNESS_LIBRARY, library)
+        library_dir = root / "scripts/lib"
+        library_dir.mkdir(parents=True)
+        shutil.copy2(
+            FRESHNESS_LIBRARY,
+            library_dir / FRESHNESS_LIBRARY.name,
+        )
+        shutil.copy2(
+            BUILD_LOCK_LIBRARY,
+            library_dir / BUILD_LOCK_LIBRARY.name,
+        )
 
     # The wrapper treats node_modules as the installation readiness gate.
     (root / "node_modules").mkdir()

@@ -56,7 +56,12 @@ import { projectRunIdentity } from "./run-identity-projection.js";
 import { projectDeclaredRunProgress } from "./declared-run-progress-projection.js";
 import { agentTopologyProjectionField, type AgentTopologyProjection } from "./agent-topology-projection.js";
 import { projectTaskCheckState, workFactsProjectionField, type WorkFactsProjection } from "./work-facts-projection.js";
-import { activityItems, activityRows, boundedOperatorActivityRows, boundedProjectionActivityItems, loadActivityDetail, type ActivityNarrativeGroupingProjection } from "./activity-projection.js";
+import {
+  boundedOperatorActivityRows,
+  boundedProjectionActivityItems,
+  type ActivityNarrativeGroupingProjection,
+} from "./activity-projection.js";
+import { ActivityProjectionCache } from "./activity-projection-cache.js";
 import { projectRunPage } from "./run-projection-store.js";
 import { projectedRunHealth, projectedRunNextMilestone } from "./run-lifecycle-projection.js";
 
@@ -98,11 +103,13 @@ export class OperatorProjectionStore {
   readonly #operatorStore: OperatorStore;
   readonly #clock: () => number;
   readonly #registryV1: boolean;
+  readonly #activityProjectionCache: ActivityProjectionCache;
 
   constructor(options: OperatorProjectionStoreOptions) {
     this.#database = options.database;
     this.#operatorStore = options.operatorStore;
     this.#clock = options.clock ?? Date.now;
+    this.#activityProjectionCache = new ActivityProjectionCache(this.#database);
     this.#registryV1 = (this.#database.prepare("PRAGMA table_info(artifacts)").all() as Array<{ name?: unknown }>)
       .some(({ name }) => name === "project_id");
   }
@@ -257,7 +264,13 @@ export class OperatorProjectionStore {
         this.#evidenceRows(request.projectId, selectedSessionId, authenticated)
       ), selectedSessionId);
       case "activity": return this.#viewPage(request, "activity", () => (
-        this.#activityRows(request.projectId, selectedSessionId, authenticated, activityNarrativeGroupingProjection)
+        this.#activityProjectionCache.rows(
+          request.projectId,
+          selectedSessionId,
+          actionAvailability(authenticated),
+          activityNarrativeGroupingProjection,
+          this.#globalRevision(),
+        )
       ), selectedSessionId, activityNarrativeGroupingProjection === "include");
       case "system": return this.#viewPage(request, "system", () => (
         this.#systemRows(request.projectId, authenticated)
@@ -276,7 +289,13 @@ export class OperatorProjectionStore {
       workRows: (projectId, sessionId, operator) => this.#workRows(projectId, sessionId, operator, "include"),
       agentRows: (projectId, sessionId, operator) => this.#agentRows(projectId, sessionId, operator, "include"),
       evidenceRows: (projectId, sessionId, operator) => this.#evidenceRows(projectId, sessionId, operator),
-      activityRows: (projectId, sessionId, operator) => this.#activityRows(projectId, sessionId, operator, activityNarrativeGroupingProjection),
+      activityRows: (projectId, sessionId, operator) => this.#activityProjectionCache.rows(
+        projectId,
+        sessionId,
+        actionAvailability(operator),
+        activityNarrativeGroupingProjection,
+        this.#globalRevision(),
+      ),
     }, request, authenticated);
   }
   page<View extends ConsoleView>(
@@ -289,6 +308,7 @@ export class OperatorProjectionStore {
     const selectedSessionId = this.#selectedSessionId(authenticated, request.projectSessionId);
     assertPageBounds(request.after, request.limit);
     const read = this.#database.transaction((): ProjectionPageResult<View> => {
+      const revision = this.#globalRevision();
       const allItems = this.#projectionItems(
         request.view,
         request.projectId,
@@ -296,19 +316,32 @@ export class OperatorProjectionStore {
         nativeNotificationProjection,
         runSessionProjection,
         activityNarrativeGroupingProjection,
+        revision,
       );
       const observedAt = toTimestamp(this.#clock(), "projectionPage.observedAt");
-      const revision = this.#globalRevision();
       // The closed view switch above preserves the View-to-item correlation that
       // TypeScript cannot retain through an indexed conditional return type.
       const requestedItems = allItems.slice(request.after, request.after + request.limit) as unknown as
         readonly ProjectionViewItemMap[View][];
-      const items = request.view === "activity" &&
+      const boundedItems = request.view === "activity" &&
           activityNarrativeGroupingProjection === "include"
         ? boundedProjectionActivityItems(requestedItems, {
             view: request.view, after: request.after, totalItems: allItems.length, revision, observedAt,
           })
         : requestedItems;
+      if (boundedItems === null) {
+        return {
+          view: request.view,
+          page: {
+            freshness: "unavailable",
+            source: "fabric",
+            revision,
+            observedAt,
+            reason: "activity-group-frame-budget-exceeded",
+          },
+        } as ProjectionPageResult<View>;
+      }
+      const items = boundedItems;
       const result = {
         view: request.view,
         page: liveFact(revision, observedAt, {
@@ -344,10 +377,13 @@ export class OperatorProjectionStore {
       const requestedRows = allRows.slice(request.cursor, request.cursor + request.limit);
       const transactionId = readTransactionId(request.projectId, selectedSessionId, currentSnapshotRevision);
       const rows = byteBounded
-        ? boundedOperatorActivityRows(requestedRows, {
+        ? boundedOperatorActivityRows(
+            requestedRows as OperatorViewRow<"activity">[],
+            {
             view, cursor: request.cursor, totalRows: allRows.length, snapshotRevision: currentSnapshotRevision,
             readTransactionId: transactionId,
-          })
+            },
+          ) as unknown as readonly OperatorViewRow<View>[]
         : requestedRows;
       return {
         status: "page",
@@ -386,6 +422,7 @@ export class OperatorProjectionStore {
         agentTopologyProjection,
         workFactsProjection,
         activityNarrativeGroupingProjection,
+        currentSnapshotRevision,
       );
       if (request.detailRef.expectedRevision !== loaded.revision) {
         return {
@@ -576,9 +613,11 @@ export class OperatorProjectionStore {
   }
 
   #globalRevision(): number {
-    return integer(row(this.#database.prepare(`
+    const revision = integer(row(this.#database.prepare(`
       SELECT revision FROM daemon_global_state WHERE singleton=1
     `).get(), "daemon global state"), "revision");
+    this.#activityProjectionCache.invalidateUnlessRevision(revision);
+    return revision;
   }
 
   #sessionFromRow(stored: Row): ProjectSession {
@@ -686,6 +725,7 @@ export class OperatorProjectionStore {
     nativeNotificationProjection: NativeNotificationProjection,
     runSessionProjection: RunSessionProjection,
     activityNarrativeGroupingProjection: ActivityNarrativeGroupingProjection,
+    snapshotRevision: number,
   ): readonly ProjectionViewItemMap[ConsoleView][] {
     switch (view) {
       case "attention": return this.#attention(projectId, projectSessionId, nativeNotificationProjection);
@@ -694,10 +734,11 @@ export class OperatorProjectionStore {
       case "work": return this.#workItems(projectId, projectSessionId);
       case "agents": return this.#agentItems(projectId, projectSessionId);
       case "evidence": return this.#evidenceItems(projectId, projectSessionId);
-      case "activity": return this.#activityItems(
+      case "activity": return this.#activityProjectionCache.items(
         projectId,
         projectSessionId,
         activityNarrativeGroupingProjection,
+        snapshotRevision,
       );
       case "system": return this.#systemItems(projectId);
       default: return assertNever(view);
@@ -946,22 +987,6 @@ export class OperatorProjectionStore {
         status: "informational",
       };
     });
-  }
-
-  #activityItems(
-    projectId: ProjectId,
-    projectSessionId: ProjectSessionId | undefined,
-    activityNarrativeGroupingProjection: ActivityNarrativeGroupingProjection,
-  ): ProjectionViewItemMap["activity"][] {
-    const values = this.#sessionQuery(
-      projectId,
-      projectSessionId,
-      `SELECT e.*, seq.sequence, r.project_session_id FROM events e
-         JOIN observer_event_sequence seq ON seq.event_id=e.event_id
-         JOIN runs r ON r.run_id=e.run_id`,
-      "ORDER BY seq.sequence DESC",
-    );
-    return activityItems(this.#database, values, activityNarrativeGroupingProjection);
   }
 
   #systemItems(projectId: ProjectId): ProjectionViewItemMap["system"][] {
@@ -1453,23 +1478,6 @@ export class OperatorProjectionStore {
     });
   }
 
-  #activityRows(
-    projectId: ProjectId,
-    projectSessionId: ProjectSessionId | undefined,
-    authenticated: AuthenticatedOperatorCredential,
-    activityNarrativeGroupingProjection: ActivityNarrativeGroupingProjection,
-  ): OperatorViewRow<"activity">[] {
-    const values = this.#sessionQuery(
-      projectId,
-      projectSessionId,
-      `SELECT e.*, seq.sequence, r.project_session_id FROM events e
-         JOIN observer_event_sequence seq ON seq.event_id=e.event_id
-         JOIN runs r ON r.run_id=e.run_id`,
-      "ORDER BY seq.sequence DESC",
-    );
-    return activityRows(this.#database, values, actionAvailability(authenticated), activityNarrativeGroupingProjection);
-  }
-
   #systemRows(projectId: ProjectId, authenticated: AuthenticatedOperatorCredential): OperatorViewRow<"system">[] {
     this.#projectRow(projectId);
     return this.#database.prepare(`
@@ -1533,6 +1541,7 @@ export class OperatorProjectionStore {
     declaredRunProgressProjection: DeclaredRunProgressProjection,
     runIdentityProjection: RunIdentityProjection, agentTopologyProjection: AgentTopologyProjection, workFactsProjection: WorkFactsProjection,
     activityNarrativeGroupingProjection: ActivityNarrativeGroupingProjection,
+    snapshotRevision: number,
   ): LoadedOperatorDetail {
     switch (detailRef.kind) {
       case "project": return this.#loadProjectDetail(detailRef, projectId);
@@ -1548,11 +1557,12 @@ export class OperatorProjectionStore {
       case "task": return this.#loadTaskDetail(detailRef, projectId, projectSessionId, workFactsProjection);
       case "agent": return this.#loadAgentDetail(detailRef, projectId, projectSessionId, agentTopologyProjection);
       case "evidence": return this.#loadEvidenceDetail(detailRef, projectId, projectSessionId);
-      case "activity": return this.#loadActivityDetail(
+      case "activity": return this.#activityProjectionCache.detail(
         detailRef,
         projectId,
         projectSessionId,
         activityNarrativeGroupingProjection,
+        snapshotRevision,
       );
       case "system": return this.#loadSystemDetail(detailRef, projectId);
       default: return assertNever(detailRef);
@@ -1766,28 +1776,6 @@ export class OperatorProjectionStore {
         status: "informational",
       },
     };
-  }
-
-  #loadActivityDetail(
-    detailRef: Extract<OperatorDetailRef, { kind: "activity" }>,
-    projectId: ProjectId,
-    projectSessionId: ProjectSessionId | undefined,
-    activityNarrativeGroupingProjection: ActivityNarrativeGroupingProjection,
-  ): LoadedOperatorDetail {
-    const values = this.#sessionQuery(
-      projectId,
-      projectSessionId,
-      `SELECT e.*, seq.sequence, r.project_session_id FROM events e
-         JOIN observer_event_sequence seq ON seq.event_id=e.event_id
-         JOIN runs r ON r.run_id=e.run_id`,
-      "ORDER BY seq.sequence DESC",
-    );
-    return loadActivityDetail(
-      this.#database,
-      values,
-      detailRef,
-      activityNarrativeGroupingProjection,
-    );
   }
 
   #loadSystemDetail(

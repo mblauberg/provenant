@@ -51,6 +51,11 @@ export function compareActivityIdentity(left: string, right: string): number {
   return left === right ? 0 : left < right ? -1 : 1;
 }
 
+function compareActivityTimestamp(left: Timestamp, right: Timestamp): number {
+  return Date.parse(left) - Date.parse(right) ||
+    compareActivityIdentity(left, right);
+}
+
 function record(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value)
     ? value as Record<string, unknown>
@@ -261,6 +266,14 @@ export function projectActivityNarrativeGroups(
     if (firstMember === undefined) {
       throw new TypeError("activity narrative group cannot be empty");
     }
+    const chronologicalMembers = [...members].sort((left, right) =>
+      compareActivityTimestamp(left.occurredAt, right.occurredAt)
+    );
+    const chronologicalFirst = chronologicalMembers[0];
+    const chronologicalLast = chronologicalMembers.at(-1);
+    if (chronologicalFirst === undefined || chronologicalLast === undefined) {
+      throw new TypeError("activity narrative group cannot be empty");
+    }
     const memberDetails = ordered.map(({ input, detailProjection: detail }) =>
       detail.status === "available"
         ? {
@@ -289,8 +302,8 @@ export function projectActivityNarrativeGroups(
         target: first.target,
         eventKinds: kinds,
         occurredAtRange: {
-          first: first.input.occurredAt,
-          last: last.input.occurredAt,
+          first: chronologicalFirst.occurredAt,
+          last: chronologicalLast.occurredAt,
         },
         sourceRange: {
           first: first.input.sourceRevision,
