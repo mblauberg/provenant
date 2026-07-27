@@ -48,11 +48,23 @@ export type RunDrillDownManifest = Readonly<{
   fixtures: readonly RunDrillDownFixture[];
 }>;
 
+/**
+ * What the automated proxy establishes about acceptance clause 47.
+ *
+ * The clause has two arms: the required answers must be correct, and a user
+ * must reach them within 20 seconds. This proxy measures the first arm only.
+ * It renders `runProjectionDetailLines` -- a pure string builder that takes
+ * microseconds -- so a duration compared against `maximumIdentificationMs`
+ * could not fail and would say nothing about a user reading a screen. The
+ * timing arm is therefore reported as unmeasured rather than as met, and
+ * `maximumRenderMs` is named for the render it actually times.
+ */
 export type RunDrillDownEvaluationReport = Readonly<{
   observations: number;
-  maximumDurationMs: number;
+  maximumRenderMs: number;
   fieldSuccessRate: number;
-  proxyPassed: boolean;
+  fieldCorrectnessPassed: boolean;
+  timingArm: "not-measured";
   humanTimingClaim: false;
 }>;
 
@@ -366,15 +378,15 @@ export function evaluateRunDrillDownProxy(
   let observations = 0;
   let correctFields = 0;
   let totalFields = 0;
-  let maximumDurationMs = 0;
+  let maximumRenderMs = 0;
   for (const fixture of manifest.fixtures) {
     for (let repetition = 0; repetition < manifest.repetitions; repetition += 1) {
       const started = performance.now();
       const lines = runProjectionDetailLines(
         projectionForRunDrillDownFixture(fixture),
       );
-      const durationMs = performance.now() - started;
-      maximumDurationMs = Math.max(maximumDurationMs, durationMs);
+      const renderMs = performance.now() - started;
+      maximumRenderMs = Math.max(maximumRenderMs, renderMs);
       observations += 1;
       for (const field of RUN_DRILL_DOWN_ANSWER_FIELDS) {
         totalFields += 1;
@@ -387,11 +399,13 @@ export function evaluateRunDrillDownProxy(
   const fieldSuccessRate = totalFields === 0 ? 0 : correctFields / totalFields;
   return {
     observations,
-    maximumDurationMs,
+    maximumRenderMs,
     fieldSuccessRate,
-    proxyPassed:
-      maximumDurationMs <= manifest.maximumIdentificationMs &&
-      fieldSuccessRate >= manifest.minimumFieldSuccessRate,
+    // `manifest.maximumIdentificationMs` is deliberately absent from this
+    // predicate. Admitting it would let a render that no user ever read stand
+    // in for the 20-second identification criterion.
+    fieldCorrectnessPassed: fieldSuccessRate >= manifest.minimumFieldSuccessRate,
+    timingArm: "not-measured",
     humanTimingClaim: false,
   };
 }
