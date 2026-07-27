@@ -12,7 +12,11 @@ import sys
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from _shared.review_ladder import check_review_ladder
+from _shared.review_ladder import (
+    REVIEW_PLAN_STATUSES,
+    SKIPPED_STATUSES,
+    check_review_ladder,
+)
 
 
 TERMINAL = {"succeeded", "failed", "cancelled"}
@@ -113,7 +117,7 @@ def _validate_review_plan(raw: object, run_dir: Path | None = None) -> list[str]
             errors.append(f"receipt review_plan.reviews[{index}].scope is invalid")
         if not isinstance(review["tier"], str) or review["tier"] not in {"scout", "workhorse", "flagship"}:
             errors.append(f"receipt review_plan.reviews[{index}].tier is invalid")
-        if not isinstance(review["status"], str) or review["status"] not in {"complete", "failed", "unavailable", "omitted"}:
+        if not isinstance(review["status"], str) or review["status"] not in REVIEW_PLAN_STATUSES:
             errors.append(f"receipt review_plan.reviews[{index}].status is invalid")
         for field in ("lens", "family"):
             if not isinstance(review[field], str) or not review[field]:
@@ -138,7 +142,7 @@ def _validate_review_plan(raw: object, run_dir: Path | None = None) -> list[str]
                 target = run_dir / path
                 if not _inside(run_dir, target) or not target.is_file() or "sha256:" + hashlib.sha256(target.read_bytes()).hexdigest() != digest:
                     errors.append(f"receipt review_plan.reviews[{index}].evidence is missing or does not match")
-        if isinstance(review["status"], str) and review["status"] in {"failed", "unavailable", "omitted"} and (
+        if isinstance(review["status"], str) and review["status"] in SKIPPED_STATUSES and (
             not isinstance(review["reason"], str) or not review["reason"]
         ):
             errors.append(f"receipt review_plan.reviews[{index}].reason is required for an incomplete leg")

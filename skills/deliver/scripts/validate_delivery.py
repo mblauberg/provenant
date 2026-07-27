@@ -464,7 +464,9 @@ def _validate_reviews(run: dict[str, Any], evidence: dict[str, dict[str, Any]], 
         legs.append({
             "role": ladder_role,
             "family": item.get("provider_family"),
-            "status": item.get("status"),
+            # The delivery-run schema calls an intentional omission "skipped";
+            # normalize it to the shared review-plan ladder vocabulary.
+            "status": "omitted" if item.get("status") == "skipped" else item.get("status"),
             "lenses": item.get("lenses", []),
             "reason": item.get("reason"),
         })

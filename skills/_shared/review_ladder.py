@@ -17,7 +17,14 @@ PRIMARY_FAMILIES = frozenset({"openai", "anthropic"})
 TARGETED_LENS_MINIMUM = 2
 TERMINAL_TARGETED_LENS_MINIMUM = 3
 TERMINAL_PRESSURE_MARKERS = ("adversarial", "challenge")
-SKIPPED_STATUSES = frozenset({"failed", "unavailable", "omitted", "skipped"})
+REVIEW_PLAN_COMPLETE_STATUS = "complete"
+REVIEW_PLAN_STATUSES = frozenset({
+    REVIEW_PLAN_COMPLETE_STATUS,
+    "failed",
+    "unavailable",
+    "omitted",
+})
+SKIPPED_STATUSES = REVIEW_PLAN_STATUSES - {REVIEW_PLAN_COMPLETE_STATUS}
 
 
 def _lenses(leg: Mapping[str, Any]) -> set[str]:
