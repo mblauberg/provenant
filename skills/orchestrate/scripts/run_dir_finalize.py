@@ -17,6 +17,7 @@ from _shared.review_ladder import (
     SKIPPED_STATUSES,
     check_review_ladder,
 )
+from _shared.review_panel import PANEL_RECORD_KEYS, validate_panel_result
 
 
 TERMINAL = {"succeeded", "failed", "cancelled"}
@@ -86,7 +87,9 @@ def _table(text: str, required: list[str]) -> list[dict[str, str]]:
 
 def _validate_review_plan(raw: object, run_dir: Path | None = None) -> list[str]:
     errors: list[str] = []
-    if not isinstance(raw, dict) or set(raw) != {"risk_tier", "chair_family", "concurrency_ceiling", "reviews"}:
+    if not isinstance(raw, dict) or set(raw) != {
+        "risk_tier", "chair_family", "concurrency_ceiling", "reviews", "panels",
+    }:
         return ["receipt review_plan must use the closed review topology schema"]
     risk = raw.get("risk_tier")
     if not isinstance(risk, str) or risk not in {"routine", "substantial", "crucial", "terminal"}:
@@ -101,7 +104,7 @@ def _validate_review_plan(raw: object, run_dir: Path | None = None) -> list[str]
         "id", "scope", "lens", "family", "tier", "status",
         "substitution_for", "evidence", "reason", "wave",
         "adapter", "model", "catalog_model", "route_receipt",
-        "reviewer_id",
+        "reviewer_id", "adapter_gate",
     }
     seen: set[str] = set()
     checked: list[dict[str, object]] = []
@@ -124,6 +127,11 @@ def _validate_review_plan(raw: object, run_dir: Path | None = None) -> list[str]
                 errors.append(f"receipt review_plan.reviews[{index}].{field} is required")
         if not isinstance(review["adapter"], str) or not review["adapter"]:
             errors.append(f"receipt review_plan.reviews[{index}].adapter is required")
+        if (
+            not isinstance(review["adapter_gate"], str)
+            or review["adapter_gate"] not in {"fabric", "direct-cli"}
+        ):
+            errors.append(f"receipt review_plan.reviews[{index}].adapter_gate is invalid")
         if not isinstance(review["reviewer_id"], str) or not review["reviewer_id"]:
             errors.append(f"receipt review_plan.reviews[{index}].reviewer_id is required")
         if review["status"] == "complete" and not any(
@@ -169,6 +177,7 @@ def _validate_review_plan(raw: object, run_dir: Path | None = None) -> list[str]
                         elif (
                             route_value.get("status") != "ok"
                             or route_value.get("adapter") != review["adapter"]
+                            or route_value.get("adapter_gate") != review["adapter_gate"]
                             or route_value.get("reviewer_id") != review["reviewer_id"]
                             or route_value.get("resolved_model", route_value.get("model", "")) != review["model"]
                             or route_value.get("catalog_model", "") != review["catalog_model"]
@@ -189,11 +198,50 @@ def _validate_review_plan(raw: object, run_dir: Path | None = None) -> list[str]
         if all(isinstance(review[field], str) for field in (
             "id", "scope", "lens", "family", "tier", "status", "substitution_for",
             "reason", "adapter", "model", "catalog_model",
-            "reviewer_id",
+            "reviewer_id", "adapter_gate",
         )) and isinstance(review["wave"], int) and not isinstance(review["wave"], bool):
             checked.append(review)
         if not isinstance(review["substitution_for"], str):
             errors.append(f"receipt review_plan.reviews[{index}].substitution_for must be a string")
+
+    panels = raw.get("panels")
+    if not isinstance(panels, list):
+        errors.append("receipt review_plan.panels must be a list")
+    else:
+        panel_ids: set[str] = set()
+        reviews_by_id = {
+            review["id"]: review
+            for review in checked
+            if isinstance(review.get("id"), str) and review["id"]
+        }
+        for index, panel in enumerate(panels):
+            prefix = f"receipt review_plan.panels[{index}]"
+            if not isinstance(panel, dict) or set(panel) != PANEL_RECORD_KEYS:
+                errors.append(f"{prefix} must use the closed panel record schema")
+                continue
+            panel_id = panel["id"]
+            if (
+                not isinstance(panel_id, str)
+                or not panel_id
+                or panel_id in panel_ids
+            ):
+                errors.append(f"{prefix}.id must be non-empty and unique")
+            else:
+                panel_ids.add(panel_id)
+
+            spec = panel["spec"]
+            membership = spec.get("membership") if isinstance(spec, dict) else None
+            members: list[dict[str, object]] = []
+            if isinstance(membership, list):
+                for member_index, review_id in enumerate(membership):
+                    if isinstance(review_id, str) and review_id in reviews_by_id:
+                        members.append(reviews_by_id[review_id])
+                    elif isinstance(review_id, str):
+                        errors.append(
+                            f"{prefix}.spec.membership[{member_index}] references unknown review id"
+                        )
+            panel_errors = validate_panel_result(spec, members, panel["result"])
+            errors.extend(f"{prefix}: {error}" for error in panel_errors)
     if not isinstance(risk, str) or risk not in {"substantial", "crucial", "terminal"}:
         return errors
     chair_value = raw.get("chair_family")

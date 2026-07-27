@@ -21,6 +21,7 @@ from _shared.review_ladder import (
     REVIEW_PLAN_STATUSES,
     SKIPPED_STATUSES,
 )
+from _shared.review_panel import panel_result, resolve_panel
 
 
 def init_run(tmp_path):
@@ -45,6 +46,7 @@ def review(review_id, scope, lens, family, tier="flagship", status="complete", s
         "reason": reason if reason is not None else ("provider unavailable" if status != "complete" else ""),
         "wave": wave,
         "adapter": "claude" if family == "anthropic" else "codex",
+        "adapter_gate": "direct-cli",
         "model": "opus" if status == "complete" else "",
         "catalog_model": "" if status == "complete" else "",
         "route_receipt": {"path": f"reviews/{review_id}.route.json", "digest": route_digest},
@@ -58,6 +60,7 @@ def substantial_plan(risk="substantial"):
         "risk_tier": risk,
         "chair_family": "openai",
         "concurrency_ceiling": 4,
+        "panels": [],
         "reviews": [
             review("target-memory", "targeted", "memory", "openai", "workhorse"),
             review("target-routing", "targeted", "routing", "openai", "workhorse"),
@@ -87,12 +90,23 @@ def bind_complete_reviews(run, plan):
         route = run / row["route_receipt"]["path"]
         route.write_text(json.dumps({
             "status": "ok", "adapter": row["adapter"], "resolved_model": row["model"],
+            "adapter_gate": row["adapter_gate"],
             "catalog_model": row["catalog_model"], "model_family": row["family"],
             "route_alias": row["tier"], "reviewer_id": row["reviewer_id"],
             "cross_family": row["scope"] == "primary",
             "certification_eligible": row["scope"] == "primary",
         }))
         row["route_receipt"]["digest"] = "sha256:" + __import__("hashlib").sha256(route.read_bytes()).hexdigest()
+
+
+def panel(panel_id, preset, membership, reviews, output):
+    spec = resolve_panel(preset, membership=membership)
+    members = [row for row in reviews if row["id"] in membership]
+    return {
+        "id": panel_id,
+        "spec": spec,
+        "result": panel_result(spec, members, output),
+    }
 
 
 def test_real_run_rejects_unavailable_other_primary_with_distinct_family_reviews(tmp_path):
@@ -221,7 +235,8 @@ def test_review_topology_binds_account_default_route_and_review_evidence(tmp_pat
     evidence.write_text("review output")
     route = tmp_path / "route.json"
     route.write_text(json.dumps({
-        "adapter": "codex", "resolved_model": "", "catalog_model": "gpt-5.6-sol",
+        "adapter": "codex", "adapter_gate": "direct-cli",
+        "resolved_model": "", "catalog_model": "gpt-5.6-sol",
         "model_family": "openai", "model_selection": "account-default",
         "status": "ok", "route_alias": "flagship", "reviewer_id": "account-default",
     }))
@@ -231,7 +246,10 @@ def test_review_topology_binds_account_default_route_and_review_evidence(tmp_pat
         "evidence": {"path": evidence.name, "digest": "sha256:" + __import__("hashlib").sha256(evidence.read_bytes()).hexdigest()},
         "route_receipt": {"path": route.name, "digest": "sha256:" + __import__("hashlib").sha256(route.read_bytes()).hexdigest()},
     })
-    plan = {"risk_tier": "routine", "chair_family": "", "concurrency_ceiling": 1, "reviews": [row]}
+    plan = {
+        "risk_tier": "routine", "chair_family": "", "concurrency_ceiling": 1,
+        "panels": [], "reviews": [row],
+    }
     assert run_dir_finalize._validate_review_plan(plan, tmp_path) == []
     route_value = json.loads(route.read_text())
     route_value["status"] = "error"
@@ -256,7 +274,8 @@ def test_review_topology_rejects_malformed_fields_and_symlink_escape(tmp_path):
     (run / "review.md").symlink_to(outside)
     route = run / "route.json"
     route.write_text(json.dumps({
-        "status": "ok", "adapter": "codex", "resolved_model": "gpt-test",
+        "status": "ok", "adapter": "codex", "adapter_gate": "direct-cli",
+        "resolved_model": "gpt-test",
         "catalog_model": "", "model_family": "openai", "route_alias": "workhorse", "reviewer_id": "escaped",
     }))
     row = review("escaped", "targeted", "correctness", "openai", tier="workhorse")
@@ -265,7 +284,10 @@ def test_review_topology_rejects_malformed_fields_and_symlink_escape(tmp_path):
         "evidence": {"path": "review.md", "digest": "sha256:" + __import__("hashlib").sha256(outside.read_bytes()).hexdigest()},
         "route_receipt": {"path": "route.json", "digest": "sha256:" + __import__("hashlib").sha256(route.read_bytes()).hexdigest()},
     })
-    routine = {"risk_tier": "routine", "chair_family": "", "concurrency_ceiling": 1, "reviews": [row]}
+    routine = {
+        "risk_tier": "routine", "chair_family": "", "concurrency_ceiling": 1,
+        "panels": [], "reviews": [row],
+    }
     assert any("evidence is missing" in error for error in run_dir_finalize._validate_review_plan(routine, run))
 
 
@@ -320,6 +342,7 @@ def test_review_plan_status_vocabulary_matches_the_shared_ladder():
             "risk_tier": "routine",
             "chair_family": "",
             "concurrency_ceiling": 1,
+            "panels": [],
             "reviews": [
                 review(
                     f"shared-{status}",
@@ -351,6 +374,154 @@ def test_review_plan_status_vocabulary_matches_the_shared_ladder():
         ".status is invalid" in error
         for error in run_dir_finalize._validate_review_plan(plan)
     )
+
+
+def test_review_plan_and_review_records_remain_closed_after_panel_widening():
+    plan = substantial_plan()
+    without_panels = dict(plan)
+    del without_panels["panels"]
+    assert any(
+        "closed review topology schema" in error
+        for error in run_dir_finalize._validate_review_plan(without_panels)
+    )
+
+    del plan["reviews"][0]["adapter_gate"]
+    assert any(
+        "closed review record schema" in error
+        for error in run_dir_finalize._validate_review_plan(plan)
+    )
+
+
+@pytest.mark.parametrize("adapter_gate", ("", "socket", [], None))
+def test_review_adapter_gate_is_explicit_and_closed(adapter_gate):
+    plan = substantial_plan()
+    plan["reviews"][0]["adapter_gate"] = adapter_gate
+
+    assert any(
+        ".adapter_gate is invalid" in error
+        for error in run_dir_finalize._validate_review_plan(plan)
+    )
+
+
+def test_review_route_receipt_binds_adapter_gate(tmp_path):
+    plan = substantial_plan()
+    bind_complete_reviews(tmp_path, plan)
+    route_path = tmp_path / plan["reviews"][0]["route_receipt"]["path"]
+    route = json.loads(route_path.read_text())
+    route["adapter_gate"] = "fabric"
+    route_path.write_text(json.dumps(route))
+    plan["reviews"][0]["route_receipt"]["digest"] = (
+        "sha256:" + __import__("hashlib").sha256(route_path.read_bytes()).hexdigest()
+    )
+
+    assert any(
+        "identity does not match" in error
+        for error in run_dir_finalize._validate_review_plan(plan, tmp_path)
+    )
+
+
+def test_panel_records_are_closed_and_reference_existing_reviews():
+    plan = substantial_plan()
+    membership = [row["id"] for row in plan["reviews"]]
+    plan["panels"] = [
+        panel(
+            "architecture-council",
+            "council",
+            membership,
+            plan["reviews"],
+            {
+                "agreements": ["Keep dispatch chair-owned."],
+                "conflicts": ["The naming remains contested."],
+                "minority_views": ["Prefer the existing name."],
+            },
+        )
+    ]
+
+    assert run_dir_finalize._validate_review_plan(plan) == []
+    plan["panels"][0]["extra"] = True
+    assert any(
+        "closed panel record schema" in error
+        for error in run_dir_finalize._validate_review_plan(plan)
+    )
+
+
+def test_panel_member_must_reference_a_review_record():
+    plan = substantial_plan()
+    spec = resolve_panel(
+        "breadth",
+        membership=["target-memory", "missing-review"],
+    )
+    plan["panels"] = [{
+        "id": "breadth",
+        "spec": spec,
+        "result": {
+            "shortfall": None,
+            "output": {"findings": ["A"]},
+        },
+    }]
+
+    assert any(
+        "unknown review id" in error
+        for error in run_dir_finalize._validate_review_plan(plan)
+    )
+
+
+def test_panel_shortfall_is_explicit_but_does_not_block():
+    plan = substantial_plan()
+    for row in plan["reviews"][2:]:
+        row["status"] = "unavailable"
+        row["reason"] = "provider unavailable"
+        row["model"] = ""
+    membership = [row["id"] for row in plan["reviews"]]
+    plan["panels"] = [
+        panel(
+            "degraded-council",
+            "council",
+            membership,
+            plan["reviews"],
+            {
+                "agreements": [],
+                "conflicts": ["Only two members answered."],
+                "minority_views": [],
+            },
+        )
+    ]
+
+    errors = run_dir_finalize._validate_review_plan(plan)
+
+    assert not any("panel" in error for error in errors)
+    assert plan["panels"][0]["result"]["shortfall"] == {
+        "minimum_members": 3,
+        "completed_members": 2,
+        "missing_members": 1,
+    }
+
+
+def test_panel_result_must_match_declared_reducer_and_membership():
+    plan = substantial_plan()
+    membership = [row["id"] for row in plan["reviews"]]
+    plan["panels"] = [
+        panel(
+            "architecture-council",
+            "council",
+            membership,
+            plan["reviews"],
+            {"agreements": [], "conflicts": [], "minority_views": []},
+        )
+    ]
+    plan["panels"][0]["result"]["output"] = {"findings": ["wrong reducer"]}
+
+    assert any(
+        "result.output is invalid" in error
+        for error in run_dir_finalize._validate_review_plan(plan)
+    )
+
+
+def test_fresh_run_receipt_declares_empty_panels(tmp_path):
+    run = init_run(tmp_path)
+    receipt = json.loads((run / "RUN_RECEIPT.json").read_text())
+
+    assert receipt["review_plan"]["panels"] == []
 
 
 @pytest.mark.parametrize(("field", "value"), (("risk_tier", []), ("chair_family", [])))

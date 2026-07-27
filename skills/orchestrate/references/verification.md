@@ -127,6 +127,32 @@ responses to every model when claim packets suffice; this reduces anchoring and
 context cost. Use a fresh-context reducer for crucial decisions. A council adds pressure, not authority:
 deterministic gates and user one-way-door decisions still win.
 
+### Panel presets and receipts
+
+The council above is one shape of a general mechanism. A panel is a chair-run
+reduction over review records the chair already dispatched — it spawns nothing
+of its own. `skills/_shared/review_panel.py` is its machine-readable owner.
+
+| preset | distribution | reduction | minimum completed |
+|---|---|---|---|
+| `council` | `shared` — every member answers the same question | `agreements-conflicts` | 3 |
+| `breadth` | `split` — members take disjoint scopes | `union` | 1 |
+
+Resolve the named preset, then override any of the four axes — membership,
+distribution, reduction, degradation. There is no other precedence, and no
+automatic model or provider routing.
+
+Record each member as an ordinary review with `adapter_gate` set to `fabric` or
+`direct-cli`, put those review ids in `spec.membership`, and fill
+`result.output` through the declared reducer. `council` keeps `agreements`,
+`conflicts` and `minority_views` separate: do not score, weight, average or
+vote-count them, per the vote-handling rule above. `breadth` records a
+deduplicated `findings` union.
+
+A member whose status is `failed`, `unavailable` or `omitted` does not count
+towards the minimum. Falling below it records an explicit shortfall rather than
+failing — a panel is advisory and never blocks.
+
 ### Research anchors
 
 - LLM-as-judge and self-preference literature: same-model or same-family judges can favour outputs that
