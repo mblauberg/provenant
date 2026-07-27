@@ -295,6 +295,37 @@ describe("activity-narrative-grouping.v1 closed result shape", () => {
     }
   });
 
+  it("rejects an occurredAt range that is inverted by source-revision order", () => {
+    const invertedMembers = [
+      {
+        ...group.members[0],
+        occurredAt: laterAt,
+      },
+      {
+        ...group.members[1],
+        occurredAt: laterAt,
+      },
+      {
+        ...group.members[2],
+        occurredAt: observedAt,
+      },
+    ];
+    const inverted = {
+      ...group,
+      occurredAtRange: { first: laterAt, last: observedAt },
+      members: invertedMembers,
+    };
+
+    expect(() => parseOperationResult(
+      FABRIC_OPERATIONS.projectionViewPage,
+      activityPage([activityRow({
+        ...groupedSummary,
+        occurredAt: observedAt,
+        group: inverted,
+      })]),
+    )).toThrowError(/occurredAtRange must be ascending/u);
+  });
+
   it("binds grouped rows and detail references to the embedded fact", () => {
     for (const malformedRow of [
       { ...activityRow(groupedSummary), itemId: "wrong_group" },
