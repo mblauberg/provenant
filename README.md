@@ -182,8 +182,8 @@ Each task has a front-door skill; the agent loads it when a request matches.
 
 ## Lifecycle
 
-Every change runs the same delivery loop, and it stops at three gates only the
-user can pass.
+Every change runs the delivery loop and stops at three gates reserved to the
+user; receipts declare approval rather than authenticating it.
 
 ```mermaid
 flowchart TB

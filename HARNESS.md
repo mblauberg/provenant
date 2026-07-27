@@ -14,8 +14,8 @@ is not concurrent bosses. For substantial work use native subagents and the othe
 approved authority may permit paired-primary mode, but one chair and one stage owner remain.
 Agent Fabric owns answer-bearing provider execution and durable communication; direct CLIs
 are preflight or degraded fallback, Herdr observes or wakes. Partition concurrent writers or use
-patch-only workers with one serial applier; an author or decision-maker cannot certify their own
-surface.
+patch-only workers with one serial applier. Authors and decision-makers must not certify their own
+surface; receipts declare that independence and enforce family separation, they do not prove it.
 
 ## Lifecycle and user gates
 

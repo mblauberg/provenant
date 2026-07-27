@@ -115,27 +115,45 @@ mismatch and any unrecognised code fail closed to `blocked` for the same
 reason; `doctor` never promises a repair that does not exist.
 
 `doctor` evaluates protocol-build freshness itself, as the `protocol-build`
-check, and reports `AGENT_FABRIC_PROTOCOL_BUILD_STALE` as `blocked`. It also
-reports `wrapperIntercepted`, which records that `scripts/agent-fabric` runs the
-same freshness preflight and exits 78 *before* `doctor` starts, so through the
-wrapper the launcher reports the condition instead. The package bin
-(`dist/cli/main.js`) and in-process `fabricDoctor` callers do not go through the
-wrapper and reach the check. #439 tracks closing the wrapper gap.
+check, and reports `AGENT_FABRIC_PROTOCOL_BUILD_STALE` as `blocked`. A stale
+build no longer prevents it from running: `scripts/agent-fabric doctor` runs the
+shared preflight in doctor mode, which hands the verdict and the exact repair
+command down instead of exiting 78, and the check reports both. Every other
+subcommand and `scripts/agent-fabric-mcp` still exit 78 on a stale build. A dist
+that is missing or cannot be imported blocks `doctor` too, because `doctor`
+imports the protocol package transitively and cannot report through a dist it
+cannot load; that import probe runs only for `doctor`, so no other entrypoint
+pays a Node start-up per invocation. `wrapperIntercepted` is now empty: it
+recorded that the launcher preempted this check, and it no longer does.
+
+`doctor` does not start the daemon, but its certifying-profile check may run one
+real Claude canary per six-hour cache window and update the private
+`review-profile-pin-observations.json` cache. Obtain provider login, quota and
+real-provider-smoke authority before running it.
 
 In the idle case the `daemon-socket` check has status `idle`, not `pass` or
 `fail`. This does not weaken preflight: for example, an intact idle daemon
 state alongside an incompatible database still produces overall `state:
 "blocked"` and a non-zero exit. A failed or in-progress bootstrap, ambiguous or
 stale discovery, crashed process, orphan socket and failed handshake are never
-relabelled idle. `doctor` diagnoses only; it does not start the on-demand
-daemon. Concurrent doctors share one non-blocking inspection fence and may
-report the same idle snapshot; bootstrap and shutdown ownership are exclusive
-and report an in-progress code before socket artifacts are classified. The
-daemon acquires its shutdown-transition fence before releasing the election
-lock and retains it until terminal discovery is durable. Only absent discovery
-or an exact, generation-matched `stopped` owner with exit `0` and no signal can
-be idle. Forced, non-zero, unknown, crashed and otherwise non-clean owners fail
-closed.
+relabelled idle. Concurrent doctors share one non-blocking inspection fence and
+may report the same idle snapshot; bootstrap and shutdown ownership are
+exclusive and report an in-progress code before socket artifacts are
+classified. The daemon acquires its shutdown-transition fence before releasing
+the election lock and retains it until terminal discovery is durable. Only
+absent discovery or an exact, generation-matched `stopped` owner with exit `0`
+and no signal can be idle. Forced, non-zero, unknown, crashed and otherwise
+non-clean owners fail closed.
+
+### Repair certifying-profile pin drift
+
+When `doctor` reports `REVIEW_PROFILE_PIN_DRIFT`, it names `npm run profile:pin`
+as the repair. This is an uncached live-provider probe and a repository edit,
+not a diagnostic. Never run it inside certification: the review profile is
+digest-bound, and changing it would move the profile a running certification
+already verified. Exit `1` may coexist with independently observed changes when
+another pin was unobservable. Inspect and review the resulting diff before
+retrying.
 
 `PROTOCOL_INCOMPATIBLE` means the incumbent answered the contract probe but did
 not negotiate a result shape required by the current client. Do not attempt MCP
@@ -328,7 +346,9 @@ The reported outcome is bounded unconditionally: elapsed time is measured and
 an overrun is failed even when the work resolved, because a synchronous frame
 parse can outlive the timer it then clears. On either bound the receipt reports
 `healthy: false` with a failed smoke and the installed seat still stands, since
-an unbounded health check is a hang rather than a diagnosis.
+an unbounded health check is a hang rather than a diagnosis. The CLI still exits
+`1`; callers must inspect `receipt.actions` and `receipt.healthy` before deciding
+whether to retry.
 
 If the machine database is not current-schema, bootstrap raises
 `SCHEMA_CUTOVER_GATE_REQUIRED` instead of starting. The gate carries the schema
@@ -540,6 +560,10 @@ reflow full, compact and inert layouts while preserving stable selection,
 focus, scroll, drafts and pending commands. `q` detaches the UI; it does not
 stop a project session or daemon.
 
+Opening a run selects its bound project session when necessary and displays
+exact run-scoped identity, freshness, progress, work, agents, evidence,
+activity and issues.
+
 ### Onboard accepted work
 
 Use this path when a reviewed project artifact is accepted and a new draft
@@ -745,10 +769,11 @@ as one team.
 
 ## Database archive-and-fresh cutover
 
-Use this deliberate operator command only after `SCHEMA_CUTOVER_REQUIRED`.
-It archives incompatible pre-release state and creates a fresh current
-baseline. It does not import, migrate or automatically restore archived state.
-First run the read-only preview without confirmation:
+Use this deliberate operator command only after
+`SCHEMA_CUTOVER_GATE_REQUIRED` whose `gate.mismatch.code` is
+`SCHEMA_CUTOVER_REQUIRED`. It archives incompatible pre-release state and
+creates a fresh current baseline. It does not import, migrate or automatically
+restore archived state. First run the read-only preview without confirmation:
 
 ```sh
 archive_directory="$HOME/.local/state/agent-harness/fabric/backups/cutover-$(date -u +%Y%m%dT%H%M%SZ)"
@@ -761,6 +786,19 @@ observed schema fields, every existing source member's identity, mode and
 SHA-256, and a `confirmation.sourceSetSha256`. With no matching cutover
 residue, an absent, empty or already current database instead returns a typed
 `no-op`; neither result creates the archive directory or changes the database.
+
+The process exit contract is:
+
+| JSON `status` | Exit | Meaning |
+| --- | ---: | --- |
+| `confirmation-required`, `no-op`, `completed` | `0` | Preview, unchanged state or completed cutover; these are different outcomes. |
+| `failed`, `conflict` | `1` | Validation, source-set or archive failure before the recovery boundary. |
+| `recovery-required`, `archive-complete-cutover-failed`, `archive-complete-fresh-init-failed` | `4` | Recovery or post-publication handling is required. |
+
+Automation must branch on the JSON `status`, never on exit `0` alone. In
+particular, `confirmation-required` is a read-only preview, not a completed
+cutover. Exit `4` requires recovery or post-publication handling before Fabric
+starts.
 
 Before confirmation, stop Fabric through its owning supervision surface and
 ensure every direct SQLite writer is quiescent. The command does not inspect,

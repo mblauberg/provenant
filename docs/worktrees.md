@@ -26,9 +26,10 @@ instruction may make a one-run location exception.
 
 ## Helper
 
-Use the checked helper after authorisation. `--human-authorised` attests that
-the current operation is covered by a direct instruction or an active approved
-envelope; the run receipt records which source supplied that authority:
+Use the checked helper after authorisation. `--human-authorised` and
+`--branch-authorised` are caller attestations; the helper does not record
+whether authority came from a direct instruction or an active approved
+envelope:
 
 ```sh
 scripts/worktree create NAME --human-authorised --detach REV
@@ -41,9 +42,12 @@ scripts/worktree remove NAME --human-authorised
 ```
 
 The helper resolves the primary checkout through Git's common directory, checks
-the name and protected root, and refuses unsafe creation/removal. Receipts for a
-run record the selected `repo_root`, `primary_root`, `common_git_dir`, worktree
-path and branch/detached state.
+the name and protected root, and refuses unsafe creation/removal. A create
+receipt emits `primary_root`, `worktree_root`, `common_git_dir`, `head_revision`
+and branch/detached state. It does not emit the supplied repo path as
+`repo_root`; record that path and the authority provenance separately when the
+run contract requires them. A removal receipt emits only `status`, `name` and
+`primary_root`.
 
 ## Ownership and cleanup
 

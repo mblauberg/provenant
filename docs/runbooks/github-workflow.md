@@ -275,15 +275,26 @@ Afterwards:
 4. Prune the merged branch's artefacts. This is the last step of the merge, not
    a later sweep — see [Post-merge
    pruning](../worktrees.md#post-merge-pruning) for the standing authority and
-   its limits. Confirm the merge landed, then remove the worktree once
-   `git status` in it is clean and no live agent, pane or unconsumed handoff
-   remains, and delete the merged local branch:
+   its limits. Run the complete repository, branch and ancestry gate before
+   removing the clean worktree or deleting the local branch:
 
    ```sh
-   git branch --merged main | grep issue-148-runbook-mechanics
-   scripts/worktree remove impl-148 --human-authorised
-   git branch -d issue-148-runbook-mechanics
-   git worktree prune
+   # 1. Establish where you are. Both must match before anything mutates.
+   test "$(git -C <primary-root> rev-parse --show-toplevel)" = "<primary-root>"
+   test "$(git -C <primary-root> symbolic-ref --quiet --short HEAD)" = "<integration-branch>"
+
+   # 2. Sync the integration branch.
+   git -C <primary-root> fetch origin
+   git -C <primary-root> merge --ff-only origin/<integration-branch>
+
+   # 3. Prove the merge by ancestry. This exiting 0 is the gate.
+   git -C <primary-root> merge-base --is-ancestor <merged-branch> <integration-branch>
+
+   # 4. Prune only that branch's artefacts.
+   scripts/worktree remove <name> --repo <primary-root> --human-authorised
+   git -C <primary-root> branch -d <merged-branch>
+   git -C <primary-root> worktree prune
+   git -C <primary-root> remote prune origin
    ```
 
    One repository-specific retention rule overrides this: a substantial software

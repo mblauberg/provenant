@@ -149,8 +149,9 @@ new keymap beyond move/open-run/expand-Watch/focus-band; new protocol or
 projection fields; the declared-progress `finite` arm and `n/N`; topology tree;
 processed-activity grouping; staged connection diagnosis; and mouse resize of
 splits. Filters and pins, declared progress, topology and activity grouping
-landed in later #141 slices. Issue #141 remains the delivery owner for the
-deferred B4 and D–I phases, including staged connection diagnosis.
+landed in later #141 slices, and exact run drill-down landed in the #410
+follow-up. Issue #141 remains the delivery owner for its still-deferred work,
+including staged connection diagnosis.
 
 ### Files touched (console-only)
 
@@ -200,7 +201,9 @@ no-protocol-change property and the Deck-from-existing-data direction.
 
 The follow-on train has since landed renderer extraction, session-local filters
 and pins, declared run plans, workflow and topology projections, and adaptive
-activity grouping through phases A, B1, B2, B3 and C. The plan-declaration
+activity grouping through phases A, B1, B2, B3 and C. Exact run drill-down now
+opens the bound project session and displays run-scoped identity, freshness,
+progress, work, agents, evidence, activity and issues. The plan-declaration
 ownership question is resolved by the standalone
 [run-plan declaration specification](../agent-fabric/run-plan-declaration.md).
-Issue #141's status comment owns the remaining deferred B4 and D–I work.
+Issue #141's status comment owns the remaining deferred work.
