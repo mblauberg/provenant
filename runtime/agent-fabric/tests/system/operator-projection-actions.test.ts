@@ -2700,6 +2700,10 @@ describe("operator work facts projection", () => {
       limit: 5,
     });
     if (page.status !== "page") throw new Error("run page unavailable");
+    // `status: "page"` does not narrow `composition`: a page can be returned
+    // without one. This helper exists to read the composed identity, so an
+    // absent composition is a failed setup, not a case to tolerate.
+    if (page.composition === undefined) throw new Error("run page omitted its composition");
     const identity = page.composition.identity;
     if (identity.freshness !== "live") throw new Error("run identity is not live");
     return identity;
