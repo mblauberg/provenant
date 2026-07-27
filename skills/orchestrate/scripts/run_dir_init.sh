@@ -48,6 +48,7 @@ cat > "$ROOT/RUN_RECEIPT.json" <<EOF
     "risk_tier": "routine",
     "chair_family": "",
     "concurrency_ceiling": 1,
+    "panels": [],
     "reviews": []
   },
   "pair": {
