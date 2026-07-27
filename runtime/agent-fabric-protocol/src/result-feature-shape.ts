@@ -26,6 +26,7 @@ export const RUN_IDENTITY_PROJECTION_FEATURE = "run-identity-projection.v2" as c
 export const AGENT_TOPOLOGY_PROJECTION_FEATURE = "agent-topology-projection.v1" as const;
 export const WORK_FACTS_PROJECTION_FEATURE = "work-facts-projection.v1" as const;
 export const RUN_SCOPED_PROJECTION_FEATURE = "run-scoped-projection.v1" as const;
+export const RUN_LIFECYCLE_FACTS_FEATURE = "run-lifecycle-facts.v1" as const;
 export const MCP_BOOTSTRAP_CREDENTIALS_FEATURE =
   "mcp-bootstrap-credentials.v2" as const;
 
@@ -341,6 +342,30 @@ function runScopedProjectionPresence(
   ];
 }
 
+function runLifecycleFactsPresence(
+  operation: ProtocolOperation,
+  result: OperationResultMap[ProtocolOperation],
+): readonly boolean[] {
+  if (operation !== FABRIC_OPERATIONS.projectionRunPage) return [];
+  const page = result as RunProjectionPageResult;
+  if (
+    page.status !== "page" ||
+    page.composition === undefined ||
+    page.composition.identity === undefined
+  ) return [];
+  const identity = factValues(page.composition.identity);
+  const revisionPresence = identity.flatMap((value) => [
+    value.lifecycleRevision !== undefined,
+    value.progressRevision !== undefined,
+  ]);
+  if (page.section !== "agents") return revisionPresence;
+  const agents = page as Extract<RunProjectionPageResult<"agents">, { status: "page" }>;
+  return [
+    ...revisionPresence,
+    ...agents.entries.map((entry) => entry.classification !== undefined),
+  ];
+}
+
 function assertUniformFeaturePresence(
   operation: ProtocolOperation,
   featureNegotiated: boolean,
@@ -432,6 +457,11 @@ export function assertOperationResultFeatureShape<Operation extends ProtocolOper
     operation,
     features.includes(RUN_SCOPED_PROJECTION_FEATURE),
     runScopedProjectionPresence(operation, result as OperationResultMap[ProtocolOperation]),
+  );
+  assertUniformFeaturePresence(
+    operation,
+    features.includes(RUN_LIFECYCLE_FACTS_FEATURE),
+    runLifecycleFactsPresence(operation, result as OperationResultMap[ProtocolOperation]),
   );
   return result;
 }

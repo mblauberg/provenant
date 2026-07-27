@@ -77,8 +77,8 @@ describe("additive persistence invariants", () => {
     database.exec(`
       INSERT INTO authorities VALUES ('authority-a','run-a',NULL,'{}','a',1);
       INSERT INTO authorities VALUES ('authority-b','run-b',NULL,'{}','b',1);
-      INSERT INTO agents VALUES ('run-a','chair-a',NULL,'authority-a',NULL,'ready');
-      INSERT INTO agents VALUES ('run-b','chair-b',NULL,'authority-b',NULL,'ready');
+      INSERT INTO agents VALUES ('run-a','chair-a',NULL,'authority-a',NULL,'ready',NULL);
+      INSERT INTO agents VALUES ('run-b','chair-b',NULL,'authority-b',NULL,'ready',NULL);
     `);
 
     expect(() => database.prepare("UPDATE agents SET lifecycle='invented' WHERE run_id='run-a'").run()).toThrow(/INVARIANT_agents_lifecycle/u);
@@ -93,7 +93,7 @@ describe("additive persistence invariants", () => {
     seedInvariantRuns(database);
     database.exec(`
       INSERT INTO authorities VALUES ('authority-a','run-a',NULL,'{}','a',1);
-      INSERT INTO agents VALUES ('run-a','chair-a',NULL,'authority-a',NULL,'ready');
+      INSERT INTO agents VALUES ('run-a','chair-a',NULL,'authority-a',NULL,'ready',NULL);
       INSERT INTO authority_budget(authority_id,unit_key,granted)
       VALUES ('authority-a','turns',4),('authority-a','provider_calls',2),('authority-a','descendants',1);
       INSERT INTO tasks VALUES ('run-a','task-a','authority-a','review','base','active','chair-a',1,1,'chair-a');
@@ -279,9 +279,9 @@ describe("additive persistence invariants", () => {
 
   it("fires every additive insert and update invariant trigger", () => {
     const cases = [
-      ["INVARIANT_agents_lifecycle", "INSERT INTO agents VALUES ('run-a','bad',NULL,'authority-a',NULL,'bad')", "UPDATE agents SET lifecycle='bad' WHERE agent_id='worker-a'"],
-      ["INVARIANT_agents_authority_same_run", "INSERT INTO agents VALUES ('run-a','bad',NULL,'authority-b',NULL,'ready')", "UPDATE agents SET authority_id='authority-b' WHERE agent_id='worker-a'"],
-      ["INVARIANT_agents_parent_same_run", "INSERT INTO agents VALUES ('run-a','bad','chair-b','authority-a',NULL,'ready')", "UPDATE agents SET parent_agent_id='chair-b' WHERE agent_id='worker-a'"],
+      ["INVARIANT_agents_lifecycle", "INSERT INTO agents VALUES ('run-a','bad',NULL,'authority-a',NULL,'bad',NULL)", "UPDATE agents SET lifecycle='bad' WHERE agent_id='worker-a'"],
+      ["INVARIANT_agents_authority_same_run", "INSERT INTO agents VALUES ('run-a','bad',NULL,'authority-b',NULL,'ready',NULL)", "UPDATE agents SET authority_id='authority-b' WHERE agent_id='worker-a'"],
+      ["INVARIANT_agents_parent_same_run", "INSERT INTO agents VALUES ('run-a','bad','chair-b','authority-a',NULL,'ready',NULL)", "UPDATE agents SET parent_agent_id='chair-b' WHERE agent_id='worker-a'"],
       ["INVARIANT_authorities_parent_same_run", "INSERT INTO authorities VALUES ('authority-x','run-a','authority-b','{}','x',1)", "UPDATE authorities SET parent_authority_id='authority-b' WHERE authority_id='authority-child'"],
       ["INVARIANT_tasks_values", "INSERT INTO tasks VALUES ('run-a','task-x','authority-a','x','b','bad',NULL,0,0,'chair-a')", "UPDATE tasks SET state='bad' WHERE task_id='task-a'"],
       ["INVARIANT_tasks_authority_same_run", "INSERT INTO tasks VALUES ('run-a','task-x','authority-b','x','b','ready',NULL,0,0,'chair-a')", "UPDATE tasks SET authority_id='authority-b' WHERE task_id='task-a'"],
@@ -320,9 +320,9 @@ describe("additive persistence invariants", () => {
           INSERT INTO authorities VALUES ('authority-a','run-a',NULL,'{}','a',1);
           INSERT INTO authorities VALUES ('authority-b','run-b',NULL,'{}','b',1);
           INSERT INTO authorities VALUES ('authority-child','run-a','authority-a','{}','c',1);
-          INSERT INTO agents VALUES ('run-a','chair-a',NULL,'authority-a',NULL,'ready');
-          INSERT INTO agents VALUES ('run-a','worker-a','chair-a','authority-a',NULL,'ready');
-          INSERT INTO agents VALUES ('run-b','chair-b',NULL,'authority-b',NULL,'ready');
+          INSERT INTO agents VALUES ('run-a','chair-a',NULL,'authority-a',NULL,'ready',NULL);
+          INSERT INTO agents VALUES ('run-a','worker-a','chair-a','authority-a',NULL,'ready','worker');
+          INSERT INTO agents VALUES ('run-b','chair-b',NULL,'authority-b',NULL,'ready',NULL);
           INSERT INTO authority_budget VALUES ('authority-a','turns',10,0,0,0,0,0);
           INSERT INTO tasks VALUES ('run-a','task-a','authority-a','x','b','ready','worker-a',0,0,'chair-a');
           INSERT INTO messages VALUES ('message-a','run-a','chair-a','da','h','{}','event','b',1,'c',NULL,NULL,0,NULL,1);

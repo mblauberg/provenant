@@ -891,6 +891,7 @@ describe("public protocol adapter", () => {
         "agent-topology-projection.v1",
         "work-facts-projection.v1",
         "run-scoped-projection.v1",
+        "run-lifecycle-facts.v1",
         "artifact-content-read.v1",
       ],
     });
@@ -914,6 +915,7 @@ describe("public protocol adapter", () => {
           "agent-topology-projection.v1",
           "work-facts-projection.v1",
           "run-scoped-projection.v1",
+          "run-lifecycle-facts.v1",
           "artifact-content-read.v1",
         ],
       },
@@ -950,6 +952,7 @@ describe("public protocol adapter", () => {
         "agent-topology-projection.v1",
         "work-facts-projection.v1",
         "run-scoped-projection.v1",
+        "run-lifecycle-facts.v1",
       ],
     });
   });
@@ -976,6 +979,7 @@ describe("public protocol adapter", () => {
         "agent-topology-projection.v1",
         "work-facts-projection.v1",
         "run-scoped-projection.v1",
+        "run-lifecycle-facts.v1",
         "artifact-content-read.v1",
         "message-body-read.v1",
         "operator-repository-read.v1",
@@ -1024,6 +1028,7 @@ describe("public protocol adapter", () => {
         "agent-topology-projection.v1",
         "work-facts-projection.v1",
         "run-scoped-projection.v1",
+        "run-lifecycle-facts.v1",
         "artifact-content-read.v1",
       ],
       projection: {},

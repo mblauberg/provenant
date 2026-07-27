@@ -9,6 +9,7 @@ import type {
   RunProjectionSection,
   RunProjectionTarget,
   RunScopedComposition,
+  RunScopedObservation,
 } from "@local/agent-fabric-protocol";
 
 import type { ConsoleProtocolPort } from "./protocol-adapter.js";
@@ -19,7 +20,7 @@ export type ConsoleRunProjection = Readonly<{
   composition: RunScopedComposition;
   readTransactionId: string;
   work: readonly OperatorViewRow<"work">[];
-  agents: readonly OperatorViewRow<"agents">[];
+  agents: readonly ConsoleRunAgentRow[];
   evidence: readonly OperatorViewRow<"evidence">[];
   activity: readonly OperatorViewRow<"activity">[];
   issues: readonly RunIssueReference[];
@@ -29,6 +30,10 @@ export type ConsoleRunProjection = Readonly<{
   // this the pane renders a complete-looking list marked `Observed` while
   // silently omitting facts it could not observe.
   evidencePathsUnobserved: number;
+}>;
+
+export type ConsoleRunAgentRow = OperatorViewRow<"agents"> & Readonly<{
+  classification: RunScopedObservation<"worker" | "reviewer">;
 }>;
 
 export class RunProjectionInvalidError extends Error {}
@@ -130,7 +135,14 @@ export async function loadRunProjection(options: Readonly<{
         ) {
           throw new RunProjectionInvalidError("run projection entry lost its exact target");
         }
-        collected[section].push(entry.value);
+        if (section === "agents") {
+          if (!("classification" in entry) || entry.classification === undefined) {
+            throw new RunProjectionInvalidError("run agent classification is unavailable");
+          }
+          collected.agents.push({ ...entry.value, classification: entry.classification });
+        } else {
+          collected[section].push(entry.value);
+        }
       }
       if (!result.hasMore) break;
       if (result.nextCursor <= cursor) {
@@ -197,7 +209,7 @@ export async function loadRunProjection(options: Readonly<{
     composition,
     readTransactionId,
     work: collected.work as OperatorViewRow<"work">[],
-    agents: collected.agents as OperatorViewRow<"agents">[],
+    agents: collected.agents as ConsoleRunAgentRow[],
     evidence,
     activity: collected.activity as OperatorViewRow<"activity">[],
     issues: collected.issues as RunIssueReference[],

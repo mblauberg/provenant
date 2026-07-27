@@ -30,6 +30,8 @@ const composition = {
     revision: 17,
     observedAt,
     value: {
+      lifecycleRevision: 11,
+      progressRevision: 17,
       acceptedScope: { observation: "Unobserved" },
       currentPlan: { observation: "Unobserved" },
       lead: { observation: "Observed", value: "agent_chair" },
@@ -91,6 +93,43 @@ function issuesPage(
 }
 
 describe("run-scoped-projection.v1", () => {
+  it("negotiates daemon lifecycle facts as one closed result-shape feature", () => {
+    expect(PROTOCOL_FEATURES).toContain("run-lifecycle-facts.v1");
+    const extended = parseOperationResult(
+      FABRIC_OPERATIONS.projectionRunPage,
+      issuesPage(),
+    );
+
+    expect(assertOperationResultFeatureShape(
+      FABRIC_OPERATIONS.projectionRunPage,
+      ["run-scoped-projection.v1", "run-lifecycle-facts.v1"],
+      extended,
+    )).toBe(extended);
+    expect(() => assertOperationResultFeatureShape(
+      FABRIC_OPERATIONS.projectionRunPage,
+      ["run-scoped-projection.v1"],
+      extended,
+    )).toThrow(expect.objectContaining({ reason: "unnegotiated-field" }));
+
+    const legacyValue = structuredClone(issuesPage());
+    const legacyComposition = legacyValue.composition as typeof composition;
+    const identity = (legacyComposition.identity.value as {
+      lifecycleRevision?: number;
+      progressRevision?: number;
+    });
+    delete identity.lifecycleRevision;
+    delete identity.progressRevision;
+    const legacy = parseOperationResult(
+      FABRIC_OPERATIONS.projectionRunPage,
+      legacyValue,
+    );
+    expect(() => assertOperationResultFeatureShape(
+      FABRIC_OPERATIONS.projectionRunPage,
+      ["run-scoped-projection.v1", "run-lifecycle-facts.v1"],
+      legacy,
+    )).toThrow(expect.objectContaining({ reason: "missing-negotiated-field" }));
+  });
+
   it("is an explicit negotiated result-shape feature", () => {
     expect(PROTOCOL_FEATURES).toContain("run-scoped-projection.v1");
   });
@@ -161,7 +200,11 @@ describe("run-scoped-projection.v1", () => {
       FABRIC_OPERATIONS.projectionRunPage,
       mixedValue,
     );
-    const feature = ["operator-projection.v2", "run-scoped-projection.v1"] as const;
+    const feature = [
+      "operator-projection.v2",
+      "run-scoped-projection.v1",
+      "run-lifecycle-facts.v1",
+    ] as const;
 
     expect(assertOperationResultFeatureShape(
       FABRIC_OPERATIONS.projectionRunPage,
@@ -178,7 +221,7 @@ describe("run-scoped-projection.v1", () => {
     }));
     expect(() => assertOperationResultFeatureShape(
       FABRIC_OPERATIONS.projectionRunPage,
-      ["operator-projection.v2"],
+      ["operator-projection.v2", "run-lifecycle-facts.v1"],
       extended,
     )).toThrow(expect.objectContaining({ reason: "unnegotiated-field" }));
     expect(() => assertOperationResultFeatureShape(

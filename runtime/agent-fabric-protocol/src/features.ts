@@ -47,6 +47,7 @@ export const RESULT_SHAPE_FEATURES = [
   "run-identity-projection.v2",
   "agent-topology-projection.v1",
   "work-facts-projection.v1",
+  "run-lifecycle-facts.v1",
   ACTIVITY_NARRATIVE_GROUPING_FEATURE,
   "mcp-bootstrap-credentials.v2",
 ] as const;

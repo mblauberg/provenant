@@ -30,6 +30,7 @@ import { CommandJournal } from "../application/command-journal.js";
 import { OperatorStore } from "../operator/store.js";
 import { supersedeFinalAcceptanceGates } from "./acceptance-cycle.js";
 import { retireProjectSessionBridges } from "./bridge-retirement.js";
+import { legalProjectSessionTransitions } from "./lifecycle-facts.js";
 import { membershipSourceDisposition } from "./membership-disposition.js";
 import {
   ProjectFabricCoreError,
@@ -38,23 +39,6 @@ import {
   type CoreServiceOptions,
 } from "./contracts.js";
 import { canonicalJson, integer, nullableText, row, sha256, text, type Row } from "./store-support.js";
-
-const legalTransitions: Readonly<Record<ProjectSessionState, readonly ProjectSessionState[]>> = {
-  draft: ["awaiting_launch"],
-  awaiting_launch: ["launching", "launch_failed"],
-  launching: ["active", "launch_failed", "launch_ambiguous"],
-  active: ["quiescing", "visibility_degraded", "reconciling", "recovery_required", "quarantined"],
-  quiescing: ["awaiting_acceptance", "active", "reconciling", "recovery_required", "quarantined"],
-  awaiting_acceptance: ["active", "reconciling"],
-  closed: [],
-  launch_failed: ["awaiting_launch"],
-  launch_ambiguous: ["launching", "active", "reconciling", "recovery_required"],
-  reconciling: ["active", "recovery_required", "quarantined"],
-  visibility_degraded: ["active", "quiescing", "reconciling"],
-  recovery_required: ["reconciling", "active", "quarantined"],
-  quarantined: ["reconciling", "recovery_required"],
-  cancelled: [],
-};
 
 const RUN_COUPLED_SESSION_STATES = new Set<ProjectSessionState>([
   "active",
@@ -195,7 +179,7 @@ export class ProjectSessionStore {
         if (current.generation !== request.expectedGeneration) {
           throw new ProjectFabricCoreError("STALE_GENERATION", "project-session generation changed");
         }
-        if (!legalTransitions[current.state].includes(request.transition.to)) {
+        if (!legalProjectSessionTransitions(current.state).includes(request.transition.to)) {
           throw new ProjectFabricCoreError(
             "LIFECYCLE_PRECONDITION_FAILED",
             `illegal project-session transition ${current.state} -> ${request.transition.to}`,

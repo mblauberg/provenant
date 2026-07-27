@@ -62,6 +62,7 @@ CREATE TABLE agents (
   authority_id TEXT NOT NULL REFERENCES authorities(authority_id),
   provider_session_ref TEXT,
   lifecycle TEXT NOT NULL DEFAULT 'ready',
+  classification TEXT CHECK (classification IN ('worker','reviewer')),
   PRIMARY KEY (run_id, agent_id)
 );
 

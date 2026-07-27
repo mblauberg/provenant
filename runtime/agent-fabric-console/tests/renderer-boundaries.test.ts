@@ -124,12 +124,14 @@ describe("renderer component boundaries", () => {
               revision: 1,
               observedAt: "2026-07-26T00:00:00.000Z",
               value: {
+                lifecycleRevision: 7,
+                progressRevision: 9,
                 acceptedScope: { observation: "Unobserved" },
                 currentPlan: { observation: "Unobserved" },
                 lead: { observation: "Observed", value: "chair-1" },
                 phase: { observation: "Observed", value: "active" },
                 health: { observation: "Observed", value: "healthy" },
-                currentMilestone: { observation: "Unobserved" },
+                currentMilestone: { observation: "Observed", value: "active" },
                 nextMilestone: { observation: "Observed", value: "quiescing" },
                 lastEventAt: { observation: "Unobserved" },
               },
@@ -156,7 +158,34 @@ describe("renderer component boundaries", () => {
             },
           },
           work: [],
-          agents: [],
+          agents: [{
+            itemId: "worker-1",
+            itemRevision: 1,
+            classification: { observation: "Observed", value: "worker" },
+            fact: {
+              freshness: "live",
+              source: "fabric",
+              revision: 1,
+              observedAt: "2026-07-26T00:00:00.000Z",
+              value: {
+                summary: {
+                  kind: "agent",
+                  role: "worker",
+                  lifecycle: "working",
+                  contextPressure: "unknown",
+                  topology: {
+                    topologyRevision: 9,
+                    teams: { observation: "Observed", memberships: [] },
+                    supervisor: { observation: "Unobserved" },
+                    currentTask: { observation: "Unobserved" },
+                    nativeChildren: { observation: "Unobserved" },
+                  },
+                },
+                detailRef: { kind: "agent", agentId: "worker-1", expectedRevision: 1 },
+                actionAvailability: { state: "read-only", reason: "state-ineligible" },
+              },
+            },
+          }],
           evidence: [],
           activity: [{
             itemId: "activity-group-1",
@@ -249,7 +278,10 @@ describe("renderer component boundaries", () => {
     expect(render(44, 8).join("\n")).toContain("Target: SESSION session-1 | coordination");
     const wide = render(120, 24).join("\n");
     expect(wide).toContain("Lead: chair-1");
-    expect(wide).toContain("Current milestone: Unobserved");
+    expect(wide).toContain("Lifecycle revisions: r7 live");
+    expect(wide).toContain("progress r9 live");
+    expect(wide).toContain("Current milestone: active");
+    expect(wide).toContain("Agent worker-1: member | worker | working");
     expect(wide).toContain("Work states (server): blocked 1 | ready 2 | active 3 | complete 4");
     expect(wide).toContain("Activity group: activity-group-1 | task | count 1");
     expect(wide).toContain("Blocking issue: task task-blocked r2 | blocked");
