@@ -5,8 +5,8 @@
  * `skills/orchestrate/scripts/codex_capabilities.py` are the only discovery
  * mechanisms used here. This module runs them, applies the same snapshot trust
  * rules `scripts/model_route.py` applies before believing one, and caches the
- * result so repeated doctor runs cost nothing beyond one canary per freshness
- * window.
+ * result so callers can choose either a cache-only read or the existing
+ * cache-with-live-refresh behaviour.
  *
  * Failure is never drift. A producer that exits non-zero, times out, is absent
  * or returns an untrusted snapshot yields `unobservable`, which the comparison
@@ -151,6 +151,10 @@ export function createCapabilityPinObserver(options: {
   readonly agentsHome: string;
   /** Absent means never cache: the refresh command always wants a live probe. */
   readonly cacheDirectory?: string;
+  /** Return unknown on a fresh-cache miss without invoking a capability producer. */
+  readonly cacheOnly?: boolean;
+  /** Bypass a fresh cache for reading, invoke the producer and refresh the cache. */
+  readonly forceLive?: boolean;
   readonly freshnessMs?: number;
   readonly timeoutMs?: number;
   readonly now?: () => number;
@@ -167,14 +171,21 @@ export function createCapabilityPinObserver(options: {
     const cachePath = options.cacheDirectory === undefined
       ? undefined
       : join(options.cacheDirectory, PIN_OBSERVATION_CACHE_FILE);
-    if (cachePath !== undefined) {
+    if (cachePath !== undefined && options.forceLive !== true) {
       const cached = (await readCache(cachePath)).entries[key];
-      if (cached !== undefined && now() - cached.observedAtMs < freshnessMs) {
-        const age = Math.floor((now() - cached.observedAtMs) / 60_000);
+      const ageMs = cached === undefined ? undefined : now() - cached.observedAtMs;
+      if (cached !== undefined && ageMs !== undefined && ageMs >= 0 && ageMs < freshnessMs) {
+        const age = Math.floor(ageMs / 60_000);
         return cached.observedModel === null
           ? { status: "retired", detail: `cached ${String(age)}m ago: provider no longer offers ${candidate}` }
           : { status: "observed", model: cached.observedModel, detail: `cached ${String(age)}m ago` };
       }
+    }
+    if (options.cacheOnly === true) {
+      return {
+        status: "unobservable",
+        detail: "no provider capability result cached within the last six hours; live provider capability probe was not run",
+      };
     }
     const result = await runProducer(providerFamily, options.agentsHome, candidate, requestedEffort, timeoutMs);
     if (!(result instanceof Map)) {
