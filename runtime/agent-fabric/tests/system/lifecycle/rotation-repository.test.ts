@@ -29,6 +29,76 @@ function lifecycleDigest(domain: string, value: unknown): string {
     .digest("hex")}`;
 }
 
+function seedActiveChildBridge(database: Database.Database, runId: string): void {
+  const leader = database.prepare(`
+    SELECT agent.authority_id,capability.token_hash,capability.expires_at,
+           capability.principal_generation
+      FROM agents agent
+      JOIN capabilities capability
+        ON capability.run_id=agent.run_id AND capability.agent_id=agent.agent_id
+     WHERE agent.run_id=? AND agent.agent_id='leader' AND capability.revoked_at IS NULL
+     ORDER BY capability.principal_generation DESC LIMIT 1
+  `).get(runId) as {
+    authority_id: string;
+    token_hash: string;
+    expires_at: number;
+    principal_generation: number;
+  };
+  const sourceActionId = "schema-negative-source";
+  const contractDigest = `sha256:${sha256("schema-negative-source-contract")}`;
+  admitProviderActionFixture(database, {
+    runId,
+    adapterId: "fake-lifecycle",
+    actionId: sourceActionId,
+    operation: "attach",
+    targetAgentId: "leader",
+    providerSessionGeneration: 1,
+    identityHash: sha256("schema-negative-source-identity"),
+    payloadHash: sha256("schema-negative-source-payload"),
+    payloadJson: "{}",
+    status: "terminal",
+    historyJson: '["prepared","terminal"]',
+    executionCount: 1,
+    effectCount: 1,
+    idempotencyProven: true,
+    resultJson: "{}",
+    updatedAt: 1,
+  });
+  database.transaction(() => {
+    database.prepare(`
+      INSERT INTO provider_agent_custody(
+        run_id,action_id,operation,actor_agent_id,target_agent_id,authority_id,
+        adapter_id,bridge_contract_digest,bridge_capable,capability_hash,
+        capability_expires_at,principal_generation,requested_provider_session_ref,
+        intent_digest,created_at
+      ) VALUES (?,?,'attach','chair','leader',?,'fake-lifecycle',?,1,?,?,?,
+                'schema-negative-source-session',?,1)
+    `).run(
+      runId,
+      sourceActionId,
+      leader.authority_id,
+      contractDigest,
+      leader.token_hash,
+      leader.expires_at,
+      leader.principal_generation,
+      `sha256:${sha256("schema-negative-source-intent")}`,
+    );
+    database.prepare(`
+      INSERT INTO agent_bridge_state(
+        run_id,agent_id,adapter_id,action_id,provider_session_ref,
+        provider_session_generation,bridge_state,bridge_generation,capability_hash,
+        activation_evidence_digest,revision,created_at,updated_at
+      ) VALUES (?,'leader','fake-lifecycle',?,'schema-negative-source-session',
+                1,'active',1,?,?,1,1,1)
+    `).run(
+      runId,
+      sourceActionId,
+      leader.token_hash,
+      `sha256:${sha256("schema-negative-source-activation")}`,
+    );
+  }).immediate();
+}
+
 function seedLifecycleScope(database: Database.Database, input: Readonly<{
   projectId: string;
   projectSessionId: string;
@@ -266,11 +336,12 @@ describe("lifecycle rotation repository", () => {
   });
 
   it("rejects a child bridge apply whose provider generation differs from the reserved target", async () => {
-    const fixture = await createLifecycleFixture({ retainedAgents: true });
+    const fixture = await createLifecycleFixture();
     await fixture.fabric.close();
     const database = new Database(fixture.databasePath);
     database.pragma("foreign_keys = ON");
     try {
+      seedActiveChildBridge(database, fixture.runId);
       const source = database.prepare(`
         SELECT run.project_session_id,run.revision AS run_revision,run.chair_generation,
                session.generation AS session_generation,bridge.adapter_id,bridge.action_id,

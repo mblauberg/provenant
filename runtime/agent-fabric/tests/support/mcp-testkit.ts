@@ -129,6 +129,15 @@ export async function createMcpFixture(
   labels: { chair: string; peer: string } = { chair: "claude-chair", peer: "codex-peer" },
   hooks: {
     chairProxyStarted?(input: { daemonPid: number; proxyPid: number; directory: string }): void;
+    routeProxies?(input: {
+      daemonPid: number;
+      directory: string;
+      socketPath: string;
+    }): Promise<{
+      chairSocketPath?: string;
+      peerSocketPath?: string;
+      close(): Promise<void>;
+    }>;
   } = {},
 ) {
   const directory = await mkdtemp(join(tmpdir(), "agent-fabric-mcp-"));
@@ -149,6 +158,7 @@ export async function createMcpFixture(
   let chairDaemon: Awaited<ReturnType<typeof connectFabricDaemon>> | undefined;
   let chairProxy: McpProxy | undefined;
   let peerProxy: McpProxy | undefined;
+  let proxyRoute: Awaited<ReturnType<NonNullable<typeof hooks.routeProxies>>> | undefined;
   let cleaned = false;
   const cleanup = async (): Promise<void> => {
     if (cleaned) return;
@@ -157,6 +167,7 @@ export async function createMcpFixture(
       chairProxy?.close() ?? Promise.resolve(),
       peerProxy?.close() ?? Promise.resolve(),
     ]);
+    await proxyRoute?.close().catch(() => undefined);
     await Promise.allSettled([
       chairDaemon?.close() ?? Promise.resolve(),
       bootstrap?.close() ?? Promise.resolve(),
@@ -200,15 +211,16 @@ export async function createMcpFixture(
     memberAgentIds: ["chair", "peer"],
     commandId: `${runId}:default-group:create`,
   });
+  proxyRoute = await hooks.routeProxies?.({ daemonPid: daemon.pid, directory, socketPath });
 
   chairProxy = await spawnMcpProxy({
-    socketPath,
+    socketPath: proxyRoute?.chairSocketPath ?? socketPath,
     capability: run.chairCapability,
     label: labels.chair,
   });
   hooks.chairProxyStarted?.({ daemonPid: daemon.pid, proxyPid: chairProxy.pid, directory });
   peerProxy = await spawnMcpProxy({
-    socketPath,
+    socketPath: proxyRoute?.peerSocketPath ?? socketPath,
     capability: peerRegistration.capability,
     label: labels.peer,
   });

@@ -250,6 +250,60 @@ async function createDelayedDaemonProxy(upstreamSocketPath: string) {
   };
 }
 
+async function createRestartBoundaryProxy(upstreamSocketPath: string) {
+  const directory = await mkdtemp(join(tmpdir(), "agent-fabric-mcp-restart-boundary-"));
+  const socketPath = join(directory, "fabric.sock");
+  const connections = new Set<{
+    client: Socket;
+    upstream: Socket;
+    stale: boolean;
+  }>();
+  const staleWaiters = new Set<() => void>();
+  const server = createServer((client) => {
+    const upstream = createConnection(upstreamSocketPath);
+    const connection = { client, upstream, stale: false };
+    connections.add(connection);
+    client.pipe(upstream, { end: false });
+    upstream.pipe(client, { end: false });
+    client.on("error", () => {});
+    upstream.on("error", () => {});
+    upstream.once("close", () => {
+      connection.stale = true;
+      for (const resolve of staleWaiters) resolve();
+      staleWaiters.clear();
+    });
+    client.once("close", () => {
+      connections.delete(connection);
+      upstream.destroy();
+    });
+  });
+  await new Promise<void>((resolve, reject) => server.listen(socketPath, resolve).once("error", reject));
+  return {
+    socketPath,
+    staleConnectionCount: () => [...connections].filter(({ stale }) => stale).length,
+    async waitForStaleConnection(): Promise<void> {
+      if ([...connections].some(({ stale }) => stale)) return;
+      await new Promise<void>((resolve) => staleWaiters.add(resolve));
+    },
+    async disconnectStaleConnections(): Promise<void> {
+      const stale = [...connections].filter((connection) => connection.stale);
+      await Promise.all(stale.map(async ({ client }) => {
+        const closed = new Promise<void>((resolve) => client.once("close", resolve));
+        client.destroy();
+        await closed;
+      }));
+    },
+    async cleanup(): Promise<void> {
+      for (const { client, upstream } of connections) {
+        client.destroy();
+        upstream.destroy();
+      }
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await rm(directory, { recursive: true, force: true });
+    },
+  };
+}
+
 describe("MCP proxy lifecycle", () => {
   it("requires the bootstrap credential result shape in the agent protocol handshake", async () => {
     const connect = vi.spyOn(NdjsonRpcTransport, "connect").mockImplementation(async (socket) => {
@@ -420,9 +474,20 @@ describe("MCP proxy lifecycle", () => {
   });
 
   it("replays command-identified requests after restart and preserves their domain errors", async () => {
-    const fixture = await createMcpFixture("run-mcp-daemon-restart");
+    let boundary: Awaited<ReturnType<typeof createRestartBoundaryProxy>> | undefined;
+    const fixture = await createMcpFixture("run-mcp-daemon-restart", undefined, {
+      routeProxies: async ({ socketPath }) => {
+        const created = await createRestartBoundaryProxy(socketPath);
+        boundary = created;
+        return {
+          chairSocketPath: created.socketPath,
+          close: async () => await created.cleanup(),
+        };
+      },
+    });
     let replacement: Awaited<ReturnType<typeof startFabricDaemon>> | undefined;
     try {
+      if (boundary === undefined) throw new Error("restart boundary proxy was not created");
       const before = await callTool(fixture.chairProxy.client, "fabric_message_receive", {
         limit: 10,
         visibilityTimeoutMs: 30_000,
@@ -430,7 +495,13 @@ describe("MCP proxy lifecycle", () => {
       expect(before.isError).toBe(false);
 
       await fixture.daemon.stop();
+      await boundary.waitForStaleConnection();
       untrackTestProcess(fixture.daemon.pid);
+      await boundary.disconnectStaleConnections();
+      expect(
+        boundary.staleConnectionCount(),
+        "the MCP proxy must observe the old daemon connection close before restart replay",
+      ).toBe(0);
       replacement = await startFabricDaemon({
         databasePath: fixture.databasePath,
         stateDirectory: join(fixture.directory, "state"),
