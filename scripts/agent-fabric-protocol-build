@@ -15,9 +15,20 @@ case "$agents_home" in /*) ;; *) echo "AGENTS_HOME must be absolute" >&2; exit 2
 
 protocol_root="$agents_home/runtime/agent-fabric-protocol"
 protocol_dist="$protocol_root/dist/index.js"
+manifest_stamp="$protocol_root/dist/.root-manifests.sha256"
+freshness_library="$script_dir/lib/agent-fabric-workspace-freshness.sh"
 
 [ -d "$agents_home/node_modules" ] || {
   echo "agent-fabric protocol build needs dependencies: run 'npm ci' in \"$agents_home\" first" >&2
+  exit 1
+}
+[ -f "$freshness_library" ] || {
+  echo "agent-fabric protocol build cannot record freshness: missing $freshness_library" >&2
+  exit 1
+}
+. "$freshness_library"
+manifest_digest=$(workspace_root_manifest_digest "$agents_home") || {
+  echo "agent-fabric protocol build cannot digest the root manifests in $agents_home" >&2
   exit 1
 }
 
@@ -52,3 +63,9 @@ npm run build --workspace=@local/agent-fabric-protocol \
 # undetectable one. Load it here so the freshness signal rests on evidence.
 node --input-type=module -e 'await import(process.argv[1]);' "$protocol_dist" \
   || abort "agent-fabric protocol build produced a dist that does not load: $protocol_dist"
+manifest_digest_after=$(workspace_root_manifest_digest "$agents_home") \
+  || abort "agent-fabric protocol build could not re-read the root manifests after the build"
+[ "$manifest_digest" = "$manifest_digest_after" ] \
+  || abort "agent-fabric protocol build inputs changed during the build; retry the repair"
+printf '%s\n' "$manifest_digest" > "$manifest_stamp" \
+  || abort "agent-fabric protocol build could not record root-manifest freshness: $manifest_stamp"
