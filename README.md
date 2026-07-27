@@ -91,9 +91,9 @@ provenant check   # harness policy gate
 npm run check     # fabric, console and Herdr gates
 ```
 
-Both installer commands take `--mcp-clients all` to register the Fabric MCP
-server for all six clients; the default, `primary`, registers Claude Code and
-Codex only.
+Each installer command registers the Fabric MCP server for the platform it
+installs. Pass `--mcp-clients all` to either one to register all six clients
+instead.
 
 Installation links each skill into `~/.claude/skills/` and `~/.codex/skills/`,
 and links the thin `provenant` command into

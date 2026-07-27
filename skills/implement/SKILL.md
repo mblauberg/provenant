@@ -18,7 +18,7 @@ Require:
 
 If missing, use `scope`; never infer owner decisions.
 
-For active service or safety impact, approved containment may parallelise
+For active service or safety impact, user-approved containment may parallelise
 verification and review. Gates and authority still apply; name a
 reconciliation run.
 
