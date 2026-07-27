@@ -19,7 +19,7 @@ their contracts:
 
 ```text
 provenant help
-provenant doctor
+provenant doctor [existing agent-fabric doctor arguments]
 provenant route [existing model-route arguments]
 provenant worktree [existing worktree arguments]
 provenant check [existing check-harness arguments]
@@ -38,11 +38,16 @@ sole behavioural owners:
 | `fabric` | `scripts/agent-fabric` |
 
 The installed symlink must resolve the wrapper's real checkout without changing
-the caller's working directory. `doctor` delegates the fixed
-argument vector `scripts/agent-fabric doctor`. `route`, `worktree`, `check`
-and `fabric` pass every argument after the subcommand unchanged. Each delegation
+the caller's working directory. `doctor` prefixes its arguments with
+`scripts/agent-fabric doctor`; `route`, `worktree`, `check` and `fabric` pass
+every argument after the subcommand unchanged. Each delegation
 must preserve the caller's environment, standard input and signals, preserve
 stdout and stderr byte-for-byte, and return the existing command's exit code.
+
+This `doctor` passthrough was added on 27 July 2026 for issue #458 so the
+explicit `--consume-provider-quota` opt-in and `--help` remain reachable from
+the installed front door. The wrapper still does not interpret those arguments;
+Agent Fabric remains their behavioural owner.
 
 This gives agents one memorable discovery surface while keeping current scripts
 stable for automation and direct use.

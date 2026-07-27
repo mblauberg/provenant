@@ -256,6 +256,68 @@ fs.writeFileSync(process.argv[process.argv.indexOf("--out") + 1], JSON.stringify
     await observe(request);
     expect((await readFile(log, "utf8")).trim().split("\n")).toHaveLength(2);
   });
+
+  it("does not treat a future-dated cache entry as fresh evidence", async () => {
+    const home = await agentsHomeWith({ "codex_capabilities.py": codexProducer(["gpt-5.6-sol"]) });
+    const state = join(home, "state");
+    const now = Date.parse("2026-07-26T00:00:00Z");
+    await mkdir(state, { recursive: true });
+    await writeFile(join(state, "review-profile-pin-observations.json"), `${JSON.stringify({
+      schemaVersion: 1,
+      entries: {
+        "openai/flagship/gpt-5.6-sol": {
+          observedModel: "gpt-5.6-sol",
+          observedAtMs: now + 60_000,
+        },
+      },
+    })}\n`);
+    const observe = createCapabilityPinObserver({
+      agentsHome: home,
+      cacheDirectory: state,
+      cacheOnly: true,
+      now: () => now,
+    });
+
+    await expect(observe({
+      providerFamily: "openai", routeAlias: "flagship", routeCandidates: ["gpt-5.6-sol"], requestedEffort: null,
+    })).resolves.toStrictEqual({
+      status: "unobservable",
+      detail: "no provider capability result cached within the last six hours; live provider capability probe was not run",
+    });
+  });
+
+  it("bypasses a fresh cache and refreshes it when live observation is explicitly requested", async () => {
+    const home = await agentsHomeWith({ "codex_capabilities.py": codexProducer(["gpt-5.6-sol"]) });
+    const state = join(home, "state");
+    const log = join(home, "calls.log");
+    const now = Date.parse("2026-07-26T00:00:00Z");
+    process.env.PIN_OBSERVER_CALL_LOG = log;
+    await mkdir(state, { recursive: true });
+    await writeFile(log, "");
+    await writeFile(join(state, "review-profile-pin-observations.json"), `${JSON.stringify({
+      schemaVersion: 1,
+      entries: {
+        "openai/flagship/gpt-5.6-sol": { observedModel: "stale-cache-value", observedAtMs: now },
+      },
+    })}\n`);
+    const observe = createCapabilityPinObserver({
+      agentsHome: home,
+      cacheDirectory: state,
+      forceLive: true,
+      now: () => now,
+    });
+
+    await expect(observe({
+      providerFamily: "openai", routeAlias: "flagship", routeCandidates: ["gpt-5.6-sol"], requestedEffort: null,
+    })).resolves.toMatchObject({
+      status: "observed",
+      model: "gpt-5.6-sol",
+      detail: "observed live via codex_capabilities.py",
+    });
+    expect(await readFile(log, "utf8")).toBe("codex\n");
+    expect(await readFile(join(state, "review-profile-pin-observations.json"), "utf8"))
+      .toContain('"observedModel": "gpt-5.6-sol"');
+  });
 });
 
 describe("profile:pin refresh", () => {
