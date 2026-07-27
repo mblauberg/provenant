@@ -80,7 +80,7 @@ type DoctorDaemonState =
 export type DoctorLifecycleState = "current" | "idle" | "recovering" | "blocked";
 
 const PRECONDITIONS: Readonly<Record<string, string>> = {
-  "protocol-build": "the local protocol build is newer than its TypeScript sources",
+  "protocol-build": "the local protocol dist is present and current for its build inputs",
   configuration: "the trusted Fabric configuration loads and names its adapters",
   "wrapper-loader": "every configured adapter wrapper loader is installed",
   "adapter-compatibility": "adapter compatibility pins verify against the pinned schema",
@@ -120,25 +120,6 @@ const RECOVERABLE_CODES: ReadonlySet<string> = new Set([
   "DAEMON_PROCESS_CRASHED",
   "DAEMON_PROCESS_UNCLEAN_STOP",
 ]);
-
-/**
- * Preconditions another entrypoint reports before `doctor` can. This is an
- * entrypoint-specific interception, not a structural blind spot: `doctor`
- * evaluates the `protocol-build` check itself, so the package bin and
- * in-process callers do classify a stale dist. Only the `scripts/agent-fabric`
- * wrapper preempts it, by exiting 78 before `doctor` starts (#399, gap #439).
- */
-const WRAPPER_INTERCEPTED_PRECONDITIONS = [
-  {
-    precondition: "the local protocol build is newer than its TypeScript sources",
-    code: "AGENT_FABRIC_PROTOCOL_BUILD_STALE",
-    check: "protocol-build",
-    observedByDoctor: true,
-    interceptedBy: "scripts/agent-fabric",
-    reason: "the launcher preflight exits 78 before doctor starts, so the wrapper path reports this instead of doctor; the package bin and in-process callers reach the protocol-build check",
-    issue: "#439",
-  },
-] as const;
 
 const PRIMARY_ADAPTER_IDS = ["claude-agent-sdk", "codex-app-server"] as const;
 const PROVIDER_PROBE_TIMEOUT_MS = 16_000;
@@ -609,11 +590,20 @@ export async function fabricDoctor(
   let compatibilityVerification: Awaited<ReturnType<typeof verifyAdapterCompatibility>> | undefined;
   const providerObservations: ProviderObservation[] = [];
   const checks: Check[] = [];
-  // Evaluated by doctor itself so the package bin and in-process callers still
-  // classify a stale dist; only the wrapper preempts it by exiting 78 first.
   checks.push(await check("protocol-build", async () => {
+    if (process.env.AGENT_FABRIC_PROTOCOL_BUILD_VERDICT === "stale") {
+      const repair = process.env.AGENT_FABRIC_PROTOCOL_BUILD_REPAIR;
+      throw Object.assign(
+        new Error(
+          repair === undefined || repair.length === 0
+            ? "the launcher observed a stale protocol dist but did not provide a repair command"
+            : `the launcher observed a stale protocol dist; repair: ${repair}`,
+        ),
+        { code: "AGENT_FABRIC_PROTOCOL_BUILD_STALE" },
+      );
+    }
     await (dependencies.preflightProtocolBuild ?? preflightProtocolBuild)();
-    return "protocol dist is newer than its build inputs";
+    return "protocol dist is present and current for its build inputs";
   }));
   checks.push(await check("configuration", async () => {
     const config = await loadFabricConfig({ globalPath: selected.config, agentsHome: selected.agentsHome });
@@ -790,7 +780,7 @@ export async function fabricDoctor(
       detail: holds?.detail ?? daemon.detail,
       recoverable: !healthy && state === "recovering",
     },
-    wrapperIntercepted: WRAPPER_INTERCEPTED_PRECONDITIONS,
+    wrapperIntercepted: [],
     daemon: {
       status: daemon.status,
       pid: daemon.pid,

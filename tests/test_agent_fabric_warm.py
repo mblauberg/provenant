@@ -39,6 +39,13 @@ def _fixture(tmp_path: Path) -> tuple[Path, Path, Path]:
     _write(root / "runtime/agent-fabric/dist/mcp/main.js")
     _write(root / "runtime/agent-fabric-herdr/dist/bin.js")
     _write(root / "runtime/agent-fabric-console/dist/bin.js")
+    for manifest, content in {
+        "package.json": '{"type":"module"}\n',
+        "package-lock.json": '{"lockfileVersion":3}\n',
+        "tsconfig.json": '{"files":[]}\n',
+    }.items():
+        _write(root / manifest, content)
+        os.utime(root / manifest, (1_700_000_000, 1_700_000_000))
 
     bin_dir = tmp_path / "bin"
     marker = tmp_path / "npm-invocations"
@@ -89,6 +96,52 @@ def test_protocol_only_staleness_rebuilds_then_fresh_workspace_is_noop(
     assert fresh.returncode == 0, fresh.stderr
     assert "agent-fabric dist fresh:" in fresh.stdout
     assert marker.read_text(encoding="utf-8").splitlines() == ["run build"]
+
+
+def test_manifest_digest_change_rebuilds_once_and_warm_records_the_new_digest(
+    tmp_path: Path,
+) -> None:
+    root, protocol_source, marker = _fixture(tmp_path)
+    now = 1_700_000_000
+    os.utime(protocol_source, (now - 20, now - 20))
+    for relative, content in {
+        "package.json": '{"type":"module"}\n',
+        "package-lock.json": '{"lockfileVersion":3}\n',
+        "tsconfig.json": '{"files":[]}\n',
+    }.items():
+        path = root / relative
+        _write(path, content)
+        os.utime(path, (now - 20, now - 20))
+
+    digest = subprocess.run(
+        [
+            "/bin/sh",
+            "-c",
+            '. "$1"; workspace_root_manifest_digest "$2"',
+            "digest-fixture",
+            str(root / "scripts/lib/agent-fabric-workspace-freshness.sh"),
+            str(root),
+        ],
+        text=True,
+        capture_output=True,
+        check=True,
+    ).stdout
+    stamp = root / "runtime/agent-fabric-protocol/dist/.root-manifests.sha256"
+    _write(stamp, digest)
+
+    _write(root / "package-lock.json", '{"lockfileVersion":3,"changed":true}\n')
+    os.utime(root / "package-lock.json", (now - 10, now - 10))
+
+    rebuilt = _run(root, marker, now=now)
+    fresh = _run(root, marker, now=now + 20)
+
+    assert rebuilt.returncode == 0, rebuilt.stderr
+    assert "agent-fabric dist stale; rebuilding workspace" in rebuilt.stdout
+    assert fresh.returncode == 0, fresh.stderr
+    assert "agent-fabric dist fresh:" in fresh.stdout
+    assert marker.read_text(encoding="utf-8").splitlines() == ["run build"], (
+        "warm must replace the protocol manifest stamp after its successful root build"
+    )
 
 
 @pytest.mark.parametrize(

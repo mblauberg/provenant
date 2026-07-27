@@ -25,11 +25,32 @@ fi
 
 protocol_root="$agents_home/runtime/agent-fabric-protocol"
 protocol_dist="$protocol_root/dist/index.js"
-if workspace_is_stale "$protocol_root" "$protocol_dist"; then
-  echo "AGENT_FABRIC_PROTOCOL_BUILD_STALE: local @local/agent-fabric-protocol dist is missing or older than its build inputs" >&2
-  # The verdict is about $agents_home, which is not always the tree this script
-  # lives in. Naming the bare script would send an operator to rebuild a
-  # different checkout and leave the diagnosed one stale.
-  echo "repair: AGENTS_HOME=\"$agents_home\" \"$script_dir/agent-fabric-protocol-build\"" >&2
+repair_command="AGENTS_HOME=\"$agents_home\" \"$script_dir/agent-fabric-protocol-build\""
+
+protocol_build_block() {
+  echo "AGENT_FABRIC_PROTOCOL_BUILD_STALE: local @local/agent-fabric-protocol dist is missing, unloadable, or stale against its build inputs" >&2
+  echo "repair: $repair_command" >&2
   exit 78
+}
+
+[ -f "$protocol_dist" ] || protocol_build_block
+
+# Loadability is probed only for `doctor`, which is the caller that needs it:
+# it imports the protocol package transitively, so a dist that cannot load
+# leaves it unable to report anything and it must block rather than pretend.
+# Every other entrypoint would be charged a Node start-up -- ~130ms measured,
+# against ~10ms for the rest of this script -- on the path that runs before
+# every `agent-fabric` and `agent-fabric-mcp` invocation, to learn something
+# their own import is about to establish anyway.
+if [ "${AGENT_FABRIC_PROTOCOL_PREFLIGHT_MODE:-}" = doctor ]; then
+  node --input-type=module -e 'await import(process.argv[1]);' "$protocol_dist" \
+    >/dev/null 2>&1 || protocol_build_block
+fi
+
+if workspace_is_stale "$protocol_root" "$protocol_dist"; then
+  if [ "${AGENT_FABRIC_PROTOCOL_PREFLIGHT_MODE:-}" = doctor ]; then
+    printf '%s\n' "$repair_command"
+    exit 0
+  fi
+  protocol_build_block
 fi
