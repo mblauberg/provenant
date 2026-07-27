@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { spawn } from "node:child_process";
 import {
   chmodSync,
   mkdirSync,
@@ -20,6 +21,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 
 import Database from "better-sqlite3";
@@ -28,8 +30,11 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   archiveAndFreshDatabase,
   inspectDatabaseArchiveAndFresh,
-  runDatabaseArchiveAndFreshCli,
 } from "../../src/cli/database-archive-and-fresh.ts";
+import {
+  cutoverFailure,
+  runDatabaseArchiveAndFreshCli,
+} from "../../src/cli/database-archive-and-fresh-cli.ts";
 import {
   inspectFabricDatabase,
   SQLITE_SOURCE_SUFFIXES,
@@ -37,6 +42,11 @@ import {
 import { openFabricDatabase } from "../../src/persistence/sqlite.ts";
 
 const cleanup: string[] = [];
+const unattendedTestApproval = {
+  kind: "unattended-approval",
+  status: "asserted",
+  principal: "integration-test",
+} as const;
 
 afterEach(async () => {
   await Promise.all(cleanup.splice(0).map((path) => rm(path, { recursive: true, force: true })));
@@ -146,6 +156,36 @@ async function sourcePathSnapshot(databasePath: string): Promise<unknown> {
   }));
 }
 
+async function runDetachedArchiveCli(
+  arguments_: string[],
+  stdin: string,
+): Promise<Readonly<{ exitCode: number | null; stdout: string; stderr: string }>> {
+  const mainPath = fileURLToPath(new URL("../../src/cli/main.ts", import.meta.url));
+  const child = spawn(
+    process.execPath,
+    ["--import", "tsx", mainPath, "database", "archive-and-fresh", ...arguments_],
+    {
+      cwd: fileURLToPath(new URL("../..", import.meta.url)),
+      detached: true,
+      stdio: ["pipe", "pipe", "pipe"],
+    },
+  );
+  let stdout = "";
+  let stderr = "";
+  child.stdout.setEncoding("utf8").on("data", (chunk: string) => {
+    stdout += chunk;
+  });
+  child.stderr.setEncoding("utf8").on("data", (chunk: string) => {
+    stderr += chunk;
+  });
+  child.stdin.end(stdin);
+  const exitCode = await new Promise<number | null>((resolve, reject) => {
+    child.once("error", reject);
+    child.once("close", resolve);
+  });
+  return { exitCode, stdout, stderr };
+}
+
 describe("database archive-and-fresh cutover", () => {
   it("reports an exact mismatch and requires digest-bound confirmation without mutation", async () => {
     const fixture = await legacyFixture();
@@ -175,6 +215,206 @@ describe("database archive-and-fresh cutover", () => {
     await expect(readdir(fixture.archiveDirectory)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
+  it("refuses a captured digest when the mutating owner receives no approval", async () => {
+    const fixture = await legacyFixture();
+    const preview = inspectDatabaseArchiveAndFresh(fixture.databasePath);
+    if (preview.status !== "confirmation-required") {
+      throw new TypeError("expected confirmation preview");
+    }
+    const before = await sourcePathSnapshot(fixture.databasePath);
+
+    const result = archiveAndFreshDatabase({
+      databasePath: fixture.databasePath,
+      archiveDirectory: fixture.archiveDirectory,
+      confirmSourceSetSha256: preview.confirmation.sourceSetSha256,
+    });
+
+    expect(result).toMatchObject({
+      status: "approval-required",
+      code: "CUTOVER_APPROVAL_REQUIRED",
+      approval: {
+        required: "verified-interactive-confirmation",
+        satisfied: false,
+      },
+      sourcePreserved: true,
+    });
+    expect(await sourcePathSnapshot(fixture.databasePath)).toEqual(before);
+    await expect(readdir(fixture.archiveDirectory)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("does not accept interactive confirmation from piped stdin", async () => {
+    const fixture = await legacyFixture();
+    const preview = inspectDatabaseArchiveAndFresh(fixture.databasePath);
+    if (preview.status !== "confirmation-required") {
+      throw new TypeError("expected confirmation preview");
+    }
+    const before = await sourcePathSnapshot(fixture.databasePath);
+
+    const result = await runDetachedArchiveCli(
+      [
+        "--database",
+        fixture.databasePath,
+        "--archive",
+        fixture.archiveDirectory,
+        "--confirm-source-set",
+        preview.confirmation.sourceSetSha256,
+      ],
+      "ARCHIVE-AND-FRESH\n",
+    );
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toBe("");
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      status: "approval-required",
+      code: "CUTOVER_INTERACTIVE_CONFIRMATION_REQUIRED",
+      sourcePreserved: true,
+    });
+    expect(await sourcePathSnapshot(fixture.databasePath)).toEqual(before);
+    await expect(readdir(fixture.archiveDirectory)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("rejects a caller-forged verified interactive approval without mutation", async () => {
+    const fixture = await legacyFixture();
+    const preview = inspectDatabaseArchiveAndFresh(fixture.databasePath);
+    if (preview.status !== "confirmation-required") {
+      throw new TypeError("expected confirmation preview");
+    }
+    const before = await sourcePathSnapshot(fixture.databasePath);
+
+    let failure: unknown;
+    try {
+      archiveAndFreshDatabase({
+        databasePath: fixture.databasePath,
+        archiveDirectory: fixture.archiveDirectory,
+        confirmSourceSetSha256: preview.confirmation.sourceSetSha256,
+        approval: {
+          kind: "interactive-confirmation",
+          status: "verified",
+        },
+      } as never);
+    } catch (error: unknown) {
+      failure = error;
+    }
+    expect(failure).toEqual(new Error(
+      "interactive cutover approval was not issued by controlling-terminal verification",
+    ));
+    expect(cutoverFailure(fixture.databasePath, failure)).toMatchObject({
+      status: "failed",
+      code: "INVALID_ARGUMENT",
+      databasePath: fixture.databasePath,
+      sourcePreserved: true,
+    });
+    expect(await sourcePathSnapshot(fixture.databasePath)).toEqual(before);
+    await expect(readdir(fixture.archiveDirectory)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("records unattended approval as asserted by a named principal, never verified", async () => {
+    const fixture = await legacyFixture();
+    const preview = runDatabaseArchiveAndFreshCli(
+      ["--archive", fixture.archiveDirectory],
+      fixture.databasePath,
+    );
+    if (preview.result.status !== "confirmation-required") {
+      throw new TypeError("expected confirmation preview");
+    }
+
+    const result = runDatabaseArchiveAndFreshCli(
+      [
+        "--archive",
+        fixture.archiveDirectory,
+        "--confirm-source-set",
+        preview.result.confirmation.sourceSetSha256,
+        "--unattended-approval-asserted-by",
+        "release-automation",
+      ],
+      fixture.databasePath,
+    );
+
+    expect(result).toMatchObject({ exitCode: 0, result: { status: "completed" } });
+    const receipt = JSON.parse(await readFile(
+      join(fixture.archiveDirectory, "source-set", "receipt.json"),
+      "utf8",
+    )) as { approval?: unknown };
+    expect(receipt.approval).toEqual({
+      kind: "unattended-approval",
+      status: "asserted",
+      principal: "release-automation",
+    });
+    expect(receipt.approval).not.toMatchObject({ status: "verified" });
+  });
+
+  it("snapshots stateful unattended approval input into an asserted canonical receipt", async () => {
+    const fixture = await legacyFixture();
+    const preview = inspectDatabaseArchiveAndFresh(fixture.databasePath);
+    if (preview.status !== "confirmation-required") {
+      throw new TypeError("expected confirmation preview");
+    }
+    let kindReads = 0;
+    const statefulApproval = {
+      get kind() {
+        kindReads += 1;
+        return kindReads === 1 ? "unattended-approval" : "interactive-confirmation";
+      },
+      get status() {
+        return kindReads === 1 ? "asserted" : "verified";
+      },
+      get principal() {
+        return "stateful-agent";
+      },
+    };
+
+    const result = archiveAndFreshDatabase({
+      databasePath: fixture.databasePath,
+      archiveDirectory: fixture.archiveDirectory,
+      confirmSourceSetSha256: preview.confirmation.sourceSetSha256,
+      approval: statefulApproval,
+    } as never);
+
+    expect(result.status).toBe("completed");
+    const receipt = JSON.parse(await readFile(
+      join(fixture.archiveDirectory, "source-set", "receipt.json"),
+      "utf8",
+    )) as { approval?: unknown };
+    expect(receipt.approval).toEqual({
+      kind: "unattended-approval",
+      status: "asserted",
+      principal: "stateful-agent",
+    });
+  });
+
+  it("refuses an invalid unattended principal without changing the source set", async () => {
+    const fixture = await legacyFixture();
+    const preview = inspectDatabaseArchiveAndFresh(fixture.databasePath);
+    if (preview.status !== "confirmation-required") {
+      throw new TypeError("expected confirmation preview");
+    }
+    const before = await sourcePathSnapshot(fixture.databasePath);
+
+    const result = runDatabaseArchiveAndFreshCli(
+      [
+        "--archive",
+        fixture.archiveDirectory,
+        "--confirm-source-set",
+        preview.confirmation.sourceSetSha256,
+        "--unattended-approval-asserted-by",
+        "not a principal",
+      ],
+      fixture.databasePath,
+    );
+
+    expect(result).toMatchObject({
+      exitCode: 1,
+      result: {
+        status: "failed",
+        code: "INVALID_ARGUMENT",
+        message: expect.stringContaining("asserted named principal"),
+        sourcePreserved: true,
+      },
+    });
+    expect(await sourcePathSnapshot(fixture.databasePath)).toEqual(before);
+    await expect(readdir(fixture.archiveDirectory)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it("publishes a mode-preserving receipt archive before initialising a fresh current baseline", async () => {
     const fixture = await legacyFixture();
     const beforeBytes = await readFile(fixture.databasePath);
@@ -187,6 +427,7 @@ describe("database archive-and-fresh cutover", () => {
       databasePath: fixture.databasePath,
       archiveDirectory: fixture.archiveDirectory,
       confirmSourceSetSha256: preview.confirmation.sourceSetSha256,
+      approval: unattendedTestApproval,
     });
 
     expect(result).toMatchObject({
@@ -236,6 +477,7 @@ describe("database archive-and-fresh cutover", () => {
       databasePath: fixture.databasePath,
       archiveDirectory: fixture.archiveDirectory,
       confirmSourceSetSha256: preview.confirmation.sourceSetSha256,
+      approval: unattendedTestApproval,
     });
 
     expect(result.status).toBe("completed");
@@ -261,6 +503,7 @@ describe("database archive-and-fresh cutover", () => {
       databasePath: fixture.databasePath,
       archiveDirectory: fixture.archiveDirectory,
       confirmSourceSetSha256: preview.confirmation.sourceSetSha256,
+      approval: unattendedTestApproval,
     });
 
     expect(result.status).toBe("completed");
@@ -368,6 +611,7 @@ describe("database archive-and-fresh cutover", () => {
       databasePath,
       archiveDirectory,
       confirmSourceSetSha256: preview.confirmation.sourceSetSha256,
+      approval: unattendedTestApproval,
     });
 
     expect(result.status).toBe("completed");
@@ -413,6 +657,7 @@ describe("database archive-and-fresh cutover", () => {
       databasePath: fixture.databasePath,
       archiveDirectory: fixture.archiveDirectory,
       confirmSourceSetSha256: preview.confirmation.sourceSetSha256,
+      approval: unattendedTestApproval,
     })).toThrowError(expect.objectContaining({ code: "EEXIST" }));
 
     expect(await sourceHashes(fixture.databasePath)).toEqual(before);
@@ -431,6 +676,7 @@ describe("database archive-and-fresh cutover", () => {
         databasePath: fixture.databasePath,
         archiveDirectory: join(`${fixture.databasePath}${suffix}`, "archive"),
         confirmSourceSetSha256: preview.confirmation.sourceSetSha256,
+        approval: unattendedTestApproval,
       })).toThrow("archive destination must not equal or descend from database source member");
 
       expect(await sourcePathSnapshot(fixture.databasePath)).toEqual(before);
@@ -449,6 +695,7 @@ describe("database archive-and-fresh cutover", () => {
       databasePath: fixture.databasePath,
       archiveDirectory: join(alias, "fabric.sqlite3-wal", "archive"),
       confirmSourceSetSha256: preview.confirmation.sourceSetSha256,
+      approval: unattendedTestApproval,
     })).toThrow("archive destination must not equal or descend from database source member");
 
     expect(await sourcePathSnapshot(fixture.databasePath)).toEqual(before);
@@ -465,6 +712,7 @@ describe("database archive-and-fresh cutover", () => {
       databasePath: fixture.databasePath,
       archiveDirectory: fixture.archiveDirectory,
       confirmSourceSetSha256: preview.confirmation.sourceSetSha256,
+      approval: unattendedTestApproval,
     }, {
       afterInspection: () => {
         writeFileSync(`${fixture.databasePath}-wal`, "racing sidecar\n", { mode: 0o640 });
@@ -493,6 +741,7 @@ describe("database archive-and-fresh cutover", () => {
       databasePath: fixture.databasePath,
       archiveDirectory: fixture.archiveDirectory,
       confirmSourceSetSha256: preview.confirmation.sourceSetSha256,
+      approval: unattendedTestApproval,
     }, {
       beforeSourceClaim: () => {
         writeFileSync(`${fixture.databasePath}-wal`, "late race winner\n", { mode: 0o640 });
@@ -634,6 +883,7 @@ describe("database archive-and-fresh cutover", () => {
       databasePath: fixture.databasePath,
       archiveDirectory: fixture.archiveDirectory,
       confirmSourceSetSha256: preview.confirmation.sourceSetSha256,
+      approval: unattendedTestApproval,
     }, {
       claimSourceFile: (sourcePath) => {
         mkdirSync(competingClaimDirectory, { mode: 0o700 });
@@ -672,6 +922,7 @@ describe("database archive-and-fresh cutover", () => {
       databasePath: fixture.databasePath,
       archiveDirectory: fixture.archiveDirectory,
       confirmSourceSetSha256: preview.confirmation.sourceSetSha256,
+      approval: unattendedTestApproval,
     }, {
       prepareClaimDirectory: () => {
         throw new Error("injected private claim setup failure");
@@ -703,6 +954,7 @@ describe("database archive-and-fresh cutover", () => {
       databasePath: fixture.databasePath,
       archiveDirectory: fixture.archiveDirectory,
       confirmSourceSetSha256: preview.confirmation.sourceSetSha256,
+      approval: unattendedTestApproval,
     }, {
       claimSourceFile: (sourcePath, claimedPath) => {
         renameSync(sourcePath, claimedPath);
@@ -740,6 +992,7 @@ describe("database archive-and-fresh cutover", () => {
       databasePath: fixture.databasePath,
       archiveDirectory: fixture.archiveDirectory,
       confirmSourceSetSha256: preview.confirmation.sourceSetSha256,
+      approval: unattendedTestApproval,
     }, {
       writeArchiveFile: (path, bytes, mode) => {
         writes += 1;
@@ -764,6 +1017,7 @@ describe("database archive-and-fresh cutover", () => {
       databasePath: fixture.databasePath,
       archiveDirectory: fixture.archiveDirectory,
       confirmSourceSetSha256: preview.confirmation.sourceSetSha256,
+      approval: unattendedTestApproval,
     }, {
       claimSourceFile: (sourcePath, claimedPath) => {
         claims += 1;
@@ -809,6 +1063,7 @@ describe("database archive-and-fresh cutover", () => {
       databasePath: fixture.databasePath,
       archiveDirectory: fixture.archiveDirectory,
       confirmSourceSetSha256: preview.confirmation.sourceSetSha256,
+      approval: unattendedTestApproval,
     }, {
       claimSourceFile: (sourcePath, claimedPath) => {
         renameSync(sourcePath, claimedPath);
@@ -853,6 +1108,7 @@ describe("database archive-and-fresh cutover", () => {
       databasePath: fixture.databasePath,
       archiveDirectory: fixture.archiveDirectory,
       confirmSourceSetSha256: preview.confirmation.sourceSetSha256,
+      approval: unattendedTestApproval,
     }, {
       initialiseFreshDatabase: () => {
         throw new Error("injected fresh baseline failure");
@@ -888,6 +1144,7 @@ describe("database archive-and-fresh cutover", () => {
       databasePath: fixture.databasePath,
       archiveDirectory: fixture.archiveDirectory,
       confirmSourceSetSha256: preview.confirmation.sourceSetSha256,
+      approval: unattendedTestApproval,
     }, {
       removeClaimedSource: () => {
         throw new Error("injected claimed-source cleanup failure");
@@ -922,6 +1179,7 @@ describe("database archive-and-fresh cutover", () => {
       databasePath: fixture.databasePath,
       archiveDirectory: fixture.archiveDirectory,
       confirmSourceSetSha256: preview.confirmation.sourceSetSha256,
+      approval: unattendedTestApproval,
     }, {
       finaliseReceipt: () => {
         throw new Error("injected receipt finalisation failure");

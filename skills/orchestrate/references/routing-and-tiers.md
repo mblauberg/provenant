@@ -3,6 +3,10 @@
 > `config/model-routing.json` is the dated machine catalogue; `scripts/model-route`
 > is the policy resolver. This file owns human-readable family/role and
 > degradation policy. `HARNESS.md` keeps only the invariant core.
+> `docs/model-dossier.md` owns what each model is *like* — strengths,
+> weaknesses and cost profile. That dossier is advisory and cannot change what
+> is admissible; this file stays the authority on task class, tier, role,
+> effort and degradation. Neither restates the other.
 
 The resolver's default `--adapter-gate fabric` fails closed when the selected
 fabric adapter is disabled or has unresolved compatibility pins. A direct CLI
@@ -81,23 +85,25 @@ Cost is not just tokens: tools meter differently (tokens vs credits vs monthly c
 tiers cost far more per call. A "small, objective" task only stays cheap if the schema is strict and
 the output is validated — a loose schema lets a cheap model invent fields, which costs more in rework.
 
-**Effort-controllable flagship can substitute for a mid model** when the CLI exposes effort control and
-the cost/latency is acceptable. Treat this as a dated local heuristic, not doctrine. Smoke-test important
-routes against the task before relying on them.
+## Choosing among admissible routes
 
-## Roles → where each tends to fit (dated heuristic — re-check, don't worship)
+The tables above decide what a route *must* be. When more than one route
+satisfies them, choose on model character rather than habit: read
+`docs/model-dossier.md`, which owns per-model strengths, weaknesses and cost
+profile, and the category notes for adversarial, long-context, cheap-bulk and
+effort-substitution work. Its entries are examples, not an enumeration — a task
+whose character is unlisted is still routed by reasoning from the nearest
+entries. The dossier is advisory: it ranks admissible options and never widens
+authority, reaches a disabled adapter, or overrides a reservation, tier or
+compatibility gate.
 
-These are tendencies, not laws; confirm with a quick task-local smoke test before routing something
-important.
-
-- **Orchestrate / synthesise / decide** → flagship, in your own session.
-- **Research legwork, drafting, review** → mid, in parallel, write-to-file.
-- **Adversarial red-team** → a strong *different* family. Alignment-tuned models tend to be weaker at
-  *playing* an attacker; a strong code/agent family with an explicit defect taxonomy tends to be a
-  sharper critic. Give it the artifact + a checklist of failure types.
-- **Long-context audit** → a long-context family (e.g. Gemini through Agent Fabric), then bring the distilled
-  result back to a flagship for the decision.
-- **Cheap bulk / scouting** → cheapest diverse family (kiro's open models), objective fields only.
+When a dossier entry actually decided between two admissible routes, name that
+entry's heading in the run receipt and the worker brief, for example
+`dossier: GPT-5.6 Sol`. Record nothing when no entry informed the choice; an
+unapplied preference is not evidence the dossier helped. The resolver receipt
+from `scripts/model-route` has a fixed schema with no advisory field, so the
+citation lives in the chair-authored run receipt and worker brief, never in
+resolver output.
 
 ## Default stack & fallback chains
 

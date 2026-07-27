@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  FabricError,
   LocalOperatorConsoleUnavailableError,
   daemonStartUnavailableReason,
   type LocalOperatorConsoleUnavailableReason,
@@ -25,6 +26,25 @@ describe("daemonStartUnavailableReason", () => {
     [{ code: "BOOTSTRAP_ACTION_MISMATCH" }, "bootstrap-receipt-invalid"],
     [{ code: "BOOTSTRAP_RECEIPT_INVALID" }, "bootstrap-receipt-invalid"],
     [{ code: "BOOTSTRAP_LEASE_EXPIRED" }, "daemon-unreachable"],
+    [new FabricError(
+      "ARTIFACT_DIGEST_INVALID",
+      "the pinned semantic snapshot differs",
+      { field: "config/review-profiles/certifying-review-four-slot-v1.json" },
+    ), "review-profile-catalogue-invalid"],
+    [new FabricError(
+      "NOT_FOUND",
+      "the required schema source is unavailable",
+      { field: "runtime/agent-fabric/schemas/review-profile.v1.schema.json" },
+    ), "review-profile-catalogue-invalid"],
+    [new FabricError(
+      "NOT_FOUND",
+      "review profile catalogue lookalike",
+      { field: "config/not-a-review-profile-member.json" },
+    ), "start-failed"],
+    [{
+      code: "NOT_FOUND",
+      field: "runtime/agent-fabric/schemas/review-profile.v1.schema.json",
+    }, "start-failed"],
     [{ name: "BootstrapElectionError" }, "daemon-election-conflict"],
     [{ name: "BootstrapSpawnPhaseError", phase: "spawn" }, "daemon-spawn-failed"],
     [new Error("opaque runtime failure"), "start-failed"],
@@ -35,6 +55,16 @@ describe("daemonStartUnavailableReason", () => {
 
   it.each(cases)("maps %o to its truthful reason", (error, expected) => {
     expect(daemonStartUnavailableReason(error)).toBe(expected);
+  });
+
+  it("keeps catalogue discrimination stable when a typed error message is reworded", () => {
+    const error = new FabricError(
+      "ARTIFACT_DIGEST_INVALID",
+      "wording deliberately unrelated to the catalogue",
+      { field: "config/review-profiles/certifying-review-four-slot-v1.json" },
+    );
+
+    expect(daemonStartUnavailableReason(error)).toBe("review-profile-catalogue-invalid");
   });
 
   it("assigns each reason a distinct safe code", () => {
@@ -48,6 +78,7 @@ describe("daemonStartUnavailableReason", () => {
       "daemon-election-conflict",
       "daemon-spawn-failed",
       "bootstrap-receipt-invalid",
+      "review-profile-catalogue-invalid",
       "start-failed",
     ];
     const codes = new Set(
@@ -57,5 +88,7 @@ describe("daemonStartUnavailableReason", () => {
     // The schema-cutover arm keeps its preserved-database operator message.
     expect(new LocalOperatorConsoleUnavailableError("schema-cutover-required").message)
       .toContain("CUTOVER REQUIRED");
+    expect(new LocalOperatorConsoleUnavailableError("review-profile-catalogue-invalid").message)
+      .toContain("npm run profile:catalogue:pin");
   });
 });

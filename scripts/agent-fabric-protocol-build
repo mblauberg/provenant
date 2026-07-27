@@ -17,6 +17,8 @@ protocol_root="$agents_home/runtime/agent-fabric-protocol"
 protocol_dist="$protocol_root/dist/index.js"
 manifest_stamp="$protocol_root/dist/.root-manifests.sha256"
 freshness_library="$script_dir/lib/agent-fabric-workspace-freshness.sh"
+build_lock_library="$script_dir/lib/agent-fabric-protocol-build-lock.sh"
+repair_command="AGENTS_HOME=\"$agents_home\" \"$script_dir/agent-fabric-protocol-build\""
 
 [ -d "$agents_home/node_modules" ] || {
   echo "agent-fabric protocol build needs dependencies: run 'npm ci' in \"$agents_home\" first" >&2
@@ -26,7 +28,26 @@ freshness_library="$script_dir/lib/agent-fabric-workspace-freshness.sh"
   echo "agent-fabric protocol build cannot record freshness: missing $freshness_library" >&2
   exit 1
 }
+[ -f "$build_lock_library" ] || {
+  echo "AGENT_FABRIC_PROTOCOL_BUILD_LOCK_INCOMPLETE: missing \"$build_lock_library\"" >&2
+  echo "repair: reinstall the harness scripts directory, including scripts/lib" >&2
+  exit 78
+}
 . "$freshness_library"
+. "$build_lock_library"
+
+# Acquire before reading, removing or loading dist. A waiter enters only after
+# the prior holder has built, verified and stamped the complete tree, then
+# explicitly re-checks that result and avoids a redundant tsc invocation.
+protocol_build_lock_acquire "$protocol_root/dist" "$repair_command"
+if ! workspace_is_stale "$protocol_root" "$protocol_dist" \
+  && node --input-type=module -e 'await import(process.argv[1]);' "$protocol_dist" \
+    >/dev/null 2>&1
+then
+  echo "agent-fabric protocol dist fresh: $protocol_dist"
+  exit 0
+fi
+
 manifest_digest=$(workspace_root_manifest_digest "$agents_home") || {
   echo "agent-fabric protocol build cannot digest the root manifests in $agents_home" >&2
   exit 1

@@ -15,7 +15,11 @@ import {
   type PinRouteObserver,
 } from "../../src/review/profile/pin-drift.ts";
 import { createCapabilityPinObserver } from "../../src/review/profile/pin-observer.ts";
-import { refreshReviewProfilePins } from "../../scripts/pin-review-profile-models.ts";
+import { verifyReviewProfileCatalogueDigest } from "../../src/review/profile/catalogue-digest.ts";
+import {
+  refreshAndPinReviewProfilePins,
+  refreshReviewProfilePins,
+} from "../../scripts/pin-review-profile-models.ts";
 
 function repositoryPath(relativePath: string): string {
   return fileURLToPath(new URL(`../../../../${relativePath}`, import.meta.url));
@@ -26,6 +30,10 @@ const catalogueSource = await readFile(
   "utf8",
 );
 const routingSource = await readFile(repositoryPath("config/model-routing.json"), "utf8");
+const profileSchemaSource = await readFile(
+  repositoryPath("runtime/agent-fabric/schemas/review-profile.v1.schema.json"),
+  "utf8",
+);
 const catalogue = JSON.parse(catalogueSource) as ReviewProfileCatalogue;
 const routing: unknown = JSON.parse(routingSource);
 
@@ -248,6 +256,68 @@ fs.writeFileSync(process.argv[process.argv.indexOf("--out") + 1], JSON.stringify
     await observe(request);
     expect((await readFile(log, "utf8")).trim().split("\n")).toHaveLength(2);
   });
+
+  it("does not treat a future-dated cache entry as fresh evidence", async () => {
+    const home = await agentsHomeWith({ "codex_capabilities.py": codexProducer(["gpt-5.6-sol"]) });
+    const state = join(home, "state");
+    const now = Date.parse("2026-07-26T00:00:00Z");
+    await mkdir(state, { recursive: true });
+    await writeFile(join(state, "review-profile-pin-observations.json"), `${JSON.stringify({
+      schemaVersion: 1,
+      entries: {
+        "openai/flagship/gpt-5.6-sol": {
+          observedModel: "gpt-5.6-sol",
+          observedAtMs: now + 60_000,
+        },
+      },
+    })}\n`);
+    const observe = createCapabilityPinObserver({
+      agentsHome: home,
+      cacheDirectory: state,
+      cacheOnly: true,
+      now: () => now,
+    });
+
+    await expect(observe({
+      providerFamily: "openai", routeAlias: "flagship", routeCandidates: ["gpt-5.6-sol"], requestedEffort: null,
+    })).resolves.toStrictEqual({
+      status: "unobservable",
+      detail: "no provider capability result cached within the last six hours; live provider capability probe was not run",
+    });
+  });
+
+  it("bypasses a fresh cache and refreshes it when live observation is explicitly requested", async () => {
+    const home = await agentsHomeWith({ "codex_capabilities.py": codexProducer(["gpt-5.6-sol"]) });
+    const state = join(home, "state");
+    const log = join(home, "calls.log");
+    const now = Date.parse("2026-07-26T00:00:00Z");
+    process.env.PIN_OBSERVER_CALL_LOG = log;
+    await mkdir(state, { recursive: true });
+    await writeFile(log, "");
+    await writeFile(join(state, "review-profile-pin-observations.json"), `${JSON.stringify({
+      schemaVersion: 1,
+      entries: {
+        "openai/flagship/gpt-5.6-sol": { observedModel: "stale-cache-value", observedAtMs: now },
+      },
+    })}\n`);
+    const observe = createCapabilityPinObserver({
+      agentsHome: home,
+      cacheDirectory: state,
+      forceLive: true,
+      now: () => now,
+    });
+
+    await expect(observe({
+      providerFamily: "openai", routeAlias: "flagship", routeCandidates: ["gpt-5.6-sol"], requestedEffort: null,
+    })).resolves.toMatchObject({
+      status: "observed",
+      model: "gpt-5.6-sol",
+      detail: "observed live via codex_capabilities.py",
+    });
+    expect(await readFile(log, "utf8")).toBe("codex\n");
+    expect(await readFile(join(state, "review-profile-pin-observations.json"), "utf8"))
+      .toContain('"observedModel": "gpt-5.6-sol"');
+  });
 });
 
 describe("profile:pin refresh", () => {
@@ -255,8 +325,11 @@ describe("profile:pin refresh", () => {
     const home = await mkdtemp(join(tmpdir(), "agent-fabric-pin-refresh-"));
     cleanup.push(home);
     await mkdir(join(home, "config", "review-profiles"), { recursive: true });
+    await mkdir(join(home, "runtime", "agent-fabric", "schemas"), { recursive: true });
+    await mkdir(join(home, "runtime", "agent-fabric", "src", "review", "profile"), { recursive: true });
     await writeFile(join(home, "config", "review-profiles", "certifying-review-four-slot-v1.json"), catalogueSource);
     await writeFile(join(home, "config", "model-routing.json"), routingSource);
+    await writeFile(join(home, "runtime", "agent-fabric", "schemas", "review-profile.v1.schema.json"), profileSchemaSource);
     return { path: join(home, "config", "review-profiles", "certifying-review-four-slot-v1.json"), agentsHome: home };
   }
 
@@ -304,5 +377,36 @@ describe("profile:pin refresh", () => {
     expect(result.changed).toBe(false);
     expect(result.outcomes.filter((outcome) => outcome.action === "unobservable")).toHaveLength(2);
     expect(await readFile(path, "utf8")).toBe(catalogueSource);
+  });
+
+  it("advances the catalogue pin after partial writes even when another pin is unobservable", async () => {
+    const { agentsHome } = await profileCopy();
+    const result = await refreshAndPinReviewProfilePins({
+      agentsHome,
+      observe: async ({ providerFamily }) => providerFamily === "openai"
+        ? { status: "observed", model: "gpt-5.6-sol", detail: "fixture" }
+        : { status: "unobservable", detail: "quota exhausted" },
+      now: () => Date.parse("2026-08-01T00:00:00Z"),
+    });
+    expect(result.refresh.changed).toBe(true);
+    expect(result.refresh.outcomes.some((outcome) => outcome.action === "unobservable")).toBe(true);
+    expect(result.cataloguePin.changed).toBe(true);
+    await expect(verifyReviewProfileCatalogueDigest(
+      agentsHome,
+      result.cataloguePin.digest,
+      result.cataloguePin.profileDocumentDigest,
+    )).resolves.toMatchObject({
+      digest: result.cataloguePin.digest,
+      profileDocumentDigest: result.cataloguePin.profileDocumentDigest,
+    });
+  });
+
+  it("rejects a custom refresh path that is not the digest-bound catalogue member", async () => {
+    const { agentsHome } = await profileCopy();
+    await expect(refreshAndPinReviewProfilePins({
+      agentsHome,
+      reviewProfilePath: join(agentsHome, "scratch-profile.json"),
+      observe: truthfulObserver,
+    })).rejects.toThrow(/digest-bound catalogue member/u);
   });
 });

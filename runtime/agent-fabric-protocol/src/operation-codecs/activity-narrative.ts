@@ -20,6 +20,10 @@ function compareIdentity(left: string, right: string): number {
   return left === right ? 0 : left < right ? -1 : 1;
 }
 
+function compareTimestamp(left: string, right: string): number {
+  return Date.parse(left) - Date.parse(right) || compareIdentity(left, right);
+}
+
 function targetIdentity(value: unknown): string {
   if (value === null) return "null";
   const target = value as Record<string, unknown>;
@@ -108,10 +112,25 @@ export function createActivityNarrativeCodecs(dependencies: Readonly<{
         throw new TypeError(`${path}.sourceRange must bind the member range`);
       }
       if (
-        members[0]?.occurredAt !== occurredAtRange.first ||
-        members.at(-1)?.occurredAt !== occurredAtRange.last
+        occurredAtRange.first === undefined ||
+        occurredAtRange.last === undefined ||
+        compareTimestamp(occurredAtRange.first, occurredAtRange.last) > 0
       ) {
-        throw new TypeError(`${path}.occurredAtRange must bind the member range`);
+        throw new TypeError(`${path}.occurredAtRange must be ascending`);
+      }
+      const chronologicalMembers = [...members].sort((left, right) =>
+        compareTimestamp(
+          left.occurredAt as string,
+          right.occurredAt as string,
+        )
+      );
+      if (
+        chronologicalMembers[0]?.occurredAt !== occurredAtRange.first ||
+        chronologicalMembers.at(-1)?.occurredAt !== occurredAtRange.last
+      ) {
+        throw new TypeError(
+          `${path}.occurredAtRange must bind the chronological member range`,
+        );
       }
       const groupTarget = targetIdentity(group.target);
       if (members.some((member) => targetIdentity(member.target) !== groupTarget)) {

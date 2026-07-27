@@ -26,6 +26,8 @@ herdr_root="$agents_home/runtime/agent-fabric-herdr"
 herdr_dist="$herdr_root/dist/bin.js"
 console_root="$agents_home/runtime/agent-fabric-console"
 console_dist="$console_root/dist/bin.js"
+build_lock_library="$script_dir/lib/agent-fabric-protocol-build-lock.sh"
+repair_command="AGENTS_HOME=\"$agents_home\" \"$script_dir/agent-fabric-warm\""
 
 . "$script_dir/lib/agent-fabric-workspace-freshness.sh"
 
@@ -45,6 +47,29 @@ fi
 if [ ! -d "$agents_home/node_modules" ]; then
   echo "agent-fabric dist stale and node_modules missing; run 'npm ci' in $agents_home first" >&2
   exit 1
+fi
+
+[ -f "$build_lock_library" ] || {
+  echo "AGENT_FABRIC_PROTOCOL_BUILD_LOCK_INCOMPLETE: missing \"$build_lock_library\"" >&2
+  echo "repair: reinstall the harness scripts directory, including scripts/lib" >&2
+  exit 78
+}
+. "$build_lock_library"
+protocol_build_lock_acquire "$protocol_root/dist" "$repair_command"
+
+# Another repair may have completed while this caller waited. Re-evaluate every
+# output under the lock and return without a second root build when that repair
+# already produced and stamped the complete workspace.
+workspace_stale=false
+if workspace_is_stale "$protocol_root" "$protocol_dist" \
+  || workspace_is_stale "$package_root" "$dist_cli" "$dist_mcp" \
+  || workspace_is_stale "$herdr_root" "$herdr_dist" \
+  || workspace_is_stale "$console_root" "$console_dist"; then
+  workspace_stale=true
+fi
+if [ "$workspace_stale" = false ]; then
+  echo "agent-fabric dist fresh after repair wait: $dist_cli"
+  exit 0
 fi
 
 echo "agent-fabric dist stale; rebuilding workspace"

@@ -12,7 +12,8 @@ The following remain separate approvals. One does not imply another:
    the exact current project, or provision/rotate operator and agent seats;
 3. enable a provider adapter after compatibility verification;
 4. install an auto-start/login service for the daemon;
-5. log into or consume quota from a provider;
+5. log into or consume quota from a provider, including
+   `doctor --consume-provider-quota`;
 6. change or remove a client registry entry;
 7. run a smoke that invokes a real provider adapter;
 8. accept the implementation, release it or publish Git state.
@@ -83,12 +84,21 @@ scripts/agent-fabric status --json --project "$PWD"
 scripts/agent-fabric doctor --json
 ```
 
+The default `doctor` is safe without provider authority. Its certifying-profile
+pin check reads only a result cached within the last six hours. It never invokes
+a capability producer, creates or rewrites the pin cache, materialises absent
+daemon lock files, or opens the live SQLite database in a way that creates WAL
+sidecars. It does not create absent state/runtime directories or chmod existing
+ones. The database-integrity check uses a byte-stable temporary recovery clone,
+including WAL or rollback-journal state, outside the state directory. The state
+directory is byte-identical before and after a default run.
+
 `doctor` reports one typed overall state and exits successfully for both normal
 operating modes:
 
 | `state` | `code` | `healthy` | Meaning |
 | --- | --- | --- | --- |
-| `idle` | `DAEMON_ON_DEMAND_IDLE` | `true` | Configuration, compatibility, private paths, database and election state pass; no daemon is expected to be running. `daemon.pid` and `daemon.socketPath` are `null`. |
+| `idle` | `DAEMON_ON_DEMAND_IDLE` | `true` | No daemon is expected to be running. Configuration, compatibility, private paths, database and election state pass; an unavailable provider identity probe or missing fresh pin-cache result may remain an advisory `unknown`. `daemon.pid` and `daemon.socketPath` are `null`. |
 | `current` | `DAEMON_LIVE` | `true` | Generation-bound discovery, bootstrap election, process, owned Unix socket, authenticated negotiation and a non-mutating bootstrap-scope contract probe agree. |
 | `recovering` | converging transition or unreachable-daemon residue | `false` | The next ordinary bootstrap reconciles this locally and reversibly under existing authority. The command exits non-zero. |
 | `blocked` | every other causal failure code | `false` | Repair needs user authority, material state displacement, or an action outside this lifecycle. The command exits non-zero. |
@@ -126,10 +136,37 @@ cannot load; that import probe runs only for `doctor`, so no other entrypoint
 pays a Node start-up per invocation. `wrapperIntercepted` is now empty: it
 recorded that the launcher preempted this check, and it no longer does.
 
-`doctor` does not start the daemon, but its certifying-profile check may run one
-real Claude canary per six-hour cache window and update the private
-`review-profile-pin-observations.json` cache. Obtain provider login, quota and
-real-provider-smoke authority before running it.
+The default certifying-profile precondition is exactly:
+
+> each certifying-profile model pin in the automated comparison set matches a provider capability result cached within the last six hours
+
+A fresh matching cache result reports `clean` and names its cache age, for
+example `flagship resolves to claude-opus-5; cached 0m ago`. A missing or stale
+result reports `REVIEW_PROFILE_PIN_UNKNOWN`, leaves `cause.satisfied` false and
+says:
+
+> no provider capability result cached within the last six hours; live provider capability probe was not run
+
+That is “not checked”, not a satisfied pin. To perform the separately approved
+live check, run:
+
+```sh
+scripts/agent-fabric doctor --consume-provider-quota --json
+```
+
+For each automated pin with a valid recorded observation and route, the flag
+bypasses its cached result, invokes the live capability producer and refreshes
+the private `review-profile-pin-observations.json` cache. For Anthropic this
+consumes provider quota. A missing observation or route still fails closed
+before a producer can supply evidence. The flag does not authorise a
+real-provider adapter smoke, which remains a separate approval. The live check
+precondition is exactly:
+
+> each certifying-profile model pin in the automated comparison set matches alias resolution checked by a live provider capability probe
+
+Successful live detail names the producer, for example
+`observed live via claude_capabilities.py`. An unobservable live producer is
+still `unknown`, never `clean` or `drifted`.
 
 In the idle case the `daemon-socket` check has status `idle`, not `pass` or
 `fail`. This does not weaken preflight: for example, an intact idle daemon
@@ -148,12 +185,13 @@ non-clean owners fail closed.
 ### Repair certifying-profile pin drift
 
 When `doctor` reports `REVIEW_PROFILE_PIN_DRIFT`, it names `npm run profile:pin`
-as the repair. This is an uncached live-provider probe and a repository edit,
-not a diagnostic. Never run it inside certification: the review profile is
-digest-bound, and changing it would move the profile a running certification
-already verified. Exit `1` may coexist with independently observed changes when
-another pin was unobservable. Inspect and review the resulting diff before
-retrying.
+as the repair. `doctor --consume-provider-quota` is a live diagnostic that
+updates only the private cache; it does not repair the digest-bound review
+profile. `npm run profile:pin` is an uncached live-provider probe and a
+repository edit. Never run it inside certification: changing the profile would
+move the profile a running certification already verified. Exit `1` may coexist
+with independently observed changes when another pin was unobservable. Inspect
+and review the resulting diff before retrying.
 
 `PROTOCOL_INCOMPATIBLE` means the incumbent answered the contract probe but did
 not negotiate a result shape required by the current client. Do not attempt MCP
@@ -360,9 +398,10 @@ invoke the cutover: the SQLite source set is byte-identical after the gate.
 Report counts and consequences, obtain exactly one user decision, and only then
 run the command in
 [Database archive-and-fresh cutover](#database-archive-and-fresh-cutover). The
-cutover entrypoint is separately invocable and confirms only a source-set
-digest, so it does not itself verify that a user decision happened; treat
-running it as the approval, and never script it unattended.
+cutover separately requires either the default confirmation phrase read from
+its controlling terminal or the explicit named-principal unattended assertion.
+The former verifies only the input channel and phrase, not that a human or
+authorised user decided; the latter records `asserted`, never `verified`.
 
 After bootstrap, call `fabric_whoami` before constructing any request. It
 returns the authenticated seat, agent, run, authority, active seat generation
@@ -793,6 +832,7 @@ The process exit contract is:
 | JSON `status` | Exit | Meaning |
 | --- | ---: | --- |
 | `confirmation-required`, `no-op`, `completed` | `0` | Preview, unchanged state or completed cutover; these are different outcomes. |
+| `approval-required` | `1` | The digest matched, but verified interactive confirmation could not be read from the controlling terminal or did not match. The source set is unchanged. |
 | `failed`, `conflict` | `1` | Validation, source-set or archive failure before the recovery boundary. |
 | `recovery-required`, `archive-complete-cutover-failed`, `archive-complete-fresh-init-failed` | `4` | Recovery or post-publication handling is required. |
 
@@ -805,7 +845,7 @@ Before confirmation, stop Fabric through its owning supervision surface and
 ensure every direct SQLite writer is quiescent. The command does not inspect,
 list or signal operating-system processes. It re-reads the complete source set
 and fails closed on a race, but this last-moment check is not a lifetime writer
-lock. Confirm the exact previewed bytes without a TTY:
+lock. Confirm the exact previewed bytes from an interactive terminal:
 
 ```sh
 scripts/agent-fabric database archive-and-fresh \
@@ -813,13 +853,41 @@ scripts/agent-fabric database archive-and-fresh \
   --confirm-source-set 'sha256:<digest from preview>'
 ```
 
-Confirmation is digest-bound. The token is a correctness interlock: it proves
-the destructive invocation still targets exactly the bytes inspected by the
-preview. It is not a user-authority gate because the preview itself reports the
-token. Explicit user authority for the destructive step is enforced by the
-permission gate outside this command; [issue #450](https://github.com/mblauberg/provenant/issues/450)
-owns the deeper interlock follow-up. A changed source set, stale digest,
-symlink, archive collision,
+The command reads the phrase `ARCHIVE-AND-FRESH` from `/dev/tty`, not stdin. It
+returns `approval-required` with exit `1` without publishing an archive when it
+has no controlling terminal or the phrase does not match. A pipe therefore
+cannot silently supply the default confirmation. A background invocation may
+be suspended by the terminal's `SIGTTIN` job-control behaviour when it tries to
+read `/dev/tty`; return it to the foreground before confirming.
+
+Digest confirmation and approval are separate. The digest is a byte-correctness
+interlock: it proves the destructive invocation still targets exactly the bytes
+inspected by the preview. It is not authority evidence because the preview
+itself reports it. The receipt records default confirmation as
+`approval.kind: "interactive-confirmation"` and
+`approval.status: "verified"`, separately from
+`confirmation.sourceSetSha256`. Here, `verified` means only that the expected
+phrase was read from the controlling terminal. **This gate does not establish
+that a human or authorised user supplied the confirmation; a process with
+access to the controlling terminal can supply it.**
+
+Legitimate unattended automation must use the explicit assertion escape:
+
+```sh
+scripts/agent-fabric database archive-and-fresh \
+  --archive "$archive_directory" \
+  --confirm-source-set 'sha256:<digest from preview>' \
+  --unattended-approval-asserted-by 'named-principal'
+```
+
+The principal is a 1-128 character identifier. This path does not read a
+terminal and does not claim verification. The principal string is caller-supplied
+and is not authenticated or independently verified. The receipt records
+`approval.kind: "unattended-approval"`, `approval.status: "asserted"` and the
+exact `approval.principal`. The flag requires `--confirm-source-set`; the digest
+interlock remains mandatory.
+
+A changed source set, stale digest, symlink, archive collision,
 SHM without WAL or a rollback journal mixed with WAL/SHM returns a typed
 conflict or failure without displacing the source. A readable database plus WAL
 without SHM is valid because SQLite rebuilds the missing wal-index. The archive
@@ -829,8 +897,8 @@ source-member path after resolving existing destination ancestors, claims the
 final archive directory without overwrite, and atomically publishes
 `source-set/`. Only after that durable recovery boundary does it atomically
 claim the exact confirmed source files into a private same-directory holding
-area and verify their identities before removal. The archive contains the main database
-and every existing canonical sidecar (`-wal`, `-shm`, `-journal`) plus
+area and verify their identities before removal. The archive contains the main
+database and every existing canonical sidecar (`-wal`, `-shm`, `-journal`) plus
 `source-set/receipt.json`. Modes are preserved and the receipt records the
 source identity and SHA-256 of each member without database rows, environment,
 capabilities or credentials.

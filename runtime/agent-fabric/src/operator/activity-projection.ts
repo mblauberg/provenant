@@ -13,6 +13,7 @@ import type {
   Timestamp,
 } from "@local/agent-fabric-protocol";
 import {
+  JSON_VALUE_LIMITS,
   PROTOCOL_LIMITS,
   parseIdentifier,
   parseTimestamp,
@@ -43,34 +44,96 @@ export type LoadedActivityDetail = Readonly<{
 }>;
 
 const ACTIVITY_MEMBER_CONTENT_PAGE_BYTES = 256 * 1024;
+// Keep 128 nodes (3.125% of the current codec ceiling) unused so a small
+// activity-row shape addition is caught by producer tests before it becomes a
+// wire outage. The ceiling itself remains owned by the protocol package.
+const ACTIVITY_PAGE_NODE_HEADROOM = 128;
+
+function jsonNodeCount(value: unknown): number {
+  let nodes = 0;
+  const pending: unknown[] = [value];
+  while (pending.length > 0) {
+    const current = pending.pop();
+    nodes += 1;
+    if (Array.isArray(current)) {
+      pending.push(...current);
+    } else if (current !== null && typeof current === "object") {
+      pending.push(...Object.values(current));
+    }
+  }
+  return nodes;
+}
 
 export function boundedActivityPagePrefix<T>(
   requested: readonly T[],
   resultFor: (values: readonly T[]) => unknown,
+  options: Readonly<{
+    firstOverflow?: (value: T) => T | null;
+    jsonValueFor?: (values: readonly T[]) => unknown;
+  }> = {},
 ): readonly T[] {
   const maximumBytes = PROTOCOL_LIMITS.maximumFrameBytes - 65_536;
+  const maximumNodes =
+    JSON_VALUE_LIMITS.maximumNodes - ACTIVITY_PAGE_NODE_HEADROOM;
+  const frameFor = (values: readonly T[]) => ({
+    jsonrpc: "2.0",
+    id: "activity-page-byte-budget".padEnd(128, "x"),
+    result: resultFor(values),
+  });
+  const jsonValueFor = options.jsonValueFor ?? resultFor;
+  const emptyFrameBytes = Buffer.byteLength(JSON.stringify(frameFor([])));
+  const emptyNodes = jsonNodeCount(jsonValueFor([]));
+  let estimatedFrameBytes = emptyFrameBytes;
+  let estimatedNodes = emptyNodes;
   const selected: T[] = [];
   for (const value of requested) {
-    const candidate = [...selected, value];
-    const frame = {
-      jsonrpc: "2.0",
-      id: "activity-page-byte-budget".padEnd(128, "x"),
-      result: resultFor(candidate),
-    };
+    const singleValueFrameBytes = Buffer.byteLength(
+      JSON.stringify(frameFor([value])),
+    );
+    const singleValueNodes = jsonNodeCount(jsonValueFor([value]));
+    const additionalBytes = Math.max(
+      0,
+      singleValueFrameBytes - emptyFrameBytes,
+    ) + (selected.length === 0 ? 0 : 1);
+    const additionalNodes = Math.max(0, singleValueNodes - emptyNodes);
     if (
-      Buffer.byteLength(JSON.stringify(frame)) > maximumBytes ||
-      jsonNodeCount(frame) > 3_500
+      estimatedFrameBytes + additionalBytes > maximumBytes ||
+      estimatedNodes + additionalNodes > maximumNodes
     ) break;
     selected.push(value);
+    estimatedFrameBytes += additionalBytes;
+    estimatedNodes += additionalNodes;
+  }
+  while (
+    selected.length > 0 &&
+    (
+      Buffer.byteLength(JSON.stringify(frameFor(selected))) > maximumBytes ||
+      jsonNodeCount(jsonValueFor(selected)) > maximumNodes
+    )
+  ) {
+    selected.pop();
   }
   if (selected.length === 0 && requested.length > 0) {
-    throw new TypeError("one activity group exceeds the protocol frame budget");
+    const replacement = options.firstOverflow?.(requested[0] as T);
+    if (replacement === null) return [];
+    if (
+      replacement === undefined ||
+      Buffer.byteLength(JSON.stringify(frameFor([replacement]))) >
+        maximumBytes ||
+      jsonNodeCount(jsonValueFor([replacement])) > maximumNodes
+    ) {
+      throw new ProjectFabricCoreError(
+        "RESOURCE_EXHAUSTED",
+        "one activity group exceeds the protocol frame or JSON-node budget",
+      );
+    }
+    return [replacement];
   }
   return selected;
 }
 
-export function boundedOperatorActivityRows<T>(
-  requested: readonly T[],
+export function boundedOperatorActivityRows(
+  requested: readonly OperatorViewRow<"activity">[],
   input: Readonly<{
     view: ConsoleView;
     cursor: number;
@@ -78,7 +141,7 @@ export function boundedOperatorActivityRows<T>(
     snapshotRevision: number;
     readTransactionId: string;
   }>,
-): readonly T[] {
+): readonly OperatorViewRow<"activity">[] {
   return boundedActivityPagePrefix(requested, (rows) => ({
     status: "page",
     view: input.view,
@@ -87,7 +150,25 @@ export function boundedOperatorActivityRows<T>(
     hasMore: input.cursor + rows.length < input.totalRows,
     snapshotRevision: input.snapshotRevision,
     readTransactionId: input.readTransactionId,
-  }));
+  }), {
+    jsonValueFor: (rows) => rows,
+    firstOverflow: activityBudgetExceededRow,
+  });
+}
+
+export function activityBudgetExceededRow(
+  activity: OperatorViewRow<"activity">,
+): OperatorViewRow<"activity"> {
+  return {
+    ...activity,
+    fact: {
+      freshness: "unavailable",
+      source: activity.fact.source,
+      revision: activity.itemRevision,
+      observedAt: activity.fact.observedAt,
+      reason: "activity-group-frame-budget-exceeded",
+    },
+  };
 }
 
 export function boundedProjectionActivityItems<T>(
@@ -99,30 +180,21 @@ export function boundedProjectionActivityItems<T>(
     revision: number;
     observedAt: Timestamp;
   }>,
-): readonly T[] {
-  return boundedActivityPagePrefix(requested, (items) => ({
-    view: input.view,
-    page: liveFact(input.revision, input.observedAt, {
+): readonly T[] | null {
+  const pageFor = (items: readonly T[]) =>
+    liveFact(input.revision, input.observedAt, {
       items,
       nextCursor: input.after + items.length,
       hasMore: input.after + items.length < input.totalItems,
-    }),
-  }));
-}
-
-function jsonNodeCount(value: unknown): number {
-  let count = 0;
-  const pending = [value];
-  while (pending.length > 0) {
-    const current = pending.pop();
-    count += 1;
-    if (Array.isArray(current)) {
-      pending.push(...current);
-    } else if (typeof current === "object" && current !== null) {
-      pending.push(...Object.values(current));
-    }
-  }
-  return count;
+    });
+  const selected = boundedActivityPagePrefix(requested, (items) => ({
+    view: input.view,
+    page: pageFor(items),
+  }), {
+    jsonValueFor: pageFor,
+    firstOverflow: () => null,
+  });
+  return requested.length > 0 && selected.length === 0 ? null : selected;
 }
 
 function jsonObject(serialized: string, label: string): Row {
@@ -222,7 +294,7 @@ function messageTarget(
   return { kind: "message", id: payload.messageId };
 }
 
-function activityNarrativeGroups(
+export function activityNarrativeGroups(
   database: Database.Database,
   values: readonly Row[],
 ): readonly ProjectedActivityNarrativeGroup[] {
@@ -269,9 +341,10 @@ export function activityItems(
   database: Database.Database,
   values: readonly Row[],
   grouping: ActivityNarrativeGroupingProjection,
+  projectedGroups?: readonly ProjectedActivityNarrativeGroup[],
 ): ProjectionViewItemMap["activity"][] {
   if (grouping === "include") {
-    return activityNarrativeGroups(database, values).map(({ group }) => {
+    return (projectedGroups ?? activityNarrativeGroups(database, values)).map(({ group }) => {
       const member = group.members[0];
       if (member === undefined) throw new Error("activity group has no member");
       const kind = activityKind(member.eventKind);
@@ -323,9 +396,10 @@ export function activityRows(
   values: readonly Row[],
   availability: OperatorActionAvailability,
   grouping: ActivityNarrativeGroupingProjection,
+  projectedGroups?: readonly ProjectedActivityNarrativeGroup[],
 ): OperatorViewRow<"activity">[] {
   if (grouping === "include") {
-    return activityNarrativeGroups(database, values).map(({ group }) => ({
+    return (projectedGroups ?? activityNarrativeGroups(database, values)).map(({ group }) => ({
       itemId: group.groupId,
       itemRevision: group.sourceRange.last,
       fact: liveFact(group.sourceRange.last, group.occurredAtRange.last, {
@@ -383,6 +457,7 @@ export function loadActivityDetail(
   values: readonly Row[],
   detailRef: Extract<OperatorDetailRef, { kind: "activity" }>,
   grouping: ActivityNarrativeGroupingProjection,
+  projectedGroups?: readonly ProjectedActivityNarrativeGroup[],
 ): LoadedActivityDetail {
   if (
     "groupId" in detailRef &&
@@ -395,7 +470,7 @@ export function loadActivityDetail(
         "activity narrative grouping was not negotiated",
       );
     }
-    const projected = activityNarrativeGroups(database, values).find(
+    const projected = (projectedGroups ?? activityNarrativeGroups(database, values)).find(
       ({ group }) => group.groupId === detailRef.groupId,
     );
     const memberIndex = projected?.group.members.findIndex(
@@ -477,7 +552,7 @@ export function loadActivityDetail(
         "activity narrative grouping was not negotiated",
       );
     }
-    const projected = activityNarrativeGroups(database, values).find(
+    const projected = (projectedGroups ?? activityNarrativeGroups(database, values)).find(
       ({ group }) => group.groupId === detailRef.groupId,
     );
     if (projected === undefined) {
