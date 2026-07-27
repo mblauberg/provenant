@@ -27,6 +27,10 @@ import { projectDeclaredRunProgress } from "./declared-run-progress-projection.j
 import { projectRunIdentity } from "./run-identity-projection.js";
 import { projectedRunHealth, projectedRunNextMilestone } from "./run-lifecycle-projection.js";
 import type { AuthenticatedOperatorCredential } from "./store.js";
+import {
+  activityBudgetExceededRow,
+  boundedActivityPagePrefix,
+} from "./activity-projection.js";
 
 export type RunProjectionStoreContext = Readonly<{
   database: Database.Database;
@@ -77,23 +81,42 @@ export function projectRunPage<Section extends RunProjectionSection>(
     const run = runTargetRow(context.database, request);
     const workRows = runScopedWorkRows(context, request, authenticated);
     const values = runSectionValues(context, request, run, workRows, authenticated);
-    const selected = values.slice(request.cursor, request.cursor + request.limit);
-    const entries = selected.map((value) => ({
-      runScope: request.target,
-      value,
-    })) as unknown as readonly RunProjectionPageEntry<Section>[];
-    return {
+    const requestedValues = values.slice(
+      request.cursor,
+      request.cursor + request.limit,
+    );
+    const composition = runScopedComposition(
+      context,
+      request,
+      run,
+      currentSnapshotRevision,
+    );
+    const entriesFor = (selected: readonly unknown[]) =>
+      selected.map((value) => ({
+        runScope: request.target,
+        value,
+      })) as unknown as readonly RunProjectionPageEntry<Section>[];
+    const resultFor = (selected: readonly unknown[]) => ({
       status: "page",
       projectSessionId: request.projectSessionId,
       target: request.target,
       section: request.section,
-      entries,
-      nextCursor: request.cursor + entries.length,
-      hasMore: request.cursor + entries.length < values.length,
+      entries: entriesFor(selected),
+      nextCursor: request.cursor + selected.length,
+      hasMore: request.cursor + selected.length < values.length,
       snapshotRevision: currentSnapshotRevision,
       readTransactionId: `projection:${request.projectId}:${request.projectSessionId}:${String(currentSnapshotRevision)}`,
-      composition: runScopedComposition(context, request, run, currentSnapshotRevision),
-    } as RunProjectionPageResult<Section>;
+      composition,
+    });
+    const selected = request.section === "activity"
+      ? boundedActivityPagePrefix(requestedValues, resultFor, {
+          jsonValueFor: entriesFor,
+          firstOverflow: (value) => activityBudgetExceededRow(
+            value as OperatorViewRow<"activity">,
+          ),
+        })
+      : requestedValues;
+    return resultFor(selected) as RunProjectionPageResult<Section>;
   });
   return read();
 }
