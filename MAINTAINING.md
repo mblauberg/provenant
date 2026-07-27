@@ -71,7 +71,9 @@ only when its trigger, authority, artifact and gate remain distinct.
 
 Nothing outside a skill may name a file under that skill's `references/`
 directory. Cross-skill references use the skill name only. The harness contract
-test enforces this maintenance rule.
+test enforces this for the ambient `AGENTS.md` and `HARNESS.md`; elsewhere it is
+a review rule. Licence attribution in `THIRD_PARTY_NOTICES.md` is the deliberate
+exception, because an attribution must name the file it covers.
 
 `natural-writing` is the writing hub and single owner of the shared prose
 doctrine (tiered anti-AI taxonomy, Australian-English house style, condense pass
@@ -162,5 +164,6 @@ It is target-scoped evidence: it deliberately ignores the checkout, index and
 unrelated private refs. The script owns the hardened raw-object verification
 details; default no-flag mode still checks the checkout and index.
 
-The first public release must use a fresh root commit. Never push private
-pre-publication refs merely because the current tree is clean.
+Publication used a fresh root commit, `a39c7b7e`. History rewrites stay gated
+behind explicit user authority. Never push private pre-publication refs merely
+because the current tree is clean.

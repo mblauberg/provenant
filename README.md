@@ -98,9 +98,14 @@ npm ci
 provenant help
 provenant doctor
 
-# run the full repository gate when changing Provenant
-provenant check
+# run the repository gates when changing Provenant
+provenant check   # harness policy gate
+npm run check     # fabric, console and Herdr gates
 ```
+
+Both installer commands take `--mcp-clients all` to register the Fabric MCP
+server for all six clients; the default, `primary`, registers Claude Code and
+Codex only.
 
 Installation links each skill into `~/.claude/skills/` and `~/.codex/skills/`,
 and links the thin `provenant` command into
@@ -112,7 +117,9 @@ include the bootstrap line to add.
 
 `provenant doctor` checks Fabric configuration and enabled adapters (identity
 and non-answer interfaces, not login or quota); Provenant never sets or persists
-provider API keys. `provenant check` runs the full repository gate.
+provider API keys. `provenant check` runs the harness policy gate; the fabric,
+console, Herdr and review-portal gates run through `npm run check` and the CI
+workflow.
 
 <details>
 <summary>Filesystem layout, Codex config and uninstall</summary>
@@ -120,15 +127,17 @@ provider API keys. `provenant check` runs the full repository gate.
 ```text
 ~/.agents/                cloned once
   HARNESS.md    the constitution
-  AGENTS.md     the bootstrap line
+  AGENTS.md     the ambient global instructions
   skills/       one folder per skill
+  workflows/    repository-managed Claude workflows
   scripts/      install, route, check
   config/       risk, routing, profiles
      |
      |  scripts/install-harness
      v
-  ~/.claude/skills/   symlinks
-  ~/.codex/skills/    symlinks
+  ~/.claude/skills/     symlinks
+  ~/.codex/skills/      symlinks
+  ~/.claude/workflows/  symlinks
 ```
 
 The Codex installer appends one block to `~/.codex/config.toml` disabling
@@ -157,8 +166,8 @@ each before `provenant doctor`.
 | Claude Code | Primary client and enabled Anthropic provider |
 | Codex | Primary client and enabled OpenAI provider |
 | Agy | Enabled optional Gemini/Claude provider |
-| Cursor | Enabled optional Grok/Composer provider |
-| Kiro | Global MCP client and enabled optional open-weight ACP provider |
+| Cursor | Enabled optional Composer/Grok and hosted third-party provider |
+| Kiro | Enabled optional open-weight ACP provider |
 | OpenCode | Enabled optional ACP provider for its built-in account models |
 
 Provider CLI versions and digests are diagnostic observations, not admission
