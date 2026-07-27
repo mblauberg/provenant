@@ -48,12 +48,28 @@ then
   exit 0
 fi
 
+# A preflight that observed dist absent under a live holder may wait for that
+# holder, but it must not turn the holder's failed rebuild into an implicit
+# second attempt. Only the original stale-file path is authorised to build.
+[ "${AGENT_FABRIC_PROTOCOL_AUTOBUILD_WAIT_ONLY:-}" != 1 ] || exit 1
+
+if [ "${AGENT_FABRIC_PROTOCOL_AUTOBUILD:-}" = 1 ]; then
+  echo "agent-fabric protocol autobuild: stale dist at \"$agents_home\"; rebuilding" >&2
+fi
+
 manifest_digest=$(workspace_root_manifest_digest "$agents_home") || {
   echo "agent-fabric protocol build cannot digest the root manifests in $agents_home" >&2
   exit 1
 }
 
 cd "$agents_home"
+protocol_build_cleanup_armed=true
+protocol_build_cleanup() {
+  [ "$protocol_build_cleanup_armed" != true ] || rm -rf "$protocol_root/dist" || :
+  protocol_build_lock_release
+}
+trap 'protocol_build_cleanup' EXIT
+
 # An incremental compile neither restores a deleted output nor reports its
 # absence: it exits 0 and leaves the hole. A partial dist therefore survives an
 # apparently successful rebuild. Clearing the output tree makes the emit total,
@@ -90,3 +106,4 @@ manifest_digest_after=$(workspace_root_manifest_digest "$agents_home") \
   || abort "agent-fabric protocol build inputs changed during the build; retry the repair"
 printf '%s\n' "$manifest_digest" > "$manifest_stamp" \
   || abort "agent-fabric protocol build could not record root-manifest freshness: $manifest_stamp"
+protocol_build_cleanup_armed=false
