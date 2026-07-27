@@ -23,8 +23,8 @@ does not map to the hub's observed/inferred evidence schema.
 
 1. Read project instructions, live matter state and source-boundary rules. Load
    the matching jurisdiction, forum and document skill where one exists.
-2. Choose `draft`, `rewrite`, `condense`, `diagnose`, `correspondence` or
-   `final-scrub`. Load [legal concision](references/legal-concision-and-anti-ai.md)
+2. Choose `draft`, `rewrite`, `condense`, `diagnose`, `correspondence`,
+   `decision-overview` or `final-scrub`. Load [legal concision](references/legal-concision-and-anti-ai.md)
    for all prose; see the reference map in
    [validation-checklists.md](references/validation-checklists.md) for which
    remaining reference a mode or content type needs. For `decision-overview`,

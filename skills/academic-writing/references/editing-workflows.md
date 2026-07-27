@@ -70,9 +70,9 @@ Process:
 
 Do not turn bullet points into a bullet list unless the target section calls for one. Most thesis prose should be full paragraphs.
 
-## Chapter Polish Mode
+## Section Polish Mode (`section-polish`)
 
-Use when multiple paragraphs or a full section need flow.
+Use when multiple paragraphs, a full section or a chapter need flow.
 
 Process:
 

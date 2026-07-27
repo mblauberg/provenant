@@ -18,9 +18,9 @@ Require:
 
 If missing, use `scope`; never infer owner decisions.
 
-For active service/safety impact, approved `mode: expedited-incident` may
-parallelise containment verification/review. Gates and authority still apply;
-name a reconciliation run.
+For active service or safety impact, user-approved containment work may
+parallelise verification and review rather than running them in sequence. Gates
+and authority still apply; name a reconciliation run.
 
 ## Loop
 
@@ -39,11 +39,11 @@ name a reconciliation run.
 3. Run deterministic checks; map each criterion to evidence. When required, run
    `evaluate` and attach its passing receipt.
 4. Invoke read-only `code-review` under the current `HARNESS.md` risk ladder.
-   Its adaptive topology and recorded substitution path load-bear. Record
-   adapter, actual family, omissions, and substitutions.
-5. Repair blockers, then repeat verification and review. Stop at
-   the scaled repair budget (guardrail-not-target: 1-2 routine, up to ~5
-   complex; see `references/run-contract.md`) or on scope/design drift;
+   Its adaptive topology load-bears. Record adapter, actual family, omissions
+   and substitutions.
+5. Repair blockers, then repeat verification and review. Stop at the repair
+   budget of at most two cycles (a guardrail against unbounded loops, not a
+   target; see `references/run-contract.md`) or on scope/design drift;
    return evidence to the user or `scope`.
 6. Update owned docs for behavioural, architectural, operational or decision
    change. For substantial+ apply `session`: refresh the recovery checkpoint,
@@ -65,8 +65,8 @@ name a reconciliation run.
 - Reviewed source stays immutable; separately authorised artifacts and Fabric
   communication stay bounded.
 - Record missing legs as failed/unavailable; never filter them. Review coverage
-  blocks only when the current HARNESS ladder and its substitution path remain
-  unsatisfied.
+  blocks whenever the current HARNESS ladder remains unsatisfied; missing
+  other-primary coverage is a blocking omission from `substantial` up.
 - Objective evidence outranks reviewer confidence; adjudicate conclusions,
   never vote.
 - Substantial+ starts a fresh implementation session bound to approved digests.
