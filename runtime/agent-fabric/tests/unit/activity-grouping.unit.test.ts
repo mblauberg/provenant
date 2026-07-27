@@ -140,6 +140,37 @@ describe("daemon activity narrative grouping", () => {
     expect(new Set(projected.map(({ group }) => group.groupId)).size).toBe(9);
   });
 
+  it("projects the chronological extrema when source revisions and time diverge", () => {
+    const [projected] = projectActivityNarrativeGroups("run_time_range", [
+      {
+        eventId: "event_later",
+        eventKind: "tool-invoked",
+        actorId: "agent_time",
+        payloadJson: '{"taskId":"task_time"}',
+        occurredAt: "2026-07-26T00:00:02.000Z" as never,
+        sourceRevision: 1,
+        messageBodyRef: null,
+        messageTarget: null,
+      },
+      {
+        eventId: "event_earlier",
+        eventKind: "tool-result-recorded",
+        actorId: "agent_time",
+        payloadJson: '{"taskId":"task_time"}',
+        occurredAt: "2026-07-26T00:00:01.000Z" as never,
+        sourceRevision: 2,
+        messageBodyRef: null,
+        messageTarget: null,
+      },
+    ]);
+
+    expect(projected?.group.sourceRange).toStrictEqual({ first: 1, last: 2 });
+    expect(projected?.group.occurredAtRange).toStrictEqual({
+      first: "2026-07-26T00:00:01.000Z",
+      last: "2026-07-26T00:00:02.000Z",
+    });
+  });
+
   it("labels unavailable event detail consistently in member and detail facts", () => {
     const [projected] = projectActivityNarrativeGroups("run_unsafe", [{
       eventId: "event_unsafe",

@@ -421,6 +421,27 @@ function createPrivateDatabaseClone(databasePath: string): Readonly<{
 }
 
 /**
+ * Runs an inspection against the canonical private database clone.
+ *
+ * SQLite may recover or checkpoint the clone. The live main file and every
+ * recovery sidecar are identity-checked before and after the operation, and
+ * the private clone is always removed by this owner.
+ */
+export function withPrivateDatabaseClone<T>(
+  databasePath: string,
+  operation: (clonePath: string) => T,
+): T {
+  const clone = createPrivateDatabaseClone(databasePath);
+  try {
+    const result = operation(clone.clonePath);
+    assertSameSourceSet(clone.sources, stableSourceSet(databasePath));
+    return result;
+  } finally {
+    rmSync(clone.cloneDirectory, { recursive: true, force: true });
+  }
+}
+
+/**
  * Initialises only a genuinely empty database connection. Existing current
  * state is verified; every other epoch is rejected without repair or backfill.
  */
