@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { existsSync, watch } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:net";
@@ -973,7 +973,7 @@ export async function writeLifecycleCheckpoint(
     providerResumeReference?: string;
   },
 ): Promise<LifecycleCheckpoint> {
-  const relativePath = join("checkpoints", `${options.agentId}-${Date.now()}.json`);
+  const relativePath = join("checkpoints", `${options.agentId}-${randomUUID()}.json`);
   const absolutePath = join(fixture.runDirectory, relativePath);
   await mkdir(join(fixture.runDirectory, "checkpoints"), { recursive: true });
   const document = {
