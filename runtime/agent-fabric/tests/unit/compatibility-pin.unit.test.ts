@@ -30,6 +30,7 @@ describe("compatibility:pin", () => {
     temporaryDirectories.push(directory);
     const packageRoot = join(directory, "claude-agent-sdk");
     const compatibilityPath = join(directory, "adapter-compatibility.yaml");
+    const lockfilePath = join(directory, "package-lock.json");
     const scriptPath = repositoryPath("runtime/agent-fabric/scripts/pin-primary-compatibility.mjs");
     const entrypointBytes = "export const pinnedFixture = true;\n";
     await mkdir(packageRoot, { recursive: true });
@@ -38,6 +39,14 @@ describe("compatibility:pin", () => {
       version: "9.9.9",
     }));
     await writeFile(join(packageRoot, "sdk.mjs"), entrypointBytes);
+    await writeFile(lockfilePath, JSON.stringify({
+      packages: {
+        "node_modules/@anthropic-ai/claude-agent-sdk": {
+          version: "9.9.9",
+          resolved: "https://example.invalid/old.tgz",
+        },
+      },
+    }));
     await writeFile(compatibilityPath, stringify({
       schema_version: 1,
       verification_date: "2026-07-01",
@@ -80,6 +89,8 @@ describe("compatibility:pin", () => {
       compatibilityPath,
       "--package-root",
       packageRoot,
+      "--lockfile",
+      lockfilePath,
     ]);
     expect(result.stdout).toContain("9.9.9");
 
@@ -103,5 +114,155 @@ describe("compatibility:pin", () => {
     expect(adapter?.contract).not.toHaveProperty("schema_source");
     expect(adapter?.contract).not.toHaveProperty("schema_sha256");
     expect(document.verification_date).toBe("2026-07-01");
+  });
+
+  it("moves every SDK version-bearing field together", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "agent-fabric-compatibility-pin-"));
+    temporaryDirectories.push(directory);
+    const packageRoot = join(directory, "claude-agent-sdk");
+    const compatibilityPath = join(directory, "adapter-compatibility.yaml");
+    const lockfilePath = join(directory, "package-lock.json");
+    const scriptPath = repositoryPath("runtime/agent-fabric/scripts/pin-primary-compatibility.mjs");
+    const entrypointBytes = "export const bumpedFixture = true;\n";
+    const resolvedArtifact = "https://registry.example.test/custom/claude-agent-sdk-9.9.10.tgz";
+    await mkdir(packageRoot, { recursive: true });
+    await writeFile(join(packageRoot, "package.json"), JSON.stringify({
+      name: "@anthropic-ai/claude-agent-sdk",
+      version: "9.9.10",
+    }));
+    await writeFile(join(packageRoot, "sdk.mjs"), entrypointBytes);
+    await writeFile(lockfilePath, JSON.stringify({
+      packages: {
+        "node_modules/@anthropic-ai/claude-agent-sdk": {
+          version: "9.9.10",
+          resolved: resolvedArtifact,
+        },
+      },
+    }));
+    await writeFile(compatibilityPath, stringify({
+      adapters: {
+        "claude-agent-sdk": {
+          implementation: {
+            package: "@anthropic-ai/claude-agent-sdk",
+            installed_version: "9.9.9",
+            resolved_artifact: "https://example.invalid/stale.tgz",
+            entrypoint: "node_modules/@anthropic-ai/claude-agent-sdk/sdk.mjs",
+            entrypoint_sha256: "0".repeat(64),
+          },
+          contract: {
+            protocol_version: "sdk-9.9.9",
+          },
+        },
+      },
+    }));
+
+    await execFileAsync(process.execPath, [
+      scriptPath,
+      "--compatibility",
+      compatibilityPath,
+      "--package-root",
+      packageRoot,
+      "--lockfile",
+      lockfilePath,
+    ]);
+
+    const document = parse(await readFile(compatibilityPath, "utf8")) as {
+      adapters: Record<string, {
+        implementation: Record<string, unknown>;
+        contract: Record<string, unknown>;
+      }>;
+    };
+    const adapter = document.adapters["claude-agent-sdk"];
+    expect(adapter?.implementation).toMatchObject({
+      installed_version: "9.9.10",
+      entrypoint_sha256: sha256(entrypointBytes),
+      resolved_artifact: resolvedArtifact,
+    });
+    expect(adapter?.contract.protocol_version).toBe("sdk-9.9.10");
+  });
+
+  it("rejects a lockfile version that disagrees with the installed package", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "agent-fabric-compatibility-pin-"));
+    temporaryDirectories.push(directory);
+    const packageRoot = join(directory, "claude-agent-sdk");
+    const compatibilityPath = join(directory, "adapter-compatibility.yaml");
+    const lockfilePath = join(directory, "package-lock.json");
+    const scriptPath = repositoryPath("runtime/agent-fabric/scripts/pin-primary-compatibility.mjs");
+    await mkdir(packageRoot, { recursive: true });
+    await writeFile(join(packageRoot, "package.json"), JSON.stringify({
+      name: "@anthropic-ai/claude-agent-sdk",
+      version: "9.9.10",
+    }));
+    await writeFile(join(packageRoot, "sdk.mjs"), "export {};\n");
+    await writeFile(lockfilePath, JSON.stringify({
+      packages: {
+        "node_modules/@anthropic-ai/claude-agent-sdk": {
+          version: "9.9.9",
+          resolved: "https://example.invalid/claude-agent-sdk-9.9.9.tgz",
+        },
+      },
+    }));
+    await writeFile(compatibilityPath, stringify({
+      adapters: {
+        "claude-agent-sdk": {
+          implementation: {
+            package: "@anthropic-ai/claude-agent-sdk",
+            entrypoint: "node_modules/@anthropic-ai/claude-agent-sdk/sdk.mjs",
+          },
+        },
+      },
+    }));
+
+    await expect(execFileAsync(process.execPath, [
+      scriptPath,
+      "--compatibility",
+      compatibilityPath,
+      "--package-root",
+      packageRoot,
+      "--lockfile",
+      lockfilePath,
+    ])).rejects.toMatchObject({
+      code: 1,
+      stderr: expect.stringContaining("disagrees with package-lock.json version"),
+    });
+  });
+
+  it("rejects a lockfile with no SDK package entry", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "agent-fabric-compatibility-pin-"));
+    temporaryDirectories.push(directory);
+    const packageRoot = join(directory, "claude-agent-sdk");
+    const compatibilityPath = join(directory, "adapter-compatibility.yaml");
+    const lockfilePath = join(directory, "package-lock.json");
+    const scriptPath = repositoryPath("runtime/agent-fabric/scripts/pin-primary-compatibility.mjs");
+    await mkdir(packageRoot, { recursive: true });
+    await writeFile(join(packageRoot, "package.json"), JSON.stringify({
+      name: "@anthropic-ai/claude-agent-sdk",
+      version: "9.9.10",
+    }));
+    await writeFile(join(packageRoot, "sdk.mjs"), "export {};\n");
+    await writeFile(lockfilePath, JSON.stringify({ packages: {} }));
+    await writeFile(compatibilityPath, stringify({
+      adapters: {
+        "claude-agent-sdk": {
+          implementation: {
+            package: "@anthropic-ai/claude-agent-sdk",
+            entrypoint: "node_modules/@anthropic-ai/claude-agent-sdk/sdk.mjs",
+          },
+        },
+      },
+    }));
+
+    await expect(execFileAsync(process.execPath, [
+      scriptPath,
+      "--compatibility",
+      compatibilityPath,
+      "--package-root",
+      packageRoot,
+      "--lockfile",
+      lockfilePath,
+    ])).rejects.toMatchObject({
+      code: 1,
+      stderr: expect.stringContaining("has no packages entry for node_modules/@anthropic-ai/claude-agent-sdk"),
+    });
   });
 });
