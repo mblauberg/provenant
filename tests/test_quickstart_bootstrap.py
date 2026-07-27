@@ -36,6 +36,10 @@ def test_documented_fresh_checkout_sequence_produces_runnable_doctor(tmp_path):
         ROOT / "scripts" / "lib" / "agent-fabric-workspace-freshness.sh",
         freshness_library,
     )
+    shutil.copy2(
+        ROOT / "scripts" / "lib" / "agent-fabric-protocol-build-lock.sh",
+        freshness_library.with_name("agent-fabric-protocol-build-lock.sh"),
+    )
 
     for workspace in (
         "agent-fabric-protocol",

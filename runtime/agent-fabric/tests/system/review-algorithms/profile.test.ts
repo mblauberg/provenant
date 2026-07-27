@@ -10,6 +10,7 @@ import {
   type ReviewProfileCatalogue,
   type SlotAvailabilityIdentity,
 } from "../../../src/review/profile/index.ts";
+import { REVIEW_PROFILE_CATALOGUE_DIGEST } from "../../../src/review/profile/catalogue-digest.generated.ts";
 
 const digest = (value: string) => sha256Digest(value);
 const catalogue = JSON.parse(readFileSync(
@@ -17,12 +18,14 @@ const catalogue = JSON.parse(readFileSync(
   "utf8",
 )) as ReviewProfileCatalogue;
 
-function availability(): SlotAvailabilityIdentity[] {
+function availability(
+  profileSchemaDigest = REVIEW_PROFILE_CATALOGUE_DIGEST,
+): SlotAvailabilityIdentity[] {
   const selected = catalogue.chairProfiles.find((value) => value.targetChairFamily === "openai")!;
   return selected.slots.map((slot, index) => ({
     projectSessionId: "session-1",
     profileId: "certifying-review-four-slot-v1",
-    profileSchemaDigest: digest("profile-schema"),
+    profileSchemaDigest,
     targetChairFamily: "openai",
     slot: slot.slot,
     adapterId: slot.adapterId,
@@ -39,13 +42,39 @@ function availability(): SlotAvailabilityIdentity[] {
 }
 
 describe("certifying-review-four-slot-v1 profile", () => {
+  it("rejects a caller-selected profile digest even when availability repeats it", () => {
+    const callerSelectedDigest = digest("profile-schema");
+    expect(() => resolveReviewProfile({
+      catalogue,
+      projectSessionId: "session-1",
+      targetChairFamily: "openai",
+      profileSchemaDigest: callerSelectedDigest,
+      availability: availability(callerSelectedDigest),
+    })).toThrow(/authoritative checked-in catalogue digest/u);
+  });
+
+  it("rejects a caller-supplied catalogue that differs from the pinned profile member", () => {
+    const rewritten = structuredClone(catalogue);
+    rewritten.chairProfiles[0]!.slots[0]!.model = "silently-rewritten-model";
+    const rows = availability().map((row) => row.slot === "native"
+      ? { ...row, model: "silently-rewritten-model" }
+      : row);
+    expect(() => resolveReviewProfile({
+      catalogue: rewritten,
+      projectSessionId: "session-1",
+      targetChairFamily: "openai",
+      profileSchemaDigest: REVIEW_PROFILE_CATALOGUE_DIGEST,
+      availability: rows,
+    })).toThrow(/pinned profile member/u);
+  });
+
   it("resolves exactly four ordered slots with target-family reviewer relations and full availability identity", () => {
     const rows = availability();
     const resolved = resolveReviewProfile({
       catalogue,
       projectSessionId: "session-1",
       targetChairFamily: "openai",
-      profileSchemaDigest: digest("profile-schema"),
+      profileSchemaDigest: REVIEW_PROFILE_CATALOGUE_DIGEST,
       availability: [...rows].reverse(),
     });
     expect(resolved.slots.map((slot) => [slot.slot, slot.reviewerFamilyRelation])).toStrictEqual([
@@ -58,7 +87,7 @@ describe("certifying-review-four-slot-v1 profile", () => {
       catalogue,
       projectSessionId: "session-1",
       targetChairFamily: "openai",
-      profileSchemaDigest: digest("profile-schema"),
+      profileSchemaDigest: REVIEW_PROFILE_CATALOGUE_DIGEST,
       availability: rows,
     })).toStrictEqual(resolved);
     // Pin observation metadata is a sibling of chairProfiles, never a slot
@@ -86,17 +115,17 @@ describe("certifying-review-four-slot-v1 profile", () => {
       catalogue,
       projectSessionId: "session-1",
       targetChairFamily: "openai",
-      profileSchemaDigest: digest("profile-schema"),
+      profileSchemaDigest: REVIEW_PROFILE_CATALOGUE_DIGEST,
       availability: [...rows, { ...rows.find((row) => row.slot === "cursor-grok")!, adapterContractDigest: digest("crossed") }],
     })).toThrow(/availability/u);
     const crossedBudget = structuredClone(catalogue);
     crossedBudget.chairProfiles[0]!.slots[0]!.providerTurnCeiling = 16;
     expect(() => resolveReviewProfile({ catalogue: crossedBudget, projectSessionId: "session-1", targetChairFamily: "openai",
-      profileSchemaDigest: digest("profile-schema"), availability: rows })).toThrow(/budget/u);
+      profileSchemaDigest: REVIEW_PROFILE_CATALOGUE_DIGEST, availability: rows })).toThrow(/budget/u);
     const crossedRisk = structuredClone(catalogue);
     crossedRisk.chairProfiles[0]!.slots[0]!.riskReadMapDigest = digest("stale-risk-rules");
     expect(() => resolveReviewProfile({ catalogue: crossedRisk, projectSessionId: "session-1", targetChairFamily: "openai",
-      profileSchemaDigest: digest("profile-schema"), availability: rows })).toThrow(/risk-map digest/u);
+      profileSchemaDigest: REVIEW_PROFILE_CATALOGUE_DIGEST, availability: rows })).toThrow(/risk-map digest/u);
   });
 
   it("rejects crossed effort applicability and classifies required actual route identity", () => {
@@ -106,7 +135,7 @@ describe("certifying-review-four-slot-v1 profile", () => {
       catalogue: broken,
       projectSessionId: "session-1",
       targetChairFamily: "openai",
-      profileSchemaDigest: digest("profile-schema"),
+      profileSchemaDigest: REVIEW_PROFILE_CATALOGUE_DIGEST,
       availability: availability(),
     })).toThrow(/inapplicable/u);
 
@@ -114,7 +143,7 @@ describe("certifying-review-four-slot-v1 profile", () => {
       catalogue,
       projectSessionId: "session-1",
       targetChairFamily: "openai",
-      profileSchemaDigest: digest("profile-schema"),
+      profileSchemaDigest: REVIEW_PROFILE_CATALOGUE_DIGEST,
       availability: availability(),
     }).slots[2]!;
     const admission = {

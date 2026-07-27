@@ -173,6 +173,32 @@ describe("bootstrap election receipts", () => {
     await expect(snapshot).resolves.toBe("absent");
   });
 
+  it("retries under the shared fence when an initially absent lock appears during the read-only snapshot", async () => {
+    const root = await mkdtemp(join(tmpdir(), "fabric-bootstrap-read-only-race-"));
+    cleanup.push(root);
+    const runtimeDirectory = join(root, "runtime");
+    await mkdir(runtimeDirectory, { mode: 0o700 });
+    const election = new BootstrapElection({ runtimeDirectory });
+    let held: Awaited<ReturnType<typeof FLOCK_ELECTION_LOCK_PORT.tryAcquire>>;
+    const observations: string[] = [];
+
+    try {
+      const result = await election.inspectCurrentReadOnlyWith(async (inspection) => {
+        observations.push(inspection.status);
+        if (observations.length === 1) {
+          held = await FLOCK_ELECTION_LOCK_PORT.tryAcquire(election.paths.lockPath);
+          expect(held).toBeDefined();
+        }
+        return inspection.status;
+      });
+
+      expect(result).toBe("active");
+      expect(observations).toEqual(["absent", "active"]);
+    } finally {
+      await held?.release();
+    }
+  });
+
   it("requires both lease expiry and kernel-lock release before reclaiming a generation", async () => {
     const root = await mkdtemp(join(tmpdir(), "fabric-bootstrap-reclaim-"));
     cleanup.push(root);

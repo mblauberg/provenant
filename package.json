@@ -21,6 +21,7 @@
     "schema:check:generated": "node --import tsx runtime/agent-fabric-protocol/scripts/write-schema.mjs --check",
     "compatibility:pin": "node runtime/agent-fabric/scripts/pin-primary-compatibility.mjs",
     "profile:pin": "tsx runtime/agent-fabric/scripts/pin-review-profile-models.ts",
+    "profile:catalogue:pin": "node --import tsx runtime/agent-fabric/scripts/pin-review-profile-catalogue-digest.ts",
     "compatibility:check:primary": "tsx runtime/agent-fabric/scripts/verify-primary-compatibility.ts",
     "build": "tsc -b tsconfig.json && npm run schema:write",
     "pretypecheck": "npm run build",
