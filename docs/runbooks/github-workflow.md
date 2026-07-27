@@ -275,8 +275,10 @@ Afterwards:
 4. Prune the merged branch's artefacts. This is the last step of the merge, not
    a later sweep — see [Post-merge
    pruning](../worktrees.md#post-merge-pruning) for the standing authority and
-   its limits. Run the complete repository, branch and ancestry gate before
-   removing the clean worktree or deleting the local branch:
+   its limits. Run the complete repository, branch and merge gate before
+   removing the clean worktree or deleting the local branch. **This repository
+   squash-merges**, so the content gate — not the ancestry gate — is the one
+   that applies here:
 
    ```sh
    # 1. Establish where you are. Both must match before anything mutates.
@@ -287,15 +289,22 @@ Afterwards:
    git -C <primary-root> fetch origin
    git -C <primary-root> merge --ff-only origin/<integration-branch>
 
-   # 3. Prove the merge by ancestry. This exiting 0 is the gate.
-   git -C <primary-root> merge-base --is-ancestor <merged-branch> <integration-branch>
+   # 3. Prove the merge. A squash merge leaves no ancestry link, so
+   #    `merge-base --is-ancestor` would refuse a branch that is fully merged.
+   #    Prove content instead: both of these, and empty diff output, are the gate.
+   gh pr view <n> --json state,headRefName,baseRefName
+   git -C <primary-root> diff <integration-branch> <merged-branch> -- <paths the branch touched>
 
    # 4. Prune only that branch's artefacts.
    scripts/worktree remove <name> --repo <primary-root> --human-authorised
-   git -C <primary-root> branch -d <merged-branch>
+   git -C <primary-root> branch -D <merged-branch>   # -d cannot see a squash merge
    git -C <primary-root> worktree prune
    git -C <primary-root> remote prune origin
    ```
+
+   Scope the step-3 diff to the paths the branch touched. Unscoped, it also
+   reports everything `main` gained after the branch was cut, which reads as
+   divergence when the branch is merely behind.
 
    One repository-specific retention rule overrides this: a substantial software
    change's canonical `delivery-run` receipt directory must survive the merge

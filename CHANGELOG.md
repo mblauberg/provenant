@@ -105,9 +105,11 @@ The current pre-release tree includes:
 - Stale protocol builds now fail before daemon election with exit `78`, and
   bootstrap, seat renewal and Console attachment reject stale daemon result
   shapes instead of accepting an older contract.
-- Authorised post-merge cleanup now proves the implementation branch is an
-  ancestor of the named integration branch before pruning its worktree and
-  local or stale remote-tracking refs.
+- Authorised post-merge cleanup now proves the merge before pruning an
+  implementation branch's worktree and local or stale remote-tracking refs:
+  ancestry for a merge commit, and the pull request's merged state plus an empty
+  path-scoped content diff for a squash merge, which leaves no ancestry link
+  (#430).
 
 ### Fixed
 
