@@ -19,6 +19,7 @@ import {
   startFabricDaemon,
   type FabricDaemonHandle,
 } from "../../../src/daemon/client.ts";
+import { digestCanonical } from "../../../src/review/canonical/index.ts";
 import { MCP_ROOT_AUTHORITY } from "../../support/mcp-testkit.ts";
 import { createCurrentSessionRun } from "../../support/current-session-testkit.ts";
 
@@ -229,13 +230,26 @@ describe("production daemon bootstrap wiring", () => {
       mkdir(join(agentsHome, "config/review-profiles"), { recursive: true }),
       mkdir(join(agentsHome, "runtime/agent-fabric/schemas"), { recursive: true }),
     ]);
-    const profile = JSON.parse(await readFile(
+    const authoritativeProfile = JSON.parse(await readFile(
       new URL("../../../../../config/review-profiles/certifying-review-four-slot-v1.json", import.meta.url),
       "utf8",
     )) as { profileId: string };
+    const profile = structuredClone(authoritativeProfile);
     profile.profileId = "silently-rewritten-profile";
     await Promise.all([
       writeFile(profilePath, `${JSON.stringify(profile)}\n`, "utf8"),
+      writeFile(
+        join(
+          agentsHome,
+          "config/review-profiles/certifying-review-four-slot-v1.deployment-digest.json",
+        ),
+        `${JSON.stringify({
+          schemaVersion: 1,
+          profile: "config/review-profiles/certifying-review-four-slot-v1.json",
+          digest: digestCanonical(authoritativeProfile),
+        })}\n`,
+        "utf8",
+      ),
       writeFile(schemaPath, await readFile(
         new URL("../../../schemas/review-profile.v1.schema.json", import.meta.url),
         "utf8",
