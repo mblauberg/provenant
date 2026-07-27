@@ -13,6 +13,7 @@ import { verifyProviderExecutableIdentity } from "../adapters/provider-identity.
 import { ADAPTER_INTERFACE_PROBE_INCOMPLETE, probeProviderInterface } from "../adapters/provider-interface.js";
 import { loadAdapterModelConstraints } from "../adapters/model-selection.js";
 import { loadFabricConfig } from "../config/index.js";
+import { withPrivateDatabaseClone } from "../core/migrations.js";
 import type { ReviewProfileCatalogue } from "../review/profile/index.js";
 import {
   evaluateReviewProfilePinDrift,
@@ -87,10 +88,9 @@ const PRECONDITIONS: Readonly<Record<string, string>> = {
   "provider-conformance": "each configured provider executable answers its conformance probe",
   "provider-identity": "each primary provider matches its pinned executable identity",
   "pin-staleness": "compatibility and catalogue pin dates are within the advisory threshold",
-  "review-profile-pins": "each certifying-profile model pin matches current alias resolution",
   "state-directory": "the state directory is a private non-symlink directory",
   "runtime-directory": "the runtime directory is a private non-symlink directory",
-  "database-integrity": "the Fabric database is current-schema and passes its invariants",
+  "database-integrity": "a byte-stable copy of the Fabric database is current-schema and passes its invariants",
   "daemon-socket": "daemon discovery, election, process, socket and bootstrap contract agree",
 };
 
@@ -127,6 +127,10 @@ const STALENESS_THRESHOLD_DAYS = 30;
 const REPAIR_COMMAND = "npm run compatibility:pin";
 const PROFILE_PIN_REPAIR_COMMAND = "npm run profile:pin";
 const DAY_MS = 24 * 60 * 60 * 1000;
+const CACHED_REVIEW_PROFILE_PIN_PRECONDITION =
+  "each certifying-profile model pin in the automated comparison set matches a provider capability result cached within the last six hours";
+const LIVE_REVIEW_PROFILE_PIN_PRECONDITION =
+  "each certifying-profile model pin in the automated comparison set matches alias resolution checked by a live provider capability probe";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -373,7 +377,11 @@ async function doctorDaemonState(
   dependencies: DoctorDependencies,
 ): Promise<DoctorDaemonState> {
   try {
-    return await new BootstrapElection({ runtimeDirectory: paths.runtimeDirectory }).inspectCurrentWith(async (election) => {
+    const runtimeInfo = await lstat(paths.runtimeDirectory);
+    if (!runtimeInfo.isDirectory() || runtimeInfo.isSymbolicLink()) {
+      throw new Error(`${paths.runtimeDirectory} must be a non-symlink directory`);
+    }
+    return await new BootstrapElection({ runtimeDirectory: paths.runtimeDirectory }).inspectCurrentReadOnlyWith(async (election) => {
       if (election.status === "active") {
         return {
           status: "failed" as const,
@@ -383,8 +391,11 @@ async function doctorDaemonState(
           socketPath: null,
         };
       }
-      const shutdown = await FLOCK_ELECTION_LOCK_PORT.probe(join(paths.runtimeDirectory, "daemon-shutdown.lock"));
-      if (shutdown.status === "held") {
+      const shutdownPath = join(paths.runtimeDirectory, "daemon-shutdown.lock");
+      const shutdown = await socketIsAbsent(shutdownPath)
+        ? undefined
+        : await FLOCK_ELECTION_LOCK_PORT.probe(shutdownPath);
+      if (shutdown?.status === "held") {
         return {
           status: "failed" as const,
           code: "DAEMON_SHUTDOWN_IN_PROGRESS",
@@ -565,7 +576,7 @@ async function doctorDaemonState(
       socketPath: discovery.receipt.socketPath,
     };
       } finally {
-        await shutdown.handle.release();
+        if (shutdown?.status === "acquired") await shutdown.handle.release();
       }
     });
   } catch (error: unknown) {
@@ -585,6 +596,7 @@ export async function fabricDoctor(
   dependencies: DoctorDependencies = {},
 ): Promise<Record<string, unknown>> {
   const selected = pathsFor(arguments_);
+  const consumeProviderQuota = arguments_.includes("--consume-provider-quota");
   let adapterIds: string[] = [];
   let adapterCommands: string[][] = [];
   let compatibilityVerification: Awaited<ReturnType<typeof verifyAdapterCompatibility>> | undefined;
@@ -688,16 +700,26 @@ export async function fabricDoctor(
   const pinReport = await reviewProfilePins(
     selected.reviewProfile,
     metadata.modelRouting,
-    dependencies.observeReviewProfilePin ?? createCapabilityPinObserver({
-      agentsHome: selected.agentsHome,
-      cacheDirectory: paths.stateDirectory,
-      ...(dependencies.now === undefined ? {} : { now: dependencies.now }),
-    }),
+    consumeProviderQuota
+      ? dependencies.observeReviewProfilePin ?? createCapabilityPinObserver({
+          agentsHome: selected.agentsHome,
+          cacheDirectory: paths.stateDirectory,
+          forceLive: true,
+          ...(dependencies.now === undefined ? {} : { now: dependencies.now }),
+        })
+      : createCapabilityPinObserver({
+          agentsHome: selected.agentsHome,
+          cacheDirectory: paths.stateDirectory,
+          cacheOnly: true,
+          ...(dependencies.now === undefined ? {} : { now: dependencies.now }),
+        }),
   );
   const pinOutcome = reviewProfilePinOutcome(pinReport);
   checks.push({
     id: "review-profile-pins",
-    precondition: precondition("review-profile-pins"),
+    precondition: consumeProviderQuota
+      ? LIVE_REVIEW_PROFILE_PIN_PRECONDITION
+      : CACHED_REVIEW_PROFILE_PIN_PRECONDITION,
     ...pinOutcome,
     detail: [
       ...pinReport.compared.map((pin) =>
@@ -737,9 +759,11 @@ export async function fabricDoctor(
       if (info.isSymbolicLink() || (expectedKind === "directory" && !info.isDirectory()) || (info.mode & 0o077) !== 0) throw new Error(`${path} must be a private non-symlink directory`);
     }));
   }
-  checks.push(await check("database-integrity", () => {
-    const database = new Database(paths.databasePath, { readonly: true, fileMustExist: true });
-    try { assertDatabaseIntegrity(database); } finally { database.close(); }
+  checks.push(await check("database-integrity", async () => {
+    withPrivateDatabaseClone(paths.databasePath, (snapshotPath) => {
+      const database = new Database(snapshotPath, { fileMustExist: true });
+      try { assertDatabaseIntegrity(database); } finally { database.close(); }
+    });
   }));
   const daemon = await doctorDaemonState(paths, dependencies);
   checks.push({

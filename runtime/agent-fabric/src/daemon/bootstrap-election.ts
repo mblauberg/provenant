@@ -645,6 +645,35 @@ export class BootstrapElection {
     return await this.inspectCurrentWith(async (inspection) => inspection);
   }
 
+  /**
+   * Inspect without creating the election lock on a never-started runtime.
+   *
+   * An existing lock still uses the shared inspection fence. When the lock is
+   * absent there is no generation to fence, so this reads the receipt snapshot
+   * without materialising private state merely to diagnose it.
+   */
+  async inspectCurrentReadOnlyWith<T>(
+    callback: (inspection: BootstrapElectionInspection) => Promise<T>,
+  ): Promise<T> {
+    if (await validateExistingPrivateFile(this.paths.lockPath)) {
+      return await this.inspectCurrentWith(callback);
+    }
+    let inspection: BootstrapElectionInspection;
+    try {
+      inspection = await this.#inspectCurrentReceipts();
+    } catch (error: unknown) {
+      if (await validateExistingPrivateFile(this.paths.lockPath)) {
+        return await this.inspectCurrentWith(callback);
+      }
+      throw error;
+    }
+    const result = await callback(inspection);
+    if (await validateExistingPrivateFile(this.paths.lockPath)) {
+      return await this.inspectCurrentWith(callback);
+    }
+    return result;
+  }
+
   async inspectCurrentWith<T>(
     callback: (inspection: BootstrapElectionInspection) => Promise<T>,
   ): Promise<T> {
@@ -653,27 +682,30 @@ export class BootstrapElection {
       return await callback({ status: "active", ownership: "kernel-lock" });
     }
     try {
-      const [lease, ready] = await Promise.all([this.#readLease(), this.#readReady()]);
-      if (lease === undefined && ready === undefined) return await callback({ status: "absent" });
-      if (lease?.status === "held") {
-        throw new BootstrapElectionError(
-          "BOOTSTRAP_ELECTION_INCONSISTENT",
-          "bootstrap lease is held without kernel election ownership",
-        );
-      }
-      const generation = Math.max(lease?.electionGeneration ?? 0, ready?.electionGeneration ?? 0);
-      if (generation === 0) return await callback({ status: "absent" });
-      const outcome = await this.readGenerationOutcome(generation);
-      if (outcome === undefined) {
-        throw new BootstrapElectionError("BOOTSTRAP_INCOMPLETE", "bootstrap election artifacts have no current outcome");
-      }
-      const inspection: BootstrapElectionInspection = outcome.kind === "ready"
-        ? { status: "ready", receipt: outcome.receipt }
-        : { status: "terminal", receipt: outcome.receipt };
-      return await callback(inspection);
+      return await callback(await this.#inspectCurrentReceipts());
     } finally {
       if (lock.status === "acquired") await lock.handle.release();
     }
+  }
+
+  async #inspectCurrentReceipts(): Promise<BootstrapElectionInspection> {
+    const [lease, ready] = await Promise.all([this.#readLease(), this.#readReady()]);
+    if (lease === undefined && ready === undefined) return { status: "absent" };
+    if (lease?.status === "held") {
+      throw new BootstrapElectionError(
+        "BOOTSTRAP_ELECTION_INCONSISTENT",
+        "bootstrap lease is held without kernel election ownership",
+      );
+    }
+    const generation = Math.max(lease?.electionGeneration ?? 0, ready?.electionGeneration ?? 0);
+    if (generation === 0) return { status: "absent" };
+    const outcome = await this.readGenerationOutcome(generation);
+    if (outcome === undefined) {
+      throw new BootstrapElectionError("BOOTSTRAP_INCOMPLETE", "bootstrap election artifacts have no current outcome");
+    }
+    return outcome.kind === "ready"
+      ? { status: "ready", receipt: outcome.receipt }
+      : { status: "terminal", receipt: outcome.receipt };
   }
 
   async waitForGenerationOutcome(generation: number, deadlineAt = this.#clock() + this.#waitTimeoutMs): Promise<BootstrapGenerationOutcome> {
