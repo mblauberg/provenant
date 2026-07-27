@@ -37,12 +37,12 @@
     "check": "npm run schema:check && npm run typecheck && npm run build && npm run test"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "0.3.215",
+    "@anthropic-ai/claude-agent-sdk": "0.3.220",
     "@local/agent-fabric-protocol": "file:../agent-fabric-protocol",
     "@modelcontextprotocol/sdk": "1.29.0",
     "ajv": "8.20.0",
     "ajv-formats": "3.0.1",
-    "better-sqlite3": "12.11.1",
+    "better-sqlite3": "13.0.1",
     "fs-ext": "2.1.1",
     "uuid": "14.0.1",
     "yaml": "2.9.0",

@@ -13,17 +13,17 @@ adapters:
     implementation:
       kind: npm-package
       package: "@anthropic-ai/claude-agent-sdk"
-      installed_version: "0.3.215"
-      resolved_artifact: "https://registry.npmjs.org/@anthropic-ai/claude-agent-sdk/-/claude-agent-sdk-0.3.215.tgz"
+      installed_version: "0.3.220"
+      resolved_artifact: "https://registry.npmjs.org/@anthropic-ai/claude-agent-sdk/-/claude-agent-sdk-0.3.220.tgz"
       entrypoint: "node_modules/@anthropic-ai/claude-agent-sdk/sdk.mjs"
-      entrypoint_sha256: "8264b93df478f670b05f7cd92b058644dd3fbf6974862160e808e597439ce3cd"
+      entrypoint_sha256: "1202bcd295a7c69cd0952f819a939e63071a3f2c3476a05f7e23425b01184fda"
       executable: "/opt/homebrew/bin/claude"
       provider_identity: apple-designated
       wrapper_entrypoint: "runtime/agent-fabric/src/adapters/providers/claude-agent-sdk.ts"
     contract:
       adapter_version: 1
       protocol: claude-agent-sdk+claude-code-cli
-      protocol_version: "sdk-0.3.215"
+      protocol_version: "sdk-0.3.220"
       capability_fixture_version: 1
     runtime_range:
       fabric_node: ">=24.15.0 <25"
