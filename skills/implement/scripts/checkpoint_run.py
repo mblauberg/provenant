@@ -12,6 +12,14 @@ import tempfile
 from typing import Any
 
 
+def fsync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 def update(path: Path, current_slice: str, next_action: str, in_flight: list[Any], artifacts: list[Any]) -> dict[str, Any]:
     path = path.resolve()
     root = path.parent
@@ -56,6 +64,9 @@ def update(path: Path, current_slice: str, next_action: str, in_flight: list[Any
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temp_path, path)
+        # The rename itself needs an fsync on the directory, or a crash can
+        # leave the checkpoint the recovery path depends on unreachable.
+        fsync_directory(root)
     finally:
         if temp_path is not None and temp_path.exists():
             temp_path.unlink()
