@@ -25,16 +25,20 @@ import {
 } from "../project-session/store-support.js";
 import { projectDeclaredRunProgress } from "./declared-run-progress-projection.js";
 import { projectRunIdentity } from "./run-identity-projection.js";
-import { projectedRunHealth, projectedRunNextMilestone } from "./run-lifecycle-projection.js";
+import { observedRunHealth } from "./run-lifecycle-projection.js";
 import type { AuthenticatedOperatorCredential } from "./store.js";
 import {
   activityBudgetExceededRow,
   boundedActivityPagePrefix,
 } from "./activity-projection.js";
 
+/**
+ * A run-scoped page reads stored rows only. It deliberately has no clock: every
+ * `observedAt` it publishes must come from a recorded fabric write, never from
+ * the moment of the read.
+ */
 export type RunProjectionStoreContext = Readonly<{
   database: Database.Database;
-  clock: () => number;
   globalRevision: () => number;
   eventCursor: (projectId: ProjectId, projectSessionId: ProjectSessionId) => number;
   workRows: (
@@ -157,7 +161,6 @@ function runScopedComposition(
 ): RunScopedComposition {
   const runRevision = integer(run, "revision");
   const identity = projectRunIdentity(context.database, run);
-  const observedAt = toTimestamp(context.clock(), "runScopedComposition.observedAt");
   if (request.target.kind === "delivery-workstream") {
     const target = request.target;
     const matches = identity.workstreams.filter((workstream) =>
@@ -190,6 +193,16 @@ function runScopedComposition(
     };
   }
   const phase = text(run, "lifecycle_state");
+  const health = observedRunHealth(phase);
+  // `observedAt` states when the fabric last recorded a fact about this run, not
+  // when the Console read it. Fabric-owned `runs` rows carry no write timestamp,
+  // so the newest recorded event bounds every fact composed below, and a run
+  // with no event has recorded nothing since it was created. Filling this from
+  // `context.clock()` would report an arbitrarily stale row as freshly observed,
+  // and would disagree with the delivery-workstream arm's `workstream.updatedAt`
+  // about what the same field means.
+  const observedAt = identity.lastEventAt ??
+    toTimestamp(integer(run, "created_at"), "runScopedComposition.observedAt");
   return {
     projectSessionId: request.projectSessionId,
     target: request.target,
@@ -208,9 +221,20 @@ function runScopedComposition(
           },
       lead: { observation: "Observed", value: identity.chairAgentId },
       phase: { observation: "Observed", value: phase },
-      health: { observation: "Observed", value: projectedRunHealth(phase) },
+      // A mapped lifecycle state establishes its health; an unmapped one
+      // establishes nothing, so the default is rendered as the missing fact it
+      // is rather than stamped `Observed`.
+      health: health === null
+        ? { observation: "Unobserved" }
+        : { observation: "Observed", value: health },
+      // Neither milestone is a fabric-emitted fact. `projectedRunNextMilestone`
+      // names one happy-path successor of the lifecycle state -- which the
+      // machine is free not to take -- and otherwise returns the prose
+      // placeholder "next valid lifecycle transition". Both stay `Unobserved`
+      // until #434 emits milestones daemon-side; do not fill either from the
+      // phase map.
       currentMilestone: { observation: "Unobserved" },
-      nextMilestone: { observation: "Observed", value: projectedRunNextMilestone(phase) },
+      nextMilestone: { observation: "Unobserved" },
       lastEventAt: identity.lastEventAt === null
         ? { observation: "Unobserved" }
         : { observation: "Observed", value: identity.lastEventAt },
