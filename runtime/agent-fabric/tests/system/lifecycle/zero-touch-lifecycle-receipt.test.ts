@@ -360,6 +360,10 @@ describe("zero-touch lifecycle action receipt", () => {
     expect(counts.get("projects")).toBe(1);
     expect(gate.consequences.length).toBeGreaterThan(0);
     expect(gate.consequences.join(" ")).toContain("stay there until approval");
+    expect(gate.consequences.join(" ")).toContain(
+      "asks for ARCHIVE-AND-FRESH on its controlling terminal",
+    );
+    expect(gate.consequences.join(" ")).toContain("refuses non-interactive execution");
     // Routed to #215, never invoked automatically.
     expect(gate.command).toContain("database archive-and-fresh");
     expect(gate.command).toContain(`--confirm-source-set ${gate.sourceSetSha256!}`);

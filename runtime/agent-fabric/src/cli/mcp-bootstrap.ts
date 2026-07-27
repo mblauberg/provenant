@@ -217,6 +217,7 @@ function schemaCutoverGate(databasePath: string, cause: unknown): SchemaCutoverG
       "Approval moves the whole SQLite source set into a new archive directory and starts an empty current-schema database.",
       "Runs, tasks, agents and messages in the archive are no longer visible to Fabric; only the archive receipt links them.",
       "Nothing is deleted: the archive keeps every source byte, and the cutover refuses if the source set changed since this report.",
+      "The command asks for ARCHIVE-AND-FRESH on its controlling terminal and refuses non-interactive execution unless an explicit named-principal unattended approval assertion is supplied.",
     ],
     command: `"$HOME/.agents/scripts/agent-fabric" database archive-and-fresh --archive ABSOLUTE_NEW_DIRECTORY` +
       (sourceSetSha256 === null ? "" : ` --confirm-source-set ${sourceSetSha256}`),

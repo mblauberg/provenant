@@ -398,9 +398,10 @@ invoke the cutover: the SQLite source set is byte-identical after the gate.
 Report counts and consequences, obtain exactly one user decision, and only then
 run the command in
 [Database archive-and-fresh cutover](#database-archive-and-fresh-cutover). The
-cutover entrypoint is separately invocable and confirms only a source-set
-digest, so it does not itself verify that a user decision happened; treat
-running it as the approval, and never script it unattended.
+cutover separately requires either the default confirmation phrase read from
+its controlling terminal or the explicit named-principal unattended assertion.
+The former verifies only the input channel and phrase, not that a human or
+authorised user decided; the latter records `asserted`, never `verified`.
 
 After bootstrap, call `fabric_whoami` before constructing any request. It
 returns the authenticated seat, agent, run, authority, active seat generation
@@ -831,6 +832,7 @@ The process exit contract is:
 | JSON `status` | Exit | Meaning |
 | --- | ---: | --- |
 | `confirmation-required`, `no-op`, `completed` | `0` | Preview, unchanged state or completed cutover; these are different outcomes. |
+| `approval-required` | `1` | The digest matched, but verified interactive confirmation could not be read from the controlling terminal or did not match. The source set is unchanged. |
 | `failed`, `conflict` | `1` | Validation, source-set or archive failure before the recovery boundary. |
 | `recovery-required`, `archive-complete-cutover-failed`, `archive-complete-fresh-init-failed` | `4` | Recovery or post-publication handling is required. |
 
@@ -843,7 +845,7 @@ Before confirmation, stop Fabric through its owning supervision surface and
 ensure every direct SQLite writer is quiescent. The command does not inspect,
 list or signal operating-system processes. It re-reads the complete source set
 and fails closed on a race, but this last-moment check is not a lifetime writer
-lock. Confirm the exact previewed bytes without a TTY:
+lock. Confirm the exact previewed bytes from an interactive terminal:
 
 ```sh
 scripts/agent-fabric database archive-and-fresh \
@@ -851,13 +853,41 @@ scripts/agent-fabric database archive-and-fresh \
   --confirm-source-set 'sha256:<digest from preview>'
 ```
 
-Confirmation is digest-bound. The token is a correctness interlock: it proves
-the destructive invocation still targets exactly the bytes inspected by the
-preview. It is not a user-authority gate because the preview itself reports the
-token. Explicit user authority for the destructive step is enforced by the
-permission gate outside this command; [issue #450](https://github.com/mblauberg/provenant/issues/450)
-owns the deeper interlock follow-up. A changed source set, stale digest,
-symlink, archive collision,
+The command reads the phrase `ARCHIVE-AND-FRESH` from `/dev/tty`, not stdin. It
+returns `approval-required` with exit `1` without publishing an archive when it
+has no controlling terminal or the phrase does not match. A pipe therefore
+cannot silently supply the default confirmation. A background invocation may
+be suspended by the terminal's `SIGTTIN` job-control behaviour when it tries to
+read `/dev/tty`; return it to the foreground before confirming.
+
+Digest confirmation and approval are separate. The digest is a byte-correctness
+interlock: it proves the destructive invocation still targets exactly the bytes
+inspected by the preview. It is not authority evidence because the preview
+itself reports it. The receipt records default confirmation as
+`approval.kind: "interactive-confirmation"` and
+`approval.status: "verified"`, separately from
+`confirmation.sourceSetSha256`. Here, `verified` means only that the expected
+phrase was read from the controlling terminal. **This gate does not establish
+that a human or authorised user supplied the confirmation; a process with
+access to the controlling terminal can supply it.**
+
+Legitimate unattended automation must use the explicit assertion escape:
+
+```sh
+scripts/agent-fabric database archive-and-fresh \
+  --archive "$archive_directory" \
+  --confirm-source-set 'sha256:<digest from preview>' \
+  --unattended-approval-asserted-by 'named-principal'
+```
+
+The principal is a 1-128 character identifier. This path does not read a
+terminal and does not claim verification. The principal string is caller-supplied
+and is not authenticated or independently verified. The receipt records
+`approval.kind: "unattended-approval"`, `approval.status: "asserted"` and the
+exact `approval.principal`. The flag requires `--confirm-source-set`; the digest
+interlock remains mandatory.
+
+A changed source set, stale digest, symlink, archive collision,
 SHM without WAL or a rollback journal mixed with WAL/SHM returns a typed
 conflict or failure without displacing the source. A readable database plus WAL
 without SHM is valid because SQLite rebuilds the missing wal-index. The archive
@@ -867,8 +897,8 @@ source-member path after resolving existing destination ancestors, claims the
 final archive directory without overwrite, and atomically publishes
 `source-set/`. Only after that durable recovery boundary does it atomically
 claim the exact confirmed source files into a private same-directory holding
-area and verify their identities before removal. The archive contains the main database
-and every existing canonical sidecar (`-wal`, `-shm`, `-journal`) plus
+area and verify their identities before removal. The archive contains the main
+database and every existing canonical sidecar (`-wal`, `-shm`, `-journal`) plus
 `source-set/receipt.json`. Modes are preserved and the receipt records the
 source identity and SHA-256 of each member without database rows, environment,
 capabilities or credentials.
