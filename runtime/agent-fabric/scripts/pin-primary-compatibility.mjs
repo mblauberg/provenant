@@ -9,6 +9,7 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const packageName = "@anthropic-ai/claude-agent-sdk";
 const defaultCompatibilityPath = join(root, "config/adapter-compatibility.yaml");
 const defaultPackageRoot = join(root, "node_modules", packageName);
+const defaultLockfilePath = join(root, "package-lock.json");
 
 function argumentValue(arguments_, name) {
   const index = arguments_.indexOf(name);
@@ -42,6 +43,7 @@ function packageEntrypointPath(packageRoot, entrypoint) {
 export async function pinClaudeAgentSdk(options = {}) {
   const compatibilityPath = resolve(options.compatibilityPath ?? defaultCompatibilityPath);
   const packageRoot = resolve(options.packageRoot ?? defaultPackageRoot);
+  const lockfilePath = resolve(options.lockfilePath ?? defaultLockfilePath);
   const source = await readFile(compatibilityPath, "utf8");
   const document = parseDocument(source);
   if (document.errors.length > 0) {
@@ -61,6 +63,25 @@ export async function pinClaudeAgentSdk(options = {}) {
   if (!isRecord(packageManifest) || packageManifest.name !== packageName || typeof packageManifest.version !== "string") {
     throw new Error(`installed package manifest is not ${packageName}`);
   }
+  let packageLock;
+  try {
+    packageLock = JSON.parse(await readFile(lockfilePath, "utf8"));
+  } catch (error) {
+    throw new Error(`package-lock.json is missing or unparseable: ${lockfilePath}`, { cause: error });
+  }
+  const lockedPackage = isRecord(packageLock) && isRecord(packageLock.packages)
+    ? packageLock.packages[`node_modules/${packageName}`]
+    : undefined;
+  if (!isRecord(lockedPackage)) {
+    throw new Error(`package-lock.json has no packages entry for node_modules/${packageName}`);
+  }
+  if (typeof lockedPackage.resolved !== "string") {
+    throw new Error(`package-lock.json entry for ${packageName} has no string resolved artifact`);
+  }
+  if (lockedPackage.version !== packageManifest.version) {
+    throw new Error(`installed ${packageName} version ${packageManifest.version} disagrees with package-lock.json version ${String(lockedPackage.version)}`);
+  }
+  const resolvedArtifact = lockedPackage.resolved;
   const entrypointPath = packageEntrypointPath(packageRoot, entrypoint);
   const entrypointSha256 = sha256(await readFile(entrypointPath));
   document.deleteIn(["adapters", "claude-agent-sdk", "implementation", "lock_integrity_sha512"]);
@@ -68,6 +89,8 @@ export async function pinClaudeAgentSdk(options = {}) {
   document.deleteIn(["adapters", "claude-agent-sdk", "contract", "schema_sha256"]);
   document.setIn(["adapters", "claude-agent-sdk", "implementation", "installed_version"], packageManifest.version);
   document.setIn(["adapters", "claude-agent-sdk", "implementation", "entrypoint_sha256"], entrypointSha256);
+  document.setIn(["adapters", "claude-agent-sdk", "implementation", "resolved_artifact"], resolvedArtifact);
+  document.setIn(["adapters", "claude-agent-sdk", "contract", "protocol_version"], `sdk-${packageManifest.version}`);
 
   const rendered = document.toString({ lineWidth: 0 });
   const changed = rendered !== source;
@@ -76,6 +99,7 @@ export async function pinClaudeAgentSdk(options = {}) {
     compatibilityPath,
     installedVersion: packageManifest.version,
     entrypointSha256,
+    resolvedArtifact,
     changed,
   };
 }
@@ -84,6 +108,7 @@ if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(
   const result = await pinClaudeAgentSdk({
     compatibilityPath: argumentValue(process.argv.slice(2), "--compatibility"),
     packageRoot: argumentValue(process.argv.slice(2), "--package-root"),
+    lockfilePath: argumentValue(process.argv.slice(2), "--lockfile"),
   });
   process.stdout.write(`${result.changed ? "updated" : "unchanged"} compatibility pin: ${result.installedVersion} ${result.entrypointSha256}\n`);
 }
