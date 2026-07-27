@@ -2676,6 +2676,93 @@ describe("operator work facts projection", () => {
     )).toBe(encoded);
   });
 
+  function coordinationRunIdentity(
+    fixture: ReturnType<typeof setupProjection>,
+  ) {
+    const projectId = identifier<"ProjectId">("project_01");
+    const projectSessionId = identifier<"ProjectSessionId">("session_01");
+    const snapshot = fixture.projections.snapshot({
+      credential: fixture.credential,
+      projectId,
+      projectSessionId,
+    }, "include");
+    const page = fixture.projections.runPage({
+      credential: fixture.credential,
+      projectId,
+      projectSessionId,
+      target: {
+        kind: "coordination-run",
+        coordinationRunId: identifier<"CoordinationRunId">("run_01"),
+      },
+      snapshotRevision: snapshot.snapshotRevision,
+      section: "work",
+      cursor: 0,
+      limit: 5,
+    });
+    if (page.status !== "page") throw new Error("run page unavailable");
+    const identity = page.composition.identity;
+    if (identity.freshness !== "live") throw new Error("run identity is not live");
+    return identity;
+  }
+
+  it("observes a mapped run health and leaves both milestones unobserved", () => {
+    // `health` is a total decode of the observed lifecycle state, so a mapped
+    // state establishes it. Milestones are not a fabric-emitted fact at all:
+    // the phase map only names one happy-path successor the lifecycle machine
+    // is free not to take, so `nextMilestone` must stay `Unobserved` beside the
+    // `currentMilestone` deferred to #434 rather than be stamped `Observed`.
+    const identity = coordinationRunIdentity(setupProjection());
+
+    expect(identity.value).toMatchObject({
+      phase: { observation: "Observed", value: "active" },
+      health: { observation: "Observed", value: "healthy" },
+      currentMilestone: { observation: "Unobserved" },
+      nextMilestone: { observation: "Unobserved" },
+    });
+  });
+
+  it("renders an unmapped lifecycle state as unobserved health, never a derived default", () => {
+    // `projectedRunHealth` answers every phase for its plain-field callers, so
+    // an unmapped state falls through to the string "unknown". Stamping that
+    // default `Observed` publishes `Health: unknown`, which differs from the
+    // `Unknown`/`ContradictoryFacts` arm by one character of case and asserts
+    // something entirely different.
+    const fixture = setupProjection();
+    fixture.database.exec(
+      "UPDATE runs SET lifecycle_state='quiescing', revision=revision+1 WHERE run_id='run_01'",
+    );
+    const identity = coordinationRunIdentity(fixture);
+
+    expect(identity.value).toMatchObject({
+      phase: { observation: "Observed", value: "quiescing" },
+      health: { observation: "Unobserved" },
+      nextMilestone: { observation: "Unobserved" },
+    });
+    expect(identity.value.health).not.toHaveProperty("value");
+  });
+
+  it("dates the coordination identity from the last recorded fabric write, not the read", () => {
+    // `observedAt` claims when the fact was observed. Filling it from the read
+    // clock reports an arbitrarily stale run row as freshly observed, and
+    // disagrees with the delivery-workstream arm's `workstream.updatedAt`.
+    const identity = coordinationRunIdentity(setupProjection());
+
+    expect(identity.observedAt).toBe(new Date(now - 300).toISOString());
+    expect(identity.observedAt).not.toBe(new Date(now).toISOString());
+  });
+
+  it("falls back to the run row's own creation time when the run recorded no event", () => {
+    const fixture = setupProjection();
+    fixture.database.exec(`
+      DELETE FROM observer_event_sequence;
+      DELETE FROM events WHERE run_id='run_01';
+    `);
+    const identity = coordinationRunIdentity(fixture);
+
+    expect(identity.value.lastEventAt).toStrictEqual({ observation: "Unobserved" });
+    expect(identity.observedAt).toBe(new Date(now - 8_000).toISOString());
+  });
+
   it("retains deterministic activity groups in an exact run page", () => {
     const fixture = setupProjection();
     const projectId = identifier<"ProjectId">("project_01");
