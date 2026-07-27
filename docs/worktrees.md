@@ -86,12 +86,17 @@ test "$(git -C <primary-root> symbolic-ref --quiet --short HEAD)" = "<integratio
 git -C <primary-root> fetch origin
 git -C <primary-root> merge --ff-only origin/<integration-branch>
 
-# 3. Prove the merge by ancestry. This exiting 0 is the gate.
+# 3. Prove the merge. Use the gate that matches how the merge landed.
+#    Merge commit -- ancestry holds. This exiting 0 is the gate.
 git -C <primary-root> merge-base --is-ancestor <merged-branch> <integration-branch>
+#    Squash merge -- ancestry does NOT hold. Prove content instead:
+gh pr view <n> --json state,headRefName,baseRefName   # MERGED, and the refs in front of you
+git -C <primary-root> diff <integration-branch> <merged-branch> -- <paths the branch touched>
+#    Empty output is the gate.
 
 # 4. Prune only that branch's artefacts.
 scripts/worktree remove <name> --repo <primary-root> --human-authorised
-git -C <primary-root> branch -d <merged-branch>
+git -C <primary-root> branch -d <merged-branch>    # -D after a squash merge; see below
 git -C <primary-root> worktree prune
 git -C <primary-root> remote prune origin
 ```
@@ -103,14 +108,31 @@ Constraints that keep this narrow:
   helper acts on its own current repository unless given `--repo`. A prune run
   from the wrong checkout, or against a detached HEAD, silently moves the wrong
   ref. Step 1 is not optional.
-- **Prove the merge by ancestry, not by status.**
+- **Prove the merge, not the status — and use the proof that fits the merge.**
+  For a merge commit,
   `git merge-base --is-ancestor <merged-branch> <integration-branch>` exiting 0
-  is the proof, because it names both refs explicitly. `gh pr view <n> --json
-  state` reporting `MERGED` is not sufficient alone: it says nothing about which
-  repository the pull request belongs to, nor whether its head and base refs are
-  the branches in front of you. If you use it, verify `headRefName` and
-  `baseRefName` too. Never infer a merge from a green pull request or a passing
-  suite.
+  is the proof, because it names both refs explicitly and is cheap.
+
+  A **squash merge produces a new commit with no ancestry link**, so that gate
+  refuses a branch that is fully merged. An agent following it either stalls or
+  reaches for the force-delete the policy exists to prevent. Where the repository
+  squash-merges — this one does — prove *content* instead: the pull request
+  reports `MERGED`, and
+
+  ```sh
+  git -C <primary-root> diff <integration-branch> <merged-branch> -- <paths the branch touched>
+  ```
+
+  is empty. **Scope it to the paths the branch touched.** An unscoped diff also
+  reports everything the integration branch gained *after* the branch was cut,
+  which reads as divergence: one prune showed 124 deletions that all came from an
+  unrelated later merge, and was empty once scoped to its two files.
+
+  `gh pr view <n> --json state` reporting `MERGED` is not sufficient alone: it
+  says nothing about which repository the pull request belongs to, nor whether
+  its head and base refs are the branches in front of you. Verify `headRefName`
+  and `baseRefName` too. Never infer a merge from a green pull request or a
+  passing suite.
 - **Only that branch's artefacts.** The authority covers the worktree created
   for the merged branch, that branch's local ref, and stale remote-tracking refs
   for branches the forge already deleted. It does not extend to any other
@@ -126,10 +148,19 @@ Constraints that keep this narrow:
   Deleted branch feat (was 95ef3c3).
   ```
 
-  So step 3 is the safeguard and `-d` is only a second line of defence. Still
-  `-d`, never `-D`: if Git refuses despite step 3 passing, something disagrees
-  with your model of the repository, so stop and report. `git worktree remove`
-  likewise stays unforced — a dirty worktree is unconsumed work, not debris.
+  It fails the other way too: after a **squash** merge `-d` refuses a branch that
+  is fully merged, because it looks for ancestry that no longer exists. Both
+  directions mislead, which is why step 3 is the safeguard and `-d` is only a
+  second line of defence.
+
+  After a merge commit, use `-d`; if Git refuses despite step 3 passing,
+  something disagrees with your model of the repository, so stop and report.
+  After a squash merge whose content gate in step 3 came back empty, `-D` is the
+  correct command and is covered by this standing authority — the proof has
+  already been made, and `-d` cannot see it. `-D` on a branch whose step-3 gate
+  did *not* pass is still a force-delete needing separate authority.
+  `git worktree remove` stays unforced either way — a dirty worktree is
+  unconsumed work, not debris.
 - **Retention beats reclamation.** Where a repository requires a run directory,
   receipt or artifact to survive the merge, that requirement wins; prune only
   after it is satisfied. Check the repository's own workflow runbook.
