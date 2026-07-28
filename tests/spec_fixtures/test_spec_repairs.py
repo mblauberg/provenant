@@ -1652,6 +1652,10 @@ class SpecRepairTests(unittest.TestCase):
                 binding_digest,task_id,bundle_digest,profile_digest));
             CREATE TABLE review_finding_sets(
               finding_set_digest PRIMARY KEY);
+            CREATE UNIQUE INDEX provider_action_route_review_evidence_parent
+              ON provider_action_routes(
+                adapter_id,action_id,route_receipt_digest,
+                deployed_route_admission_digest);
         """)
         db.execute(
             "CREATE TABLE "

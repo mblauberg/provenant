@@ -639,8 +639,10 @@ Ordinals must never recycle, and a resolver or preflight failure that creates no
 action must allocate none. The provider action must survive legitimate route
 missing or integrity recovery, because it, not the route, owns list membership
 and the attached reservation. Task-bound action rows must never be deletable,
-and their run, task, ordinal and listing timestamp must be immutable. A later
-`attached -> settled` transition must not rewrite the immutable action or route.
+and their run, task, ordinal and listing timestamp must be immutable. A route
+must bind a reservation that is `attached` at admission, and a later
+`attached -> settled` transition must neither rewrite the immutable action or
+route nor invalidate its foreign key.
 
 Two requirements below do hold against the shipped schema. Every route,
 dispatch, observation or recovery-state advance increments the owning action's
