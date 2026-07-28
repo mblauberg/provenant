@@ -58,7 +58,10 @@ export type BootstrapMcpSeatResult = Omit<CurrentMcpSeatBindingResult, "credenti
   droppedSeats?: Array<{
     seat: string;
     agentId: string;
-    reason: "AGENT_NOT_LIVE" | "STALE_PRINCIPAL_GENERATION";
+    reason:
+      | "AGENT_NOT_LIVE"
+      | "STALE_PRINCIPAL_GENERATION"
+      | "AUTHORITY_EXPIRES_BEFORE_RENEWAL";
   }>;
 };
 

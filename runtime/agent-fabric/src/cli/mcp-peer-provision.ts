@@ -174,6 +174,10 @@ function peerAgentId(projectKey: string, runId: string, seat: McpSeat): string {
   return `${seat}_bootstrap_peer_${digest}`;
 }
 
+function rosterCasChanged(error: unknown): boolean {
+  return error instanceof Error && /active MCP seat generation changed/u.test(error.message);
+}
+
 function parseArguments(arguments_: string[]): {
   project: string;
   seats: McpSeat[];
@@ -220,13 +224,15 @@ export async function provisionMcpPeerSeats(
   if (request.seats.every((seat) => present.has(seat))) return rosterOutput(chair, roster);
 
   const daemonHandle = await startMcpProvisionDaemon(paths);
-  const chairCapability = (await privateRead(chair.credentialPath)).trim();
-  const client = await connectFabricDaemon({
-    socketPath: daemonHandle.address.path,
-    capability: chairCapability,
-  });
-  const database = new Database(paths.databasePath, { readonly: true, fileMustExist: true });
+  let client: Awaited<ReturnType<typeof connectFabricDaemon>> | undefined;
+  let database: Database.Database | undefined;
   try {
+    const chairCapability = (await privateRead(chair.credentialPath)).trim();
+    client = await connectFabricDaemon({
+      socketPath: daemonHandle.address.path,
+      capability: chairCapability,
+    });
+    database = new Database(paths.databasePath, { readonly: true, fileMustExist: true });
     const authorityRow = database.prepare(`
       SELECT agent.authority_id,authority.authority_json,authority.authority_hash
         FROM agents agent
@@ -244,11 +250,7 @@ export async function provisionMcpPeerSeats(
     const parentAuthorityId = authorityRow.authority_id;
     const parentAuthority = readStoredAuthority(authorityRow, "chair authority");
     const expiresAt = peerExpiry(request.expiresAt, parentAuthority, chair.metadata.expiresAt);
-    const bindings: ParsedSeatBinding[] = roster.map(({ metadata }) => ({
-      seat: metadata.seat,
-      agentId: metadata.agentId,
-      expectedPrincipalGeneration: metadata.principalGeneration,
-    }));
+    const registeredBindings: ParsedSeatBinding[] = [];
     for (const seat of request.seats) {
       if (present.has(seat)) continue;
       const agentId = peerAgentId(chair.metadata.projectKey, chair.metadata.runId, seat);
@@ -272,29 +274,52 @@ export async function provisionMcpPeerSeats(
       ) {
         throw new Error(`registered peer ${seat} has no live capability`);
       }
-      bindings.push({
+      registeredBindings.push({
         seat,
         agentId,
         expectedPrincipalGeneration: capability.principal_generation,
       });
     }
-    return await bindProvisionedSeatRoster({
-      project: chair.metadata.projectPath,
-      projectSessionId: chair.metadata.projectSessionId,
-      sessionRevision: chair.metadata.sessionRevision,
-      sessionGeneration: chair.metadata.sessionGeneration,
-      runId: chair.metadata.runId,
-      runRevision: chair.metadata.runRevision,
-      chairSeat: chair.metadata.seat,
-      chairAgentId: chair.metadata.chairAgentId,
-      chairGeneration: chair.metadata.chairGeneration,
-      chairLeaseId: chair.metadata.chairLeaseId,
-      bindings: bindings.sort((left, right) => left.seat.localeCompare(right.seat)),
-      expiresAt,
-    }, paths);
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const latestRoster = await installedRoster(paths, chair.metadata.projectPath);
+      const bindings = new Map<McpSeat, ParsedSeatBinding>();
+      for (const { metadata } of latestRoster) {
+        bindings.set(metadata.seat, {
+          seat: metadata.seat,
+          agentId: metadata.agentId,
+          expectedPrincipalGeneration: metadata.principalGeneration,
+        });
+      }
+      for (const binding of registeredBindings) bindings.set(binding.seat, binding);
+      try {
+        return await bindProvisionedSeatRoster({
+          project: chair.metadata.projectPath,
+          projectSessionId: chair.metadata.projectSessionId,
+          sessionRevision: chair.metadata.sessionRevision,
+          sessionGeneration: chair.metadata.sessionGeneration,
+          runId: chair.metadata.runId,
+          runRevision: chair.metadata.runRevision,
+          chairSeat: chair.metadata.seat,
+          chairAgentId: chair.metadata.chairAgentId,
+          chairGeneration: chair.metadata.chairGeneration,
+          chairLeaseId: chair.metadata.chairLeaseId,
+          bindings: [...bindings.values()].sort((left, right) => left.seat.localeCompare(right.seat)),
+          expiresAt,
+        }, paths);
+      } catch (error: unknown) {
+        if (attempt === 2 || !rosterCasChanged(error)) throw error;
+      }
+    }
+    throw new Error("MCP peer roster retry exhausted");
   } finally {
-    database.close();
-    await client.close();
-    daemonHandle.release();
+    try {
+      database?.close();
+    } finally {
+      try {
+        await client?.close();
+      } finally {
+        daemonHandle.release();
+      }
+    }
   }
 }

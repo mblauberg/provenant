@@ -1,9 +1,21 @@
 import { describe, expect, it, vi } from "vitest";
 
 import type { FabricClient } from "../../src/core/fabric.ts";
-import { dispatchClientMethod } from "../../src/daemon/protocol.ts";
+import { bootstrapMcpSeatInput, dispatchClientMethod } from "../../src/daemon/protocol.ts";
 
 describe("daemon provider action protocol", () => {
+  it("names an exact shell-safe peer-provision remedy for optional bootstrap seats", () => {
+    expect(() => bootstrapMcpSeatInput({
+      canonicalRoot: "/tmp/project root's",
+      trustRecordDigest: `sha256:${"a".repeat(64)}`,
+      seat: "agy",
+      expiresAt: "2026-07-19T00:00:00.000Z",
+    })).toThrow(
+      `"$HOME/.agents/scripts/agent-fabric" mcp peer-provision ` +
+      `--project '/tmp/project root'"'"'s' --seat agy`,
+    );
+  });
+
   it.each([
     ["adapter", { adapterId: "fake\0lifecycle", actionId: "provider-action:spawn", operation: "spawn", taskId: "task-1", authorityId: "authority-1" }],
     ["action", { adapterId: "fake-lifecycle", actionId: "provider-action\0steer", operation: "steer" }],

@@ -435,6 +435,20 @@ describe("zero-state MCP bootstrap", () => {
         agentId: agyAgentId,
         authorityId: delegated.authorityId,
       });
+      const cursorAgentId = `cursor_bootstrap_peer_${"f".repeat(16)}`;
+      const cursorAuthority = {
+        ...JSON.parse(chairAuthority.authority_json),
+        expiresAt: roster.expiresAt,
+      };
+      const delegatedCursor = fabric.delegateAuthority(roster.runId, roster.chairAgentId, {
+        parentAuthorityId: chairAuthority.authority_id,
+        authority: cursorAuthority,
+        commandId: "peer-seat:test:cursor",
+      });
+      fabric.registerAgent(roster.runId, roster.chairAgentId, {
+        agentId: cursorAgentId,
+        authorityId: delegatedCursor.authorityId,
+      });
       const bindings = [
         ...roster.credentials.map(({ seat, agentId, expectedPrincipalGeneration }) => ({
           seat,
@@ -442,6 +456,7 @@ describe("zero-state MCP bootstrap", () => {
           expectedPrincipalGeneration,
         })),
         { seat: "agy", agentId: agyAgentId, expectedPrincipalGeneration: 1 },
+        { seat: "cursor", agentId: cursorAgentId, expectedPrincipalGeneration: 1 },
       ].sort((left, right) => left.seat.localeCompare(right.seat));
       const provisionedIdentity = currentMcpSeatGeneration({
         canonicalRoot: root,
@@ -471,7 +486,7 @@ describe("zero-state MCP bootstrap", () => {
         expiresAt: roster.expiresAt,
         bindings,
       });
-      expect(provisioned.credentials.map(({ seat }) => seat)).toEqual(["agy", "claude", "codex"]);
+      expect(provisioned.credentials.map(({ seat }) => seat)).toEqual(["agy", "claude", "codex", "cursor"]);
 
       now = Date.parse("2026-07-18T23:30:00.000Z");
       const renewed = fabric.bootstrapCurrentMcpSeat({
@@ -482,6 +497,11 @@ describe("zero-state MCP bootstrap", () => {
 
       expect(renewed.credentials.map(({ seat }) => seat)).toEqual(["agy", "claude", "codex"]);
       expect(renewed.expectedPreviousGeneration).toBe(provisioned.generation);
+      expect(renewed.droppedSeats).toEqual([{
+        seat: "cursor",
+        agentId: cursorAgentId,
+        reason: "AUTHORITY_EXPIRES_BEFORE_RENEWAL",
+      }]);
 
       const revoke = new Database(databasePath);
       try {

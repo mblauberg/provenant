@@ -65,6 +65,7 @@ function canonicalJson(value: unknown): string {
 
 function sha256(value: string): string { return createHash("sha256").update(value).digest("hex"); }
 function sha256Digest(value: string): string { return "sha256:" + sha256(value); }
+function shellQuote(value: string): string { return `'${value.replaceAll("'", `'"'"'`)}'`; }
 function capabilityToken(key: string, runId: string, agentId: string, generation: number): string {
   return "afc_" + createHmac("sha256", key).update(canonicalJson({ runId, agentId, principalGeneration: generation })).digest("base64url");
 }
@@ -80,8 +81,9 @@ export function bootstrapCurrentMcpSeat(custody: BootstrapMcpCustody, input: Boo
     if (input.seat !== "claude" && input.seat !== "codex") {
       throw new FabricError(
         "AUTHENTICATION_FAILED",
-        `bootstrap creates only chair seats claude or codex; run agent-fabric mcp peer-provision ` +
-        `--project ${input.canonicalRoot} --seat ${input.seat} instead`,
+        `bootstrap creates only chair seats claude or codex; run ` +
+        `"$HOME/.agents/scripts/agent-fabric" mcp peer-provision ` +
+        `--project ${shellQuote(input.canonicalRoot)} --seat ${input.seat} instead`,
       );
     }
     const requestedExpiry = Date.parse(input.expiresAt);
@@ -335,6 +337,9 @@ export function bootstrapCurrentMcpSeat(custody: BootstrapMcpCustody, input: Boo
         );
       }
 
+      const expiresAt = isRow(active) && !activeGenerationNeedsRenewal
+        ? new Date(numberField(active, "expires_at")).toISOString()
+        : input.expiresAt;
       const candidates = custody.database.prepare(`
         WITH candidates(seat,agentId,expectedPrincipalGeneration,priority) AS (
           SELECT member.seat,member.agent_id,member.principal_generation,1
@@ -365,7 +370,8 @@ export function bootstrapCurrentMcpSeat(custody: BootstrapMcpCustody, input: Boo
       const droppedSeats: NonNullable<BootstrapMcpSeatResult["droppedSeats"]> = [];
       for (const candidate of candidates) {
         const live = custody.database.prepare(`
-          SELECT agent.lifecycle,MAX(capability.principal_generation) AS principal_generation
+          SELECT agent.lifecycle,authority.authority_json,
+                 MAX(capability.principal_generation) AS principal_generation
             FROM agents agent
             JOIN authorities authority ON authority.authority_id=agent.authority_id
             JOIN capabilities capability
@@ -394,11 +400,16 @@ export function bootstrapCurrentMcpSeat(custody: BootstrapMcpCustody, input: Boo
           });
           continue;
         }
+        if (authorityExpiry(stringField(live, "authority_json")) < Date.parse(expiresAt)) {
+          droppedSeats.push({
+            seat: candidate.seat,
+            agentId: candidate.agentId,
+            reason: "AUTHORITY_EXPIRES_BEFORE_RENEWAL",
+          });
+          continue;
+        }
         bindings.push(candidate);
       }
-      const expiresAt = isRow(active) && !activeGenerationNeedsRenewal
-        ? new Date(numberField(active, "expires_at")).toISOString()
-        : input.expiresAt;
       const expectedPreviousGeneration = isRow(active) ? stringField(active, "generation") : null;
       const generationIdentity = currentMcpSeatGeneration({
         canonicalRoot,

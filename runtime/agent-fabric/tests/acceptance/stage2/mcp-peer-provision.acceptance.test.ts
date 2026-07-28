@@ -88,6 +88,22 @@ async function cli(
   });
 }
 
+async function cliFailure(value: Fixture, arguments_: string[]): Promise<{ stdout: string; stderr: string }> {
+  try {
+    await cli(value, arguments_);
+  } catch (error: unknown) {
+    if (
+      typeof error === "object" && error !== null &&
+      "stdout" in error && typeof error.stdout === "string" &&
+      "stderr" in error && typeof error.stderr === "string"
+    ) {
+      return { stdout: error.stdout, stderr: error.stderr };
+    }
+    throw error;
+  }
+  throw new Error("expected CLI command to fail");
+}
+
 async function trackCurrentDaemon(value: Fixture): Promise<number> {
   const receipt = JSON.parse(
     await readFile(join(value.runtimeDirectory, "fabric-v1.discovery.json"), "utf8"),
@@ -162,5 +178,67 @@ describe("MCP peer provisioning from a fresh project", () => {
     };
     expect(renewal.credentials.map(({ seat }) => seat)).toEqual(["agy", "codex"]);
     expect(renewalResult.stdout).not.toMatch(/af[bc]_[A-Za-z0-9_-]{43}/u);
+  });
+
+  it("converges concurrent optional seat additions without silently dropping either seat", async () => {
+    const value = await fixture();
+    await cli(value, ["workspace", "trust", value.project]);
+    await cli(value, ["bootstrap", "--seat", "codex"]);
+    const bootstrapPid = await trackCurrentDaemon(value);
+    await terminateTrackedTestProcess(bootstrapPid);
+    daemonPids.delete(bootstrapPid);
+
+    const attempts = await Promise.allSettled([
+      cli(value, ["mcp", "peer-provision", "--project", value.project, "--seat", "agy"]),
+      cli(value, ["mcp", "peer-provision", "--project", value.project, "--seat", "cursor"]),
+    ]);
+    for (const attempt of attempts) {
+      const output = attempt.status === "fulfilled"
+        ? attempt.value.stdout + attempt.value.stderr
+        : String(attempt.reason);
+      expect(output).not.toMatch(/af[bc]_[A-Za-z0-9_-]{43}/u);
+    }
+    await cli(value, ["mcp", "peer-provision", "--project", value.project, "--seat", "agy"]);
+    await cli(value, ["mcp", "peer-provision", "--project", value.project, "--seat", "cursor"]);
+    await trackCurrentDaemon(value);
+
+    const database = new Database(value.databasePath, { readonly: true, fileMustExist: true });
+    try {
+      const members = database.prepare(`
+        SELECT member.seat
+          FROM mcp_active_seat_generations active
+          JOIN mcp_seat_generation_members member ON member.generation=active.generation
+         ORDER BY member.seat
+      `).all() as Array<{ seat: string }>;
+      expect(members.map(({ seat }) => seat)).toEqual(["agy", "codex", "cursor"]);
+    } finally {
+      database.close();
+    }
+  });
+
+  it("keeps chair-seat and revoked-lease failures on their real enforcement paths", async () => {
+    const value = await fixture();
+    await cli(value, ["workspace", "trust", value.project]);
+    await cli(value, ["bootstrap", "--seat", "codex"]);
+    await trackCurrentDaemon(value);
+
+    const chairFailure = await cliFailure(value, [
+      "mcp", "peer-provision", "--project", value.project, "--seat", "codex",
+    ]);
+    expect(chairFailure.stderr).toMatch(/refuses to provision the active chair seat codex/u);
+    expect(chairFailure.stdout + chairFailure.stderr).not.toMatch(/af[bc]_[A-Za-z0-9_-]{43}/u);
+
+    const database = new Database(value.databasePath);
+    try {
+      database.prepare("UPDATE run_chair_leases SET status='revoked' WHERE status='active'").run();
+    } finally {
+      database.close();
+    }
+    const leaseFailure = await cliFailure(value, [
+      "mcp", "peer-provision", "--project", value.project, "--seat", "agy",
+    ]);
+    expect(leaseFailure.stderr).toMatch(/active operator-launched run|chair lease/iu);
+    expect(leaseFailure.stderr).not.toMatch(/authori[sz]ation step/iu);
+    expect(leaseFailure.stdout + leaseFailure.stderr).not.toMatch(/af[bc]_[A-Za-z0-9_-]{43}/u);
   });
 });

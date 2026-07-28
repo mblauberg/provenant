@@ -409,7 +409,11 @@ export class FabricDaemonClient {
           isRecord(seat) &&
           typeof seat.seat === "string" &&
           typeof seat.agentId === "string" &&
-          (seat.reason === "AGENT_NOT_LIVE" || seat.reason === "STALE_PRINCIPAL_GENERATION")
+          (
+            seat.reason === "AGENT_NOT_LIVE" ||
+            seat.reason === "STALE_PRINCIPAL_GENERATION" ||
+            seat.reason === "AUTHORITY_EXPIRES_BEFORE_RENEWAL"
+          )
         )
       ))
     ) throw new Error("daemon returned an invalid MCP bootstrap result");
