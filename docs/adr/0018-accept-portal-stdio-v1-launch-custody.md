@@ -89,10 +89,13 @@ Custody today is what the Rust crate proves, and that is not nothing:
   (`src/lib.rs:346`) enumerates `/dev/fd` and fails when any descriptor above
   standard error is open, evidenced by
   `tests/portal_relay.rs:574`.
-- the private control descriptor is supervisor-only.
-  `mark_control_fd_cloexec` (`src/lib.rs:403`) sets and verifies `FD_CLOEXEC`
-  on `CONTROL_FD = 3` (`src/lib.rs:20`) before any child exec, evidenced by
-  `tests/control_fd.rs:30`.
+- `mark_control_fd_cloexec` (`src/lib.rs:403`) sets and verifies `FD_CLOEXEC`
+  on `CONTROL_FD = 3` (`src/lib.rs:20`), evidenced by `tests/control_fd.rs:30`.
+  It is a library routine with no production caller: `portal-stdio-v1` refuses
+  every descriptor above standard error, so no control descriptor reaches the
+  running helper, and the crate never forks or execs a child that could
+  inherit one. It is recorded here as available, not as shipped launch
+  contract.
 - peer identity is proved from the kernel, not claimed on the wire.
   `observe_peer` (`src/lib.rs:1161`) reads local peer credentials — on Darwin
   `LOCAL_PEERPID` and `LOCAL_PEERTOKEN` (`src/lib.rs:2168`–`2177`) — and binds
