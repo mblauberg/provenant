@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { chmod, lstat, mkdir, mkdtemp, readFile, realpath, rename, rm, symlink } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -213,6 +213,98 @@ describe("machine-local workspace trust", () => {
 
     await expect(runWorkspaceTrust(["trust", value.workspace], value.paths))
       .rejects.toThrow(/ancestor broadening/u);
+  });
+
+  async function driftRecordedDevice(paths: { stateDirectory: string }, canonicalPath: string): Promise<number> {
+    const registryPath = join(paths.stateDirectory, "trusted-workspaces.json");
+    const registry = JSON.parse(await readFile(registryPath, "utf8")) as {
+      entries: { canonicalPath: string; device: number }[];
+    };
+    const entry = registry.entries.find((item) => item.canonicalPath === canonicalPath);
+    if (entry === undefined) throw new Error("expected a record to drift");
+    const stale = entry.device + 3;
+    entry.device = stale;
+    await writeFile(registryPath, `${JSON.stringify(registry, null, 2)}\n`);
+    return stale;
+  }
+
+  it("honours a record whose device drifted while its inode still matches", async () => {
+    const value = await fixture();
+    await runWorkspaceTrust(["trust", value.workspace], value.paths);
+    const canonicalPath = await realpath(value.workspace);
+    await driftRecordedDevice(value.paths, canonicalPath);
+
+    await expect(runWorkspaceTrust(["inspect", value.workspace], value.paths))
+      .resolves.toMatchObject({ trusted: true });
+    await expect(trustedWorkspaceRoots({ stateDirectory: value.paths.stateDirectory }))
+      .resolves.toContain(canonicalPath);
+    await expect(trustedWorkspaceIdentity({
+      stateDirectory: value.paths.stateDirectory,
+      canonicalRoot: value.workspace,
+    })).resolves.toMatchObject({ canonicalRoot: canonicalPath });
+  });
+
+  it("heals a drifted device on retrust instead of refusing it as ancestor broadening", async () => {
+    const value = await fixture();
+    await runWorkspaceTrust(["trust", value.workspace], value.paths);
+    const nested = join(value.workspace, "nested");
+    await mkdir(nested);
+    await runWorkspaceTrust(["trust", nested], value.paths);
+    const canonicalPath = await realpath(value.workspace);
+    const stale = await driftRecordedDevice(value.paths, canonicalPath);
+    const live = (await lstat(canonicalPath)).dev;
+
+    const result = await runWorkspaceTrust(["trust", value.workspace], value.paths) as {
+      entry: { device: number };
+    };
+    expect(result.entry.device).toBe(live);
+    expect(result.entry.device).not.toBe(stale);
+  });
+
+  it("still refuses a root whose inode changed, which a device drift must not mask", async () => {
+    const value = await fixture();
+    await runWorkspaceTrust(["trust", value.workspace], value.paths);
+    const canonicalPath = await realpath(value.workspace);
+    await rename(value.workspace, join(value.root, "workspace-original"));
+    await mkdir(value.workspace);
+
+    await expect(runWorkspaceTrust(["inspect", value.workspace], value.paths))
+      .resolves.toMatchObject({ trusted: false });
+    await expect(trustedWorkspaceRoots({ stateDirectory: value.paths.stateDirectory }))
+      .resolves.not.toContain(canonicalPath);
+  });
+
+  it("revokes a record whose directory has been removed", async () => {
+    const value = await fixture();
+    const nested = join(value.workspace, "nested");
+    await mkdir(nested);
+    await runWorkspaceTrust(["trust", nested], value.paths);
+    const canonicalNested = await realpath(nested);
+    await rm(nested, { recursive: true });
+
+    await expect(runWorkspaceTrust(["revoke", nested], value.paths))
+      .resolves.toMatchObject({ revoked: true, canonicalPath: canonicalNested });
+    await expect(runWorkspaceTrust(["list"], value.paths))
+      .resolves.toMatchObject({ entries: [] });
+  });
+
+  it("reports per-entry liveness from list so a dead record is visible", async () => {
+    const value = await fixture();
+    const nested = join(value.workspace, "nested");
+    await mkdir(nested);
+    await runWorkspaceTrust(["trust", value.workspace], value.paths);
+    await runWorkspaceTrust(["trust", nested], value.paths);
+    const canonicalNested = await realpath(nested);
+    await rm(nested, { recursive: true });
+
+    const listed = await runWorkspaceTrust(["list"], value.paths) as {
+      entries: { canonicalPath: string; trusted: boolean; identity: string }[];
+    };
+    const dead = listed.entries.find((entry) => entry.canonicalPath === canonicalNested);
+    expect(dead).toMatchObject({ trusted: false, identity: "mismatch" });
+    const canonicalWorkspacePath = await realpath(value.workspace);
+    const live = listed.entries.find((entry) => entry.canonicalPath === canonicalWorkspacePath);
+    expect(live).toMatchObject({ trusted: true, identity: "match" });
   });
 
   it("applies explicit profile and expiry changes to an already trusted exact root", async () => {
