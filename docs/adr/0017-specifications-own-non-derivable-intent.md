@@ -1,9 +1,9 @@
 # ADR 0017 — Specifications own non-derivable intent only
 
-**Status:** Proposed 2026-07-28 (amends [ADR
+**Status:** Accepted 2026-07-28 (user); amends [ADR
 0009](0009-standalone-semantic-specifications.md); applies [ADR
 0011](0011-github-owns-work-state.md) and [ADR
-0004](0004-per-domain-truth-owners.md))
+0004](0004-per-domain-truth-owners.md)
 
 ## Context
 
@@ -63,9 +63,9 @@ Concretely:
   requirements, ordering and concurrency constraints, digest preimage
   definitions, intended failure semantics, security boundaries and explicit
   requirement matrices.
-- Test fixtures execute the schema authority. A fixture that needs the schema
-  loads `0001-current-baseline.sql` or inspects the catalogue it produces; no
-  fixture parses SQL out of prose.
+- Any structure a specification does still restate is gated against its owner.
+  `scripts/check_spec_schema_drift.py` compares specification DDL to the
+  migration and ratchets, so a second copy that survives cannot silently diverge.
 - A requirement that is normative but unimplemented is an open GitHub issue, not
   a present-tense sentence in a specification.
 - `docs/invariants/agent-fabric.md` is the retention pattern: a durable claim, the
@@ -73,29 +73,37 @@ Concretely:
 
 ## Consequences
 
-The corpus loses roughly a quarter of its lines and the entire class of drift
-between prose schema and shipped schema, because the duplicate is removed rather
-than policed. A grep-based drift gate was considered and rejected: it would catch
-missing identifiers but not wrong modality, inverted conditionals or false
-current-state claims, and it would institutionalise maintaining the very lines
-that should not exist.
+The corpus loses the class of drift between prose schema and shipped schema,
+because the duplicate is removed where it is pure restatement and gated where it
+survives.
 
 Readers lose the convenience of a prose tour of the schema sitting beside its
 narrative, and must open the migration or the generated catalogue for concrete
 tables, columns and indexes. That cost is accepted because those artefacts are
 already the only authoritative ones.
 
-The fixtures become stricter than they were. Executing the real baseline enforces
-types and `CHECK` constraints the pseudo-DDL omitted, so assertions that passed
-against a permissive transcription may now fail. Each such failure is a defect the
-previous arrangement concealed.
+The behavioural fixtures are deliberately **not** repointed at the migration.
+Investigation found they are a semantic re-modelling rather than a failed copy:
+they use a different timestamp representation, define fixture-local alias
+relations, and build reduced support schemas around the objects under test.
+Replaying their inserts against the baseline fails at 98%, and two negative
+assertions were shown to pass against the baseline for the wrong reason, on an
+unrelated foreign key. Repointing them would destroy a working oracle and
+manufacture false confidence rather than remove it. The drift gate gives the
+protection the repoint was meant to give, without that cost.
+
+Deleting a restatement therefore requires knowing that it *is* one. Identifier
+absence alone does not establish that a specification describes something
+unbuilt, because this codebase has renamed objects without renaming their
+specifications: of 34 triggers the specifications name, 5 match exactly, 18 exist
+under another name, and 11 are genuinely absent. Removal needs rename-aware
+evidence, and a stale name is corrected rather than deleted.
 
 ADR 0009 is amended, not superseded. Its decision on semantic paths, independent
-subject files, line limits and Git-owned integrity stands unchanged. Only its
-closing consequence — that behavioural fixtures read their owning specifications
-or a test-only set of owners — no longer describes the schema fixtures, which now
-read the migration. Fixtures asserting non-schema normative text continue to read
-their owning specification.
+subject files, line limits and Git-owned integrity stands unchanged, as does its
+consequence that behavioural fixtures read their owning specifications. This ADR
+narrows what those specifications may contain; it does not move where the
+fixtures read from.
 
 ADR 0011 is unchanged and unsuperseded. Removing delivery narration from
 specifications is compliance with it rather than a new decision.
