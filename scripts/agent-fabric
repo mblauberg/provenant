@@ -43,8 +43,8 @@ tsx_loader_library="$script_dir/lib/agent-fabric-tsx-loader.sh"
 }
 . "$tsx_loader_library"
 
-tsx_loader=$(resolve_tsx_loader "$agents_home") || {
-  echo "agent-fabric found no tsx/dist/loader.mjs under \"$agents_home\" or any ancestor" >&2
+tsx_loader=$(resolve_tsx_loader "$package_root" "$agents_home") || {
+  echo "agent-fabric found no tsx package for \"$package_root\" within \"$(resolve_tsx_loader_boundary "$agents_home")\"" >&2
   echo "repair: run 'npm ci' in the repository root that owns this workspace" >&2
   exit 1
 }

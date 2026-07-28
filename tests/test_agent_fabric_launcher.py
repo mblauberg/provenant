@@ -86,7 +86,11 @@ def _fixture(
     protocol_output = root / "runtime/agent-fabric-protocol/dist/index.js"
     _write(fabric_source)
     _write(protocol_source)
+    # A real install carries the package manifest beside the loader, and
+    # resolution checks it: the loader path is executed, so a bare file of the
+    # right name is not evidence that it is really tsx.
     _write(root / "node_modules/tsx/dist/loader.mjs")
+    _write(root / "node_modules/tsx/package.json", '{"name":"tsx","version":"4.0.0"}\n')
     now = 1_700_000_000
     for manifest, content in {
         "package.json": '{"type":"module"}\n',
@@ -1969,32 +1973,55 @@ def test_protocol_preflight_reports_a_partial_install_as_typed_and_repairable(
     assert "scripts/lib" in result.stderr
 
 
-def _resolve_tsx_loader(start: Path) -> subprocess.CompletedProcess[str]:
+def _resolve_tsx_loader(
+    start: Path, workspace: Path | None = None
+) -> subprocess.CompletedProcess[str]:
+    call = f'resolve_tsx_loader "{start}"'
+    if workspace is not None:
+        call = f'resolve_tsx_loader "{start}" "{workspace}"'
     return subprocess.run(
-        [
-            "sh",
-            "-c",
-            f'. "{TSX_LOADER_LIBRARY}"; resolve_tsx_loader "{start}"',
-        ],
+        ["sh", "-c", f'. "{TSX_LOADER_LIBRARY}"; {call}'],
         text=True,
         capture_output=True,
         check=False,
     )
 
 
-def test_tsx_loader_resolves_from_an_ancestor_node_modules(tmp_path: Path) -> None:
+def _install_tsx(root: Path, *, name: str = "tsx") -> Path:
+    """Create a node_modules/tsx that satisfies the package identity check.
+
+    The loader path is handed straight to `node --import`, so a bare file of
+    the right name is not enough to prove it is really tsx.
+    """
+    package = root / "node_modules/tsx"
+    (package / "dist").mkdir(parents=True, exist_ok=True)
+    (package / "package.json").write_text(
+        f'{{"name": "{name}", "version": "4.0.0"}}\n', encoding="utf-8"
+    )
+    loader = package / "dist/loader.mjs"
+    loader.write_text("", encoding="utf-8")
+    return loader
+
+
+def _git_repository(root: Path) -> None:
+    root.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        ["git", "init", "--quiet"], cwd=root, check=True, capture_output=True
+    )
+
+
+def test_tsx_loader_resolves_from_the_owning_repository(tmp_path: Path) -> None:
     """A linked git worktree has no node_modules of its own.
 
     npm hoists workspace dependencies to the repository root, so resolution
-    must walk towards the filesystem root the way Node resolves a bare
-    specifier. Assuming node_modules sits directly beneath AGENTS_HOME broke
-    every worktree whose TypeScript was newer than its build, because only
-    then does the launcher take the source-tree fallback.
+    must look above the worktree. Assuming node_modules sits directly beneath
+    AGENTS_HOME broke every worktree whose TypeScript was newer than its build,
+    because only then does the launcher take the source-tree fallback.
     """
-    loader = tmp_path / "node_modules/tsx/dist/loader.mjs"
-    loader.parent.mkdir(parents=True)
-    loader.write_text("", encoding="utf-8")
-    worktree = tmp_path / ".worktrees/impl-example"
+    repository = tmp_path / "repo"
+    _git_repository(repository)
+    loader = _install_tsx(repository)
+    worktree = repository / ".worktrees/impl-example"
     worktree.mkdir(parents=True)
 
     result = _resolve_tsx_loader(worktree)
@@ -2003,16 +2030,73 @@ def test_tsx_loader_resolves_from_an_ancestor_node_modules(tmp_path: Path) -> No
     assert result.stdout.strip() == str(loader)
 
 
+def test_tsx_loader_prefers_the_declaring_package(tmp_path: Path) -> None:
+    """Resolution starts at the package that declares the dependency.
+
+    The previous implementation began at AGENTS_HOME and so never looked in
+    runtime/agent-fabric/node_modules, skipping the package's own tsx in
+    favour of whatever an ancestor happened to hold.
+    """
+    repository = tmp_path / "repo"
+    _git_repository(repository)
+    hoisted = _install_tsx(repository)
+    package_root = repository / "runtime/agent-fabric"
+    package_root.mkdir(parents=True)
+    own = _install_tsx(package_root)
+
+    result = _resolve_tsx_loader(package_root, repository)
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == str(own)
+    assert result.stdout.strip() != str(hoisted)
+
+
+def test_tsx_loader_refuses_a_loader_above_the_owning_repository(
+    tmp_path: Path,
+) -> None:
+    """The resolved path is executed, so the walk must be bounded.
+
+    An unbounded walk towards / will run a loader.mjs planted in $HOME or any
+    intermediate directory. That contradicts the workspace trust doctrine,
+    which refuses filesystem-root and home-wide authority.
+    """
+    planted = _install_tsx(tmp_path)
+    repository = tmp_path / "repo"
+    _git_repository(repository)
+    worktree = repository / ".worktrees/impl-example"
+    worktree.mkdir(parents=True)
+
+    result = _resolve_tsx_loader(worktree)
+
+    assert result.returncode == 1
+    assert result.stdout.strip() == ""
+    assert str(planted) not in result.stdout
+
+
+def test_tsx_loader_rejects_a_loader_that_is_not_the_tsx_package(
+    tmp_path: Path,
+) -> None:
+    """Any file named loader.mjs used to satisfy the probe."""
+    repository = tmp_path / "repo"
+    _git_repository(repository)
+    _install_tsx(repository, name="not-tsx")
+
+    result = _resolve_tsx_loader(repository)
+
+    assert result.returncode == 1
+    assert result.stdout.strip() == ""
+
+
 def test_tsx_loader_ignores_a_node_modules_holding_no_packages(tmp_path: Path) -> None:
     """Vitest leaves a .vite cache in the worktree it runs from.
 
     That directory satisfies a `[ -d node_modules ]` test while containing no
     packages, so the probe must test for the loader file itself.
     """
-    loader = tmp_path / "node_modules/tsx/dist/loader.mjs"
-    loader.parent.mkdir(parents=True)
-    loader.write_text("", encoding="utf-8")
-    worktree = tmp_path / ".worktrees/impl-example"
+    repository = tmp_path / "repo"
+    _git_repository(repository)
+    loader = _install_tsx(repository)
+    worktree = repository / ".worktrees/impl-example"
     (worktree / "node_modules/.vite").mkdir(parents=True)
 
     result = _resolve_tsx_loader(worktree)
@@ -2021,7 +2105,29 @@ def test_tsx_loader_ignores_a_node_modules_holding_no_packages(tmp_path: Path) -
     assert result.stdout.strip() == str(loader)
 
 
-def test_tsx_loader_fails_when_no_ancestor_provides_it(tmp_path: Path) -> None:
+def test_tsx_loader_resolves_through_a_symlinked_invocation(tmp_path: Path) -> None:
+    """Invoked through a symlinked alias, a lexical walk climbs the link path.
+
+    ~/.codex/skills/... is such an alias. Walking the lexical ancestry misses
+    the real tree entirely, so resolution must canonicalise first.
+    """
+    repository = tmp_path / "repo"
+    _git_repository(repository)
+    loader = _install_tsx(repository)
+    worktree = repository / ".worktrees/impl-example"
+    worktree.mkdir(parents=True)
+    alias = tmp_path / "alias"
+    alias.symlink_to(worktree)
+
+    result = _resolve_tsx_loader(alias)
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == str(loader)
+
+
+def test_tsx_loader_fails_when_nothing_inside_the_boundary_provides_it(
+    tmp_path: Path,
+) -> None:
     result = _resolve_tsx_loader(tmp_path)
 
     assert result.returncode == 1
