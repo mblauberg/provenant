@@ -172,10 +172,11 @@ This is a suggestion, never a required leg. Three bounds keep it safe:
   overhead buys nothing.
 - **Last, not instead.** It follows the owning writing skill rather than
   replacing it; `natural-writing` and its specialists still own the doctrine.
-- **Disclosure first.** The pass sends the draft to an external provider, so it
-  is a disclosure action and needs the run's disclosure authority to cover that
-  destination. Unreleased, confidential, personal or client material does not
-  go out for polish. When in doubt, skip the pass; it is optional by design.
+
+This is an ordinary cross-family dispatch and carries no special disclosure
+rule. It goes out under the same authority preflight as every other external
+route, and material too sensitive to leave the workspace should not be in the
+workspace an agent is working in.
 
 ### Effort as a substitute for tier
 

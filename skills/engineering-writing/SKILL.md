@@ -36,10 +36,9 @@ Australian English default, the anti-AI taxonomy and the condense pass. See
    [sources](references/sources.md) only for a specific problem. Load the hub
    anti-AI taxonomy and condense pass from the `natural-writing` skill
    alongside `engineer-voice.md` and `process.md` respectively.
-6. Optional, reader-facing prose only and within disclosure authority: consider
-   a final voice pass by the model under human-facing final polish in the
-   advisory model dossier. Never required; the chair owns substance, so diff
-   the return for changed facts.
+6. Optional, reader-facing prose only: consider a final voice pass by the model
+   under human-facing final polish in the advisory model dossier. Never
+   required; the chair owns substance, so diff the return for changed facts.
 
 Preserve technical meaning and evidence altitude. Distinguish observation from
 interpretation; attach numbers to comparatives. Verify every package, API,
