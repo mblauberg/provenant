@@ -72,12 +72,29 @@ and record it.
 
 ## Reaching Gemini
 
-`agy` reads files under `--add-dir` without extra permission. It cannot run
-shell commands or write files in headless mode — those need `command(...)` and
-`write_file(...)` allow-rules in `~/.gemini/antigravity-cli/settings.json`, and
-adding them is the operator's call. Generate any diff yourself and redirect the
-CLI's stdout rather than asking Gemini to write its own output. Never pass
-`--dangerously-skip-permissions`.
+Invoke it as `agy --add-dir DIR --model "Gemini 3.6 Flash (High)" -p PROMPT`.
+The model flag is `--model`, not `-m`, and the value is the display name shown
+by `agy models`. Never pass `--dangerously-skip-permissions`; `agy` prints that
+suggestion on every denial, and following it hands Gemini every tool at once.
+
+Headless mode cannot prompt, so it auto-denies anything not already allowed.
+The three tool families behave differently, and the differences were measured,
+not inferred:
+
+- **Reads work only through `--add-dir`.** A `read_file(...)` allow-rule with a
+  glob does not match; a read outside the added directories is denied even when
+  a `read_file(/some/prefix/**)` rule appears to cover it. Add the directory and
+  reads inside it just work. This is the mechanism to rely on.
+- **`write_file` matches exact literal paths only.** Globs never match, in
+  either the `/tmp` or the `/private/tmp` spelling. Allowing a write means
+  writing that one full path into `permissions.allow` before the run.
+- **`command(NAME)` matches the binary and admits any arguments.** `command(rg)`
+  permits `rg` with arbitrary flags. Rules of this shape are far broader than
+  they look — `command(sed)` includes `sed -i`, which writes files.
+
+The practical consequence: do not ask Gemini to write its own output file.
+Generate any diff yourself, pass the directory with `--add-dir`, and redirect
+the CLI's stdout to capture the review. That path needs no allow-rules at all.
 
 ## Changing this file
 
