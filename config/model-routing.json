@@ -11,7 +11,7 @@
     "anthropic": {
       "aliases": {
         "flagship": ["opus"],
-        "workhorse": ["sonnet", "opus"],
+        "workhorse": ["opus", "sonnet"],
         "scout": ["haiku"]
       },
       "role_overrides": {

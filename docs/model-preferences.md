@@ -25,14 +25,27 @@ preference that becomes a gate has stopped being a preference.
 affinity and fair spreading. Do not put version-bearing preferences there; they
 change too often and carry no room for the reason.
 
+One mechanical detail matters when editing this file. Where an alias in the
+catalogue lists several models, **the order is the resolution order**: the first
+is what an automated dispatch gets, and the rest stay admissible. So a
+preference written here only becomes the automatic default if the catalogue
+array is ordered to match. Change both together. A preference that contradicts
+the array is not a preference, it is a stale note.
+
 ## Current preferences
 
 **Token-heavy legwork goes to OpenAI.** Reading a lot to produce a report,
 exhaustive inventories, mechanical sweeps: these are cheaper there and Claude's
-budget is better spent on judgement. Prefer `gpt-5.6-luna` over `gpt-5.6-terra`
-for the bulk of it — fast enough, and cheaper per token. Raise the effort rather
-than the model when a leg turns out to be harder than it looked; `luna` at high
-or xhigh effort beats reaching for a flagship out of habit.
+budget is better spent on judgement. `gpt-5.6-terra` is the default workhorse
+and should stay it.
+
+The standing wish is `gpt-5.6-luna` **at xhigh effort** as a workhorse — cheap
+model, effort turned up, rather than a more expensive model at medium. That is
+not expressible yet: effort is fixed per task class, so ordering Luna ahead of
+Terra in the catalogue would buy Luna at *medium*, which is a downgrade rather
+than the trade intended. Until a task class can carry an effort range, ask for
+Luna and a raised effort explicitly when a leg suits it, and leave the default
+alone.
 
 **`gpt-5.6-sol` is the stronger OpenAI model, not the faster one.** Give it the
 slices that are genuinely hard. `luna` is for trivial and mechanical work.
