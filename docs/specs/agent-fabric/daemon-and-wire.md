@@ -975,9 +975,9 @@ Deterministic verification covers:
   target/evidence/finding identity; review-subject JCS golden/permutation/extra/omission/equality-copy fixtures fail
   every crossed nested bundle/profile field;
 - contract-bound Claude/Codex/Cursor/Agy exact server/tool/helper/broker sandbox canaries, peer credentials,
-  stopped-child persistence, exact provider-closure derivation/substitution negatives, supervisor-FD-3 isolation and
-  stub-FD-4– FD-7 closure, daemon/supervisor/startup/PID-reuse cleanup, empty list probes, denied extra methods/effects
-  and no cross-bundle portal read;
+  closed `portal-stdio-v1` argv/three-locator invocation rejection, inherited non-stdio descriptor refusal,
+  supervisor-FD-3 `CLOEXEC` isolation and bounded-LF-frame negatives, daemon/supervisor/startup/PID-reuse cleanup,
+  empty list probes, denied extra methods/effects and no cross-bundle portal read;
 - structural Python/TypeScript route-schema parity, post-router admission checks, process-tree kill, daemon-global pair
   single-flight, requested/ resolved adapter equality, cross-run conflict, different-adapter same-ID allowance, changed
   concurrent input and replay without router;
