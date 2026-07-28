@@ -16,7 +16,7 @@ function repositoryPath(relativePath: string): string {
 
 it.each([
   { taskClass: "mechanical", role: "worker", expectedAlias: "haiku" },
-  { taskClass: "legwork", role: "worker", expectedAlias: "sonnet" },
+  { taskClass: "legwork", role: "worker", expectedAlias: "opus" },
   { taskClass: "critical-review", role: "critical-review", expectedAlias: "opus" },
   { taskClass: "orchestration", role: "orchestrator", expectedAlias: "opus" },
 ])("derives the $taskClass Claude capability probe alias from the catalogue", async ({

@@ -224,6 +224,14 @@ function positiveInteger(value: unknown, field: string): number | undefined {
   return value;
 }
 
+function minimalWriteOfflineEnvironment(): Record<string, string> {
+  return {
+    PATH: process.env.PATH ?? "/usr/bin:/bin",
+    TMPDIR: process.env.TMPDIR ?? "/tmp",
+    ...(process.env.HOME === undefined ? {} : { HOME: process.env.HOME }),
+  };
+}
+
 export function claudeReadOnlyOptions(
   payload: Record<string, unknown>,
   resume?: string,
@@ -269,7 +277,6 @@ function claudeWorkspaceWriteOfflineOptions(
   payload: Record<string, unknown>,
   resume?: string,
   executable?: string,
-  environment?: Record<string, string>,
 ): Options {
   const projection = parseWorkspaceWriteOfflineProjection(payload);
   if (projection === undefined) {
@@ -286,7 +293,7 @@ function claudeWorkspaceWriteOfflineOptions(
     ...(effort === undefined ? {} : { effort }),
     ...(resume === undefined ? {} : { resume }),
     ...(executable === undefined ? {} : { pathToClaudeCodeExecutable: executable }),
-    ...(environment === undefined ? {} : { env: { ...process.env, ...environment } }),
+    env: minimalWriteOfflineEnvironment(),
     tools: [...WORKSPACE_WRITE_OFFLINE_TOOLS],
     permissionMode: "acceptEdits",
     sandbox: {
@@ -329,7 +336,7 @@ export function claudeProviderOptions(
 ): Options {
   return payload.executionProfile === undefined
     ? claudeReadOnlyOptions(payload, resume, executable, environment)
-    : claudeWorkspaceWriteOfflineOptions(payload, resume, executable, environment);
+    : claudeWorkspaceWriteOfflineOptions(payload, resume, executable);
 }
 
 function prompt(payload: Record<string, unknown>): string {
