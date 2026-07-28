@@ -217,7 +217,7 @@ export function codexThreadConfiguration(
   return configuration;
 }
 
-function codexTurnContainment(payload: Record<string, unknown>): Record<string, unknown> {
+export function codexTurnContainment(payload: Record<string, unknown>): Record<string, unknown> {
   const writeOffline = parseWorkspaceWriteOfflineProjection(payload);
   if (writeOffline === undefined) {
     return { sandboxPolicy: { type: "readOnly", networkAccess: false } };

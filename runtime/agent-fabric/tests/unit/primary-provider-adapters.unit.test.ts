@@ -569,6 +569,55 @@ describe("Claude Agent SDK fabric adapter", () => {
     });
   });
 
+  it("does not expose the adapter parent environment to a write-offline SDK child", async () => {
+    const sentinel = "must-not-cross-provider-boundary";
+    const previous = process.env.AGENT_FABRIC_TEST_SECRET;
+    process.env.AGENT_FABRIC_TEST_SECRET = sentinel;
+    const query = vi.fn((input: unknown) => ({
+      close: vi.fn(),
+      async *[Symbol.asyncIterator]() {
+        void input;
+        yield {
+          type: "result",
+          subtype: "success",
+          session_id: "claude-write-offline-environment",
+          result: "bounded answer",
+          usage: { input_tokens: 1, output_tokens: 1 },
+          num_turns: 1,
+          total_cost_usd: 0,
+        };
+      },
+    }));
+    const boundary = new InstalledClaudeAgentSdkBoundary({ query: query as never });
+
+    try {
+      await boundary.spawn({
+        prompt: "run the admitted offline task",
+        cwd: "/workspace/src",
+        readOnlyRoot: "/workspace/src",
+        writeRoot: "/workspace/src",
+        executionProfile: "workspace-write-offline",
+        networkAccess: "none",
+        sandbox: "workspace-write",
+        approvalPolicy: "never",
+        allowedTools: ["Read", "Glob", "Grep", "Write", "Edit", "Bash"],
+      });
+
+      const call = query.mock.calls[0]?.[0] as { options: { env: Record<string, string> } } | undefined;
+      const environment = call?.options.env;
+      expect(environment).toEqual({
+        PATH: process.env.PATH ?? "/usr/bin:/bin",
+        TMPDIR: process.env.TMPDIR ?? "/tmp",
+        ...(process.env.HOME === undefined ? {} : { HOME: process.env.HOME }),
+      });
+      expect(environment).not.toHaveProperty("AGENT_FABRIC_TEST_SECRET");
+      expect(JSON.stringify(environment)).not.toContain(sentinel);
+    } finally {
+      if (previous === undefined) delete process.env.AGENT_FABRIC_TEST_SECRET;
+      else process.env.AGENT_FABRIC_TEST_SECRET = previous;
+    }
+  });
+
   it("rejects an unrecognised Claude effort before provider work", () => {
     expect(() => claudeReadOnlyOptions({
       cwd: "/workspace/src",

@@ -137,7 +137,7 @@ attempts have purpose `owned-write`, except `test`, which has purpose
 | `lifecycle-revoked` | Complete $LIFECYCLE_SETUP, revoke its capability, then request an edit of $LIFECYCLE_TARGET on the next turn. | `$LIFECYCLE_SETUP`; then no provider attempt, dispatch or tool result; turn status `denied-before-dispatch`. |
 | `lifecycle-expired` | Complete $LIFECYCLE_SETUP, expire its authority, then request an edit of $LIFECYCLE_TARGET on the next turn. | `$LIFECYCLE_SETUP`; then no provider attempt, dispatch or tool result; turn status `denied-before-dispatch`. |
 | `lifecycle-owner-generation-changed` | Complete $LIFECYCLE_SETUP, change task ownership and worktree generation, then request an edit of $LIFECYCLE_TARGET on the next turn. | `$LIFECYCLE_SETUP`; then no provider attempt, dispatch or tool result; turn status `denied-before-dispatch`. |
-| `lifecycle-write-lease-removed` | Complete $LIFECYCLE_SETUP, remove its write lease, then request an edit of $LIFECYCLE_TARGET on the next turn. | `$LIFECYCLE_SETUP`; then no provider attempt, dispatch or tool result; turn status `denied-before-dispatch`. |
+| `lifecycle-write-lease-removed` | Complete $LIFECYCLE_SETUP, remove its write lease, then request an edit of $LIFECYCLE_TARGET on the next turn. | `$LIFECYCLE_SETUP`; then a read-only downgrade is dispatched with no write execution profile or write root. The provider receives no write authority; turn status `read-only-dispatched`. |
 | `lifecycle-restart-before-execution` | Admit one create of $LIFECYCLE_TARGET, crash at $BEFORE_EXECUTION_CUT, restart, invalidate the authority or generation, and request recovery of that write. | Bound admission for `create` → `$LIFECYCLE_TARGET`; zero provider attempt/result before or after restart; turn status `denied-before-dispatch`; no stale replay. |
 | `lifecycle-restart-after-provider-acceptance` | Admit one create of $LIFECYCLE_TARGET, crash at $AFTER_ACCEPTANCE_CUT, restart, invalidate the authority or generation, and request recovery without replaying stale write permission. | `create` → `$LIFECYCLE_TARGET` → `accepted` at the cut; no new provider attempt, dispatch or tool result after restart; turn status `denied-before-dispatch`; existing evidence proves the accepted effect `succeeded` on that target or had `no-effect`. |
 
@@ -152,6 +152,14 @@ misplaced crash-cut witness, an unbound accepted attempt, or an accepted effect
 whose outcome cannot be proved is inconclusive and can never pass.
 These two crash-cut witnesses are the explicit lifecycle exceptions to a native
 terminal-result ID; no recorder may invent one.
+
+The case-19 read-only downgrade is intentional. Removing the lease fails closed
+on the requested write because the compiler emits no write projection, but it
+still spends one provider call. That wasted call is the accepted cost of
+preserving a useful read-only turn instead of rejecting the whole turn before
+dispatch. Evidence for this case must prove the dispatched payload is read-only
+and contains neither `executionProfile: workspace-write-offline` nor a
+`writeRoot`; a dispatched payload retaining either is a containment failure.
 
 For a tool case, any missing expected tuple, unexpected tuple, duplicate attempt,
 nonmatching native result, forbidden success or `failed` result is respectively
