@@ -1,7 +1,7 @@
 import type Database from "better-sqlite3";
 
 import { ProjectFabricCoreError } from "../project-session/contracts.js";
-import { canonicalJson, sha256 } from "../project-session/store-support.js";
+import { canonicalJson, sha256 } from "../persistence/row-codec.js";
 import { touchProjectSessionMembershipRevision } from "../project-session/membership-store.js";
 import type { ResolvedControlTarget } from "./control-eligibility.js";
 import { cancelEffectFreeProjectSession } from "./effect-free-session-cancellation.js";

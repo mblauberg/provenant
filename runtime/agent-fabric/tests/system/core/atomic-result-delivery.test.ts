@@ -15,7 +15,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   AtomicDeliveryStore,
   resultDeliveryProviderActionBinding,
-  type AuthenticatedIntegrationContext,
+  type ResultDeliveryIntegrationContext,
 } from "../../../src/results/store.ts";
 import {
   chairContext,
@@ -100,7 +100,7 @@ function requestWithDeadline(responseDeadline: string): TaskRequest {
   } as TaskRequest;
 }
 
-const integrationContext: AuthenticatedIntegrationContext = {
+const integrationContext: ResultDeliveryIntegrationContext = {
   integrationId: "integration_provider",
   projectId: "project_01",
   projectSessionId: "session_01",

@@ -16,7 +16,7 @@ import type { LifecycleIntegrityReceiptAuthorityPort, LifecycleDigest } from "..
 import type { LifecycleReceiptRepository } from "../lifecycle/receipt-repository.js";
 import { recoverTerminalAuthorityReceipt } from "../lifecycle/terminal-receipt-authority.js";
 import { ProjectFabricCoreError } from "../project-session/contracts.js";
-import { canonicalJson, integer, isRow, row, sha256, text } from "../project-session/store-support.js";
+import { canonicalJson, integer, isRow, row, sha256, text } from "../persistence/row-codec.js";
 
 type LifecycleRecoveryIntent = Extract<OperatorActionIntent, { kind: "agent-lifecycle-recovery" }>;
 type LifecycleAbandonIntent = Extract<LifecycleRecoveryIntent, { path: "abandon" }>;

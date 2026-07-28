@@ -18,7 +18,7 @@ import {
   sha256,
   text,
   type Row,
-} from "./store-support.js";
+} from "../persistence/row-codec.js";
 import { assertProviderActionOwner } from "../application/provider-action-owner.js";
 import {
   exactRecord,

@@ -1,6 +1,6 @@
 import type Database from "better-sqlite3";
 
-import { integer, isRow, text } from "../project-session/store-support.js";
+import { integer, isRow, text } from "../persistence/row-codec.js";
 
 export type ResolvedControlTarget = {
   scopeKind: "task" | "subtree" | "run" | "session";

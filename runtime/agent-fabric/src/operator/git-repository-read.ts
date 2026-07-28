@@ -36,7 +36,7 @@ import type Database from "better-sqlite3";
 
 import { ArtifactRegistry } from "../artifacts/registry.js";
 import { ProjectFabricCoreError, type CoreServiceOptions } from "../project-session/contracts.js";
-import { canonicalJson, integer, isRow, row, text } from "../project-session/store-support.js";
+import { canonicalJson, integer, isRow, row, text } from "../persistence/row-codec.js";
 import type { AuthenticatedOperatorCredential, OperatorStore } from "./store.js";
 
 const MAX_GIT_OUTPUT_BYTES = 8 * 1024 * 1024;

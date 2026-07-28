@@ -24,12 +24,12 @@ import {
   sha256,
   text,
   type Row,
-} from "./store-support.js";
+} from "../persistence/row-codec.js";
 
 type Digest = Sha256Digest;
 
 // Shared with launch-custody.ts (and, via this module's imports, with
-// provider-agent-custody-recovery.ts); kept here rather than in store-support.ts because these
+// provider-agent-custody-recovery.ts); kept here rather than in row-codec.ts because these
 // helpers are specific to launch/provider-agent custody protocol validation, not generic row
 // access. launch-custody.ts imports them back from this module to avoid a duplicate definition.
 export const DIGEST = /^sha256:[0-9a-f]{64}$/u;

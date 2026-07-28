@@ -38,7 +38,7 @@ import {
   text,
   timestampToMillis,
   type Row,
-} from "../project-session/store-support.js";
+} from "../persistence/row-codec.js";
 
 export type DependencyEdge = Readonly<{ taskId: string; dependencyTaskId: string }>;
 

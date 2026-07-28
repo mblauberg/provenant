@@ -11,7 +11,7 @@ import {
   type ProviderActionOwnerRef,
   type ProviderActionOwner,
 } from "../../src/application/provider-action-owner.ts";
-import { canonicalJson, sha256 } from "../../src/project-session/store-support.ts";
+import { canonicalJson, sha256 } from "../../src/persistence/row-codec.ts";
 
 const databases: Database.Database[] = [];
 

@@ -1,5 +1,5 @@
 import type { CurrentMcpSeatBinding } from "./contracts.js";
-import { canonicalJson, sha256 } from "../project-session/store-support.js";
+import { canonicalJson, sha256 } from "../persistence/row-codec.js";
 
 export type CurrentMcpSeatGenerationIdentity = Readonly<{
   canonicalRoot: string;

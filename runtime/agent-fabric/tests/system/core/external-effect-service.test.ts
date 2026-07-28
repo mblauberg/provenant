@@ -18,7 +18,7 @@ import {
 } from "../../../src/operator/external-effect-service.ts";
 import type { OperatorEffectRequest } from "../../../src/operator/action-store.ts";
 import { createProductionOperatorActionPorts } from "../../../src/operator/production-action-ports.ts";
-import { canonicalJson, sha256 } from "../../../src/project-session/store-support.ts";
+import { canonicalJson, sha256 } from "../../../src/persistence/row-codec.ts";
 
 const databases: Database.Database[] = [];
 const digest = parseSha256Digest(`sha256:${"a".repeat(64)}`, "test.digest");

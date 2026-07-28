@@ -17,7 +17,7 @@ import {
   type CoreServiceOptions,
 } from "./contracts.js";
 import { touchProjectSessionMembershipRevision } from "./membership-store.js";
-import { canonicalJson, integer, isRow, row, sha256, text, type Row } from "./store-support.js";
+import { canonicalJson, integer, isRow, row, sha256, text, type Row } from "../persistence/row-codec.js";
 
 type WorkstreamStoreOptions = CoreServiceOptions & {
   commandJournal: CommandJournal;

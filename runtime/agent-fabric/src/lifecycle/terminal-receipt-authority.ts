@@ -1,5 +1,5 @@
 import { FabricError } from "../errors.js";
-import { canonicalJson, integer, row, text } from "../project-session/store-support.js";
+import { canonicalJson, integer, row, text } from "../persistence/row-codec.js";
 import type {
   LifecycleAuthenticatedScopeCheckpoint,
   LifecycleDigest,

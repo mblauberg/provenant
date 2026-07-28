@@ -1,6 +1,6 @@
 import type Database from "better-sqlite3";
 
-import { canonicalJson, integer, isRow, row, text } from "../project-session/store-support.js";
+import { canonicalJson, integer, isRow, row, text } from "../persistence/row-codec.js";
 import {
   custodyRef,
   lifecycleDigest,

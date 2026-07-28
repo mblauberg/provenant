@@ -2,7 +2,7 @@ import type Database from "better-sqlite3";
 
 import { ProjectFabricCoreError, type CoreServiceOptions } from "./contracts.js";
 import { membershipSourceDisposition } from "./membership-disposition.js";
-import { integer, isRow, row, text } from "./store-support.js";
+import { integer, isRow, row, text } from "../persistence/row-codec.js";
 
 export type AutomaticMembershipKind =
   | "task"

@@ -1,7 +1,7 @@
 import type Database from "better-sqlite3";
 
 import { ProjectFabricCoreError } from "./contracts.js";
-import { nullableText, row, text, type Row } from "./store-support.js";
+import { nullableText, row, text, type Row } from "../persistence/row-codec.js";
 
 export type SessionBridgeRetirement = Readonly<{
   projectSessionId: string;

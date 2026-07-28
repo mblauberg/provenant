@@ -9,7 +9,7 @@ import {
   isRow,
   row as rowOrNotFound,
   text as stringField,
-} from "../project-session/store-support.js";
+} from "../persistence/row-codec.js";
 import { isLifecycleCheckpoint } from "./checkpoint-policy.js";
 import type { LifecycleCheckpoint } from "../core/contracts.js";
 import { type LifecycleRotationRepository } from "./rotation-repository.js";

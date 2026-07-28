@@ -38,7 +38,7 @@ import {
   type AuthenticatedOperatorContext,
   type CoreServiceOptions,
 } from "./contracts.js";
-import { canonicalJson, integer, nullableText, row, sha256, text, type Row } from "./store-support.js";
+import { canonicalJson, integer, nullableText, row, sha256, text, type Row } from "../persistence/row-codec.js";
 
 const RUN_COUPLED_SESSION_STATES = new Set<ProjectSessionState>([
   "active",

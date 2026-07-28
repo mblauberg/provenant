@@ -8,7 +8,7 @@ import type {
 } from "@local/agent-fabric-protocol";
 import type Database from "better-sqlite3";
 
-import { isRow, row, type Row } from "../project-session/store-support.js";
+import { isRow, row, type Row } from "../persistence/row-codec.js";
 import {
   activityItems,
   activityNarrativeGroups,

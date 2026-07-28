@@ -14,7 +14,7 @@ import {
   text,
   timestampToMillis,
   type Row,
-} from "../project-session/store-support.js";
+} from "../persistence/row-codec.js";
 
 export type AttentionProducerContext = Readonly<{
   producerId: string;

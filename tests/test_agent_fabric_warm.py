@@ -10,8 +10,9 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 WARM_SCRIPT = REPO_ROOT / "scripts" / "agent-fabric-warm"
-FRESHNESS_LIBRARY = REPO_ROOT / "scripts" / "lib" / "agent-fabric-workspace-freshness.sh"
-BUILD_LOCK_LIBRARY = REPO_ROOT / "scripts" / "lib" / "agent-fabric-protocol-build-lock.sh"
+SCRIPT_LIBRARY_DIR = REPO_ROOT / "scripts" / "lib"
+FRESHNESS_LIBRARY = SCRIPT_LIBRARY_DIR / "agent-fabric-workspace-freshness.sh"
+BUILD_LOCK_LIBRARY = SCRIPT_LIBRARY_DIR / "agent-fabric-protocol-build-lock.sh"
 
 
 def _write(path: Path, content: str = "fixture\n") -> None:
@@ -25,17 +26,11 @@ def _fixture(tmp_path: Path) -> tuple[Path, Path, Path]:
     script.parent.mkdir(parents=True)
     shutil.copy2(WARM_SCRIPT, script)
     script.chmod(0o755)
-    if FRESHNESS_LIBRARY.exists():
-        library_dir = root / "scripts/lib"
-        library_dir.mkdir(parents=True)
-        shutil.copy2(
-            FRESHNESS_LIBRARY,
-            library_dir / FRESHNESS_LIBRARY.name,
-        )
-        shutil.copy2(
-            BUILD_LOCK_LIBRARY,
-            library_dir / BUILD_LOCK_LIBRARY.name,
-        )
+    # Copy the whole library directory. Enumerating its members here meant that
+    # adding a scripts/lib file broke this fixture rather than exercising the
+    # script it is meant to test.
+    if SCRIPT_LIBRARY_DIR.exists():
+        shutil.copytree(SCRIPT_LIBRARY_DIR, root / "scripts/lib")
 
     # The wrapper treats node_modules as the installation readiness gate.
     (root / "node_modules").mkdir()

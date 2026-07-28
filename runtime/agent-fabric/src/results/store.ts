@@ -33,7 +33,7 @@ import {
   text,
   timestampToMillis,
   type Row,
-} from "../project-session/store-support.js";
+} from "../persistence/row-codec.js";
 import {
   ProjectSessionMembershipStore,
   touchProjectSessionMembershipRevision,
@@ -42,7 +42,7 @@ import { assertRunAcceptingWork, assertTaskOperationAdmitted } from "../operator
 import { NotificationOutbox } from "../attention/outbox.js";
 import { assertScopedOperationAllowed } from "../gates/store.js";
 
-export type AuthenticatedIntegrationContext = Readonly<{
+export type ResultDeliveryIntegrationContext = Readonly<{
   integrationId: string;
   projectId: string;
   projectSessionId: string;
@@ -50,7 +50,7 @@ export type AuthenticatedIntegrationContext = Readonly<{
   principalGeneration: number;
 }>;
 
-type DeliveryContext = AuthenticatedAgentContext | AuthenticatedIntegrationContext;
+type DeliveryContext = AuthenticatedAgentContext | ResultDeliveryIntegrationContext;
 
 export type DeliveryRecoveryResult = Readonly<{
   returnedClaims: number;
@@ -452,7 +452,7 @@ export class AtomicDeliveryStore {
   }
 
   providerAccept(
-    context: AuthenticatedIntegrationContext,
+    context: ResultDeliveryIntegrationContext,
     request: ResultDeliveryProviderAcceptRequest,
   ): ResultDelivery {
     return this.#transition(context, request.commandId, "provider-accept", request, () => {

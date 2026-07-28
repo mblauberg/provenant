@@ -17,7 +17,7 @@ import {
   type HerdrActionRecord,
   type HerdrRecoverySummary,
 } from "./herdr-fabric-ports.js";
-import { canonicalJson, integer, isRow, nullableText, text } from "../project-session/store-support.js";
+import { canonicalJson, integer, isRow, nullableText, text } from "../persistence/row-codec.js";
 import { ProviderActionAdmissionCoordinator } from "../application/provider-action-admission.js";
 
 export type HerdrDaemonRuntime = Readonly<{

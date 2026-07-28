@@ -2,7 +2,7 @@ import type { ChairLiveHandoffIntent, Sha256Digest } from "@local/agent-fabric-p
 import type Database from "better-sqlite3";
 
 import { assertProviderActionOwner } from "../application/provider-action-owner.js";
-import { isRow, text } from "./store-support.js";
+import { isRow, text } from "../persistence/row-codec.js";
 import { jsonEvidenceDigest } from "./provider-agent-custody.js";
 import type {
   ChairLiveHandoffCustodyRecoveryPort,

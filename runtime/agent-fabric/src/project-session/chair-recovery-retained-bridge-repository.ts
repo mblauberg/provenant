@@ -10,7 +10,7 @@ import {
   row,
   sha256,
   text,
-} from "./store-support.js";
+} from "../persistence/row-codec.js";
 import { supersedeFinalAcceptanceGates } from "./acceptance-cycle.js";
 import type { ChairBridgeLossObservation, RetainedChairBridge } from "./launch-custody.js";
 

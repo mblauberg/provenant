@@ -6,7 +6,7 @@ import {
   LifecycleReviewAdoptionStore,
   type PreparedReviewAdoptionContext,
 } from "../../../src/lifecycle/review-adoption.ts";
-import { canonicalJson } from "../../../src/project-session/store-support.ts";
+import { canonicalJson } from "../../../src/persistence/row-codec.ts";
 import { custodyRef, lifecycleDigest } from "../../../src/lifecycle/custody-codec.ts";
 import { LifecycleRotationRepository } from "../../../src/lifecycle/rotation-repository.ts";
 import { admitProviderActionFixture } from "../../support/provider-action-fixture.ts";

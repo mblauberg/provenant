@@ -26,7 +26,7 @@ import {
   type AuthenticatedOperatorContext,
   type CoreServiceOptions,
 } from "./contracts.js";
-import { canonicalJson, digest, integer, isRow, nullableText, row, sha256, text } from "./store-support.js";
+import { canonicalJson, digest, integer, isRow, nullableText, row, sha256, text } from "../persistence/row-codec.js";
 
 export interface IntakeTaskRequestCommitter {
   commitTaskRequest(request: TaskRequest): TaskRequestCommit;

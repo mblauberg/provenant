@@ -12,7 +12,7 @@ import {
   assertOperatorTaskRunnable,
   assertRunAcceptingWork,
 } from "../../../src/operator/task-run-admission.ts";
-import { canonicalJson, sha256 } from "../../../src/project-session/store-support.ts";
+import { canonicalJson, sha256 } from "../../../src/persistence/row-codec.ts";
 import {
   admitProviderActionFixture,
 } from "../../support/provider-action-fixture.ts";

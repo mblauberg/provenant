@@ -20,7 +20,7 @@ import {
 import {
   normaliseLaunchChairAuthority,
 } from "../../../src/project-session/launch-custody.ts";
-import { canonicalJson } from "../../../src/project-session/store-support.ts";
+import { canonicalJson } from "../../../src/persistence/row-codec.ts";
 import { TEST_AUTHORITY_V2_FIELDS } from "../../support/authority-v2-testkit.ts";
 import {
   terminateTrackedTestProcess,

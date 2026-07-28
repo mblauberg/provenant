@@ -20,7 +20,7 @@ import type {
 import type Database from "better-sqlite3";
 
 import { ProjectFabricCoreError } from "../project-session/contracts.js";
-import { canonicalJson, integer, isRow, nullableText, row, sha256, text, type Row } from "../project-session/store-support.js";
+import { canonicalJson, integer, isRow, nullableText, row, sha256, text, type Row } from "../persistence/row-codec.js";
 import type { OperatorEffectOutcome } from "./action-store.js";
 import type { GitMutationInspection, GitMutationPort } from "./fixed-git-mutation-port.js";
 
