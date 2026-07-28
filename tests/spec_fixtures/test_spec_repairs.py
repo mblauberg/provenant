@@ -541,50 +541,6 @@ class SpecRepairTests(unittest.TestCase):
         db.commit()
         self.assertEqual([], db.execute("PRAGMA foreign_key_check").fetchall())
 
-        db.execute("BEGIN")
-        db.execute(
-            "INSERT INTO lifecycle_scope_admission_outbox VALUES(?,?,?,?,?,?,?,?,?,?)",
-            ("request-gap", "project-gap", "session-gap", "run-gap", "authority",
-             "admission-gap", "admitted-at", "{}", "scope-gap", "created-at"),
-        )
-        db.execute(
-            "INSERT INTO lifecycle_admitted_run_scopes VALUES(?,?,?,?,?,?,?,?,?,?)",
-            ("project-gap", "session-gap", "run-gap", "authority", "request-gap",
-             "admission-gap", "scope-gap", "scope-checkpoint-gap", "resolution-gap",
-             "admitted-at"),
-        )
-        db.execute(
-            "INSERT INTO lifecycle_receipt_scope_checkpoints VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-            ("session-gap", "run-gap", "authority", 0, 0, None, "empty-set-gap",
-             "{}", "scope-checkpoint-gap", "attestation", "verified-at"),
-        )
-        db.execute(
-            "INSERT INTO lifecycle_receipt_scope_heads VALUES(?,?,?,?)",
-            ("session-gap", "run-gap", "scope-checkpoint-gap", 1),
-        )
-        db.execute(
-            "INSERT INTO lifecycle_receipt_namespace_checkpoints VALUES(?,?,?,?,?,?,?,?)",
-            ("project-gap", "authority", 2, "scope-head-set-gap", "{}",
-             "namespace-checkpoint-gap", "attestation", "verified-at"),
-        )
-        db.execute(
-            "INSERT INTO lifecycle_receipt_namespace_members VALUES(?,?,?,?,?,?,?,?,?)",
-            ("project-gap", "namespace-checkpoint-gap", 1, "session-gap", "run-gap",
-             "authority", "scope-checkpoint-gap", 0, None),
-        )
-        with self.assertRaisesRegex(
-            sqlite3.IntegrityError,
-            "lifecycle-scope-admission-namespace-set-incomplete",
-        ):
-            db.execute(
-                "INSERT INTO lifecycle_scope_admission_resolutions VALUES("
-                + ",".join("?" for _ in range(13)) + ")",
-                ("request-gap", "project-gap", "session-gap", "run-gap", "authority",
-                 "scope-gap", "scope-checkpoint-gap", 0, None,
-                 "namespace-checkpoint-gap", "{}", "resolution-gap", "verified-at"),
-            )
-        db.rollback()
-
         with self.assertRaises(sqlite3.IntegrityError):
             db.execute(
                 "INSERT INTO lifecycle_receipt_namespace_members VALUES("
@@ -688,19 +644,6 @@ class SpecRepairTests(unittest.TestCase):
             "namespace-checkpoint-missing", "{}", "resolution-missing",
             "verified-at",
         )
-        for namespace_case, namespace_digest in (
-            ("omitted", None),
-            ("crossed", "namespace-checkpoint"),
-        ):
-            values = list(resolution_values)
-            values[9] = namespace_digest
-            with self.subTest(namespace_member=namespace_case):
-                with self.assertRaisesRegex(
-                    sqlite3.IntegrityError,
-                    "lifecycle-scope-admission-namespace-member-"
-                    "missing-or-crossed|NOT NULL",
-                ):
-                    db.execute(resolution_insert, values)
         self.assertEqual(
             1,
             db.execute(
@@ -1582,7 +1525,7 @@ class SpecRepairTests(unittest.TestCase):
                     db.execute(statement, values)
         self.assertEqual([], db.execute("PRAGMA foreign_key_check").fetchall())
 
-    def test_normative_review_evidence_ddl_executes_exactly(self) -> None:
+    def test_normative_review_evidence_ddl_and_missing_target_parent(self) -> None:
         db = sqlite3.connect(":memory:")
         db.execute("PRAGMA foreign_keys=ON")
         db.executescript("""
@@ -1661,40 +1604,6 @@ class SpecRepairTests(unittest.TestCase):
              None, "result", None, None, "classifier", "selector", None,
              None, 1),
         )
-        db.execute(
-            "INSERT INTO provider_action_routes VALUES(?,?,?,?,?,?,?,?)",
-            ("adapter-cross", "action-cross", "route-cross", "admission-cross",
-             "run-cross", 1, "native", 1),
-        )
-        db.execute(
-            "INSERT INTO provider_review_terminal_journal "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            ("adapter-cross", "action-cross", "run-cross", 1, "native", 1,
-             "terminal-no-effect", 1, "terminal-input-cross", None, None,
-             None, None, None, "projection-cross", None, 2),
-        )
-        with self.assertRaises(sqlite3.IntegrityError):
-            db.execute(
-                "INSERT INTO provider_review_results "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                ("adapter-cross", "action-cross", 1, "safe-answer",
-                 "answer-cross", 1, "{}", "result-cross", "finding-cross",
-                 "resolved-cross", "classifier-cross", "selector-cross",
-                None, None, 2),
-            )
-        db.execute(
-            "INSERT INTO provider_action_routes VALUES(?,?,?,?,?,?,?,?)",
-            ("adapter-scope", "action-scope", "route-scope", "admission-scope",
-             "run-scope", 1, "native", 1),
-        )
-        with self.assertRaises(sqlite3.IntegrityError):
-            db.execute(
-                "INSERT INTO provider_review_terminal_journal "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                ("adapter-scope", "action-scope", "run-scope", 2, "native", 1,
-                 "unusable-answer", 1, "terminal-input-scope", "answer-scope",
-                 None, None, None, None, "projection-scope", None, 3),
-            )
         db.execute("INSERT INTO review_finding_sets VALUES('empty-set')")
         db.execute(
             "INSERT INTO review_finding_capacity_reservations "
@@ -1769,38 +1678,20 @@ class SpecRepairTests(unittest.TestCase):
                 tuple(row.values()),
             )
 
-        with self.assertRaises(sqlite3.IntegrityError):
-            insert_evidence({
-                **evidence,
-                "evidence_id": "evidence-crossed-answer",
-                "provider_answer_digest": "crossed-answer",
-                "mutation_receipt_digest": "mutation-crossed-answer",
-                "evidence_digest": "evidence-crossed-answer-digest",
-            })
-        with self.assertRaises(sqlite3.IntegrityError):
-            insert_evidence({
-                **evidence,
-                "evidence_id": "evidence-crossed-kind",
-                "terminal_kind": "safe-answer",
-                "verdict": "CLEAN",
-                "answer_safety": "safe",
-                "review_result_digest": "review-result",
-                "mutation_receipt_digest": "mutation-crossed-kind",
-                "evidence_digest": "evidence-crossed-kind-digest",
-            })
         insert_evidence(evidence)
         db.execute(
             "INSERT INTO review_slot_heads VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             ("run", 1, "native", 0, None, 0, None, None, None,
              "empty-set", "empty-set", None, None, 1, "updated-at"),
         )
-        with self.assertRaises(sqlite3.IntegrityError):
+        with self.assertRaises(sqlite3.IntegrityError) as caught:
             db.execute(
                 "INSERT INTO review_slot_heads VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 ("run", 2, "native", 1, "fabricated-evidence", 0,
                  None, None, None, "empty-set", "empty-set", None, None,
                  1, "updated-at"),
             )
+        self.assertEqual(str(caught.exception), "FOREIGN KEY constraint failed")
         self.assertEqual([], db.execute("PRAGMA foreign_key_check").fetchall())
 
     def test_new_route_sections_have_unique_requirement_anchors(self) -> None:

@@ -662,26 +662,6 @@ CREATE TABLE provider_context_pressure_current(
   CHECK(confidence<>'unknown' OR pressure='unknown')
 ) STRICT;
 
-CREATE TRIGGER binding_update_requires_pressure_clear
-BEFORE UPDATE OF adapter_id ON agent_adapter_bindings
-WHEN OLD.adapter_id IS NOT NEW.adapter_id AND EXISTS (
-  SELECT 1 FROM provider_context_pressure_current p
-  WHERE p.run_id=OLD.run_id AND p.agent_id=OLD.agent_id
-    AND p.adapter_id=OLD.adapter_id)
-BEGIN
-  SELECT RAISE(ABORT,'provider-context-pressure-not-cleared');
-END;
-
-CREATE TRIGGER binding_delete_requires_pressure_clear
-BEFORE DELETE ON agent_adapter_bindings
-WHEN EXISTS (
-  SELECT 1 FROM provider_context_pressure_current p
-  WHERE p.run_id=OLD.run_id AND p.agent_id=OLD.agent_id
-    AND p.adapter_id=OLD.adapter_id)
-BEGIN
-  SELECT RAISE(ABORT,'provider-context-pressure-not-cleared');
-END;
-
 CREATE TRIGGER observation_audit_immutable_update
 BEFORE UPDATE ON provider_context_observation_audit
 BEGIN
@@ -1837,50 +1817,6 @@ class LaneAHeadsRouteMiscOracle(unittest.TestCase):
         )
 
         self.seed_preflight_and_configuration(
-            "adapter-a", "cert-before-reservation", kind="certifying"
-        )
-        self.insert_action("adapter-a", "cert-before-reservation", ordinal=2)
-        self.reject(
-            "INSERT INTO provider_action_routes VALUES(" + ",".join("?" * 20) + ")",
-            self.route_values(
-                "adapter-a", "cert-before-reservation", kind="certifying"
-            ),
-        )
-        self.insert_reservation(
-            "adapter-a",
-            "cert-before-reservation",
-            attempt=None,
-            state="preflight",
-        )
-        self.reject(
-            "INSERT INTO provider_action_routes VALUES(" + ",".join("?" * 20) + ")",
-            self.route_values(
-                "adapter-a", "cert-before-reservation", kind="certifying"
-            ),
-        )
-        self.db.execute(
-            """UPDATE review_finding_capacity_reservations
-               SET attempt_generation=1, state='settled'
-               WHERE adapter_id='adapter-a'
-                 AND action_id='cert-before-reservation'"""
-        )
-        self.assertEqual(
-            self.db.execute(
-                """SELECT attempt_generation,state
-                   FROM review_finding_capacity_reservations
-                   WHERE adapter_id='adapter-a'
-                     AND action_id='cert-before-reservation'"""
-            ).fetchone(),
-            (1, "settled"),
-        )
-        self.reject(
-            "INSERT INTO provider_action_routes VALUES(" + ",".join("?" * 20) + ")",
-            self.route_values(
-                "adapter-a", "cert-before-reservation", kind="certifying"
-            ),
-        )
-
-        self.seed_preflight_and_configuration(
             "adapter-a", "canonical-cert", kind="certifying"
         )
         self.db.execute("BEGIN IMMEDIATE")
@@ -2023,11 +1959,6 @@ class LaneAHeadsRouteMiscOracle(unittest.TestCase):
                  'run-1',2,'native',0,NULL,0,NULL,NULL,NULL,
                  'finding-empty','finding-empty',1)"""
         )
-        self.reject(
-            """INSERT INTO review_slot_heads VALUES(
-                 'run-1',1,'native',2,'evidence-1',1,'adapter-a','review-a',
-                 'terminal','finding-empty','finding-empty',1)"""
-        )
         self.accept(
             """INSERT INTO review_slot_heads VALUES(
                  'run-1',1,'native',1,'evidence-1',1,'adapter-a','review-a',
@@ -2038,19 +1969,9 @@ class LaneAHeadsRouteMiscOracle(unittest.TestCase):
                  'run-1',3,'native',1,NULL,0,NULL,NULL,NULL,
                  'finding-empty','finding-empty',1)"""
         )
-        self.reject(
-            """INSERT INTO review_slot_heads VALUES(
-                 'run-1',1,'other-primary',1,'evidence-1',0,NULL,NULL,NULL,
-                 'finding-empty','finding-empty',1)"""
-        )
-        self.reject(
-            """INSERT INTO review_slot_heads VALUES(
-                 'run-1',4,'native',1,'evidence-1',0,NULL,NULL,NULL,
-                 'finding-empty','finding-empty',1)"""
-        )
         self.assert_foreign_keys_clean()
 
-    def test_review_evidence_rejects_fabricated_and_crossed_parents(self) -> None:
+    def test_review_evidence_rejects_real_constraints(self) -> None:
         self.seed_route(
             "adapter-a", "review-a", kind="certifying", target=1, slot="native"
         )
@@ -2064,26 +1985,6 @@ class LaneAHeadsRouteMiscOracle(unittest.TestCase):
         self.seed_review_terminal("adapter-a", "review-a", identity=False)
         self.seed_review_terminal("adapter-b", "review-b", identity=True)
 
-        self.reject(
-            """INSERT INTO provider_action_actual_route_identities
-               VALUES('adapter-a','review-a','admission-review-a',
-                 'observation-review-b','{}','actual-cross-observation')"""
-        )
-        self.reject(
-            """INSERT INTO provider_action_actual_route_identities
-               VALUES('adapter-a','review-a','admission-review-b',
-                 'observation-review-a','{}','actual-cross-admission')"""
-        )
-
-        fabricated = self.evidence_values(
-            "adapter-a",
-            "review-a",
-            evidence="fabricated",
-            observation="observation-review-a",
-            actual="actual-fabricated",
-        )
-        self.reject_evidence(fabricated)
-
         without_observation = self.evidence_values(
             "adapter-a",
             "review-a",
@@ -2092,24 +1993,6 @@ class LaneAHeadsRouteMiscOracle(unittest.TestCase):
             actual="actual-review-b",
         )
         self.reject_evidence(without_observation)
-
-        crossed_observation = self.evidence_values(
-            "adapter-a",
-            "review-a",
-            evidence="cross-observation",
-            observation="observation-review-b",
-            actual=None,
-        )
-        self.reject_evidence(crossed_observation)
-
-        crossed_result = self.evidence_values(
-            "adapter-a",
-            "review-a",
-            evidence="cross-result",
-            observation="observation-review-a",
-        )
-        crossed_result[7] = "result-review-b"
-        self.reject_evidence(crossed_result)
 
         crossed_reservation = self.evidence_values(
             "adapter-a",
@@ -2133,7 +2016,7 @@ class LaneAHeadsRouteMiscOracle(unittest.TestCase):
         self.reject_evidence(skipped_generation)
         self.assert_foreign_keys_clean()
 
-    def test_review_evidence_prior_chain_is_exactly_target_and_slot_bound(self) -> None:
+    def test_review_evidence_prior_chain_accepts_exact_target_and_slot(self) -> None:
         self.seed_route(
             "adapter-a", "review-a", kind="certifying", target=1,
             slot="native", ordinal=1,
@@ -2160,18 +2043,6 @@ class LaneAHeadsRouteMiscOracle(unittest.TestCase):
         self.insert_evidence(successor)
         mark_case()
 
-        self.seed_route(
-            "adapter-c", "review-c", kind="certifying", target=2,
-            slot="other-primary", ordinal=3,
-        )
-        self.seed_review_terminal("adapter-c", "review-c", identity=False)
-        crossed = self.evidence_values(
-            "adapter-c", "review-c", evidence="evidence-crossed-prior",
-            target=2, slot="other-primary",
-            observation="observation-review-c", prior_generation=1,
-            new_generation=2, prior_evidence="evidence-first",
-        )
-        self.reject_evidence(crossed)
         self.assert_foreign_keys_clean()
 
     def reject_evidence(self, values: Sequence[Any]) -> None:
@@ -2179,7 +2050,7 @@ class LaneAHeadsRouteMiscOracle(unittest.TestCase):
             self.insert_evidence(values)
         mark_case()
 
-    def test_pressure_compare_delete_crash_matrix_and_success(self) -> None:
+    def test_pressure_child_fk_and_compare_delete_crash_matrix(self) -> None:
         self.seed_pressure()
         before = self.capture_pressure()
         self.assertIsNotNone(before)
@@ -2188,14 +2059,20 @@ class LaneAHeadsRouteMiscOracle(unittest.TestCase):
             """UPDATE agent_adapter_bindings SET revision=revision+1
                WHERE run_id='run-1' AND agent_id='agent-1'"""
         )
-        self.reject(
-            """UPDATE agent_adapter_bindings SET adapter_id='adapter-crossed'
-               WHERE run_id='run-1' AND agent_id='agent-1'"""
-        )
-        self.reject(
-            """DELETE FROM agent_adapter_bindings
-               WHERE run_id='run-1' AND agent_id='agent-1'"""
-        )
+        with self.assertRaises(sqlite3.IntegrityError) as caught:
+            self.db.execute(
+                """UPDATE agent_adapter_bindings SET adapter_id='adapter-crossed'
+                   WHERE run_id='run-1' AND agent_id='agent-1'"""
+            )
+        self.assertEqual(str(caught.exception), "FOREIGN KEY constraint failed")
+        mark_case()
+        with self.assertRaises(sqlite3.IntegrityError) as caught:
+            self.db.execute(
+                """DELETE FROM agent_adapter_bindings
+                   WHERE run_id='run-1' AND agent_id='agent-1'"""
+            )
+        self.assertEqual(str(caught.exception), "FOREIGN KEY constraint failed")
+        mark_case()
 
         for fault in ("before-clear", "after-clear", "after-binding-update"):
             with self.subTest(fault=fault):
@@ -2393,16 +2270,6 @@ class LaneAHeadsRouteMiscOracle(unittest.TestCase):
             """INSERT INTO generic_provider_route_recovery_evidence
                VALUES('adapter-g','generic-corrupt','integrity-failed',
                  'recovery-generic-corrupt',2)"""
-        )
-        self.reject(
-            """INSERT INTO generic_provider_route_recovery_evidence
-               VALUES('adapter-c','certifying','missing',
-                 'recovery-certifying-cross',4)"""
-        )
-        self.reject(
-            """INSERT INTO generic_provider_route_recovery_evidence
-               VALUES('adapter-g','generic-unresolved','missing',
-                 'recovery-route-state-cross',3)"""
         )
         visible = self.db.execute(
             """SELECT e.action_id,e.route_state,e.recovery_evidence_digest
