@@ -2,11 +2,13 @@
 """Executable CAPA-001 Lead-2 retirement-evidence after-repair oracle.
 
 The oracle is intentionally isolated and Python-stdlib only. Its original
-12-case crossing checks remain stable, while its NULL-vacuity checks execute
-the current plan/effect/result DDL directly with only unrelated parent
-tables reduced to fixtures.
+12-case crossing checks remain stable, while its current tuple checks execute
+the plan/effect/result fixture DDL directly with only unrelated parent tables
+reduced to fixtures. L2-D formerly asserted NULL rejection from normative
+specification DDL; it was retired because the shipped migration does not
+enforce those assertions.
 
-Stable output reports L2-A/B/C/D, the aggregate crossing case count, and a
+Stable output reports L2-A/B/C, the aggregate crossing case count, and a
 final empty ``PRAGMA foreign_key_check``.
 """
 

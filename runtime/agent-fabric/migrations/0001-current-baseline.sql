@@ -2274,7 +2274,7 @@ CREATE TABLE lifecycle_transition_applies (
         handoff_id,handoff_digest,new_custody_id,new_custody_revision,
         new_custody_semantic_digest,new_custody_source_ref_digest,
         affected_generation_loss_after_key),
-  CHECK((apply_kind='terminal' AND
+  CONSTRAINT lifecycle_transition_applies_arm_guard CHECK((apply_kind='terminal' AND
         batch_transition_kind IN ('custody-terminal','generation-loss-terminal',
           'custody-recovery-retirement') AND receipt_batch_id IS NOT NULL AND
         batch_completion_digest IS NOT NULL AND
