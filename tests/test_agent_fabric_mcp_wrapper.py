@@ -1,4 +1,5 @@
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -22,7 +23,22 @@ def run_launcher_fixture(
     loader.parent.mkdir(parents=True)
     fake_bin.mkdir()
     loader.write_text("// loader\n")
-    fake_node.write_text("#!/bin/sh\nprintf '%s\\n' \"$@\"\n")
+    # A real install carries the package manifest beside the loader, and
+    # resolution checks it: the loader path is executed, so a bare file of the
+    # right name is not evidence that it is really tsx.
+    (loader.parent.parent / "package.json").write_text(
+        '{"name":"tsx","version":"4.0.0"}\n', encoding="utf-8"
+    )
+    # The stub exists to capture the final exec, not to stand in for node
+    # everywhere. Loader resolution probes the interpreter with `-e`, and those
+    # probes must reach the real one, or resolution is being answered by this
+    # shell script rather than by node.
+    real_node = shutil.which("node") or "/usr/bin/env node"
+    fake_node.write_text(
+        "#!/bin/sh\n"
+        f'[ "${{1:-}}" != "-e" ] || exec "{real_node}" "$@"\n'
+        "printf '%s\\n' \"$@\"\n"
+    )
     fake_node.chmod(0o755)
     # These cases are about dist-vs-source selection, so give the fixture a
     # current protocol build; the stale-protocol path is covered separately in
