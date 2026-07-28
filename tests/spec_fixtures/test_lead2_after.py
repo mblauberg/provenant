@@ -436,10 +436,9 @@ def expect_foreign_key_rejection(
     try:
         operation()
     except sqlite3.IntegrityError as error:
-        error_name = getattr(error, "sqlite_errorname", "")
         require(
-            error_name == "SQLITE_CONSTRAINT_FOREIGNKEY",
-            f"wrong SQLite rejection: {error_name}: {error}",
+            str(error) == "FOREIGN KEY constraint failed",
+            f"wrong SQLite rejection: {error}",
         )
         connection.rollback()
         return

@@ -906,8 +906,9 @@ class TransitionLead456AfterTests(unittest.TestCase):
         db.execute("BEGIN")
         materialize_arm(db, "terminal-fresh", fresh_head=False,
                         fresh_commit=False)
-        with self.assertRaises(sqlite3.IntegrityError):
+        with self.assertRaises(sqlite3.IntegrityError) as caught:
             insert_apply(db, "terminal-fresh", crossed_plain_terminal=True)
+        self.assertEqual(str(caught.exception), "FOREIGN KEY constraint failed")
         db.rollback()
 
     def test_l4_terminal_fresh_terminal_and_fresh_plans_stay_distinct(
@@ -930,7 +931,7 @@ class TransitionLead456AfterTests(unittest.TestCase):
     def test_l5_wrong_owner_kind_rejected(self) -> None:
         db = database()
         prepare_arm(db, "custody")
-        with self.assertRaises(sqlite3.IntegrityError):
+        with self.assertRaises(sqlite3.IntegrityError) as caught:
             db.execute(
                 "INSERT INTO lifecycle_receipt_intents "
                 "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
@@ -940,6 +941,35 @@ class TransitionLead456AfterTests(unittest.TestCase):
                     "custody-effect-custody", None, None, None, None,
                 ),
             )
+        self.assertEqual(
+            str(caught.exception),
+            """CHECK constraint failed: (kind IN ('custody-terminal','review-adoption-decision') AND
+      subject_owner_kind='custody' AND custody_effect_digest IS NOT NULL AND
+      generation_loss_effect_role IS NULL AND
+      generation_loss_effect_digest IS NULL AND
+      recovery_retirement_effect_digest IS NULL AND
+      fresh_origin_effect_digest IS NULL) OR
+    (kind='generation-loss-terminal' AND
+      subject_owner_kind='generation-loss' AND
+      custody_effect_digest IS NULL AND
+      generation_loss_effect_role='primary' AND
+      generation_loss_effect_digest IS NOT NULL AND
+      recovery_retirement_effect_digest IS NULL AND
+      fresh_origin_effect_digest IS NULL) OR
+    (kind='custody-recovery-retirement' AND
+      subject_owner_kind='recovery-retirement' AND
+      custody_effect_digest IS NULL AND
+      generation_loss_effect_role IS NULL AND
+      generation_loss_effect_digest IS NULL AND
+      recovery_retirement_effect_digest IS NOT NULL AND
+      fresh_origin_effect_digest IS NULL) OR
+    (kind='fresh-origin' AND subject_owner_kind='custody' AND
+      custody_effect_digest IS NULL AND
+      generation_loss_effect_role IS NULL AND
+      generation_loss_effect_digest IS NULL AND
+      recovery_retirement_effect_digest IS NULL AND
+      fresh_origin_effect_digest IS NOT NULL)""",
+        )
 
     def test_l5_cross_batch_effect_binding_rejected(self) -> None:
         db = database()
@@ -957,7 +987,7 @@ class TransitionLead456AfterTests(unittest.TestCase):
             "INSERT INTO lifecycle_receipt_custody_effects VALUES (?,?,?,?)",
             ("batch-custody-b", "custody-effect-b", "custody-b", 2),
         )
-        with self.assertRaises(sqlite3.IntegrityError):
+        with self.assertRaises(sqlite3.IntegrityError) as caught:
             db.execute(
                 "INSERT INTO lifecycle_receipt_intents "
                 "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
@@ -967,6 +997,7 @@ class TransitionLead456AfterTests(unittest.TestCase):
                     None,
                 ),
             )
+        self.assertEqual(str(caught.exception), "FOREIGN KEY constraint failed")
 
     def test_l5_extra_effect_before_completion_rejected(self) -> None:
         db = database()
@@ -991,9 +1022,7 @@ class TransitionLead456AfterTests(unittest.TestCase):
             "VALUES (?,?,?,?,?)",
             ("batch-custody", "linked", "extra-loss", "loss-extra", 2),
         )
-        with self.assertRaisesRegex(
-            sqlite3.IntegrityError, "lifecycle-effect-set-incomplete"
-        ):
+        with self.assertRaises(sqlite3.IntegrityError) as caught:
             db.execute(
                 "INSERT INTO lifecycle_receipt_batch_completions "
                 "VALUES (?,?,?,?,?,?,?,?)",
@@ -1002,6 +1031,10 @@ class TransitionLead456AfterTests(unittest.TestCase):
                     "custody-effect-custody", None, None, None, None,
                 ),
             )
+        self.assertEqual(
+            str(caught.exception),
+            "lifecycle-effect-set-incomplete",
+        )
 
     def test_l5_each_effect_table_closed_after_completion(self) -> None:
         inserts = (
@@ -1030,18 +1063,22 @@ class TransitionLead456AfterTests(unittest.TestCase):
             with self.subTest(effect_table=name):
                 db = database()
                 prepare_arm(db, "custody")
-                with self.assertRaisesRegex(
-                    sqlite3.IntegrityError, "lifecycle-effect-set-closed"
-                ):
+                with self.assertRaises(sqlite3.IntegrityError) as caught:
                     db.execute(statement)
+                self.assertEqual(
+                    str(caught.exception),
+                    "lifecycle-effect-set-closed",
+                )
 
     def test_l6_bare_apply_rejected(self) -> None:
         db = database()
         prepare_arm(db, "custody")
-        with self.assertRaisesRegex(
-            sqlite3.IntegrityError, "lifecycle-apply-post-state-incomplete"
-        ):
+        with self.assertRaises(sqlite3.IntegrityError) as caught:
             insert_apply(db, "custody")
+        self.assertEqual(
+            str(caught.exception),
+            "lifecycle-apply-post-state-incomplete",
+        )
 
     def test_l6_all_six_legal_apply_arms_accept_children_first(self) -> None:
         for arm in ARMS:
@@ -1076,11 +1113,12 @@ class TransitionLead456AfterTests(unittest.TestCase):
                 prepare_arm(db, arm)
                 db.execute("BEGIN")
                 materialize_arm(db, arm, **omissions)
-                with self.assertRaisesRegex(
-                    sqlite3.IntegrityError,
-                    "lifecycle-apply-post-state-incomplete",
-                ):
+                with self.assertRaises(sqlite3.IntegrityError) as caught:
                     insert_apply(db, arm)
+                self.assertEqual(
+                    str(caught.exception),
+                    "lifecycle-apply-post-state-incomplete",
+                )
                 db.rollback()
 
     def test_l6_each_fresh_arm_rejects_missing_commit(self) -> None:
@@ -1090,11 +1128,12 @@ class TransitionLead456AfterTests(unittest.TestCase):
                 prepare_arm(db, arm)
                 db.execute("BEGIN")
                 materialize_arm(db, arm, fresh_commit=False)
-                with self.assertRaisesRegex(
-                    sqlite3.IntegrityError,
-                    "lifecycle-apply-post-state-incomplete",
-                ):
+                with self.assertRaises(sqlite3.IntegrityError) as caught:
                     insert_apply(db, arm)
+                self.assertEqual(
+                    str(caught.exception),
+                    "lifecycle-apply-post-state-incomplete",
+                )
                 db.rollback()
 
 
