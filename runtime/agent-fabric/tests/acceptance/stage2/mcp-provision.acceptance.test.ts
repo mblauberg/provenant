@@ -470,7 +470,7 @@ describe("MCP current project seat provisioning", () => {
       socketPath: discovery.socketPath,
       capability: currentCredential,
     });
-    await expect(topologyStaleClient.getMailboxState()).rejects.toThrow(/inactive MCP seat generation/iu);
+    await expect(topologyStaleClient.getMailboxState()).rejects.toThrow(/chair lease is not active/iu);
     await topologyStaleClient.close();
     const restoredTopology = new Database(current.databasePath);
     try {
