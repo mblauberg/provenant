@@ -151,7 +151,7 @@ Every fresh-created custody is authenticated by exactly one `fresh-origin` subje
 
 Every custody and generation-loss mutation appends one immutable revision row, then moves a small head pointer to that exact row. Revision one is creation and each legal edge increments by exactly one. Terminal owner revision is therefore the immutable final journal revision, not a hardcoded creation revision. Both receipt subjects and every review cut/binding equality-copy that exact ref. Authority lookup uses `(kind,projectSessionId,runId,agentId,ownerRefDigest, ownerRevision)`. Goldens include revision two and the maximum safe integer; creation/final confusion, leading-zero, mutable-head and crossed-owner forms fail.
 
-`admissionDigest=LD("admission",lifecycleAdmissionV1)`. The exact admission is one of two closed arms: `fresh-recovery` contains the accepted fresh-rotate handoff request, exact issue, preparation and apply plan, but no batch/intent/receipt/apply/final commit; `confirmed-abandon` contains the full accepted operator commit, source, gate and direct-human confirmation. Each arm also contains schema version, project/session/run, actor principal and stable command ID. Command/attempt replay stores that same digest. No terminal subject accepts a caller-supplied or separately reconstructed digest.
+`admissionDigest=LD("admission",lifecycleAdmissionV1)`. The exact admission is one closed arm: `self-request` contains the full accepted rotate/compact request; `fresh-recovery` contains the accepted fresh-rotate handoff request, exact issue, preparation and apply plan, but no batch/intent/receipt/apply/final commit; and `confirmed-abandon` contains the full accepted operator commit, source, gate and direct-human confirmation. Each arm also contains schema version, project/session/run, actor principal and stable command ID. Command/attempt replay stores that same digest. No terminal subject accepts a caller-supplied or separately reconstructed digest.
 
 The authenticated receipt has exactly `schemaVersion=1`, matching `kind`, nonempty `authorityId`, positive safe-integer `authoritySequence`, `previousReceiptDigest|null`, `subjectDigest`, `intentDigest`, `receiptDigest` and nonempty opaque `attestation`. Receipt sequence one has null previous digest; every later sequence has the exact preceding receipt digest.
 
@@ -204,7 +204,6 @@ The lifecycle digest registry is exact:
 | fresh preparation | `fresh-preparation` |
 | fresh handoff reservation | `fresh-handoff` |
 | fresh commit | `fresh-commit` |
-| lifecycle domain snapshot | `lifecycle-domain-snapshot` |
 | admitted lifecycle scope | `admitted-scope` |
 | scope-admission outbox ID | `scope-admission-outbox` |
 | scope-admission resolution | `scope-admission-resolution` |
@@ -251,6 +250,14 @@ confirmedAbandonCommitRequestV1:
 
 lifecycleAdmissionV1:
   oneOf:
+    - schemaVersion: 1
+      admissionKind: self-request
+      projectId: exact-project
+      projectSessionId: exact-project-session
+      runId: exact-run
+      actorPrincipal: {kind: agent, agentId: exact-agent, principalGeneration: positive-safe-integer}
+      commandId: exact-request-command
+      request: exact-rotationRequestV1
     - schemaVersion: 1
       admissionKind: fresh-recovery
       projectId: exact-project

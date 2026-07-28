@@ -5,7 +5,7 @@
 authority: `database-baseline.mjs` reads, executes and hashes only that file, and
 `migrations.ts` rejects a hash mismatch. The hardening specifications carry a
 second, hand-maintained copy of much of the same structure, and until this gate
-nothing compared them. They drift on 44 of the 83 tables they share.
+nothing compared them. They drift on 45 of the 85 tables they share.
 
 The migration side is not parsed. It is *executed* into an in-memory database and
 read back through `PRAGMA table_info`, `index_list`, `index_info` and
@@ -66,7 +66,11 @@ SPEC_FILES = (
 )
 
 # Specification DDL is typeless pseudo-SQL: "table_name(\n  col, col,\n)".
-SPEC_TABLE = re.compile(r"\n([a-z_][a-z0-9_]*)\(\n(.*?)\n\)\n", re.S)
+# Anchored per line rather than on surrounding newlines: consuming the trailing
+# newline left the next line without the leading one it needed, so a block
+# written immediately after another was skipped entirely — silently opting that
+# table out of this gate.
+SPEC_TABLE = re.compile(r"^([a-z_][a-z0-9_]*)\(\n(.*?)\n\)$", re.S | re.M)
 IDENTIFIER = re.compile(r"^([a-z_][a-z0-9_]*)")
 # Key constraints, table-level and column-level.
 TABLE_KEY = re.compile(r"^(PRIMARY\s+KEY|UNIQUE)\s*\(([^)]*)\)", re.I)

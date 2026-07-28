@@ -1,7 +1,9 @@
 # ADR 0009 — Standalone semantic specifications
 
 **Status:** Accepted 2026-07-15 (human direction; supersedes the earlier
-family-manifest form of this ADR)
+family-manifest form of this ADR); amended 2026-07-28 by [ADR
+0017](0017-specifications-own-non-derivable-intent.md), which narrows what these
+specifications may contain and adds a permanent gate over the same corpus
 
 ## Context
 

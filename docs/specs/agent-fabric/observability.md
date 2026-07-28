@@ -646,20 +646,21 @@ and `route_listed_at` columns do not exist. The requirement that list
 membership be stable under concurrent allocation stands, and the mechanism is
 recoverable from Git history.
 
-Task-bound answer-bearing action admission increments the run high water, keeps it equal to the run's greatest allocated
-route ordinal and equality- copies that positive ordinal to action and route in the same transaction. It also writes the
-action's immutable `route_listed_at` and equality-copies that timestamp to the route row's `created_at`; every read arm
-exposes that action column as `createdAt`, including when the route row is missing or untrusted. The route row's own
-`created_at` remains internal and is equality- checked against `route_listed_at` when present; it does not extend or
-replace the canonical nested `providerRouteV1` shape. Resolver/preflight failure that creates no action allocates no
-ordinal. Ordinals never recycle. The provider action survives legitimate route missing/integrity recovery and therefore
-remains the list membership owner. Task-bound provider-action rows cannot be deleted and their run, task, ordinal and
-`route_listed_at` fields are immutable; current-baseline triggers abort either mutation. The stable seven-column route
-foreign key retains reservation identity after terminal settlement. The insert guard separately requires that exact
-reservation to be `attached` at route admission; later `attached -> settled` does not rewrite the immutable route or
-invalidate its foreign key. Every route, dispatch, observation or recovery-state advance also increments that action's
-existing `journal_revision`; the read wrapper exposes it as `routeRevision`. No route bytes or freshness label is copied
-into another store.
+Were that mechanism built, these requirements would bind it. Admission must
+allocate the ordinal, keep the run high water equal to the greatest allocated
+ordinal, and copy that positive ordinal to action and route in one transaction.
+Ordinals must never recycle, and a resolver or preflight failure that creates no
+action must allocate none. The provider action must survive legitimate route
+missing or integrity recovery, because it, not the route, owns list membership;
+task-bound action rows must never be deletable, and their run, task, ordinal and
+listing timestamp must be immutable. A route must bind a reservation that is
+`attached` at admission, and a later `attached -> settled` transition must
+neither rewrite the immutable route nor invalidate its foreign key.
+
+Two requirements below do hold against the shipped schema. Every route,
+dispatch, observation or recovery-state advance increments the owning action's
+`journal_revision`, which the read wrapper exposes as `routeRevision`. No route
+bytes or freshness label is copied into another store.
 
 None of the supporting indexes formerly listed here exist in the shipped
 baseline. The requirement that route-list and preparation lookups use bounded
@@ -667,20 +668,20 @@ indexed paths stands and is evidenced by the persistence invariant tests.
 
 The route read starts from exact `(adapter_id,action_id)` in `provider_actions`, then equality-joins task/run/requested
 session and left- joins the pair-keyed route, dispatch, observation and live route-recovery owner. An exact action pair
-whose `route_ordinal` is null is not an answer- bearing route-list member and returns `NOT_FOUND`; its lack of
-route/recovery is legitimate. An intact listed row maps through the existing full `PROVIDER_ROUTE_V1_CODEC`. A
-recovery-owned missing/integrity-failed state maps the null route/evidence arm and copies immutable action
-`route_listed_at` to wrapper `createdAt`. No route plus no exact recovery evidence is an operation integrity error, not
-an invented missing arm. Every child is pair-keyed; no caller-stamped adapter ID and no action-only query may
+that is not an answer-bearing route-list member returns `NOT_FOUND`; its lack of route/recovery is legitimate. An intact
+listed row maps through the existing full `PROVIDER_ROUTE_V1_CODEC`. A recovery-owned missing/integrity-failed state
+maps the null route/evidence arm and exposes the action's listing timestamp as wrapper `createdAt`. No route plus no
+exact recovery evidence is an operation integrity error, not an invented missing arm. Every child is pair-keyed; no caller-stamped adapter ID and no action-only query may
 participate. Crossed parents are scope or integrity errors, never partial route objects.
 
-Route list starts from exact authenticated run actions with nonnull route ordinal. Every page scans at most 256
-consecutive unfiltered members strictly after the cursor's last-scanned tuple and at or below the watermark. It first
-classifies each scanned member through either the canonical present route or the composite-FK-bound recovery arm. Any
-orphaned, crossed or unparseable member fails the whole list with `INTEGRITY_FAILURE`. Only then does it apply nullable
-task, target and slot predicates in SQL. Target/slot filters join either the immutable certifying route fields or the
-exact daemon-derived recovery-custody tuple; they never trust a route whose integrity failed or silently exclude an
-unclassifiable member. The list operation and its ordinal-bound paging are not implemented; the watermark, cursor and contiguity-proof mechanism formerly specified here depended on relations the baseline does not contain.
+The route list operation and its ordinal-bound paging are not implemented; the watermark, cursor and contiguity-proof
+mechanism formerly specified here depended on relations the baseline does not contain. These requirements bind whatever
+implements it. Every page must scan at most 256 consecutive unfiltered members strictly after the cursor's last-scanned
+tuple and at or below the watermark. It must classify each scanned member through either the canonical present route or
+the composite-FK-bound recovery arm before applying any nullable predicate, and any orphaned, crossed or unparseable
+member must fail the whole list with `INTEGRITY_FAILURE`. Target and slot filters must join either the immutable
+certifying route fields or the exact daemon-derived recovery-custody tuple; they must never trust a route whose
+integrity failed, and must never silently exclude an unclassifiable member.
 
 Operator projection source queries are likewise exactly scoped. Work, Agent and Activity rows join `projects ->
 project_sessions -> runs -> tasks|agents`; source rows, summary builders, detail references and detail readers carry the
