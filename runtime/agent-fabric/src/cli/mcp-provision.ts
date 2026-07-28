@@ -77,6 +77,21 @@ export type ProvisionedSeatRosterInput = {
   expiresAt: string;
 };
 
+export async function startMcpProvisionDaemon(
+  paths: FabricPaths,
+  environment: NodeJS.ProcessEnv = process.env,
+): Promise<Awaited<ReturnType<typeof startFabricDaemon>>> {
+  try {
+    return await startFabricDaemon(defaultDaemonStartOptions(paths, environment.AGENTS_HOME));
+  } catch (cause: unknown) {
+    if (!isSchemaCutoverRefusal(cause)) throw cause;
+    throw new McpBootstrapSchemaCutoverGateError(
+      schemaCutoverGate(paths.databasePath, cause),
+      { cause },
+    );
+  }
+}
+
 function assertExactOptions(arguments_: string[], names: readonly string[], command: string): void {
   if (arguments_.length !== names.length * 2) {
     throw new Error(`${command} requires ${names.map((name) => `${name} <value>`).join(" ")}`);
@@ -233,16 +248,7 @@ export async function provisionMcpSeats(arguments_: string[], paths: FabricPaths
     bindings,
     expiresAt,
   };
-  let daemonHandle: Awaited<ReturnType<typeof startFabricDaemon>>;
-  try {
-    daemonHandle = await startFabricDaemon(defaultDaemonStartOptions(paths, process.env.AGENTS_HOME));
-  } catch (cause: unknown) {
-    if (!isSchemaCutoverRefusal(cause)) throw cause;
-    throw new McpBootstrapSchemaCutoverGateError(
-      schemaCutoverGate(paths.databasePath, cause),
-      { cause },
-    );
-  }
+  const daemonHandle = await startMcpProvisionDaemon(paths);
   try {
     return await bindProvisionedSeatRoster(input, paths);
   } finally {
