@@ -26,3 +26,4 @@ on 2026-07-21.
 | [0014](0014-comparative-skill-evals-on-suspicion.md) | Comparative skill evals run on suspicion, not by default | Accepted |
 | [0015](0015-bootstrap-paired-task-completion-evidence-bound-reply.md) | Bootstrap paired-task completion via an evidence-bound reply, not authority widening | Accepted |
 | [0016](0016-gate-b-restate-permanent-by-design.md) | Keep GATE-B' skipped by design after the RESTATE decision | Accepted |
+| [0017](0017-specifications-own-non-derivable-intent.md) | Specifications own non-derivable intent only | Proposed |
