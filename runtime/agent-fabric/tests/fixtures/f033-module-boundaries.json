@@ -1,6 +1,7 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "requirement": "F-033",
+  "allowed_edge_count": 132,
   "allowed_edges": [
     {
       "from": "adapters",
@@ -531,6 +532,7 @@
       "to": "operator"
     }
   ],
+  "reciprocal_scc_count": 1,
   "temporary_computed_imports": [
     {
       "id": "TEMP-HERDR-RUNTIME-MODULE",
@@ -540,108 +542,27 @@
   ],
   "temporary_reciprocal_edges": [
     {
-      "id": "TEMP-APPLICATION-PROJECT-SESSION",
-      "domains": [
+      "id": "SCC-APPLICATION-ATTENTION-CLI-CORE-DAEMON-GATES-INTEGRATIONS-LIFECYCLE-MCP-OPERATOR-PERSISTENCE-PROJECT-SESSION-PROVIDER-ACTION-RESOURCES-RESULTS-VISIBILITY",
+      "members": [
         "application",
-        "project-session"
-      ],
-      "reason": "provider orchestration and project-session custody still call each other"
-    },
-    {
-      "id": "TEMP-CLI-DAEMON",
-      "domains": [
+        "attention",
         "cli",
-        "daemon"
-      ],
-      "reason": "daemon lifecycle commands and CLI composition still call each other"
-    },
-    {
-      "id": "TEMP-CLI-MCP",
-      "domains": [
-        "cli",
-        "mcp"
-      ],
-      "reason": "CLI provisioning and MCP entry points still call each other"
-    },
-    {
-      "id": "TEMP-CORE-LIFECYCLE",
-      "domains": [
         "core",
-        "lifecycle"
-      ],
-      "reason": "Fabric composition and lifecycle services still call each other"
-    },
-    {
-      "id": "TEMP-CORE-PERSISTENCE",
-      "domains": [
-        "core",
-        "persistence"
-      ],
-      "reason": "SQLite opening still depends on migration custody under core"
-    },
-    {
-      "id": "TEMP-CORE-PROJECT-SESSION",
-      "domains": [
-        "core",
-        "project-session"
-      ],
-      "reason": "Fabric composition and project-session stores still call each other"
-    },
-    {
-      "id": "TEMP-CORE-PROVIDER-ACTION",
-      "domains": [
-        "core",
-        "provider-action"
-      ],
-      "reason": "Fabric composition and provider-action services still call each other"
-    },
-    {
-      "id": "TEMP-CORE-VISIBILITY",
-      "domains": [
-        "core",
+        "daemon",
+        "gates",
+        "integrations",
+        "lifecycle",
+        "mcp",
+        "operator",
+        "persistence",
+        "project-session",
+        "provider-action",
+        "resources",
+        "results",
         "visibility"
       ],
-      "reason": "Fabric composition and visibility coordination still call each other"
-    },
-    {
-      "id": "TEMP-DAEMON-OPERATOR",
-      "domains": [
-        "daemon",
-        "operator"
-      ],
-      "reason": "daemon composition and local operator control still call each other"
-    },
-    {
-      "id": "TEMP-GATES-OPERATOR",
-      "domains": [
-        "gates",
-        "operator"
-      ],
-      "reason": "gate custody and operator action custody still call each other"
-    },
-    {
-      "id": "TEMP-LIFECYCLE-OPERATOR",
-      "domains": [
-        "lifecycle",
-        "operator"
-      ],
-      "reason": "lifecycle and operator action custody still call each other"
-    },
-    {
-      "id": "TEMP-OPERATOR-PROJECT-SESSION",
-      "domains": [
-        "operator",
-        "project-session"
-      ],
-      "reason": "operator and project-session custody still call each other"
-    },
-    {
-      "id": "TEMP-PROJECT-SESSION-RESOURCES",
-      "domains": [
-        "project-session",
-        "resources"
-      ],
-      "reason": "session membership and resource custody still call each other"
+      "reason": "Extracted from SCC analysis: these 16 domains form a cyclic dependency to be addressed"
     }
-  ]
+  ],
+  "layer_order_needed": "An accepted architecture decision must assign every F-033 import domain to a numbered layer and define permitted import direction, including composition-root and adapter exceptions. ADR 0003 intentionally prescribes vertical seam extraction, not a global dependency hierarchy."
 }
