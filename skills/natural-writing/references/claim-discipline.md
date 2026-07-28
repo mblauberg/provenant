@@ -4,8 +4,8 @@
 family. `academic-writing` and `engineering-writing` link here and add only
 their own domain extensions (reproducibility statements and small-sample
 statistics; README feature-list scoping). `legal-writing` uses a distinct,
-non-overlapping schema: the Legal Function Test in its own
-`legal-concision-and-anti-ai.md`, because a legal document classifies
+non-overlapping schema: the Legal Function Test owned by the `legal-writing`
+skill, because a legal document classifies
 sentences by legal function (relief, contention, source-backed fact), not by
 observed/inferred evidence strength. It does not link here for that reason.
 

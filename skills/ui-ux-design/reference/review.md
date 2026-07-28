@@ -27,8 +27,9 @@ tokens and runtime boundaries. Select proportionate evidence:
 - loading, empty, partial, permission, validation, network/server failure,
   offline/retry, destructive confirmation, long/localised and RTL cases;
 - console/network errors and measured performance evidence where relevant;
-- independent judgement of hierarchy, information architecture, cognitive
-  load, task clarity, copy, brand fit and visual craft;
+- independent judgement of hierarchy, information architecture,
+  [cognitive load](cognitive-load.md), task clarity, copy, brand fit and
+  visual craft;
 - `scripts/detector/` (see root SKILL.md) for automated antipattern and
   contrast findings — run it before or alongside manual inspection, never as
   a substitute for it.

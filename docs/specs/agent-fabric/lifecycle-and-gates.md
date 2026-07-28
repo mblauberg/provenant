@@ -2,7 +2,7 @@
 
 ### Externally authenticated lifecycle receipts
 
-Lifecycle snapshot integrity does not rely on a digest that the same snapshot can reseal. Every externally admitted project/run lifecycle scope, including a generation-loss-only scope with no custody, receives a mandatory `LifecycleIntegrityReceiptAuthorityPort` whose storage, authentication material and append head live outside `LifecycleDomainSnapshotV1`. It exposes exactly:
+Lifecycle snapshot integrity does not rely on a digest that the same snapshot can reseal. Every externally admitted project/run lifecycle scope, including a generation-loss-only scope with no custody, receives a mandatory `LifecycleIntegrityReceiptAuthorityPort` whose storage, authentication material and append head remain external to lifecycle domain state. It exposes exactly:
 
 The production local adapter opens, but never creates or repairs, `lifecycle-receipts.sqlite3` and a separate raw 32-byte `lifecycle-receipts.hmac.key` in the configured Fabric state directory. The directory must be owned by the daemon user with mode `0700`; both regular, non-symlink files must be owned by that user with mode `0600`. Its fixed initial DDL is `runtime/agent-fabric/schemas/lifecycle-receipt-authority-v1.sql`. Provisioning must insert the configured immutable authority ID into the single `authority_metadata` row before startup. Startup rejects missing or crossed identity, ownership, mode, file type, key length, schema, database integrity, HMAC, receipt chain and authenticated-membership state. It performs no migration, identity generation or key rotation.
 
@@ -204,7 +204,6 @@ The lifecycle digest registry is exact:
 | fresh preparation | `fresh-preparation` |
 | fresh handoff reservation | `fresh-handoff` |
 | fresh commit | `fresh-commit` |
-| lifecycle domain snapshot | `lifecycle-domain-snapshot` |
 | admitted lifecycle scope | `admitted-scope` |
 | scope-admission outbox ID | `scope-admission-outbox` |
 | scope-admission resolution | `scope-admission-resolution` |
@@ -230,32 +229,6 @@ rotationRequestV1:
   taskRevision: positive-safe-integer
   checkpoint: exact-lifecycleCheckpointV1
   commandId: stable-command-id
-
-freshRotateCommitRequestV1:
-  schemaVersion: 1
-  commandId: stable-command-id
-  projectId: exact-project
-  previewId: exact-preview
-  expectedPreviewRevision: positive-safe-integer
-  previewDigest: exact-digest
-  expectedIntentDigest: exact-digest
-  confirmation: {kind: explicit, confirmationId: exact-id} | {kind: echo, echoedPreviewDigest: exact-equal-preview-digest}
-  attemptId: exact-attempt
-  issueId: exact-active-issue
-  projectSessionId: exact-project-session
-  runId: exact-run
-  agentId: exact-agent
-  recoverySource: exact-lifecycle-recovery-source-ref-v1
-  replacementAdapterId: exact-adapter
-  replacementContractDigest: exact-digest
-  replacementActionRef: exact-new-provider-action-ref
-  checkpointRef: exact-checkpoint-ref
-  checkpointDigest: exact-digest
-  checkpointValidationReceiptDigest: exact-digest | null
-  preparationDigest: exact-fresh-preparation-digest
-  handoffId: exact-handoff
-  plannedApplyId: exact-transition-apply
-  handoffApplyPlanDigest: exact-lifecycle-mutation-plan-digest
 
 confirmedAbandonCommitRequestV1:
   schemaVersion: 1
@@ -292,7 +265,31 @@ lifecycleAdmissionV1:
       runId: exact-run
       actorPrincipal: {kind: operator, operatorId: exact-operator, sessionGeneration: positive-safe-integer}
       commandId: exact-request-command
-      request: exact-freshRotateCommitRequestV1
+      request:
+        schemaVersion: 1
+        commandId: stable-command-id
+        projectId: exact-project
+        previewId: exact-preview
+        expectedPreviewRevision: positive-safe-integer
+        previewDigest: exact-digest
+        expectedIntentDigest: exact-digest
+        confirmation: {kind: explicit, confirmationId: exact-id} | {kind: echo, echoedPreviewDigest: exact-equal-preview-digest}
+        attemptId: exact-attempt
+        issueId: exact-active-issue
+        projectSessionId: exact-project-session
+        runId: exact-run
+        agentId: exact-agent
+        recoverySource: exact-lifecycle-recovery-source-ref-v1
+        replacementAdapterId: exact-adapter
+        replacementContractDigest: exact-digest
+        replacementActionRef: exact-new-provider-action-ref
+        checkpointRef: exact-checkpoint-ref
+        checkpointDigest: exact-digest
+        checkpointValidationReceiptDigest: exact-digest | null
+        preparationDigest: exact-fresh-preparation-digest
+        handoffId: exact-handoff
+        plannedApplyId: exact-transition-apply
+        handoffApplyPlanDigest: exact-lifecycle-mutation-plan-digest
     - schemaVersion: 1
       admissionKind: confirmed-abandon
       projectId: exact-project
@@ -303,7 +300,7 @@ lifecycleAdmissionV1:
       request: exact-confirmedAbandonCommitRequestV1
 ~~~
 
-Every brace-form union above is a closed object, not shorthand for an open map. Outer scope, command and actor equality-copy the selected request and authenticated principal. Echo confirmation requires byte-equal preview digest. Checkpoint-validation receipt is nonnull exactly when the selected source lacked a currently valid checkpoint and the separate validator supplied one. `freshRotateCommitRequestV1` is the operator's Commit request name, not a `FreshCommitRecord`: its handoff/apply plan is fixed before any authority append, and the final record can only equality-copy its admission digest after apply.
+Every brace-form union above is a closed object, not shorthand for an open map. Outer scope, command and actor equality-copy the selected request and authenticated principal. Echo confirmation requires byte-equal preview digest. Checkpoint-validation receipt is nonnull exactly when the selected source lacked a currently valid checkpoint and the separate validator supplied one. The fresh-recovery handoff/apply plan is fixed before any authority append, and the final record can only equality-copy its admission digest after apply.
 
 Every scope page carries one byte-identical checkpoint:
 
@@ -724,8 +721,6 @@ When all declared children and exact effect rows exist, the worker inserts one i
 
 Hydration is read-only: it first pages the authenticated project namespace, then every listed scope at one pinned checkpoint, including scopes absent from the local snapshot. It never appends. It exact-reconciles each external record to one local immutable intent plus either pending or applied state. A pending intent may be externally absent; an applied intent may not. Any external row without an exact local intent proves whole-custody/run rollback; any local authority receipt absent externally proves ledger loss. Only after successful hydration may the runtime recovery worker resume a pending append/apply. Missing, extra, crossed, deleted, downgraded, chain-invalid, digest-invalid, unverifiable or coordinated- resealed evidence is `SNAPSHOT_INVALID`; an admitted lifecycle scope without its authority fails closed.
 
-`LifecycleDomainSnapshotV1` is the exact closed root `{schemaVersion,projectId,domainRevision,scopeAdmissionOutbox, scopeAdmissionResolutions,admittedRunScopes,custodyIdentities, custodyRevisions,custodyHeads,generationLossIdentities,generationLossRevisions, generationLossHeads,receiptBatches,receiptIntents,authorityReceipts, custodyReceiptEffects,generationLossReceiptEffects,recoveryRetirementEffects, freshOriginReceiptEffects, batchCompletions,scopeCheckpoints,scopeHeads,namespaceCheckpoints,namespaceMembers, namespaceHeads,batchAuthorizations,transitionApplies,reviewReservations, reviewAuthorityBindings, recoveryRetirementPlans,recoveryRetirements,freshPreparations,freshHandoffs, freshCommits,recoveryIssues,recoveryIssueRevocations, snapshotDigest}`. Arrays use the exact the operational-hardening contract row codecs, are strictly sorted by their displayed primary keys and contain no duplicate. `snapshotDigest=LD( "lifecycle-domain-snapshot",root)` with only snapshot digest omitted. Every append-only array is mandatory, including an empty array; no undefined or legacy optional receipt field exists.
-
 Fresh recovery uses three immutable closed records:
 
 ~~~yaml
@@ -933,7 +928,7 @@ lifecycleRecoverySourceV1:
 
 generation-advance is canonical whenever the new provider generation is greater than old, including when context revision also changes. context-advance requires equal provider generations and a strictly greater proved new context revision. The arms are therefore disjoint. checkpoint ref/digest are both non-null only for last- validated and both null for absent/invalid.
 
-Detection equality-checks that no custody owns the transition, inserts one immutable generation-loss row, revokes/fences the observed bridge/capability, CAS-ratchets only provider/context high-water from this telemetry, quarantines writes, turns and delivery claims, sets context-unreconciled and assigns LifecycleRotationRecoveryService before generic scans. Repeated source event is idempotent and returns its existing classification/audit row. Principal and bridge high-water may advance only from authenticated daemon custody reservation/adoption inputs that name those exact generations; they are never inferred from provider generation or context revision. The loss arm permits no self-request, Resume or pair lookup that could bless the unannounced generation; only the exact operator fresh-rotate/abandon paths below can close it.
+Detection equality-checks that no custody owns the transition, inserts one immutable generation-loss row, revokes/fences the observed bridge/capability, CAS-ratchets only provider/context high-water from this telemetry, quarantines writes, turns and delivery claims, sets context-unreconciled and assigns LifecycleRotationRecoveryService before generic scans. Repeated source event is idempotent and returns its existing classification/audit row. Principal and bridge high-water may advance only from authenticated daemon custody reservation/adoption inputs that name those exact generations; they are never inferred from provider generation or context revision. The loss arm permits no agent-requested rotation, Resume or pair lookup that could bless the unannounced generation; only the exact operator fresh-rotate/abandon paths below can close it.
 
 Generation-loss edges are `open -> recovery-in-progress -> recovered-adopted`, `recovery-in-progress -> abandoned`, `recovery-in-progress -> open` and direct `open -> abandoned`. fresh-rotate binds its new custody and canonical provider action pair to the loss and moves open to recovery-in-progress. Only adopted custody atomically records recovered-adopted and clears loss freezes. A no-effect/quarantined/ superseded custody returns the loss to open (the `recovery-in-progress -> open` edge) with immutable attempt history. Direct-open abandon records `abandonKind: direct-open` and `recoveryActionRef: null`; abandon after a recovery attempt records `abandonKind: recovery-attempt` and that custody's exact `{adapterId, actionId}` pair. Crossed null/discriminator/pair combinations are invalid. Both terminal arms perform the same owner-row cleanup below; no action is fabricated for direct abandon.
 

@@ -7,7 +7,7 @@ Changes remain under `Unreleased` until a tag and release are separately
 authorised. [`MAINTAINING.md`](MAINTAINING.md) requires evaluation runs to
 record the harness revision they ran against.
 
-## [Unreleased]
+## Unreleased
 
 The current pre-release tree includes:
 
@@ -34,28 +34,31 @@ The current pre-release tree includes:
   `delivery-run` schema-v1 receipt owned by `deliver`, and
   `scripts/validate_delivery_scenarios.py`.
 - Risk and authority policy in `config/risk-policy.json`: the `routine`,
-  `substantial`, `crucial` and `terminal` tiers, the factors that raise a tier,
-  and review pressure that scales with it.
+  `substantial`, `crucial` and `terminal` tiers and the factors that raise a
+  tier. The review-pressure ladder those tiers select lives in `HARNESS.md`.
 - Model routing through `scripts/model-route`, resolving the `flagship`,
   `workhorse` and `scout` aliases from runtime capability discovery, with
   receipts that separate adapter, endpoint, model family, requested and
   effective effort, capability source and any substitution.
 - The Agent Fabric runtime under `runtime/`: the fabric itself, the wire
-  protocol, the console and the Herdr adapter, with an MCP server for agent
-  spawn, durable messaging, budgets and run state.
+  protocol, the console, the Herdr adapter and the Rust review-portal
+  supervisor, with an MCP server for agent spawn, durable messaging, budgets
+  and run state.
 - Gates: `scripts/check-harness` (policy checks, skill trigger fixtures, shell
   parse, `pytest`), `scripts/static-security-check.py` and
-  `scripts/public-release-check`, plus a CI workflow that runs the harness gate
-  and the fabric, console and Herdr typecheck, tests, evaluation, load and
-  production dependency audit.
+  `scripts/public-release-check`, plus a CI workflow that runs the harness gate;
+  the fabric, console and Herdr typecheck, tests, evaluation, load and
+  production dependency audit; the review-portal-supervisor Rust fmt, clippy and
+  test jobs; and a `zizmor` workflow security lint. The aggregate `ci-status`
+  job is the single required check.
 - The shared worktree invariant and the checked `scripts/worktree` helper: an
   authorised linked worktree lives at the owning repository's
   `.worktrees/<task-agent>` path and nowhere else.
 - Repository documentation: `docs/ARCHITECTURE.md`, specs, evals, runbooks,
   `MAINTAINING.md`, `SECURITY.md`, `ACKNOWLEDGEMENTS.md` and
   `THIRD_PARTY_NOTICES.md`, under the MIT licence.
-- Community files: this changelog and the bug, feature and skill-proposal issue
-  forms.
+- Community files: this changelog and the bug, feature, skill-proposal and
+  work-item issue forms.
 - Standalone Agent Fabric specifications for run-plan declaration, agent
   topology projection and work-facts projection.
 - The `setup-repo` skill, extending the former `github-setup` owner with
@@ -67,13 +70,21 @@ The current pre-release tree includes:
   byte-correctness confirmation interlock, durable exact-source archive,
   typed conflict and recovery results, and distinct exit `4` recovery handling.
 - Certifying-profile pin observation in `doctor` and the separate uncached
-  `npm run profile:pin` live-provider repair command. Doctor caches successful
-  capability observations for six hours; the repair command edits the
+  `npm run profile:pin` live-provider repair command. Doctor accepts capability
+  observations cached within the last six hours; the repair command edits the
   digest-bound profile and must be reviewed like any other repository change.
 - A read-only worker-liveness helper that reports worker CPU, session-log age
   and worktree state without signalling or supervising the process.
 - CI checks for deterministic adapter builds, seeded adapter-digest mismatch
   rejection and the extracted model-routing catalogue validator.
+- A model-preferencing layer in `config/model-preferences.json`, expressing
+  per-task-class and per-role preference, family/model/adapter deprioritisation
+  and fair-round-robin spreading inside the hard routing tiers rather than
+  across them (#478).
+- Four daemon-side lifecycle facts emitted by the fabric (#486).
+- Review panels for `orchestrate`, with council and breadth presets (#485).
+- An advisory model dossier for route selection, `docs/model-dossier.md`, with
+  Gemini 3.6 Flash recorded as a reachable google route (#470, #484).
 
 ### Changed
 
@@ -95,9 +106,9 @@ The current pre-release tree includes:
   and exact run-scoped drill-down across work, agents, evidence, activity and
   issues. Remaining work stays tracked by issue #141.
 - `doctor` now reports causal lifecycle state, provider identity
-  drift/staleness and certifying-profile pin drift or unknown observations. Its
-  profile check may consume provider quota and update a private observation
-  cache even though it does not start the daemon.
+  drift/staleness and certifying-profile pin drift or unknown observations. It
+  is read-only and quota-free by default; `--consume-provider-quota` opts into
+  live provider capability probes and a private cache refresh.
 - Provider routing now derives OpenAI effort capabilities at runtime, rejects
   unsupported Claude `ultra`, records Claude effort as `provider-unverified`,
   derives the Claude probe alias from the catalogue and applies general
@@ -110,6 +121,16 @@ The current pre-release tree includes:
   ancestry for a merge commit, and the pull request's merged state plus an empty
   path-scoped content diff for a squash merge, which leaves no ancestry link
   (#430).
+- `database archive-and-fresh` now requires an approval the calling agent
+  cannot grant itself, asserted through `--unattended-approval-asserted-by`
+  (#475).
+- The review profile catalogue is pinned by digest and verified code-adjacent,
+  at the point it is read rather than at load time, with
+  `npm run profile:catalogue:pin` and `profile:catalogue:deploy` owning the pin
+  and deployment (#473, #481).
+- Both review validators now share one leg-status vocabulary (#479).
+- `runtime/agent-fabric-protocol` splits projection from operator-projection to
+  stay under the module size cap (#471).
 
 ### Fixed
 
@@ -133,6 +154,13 @@ The current pre-release tree includes:
   15-second bound instead of leaving a provider-identity check hung (#423).
 - Rejected stale daemon result shapes before bootstrap, seat renewal or Console
   attachment rather than continuing against an older protocol contract (#428).
+- Autobuilt the install root's stale protocol `dist` instead of failing the
+  caller, and guarded protocol `dist` writers with a shared build lock so
+  concurrent builds cannot interleave (#480, #464).
+- Stopped the Console stamping derived values as `Observed`, and bounded
+  activity-projection cost and the page node budget (#476, #463).
+- Regenerated every version-bearing SDK pin field rather than only the first,
+  and reported first-recorded legacy bootstrap provenance (#483, #462).
 - Removed four test flakes by mechanism rather than by retrying or raising a
   timeout: the portal crash-helper phase marker is published atomically (#444),
   the orchestration FIFO oracle no longer requires a transient dispatch state to
@@ -140,12 +168,12 @@ The current pre-release tree includes:
   and socket fixture, and an MCP restart no longer assumes daemon exit proves a
   separate proxy process observed the close (#429).
 
-### Notes
+## Notes
 
 The name Provenant is the public identity. Several internal identifiers keep the
 older `agent-harness` string on purpose, because renaming them would break
 existing installations: the installation manifest owner in
-`scripts/manage_installation.py`, the schema `$id` values under
+`scripts/managed_installation_manifest.py`, the schema `$id` values under
 `runtime/agent-fabric/schemas/`, the run-state path under
 `~/.local/state/agent-harness/`, and the `HARNESS.md` filename that installed
 global instructions point at by name. `AGENTS_HOME` and `$HOME/.agents` are

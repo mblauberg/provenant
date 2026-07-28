@@ -56,7 +56,7 @@ rerun both against the new head.
 | Fabric typecheck, tests, build | `npm run check` | | | |
 | Fabric evaluation | `npm run test:evaluation` | | | |
 | Fabric load | `npm run test:load` | | | |
-| Production dependency audit | | | | |
+| Production dependency audit | `npm run audit` | | | |
 | Contract and cutover | | | | |
 | Security and operations | | | | |
 | Operator documentation | | | | |

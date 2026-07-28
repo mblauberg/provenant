@@ -41,8 +41,9 @@ version-sensitive behaviour.
 1. Inventory query clients, key families, option factories, mutation effects,
    SSR boundaries and existing tests.
 2. State freshness, invalidation, concurrency and error invariants before code.
-3. Implement through `tdd`; load `typescript-clean-code` for type boundaries and
-   `react-performance` only for broader React/Next.js performance.
+3. Implement through `implement`, applying `tdd` to behaviour changes; load
+   `typescript-clean-code` for type boundaries and `react-performance` only for
+   broader React/Next.js performance.
 4. Run tests, typecheck and the TanStack Query ESLint plugin where installed.
 5. Review with [review-checklist.md](references/review-checklist.md).
 

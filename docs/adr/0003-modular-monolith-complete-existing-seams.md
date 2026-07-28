@@ -4,7 +4,8 @@
 
 ## Context
 
-`runtime/agent-fabric/src/core/fabric.ts` is a 7,401-line class owning policy,
+At the time of this decision `runtime/agent-fabric/src/core/fabric.ts` was a
+7,401-line class owning policy,
 SQL, provider execution, recovery, budgets, barriers, projections, task/message
 orchestration and capability issuance. The review pack proposed decomposition
 behind a `FabricRuntime` composition root with a generic command dispatcher,

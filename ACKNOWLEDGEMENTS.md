@@ -20,7 +20,7 @@ not the legal record.
   the approach in `tdd`, `diagnose` and `skill-craft`.
 - [Microsoft Playwright CLI](https://github.com/microsoft/playwright-cli/tree/main/skills/playwright-cli) is
   the source of adapted material in `playwright` (Apache-2.0).
-- [Vercel agent-skills](https://github.com/vercel-labs/agent-skills/tree/main/skills/react-best-practices)
+- [Vercel agent-skills](https://github.com/vercel-labs/agent-skills/tree/dc8367e6f91c92676c468b6725c6610418cc5454/skills/react-best-practices)
   is the basis of the detailed rules in `react-performance` (MIT as declared
   upstream).
 - [BMAD Labs](https://github.com/bmad-labs/skills/tree/main/skills/typescript-clean-code)

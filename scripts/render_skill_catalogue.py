@@ -166,7 +166,7 @@ def render_counts(text: str, count: int) -> tuple[str, int]:
     return COUNT_MARK.sub(substitute, text), marks
 
 
-def audit_unmarked_counts(text: str) -> None:
+def audit_unmarked_counts(text: str, count: int) -> None:
     """Refuse any skill count the generator does not own.
 
     This is the half that makes the mark trustworthy. Without it, deleting the mark,
@@ -179,7 +179,7 @@ def audit_unmarked_counts(text: str) -> None:
         listed = ", ".join(repr(item) for item in stray)
         raise CatalogueError(
             f"unmanaged skill count(s) in README: {listed}. "
-            f"The total must be written {COUNT_OPEN}33{COUNT_CLOSE} so this script owns it. "
+            f"The total must be written {COUNT_OPEN}{count}{COUNT_CLOSE} so this script owns it. "
             "If the number is not the library total, phrase it without a digit."
         )
 
@@ -189,8 +189,8 @@ def render(text: str) -> tuple[str, int, int]:
     head, block, tail = split_readme(text)
     assigned = assign(skills, parse_areas(block))
     # Reject any count this script does not own, before rewriting the ones it does.
-    audit_unmarked_counts(head)
-    audit_unmarked_counts(tail)
+    audit_unmarked_counts(head, len(skills))
+    audit_unmarked_counts(tail, len(skills))
     rendered_head, head_marks = render_counts(head, len(skills))
     rendered_tail, tail_marks = render_counts(tail, len(skills))
     # Fail closed. A README that states no count cannot drift, but it cannot be checked

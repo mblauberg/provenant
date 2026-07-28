@@ -211,7 +211,6 @@ The system is local and single-user through Stage 5. Defaults favour bounded wor
 ```yaml
 limits:
   maximum_tree_depth_below_chair: 2
-  maximum_leaders: 4
   maximum_workers_per_leader: 5
   maximum_concurrent_provider_turns: 8
   maximum_inline_message_bytes: 4096
@@ -220,25 +219,17 @@ limits:
   reserve_for_verification_and_recovery_percent: 25
 ```
 
-`maximum_leaders` is the run-wide count of all active top-level and nested team leaders, not a per-depth allowance. The fifth leader is rejected atomically before any authority, agent, task, group or budget row survives.
-
 The Stage 1 core shall support at least 32 registered simulated agents. Stage 3 shall support eight concurrent provider turns on the local development machine. Local mailbox and task operations shall complete within 100 ms at p95 under that load, excluding provider and filesystem artifact latency.
 
 ## Pinned implementation baseline
 
-These versions are the proposed Stage 1 core baseline, verified on 10 July
-2026. Review shall revalidate them before implementation begins.
+The Stage 1 core baseline was proposed and verified on 10 July 2026 against
+Node.js 24.15.0, TypeScript 7.0.2, `@modelcontextprotocol/sdk` 1.29.0,
+`better-sqlite3` 12.11.1, `yaml` 2.9.0, `ajv` 8.20.0, `uuid` 14.0.1 and Vitest
+4.1.10. That record is historical and has since moved: the current pins live in
+`runtime/agent-fabric/package.json` and the root `package.json`, which are
+authoritative. Do not read the list above as the versions in force.
 
-| Dependency | Version |
-|---|---|
-| Node.js | 24.15.0 |
-| TypeScript | 7.0.2 |
-| `@modelcontextprotocol/sdk` | 1.29.0 |
-| `better-sqlite3` | 12.11.1 |
-| `yaml` | 2.9.0 |
-| `ajv` | 8.20.0 |
-| `uuid` | 14.0.1 |
-| Vitest | 4.1.10 |
 The lockfile pins exact transitive Fabric dependencies. A provider stage cannot
 enter implementation until `config/adapter-compatibility.yaml` records its
 adapter contract, stable launcher, required vendor-identity policy,

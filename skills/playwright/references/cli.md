@@ -1,6 +1,7 @@
 # Playwright CLI Reference
 
-Use the wrapper script unless the CLI is already installed globally:
+Always invoke through the wrapper script. It applies `PLAYWRIGHT_CLI_SESSION`
+and the authorised-npx policy that the bare CLI does not:
 
 ```bash
 export AGENTS_HOME="${AGENTS_HOME:-$HOME/.agents}"

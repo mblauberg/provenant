@@ -14,10 +14,10 @@ review. Stochastic or judgement-bearing product behaviour also links an
 
 State follows the delivery kernel: `draft -> scoped -> approved -> executing ->
 verifying -> reviewing -> awaiting_acceptance`. Repairs return through
-verification and review under a repair budget scaled to task complexity: ~1-2
-cycles for routine fixes, up to ~5 for complex tasks. The budget is a
-guardrail against unbounded loops, not a target to spend — converge as soon
-as checks and review pass. Exceeding the scaled budget means the run is
+verification and review under a repair budget of at most two cycles, which
+`validate_delivery.py` enforces against the recorded `repairing` transitions.
+The budget is a guardrail against unbounded loops, not a target to spend —
+converge as soon as checks and review pass. Exceeding the budget means the run is
 stuck: stop and return evidence to the user or `scope`, the same trigger
 `docs/runbooks/github-workflow.md` uses for the merge-gate escalation. A new
 requirement, authority expansion or one-way-door decision returns to `scope`;

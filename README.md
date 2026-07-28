@@ -11,18 +11,6 @@ without notice and support is best effort. Propose changes through
 [GitHub issues](https://github.com/mblauberg/provenant/issues); report
 vulnerabilities privately through [`SECURITY.md`](SECURITY.md).
 
-## Contents
-
-- [Why Provenant](#why-provenant)
-- [How it fits together](#how-it-fits-together)
-- [Quick start](#quick-start)
-- [Providers](#providers)
-- [Core workflows](#core-workflows)
-- [Lifecycle](#lifecycle)
-- [What the harness guarantees](#what-the-harness-guarantees)
-- [Skill library](#skill-library)
-- [Documentation and help](#documentation-and-help)
-
 ## Why Provenant
 
 A bare coding agent will write and "finish" a change in one pass, with its own
@@ -41,9 +29,9 @@ agent's own mistakes.
 
 ## How it fits together
 
-Three parts bear on every request at once: the constitution sets the rules,
-a skill supplies the procedure, and Agent Fabric executes and cross-reviews
-the work. None of them is a stage the work passes through.
+Three parts act on every request at once: the constitution sets the rules, a
+skill supplies the procedure, and Agent Fabric runs and cross-reviews the work.
+None of them is a stage the work passes through.
 
 ```mermaid
 flowchart TB
@@ -72,13 +60,13 @@ flowchart TB
 
 Requirements:
 
-- Git and Python 3.11+;
-- a subscription-authenticated Claude Code or Codex installation for each
-  installed primary client;
-- Node.js `>=24.15.0 <25` and npm `>=11.12.1 <12` to run repository
-  verification (the suite shells out to `node`); and
-- PyYAML and pytest for harness checks (`uv sync --only-group test` installs
-  the locked versions; `scripts/check-harness` honours `HARNESS_PYTHON`).
+- **Git** and **Python 3.11+**
+- **Claude Code** or **Codex**, subscription-authenticated, per primary client
+- **Node.js** `>=24.15.0 <25` and **npm** `>=11.12.1 <12` for repository
+  verification (the suite shells out to `node`)
+- **PyYAML** and **pytest** for harness checks (`uv sync --only-group test`
+  installs the locked versions; `scripts/check-harness` honours
+  `HARNESS_PYTHON`)
 
 Install either platform independently, or both:
 
@@ -87,7 +75,7 @@ git clone https://github.com/mblauberg/provenant.git "$HOME/.agents"
 export AGENTS_HOME="$HOME/.agents"   # optional override; the installed harness defaults here
 cd "$AGENTS_HOME"
 
-# install the pinned workspace dependencies and compile Fabric before its first use
+# install the pinned workspace dependencies and compile Fabric
 npm ci
 "$AGENTS_HOME/scripts/agent-fabric-warm"
 
@@ -98,9 +86,14 @@ npm ci
 provenant help
 provenant doctor
 
-# run the full repository gate when changing Provenant
-provenant check
+# run the repository gates when changing Provenant
+provenant check   # harness policy gate
+npm run check     # fabric, console and Herdr gates
 ```
+
+Each installer command registers the Fabric MCP server for the platform it
+installs. Pass `--mcp-clients all` to either one to register all six clients
+instead.
 
 Installation links each skill into `~/.claude/skills/` and `~/.codex/skills/`,
 and links the thin `provenant` command into
@@ -112,7 +105,9 @@ include the bootstrap line to add.
 
 `provenant doctor` checks Fabric configuration and enabled adapters (identity
 and non-answer interfaces, not login or quota); Provenant never sets or persists
-provider API keys. `provenant check` runs the full repository gate.
+provider API keys. `provenant check` runs the harness policy gate; the fabric,
+console, Herdr and review-portal gates run through `npm run check` and the CI
+workflow.
 
 <details>
 <summary>Filesystem layout, Codex config and uninstall</summary>
@@ -120,15 +115,17 @@ provider API keys. `provenant check` runs the full repository gate.
 ```text
 ~/.agents/                cloned once
   HARNESS.md    the constitution
-  AGENTS.md     the bootstrap line
+  AGENTS.md     the ambient global instructions
   skills/       one folder per skill
+  workflows/    repository-managed Claude workflows
   scripts/      install, route, check
   config/       risk, routing, profiles
      |
      |  scripts/install-harness
      v
-  ~/.claude/skills/   symlinks
-  ~/.codex/skills/    symlinks
+  ~/.claude/skills/     symlinks
+  ~/.codex/skills/      symlinks
+  ~/.claude/workflows/  symlinks
 ```
 
 The Codex installer appends one block to `~/.codex/config.toml` disabling
@@ -157,14 +154,14 @@ each before `provenant doctor`.
 | Claude Code | Primary client and enabled Anthropic provider |
 | Codex | Primary client and enabled OpenAI provider |
 | Agy | Enabled optional Gemini/Claude provider |
-| Cursor | Enabled optional Grok/Composer provider |
-| Kiro | Global MCP client and enabled optional open-weight ACP provider |
+| Cursor | Enabled optional Composer/Grok and hosted third-party provider |
+| Kiro | Enabled optional open-weight ACP provider |
 | OpenCode | Enabled optional ACP provider for its built-in account models |
 
 Provider CLI versions and digests are diagnostic observations, not admission
 locks. Provenant revalidates vendor identity, wrapper provenance and each
-bounded provider interface at point of use, so an ordinary signed CLI update
-does not require a compatibility-table edit.
+bounded provider interface at point of use, so a signed CLI update needs no
+compatibility-table edit.
 
 ## Core workflows
 
@@ -204,15 +201,11 @@ flowchart TB
     class G1,G2,G3 gate
 ```
 
-Gold hexagons are user gates. Every gate can stop progression; specification
-approval and acceptance can return work for revision. Scoping itself is usually a
-conversation: a decision packet with choices and a recommendation, owner
-calls parked as named questions rather than guesses, and the
-[`grill-me`](skills/grill-me/SKILL.md) interview, one question per round,
-on request or while material decisions stay unresolved. `review` runs in a fresh
-context that never wrote the diff. From the `substantial` tier up it requires
-multiple targeted lenses plus the other primary; a receipt missing that leg cannot
-reach acceptance.
+Gold hexagons are user gates; specification approval and acceptance can also
+return work for revision. Scoping is usually a conversation: a decision packet
+with choices and a recommendation, owner calls parked as named questions rather
+than guesses, and the [`grill-me`](skills/grill-me/SKILL.md) interview, one
+question per round, while material decisions stay unresolved.
 
 The loop is [`deliver`](skills/deliver/SKILL.md), the kernel binding one run to one receipt;
 [`implement`](skills/implement/SKILL.md) is its software front door, and the
