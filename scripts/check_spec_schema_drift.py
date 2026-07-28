@@ -5,12 +5,26 @@
 authority: `database-baseline.mjs` reads, executes and hashes only that file, and
 `migrations.ts` rejects a hash mismatch. The hardening specifications carry a
 second, hand-maintained copy of much of the same structure, and until this gate
-nothing compared them. They had drifted on 19 of the 86 tables they share.
+nothing compared them. They drift on 44 of the 83 tables they share.
+
+The migration side is not parsed. It is *executed* into an in-memory database and
+read back through `PRAGMA table_info`, `index_list`, `index_info` and
+`foreign_key_list`, so this half of the comparison is SQLite's own answer rather
+than a regex approximation of it. Only the specification dialect — which is not
+executable SQL — is parsed textually.
 
 Scope, stated so the gate is not mistaken for more than it is: this compares
 column *sets* and key-constraint signatures (PRIMARY KEY, UNIQUE, FOREIGN KEY)
-per shared table. It does not compare types, CHECK bodies, triggers or indexes,
-and it says nothing about whether the prose around the SQL is true.
+per shared table. It does not compare types, NOT NULL, CHECK bodies, foreign-key
+actions (`ON DELETE`/`ON UPDATE`), triggers or non-constraint indexes, and it
+says nothing about whether the prose around the SQL is true.
+
+Key signatures are column-order-sensitive: `UNIQUE(a,b)` and `UNIQUE(b,a)` are
+distinct index prefixes and compare as drift.
+
+A table named by a specification but absent from the schema is reported
+separately rather than ignored, because an intersection-only comparison would
+silently pass the worst case — a table that does not exist at all.
 
 CHECK is deliberately excluded. Its body is free-form SQL that the typeless
 specification dialect legitimately writes differently from the migration, so
@@ -28,6 +42,7 @@ from __future__ import annotations
 from pathlib import Path
 import json
 import re
+import sqlite3
 import sys
 
 
@@ -50,27 +65,26 @@ SPEC_FILES = (
     "recovery.md",
 )
 
-MIGRATION_TABLE = re.compile(r"CREATE TABLE (\w+)\s*\((.*?)\n\)\s*(?:STRICT)?\s*;", re.S)
 # Specification DDL is typeless pseudo-SQL: "table_name(\n  col, col,\n)".
 SPEC_TABLE = re.compile(r"\n([a-z_][a-z0-9_]*)\(\n(.*?)\n\)\n", re.S)
 IDENTIFIER = re.compile(r"^([a-z_][a-z0-9_]*)")
-# Key constraints in either dialect, table-level and column-level.
+# Key constraints, table-level and column-level.
 TABLE_KEY = re.compile(r"^(PRIMARY\s+KEY|UNIQUE)\s*\(([^)]*)\)", re.I)
 TABLE_FOREIGN_KEY = re.compile(
-    r"^FOREIGN\s+KEY\s*\(([^)]*)\)\s*REFERENCES\s+(\w+)\s*\(([^)]*)\)", re.I
+    r"^FOREIGN\s+KEY\s*\(([^)]*)\)\s*REFERENCES\s+(\w+)\s*(?:\(([^)]*)\))?", re.I
 )
 COLUMN_REFERENCES = re.compile(r"\bREFERENCES\s+(\w+)\s*(?:\(([^)]*)\))?", re.I)
+NAMED_CONSTRAINT = re.compile(r"^CONSTRAINT\s+\w+\s+", re.I)
+LINE_COMMENT = re.compile(r"--[^\n]*")
 
-# Fragments that open a table constraint rather than declare a column.
-CONSTRAINTS = (
-    "CHECK",
-    "PRIMARY",
-    "UNIQUE",
-    "FOREIGN",
-    "REFERENCES",
-    "CONSTRAINT",
-    "DEFERRABLE",
-    "ON ",
+# A fragment that opens a table constraint rather than declaring a column. The
+# trailing \b matters: a bare "CHECK" prefix also matches the column
+# `checkpoint_id`, and a prefix test silently deleted 35 such columns from both
+# sides of the comparison, where they agreed only by being equally invisible.
+CONSTRAINT_OPENER = re.compile(
+    r"(?:CHECK|PRIMARY\s+KEY|UNIQUE|FOREIGN\s+KEY|REFERENCES|CONSTRAINT"
+    r"|DEFERRABLE|ON\s+(?:DELETE|UPDATE))\b",
+    re.I,
 )
 # A prose elision inside a DDL block makes that block unparseable as SQL. It is
 # reported rather than skipped, because silently ignoring it would let a spec
@@ -97,18 +111,36 @@ def split_top_level(body: str) -> list[str]:
     return fragments
 
 
+def fragments(body: str) -> list[str]:
+    """Split a body into whitespace-normalised fragments with comments removed.
+
+    A trailing `-- comment` would otherwise be carried into the *next* fragment
+    by the comma split and, once the newline is folded away, swallow the column
+    declaration that follows it.
+    """
+    cleaned = []
+    for fragment in split_top_level(body):
+        text = " ".join(LINE_COMMENT.sub("", fragment).split())
+        if text:
+            cleaned.append(NAMED_CONSTRAINT.sub("", text))
+    return cleaned
+
+
+def opens_constraint(text: str) -> bool:
+    """Whether a fragment declares a table constraint rather than a column."""
+    match = CONSTRAINT_OPENER.match(text)
+    return match is not None and match.start() == 0
+
+
 def columns(body: str) -> tuple[set[str], bool]:
     """Return the declared column names, and whether the block was elided."""
     names: set[str] = set()
     elided = False
-    for fragment in split_top_level(body):
-        text = fragment.strip()
-        if not text:
-            continue
+    for text in fragments(body):
         if ELISION in text:
             elided = True
             continue
-        if text.upper().startswith(CONSTRAINTS):
+        if opens_constraint(text):
             continue
         match = IDENTIFIER.match(text)
         if match:
@@ -117,22 +149,25 @@ def columns(body: str) -> tuple[set[str], bool]:
 
 
 def normalise_columns(text: str) -> str:
-    """Collapse a parenthesised column list to a canonical comma-joined form."""
+    """Collapse a parenthesised column list to a canonical comma-joined form.
+
+    Order is significant: `UNIQUE(a,b)` and `UNIQUE(b,a)` describe different
+    index prefixes and compare as drift.
+    """
     return ",".join(part.strip() for part in text.split(",") if part.strip())
 
 
 def constraints(body: str) -> set[str]:
     """Return canonical PRIMARY KEY, UNIQUE and FOREIGN KEY signatures.
 
-    Both dialects are reduced to the same shape, so a table constraint and the
-    equivalent column constraint compare equal: the migration's
-    `admission_digest TEXT NOT NULL UNIQUE` and a specification's
-    `UNIQUE(admission_digest)` are one signature, not two.
+    Table and column spellings reduce to the same shape, so
+    `admission_digest TEXT NOT NULL UNIQUE` and `UNIQUE(admission_digest)` are
+    one signature, not two. This is the form SQLite's own PRAGMA output is
+    rendered into, so the two sides of the comparison speak one language.
     """
     found: set[str] = set()
-    for fragment in split_top_level(body):
-        text = " ".join(fragment.split())
-        if not text or ELISION in text:
+    for text in fragments(body):
+        if ELISION in text:
             continue
         upper = text.upper()
 
@@ -144,13 +179,13 @@ def constraints(body: str) -> set[str]:
 
         table_fk = TABLE_FOREIGN_KEY.match(text)
         if table_fk:
-            found.add(
-                f"FOREIGN KEY({normalise_columns(table_fk.group(1))})"
-                f"->{table_fk.group(2)}({normalise_columns(table_fk.group(3))})"
-            )
+            source = normalise_columns(table_fk.group(1))
+            # SQLite permits omitting the target list; the target's key is meant.
+            target = normalise_columns(table_fk.group(3) or source)
+            found.add(f"FOREIGN KEY({source})->{table_fk.group(2)}({target})")
             continue
 
-        if upper.startswith(CONSTRAINTS):
+        if opens_constraint(text):
             continue
 
         # A column declaration may carry the same constraints inline.
@@ -172,12 +207,62 @@ def constraints(body: str) -> set[str]:
 Table = tuple[set[str], set[str]]
 
 
+def load_migration() -> dict[str, Table]:
+    """Execute the migration and read its shape back out of SQLite.
+
+    Reading the schema through PRAGMA rather than a regex means the authoritative
+    half of this comparison is SQLite's own answer. An earlier regex missed a
+    whole table whose predecessor's body ended `));`, and silently folded it into
+    the previous one; a parser cannot make that class of mistake if it is not
+    doing the parsing.
+    """
+    database = sqlite3.connect(":memory:")
+    database.executescript(MIGRATION.read_text(encoding="utf-8"))
+    names = [
+        row[0]
+        for row in database.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' "
+            "AND name NOT LIKE 'sqlite_%' ORDER BY name"
+        )
+    ]
+
+    tables: dict[str, Table] = {}
+    for table in names:
+        info = database.execute(f'PRAGMA table_info("{table}")').fetchall()
+        found = {row[1] for row in info}
+        keys: set[str] = set()
+
+        primary = [row[1] for row in sorted(info, key=lambda row: row[5]) if row[5]]
+        if primary:
+            keys.add(f"PRIMARY KEY({','.join(primary)})")
+
+        for index in database.execute(f'PRAGMA index_list("{table}")'):
+            # origin 'u' is a UNIQUE constraint; 'pk' is covered above and 'c' is
+            # a standalone CREATE INDEX, which this gate does not compare.
+            if index[3] != "u":
+                continue
+            members = database.execute(f'PRAGMA index_info("{index[1]}")').fetchall()
+            ordered = [row[2] for row in sorted(members, key=lambda row: row[0])]
+            keys.add(f"UNIQUE({','.join(ordered)})")
+
+        references: dict[int, list[tuple[int, str, str, str]]] = {}
+        for row in database.execute(f'PRAGMA foreign_key_list("{table}")'):
+            references.setdefault(row[0], []).append((row[1], row[2], row[3], row[4]))
+        for parts in references.values():
+            parts.sort()
+            target = parts[0][1]
+            source_columns = ",".join(part[2] for part in parts)
+            # A null target column means the reference named no column list, so
+            # SQLite resolves it to the target's primary key.
+            target_columns = ",".join(part[3] or part[2] for part in parts)
+            keys.add(f"FOREIGN KEY({source_columns})->{target}({target_columns})")
+
+        tables[table] = (found, keys)
+    return tables
+
+
 def load_tables() -> tuple[dict[str, Table], dict[str, Table], list[str]]:
-    migration_sql = MIGRATION.read_text(encoding="utf-8")
-    migration = {
-        match.group(1): (columns(match.group(2))[0], constraints(match.group(2)))
-        for match in MIGRATION_TABLE.finditer(migration_sql)
-    }
+    migration = load_migration()
 
     spec: dict[str, Table] = {}
     elisions: list[str] = []
@@ -193,8 +278,8 @@ def load_tables() -> tuple[dict[str, Table], dict[str, Table], list[str]]:
     return spec, migration, elisions
 
 
-def measure() -> tuple[dict[str, dict[str, list[str]]], list[str], int]:
-    """Return current drift, current elisions, and the shared-table count."""
+def measure() -> tuple[dict[str, dict[str, list[str]]], list[str], list[str], int]:
+    """Return drift, elisions, specified-but-absent tables, and the shared count."""
     spec, migration, elisions = load_tables()
     drift: dict[str, dict[str, list[str]]] = {}
     shared = sorted(set(spec) & set(migration))
@@ -209,21 +294,35 @@ def measure() -> tuple[dict[str, dict[str, list[str]]], list[str], int]:
         }
         if any(entry.values()):
             drift[table] = entry
-    return drift, sorted(elisions), len(shared)
+    return drift, sorted(elisions), sorted(set(spec) - set(migration)), len(shared)
 
 
 def load_baseline() -> dict:
     if not BASELINE.is_file():
-        return {"drift": {}, "elided": []}
+        return {"drift": {}, "elided": [], "absent": []}
     return json.loads(BASELINE.read_text(encoding="utf-8"))
 
 
 def failures() -> list[str]:
     problems: list[str] = []
-    drift, elisions, _ = measure()
+    drift, elisions, absent, _ = measure()
     baseline = load_baseline()
     allowed = baseline.get("drift", {})
     allowed_elisions = set(baseline.get("elided", []))
+    allowed_absent = set(baseline.get("absent", []))
+
+    for table in absent:
+        if table not in allowed_absent:
+            problems.append(
+                f"{table} is declared in a specification but does not exist in the "
+                f"migration under that name; check for a rename before recording it"
+            )
+
+    for stale in sorted(allowed_absent - set(absent)):
+        problems.append(
+            f"{stale} now exists in the migration but is still listed as absent in "
+            f"{BASELINE.name}; remove the entry so the ratchet holds"
+        )
 
     for table, entry in drift.items():
         if table not in allowed:
@@ -264,14 +363,14 @@ def failures() -> list[str]:
 
 
 def main() -> int:
-    drift, elisions, shared = measure()
+    drift, elisions, absent, shared = measure()
 
     if "--write-baseline" in sys.argv:
-        payload = {"drift": drift, "elided": elisions}
+        payload = {"drift": drift, "elided": elisions, "absent": absent}
         BASELINE.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         print(
             f"spec-schema-drift: wrote {BASELINE.name} with {len(drift)} drifting "
-            f"table(s) and {len(elisions)} elided block(s)"
+            f"table(s), {len(elisions)} elided block(s) and {len(absent)} absent table(s)"
         )
         return 0
 
@@ -284,7 +383,7 @@ def main() -> int:
     print(
         f"spec-schema-drift: ok ({shared} shared tables, "
         f"{shared - len(drift)} agree exactly, {len(drift)} known-drifting, "
-        f"{len(elisions)} elided)"
+        f"{len(elisions)} elided, {len(absent)} specified but absent)"
     )
     return 0
 

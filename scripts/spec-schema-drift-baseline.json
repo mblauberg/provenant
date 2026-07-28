@@ -1,4 +1,7 @@
 {
+  "absent": [
+    "provider_action_actual_route_identities"
+  ],
   "drift": {
     "adapter_capability_snapshots": {
       "migration_only": [],
@@ -112,6 +115,8 @@
     "lifecycle_receipt_batch_completions": {
       "migration_only": [
         "effects_set_digest",
+        "primary_fresh_origin_effect_digest",
+        "primary_fresh_origin_effect_role",
         "secondary_fresh_origin_effect_digest",
         "secondary_fresh_origin_effect_role"
       ],
@@ -122,6 +127,9 @@
         "UNIQUE(batch_id,effects_set_digest)"
       ],
       "spec_only": [
+        "primary_fresh_effect_digest",
+        "primary_fresh_effect_ordinal",
+        "primary_fresh_effect_role",
         "secondary_fresh_effect_digest",
         "secondary_fresh_effect_ordinal",
         "secondary_fresh_effect_role"
@@ -566,6 +574,14 @@
         "FOREIGN KEY(adapter_id,action_id,run_id,target_generation,slot,attempt_generation,reservation_digest)->review_finding_capacity_reservations(adapter_id,action_id,run_id,target_generation,slot,attempt_generation,reservation_digest)",
         "FOREIGN KEY(adapter_id,action_id,run_id,task_id,route_ordinal)->provider_actions(adapter_id,action_id,run_id,task_id,route_ordinal)"
       ]
+    },
+    "run_plan_declarations": {
+      "migration_only": [],
+      "migration_only_keys": [
+        "FOREIGN KEY(run_id)->runs(run_id)"
+      ],
+      "spec_only": [],
+      "spec_only_keys": []
     },
     "topology_wave_plans": {
       "migration_only": [],
