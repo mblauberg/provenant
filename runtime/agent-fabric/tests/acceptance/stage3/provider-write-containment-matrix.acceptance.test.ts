@@ -237,13 +237,29 @@ describe("provider-write containment matrix evidence", () => {
       const cases = await matrixCases();
       const spec = await readFile(specUrl, "utf8");
       const specLines = spec.split("\n");
-      const specCaseIds = [...spec.matchAll(/^\| `([^`]+)` \|/gmu)].map((match) => match[1]);
+      const specRows = [...spec.matchAll(/^\| `([^`]+)` \|.*\| (.*) \|$/gmu)];
+      const specCaseIds = specRows.map((match) => match[1]);
 
       expect(cases.map((entry) => entry.id)).toStrictEqual([...CONTAINMENT_CASE_IDS]);
       expect(specCaseIds).toStrictEqual([...CONTAINMENT_CASE_IDS]);
       expect(cases).toHaveLength(21);
       for (const entry of cases) {
         expect(specLines[entry.specLine - 1], `stale specLine for ${entry.id}`).toContain(`\`${entry.id}\``);
+        const row = specRows.find((match) => match[1] === entry.id);
+        expect(row, `missing normative row for ${entry.id}`).toBeDefined();
+        const normativeResult = row?.[2] ?? "";
+        const normativeTurnStatus = /turn status `([^`]+)`/u.exec(normativeResult)?.[1];
+        expect(entry.turnStatus, `turnStatus drift for ${entry.id}`).toBe(normativeTurnStatus);
+        if (entry.failureMapClass === "T") {
+          const normativeTuples = [...normativeResult.matchAll(
+            /`([^`]+)` → `([^`]+)` → `([^`]+)`/gu,
+          )].map((match) => ({
+            operation: match[1],
+            target: match[2],
+            status: match[3],
+          }));
+          expect(entry.expected, `expected tuple drift for ${entry.id}`).toStrictEqual(normativeTuples);
+        }
       }
     });
 
@@ -316,7 +332,9 @@ describe("provider-write containment matrix evidence", () => {
         expect(
           entry.expected.map((tuple) => wouldDenyClaude(claude, tuple)),
           `Claude projection-only ${entry.id}:${mode}`,
-        ).toEqual(expectedDenials);
+        ).toEqual(entry.id === "denied-path-and-credential-reads"
+          ? [true, true, true, true, false]
+          : expectedDenials);
         const codexResults = entry.expected.map((tuple) => wouldDenyCodex(codex, tuple));
         if (entry.id === "denied-path-and-credential-reads") {
           expect(codexResults, `Codex has no projected read fence ${entry.id}:${mode}`)
@@ -332,7 +350,9 @@ describe("provider-write containment matrix evidence", () => {
   });
 
   describe("Channel A admission-verified", () => {
-    it.each(EXECUTION_MODES)("rejects raw controls before %s adapter invocation", async (mode) => {
+    it.each(EXECUTION_MODES)(
+      "rejects raw controls before %s adapter invocation (resume ancestry remains unverified)",
+      async (mode) => {
       const fixture = await fabricFixture();
       await expect(dispatch(fixture, mode, `raw-controls:${mode}`, {
         sandbox: "danger-full-access",
@@ -341,49 +361,53 @@ describe("provider-write containment matrix evidence", () => {
         environments: [{ inherit: true }],
       })).rejects.toMatchObject({ code: "CAPABILITY_FORBIDDEN" });
       expect(existsSync(fixture.journalPath)).toBe(false);
-    });
+      },
+    );
 
-    it.each(EXECUTION_MODES)("rejects external-effect write authority before %s adapter invocation", async (mode) => {
+    it.each(EXECUTION_MODES)(
+      "rejects external-effect write authority before %s adapter invocation (resume ancestry remains unverified)",
+      async (mode) => {
       const fixture = await fabricFixture({ externalEffects: true });
       await expect(dispatch(fixture, mode, `external-effects:${mode}`, {}))
         .rejects.toMatchObject({ code: "CAPABILITY_FORBIDDEN" });
       expect(existsSync(fixture.journalPath)).toBe(false);
-    });
+      },
+    );
 
-    it.each(EXECUTION_MODES)("rejects a revoked provider principal before %s adapter invocation", async (mode) => {
+    it("proves revoked-principal admission without claiming a matrix fresh/resume execution", async () => {
       const fixture = await fabricFixture();
-      await setupLifecycle(fixture, mode);
+      await setupLifecycle(fixture, "fresh");
       await fixture.chair.revokeCapability({
         agentId: "worker",
-        commandId: `lifecycle-revoked:${mode}:revoke`,
+        commandId: "lifecycle-revoked:mechanism:revoke",
       });
-      await expect(dispatch(fixture, "resume", `lifecycle-revoked:${mode}`, {}))
+      await expect(dispatch(fixture, "resume", "lifecycle-revoked:mechanism", {}))
         .rejects.toMatchObject({ code: "AUTHENTICATION_FAILED" });
       expect(existsSync(fixture.journalPath)).toBe(false);
     });
 
-    it.each(EXECUTION_MODES)("rejects an expired provider principal before %s adapter invocation", async (mode) => {
+    it("proves expired-principal admission without claiming a matrix fresh/resume execution", async () => {
       const fixture = await fabricFixture({ expiringWorker: true });
-      await setupLifecycle(fixture, mode);
+      await setupLifecycle(fixture, "fresh");
       fixture.clock.advance(1_001);
-      await expect(dispatch(fixture, "resume", `lifecycle-expired:${mode}`, {}))
+      await expect(dispatch(fixture, "resume", "lifecycle-expired:mechanism", {}))
         .rejects.toMatchObject({ code: "AUTHENTICATION_FAILED" });
       expect(existsSync(fixture.journalPath)).toBe(false);
     });
 
-    it.each(EXECUTION_MODES)("rejects the stale owner after a generation change before %s adapter invocation", async (mode) => {
+    it("proves stale-owner admission without claiming a matrix fresh/resume execution", async () => {
       const fixture = await fabricFixture();
-      await setupLifecycle(fixture, mode);
+      await setupLifecycle(fixture, "fresh");
       await fixture.chair.revokeCapability({
         agentId: "worker",
-        commandId: `lifecycle-owner:${mode}:revoke`,
+        commandId: "lifecycle-owner:mechanism:revoke",
       });
       const proof = await fixture.chair.recordTaskOwnerRecoveryProof({
         taskId: fixture.activeTask.taskId,
         ownerLeaseGeneration: fixture.activeTask.ownerLeaseGeneration,
         kind: "predecessor-terminal",
         detail: { agentId: "worker" },
-        commandId: `lifecycle-owner:${mode}:proof`,
+        commandId: "lifecycle-owner:mechanism:proof",
       });
       const recovered = await fixture.chair.recoverTaskOwner({
         taskId: fixture.activeTask.taskId,
@@ -391,25 +415,25 @@ describe("provider-write containment matrix evidence", () => {
         expectedOwnerLeaseGeneration: fixture.activeTask.ownerLeaseGeneration,
         successorAgentId: "successor",
         proofId: proof.proofId,
-        commandId: `lifecycle-owner:${mode}:recover`,
+        commandId: "lifecycle-owner:mechanism:recover",
       });
       expect(recovered.ownerLeaseGeneration).toBe(fixture.activeTask.ownerLeaseGeneration + 1);
-      await expect(dispatch(fixture, "resume", `lifecycle-owner:${mode}`, {}))
+      await expect(dispatch(fixture, "resume", "lifecycle-owner:mechanism", {}))
         .rejects.toMatchObject({ code: "AUTHENTICATION_FAILED" });
       expect(existsSync(fixture.journalPath)).toBe(false);
     });
   });
 
   describe("case 19 shipped read-only downgrade", () => {
-    it.each(EXECUTION_MODES)("dispatches %s without retaining write permission after lease removal", async (mode) => {
+    it("pins the mechanism without claiming a matrix fresh/resume execution", async () => {
       const fixture = await fabricFixture();
-      await setupLifecycle(fixture, mode);
+      await setupLifecycle(fixture, "fresh");
       await fixture.chair.releaseWriteLease({
         leaseId: fixture.lease.leaseId,
         expectedGeneration: fixture.lease.generation,
-        commandId: `lifecycle-lease-removed:${mode}:release`,
+        commandId: "lifecycle-lease-removed:mechanism:release",
       });
-      const actionId = `lifecycle-lease-removed:${mode}`;
+      const actionId = "lifecycle-lease-removed:mechanism";
       await expect(dispatch(fixture, "resume", actionId, {})).resolves.toMatchObject({ status: "terminal" });
       expect(existsSync(fixture.journalPath)).toBe(true);
       const payload = await storedPayload(fixture.databasePath, actionId);

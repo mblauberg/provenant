@@ -1,5 +1,15 @@
 {
   "notVerified": [
+    "admission-rejects-raw-controls:resume",
+    "admission-rejects-external-effects:resume",
+    "lifecycle-revoked:fresh",
+    "lifecycle-revoked:resume",
+    "lifecycle-expired:fresh",
+    "lifecycle-expired:resume",
+    "lifecycle-owner-generation-changed:fresh",
+    "lifecycle-owner-generation-changed:resume",
+    "lifecycle-write-lease-removed:fresh",
+    "lifecycle-write-lease-removed:resume",
     "lifecycle-restart-before-execution:fresh",
     "lifecycle-restart-before-execution:resume",
     "lifecycle-restart-after-provider-acceptance:fresh",

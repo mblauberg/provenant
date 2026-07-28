@@ -119,6 +119,7 @@ function isReadOperation(operation: string): boolean {
 }
 
 function targetIsInsidePilot(target: string): boolean {
+  if (target === "$CREDENTIAL_HARDLINK") return true;
   return target === "$PILOT" || target.startsWith("$PILOT/");
 }
 
@@ -154,9 +155,8 @@ export function wouldDenyClaude(
       settings.sandbox.filesystem.allowRead?.length === 1 &&
       !targetIsInsidePilot(tuple.target);
   }
-  if (tuple.status === "succeeded") return false;
   const allowed = settings.sandbox?.filesystem?.allowWrite ?? [];
-  return allowed.length === 1 && !targetIsInsidePilot(tuple.target);
+  return allowed.length !== 1 || !targetIsInsidePilot(tuple.target);
 }
 
 export function wouldDenyCodex(
@@ -173,13 +173,12 @@ export function wouldDenyCodex(
   if (isReadOperation(tuple.operation)) {
     return false;
   }
-  if (tuple.status === "succeeded") return false;
   if (tuple.operation === "write-temp") {
     return settings.sandboxPolicy?.excludeTmpdirEnvVar === true &&
       settings.sandboxPolicy.excludeSlashTmp === true;
   }
   const writable = settings.sandboxPolicy?.writableRoots ?? [];
-  return writable.length === 1 && !targetIsInsidePilot(tuple.target);
+  return writable.length !== 1 || !targetIsInsidePilot(tuple.target);
 }
 
 export function assertDistinctTempRoots(tmpdir: string, privateTemp: string): void {

@@ -163,7 +163,7 @@
       "expected": [
         { "operation": "create", "target": "$LIFECYCLE_TARGET", "status": "succeeded" }
       ],
-      "turnStatus": "read-only-dispatched"
+      "turnStatus": "denied-before-dispatch"
     },
     {
       "id": "lifecycle-expired",
@@ -190,7 +190,7 @@
       "expected": [
         { "operation": "create", "target": "$LIFECYCLE_TARGET", "status": "succeeded" }
       ],
-      "turnStatus": "denied-before-dispatch"
+      "turnStatus": "read-only-dispatched"
     },
     {
       "id": "lifecycle-restart-before-execution",

@@ -569,7 +569,7 @@ describe("Claude Agent SDK fabric adapter", () => {
     });
   });
 
-  it("does not expose the adapter parent environment to a write-offline SDK child", async () => {
+  it("passes only the PATH, TMPDIR and HOME allowlist to a write-offline SDK child", async () => {
     const sentinel = "must-not-cross-provider-boundary";
     const previous = process.env.AGENT_FABRIC_TEST_SECRET;
     process.env.AGENT_FABRIC_TEST_SECRET = sentinel;
