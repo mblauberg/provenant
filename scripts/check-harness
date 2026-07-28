@@ -26,6 +26,7 @@ fi
 cd "$ROOT"
 "${PYTHON[@]}" scripts/check_harness.py
 "${PYTHON[@]}" scripts/check_specs.py
+"${PYTHON[@]}" scripts/check_adr_index.py
 "${PYTHON[@]}" skills/orchestrate/evals/check_skill_triggers.py
 # Lifecycle-skill alignment is a deterministic current-tree gate. Historical
 # provider routing evidence stays immutable under docs/archive and is not
