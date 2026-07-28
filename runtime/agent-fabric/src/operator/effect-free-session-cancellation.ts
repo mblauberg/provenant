@@ -1,7 +1,7 @@
 import type Database from "better-sqlite3";
 
 import { ProjectFabricCoreError } from "../project-session/contracts.js";
-import { canonicalJson, integer, row, text } from "../project-session/store-support.js";
+import { canonicalJson, integer, row, text } from "../persistence/row-codec.js";
 import type { OperatorEffectOutcome } from "./action-store.js";
 
 export type EffectFreeSessionCancellationInput = Readonly<{

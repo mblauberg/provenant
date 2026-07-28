@@ -61,6 +61,13 @@ These have no legitimate register value in any of this family's domains.
   workspace vocabulary leaking into reader-facing text (`the subagent
   found`, `gate fired`, `per the manifest`). Translate to the actual fact or
   cite the real source.
+- **Patronising expert instruction.** Directions, reminders or parentheticals
+  telling a reader how to do the thing they are the expert in: telling a
+  solicitor to identify a company by ACN, telling an auditor which standard
+  applies, telling an engineer to use version control. It costs the writer
+  standing and buries the one fact the reader actually needed. Supply the fact
+  only the writer holds and stop; the method is the reader's. Offering to help
+  with the specialist's own craft is the same defect in a friendlier voice.
 - **Absence tombstones.** Never announce an absence that exists only because
   an editing instruction removed content (`Subgroup results are not
   discussed here because that section was removed`). The test: would this
@@ -147,6 +154,13 @@ does not excuse them.
   importance, and the `bold term: gloss` bullet as every section's default
   shape. Genuine enumerations (steps, fields, statutory elements) correctly
   stay parallel.
+- **Situational list labels.** A bold lead-in that narrates a condition
+  instead of naming the thing: `Ready to go live when the founders decide`,
+  `A base to hire onto`, `Evidence on hand`. Name it with a short noun phrase
+  the reader can scan and refer back to (`Go-live readiness`, `Technical
+  continuity`, `Audit-ready records`), and let the sentence after it carry the
+  condition. A label that resists a noun phrase usually marks two items fused
+  into one, or a bullet with nothing to name.
 - **Sentence-ending participle synthesis.** `, highlighting ...`,
   `, underscoring ...`, `, reflecting ...` appending an unsourced conclusion
   to a factual sentence. Stop at the fact, or make the conclusion its own

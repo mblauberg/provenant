@@ -27,7 +27,7 @@ import {
   sha256,
   text,
   type Row,
-} from "./store-support.js";
+} from "../persistence/row-codec.js";
 
 /**
  * Byte-moved from `launch-custody.ts` (issue #354, S4e, plan §2 "S4e"): the project-session

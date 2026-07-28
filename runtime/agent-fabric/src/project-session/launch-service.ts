@@ -26,7 +26,7 @@ import {
   sha256,
   text,
   type Row,
-} from "./store-support.js";
+} from "../persistence/row-codec.js";
 import {
   ProviderActionAdmissionCoordinator,
   type ProviderActionTicket,

@@ -30,7 +30,7 @@ import {
   sha256,
   text,
   type Row,
-} from "../project-session/store-support.js";
+} from "../persistence/row-codec.js";
 
 export type EnsureRunHierarchyContext = Readonly<{
   projectId: string;

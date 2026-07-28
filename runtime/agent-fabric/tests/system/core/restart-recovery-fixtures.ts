@@ -2,7 +2,7 @@ import Database from "better-sqlite3";
 
 import { applyMigrations } from "../../../src/core/migrations.ts";
 import type { AuthenticatedAgentContext } from "../../../src/project-session/contracts.ts";
-import { canonicalJson, sha256 } from "../../../src/project-session/store-support.ts";
+import { canonicalJson, sha256 } from "../../../src/persistence/row-codec.ts";
 import { TEST_AUTHORITY_V2_FIELDS } from "../../support/authority-v2-testkit.ts";
 
 export function openSystemDatabase(filename = ":memory:"): Database.Database {

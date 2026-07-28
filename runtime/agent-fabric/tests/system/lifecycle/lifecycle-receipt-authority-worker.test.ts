@@ -10,7 +10,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { openFabric, type Fabric, type FabricClient } from "../../../src/index.ts";
 import { servePublicProtocolConnection } from "../../../src/daemon/public-protocol.ts";
-import { canonicalJson } from "../../../src/project-session/store-support.ts";
+import { canonicalJson } from "../../../src/persistence/row-codec.ts";
 import { AtomicDeliveryStore } from "../../../src/results/store.ts";
 import {
   TestLifecycleReceiptAuthority,

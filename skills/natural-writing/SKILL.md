@@ -1,6 +1,6 @@
 ---
 name: natural-writing
-description: "Use for making general or mixed prose natural and direct while preserving facts, citations, numbers, and intent. Not for engineering, academic, or Australian legal prose; use its specialist."
+description: "Use for making general, mixed, or correspondence prose natural and direct while preserving facts, citations, numbers, and intent. Not for engineering, academic, or Australian legal prose; use its specialist."
 ---
 
 # Natural writing
@@ -14,16 +14,18 @@ rhythm and chatbot residue.
 This skill is the writing family's hub: it owns the shared prose doctrine,
 the anti-AI taxonomy, condense pass, claim-discipline/evidence schema, voice
 matching, and the always-on Australian English default. `academic-writing`,
-`engineering-writing` and `legal-writing` link here instead of cloning it,
-keeping only their own domain specialization and linking back for the rest.
+`engineering-writing` and `legal-writing` link here rather than clone it,
+keeping only their own domain specialization.
 Load [au-english.md](references/au-english.md) as the default house style for
 any prose without a project convention that overrides it.
 
 ## Boundary
 
-Use this skill for general, mixed or unclassified prose. Defer technical docs
-and READMEs to `engineering-writing`, scholarly work to `academic-writing`, and
-Australian legal drafting to `legal-writing`.
+Use this skill for general, mixed or unclassified prose, including
+correspondence. Defer technical docs and READMEs to `engineering-writing`,
+scholarly work to `academic-writing`, and Australian legal drafting to
+`legal-writing`. Correspondence about a specialist matter stays here, with that
+specialist as companion.
 
 Do not fabricate experience, invent sources, add fake messiness or optimise
 for AI-detector scores. Formal prose is not proof of AI authorship.

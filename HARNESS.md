@@ -41,7 +41,7 @@ force-removal, history rewrites and shared-branch pushes outside authorised merg
 binding identity, effort and receipt; runtime governs, catalogues cache, mechanics live in
 `orchestrate`. Durable knowledge belongs in project state, specs, ADRs and runbooks;
 harness-private memory holds only cross-project preferences. Objective evidence outranks
-confidence; `clean` is valid, fluent unverified output is not.
+confidence; `clean` is valid, fluent unverified output is not. A user correction names a class, not an instance: sweep every artefact in scope for the same defect and report what the sweep found.
 
 | Risk | Minimum review pressure |
 |---|---|
@@ -50,11 +50,11 @@ confidence; `clean` is valid, fluent unverified output is not.
 | `crucial` | substantial coverage plus another strong distinct-family review when available |
 | `terminal` | all preceding coverage with stronger targeted and adversarial pressure |
 
-For machine checking, multiple means at least two distinct targeted lenses; terminal raises that
-minimum to three and requires an adversarial or challenge lens. The other-primary leg remains required
-from substantial upwards; skipped distinct-family legs record a reason. Evidence, never majority voting, decides claims.
+For machine checking, multiple means at least two distinct targeted lenses; terminal raises that minimum to three and requires an adversarial or challenge lens.
+The other-primary leg remains required from substantial upwards; skipped distinct-family legs record a reason. Evidence, never majority voting, decides claims.
 
 ## Load depth only when triggered
 
 - orchestration / routing / Herdr → `orchestrate`; implementation / review → `implement`, `code-review`; lifecycle / profile → `deliver`
 - context hygiene / compaction → `session`; promotion / assurance → `release`, `evaluate`; retrospect → `retrospect`; governance → `MAINTAINING.md`
+- any reader-facing prose, including correspondence → `natural-writing`, which routes on to its specialists; drafting under another skill's lead does not exempt the prose

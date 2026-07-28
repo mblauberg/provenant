@@ -8,7 +8,7 @@ import type Database from "better-sqlite3";
 
 import { ProjectFabricCoreError } from "../project-session/contracts.js";
 import { currentAcceptedRunScope, currentRunPlanBinding } from "../project-session/run-plan-store.js";
-import { integer, isRow, row, text, type Row } from "../project-session/store-support.js";
+import { integer, isRow, row, text, type Row } from "../persistence/row-codec.js";
 
 export const MAX_RUN_IDENTITY_WORKSTREAMS = 1024;
 

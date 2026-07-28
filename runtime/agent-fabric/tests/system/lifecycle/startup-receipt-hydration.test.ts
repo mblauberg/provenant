@@ -14,7 +14,7 @@ import type {
   LifecycleAuthenticatedScopeCheckpoint,
   LifecycleDigest,
 } from "../../../src/lifecycle/receipt-authority.ts";
-import { canonicalJson } from "../../../src/project-session/store-support.ts";
+import { canonicalJson } from "../../../src/persistence/row-codec.ts";
 import { TestLifecycleReceiptAuthority } from "../../support/lifecycle-receipt-authority-fake.ts";
 
 type StartupSeed = Readonly<{

@@ -520,25 +520,14 @@ safe new findings. Raw unsafe output is UNUSABLE. Provider text cannot attest co
 manifest-complete-risk-directed gap summary with per-group total/read/ unread counts and unread-set digests;
 byteComplete is false unless every object was fully read.
 
-The proved actual-route identity is a dedicated immutable child of the exact admission observation. A digest cannot be
-coined directly on review evidence. The full current-baseline result relation is reproduced below rather than replaced
-by a thinner parent stub. It retains every result field and arm CHECK; the only extension is the journal-bound terminal
-sequence and composite evidence-parent key.
+The daemon derives the proved actual-route identity from the admission
+observation and records its digest directly on review evidence. The evidence
+CHECK permits that digest only when `route_observation_digest` is nonnull.
+There is no dedicated actual-route-identity child relation. The full
+current-baseline result relation is reproduced below rather than replaced by a
+thinner parent stub. It retains every result field and arm CHECK.
 
 ~~~sql
-provider_action_actual_route_identities(
-  adapter_id NOT NULL, action_id NOT NULL,
-  admission_digest NOT NULL, observation_digest NOT NULL,
-  actual_route_identity_json NOT NULL,
-  actual_route_identity_digest NOT NULL,
-  PRIMARY KEY(adapter_id,action_id),
-  UNIQUE(adapter_id,action_id,admission_digest,observation_digest,
-    actual_route_identity_digest),
-  FOREIGN KEY(adapter_id,action_id,admission_digest,observation_digest)
-    REFERENCES provider_action_route_observations(
-      adapter_id,action_id,admission_digest,observation_digest)
-)
-
 provider_review_terminal_journal(
   adapter_id TEXT NOT NULL,
   action_id TEXT NOT NULL,
@@ -673,20 +662,10 @@ provider_review_evidence(
     REFERENCES provider_review_results(
       adapter_id,action_id,terminal_sequence,result_kind,
       provider_answer_digest,result_digest),
-  FOREIGN KEY(action_adapter_id,action_id,route_receipt_digest,
-      route_admission_digest)
-    REFERENCES provider_action_routes(
-      adapter_id,action_id,route_receipt_digest,
-      deployed_route_admission_digest),
   FOREIGN KEY(action_adapter_id,action_id,route_admission_digest,
       route_observation_digest)
     REFERENCES provider_action_route_observations(
       adapter_id,action_id,admission_digest,observation_digest),
-  FOREIGN KEY(action_adapter_id,action_id,route_admission_digest,
-      route_observation_digest,actual_route_identity_digest)
-    REFERENCES provider_action_actual_route_identities(
-      adapter_id,action_id,admission_digest,observation_digest,
-      actual_route_identity_digest),
   FOREIGN KEY(action_adapter_id,action_id,run_id,target_generation,slot,
       attempt_generation,finding_capacity_reservation_digest)
     REFERENCES review_finding_capacity_reservations(
@@ -975,9 +954,9 @@ Deterministic verification covers:
   target/evidence/finding identity; review-subject JCS golden/permutation/extra/omission/equality-copy fixtures fail
   every crossed nested bundle/profile field;
 - contract-bound Claude/Codex/Cursor/Agy exact server/tool/helper/broker sandbox canaries, peer credentials,
-  stopped-child persistence, exact provider-closure derivation/substitution negatives, supervisor-FD-3 isolation and
-  stub-FD-4– FD-7 closure, daemon/supervisor/startup/PID-reuse cleanup, empty list probes, denied extra methods/effects
-  and no cross-bundle portal read;
+  closed `portal-stdio-v1` argv/three-locator invocation rejection, inherited non-stdio descriptor refusal,
+  supervisor-FD-3 `CLOEXEC` isolation and bounded-LF-frame negatives, daemon/supervisor/startup/PID-reuse cleanup,
+  empty list probes, denied extra methods/effects and no cross-bundle portal read;
 - structural Python/TypeScript route-schema parity, post-router admission checks, process-tree kill, daemon-global pair
   single-flight, requested/ resolved adapter equality, cross-run conflict, different-adapter same-ID allowance, changed
   concurrent input and replay without router;

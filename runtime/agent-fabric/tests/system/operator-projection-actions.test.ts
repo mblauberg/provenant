@@ -46,7 +46,7 @@ import { OperatorProjectionStore } from "../../src/operator/projection-store.ts"
 import { OperatorStore } from "../../src/operator/store.ts";
 import { ScopedGateStore } from "../../src/gates/store.ts";
 import type { ProviderActionTicket } from "../../src/application/provider-action-admission.ts";
-import { sha256 } from "../../src/project-session/store-support.ts";
+import { sha256 } from "../../src/persistence/row-codec.ts";
 import type { AuthenticatedOperatorContext } from "../../src/project-session/contracts.ts";
 
 const databases: Database.Database[] = [];

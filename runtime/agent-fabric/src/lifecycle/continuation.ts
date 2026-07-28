@@ -1,7 +1,7 @@
 import type Database from "better-sqlite3";
 
 import { assertProviderActionOwner, ProviderActionOwnerError } from "../application/provider-action-owner.js";
-import { canonicalJson, stringDigest as sha256Digest, row as rowOrNotFound, text as stringField } from "../project-session/store-support.js";
+import { canonicalJson, stringDigest as sha256Digest, row as rowOrNotFound, text as stringField } from "../persistence/row-codec.js";
 import { type LifecycleContinuationInput } from "./admission.js";
 import { type LifecycleCustodyHead, type LifecycleRotationRepository } from "./rotation-repository.js";
 import type { LifecycleFinalizer } from "./finalizer.js";

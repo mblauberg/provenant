@@ -3,7 +3,7 @@ import type Database from "better-sqlite3";
 import type { AgentProvisionProviderResult } from "../adapters/providers/types.js";
 import { FabricError } from "../errors.js";
 import { assertProviderActionOwner } from "../application/provider-action-owner.js";
-import { canonicalJson, digest as sha256Digest, integer as numberField, isRow, row as rowOrNotFound, sha256, text as stringField } from "../project-session/store-support.js";
+import { canonicalJson, digest as sha256Digest, integer as numberField, isRow, row as rowOrNotFound, sha256, text as stringField } from "../persistence/row-codec.js";
 import { lifecycleDigest } from "./custody-codec.js";
 import { recoverTerminalAuthorityReceipt } from "./terminal-receipt-authority.js";
 import { type LifecycleCustodyHead, type LifecycleRotationRepository } from "./rotation-repository.js";

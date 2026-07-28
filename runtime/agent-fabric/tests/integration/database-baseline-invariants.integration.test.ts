@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 
 import { applyMigrations } from "../../src/core/migrations.ts";
-import { canonicalJson, digest } from "../../src/project-session/store-support.ts";
+import { canonicalJson, digest } from "../../src/persistence/row-codec.ts";
 import {
   admitProviderActionFixture,
   insertProviderActionPreflightParent,

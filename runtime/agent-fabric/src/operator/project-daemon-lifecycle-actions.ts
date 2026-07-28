@@ -8,7 +8,7 @@ import type Database from "better-sqlite3";
 import { ProjectFabricCoreError } from "../project-session/contracts.js";
 import { supersedeFinalAcceptanceGates } from "../project-session/acceptance-cycle.js";
 import { retireProjectSessionBridges } from "../project-session/bridge-retirement.js";
-import { canonicalJson, sha256 } from "../project-session/store-support.js";
+import { canonicalJson, sha256 } from "../persistence/row-codec.js";
 import type { OperatorEffectOutcome, OperatorEffectRequest } from "./action-store.js";
 
 export type Row = Record<string, unknown>;

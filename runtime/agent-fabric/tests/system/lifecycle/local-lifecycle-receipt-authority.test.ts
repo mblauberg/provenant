@@ -8,7 +8,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { openLocalLifecycleReceiptAuthority } from "../../../src/lifecycle/local-receipt-authority.ts";
 import type { LifecycleAdmittedRunScope, LifecycleDigest } from "../../../src/lifecycle/receipt-authority.ts";
-import { canonicalJson } from "../../../src/project-session/store-support.ts";
+import { canonicalJson } from "../../../src/persistence/row-codec.ts";
 
 const roots: string[] = [];
 

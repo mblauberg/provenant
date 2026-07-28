@@ -41,7 +41,7 @@ import type {
   ChairRecoveryCurrentState,
   ChairLiveHandoffCurrentState,
 } from "../project-session/launch-custody.js";
-import { canonicalJson, integer, isRow, row, sha256, text, type Row } from "../project-session/store-support.js";
+import { canonicalJson, integer, isRow, row, sha256, text, type Row } from "../persistence/row-codec.js";
 import type { AuthenticatedOperatorCredential, OperatorStore } from "./store.js";
 import {
   OperatorActionJournal,

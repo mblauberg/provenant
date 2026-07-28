@@ -30,6 +30,10 @@ EXPECTED_AMBIENT_SKILL_NAMES = frozenset(
         "diagnose",
         "evaluate",
         "implement",
+        # The constitution routes reader-facing prose to one named entry point;
+        # `natural-writing` resolves its own specialists, so only the entry
+        # point is ambient.
+        "natural-writing",
         "orchestrate",
         "release",
         "retrospect",

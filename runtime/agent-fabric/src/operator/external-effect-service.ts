@@ -19,7 +19,7 @@ import type {
   OperatorEffectRequest,
 } from "./action-store.js";
 import { ProjectFabricCoreError } from "../project-session/contracts.js";
-import { canonicalJson, integer, isRow, nullableText, row, sha256, text, type Row } from "../project-session/store-support.js";
+import { canonicalJson, integer, isRow, nullableText, row, sha256, text, type Row } from "../persistence/row-codec.js";
 
 export type RegisteredEffectPort = Readonly<{
   integrationId: string;

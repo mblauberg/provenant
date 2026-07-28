@@ -44,4 +44,18 @@ if [ -f "$DIST_MCP" ]; then
 fi
 
 # Source-tree fallback for development checkouts without a build.
-exec node --import "$AGENTS_ROOT/node_modules/tsx/dist/loader.mjs" "$FABRIC_ROOT/src/mcp/main.ts" "$@"
+TSX_LOADER_LIBRARY="$SCRIPT_DIR/lib/agent-fabric-tsx-loader.sh"
+[ -f "$TSX_LOADER_LIBRARY" ] || {
+  echo "agent-fabric-mcp cannot resolve the tsx loader: missing $TSX_LOADER_LIBRARY" >&2
+  echo "repair: reinstall the harness scripts directory, including scripts/lib" >&2
+  exit 78
+}
+. "$TSX_LOADER_LIBRARY"
+
+TSX_LOADER=$(resolve_tsx_loader "$AGENTS_ROOT") || {
+  echo "agent-fabric-mcp found no tsx/dist/loader.mjs under \"$AGENTS_ROOT\" or any ancestor" >&2
+  echo "repair: run 'npm ci' in the repository root that owns this workspace" >&2
+  exit 1
+}
+
+exec node --import "$TSX_LOADER" "$FABRIC_ROOT/src/mcp/main.ts" "$@"

@@ -13,8 +13,10 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 LAUNCHER = REPO_ROOT / "scripts" / "agent-fabric"
 MCP_WRAPPER = REPO_ROOT / "scripts" / "agent-fabric-mcp"
 WARM = REPO_ROOT / "scripts" / "agent-fabric-warm"
-FRESHNESS_LIBRARY = REPO_ROOT / "scripts" / "lib" / "agent-fabric-workspace-freshness.sh"
-BUILD_LOCK_LIBRARY = REPO_ROOT / "scripts" / "lib" / "agent-fabric-protocol-build-lock.sh"
+SCRIPT_LIBRARY_DIR = REPO_ROOT / "scripts" / "lib"
+FRESHNESS_LIBRARY = SCRIPT_LIBRARY_DIR / "agent-fabric-workspace-freshness.sh"
+BUILD_LOCK_LIBRARY = SCRIPT_LIBRARY_DIR / "agent-fabric-protocol-build-lock.sh"
+TSX_LOADER_LIBRARY = SCRIPT_LIBRARY_DIR / "agent-fabric-tsx-loader.sh"
 PREFLIGHT = REPO_ROOT / "scripts" / "agent-fabric-protocol-preflight"
 PROTOCOL_BUILD = REPO_ROOT / "scripts" / "agent-fabric-protocol-build"
 PROTOCOL_BIN_PREFLIGHT = (
@@ -63,11 +65,10 @@ def _copy_launcher_scripts(root: Path) -> None:
     scripts.mkdir(parents=True)
     for source in (LAUNCHER, MCP_WRAPPER, WARM, PREFLIGHT, PROTOCOL_BUILD):
         shutil.copy2(source, scripts / source.name)
-    library_dir = scripts / "lib"
-    library_dir.mkdir()
-    for source in (FRESHNESS_LIBRARY, BUILD_LOCK_LIBRARY):
-        if source.exists():
-            shutil.copy2(source, library_dir / source.name)
+    # Copy the whole library directory. Enumerating its members here meant that
+    # adding a scripts/lib file broke this fixture rather than exercising the
+    # launcher it is meant to test.
+    shutil.copytree(SCRIPT_LIBRARY_DIR, scripts / "lib")
 
 
 def _fixture(
@@ -1966,3 +1967,62 @@ def test_protocol_preflight_reports_a_partial_install_as_typed_and_repairable(
     assert result.returncode == 78
     assert "AGENT_FABRIC_PREFLIGHT_INCOMPLETE" in result.stderr
     assert "scripts/lib" in result.stderr
+
+
+def _resolve_tsx_loader(start: Path) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [
+            "sh",
+            "-c",
+            f'. "{TSX_LOADER_LIBRARY}"; resolve_tsx_loader "{start}"',
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+
+def test_tsx_loader_resolves_from_an_ancestor_node_modules(tmp_path: Path) -> None:
+    """A linked git worktree has no node_modules of its own.
+
+    npm hoists workspace dependencies to the repository root, so resolution
+    must walk towards the filesystem root the way Node resolves a bare
+    specifier. Assuming node_modules sits directly beneath AGENTS_HOME broke
+    every worktree whose TypeScript was newer than its build, because only
+    then does the launcher take the source-tree fallback.
+    """
+    loader = tmp_path / "node_modules/tsx/dist/loader.mjs"
+    loader.parent.mkdir(parents=True)
+    loader.write_text("", encoding="utf-8")
+    worktree = tmp_path / ".worktrees/impl-example"
+    worktree.mkdir(parents=True)
+
+    result = _resolve_tsx_loader(worktree)
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == str(loader)
+
+
+def test_tsx_loader_ignores_a_node_modules_holding_no_packages(tmp_path: Path) -> None:
+    """Vitest leaves a .vite cache in the worktree it runs from.
+
+    That directory satisfies a `[ -d node_modules ]` test while containing no
+    packages, so the probe must test for the loader file itself.
+    """
+    loader = tmp_path / "node_modules/tsx/dist/loader.mjs"
+    loader.parent.mkdir(parents=True)
+    loader.write_text("", encoding="utf-8")
+    worktree = tmp_path / ".worktrees/impl-example"
+    (worktree / "node_modules/.vite").mkdir(parents=True)
+
+    result = _resolve_tsx_loader(worktree)
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == str(loader)
+
+
+def test_tsx_loader_fails_when_no_ancestor_provides_it(tmp_path: Path) -> None:
+    result = _resolve_tsx_loader(tmp_path)
+
+    assert result.returncode == 1
+    assert result.stdout.strip() == ""

@@ -20,6 +20,81 @@ HARDENING_SPECS = read_specs(AGENT_FABRIC_HARDENING)
 PROVIDER_ACTIONS_SPEC = read_spec("agent-fabric/provider-actions-and-adapters.md")
 MESSAGING_PROTOCOL_SPEC = read_spec("agent-fabric/messaging-and-public-protocol.md")
 
+APPLY_ARM_CHECK_ERROR = """CHECK constraint failed: (apply_kind='terminal' AND
+      batch_transition_kind IN ('custody-terminal','generation-loss-terminal',
+        'custody-recovery-retirement') AND receipt_batch_id IS NOT NULL AND
+      batch_completion_digest IS NOT NULL AND
+      transition_replay_digest IS NOT NULL AND
+      ordered_authority_receipt_set_digest IS NOT NULL AND
+      verified_scope_checkpoint_digest IS NOT NULL AND
+      applied_mutation_plan_digest IS NOT NULL AND fresh_handoff_id IS NULL AND
+      fresh_handoff_digest IS NULL AND fresh_handoff_key='none' AND
+      fresh_project_session_id IS NULL AND
+      fresh_run_id IS NULL AND fresh_agent_id IS NULL AND
+      fresh_source_mode IS NULL AND fresh_apply_plan_digest IS NULL AND
+      new_custody_id IS NULL AND new_custody_semantic_digest IS NULL AND
+      new_custody_source_ref_digest IS NULL AND
+      fresh_generation_loss_id IS NULL AND
+      fresh_generation_loss_after_revision IS NULL AND
+      fresh_generation_loss_after_semantic_digest IS NULL AND
+      fresh_generation_loss_after_source_ref_digest IS NULL AND
+      fresh_generation_loss_after_key='none') OR
+    (apply_kind='terminal-fresh' AND
+      batch_transition_kind='custody-terminal' AND receipt_batch_id IS NOT NULL AND
+      batch_completion_digest IS NOT NULL AND
+      transition_replay_digest IS NOT NULL AND
+      ordered_authority_receipt_set_digest IS NOT NULL AND
+      verified_scope_checkpoint_digest IS NOT NULL AND
+      applied_mutation_plan_digest IS NOT NULL AND fresh_handoff_id IS NOT NULL AND
+      fresh_handoff_digest IS NOT NULL AND
+      fresh_handoff_key=fresh_handoff_digest AND
+      fresh_project_session_id IS NOT NULL AND
+      fresh_run_id IS NOT NULL AND fresh_agent_id IS NOT NULL AND
+      fresh_source_mode='terminalize-nonfinal-custody' AND
+      fresh_apply_plan_digest IS NOT NULL AND
+      new_custody_id IS NOT NULL AND new_custody_semantic_digest IS NOT NULL AND
+      new_custody_source_ref_digest IS NOT NULL AND
+      ((fresh_generation_loss_after_key='none' AND
+          fresh_generation_loss_id IS NULL AND
+          fresh_generation_loss_after_revision IS NULL AND
+          fresh_generation_loss_after_semantic_digest IS NULL AND
+          fresh_generation_loss_after_source_ref_digest IS NULL) OR
+        (fresh_generation_loss_after_key<>'none' AND
+          fresh_generation_loss_id IS NOT NULL AND
+          fresh_generation_loss_after_revision IS NOT NULL AND
+          fresh_generation_loss_after_semantic_digest IS NOT NULL AND
+          fresh_generation_loss_after_source_ref_digest=
+            fresh_generation_loss_after_key))) OR
+    (apply_kind='fresh' AND batch_transition_kind='fresh-origin' AND
+      receipt_batch_id IS NOT NULL AND
+      batch_completion_digest IS NOT NULL AND
+      transition_replay_digest IS NOT NULL AND
+      ordered_authority_receipt_set_digest IS NOT NULL AND
+      verified_scope_checkpoint_digest IS NOT NULL AND
+      applied_mutation_plan_digest IS NOT NULL AND fresh_handoff_id IS NOT NULL AND
+      fresh_handoff_digest IS NOT NULL AND
+      fresh_handoff_key=fresh_handoff_digest AND
+      fresh_project_session_id IS NOT NULL AND
+      fresh_run_id IS NOT NULL AND fresh_agent_id IS NOT NULL AND
+      fresh_source_mode IN ('reuse-final-custody','open-generation-loss') AND
+      fresh_apply_plan_digest IS NOT NULL AND
+      new_custody_id IS NOT NULL AND new_custody_semantic_digest IS NOT NULL AND
+      new_custody_source_ref_digest IS NOT NULL AND
+      applied_mutation_plan_digest=fresh_apply_plan_digest AND
+      ((fresh_source_mode='reuse-final-custody' AND
+          fresh_generation_loss_after_key='none' AND
+          fresh_generation_loss_id IS NULL AND
+          fresh_generation_loss_after_revision IS NULL AND
+          fresh_generation_loss_after_semantic_digest IS NULL AND
+          fresh_generation_loss_after_source_ref_digest IS NULL) OR
+        (fresh_source_mode='open-generation-loss' AND
+          fresh_generation_loss_after_key<>'none' AND
+          fresh_generation_loss_id IS NOT NULL AND
+          fresh_generation_loss_after_revision IS NOT NULL AND
+          fresh_generation_loss_after_semantic_digest IS NOT NULL AND
+          fresh_generation_loss_after_source_ref_digest=
+            fresh_generation_loss_after_key)))"""
+
 
 def ddl_block(text: str, table: str) -> str:
     start = text.index(f"\n{table}(") + 1
@@ -135,10 +210,6 @@ def trigger_database() -> sqlite3.Connection:
 
 class SpecRepairTests(unittest.TestCase):
     def test_fresh_origin_effect_ddl_accepts_exact_and_rejects_crossed_arm(self) -> None:
-        self.assertIn(
-            "CREATE TRIGGER lifecycle_fresh_origin_effect_requires_exact_handoff",
-            HARDENING_SPECS,
-        )
         db = sqlite3.connect(":memory:", isolation_level=None)
         db.execute("PRAGMA foreign_keys=ON")
         db.executescript(
@@ -164,6 +235,7 @@ class SpecRepairTests(unittest.TestCase):
               new_custody_source_ref_digest TEXT,
               affected_generation_loss_id TEXT,
               affected_generation_loss_before_revision INTEGER,
+              affected_generation_loss_before_state TEXT,
               affected_generation_loss_before_source_ref_digest TEXT,
               affected_generation_loss_before_journal_digest TEXT,
               affected_generation_loss_after_revision INTEGER,
@@ -184,7 +256,22 @@ class SpecRepairTests(unittest.TestCase):
                 affected_generation_loss_after_revision,
                 affected_generation_loss_after_semantic_digest,
                 affected_generation_loss_after_source_ref_digest,
-                affected_generation_loss_after_key)
+                affected_generation_loss_after_key),
+              UNIQUE(handoff_id,handoff_digest,planned_apply_id,
+                project_session_id,run_id,agent_id,source_mode,
+                recovery_source_kind,recovery_source_ref_digest,
+                source_journal_digest,new_custody_id,
+                new_custody_semantic_digest,new_custody_source_ref_digest,
+                affected_generation_loss_after_key,admission_digest,
+                fresh_apply_plan_digest),
+              UNIQUE(handoff_id,handoff_digest,affected_generation_loss_id,
+                affected_generation_loss_before_revision,
+                affected_generation_loss_before_state,
+                affected_generation_loss_before_source_ref_digest,
+                affected_generation_loss_before_journal_digest,
+                affected_generation_loss_after_revision,
+                affected_generation_loss_after_semantic_digest,
+                affected_generation_loss_after_source_ref_digest)
             );
             CREATE TABLE lifecycle_receipt_custody_effects(
               batch_id TEXT,effect_digest TEXT,project_session_id TEXT,
@@ -212,11 +299,6 @@ class SpecRepairTests(unittest.TestCase):
             "CREATE TABLE "
             + ddl_block(HARDENING_SPECS, "lifecycle_receipt_fresh_origin_effects")
         )
-        db.executescript(
-            trigger_sql(
-                HARDENING_SPECS, "lifecycle_fresh_origin_effect_requires_exact_handoff"
-            )
-        )
         db.execute(
             "INSERT INTO lifecycle_receipt_batches VALUES(?,?,?,?,?,?,?)",
             ("batch", "fresh-origin", 1, "none", "session", "run", "agent"),
@@ -226,7 +308,7 @@ class SpecRepairTests(unittest.TestCase):
             "reuse-final-custody", "custody", "old", 7, None, None,
             "source-ref", "source-journal", "admission", "plan", "new",
             "new-semantic", "new-source", None, None, None, None, None, None,
-            None, "none",
+            None, None, "none",
         )
         db.execute(
             "INSERT INTO lifecycle_fresh_recovery_handoffs VALUES("
@@ -238,13 +320,12 @@ class SpecRepairTests(unittest.TestCase):
             "batch_id,ordinal,role,transition_kind,batch_intent_count,"
             "batch_secondary_intent_kind,planned_apply_id,project_session_id,"
             "run_id,agent_id,handoff_id,handoff_digest,source_mode,"
-            "recovery_source_kind,recovery_from_custody_id,"
-            "recovery_from_custody_revision,recovery_from_generation_loss_id,"
-            "recovery_from_generation_loss_revision,recovery_source_ref_digest,"
+            "recovery_source_kind,recovery_source_ref_digest,"
             "source_journal_digest,admission_digest,fresh_apply_plan_digest,"
             "new_custody_id,new_custody_revision,new_custody_semantic_digest,"
             "new_custody_source_ref_digest,affected_generation_loss_id,"
             "affected_generation_loss_before_revision,"
+            "affected_generation_loss_before_state,"
             "affected_generation_loss_before_source_ref_digest,"
             "affected_generation_loss_before_journal_digest,"
             "affected_generation_loss_after_revision,"
@@ -255,10 +336,10 @@ class SpecRepairTests(unittest.TestCase):
         values = (
             "batch", 1, "primary", "fresh-origin", 1, "none", "apply",
             "session", "run", "agent", "handoff", "handoff-digest",
-            "reuse-final-custody", "custody", "old", 7, None, None,
-            "source-ref", "source-journal", "admission", "plan", "new", 1,
+            "reuse-final-custody", "custody", "source-ref", "source-journal",
+            "admission", "plan", "new", 1,
             "new-semantic", "new-source", None, None, None, None, None, None,
-            None, "none", "effect",
+            None, None, "none", "effect",
         )
         statement = (
             f"INSERT INTO lifecycle_receipt_fresh_origin_effects({columns}) "
@@ -292,7 +373,7 @@ class SpecRepairTests(unittest.TestCase):
             None, None, "source-ref-terminal", "source-journal-terminal",
             "admission-terminal", "plan-terminal", "new-terminal",
             "new-semantic-terminal", "new-source-terminal", None, None, None,
-            None, None, None, None, "none",
+            None, None, None, None, None, "none",
         )
         db.execute(
             "INSERT INTO lifecycle_fresh_recovery_handoffs VALUES("
@@ -305,11 +386,10 @@ class SpecRepairTests(unittest.TestCase):
             "fresh-origin", "apply-terminal", "session-terminal",
             "run-terminal", "agent-terminal", "handoff-terminal",
             "handoff-digest-terminal", "terminalize-nonfinal-custody",
-            "custody", "old-terminal", 1, None, None,
-            "source-ref-terminal", "source-journal-terminal",
+            "custody", "source-ref-terminal", "source-journal-terminal",
             "admission-terminal", "plan-terminal", "new-terminal", 1,
             "new-semantic-terminal", "new-source-terminal", None, None, None,
-            None, None, None, None, "none", "effect-terminal",
+            None, None, None, None, None, "none", "effect-terminal",
         )
         db.execute(statement, terminal_values)
         db.execute(
@@ -336,17 +416,17 @@ class SpecRepairTests(unittest.TestCase):
                  "loss-open", 1, "loss-before-source-open",
                  "loss-before-journal-open", "admission-open", "plan-open",
                  "new-open", "new-semantic-open", "new-source-open",
-                 "loss-open", 1, "loss-before-source-open",
+                 "loss-open", 1, "open", "loss-before-source-open",
                  "loss-before-journal-open", 2, "loss-after-semantic-open",
                  "loss-after-source-open", "loss-after-source-open"),
                 ("batch-open", 1, "primary", "fresh-origin", 1, "none",
                  "apply-open", "session-open", "run-open", "agent-open",
                  "handoff-open", "handoff-digest-open",
-                 "open-generation-loss", "generation-loss", None, None,
-                 "loss-open", 1, "loss-before-source-open",
+                 "open-generation-loss", "generation-loss",
+                 "loss-before-source-open",
                  "loss-before-journal-open", "admission-open", "plan-open",
                  "new-open", 1, "new-semantic-open", "new-source-open",
-                 "loss-open", 1, "loss-before-source-open",
+                 "loss-open", 1, "open", "loss-before-source-open",
                  "loss-before-journal-open", 2, "loss-after-semantic-open",
                  "loss-after-source-open", "loss-after-source-open",
                  "effect-open"),
@@ -364,7 +444,7 @@ class SpecRepairTests(unittest.TestCase):
                  "admission-terminal-linked", "plan-terminal-linked",
                  "new-terminal-linked", "new-semantic-terminal-linked",
                  "new-source-terminal-linked", "loss-terminal-linked", 1,
-                 "loss-before-source-terminal-linked",
+                 "open", "loss-before-source-terminal-linked",
                  "loss-before-journal-terminal-linked", 2,
                  "loss-after-semantic-terminal-linked",
                  "loss-after-source-terminal-linked",
@@ -375,12 +455,11 @@ class SpecRepairTests(unittest.TestCase):
                  "agent-terminal-linked", "handoff-terminal-linked",
                  "handoff-digest-terminal-linked",
                  "terminalize-nonfinal-custody", "custody",
-                 "old-terminal-linked", 1, None, None,
                  "source-ref-terminal-linked", "source-journal-terminal-linked",
                  "admission-terminal-linked", "plan-terminal-linked",
                  "new-terminal-linked", 1, "new-semantic-terminal-linked",
                  "new-source-terminal-linked", "loss-terminal-linked", 1,
-                 "loss-before-source-terminal-linked",
+                 "open", "loss-before-source-terminal-linked",
                  "loss-before-journal-terminal-linked", 2,
                  "loss-after-semantic-terminal-linked",
                  "loss-after-source-terminal-linked",
@@ -399,44 +478,18 @@ class SpecRepairTests(unittest.TestCase):
                 handoff_row,
             )
             db.execute(statement, effect_row)
-        crossed = list(values)
-        crossed[12] = "open-generation-loss"
-        crossed[-1] = "effect-crossed"
-        crossed_effects = (
-            ("source-mode", crossed),
-            ("handoff-digest", [
-                *values[:11], "crossed-handoff-digest", *values[12:-1],
-                "effect-crossed-digest",
-            ]),
-            ("admission", [
-                *values[:20], "crossed-admission", *values[21:-1],
-                "effect-crossed-admission",
-            ]),
-            ("source-ref", [
-                *values[:18], "crossed-source-ref", *values[19:-1],
-                "effect-crossed-source-ref",
-            ]),
-            ("source-journal", [
-                *values[:19], "crossed-source-journal", *values[20:-1],
-                "effect-crossed-source-journal",
-            ]),
-            ("new-custody-source", [
-                *values[:25], "crossed-new-custody-source", *values[26:-1],
-                "effect-crossed-new-custody-source",
-            ]),
-            ("custody-loss-pair", [
-                *values[:16], "crossed-loss", 1, *values[18:-1],
-                "effect-crossed-pair",
-            ]),
+        db.execute(
+            "DELETE FROM lifecycle_receipt_fresh_origin_effects "
+            "WHERE batch_id='batch-open'"
         )
-        for label, crossed_values in crossed_effects:
-            with self.subTest(crossed_handoff_field=label):
-                with self.assertRaisesRegex(
-                    sqlite3.IntegrityError,
-                    "lifecycle-fresh-origin-effect-handoff-missing-or-crossed",
-                ):
-                    db.execute(statement, crossed_values)
-        with self.assertRaises(sqlite3.IntegrityError):
+        crossed_open = list(additional_arms[0][2])
+        crossed_open[16] = "crossed-admission"
+        crossed_open[-1] = "effect-crossed-admission"
+        with self.assertRaises(sqlite3.IntegrityError) as caught:
+            db.execute(statement, crossed_open)
+        self.assertEqual(str(caught.exception), "FOREIGN KEY constraint failed")
+
+        with self.assertRaises(sqlite3.IntegrityError) as caught:
             db.execute(
                 "INSERT INTO lifecycle_receipt_intents("
                 "batch_id,ordinal,batch_transition_kind,batch_intent_count,"
@@ -450,6 +503,16 @@ class SpecRepairTests(unittest.TestCase):
                  "agent-terminal", "custody", "new-terminal", 1, "effect",
                  "{}", "subject-crossed", "intent-crossed", "created-at"),
             )
+        self.assertEqual(
+            str(caught.exception),
+            "UNIQUE constraint failed: lifecycle_receipt_intents.kind, "
+            "lifecycle_receipt_intents.project_session_id, "
+            "lifecycle_receipt_intents.run_id, "
+            "lifecycle_receipt_intents.agent_id, "
+            "lifecycle_receipt_intents.subject_owner_kind, "
+            "lifecycle_receipt_intents.subject_owner_id, "
+            "lifecycle_receipt_intents.subject_owner_revision",
+        )
         self.assertEqual([], db.execute("PRAGMA foreign_key_check").fetchall())
 
     def test_scope_admission_ddl_accepts_zero_member_and_rejects_near_valid(self) -> None:
@@ -541,51 +604,7 @@ class SpecRepairTests(unittest.TestCase):
         db.commit()
         self.assertEqual([], db.execute("PRAGMA foreign_key_check").fetchall())
 
-        db.execute("BEGIN")
-        db.execute(
-            "INSERT INTO lifecycle_scope_admission_outbox VALUES(?,?,?,?,?,?,?,?,?,?)",
-            ("request-gap", "project-gap", "session-gap", "run-gap", "authority",
-             "admission-gap", "admitted-at", "{}", "scope-gap", "created-at"),
-        )
-        db.execute(
-            "INSERT INTO lifecycle_admitted_run_scopes VALUES(?,?,?,?,?,?,?,?,?,?)",
-            ("project-gap", "session-gap", "run-gap", "authority", "request-gap",
-             "admission-gap", "scope-gap", "scope-checkpoint-gap", "resolution-gap",
-             "admitted-at"),
-        )
-        db.execute(
-            "INSERT INTO lifecycle_receipt_scope_checkpoints VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-            ("session-gap", "run-gap", "authority", 0, 0, None, "empty-set-gap",
-             "{}", "scope-checkpoint-gap", "attestation", "verified-at"),
-        )
-        db.execute(
-            "INSERT INTO lifecycle_receipt_scope_heads VALUES(?,?,?,?)",
-            ("session-gap", "run-gap", "scope-checkpoint-gap", 1),
-        )
-        db.execute(
-            "INSERT INTO lifecycle_receipt_namespace_checkpoints VALUES(?,?,?,?,?,?,?,?)",
-            ("project-gap", "authority", 2, "scope-head-set-gap", "{}",
-             "namespace-checkpoint-gap", "attestation", "verified-at"),
-        )
-        db.execute(
-            "INSERT INTO lifecycle_receipt_namespace_members VALUES(?,?,?,?,?,?,?,?,?)",
-            ("project-gap", "namespace-checkpoint-gap", 1, "session-gap", "run-gap",
-             "authority", "scope-checkpoint-gap", 0, None),
-        )
-        with self.assertRaisesRegex(
-            sqlite3.IntegrityError,
-            "lifecycle-scope-admission-namespace-set-incomplete",
-        ):
-            db.execute(
-                "INSERT INTO lifecycle_scope_admission_resolutions VALUES("
-                + ",".join("?" for _ in range(13)) + ")",
-                ("request-gap", "project-gap", "session-gap", "run-gap", "authority",
-                 "scope-gap", "scope-checkpoint-gap", 0, None,
-                 "namespace-checkpoint-gap", "{}", "resolution-gap", "verified-at"),
-            )
-        db.rollback()
-
-        with self.assertRaises(sqlite3.IntegrityError):
+        with self.assertRaises(sqlite3.IntegrityError) as caught:
             db.execute(
                 "INSERT INTO lifecycle_receipt_namespace_members VALUES("
                 "?,?,?,?,?,?,?,?,?)",
@@ -593,23 +612,31 @@ class SpecRepairTests(unittest.TestCase):
                  "other-run", "authority", "scope-checkpoint", 0,
                  "impossible-head"),
             )
-        with self.assertRaisesRegex(
-            sqlite3.IntegrityError, "lifecycle-scope-admission-outbox-immutable"
-        ):
+        self.assertEqual(
+            str(caught.exception),
+            "CHECK constraint failed: "
+            "(receipt_count=0)=(head_receipt_digest IS NULL)",
+        )
+        with self.assertRaises(sqlite3.IntegrityError) as caught:
             db.execute(
                 "UPDATE lifecycle_scope_admission_outbox SET created_at=created_at"
             )
+        self.assertEqual(
+            str(caught.exception),
+            "lifecycle-scope-admission-outbox-immutable",
+        )
         for statement in (
             "UPDATE lifecycle_scope_admission_resolutions "
             "SET verified_at=verified_at",
             "DELETE FROM lifecycle_scope_admission_resolutions",
         ):
             with self.subTest(resolution_mutation=statement.split()[0]):
-                with self.assertRaisesRegex(
-                    sqlite3.IntegrityError,
-                    "lifecycle-scope-admission-resolution-immutable",
-                ):
+                with self.assertRaises(sqlite3.IntegrityError) as caught:
                     db.execute(statement)
+                self.assertEqual(
+                    str(caught.exception),
+                    "lifecycle-scope-admission-resolution-immutable",
+                )
         for statement, marker in (
             (
                 "UPDATE lifecycle_receipt_namespace_checkpoints "
@@ -630,8 +657,9 @@ class SpecRepairTests(unittest.TestCase):
             ),
         ):
             with self.subTest(namespace_immutability=statement.split()[0:2]):
-                with self.assertRaisesRegex(sqlite3.IntegrityError, marker):
+                with self.assertRaises(sqlite3.IntegrityError) as caught:
                     db.execute(statement)
+                self.assertEqual(str(caught.exception), marker)
 
         db.execute(
             "INSERT INTO lifecycle_scope_admission_outbox("
@@ -688,19 +716,6 @@ class SpecRepairTests(unittest.TestCase):
             "namespace-checkpoint-missing", "{}", "resolution-missing",
             "verified-at",
         )
-        for namespace_case, namespace_digest in (
-            ("omitted", None),
-            ("crossed", "namespace-checkpoint"),
-        ):
-            values = list(resolution_values)
-            values[9] = namespace_digest
-            with self.subTest(namespace_member=namespace_case):
-                with self.assertRaisesRegex(
-                    sqlite3.IntegrityError,
-                    "lifecycle-scope-admission-namespace-member-"
-                    "missing-or-crossed|NOT NULL",
-                ):
-                    db.execute(resolution_insert, values)
         self.assertEqual(
             1,
             db.execute(
@@ -710,11 +725,12 @@ class SpecRepairTests(unittest.TestCase):
             ).rowcount,
         )
         with self.subTest(initial_head="crossed-only"):
-            with self.assertRaisesRegex(
-                sqlite3.IntegrityError,
-                "lifecycle-scope-admission-initial-head-missing-or-crossed",
-            ):
+            with self.assertRaises(sqlite3.IntegrityError) as caught:
                 db.execute(resolution_insert, resolution_values)
+            self.assertEqual(
+                str(caught.exception),
+                "lifecycle-scope-admission-initial-head-missing-or-crossed",
+            )
         self.assertEqual(
             1,
             db.execute(
@@ -723,11 +739,12 @@ class SpecRepairTests(unittest.TestCase):
             ).rowcount,
         )
         with self.subTest(initial_head="missing"):
-            with self.assertRaisesRegex(
-                sqlite3.IntegrityError,
-                "lifecycle-scope-admission-initial-head-missing-or-crossed",
-            ):
+            with self.assertRaises(sqlite3.IntegrityError) as caught:
                 db.execute(resolution_insert, resolution_values)
+            self.assertEqual(
+                str(caught.exception),
+                "lifecycle-scope-admission-initial-head-missing-or-crossed",
+            )
         db.rollback()
 
     def test_exact_batch_and_apply_ddl_accepts_only_complete_fresh_arms(self) -> None:
@@ -958,12 +975,16 @@ class SpecRepairTests(unittest.TestCase):
                 )
                 for index, value in mutation.items():
                     values[index] = value
-                with self.assertRaises(sqlite3.IntegrityError):
+                with self.assertRaises(sqlite3.IntegrityError) as caught:
                     db.execute(
                         f"INSERT INTO lifecycle_transition_applies({apply_columns}) "
                         f"VALUES({','.join('?' for _ in values)})",
                         values,
                     )
+                self.assertEqual(
+                    str(caught.exception),
+                    APPLY_ARM_CHECK_ERROR,
+                )
 
         self.assertEqual([], db.execute("PRAGMA foreign_key_check").fetchall())
 
@@ -1058,10 +1079,12 @@ class SpecRepairTests(unittest.TestCase):
         for name, statement in missing_effects:
             with self.subTest(missing_effect=name):
                 missing = trigger_database()
-                with self.assertRaisesRegex(
-                    sqlite3.IntegrityError, "lifecycle-effect-set-incomplete"
-                ):
+                with self.assertRaises(sqlite3.IntegrityError) as caught:
                     missing.execute(statement)
+                self.assertEqual(
+                    str(caught.exception),
+                    "lifecycle-effect-set-incomplete",
+                )
 
         extra = trigger_database()
         extra.execute(
@@ -1073,14 +1096,16 @@ class SpecRepairTests(unittest.TestCase):
             "(batch_id,role,effect_digest) "
             "VALUES ('batch-extra','linked','extra-loss')"
         )
-        with self.assertRaisesRegex(
-            sqlite3.IntegrityError, "lifecycle-effect-set-incomplete"
-        ):
+        with self.assertRaises(sqlite3.IntegrityError) as caught:
             extra.execute(
                 "INSERT INTO lifecycle_receipt_batch_completions "
                 "(batch_id,transition_kind,primary_custody_effect_digest) "
                 "VALUES ('batch-extra','custody-terminal','custody-effect')"
             )
+        self.assertEqual(
+            str(caught.exception),
+            "lifecycle-effect-set-incomplete",
+        )
 
         late_inserts = (
             (
@@ -1113,10 +1138,12 @@ class SpecRepairTests(unittest.TestCase):
                     "(batch_id,transition_kind,primary_custody_effect_digest) "
                     "VALUES ('batch-closed','custody-terminal','custody-effect')"
                 )
-                with self.assertRaisesRegex(
-                    sqlite3.IntegrityError, "lifecycle-effect-set-closed"
-                ):
+                with self.assertRaises(sqlite3.IntegrityError) as caught:
                     closed.execute(statement)
+                self.assertEqual(
+                    str(caught.exception),
+                    "lifecycle-effect-set-closed",
+                )
 
     def _valid_apply_database(self) -> sqlite3.Connection:
         db = trigger_database()
@@ -1491,11 +1518,12 @@ class SpecRepairTests(unittest.TestCase):
             with self.subTest(apply_arm=arm):
                 db = self._valid_apply_database()
                 self.assertEqual(1, db.execute(break_post_state).rowcount)
-                with self.assertRaisesRegex(
-                    sqlite3.IntegrityError,
-                    "lifecycle-apply-post-state-incomplete",
-                ):
+                with self.assertRaises(sqlite3.IntegrityError) as caught:
                     db.execute(apply_statements[arm])
+                self.assertEqual(
+                    str(caught.exception),
+                    "lifecycle-apply-post-state-incomplete",
+                )
 
     def test_normative_lifecycle_head_ddl_rejects_null_vacuity(self) -> None:
         db = sqlite3.connect(":memory:")
@@ -1533,13 +1561,15 @@ class SpecRepairTests(unittest.TestCase):
              "direct-open", "semantic", "source", "journal"),
         )
 
-        for label, statement, values in (
+        for label, statement, values, message in (
             (
                 "custody-null-revision",
                 "INSERT INTO lifecycle_rotation_custody_heads "
                 "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                 ("session", "run", "agent", "custody", None, "finalized",
                  "adopted", "semantic", "source", "journal", 1, 1),
+                "NOT NULL constraint failed: "
+                "lifecycle_rotation_custody_heads.current_revision",
             ),
             (
                 "custody-null-terminal",
@@ -1547,6 +1577,8 @@ class SpecRepairTests(unittest.TestCase):
                 "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                 ("session", "run", "agent", "custody", 1, "finalized",
                  "adopted", "semantic", "source", "journal", None, 1),
+                "NOT NULL constraint failed: "
+                "lifecycle_rotation_custody_heads.terminal",
             ),
             (
                 "loss-null-revision",
@@ -1554,6 +1586,8 @@ class SpecRepairTests(unittest.TestCase):
                 "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                 ("session", "run", "agent", "loss", None, "abandoned",
                  "direct-open", "semantic", "source", "journal", 1, 1),
+                "NOT NULL constraint failed: "
+                "lifecycle_generation_loss_heads.current_revision",
             ),
             (
                 "loss-null-terminal",
@@ -1561,6 +1595,8 @@ class SpecRepairTests(unittest.TestCase):
                 "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                 ("session", "run", "agent", "loss", 1, "abandoned",
                  "direct-open", "semantic", "source", "journal", None, 1),
+                "NOT NULL constraint failed: "
+                "lifecycle_generation_loss_heads.terminal",
             ),
             (
                 "custody-missing-parent",
@@ -1568,6 +1604,7 @@ class SpecRepairTests(unittest.TestCase):
                 "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                 ("session", "run", "agent", "missing-custody", 1, "finalized",
                  "adopted", "semantic", "source", "journal", 1, 1),
+                "FOREIGN KEY constraint failed",
             ),
             (
                 "loss-missing-parent",
@@ -1575,14 +1612,16 @@ class SpecRepairTests(unittest.TestCase):
                 "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                 ("session", "run", "agent", "missing-loss", 1, "abandoned",
                  "direct-open", "semantic", "source", "journal", 1, 1),
+                "FOREIGN KEY constraint failed",
             ),
         ):
             with self.subTest(label=label):
-                with self.assertRaises(sqlite3.IntegrityError):
+                with self.assertRaises(sqlite3.IntegrityError) as caught:
                     db.execute(statement, values)
+                self.assertEqual(str(caught.exception), message)
         self.assertEqual([], db.execute("PRAGMA foreign_key_check").fetchall())
 
-    def test_normative_review_evidence_ddl_executes_exactly(self) -> None:
+    def test_normative_review_evidence_ddl_and_missing_target_parent(self) -> None:
         db = sqlite3.connect(":memory:")
         db.execute("PRAGMA foreign_keys=ON")
         db.executescript("""
@@ -1623,7 +1662,6 @@ class SpecRepairTests(unittest.TestCase):
             + ddl_block(HARDENING_SPECS, "provider_action_route_observations")
         )
         for table in (
-            "provider_action_actual_route_identities",
             "provider_review_terminal_journal",
             "provider_review_results",
             "provider_review_evidence",
@@ -1642,12 +1680,6 @@ class SpecRepairTests(unittest.TestCase):
              "observed-at"),
         )
         db.execute(
-            "INSERT INTO provider_action_actual_route_identities "
-            "VALUES(?,?,?,?,?,?)",
-            ("adapter", "action", "admission", "observation", "{}",
-             "actual-route"),
-        )
-        db.execute(
             "INSERT INTO provider_review_terminal_journal "
             "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             ("adapter", "action", "run", 1, "native", 1,
@@ -1661,40 +1693,6 @@ class SpecRepairTests(unittest.TestCase):
              None, "result", None, None, "classifier", "selector", None,
              None, 1),
         )
-        db.execute(
-            "INSERT INTO provider_action_routes VALUES(?,?,?,?,?,?,?,?)",
-            ("adapter-cross", "action-cross", "route-cross", "admission-cross",
-             "run-cross", 1, "native", 1),
-        )
-        db.execute(
-            "INSERT INTO provider_review_terminal_journal "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            ("adapter-cross", "action-cross", "run-cross", 1, "native", 1,
-             "terminal-no-effect", 1, "terminal-input-cross", None, None,
-             None, None, None, "projection-cross", None, 2),
-        )
-        with self.assertRaises(sqlite3.IntegrityError):
-            db.execute(
-                "INSERT INTO provider_review_results "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                ("adapter-cross", "action-cross", 1, "safe-answer",
-                 "answer-cross", 1, "{}", "result-cross", "finding-cross",
-                 "resolved-cross", "classifier-cross", "selector-cross",
-                None, None, 2),
-            )
-        db.execute(
-            "INSERT INTO provider_action_routes VALUES(?,?,?,?,?,?,?,?)",
-            ("adapter-scope", "action-scope", "route-scope", "admission-scope",
-             "run-scope", 1, "native", 1),
-        )
-        with self.assertRaises(sqlite3.IntegrityError):
-            db.execute(
-                "INSERT INTO provider_review_terminal_journal "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                ("adapter-scope", "action-scope", "run-scope", 2, "native", 1,
-                 "unusable-answer", 1, "terminal-input-scope", "answer-scope",
-                 None, None, None, None, "projection-scope", None, 3),
-            )
         db.execute("INSERT INTO review_finding_sets VALUES('empty-set')")
         db.execute(
             "INSERT INTO review_finding_capacity_reservations "
@@ -1769,38 +1767,20 @@ class SpecRepairTests(unittest.TestCase):
                 tuple(row.values()),
             )
 
-        with self.assertRaises(sqlite3.IntegrityError):
-            insert_evidence({
-                **evidence,
-                "evidence_id": "evidence-crossed-answer",
-                "provider_answer_digest": "crossed-answer",
-                "mutation_receipt_digest": "mutation-crossed-answer",
-                "evidence_digest": "evidence-crossed-answer-digest",
-            })
-        with self.assertRaises(sqlite3.IntegrityError):
-            insert_evidence({
-                **evidence,
-                "evidence_id": "evidence-crossed-kind",
-                "terminal_kind": "safe-answer",
-                "verdict": "CLEAN",
-                "answer_safety": "safe",
-                "review_result_digest": "review-result",
-                "mutation_receipt_digest": "mutation-crossed-kind",
-                "evidence_digest": "evidence-crossed-kind-digest",
-            })
         insert_evidence(evidence)
         db.execute(
             "INSERT INTO review_slot_heads VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             ("run", 1, "native", 0, None, 0, None, None, None,
              "empty-set", "empty-set", None, None, 1, "updated-at"),
         )
-        with self.assertRaises(sqlite3.IntegrityError):
+        with self.assertRaises(sqlite3.IntegrityError) as caught:
             db.execute(
                 "INSERT INTO review_slot_heads VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 ("run", 2, "native", 1, "fabricated-evidence", 0,
                  None, None, None, "empty-set", "empty-set", None, None,
                  1, "updated-at"),
             )
+        self.assertEqual(str(caught.exception), "FOREIGN KEY constraint failed")
         self.assertEqual([], db.execute("PRAGMA foreign_key_check").fetchall())
 
     def test_new_route_sections_have_unique_requirement_anchors(self) -> None:

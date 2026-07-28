@@ -11,7 +11,7 @@ import { parseTimestamp, requiredOperatorActionForIntent } from "@local/agent-fa
 import type Database from "better-sqlite3";
 
 import { ProjectFabricCoreError, type AuthenticatedOperatorContext } from "../project-session/contracts.js";
-import { canonicalJson, type Row } from "../project-session/store-support.js";
+import { canonicalJson, type Row } from "../persistence/row-codec.js";
 import type { AuthenticatedOperatorCredential } from "../operator/store.js";
 import {
   OperatorActionJournal,

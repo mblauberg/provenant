@@ -6,7 +6,7 @@ import {
 import type Database from "better-sqlite3";
 
 import { ProjectFabricCoreError } from "../project-session/contracts.js";
-import { integer, nullableText, row, text, type Row } from "../project-session/store-support.js";
+import { integer, nullableText, row, text, type Row } from "../persistence/row-codec.js";
 
 const MAX_AGENT_TEAM_MEMBERSHIPS = 4;
 

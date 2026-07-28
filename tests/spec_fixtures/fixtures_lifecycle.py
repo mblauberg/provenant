@@ -909,13 +909,25 @@ def lead3():
             "prepare-time reservation insert unexpectedly succeeded -- the "
             "ordering defect was NOT confirmed against this DDL"
         )
-    except (sqlite3.IntegrityError, sqlite3.OperationalError) as e:
+    except sqlite3.IntegrityError as e:
+        if str(e) != "FOREIGN KEY constraint failed":
+            con.close()
+            return "REJECTED", (
+                "prepare-time reservation insert hit the wrong constraint: "
+                f"{type(e).__name__}: {e}"
+            )
         con.close()
         return "CONFIRMED", (
             "inserting the generation-loss reservation with "
             "decision_loss_after_revision=2 (the not-yet-materialized "
             "recovered-adopted revision) was blocked: "
             f"{type(e).__name__}: {e}"
+        )
+    except sqlite3.OperationalError as e:
+        con.close()
+        return "REJECTED", (
+            "prepare-time reservation insert hit an operational error instead "
+            f"of the required foreign key: {e}"
         )
 
 

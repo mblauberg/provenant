@@ -2,7 +2,7 @@ import type { DeclaredRunProgress, DeclaredRunTaskStateCounts } from "@local/age
 import type Database from "better-sqlite3";
 
 import { currentRunPlanBinding } from "../project-session/run-plan-store.js";
-import { integer, row, text } from "../project-session/store-support.js";
+import { integer, row, text } from "../persistence/row-codec.js";
 
 export type ServerRunTaskStates =
   | { status: "observed"; counts: DeclaredRunTaskStateCounts }

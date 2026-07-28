@@ -23,7 +23,7 @@ import {
   row,
   text,
   type Row,
-} from "../project-session/store-support.js";
+} from "../persistence/row-codec.js";
 import {
   deliveryWorkstreamProgressObservedAt,
   projectDeclaredRunProgress,

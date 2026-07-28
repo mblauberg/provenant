@@ -2,7 +2,7 @@ import { parseLaunchAdapterOutcomeV1 } from "@local/agent-fabric-protocol";
 import type Database from "better-sqlite3";
 
 import { ProjectFabricCoreError } from "./contracts.js";
-import { canonicalJson, integer, isRow, row, sha256, text } from "./store-support.js";
+import { canonicalJson, integer, isRow, row, sha256, text } from "../persistence/row-codec.js";
 
 const DIGEST = /^sha256:[0-9a-f]{64}$/u;
 const UNIT_KEY = /^[a-z][a-z0-9_.:-]{0,63}$/u;

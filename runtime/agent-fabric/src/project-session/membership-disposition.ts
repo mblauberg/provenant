@@ -1,7 +1,7 @@
 import type Database from "better-sqlite3";
 
 import { ProjectFabricCoreError } from "./contracts.js";
-import { integer, nullableText, row, text } from "./store-support.js";
+import { integer, nullableText, row, text } from "../persistence/row-codec.js";
 
 export type MembershipSourceKind =
   | "coordination-run"

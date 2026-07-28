@@ -1,7 +1,7 @@
 import type Database from "better-sqlite3";
 
 import { ProjectFabricCoreError } from "./contracts.js";
-import { canonicalJson, row, text, type Row } from "./store-support.js";
+import { canonicalJson, row, text, type Row } from "../persistence/row-codec.js";
 
 export function supersedeFinalAcceptanceGates(input: Readonly<{
   database: Database.Database;

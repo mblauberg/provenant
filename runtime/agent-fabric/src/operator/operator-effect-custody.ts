@@ -14,7 +14,7 @@ import type {
   ExternalEffectDispatchHandle,
 } from "./external-effect-service.js";
 import { ProjectFabricCoreError } from "../project-session/contracts.js";
-import { canonicalJson, sha256 } from "../project-session/store-support.js";
+import { canonicalJson, sha256 } from "../persistence/row-codec.js";
 import { ProviderActionOwnerError } from "../application/provider-action-owner.js";
 import type {
   TypedGitAdministrativeRequest,

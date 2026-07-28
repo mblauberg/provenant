@@ -56,7 +56,7 @@ import { reconcileUnknownLaunchUsage as reconcileUnknownLaunchUsageOwner } from 
 import { recoverLaunchCustodyFamilies } from "../../../src/project-session/custody-startup.ts";
 import { ProjectSessionStore } from "../../../src/project-session/store.ts";
 import { ProjectFabricCoreError } from "../../../src/project-session/contracts.ts";
-import { canonicalJson, sha256 } from "../../../src/project-session/store-support.ts";
+import { canonicalJson, sha256 } from "../../../src/persistence/row-codec.ts";
 import { admitProviderActionFixture } from "../../support/provider-action-fixture.ts";
 import { TEST_AUTHORITY_V2_FIELDS } from "../../support/authority-v2-testkit.ts";
 

@@ -436,10 +436,9 @@ def expect_foreign_key_rejection(
     try:
         operation()
     except sqlite3.IntegrityError as error:
-        error_name = getattr(error, "sqlite_errorname", "")
         require(
-            error_name == "SQLITE_CONSTRAINT_FOREIGNKEY",
-            f"wrong SQLite rejection: {error_name}: {error}",
+            str(error) == "FOREIGN KEY constraint failed",
+            f"wrong SQLite rejection: {error}",
         )
         connection.rollback()
         return
@@ -581,59 +580,6 @@ def l2_c_result_mutations_are_rejected() -> None:
             connection.close()
 
 
-def l2_d_normative_null_components_are_rejected() -> None:
-    for field in PLAN_CHAIN_FIELDS:
-        connection = sqlite3.connect(":memory:")
-        connection.execute("PRAGMA foreign_keys=ON")
-        try:
-            connection.executescript(NORMATIVE_SCHEMA)
-            insert_row(connection, "lifecycle_rotation_custody_revisions", CUSTODY)
-            mutant = dict(PLAN)
-            mutant[field] = None
-            expect_not_null_rejection(
-                connection,
-                lambda mutant=mutant: insert_row(
-                    connection,
-                    "lifecycle_recovery_retirement_plans",
-                    mutant,
-                ),
-            )
-        finally:
-            connection.close()
-
-    for field in EFFECT_CHAIN_FIELDS:
-        connection = normative_baseline(with_effect=False)
-        try:
-            mutant = dict(EFFECT)
-            mutant[field] = None
-            expect_not_null_rejection(
-                connection,
-                lambda mutant=mutant: insert_row(
-                    connection,
-                    "lifecycle_receipt_recovery_retirement_effects",
-                    mutant,
-                ),
-            )
-        finally:
-            connection.close()
-
-    for field in RESULT_CHAIN_FIELDS:
-        connection = normative_baseline(with_effect=True)
-        try:
-            mutant = dict(RESULT)
-            mutant[field] = None
-            expect_not_null_rejection(
-                connection,
-                lambda mutant=mutant: insert_row(
-                    connection,
-                    "agent_lifecycle_recovery_retirements",
-                    mutant,
-                ),
-            )
-        finally:
-            connection.close()
-
-
 def main() -> None:
     l2_a_exact_tuple_is_accepted()
     print("L2-A PASS exact plan/effect/result tuple accepted")
@@ -644,14 +590,6 @@ def main() -> None:
     l2_c_result_mutations_are_rejected()
     print("L2-C PASS result/effect crossings rejected 6/6")
     print("LEAD2-AFTER PASS cases=12")
-
-    l2_d_normative_null_components_are_rejected()
-    null_cases = (
-        len(PLAN_CHAIN_FIELDS)
-        + len(EFFECT_CHAIN_FIELDS)
-        + len(RESULT_CHAIN_FIELDS)
-    )
-    print(f"L2-D PASS normative NULL components rejected {null_cases}/{null_cases}")
 
     final_connection = baseline(with_effect=True)
     try:

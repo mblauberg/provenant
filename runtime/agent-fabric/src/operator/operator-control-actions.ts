@@ -3,7 +3,7 @@ import { parseArtifactRef, parseSha256Digest } from "@local/agent-fabric-protoco
 import type Database from "better-sqlite3";
 
 import { ProjectFabricCoreError } from "../project-session/contracts.js";
-import { canonicalJson, sha256 } from "../project-session/store-support.js";
+import { canonicalJson, sha256 } from "../persistence/row-codec.js";
 import { touchProjectSessionMembershipRevisionForRun } from "../project-session/membership-store.js";
 import {
   readControlActiveTurns,

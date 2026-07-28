@@ -9,6 +9,7 @@ Verified locally on macOS, 2026-06-07. Model IDs, flags, auth, and safety modes 
 - [Harness-conditioned rule](#harness-conditioned-rule)
 - [Auth preflight](#auth-preflight)
 - [Fabric distinct-family lane](#fabric-distinct-family-lane)
+- [Codex worktree implementation lane](#codex-worktree-implementation-lane)
 - [Runtime routing](#runtime-routing)
 - [Output normalisation](#output-normalisation)
 - [Data policy](#data-policy)
@@ -129,6 +130,41 @@ return: hypothesis | risk | evidence_needed | likely_files | falsification_check
 
 Do not treat distinct-family output as established fact. Feed its claims to targeted reviewers or certified
 cross-family verifiers for source/test/schema confirmation.
+
+## Codex worktree implementation lane
+
+`codex exec -s workspace-write -C <absolute-worktree>` is the one headless lane that writes.
+It stays a recorded degraded fallback under the safety rule above, not a substitute for
+Fabric: take it when the Fabric roundtrip is unavailable, and record why. Soft family
+affinity for who gets token-heavy legwork belongs in the preference catalogue named by
+[routing-and-tiers.md](routing-and-tiers.md), never in a remembered model name here.
+
+Four failure modes are specific to this lane:
+
+- **Never pipe `codex exec` stdout.** `codex exec ... | tail -5` hangs indefinitely; one run
+  sat at 14 minutes elapsed against 0.16 CPU-seconds. Redirect to a file, then read the file.
+  Judge liveness by [worker-liveness.md](worker-liveness.md), never by output size.
+- **One writer per worktree, and never the primary checkout.** `-C` hands Codex the whole
+  tree. Two lanes sharing one worktree corrupt both, not always visibly.
+- **A worker cannot commit inside a linked worktree.** Its `.git` metadata lives in the
+  primary repository's `.git/worktrees/<name>/`, outside the sandbox root, so `git commit`
+  dies on `index.lock: Operation not permitted`. It is intermittent, so neither outcome can
+  be assumed. Instruct the leg to leave the work uncommitted and end by printing
+  `git status --short` and `git diff --stat`; the chair commits. Widening the sandbox to the
+  repository root to work around this hands the worker every sibling worktree at once.
+- **`-s read-only` blocks the worker's own scratch files.** A leg that must run code under
+  that sandbox needs forms that write nothing, such as `python3 -c`.
+
+Verify the tree, not the transcript: a run can report success having produced nothing. After
+every implementation leg, check `git -C <worktree> log --oneline <base>..HEAD`, `git diff
+--stat` and `git status --short`, and confirm the diff touches only permitted paths.
+
+A worker has no conversation context, so the brief carries everything: absolute path and
+branch, what has already been verified so it is not redone, ordered parts, out-of-scope
+paths, how to verify, and that it must not push, open a pull request or merge. Always
+include the scepticism clause — *verify every claim in this brief before relying on it; if
+something here is wrong, saying so is more valuable than following it* — which has
+repeatedly produced the most valuable output of a run.
 
 ## Runtime routing
 

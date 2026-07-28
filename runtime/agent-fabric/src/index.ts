@@ -1,7 +1,6 @@
-import { Fabric, type FabricRuntimeOpenOptions } from "./core/fabric.js";
-
 export { Fabric, FabricClient } from "./core/fabric.js";
 export type { FabricOperatorActionPorts, FabricRuntimeOpenOptions } from "./core/fabric.js";
+export { openFabric } from "./core/open-fabric.js";
 export type {
   LifecycleIntegrityReceiptAuthorityPort,
   LifecycleAuthenticatedReceipt,
@@ -132,7 +131,3 @@ export { resolveFabricPaths } from "./cli/paths.js";
 export { MESSAGE_POLICY } from "./domain/types.js";
 export { redactLaunchProviderInput } from "./project-session/provider-input-safety.js";
 export type * from "./domain/types.js";
-
-export async function openFabric(options: FabricRuntimeOpenOptions): Promise<Fabric> {
-  return new Fabric(options);
-}

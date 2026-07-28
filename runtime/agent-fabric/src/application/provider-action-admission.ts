@@ -1,7 +1,7 @@
 import type Database from "better-sqlite3";
 
 import { FabricError } from "../errors.js";
-import { digest, isRow } from "../project-session/store-support.js";
+import { digest, isRow } from "../persistence/row-codec.js";
 import {
   assertProviderActionOwner,
   type ProviderActionCustodyOwner,

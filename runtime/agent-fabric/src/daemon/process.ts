@@ -18,7 +18,7 @@ import {
   PROTOCOL_LIMITS,
 } from "@local/agent-fabric-protocol";
 
-import { openFabric } from "../index.js";
+import { openFabric } from "../core/open-fabric.js";
 import {
   openLocalLifecycleReceiptAuthority,
   type LocalLifecycleReceiptAuthority,

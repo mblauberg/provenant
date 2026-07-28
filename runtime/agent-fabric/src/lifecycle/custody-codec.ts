@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-import { canonicalJson } from "../project-session/store-support.js";
+import { canonicalJson } from "../persistence/row-codec.js";
 
 export type LifecycleCustodyState =
   | "awaiting-boundary"

@@ -8,7 +8,7 @@ import type Database from "better-sqlite3";
 import { isAbsolute, normalize, resolve } from "node:path";
 
 import { ProjectFabricCoreError } from "../project-session/contracts.js";
-import { canonicalJson, integer, nullableText, row, sha256, text } from "../project-session/store-support.js";
+import { canonicalJson, integer, nullableText, row, sha256, text } from "../persistence/row-codec.js";
 import type {
   AuthenticatedOperatorCredential,
   LocalOperatorTakeoverCapabilityInput,

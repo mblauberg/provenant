@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { openFabric } from "../../../src/index.ts";
 import { LifecycleRotationRepository } from "../../../src/lifecycle/rotation-repository.ts";
-import { sha256 } from "../../../src/project-session/store-support.ts";
+import { sha256 } from "../../../src/persistence/row-codec.ts";
 import { TestLifecycleReceiptAuthority } from "../../support/lifecycle-receipt-authority-fake.ts";
 import {
   createLifecycleFixture,

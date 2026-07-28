@@ -9,7 +9,7 @@ import type {
   ProviderActionDispatchRequest,
   ProviderActionResult,
 } from "./contracts.js";
-import { digest } from "../project-session/store-support.js";
+import { digest } from "../persistence/row-codec.js";
 
 function providerActionRequestIdentity(value: unknown): Readonly<{
   adapterId: string;
