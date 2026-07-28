@@ -12,7 +12,9 @@ import { afterEach, describe, expect, it } from "vitest";
 import { Fabric } from "../../src/core/fabric.ts";
 import { currentMcpSeatGeneration } from "../../src/core/mcp-seat-generation.ts";
 import { bootstrapMcpSeat } from "../../src/cli/mcp-bootstrap.ts";
+import { peerSeatAuthority } from "../../src/cli/observer-provision.ts";
 import { installSeatGeneration, projectKey, readActiveSeatGeneration, resolveSeatPaths } from "../../src/cli/seat-store.ts";
+import { FABRIC_OPERATIONS } from "../../src/domain/operations.ts";
 
 const roots: string[] = [];
 const execFileAsync = promisify(execFile);
@@ -500,6 +502,123 @@ describe("zero-state MCP bootstrap", () => {
         agentId: agyAgentId,
         reason: "AGENT_NOT_LIVE",
       }]);
+    } finally {
+      await fabric.close();
+    }
+  });
+
+  it("keeps authority widening, revoked peer capability, and revoked chair lease in daemon enforcement", async () => {
+    const temporaryRoot = await mkdtemp(join(tmpdir(), "fabric-zero-state-peer-guards-"));
+    roots.push(temporaryRoot);
+    const root = await realpath(temporaryRoot);
+    const now = Date.parse("2026-07-18T00:00:00.000Z");
+    const databasePath = join(root, "fabric.sqlite3");
+    const fabric = new Fabric({ databasePath, workspaceRoots: [root], clock: () => now });
+    try {
+      const bootstrap = fabric.bootstrapCurrentMcpSeat({
+        canonicalRoot: root,
+        trustRecordDigest: `sha256:${"f".repeat(64)}`,
+        seat: "codex",
+        expiresAt: "2026-07-19T00:00:00.000Z",
+      });
+      const database = new Database(databasePath);
+      const chairAuthority = database.prepare(`
+        SELECT authority_id,authority_json FROM authorities
+         WHERE run_id=? AND parent_authority_id IS NULL
+      `).get(bootstrap.runId) as { authority_id: string; authority_json: string };
+      const parentAuthority = JSON.parse(chairAuthority.authority_json);
+      const narrowPeer = peerSeatAuthority(parentAuthority);
+      const handWidened = {
+        ...narrowPeer,
+        actions: [...narrowPeer.actions, FABRIC_OPERATIONS.observeEvents],
+      };
+      expect(() => fabric.delegateAuthority(bootstrap.runId, bootstrap.chairAgentId, {
+        parentAuthorityId: chairAuthority.authority_id,
+        authority: handWidened,
+        commandId: "peer-seat:test:widened",
+      })).toThrow(expect.objectContaining({ code: "AUTHORITY_WIDENING" }));
+
+      const delegated = fabric.delegateAuthority(bootstrap.runId, bootstrap.chairAgentId, {
+        parentAuthorityId: chairAuthority.authority_id,
+        authority: peerSeatAuthority(parentAuthority),
+        commandId: "peer-seat:test:revoked-capability",
+      });
+      const agyAgentId = `agy_bootstrap_peer_${"f".repeat(16)}`;
+      fabric.registerAgent(bootstrap.runId, bootstrap.chairAgentId, {
+        agentId: agyAgentId,
+        authorityId: delegated.authorityId,
+      });
+      database.prepare("UPDATE capabilities SET revoked_at=? WHERE run_id=? AND agent_id=?")
+        .run(now, bootstrap.runId, agyAgentId);
+      const peerBindings = [
+        ...bootstrap.credentials.map(({ seat, agentId, expectedPrincipalGeneration }) => ({
+          seat,
+          agentId,
+          expectedPrincipalGeneration,
+        })),
+        { seat: "agy", agentId: agyAgentId, expectedPrincipalGeneration: 1 },
+      ];
+      const peerIdentity = currentMcpSeatGeneration({
+        canonicalRoot: root,
+        projectSessionId: bootstrap.projectSessionId,
+        sessionRevision: bootstrap.sessionRevision,
+        sessionGeneration: bootstrap.sessionGeneration,
+        runId: bootstrap.runId,
+        runRevision: bootstrap.runRevision,
+        chairAgentId: bootstrap.chairAgentId,
+        chairGeneration: bootstrap.chairGeneration,
+        chairLeaseId: bootstrap.chairLeaseId,
+        expiresAt: bootstrap.expiresAt,
+        bindings: peerBindings,
+      });
+      expect(() => fabric.bindCurrentMcpSeats({
+        canonicalRoot: root,
+        expectedPreviousGeneration: bootstrap.generation,
+        generation: peerIdentity.generation,
+        projectSessionId: bootstrap.projectSessionId,
+        expectedSessionRevision: bootstrap.sessionRevision,
+        expectedSessionGeneration: bootstrap.sessionGeneration,
+        runId: bootstrap.runId,
+        expectedRunRevision: bootstrap.runRevision,
+        chairAgentId: bootstrap.chairAgentId,
+        expectedChairGeneration: bootstrap.chairGeneration,
+        chairLeaseId: bootstrap.chairLeaseId,
+        expiresAt: bootstrap.expiresAt,
+        bindings: peerBindings,
+      })).toThrow(/current MCP agent .* not found/u);
+
+      database.prepare("UPDATE run_chair_leases SET status='revoked' WHERE lease_id=?")
+        .run(bootstrap.chairLeaseId);
+      const revokedLeaseExpiresAt = "2026-07-18T23:59:00.000Z";
+      const revokedLeaseIdentity = currentMcpSeatGeneration({
+        canonicalRoot: root,
+        projectSessionId: bootstrap.projectSessionId,
+        sessionRevision: bootstrap.sessionRevision,
+        sessionGeneration: bootstrap.sessionGeneration,
+        runId: bootstrap.runId,
+        runRevision: bootstrap.runRevision,
+        chairAgentId: bootstrap.chairAgentId,
+        chairGeneration: bootstrap.chairGeneration,
+        chairLeaseId: bootstrap.chairLeaseId,
+        expiresAt: revokedLeaseExpiresAt,
+        bindings: bootstrap.credentials,
+      });
+      expect(() => fabric.bindCurrentMcpSeats({
+        canonicalRoot: root,
+        expectedPreviousGeneration: bootstrap.generation,
+        generation: revokedLeaseIdentity.generation,
+        projectSessionId: bootstrap.projectSessionId,
+        expectedSessionRevision: bootstrap.sessionRevision,
+        expectedSessionGeneration: bootstrap.sessionGeneration,
+        runId: bootstrap.runId,
+        expectedRunRevision: bootstrap.runRevision,
+        chairAgentId: bootstrap.chairAgentId,
+        expectedChairGeneration: bootstrap.chairGeneration,
+        chairLeaseId: bootstrap.chairLeaseId,
+        expiresAt: revokedLeaseExpiresAt,
+        bindings: bootstrap.credentials,
+      })).toThrow(expect.objectContaining({ code: "LIFECYCLE_PRECONDITION_FAILED" }));
+      database.close();
     } finally {
       await fabric.close();
     }
