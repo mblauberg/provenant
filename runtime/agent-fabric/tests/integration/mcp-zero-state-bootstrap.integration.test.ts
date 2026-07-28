@@ -10,6 +10,7 @@ import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { Fabric } from "../../src/core/fabric.ts";
+import { currentMcpSeatGeneration } from "../../src/core/mcp-seat-generation.ts";
 import { bootstrapMcpSeat } from "../../src/cli/mcp-bootstrap.ts";
 import { installSeatGeneration, projectKey, readActiveSeatGeneration, resolveSeatPaths } from "../../src/cli/seat-store.ts";
 
@@ -321,12 +322,49 @@ describe("zero-state MCP bootstrap", () => {
       }
 
       now = Date.parse("2026-07-18T23:30:00.000Z");
+      const renewalExpiresAt = "2026-07-19T23:30:00.000Z";
+      const legacyTwoSeatIdentity = currentMcpSeatGeneration({
+        canonicalRoot: root,
+        projectSessionId: roster.projectSessionId,
+        sessionRevision: roster.sessionRevision,
+        sessionGeneration: roster.sessionGeneration,
+        runId: roster.runId,
+        runRevision: roster.runRevision,
+        chairAgentId: roster.chairAgentId,
+        chairGeneration: roster.chairGeneration,
+        chairLeaseId: roster.chairLeaseId,
+        expiresAt: renewalExpiresAt,
+        bindings: roster.credentials.map(({ seat, agentId, expectedPrincipalGeneration }) => ({
+          seat,
+          agentId,
+          expectedPrincipalGeneration,
+        })),
+      });
       const renewed = fabric.bootstrapCurrentMcpSeat({
         ...trust,
         seat: "codex",
-        expiresAt: "2026-07-19T23:30:00.000Z",
+        expiresAt: renewalExpiresAt,
       });
 
+      const renewedIdentity = currentMcpSeatGeneration({
+        canonicalRoot: root,
+        projectSessionId: renewed.projectSessionId,
+        sessionRevision: renewed.sessionRevision,
+        sessionGeneration: renewed.sessionGeneration,
+        runId: renewed.runId,
+        runRevision: renewed.runRevision,
+        chairAgentId: renewed.chairAgentId,
+        chairGeneration: renewed.chairGeneration,
+        chairLeaseId: renewed.chairLeaseId,
+        expiresAt: renewed.expiresAt,
+        bindings: renewed.credentials.map(({ seat, agentId, expectedPrincipalGeneration }) => ({
+          seat,
+          agentId,
+          expectedPrincipalGeneration,
+        })),
+      });
+      expect(renewedIdentity.bindingJson).toBe(legacyTwoSeatIdentity.bindingJson);
+      expect(renewed.generation).toBe(legacyTwoSeatIdentity.generation);
       expect(renewed.generation).not.toBe(roster.generation);
       expect(renewed.expectedPreviousGeneration).toBe(roster.generation);
       expect(renewed.projectSessionId).toBe(roster.projectSessionId);
@@ -352,6 +390,116 @@ describe("zero-state MCP bootstrap", () => {
       } finally {
         database.close();
       }
+    } finally {
+      await fabric.close();
+    }
+  });
+
+  it("preserves a live provisioned peer when renewing the bootstrap pair", async () => {
+    const temporaryRoot = await mkdtemp(join(tmpdir(), "fabric-zero-state-peer-renewal-"));
+    roots.push(temporaryRoot);
+    const root = await realpath(temporaryRoot);
+    let now = Date.parse("2026-07-18T00:00:00.000Z");
+    const databasePath = join(root, "fabric.sqlite3");
+    const fabric = new Fabric({ databasePath, workspaceRoots: [root], clock: () => now });
+    const trust = {
+      canonicalRoot: root,
+      trustRecordDigest: `sha256:${"e".repeat(64)}`,
+    } as const;
+    try {
+      const first = fabric.bootstrapCurrentMcpSeat({
+        ...trust,
+        seat: "codex",
+        expiresAt: "2026-07-19T00:00:00.000Z",
+      });
+      const roster = fabric.bootstrapCurrentMcpSeat({
+        ...trust,
+        seat: "claude",
+        expiresAt: first.expiresAt,
+      });
+      const setup = new Database(databasePath);
+      const chairAuthority = setup.prepare(`
+        SELECT authority_id,authority_json FROM authorities
+         WHERE run_id=? AND parent_authority_id IS NULL
+      `).get(roster.runId) as { authority_id: string; authority_json: string };
+      setup.close();
+      const agyAgentId = `agy_bootstrap_peer_${"e".repeat(16)}`;
+      const delegated = fabric.delegateAuthority(roster.runId, roster.chairAgentId, {
+        parentAuthorityId: chairAuthority.authority_id,
+        authority: JSON.parse(chairAuthority.authority_json),
+        commandId: "peer-seat:test:agy",
+      });
+      fabric.registerAgent(roster.runId, roster.chairAgentId, {
+        agentId: agyAgentId,
+        authorityId: delegated.authorityId,
+      });
+      const bindings = [
+        ...roster.credentials.map(({ seat, agentId, expectedPrincipalGeneration }) => ({
+          seat,
+          agentId,
+          expectedPrincipalGeneration,
+        })),
+        { seat: "agy", agentId: agyAgentId, expectedPrincipalGeneration: 1 },
+      ].sort((left, right) => left.seat.localeCompare(right.seat));
+      const provisionedIdentity = currentMcpSeatGeneration({
+        canonicalRoot: root,
+        projectSessionId: roster.projectSessionId,
+        sessionRevision: roster.sessionRevision,
+        sessionGeneration: roster.sessionGeneration,
+        runId: roster.runId,
+        runRevision: roster.runRevision,
+        chairAgentId: roster.chairAgentId,
+        chairGeneration: roster.chairGeneration,
+        chairLeaseId: roster.chairLeaseId,
+        expiresAt: roster.expiresAt,
+        bindings,
+      });
+      const provisioned = fabric.bindCurrentMcpSeats({
+        canonicalRoot: root,
+        expectedPreviousGeneration: roster.generation,
+        generation: provisionedIdentity.generation,
+        projectSessionId: roster.projectSessionId,
+        expectedSessionRevision: roster.sessionRevision,
+        expectedSessionGeneration: roster.sessionGeneration,
+        runId: roster.runId,
+        expectedRunRevision: roster.runRevision,
+        chairAgentId: roster.chairAgentId,
+        expectedChairGeneration: roster.chairGeneration,
+        chairLeaseId: roster.chairLeaseId,
+        expiresAt: roster.expiresAt,
+        bindings,
+      });
+      expect(provisioned.credentials.map(({ seat }) => seat)).toEqual(["agy", "claude", "codex"]);
+
+      now = Date.parse("2026-07-18T23:30:00.000Z");
+      const renewed = fabric.bootstrapCurrentMcpSeat({
+        ...trust,
+        seat: "codex",
+        expiresAt: "2026-07-19T23:30:00.000Z",
+      });
+
+      expect(renewed.credentials.map(({ seat }) => seat)).toEqual(["agy", "claude", "codex"]);
+      expect(renewed.expectedPreviousGeneration).toBe(provisioned.generation);
+
+      const revoke = new Database(databasePath);
+      try {
+        revoke.prepare("UPDATE capabilities SET revoked_at=? WHERE run_id=? AND agent_id=?")
+          .run(now, roster.runId, agyAgentId);
+      } finally {
+        revoke.close();
+      }
+      now = Date.parse("2026-07-19T23:00:00.000Z");
+      const withoutStalePeer = fabric.bootstrapCurrentMcpSeat({
+        ...trust,
+        seat: "codex",
+        expiresAt: "2026-07-20T23:00:00.000Z",
+      });
+      expect(withoutStalePeer.credentials.map(({ seat }) => seat)).toEqual(["claude", "codex"]);
+      expect(withoutStalePeer.droppedSeats).toEqual([{
+        seat: "agy",
+        agentId: agyAgentId,
+        reason: "AGENT_NOT_LIVE",
+      }]);
     } finally {
       await fabric.close();
     }

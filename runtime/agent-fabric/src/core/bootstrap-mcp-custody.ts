@@ -335,10 +335,67 @@ export function bootstrapCurrentMcpSeat(custody: BootstrapMcpCustody, input: Boo
         );
       }
 
-      const bindings = custody.database.prepare(`
-        SELECT CASE WHEN agent_id=? THEN ? ELSE ? END AS seat,agent_id AS agentId,1 AS expectedPrincipalGeneration
-          FROM agents WHERE run_id=? AND agent_id IN (?,?) ORDER BY seat
-      `).all(currentChairAgentId, chairSeat, peerSeat, runId, currentChairAgentId, peerAgentId) as CurrentMcpSeatBindingInput["bindings"];
+      const candidates = custody.database.prepare(`
+        WITH candidates(seat,agentId,expectedPrincipalGeneration,priority) AS (
+          SELECT member.seat,member.agent_id,member.principal_generation,1
+            FROM mcp_active_seat_generations active
+            JOIN mcp_seat_generation_members member ON member.generation=active.generation
+           WHERE active.project_id=?
+          UNION ALL
+          SELECT CASE WHEN agent_id=? THEN ? ELSE ? END,agent_id,1,2
+            FROM agents WHERE run_id=? AND agent_id IN (?,?)
+        ),
+        ranked AS (
+          SELECT seat,agentId,expectedPrincipalGeneration,
+                 ROW_NUMBER() OVER (PARTITION BY seat ORDER BY priority DESC) AS ordinal
+            FROM candidates
+        )
+        SELECT seat,agentId,expectedPrincipalGeneration
+          FROM ranked WHERE ordinal=1 ORDER BY seat
+      `).all(
+        projectId,
+        currentChairAgentId,
+        chairSeat,
+        peerSeat,
+        runId,
+        currentChairAgentId,
+        peerAgentId,
+      ) as CurrentMcpSeatBindingInput["bindings"];
+      const bindings: CurrentMcpSeatBindingInput["bindings"] = [];
+      const droppedSeats: NonNullable<BootstrapMcpSeatResult["droppedSeats"]> = [];
+      for (const candidate of candidates) {
+        const live = custody.database.prepare(`
+          SELECT agent.lifecycle,MAX(capability.principal_generation) AS principal_generation
+            FROM agents agent
+            JOIN authorities authority ON authority.authority_id=agent.authority_id
+            JOIN capabilities capability
+              ON capability.run_id=agent.run_id AND capability.agent_id=agent.agent_id
+           WHERE agent.run_id=? AND agent.agent_id=?
+             AND capability.revoked_at IS NULL AND capability.expires_at>?
+           GROUP BY agent.lifecycle
+        `).get(runId, candidate.agentId, now);
+        if (
+          !isRow(live) ||
+          live.lifecycle === "archived" ||
+          live.lifecycle === "suspended"
+        ) {
+          droppedSeats.push({
+            seat: candidate.seat,
+            agentId: candidate.agentId,
+            reason: "AGENT_NOT_LIVE",
+          });
+          continue;
+        }
+        if (numberField(live, "principal_generation") !== candidate.expectedPrincipalGeneration) {
+          droppedSeats.push({
+            seat: candidate.seat,
+            agentId: candidate.agentId,
+            reason: "STALE_PRINCIPAL_GENERATION",
+          });
+          continue;
+        }
+        bindings.push(candidate);
+      }
       const expiresAt = isRow(active) && !activeGenerationNeedsRenewal
         ? new Date(numberField(active, "expires_at")).toISOString()
         : input.expiresAt;
@@ -377,6 +434,13 @@ export function bootstrapCurrentMcpSeat(custody: BootstrapMcpCustody, input: Boo
           "SELECT authority_id FROM agents WHERE run_id=? AND agent_id=?",
         ).get(bound.runId, credential.agentId), "bootstrap seat authority"), "authority_id"),
       }));
-      return { ...bound, credentials, projectId, canonicalRoot, bootstrapRunDirectory };
+      return {
+        ...bound,
+        credentials,
+        projectId,
+        canonicalRoot,
+        bootstrapRunDirectory,
+        ...(droppedSeats.length === 0 ? {} : { droppedSeats }),
+      };
     }).immediate();
 }

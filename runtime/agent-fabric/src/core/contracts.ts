@@ -55,6 +55,11 @@ export type BootstrapMcpSeatResult = Omit<CurrentMcpSeatBindingResult, "credenti
   canonicalRoot: string;
   bootstrapRunDirectory: string;
   credentials: Array<CurrentMcpSeatBinding & { capability: string; authorityId: string }>;
+  droppedSeats?: Array<{
+    seat: string;
+    agentId: string;
+    reason: "AGENT_NOT_LIVE" | "STALE_PRINCIPAL_GENERATION";
+  }>;
 };
 
 export type LeaseResult = {

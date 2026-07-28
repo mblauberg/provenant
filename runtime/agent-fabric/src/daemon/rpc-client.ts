@@ -397,12 +397,21 @@ export class FabricDaemonClient {
       !Array.isArray(result.credentials) ||
       !result.credentials.every((credential) =>
         isRecord(credential) &&
-        (credential.seat === "claude" || credential.seat === "codex") &&
+        typeof credential.seat === "string" &&
         typeof credential.agentId === "string" &&
         typeof credential.authorityId === "string" &&
         isPositiveInteger(credential.expectedPrincipalGeneration) &&
         typeof credential.capability === "string"
-      )
+      ) ||
+      (result.droppedSeats !== undefined && (
+        !Array.isArray(result.droppedSeats) ||
+        !result.droppedSeats.every((seat) =>
+          isRecord(seat) &&
+          typeof seat.seat === "string" &&
+          typeof seat.agentId === "string" &&
+          (seat.reason === "AGENT_NOT_LIVE" || seat.reason === "STALE_PRINCIPAL_GENERATION")
+        )
+      ))
     ) throw new Error("daemon returned an invalid MCP bootstrap result");
     return result as BootstrapMcpSeatResult;
   }

@@ -146,5 +146,21 @@ describe("MCP peer provisioning from a fresh project", () => {
     expect(JSON.parse(secondResult.stdout)).toEqual(JSON.parse(firstResult.stdout));
     expect(counts(value.databasePath)).toEqual(afterFirst);
     expect(secondResult.stdout).not.toMatch(/af[bc]_[A-Za-z0-9_-]{43}/u);
+
+    const database = new Database(value.databasePath);
+    try {
+      database.prepare(`
+        UPDATE mcp_seat_generations SET expires_at=?
+         WHERE generation=(SELECT generation FROM mcp_active_seat_generations LIMIT 1)
+      `).run(Date.now() + 30 * 60 * 1_000);
+    } finally {
+      database.close();
+    }
+    const renewalResult = await cli(value, ["bootstrap", "--seat", "codex"]);
+    const renewal = JSON.parse(renewalResult.stdout) as {
+      credentials: Array<{ seat: string }>;
+    };
+    expect(renewal.credentials.map(({ seat }) => seat)).toEqual(["agy", "codex"]);
+    expect(renewalResult.stdout).not.toMatch(/af[bc]_[A-Za-z0-9_-]{43}/u);
   });
 });
