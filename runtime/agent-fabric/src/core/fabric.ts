@@ -304,6 +304,9 @@ function assertActiveMcpSeatGeneration(row: Row): void {
   const generation = row.mcp_seat_generation;
   if (generation === null || generation === undefined) return;
   if (typeof generation !== "string" || row.active_mcp_seat_generation !== generation) {
+    if (row.mcp_seat_generation_chair_lease_status !== "active") {
+      throw new FabricError("AUTHENTICATION_FAILED", "capability belongs to an MCP seat generation whose chair lease is not active");
+    }
     throw new FabricError("AUTHENTICATION_FAILED", "capability belongs to an inactive MCP seat generation");
   }
 }
@@ -2280,9 +2283,12 @@ export class Fabric {
         .prepare(`
           SELECT capability.run_id,capability.agent_id,capability.expires_at,capability.revoked_at,
                  member.generation AS mcp_seat_generation,
+                 lease.status AS mcp_seat_generation_chair_lease_status,
                  active.generation AS active_mcp_seat_generation
             FROM capabilities capability
             LEFT JOIN mcp_seat_generation_members member ON member.token_hash=capability.token_hash
+            LEFT JOIN mcp_seat_generations generation ON generation.generation=member.generation
+            LEFT JOIN run_chair_leases lease ON lease.lease_id=generation.chair_lease_id
             LEFT JOIN current_mcp_seat_generation_members active ON active.token_hash=capability.token_hash
            WHERE capability.token_hash=?
         `)
@@ -2301,12 +2307,15 @@ export class Fabric {
       SELECT c.run_id, c.agent_id, c.principal_generation, c.expires_at, c.revoked_at,
              a.authority_json, a.authority_hash, r.project_session_id,
              member.generation AS mcp_seat_generation,
+             lease.status AS mcp_seat_generation_chair_lease_status,
              active.generation AS active_mcp_seat_generation
         FROM capabilities c
         JOIN agents g ON g.run_id=c.run_id AND g.agent_id=c.agent_id
         JOIN authorities a ON a.authority_id=g.authority_id
         JOIN runs r ON r.run_id=c.run_id
         LEFT JOIN mcp_seat_generation_members member ON member.token_hash=c.token_hash
+        LEFT JOIN mcp_seat_generations generation ON generation.generation=member.generation
+        LEFT JOIN run_chair_leases lease ON lease.lease_id=generation.chair_lease_id
         LEFT JOIN current_mcp_seat_generation_members active ON active.token_hash=c.token_hash
        WHERE c.token_hash=?
     `).get(sha256(token));
@@ -3480,13 +3489,16 @@ export class Fabric {
   assertCapability(runId: string, agentId: string, tokenHash: string, requiredOperation: FabricOperation, allowSuspended = false): void {
     const row = this.#database
       .prepare(`
-        SELECT c.expires_at,c.revoked_at,a.authority_json,a.authority_hash,g.lifecycle,
-               member.generation AS mcp_seat_generation,
-               active.generation AS active_mcp_seat_generation
+      SELECT c.expires_at,c.revoked_at,a.authority_json,a.authority_hash,g.lifecycle,
+             member.generation AS mcp_seat_generation,
+             lease.status AS mcp_seat_generation_chair_lease_status,
+             active.generation AS active_mcp_seat_generation
           FROM capabilities c
           JOIN agents g ON g.run_id=c.run_id AND g.agent_id=c.agent_id
           JOIN authorities a ON a.authority_id=g.authority_id
           LEFT JOIN mcp_seat_generation_members member ON member.token_hash=c.token_hash
+          LEFT JOIN mcp_seat_generations generation ON generation.generation=member.generation
+          LEFT JOIN run_chair_leases lease ON lease.lease_id=generation.chair_lease_id
           LEFT JOIN current_mcp_seat_generation_members active ON active.token_hash=c.token_hash
          WHERE c.token_hash=? AND c.run_id=? AND c.agent_id=?
       `)
