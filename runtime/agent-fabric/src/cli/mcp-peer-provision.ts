@@ -181,6 +181,10 @@ function rosterCasChanged(error: unknown): boolean {
   return error instanceof Error && /active MCP seat generation changed/u.test(error.message);
 }
 
+function chairCredentialChanged(error: unknown): boolean {
+  return error instanceof Error && /capability is expired or revoked|inactive MCP seat generation/u.test(error.message);
+}
+
 async function waitForRosterConvergence(): Promise<void> {
   await new Promise<void>((resolve) => setTimeout(resolve, ROSTER_CONVERGENCE_POLL_MS));
 }
@@ -218,92 +222,98 @@ export async function provisionMcpPeerSeats(
   paths: FabricPaths,
 ): Promise<McpProvisionOutput> {
   const request = parseArguments(arguments_);
-  const roster = await installedRoster(paths, request.project);
-  let chair: InstalledSeat | undefined;
-  for (const member of roster) {
-    if (member.metadata.role === "chair") chair = member;
+  const initialRoster = await installedRoster(paths, request.project);
+  const initialChair = initialRoster.find((member) => member.metadata.role === "chair");
+  if (initialChair === undefined) throw new McpPeerProvisionChairRequiredError(request.project);
+  if (request.seats.includes(initialChair.metadata.seat)) {
+    throw new Error(`mcp peer-provision refuses to provision the active chair seat ${initialChair.metadata.seat}`);
   }
-  if (chair === undefined) throw new McpPeerProvisionChairRequiredError(request.project);
-  if (request.seats.includes(chair.metadata.seat)) {
-    throw new Error(`mcp peer-provision refuses to provision the active chair seat ${chair.metadata.seat}`);
+  if (request.seats.every((seat) => initialRoster.some((member) => member.metadata.seat === seat))) {
+    return rosterOutput(initialChair, initialRoster);
   }
-  const present = new Set(roster.map(({ metadata }) => metadata.seat));
-  if (request.seats.every((seat) => present.has(seat))) return rosterOutput(chair, roster);
-
   const daemonHandle = await startMcpProvisionDaemon(paths);
-  let client: Awaited<ReturnType<typeof connectFabricDaemon>> | undefined;
-  let database: Database.Database | undefined;
+  const convergenceDeadline = Date.now() + ROSTER_CONVERGENCE_TIMEOUT_MS;
   try {
-    const chairCapability = (await privateRead(chair.credentialPath)).trim();
-    client = await connectFabricDaemon({
-      socketPath: daemonHandle.address.path,
-      capability: chairCapability,
-    });
-    database = new Database(paths.databasePath, { readonly: true, fileMustExist: true });
-    const authorityRow = database.prepare(`
+    while (true) {
+      let client: Awaited<ReturnType<typeof connectFabricDaemon>> | undefined;
+      let database: Database.Database | undefined;
+      try {
+        const roster = await installedRoster(paths, request.project);
+        const chair = roster.find((member) => member.metadata.role === "chair");
+        if (chair === undefined) throw new McpPeerProvisionChairRequiredError(request.project);
+        if (request.seats.includes(chair.metadata.seat)) {
+          throw new Error(`mcp peer-provision refuses to provision the active chair seat ${chair.metadata.seat}`);
+        }
+        const present = new Set(roster.map(({ metadata }) => metadata.seat));
+        if (request.seats.every((seat) => present.has(seat))) return rosterOutput(chair, roster);
+
+        const chairCapability = (await privateRead(chair.credentialPath)).trim();
+        client = await connectFabricDaemon({
+          socketPath: daemonHandle.address.path,
+          capability: chairCapability,
+        });
+        database = new Database(paths.databasePath, { readonly: true, fileMustExist: true });
+        const authorityRow = database.prepare(`
       SELECT agent.authority_id,authority.authority_json,authority.authority_hash
         FROM agents agent
         JOIN authorities authority
           ON authority.run_id=agent.run_id AND authority.authority_id=agent.authority_id
        WHERE agent.run_id=? AND agent.agent_id=?
-    `).get(chair.metadata.runId, chair.metadata.agentId) as {
-      authority_id?: unknown;
-      authority_json?: unknown;
-      authority_hash?: unknown;
-    } | undefined;
-    if (authorityRow === undefined || typeof authorityRow.authority_id !== "string") {
-      throw new Error("chair authority is unavailable");
-    }
-    const parentAuthorityId = authorityRow.authority_id;
-    const parentAuthority = readStoredAuthority(authorityRow, "chair authority");
-    const expiresAt = peerExpiry(request.expiresAt, parentAuthority, chair.metadata.expiresAt);
-    const registeredBindings: ParsedSeatBinding[] = [];
-    for (const seat of request.seats) {
-      if (present.has(seat)) continue;
-      const agentId = peerAgentId(chair.metadata.projectKey, chair.metadata.runId, seat);
-      const delegated = await client.delegateAuthority({
-        parentAuthorityId,
-        authority: peerSeatAuthority(parentAuthority),
-        commandId: `peer-seat:${chair.metadata.projectKey}:${chair.metadata.runId}:${seat}`,
-      });
-      const registration = await client.registerAgent({ agentId, authorityId: delegated.authorityId });
-      const capability = database.prepare(`
+        `).get(chair.metadata.runId, chair.metadata.agentId) as {
+          authority_id?: unknown;
+          authority_json?: unknown;
+          authority_hash?: unknown;
+        } | undefined;
+        if (authorityRow === undefined || typeof authorityRow.authority_id !== "string") {
+          throw new Error("chair authority is unavailable");
+        }
+        const parentAuthorityId = authorityRow.authority_id;
+        const parentAuthority = readStoredAuthority(authorityRow, "chair authority");
+        const expiresAt = peerExpiry(request.expiresAt, parentAuthority, chair.metadata.expiresAt);
+        const registeredBindings: ParsedSeatBinding[] = [];
+        for (const seat of request.seats) {
+          if (present.has(seat)) continue;
+          const agentId = peerAgentId(chair.metadata.projectKey, chair.metadata.runId, seat);
+          const delegated = await client.delegateAuthority({
+            parentAuthorityId,
+            authority: peerSeatAuthority(parentAuthority),
+            commandId: `peer-seat:${chair.metadata.projectKey}:${chair.metadata.runId}:${seat}`,
+          });
+          const registration = await client.registerAgent({ agentId, authorityId: delegated.authorityId });
+          const capability = database.prepare(`
         SELECT principal_generation
           FROM capabilities
          WHERE token_hash=? AND run_id=? AND agent_id=? AND revoked_at IS NULL AND expires_at>?
          ORDER BY principal_generation DESC LIMIT 1
-      `).get(
-        createHash("sha256").update(registration.capability).digest("hex"),
-        chair.metadata.runId,
-        agentId,
-        Date.now(),
-      ) as { principal_generation?: unknown } | undefined;
-      if (
-        capability === undefined ||
-        typeof capability.principal_generation !== "number" ||
-        !Number.isSafeInteger(capability.principal_generation)
-      ) {
-        throw new Error(`registered peer ${seat} capability does not match live custody`);
-      }
-      registeredBindings.push({
-        seat,
-        agentId,
-        expectedPrincipalGeneration: capability.principal_generation,
-      });
-    }
-    const convergenceDeadline = Date.now() + ROSTER_CONVERGENCE_TIMEOUT_MS;
-    while (true) {
-      const latestRoster = await installedRoster(paths, chair.metadata.projectPath);
-      const bindings = new Map<McpSeat, ParsedSeatBinding>();
-      for (const { metadata } of latestRoster) {
-        bindings.set(metadata.seat, {
-          seat: metadata.seat,
-          agentId: metadata.agentId,
-          expectedPrincipalGeneration: metadata.principalGeneration,
-        });
-      }
-      for (const binding of registeredBindings) bindings.set(binding.seat, binding);
-      try {
+          `).get(
+            createHash("sha256").update(registration.capability).digest("hex"),
+            chair.metadata.runId,
+            agentId,
+            Date.now(),
+          ) as { principal_generation?: unknown } | undefined;
+          if (
+            capability === undefined ||
+            typeof capability.principal_generation !== "number" ||
+            !Number.isSafeInteger(capability.principal_generation)
+          ) {
+            throw new Error(`registered peer ${seat} capability does not match live custody`);
+          }
+          registeredBindings.push({
+            seat,
+            agentId,
+            expectedPrincipalGeneration: capability.principal_generation,
+          });
+        }
+        const latestRoster = await installedRoster(paths, chair.metadata.projectPath);
+        const bindings = new Map<McpSeat, ParsedSeatBinding>();
+        for (const { metadata } of latestRoster) {
+          bindings.set(metadata.seat, {
+            seat: metadata.seat,
+            agentId: metadata.agentId,
+            expectedPrincipalGeneration: metadata.principalGeneration,
+          });
+        }
+        for (const binding of registeredBindings) bindings.set(binding.seat, binding);
         return await bindProvisionedSeatRoster({
           project: chair.metadata.projectPath,
           projectSessionId: chair.metadata.projectSessionId,
@@ -319,19 +329,20 @@ export async function provisionMcpPeerSeats(
           expiresAt,
         }, paths);
       } catch (error: unknown) {
-        if (!rosterCasChanged(error) || Date.now() >= convergenceDeadline) throw error;
+        if (
+          (!rosterCasChanged(error) && !chairCredentialChanged(error)) ||
+          Date.now() >= convergenceDeadline
+        ) throw error;
         await waitForRosterConvergence();
+      } finally {
+        try {
+          database?.close();
+        } finally {
+          await client?.close();
+        }
       }
     }
   } finally {
-    try {
-      database?.close();
-    } finally {
-      try {
-        await client?.close();
-      } finally {
-        daemonHandle.release();
-      }
-    }
+    daemonHandle.release();
   }
 }
