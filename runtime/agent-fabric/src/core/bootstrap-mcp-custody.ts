@@ -240,12 +240,14 @@ export function bootstrapCurrentMcpSeat(custody: BootstrapMcpCustody, input: Boo
       const peerSeat = chairSeat === "codex" ? "claude" : "codex";
       const peerAgentId = `${peerSeat}_bootstrap_peer_${identityDigest.slice(0, 16)}`;
       let activeGenerationNeedsRenewal = false;
+      let requestedSeatIsActive = false;
       if (isRow(active)) {
         activeGenerationNeedsRenewal =
           numberField(active, "expires_at") - now <= MCP_SEAT_RENEWAL_WINDOW_MS;
         const member = custody.database.prepare(
           "SELECT 1 FROM mcp_seat_generation_members WHERE generation=? AND seat=?",
         ).get(active.generation, input.seat);
+        requestedSeatIsActive = member !== undefined;
         if (member !== undefined && !activeGenerationNeedsRenewal) {
           const generation = stringField(active, "generation");
           const storedProjectSessionId = stringField(active, "project_session_id");
@@ -309,7 +311,7 @@ export function bootstrapCurrentMcpSeat(custody: BootstrapMcpCustody, input: Boo
       const requestedAgentId = input.seat === chairSeat
         ? currentChairAgentId
         : peerAgentId;
-      if (requestedAgentId !== currentChairAgentId && custody.database.prepare(
+      if (!requestedSeatIsActive && requestedAgentId !== currentChairAgentId && custody.database.prepare(
         "SELECT 1 FROM agents WHERE run_id=? AND agent_id=?",
       ).get(runId, requestedAgentId) === undefined) {
         const chairAuthority = rowOrNotFound(custody.database.prepare(
@@ -342,13 +344,28 @@ export function bootstrapCurrentMcpSeat(custody: BootstrapMcpCustody, input: Boo
         : input.expiresAt;
       const candidates = custody.database.prepare(`
         WITH candidates(seat,agentId,expectedPrincipalGeneration,priority) AS (
-          SELECT member.seat,member.agent_id,member.principal_generation,1
+          SELECT member.seat,member.agent_id,COALESCE((
+                   SELECT MAX(capability.principal_generation)
+                     FROM capabilities capability
+                    WHERE capability.run_id=member.run_id
+                      AND capability.agent_id=member.agent_id
+                      AND capability.revoked_at IS NULL
+                      AND capability.expires_at>?
+                 ),member.principal_generation),1
             FROM mcp_active_seat_generations active
             JOIN mcp_seat_generation_members member ON member.generation=active.generation
            WHERE active.project_id=?
           UNION ALL
-          SELECT CASE WHEN agent_id=? THEN ? ELSE ? END,agent_id,1,2
-            FROM agents WHERE run_id=? AND agent_id IN (?,?)
+          SELECT ?,agent.agent_id,(
+                   SELECT MAX(capability.principal_generation)
+                     FROM capabilities capability
+                    WHERE capability.run_id=agent.run_id
+                      AND capability.agent_id=agent.agent_id
+                      AND capability.revoked_at IS NULL
+                      AND capability.expires_at>?
+                 ),2
+            FROM agents agent
+           WHERE agent.run_id=? AND agent.agent_id=? AND ?=0
         ),
         ranked AS (
           SELECT seat,agentId,expectedPrincipalGeneration,
@@ -358,13 +375,13 @@ export function bootstrapCurrentMcpSeat(custody: BootstrapMcpCustody, input: Boo
         SELECT seat,agentId,expectedPrincipalGeneration
           FROM ranked WHERE ordinal=1 ORDER BY seat
       `).all(
+        now,
         projectId,
-        currentChairAgentId,
-        chairSeat,
-        peerSeat,
+        input.seat,
+        now,
         runId,
-        currentChairAgentId,
-        peerAgentId,
+        requestedAgentId,
+        requestedSeatIsActive ? 1 : 0,
       ) as CurrentMcpSeatBindingInput["bindings"];
       const bindings: CurrentMcpSeatBindingInput["bindings"] = [];
       const droppedSeats: NonNullable<BootstrapMcpSeatResult["droppedSeats"]> = [];

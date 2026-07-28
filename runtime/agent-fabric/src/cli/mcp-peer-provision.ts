@@ -108,6 +108,7 @@ async function installedRoster(paths: FabricPaths, project: string): Promise<Ins
       ) {
         throw new Error(`MCP seat metadata does not match the active ${seat} path`);
       }
+      if (!(Date.parse(metadata.expiresAt) > Date.now())) continue;
       roster.push({
         metadata,
         credentialPath: location.credentialPath,
@@ -266,19 +267,23 @@ export async function provisionMcpPeerSeats(
         commandId: `peer-seat:${chair.metadata.projectKey}:${chair.metadata.runId}:${seat}`,
       });
       const registration = await client.registerAgent({ agentId, authorityId: delegated.authorityId });
-      void registration.capability;
       const capability = database.prepare(`
         SELECT principal_generation
           FROM capabilities
-         WHERE run_id=? AND agent_id=? AND revoked_at IS NULL AND expires_at>?
+         WHERE token_hash=? AND run_id=? AND agent_id=? AND revoked_at IS NULL AND expires_at>?
          ORDER BY principal_generation DESC LIMIT 1
-      `).get(chair.metadata.runId, agentId, Date.now()) as { principal_generation?: unknown } | undefined;
+      `).get(
+        createHash("sha256").update(registration.capability).digest("hex"),
+        chair.metadata.runId,
+        agentId,
+        Date.now(),
+      ) as { principal_generation?: unknown } | undefined;
       if (
         capability === undefined ||
         typeof capability.principal_generation !== "number" ||
         !Number.isSafeInteger(capability.principal_generation)
       ) {
-        throw new Error(`registered peer ${seat} has no live capability`);
+        throw new Error(`registered peer ${seat} capability does not match live custody`);
       }
       registeredBindings.push({
         seat,
