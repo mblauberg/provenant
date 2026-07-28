@@ -8,8 +8,14 @@ second, hand-maintained copy of much of the same structure, and until this gate
 nothing compared them. They had drifted on 19 of the 86 tables they share.
 
 Scope, stated so the gate is not mistaken for more than it is: this compares
-column *sets* per shared table. It does not compare types, constraints, triggers
-or indexes, and it says nothing about whether the prose around the SQL is true.
+column *sets* and key-constraint signatures (PRIMARY KEY, UNIQUE, FOREIGN KEY)
+per shared table. It does not compare types, CHECK bodies, triggers or indexes,
+and it says nothing about whether the prose around the SQL is true.
+
+CHECK is deliberately excluded. Its body is free-form SQL that the typeless
+specification dialect legitimately writes differently from the migration, so
+comparing it would report drift on every table and mean nothing. The key
+constraints have a canonical column-list form, so they compare honestly.
 
 The gate is a ratchet. `spec-schema-drift-baseline.json` records the drift that
 existed when it was introduced, so CI fails on *new* drift rather than on the
@@ -48,6 +54,12 @@ MIGRATION_TABLE = re.compile(r"CREATE TABLE (\w+)\s*\((.*?)\n\)\s*(?:STRICT)?\s*
 # Specification DDL is typeless pseudo-SQL: "table_name(\n  col, col,\n)".
 SPEC_TABLE = re.compile(r"\n([a-z_][a-z0-9_]*)\(\n(.*?)\n\)\n", re.S)
 IDENTIFIER = re.compile(r"^([a-z_][a-z0-9_]*)")
+# Key constraints in either dialect, table-level and column-level.
+TABLE_KEY = re.compile(r"^(PRIMARY\s+KEY|UNIQUE)\s*\(([^)]*)\)", re.I)
+TABLE_FOREIGN_KEY = re.compile(
+    r"^FOREIGN\s+KEY\s*\(([^)]*)\)\s*REFERENCES\s+(\w+)\s*\(([^)]*)\)", re.I
+)
+COLUMN_REFERENCES = re.compile(r"\bREFERENCES\s+(\w+)\s*(?:\(([^)]*)\))?", re.I)
 
 # Fragments that open a table constraint rather than declare a column.
 CONSTRAINTS = (
@@ -104,14 +116,70 @@ def columns(body: str) -> tuple[set[str], bool]:
     return names, elided
 
 
-def load_tables() -> tuple[dict[str, set[str]], dict[str, set[str]], list[str]]:
+def normalise_columns(text: str) -> str:
+    """Collapse a parenthesised column list to a canonical comma-joined form."""
+    return ",".join(part.strip() for part in text.split(",") if part.strip())
+
+
+def constraints(body: str) -> set[str]:
+    """Return canonical PRIMARY KEY, UNIQUE and FOREIGN KEY signatures.
+
+    Both dialects are reduced to the same shape, so a table constraint and the
+    equivalent column constraint compare equal: the migration's
+    `admission_digest TEXT NOT NULL UNIQUE` and a specification's
+    `UNIQUE(admission_digest)` are one signature, not two.
+    """
+    found: set[str] = set()
+    for fragment in split_top_level(body):
+        text = " ".join(fragment.split())
+        if not text or ELISION in text:
+            continue
+        upper = text.upper()
+
+        table_key = TABLE_KEY.match(text)
+        if table_key:
+            keyword = "PRIMARY KEY" if upper.startswith("PRIMARY") else "UNIQUE"
+            found.add(f"{keyword}({normalise_columns(table_key.group(2))})")
+            continue
+
+        table_fk = TABLE_FOREIGN_KEY.match(text)
+        if table_fk:
+            found.add(
+                f"FOREIGN KEY({normalise_columns(table_fk.group(1))})"
+                f"->{table_fk.group(2)}({normalise_columns(table_fk.group(3))})"
+            )
+            continue
+
+        if upper.startswith(CONSTRAINTS):
+            continue
+
+        # A column declaration may carry the same constraints inline.
+        column = IDENTIFIER.match(text)
+        if not column:
+            continue
+        name = column.group(1)
+        if re.search(r"\bPRIMARY\s+KEY\b", upper):
+            found.add(f"PRIMARY KEY({name})")
+        if re.search(r"\bUNIQUE\b", upper):
+            found.add(f"UNIQUE({name})")
+        column_fk = COLUMN_REFERENCES.search(text)
+        if column_fk:
+            target = normalise_columns(column_fk.group(2) or name)
+            found.add(f"FOREIGN KEY({name})->{column_fk.group(1)}({target})")
+    return found
+
+
+Table = tuple[set[str], set[str]]
+
+
+def load_tables() -> tuple[dict[str, Table], dict[str, Table], list[str]]:
     migration_sql = MIGRATION.read_text(encoding="utf-8")
     migration = {
-        match.group(1): columns(match.group(2))[0]
+        match.group(1): (columns(match.group(2))[0], constraints(match.group(2)))
         for match in MIGRATION_TABLE.finditer(migration_sql)
     }
 
-    spec: dict[str, set[str]] = {}
+    spec: dict[str, Table] = {}
     elisions: list[str] = []
     for name in SPEC_FILES:
         path = SPEC_DIR / name
@@ -121,7 +189,7 @@ def load_tables() -> tuple[dict[str, set[str]], dict[str, set[str]], list[str]]:
             found, elided = columns(match.group(2))
             if elided:
                 elisions.append(f"{path.relative_to(ROOT)}: {table} has an elided DDL block")
-            spec[table] = found
+            spec[table] = (found, constraints(match.group(2)))
     return spec, migration, elisions
 
 
@@ -131,10 +199,16 @@ def measure() -> tuple[dict[str, dict[str, list[str]]], list[str], int]:
     drift: dict[str, dict[str, list[str]]] = {}
     shared = sorted(set(spec) & set(migration))
     for table in shared:
-        spec_only = sorted(spec[table] - migration[table])
-        migration_only = sorted(migration[table] - spec[table])
-        if spec_only or migration_only:
-            drift[table] = {"spec_only": spec_only, "migration_only": migration_only}
+        spec_columns, spec_keys = spec[table]
+        migration_columns, migration_keys = migration[table]
+        entry = {
+            "spec_only": sorted(spec_columns - migration_columns),
+            "migration_only": sorted(migration_columns - spec_columns),
+            "spec_only_keys": sorted(spec_keys - migration_keys),
+            "migration_only_keys": sorted(migration_keys - spec_keys),
+        }
+        if any(entry.values()):
+            drift[table] = entry
     return drift, sorted(elisions), len(shared)
 
 
@@ -154,10 +228,15 @@ def failures() -> list[str]:
     for table, entry in drift.items():
         if table not in allowed:
             problems.append(
-                f"new drift in {table}: {len(entry['spec_only'])} spec-only, "
-                f"{len(entry['migration_only'])} migration-only column(s); "
+                f"new drift in {table}: "
+                f"{len(entry['spec_only'])} spec-only and "
+                f"{len(entry['migration_only'])} migration-only column(s), "
+                f"{len(entry['spec_only_keys'])} spec-only and "
+                f"{len(entry['migration_only_keys'])} migration-only key(s); "
                 f"spec-only={entry['spec_only'] or '-'} "
-                f"migration-only={entry['migration_only'] or '-'}"
+                f"migration-only={entry['migration_only'] or '-'} "
+                f"spec-only-keys={entry['spec_only_keys'] or '-'} "
+                f"migration-only-keys={entry['migration_only_keys'] or '-'}"
             )
         elif allowed[table] != entry:
             problems.append(
