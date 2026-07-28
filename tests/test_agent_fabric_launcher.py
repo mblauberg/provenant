@@ -111,10 +111,16 @@ def _fixture(
 
     marker = tmp_path / "daemon-election-attempt"
     fake_node = tmp_path / "bin" / "node"
+    # The stub exists to capture the final exec, not to stand in for node
+    # everywhere. Helper invocations — the loader resolution probes, and the
+    # module-type check above — must reach the real interpreter, or the helper
+    # is being tested against a shell script rather than against node.
+    real_node = shutil.which("node") or "/usr/bin/env node"
     _write(
         fake_node,
         "#!/bin/sh\n"
         '[ "${1:-}" != "--input-type=module" ] || exit 0\n'
+        f'[ "${{1:-}}" != "-e" ] || exec "{real_node}" "$@"\n'
         "printf '%s\\n' \"$@\" > \"$LAUNCHER_TEST_MARKER\"\n"
         "if [ -n \"${LAUNCHER_TEST_ENV_MARKER:-}\" ]; then\n"
         "  printf '%s\\n%s\\n' \"${AGENT_FABRIC_PROTOCOL_BUILD_VERDICT:-}\" "
@@ -2123,6 +2129,105 @@ def test_tsx_loader_resolves_through_a_symlinked_invocation(tmp_path: Path) -> N
 
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == str(loader)
+
+
+def test_tsx_loader_ignores_git_environment_that_would_widen_the_boundary(
+    tmp_path: Path,
+) -> None:
+    """GIT_DIR and friends override what `git rev-parse` reports.
+
+    An inherited environment naming an ancestor repository would otherwise
+    move the boundary out to that ancestor, which is exactly the widening the
+    boundary exists to prevent. The boundary must come from the workspace on
+    disk, never from the caller's environment.
+    """
+    outer = tmp_path / "outer"
+    _git_repository(outer)
+    planted = _install_tsx(outer)
+    repository = outer / "repo"
+    _git_repository(repository)
+    worktree = repository / ".worktrees/impl-example"
+    worktree.mkdir(parents=True)
+
+    result = subprocess.run(
+        ["sh", "-c", f'. "{TSX_LOADER_LIBRARY}"; resolve_tsx_loader "{worktree}"'],
+        text=True,
+        capture_output=True,
+        check=False,
+        env={**os.environ, "GIT_DIR": str(outer / ".git")},
+    )
+
+    assert result.returncode == 1
+    assert str(planted) not in result.stdout
+
+
+def test_tsx_loader_rejects_a_loader_symlinked_outside_the_boundary(
+    tmp_path: Path,
+) -> None:
+    """The resolved file is executed, so its own basename must be canonical.
+
+    A loader.mjs that is itself a symlink runs its target. Checking only the
+    link path, or canonicalising the directory and re-appending the name,
+    proves nothing about what `node --import` will actually load.
+    """
+    repository = tmp_path / "repo"
+    _git_repository(repository)
+    loader = _install_tsx(repository)
+    outside = tmp_path / "outside/payload.mjs"
+    outside.parent.mkdir(parents=True)
+    outside.write_text("", encoding="utf-8")
+    loader.unlink()
+    loader.symlink_to(outside)
+
+    result = _resolve_tsx_loader(repository)
+
+    assert result.returncode == 1
+    assert result.stdout.strip() == ""
+
+
+def test_tsx_loader_rejects_a_manifest_that_only_mentions_tsx(tmp_path: Path) -> None:
+    """Identity is a JSON field, not a substring.
+
+    A manifest may carry `"name": "tsx"` inside a description, a keyword list
+    or a dependency entry without being tsx at all.
+    """
+    repository = tmp_path / "repo"
+    _git_repository(repository)
+    package = repository / "node_modules/tsx"
+    (package / "dist").mkdir(parents=True)
+    (package / "dist/loader.mjs").write_text("", encoding="utf-8")
+    (package / "package.json").write_text(
+        '{"name": "impostor", "description": "shim for \\"name\\": \\"tsx\\" loaders",'
+        ' "dependencies": {"tsx": "4.0.0"}}\n',
+        encoding="utf-8",
+    )
+
+    result = _resolve_tsx_loader(repository)
+
+    assert result.returncode == 1
+    assert result.stdout.strip() == ""
+
+
+def test_tsx_loader_refuses_when_the_package_sits_outside_the_boundary(
+    tmp_path: Path,
+) -> None:
+    """The walk never meets a boundary that is not its ancestor.
+
+    With PACKAGE_ROOT outside WORKSPACE, a loop that only stops *at* the
+    boundary climbs past it to /, accepting anything it passed on the way. Each
+    candidate must therefore be checked against the boundary, not just the
+    stopping point.
+    """
+    planted = _install_tsx(tmp_path)
+    workspace = tmp_path / "repo"
+    _git_repository(workspace)
+    stray = tmp_path / "elsewhere/pkg"
+    stray.mkdir(parents=True)
+
+    result = _resolve_tsx_loader(stray, workspace)
+
+    assert result.returncode == 1
+    assert str(planted) not in result.stdout
 
 
 def test_tsx_loader_fails_when_nothing_inside_the_boundary_provides_it(

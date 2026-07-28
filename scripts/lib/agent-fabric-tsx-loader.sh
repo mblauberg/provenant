@@ -36,7 +36,12 @@ _aftsx_physical() {
 resolve_tsx_loader_boundary() {
   _aftsx_home=$(_aftsx_physical "$1")
 
+  # GIT_DIR, GIT_COMMON_DIR and GIT_WORK_TREE override what rev-parse reports,
+  # so an inherited environment could otherwise name an ancestor repository and
+  # widen the boundary to it. The boundary must come from the workspace on
+  # disk, never from the caller's environment.
   _aftsx_common=$(
+    unset GIT_DIR GIT_COMMON_DIR GIT_WORK_TREE
     git -C "$_aftsx_home" rev-parse --path-format=absolute --git-common-dir 2>/dev/null
   ) || _aftsx_common=
   if [ -z "$_aftsx_common" ]; then
@@ -53,24 +58,38 @@ resolve_tsx_loader_boundary() {
   esac
 }
 
-# Whether a resolved path lies inside the boundary. Both arguments are already
-# physical, so this is a prefix test on canonical paths rather than on whatever
-# spelling the caller happened to use.
-_aftsx_within() {
-  case "$1" in
-    "$2" | "$2"/*) return 0 ;;
-    *) return 1 ;;
-  esac
-}
-
-# A loader.mjs is accepted only when the package around it really is tsx. The
-# bare file test admits any file of that name, including a planted one. This
-# deliberately does not pin a version: no declared expectation exists to pin
+# Validate one candidate and print the path that would actually be executed.
+#
+# The boundary governs *where a package may be declared*, not where its bytes
+# live. A node_modules entry is frequently a symlink — pnpm links every package
+# out to a global store, and npm links workspace members — so demanding that
+# the resolved file also sit inside the boundary would reject ordinary layouts
+# while proving nothing extra. Containment is therefore enforced by the caller,
+# which only ever searches node_modules directories inside the boundary.
+#
+# What this checks is the candidate itself:
+#
+#   - it is canonicalised, including its own basename. A loader.mjs that is
+#     itself a symlink executes its target, so the link path says nothing about
+#     what runs, and the target is what must be identified and executed;
+#   - the package owning the *resolved* file names itself tsx. Reading the
+#     manifest as JSON rather than grepping it means a `"name": "tsx"` buried
+#     in a description, a keyword list or a dependency entry cannot pass. This
+#     is what stops a loader.mjs symlinked at some unrelated payload.
+#
+# It deliberately does not pin a version: no declared expectation exists to pin
 # against, and inventing one here would fail every legitimate upgrade.
-_aftsx_is_tsx_package() {
-  _aftsx_manifest=${1%/dist/loader.mjs}/package.json
-  [ -f "$_aftsx_manifest" ] || return 1
-  grep -q '"name"[[:space:]]*:[[:space:]]*"tsx"' "$_aftsx_manifest"
+_aftsx_validate() {
+  node -e '
+const { realpathSync } = require("node:fs");
+const { dirname } = require("node:path");
+try {
+  const real = realpathSync(process.argv[1]);
+  const manifest = require(dirname(dirname(real)) + "/package.json");
+  if (manifest.name !== "tsx") process.exit(1);
+  process.stdout.write(real);
+} catch { process.exit(1); }
+' "$1" 2>/dev/null
 }
 
 # resolve_tsx_loader PACKAGE_ROOT [WORKSPACE]
@@ -87,32 +106,31 @@ resolve_tsx_loader() {
   _aftsx_start=$(_aftsx_physical "$1")
   _aftsx_boundary=$(resolve_tsx_loader_boundary "${2:-$1}")
 
-  # Node's own resolution algorithm, rooted at the declaring package. It is
-  # symlink-correct and finds exactly what `import "tsx"` would find from that
-  # package, which is the behaviour this fallback is trying to reproduce.
-  _aftsx_resolved=$(
-    node -e 'try{process.stdout.write(require.resolve("tsx/dist/loader.mjs",{paths:[process.argv[1]]}))}catch{}' \
-      "$_aftsx_start" 2>/dev/null
-  ) || _aftsx_resolved=
-  if [ -n "$_aftsx_resolved" ] && [ -f "$_aftsx_resolved" ]; then
-    _aftsx_resolved=$(_aftsx_physical "$(dirname -- "$_aftsx_resolved")")/loader.mjs
-    if _aftsx_within "$_aftsx_resolved" "$_aftsx_boundary" &&
-      _aftsx_is_tsx_package "$_aftsx_resolved"; then
-      printf '%s\n' "$_aftsx_resolved"
-      return 0
-    fi
-  fi
-
-  # Fallback for what Node cannot serve: a hoisted node_modules that is an
-  # ancestor of the workspace but not on the declaring package's resolution
-  # path. The walk stops at the boundary and never reaches /.
+  # The walk searches only node_modules directories that are themselves inside
+  # the boundary, which is what makes the result safe. `require.resolve` is not
+  # used: it reports a realpath and discards where the package was declared, so
+  # its answer cannot be told apart from one found outside the boundary. Doing
+  # the lookup here keeps the location and the target distinct, and the fixed
+  # `tsx/dist/loader.mjs` path needs none of Node's exports-map machinery.
+  #
+  # Containment is checked per candidate rather than only at the loop's
+  # stopping point. When PACKAGE_ROOT is not inside the boundary the walk never
+  # meets it, so a termination-only check would climb to / and accept whatever
+  # it passed on the way.
   _aftsx_dir=$_aftsx_start
   while :; do
-    _aftsx_candidate="$_aftsx_dir/node_modules/tsx/dist/loader.mjs"
-    if [ -f "$_aftsx_candidate" ] && _aftsx_is_tsx_package "$_aftsx_candidate"; then
-      printf '%s\n' "$_aftsx_candidate"
-      return 0
-    fi
+    case "$_aftsx_dir" in
+      "$_aftsx_boundary" | "$_aftsx_boundary"/*)
+        _aftsx_candidate="$_aftsx_dir/node_modules/tsx/dist/loader.mjs"
+        if [ -f "$_aftsx_candidate" ]; then
+          _aftsx_accepted=$(_aftsx_validate "$_aftsx_candidate") || _aftsx_accepted=
+          if [ -n "$_aftsx_accepted" ]; then
+            printf '%s\n' "$_aftsx_accepted"
+            return 0
+          fi
+        fi
+        ;;
+    esac
     [ "$_aftsx_dir" = "$_aftsx_boundary" ] && return 1
     [ "$_aftsx_dir" = / ] && return 1
     _aftsx_parent=$(dirname -- "$_aftsx_dir")
