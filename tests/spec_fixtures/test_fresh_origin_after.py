@@ -56,21 +56,17 @@ def require(condition: bool, message: str) -> None:
 
 def expect_integrity(
     operation: Callable[[], Any],
-    error_name: str,
-    message_fragment: str | None = None,
+    exact_message: str,
 ) -> sqlite3.IntegrityError:
     try:
         operation()
     except sqlite3.IntegrityError as error:
-        actual_name = getattr(error, "sqlite_errorname", "")
         require(
-            actual_name == error_name,
-            f"wrong SQLite reason: expected {error_name}, got {actual_name}: {error}",
+            str(error) == exact_message,
+            f"wrong SQLite reason: expected {exact_message!r}, got {str(error)!r}",
         )
-        if message_fragment is not None:
-            require(message_fragment in str(error), f"missing error marker: {error}")
         return error
-    raise OracleFailure(f"expected {error_name}, operation accepted")
+    raise OracleFailure(f"expected {exact_message!r}, operation accepted")
 
 
 # ---------------------------------------------------------------------------
@@ -688,6 +684,47 @@ def relational_db() -> sqlite3.Connection:
     connection.execute("PRAGMA foreign_keys=ON")
     connection.executescript(SCHEMA_SQL)
     return connection
+
+
+BATCH_LEGAL_ARM_ERROR = """CHECK constraint failed: (transition_kind='custody-terminal' AND secondary_intent_kind='none' AND
+      receipt_intent_count=1 AND review_reservation_id IS NULL AND
+      fresh_handoff_id IS NULL AND recovery_retirement_id IS NULL) OR
+    (transition_kind='custody-terminal' AND
+      secondary_intent_kind='review-adoption-decision' AND
+      receipt_intent_count=2 AND review_reservation_id IS NOT NULL AND
+      fresh_handoff_id IS NULL AND recovery_retirement_id IS NULL) OR
+    (transition_kind='custody-terminal' AND
+      secondary_intent_kind='fresh-origin' AND receipt_intent_count=2 AND
+      review_reservation_id IS NULL AND fresh_handoff_id IS NOT NULL AND
+      fresh_handoff_source_mode='terminalize-nonfinal-custody' AND
+      recovery_retirement_id IS NULL) OR
+    (transition_kind='generation-loss-terminal' AND
+      secondary_intent_kind='none' AND receipt_intent_count=1 AND
+      review_reservation_id IS NULL AND fresh_handoff_id IS NULL AND
+      recovery_retirement_id IS NULL) OR
+    (transition_kind='custody-recovery-retirement' AND
+      secondary_intent_kind='none' AND receipt_intent_count=1 AND
+      review_reservation_id IS NULL AND fresh_handoff_id IS NULL AND
+      recovery_retirement_id IS NOT NULL) OR
+    (transition_kind='fresh-origin' AND secondary_intent_kind='none' AND
+      receipt_intent_count=1 AND review_reservation_id IS NULL AND
+      fresh_handoff_id IS NOT NULL AND fresh_handoff_source_mode IN
+        ('reuse-final-custody','open-generation-loss') AND
+      recovery_retirement_id IS NULL)"""
+
+INTENT_ORDINAL_ERROR = """CHECK constraint failed: (ordinal=1 AND kind=batch_transition_kind) OR
+    (ordinal=2 AND batch_intent_count=2 AND
+      batch_secondary_intent_kind<>'none' AND
+      kind=batch_secondary_intent_kind)"""
+
+COMPLETION_ORDINAL_ERROR = """CHECK constraint failed: (secondary_intent_kind='none' AND receipt_intent_count=1 AND
+      ordinal_two IS NULL AND ordinal_two_kind IS NULL AND
+      ordinal_two_intent_digest IS NULL AND ordinal_two_subject_digest IS NULL AND
+      ordinal_two_receipt_digest IS NULL) OR
+    (secondary_intent_kind<>'none' AND receipt_intent_count=2 AND
+      ordinal_two=2 AND ordinal_two_kind=secondary_intent_kind AND
+      ordinal_two_intent_digest IS NOT NULL AND ordinal_two_subject_digest IS NOT NULL AND
+      ordinal_two_receipt_digest IS NOT NULL)"""
 
 
 def insert_parents(
@@ -1660,7 +1697,7 @@ def every_non_table_batch_combination_rejects_by_check() -> None:
             operation()
             accepted += 1
         else:
-            expect_integrity(operation, "SQLITE_CONSTRAINT_CHECK")
+            expect_integrity(operation, BATCH_LEGAL_ARM_ERROR)
             rejected += 1
     require(accepted == 7, f"cartesian oracle admitted {accepted}, expected 7")
     require(rejected == 377, f"cartesian oracle rejected {rejected}, expected 377")
@@ -1707,7 +1744,7 @@ def pure_fresh_is_count_one_primary_and_terminal_fresh_has_ordinal_two() -> None
             "custody-terminal", 2, "fresh-origin"
         )
 
-    expect_integrity(wrong_ordinal_two, "SQLITE_CONSTRAINT_CHECK")
+    expect_integrity(wrong_ordinal_two, INTENT_ORDINAL_ERROR)
 
     def incomplete_completion() -> None:
         insert_completion(
@@ -1715,7 +1752,7 @@ def pure_fresh_is_count_one_primary_and_terminal_fresh_has_ordinal_two() -> None
             terminal_first, None, D77
         )
 
-    expect_integrity(incomplete_completion, "SQLITE_CONSTRAINT_CHECK")
+    expect_integrity(incomplete_completion, COMPLETION_ORDINAL_ERROR)
     terminal_second = insert_intent_and_receipt(
         connection, terminal, 2, "fresh-origin", "custody-terminal", 2,
         "fresh-origin"
@@ -1752,7 +1789,7 @@ def preparation_dependencies_force_handoff_then_batch_then_effect_then_intents()
             (D22, D44, D55),
         )
 
-    expect_integrity(batch_without_handoff, "SQLITE_CONSTRAINT_FOREIGNKEY")
+    expect_integrity(batch_without_handoff, "FOREIGN KEY constraint failed")
     connection.execute(
         "INSERT INTO fresh_handoffs VALUES(?,?,?,?)",
         ("handoff-order", D22, "apply-order", "reuse-final-custody"),
@@ -1765,7 +1802,7 @@ def preparation_dependencies_force_handoff_then_batch_then_effect_then_intents()
              "apply-order", "reuse-final-custody", "primary", D66),
         )
 
-    expect_integrity(effect_before_batch, "SQLITE_CONSTRAINT_FOREIGNKEY")
+    expect_integrity(effect_before_batch, "FOREIGN KEY constraint failed")
     batch_without_handoff()
     connection.execute(
         "INSERT INTO fresh_origin_effects VALUES(?,?,?,?,?,?,?,?,?,?,?)",
@@ -1816,12 +1853,10 @@ def outbox_is_the_only_pre_authority_write_and_is_immutable() -> None:
             lambda: connection.execute(
                 "UPDATE scope_admission_outbox SET created_at=created_at"
             ),
-            "SQLITE_CONSTRAINT_TRIGGER",
             "SCOPE_ADMISSION_OUTBOX_IMMUTABLE",
         )
         expect_integrity(
             lambda: connection.execute("DELETE FROM scope_admission_outbox"),
-            "SQLITE_CONSTRAINT_TRIGGER",
             "SCOPE_ADMISSION_OUTBOX_IMMUTABLE",
         )
         connection.close()

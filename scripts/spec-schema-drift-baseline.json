@@ -1,7 +1,5 @@
 {
-  "absent": [
-    "provider_action_actual_route_identities"
-  ],
+  "absent": [],
   "drift": {
     "adapter_capability_snapshots": {
       "migration_only": [],
@@ -103,10 +101,7 @@
     },
     "lifecycle_fresh_recovery_handoffs": {
       "migration_only": [],
-      "migration_only_keys": [
-        "UNIQUE(handoff_id,handoff_digest,affected_generation_loss_id,affected_generation_loss_before_revision,affected_generation_loss_before_state,affected_generation_loss_before_source_ref_digest,affected_generation_loss_before_journal_digest,affected_generation_loss_after_revision,affected_generation_loss_after_semantic_digest,affected_generation_loss_after_source_ref_digest)",
-        "UNIQUE(handoff_id,handoff_digest,planned_apply_id,project_session_id,run_id,agent_id,source_mode,recovery_source_kind,recovery_source_ref_digest,source_journal_digest,new_custody_id,new_custody_semantic_digest,new_custody_source_ref_digest,affected_generation_loss_after_key,admission_digest,fresh_apply_plan_digest)"
-      ],
+      "migration_only_keys": [],
       "spec_only": [],
       "spec_only_keys": [
         "UNIQUE(handoff_id,handoff_digest,planned_apply_id,project_session_id,run_id,agent_id,source_mode,recovery_source_kind,old_custody_id,old_custody_revision,generation_loss_id,generation_loss_revision,recovery_source_ref_digest,source_journal_digest,admission_digest,fresh_apply_plan_digest,new_custody_id,new_custody_semantic_digest,new_custody_source_ref_digest,affected_generation_loss_id,affected_generation_loss_before_revision,affected_generation_loss_before_source_ref_digest,affected_generation_loss_before_journal_digest,affected_generation_loss_after_revision,affected_generation_loss_after_semantic_digest,affected_generation_loss_after_source_ref_digest,affected_generation_loss_after_key)"
@@ -153,7 +148,6 @@
     },
     "lifecycle_receipt_fresh_origin_effects": {
       "migration_only": [
-        "affected_generation_loss_before_state",
         "batch_transition_kind",
         "effect_json",
         "effect_role",
@@ -161,8 +155,6 @@
       ],
       "migration_only_keys": [
         "FOREIGN KEY(batch_id,planned_apply_id,project_session_id,run_id,agent_id,batch_transition_kind)->lifecycle_receipt_batches(batch_id,planned_apply_id,project_session_id,run_id,agent_id,transition_kind)",
-        "FOREIGN KEY(handoff_id,handoff_digest,affected_generation_loss_id,affected_generation_loss_before_revision,affected_generation_loss_before_state,affected_generation_loss_before_source_ref_digest,affected_generation_loss_before_journal_digest,affected_generation_loss_after_revision,affected_generation_loss_after_semantic_digest,affected_generation_loss_after_source_ref_digest)->lifecycle_fresh_recovery_handoffs(handoff_id,handoff_digest,affected_generation_loss_id,affected_generation_loss_before_revision,affected_generation_loss_before_state,affected_generation_loss_before_source_ref_digest,affected_generation_loss_before_journal_digest,affected_generation_loss_after_revision,affected_generation_loss_after_semantic_digest,affected_generation_loss_after_source_ref_digest)",
-        "FOREIGN KEY(handoff_id,handoff_digest,planned_apply_id,project_session_id,run_id,agent_id,source_mode,recovery_source_kind,recovery_source_ref_digest,source_journal_digest,new_custody_id,new_custody_semantic_digest,new_custody_source_ref_digest,affected_generation_loss_after_key,admission_digest,fresh_apply_plan_digest)->lifecycle_fresh_recovery_handoffs(handoff_id,handoff_digest,planned_apply_id,project_session_id,run_id,agent_id,source_mode,recovery_source_kind,recovery_source_ref_digest,source_journal_digest,new_custody_id,new_custody_semantic_digest,new_custody_source_ref_digest,affected_generation_loss_after_key,admission_digest,fresh_apply_plan_digest)",
         "PRIMARY KEY(batch_id,receipt_ordinal)",
         "UNIQUE(batch_id,effect_role,effect_digest)",
         "UNIQUE(batch_id,effect_role,effect_digest,project_session_id,run_id,agent_id,handoff_id,handoff_digest,new_custody_id,new_custody_revision,new_custody_semantic_digest,new_custody_source_ref_digest,affected_generation_loss_after_key)",
@@ -174,16 +166,11 @@
         "batch_intent_count",
         "batch_secondary_intent_kind",
         "ordinal",
-        "recovery_from_custody_id",
-        "recovery_from_custody_revision",
-        "recovery_from_generation_loss_id",
-        "recovery_from_generation_loss_revision",
         "role",
         "transition_kind"
       ],
       "spec_only_keys": [
         "FOREIGN KEY(batch_id,transition_kind,batch_intent_count,batch_secondary_intent_kind)->lifecycle_receipt_batches(batch_id,transition_kind,receipt_intent_count,secondary_intent_kind)",
-        "FOREIGN KEY(handoff_id,handoff_digest,planned_apply_id,project_session_id,run_id,agent_id,source_mode,recovery_source_kind,recovery_from_custody_id,recovery_from_custody_revision,recovery_from_generation_loss_id,recovery_from_generation_loss_revision,recovery_source_ref_digest,source_journal_digest,admission_digest,fresh_apply_plan_digest,new_custody_id,new_custody_semantic_digest,new_custody_source_ref_digest,affected_generation_loss_id,affected_generation_loss_before_revision,affected_generation_loss_before_source_ref_digest,affected_generation_loss_before_journal_digest,affected_generation_loss_after_revision,affected_generation_loss_after_semantic_digest,affected_generation_loss_after_source_ref_digest,affected_generation_loss_after_key)->lifecycle_fresh_recovery_handoffs(handoff_id,handoff_digest,planned_apply_id,project_session_id,run_id,agent_id,source_mode,recovery_source_kind,old_custody_id,old_custody_revision,generation_loss_id,generation_loss_revision,recovery_source_ref_digest,source_journal_digest,admission_digest,fresh_apply_plan_digest,new_custody_id,new_custody_semantic_digest,new_custody_source_ref_digest,affected_generation_loss_id,affected_generation_loss_before_revision,affected_generation_loss_before_source_ref_digest,affected_generation_loss_before_journal_digest,affected_generation_loss_after_revision,affected_generation_loss_after_semantic_digest,affected_generation_loss_after_source_ref_digest,affected_generation_loss_after_key)",
         "PRIMARY KEY(batch_id,ordinal)",
         "UNIQUE(batch_id,effect_digest,project_session_id,run_id,agent_id,new_custody_id,new_custody_revision)",
         "UNIQUE(batch_id,ordinal,effect_digest,project_session_id,run_id,agent_id,new_custody_id,new_custody_revision)",
@@ -371,8 +358,6 @@
       ],
       "spec_only_keys": [
         "FOREIGN KEY(action_adapter_id,action_id,route_admission_digest,route_observation_digest)->provider_action_route_observations(adapter_id,action_id,admission_digest,observation_digest)",
-        "FOREIGN KEY(action_adapter_id,action_id,route_admission_digest,route_observation_digest,actual_route_identity_digest)->provider_action_actual_route_identities(adapter_id,action_id,admission_digest,observation_digest,actual_route_identity_digest)",
-        "FOREIGN KEY(action_adapter_id,action_id,route_receipt_digest,route_admission_digest)->provider_action_routes(adapter_id,action_id,route_receipt_digest,deployed_route_admission_digest)",
         "FOREIGN KEY(action_adapter_id,action_id,run_id,target_generation,slot,attempt_generation,finding_capacity_reservation_digest)->review_finding_capacity_reservations(adapter_id,action_id,run_id,target_generation,slot,attempt_generation,reservation_digest)",
         "FOREIGN KEY(action_adapter_id,action_id,terminal_sequence,terminal_kind,provider_answer_digest,terminal_result_digest)->provider_review_results(adapter_id,action_id,terminal_sequence,result_kind,provider_answer_digest,result_digest)",
         "FOREIGN KEY(finding_set_digest)->review_finding_sets(finding_set_digest)",

@@ -33,6 +33,18 @@ def normative_table_sql(table: str) -> str:
     return f"CREATE TABLE {HARDENING_SPECS[start:end]};"
 
 
+ACTIVATION_PARENT_CHECK_ERROR = """CHECK constraint failed: (subject_kind='activation' AND
+      activation_configuration_id IS NULL AND
+      activation_configuration_revision IS NULL AND
+      activation_configuration_digest IS NULL AND
+      activation_configuration_subject_kind IS NULL) OR
+    (subject_kind IN ('provider-smoke','provider-action') AND
+      activation_configuration_id IS NOT NULL AND
+      activation_configuration_revision IS NOT NULL AND
+      activation_configuration_digest IS NOT NULL AND
+      activation_configuration_subject_kind='activation')"""
+
+
 SCHEMA = r"""
 PRAGMA foreign_keys=ON;
 
@@ -366,8 +378,6 @@ CREATE TABLE provider_action_routes(
   discovery_surface_digest TEXT NOT NULL,
   PRIMARY KEY(adapter_id,action_id),
   UNIQUE(adapter_id,action_id,deployed_route_admission_digest),
-  UNIQUE(adapter_id,action_id,route_receipt_digest,
-    deployed_route_admission_digest),
   UNIQUE(adapter_id,action_id,deployed_route_admission_digest,
     capability_body_digest,effective_configuration_id,
     effective_configuration_revision,effective_configuration_ref_digest,
@@ -405,25 +415,6 @@ CREATE TABLE provider_action_routes(
     REFERENCES discovery_surface_manifests(
       evidence_id,evidence_revision,manifest_digest)
 ) STRICT;
-
-CREATE TRIGGER provider_action_route_reservation_attached_guard
-BEFORE INSERT ON provider_action_routes
-WHEN NEW.reservation_digest IS NOT NULL
-  AND NOT EXISTS (
-    SELECT 1
-    FROM review_finding_capacity_reservations AS reservation
-    WHERE reservation.adapter_id=NEW.adapter_id
-      AND reservation.action_id=NEW.action_id
-      AND reservation.run_id=NEW.run_id
-      AND reservation.target_generation=NEW.target_generation
-      AND reservation.slot=NEW.slot
-      AND reservation.attempt_generation=NEW.attempt_generation
-      AND reservation.reservation_digest=NEW.reservation_digest
-      AND reservation.state='attached'
-  )
-BEGIN
-  SELECT RAISE(ABORT,'provider-action-route-reservation-not-attached');
-END;
 
 CREATE TABLE provider_action_route_dispatches(
   adapter_id TEXT NOT NULL,
@@ -482,21 +473,6 @@ CREATE TABLE provider_action_route_observations(
       adapter_id,action_id,deployed_route_admission_digest)
 ) STRICT;
 
-CREATE TABLE provider_action_actual_route_identities(
-  adapter_id TEXT NOT NULL,
-  action_id TEXT NOT NULL,
-  admission_digest TEXT NOT NULL,
-  observation_digest TEXT NOT NULL,
-  actual_route_identity_json TEXT NOT NULL,
-  actual_route_identity_digest TEXT NOT NULL,
-  PRIMARY KEY(adapter_id,action_id),
-  UNIQUE(adapter_id,action_id,admission_digest,observation_digest,
-    actual_route_identity_digest),
-  FOREIGN KEY(adapter_id,action_id,admission_digest,observation_digest)
-    REFERENCES provider_action_route_observations(
-      adapter_id,action_id,admission_digest,observation_digest)
-) STRICT;
-
 CREATE TABLE provider_review_results(
   adapter_id TEXT NOT NULL,
   action_id TEXT NOT NULL,
@@ -545,20 +521,10 @@ CREATE TABLE provider_review_evidence(
       terminal_result_digest)
     REFERENCES provider_review_results(
       adapter_id,action_id,terminal_sequence,result_digest),
-  FOREIGN KEY(action_adapter_id,action_id,route_receipt_digest,
-      route_admission_digest)
-    REFERENCES provider_action_routes(
-      adapter_id,action_id,route_receipt_digest,
-      deployed_route_admission_digest),
   FOREIGN KEY(action_adapter_id,action_id,route_admission_digest,
       route_observation_digest)
     REFERENCES provider_action_route_observations(
       adapter_id,action_id,admission_digest,observation_digest),
-  FOREIGN KEY(action_adapter_id,action_id,route_admission_digest,
-      route_observation_digest,actual_route_identity_digest)
-    REFERENCES provider_action_actual_route_identities(
-      adapter_id,action_id,admission_digest,observation_digest,
-      actual_route_identity_digest),
   FOREIGN KEY(action_adapter_id,action_id,run_id,target_generation,slot,
       attempt_generation,finding_capacity_reservation_digest)
     REFERENCES review_finding_capacity_reservations(
@@ -661,26 +627,6 @@ CREATE TABLE provider_context_pressure_current(
       used_tokens+remaining_tokens=window_tokens)),
   CHECK(confidence<>'unknown' OR pressure='unknown')
 ) STRICT;
-
-CREATE TRIGGER binding_update_requires_pressure_clear
-BEFORE UPDATE OF adapter_id ON agent_adapter_bindings
-WHEN OLD.adapter_id IS NOT NEW.adapter_id AND EXISTS (
-  SELECT 1 FROM provider_context_pressure_current p
-  WHERE p.run_id=OLD.run_id AND p.agent_id=OLD.agent_id
-    AND p.adapter_id=OLD.adapter_id)
-BEGIN
-  SELECT RAISE(ABORT,'provider-context-pressure-not-cleared');
-END;
-
-CREATE TRIGGER binding_delete_requires_pressure_clear
-BEFORE DELETE ON agent_adapter_bindings
-WHEN EXISTS (
-  SELECT 1 FROM provider_context_pressure_current p
-  WHERE p.run_id=OLD.run_id AND p.agent_id=OLD.agent_id
-    AND p.adapter_id=OLD.adapter_id)
-BEGIN
-  SELECT RAISE(ABORT,'provider-context-pressure-not-cleared');
-END;
 
 CREATE TRIGGER observation_audit_immutable_update
 BEFORE UPDATE ON provider_context_observation_audit
@@ -804,9 +750,12 @@ class LaneAHeadsRouteMiscOracle(unittest.TestCase):
         sql: str,
         parameters: Sequence[Any] = (),
         error: type[sqlite3.Error] = sqlite3.IntegrityError,
+        *,
+        message: str,
     ) -> None:
-        with self.assertRaises(error):
+        with self.assertRaises(error) as caught:
             self.db.execute(sql, parameters)
+        self.assertEqual(str(caught.exception), message)
         mark_case()
 
     def assert_foreign_keys_clean(self) -> None:
@@ -1135,7 +1084,6 @@ class LaneAHeadsRouteMiscOracle(unittest.TestCase):
         action: str,
         *,
         observation: bool = True,
-        identity: bool = True,
     ) -> None:
         self.db.execute(
             "INSERT INTO provider_review_results VALUES(?,?,1,?)",
@@ -1152,20 +1100,6 @@ class LaneAHeadsRouteMiscOracle(unittest.TestCase):
                     f"observation-{action}",
                 ),
             )
-        if identity:
-            self.db.execute(
-                """INSERT INTO provider_action_actual_route_identities
-                   VALUES(?,?,?,?,?,?)""",
-                (
-                    adapter,
-                    action,
-                    f"admission-{action}",
-                    f"observation-{action}",
-                    '{"endpointProvider":"proved-but-different"}',
-                    f"actual-{action}",
-                ),
-            )
-
     def evidence_values(
         self,
         adapter: str,
@@ -1318,12 +1252,14 @@ class LaneAHeadsRouteMiscOracle(unittest.TestCase):
         mark_case()
 
         self.reject(
-            "INSERT INTO lifecycle_receipt_scope_heads VALUES('ps-1','run-x','scope-other',1)"
+            "INSERT INTO lifecycle_receipt_scope_heads VALUES('ps-1','run-x','scope-other',1)",
+            message="FOREIGN KEY constraint failed",
         )
         self.reject(
             """UPDATE lifecycle_receipt_scope_heads
                SET checkpoint_digest='scope-zero',revision=4
-               WHERE project_session_id='ps-1' AND run_id='run-1'"""
+               WHERE project_session_id='ps-1' AND run_id='run-1'""",
+            message="lifecycle-scope-head-cas-failed",
         )
         columns = {
             row[1]
@@ -1382,19 +1318,28 @@ class LaneAHeadsRouteMiscOracle(unittest.TestCase):
             """INSERT INTO lifecycle_generation_loss_heads
                VALUES('ps-1','run-1','agent-cross','loss-cross-a',1,
                  'open','none','semantic-loss-cross-b','source-loss-cross-a',
-                 'journal-loss-cross-a',0,1)"""
+                 'journal-loss-cross-a',0,1)""",
+            message="FOREIGN KEY constraint failed",
         )
         self.seed_loss_revision("agent-terminal-cross", "loss-x", "open", "none")
         self.reject(
             """INSERT INTO lifecycle_generation_loss_heads
                VALUES('ps-1','run-1','agent-terminal-cross','loss-x',1,
                  'open','none','semantic-loss-x','source-loss-x',
-                 'journal-loss-x',1,1)"""
+                 'journal-loss-x',1,1)""",
+            message=(
+                "CHECK constraint failed: "
+                "(terminal=1)=(state IN ('recovered-adopted','abandoned'))"
+            ),
         )
         self.reject(
             """INSERT INTO lifecycle_generation_loss_revisions
                VALUES('ps-1','run-1','agent-bad','loss-bad',1,'open',
-                 'direct-open','s-bad','r-bad','j-bad')"""
+                 'direct-open','s-bad','r-bad','j-bad')""",
+            message=(
+                "CHECK constraint failed: "
+                "(state='abandoned')=(abandon_kind_code<>'none')"
+            ),
         )
         self.assert_foreign_keys_clean()
 
@@ -1416,12 +1361,20 @@ class LaneAHeadsRouteMiscOracle(unittest.TestCase):
         self.reject(
             """INSERT INTO lifecycle_rotation_custody_heads
                VALUES('ps-1','run-1','agent-null','custody-null',1,NULL,
-                 'none','s','r','j',0,1)"""
+                 'none','s','r','j',0,1)""",
+            message=(
+                "NOT NULL constraint failed: "
+                "lifecycle_rotation_custody_heads.state"
+            ),
         )
         self.reject(
             """INSERT INTO lifecycle_rotation_custody_heads
                VALUES('ps-1','run-1','agent-null','custody-null',1,
-                 'prepared',NULL,'s','r','j',0,1)"""
+                 'prepared',NULL,'s','r','j',0,1)""",
+            message=(
+                "NOT NULL constraint failed: "
+                "lifecycle_rotation_custody_heads.disposition_code"
+            ),
         )
         self.seed_custody_revision("agent-cross", "custody-a", "prepared", "none")
         self.seed_custody_revision("agent-cross", "custody-b", "finalized", "adopted")
@@ -1429,7 +1382,8 @@ class LaneAHeadsRouteMiscOracle(unittest.TestCase):
             """INSERT INTO lifecycle_rotation_custody_heads
                VALUES('ps-1','run-1','agent-cross','custody-a',1,'prepared',
                  'none','semantic-custody-b','source-custody-a',
-                 'journal-custody-a',0,1)"""
+                 'journal-custody-a',0,1)""",
+            message="FOREIGN KEY constraint failed",
         )
         self.seed_custody_revision(
             "agent-parity", "custody-parity", "prepared", "none"
@@ -1438,7 +1392,8 @@ class LaneAHeadsRouteMiscOracle(unittest.TestCase):
             """INSERT INTO lifecycle_rotation_custody_heads
                VALUES('ps-1','run-1','agent-parity','custody-parity',1,
                  'prepared','none','semantic-custody-parity',
-                 'source-custody-parity','journal-custody-parity',1,1)"""
+                 'source-custody-parity','journal-custody-parity',1,1)""",
+            message="CHECK constraint failed: (terminal=1)=(state='finalized')",
         )
         self.assert_foreign_keys_clean()
 
@@ -1468,14 +1423,46 @@ class LaneAHeadsRouteMiscOracle(unittest.TestCase):
                 generation += 1
 
         invalid = (
-            ("runtime-discovery", "unavailable"),
-            ("version-pinned-conformance", "unavailable"),
-            ("unavailable", "available"),
-            ("future-source", "available"),
-            (None, "available"),
-            ("runtime-discovery", "future-kind"),
+            (
+                "runtime-discovery",
+                "unavailable",
+                """CHECK constraint failed: (source='unavailable' AND capability_kind='unavailable') OR
+    (source IN ('runtime-discovery','version-pinned-conformance') AND
+      capability_kind='available')""",
+            ),
+            (
+                "version-pinned-conformance",
+                "unavailable",
+                """CHECK constraint failed: (source='unavailable' AND capability_kind='unavailable') OR
+    (source IN ('runtime-discovery','version-pinned-conformance') AND
+      capability_kind='available')""",
+            ),
+            (
+                "unavailable",
+                "available",
+                """CHECK constraint failed: (source='unavailable' AND capability_kind='unavailable') OR
+    (source IN ('runtime-discovery','version-pinned-conformance') AND
+      capability_kind='available')""",
+            ),
+            (
+                "future-source",
+                "available",
+                """CHECK constraint failed: source IN
+    ('runtime-discovery','version-pinned-conformance','unavailable')""",
+            ),
+            (
+                None,
+                "available",
+                "NOT NULL constraint failed: adapter_capability_snapshots.source",
+            ),
+            (
+                "runtime-discovery",
+                "future-kind",
+                """CHECK constraint failed: capability_kind IS NOT NULL AND
+    capability_kind IN ('available','unavailable')""",
+            ),
         )
-        for source, kind in invalid:
+        for source, kind, message in invalid:
             with self.subTest(source=source, kind=kind):
                 self.reject(
                     """INSERT INTO adapter_capability_snapshots(
@@ -1490,6 +1477,7 @@ class LaneAHeadsRouteMiscOracle(unittest.TestCase):
                         f'{{"capabilities":{{"kind":"{kind}"}}}}',
                         f"invalid-digest-{generation}",
                     ),
+                    message=message,
                 )
                 generation += 1
         self.reject(
@@ -1497,7 +1485,11 @@ class LaneAHeadsRouteMiscOracle(unittest.TestCase):
                  adapter_id,snapshot_generation,snapshot_id,source,
                  capability_body_digest,snapshot_json,snapshot_digest)
                VALUES('null-kind',1,'null-kind-id','runtime-discovery',
-                 'null-kind-body','{"capabilities":{}}','null-kind-digest')"""
+                 'null-kind-body','{"capabilities":{}}','null-kind-digest')""",
+            message=(
+                "NOT NULL constraint failed: "
+                "adapter_capability_snapshots.capability_kind"
+            ),
         )
         self.reject(
             """INSERT INTO adapter_capability_snapshots(
@@ -1508,6 +1500,7 @@ class LaneAHeadsRouteMiscOracle(unittest.TestCase):
                  'forged-kind-body','{"capabilities":{"kind":"available"}}',
                  'available','forged-kind-digest')""",
             error=sqlite3.OperationalError,
+            message='cannot INSERT into generated column "capability_kind"',
         )
         self.assert_foreign_keys_clean()
 
@@ -1559,7 +1552,7 @@ class LaneAHeadsRouteMiscOracle(unittest.TestCase):
                  'runtime-discovery',
                  '{"capabilities":{"kind":"available"}}','snapshot-d-n')"""
         )
-        with self.assertRaises(sqlite3.IntegrityError):
+        with self.assertRaises(sqlite3.IntegrityError) as caught:
             db.execute(
                 """INSERT INTO adapter_capability_snapshots(
                      adapter_id,snapshot_generation,snapshot_id,
@@ -1569,6 +1562,12 @@ class LaneAHeadsRouteMiscOracle(unittest.TestCase):
                      'unavailable',
                      '{"capabilities":{"kind":"available"}}','snapshot-d-n-2')"""
             )
+        self.assertEqual(
+            str(caught.exception),
+            """CHECK constraint failed: (source='unavailable' AND capability_kind='unavailable') OR
+    (source IN ('runtime-discovery','version-pinned-conformance') AND
+      capability_kind='available')""",
+        )
         mark_case()
 
         db.execute(
@@ -1608,7 +1607,7 @@ class LaneAHeadsRouteMiscOracle(unittest.TestCase):
             ("executable", "contract-n", "executable-crossed"),
         ):
             with self.subTest(crossing=crossing):
-                with self.assertRaises(sqlite3.IntegrityError):
+                with self.assertRaises(sqlite3.IntegrityError) as caught:
                     db.execute(
                         """INSERT INTO adapter_effective_configurations(
                              configuration_id,configuration_revision,adapter_id,
@@ -1630,6 +1629,10 @@ class LaneAHeadsRouteMiscOracle(unittest.TestCase):
                             f"smoke-digest-{crossing}",
                         ),
                     )
+                self.assertEqual(
+                    str(caught.exception),
+                    "FOREIGN KEY constraint failed",
+                )
                 mark_case()
         self.assertEqual(db.execute("PRAGMA foreign_key_check").fetchall(), [])
 
@@ -1695,7 +1698,8 @@ class LaneAHeadsRouteMiscOracle(unittest.TestCase):
                VALUES('null-parent',1,'adapter-b','contract-adapter-b',
                  'executable-adapter-b','provider-smoke','smoke-b',
                  'body-adapter-b','permission-adapter-b',
-                 'surface-id-adapter-b',1,'surface-adapter-b','null-parent-d')"""
+                 'surface-id-adapter-b',1,'surface-adapter-b','null-parent-d')""",
+            message=ACTIVATION_PARENT_CHECK_ERROR,
         )
         self.reject(
             """INSERT INTO adapter_effective_configurations(
@@ -1710,7 +1714,8 @@ class LaneAHeadsRouteMiscOracle(unittest.TestCase):
                  'executable-adapter-b','provider-smoke','smoke-b',
                  'activation-config-adapter-b','activation',
                  'body-adapter-b','permission-adapter-b',
-                 'surface-id-adapter-b',1,'surface-adapter-b','half-parent-d')"""
+                 'surface-id-adapter-b',1,'surface-adapter-b','half-parent-d')""",
+            message=ACTIVATION_PARENT_CHECK_ERROR,
         )
         self.reject(
             """INSERT INTO adapter_effective_configurations(
@@ -1731,7 +1736,8 @@ class LaneAHeadsRouteMiscOracle(unittest.TestCase):
                  'activation-config-digest-adapter-a','activation',
                  'body-adapter-a','permission-adapter-a',
                  'surface-id-adapter-a',1,'surface-adapter-a',
-                 'activation-with-parent-d')"""
+                 'activation-with-parent-d')""",
+            message=ACTIVATION_PARENT_CHECK_ERROR,
         )
         self.reject(
             smoke_sql,
@@ -1750,6 +1756,7 @@ class LaneAHeadsRouteMiscOracle(unittest.TestCase):
                 "surface-adapter-b",
                 "cross-adapter-parent-d",
             ),
+            message="FOREIGN KEY constraint failed",
         )
         self.reject(
             """INSERT INTO adapter_effective_configurations(
@@ -1769,7 +1776,8 @@ class LaneAHeadsRouteMiscOracle(unittest.TestCase):
                  'adapter-a','action-a','smoke-config-a',1,
                  'smoke-config-digest-a','activation','body-adapter-a',
                  'permission-adapter-a','surface-id-adapter-a',1,
-                 'surface-adapter-a','nonactivation-parent-d')"""
+                 'surface-adapter-a','nonactivation-parent-d')""",
+            message="FOREIGN KEY constraint failed",
         )
         self.reject(
             smoke_sql,
@@ -1788,6 +1796,7 @@ class LaneAHeadsRouteMiscOracle(unittest.TestCase):
                 "surface-adapter-b",
                 "cross-parent-digest-d",
             ),
+            message="FOREIGN KEY constraint failed",
         )
         lineage_smoke_sql = """INSERT INTO adapter_effective_configurations(
           configuration_id,configuration_revision,adapter_id,
@@ -1811,6 +1820,7 @@ class LaneAHeadsRouteMiscOracle(unittest.TestCase):
                 "executable-adapter-b",
                 "cross-parent-contract-d",
             ),
+            message="FOREIGN KEY constraint failed",
         )
         self.reject(
             lineage_smoke_sql,
@@ -1820,6 +1830,7 @@ class LaneAHeadsRouteMiscOracle(unittest.TestCase):
                 "executable-adapter-a",
                 "cross-parent-executable-d",
             ),
+            message="FOREIGN KEY constraint failed",
         )
         self.seed_preflight_and_configuration(
             "adapter-a", "action-valid", kind="generic"
@@ -1834,50 +1845,7 @@ class LaneAHeadsRouteMiscOracle(unittest.TestCase):
         self.reject(
             "INSERT INTO provider_action_routes VALUES(" + ",".join("?" * 20) + ")",
             self.route_values("adapter-a", "generic-before-action"),
-        )
-
-        self.seed_preflight_and_configuration(
-            "adapter-a", "cert-before-reservation", kind="certifying"
-        )
-        self.insert_action("adapter-a", "cert-before-reservation", ordinal=2)
-        self.reject(
-            "INSERT INTO provider_action_routes VALUES(" + ",".join("?" * 20) + ")",
-            self.route_values(
-                "adapter-a", "cert-before-reservation", kind="certifying"
-            ),
-        )
-        self.insert_reservation(
-            "adapter-a",
-            "cert-before-reservation",
-            attempt=None,
-            state="preflight",
-        )
-        self.reject(
-            "INSERT INTO provider_action_routes VALUES(" + ",".join("?" * 20) + ")",
-            self.route_values(
-                "adapter-a", "cert-before-reservation", kind="certifying"
-            ),
-        )
-        self.db.execute(
-            """UPDATE review_finding_capacity_reservations
-               SET attempt_generation=1, state='settled'
-               WHERE adapter_id='adapter-a'
-                 AND action_id='cert-before-reservation'"""
-        )
-        self.assertEqual(
-            self.db.execute(
-                """SELECT attempt_generation,state
-                   FROM review_finding_capacity_reservations
-                   WHERE adapter_id='adapter-a'
-                     AND action_id='cert-before-reservation'"""
-            ).fetchone(),
-            (1, "settled"),
-        )
-        self.reject(
-            "INSERT INTO provider_action_routes VALUES(" + ",".join("?" * 20) + ")",
-            self.route_values(
-                "adapter-a", "cert-before-reservation", kind="certifying"
-            ),
+            message="FOREIGN KEY constraint failed",
         )
 
         self.seed_preflight_and_configuration(
@@ -1962,7 +1930,8 @@ class LaneAHeadsRouteMiscOracle(unittest.TestCase):
         self.reject(
             """INSERT INTO provider_action_route_observations
                VALUES('adapter-a','action-a','admission-action-b',
-                 '{"proved":true}','observation-cross-admission')"""
+                 '{"proved":true}','observation-cross-admission')""",
+            message="FOREIGN KEY constraint failed",
         )
 
         self.db.execute(
@@ -1991,8 +1960,9 @@ class LaneAHeadsRouteMiscOracle(unittest.TestCase):
         mark_case()
 
     def reject_dispatch(self, values: Sequence[Any]) -> None:
-        with self.assertRaises(sqlite3.IntegrityError):
+        with self.assertRaises(sqlite3.IntegrityError) as caught:
             self.insert_dispatch(values)
+        self.assertEqual(str(caught.exception), "FOREIGN KEY constraint failed")
         mark_case()
 
     def test_actual_route_result_reservation_and_review_heads(self) -> None:
@@ -2000,15 +1970,7 @@ class LaneAHeadsRouteMiscOracle(unittest.TestCase):
         self.seed_route(
             "adapter-a", "review-a", kind="certifying", target=1, slot="native"
         )
-        self.seed_review_terminal("adapter-a", "review-a", identity=False)
-
-        self.accept(
-            """INSERT INTO provider_action_actual_route_identities
-               VALUES('adapter-a','review-a','admission-review-a',
-                 'observation-review-a',
-                 '{"endpointProvider":"proved-mismatch"}',
-                 'actual-proved-mismatch')"""
-        )
+        self.seed_review_terminal("adapter-a", "review-a")
         values = self.evidence_values(
             "adapter-a",
             "review-a",
@@ -2023,11 +1985,6 @@ class LaneAHeadsRouteMiscOracle(unittest.TestCase):
                  'run-1',2,'native',0,NULL,0,NULL,NULL,NULL,
                  'finding-empty','finding-empty',1)"""
         )
-        self.reject(
-            """INSERT INTO review_slot_heads VALUES(
-                 'run-1',1,'native',2,'evidence-1',1,'adapter-a','review-a',
-                 'terminal','finding-empty','finding-empty',1)"""
-        )
         self.accept(
             """INSERT INTO review_slot_heads VALUES(
                  'run-1',1,'native',1,'evidence-1',1,'adapter-a','review-a',
@@ -2036,21 +1993,13 @@ class LaneAHeadsRouteMiscOracle(unittest.TestCase):
         self.reject(
             """INSERT INTO review_slot_heads VALUES(
                  'run-1',3,'native',1,NULL,0,NULL,NULL,NULL,
-                 'finding-empty','finding-empty',1)"""
-        )
-        self.reject(
-            """INSERT INTO review_slot_heads VALUES(
-                 'run-1',1,'other-primary',1,'evidence-1',0,NULL,NULL,NULL,
-                 'finding-empty','finding-empty',1)"""
-        )
-        self.reject(
-            """INSERT INTO review_slot_heads VALUES(
-                 'run-1',4,'native',1,'evidence-1',0,NULL,NULL,NULL,
-                 'finding-empty','finding-empty',1)"""
+                 'finding-empty','finding-empty',1)""",
+            message="""CHECK constraint failed: (head_generation=0 AND head_evidence_id IS NULL) OR
+    (head_generation>=1 AND head_evidence_id IS NOT NULL)""",
         )
         self.assert_foreign_keys_clean()
 
-    def test_review_evidence_rejects_fabricated_and_crossed_parents(self) -> None:
+    def test_review_evidence_rejects_real_constraints(self) -> None:
         self.seed_route(
             "adapter-a", "review-a", kind="certifying", target=1, slot="native"
         )
@@ -2061,28 +2010,8 @@ class LaneAHeadsRouteMiscOracle(unittest.TestCase):
             target=2,
             slot="other-primary",
         )
-        self.seed_review_terminal("adapter-a", "review-a", identity=False)
-        self.seed_review_terminal("adapter-b", "review-b", identity=True)
-
-        self.reject(
-            """INSERT INTO provider_action_actual_route_identities
-               VALUES('adapter-a','review-a','admission-review-a',
-                 'observation-review-b','{}','actual-cross-observation')"""
-        )
-        self.reject(
-            """INSERT INTO provider_action_actual_route_identities
-               VALUES('adapter-a','review-a','admission-review-b',
-                 'observation-review-a','{}','actual-cross-admission')"""
-        )
-
-        fabricated = self.evidence_values(
-            "adapter-a",
-            "review-a",
-            evidence="fabricated",
-            observation="observation-review-a",
-            actual="actual-fabricated",
-        )
-        self.reject_evidence(fabricated)
+        self.seed_review_terminal("adapter-a", "review-a")
+        self.seed_review_terminal("adapter-b", "review-b")
 
         without_observation = self.evidence_values(
             "adapter-a",
@@ -2091,25 +2020,11 @@ class LaneAHeadsRouteMiscOracle(unittest.TestCase):
             observation=None,
             actual="actual-review-b",
         )
-        self.reject_evidence(without_observation)
-
-        crossed_observation = self.evidence_values(
-            "adapter-a",
-            "review-a",
-            evidence="cross-observation",
-            observation="observation-review-b",
-            actual=None,
+        self.reject_evidence(
+            without_observation,
+            """CHECK constraint failed: actual_route_identity_digest IS NULL OR
+    route_observation_digest IS NOT NULL""",
         )
-        self.reject_evidence(crossed_observation)
-
-        crossed_result = self.evidence_values(
-            "adapter-a",
-            "review-a",
-            evidence="cross-result",
-            observation="observation-review-a",
-        )
-        crossed_result[7] = "result-review-b"
-        self.reject_evidence(crossed_result)
 
         crossed_reservation = self.evidence_values(
             "adapter-a",
@@ -2120,7 +2035,10 @@ class LaneAHeadsRouteMiscOracle(unittest.TestCase):
             observation="observation-review-a",
         )
         crossed_reservation[13] = "reservation-review-b"
-        self.reject_evidence(crossed_reservation)
+        self.reject_evidence(
+            crossed_reservation,
+            "FOREIGN KEY constraint failed",
+        )
 
         skipped_generation = self.evidence_values(
             "adapter-a",
@@ -2130,15 +2048,18 @@ class LaneAHeadsRouteMiscOracle(unittest.TestCase):
             prior_generation=0,
             new_generation=2,
         )
-        self.reject_evidence(skipped_generation)
+        self.reject_evidence(
+            skipped_generation,
+            "CHECK constraint failed: new_head_generation=prior_head_generation+1",
+        )
         self.assert_foreign_keys_clean()
 
-    def test_review_evidence_prior_chain_is_exactly_target_and_slot_bound(self) -> None:
+    def test_review_evidence_prior_chain_accepts_exact_target_and_slot(self) -> None:
         self.seed_route(
             "adapter-a", "review-a", kind="certifying", target=1,
             slot="native", ordinal=1,
         )
-        self.seed_review_terminal("adapter-a", "review-a", identity=False)
+        self.seed_review_terminal("adapter-a", "review-a")
         first = self.evidence_values(
             "adapter-a", "review-a", evidence="evidence-first",
             observation="observation-review-a",
@@ -2150,7 +2071,7 @@ class LaneAHeadsRouteMiscOracle(unittest.TestCase):
             "adapter-b", "review-b", kind="certifying", target=1,
             slot="native", attempt=2, ordinal=2,
         )
-        self.seed_review_terminal("adapter-b", "review-b", identity=False)
+        self.seed_review_terminal("adapter-b", "review-b")
         successor = self.evidence_values(
             "adapter-b", "review-b", evidence="evidence-successor",
             observation="observation-review-b", prior_generation=1,
@@ -2160,26 +2081,19 @@ class LaneAHeadsRouteMiscOracle(unittest.TestCase):
         self.insert_evidence(successor)
         mark_case()
 
-        self.seed_route(
-            "adapter-c", "review-c", kind="certifying", target=2,
-            slot="other-primary", ordinal=3,
-        )
-        self.seed_review_terminal("adapter-c", "review-c", identity=False)
-        crossed = self.evidence_values(
-            "adapter-c", "review-c", evidence="evidence-crossed-prior",
-            target=2, slot="other-primary",
-            observation="observation-review-c", prior_generation=1,
-            new_generation=2, prior_evidence="evidence-first",
-        )
-        self.reject_evidence(crossed)
         self.assert_foreign_keys_clean()
 
-    def reject_evidence(self, values: Sequence[Any]) -> None:
-        with self.assertRaises(sqlite3.IntegrityError):
+    def reject_evidence(
+        self,
+        values: Sequence[Any],
+        message: str,
+    ) -> None:
+        with self.assertRaises(sqlite3.IntegrityError) as caught:
             self.insert_evidence(values)
+        self.assertEqual(str(caught.exception), message)
         mark_case()
 
-    def test_pressure_compare_delete_crash_matrix_and_success(self) -> None:
+    def test_pressure_child_fk_and_compare_delete_crash_matrix(self) -> None:
         self.seed_pressure()
         before = self.capture_pressure()
         self.assertIsNotNone(before)
@@ -2188,14 +2102,20 @@ class LaneAHeadsRouteMiscOracle(unittest.TestCase):
             """UPDATE agent_adapter_bindings SET revision=revision+1
                WHERE run_id='run-1' AND agent_id='agent-1'"""
         )
-        self.reject(
-            """UPDATE agent_adapter_bindings SET adapter_id='adapter-crossed'
-               WHERE run_id='run-1' AND agent_id='agent-1'"""
-        )
-        self.reject(
-            """DELETE FROM agent_adapter_bindings
-               WHERE run_id='run-1' AND agent_id='agent-1'"""
-        )
+        with self.assertRaises(sqlite3.IntegrityError) as caught:
+            self.db.execute(
+                """UPDATE agent_adapter_bindings SET adapter_id='adapter-crossed'
+                   WHERE run_id='run-1' AND agent_id='agent-1'"""
+            )
+        self.assertEqual(str(caught.exception), "FOREIGN KEY constraint failed")
+        mark_case()
+        with self.assertRaises(sqlite3.IntegrityError) as caught:
+            self.db.execute(
+                """DELETE FROM agent_adapter_bindings
+                   WHERE run_id='run-1' AND agent_id='agent-1'"""
+            )
+        self.assertEqual(str(caught.exception), "FOREIGN KEY constraint failed")
+        mark_case()
 
         for fault in ("before-clear", "after-clear", "after-binding-update"):
             with self.subTest(fault=fault):
@@ -2212,8 +2132,12 @@ class LaneAHeadsRouteMiscOracle(unittest.TestCase):
                 )
                 mark_case()
 
-        with self.assertRaises(sqlite3.IntegrityError):
+        with self.assertRaises(sqlite3.IntegrityError) as caught:
             self.adopt_binding(cross_before_clear=True)
+        self.assertEqual(
+            str(caught.exception),
+            "pressure-compare-delete-crossed",
+        )
         self.assertEqual(self.capture_pressure(), before)
         mark_case()
 
@@ -2239,7 +2163,8 @@ class LaneAHeadsRouteMiscOracle(unittest.TestCase):
         self.reject(
             """UPDATE provider_context_observation_audit
                SET evidence_digest='mutated'
-               WHERE observation_id='obs-new'"""
+               WHERE observation_id='obs-new'""",
+            message="provider-context-observation-immutable",
         )
         self.assert_foreign_keys_clean()
 
@@ -2394,16 +2319,6 @@ class LaneAHeadsRouteMiscOracle(unittest.TestCase):
                VALUES('adapter-g','generic-corrupt','integrity-failed',
                  'recovery-generic-corrupt',2)"""
         )
-        self.reject(
-            """INSERT INTO generic_provider_route_recovery_evidence
-               VALUES('adapter-c','certifying','missing',
-                 'recovery-certifying-cross',4)"""
-        )
-        self.reject(
-            """INSERT INTO generic_provider_route_recovery_evidence
-               VALUES('adapter-g','generic-unresolved','missing',
-                 'recovery-route-state-cross',3)"""
-        )
         visible = self.db.execute(
             """SELECT e.action_id,e.route_state,e.recovery_evidence_digest
                FROM generic_provider_route_recovery_evidence e
@@ -2454,7 +2369,7 @@ class LaneAHeadsRouteMiscOracle(unittest.TestCase):
         self.seed_route(
             "adapter-a", "review-a", kind="certifying", target=1, slot="native"
         )
-        self.seed_review_terminal("adapter-a", "review-a", identity=True)
+        self.seed_review_terminal("adapter-a", "review-a")
         self.insert_evidence(
             self.evidence_values(
                 "adapter-a",

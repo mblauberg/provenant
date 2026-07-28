@@ -581,8 +581,9 @@ def database() -> sqlite3.Connection:
 
 
 def expect_commit_failure(test: unittest.TestCase, db: sqlite3.Connection) -> None:
-    with test.assertRaisesRegex(sqlite3.IntegrityError, "FOREIGN KEY"):
+    with test.assertRaises(sqlite3.IntegrityError) as caught:
         db.commit()
+    test.assertEqual(str(caught.exception), "FOREIGN KEY constraint failed")
     db.rollback()
 
 
@@ -811,7 +812,7 @@ class TransitionCoreAfterTests(unittest.TestCase):
         db = database()
         db.execute("BEGIN")
         insert_review_reservation(db)
-        with self.assertRaises(sqlite3.IntegrityError):
+        with self.assertRaises(sqlite3.IntegrityError) as caught:
             db.execute(
                 """INSERT INTO lifecycle_receipt_batches VALUES
                 (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
@@ -821,6 +822,38 @@ class TransitionCoreAfterTests(unittest.TestCase):
                  "reservation-1", "reservation-digest", "effect-review",
                  None, None, LOSS[0], LOSS[1], LOSS[2], LOSS[3]),
             )
+        self.assertEqual(
+            str(caught.exception),
+            """CHECK constraint failed: (review_adoption_reservation_id IS NULL AND
+      review_adoption_reservation_digest IS NULL AND
+      review_decision_loss_effect_key='none' AND
+      review_decision_loss_effect_role IS NULL AND
+      review_decision_loss_effect_digest IS NULL AND
+      review_decision_loss_after_id IS NULL AND
+      review_decision_loss_after_revision IS NULL AND
+      review_decision_loss_after_semantic_digest IS NULL AND
+      review_decision_loss_after_source_ref_digest IS NULL) OR
+    (review_adoption_reservation_id IS NOT NULL AND
+      review_adoption_reservation_digest IS NOT NULL AND
+      review_decision_loss_effect_key='none' AND
+      review_decision_loss_effect_role IS NULL AND
+      review_decision_loss_effect_digest IS NULL AND
+      review_decision_loss_after_id IS NULL AND
+      review_decision_loss_after_revision IS NULL AND
+      review_decision_loss_after_semantic_digest IS NULL AND
+      review_decision_loss_after_source_ref_digest IS NULL) OR
+    (review_adoption_reservation_id IS NOT NULL AND
+      review_adoption_reservation_digest IS NOT NULL AND
+      review_decision_loss_effect_key<>'none' AND
+      review_decision_loss_effect_role IS NOT NULL AND
+      review_decision_loss_effect_digest IS NOT NULL AND
+      review_decision_loss_effect_role='linked' AND
+      review_decision_loss_effect_digest=review_decision_loss_effect_key AND
+      review_decision_loss_after_id IS NOT NULL AND
+      review_decision_loss_after_revision IS NOT NULL AND
+      review_decision_loss_after_semantic_digest IS NOT NULL AND
+      review_decision_loss_after_source_ref_digest IS NOT NULL)""",
+        )
         db.rollback()
 
     def test_batch_side_crossed_effect_fails_at_commit(self) -> None:
@@ -868,8 +901,9 @@ class TransitionCoreAfterTests(unittest.TestCase):
         crossed = database()
         seed_review_prepare(crossed)
         crossed.execute("BEGIN")
-        with self.assertRaises(sqlite3.IntegrityError):
+        with self.assertRaises(sqlite3.IntegrityError) as caught:
             insert_review_binding(crossed, revision=1)
+        self.assertEqual(str(caught.exception), "FOREIGN KEY constraint failed")
         crossed.rollback()
 
     def test_review_binding_missing_apply_fails_only_at_commit(self) -> None:
@@ -883,7 +917,7 @@ class TransitionCoreAfterTests(unittest.TestCase):
         db = database()
         seed_review_prepare(db)
         db.execute("BEGIN")
-        with self.assertRaises(sqlite3.IntegrityError):
+        with self.assertRaises(sqlite3.IntegrityError) as caught:
             db.execute(
                 """INSERT INTO lifecycle_review_authority_bindings VALUES
                 (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
@@ -891,6 +925,25 @@ class TransitionCoreAfterTests(unittest.TestCase):
                  "effect-review", None, None,
                  LOSS[0], LOSS[1], LOSS[2], LOSS[3]),
             )
+        self.assertEqual(
+            str(caught.exception),
+            """CHECK constraint failed: (decision_loss_effect_key='none' AND
+      decision_loss_effect_role IS NULL AND
+      decision_loss_effect_digest IS NULL AND
+      decision_loss_after_id IS NULL AND
+      decision_loss_after_revision IS NULL AND
+      decision_loss_after_semantic_digest IS NULL AND
+      decision_loss_after_source_ref_digest IS NULL) OR
+    (decision_loss_effect_key<>'none' AND
+      decision_loss_effect_role IS NOT NULL AND
+      decision_loss_effect_digest IS NOT NULL AND
+      decision_loss_effect_role='linked' AND
+      decision_loss_effect_digest=decision_loss_effect_key AND
+      decision_loss_after_id IS NOT NULL AND
+      decision_loss_after_revision IS NOT NULL AND
+      decision_loss_after_semantic_digest IS NOT NULL AND
+      decision_loss_after_source_ref_digest IS NOT NULL)""",
+        )
         db.rollback()
 
     def test_terminal_fresh_without_linked_loss_succeeds(self) -> None:
@@ -933,10 +986,7 @@ class TransitionCoreAfterTests(unittest.TestCase):
         )
         db.execute("BEGIN")
         insert_fresh_commit(db, with_loss=False)
-        with self.assertRaisesRegex(
-            sqlite3.IntegrityError,
-            "lifecycle-terminal-fresh-linked-loss-crossed",
-        ):
+        with self.assertRaises(sqlite3.IntegrityError) as caught:
             insert_apply(
                 db, batch_id="batch-fresh", apply_id="apply-fresh",
                 apply_digest="apply-digest-fresh",
@@ -944,6 +994,10 @@ class TransitionCoreAfterTests(unittest.TestCase):
                 apply_kind="terminal-fresh", replay="replay-fresh",
                 mutation="terminal-plan", handoff_has_loss=False,
             )
+        self.assertEqual(
+            str(caught.exception),
+            "lifecycle-terminal-fresh-linked-loss-crossed",
+        )
         db.rollback()
 
     def test_terminal_fresh_apply_only_is_rejected(self) -> None:
@@ -954,10 +1008,7 @@ class TransitionCoreAfterTests(unittest.TestCase):
         db.execute("BEGIN")
         insert_loss_revision_and_head(db)
         insert_fresh_commit(db, with_loss=True)
-        with self.assertRaisesRegex(
-            sqlite3.IntegrityError,
-            "lifecycle-terminal-fresh-linked-loss-crossed",
-        ):
+        with self.assertRaises(sqlite3.IntegrityError) as caught:
             insert_apply(
                 db, batch_id="batch-fresh", apply_id="apply-fresh",
                 apply_digest="apply-digest-fresh",
@@ -965,6 +1016,10 @@ class TransitionCoreAfterTests(unittest.TestCase):
                 apply_kind="terminal-fresh", replay="replay-fresh",
                 mutation="terminal-plan", handoff_has_loss=True,
             )
+        self.assertEqual(
+            str(caught.exception),
+            "lifecycle-terminal-fresh-linked-loss-crossed",
+        )
         db.rollback()
 
     def test_fresh_commit_child_first_is_deferred_but_guarded(self) -> None:

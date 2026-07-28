@@ -425,6 +425,12 @@ Admission and dispatch use this order:
    under a new action pair. After ambiguous effect, retain the original route and invoke only its existing pair-keyed
    recovery owner.
 
+The reservation attaches to `provider_actions`, whose
+`finding_capacity_reservation_digest` foreign key names the exact reservation.
+The reservation state-update guard requires that matching action before the
+`preflight -> attached` transition. Routes attach to their action; they do not
+own a second reservation attachment or reservation-state trigger.
+
 The pure resolver never persists, performs provider/network I/O or becomes the route owner. Its existing five-second
 process-group TERM/KILL boundary remains binding. The daemon persistence wrapper is not callable as a resolver.
 
@@ -551,26 +557,6 @@ provider_context_pressure_current(
        used_tokens + remaining_tokens = window_tokens)))),
   CHECK(confidence != 'unknown' OR pressure='unknown')
 )
-
-CREATE TRIGGER binding_update_requires_pressure_clear
-BEFORE UPDATE OF adapter_id ON agent_adapter_bindings
-WHEN OLD.adapter_id IS NOT NEW.adapter_id AND EXISTS (
-  SELECT 1 FROM provider_context_pressure_current AS p
-  WHERE p.run_id=OLD.run_id AND p.agent_id=OLD.agent_id
-    AND p.adapter_id=OLD.adapter_id)
-BEGIN
-  SELECT RAISE(ABORT,'provider-context-pressure-not-cleared');
-END;
-
-CREATE TRIGGER binding_delete_requires_pressure_clear
-BEFORE DELETE ON agent_adapter_bindings
-WHEN EXISTS (
-  SELECT 1 FROM provider_context_pressure_current AS p
-  WHERE p.run_id=OLD.run_id AND p.agent_id=OLD.agent_id
-    AND p.adapter_id=OLD.adapter_id)
-BEGIN
-  SELECT RAISE(ABORT,'provider-context-pressure-not-cleared');
-END;
 ```
 
 Token fields are nullable nonnegative integers and satisfy the displayed closed source/confidence/nullability/arithmetic
@@ -586,9 +572,9 @@ exactly one deletion; when no row was captured, it requires the row to remain ab
 change the binding's adapter identity. A mismatch or crossed row aborts the transaction, and rollback after either the
 clear or binding update restores the prior binding and pressure row together.
 
-The displayed narrow guards make direct writes fail closed: an adapter-identity UPDATE or binding DELETE aborts while
-its current pressure row remains. Provider-generation, context-revision and binding-revision advances that retain the
-adapter identity do not invoke the update guard. This adoption step removes only the obsolete current projection. It
+The displayed composite foreign key makes direct writes fail closed: an adapter-identity UPDATE or binding DELETE
+aborts while its current pressure row remains. Provider-generation, context-revision and binding-revision advances
+that retain the adapter identity remain legal. This adoption step removes only the obsolete current projection. It
 creates no pressure history, re-keyed pressure row or synthetic unknown observation.
 
 `fabric.v1.provider-context-pressure.read` and the negotiated scoped operator System projection map this row exactly to
@@ -651,11 +637,10 @@ allocate the ordinal, keep the run high water equal to the greatest allocated
 ordinal, and copy that positive ordinal to action and route in one transaction.
 Ordinals must never recycle, and a resolver or preflight failure that creates no
 action must allocate none. The provider action must survive legitimate route
-missing or integrity recovery, because it, not the route, owns list membership;
-task-bound action rows must never be deletable, and their run, task, ordinal and
-listing timestamp must be immutable. A route must bind a reservation that is
-`attached` at admission, and a later `attached -> settled` transition must
-neither rewrite the immutable route nor invalidate its foreign key.
+missing or integrity recovery, because it, not the route, owns list membership
+and the attached reservation. Task-bound action rows must never be deletable,
+and their run, task, ordinal and listing timestamp must be immutable. A later
+`attached -> settled` transition must not rewrite the immutable action or route.
 
 Two requirements below do hold against the shipped schema. Every route,
 dispatch, observation or recovery-state advance increments the owning action's

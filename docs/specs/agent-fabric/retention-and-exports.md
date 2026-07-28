@@ -83,13 +83,12 @@ lifecycle_receipt_fresh_origin_effects(
   handoff_id, handoff_digest, source_mode CHECK(source_mode IN
     ('terminalize-nonfinal-custody','reuse-final-custody',
       'open-generation-loss')),
-  recovery_source_kind, recovery_from_custody_id, recovery_from_custody_revision,
-  recovery_from_generation_loss_id, recovery_from_generation_loss_revision,
-  recovery_source_ref_digest, source_journal_digest,
+  recovery_source_kind, recovery_source_ref_digest, source_journal_digest,
   admission_digest, fresh_apply_plan_digest,
   new_custody_id, new_custody_revision CHECK(new_custody_revision=1),
   new_custody_semantic_digest, new_custody_source_ref_digest,
   affected_generation_loss_id, affected_generation_loss_before_revision,
+  affected_generation_loss_before_state,
   affected_generation_loss_before_source_ref_digest,
   affected_generation_loss_before_journal_digest,
   affected_generation_loss_after_revision,
@@ -109,61 +108,56 @@ lifecycle_receipt_fresh_origin_effects(
       batch_id,transition_kind,receipt_intent_count,secondary_intent_kind),
   FOREIGN KEY(handoff_id,handoff_digest,planned_apply_id,project_session_id,
       run_id,agent_id,source_mode,recovery_source_kind,
-      recovery_from_custody_id,recovery_from_custody_revision,
-      recovery_from_generation_loss_id,recovery_from_generation_loss_revision,
-      recovery_source_ref_digest,source_journal_digest,admission_digest,
-      fresh_apply_plan_digest,new_custody_id,new_custody_semantic_digest,
-      new_custody_source_ref_digest,affected_generation_loss_id,
-      affected_generation_loss_before_revision,
-      affected_generation_loss_before_source_ref_digest,
-      affected_generation_loss_before_journal_digest,
-      affected_generation_loss_after_revision,
-      affected_generation_loss_after_semantic_digest,
-      affected_generation_loss_after_source_ref_digest,
-      affected_generation_loss_after_key)
+      recovery_source_ref_digest,source_journal_digest,new_custody_id,
+      new_custody_semantic_digest,new_custody_source_ref_digest,
+      affected_generation_loss_after_key,admission_digest,
+      fresh_apply_plan_digest)
     REFERENCES lifecycle_fresh_recovery_handoffs(
       handoff_id,handoff_digest,planned_apply_id,project_session_id,run_id,
-      agent_id,source_mode,recovery_source_kind,old_custody_id,
-      old_custody_revision,generation_loss_id,generation_loss_revision,
-      recovery_source_ref_digest,source_journal_digest,admission_digest,
-      fresh_apply_plan_digest,
-      new_custody_id,new_custody_semantic_digest,new_custody_source_ref_digest,
-      affected_generation_loss_id,affected_generation_loss_before_revision,
+      agent_id,source_mode,recovery_source_kind,
+      recovery_source_ref_digest,source_journal_digest,new_custody_id,
+      new_custody_semantic_digest,new_custody_source_ref_digest,
+      affected_generation_loss_after_key,admission_digest,
+      fresh_apply_plan_digest),
+  FOREIGN KEY(handoff_id,handoff_digest,affected_generation_loss_id,
+      affected_generation_loss_before_revision,
+      affected_generation_loss_before_state,
       affected_generation_loss_before_source_ref_digest,
       affected_generation_loss_before_journal_digest,
       affected_generation_loss_after_revision,
       affected_generation_loss_after_semantic_digest,
-      affected_generation_loss_after_source_ref_digest,
-      affected_generation_loss_after_key),
+      affected_generation_loss_after_source_ref_digest)
+    REFERENCES lifecycle_fresh_recovery_handoffs(
+      handoff_id,handoff_digest,affected_generation_loss_id,
+      affected_generation_loss_before_revision,
+      affected_generation_loss_before_state,
+      affected_generation_loss_before_source_ref_digest,
+      affected_generation_loss_before_journal_digest,
+      affected_generation_loss_after_revision,
+      affected_generation_loss_after_semantic_digest,
+      affected_generation_loss_after_source_ref_digest),
   CHECK((transition_kind='fresh-origin' AND ordinal=1 AND role='primary' AND
       batch_intent_count=1 AND batch_secondary_intent_kind='none' AND
       source_mode IN ('reuse-final-custody','open-generation-loss')) OR
     (transition_kind='custody-terminal' AND ordinal=2 AND role='secondary' AND
       batch_intent_count=2 AND batch_secondary_intent_kind='fresh-origin' AND
       source_mode='terminalize-nonfinal-custody')),
-  CHECK((source_mode='terminalize-nonfinal-custody' AND
+  CHECK((source_mode='reuse-final-custody' AND
       recovery_source_kind='custody' AND
-      recovery_from_custody_id IS NOT NULL AND
-      recovery_from_custody_revision IS NOT NULL AND
-      recovery_from_generation_loss_id IS NULL AND
-      recovery_from_generation_loss_revision IS NULL) OR
-    (source_mode='reuse-final-custody' AND recovery_source_kind='custody' AND
-      recovery_from_custody_id IS NOT NULL AND
-      recovery_from_custody_revision IS NOT NULL AND
-      recovery_from_generation_loss_id IS NULL AND
-      recovery_from_generation_loss_revision IS NULL AND
       affected_generation_loss_after_key='none') OR
     (source_mode='open-generation-loss' AND
       recovery_source_kind='generation-loss' AND
-      recovery_from_custody_id IS NULL AND
-      recovery_from_custody_revision IS NULL AND
-      recovery_from_generation_loss_id=affected_generation_loss_id AND
-      recovery_from_generation_loss_revision=
-        affected_generation_loss_before_revision AND
-      affected_generation_loss_after_key<>'none')),
+      affected_generation_loss_id IS NOT NULL AND
+      affected_generation_loss_before_source_ref_digest=
+        recovery_source_ref_digest AND
+      affected_generation_loss_before_journal_digest=
+        source_journal_digest) OR
+    (source_mode='terminalize-nonfinal-custody' AND
+      recovery_source_kind='custody')),
   CHECK((affected_generation_loss_after_key='none' AND
       affected_generation_loss_id IS NULL AND
       affected_generation_loss_before_revision IS NULL AND
+      affected_generation_loss_before_state IS NULL AND
       affected_generation_loss_before_source_ref_digest IS NULL AND
       affected_generation_loss_before_journal_digest IS NULL AND
       affected_generation_loss_after_revision IS NULL AND
@@ -172,6 +166,7 @@ lifecycle_receipt_fresh_origin_effects(
     (affected_generation_loss_after_key<>'none' AND
       affected_generation_loss_id IS NOT NULL AND
       affected_generation_loss_before_revision IS NOT NULL AND
+      affected_generation_loss_before_state IS NOT NULL AND
       affected_generation_loss_before_source_ref_digest IS NOT NULL AND
       affected_generation_loss_before_journal_digest IS NOT NULL AND
       affected_generation_loss_after_revision=
@@ -181,48 +176,10 @@ lifecycle_receipt_fresh_origin_effects(
         affected_generation_loss_after_key))
 )
 
-CREATE TRIGGER lifecycle_fresh_origin_effect_requires_exact_handoff
-BEFORE INSERT ON lifecycle_receipt_fresh_origin_effects
-BEGIN
-  SELECT RAISE(
-    ABORT,'lifecycle-fresh-origin-effect-handoff-missing-or-crossed')
-  WHERE NOT EXISTS (
-    SELECT 1 FROM lifecycle_fresh_recovery_handoffs h
-    WHERE h.handoff_id=NEW.handoff_id AND
-      h.handoff_digest=NEW.handoff_digest AND
-      h.planned_apply_id=NEW.planned_apply_id AND
-      h.project_session_id=NEW.project_session_id AND
-      h.run_id=NEW.run_id AND h.agent_id=NEW.agent_id AND
-      h.source_mode=NEW.source_mode AND
-      h.recovery_source_kind=NEW.recovery_source_kind AND
-      h.old_custody_id IS NEW.recovery_from_custody_id AND
-      h.old_custody_revision IS NEW.recovery_from_custody_revision AND
-      h.generation_loss_id IS NEW.recovery_from_generation_loss_id AND
-      h.generation_loss_revision IS
-        NEW.recovery_from_generation_loss_revision AND
-      h.recovery_source_ref_digest=NEW.recovery_source_ref_digest AND
-      h.source_journal_digest=NEW.source_journal_digest AND
-      h.admission_digest=NEW.admission_digest AND
-      h.fresh_apply_plan_digest=NEW.fresh_apply_plan_digest AND
-      h.new_custody_id=NEW.new_custody_id AND
-      h.new_custody_semantic_digest=NEW.new_custody_semantic_digest AND
-      h.new_custody_source_ref_digest=NEW.new_custody_source_ref_digest AND
-      h.affected_generation_loss_id IS NEW.affected_generation_loss_id AND
-      h.affected_generation_loss_before_revision IS
-        NEW.affected_generation_loss_before_revision AND
-      h.affected_generation_loss_before_source_ref_digest IS
-        NEW.affected_generation_loss_before_source_ref_digest AND
-      h.affected_generation_loss_before_journal_digest IS
-        NEW.affected_generation_loss_before_journal_digest AND
-      h.affected_generation_loss_after_revision IS
-        NEW.affected_generation_loss_after_revision AND
-      h.affected_generation_loss_after_semantic_digest IS
-        NEW.affected_generation_loss_after_semantic_digest AND
-      h.affected_generation_loss_after_source_ref_digest IS
-        NEW.affected_generation_loss_after_source_ref_digest AND
-      h.affected_generation_loss_after_key=NEW.affected_generation_loss_after_key
-  );
-END;
+-- The shipped effect relation uses its two composite foreign keys to bind the
+-- effect to the exact handoff identity and affected-loss tuple. Those foreign
+-- keys, together with the arm checks above, reject missing or crossed handoffs;
+-- there is no separate handoff-validation trigger.
 
 lifecycle_receipt_intents(
   batch_id, ordinal CHECK(ordinal IN (1,2)),

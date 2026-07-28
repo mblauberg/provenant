@@ -785,7 +785,7 @@ def batch_id_key_reuse_conflicts_after_member_mutation() -> None:
             "INSERT INTO batch_ids VALUES(?,?)",
             (vector["goldens"]["batch"], core.jcs(crossed).decode("utf-8")),
         ),
-        "SQLITE_CONSTRAINT_PRIMARYKEY",
+        "UNIQUE constraint failed: batch_ids.batch_id",
     )
     require(core.ld("receipt-batch-id", dict(reversed(list(vector["batchBody"].items()))))
             == vector["goldens"]["batch"], "JCS key order changed batch ID")
@@ -1177,7 +1177,7 @@ def fresh_completion_rejects_absent_wrong_or_crossed_effect() -> None:
         lambda: core.insert_completion(
             connection, batch, "fresh-origin", 1, "none", first, None, core.D66
         ),
-        "SQLITE_CONSTRAINT_FOREIGNKEY",
+        "FOREIGN KEY constraint failed",
     )
     connection.close()
 
@@ -1194,7 +1194,10 @@ def fresh_completion_rejects_absent_wrong_or_crossed_effect() -> None:
                  f"handoff-s05-{ordinal}-{role}", core.D22,
                  f"apply-s05-{ordinal}-{role}", "reuse-final-custody", role, core.D66),
             ),
-            "SQLITE_CONSTRAINT_CHECK",
+            """CHECK constraint failed: (batch_transition_kind='fresh-origin' AND receipt_ordinal=1 AND
+      effect_role='primary') OR
+    (batch_transition_kind='custody-terminal' AND receipt_ordinal=2 AND
+      effect_role='secondary')""",
         )
         connection.close()
 
@@ -1215,7 +1218,7 @@ def fresh_completion_rejects_absent_wrong_or_crossed_effect() -> None:
             connection, first_prepared["batchId"], "fresh-origin", 1, "none",
             first_receipt, None, second_prepared["effectDigest"]
         ),
-        "SQLITE_CONSTRAINT_FOREIGNKEY",
+        "FOREIGN KEY constraint failed",
     )
     core.expect_integrity(
         lambda: connection.execute(
@@ -1224,7 +1227,6 @@ def fresh_completion_rejects_absent_wrong_or_crossed_effect() -> None:
              "handoff-s05-b", core.D22, "apply-s05-b",
              "reuse-final-custody", "primary", core.D00),
         ),
-        "SQLITE_CONSTRAINT_TRIGGER",
         "fresh-effect-batch-handoff-crossed",
     )
     connection.close()
@@ -1239,8 +1241,10 @@ def pure_fresh_apply_requires_completion_authorization() -> None:
     try:
         apply_prepared(connection, prepared)
     except sqlite3.IntegrityError as error:
-        require(getattr(error, "sqlite_errorname", "") == "SQLITE_CONSTRAINT_FOREIGNKEY",
-                f"wrong unauthorized apply reason: {error}")
+        require(
+            str(error) == "FOREIGN KEY constraint failed",
+            f"wrong unauthorized apply reason: {error}",
+        )
     else:
         raise core.OracleFailure("unauthorized fresh apply accepted")
     require(fresh_post_counts(connection, prepared)["writes"] == 0,
@@ -1399,7 +1403,6 @@ def every_apply_child_and_marker_fault_rolls_back_then_retries_once() -> None:
     )
     core.expect_integrity(
         lambda: insert_apply_marker(connection, prepared),
-        "SQLITE_CONSTRAINT_TRIGGER",
         "apply-children-incomplete",
     )
     connection.execute("BEGIN IMMEDIATE")
@@ -1414,7 +1417,6 @@ def every_apply_child_and_marker_fault_rolls_back_then_retries_once() -> None:
         )
     core.expect_integrity(
         lambda: insert_apply_marker(connection, prepared),
-        "SQLITE_CONSTRAINT_TRIGGER",
         "apply-children-incomplete",
     )
     connection.rollback()
@@ -1424,7 +1426,7 @@ def every_apply_child_and_marker_fault_rolls_back_then_retries_once() -> None:
             "INSERT INTO semantic_writes VALUES(?,?,?,?,?,?)",
             (prepared["applyId"], 99, "commit", "extra", 1, core.D00),
         ),
-        "SQLITE_CONSTRAINT_FOREIGNKEY",
+        "FOREIGN KEY constraint failed",
     )
     connection.rollback()
     connection.close()
