@@ -1,7 +1,8 @@
-import { chmod, lstat, mkdir, mkdtemp, readFile, realpath, rm, symlink, unlink, writeFile } from "node:fs/promises";
+import { chmod, copyFile, lstat, mkdir, mkdtemp, readFile, realpath, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
@@ -11,11 +12,19 @@ import { currentMcpSeatGeneration } from "../../../src/core/mcp-seat-generation.
 import { MCP_ROOT_AUTHORITY } from "../../support/mcp-testkit.ts";
 import { parseCliJson, runSourceCli } from "../../support/cli-process.ts";
 import { createCurrentSessionRun } from "../../support/current-session-testkit.ts";
+import { terminateTrackedTestProcess, trackTestProcess } from "../../support/test-process-registry.ts";
 
 const roots: string[] = [];
 const daemons: FabricDaemonHandle[] = [];
+const daemonPids = new Set<number>();
+const compatibilitySource = fileURLToPath(new URL("../../../../../config/adapter-compatibility.yaml", import.meta.url));
+const compatibilitySchemaSource = fileURLToPath(new URL("../../../schemas/adapter-compatibility.schema.json", import.meta.url));
 
 afterEach(async () => {
+  await Promise.allSettled([...daemonPids].map(async (pid) => {
+    await terminateTrackedTestProcess(pid);
+    daemonPids.delete(pid);
+  }));
   await Promise.allSettled(daemons.splice(0).map(async (daemon) => daemon.stop()));
   await Promise.allSettled(roots.splice(0).map(async (root) => rm(root, { recursive: true, force: true })));
 });
@@ -46,16 +55,39 @@ const CURRENT_BINDINGS = [
   { seat: "kiro", agentId: "agent_kiro", expectedPrincipalGeneration: 1 },
 ] as const;
 
-async function fixture(options: { broaderRoot?: boolean } = {}): Promise<Fixture> {
+async function fixture(options: { broaderRoot?: boolean; daemonIdle?: boolean } = {}): Promise<Fixture> {
   const root = await mkdtemp(join(tmpdir(), "fabric-mcp-provision-"));
   roots.push(root);
   const stateDirectory = join(root, "state");
   const runtimeDirectory = join(root, "runtime");
+  const agentsHome = join(root, "agents-home");
+  const configDirectory = join(agentsHome, "config");
+  const schemaDirectory = join(agentsHome, "runtime", "agent-fabric", "schemas");
   const requestedProjectPath = options.broaderRoot === true
     ? join(root, "projects", "one")
     : join(root, "project");
-  await mkdir(requestedProjectPath, { recursive: true });
+  await Promise.all([
+    mkdir(requestedProjectPath, { recursive: true }),
+    mkdir(configDirectory, { recursive: true, mode: 0o700 }),
+    mkdir(schemaDirectory, { recursive: true, mode: 0o700 }),
+  ]);
   const projectPath = await realpath(requestedProjectPath);
+  await Promise.all([
+    writeFile(join(configDirectory, "agent-fabric.yaml"), [
+      "schemaVersion: 1",
+      "allowedAdapters: []",
+      "activeAdapters: []",
+      "allowedProfiles: [headless]",
+      "adapters: {}",
+      "workspaceRoots:",
+      `  - ${JSON.stringify(options.broaderRoot === true ? root : projectPath)}`,
+      "limits:",
+      "  maximumConcurrentProviderTurns: 8",
+      "",
+    ].join("\n"), { mode: 0o600 }),
+    copyFile(compatibilitySource, join(configDirectory, "adapter-compatibility.yaml")),
+    copyFile(compatibilitySchemaSource, join(schemaDirectory, "adapter-compatibility.schema.json")),
+  ]);
   const databasePath = join(stateDirectory, "fabric-v1.sqlite3");
   const socketPath = join(runtimeDirectory, "fabric-v1.sock");
   const daemon = await startFabricDaemon({
@@ -114,9 +146,14 @@ async function fixture(options: { broaderRoot?: boolean } = {}): Promise<Fixture
   } finally {
     await chair.close();
   }
+  if (options.daemonIdle === true) {
+    await daemon.stop();
+    daemons.splice(daemons.indexOf(daemon), 1);
+  }
 
   return {
     environment: {
+      AGENTS_HOME: agentsHome,
       AGENT_FABRIC_STATE_DIRECTORY: stateDirectory,
       AGENT_FABRIC_RUNTIME_DIRECTORY: runtimeDirectory,
     },
@@ -212,6 +249,22 @@ function persistenceCounts(databasePath: string): PersistenceCounts {
 }
 
 describe("MCP current project seat provisioning", () => {
+  it("starts the on-demand daemon when provisioning begins from the healthy idle state", async () => {
+    const current = await fixture({ daemonIdle: true });
+    const result = await runSourceCli(
+      provisionArguments(current, new Date(Date.now() + 14 * 24 * 60 * 60 * 1_000).toISOString()),
+      { environment: current.environment },
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(parseCliJson(result)).toMatchObject({ projectPath: current.projectPath });
+    const discovery = JSON.parse(
+      await readFile(join(current.stateDirectory, "..", "runtime", "fabric-v1.discovery.json"), "utf8"),
+    ) as { pid: number };
+    daemonPids.add(discovery.pid);
+    trackTestProcess(discovery.pid, "mcp provision on-demand daemon");
+  });
+
   it("idempotently binds private seat credentials without creating a project, run, authority or agent", async () => {
     const current = await fixture();
     const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1_000).toISOString();

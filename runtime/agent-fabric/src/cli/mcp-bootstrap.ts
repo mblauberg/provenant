@@ -182,13 +182,13 @@ function shellQuote(value: string): string {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
 
-function isSchemaCutoverRefusal(error: unknown): boolean {
+export function isSchemaCutoverRefusal(error: unknown): boolean {
   return typeof error === "object" && error !== null &&
     "code" in error && error.code === "SCHEMA_CUTOVER_REQUIRED" &&
     "preserved" in error && error.preserved === true;
 }
 
-function schemaCutoverGate(databasePath: string, cause: unknown): SchemaCutoverGate {
+export function schemaCutoverGate(databasePath: string, cause: unknown): SchemaCutoverGate {
   const inspection = inspectFabricDatabaseForCutover(databasePath);
   const mismatch = inspection.state === "incompatible"
     ? inspection.mismatch
