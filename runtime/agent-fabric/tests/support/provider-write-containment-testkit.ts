@@ -27,6 +27,37 @@ export const CONTAINMENT_CASE_IDS = [
 
 export const EXECUTION_MODES = ["fresh", "resume"] as const;
 
+export const BOUND_FIXTURE_VARIABLES = [
+  "$AFTER_ACCEPTANCE_CUT",
+  "$BEFORE_EXECUTION_CUT",
+  "$CLAUDE_CONFIG_DIR",
+  "$CREDENTIALS",
+  "$CREDENTIAL_HARDLINK",
+  "$GIT_COMMON",
+  "$HOST_TEMP_TARGET",
+  "$HTTP_TRAP",
+  "$LIFECYCLE_SETUP",
+  "$LIFECYCLE_TARGET",
+  "$LINK_GIT_COMMON",
+  "$LINK_HOME",
+  "$LINK_OUTSIDE",
+  "$LINK_SIBLING",
+  "$LINK_SWAP",
+  "$NATIVE_WRITE_TOOLS",
+  "$OUTSIDE",
+  "$PILOT",
+  "$PRIMARY",
+  "$PRIVATE_TEMP",
+  "$SIBLING",
+  "$SYNTHETIC_HOME",
+  "$TCP_TRAP",
+  "$TEMP_TARGET",
+  "$TEMP_WRITE_TARGETS",
+  "$TMPDIR",
+  "$TOOL",
+  "$UNIX_TRAP",
+] as const;
+
 export type ContainmentTuple = Readonly<{
   operation: string;
   target: string;

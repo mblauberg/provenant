@@ -1,0 +1,9 @@
+{
+  "notVerified": [
+    "lifecycle-restart-before-execution:fresh",
+    "lifecycle-restart-before-execution:resume",
+    "lifecycle-restart-after-provider-acceptance:fresh",
+    "lifecycle-restart-after-provider-acceptance:resume"
+  ],
+  "specDivergence": []
+}

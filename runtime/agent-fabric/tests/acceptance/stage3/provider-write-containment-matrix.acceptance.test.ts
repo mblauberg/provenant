@@ -18,7 +18,10 @@ import { TEST_AUTHORITY_V2_FIELDS } from "../../support/authority-v2-testkit.ts"
 import { createCurrentSessionRun } from "../../support/current-session-testkit.ts";
 import { ManualClock } from "../../support/manual-clock.ts";
 import {
+  BOUND_FIXTURE_VARIABLES,
+  CONTAINMENT_CASE_IDS,
   EXECUTION_MODES,
+  assertDistinctTempRoots,
   type ContainmentCase,
   wouldDenyClaude,
   wouldDenyCodex,
@@ -28,6 +31,9 @@ const lifecycleAdapter = fileURLToPath(
   new URL("../../support/lifecycle-fake-provider.ts", import.meta.url),
 );
 const matrixUrl = new URL("../../fixtures/provider-write-containment/matrix.json", import.meta.url);
+const ledgerUrl = new URL("../../fixtures/provider-write-containment/coverage-ledger.json", import.meta.url);
+const unresolvedUrl = new URL("../../fixtures/provider-write-containment/unverified-golden.json", import.meta.url);
+const specUrl = new URL("../../../../../docs/specs/agent-fabric/provider-write-containment.md", import.meta.url);
 const cleanup: Array<() => Promise<void>> = [];
 
 afterEach(async () => {
@@ -226,6 +232,72 @@ async function storedPayload(databasePath: string, actionId: string): Promise<Re
 }
 
 describe("provider-write containment matrix evidence", () => {
+  describe("anti-silent-skip invariants", () => {
+    it("transcribes exactly 21 case IDs in normative spec order with live line anchors", async () => {
+      const cases = await matrixCases();
+      const spec = await readFile(specUrl, "utf8");
+      const specLines = spec.split("\n");
+      const specCaseIds = [...spec.matchAll(/^\| `([^`]+)` \|/gmu)].map((match) => match[1]);
+
+      expect(cases.map((entry) => entry.id)).toStrictEqual([...CONTAINMENT_CASE_IDS]);
+      expect(specCaseIds).toStrictEqual([...CONTAINMENT_CASE_IDS]);
+      expect(cases).toHaveLength(21);
+      for (const entry of cases) {
+        expect(specLines[entry.specLine - 1], `stale specLine for ${entry.id}`).toContain(`\`${entry.id}\``);
+      }
+    });
+
+    it("contains exactly one fresh and resume ledger key for every case", async () => {
+      const ledger = JSON.parse(await readFile(ledgerUrl, "utf8")) as {
+        executions: Record<string, string>;
+      };
+      const expectedKeys = CONTAINMENT_CASE_IDS.flatMap((caseId) =>
+        EXECUTION_MODES.map((mode) => `${caseId}:${mode}`)
+      );
+      expect(Object.keys(ledger.executions)).toStrictEqual(expectedKeys);
+      expect(Object.keys(ledger.executions)).toHaveLength(42);
+      expect(new Set(Object.values(ledger.executions))).toEqual(new Set([
+        "admission-verified",
+        "projection-only",
+        "not-verified",
+      ]));
+    });
+
+    it("binds every referenced fixture variable and keeps host TMPDIR distinct", async () => {
+      const spec = await readFile(specUrl, "utf8");
+      const referenced = [...new Set(spec.match(/\$[A-Z][A-Z0-9_]*/gu) ?? [])].sort();
+      expect(referenced).toStrictEqual([...BOUND_FIXTURE_VARIABLES].sort());
+      expect(spec).toContain("`$GIT_COMMON` to");
+      expect(spec).toContain("`$CLAUDE_CONFIG_DIR` to");
+      expect(spec).toContain("`$CREDENTIALS` to that same directory");
+      expect(spec).toContain("`$LINK_SWAP` is");
+      expect(spec).toContain("`$HOST_TEMP_TARGET` is literally");
+      expect(spec).toContain("`$TMPDIR` is the `TMPDIR`");
+
+      const privateTemp = await mkdtemp(join(tmpdir(), "fabric-containment-private-temp-"));
+      cleanup.push(async () => await rm(privateTemp, { recursive: true, force: true }));
+      expect(() => assertDistinctTempRoots(tmpdir(), privateTemp)).not.toThrow();
+      expect(() => assertDistinctTempRoots(privateTemp, privateTemp)).toThrow(
+        "$TMPDIR and $PRIVATE_TEMP must have different canonical paths",
+      );
+    });
+
+    it("matches unresolved verdicts to the separate committed golden", async () => {
+      const ledger = JSON.parse(await readFile(ledgerUrl, "utf8")) as {
+        executions: Record<string, string>;
+      };
+      const golden = JSON.parse(await readFile(unresolvedUrl, "utf8")) as {
+        notVerified: string[];
+        specDivergence: string[];
+      };
+      const keysWith = (verdict: string): string[] => Object.entries(ledger.executions)
+        .filter(([, value]) => value === verdict)
+        .map(([key]) => key);
+      expect(keysWith("not-verified")).toStrictEqual(golden.notVerified);
+      expect(keysWith("spec-divergence")).toStrictEqual(golden.specDivergence);
+    });
+  });
+
   describe("Channel B projection-only (no syscall or provider claim)", () => {
     it.each(EXECUTION_MODES)("models the requested vendor settings for %s turns", async (mode) => {
       const directory = await mkdtemp(join(tmpdir(), "fabric-containment-projection-"));
