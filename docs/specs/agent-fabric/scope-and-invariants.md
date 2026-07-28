@@ -211,7 +211,6 @@ The system is local and single-user through Stage 5. Defaults favour bounded wor
 ```yaml
 limits:
   maximum_tree_depth_below_chair: 2
-  maximum_leaders: 4
   maximum_workers_per_leader: 5
   maximum_concurrent_provider_turns: 8
   maximum_inline_message_bytes: 4096
@@ -219,8 +218,6 @@ limits:
   maximum_unacknowledged_messages_per_agent: 100
   reserve_for_verification_and_recovery_percent: 25
 ```
-
-`maximum_leaders` is the run-wide count of all active top-level and nested team leaders, not a per-depth allowance. The fifth leader is rejected atomically before any authority, agent, task, group or budget row survives.
 
 The Stage 1 core shall support at least 32 registered simulated agents. Stage 3 shall support eight concurrent provider turns on the local development machine. Local mailbox and task operations shall complete within 100 ms at p95 under that load, excluding provider and filesystem artifact latency.
 

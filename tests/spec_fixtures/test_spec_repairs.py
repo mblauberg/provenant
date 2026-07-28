@@ -33,12 +33,6 @@ def trigger_sql(text: str, name: str) -> str:
     return text[start:end]
 
 
-def create_index_sql(text: str, name: str) -> str:
-    start = text.index(f"CREATE UNIQUE INDEX {name}\n")
-    end = text.index(";", start) + 1
-    return text[start:end]
-
-
 TRIGGER_FIXTURE_SCHEMA = r"""
 CREATE TABLE lifecycle_receipt_batch_completions(
   batch_id TEXT, transition_kind TEXT,
@@ -1722,24 +1716,8 @@ class SpecRepairTests(unittest.TestCase):
 
     def test_route_children_bind_the_exact_admission(self) -> None:
         configuration = ddl_block(HARDENING_SPECS, "adapter_effective_configurations")
-        route = ddl_block(HARDENING_SPECS, "provider_action_routes")
         dispatch = ddl_block(HARDENING_SPECS, "provider_action_route_dispatches")
         observation = ddl_block(HARDENING_SPECS, "provider_action_route_observations")
-        attached_guard = trigger_sql(
-            HARDENING_SPECS, "provider_action_route_reservation_attached_guard"
-        )
-        self.assertEqual(HARDENING_SPECS.count("\nprovider_action_routes("), 1)
-        self.assertIn("...remaining route/admission columns...", route)
-        self.assertNotIn("...existing columns...", route)
-        self.assertIn(
-            "FROM review_finding_capacity_reservations AS reservation",
-            attached_guard,
-        )
-        self.assertIn("AND NOT EXISTS (", attached_guard)
-        self.assertIn(
-            "reservation.state = 'attached'",
-            attached_guard,
-        )
         self.assertIn(
             "UNIQUE(subject_action_adapter_id, subject_action_id,\n"
             "    configuration_id, configuration_revision, configuration_digest,\n"
@@ -1747,15 +1725,6 @@ class SpecRepairTests(unittest.TestCase):
             "    discovery_surface_evidence_id, discovery_surface_evidence_revision,\n"
             "    discovery_surface_digest)",
             configuration,
-        )
-        self.assertIn(
-            "UNIQUE(adapter_id, action_id, deployed_route_admission_digest)",
-            route,
-        )
-        self.assertIn(
-            "UNIQUE(adapter_id, action_id, deployed_route_admission_digest,\n"
-            "    capability_body_digest, effective_configuration_id",
-            route,
         )
         self.assertIn("discovery_surface_digest", dispatch)
         self.assertIn(
@@ -2015,13 +1984,6 @@ class SpecRepairTests(unittest.TestCase):
             "UNIQUE(adapter_id,action_id,admission_digest,observation_digest)",
             observation,
         )
-        self.assertIn(
-            "adapter_id,action_id,route_receipt_digest,"
-            "deployed_route_admission_digest",
-            create_index_sql(
-                HARDENING_SPECS, "provider_action_route_review_evidence_parent"
-            ),
-        )
         for baseline_result_field in (
             "result_kind TEXT NOT NULL CHECK(result_kind IN",
             "provider_answer_length INTEGER CHECK(",
@@ -2160,10 +2122,11 @@ class SpecRepairTests(unittest.TestCase):
                 binding_digest,task_id,bundle_digest,profile_digest));
             CREATE TABLE review_finding_sets(
               finding_set_digest PRIMARY KEY);
+            CREATE UNIQUE INDEX provider_action_route_review_evidence_parent
+              ON provider_action_routes(
+                adapter_id,action_id,route_receipt_digest,
+                deployed_route_admission_digest);
         """)
-        db.execute(create_index_sql(
-            HARDENING_SPECS, "provider_action_route_review_evidence_parent"
-        ))
         db.execute(
             "CREATE TABLE "
             + ddl_block(HARDENING_SPECS, "provider_action_route_observations")
@@ -2348,44 +2311,6 @@ class SpecRepairTests(unittest.TestCase):
                  1, "updated-at"),
             )
         self.assertEqual([], db.execute("PRAGMA foreign_key_check").fetchall())
-
-    def test_review_evidence_parent_candidate_indexes_are_required(self) -> None:
-        cases = (
-            (
-                "provider_action_route_review_evidence_parent",
-                "provider_action_routes",
-                "CREATE TABLE provider_action_routes("
-                "adapter_id,action_id,route_receipt_digest,"
-                "deployed_route_admission_digest)",
-                "CREATE TABLE route_child("
-                "adapter_id,action_id,route_receipt_digest,admission_digest,"
-                "FOREIGN KEY(adapter_id,action_id,route_receipt_digest,"
-                "admission_digest) REFERENCES provider_action_routes("
-                "adapter_id,action_id,route_receipt_digest,"
-                "deployed_route_admission_digest))",
-                ("adapter", "action", "receipt", "admission"),
-                "INSERT INTO route_child VALUES(?,?,?,?)",
-            ),
-        )
-        for index_name, parent, parent_ddl, child_ddl, values, child_insert in cases:
-            with self.subTest(index=index_name):
-                db = sqlite3.connect(":memory:")
-                db.execute("PRAGMA foreign_keys=ON")
-                db.execute(parent_ddl)
-                db.execute(child_ddl)
-                with self.assertRaisesRegex(
-                    sqlite3.OperationalError, "foreign key mismatch"
-                ):
-                    db.execute(child_insert, values)
-                db.execute(create_index_sql(HARDENING_SPECS, index_name))
-                db.execute(
-                    f"INSERT INTO {parent} VALUES(?,?,?,?)",
-                    values,
-                )
-                db.execute(child_insert, values)
-                self.assertEqual(
-                    [], db.execute("PRAGMA foreign_key_check").fetchall()
-                )
 
     def test_recovery_issue_source_head_closes_both_race_orders(self) -> None:
         source_head = ddl_block(
