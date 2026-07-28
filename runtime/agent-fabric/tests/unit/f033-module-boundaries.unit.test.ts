@@ -31,7 +31,7 @@ type BoundaryGolden = Readonly<{
 
 const sourceRoot = resolve(import.meta.dirname, "../../src");
 const goldenPath = resolve(import.meta.dirname, "../fixtures/f033-module-boundaries.json");
-const layerOrderNeeded = "An accepted architecture decision must assign every F-033 import domain to a numbered layer and define permitted import direction, including composition-root and adapter exceptions. ADR 0003 intentionally prescribes vertical seam extraction, not a global dependency hierarchy.";
+const layerOrderNeeded = "ADR-0003";
 let goldenRegeneratedForRun: BoundaryGolden | undefined;
 initSync();
 
@@ -244,7 +244,7 @@ function regeneratedGolden(graph: ReturnType<typeof inspectGraph>, golden: Bound
       members,
       reason: `Extracted from SCC analysis: these ${members.length} domains form a cyclic dependency to be addressed`,
     })),
-    // ADR 0003 calls for extraction along existing seams, not a horizontal layer model.
+    // ADR-0003 calls for extraction along existing seams, not a horizontal layer model.
     // A layer order needs an explicit architectural decision before this test can enforce one.
     layer_order_needed: layerOrderNeeded,
   };
@@ -279,7 +279,7 @@ describe("F-033 Agent Fabric module boundaries", () => {
     }
   });
 
-  it("allows only the committed domain-to-domain edge set", () => {
+  it("rejects edges outside the committed domain-to-domain edge set", () => {
     const graph = inspectGraph();
     const golden = maybeRegenerateGolden(graph, readGolden());
     expect(golden.schema_version).toBe(2);
@@ -288,6 +288,13 @@ describe("F-033 Agent Fabric module boundaries", () => {
     const allowedEdgeKeys = golden.allowed_edges.map(edgeKey);
     expect(new Set(allowedEdgeKeys).size).toBe(allowedEdgeKeys.length);
     expect(graph.edges.every((edge) => allowedEdgeKeys.includes(edgeKey(edge)))).toBe(true);
+    const graphEdgeKeys = new Set(graph.edges.map(edgeKey));
+    const staleEdges = golden.allowed_edges.filter((edge) => !graphEdgeKeys.has(edgeKey(edge)));
+    if (staleEdges.length > 0) {
+      process.stdout.write(
+        `f033-module-boundaries: stale edges in golden (removed from graph): ${staleEdges.map((edge) => `${edge.from} → ${edge.to}`).join(", ")}. Run: F033_WRITE_GOLDEN=1 npx vitest run\n`,
+      );
+    }
   });
 
   it("keeps every cyclic domain component visible as a named temporary allowance", () => {
@@ -307,7 +314,7 @@ describe("F-033 Agent Fabric module boundaries", () => {
       .sort();
     expect(new Set(allowanceSccs).size).toBe(allowanceSccs.length);
     expect(graph.reciprocalSccs.map(sccKey)).toEqual(allowanceSccs);
-    // No layer direction is asserted until the architecture names a layer order.
-    expect(golden.layer_order_needed.trim().length).toBeGreaterThan(0);
+    // No layer direction is asserted until the named architecture decision defines one.
+    expect(golden.layer_order_needed).toMatch(/^(ADR-\d+|#\d+)$/u);
   });
 });

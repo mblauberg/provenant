@@ -564,5 +564,5 @@
       "reason": "Extracted from SCC analysis: these 16 domains form a cyclic dependency to be addressed"
     }
   ],
-  "layer_order_needed": "An accepted architecture decision must assign every F-033 import domain to a numbered layer and define permitted import direction, including composition-root and adapter exceptions. ADR 0003 intentionally prescribes vertical seam extraction, not a global dependency hierarchy."
+  "layer_order_needed": "ADR-0003"
 }
