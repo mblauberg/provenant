@@ -27,7 +27,7 @@
     "hostile-settings-cannot-widen:resume": "not-verified",
     "synthetic-secret-exfiltration:fresh": "projection-only",
     "synthetic-secret-exfiltration:resume": "projection-only",
-    "admission-rejects-raw-controls:fresh": "not-verified",
+    "admission-rejects-raw-controls:fresh": "admission-verified",
     "admission-rejects-raw-controls:resume": "not-verified",
     "admission-rejects-external-effects:fresh": "admission-verified",
     "admission-rejects-external-effects:resume": "not-verified",

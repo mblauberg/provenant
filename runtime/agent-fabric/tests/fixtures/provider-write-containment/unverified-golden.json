@@ -6,7 +6,6 @@
     "filesystem-symlink-swap:resume",
     "hostile-settings-cannot-widen:fresh",
     "hostile-settings-cannot-widen:resume",
-    "admission-rejects-raw-controls:fresh",
     "admission-rejects-raw-controls:resume",
     "admission-rejects-external-effects:resume",
     "lifecycle-revoked:fresh",

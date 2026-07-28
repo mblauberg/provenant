@@ -21,6 +21,7 @@ import {
   BOUND_FIXTURE_VARIABLES,
   CONTAINMENT_CASE_IDS,
   EXECUTION_MODES,
+  admitsOnlyPilotWrites,
   assertDistinctTempRoots,
   type ContainmentCase,
   wouldDenyClaude,
@@ -374,8 +375,13 @@ describe("provider-write containment matrix evidence", () => {
       const ledger = JSON.parse(await readFile(ledgerUrl, "utf8")) as {
         executions: Record<string, string>;
       };
+      // Both fresh admission cases are proved by equally strong tests below:
+      // each asserts CAPABILITY_FORBIDDEN before adapter invocation and that no
+      // journal was written. Their resume halves stay unverified because resume
+      // ancestry is not proved, which is a property of the mode, not the case.
       const expectedAdmissionVerified = [
         "admission-rejects-external-effects:fresh",
+        "admission-rejects-raw-controls:fresh",
       ];
       const admissionVerified = Object.entries(ledger.executions)
         .filter(([, value]) => value === "admission-verified")
@@ -386,18 +392,54 @@ describe("provider-write containment matrix evidence", () => {
   });
 
   describe("Channel B projection-only (no syscall or provider claim)", () => {
-    it("rejects filesystem-root write projections that do not match the admitted pilot", () => {
+    it("treats a filesystem-root grant as unadmitted settings, not as a denied write", () => {
       const ownedWrite = {
         operation: "create",
         target: "$PILOT/owned.txt",
         status: "succeeded",
       };
+
+      // Whether the settings are the ones we meant to request.
+      expect(admitsOnlyPilotWrites(["/pilot"])).toBe(true);
+      for (const wider of [["/"], ["//"], ["/./"], ["/.."], [""], ["/pilot", "/"], []]) {
+        expect(admitsOnlyPilotWrites(wider), `${JSON.stringify(wider)} is wider than the pilot`)
+          .toBe(false);
+      }
+
+      // Whether the vendor would deny the write. A root grant permits it, so the
+      // projection must not report a denial: scoring the widest possible grant
+      // as contained is exactly the false assurance this matrix exists to avoid.
       expect(wouldDenyClaude({
         sandbox: { filesystem: { allowWrite: ["/"] } },
-      }, ownedWrite)).toBe(true);
+      }, ownedWrite)).toBe(false);
       expect(wouldDenyCodex({
         sandboxPolicy: { writableRoots: ["/"] },
-      }, ownedWrite)).toBe(true);
+      }, ownedWrite)).toBe(false);
+      expect(wouldDenyClaude({
+        sandbox: { filesystem: { allowWrite: ["/pilot", "/"] } },
+      }, ownedWrite)).toBe(false);
+
+      // An empty allow-list grants nothing, so the write really is denied.
+      expect(wouldDenyClaude({ sandbox: { filesystem: { allowWrite: [] } } }, ownedWrite))
+        .toBe(true);
+      expect(wouldDenyCodex({ sandboxPolicy: { writableRoots: [] } }, ownedWrite)).toBe(true);
+    });
+
+    it("requests exactly the admitted pilot write root from both vendors", async () => {
+      const directory = await mkdtemp(join(tmpdir(), "fabric-containment-admitted-"));
+      cleanup.push(async () => await rm(directory, { recursive: true, force: true }));
+      await mkdir(join(directory, "src"), { recursive: true });
+      const payload = compiledWritePayload(await realpath(directory));
+
+      const claude = claudeProviderOptions(payload) as {
+        sandbox?: { filesystem?: { allowWrite?: string[] } };
+      };
+      expect(admitsOnlyPilotWrites(claude.sandbox?.filesystem?.allowWrite ?? [])).toBe(true);
+
+      const codex = codexTurnContainment(payload) as {
+        sandboxPolicy?: { writableRoots?: string[] };
+      };
+      expect(admitsOnlyPilotWrites(codex.sandboxPolicy?.writableRoots ?? [])).toBe(true);
     });
 
     it.each(EXECUTION_MODES)("models the requested vendor settings for %s turns", async (mode) => {

@@ -129,11 +129,41 @@ function targetIsEnvironment(target: string): boolean {
   return target.startsWith("env:");
 }
 
-// Accepts `undefined` because the callers index a possibly-empty list. An absent
-// entry is not a filesystem root, and the length check beside it already rejects
-// that shape; narrowing here would only push the same check to both call sites.
-function isFilesystemRoot(root: string | undefined): boolean {
-  return root === "/" || root === "";
+// A root that grants the whole filesystem, written in any of the forms a hostile
+// or careless settings blob might use: `/`, `//`, `/.`, `/./`, `/..`. `resolve`
+// collapses all of them. An empty entry is read the same way — its meaning is
+// vendor-ambiguous, so the widest reading is the safe one for both callers
+// below: it is unsafe for `admitsOnlyPilotWrites`, and it stops `wouldDeny*`
+// from claiming a denial it cannot justify.
+function isFilesystemRoot(root: string): boolean {
+  return root === "" || resolve(root) === "/";
+}
+
+/**
+ * Whether a write-root list grants the admitted pilot workspace and nothing
+ * wider. This is the *safety* question — are these settings the projection we
+ * meant to request — and it is deliberately separate from `wouldDeny*` below,
+ * which answers the different *behavioural* question of what the vendor would
+ * do with the settings it was actually given.
+ *
+ * Conflating the two is how a settings blob that opens the whole filesystem
+ * scores as contained: the write really is permitted, so modelling it as denied
+ * turns the widest possible grant into evidence of containment.
+ */
+export function admitsOnlyPilotWrites(roots: readonly string[]): boolean {
+  return roots.length === 1 && roots.every((root) => !isFilesystemRoot(root));
+}
+
+/**
+ * Faithful model of a vendor write-root list, with no safety opinion.
+ *
+ * The testkit only knows targets symbolically — inside the pilot or not — so a
+ * non-root entry is taken to be the admitted pilot root.
+ */
+function wouldDenyWrite(roots: readonly string[], target: string): boolean {
+  if (roots.some((root) => isFilesystemRoot(root))) return false;
+  if (roots.length === 0) return true;
+  return !targetIsInsidePilot(target);
 }
 
 /**
@@ -164,8 +194,7 @@ export function wouldDenyClaude(
       settings.sandbox.filesystem.allowRead?.length === 1 &&
       !targetIsInsidePilot(tuple.target);
   }
-  const allowed = settings.sandbox?.filesystem?.allowWrite ?? [];
-  return allowed.length !== 1 || isFilesystemRoot(allowed[0]) || !targetIsInsidePilot(tuple.target);
+  return wouldDenyWrite(settings.sandbox?.filesystem?.allowWrite ?? [], tuple.target);
 }
 
 export function wouldDenyCodex(
@@ -186,8 +215,7 @@ export function wouldDenyCodex(
     return settings.sandboxPolicy?.excludeTmpdirEnvVar === true &&
       settings.sandboxPolicy.excludeSlashTmp === true;
   }
-  const writable = settings.sandboxPolicy?.writableRoots ?? [];
-  return writable.length !== 1 || isFilesystemRoot(writable[0]) || !targetIsInsidePilot(tuple.target);
+  return wouldDenyWrite(settings.sandboxPolicy?.writableRoots ?? [], tuple.target);
 }
 
 export function assertDistinctTempRoots(tmpdir: string, privateTemp: string): void {
