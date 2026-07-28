@@ -721,7 +721,12 @@ export function bindCurrentMcpSeatsInput(params: Record<string, unknown>): Curre
 export function bootstrapMcpSeatInput(params: Record<string, unknown>): BootstrapMcpSeatInput {
   exactFields(params, ["canonicalRoot", "trustRecordDigest", "seat", "expiresAt"], "MCP zero-state bootstrap");
   const seat = requiredString(params, "seat");
-  if (seat !== "claude" && seat !== "codex") throw new TypeError("MCP bootstrap seat must be claude or codex");
+  if (seat !== "claude" && seat !== "codex") {
+    throw new TypeError(
+      `MCP bootstrap creates only chair seats claude or codex; run agent-fabric mcp peer-provision ` +
+      `--project PATH --seat ${seat} instead`,
+    );
+  }
   const trustRecordDigest = requiredString(params, "trustRecordDigest");
   if (!/^sha256:[0-9a-f]{64}$/u.test(trustRecordDigest)) throw new TypeError("MCP bootstrap trust digest is invalid");
   return {

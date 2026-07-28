@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { readFile } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -15,11 +15,15 @@ const socketPath = process.env.AGENT_FABRIC_SOCKET_PATH
 const projectKey = process.env.AGENT_FABRIC_PROJECT_KEY;
 if (projectKey === undefined) throw new Error("AGENT_FABRIC_PROJECT_KEY is required");
 
-const seats = ["agy", "claude", "codex", "cursor", "kiro"];
 const requiredTools = ["fabric_message_send", "fabric_message_receive", "fabric_delivery_acknowledge", "fabric_run_status_read", "fabric_whoami"];
 
 const results = [];
 const seatDirectory = await currentSeatDirectory(stateDirectory, projectKey);
+const seats = (await readdir(seatDirectory, { withFileTypes: true }))
+  .filter((entry) => entry.isFile() && entry.name.endsWith(".json"))
+  .map((entry) => entry.name.slice(0, -".json".length))
+  .sort();
+if (seats.length === 0) throw new Error("current MCP generation contains no registered seats");
 for (const seat of seats) {
   const metadata = JSON.parse(await readFile(join(seatDirectory, `${seat}.json`), "utf8"));
   const transport = new StdioClientTransport({

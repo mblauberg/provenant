@@ -78,7 +78,11 @@ export function bootstrapCurrentMcpSeat(custody: BootstrapMcpCustody, input: Boo
       throw new FabricError("AUTHENTICATION_FAILED", "bootstrap trust record digest is invalid");
     }
     if (input.seat !== "claude" && input.seat !== "codex") {
-      throw new FabricError("AUTHENTICATION_FAILED", "bootstrap seat must be claude or codex");
+      throw new FabricError(
+        "AUTHENTICATION_FAILED",
+        `bootstrap creates only chair seats claude or codex; run agent-fabric mcp peer-provision ` +
+        `--project ${input.canonicalRoot} --seat ${input.seat} instead`,
+      );
     }
     const requestedExpiry = Date.parse(input.expiresAt);
     const validatedAt = custody.clock();

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
-import { mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import type { Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -23,6 +23,7 @@ import { deployReviewProfileCatalogue } from "../../scripts/deploy-review-profil
 import { FABRIC_PROTOCOL_LIMITS } from "../../src/transport/bounded-ndjson.ts";
 import { createPortableActivatedPrimaryFixture } from "../support/primary-adapter-testkit.ts";
 import { runSourceCli } from "../support/cli-process.ts";
+import { installSeatGeneration, projectKey } from "../../src/cli/seat-store.ts";
 
 const cleanup: string[] = [];
 afterEach(async () => Promise.all(cleanup.splice(0).map((path) => rm(path, { recursive: true, force: true }))));
@@ -348,6 +349,90 @@ describe("machine status and doctor", () => {
       project: { path: agentsHome },
     });
     expect(JSON.stringify(status)).not.toMatch(/capability|credentialPath|afb_|afc_/u);
+  });
+
+  it("reports an exact bootstrap remedy when the project has no chair seat", async () => {
+    const value = await paths();
+    const agentsHome = resolve(import.meta.dirname, "../../../..");
+    const requestedProject = join(dirname(value.stateDirectory), "project root");
+    await mkdir(requestedProject);
+    const project = await realpath(requestedProject);
+
+    const status = await fabricStatus(["--agents-home", agentsHome, "--project", project], value);
+
+    expect(status.project).toEqual({
+      path: project,
+      seats: expect.arrayContaining([{
+        seat: "agy",
+        registered: false,
+        active: false,
+        reason: "PROJECT_NOT_BOOTSTRAPPED",
+        remedy: `cd '${project}' && "$HOME/.agents/scripts/agent-fabric" bootstrap --seat codex`,
+      }]),
+    });
+  });
+
+  it("reports registered provenance and an exact peer provisioning remedy without credentials", async () => {
+    const value = await paths();
+    const agentsHome = resolve(import.meta.dirname, "../../../..");
+    const requestedProject = join(dirname(value.stateDirectory), "project root");
+    await mkdir(requestedProject);
+    const project = await realpath(requestedProject);
+    const generation = "a".repeat(64);
+    const expiresAt = "2099-01-01T00:00:00.000Z";
+    const common = {
+      schemaVersion: 1 as const,
+      projectKey: projectKey(project),
+      projectPath: project,
+      generation,
+      previousGeneration: null,
+      originKind: "bootstrap" as const,
+      projectSessionId: "session-one",
+      sessionRevision: 1,
+      sessionGeneration: 1,
+      runId: "run-one",
+      runRevision: 1,
+      chairAgentId: "codex-chair",
+      chairGeneration: 1,
+      chairLeaseId: "chair:run-one:1",
+      principalGeneration: 1,
+      expiresAt,
+    };
+    await installSeatGeneration({
+      stateDirectory: value.stateDirectory,
+      projectPath: project,
+      generation,
+      expectedPreviousGeneration: null,
+      seats: [
+        {
+          credential: `afc_${"a".repeat(43)}`,
+          metadata: { ...common, seat: "claude", agentId: "claude-peer", role: "peer" },
+        },
+        {
+          credential: `afc_${"b".repeat(43)}`,
+          metadata: { ...common, seat: "codex", agentId: "codex-chair", role: "chair" },
+        },
+      ],
+    });
+
+    const status = await fabricStatus(["--agents-home", agentsHome, "--project", project], value);
+    const seats = (status.project as { seats: Array<Record<string, unknown>> }).seats;
+
+    expect(seats).toContainEqual(expect.objectContaining({
+      seat: "codex",
+      registered: true,
+      active: true,
+      role: "chair",
+      originKind: "bootstrap",
+    }));
+    expect(seats).toContainEqual({
+      seat: "agy",
+      registered: false,
+      active: false,
+      reason: "PEER_SEAT_NOT_PROVISIONED",
+      remedy: `"$HOME/.agents/scripts/agent-fabric" mcp peer-provision --project '${project}' --seat agy`,
+    });
+    expect(JSON.stringify(status)).not.toMatch(/af[bc]_[A-Za-z0-9_-]{43}|credentialPath/u);
   });
 
   it("reports a healthy typed on-demand idle state when every preflight passes", async () => {
