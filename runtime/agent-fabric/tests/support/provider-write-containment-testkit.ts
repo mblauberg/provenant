@@ -129,6 +129,13 @@ function targetIsEnvironment(target: string): boolean {
   return target.startsWith("env:");
 }
 
+// Accepts `undefined` because the callers index a possibly-empty list. An absent
+// entry is not a filesystem root, and the length check beside it already rejects
+// that shape; narrowing here would only push the same check to both call sites.
+function isFilesystemRoot(root: string | undefined): boolean {
+  return root === "/" || root === "";
+}
+
 /**
  * Declarative model of the vendor settings requested by the adapters.
  *
@@ -158,7 +165,7 @@ export function wouldDenyClaude(
       !targetIsInsidePilot(tuple.target);
   }
   const allowed = settings.sandbox?.filesystem?.allowWrite ?? [];
-  return allowed.length !== 1 || !targetIsInsidePilot(tuple.target);
+  return allowed.length !== 1 || isFilesystemRoot(allowed[0]) || !targetIsInsidePilot(tuple.target);
 }
 
 export function wouldDenyCodex(
@@ -180,7 +187,7 @@ export function wouldDenyCodex(
       settings.sandboxPolicy.excludeSlashTmp === true;
   }
   const writable = settings.sandboxPolicy?.writableRoots ?? [];
-  return writable.length !== 1 || !targetIsInsidePilot(tuple.target);
+  return writable.length !== 1 || isFilesystemRoot(writable[0]) || !targetIsInsidePilot(tuple.target);
 }
 
 export function assertDistinctTempRoots(tmpdir: string, privateTemp: string): void {

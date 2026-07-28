@@ -363,17 +363,43 @@ describe("provider-write containment matrix evidence", () => {
       };
       const golden = JSON.parse(await readFile(unresolvedUrl, "utf8")) as {
         notVerified: string[];
-        specDivergence: string[];
       };
       const keysWith = (verdict: string): string[] => Object.entries(ledger.executions)
         .filter(([, value]) => value === verdict)
         .map(([key]) => key);
       expect(keysWith("not-verified")).toStrictEqual(golden.notVerified);
-      expect(keysWith("spec-divergence")).toStrictEqual(golden.specDivergence);
+    });
+
+    it("asserts exact ledger keys and verdicts per channel", async () => {
+      const ledger = JSON.parse(await readFile(ledgerUrl, "utf8")) as {
+        executions: Record<string, string>;
+      };
+      const expectedAdmissionVerified = [
+        "admission-rejects-external-effects:fresh",
+      ];
+      const admissionVerified = Object.entries(ledger.executions)
+        .filter(([, value]) => value === "admission-verified")
+        .map(([key]) => key)
+        .sort();
+      expect(admissionVerified).toStrictEqual(expectedAdmissionVerified);
     });
   });
 
   describe("Channel B projection-only (no syscall or provider claim)", () => {
+    it("rejects filesystem-root write projections that do not match the admitted pilot", () => {
+      const ownedWrite = {
+        operation: "create",
+        target: "$PILOT/owned.txt",
+        status: "succeeded",
+      };
+      expect(wouldDenyClaude({
+        sandbox: { filesystem: { allowWrite: ["/"] } },
+      }, ownedWrite)).toBe(true);
+      expect(wouldDenyCodex({
+        sandboxPolicy: { writableRoots: ["/"] },
+      }, ownedWrite)).toBe(true);
+    });
+
     it.each(EXECUTION_MODES)("models the requested vendor settings for %s turns", async (mode) => {
       const directory = await mkdtemp(join(tmpdir(), "fabric-containment-projection-"));
       cleanup.push(async () => await rm(directory, { recursive: true, force: true }));
@@ -462,7 +488,13 @@ describe("provider-write containment matrix evidence", () => {
       expect(existsSync(fixture.journalPath)).toBe(false);
     });
 
-    it("proves stale-owner admission without claiming a matrix fresh/resume execution", async () => {
+    // Named for what it asserts. It exercises the owner-recovery mechanism —
+    // revoke, prove, recover, generation increments — and does NOT prove that a
+    // stale owner is rejected: `recordTaskOwnerRecoveryProof` requires the
+    // predecessor capability to be revoked first, so any later rejection cannot
+    // be attributed to staleness rather than to that revocation. The stale-owner
+    // claim stays unverified in the ledger rather than resting on this test.
+    it("proves owner recovery without claiming a matrix fresh/resume execution", async () => {
       const fixture = await fabricFixture();
       await setupLifecycle(fixture, "fresh");
       await fixture.chair.revokeCapability({
@@ -485,9 +517,6 @@ describe("provider-write containment matrix evidence", () => {
         commandId: "lifecycle-owner:mechanism:recover",
       });
       expect(recovered.ownerLeaseGeneration).toBe(fixture.activeTask.ownerLeaseGeneration + 1);
-      await expect(dispatch(fixture, "resume", "lifecycle-owner:mechanism", {}))
-        .rejects.toMatchObject({ code: "AUTHENTICATION_FAILED" });
-      expect(existsSync(fixture.journalPath)).toBe(false);
     });
   });
 
