@@ -30,16 +30,10 @@ def test_documented_fresh_checkout_sequence_produces_runnable_doctor(tmp_path):
         "provenant",
     ):
         shutil.copy2(ROOT / "scripts" / name, scripts / name)
-    freshness_library = scripts / "lib" / "agent-fabric-workspace-freshness.sh"
-    freshness_library.parent.mkdir()
-    shutil.copy2(
-        ROOT / "scripts" / "lib" / "agent-fabric-workspace-freshness.sh",
-        freshness_library,
-    )
-    shutil.copy2(
-        ROOT / "scripts" / "lib" / "agent-fabric-protocol-build-lock.sh",
-        freshness_library.with_name("agent-fabric-protocol-build-lock.sh"),
-    )
+    # Copy the whole library directory. Enumerating its members here meant that
+    # adding a scripts/lib file broke this fixture rather than exercising the
+    # bootstrap it is meant to test.
+    shutil.copytree(ROOT / "scripts" / "lib", scripts / "lib")
 
     for workspace in (
         "agent-fabric-protocol",

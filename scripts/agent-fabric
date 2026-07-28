@@ -35,5 +35,18 @@ if [ -f "$dist_cli" ] && ! find "$package_root/src" -type f -name '*.ts' -newer 
   exec node "$package_root/dist/cli/main.js" "$@"
 fi
 
-exec node --import "$agents_home/node_modules/tsx/dist/loader.mjs" \
-  "$package_root/src/cli/main.ts" "$@"
+tsx_loader_library="$script_dir/lib/agent-fabric-tsx-loader.sh"
+[ -f "$tsx_loader_library" ] || {
+  echo "agent-fabric cannot resolve the tsx loader: missing $tsx_loader_library" >&2
+  echo "repair: reinstall the harness scripts directory, including scripts/lib" >&2
+  exit 78
+}
+. "$tsx_loader_library"
+
+tsx_loader=$(resolve_tsx_loader "$agents_home") || {
+  echo "agent-fabric found no tsx/dist/loader.mjs under \"$agents_home\" or any ancestor" >&2
+  echo "repair: run 'npm ci' in the repository root that owns this workspace" >&2
+  exit 1
+}
+
+exec node --import "$tsx_loader" "$package_root/src/cli/main.ts" "$@"
