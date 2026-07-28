@@ -8,7 +8,7 @@ import {
 import type Database from "better-sqlite3";
 
 import { ProjectFabricCoreError, type AuthenticatedAgentContext, type CoreServiceOptions } from "./contracts.js";
-import { integer, isRow, row, text, type Row } from "./store-support.js";
+import { integer, isRow, row, text, type Row } from "../persistence/row-codec.js";
 
 export type AcceptedRunScope = Readonly<{
   artifactId: string;

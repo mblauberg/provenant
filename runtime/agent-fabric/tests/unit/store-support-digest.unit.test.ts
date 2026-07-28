@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 
-import { canonicalJson, digest, stringDigest } from "../../src/project-session/store-support.ts";
+import { canonicalJson, digest, stringDigest } from "../../src/persistence/row-codec.ts";
 
-describe("store-support digests", () => {
+describe("row-codec digests", () => {
   it("digest canonicalizes exactly once", () => {
     expect(digest({ a: 1 })).toBe("sha256:015abd7f5cc57a2dd94b7590f04ad8084273905ee33ec5cebeae62276a97f862");
   });

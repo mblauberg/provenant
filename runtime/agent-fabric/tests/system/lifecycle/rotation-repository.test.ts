@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 
 import { LifecycleRotationRepository } from "../../../src/lifecycle/rotation-repository.ts";
 import { LifecycleReceiptRepository } from "../../../src/lifecycle/receipt-repository.ts";
-import { sha256 } from "../../../src/project-session/store-support.ts";
+import { sha256 } from "../../../src/persistence/row-codec.ts";
 import { admitProviderActionFixture } from "../../support/provider-action-fixture.ts";
 import { createLifecycleFixture } from "../../support/lifecycle-testkit.ts";
 import { createStage1Fixture } from "../../support/stage1-fixture.ts";

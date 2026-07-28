@@ -17,7 +17,7 @@ import {
 import type Database from "better-sqlite3";
 
 import { ProjectFabricCoreError, type AuthenticatedOperatorContext } from "../project-session/contracts.js";
-import { canonicalJson, integer, isRow, nullableText, row, sha256, text, type Row } from "../project-session/store-support.js";
+import { canonicalJson, integer, isRow, nullableText, row, sha256, text, type Row } from "../persistence/row-codec.js";
 import type { AuthenticatedOperatorCredential } from "./store.js";
 import type { ProviderActionTicket } from "../application/provider-action-admission.js";
 

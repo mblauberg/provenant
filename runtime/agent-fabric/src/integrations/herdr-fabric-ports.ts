@@ -15,7 +15,7 @@ import type {
 } from "@local/agent-fabric-protocol";
 import type Database from "better-sqlite3";
 
-import { canonicalJson, integer, isRow, nullableText, row, text } from "../project-session/store-support.js";
+import { canonicalJson, integer, isRow, nullableText, row, text } from "../persistence/row-codec.js";
 import { touchProjectSessionMembershipRevision } from "../project-session/membership-store.js";
 import {
   ProviderActionAdmissionCoordinator,

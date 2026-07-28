@@ -7,7 +7,7 @@ import type Database from "better-sqlite3";
 
 import { ProjectFabricCoreError } from "../project-session/contracts.js";
 import { currentRunPlanBinding } from "../project-session/run-plan-store.js";
-import { integer, nullableText, row, text, type Row } from "../project-session/store-support.js";
+import { integer, nullableText, row, text, type Row } from "../persistence/row-codec.js";
 import { projectServerRunTaskStates } from "./declared-run-progress-projection.js";
 
 const MAX_DEPENDENCIES = 1024;

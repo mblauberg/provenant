@@ -1,7 +1,7 @@
 import type Database from "better-sqlite3";
 import { createHash } from "node:crypto";
 
-import { canonicalJson, integer, row, text } from "../project-session/store-support.js";
+import { canonicalJson, integer, row, text } from "../persistence/row-codec.js";
 
 export type GenerationLossObservationClassification =
   | "replay"

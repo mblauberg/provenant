@@ -20,7 +20,7 @@ import { openFabric, type Fabric } from "../../../src/index.ts";
 import type { PublicProtocolContext } from "../../../src/daemon/public-protocol.ts";
 import { OperatorStore } from "../../../src/operator/store.ts";
 import { OperatorProjectionStore } from "../../../src/operator/projection-store.ts";
-import { canonicalJson, sha256 } from "../../../src/project-session/store-support.ts";
+import { canonicalJson, sha256 } from "../../../src/persistence/row-codec.ts";
 import { ROOT_AUTHORITY } from "../../support/stage1-fixture.ts";
 import { createCurrentSessionRun } from "../../support/current-session-testkit.ts";
 

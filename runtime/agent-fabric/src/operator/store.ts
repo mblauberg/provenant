@@ -39,7 +39,7 @@ import {
   text,
   timestampToMillis,
   type Row,
-} from "../project-session/store-support.js";
+} from "../persistence/row-codec.js";
 import {
   openLocalOperatorConsoleTakeoverCapability as openLocalOperatorConsoleTakeoverCapabilityOwner,
 } from "./local-takeover-capability.js";

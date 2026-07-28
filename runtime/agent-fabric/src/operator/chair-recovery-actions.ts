@@ -10,7 +10,7 @@ import { parseTimestamp } from "@local/agent-fabric-protocol";
 import type Database from "better-sqlite3";
 
 import { ProjectFabricCoreError, type AuthenticatedOperatorContext } from "../project-session/contracts.js";
-import { canonicalJson, type Row } from "../project-session/store-support.js";
+import { canonicalJson, type Row } from "../persistence/row-codec.js";
 import type {
   ChairRecoveryCommit,
   ChairRecoveryCurrentState,

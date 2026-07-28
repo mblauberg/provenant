@@ -6,7 +6,7 @@ import {
 import type Database from "better-sqlite3";
 
 import { assertProviderActionOwner } from "../application/provider-action-owner.js";
-import { integer, isRow, text } from "./store-support.js";
+import { integer, isRow, text } from "../persistence/row-codec.js";
 import {
   exactDigest,
   jsonEvidenceDigest,

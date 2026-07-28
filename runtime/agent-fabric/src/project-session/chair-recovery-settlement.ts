@@ -14,7 +14,7 @@ import {
   row,
   text,
   type Row,
-} from "./store-support.js";
+} from "../persistence/row-codec.js";
 import { assertProviderActionOwner } from "../application/provider-action-owner.js";
 import type { ChairRecoveryRetainedBridgeRepository } from "./chair-recovery-retained-bridge-repository.js";
 import type {

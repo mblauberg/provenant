@@ -3,7 +3,7 @@ import { readFile, rm } from "node:fs/promises";
 import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { digest } from "../../src/project-session/store-support.ts";
+import { digest } from "../../src/persistence/row-codec.ts";
 import { createLifecycleFixture, reopenLifecycleFabric } from "../support/lifecycle-testkit.ts";
 
 const cleanup: Array<() => Promise<void>> = [];

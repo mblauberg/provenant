@@ -10,7 +10,7 @@ import {
   assertTaskOperationAdmitted,
 } from "../operator/task-run-admission.js";
 import type { ProjectSessionMembershipStore } from "./membership-store.js";
-import { canonicalJson, isRow, sha256, type Row } from "./store-support.js";
+import { canonicalJson, isRow, sha256, type Row } from "../persistence/row-codec.js";
 
 type MailboxCommandJournalPort = Pick<CommandJournal, "execute">;
 

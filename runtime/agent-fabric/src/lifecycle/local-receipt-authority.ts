@@ -11,7 +11,7 @@ import { join } from "node:path";
 
 import Database from "better-sqlite3";
 
-import { canonicalJson } from "../project-session/store-support.js";
+import { canonicalJson } from "../persistence/row-codec.js";
 import type {
   LifecycleAdmittedRunScope,
   LifecycleAuthenticatedNamespaceCheckpoint,

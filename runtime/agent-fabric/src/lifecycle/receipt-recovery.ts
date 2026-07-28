@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 
 import type Database from "better-sqlite3";
 
-import { canonicalJson, integer, nullableText, row, text, type Row } from "../project-session/store-support.js";
+import { canonicalJson, integer, nullableText, row, text, type Row } from "../persistence/row-codec.js";
 import type {
   LifecycleAuthenticatedNamespaceCheckpoint,
   LifecycleAuthenticatedScopeCheckpoint,

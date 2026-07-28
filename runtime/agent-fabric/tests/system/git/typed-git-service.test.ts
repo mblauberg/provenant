@@ -12,7 +12,7 @@ import type {
 import { applyMigrations } from "../../../src/core/migrations.ts";
 import { ProviderActionAdmissionCoordinator } from "../../../src/application/provider-action-admission.ts";
 import { readGlobalLiveness } from "../../../src/lifecycle/global-liveness.ts";
-import { canonicalJson, sha256 } from "../../../src/project-session/store-support.ts";
+import { canonicalJson, sha256 } from "../../../src/persistence/row-codec.ts";
 import { OperatorActionStore } from "../../../src/operator/action-store.ts";
 import type { GitMutationDispatchContext, GitMutationInspection, GitMutationPort } from "../../../src/operator/fixed-git-mutation-port.ts";
 import { createProductionOperatorActionPorts } from "../../../src/operator/production-action-ports.ts";

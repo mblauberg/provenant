@@ -47,7 +47,7 @@ import type Database from "better-sqlite3";
 
 import { readStoredAuthority } from "../authority/stored-authority.js";
 import { ProjectFabricCoreError, type CoreServiceOptions } from "../project-session/contracts.js";
-import { digest, integer, isRow, nullableText, row, text, type Row } from "../project-session/store-support.js";
+import { digest, integer, isRow, nullableText, row, text, type Row } from "../persistence/row-codec.js";
 import type { AuthenticatedOperatorCredential, OperatorStore } from "./store.js";
 import { renderSafeMessageBody } from "./message-safety.js";
 import { HERDR_CONTROL_ADAPTER_ID } from "../integrations/herdr-fabric-ports.js";

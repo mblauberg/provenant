@@ -21,7 +21,7 @@ import { createProductionOperatorActionPorts } from "../../../src/operator/produ
 import { OperatorStore } from "../../../src/operator/store.ts";
 import { ProjectSessionStore } from "../../../src/project-session/store.ts";
 import { ScopedGateStore } from "../../../src/gates/store.ts";
-import { canonicalJson, sha256 } from "../../../src/project-session/store-support.ts";
+import { canonicalJson, sha256 } from "../../../src/persistence/row-codec.ts";
 import { NotificationOutbox } from "../../../src/attention/outbox.ts";
 import { admitProviderActionFixture } from "../../support/provider-action-fixture.ts";
 

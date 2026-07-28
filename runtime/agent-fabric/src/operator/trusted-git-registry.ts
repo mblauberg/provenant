@@ -2,7 +2,7 @@ import type { GitOperationVariant, GitRemoteBinding, Sha256Digest } from "@local
 import type Database from "better-sqlite3";
 
 import { ProjectFabricCoreError } from "../project-session/contracts.js";
-import { canonicalJson, integer, isRow, nullableText, row, sha256, text } from "../project-session/store-support.js";
+import { canonicalJson, integer, isRow, nullableText, row, sha256, text } from "../persistence/row-codec.js";
 
 export type TrustedGitExecutionProfile = Readonly<{
   profileId: string;
