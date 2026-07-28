@@ -140,9 +140,20 @@ describe("MCP peer provisioning from a fresh project", () => {
       "mcp", "peer-provision", "--project", value.project, "--seat", "agy",
     ]);
     const first = JSON.parse(firstResult.stdout) as {
+      projectSessionId: string;
+      sessionRevision: number;
+      sessionGeneration: number;
+      runId: string;
+      runRevision: number;
+      chairSeat: string;
+      chairAgentId: string;
+      chairGeneration: number;
+      chairLeaseId: string;
       seats: Array<{
         seat: string;
         role: string;
+        agentId: string;
+        principalGeneration: number;
         credentialPath: string;
         metadataPath: string;
       }>;
@@ -165,15 +176,24 @@ describe("MCP peer provisioning from a fresh project", () => {
     expect(counts(value.databasePath)).toEqual(afterFirst);
     expect(secondResult.stdout).not.toMatch(/af[bc]_[A-Za-z0-9_-]{43}/u);
 
-    const database = new Database(value.databasePath);
-    try {
-      database.prepare(`
-        UPDATE mcp_seat_generations SET expires_at=?
-         WHERE generation=(SELECT generation FROM mcp_active_seat_generations LIMIT 1)
-      `).run(Date.now() + 30 * 60 * 1_000);
-    } finally {
-      database.close();
-    }
+    const renewalExpiry = new Date(Date.now() + 30 * 60 * 1_000).toISOString();
+    await cli(value, [
+      "mcp", "provision",
+      "--project", value.project,
+      "--project-session-id", first.projectSessionId,
+      "--session-revision", String(first.sessionRevision),
+      "--session-generation", String(first.sessionGeneration),
+      "--run-id", first.runId,
+      "--run-revision", String(first.runRevision),
+      "--chair-seat", first.chairSeat,
+      "--chair-agent-id", first.chairAgentId,
+      "--chair-generation", String(first.chairGeneration),
+      "--chair-lease-id", first.chairLeaseId,
+      "--seat-bindings", first.seats
+        .map(({ seat, agentId, principalGeneration }) => `${seat}=${agentId}@${String(principalGeneration)}`)
+        .join(","),
+      "--expires-at", renewalExpiry,
+    ]);
     const renewalResult = await cli(value, ["bootstrap", "--seat", "codex"]);
     const renewal = JSON.parse(renewalResult.stdout) as {
       credentials: Array<{ seat: string }>;
