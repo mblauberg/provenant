@@ -1,5 +1,9 @@
 {
   "notVerified": [
+    "filesystem-symlink-escapes:fresh",
+    "filesystem-symlink-escapes:resume",
+    "filesystem-symlink-swap:fresh",
+    "filesystem-symlink-swap:resume",
     "admission-rejects-raw-controls:resume",
     "admission-rejects-external-effects:resume",
     "lifecycle-revoked:fresh",

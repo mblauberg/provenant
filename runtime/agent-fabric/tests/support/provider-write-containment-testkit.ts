@@ -65,11 +65,12 @@ export type ContainmentTuple = Readonly<{
 }>;
 
 export type ContainmentCase = Readonly<{
-  id: string;
+  id: typeof CONTAINMENT_CASE_IDS[number];
   specLine: number;
   failureMapClass: "T" | "A" | "L";
   expected: ContainmentTuple[];
   turnStatus?: string;
+  acceptedEffectStatuses?: string[];
 }>;
 
 type ClaudeSettings = Readonly<{
@@ -119,6 +120,7 @@ function isReadOperation(operation: string): boolean {
 }
 
 function targetIsInsidePilot(target: string): boolean {
+  if (target.startsWith("$LINK_")) return true;
   if (target === "$CREDENTIAL_HARDLINK") return true;
   return target === "$PILOT" || target.startsWith("$PILOT/");
 }

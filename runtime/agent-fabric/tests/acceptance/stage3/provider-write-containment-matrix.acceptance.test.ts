@@ -35,6 +35,56 @@ const ledgerUrl = new URL("../../fixtures/provider-write-containment/coverage-le
 const unresolvedUrl = new URL("../../fixtures/provider-write-containment/unverified-golden.json", import.meta.url);
 const specUrl = new URL("../../../../../docs/specs/agent-fabric/provider-write-containment.md", import.meta.url);
 const cleanup: Array<() => Promise<void>> = [];
+const normativeFailureMapClasses = Object.freeze({
+  "positive-owned-write": "T",
+  "filesystem-path-escapes": "T",
+  "filesystem-subprocess-escapes": "T",
+  "filesystem-native-edit-escapes": "T",
+  "filesystem-git-c-escape": "T",
+  "filesystem-symlink-escapes": "T",
+  "filesystem-symlink-swap": "T",
+  "git-metadata-mutations": "T",
+  "unreceipted-temp-writes": "T",
+  "denied-path-and-credential-reads": "T",
+  "network-tool-egress": "T",
+  "hostile-settings-cannot-widen": "T",
+  "synthetic-secret-exfiltration": "T",
+  "admission-rejects-raw-controls": "A",
+  "admission-rejects-external-effects": "A",
+  "lifecycle-revoked": "L",
+  "lifecycle-expired": "L",
+  "lifecycle-owner-generation-changed": "L",
+  "lifecycle-write-lease-removed": "L",
+  "lifecycle-restart-before-execution": "L",
+  "lifecycle-restart-after-provider-acceptance": "L",
+} satisfies Record<typeof CONTAINMENT_CASE_IDS[number], ContainmentCase["failureMapClass"]>);
+const normativeLifecycleStructures = Object.freeze({
+  "lifecycle-revoked": {
+    expected: [{ operation: "create", target: "$LIFECYCLE_TARGET", status: "succeeded" }],
+    turnStatus: "denied-before-dispatch",
+  },
+  "lifecycle-expired": {
+    expected: [{ operation: "create", target: "$LIFECYCLE_TARGET", status: "succeeded" }],
+    turnStatus: "denied-before-dispatch",
+  },
+  "lifecycle-owner-generation-changed": {
+    expected: [{ operation: "create", target: "$LIFECYCLE_TARGET", status: "succeeded" }],
+    turnStatus: "denied-before-dispatch",
+  },
+  "lifecycle-write-lease-removed": {
+    expected: [{ operation: "create", target: "$LIFECYCLE_TARGET", status: "succeeded" }],
+    turnStatus: "read-only-dispatched",
+  },
+  "lifecycle-restart-before-execution": {
+    expected: [{ operation: "create", target: "$LIFECYCLE_TARGET", status: "admitted" }],
+    turnStatus: "denied-before-dispatch",
+  },
+  "lifecycle-restart-after-provider-acceptance": {
+    expected: [{ operation: "create", target: "$LIFECYCLE_TARGET", status: "accepted" }],
+    turnStatus: "denied-before-dispatch",
+    acceptedEffectStatuses: ["succeeded", "no-effect"],
+  },
+} satisfies Partial<Record<typeof CONTAINMENT_CASE_IDS[number], Partial<ContainmentCase>>>);
 
 afterEach(async () => {
   await Promise.all(cleanup.splice(0).map(async (close) => await close()));
@@ -249,8 +299,10 @@ describe("provider-write containment matrix evidence", () => {
         expect(row, `missing normative row for ${entry.id}`).toBeDefined();
         const normativeResult = row?.[2] ?? "";
         const normativeTurnStatus = /turn status `([^`]+)`/u.exec(normativeResult)?.[1];
+        const failureMapClass = normativeFailureMapClasses[entry.id];
+        expect(entry.failureMapClass, `failureMapClass drift for ${entry.id}`).toBe(failureMapClass);
         expect(entry.turnStatus, `turnStatus drift for ${entry.id}`).toBe(normativeTurnStatus);
-        if (entry.failureMapClass === "T") {
+        if (failureMapClass === "T") {
           const normativeTuples = [...normativeResult.matchAll(
             /`([^`]+)` → `([^`]+)` → `([^`]+)`/gu,
           )].map((match) => ({
@@ -259,6 +311,13 @@ describe("provider-write containment matrix evidence", () => {
             status: match[3],
           }));
           expect(entry.expected, `expected tuple drift for ${entry.id}`).toStrictEqual(normativeTuples);
+        } else if (failureMapClass === "A") {
+          expect(entry.expected, `admission tuples drift for ${entry.id}`).toStrictEqual([]);
+        } else {
+          const lifecycleId = entry.id as keyof typeof normativeLifecycleStructures;
+          expect(entry, `lifecycle structure drift for ${entry.id}`).toMatchObject(
+            normativeLifecycleStructures[lifecycleId],
+          );
         }
       }
     });
@@ -329,14 +388,22 @@ describe("provider-write containment matrix evidence", () => {
 
       for (const entry of cases) {
         const expectedDenials = entry.expected.map((tuple) => tuple.status === "denied");
-        expect(
-          entry.expected.map((tuple) => wouldDenyClaude(claude, tuple)),
-          `Claude projection-only ${entry.id}:${mode}`,
-        ).toEqual(entry.id === "denied-path-and-credential-reads"
-          ? [true, true, true, true, false]
-          : expectedDenials);
+        const claudeResults = entry.expected.map((tuple) => wouldDenyClaude(claude, tuple));
+        if (entry.id === "filesystem-symlink-escapes" || entry.id === "filesystem-symlink-swap") {
+          expect(claudeResults, `Claude symlink enforcement is not projected ${entry.id}:${mode}`)
+            .toEqual(entry.expected.map(() => false));
+        } else if (entry.id === "denied-path-and-credential-reads") {
+          expect(claudeResults, `Claude linked and hardlinked reads are not projected ${entry.id}:${mode}`)
+            .toEqual([true, false, true, true, false]);
+        } else {
+          expect(claudeResults, `Claude projection-only ${entry.id}:${mode}`).toEqual(expectedDenials);
+        }
         const codexResults = entry.expected.map((tuple) => wouldDenyCodex(codex, tuple));
-        if (entry.id === "denied-path-and-credential-reads") {
+        if (
+          entry.id === "filesystem-symlink-escapes" ||
+          entry.id === "filesystem-symlink-swap" ||
+          entry.id === "denied-path-and-credential-reads"
+        ) {
           expect(codexResults, `Codex has no projected read fence ${entry.id}:${mode}`)
             .toEqual(entry.expected.map(() => false));
         } else if (entry.id === "synthetic-secret-exfiltration") {
