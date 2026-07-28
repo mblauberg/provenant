@@ -3,7 +3,7 @@ import Database from "better-sqlite3";
 import { constants } from "node:fs";
 import { chmod, lstat, open, realpath, rename, rm } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, join, parse, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, parse, resolve, sep } from "node:path";
 
 import type { FabricPaths } from "./paths.js";
 
@@ -157,13 +157,47 @@ async function canonicalWorkspace(path: string): Promise<{ canonicalPath: string
   return { canonicalPath: canonical, device: canonicalInfo.dev, inode: canonicalInfo.ino };
 }
 
-async function identityMatches(entry: WorkspaceTrustEntry): Promise<boolean> {
+// `st_dev` is a runtime mount handle the kernel assigns at mount time, not durable
+// identity: macOS renumbers APFS volumes across reboots, which silently invalidated
+// every record written before the last one. The canonical path, the inode and the
+// directory type still pin the same filesystem object, so a device-only change is
+// drift to heal rather than evidence of a swapped root. Substituting a different
+// directory at the recorded path changes the inode and is still refused; forging a
+// device change alone would mean mounting over the path, which needs the privilege
+// to rewrite this registry directly.
+type WorkspaceIdentityState = "match" | "device-drifted" | "mismatch";
+
+async function identityState(entry: WorkspaceTrustEntry): Promise<WorkspaceIdentityState> {
   try {
     const info = await lstat(entry.canonicalPath);
-    return info.isDirectory() && !info.isSymbolicLink() && info.dev === entry.device && info.ino === entry.inode &&
-      await realpath(entry.canonicalPath) === entry.canonicalPath;
+    if (!info.isDirectory() || info.isSymbolicLink()) return "mismatch";
+    if (info.ino !== entry.inode) return "mismatch";
+    if (await realpath(entry.canonicalPath) !== entry.canonicalPath) return "mismatch";
+    return info.dev === entry.device ? "match" : "device-drifted";
   } catch {
-    return false;
+    return "mismatch";
+  }
+}
+
+async function identityMatches(entry: WorkspaceTrustEntry): Promise<boolean> {
+  return await identityState(entry) !== "mismatch";
+}
+
+// A removed root cannot be canonicalised, yet the record it must be matched against
+// holds a canonical path. Resolving the deepest surviving ancestor and re-attaching
+// the rest recovers it; a purely lexical fallback would miss every path under a
+// symlinked ancestor, which on macOS includes everything below `/var`.
+async function bestEffortCanonicalPath(target: string): Promise<string> {
+  const absolute = resolve(target);
+  const suffix: string[] = [];
+  let probe = absolute;
+  for (;;) {
+    const resolved = await realpath(probe).catch(() => undefined);
+    if (resolved !== undefined) return join(resolved, ...suffix);
+    const parent = dirname(probe);
+    if (parent === probe) return absolute;
+    suffix.unshift(basename(probe));
+    probe = parent;
   }
 }
 
@@ -234,9 +268,47 @@ export async function runWorkspaceTrust(
   const action = requestedAction === "status" ? "inspect" : requestedAction;
   const registryPath = join(paths.stateDirectory, "trusted-workspaces.json");
   const registry = await readRegistry(registryPath);
-  if (action === "list") return { schemaVersion: 1, registryPath, entries: registry.entries };
+  if (action === "list") {
+    // A record whose root has been removed or replaced is dead, but rendering it
+    // exactly like a live one made `list` say trusted where `inspect` said false.
+    const states = await Promise.all(registry.entries.map(identityState));
+    return {
+      schemaVersion: 1,
+      registryPath,
+      entries: registry.entries.map((entry, index) => ({
+        ...entry,
+        identity: states[index],
+        expired: entry.expiresAt !== undefined && timestamp(entry.expiresAt, "workspace expiry") <= now.getTime(),
+        trusted: states[index] !== "mismatch" &&
+          (entry.expiresAt === undefined || timestamp(entry.expiresAt, "workspace expiry") > now.getTime()),
+      })),
+    };
+  }
   const requested = arguments_[1];
-  if (requested === undefined || requested.startsWith("--")) throw new Error(`workspace ${String(action)} requires a path`);
+  if (requested === undefined || requested.startsWith("--")) {
+    throw new Error(`workspace ${String(requestedAction)} requires a path`);
+  }
+  if (action === "revoke") {
+    // Revoking only ever narrows authority, so it must not require the directory to
+    // still exist. Canonicalising first made a removed worktree unrevokable, and a
+    // stale descendant record blocks an exact-root re-trust, so the pair deadlocked
+    // recovery: the only remaining escape was hand-editing the registry.
+    const resolvedPath = resolve(requested);
+    const canonicalCandidate = await bestEffortCanonicalPath(resolvedPath);
+    return await withRegistryMutationLock(paths.stateDirectory, async () => {
+      const current = await readRegistry(registryPath);
+      const doomed = current.entries.filter(
+        (entry) => entry.canonicalPath === canonicalCandidate || entry.canonicalPath === resolvedPath,
+      );
+      const [first] = doomed;
+      if (first === undefined) return { schemaVersion: 1, canonicalPath: canonicalCandidate, revoked: false };
+      await writeRegistry(registryPath, {
+        schemaVersion: 1,
+        entries: current.entries.filter((entry) => !doomed.includes(entry)),
+      });
+      return { schemaVersion: 1, canonicalPath: first.canonicalPath, revoked: true };
+    });
+  }
   const identity = await canonicalWorkspace(requested);
   const { canonicalPath } = identity;
   const existing = registry.entries.find((entry) => entry.canonicalPath === canonicalPath);
@@ -244,15 +316,6 @@ export async function runWorkspaceTrust(
     const expired = existing?.expiresAt !== undefined && timestamp(existing.expiresAt, "workspace expiry") <= now.getTime();
     const trusted = existing !== undefined && !expired && await identityMatches(existing);
     return { schemaVersion: 1, canonicalPath, trusted, expired, entry: existing ?? null };
-  }
-  if (action === "revoke") {
-    return await withRegistryMutationLock(paths.stateDirectory, async () => {
-      const current = await readRegistry(registryPath);
-      const currentEntry = current.entries.find((entry) => entry.canonicalPath === canonicalPath);
-      if (currentEntry === undefined) return { schemaVersion: 1, canonicalPath, revoked: false };
-      await writeRegistry(registryPath, { schemaVersion: 1, entries: current.entries.filter((entry) => entry.canonicalPath !== canonicalPath) });
-      return { schemaVersion: 1, canonicalPath, revoked: true };
-    });
   }
   if (action !== "trust") throw new Error("workspace command must be trust, inspect, status, list or revoke");
   const profileValue = option(arguments_, "--profiles");
@@ -268,11 +331,14 @@ export async function runWorkspaceTrust(
   return await withRegistryMutationLock(paths.stateDirectory, async () => {
     const current = await readRegistry(registryPath);
     const currentEntry = current.entries.find((item) => item.canonicalPath === canonicalPath);
-    const currentEntryIdentityMatches = currentEntry !== undefined && await identityMatches(currentEntry);
+    const currentEntryState = currentEntry === undefined ? "mismatch" : await identityState(currentEntry);
+    const currentEntryIdentityMatches = currentEntryState !== "mismatch";
     const currentEntryIsLive = currentEntry !== undefined &&
       (currentEntry.expiresAt === undefined || timestamp(currentEntry.expiresAt, "workspace expiry") > now.getTime()) &&
       currentEntryIdentityMatches;
-    if (currentEntryIsLive && profileValue === undefined && expiresAt === undefined) {
+    // A drifted record is honoured, but re-trusting it is the moment to write the
+    // live device back, so the stale number does not persist forever.
+    if (currentEntryIsLive && currentEntryState === "match" && profileValue === undefined && expiresAt === undefined) {
       return {
         schemaVersion: 1,
         trusted: true,
