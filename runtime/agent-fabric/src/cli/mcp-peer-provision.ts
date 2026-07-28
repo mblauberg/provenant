@@ -23,6 +23,8 @@ import {
 } from "./seat-store.js";
 
 const MAXIMUM_SEAT_LIFETIME_MS = 31 * 24 * 60 * 60 * 1_000;
+const ROSTER_CONVERGENCE_TIMEOUT_MS = 5_000;
+const ROSTER_CONVERGENCE_POLL_MS = 25;
 
 type InstalledSeat = {
   metadata: SeatMetadata;
@@ -178,6 +180,10 @@ function rosterCasChanged(error: unknown): boolean {
   return error instanceof Error && /active MCP seat generation changed/u.test(error.message);
 }
 
+async function waitForRosterConvergence(): Promise<void> {
+  await new Promise<void>((resolve) => setTimeout(resolve, ROSTER_CONVERGENCE_POLL_MS));
+}
+
 function parseArguments(arguments_: string[]): {
   project: string;
   seats: McpSeat[];
@@ -280,7 +286,8 @@ export async function provisionMcpPeerSeats(
         expectedPrincipalGeneration: capability.principal_generation,
       });
     }
-    for (let attempt = 0; attempt < 3; attempt += 1) {
+    const convergenceDeadline = Date.now() + ROSTER_CONVERGENCE_TIMEOUT_MS;
+    while (true) {
       const latestRoster = await installedRoster(paths, chair.metadata.projectPath);
       const bindings = new Map<McpSeat, ParsedSeatBinding>();
       for (const { metadata } of latestRoster) {
@@ -307,10 +314,10 @@ export async function provisionMcpPeerSeats(
           expiresAt,
         }, paths);
       } catch (error: unknown) {
-        if (attempt === 2 || !rosterCasChanged(error)) throw error;
+        if (!rosterCasChanged(error) || Date.now() >= convergenceDeadline) throw error;
+        await waitForRosterConvergence();
       }
     }
-    throw new Error("MCP peer roster retry exhausted");
   } finally {
     try {
       database?.close();

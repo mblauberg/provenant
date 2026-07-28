@@ -85,6 +85,8 @@ async function cli(
   return await execFileAsync(process.execPath, ["--import", tsxLoader, cliMain, ...arguments_], {
     cwd: value.project,
     env: value.environment,
+    timeout: 20_000,
+    killSignal: "SIGKILL",
   });
 }
 
@@ -188,18 +190,13 @@ describe("MCP peer provisioning from a fresh project", () => {
     await terminateTrackedTestProcess(bootstrapPid);
     daemonPids.delete(bootstrapPid);
 
-    const attempts = await Promise.allSettled([
+    const results = await Promise.all([
       cli(value, ["mcp", "peer-provision", "--project", value.project, "--seat", "agy"]),
       cli(value, ["mcp", "peer-provision", "--project", value.project, "--seat", "cursor"]),
     ]);
-    for (const attempt of attempts) {
-      const output = attempt.status === "fulfilled"
-        ? attempt.value.stdout + attempt.value.stderr
-        : String(attempt.reason);
-      expect(output).not.toMatch(/af[bc]_[A-Za-z0-9_-]{43}/u);
+    for (const result of results) {
+      expect(result.stdout + result.stderr).not.toMatch(/af[bc]_[A-Za-z0-9_-]{43}/u);
     }
-    await cli(value, ["mcp", "peer-provision", "--project", value.project, "--seat", "agy"]);
-    await cli(value, ["mcp", "peer-provision", "--project", value.project, "--seat", "cursor"]);
     await trackCurrentDaemon(value);
 
     const database = new Database(value.databasePath, { readonly: true, fileMustExist: true });

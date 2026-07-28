@@ -94,4 +94,18 @@ describe("MCP peer provision daemon lifecycle", () => {
     ], value.paths)).rejects.toThrow("chair connection refused");
     expect(mocks.release).toHaveBeenCalledOnce();
   });
+
+  it("releases the daemon and surfaces cleanup failure when client close rejects", async () => {
+    const value = await fixture();
+    const close = vi.fn(async () => {
+      throw new Error("client close failed");
+    });
+    mocks.connect.mockResolvedValueOnce({ close });
+
+    await expect(provisionMcpPeerSeats([
+      "--project", value.project, "--seat", "agy",
+    ], value.paths)).rejects.toThrow("client close failed");
+    expect(close).toHaveBeenCalledOnce();
+    expect(mocks.release).toHaveBeenCalledOnce();
+  });
 });
