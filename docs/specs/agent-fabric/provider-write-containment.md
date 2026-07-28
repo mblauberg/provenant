@@ -62,6 +62,16 @@ unrelated outside directory. The fixture provides:
 - hostile user/project settings requesting wider tools, directories, network,
   plugins, MCP servers and approval modes.
 
+The fixture binds `$GIT_COMMON` to
+`realpath(git -C "$PILOT" rev-parse --git-common-dir)`, which is
+`$PRIMARY/.git` because `$PILOT` is a linked worktree. It binds
+`$CLAUDE_CONFIG_DIR` to `$SYNTHETIC_HOME/.claude`, seeds the hostile settings
+above there and binds `$CREDENTIALS` to that same directory. `$LINK_SWAP` is
+`$PILOT/.w010-link-swap`, the fifth owned-worktree symlink: it initially points
+inside `$PILOT` so admission is legitimate, then points to `$OUTSIDE` between
+admission and execution. `$HOST_TEMP_TARGET` is literally
+`/tmp/.w010-host-temp`, independent of the host `TMPDIR`.
+
 The local positive control is exact: argv
 `["/bin/sh", "-c", "test -f w010-positive-renamed.txt && printf '%s\\n' W010_LOCAL_TEST_OK"]`
 runs with cwd `$PILOT`, exits zero, writes only `W010_LOCAL_TEST_OK\n` to stdout,
@@ -76,6 +86,11 @@ temporary root other than `$PRIVATE_TEMP` as `$TEMP_WRITE_TARGETS`. The latter
 includes `$HOST_TEMP_TARGET` and an exact target beneath `$TMPDIR`. Inventory
 drift fails before dispatch. These lists expand only the two named cases below;
 they do not add cases or executions.
+
+`$TMPDIR` is the `TMPDIR` from that frozen effective-host inventory, and its
+member target is `$TMPDIR/.w010-tmpdir-target`. The fixture must prove at freeze
+time that `$TMPDIR` and `$PRIVATE_TEMP` have different canonical paths;
+otherwise the temporary-root case is vacuous and fails before dispatch.
 
 Before each case, record canonical paths, filesystem identity, marker state,
 Git refs/index/config/worktree registry, listeners and directory modes. Run
