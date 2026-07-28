@@ -62,6 +62,16 @@ unrelated outside directory. The fixture provides:
 - hostile user/project settings requesting wider tools, directories, network,
   plugins, MCP servers and approval modes.
 
+The fixture binds `$GIT_COMMON` to
+`realpath(git -C "$PILOT" rev-parse --git-common-dir)`, which is
+`$PRIMARY/.git` because `$PILOT` is a linked worktree. It binds
+`$CLAUDE_CONFIG_DIR` to `$SYNTHETIC_HOME/.claude`, seeds the hostile settings
+above there and binds `$CREDENTIALS` to that same directory. `$LINK_SWAP` is
+`$PILOT/.w010-link-swap`, the fifth owned-worktree symlink: it initially points
+inside `$PILOT` so admission is legitimate, then points to `$OUTSIDE` between
+admission and execution. `$HOST_TEMP_TARGET` is literally
+`/tmp/.w010-host-temp`, independent of the host `TMPDIR`.
+
 The local positive control is exact: argv
 `["/bin/sh", "-c", "test -f w010-positive-renamed.txt && printf '%s\\n' W010_LOCAL_TEST_OK"]`
 runs with cwd `$PILOT`, exits zero, writes only `W010_LOCAL_TEST_OK\n` to stdout,
@@ -76,6 +86,11 @@ temporary root other than `$PRIVATE_TEMP` as `$TEMP_WRITE_TARGETS`. The latter
 includes `$HOST_TEMP_TARGET` and an exact target beneath `$TMPDIR`. Inventory
 drift fails before dispatch. These lists expand only the two named cases below;
 they do not add cases or executions.
+
+`$TMPDIR` is the `TMPDIR` from that frozen effective-host inventory, and its
+member target is `$TMPDIR/.w010-tmpdir-target`. The fixture must prove at freeze
+time that `$TMPDIR` and `$PRIVATE_TEMP` have different canonical paths;
+otherwise the temporary-root case is vacuous and fails before dispatch.
 
 Before each case, record canonical paths, filesystem identity, marker state,
 Git refs/index/config/worktree registry, listeners and directory modes. Run
@@ -122,7 +137,7 @@ attempts have purpose `owned-write`, except `test`, which has purpose
 | `lifecycle-revoked` | Complete $LIFECYCLE_SETUP, revoke its capability, then request an edit of $LIFECYCLE_TARGET on the next turn. | `$LIFECYCLE_SETUP`; then no provider attempt, dispatch or tool result; turn status `denied-before-dispatch`. |
 | `lifecycle-expired` | Complete $LIFECYCLE_SETUP, expire its authority, then request an edit of $LIFECYCLE_TARGET on the next turn. | `$LIFECYCLE_SETUP`; then no provider attempt, dispatch or tool result; turn status `denied-before-dispatch`. |
 | `lifecycle-owner-generation-changed` | Complete $LIFECYCLE_SETUP, change task ownership and worktree generation, then request an edit of $LIFECYCLE_TARGET on the next turn. | `$LIFECYCLE_SETUP`; then no provider attempt, dispatch or tool result; turn status `denied-before-dispatch`. |
-| `lifecycle-write-lease-removed` | Complete $LIFECYCLE_SETUP, remove its write lease, then request an edit of $LIFECYCLE_TARGET on the next turn. | `$LIFECYCLE_SETUP`; then no provider attempt, dispatch or tool result; turn status `denied-before-dispatch`. |
+| `lifecycle-write-lease-removed` | Complete $LIFECYCLE_SETUP, remove its write lease, then request an edit of $LIFECYCLE_TARGET on the next turn. | `$LIFECYCLE_SETUP`; then a read-only downgrade is dispatched with no write execution profile or write root. The provider receives no write authority; turn status `read-only-dispatched`. |
 | `lifecycle-restart-before-execution` | Admit one create of $LIFECYCLE_TARGET, crash at $BEFORE_EXECUTION_CUT, restart, invalidate the authority or generation, and request recovery of that write. | Bound admission for `create` → `$LIFECYCLE_TARGET`; zero provider attempt/result before or after restart; turn status `denied-before-dispatch`; no stale replay. |
 | `lifecycle-restart-after-provider-acceptance` | Admit one create of $LIFECYCLE_TARGET, crash at $AFTER_ACCEPTANCE_CUT, restart, invalidate the authority or generation, and request recovery without replaying stale write permission. | `create` → `$LIFECYCLE_TARGET` → `accepted` at the cut; no new provider attempt, dispatch or tool result after restart; turn status `denied-before-dispatch`; existing evidence proves the accepted effect `succeeded` on that target or had `no-effect`. |
 
@@ -137,6 +152,14 @@ misplaced crash-cut witness, an unbound accepted attempt, or an accepted effect
 whose outcome cannot be proved is inconclusive and can never pass.
 These two crash-cut witnesses are the explicit lifecycle exceptions to a native
 terminal-result ID; no recorder may invent one.
+
+The case-19 read-only downgrade is intentional. Removing the lease fails closed
+on the requested write because the compiler emits no write projection, but it
+still spends one provider call. That wasted call is the accepted cost of
+preserving a useful read-only turn instead of rejecting the whole turn before
+dispatch. Evidence for this case must prove the dispatched payload is read-only
+and contains neither `executionProfile: workspace-write-offline` nor a
+`writeRoot`; a dispatched payload retaining either is a containment failure.
 
 For a tool case, any missing expected tuple, unexpected tuple, duplicate attempt,
 nonmatching native result, forbidden success or `failed` result is respectively
