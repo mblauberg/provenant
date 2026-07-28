@@ -1,0 +1,302 @@
+{
+  "drift": {
+    "adapter_capability_snapshots": {
+      "migration_only": [],
+      "spec_only": [
+        "capability_kind"
+      ]
+    },
+    "adapter_effective_configurations": {
+      "migration_only": [],
+      "spec_only": [
+        "activation_configuration_subject_kind",
+        "discovery_surface_digest"
+      ]
+    },
+    "lifecycle_admitted_run_scopes": {
+      "migration_only": [
+        "scope_admission_resolution_digest"
+      ],
+      "spec_only": [
+        "admission_resolution_digest"
+      ]
+    },
+    "lifecycle_receipt_batch_completions": {
+      "migration_only": [
+        "effects_set_digest",
+        "secondary_fresh_origin_effect_digest",
+        "secondary_fresh_origin_effect_role"
+      ],
+      "spec_only": [
+        "secondary_fresh_effect_digest",
+        "secondary_fresh_effect_ordinal",
+        "secondary_fresh_effect_role"
+      ]
+    },
+    "lifecycle_receipt_fresh_origin_effects": {
+      "migration_only": [
+        "affected_generation_loss_before_state",
+        "batch_transition_kind",
+        "effect_json",
+        "effect_role",
+        "receipt_ordinal"
+      ],
+      "spec_only": [
+        "batch_intent_count",
+        "batch_secondary_intent_kind",
+        "ordinal",
+        "recovery_from_custody_id",
+        "recovery_from_custody_revision",
+        "recovery_from_generation_loss_id",
+        "recovery_from_generation_loss_revision",
+        "role",
+        "transition_kind"
+      ]
+    },
+    "lifecycle_scope_admission_resolutions": {
+      "migration_only": [
+        "admission_digest",
+        "admitted_at",
+        "initial_head_authority_sequence",
+        "initial_ordered_record_set_digest",
+        "initial_scope_checkpoint_json",
+        "initial_scope_head_revision",
+        "namespace_member_json"
+      ],
+      "spec_only": [
+        "initial_head_receipt_digest"
+      ]
+    },
+    "lifecycle_transition_applies": {
+      "migration_only": [
+        "fresh_origin_effect_digest",
+        "fresh_origin_effect_role",
+        "new_custody_revision"
+      ],
+      "spec_only": []
+    },
+    "provider_action_pair_preflights": {
+      "migration_only": [
+        "failure_json"
+      ],
+      "spec_only": []
+    },
+    "provider_action_route_dispatches": {
+      "migration_only": [],
+      "spec_only": [
+        "discovery_surface_digest"
+      ]
+    },
+    "provider_action_routes": {
+      "migration_only": [
+        "adapter_contract_digest",
+        "admission_digest",
+        "bundle_digest",
+        "bundle_search_index_digest",
+        "chair_binding_generation",
+        "context_policy_digest",
+        "context_policy_revision",
+        "coverage_digest",
+        "deployed_route_admission_json",
+        "final_prompt_digest",
+        "harness_digest",
+        "harness_revision",
+        "mandatory_read_set_digest",
+        "manifest_root_digest",
+        "model",
+        "profile_digest",
+        "profile_schema_digest",
+        "provider_family",
+        "publication_lineage_digest",
+        "requested_adapter_id",
+        "requested_effort",
+        "resolved_adapter_id",
+        "resolved_effort_kind",
+        "resolved_effort_value",
+        "reviewed_artifact_id",
+        "reviewed_artifact_revision",
+        "risk_read_map_digest",
+        "route_policy_revision",
+        "route_receipt_json",
+        "route_request_digest",
+        "route_request_json",
+        "slot_head_generation"
+      ],
+      "spec_only": [
+        "reservation_digest",
+        "route_ordinal"
+      ]
+    },
+    "provider_actions": {
+      "migration_only": [
+        "action_id",
+        "adapter_id",
+        "budget_authority_id",
+        "budget_reservation_json",
+        "budget_settlement_json",
+        "budget_started_at",
+        "budget_state",
+        "effect_count",
+        "execution_count",
+        "finding_capacity_reservation_digest",
+        "history_json",
+        "idempotency_proven",
+        "identity_hash",
+        "journal_revision",
+        "operation",
+        "payload_hash",
+        "payload_json",
+        "provider_session_generation",
+        "result_json",
+        "run_id",
+        "status",
+        "target_agent_id",
+        "task_id",
+        "turn_lease_generation",
+        "updated_at"
+      ],
+      "spec_only": [
+        "route_listed_at",
+        "route_ordinal"
+      ]
+    },
+    "provider_review_evidence": {
+      "migration_only": [
+        "adapter_id",
+        "answer_digest",
+        "certifying",
+        "current_finding_set_digest",
+        "provider_resolved_finding_set_digest",
+        "reservation_digest",
+        "result_digest"
+      ],
+      "spec_only": [
+        "action_adapter_id",
+        "answer_safety",
+        "attempt_generation",
+        "chair_binding_digest",
+        "coverage_summary_digest",
+        "endpoint_provider",
+        "evidence_json",
+        "final_prompt_digest",
+        "finding_capacity_reservation_digest",
+        "finding_set_digest",
+        "finding_window_digest",
+        "model",
+        "mutation_receipt_digest",
+        "provider_answer_digest",
+        "provider_family",
+        "reported_resolved_finding_set_digest",
+        "review_result_digest",
+        "route_admission_digest",
+        "terminal_kind",
+        "terminal_result_digest",
+        "verdict"
+      ]
+    },
+    "provider_review_results": {
+      "migration_only": [],
+      "spec_only": [
+        "terminal_sequence"
+      ]
+    },
+    "review_certification_cuts": {
+      "migration_only": [],
+      "spec_only": [
+        "lifecycle_review_authority_receipt_digest",
+        "lifecycle_review_decision_digest"
+      ]
+    },
+    "review_finding_capacity_reservations": {
+      "migration_only": [],
+      "spec_only": [
+        "attempt_generation"
+      ]
+    },
+    "review_portal_process_custody": {
+      "migration_only": [
+        "capsule_file_digest",
+        "custody_directory_path",
+        "executable_identity_digest",
+        "socket_file_digest"
+      ],
+      "spec_only": [
+        "capsule_claim_basename",
+        "capsule_cleanup_state",
+        "capsule_content_digest",
+        "capsule_file_device",
+        "capsule_file_inode",
+        "capsule_link_count",
+        "claim_directory_basename",
+        "claim_directory_device",
+        "claim_directory_inode",
+        "claim_name_codec",
+        "custody_directory_basename",
+        "custody_directory_contract_digest",
+        "directory_cleanup_evidence_digest",
+        "directory_cleanup_state",
+        "executable_parent_fd_number",
+        "filesystem_intent_digest",
+        "home_artifact_intent_digest",
+        "home_artifact_role",
+        "launch_ack_digest",
+        "launch_action_binding_digest",
+        "launch_envelope_digest",
+        "launch_nonce_digest",
+        "launch_registration_digest",
+        "launch_row_revision",
+        "launch_stub_identity_digest",
+        "process_custody_launch_digest",
+        "provider_closure_digest",
+        "provider_cwd_fd_number",
+        "provider_exec_fd_number",
+        "recovery_root_device",
+        "recovery_root_identity_digest",
+        "recovery_root_inode",
+        "recovery_root_path",
+        "registration_fd_number",
+        "socket_claim_basename",
+        "socket_cleanup_state",
+        "socket_file_device",
+        "socket_file_inode",
+        "socket_identity_digest",
+        "socket_link_count",
+        "source_contract_set_digest",
+        "supervisor_executable_identity_digest",
+        "temp_artifact_intent_digest",
+        "temp_artifact_role"
+      ]
+    },
+    "review_target_chair_bindings": {
+      "migration_only": [],
+      "spec_only": [
+        "lifecycle_review_authority_receipt_digest",
+        "lifecycle_review_decision_digest"
+      ]
+    },
+    "review_target_rebind_receipts": {
+      "migration_only": [],
+      "spec_only": [
+        "lifecycle_certification_cut_digest",
+        "lifecycle_review_authority_receipt_digest",
+        "lifecycle_review_decision_digest"
+      ]
+    },
+    "route_integrity_recoveries": {
+      "migration_only": [
+        "reservation_id"
+      ],
+      "spec_only": [
+        "attempt_generation",
+        "route_ordinal",
+        "slot",
+        "target_generation",
+        "task_id"
+      ]
+    }
+  },
+  "elided": [
+    "docs/specs/agent-fabric/observability.md: provider_action_routes has an elided DDL block",
+    "docs/specs/agent-fabric/observability.md: provider_actions has an elided DDL block"
+  ]
+}
