@@ -88,10 +88,13 @@ the output is validated — a loose schema lets a cheap model invent fields, whi
 ## Choosing among admissible routes
 
 The tables above decide what a route *must* be. When more than one route
-satisfies them, choose on model character rather than habit: read
-`docs/model-dossier.md`, which owns per-model strengths, weaknesses and cost
-profile, and the category notes for adversarial, long-context, cheap-bulk and
-effort-substitution work. Its entries are examples, not an enumeration — a task
+satisfies them, read `docs/model-preferences.md` first: it records the standing
+preferences in plain prose, is edited directly by the operator, and is enforced
+by nothing. Prefer what it says, depart from it when the work calls for
+something else, and record why. Then choose on model character rather than
+habit: read `docs/model-dossier.md`, which owns per-model strengths, weaknesses
+and cost profile, and the category notes for adversarial, long-context,
+cheap-bulk and effort-substitution work. Its entries are examples, not an enumeration — a task
 whose character is unlisted is still routed by reasoning from the nearest
 entries. The dossier is advisory: it ranks admissible options and never widens
 authority, reaches a disabled adapter, or overrides a reservation, tier or

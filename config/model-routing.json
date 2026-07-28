@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "catalog_date": "2026-07-26",
+  "catalog_date": "2026-07-29",
   "task_class_routes": {
     "mechanical": {"alias": "scout", "effort": "low", "role": "worker"},
     "legwork": {"alias": "workhorse", "effort": "medium", "role": "worker"},
@@ -11,7 +11,7 @@
     "anthropic": {
       "aliases": {
         "flagship": ["opus"],
-        "workhorse": ["sonnet"],
+        "workhorse": ["sonnet", "opus"],
         "scout": ["haiku"]
       },
       "role_overrides": {
@@ -42,7 +42,7 @@
     "openai": {
       "aliases": {
         "flagship": ["gpt-5.6-sol"],
-        "workhorse": ["gpt-5.6-terra"],
+        "workhorse": ["gpt-5.6-terra", "gpt-5.6-luna"],
         "scout": ["gpt-5.6-luna"]
       },
       "role_overrides": {},
@@ -52,6 +52,15 @@
         "critical-review": {"flagship": "max"}
       },
       "ultra_eligible_roles": ["lead", "orchestrator"],
+      "effort_fallback_order": ["max", "xhigh", "high", "medium", "low"]
+    },
+    "google": {
+      "aliases": {
+        "flagship": ["gemini-3.1-pro"],
+        "workhorse": ["gemini-3.6-flash"],
+        "scout": ["gemini-3.6-flash"]
+      },
+      "role_overrides": {},
       "effort_fallback_order": ["max", "xhigh", "high", "medium", "low"]
     }
   },
