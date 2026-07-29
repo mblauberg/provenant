@@ -300,10 +300,22 @@ function rowOrNotFound(value: unknown, label: string): Row {
   return value;
 }
 
-function assertActiveMcpSeatGeneration(row: Row): void {
+function assertActiveMcpSeatGeneration(row: Row, database: Database.Database, tokenHash: string): void {
   const generation = row.mcp_seat_generation;
   if (generation === null || generation === undefined) return;
   if (typeof generation !== "string" || row.active_mcp_seat_generation !== generation) {
+    // Lazily check chair lease status only on error
+    const leaseStatus = database.prepare(`
+      SELECT lease.status
+        FROM mcp_seat_generation_members member
+        JOIN mcp_seat_generations generation ON generation.generation=member.generation
+        LEFT JOIN run_chair_leases lease ON lease.lease_id=generation.chair_lease_id
+       WHERE member.token_hash=?
+    `).get(tokenHash) as { status?: unknown } | undefined;
+    
+    if (leaseStatus?.status !== "active") {
+      throw new FabricError("AUTHENTICATION_FAILED", "capability belongs to an MCP seat generation whose chair lease is not active");
+    }
     throw new FabricError("AUTHENTICATION_FAILED", "capability belongs to an inactive MCP seat generation");
   }
 }
@@ -2292,7 +2304,7 @@ export class Fabric {
     if (row.revoked_at !== null || numberField(row, "expires_at") <= this.#clock()) {
       throw new FabricError("AUTHENTICATION_FAILED", "capability is expired or revoked");
     }
-    assertActiveMcpSeatGeneration(row);
+    assertActiveMcpSeatGeneration(row, this.#database, sha256(token));
     return new FabricClient(this, stringField(row, "run_id"), stringField(row, "agent_id"), sha256(token));
   }
 
@@ -2326,7 +2338,7 @@ export class Fabric {
     if (authenticated.revoked_at !== null || numberField(authenticated, "expires_at") <= this.#clock()) {
       throw new FabricError("AUTHENTICATION_FAILED", "protocol credential is expired or revoked");
     }
-    assertActiveMcpSeatGeneration(authenticated);
+    assertActiveMcpSeatGeneration(authenticated, this.#database, sha256(token));
     const authority = parseAuthority(authenticated);
     const denied = new Set(authority.deniedActions);
     return {
@@ -3480,9 +3492,9 @@ export class Fabric {
   assertCapability(runId: string, agentId: string, tokenHash: string, requiredOperation: FabricOperation, allowSuspended = false): void {
     const row = this.#database
       .prepare(`
-        SELECT c.expires_at,c.revoked_at,a.authority_json,a.authority_hash,g.lifecycle,
-               member.generation AS mcp_seat_generation,
-               active.generation AS active_mcp_seat_generation
+      SELECT c.expires_at,c.revoked_at,a.authority_json,a.authority_hash,g.lifecycle,
+             member.generation AS mcp_seat_generation,
+             active.generation AS active_mcp_seat_generation
           FROM capabilities c
           JOIN agents g ON g.run_id=c.run_id AND g.agent_id=c.agent_id
           JOIN authorities a ON a.authority_id=g.authority_id
@@ -3498,7 +3510,7 @@ export class Fabric {
     ) {
       throw new FabricError("AUTHENTICATION_FAILED", "capability is expired, revoked or unknown");
     }
-    assertActiveMcpSeatGeneration(row);
+    assertActiveMcpSeatGeneration(row, this.#database, tokenHash);
     const authority = parseAuthority(row);
     if (authority.deniedActions.includes(requiredOperation) || !authority.actions.includes(requiredOperation)) {
       throw new FabricError("CAPABILITY_FORBIDDEN", `authority does not permit ${requiredOperation}`);

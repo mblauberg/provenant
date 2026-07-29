@@ -182,13 +182,13 @@ function shellQuote(value: string): string {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
 
-function isSchemaCutoverRefusal(error: unknown): boolean {
+export function isSchemaCutoverRefusal(error: unknown): boolean {
   return typeof error === "object" && error !== null &&
     "code" in error && error.code === "SCHEMA_CUTOVER_REQUIRED" &&
     "preserved" in error && error.preserved === true;
 }
 
-function schemaCutoverGate(databasePath: string, cause: unknown): SchemaCutoverGate {
+export function schemaCutoverGate(databasePath: string, cause: unknown): SchemaCutoverGate {
   const inspection = inspectFabricDatabaseForCutover(databasePath);
   const mismatch = inspection.state === "incompatible"
     ? inspection.mismatch
@@ -328,7 +328,12 @@ export async function inspectBootstrapMcpSeat(input: {
   paths: FabricPaths;
 }): Promise<BootstrapMcpSeatIdentity> {
   const seat = parseMcpSeat(input.environment.AGENT_FABRIC_SEAT ?? "");
-  if (seat !== "claude" && seat !== "codex") throw new Error("MCP bootstrap supports only claude or codex seats");
+  if (seat !== "claude" && seat !== "codex") {
+    throw new Error(
+      `MCP bootstrap creates only chair seats claude or codex; run ` +
+      `"$HOME/.agents/scripts/agent-fabric" mcp peer-provision --project ${shellQuote(input.cwd)} --seat ${seat} instead`,
+    );
+  }
   const canonicalRoot = await realpath(input.cwd);
   const database = new Database(input.paths.databasePath, { readonly: true, fileMustExist: true });
   try {
@@ -387,7 +392,12 @@ export async function bootstrapMcpSeat(input: {
   smokeDeadlineMs?: number;
 }): Promise<InstalledBootstrapMcpSeat> {
   const seat = parseMcpSeat(input.environment.AGENT_FABRIC_SEAT ?? "");
-  if (seat !== "claude" && seat !== "codex") throw new Error("MCP bootstrap supports only claude or codex seats");
+  if (seat !== "claude" && seat !== "codex") {
+    throw new Error(
+      `MCP bootstrap creates only chair seats claude or codex; run ` +
+      `"$HOME/.agents/scripts/agent-fabric" mcp peer-provision --project ${shellQuote(input.cwd)} --seat ${seat} instead`,
+    );
+  }
   const canonicalRoot = await realpath(input.cwd);
   let identity: Awaited<ReturnType<typeof trustedWorkspaceIdentity>>;
   try {

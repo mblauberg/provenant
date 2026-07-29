@@ -334,20 +334,54 @@ async function daemonState(paths: FabricPaths): Promise<{ reachable: boolean; pi
   }
 }
 
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", `'"'"'`)}'`;
+}
+
 async function seatStatus(paths: FabricPaths, project: string): Promise<Array<Record<string, unknown>>> {
-  const seats: Array<Record<string, unknown>> = [];
+  const registered = new Map<string, SeatMetadata>();
   for (const seat of MCP_SEATS) {
     try {
       const location = await resolveSeatPaths({ stateDirectory: paths.stateDirectory, project, seat });
       const metadata: unknown = JSON.parse(await readFile(location.metadataPath, "utf8"));
       if (typeof metadata !== "object" || metadata === null) throw new Error("metadata is invalid");
-      const value = metadata as SeatMetadata;
-      seats.push({ seat, agentId: value.agentId, role: value.role, runId: value.runId, expiresAt: value.expiresAt, active: Date.parse(value.expiresAt) > Date.now() });
+      registered.set(seat, metadata as SeatMetadata);
     } catch {
-      seats.push({ seat, active: false, registered: false });
+      // A missing or invalid seat is reported after the complete roster scan so
+      // the remedy can distinguish zero-state bootstrap from an absent peer.
     }
   }
-  return seats;
+  const chairExists = [...registered.values()].some(({ role }) => role === "chair");
+  return MCP_SEATS.map((seat) => {
+    const value = registered.get(seat);
+    if (value !== undefined) {
+      return {
+        seat,
+        agentId: value.agentId,
+        role: value.role,
+        originKind: value.originKind ?? "legacy-bootstrap",
+        runId: value.runId,
+        expiresAt: value.expiresAt,
+        active: Date.parse(value.expiresAt) > Date.now(),
+        registered: true,
+      };
+    }
+    return chairExists
+      ? {
+          seat,
+          registered: false,
+          active: false,
+          reason: "PEER_SEAT_NOT_PROVISIONED",
+          remedy: `"$HOME/.agents/scripts/agent-fabric" mcp peer-provision --project ${shellQuote(project)} --seat ${seat}`,
+        }
+      : {
+          seat,
+          registered: false,
+          active: false,
+          reason: "PROJECT_NOT_BOOTSTRAPPED",
+          remedy: `cd ${shellQuote(project)} && "$HOME/.agents/scripts/agent-fabric" bootstrap --seat codex`,
+        };
+  });
 }
 
 export async function fabricStatus(arguments_: string[], paths: FabricPaths): Promise<Record<string, unknown>> {

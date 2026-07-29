@@ -264,6 +264,13 @@ closed instead of authenticating into another project's run. Clients that do
 not preserve the workspace working directory need project-scoped registration.
 Subdirectories intentionally inherit the nearest ancestor project's seat.
 
+### Optional MCP clients
+
+Cursor, Agy and Kiro use the `codex` MCP seat by design while retaining their
+own client labels. A missing `agy` seat is therefore not an error for those
+clients or for cross-family Gemini review; provision an `agy` seat only when a
+separate peer principal is deliberately required.
+
 The harness installer configures only its selected primary client by default.
 Pass `--mcp-clients all` to register all six clients. Configure and verify all
 six clients, including Claude Code and Codex, from the harness checkout with:

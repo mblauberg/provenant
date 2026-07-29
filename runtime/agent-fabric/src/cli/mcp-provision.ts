@@ -3,13 +3,19 @@ import { lstat, open } from "node:fs/promises";
 import { join } from "node:path";
 
 import { MCP_BOOTSTRAP_CREDENTIALS_FEATURE } from "@local/agent-fabric-protocol";
-import { connectFabricDaemon } from "../daemon/client.js";
+import { connectFabricDaemon, startFabricDaemon } from "../daemon/client.js";
 import { currentMcpSeatGeneration } from "../core/mcp-seat-generation.js";
 import {
   parseCapabilityReceipt,
   type PrivateDiscoveryCapabilityReceipt,
 } from "../daemon/private-discovery.js";
 import type { FabricPaths } from "./paths.js";
+import { defaultDaemonStartOptions } from "./default-daemon-options.js";
+import {
+  isSchemaCutoverRefusal,
+  McpBootstrapSchemaCutoverGateError,
+  schemaCutoverGate,
+} from "./mcp-bootstrap.js";
 import {
   parseMcpSeat,
   installSeatGeneration,
@@ -50,11 +56,41 @@ export type McpProvisionOutput = {
   }>;
 };
 
-type ParsedSeatBinding = {
+export type ParsedSeatBinding = {
   seat: McpSeat;
   agentId: string;
   expectedPrincipalGeneration: number;
 };
+
+export type ProvisionedSeatRosterInput = {
+  project: string;
+  projectSessionId: string;
+  sessionRevision: number;
+  sessionGeneration: number;
+  runId: string;
+  runRevision: number;
+  chairSeat: McpSeat;
+  chairAgentId: string;
+  chairGeneration: number;
+  chairLeaseId: string;
+  bindings: ParsedSeatBinding[];
+  expiresAt: string;
+};
+
+export async function startMcpProvisionDaemon(
+  paths: FabricPaths,
+  environment: NodeJS.ProcessEnv = process.env,
+): Promise<Awaited<ReturnType<typeof startFabricDaemon>>> {
+  try {
+    return await startFabricDaemon(defaultDaemonStartOptions(paths, environment.AGENTS_HOME));
+  } catch (cause: unknown) {
+    if (!isSchemaCutoverRefusal(cause)) throw cause;
+    throw new McpBootstrapSchemaCutoverGateError(
+      schemaCutoverGate(paths.databasePath, cause),
+      { cause },
+    );
+  }
+}
 
 function assertExactOptions(arguments_: string[], names: readonly string[], command: string): void {
   if (arguments_.length !== names.length * 2) {
@@ -198,6 +234,46 @@ export async function provisionMcpSeats(arguments_: string[], paths: FabricPaths
   if (chairBinding?.agentId !== chairAgentId) {
     throw new Error("mcp provision chair seat must bind the exact supplied chair agent");
   }
+  const input: ProvisionedSeatRosterInput = {
+    project,
+    projectSessionId,
+    sessionRevision,
+    sessionGeneration,
+    runId,
+    runRevision,
+    chairSeat,
+    chairAgentId,
+    chairGeneration,
+    chairLeaseId,
+    bindings,
+    expiresAt,
+  };
+  const daemonHandle = await startMcpProvisionDaemon(paths);
+  try {
+    return await bindProvisionedSeatRoster(input, paths);
+  } finally {
+    daemonHandle.release();
+  }
+}
+
+export async function bindProvisionedSeatRoster(
+  input: ProvisionedSeatRosterInput,
+  paths: FabricPaths,
+): Promise<McpProvisionOutput> {
+  const {
+    project,
+    projectSessionId,
+    sessionRevision,
+    sessionGeneration,
+    runId,
+    runRevision,
+    chairSeat,
+    chairAgentId,
+    chairGeneration,
+    chairLeaseId,
+    bindings,
+    expiresAt,
+  } = input;
   const { projectKey, projectPath } = await resolveSeatProject({
     stateDirectory: paths.stateDirectory,
     project,
