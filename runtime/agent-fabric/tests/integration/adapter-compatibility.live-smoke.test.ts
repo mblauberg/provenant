@@ -6,7 +6,7 @@ import { repositoryPath } from "../support/primary-adapter-testkit.ts";
 const liveSmokeEnabled = process.env.AGENT_FABRIC_LIVE_COMPATIBILITY_SMOKE === "1";
 
 describe.skipIf(!liveSmokeEnabled)("live workstation adapter compatibility smoke", () => {
-  it("matches every checked-in active adapter pin", async () => {
+  it("validates every checked-in active adapter entry", async () => {
     const result = await verifyAdapterCompatibility({
       compatibilityPath: repositoryPath("config/adapter-compatibility.yaml"),
       schemaPath: repositoryPath("runtime/agent-fabric/schemas/adapter-compatibility.schema.json"),

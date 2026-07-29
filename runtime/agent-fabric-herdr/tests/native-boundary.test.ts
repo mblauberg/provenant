@@ -38,7 +38,7 @@ describe("sealed Herdr CLI boundary", () => {
       run: async (request: HerdrCommandRequest): Promise<Buffer> => {
         calls.push(request);
         if (request.arguments[0] === "api") {
-          return response({ snapshot: { version: "0.7.3", protocol: 16, agents: [], panes: [] } });
+          return response({ snapshot: { version: "fixture-version", protocol: 16, agents: [], panes: [] } });
         }
         return response({ agent: { pane_id: "w5:p9" } });
       },
@@ -46,7 +46,6 @@ describe("sealed Herdr CLI boundary", () => {
     const journal = new HerdrEffectEvidenceJournal({ stateDirectory: state });
     const boundary = new HerdrCliBoundary({
       executable: "/opt/homebrew/bin/herdr",
-      expectedVersion: "0.7.3",
       expectedProtocol: 16,
       projectId: intent.projectId,
       projectSessionId: intent.projectSessionId,
@@ -119,7 +118,7 @@ describe("sealed Herdr CLI boundary", () => {
     const process = {
       run: async (): Promise<Buffer> => response({
         snapshot: {
-          version: "0.7.3",
+          version: "fixture-version",
           protocol: 16,
           agents: [{
             agent: "codex",
@@ -134,7 +133,6 @@ describe("sealed Herdr CLI boundary", () => {
     const journal = new HerdrEffectEvidenceJournal({ stateDirectory: state });
     const boundary = new HerdrCliBoundary({
       executable: "/opt/homebrew/bin/herdr",
-      expectedVersion: "0.7.3",
       expectedProtocol: 16,
       projectId: intent.identity.projectId,
       projectSessionId: intent.identity.projectSessionId,
@@ -192,7 +190,6 @@ describe("sealed Herdr CLI boundary", () => {
     const calls: HerdrCommandRequest[] = [];
     const boundary = new HerdrCliBoundary({
       executable: "/opt/homebrew/bin/herdr",
-      expectedVersion: "0.7.3",
       expectedProtocol: 16,
       projectId: intent.identity.projectId,
       projectSessionId: intent.identity.projectSessionId,
@@ -203,7 +200,7 @@ describe("sealed Herdr CLI boundary", () => {
           calls.push(request);
           return response({
             snapshot: {
-              version: "0.7.3",
+              version: "fixture-version",
               protocol: 16,
               agents: [{
                 agent: "codex",
@@ -246,7 +243,6 @@ describe("sealed Herdr CLI boundary", () => {
     const calls: HerdrCommandRequest[] = [];
     const boundary = new HerdrCliBoundary({
       executable: "/opt/homebrew/bin/herdr",
-      expectedVersion: "0.7.3",
       expectedProtocol: 16,
       projectId: "project-01",
       projectSessionId: "session-01",
@@ -257,7 +253,7 @@ describe("sealed Herdr CLI boundary", () => {
           calls.push(request);
           return response({
             snapshot: {
-              version: "0.7.3",
+              version: "fixture-version",
               protocol: 16,
               agents: [{ name, cwd: project, pane_id: "w5:p9", tab_id: "w5:t2" }],
               panes: [],
@@ -312,7 +308,7 @@ describe("sealed Herdr CLI boundary", () => {
       run: async (request: HerdrCommandRequest): Promise<Buffer> => {
         calls.push(request);
         if (request.arguments[0] === "api") {
-          return response({ snapshot: { version: "0.7.3", protocol: 16, agents: [{
+          return response({ snapshot: { version: "fixture-version", protocol: 16, agents: [{
             agent: "codex",
             cwd: project,
             agent_session: { source: "herdr:codex", agent: "codex", kind: "id", value: "thread-01" },
@@ -325,7 +321,6 @@ describe("sealed Herdr CLI boundary", () => {
     const journal = new HerdrEffectEvidenceJournal({ stateDirectory: state });
     const boundary = new HerdrCliBoundary({
       executable: "/opt/homebrew/bin/herdr",
-      expectedVersion: "0.7.3",
       expectedProtocol: 16,
       projectId: identity.projectId,
       projectSessionId: identity.projectSessionId,
@@ -412,7 +407,6 @@ describe("sealed Herdr CLI boundary", () => {
     const journal = new HerdrEffectEvidenceJournal({ stateDirectory: state });
     const boundary = new HerdrCliBoundary({
       executable: "/opt/homebrew/bin/herdr",
-      expectedVersion: "0.7.3",
       expectedProtocol: 16,
       projectId: "project-01",
       projectSessionId: "session-01",
@@ -464,7 +458,7 @@ describe("sealed Herdr CLI boundary", () => {
     await mkdir(project, { mode: 0o700 });
     const consoleName = `fabric-console-${createHash("sha256").update("project-01\0session-01").digest("hex").slice(0, 16)}`;
     const snapshot = {
-      version: "0.7.3",
+      version: "fixture-version",
       protocol: 16,
       agents: [
         { name: consoleName, cwd: "/another/project", pane_id: "w9:p9", tab_id: "w9:t1" },
@@ -481,7 +475,6 @@ describe("sealed Herdr CLI boundary", () => {
     const calls: HerdrCommandRequest[] = [];
     const boundary = new HerdrCliBoundary({
       executable: "/opt/homebrew/bin/herdr",
-      expectedVersion: "0.7.3",
       expectedProtocol: 16,
       projectId: "project-01",
       projectSessionId: "session-01",
@@ -594,7 +587,6 @@ describe("sealed Herdr CLI boundary", () => {
     };
     const boundary = new HerdrCliBoundary({
       executable: "/opt/homebrew/bin/herdr",
-      expectedVersion: "0.7.3",
       expectedProtocol: 16,
       projectId: identity.projectId,
       projectSessionId: identity.projectSessionId,
@@ -607,7 +599,7 @@ describe("sealed Herdr CLI boundary", () => {
       process: {
         run: async (request) => {
           calls.push(request);
-          if (request.arguments[0] === "api") return response({ snapshot: { version: "0.7.3", protocol: 16, agents: [], panes: [] } });
+          if (request.arguments[0] === "api") return response({ snapshot: { version: "fixture-version", protocol: 16, agents: [], panes: [] } });
           return response({ agent: { pane_id: "w5:pA" } });
         },
       },
@@ -657,7 +649,6 @@ describe("sealed Herdr CLI boundary", () => {
     const journal = new HerdrEffectEvidenceJournal({ stateDirectory: state });
     const boundary = new HerdrCliBoundary({
       executable: "/opt/homebrew/bin/herdr",
-      expectedVersion: "0.7.3",
       expectedProtocol: 16,
       projectId: "project-01",
       projectSessionId: "session-01",
@@ -687,7 +678,6 @@ describe("sealed Herdr CLI boundary", () => {
     let calls = 0;
     const boundary = new HerdrCliBoundary({
       executable: "/opt/homebrew/bin/herdr",
-      expectedVersion: "0.7.3",
       expectedProtocol: 16,
       projectId: "project-01",
       projectSessionId: "session-01",

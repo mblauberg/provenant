@@ -59,7 +59,7 @@ orchestrate:
     notes: "replace its Fabric-vs-Herdr restatement with a pointer"
   - file: herdr-panes.md
     verdict: keep
-    notes: "third-party CLI contract, version-pinned"
+    notes: "third-party CLI contract, capability-tested"
   - file: layering-and-context.md
     verdict: keep
     notes: "canonical for worker caps (3–5)"

@@ -18,8 +18,6 @@ export type HerdrDaemonProcessConfiguration =
   | Readonly<{
       enabled: true;
       executable: string;
-      executableDigest: string;
-      expectedVersion: string;
       expectedProtocol: number;
       consoleExecutable: string;
       consoleExecutableDigest: string;
@@ -57,9 +55,7 @@ export function parseHerdrDaemonProcessConfiguration(serialized: string | undefi
     "consoleExecutableDigest",
     "enabled",
     "executable",
-    "executableDigest",
     "expectedProtocol",
-    "expectedVersion",
     ...(value.presencePollIntervalMs === undefined ? [] : ["presencePollIntervalMs"]),
     ...(observerCount === 0 ? [] : observerFields),
   ];
@@ -69,13 +65,10 @@ export function parseHerdrDaemonProcessConfiguration(serialized: string | undefi
       throw new TypeError(`daemon Herdr ${field} must be an absolute path`);
     }
   }
-  for (const field of ["executableDigest", "consoleExecutableDigest"] as const) {
+  for (const field of ["consoleExecutableDigest"] as const) {
     if (typeof value[field] !== "string" || !/^sha256:[0-9a-f]{64}$/u.test(value[field])) {
       throw new TypeError(`daemon Herdr ${field} is invalid`);
     }
-  }
-  if (typeof value.expectedVersion !== "string" || !/^[0-9]+\.[0-9]+\.[0-9]+$/u.test(value.expectedVersion)) {
-    throw new TypeError("daemon Herdr expectedVersion is invalid");
   }
   if (!Number.isSafeInteger(value.expectedProtocol) || Number(value.expectedProtocol) < 1) {
     throw new TypeError("daemon Herdr expectedProtocol is invalid");
@@ -103,8 +96,6 @@ export function parseHerdrDaemonProcessConfiguration(serialized: string | undefi
   return {
     enabled: true,
     executable: value.executable,
-    executableDigest: value.executableDigest,
-    expectedVersion: value.expectedVersion,
     expectedProtocol: Number(value.expectedProtocol),
     consoleExecutable: value.consoleExecutable,
     consoleExecutableDigest: value.consoleExecutableDigest,
@@ -133,8 +124,6 @@ export function composeHerdrDaemonIntegration(
       const module = await loadHerdrModule();
       const integration = await module.createProductionHerdrIntegration({
         executable: configuration.executable,
-        executableDigest: configuration.executableDigest,
-        expectedVersion: configuration.expectedVersion,
         expectedProtocol: configuration.expectedProtocol,
         stateDirectory: sessionDirectory,
         projectId: input.projectId,

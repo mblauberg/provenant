@@ -6,6 +6,7 @@ import { parse, stringify } from "yaml";
 
 import { composeDaemonAdapters, composeDaemonConfiguration } from "../../src/daemon/composition.ts";
 import { runWorkspaceTrust } from "../../src/cli/workspace-trust.ts";
+import { FabricError } from "../../src/errors.ts";
 import { commitFixtureRepository, writeWrapperPackageScaffold } from "../support/fixture-repository.ts";
 import {
   createPortableActivatedPrimaryFixture,
@@ -13,7 +14,7 @@ import {
 } from "../support/primary-adapter-testkit.ts";
 
 describe("daemon trusted adapter composition", () => {
-  it("composes only the explicitly activated and pinned adapters", async () => {
+  it("composes only the explicitly activated and runtime-conformant adapters", async () => {
     const fixture = await createPortableActivatedPrimaryFixture();
     const verifyProvider = vi.fn(async () => ({}) as never);
     try {
@@ -28,6 +29,26 @@ describe("daemon trusted adapter composition", () => {
         ["claude-agent-sdk", "codex-app-server"],
       );
       expect(verifyProvider).toHaveBeenCalledTimes(2);
+    } finally {
+      await rm(fixture.directory, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects an adapter that fails its runtime interface capability check", async () => {
+    const fixture = await createPortableActivatedPrimaryFixture();
+    try {
+      await expect(composeDaemonConfiguration({
+        globalConfigPath: fixture.configPath,
+        compatibilityPath: fixture.compatibilityPath,
+        compatibilitySchemaPath: fixture.schemaPath,
+        agentsHome: fixture.directory,
+        verifyProvider: async () => {
+          throw new FabricError("ADAPTER_INTERFACE_MISMATCH", "fixture handshake failed");
+        },
+      })).rejects.toMatchObject({
+        code: "ADAPTER_INTERFACE_MISMATCH",
+        message: "fixture handshake failed",
+      });
     } finally {
       await rm(fixture.directory, { recursive: true, force: true });
     }
@@ -57,7 +78,7 @@ describe("daemon trusted adapter composition", () => {
     }
   });
 
-  it("composes Codex with its pinned provider executable and trusted model policy", async () => {
+  it("composes Codex with its configured provider executable and trusted model policy", async () => {
     const fixture = await createPrimaryCompatibilityFixture();
     const configPath = join(fixture.directory, "agent-fabric.yaml");
     const compatibility = parse(await readFile(fixture.compatibilityPath, "utf8")) as {

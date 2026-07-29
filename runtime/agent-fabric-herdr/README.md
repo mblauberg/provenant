@@ -8,9 +8,11 @@ authority, persistence or provider sessions.
 ## Production composition
 
 `createProductionHerdrIntegration` is the shipped composition boundary. It
-verifies canonical executable paths and SHA-256 digests for Herdr, the Console
-and the optional observer, checks the exact Herdr version and local API
-protocol, then composes:
+resolves the configured absolute Herdr path to an executable regular file and
+checks its current structured snapshot protocol and capability shape. Stable
+provider symlinks may move when Herdr updates. It separately verifies SHA-256
+digests for the repository-owned Console and optional observer executables,
+then composes:
 
 - a fixed-argument, no-shell Herdr process port with bounded output and
   deadlines;
@@ -35,9 +37,7 @@ request/result state remains the only work transport.
 
 ```ts
 const integration = await createProductionHerdrIntegration({
-  executable: "/opt/homebrew/Cellar/herdr/0.7.3/bin/herdr",
-  executableDigest: "sha256:<pinned-file-digest>",
-  expectedVersion: "0.7.3",
+  executable: "/opt/homebrew/bin/herdr",
   expectedProtocol: 16,
   stateDirectory: "/absolute/private/fabric/herdr",
   projectId,
@@ -56,10 +56,12 @@ const integration = await createProductionHerdrIntegration({
 ```
 
 The production Fabric daemon owns this composition in normal use. Pass the
-same pins through `startFabricDaemon({ herdr: { enabled: true, ... } })`; the
+same configuration through `startFabricDaemon({ herdr: { enabled: true, ... } })`; the
 child daemon validates a closed configuration, creates a private per-session
 evidence directory, prepares each `herdr-control-v1` action before loading or
 probing Herdr, and polls structured presence without overlapping passes.
+Herdr's observed version is diagnostic evidence only. Neither it nor the
+provider executable's bytes decide admission.
 Restart performs lookup only for already-dispatched/ambiguous actions. It also
 rehydrates terminal Console/agent pane observation bindings from durable Fabric
 actions without replaying pane creation. Disabled or missing packages remain a
@@ -70,11 +72,11 @@ not expose the Fabric project/run identity or provider-session generation.
 Presence therefore remains `identity-unverified` with `identity: null`; pane
 existence never makes an agent ready. Observer panes are explicitly
 `observer-presence-only`. Enabling them requires all five observer settings:
-the pinned executable and digest, the canonical Fabric socket, a bounded
-private capability file and a canonical private cursor directory. The launched
-command is the closed `agent-fabric observe --socket ... --capability-file ...
---run-id ... --cursor ... --interval-ms 1000` surface; capability content is
-never read, copied or projected by this adapter.
+the repository-owned executable and digest, the canonical Fabric socket, a
+bounded private capability file and a canonical private cursor directory. The
+launched command is the closed `agent-fabric observe --socket ...
+--capability-file ... --run-id ... --cursor ... --interval-ms 1000` surface;
+capability content is never read, copied or projected by this adapter.
 
 ## Library use
 
@@ -116,7 +118,8 @@ diagnostics:
 agent-fabric-herdr doctor --config /absolute/trusted/herdr.json
 ```
 
-`doctor` validates the pinned local boundary. Steering is available only
+`doctor` validates the current local boundary and reports the observed Herdr
+version and negotiated protocol. Steering is available only
 through the authenticated public Fabric operation
 `fabric.v1.herdr-steer.dispatch`, which uses `DirectSteerService` to validate
 the exact reference and stable action before pane I/O. The CLI accepts no

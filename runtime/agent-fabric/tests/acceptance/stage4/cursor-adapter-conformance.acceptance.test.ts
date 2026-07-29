@@ -20,9 +20,9 @@ describe("Stage 4 Cursor adapter public contract", () => {
     try {
       if (fixture === undefined) {
         const document = parse(await readFile(repositoryPath("config/adapter-compatibility.yaml"), "utf8")) as {
-          adapters?: Record<string, { enabled?: boolean; unresolved_pins?: string[] }>;
+          adapters?: Record<string, { enabled?: boolean }>;
         };
-        expect(document.adapters?.["cursor-agent"]).toMatchObject({ enabled: true, unresolved_pins: [] });
+        expect(document.adapters?.["cursor-agent"]).toMatchObject({ enabled: true });
       } else {
         await expect(verifyAdapterCompatibility({
           compatibilityPath: fixture.compatibilityPath,
@@ -94,19 +94,4 @@ describe("Stage 4 Cursor adapter public contract", () => {
     }
   });
 
-  it("does not activate an enabled fixture while its stream schema pin is unresolved", async () => {
-    const fixture = await createCursorKiroCompatibilityFixture({ unresolvedAdapters: ["cursor-agent"] });
-    try {
-      await expect(
-        verifyAdapterCompatibility({
-          compatibilityPath: fixture.compatibilityPath,
-          schemaPath: fixture.schemaPath,
-          adapterIds: ["cursor-agent"],
-          requireEnabled: true,
-        }),
-      ).rejects.toMatchObject({ code: "ADAPTER_PIN_UNRESOLVED" });
-    } finally {
-      await rm(fixture.directory, { recursive: true, force: true });
-    }
-  });
 });

@@ -13,6 +13,7 @@ backfilled or rewritten.
 | Invariant | Enforcement | Primary evidence |
 | --- | --- | --- |
 | The runtime ships one current schema baseline and no incremental importer or compatibility migration | manifest-pinned `0001-current-baseline.sql`, `fabric_schema` and cutover inspection | `schema-baseline-custody.integration.test.ts`, `migration-runner.integration.test.ts`, `package-migrations.acceptance.test.ts` |
+| Provider adapter admission depends on current identity, handshake or protocol negotiation, and capability checks, never provider version or digest equality | `adapter-compatibility.yaml`, adapter compatibility and provider conformance modules | adapter compatibility acceptance, daemon adapter gate integration and status CLI tests |
 | Agent, task, delivery, lease, provider-action, team, budget, objective-check, scoped-gate and barrier states use closed enumerations | current-baseline checks and triggers | `persistence-invariants.integration.test.ts` |
 | Boolean fields are SQLite `0` or `1`; generations, counts and budget quantities stay in range | current-baseline checks and triggers | `migration-runner.integration.test.ts`, `persistence-invariants.integration.test.ts` |
 | Authorities, agents, tasks, messages, deliveries, leases, events and provider targets do not cross run boundaries | current-baseline foreign keys and insert/update triggers; typed spawn/attach custody preserves creation order | `persistence-invariants.integration.test.ts` and acceptance suites |

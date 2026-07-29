@@ -8,7 +8,6 @@ import {
   verifyAdapterCompatibility,
 } from "../../../src/index.ts";
 import {
-  createEnabledUnresolvedCheckedInAdapter,
   createResolvedStage4Compatibility,
   stage4FixtureCommand,
   stage4RepositoryPath,
@@ -83,19 +82,4 @@ describe("Stage 4 Pi adapter", () => {
     }
   });
 
-  it("rejects an explicitly unresolved Pi fixture", async () => {
-    const fixture = await createEnabledUnresolvedCheckedInAdapter("pi-rpc");
-    try {
-      await expect(
-        verifyAdapterCompatibility({
-          compatibilityPath: fixture.compatibilityPath,
-          schemaPath: fixture.schemaPath,
-          adapterIds: ["pi-rpc"],
-          requireEnabled: true,
-        }),
-      ).rejects.toMatchObject({ code: "ADAPTER_PIN_UNRESOLVED" });
-    } finally {
-      await rm(fixture.directory, { recursive: true, force: true });
-    }
-  });
 });

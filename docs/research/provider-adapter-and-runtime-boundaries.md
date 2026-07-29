@@ -13,7 +13,7 @@ Normative owners: [provider actions and adapters](../specs/agent-fabric/provider
 - Adapters publish versioned capability snapshots and exact effective
   configuration. Product names and previous success do not establish current
   model, effort, context, native-mode or permission capability.
-- Runtime discovery and version-pinned conformance are distinct evidence
+- Runtime discovery and capability-fixture conformance are distinct evidence
   sources. Unsupported or unobserved values are unavailable/unknown, never
   silently inferred.
 - The provider-neutral route contract is generated and shared across the
@@ -55,7 +55,7 @@ same snapshot and contract. Ambiguity stays with the original pair-keyed
 recovery owner.
 
 When active, the OpenCode route remains optional and non-blocking. Any new
-capability or future reactivation begins disabled and must prove pinned ACP
+capability or future reactivation begins disabled and must prove validated ACP
 framing, deny-first permissions, cancellation/timeout/duplicate/crash
 behaviour, actual provider/model/fallback receipts, credential isolation and
 task-local objective evaluation before advisory use. Open models do not satisfy

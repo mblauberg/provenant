@@ -1,7 +1,7 @@
+# Provider compatibility is decided by runtime identity, handshake, protocol
+# negotiation and capability checks. Provider versions and executable or schema
+# digests are observations only and are never recorded or gated here.
 schema_version: 1
-verification_date: "2026-07-20"
-adapter_contract_version: 1
-capability_fixture_version: 1
 activation_policy:
   real_adapters_require_separate_gate: true
   default_enabled: false
@@ -13,18 +13,11 @@ adapters:
     implementation:
       kind: npm-package
       package: "@anthropic-ai/claude-agent-sdk"
-      installed_version: "0.3.220"
-      resolved_artifact: "https://registry.npmjs.org/@anthropic-ai/claude-agent-sdk/-/claude-agent-sdk-0.3.220.tgz"
-      entrypoint: "node_modules/@anthropic-ai/claude-agent-sdk/sdk.mjs"
-      entrypoint_sha256: "1202bcd295a7c69cd0952f819a939e63071a3f2c3476a05f7e23425b01184fda"
       executable: "/opt/homebrew/bin/claude"
       provider_identity: apple-designated
       wrapper_entrypoint: "runtime/agent-fabric/src/adapters/providers/claude-agent-sdk.ts"
     contract:
-      adapter_version: 1
       protocol: claude-agent-sdk+claude-code-cli
-      protocol_version: "sdk-0.3.220"
-      capability_fixture_version: 1
     runtime_range:
       fabric_node: ">=24.15.0 <25"
       upstream_node: ">=18.0.0"
@@ -35,7 +28,6 @@ adapters:
         - anthropic
       requires_explicit_model: true
     official_source_url: "https://github.com/anthropics/claude-agent-sdk-typescript"
-    unresolved_pins: []
 
   codex-app-server:
     enabled: true
@@ -46,13 +38,7 @@ adapters:
       provider_identity: apple-designated
       wrapper_entrypoint: "runtime/agent-fabric/src/adapters/providers/codex-app-server.ts"
     contract:
-      adapter_version: 1
       protocol: codex-app-server
-      protocol_version: "app-server-initialize"
-      schema_generator: "codex app-server generate-json-schema --experimental --out <directory>"
-      schema_bundle: "runtime/agent-fabric/schemas/upstream/codex-app-server-0.144.1.bundle.json"
-      schema_sha256: "cb82fd306ef371fcc787ec39032c5ec097e9c096a2c6fdeef3c39469dcadf48c"
-      capability_fixture_version: 1
     runtime_range:
       platforms:
         - darwin-arm64
@@ -61,10 +47,9 @@ adapters:
         - openai
       # The installed Codex account is a ChatGPT subscription: the runtime
       # rejects explicit model ids (HTTP 400) and requires the account's
-      # default model, so codex dispatch omits the model id (#190).
+      # default model, so Codex dispatch omits the model id (#190).
       requires_explicit_model: false
     official_source_url: "https://github.com/openai/codex"
-    unresolved_pins: []
 
   herdr:
     enabled: false
@@ -72,23 +57,10 @@ adapters:
     implementation:
       kind: native-cli
       command: herdr
-      installed_version: "0.7.3"
-      source_build: "v0.7.3"
-      executable: "/opt/homebrew/Cellar/herdr/0.7.3/bin/herdr"
-      executable_sha256: "b9dfac1390d86bd0a75e86182f4b9113a03c51bc927d700cf99eb063d81f21f7"
+      executable: "/opt/homebrew/bin/herdr"
     contract:
-      adapter_version: 1
       protocol: herdr-local-api
-      protocol_version: 16
-      schema_version: 1
-      schema_generator: "herdr api schema --json"
-      schema_sha256: "7d1eede56d8009fe5b1b2f76e9cedf50b730124cec821fdc3b68ca07cd545f83"
-      capability_fixture_version: 1
     runtime_range:
-      supported_cli_versions:
-        - "0.7.3"
-      supported_protocol_versions:
-        - 16
       platforms:
         - darwin-arm64
     model_family_constraints:
@@ -96,32 +68,21 @@ adapters:
       requires_explicit_model: true
       route_role: visibility-and-wakeup-only
     official_source_url: "https://github.com/ogulcancelik/herdr"
-    unresolved_pins: []
 
   pi-rpc:
     enabled: false
+    disabled_reason: "No trusted open-weight Pi provider/model is currently available in the installed account; activation would route to an unavailable provider."
     delivery_stage: 4
     implementation:
       kind: npm-cli
       package: "@earendil-works/pi-coding-agent"
-      installed_version: "0.80.3"
       executable: "/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/dist/cli.js"
-      executable_sha256: "af302f231437eaf6f37691bce4b34234fcb626bcb5eb3910d4fc3f6519bf78ca"
-      rpc_entrypoint: "/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/dist/rpc-entry.js"
-      rpc_entrypoint_sha256: "7c3b46714f2d357f8b0d5403164663b60c13e62ef14dfc360ee757bdc16e02a0"
       wrapper_entrypoint: "runtime/agent-fabric/src/adapters/providers/optional/pi-rpc.ts"
     contract:
-      adapter_version: 1
       protocol: pi-jsonl-rpc
-      protocol_version: "package-0.80.3"
-      schema_source: "/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/dist/modes/rpc/rpc-types.d.ts"
-      schema_sha256: "fa333f49bc1e53d77be78ed645bdc5169999a9f6945a50942d7a9d5ab0e248b2"
-      capability_fixture_version: 1
     runtime_range:
       fabric_node: ">=24.15.0 <25"
       upstream_node: ">=22.19.0"
-      supported_cli_versions:
-        - "0.80.3"
       platforms:
         - darwin-arm64
     model_family_constraints:
@@ -140,8 +101,6 @@ adapters:
       requires_explicit_model: true
       route_role: generic-or-open-model-worker
     official_source_url: "https://github.com/earendil-works/pi"
-    unresolved_pins:
-      - "No trusted open-weight Pi provider/model is currently available in the installed account; activation would route to an unavailable provider."
 
   agy:
     enabled: true
@@ -153,12 +112,7 @@ adapters:
       provider_identity: apple-designated
       wrapper_entrypoint: "runtime/agent-fabric/src/adapters/providers/optional/agy.ts"
     contract:
-      adapter_version: 1
       protocol: agy-cli
-      protocol_version: "headless-cli"
-      schema_source: "runtime/agent-fabric/schemas/normalised-provider-output.v1.schema.json"
-      schema_sha256: "7fffad0b2a9eceee814cd04bc80cd5141f47fcc5a0eb056919b33983c168868c"
-      capability_fixture_version: 1
     runtime_range:
       platforms:
         - darwin-arm64
@@ -169,7 +123,6 @@ adapters:
       requires_explicit_model: true
       route_role: google-primary-anthropic-fallback-worker
     official_source_url: "https://github.com/google-antigravity/antigravity-cli"
-    unresolved_pins: []
 
   cursor-agent:
     enabled: true
@@ -182,12 +135,7 @@ adapters:
       provider_identity: cursor-partial-signed-helpers
       wrapper_entrypoint: "runtime/agent-fabric/src/adapters/providers/optional/cursor-agent.ts"
     contract:
-      adapter_version: 1
       protocol: cursor-agent-stream-json-cli
-      protocol_version: "stream-json-cli"
-      schema_source: "runtime/agent-fabric/schemas/normalised-provider-output.v1.schema.json"
-      schema_sha256: "7fffad0b2a9eceee814cd04bc80cd5141f47fcc5a0eb056919b33983c168868c"
-      capability_fixture_version: 1
     runtime_range:
       platforms:
         - darwin-arm64
@@ -200,7 +148,6 @@ adapters:
         - google
       requires_explicit_model: true
     official_source_url: "https://cursor.com/docs/cli/overview"
-    unresolved_pins: []
 
   kiro-acp:
     enabled: true
@@ -212,13 +159,7 @@ adapters:
       provider_identity: apple-designated
       wrapper_entrypoint: "runtime/agent-fabric/src/adapters/providers/optional/kiro-acp.ts"
     contract:
-      adapter_version: 1
       protocol: agent-client-protocol
-      protocol_version: 1
-      agent_engine: v2
-      schema_source: "runtime/agent-fabric/schemas/upstream/agent-client-protocol-schema-v1.19.0.json"
-      schema_sha256: "92c1dfcda10dd47e99127500a3763da2b471f9ac61e12b9bf0430c32cf953796"
-      capability_fixture_version: 1
     runtime_range:
       minimum_macos: "10.13"
       platforms:
@@ -236,7 +177,6 @@ adapters:
       requires_explicit_model: true
       route_role: open-model-worker
     official_source_url: "https://kiro.dev/docs/cli/acp/"
-    unresolved_pins: []
 
   opencode-acp:
     enabled: true
@@ -249,12 +189,7 @@ adapters:
       provider_identity: owner-controlled-install-root
       wrapper_entrypoint: "runtime/agent-fabric/src/adapters/providers/optional/opencode-acp.ts"
     contract:
-      adapter_version: 1
       protocol: agent-client-protocol
-      protocol_version: 1
-      schema_source: "runtime/agent-fabric/schemas/upstream/agent-client-protocol-schema-v1.19.0.json"
-      schema_sha256: "92c1dfcda10dd47e99127500a3763da2b471f9ac61e12b9bf0430c32cf953796"
-      capability_fixture_version: 1
     runtime_range:
       platforms:
         - darwin-arm64
@@ -266,4 +201,3 @@ adapters:
       requires_explicit_model: true
       route_role: optional-free-account-worker
     official_source_url: "https://opencode.ai/docs/acp/"
-    unresolved_pins: []

@@ -47,11 +47,11 @@ export async function runHerdrCli(arguments_: readonly string[], io: HerdrCliIo)
       fabricJournal: inactiveJournal(),
       fabricDirectSteer: inactiveDirectSteer(),
     });
-    void integration;
+    const conformance = await integration.boundary.probe();
     io.stdout.write(`${JSON.stringify({
       status: "available",
-      version: config.expectedVersion,
-      protocol: config.expectedProtocol,
+      version: conformance.version,
+      protocol: conformance.protocol,
       projectId: config.projectId,
       projectSessionId: config.projectSessionId,
       authority: "fabric",
@@ -95,12 +95,11 @@ async function readConfig(path: string): Promise<HerdrCliConfig> {
     const optional = observerFields.every((field) => value[field] === undefined) ? [] : observerFields;
     const keys = [
       "canonicalProjectRoot", "consoleExecutable", "consoleExecutableDigest", "executable",
-      "executableDigest", "expectedProtocol", "expectedVersion", "projectId", "projectSessionId",
+      "expectedProtocol", "projectId", "projectSessionId",
       "schemaVersion", "stateDirectory", ...optional,
     ];
     if (!exactKeys(value, keys) || value.schemaVersion !== 1 ||
-        typeof value.executable !== "string" || typeof value.executableDigest !== "string" ||
-        typeof value.expectedVersion !== "string" || !Number.isSafeInteger(value.expectedProtocol) ||
+        typeof value.executable !== "string" || !Number.isSafeInteger(value.expectedProtocol) ||
         typeof value.stateDirectory !== "string" || typeof value.projectId !== "string" ||
         typeof value.projectSessionId !== "string" || typeof value.canonicalProjectRoot !== "string" ||
         typeof value.consoleExecutable !== "string" || typeof value.consoleExecutableDigest !== "string" ||

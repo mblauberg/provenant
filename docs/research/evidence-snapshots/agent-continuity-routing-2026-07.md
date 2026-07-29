@@ -32,7 +32,7 @@ Evidence rules:
 1. Evaluate the deployed host, adapter/contract, model, raw effort, native
    mode, harness revision, visible surface and topology—not a model name alone.
 2. Prefer current runtime capability discovery and local outcomes. Label
-   version-pinned conformance and vendor evidence distinctly.
+   capability-fixture conformance and vendor evidence distinctly.
 3. Missing capability, actual identity, effort, quota, cost or context state
    stays unknown.
 4. Route preferences expire. Safety, authority and reviewer-family constraints

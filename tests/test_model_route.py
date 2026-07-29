@@ -2797,7 +2797,6 @@ def test_activated_optional_reviewers_route_through_fabric_with_exact_identity(
     assert route["effort"] == effort
     assert route["adapter_enabled"] is True
     assert route["adapter_active"] is True
-    assert route["adapter_unresolved_pins"] == []
 
 
 def test_primary_adapters_honour_fabric_activation_gate(tmp_path):
@@ -2820,7 +2819,6 @@ def test_primary_adapters_honour_fabric_activation_gate(tmp_path):
         assert fabric.returncode == 0
         assert fabric_route["status"] == "ok"
         assert fabric_route["adapter_enabled"] is True
-        assert fabric_route["adapter_unresolved_pins"] == []
         assert direct.returncode == 0
         assert direct_route["status"] == "ok"
 

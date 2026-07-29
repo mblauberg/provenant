@@ -328,7 +328,7 @@ adapterCapabilitySnapshotV1:
   adapterContractDigest: sha256-prefixed-digest
   hostId: exact-host-id
   hostVersion: exact-host-version
-  source: runtime-discovery | version-pinned-conformance | unavailable
+  source: runtime-discovery | capability-fixture | unavailable
   observedAt: timestamp
   expiresAt: timestamp
   capabilities:
@@ -373,19 +373,19 @@ capabilitySnapshotRefV1:
 capabilitySnapshotSummaryV1:
   admission:
     snapshotRef: capabilitySnapshotRefV1
-    source: runtime-discovery | version-pinned-conformance | unavailable
+    source: runtime-discovery | capability-fixture | unavailable
     observedAt: timestamp
     expiresAt: timestamp
   dispatch:
     oneOf:
       - null
       - snapshotRef: capabilitySnapshotRefV1
-        source: runtime-discovery | version-pinned-conformance | unavailable
+        source: runtime-discovery | capability-fixture | unavailable
         observedAt: timestamp
         expiresAt: timestamp
 ~~~
 
-The two `capabilities` arms are disjoint. `source: unavailable` requires the `kind: unavailable` arm; the available arm requires runtime discovery or version-pinned conformance. `modelCatalog` is nonempty, has at most 256 entries and is sorted by `(family, model)`. Applied effort normalisations and native-mode rows each have 1..64 entries, are sorted by raw provider value with null native mode first, and are unique. The inapplicable effort arm has no mappings. Each raw value maps to exactly one normalised value. Null depth/concurrency and explicit `unknown` mean unknown, not unlimited or false. Runtime discovery and version-pinned conformance are distinct sources. Product prose, a model alias or a prior successful call is not a capability snapshot.
+The two `capabilities` arms are disjoint. `source: unavailable` requires the `kind: unavailable` arm; the available arm requires runtime discovery or a capability fixture. `modelCatalog` is nonempty, has at most 256 entries and is sorted by `(family, model)`. Applied effort normalisations and native-mode rows each have 1..64 entries, are sorted by raw provider value with null native mode first, and are unique. The inapplicable effort arm has no mappings. Each raw value maps to exactly one normalised value. Null depth/concurrency and explicit `unknown` mean unknown, not unlimited or false. Runtime discovery and capability fixtures are distinct sources. A capability fixture records verified behaviour, not provider version equality. Product prose, a model alias or a prior successful call is not a capability snapshot.
 
 `capabilityBodyDigest` is SHA-256 of RFC 8785 JCS of exactly `{schemaVersion,adapterId,adapterContractDigest,hostId,hostVersion,source,capabilities}`. Snapshot ID, generation, observation/expiry clocks and both digest fields are excluded. `snapshotDigest` is SHA-256 of RFC 8785 JCS of the complete snapshot with only `snapshotDigest` omitted. Thus a refreshed immutable snapshot may advance its instance identity and clocks while retaining the same body digest. Every ref equality-copies all four fields from its snapshot row; no digest-only or generation-only reference is valid.
 

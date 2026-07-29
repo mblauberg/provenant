@@ -41,17 +41,16 @@ const compatibility = parse(await readFile(join(agentsRoot, "config/adapter-comp
 const compatibilityEntry = compatibility?.adapters?.[adapterId];
 if (
   typeof compatibilityEntry !== "object" || compatibilityEntry === null ||
-  compatibilityEntry.enabled !== true || !Array.isArray(compatibilityEntry.unresolved_pins) ||
-  compatibilityEntry.unresolved_pins.length !== 0
+  compatibilityEntry.enabled !== true
 ) {
-  throw new Error(`adapter ${adapterId} is not enabled and contract-conformant`);
+  throw new Error(`adapter ${adapterId} is not enabled`);
 }
 const implementation = compatibilityEntry.implementation;
 const expandPath = (value) => value
   .replaceAll("${USER_HOME}", process.env.HOME ?? "")
   .replaceAll("${AGENTS_HOME}", agentsRoot);
-const pinnedExecutable = expandPath(implementation.executable);
-if (await realpath(providerExecutable) !== await realpath(pinnedExecutable)) {
+const configuredExecutable = expandPath(implementation.executable);
+if (await realpath(providerExecutable) !== await realpath(configuredExecutable)) {
   throw new Error("provider executable does not match the compatibility path");
 }
 const providerConfigRoot = adapterId === "opencode-acp"
@@ -60,7 +59,7 @@ const providerConfigRoot = adapterId === "opencode-acp"
 const providerConfigBefore = providerConfigRoot === undefined ? undefined : await optionalTreeDigest(providerConfigRoot);
 const providerConformance = await verifyProviderConformance({
   adapterId,
-  executable: pinnedExecutable,
+  executable: configuredExecutable,
   ...(implementation.cursor_install_root === undefined ? {} : {
     cursorInstallRoot: expandPath(implementation.cursor_install_root),
   }),
@@ -73,9 +72,9 @@ if (await realpath(wrapperPath) !== await realpath(join(agentsRoot, implementati
   throw new Error("wrapper entrypoint does not match the compatibility path");
 }
 // Repository-owned wrapper code carries Git provenance: the repository commit
-// plus the tracked wrapper path. Only external artifacts keep hash pins. All
-// GIT_* environment variables are stripped so repository discovery cannot be
-// redirected.
+// plus the tracked wrapper path. Provider version and digest observations are
+// runtime evidence, never compatibility gates. All GIT_* environment variables
+// are stripped so repository discovery cannot be redirected.
 /** @type {Record<string, string>} */
 const gitEnvironment = Object.fromEntries(
   Object.entries(process.env).filter(([key, value]) => value !== undefined && !key.startsWith("GIT_")),
@@ -136,7 +135,7 @@ const args = [
   "--conditions=source",
   wrapperPath,
   "--journal", join(directory, "journal.sqlite3"),
-  "--provider-executable", pinnedExecutable,
+  "--provider-executable", configuredExecutable,
   ...(implementation.provider_identity === undefined ? [] : ["--provider-identity-policy", implementation.provider_identity]),
   ...((implementation.provider_install_root ?? implementation.cursor_install_root) === undefined
     ? []

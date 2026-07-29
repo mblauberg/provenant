@@ -28,8 +28,9 @@ only purpose is importing those earlier shapes shall be removed.
 
 Protocol initialization still rejects mismatched peers, but it does not retry an old profile or translate old result
 shapes. Independently optional current features continue to use exact negotiation. The adapter compatibility registry
-pins external executable, package and schema artifacts by hash; repository-owned wrapper code carries Git provenance
-(repository commit plus tracked wrapper path) instead of hash manifests.
+contains no provider version or digest gates. Provider admission instead requires current identity and bounded
+non-answer interface conformance; repository-owned wrapper code carries Git provenance through the repository commit
+and tracked wrapper path.
 
 ## Required behaviour
 
@@ -112,8 +113,8 @@ pins external executable, package and schema artifacts by hash; repository-owned
 
 1. `agent-fabric status --json` reports daemon reachability, protocol, configured/active adapters, trusted roots and
    current project seat metadata without capability values.
-2. `agent-fabric doctor --json` verifies configuration, compatibility pins, state permissions, database checks and
-   socket ownership with typed results.
+2. `agent-fabric doctor --json` verifies configuration, adapter runtime conformance, state permissions, database
+   checks and socket ownership with typed results.
 3. Repository documentation describes expected setup. Current workstation run IDs, project keys, expiry and pane IDs
    come from status output, not committed prose.
 

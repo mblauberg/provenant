@@ -8,9 +8,8 @@ name: Dependabot auto-merge
 # pull_request_target/pwn-request surface here at all.
 #
 # The primary SDK and CLI packages are excluded even at patch level (issues
-# #195 and #208): config/adapter-compatibility.yaml pins their executable and
-# protocol closure, so dependency updates require matching compatibility and
-# conformance evidence rather than unattended auto-merge.
+# #195 and #208) because changes to runtime adapter dependencies require current
+# compatibility and conformance evidence rather than unattended auto-merge.
 on:
   pull_request:
 

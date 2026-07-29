@@ -9586,7 +9586,7 @@ CREATE TABLE adapter_capability_snapshots (
   host_id TEXT NOT NULL,
   host_version TEXT NOT NULL,
   source TEXT NOT NULL CHECK (source IN (
-    'runtime-discovery','version-pinned-conformance','unavailable'
+    'runtime-discovery','capability-fixture','unavailable'
   )),
   observed_at INTEGER NOT NULL,
   expires_at INTEGER NOT NULL CHECK (expires_at > observed_at),

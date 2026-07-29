@@ -2635,11 +2635,9 @@ describe("trusted primary adapter configuration", () => {
       adapters: {
         "claude-agent-sdk": {
           enabled: true,
-          unresolved_pins: [],
         },
         "codex-app-server": {
           enabled: true,
-          unresolved_pins: [],
         },
       },
     });
@@ -2647,7 +2645,7 @@ describe("trusted primary adapter configuration", () => {
 });
 
 describe("Codex app-server fabric adapter", () => {
-  it("requires an absolute pinned provider executable", () => {
+  it("requires an absolute configured provider executable", () => {
     expect(codexAppServerCommand("/trusted/codex")).toEqual(["/trusted/codex", "app-server"]);
     expect(() => codexAppServerCommand("codex")).toThrow(/absolute/u);
   });

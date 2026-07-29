@@ -952,9 +952,9 @@ def test_repository_policy_covers_sensitive_fabric_surfaces() -> None:
         assert evidence in template
 
 
-def test_dependabot_automerge_excludes_pinned_primary_provider_packages() -> None:
-    # Issues #195 and #208: these packages participate in the exact executable
-    # and protocol closure, so even patch updates require compatibility review.
+def test_dependabot_automerge_excludes_primary_provider_packages() -> None:
+    # Issues #195 and #208: these packages affect runtime adapter conformance,
+    # so even patch updates require compatibility review.
     document = _parse_workflow_text(
         (ROOT / ".github" / "workflows" / "dependabot-automerge.yml").read_text(encoding="utf-8")
     )

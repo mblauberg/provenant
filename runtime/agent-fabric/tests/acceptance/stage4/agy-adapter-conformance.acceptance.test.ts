@@ -9,7 +9,6 @@ import {
   verifyAdapterCompatibility,
 } from "../../../src/index.ts";
 import {
-  createEnabledUnresolvedCheckedInAdapter,
   createResolvedStage4Compatibility,
   stage4FixtureCommand,
   stage4RepositoryPath,
@@ -23,9 +22,9 @@ describe("Stage 4 Agy adapter", () => {
     try {
       if (fixture === undefined) {
         const document = parse(await readFile(stage4RepositoryPath("config/adapter-compatibility.yaml"), "utf8")) as {
-          adapters?: Record<string, { enabled?: boolean; unresolved_pins?: string[] }>;
+          adapters?: Record<string, { enabled?: boolean }>;
         };
-        expect(document.adapters?.agy).toMatchObject({ enabled: true, unresolved_pins: [] });
+        expect(document.adapters?.agy).toMatchObject({ enabled: true });
       } else {
         await expect(verifyAdapterCompatibility({
           compatibilityPath: fixture.compatibilityPath,
@@ -97,19 +96,4 @@ describe("Stage 4 Agy adapter", () => {
     }
   });
 
-  it("rejects an explicitly unresolved Agy fixture", async () => {
-    const fixture = await createEnabledUnresolvedCheckedInAdapter("agy");
-    try {
-      await expect(
-        verifyAdapterCompatibility({
-          compatibilityPath: fixture.compatibilityPath,
-          schemaPath: fixture.schemaPath,
-          adapterIds: ["agy"],
-          requireEnabled: true,
-        }),
-      ).rejects.toMatchObject({ code: "ADAPTER_PIN_UNRESOLVED" });
-    } finally {
-      await rm(fixture.directory, { recursive: true, force: true });
-    }
-  });
 });

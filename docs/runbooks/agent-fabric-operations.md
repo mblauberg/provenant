@@ -43,20 +43,18 @@ python3 skills/deliver/scripts/validate_delivery.py \
   '<canonical-run>/RUN.json' --workspace-root "$PWD" --verify-hashes
 ```
 
-Then verify the selected compatibility entries. Fabric library and protocol
-schema artifacts are checked against their pinned hashes. Provider CLI versions
-and digests are observed evidence, not admission locks.
-Repository-owned wrapper code carries Git provenance instead of a hash pin
+Then verify the selected compatibility entries. The adapter registry records
+activation policy, stable launch paths, runtime requirements and provider
+identity policy. It does not record or compare provider versions or digests.
+Repository-owned wrapper code carries Git provenance
 (`runtime/agent-fabric/src/adapters/compatibility.ts`): the wrapper
 entrypoint must resolve inside a Git repository, be tracked at HEAD and
-byte-identical to its committed content, and its first-party source spans
-(the owning workspace package's src tree, local workspace dependency src
-trees and every consulted package manifest) must be diff-clean against HEAD.
-An empty or truncated span discovery is a hard verification failure, never a
-skip. Provenance, adapter-specific vendor identity and the bounded non-answer
-provider interface are required at activation and revalidated at point of use.
-Unresolved contract gaps, missing artifacts, disabled entries or any
-provenance/identity/interface mismatch fail closed.
+byte-identical to its committed content. Provenance, adapter-specific vendor
+identity and the bounded non-answer provider interface are required at
+activation and revalidated at point of use. Missing runtime configuration,
+disabled entries or any provenance, identity or interface mismatch fails
+closed. A provider auto-update that preserves those capabilities remains
+admissible.
 
 ## Keep the CLI dist warm
 
@@ -568,11 +566,11 @@ Do not set or persist provider API keys for these routes or Kiro. The wrappers f
 only the minimal process environment (`HOME`, `PATH` and `TMPDIR`) and use the
 provider CLIs' existing subscription sessions. `scripts/model-route resolve`
 must report the exact family, model and high effort through `--adapter-gate
-fabric` before dispatch. A disabled entry, inactive adapter, unresolved pin,
-artifact mismatch, unavailable model or wrong family is terminal routing
-evidence; use another already-admitted review family or record the distinct-family
-leg as unavailable. Never bypass the gate with a direct CLI and claim Fabric
-evidence.
+fabric` before dispatch. A disabled entry, inactive adapter, failed runtime
+identity or capability check, unavailable model or wrong family
+is terminal routing evidence; use another already-admitted review family or
+record the distinct-family leg as unavailable. Never bypass the gate with a
+direct CLI and claim Fabric evidence.
 
 Real provider smokes are local-only, consume subscription quota and require
 current provider-use authority. They traverse the verified Fabric adapter

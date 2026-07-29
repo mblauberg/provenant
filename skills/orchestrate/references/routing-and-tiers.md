@@ -9,7 +9,8 @@
 > effort and degradation. Neither restates the other.
 
 The resolver's default `--adapter-gate fabric` fails closed when the selected
-fabric adapter is disabled or has unresolved compatibility pins. A direct CLI
+fabric adapter is disabled or inactive. Runtime Fabric composition separately
+requires current provider identity and interface conformance. A direct CLI
 executor that owns its own safety and activation gates must opt in explicitly
 with `--adapter-gate direct-cli`; this never bypasses family or model-pattern
 constraints.

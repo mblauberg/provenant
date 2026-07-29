@@ -46,7 +46,6 @@ try {
   process.stdout.write(`${JSON.stringify({
     status: "pass",
     adapterIds: result.adapterIds,
-    verifiedArtifactCount: result.verifiedArtifactCount,
     observations,
   })}\n`);
 } catch (error: unknown) {

@@ -1,5 +1,4 @@
 import { execFile } from "node:child_process";
-import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, resolve } from "node:path";
 import { homedir } from "node:os";
@@ -24,22 +23,6 @@ export function resolveCompatibilityArtifact(compatibilityPath: string, value: s
   }
   if (isAbsolute(value)) return value;
   return resolve(dirname(compatibilityPath), "..", value);
-}
-
-async function digest(path: string): Promise<string> {
-  return createHash("sha256").update(await readFile(path)).digest("hex");
-}
-
-async function verifyHash(path: string, expected: string): Promise<void> {
-  let actual: string;
-  try {
-    actual = await digest(path);
-  } catch (error: unknown) {
-    throw new FabricError("ADAPTER_ARTIFACT_MISSING", `adapter artifact is unavailable: ${path}`, { cause: error });
-  }
-  if (actual !== expected) {
-    throw new FabricError("ADAPTER_HASH_MISMATCH", `adapter artifact digest changed: ${path}`);
-  }
 }
 
 const execFileAsync = promisify(execFile);
@@ -150,7 +133,7 @@ export function wrapperCommandEntrypointIndex(command: string[]): number {
 }
 
 /**
- * Re-checks the wrapper's tracked-and-clean Git pin immediately before an
+ * Re-checks the wrapper's tracked-and-clean Git provenance immediately before an
  * adapter process spawn and requires the composition identity to match.
  */
 export async function verifySpawnWrapperProvenance(input: {
@@ -180,7 +163,6 @@ export async function verifyAdapterCompatibility(input: {
 }): Promise<{
   valid: true;
   adapterIds: string[];
-  verifiedArtifactCount: number;
   wrapperProvenance: WrapperProvenance[];
   resolvedExecutables: Record<string, string>;
 }> {
@@ -197,7 +179,6 @@ export async function verifyAdapterCompatibility(input: {
     throw new FabricError("ADAPTER_COMPATIBILITY_INVALID", "compatibility registry lacks adapters");
   }
 
-  let verifiedArtifactCount = 0;
   const wrapperProvenance: WrapperProvenance[] = [];
   const resolvedExecutables: Record<string, string> = {};
   for (const adapterId of input.adapterIds) {
@@ -208,16 +189,13 @@ export async function verifyAdapterCompatibility(input: {
     if (input.requireEnabled && adapter.enabled !== true) {
       throw new FabricError("ADAPTER_DISABLED", `adapter is not activated: ${adapterId}`);
     }
-    if (input.requireEnabled && Array.isArray(adapter.unresolved_pins) && adapter.unresolved_pins.length > 0) {
-      throw new FabricError("ADAPTER_PIN_UNRESOLVED", `adapter compatibility pins remain unresolved: ${adapterId}`);
-    }
     if (!isRecord(adapter.implementation) || !isRecord(adapter.contract)) {
       throw new FabricError("ADAPTER_COMPATIBILITY_INVALID", `adapter entry is incomplete: ${adapterId}`);
     }
     if (input.requireEnabled && typeof adapter.implementation.wrapper_entrypoint !== "string") {
       throw new FabricError(
         "ADAPTER_COMPATIBILITY_INVALID",
-        `enabled adapter has no pinned fabric wrapper: ${adapterId}`,
+        `enabled adapter has no configured fabric wrapper: ${adapterId}`,
       );
     }
     if (input.requireEnabled) {
@@ -236,38 +214,12 @@ export async function verifyAdapterCompatibility(input: {
       }
     }
     if (input.requireEnabled) {
-      const protocolVersion = adapter.contract.protocol_version;
-      if (typeof protocolVersion !== "string" && typeof protocolVersion !== "number") {
-        throw new FabricError(
-          "ADAPTER_COMPATIBILITY_INVALID",
-          `enabled adapter has no protocol version pin: ${adapterId}`,
-        );
-      }
       if (typeof adapter.implementation.executable !== "string") {
         throw new FabricError(
           "ADAPTER_COMPATIBILITY_INVALID",
           `enabled adapter has no provider executable: ${adapterId}`,
         );
       }
-      if (
-        adapter.implementation.kind === "npm-package" &&
-        (typeof adapter.implementation.entrypoint !== "string" ||
-          typeof adapter.implementation.entrypoint_sha256 !== "string")
-      ) {
-        throw new FabricError(
-          "ADAPTER_COMPATIBILITY_INVALID",
-          `enabled npm adapter has no executed entrypoint pin: ${adapterId}`,
-        );
-      }
-    }
-    for (const [field, expected] of Object.entries(adapter.implementation)) {
-      if (!field.endsWith("_sha256") || field === "executable_sha256" || field === "bundle_entrypoint_sha256" || typeof expected !== "string") continue;
-      const pathValue = adapter.implementation[field.slice(0, -"_sha256".length)];
-      if (typeof pathValue !== "string") {
-        throw new FabricError("ADAPTER_COMPATIBILITY_INVALID", `${adapterId}.${field} has no artifact path`);
-      }
-      await verifyHash(resolveCompatibilityArtifact(input.compatibilityPath, pathValue), expected);
-      verifiedArtifactCount += 1;
     }
     if (typeof adapter.implementation.executable === "string") {
       resolvedExecutables[adapterId] = resolveCompatibilityArtifact(
@@ -286,7 +238,6 @@ export async function verifyAdapterCompatibility(input: {
   return {
     valid: true,
     adapterIds: [...input.adapterIds],
-    verifiedArtifactCount,
     wrapperProvenance,
     resolvedExecutables,
   };

@@ -13,8 +13,6 @@ import { HerdrCliBoundary, type HerdrCommandPort, type HerdrCommandRequest } fro
 
 export type ProductionHerdrIntegrationOptions = Readonly<{
   executable: string;
-  executableDigest: string;
-  expectedVersion: string;
   expectedProtocol: number;
   stateDirectory: string;
   projectId: string;
@@ -41,15 +39,12 @@ export type ProductionHerdrIntegration = {
 export async function createProductionHerdrIntegration(
   options: ProductionHerdrIntegrationOptions,
 ): Promise<ProductionHerdrIntegration> {
-  if (!/^[0-9]+\.[0-9]+\.[0-9]+$/u.test(options.expectedVersion)) {
-    throw new TypeError("Herdr expected version is invalid");
-  }
   if (!Number.isSafeInteger(options.expectedProtocol) || options.expectedProtocol < 1) {
     throw new TypeError("Herdr expected protocol is invalid");
   }
   parseIdentifier<"ProjectId">(options.projectId, "productionHerdr.projectId");
   parseIdentifier<"ProjectSessionId">(options.projectSessionId, "productionHerdr.projectSessionId");
-  await verifyPinnedExecutable(options.executable, options.executableDigest, "Herdr executable");
+  await verifyConfiguredExecutable(options.executable, "Herdr executable");
   await verifyPinnedExecutable(options.consoleExecutable, options.consoleExecutableDigest, "Console executable");
   const observerConfiguration = [
     options.observerExecutable,
@@ -75,16 +70,7 @@ export async function createProductionHerdrIntegration(
   await verifyCanonicalDirectory(options.stateDirectory, "Herdr integration state directory");
   await verifyCanonicalDirectory(options.canonicalProjectRoot, "Herdr project root");
 
-  const processBoundary = new SealedHerdrCommandPort(options.executable, options.executableDigest);
-  const versionOutput = await processBoundary.run({
-    executable: options.executable,
-    arguments: ["--version"],
-    timeoutMs: 5_000,
-    maximumOutputBytes: 4_096,
-  });
-  if (versionOutput.toString("utf8").trim() !== `herdr ${options.expectedVersion}`) {
-    throw new TypeError("Herdr executable version does not match the pinned integration");
-  }
+  const processBoundary = new SealedHerdrCommandPort(options.executable);
 
   const effectJournal = new HerdrEffectEvidenceJournal({ stateDirectory: options.stateDirectory });
   const observerBoundaryOptions =
@@ -99,7 +85,6 @@ export async function createProductionHerdrIntegration(
       : {};
   const boundaryOptions = {
     executable: options.executable,
-    expectedVersion: options.expectedVersion,
     expectedProtocol: options.expectedProtocol,
     projectId: options.projectId,
     projectSessionId: options.projectSessionId,
@@ -123,7 +108,7 @@ export async function createProductionHerdrIntegration(
         await verifyPrivateDirectory(options.observerCursorDirectory, "Fabric observer cursor directory");
         return;
       }
-      throw new TypeError("Herdr attempted to launch an unpinned executable");
+      throw new TypeError("Herdr attempted to launch an unapproved executable");
     },
     ...observerBoundaryOptions,
     ...(options.clock === undefined ? {} : { clock: options.clock }),
@@ -141,11 +126,9 @@ export async function createProductionHerdrIntegration(
 
 class SealedHerdrCommandPort implements HerdrCommandPort {
   readonly #executable: string;
-  readonly #executableDigest: string;
 
-  constructor(executable: string, executableDigest: string) {
+  constructor(executable: string) {
     this.#executable = executable;
-    this.#executableDigest = executableDigest;
   }
 
   async run(request: HerdrCommandRequest): Promise<Buffer> {
@@ -153,7 +136,7 @@ class SealedHerdrCommandPort implements HerdrCommandPort {
       throw new TypeError("Herdr executable path is invalid");
     }
     if (request.executable !== this.#executable) throw new TypeError("Herdr process target changed");
-    await verifyPinnedExecutable(this.#executable, this.#executableDigest, "Herdr executable");
+    await verifyConfiguredExecutable(this.#executable, "Herdr executable");
     if (!Number.isSafeInteger(request.timeoutMs) || request.timeoutMs < 1 || request.timeoutMs > 30_000) {
       throw new TypeError("Herdr command deadline is outside the trusted bound");
     }
@@ -188,12 +171,21 @@ class SealedHerdrCommandPort implements HerdrCommandPort {
   }
 }
 
-async function verifyPinnedExecutable(path: string, expectedDigest: string, label: string): Promise<void> {
+async function verifyConfiguredExecutable(path: string, label: string): Promise<void> {
   if (!isAbsolute(path) || path.includes("\0")) throw new TypeError(`${label} must be an absolute path`);
   const canonical = await realpath(path).catch(() => null);
-  if (canonical === null || canonical !== path) throw new TypeError(`${label} is missing, non-canonical or resolves through a symlink`);
-  const info = await lstat(path);
-  if (!info.isFile() || (info.mode & 0o111) === 0) throw new TypeError(`${label} is not an executable regular file`);
+  if (canonical === null) throw new TypeError(`${label} is missing or does not resolve`);
+  const info = await lstat(canonical);
+  if (!info.isFile() || (info.mode & 0o111) === 0) throw new TypeError(`${label} does not resolve to an executable regular file`);
+  const currentUid = process.getuid?.();
+  if (
+    (currentUid !== undefined && info.uid !== currentUid && info.uid !== 0) ||
+    (info.mode & 0o022) !== 0
+  ) throw new TypeError(`${label} does not resolve to an owner-controlled executable`);
+}
+
+async function verifyPinnedExecutable(path: string, expectedDigest: string, label: string): Promise<void> {
+  await verifyConfiguredExecutable(path, label);
   const expected = parseSha256Digest(expectedDigest, `${label}.expectedDigest`);
   const actual = parseSha256Digest(`sha256:${createHash("sha256").update(await readFile(path)).digest("hex")}`, `${label}.actualDigest`);
   if (actual !== expected) throw new TypeError(`${label} digest changed`);

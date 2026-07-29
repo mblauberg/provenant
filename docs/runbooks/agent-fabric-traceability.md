@@ -117,7 +117,7 @@ adapter cannot be enabled merely because the shared degradation test passes.
 |---|---|
 | Single daemon owner and attached-client shutdown | `tests/integration/daemon-single-instance.integration.test.ts`, `tests/integration/daemon-attached-client-shutdown.integration.test.ts` |
 | Immutable atomic seat renewal and project credential lookup | `tests/unit/seat-store.unit.test.ts`, `tests/acceptance/stage2/mcp-provision.acceptance.test.ts`, `tests/unit/mcp-credentials.unit.test.ts` |
-| Disabled or unpinned adapters cannot join trusted composition | `tests/integration/daemon-disabled-adapter-gate.integration.test.ts` |
+| Disabled or runtime-incompatible adapters cannot join trusted composition | `tests/integration/daemon-disabled-adapter-gate.integration.test.ts` |
 | Provider authority and trusted model admission before effects | `tests/acceptance/stage3/provider-session-boundary.acceptance.test.ts`, `tests/unit/adapter-supervisor-model-policy.unit.test.ts` |
 | Persistent adapter process reuse | `tests/unit/adapter-supervisor.unit.test.ts` |
 | Operation-scoped authority and token rotation | `tests/acceptance/stage1/operation-scoped-authority.acceptance.test.ts`, `tests/acceptance/stage1/retryable-capability-issuance.acceptance.test.ts` |
@@ -164,9 +164,11 @@ python3 skills/deliver/scripts/validate_delivery.py \
 | 5 | `npm run test:load --workspace=@local/agent-fabric` |
 
 Provider activation remains blocked until the selected entry in
-`config/adapter-compatibility.yaml` is enabled and fully pinned. The default
-`scripts/model-route` fabric gate enforces that rule for primary and optional
-adapters. Direct CLI workflows must select `--adapter-gate direct-cli`
+`config/adapter-compatibility.yaml` is enabled and its current runtime identity,
+protocol and capabilities conform. The default `scripts/model-route` fabric
+gate enforces enabled and active adapter plus family and model constraints.
+Daemon composition enforces current runtime identity, protocol and capability
+conformance. Direct CLI workflows must select `--adapter-gate direct-cli`
 explicitly and still obey family and model-pattern constraints.
 
 ## Deterministic versus live smoke
@@ -184,8 +186,8 @@ Vitest suite:
 |---|---|
 | Registered five-seat health | `node runtime/agent-fabric/smoke/registered-mcp-health.mjs` with `AGENT_FABRIC_PROJECT_KEY` |
 | Registered Codex/Claude round trip | `node runtime/agent-fabric/smoke/registered-mcp-roundtrip.mjs` with `AGENT_FABRIC_PROJECT_KEY` |
-| Live workstation adapter pins | `cd runtime/agent-fabric && AGENT_FABRIC_LIVE_COMPATIBILITY_SMOKE=1 npx vitest run tests/integration/adapter-compatibility.live-smoke.test.ts` |
-| Agy Gemini / Cursor Grok provider-backed turns | Local-only Fabric request/reply evidence after exact pin, subscription-auth and seat checks; never enabled in CI |
+| Live workstation adapter capabilities | `cd runtime/agent-fabric && AGENT_FABRIC_LIVE_COMPATIBILITY_SMOKE=1 npx vitest run tests/integration/adapter-compatibility.live-smoke.test.ts` |
+| Agy Gemini / Cursor Grok provider-backed turns | Local-only Fabric request/reply evidence after runtime capability, subscription-auth and seat checks; never enabled in CI |
 
 Run live smoke only when its exact provider-use and credential authority is
 current. This is operational evidence, not a separate programme-acceptance

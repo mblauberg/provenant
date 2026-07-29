@@ -7,10 +7,9 @@ answers or decide model routing.
 
 ## Source grounding
 
-The mechanics below were independently checked against the installed Herdr
-0.7.3 CLI and protocol 16 pinned in
-[`config/adapter-compatibility.yaml`](../../../config/adapter-compatibility.yaml).
-The installed CLI is syntax authority. The upstream
+The mechanics below were independently checked against the installed Herdr CLI
+on 15 July 2026. The installed CLI and its runtime command surfaces are the
+syntax authority. Provider versions are not compatibility gates. The upstream
 [`SKILL.md` at commit `c76e968`](https://github.com/ogulcancelik/herdr/blob/c76e96878b866bf01639c8a1d8beb9c93a8ab95f/SKILL.md)
 was consulted on 2026-07-15, not copied or vendored. That upstream component is
 licensed AGPL-3.0-or-later or commercially; this repository has no runtime or

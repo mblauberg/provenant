@@ -214,7 +214,7 @@ describe("current schema baseline", () => {
     `).pluck().get(table) as string).replaceAll(/\s+/gu, "");
 
     expect(tableSql("adapter_capability_snapshots")).toContain(
-      "'runtime-discovery','version-pinned-conformance','unavailable'",
+      "'runtime-discovery','capability-fixture','unavailable'",
     );
     expect(tableSql("topology_wave_plans")).toContain(
       "'proposed','approved','started','completed','superseded','cancelled'",

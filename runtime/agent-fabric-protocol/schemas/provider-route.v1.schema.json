@@ -905,7 +905,7 @@
               "type": "string",
               "enum": [
                 "runtime-discovery",
-                "version-pinned-conformance",
+                "capability-fixture",
                 "unavailable"
               ]
             },
@@ -966,7 +966,7 @@
                   "type": "string",
                   "enum": [
                     "runtime-discovery",
-                    "version-pinned-conformance",
+                    "capability-fixture",
                     "unavailable"
                   ]
                 },

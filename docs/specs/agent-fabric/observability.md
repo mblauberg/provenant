@@ -116,7 +116,7 @@ adapter_capability_snapshots(
   adapter_id, snapshot_generation, snapshot_id,
   adapter_contract_digest, host_id, host_version,
   source TEXT NOT NULL CHECK(source IN
-    ('runtime-discovery','version-pinned-conformance','unavailable')),
+    ('runtime-discovery','capability-fixture','unavailable')),
   observed_at, expires_at, capability_body_digest,
   snapshot_json TEXT NOT NULL,
   capability_kind TEXT GENERATED ALWAYS AS
@@ -128,7 +128,7 @@ adapter_capability_snapshots(
     capability_body_digest),
   CHECK(capability_kind IN ('available','unavailable')),
   CHECK((source='unavailable' AND capability_kind='unavailable') OR
-    (source IN ('runtime-discovery','version-pinned-conformance') AND
+    (source IN ('runtime-discovery','capability-fixture') AND
       capability_kind='available'))
 )
 

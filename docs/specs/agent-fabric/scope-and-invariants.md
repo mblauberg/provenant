@@ -12,7 +12,7 @@ The human instruction on 10 July 2026 accepted this specification and named all 
 
 Until the first human-accepted release, source HEAD owns one canonical database schema epoch and one current public protocol contract. Fresh state is created directly from that baseline. The runtime shall not carry old-schema repair, implicit legacy-run import, vintage-daemon fixtures, old-client/new-daemon result shims or an old-protocol Console retry. A database bearing an earlier or unknown schema fingerprint fails closed with a typed cutover-required error; the runtime never rewrites, deletes or silently adopts it. Any operator-chosen export, archive or replacement of that state is a separate explicit action.
 
-This rule does not remove current extensibility. Closed codecs, bounded feature negotiation for independently optional current capabilities, provider capability handshakes, adapter/model allowlists and pinned compatibility artifacts remain mandatory. They protect the current system and future extension; they do not promise execution of an obsolete binary or schema.
+This rule does not remove current extensibility. Closed codecs, bounded feature negotiation for independently optional current capabilities, provider capability handshakes and adapter/model allowlists remain mandatory. Provider adapter admission depends on current runtime protocol and capability evidence, not recorded provider versions or executable and schema digests.
 
 ## Problem
 
@@ -232,13 +232,14 @@ authoritative. Do not read the list above as the versions in force.
 
 The lockfile pins exact transitive Fabric dependencies. A provider stage cannot
 enter implementation until `config/adapter-compatibility.yaml` records its
-adapter contract, stable launcher, required vendor-identity policy,
-protocol/schema evidence, supported runtime, capability fixture, official
-source and verification date. Provider CLI versions and digests are observed,
-never admission locks; activation instead proves the bounded non-answer
-interface. Fabric SDK libraries, wrappers and protocol schemas retain their
-lockfile, Git-provenance and hash gates. An adapter without a verified entry
-remains disabled.
+adapter contract, stable launcher, required vendor-identity policy, supported
+runtime, capability fixture and official source. Provider CLI versions,
+executable digests and provider schema digests are absent from this registry
+and are never admission locks. Activation instead proves current provider
+identity and the bounded non-answer interface. Fabric SDK libraries retain
+their lockfile controls, while repository-owned wrappers retain Git
+provenance. An adapter without a valid enabled entry and current runtime
+conformance remains disabled.
 
 ## Requirements
 

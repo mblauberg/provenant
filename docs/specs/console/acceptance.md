@@ -331,11 +331,12 @@ Implementation is accepted only when objective tests demonstrate:
     command path as mouse activation. User no-colour task success remains
     within five percentage points of the default theme; visual inspection in
     supported light/dark terminal palettes supplements byte snapshots.
-53. Connection fixtures cover configuration, compatibility/pins, daemon
-    election/process, transport, handshake/authentication, feature negotiation,
-    project discovery and session attachment. Each failure identifies the exact
-    causal stage, safe code, time/freshness, relevant version/digest and bounded
-    remediation; downstream unexecuted stages are blocked, never falsely failed.
+53. Connection fixtures cover configuration, compatibility/runtime identity and
+    conformance, daemon election/process, transport, handshake/authentication,
+    feature negotiation, project discovery and session attachment. Each failure
+    identifies the exact causal stage, safe code, time/freshness, relevant
+    observed version/digest and bounded remediation; downstream unexecuted
+    stages are blocked, never falsely failed.
     Transport, projection freshness, attachment and optional integration health
     remain independent. Retry reconciles an ambiguous prior action and cannot
     duplicate bootstrap, launch or attachment effects.
