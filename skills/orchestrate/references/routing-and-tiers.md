@@ -54,11 +54,20 @@ Current durable aliases (verify against runtime before execution):
 
 | Family | flagship | workhorse | scout |
 |---|---|---|---|
-| Claude | Opus | Sonnet | Haiku |
-| OpenAI GPT-5.6 | Sol | Terra | Luna |
+| Claude | Opus | Opus, Sonnet | Haiku |
+| OpenAI GPT-5.6 | Sol | Terra, Luna | Luna |
+| Google Gemini | 3.1 Pro | 3.6 Flash | 3.6 Flash |
 
-Opus is Claude's default flagship and high-effort critical reviewer. Sonnet is
-the low-to-high workhorse. Each catalogue-configured risk tier has one bounded
+Where an alias lists more than one model the order is the resolution order, so
+the first is the default and the rest stay admissible. That order is the only
+thing that makes a standing preference in `docs/model-preferences.md` take
+effect automatically; prose alone does not move it. Change both together or
+they will disagree.
+
+Opus is Claude's default flagship and high-effort critical reviewer, and is also
+the default workhorse at low or medium effort, where it tends to beat Sonnet at
+a higher one. Sonnet stays admissible at workhorse and is the one to reach for
+when the work is genuinely routine. Each catalogue-configured risk tier has one bounded
 override occupant. Validation prevents it from being an alias or alias
 candidate. Callers must select the override explicitly and stay within that
 tier's configured roles, alias and effort ceiling. Retargeting a tier removes
@@ -88,10 +97,13 @@ the output is validated — a loose schema lets a cheap model invent fields, whi
 ## Choosing among admissible routes
 
 The tables above decide what a route *must* be. When more than one route
-satisfies them, choose on model character rather than habit: read
-`docs/model-dossier.md`, which owns per-model strengths, weaknesses and cost
-profile, and the category notes for adversarial, long-context, cheap-bulk and
-effort-substitution work. Its entries are examples, not an enumeration — a task
+satisfies them, read `docs/model-preferences.md` first: it records the standing
+preferences in plain prose, is edited directly by the operator, and is enforced
+by nothing. Prefer what it says, depart from it when the work calls for
+something else, and record why. Then choose on model character rather than
+habit: read `docs/model-dossier.md`, which owns per-model strengths, weaknesses
+and cost profile, and the category notes for adversarial, long-context,
+cheap-bulk and effort-substitution work. Its entries are examples, not an enumeration — a task
 whose character is unlisted is still routed by reasoning from the nearest
 entries. The dossier is advisory: it ranks admissible options and never widens
 authority, reaches a disabled adapter, or overrides a reservation, tier or

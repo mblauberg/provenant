@@ -1514,9 +1514,11 @@ def test_empty_routed_family_validates_every_family_the_scan_consults(
     catalog_path.write_text(json.dumps(catalog))
     monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
 
-    assert list(router.override_scan_families("gpt-5.6-sol", catalog)) == [
-        "anthropic", "openai",
-    ]
+    # Every family the catalogue defines, named from the catalogue rather than
+    # repeated here: the invariant is that the scan widens to all of them, which
+    # a hardcoded pair silently converts into a count that breaks whenever a
+    # family is added.
+    assert list(router.override_scan_families("gpt-5.6-sol", catalog)) == list(catalog["families"])
 
     result = router.main([
         "resolve", "--adapter", "cursor", "--alias", "flagship", "--role", "worker",
