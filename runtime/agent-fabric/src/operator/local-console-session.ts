@@ -603,7 +603,7 @@ export async function openLocalOperatorConsoleSession(
   if (heartbeatIntervalMs >= attachmentLeaseMs) {
     throw new TypeError("heartbeatIntervalMs must be shorter than attachmentLeaseMs");
   }
-  const paths = options.paths ?? resolveFabricPaths();
+  const paths = options.paths ?? resolveFabricPaths({ createDirectories: true });
   let identity: Awaited<ReturnType<typeof trustedWorkspaceIdentity>>;
   try {
     identity = await trustedWorkspaceIdentity({

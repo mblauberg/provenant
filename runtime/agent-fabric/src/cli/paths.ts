@@ -21,7 +21,7 @@ function privateDirectory(path: string): string {
 }
 
 export function resolveFabricPaths(options: { createDirectories?: boolean } = {}): FabricPaths {
-  const resolveDirectory = options.createDirectories === false ? (path: string): string => path : privateDirectory;
+  const resolveDirectory = options.createDirectories === true ? privateDirectory : (path: string): string => path;
   const stateDirectory = resolveDirectory(
     environmentPath("AGENT_FABRIC_STATE_DIRECTORY") ??
       join(environmentPath("XDG_STATE_HOME") ?? join(environmentPath("HOME") ?? homedir(), ".local", "state"), "agent-harness", "fabric"),
