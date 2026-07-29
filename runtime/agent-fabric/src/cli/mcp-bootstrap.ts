@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
-import { realpath } from "node:fs/promises";
+import { lstat, readFile, readdir, realpath } from "node:fs/promises";
 import { createConnection } from "node:net";
+import { homedir } from "node:os";
+import { basename, dirname, join, parse, resolve } from "node:path";
 
 import Database from "better-sqlite3";
 import {
@@ -181,6 +183,110 @@ export class McpBootstrapSchemaCutoverGateError extends Error {
 
 function shellQuote(value: string): string {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
+}
+
+type GitWorkspace = Readonly<{ root: string; linkedWorktree: boolean }>;
+
+function isMissingPathError(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "code" in error &&
+    (error.code === "ENOENT" || error.code === "ENOTDIR");
+}
+
+function hasErrorCode(error: unknown, code: string): boolean {
+  return typeof error === "object" && error !== null && "code" in error && error.code === code;
+}
+
+// Gitfiles also identify submodules, so the file alone does not prove a linked
+// worktree. Only its canonical gitdir under another repository's
+// `.git/worktrees/` boundary activates the user-only exception guidance.
+function pointsToLinkedWorktree(gitDirectory: string, workspaceRoot: string): boolean {
+  let candidate = gitDirectory;
+  for (;;) {
+    const parent = dirname(candidate);
+    if (basename(parent) === "worktrees" && basename(dirname(parent)) === ".git") {
+      return dirname(dirname(parent)) !== workspaceRoot;
+    }
+    if (parent === candidate) return false;
+    candidate = parent;
+  }
+}
+
+async function nearestGitWorkspace(canonicalRoot: string): Promise<GitWorkspace | null> {
+  let candidate = canonicalRoot;
+  for (;;) {
+    const filesystemRoot = candidate === parse(candidate).root;
+    let marker: Awaited<ReturnType<typeof lstat>>;
+    try {
+      marker = await lstat(join(candidate, ".git"));
+    } catch (error: unknown) {
+      // macOS may report EINVAL rather than ENOENT for `/.git` in a sandbox.
+      // It is a missing root marker only at this terminal probe; the same
+      // error anywhere else leaves the boundary indeterminate and fail-closed.
+      if (!isMissingPathError(error) && !(filesystemRoot && hasErrorCode(error, "EINVAL"))) throw error;
+      if (filesystemRoot) return null;
+      candidate = dirname(candidate);
+      continue;
+    }
+    if (marker.isDirectory()) return { root: candidate, linkedWorktree: false };
+    if (marker.isFile()) {
+      const match = /^gitdir:\s*(?<path>.+?)\s*$/u.exec(await readFile(join(candidate, ".git"), "utf8"));
+      const gitDirectory = match?.groups?.path;
+      if (gitDirectory === undefined) throw new Error("Git workspace marker is not a gitdir file");
+      const canonicalGitDirectory = await realpath(resolve(candidate, gitDirectory));
+      return {
+        root: candidate,
+        linkedWorktree: pointsToLinkedWorktree(canonicalGitDirectory, candidate),
+      };
+    }
+    throw new Error("Git workspace marker must be a directory or regular file");
+  }
+}
+
+// The collection heuristic is intentionally shallow: direct repository
+// children show that trusting this directory would grant sibling authority,
+// while recursively searching would misclassify an ordinary project that
+// happens to contain nested fixtures or vendored repositories.
+async function looksLikeRepositoryCollection(canonicalRoot: string): Promise<boolean> {
+  const children = await readdir(canonicalRoot, { withFileTypes: true });
+  let repositories = 0;
+  for (const child of children) {
+    if (!child.isDirectory()) continue;
+    try {
+      const marker = await lstat(join(canonicalRoot, child.name, ".git"));
+      if (marker.isDirectory() || marker.isFile()) repositories += 1;
+      if (repositories > 1) return true;
+    } catch (error: unknown) {
+      if (!isMissingPathError(error)) throw error;
+    }
+  }
+  return false;
+}
+
+async function workspaceTrustRecoveryMessage(canonicalRoot: string): Promise<string> {
+  const home = await realpath(homedir());
+  if (canonicalRoot === parse(canonicalRoot).root) {
+    return `Fabric bootstrap cannot proceed from ${shellQuote(canonicalRoot)}: the filesystem root can never be trusted because root-wide authority is forbidden by policy. Choose the exact repository root or current non-Git project directory instead`;
+  }
+  if (canonicalRoot === home) {
+    return `Fabric bootstrap cannot proceed from ${shellQuote(canonicalRoot)}: this exact path can never be trusted because home-wide trust is forbidden by policy. Choose the exact repository root or current non-Git project directory instead`;
+  }
+  const workspace = await nearestGitWorkspace(canonicalRoot);
+  if (workspace !== null && workspace.root === parse(workspace.root).root) {
+    return `Fabric bootstrap cannot proceed from ${shellQuote(workspace.root)}: the filesystem root can never be trusted because root-wide authority is forbidden by policy. Choose the exact repository root or current non-Git project directory instead`;
+  }
+  if (workspace?.root === home) {
+    return `Fabric bootstrap cannot proceed from ${shellQuote(workspace.root)}: this exact path can never be trusted because home-wide trust is forbidden by policy. Choose the exact repository root or current non-Git project directory instead`;
+  }
+  if (workspace?.linkedWorktree === true) {
+    return `Fabric bootstrap cannot proceed from ${shellQuote(workspace.root)} because it is a linked worktree; granting a worktree-path trust exception is a user-only decision, and the agent must not run a trust command unprompted`;
+  }
+  if (workspace === null && await looksLikeRepositoryCollection(canonicalRoot)) {
+    return `Fabric bootstrap cannot proceed from ${shellQuote(canonicalRoot)} because it looks like a parent collection of several repositories; policy forbids trusting a parent or collection directory. Run fabric_bootstrap again from inside the specific project it actually needs`;
+  }
+  if (workspace !== null && workspace.root !== canonicalRoot) {
+    return `Fabric bootstrap requires the exact current project root to be trusted; run "$HOME/.agents/scripts/agent-fabric" workspace trust ${shellQuote(workspace.root)}; then retry fabric_bootstrap from ${shellQuote(workspace.root)}`;
+  }
+  return `Fabric bootstrap requires the exact current project root to be trusted; run "$HOME/.agents/scripts/agent-fabric" workspace trust ${shellQuote(workspace?.root ?? canonicalRoot)}; then retry fabric_bootstrap`;
 }
 
 export function isSchemaCutoverRefusal(error: unknown): boolean {
@@ -407,9 +513,12 @@ export async function bootstrapMcpSeat(input: {
       canonicalRoot,
     });
   } catch (cause: unknown) {
+    const message = await workspaceTrustRecoveryMessage(canonicalRoot).catch(
+      () => `Fabric bootstrap cannot safely determine the trust boundary for ${shellQuote(canonicalRoot)}, so no trust command is suggested. Inspect the workspace and retry from the exact repository root or current non-Git project directory`,
+    );
     throw new McpBootstrapError(
       "WORKSPACE_NOT_TRUSTED",
-      `Fabric bootstrap requires the exact current project root to be trusted; run "$HOME/.agents/scripts/agent-fabric" workspace trust ${shellQuote(canonicalRoot)}; then retry fabric_bootstrap`,
+      message,
       { cause },
     );
   }
