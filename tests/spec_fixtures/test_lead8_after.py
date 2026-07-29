@@ -20,6 +20,7 @@ import unittest
 from collections.abc import Callable
 from pathlib import Path
 
+from assert_fk import ForeignKeySpec, assert_fk_rejected
 from spec_sources import AGENT_FABRIC_HARDENING, read_specs
 
 
@@ -374,26 +375,76 @@ class Lead8AfterRepairTests(unittest.TestCase):
     def test_reissue_before_old_handoff_blocks_stale_handoff(self) -> None:
         self.seed_issue(expires_at=T10)
 
-        error = self.race_after_first_commit(
-            lambda connection: insert_issue(
-                connection, "issue-2", T10, T20, "sha256:journal-2"
-            ),
-            # Deliberately forged/backdated: even if the expiry predicate is
-            # bypassed, the immediate current-head FK rejects the old issue.
-            lambda connection: insert_handoff(
-                connection, "handoff-old", "issue-1", T5
-            ),
-        )
+        first = self.connect()
+        first.execute("BEGIN IMMEDIATE")
+        insert_issue(first, "issue-2", T10, T20, "sha256:journal-2")
 
-        self.assert_integrity_error(error, "FOREIGN KEY constraint failed")
+        attempting = threading.Event()
+        finished = threading.Event()
+        outcome: dict[str, BaseException | None] = {}
+
+        def run_structural_oracle() -> None:
+            second = self.connect()
+            try:
+                attempting.set()
+                assert_fk_rejected(
+                    second,
+                    # Deliberately forged/backdated: even if the expiry
+                    # predicate is bypassed, the current-head FK identifies
+                    # the stale issue structurally after writer one commits.
+                    invalid_operation=lambda connection: insert_handoff(
+                        connection,
+                        "handoff-old",
+                        "issue-1",
+                        T5,
+                    ),
+                    positive_control=lambda connection: insert_handoff(
+                        connection,
+                        "handoff-current",
+                        "issue-2",
+                        T10,
+                    ),
+                    expected=frozenset(
+                        {
+                            ForeignKeySpec(
+                                "lifecycle_fresh_recovery_handoffs",
+                                ("issue_id",),
+                                "agent_lifecycle_recovery_source_heads",
+                                ("issue_id",),
+                            )
+                        }
+                    ),
+                )
+                outcome["error"] = None
+            except BaseException as error:
+                outcome["error"] = error
+            finally:
+                second.close()
+                finished.set()
+
+        thread = threading.Thread(target=run_structural_oracle, daemon=True)
+        thread.start()
+        self.assertTrue(attempting.wait(1.0), "second writer never attempted")
+        self.assertFalse(
+            finished.wait(0.10),
+            "stale handoff write did not serialize behind the reissue",
+        )
+        first.commit()
+        first.close()
+        self.assertTrue(finished.wait(3.0), "structural oracle did not finish")
+        thread.join(timeout=0.1)
+        if outcome["error"] is not None:
+            raise outcome["error"]
+
         self.assertEqual(self.current_head(), ("issue-2", "sha256:journal-2", 2))
         connection = self.connect()
         try:
             self.assertEqual(
                 connection.execute(
-                    "SELECT COUNT(*) FROM lifecycle_fresh_recovery_handoffs"
+                    "SELECT handoff_id,issue_id "
+                    "FROM lifecycle_fresh_recovery_handoffs"
                 ).fetchone(),
-                (0,),
+                ("handoff-current", "issue-2"),
             )
         finally:
             connection.close()

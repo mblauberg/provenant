@@ -11,6 +11,8 @@ from __future__ import annotations
 import sqlite3
 import unittest
 
+from assert_fk import ForeignKeySpec, assert_fk_rejected
+
 
 SCHEMA = r"""
 CREATE TABLE lifecycle_review_adoption_reservations(
@@ -580,13 +582,6 @@ def database() -> sqlite3.Connection:
     return db
 
 
-def expect_commit_failure(test: unittest.TestCase, db: sqlite3.Connection) -> None:
-    with test.assertRaises(sqlite3.IntegrityError) as caught:
-        db.commit()
-    test.assertEqual(str(caught.exception), "FOREIGN KEY constraint failed")
-    db.rollback()
-
-
 def insert_review_reservation(db: sqlite3.Connection) -> None:
     db.execute(
         """INSERT INTO lifecycle_review_adoption_reservations VALUES
@@ -802,11 +797,57 @@ class TransitionCoreAfterTests(unittest.TestCase):
 
     def test_batch_side_missing_effect_fails_at_commit(self) -> None:
         db = database()
-        db.execute("BEGIN")
-        insert_review_reservation(db)
-        insert_batch(db, batch_id="batch-review", apply_id="apply-review",
-                     review=True)
-        expect_commit_failure(self, db)
+
+        def insert_batch_without_effect(connection: sqlite3.Connection) -> None:
+            insert_review_reservation(connection)
+            insert_batch(
+                connection,
+                batch_id="batch-review",
+                apply_id="apply-review",
+                review=True,
+            )
+
+        def insert_batch_with_effect(connection: sqlite3.Connection) -> None:
+            insert_batch_without_effect(connection)
+            insert_review_effect(connection)
+
+        assert_fk_rejected(
+            db,
+            invalid_operation=insert_batch_without_effect,
+            positive_control=insert_batch_with_effect,
+            expected=frozenset(
+                {
+                    ForeignKeySpec(
+                        "lifecycle_receipt_batches",
+                        (
+                            "batch_id",
+                            "review_decision_loss_effect_role",
+                            "review_decision_loss_effect_digest",
+                            "project_session_id",
+                            "run_id",
+                            "agent_id",
+                            "review_decision_loss_after_id",
+                            "review_decision_loss_after_revision",
+                            "review_decision_loss_after_semantic_digest",
+                            "review_decision_loss_after_source_ref_digest",
+                        ),
+                        "lifecycle_receipt_generation_loss_effects",
+                        (
+                            "batch_id",
+                            "role",
+                            "effect_digest",
+                            "project_session_id",
+                            "run_id",
+                            "agent_id",
+                            "generation_loss_id",
+                            "final_revision",
+                            "final_semantic_digest",
+                            "final_source_ref_digest",
+                        ),
+                    )
+                }
+            ),
+        )
 
     def test_batch_effect_tuple_cannot_null_skip_deferred_fk(self) -> None:
         db = database()
@@ -858,12 +899,64 @@ class TransitionCoreAfterTests(unittest.TestCase):
 
     def test_batch_side_crossed_effect_fails_at_commit(self) -> None:
         db = database()
-        db.execute("BEGIN")
-        insert_review_reservation(db)
-        insert_batch(db, batch_id="batch-review", apply_id="apply-review",
-                     review=True)
-        insert_review_effect(db, final_revision=3)
-        expect_commit_failure(self, db)
+
+        def insert_crossed_effect(connection: sqlite3.Connection) -> None:
+            insert_review_reservation(connection)
+            insert_batch(
+                connection,
+                batch_id="batch-review",
+                apply_id="apply-review",
+                review=True,
+            )
+            insert_review_effect(connection, final_revision=3)
+
+        def insert_matching_effect(connection: sqlite3.Connection) -> None:
+            insert_review_reservation(connection)
+            insert_batch(
+                connection,
+                batch_id="batch-review",
+                apply_id="apply-review",
+                review=True,
+            )
+            insert_review_effect(connection)
+
+        assert_fk_rejected(
+            db,
+            invalid_operation=insert_crossed_effect,
+            positive_control=insert_matching_effect,
+            expected=frozenset(
+                {
+                    ForeignKeySpec(
+                        "lifecycle_receipt_batches",
+                        (
+                            "batch_id",
+                            "review_decision_loss_effect_role",
+                            "review_decision_loss_effect_digest",
+                            "project_session_id",
+                            "run_id",
+                            "agent_id",
+                            "review_decision_loss_after_id",
+                            "review_decision_loss_after_revision",
+                            "review_decision_loss_after_semantic_digest",
+                            "review_decision_loss_after_source_ref_digest",
+                        ),
+                        "lifecycle_receipt_generation_loss_effects",
+                        (
+                            "batch_id",
+                            "role",
+                            "effect_digest",
+                            "project_session_id",
+                            "run_id",
+                            "agent_id",
+                            "generation_loss_id",
+                            "final_revision",
+                            "final_semantic_digest",
+                            "final_source_ref_digest",
+                        ),
+                    )
+                }
+            ),
+        )
 
     def test_reservation_has_no_batch_apply_or_receipt_back_pointer(self) -> None:
         db = database()
@@ -901,17 +994,92 @@ class TransitionCoreAfterTests(unittest.TestCase):
         crossed = database()
         seed_review_prepare(crossed)
         crossed.execute("BEGIN")
-        with self.assertRaises(sqlite3.IntegrityError) as caught:
-            insert_review_binding(crossed, revision=1)
-        self.assertEqual(str(caught.exception), "FOREIGN KEY constraint failed")
-        crossed.rollback()
+        insert_apply(
+            crossed,
+            batch_id="batch-review",
+            apply_id="apply-review",
+            apply_digest="apply-digest-review",
+            transition_kind="custody-terminal",
+        )
+        crossed.commit()
+        assert_fk_rejected(
+            crossed,
+            invalid_operation=lambda connection: insert_review_binding(
+                connection,
+                revision=1,
+            ),
+            positive_control=lambda connection: insert_review_binding(
+                connection,
+                revision=2,
+            ),
+            expected=frozenset(
+                {
+                    ForeignKeySpec(
+                        "lifecycle_review_authority_bindings",
+                        (
+                            "batch_id",
+                            "decision_loss_effect_key",
+                            "decision_loss_effect_role",
+                            "decision_loss_effect_digest",
+                            "project_session_id",
+                            "run_id",
+                            "agent_id",
+                            "decision_loss_after_id",
+                            "decision_loss_after_revision",
+                            "decision_loss_after_semantic_digest",
+                            "decision_loss_after_source_ref_digest",
+                        ),
+                        "lifecycle_receipt_batches",
+                        (
+                            "batch_id",
+                            "review_decision_loss_effect_key",
+                            "review_decision_loss_effect_role",
+                            "review_decision_loss_effect_digest",
+                            "project_session_id",
+                            "run_id",
+                            "agent_id",
+                            "review_decision_loss_after_id",
+                            "review_decision_loss_after_revision",
+                            "review_decision_loss_after_semantic_digest",
+                            "review_decision_loss_after_source_ref_digest",
+                        ),
+                    )
+                }
+            ),
+        )
 
     def test_review_binding_missing_apply_fails_only_at_commit(self) -> None:
         db = database()
         seed_review_prepare(db)
-        db.execute("BEGIN")
-        insert_review_binding(db, revision=2)
-        expect_commit_failure(self, db)
+
+        def binding_without_apply(connection: sqlite3.Connection) -> None:
+            insert_review_binding(connection, revision=2)
+
+        def binding_with_apply(connection: sqlite3.Connection) -> None:
+            binding_without_apply(connection)
+            insert_apply(
+                connection,
+                batch_id="batch-review",
+                apply_id="apply-review",
+                apply_digest="apply-digest-review",
+                transition_kind="custody-terminal",
+            )
+
+        assert_fk_rejected(
+            db,
+            invalid_operation=binding_without_apply,
+            positive_control=binding_with_apply,
+            expected=frozenset(
+                {
+                    ForeignKeySpec(
+                        "lifecycle_review_authority_bindings",
+                        ("apply_id", "batch_id"),
+                        "lifecycle_transition_applies",
+                        ("apply_id", "receipt_batch_id"),
+                    )
+                }
+            ),
+        )
 
     def test_review_binding_effect_tuple_cannot_null_skip_full_fk(self) -> None:
         db = database()
@@ -1027,9 +1195,46 @@ class TransitionCoreAfterTests(unittest.TestCase):
         seed_terminal_fresh_prepare(
             db, completion_has_loss=False, handoff_has_loss=False
         )
-        db.execute("BEGIN")
-        insert_fresh_commit(db, with_loss=False)
-        expect_commit_failure(self, db)
+
+        def commit_without_apply(connection: sqlite3.Connection) -> None:
+            insert_fresh_commit(connection, with_loss=False)
+
+        def commit_with_apply(connection: sqlite3.Connection) -> None:
+            commit_without_apply(connection)
+            insert_apply(
+                connection,
+                batch_id="batch-fresh",
+                apply_id="apply-fresh",
+                apply_digest="apply-digest-fresh",
+                transition_kind="custody-terminal",
+                apply_kind="terminal-fresh",
+                replay="replay-fresh",
+                mutation="terminal-plan",
+            )
+
+        assert_fk_rejected(
+            db,
+            invalid_operation=commit_without_apply,
+            positive_control=commit_with_apply,
+            expected=frozenset(
+                {
+                    ForeignKeySpec(
+                        "lifecycle_fresh_rotation_commits",
+                        (
+                            "apply_id",
+                            "fresh_apply_digest",
+                            "generation_loss_after_key",
+                        ),
+                        "lifecycle_transition_applies",
+                        (
+                            "apply_id",
+                            "apply_digest",
+                            "fresh_generation_loss_after_key",
+                        ),
+                    )
+                }
+            ),
+        )
 
     def test_other_materialized_children_are_child_first_and_guarded(self) -> None:
         cases = {
@@ -1060,53 +1265,50 @@ class TransitionCoreAfterTests(unittest.TestCase):
                     }[name],
                 )
                 db.commit()
-                db.execute("BEGIN")
-                if name == "loss":
-                    db.execute(
-                        statement,
-                        (*SCOPE, "loss-child", 1, "sem-child", "src-child",
-                         "journal-child", f"batch-{name}", f"apply-{name}",
-                         f"digest-{name}"),
-                    )
-                else:
-                    db.execute(
-                        statement,
-                        (f"{name}-child", f"apply-{name}", f"digest-{name}"),
-                    )
-                expect_commit_failure(self, db)
 
-            with self.subTest(child=name, outcome="child-first-success"):
-                db = database()
-                transition_kind = {
-                    "custody": "custody-terminal",
-                    "loss": "generation-loss-terminal",
-                    "retirement": "custody-recovery-retirement",
-                }[name]
-                db.execute("BEGIN")
-                insert_batch(
-                    db, batch_id=f"batch-{name}", apply_id=f"apply-{name}",
-                    transition_kind=transition_kind,
-                )
-                db.commit()
-                db.execute("BEGIN")
-                if name == "loss":
-                    db.execute(
-                        statement,
-                        (*SCOPE, "loss-child", 1, "sem-child", "src-child",
-                         "journal-child", f"batch-{name}", f"apply-{name}",
-                         f"digest-{name}"),
+                def insert_child(connection: sqlite3.Connection) -> None:
+                    if name == "loss":
+                        connection.execute(
+                            statement,
+                            (*SCOPE, "loss-child", 1, "sem-child", "src-child",
+                             "journal-child", f"batch-{name}", f"apply-{name}",
+                             f"digest-{name}"),
+                        )
+                    else:
+                        connection.execute(
+                            statement,
+                            (f"{name}-child", f"apply-{name}", f"digest-{name}"),
+                        )
+
+                def insert_child_and_apply(connection: sqlite3.Connection) -> None:
+                    insert_child(connection)
+                    insert_apply(
+                        connection,
+                        batch_id=f"batch-{name}",
+                        apply_id=f"apply-{name}",
+                        apply_digest=f"digest-{name}",
+                        transition_kind={
+                            "custody": "custody-terminal",
+                            "loss": "generation-loss-terminal",
+                            "retirement": "custody-recovery-retirement",
+                        }[name],
                     )
-                else:
-                    db.execute(
-                        statement,
-                        (f"{name}-child", f"apply-{name}", f"digest-{name}"),
-                    )
-                insert_apply(
-                    db, batch_id=f"batch-{name}", apply_id=f"apply-{name}",
-                    apply_digest=f"digest-{name}",
-                    transition_kind=transition_kind,
+
+                assert_fk_rejected(
+                    db,
+                    invalid_operation=insert_child,
+                    positive_control=insert_child_and_apply,
+                    expected=frozenset(
+                        {
+                            ForeignKeySpec(
+                                _table,
+                                ("receipt_apply_id", "receipt_apply_digest"),
+                                "lifecycle_transition_applies",
+                                ("apply_id", "apply_digest"),
+                            )
+                        }
+                    ),
                 )
-                db.commit()
 
 
 if __name__ == "__main__":

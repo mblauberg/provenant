@@ -19,6 +19,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
+from assert_fk import ForeignKeySpec, assert_fk_rejected
 from spec_sources import AGENT_FABRIC_HARDENING, read_specs
 
 
@@ -758,6 +759,33 @@ class LaneAHeadsRouteMiscOracle(unittest.TestCase):
         self.assertEqual(str(caught.exception), message)
         mark_case()
 
+    def reject_fk(
+        self,
+        sql: str,
+        parameters: Sequence[Any] = (),
+        *,
+        positive_sql: str | None = None,
+        positive_parameters: Sequence[Any] = (),
+        cleanup_sql: str | None = None,
+        cleanup_parameters: Sequence[Any] = (),
+        expected: frozenset[ForeignKeySpec],
+    ) -> None:
+        assert_fk_rejected(
+            self.db,
+            invalid_operation=lambda connection: connection.execute(
+                sql,
+                parameters,
+            ),
+            positive_control=lambda connection: connection.execute(
+                positive_sql or sql,
+                positive_parameters,
+            ),
+            expected=expected,
+        )
+        if cleanup_sql is not None:
+            self.db.execute(cleanup_sql, cleanup_parameters)
+        mark_case()
+
     def assert_foreign_keys_clean(self) -> None:
         self.assertEqual(self.db.execute("PRAGMA foreign_key_check").fetchall(), [])
 
@@ -1251,9 +1279,22 @@ class LaneAHeadsRouteMiscOracle(unittest.TestCase):
         )
         mark_case()
 
-        self.reject(
+        self.reject_fk(
             "INSERT INTO lifecycle_receipt_scope_heads VALUES('ps-1','run-x','scope-other',1)",
-            message="FOREIGN KEY constraint failed",
+            positive_sql=(
+                "INSERT INTO lifecycle_receipt_scope_heads "
+                "VALUES('ps-2','run-2','scope-other',1)"
+            ),
+            expected=frozenset(
+                {
+                    ForeignKeySpec(
+                        "lifecycle_receipt_scope_heads",
+                        ("project_session_id", "run_id", "checkpoint_digest"),
+                        "lifecycle_receipt_scope_checkpoints",
+                        ("project_session_id", "run_id", "checkpoint_digest"),
+                    )
+                }
+            ),
         )
         self.reject(
             """UPDATE lifecycle_receipt_scope_heads
@@ -1314,12 +1355,35 @@ class LaneAHeadsRouteMiscOracle(unittest.TestCase):
 
         self.seed_loss_revision("agent-cross", "loss-cross-a", "open", "none")
         self.seed_loss_revision("agent-cross", "loss-cross-b", "abandoned", "direct-open")
-        self.reject(
+        self.reject_fk(
             """INSERT INTO lifecycle_generation_loss_heads
                VALUES('ps-1','run-1','agent-cross','loss-cross-a',1,
                  'open','none','semantic-loss-cross-b','source-loss-cross-a',
                  'journal-loss-cross-a',0,1)""",
-            message="FOREIGN KEY constraint failed",
+            positive_sql="""INSERT INTO lifecycle_generation_loss_heads
+               VALUES('ps-1','run-1','agent-cross','loss-cross-a',1,
+                 'open','none','semantic-loss-cross-a','source-loss-cross-a',
+                 'journal-loss-cross-a',0,1)""",
+            expected=frozenset(
+                {
+                    ForeignKeySpec(
+                        "lifecycle_generation_loss_heads",
+                        (
+                            "project_session_id", "run_id", "agent_id",
+                            "generation_loss_id", "current_revision", "state",
+                            "abandon_kind_code", "semantic_digest",
+                            "source_ref_digest", "journal_digest",
+                        ),
+                        "lifecycle_generation_loss_revisions",
+                        (
+                            "project_session_id", "run_id", "agent_id",
+                            "generation_loss_id", "revision", "state",
+                            "abandon_kind_code", "semantic_digest",
+                            "source_ref_digest", "journal_digest",
+                        ),
+                    )
+                }
+            ),
         )
         self.seed_loss_revision("agent-terminal-cross", "loss-x", "open", "none")
         self.reject(
@@ -1378,12 +1442,35 @@ class LaneAHeadsRouteMiscOracle(unittest.TestCase):
         )
         self.seed_custody_revision("agent-cross", "custody-a", "prepared", "none")
         self.seed_custody_revision("agent-cross", "custody-b", "finalized", "adopted")
-        self.reject(
+        self.reject_fk(
             """INSERT INTO lifecycle_rotation_custody_heads
                VALUES('ps-1','run-1','agent-cross','custody-a',1,'prepared',
                  'none','semantic-custody-b','source-custody-a',
                  'journal-custody-a',0,1)""",
-            message="FOREIGN KEY constraint failed",
+            positive_sql="""INSERT INTO lifecycle_rotation_custody_heads
+               VALUES('ps-1','run-1','agent-cross','custody-a',1,'prepared',
+                 'none','semantic-custody-a','source-custody-a',
+                 'journal-custody-a',0,1)""",
+            expected=frozenset(
+                {
+                    ForeignKeySpec(
+                        "lifecycle_rotation_custody_heads",
+                        (
+                            "project_session_id", "run_id", "agent_id",
+                            "custody_id", "current_revision", "state",
+                            "disposition_code", "semantic_digest",
+                            "source_ref_digest", "journal_digest",
+                        ),
+                        "lifecycle_rotation_custody_revisions",
+                        (
+                            "project_session_id", "run_id", "agent_id",
+                            "custody_id", "revision", "state",
+                            "disposition_code", "semantic_digest",
+                            "source_ref_digest", "journal_digest",
+                        ),
+                    )
+                }
+            ),
         )
         self.seed_custody_revision(
             "agent-parity", "custody-parity", "prepared", "none"
@@ -1607,20 +1694,23 @@ class LaneAHeadsRouteMiscOracle(unittest.TestCase):
             ("executable", "contract-n", "executable-crossed"),
         ):
             with self.subTest(crossing=crossing):
-                with self.assertRaises(sqlite3.IntegrityError) as caught:
-                    db.execute(
-                        """INSERT INTO adapter_effective_configurations(
-                             configuration_id,configuration_revision,adapter_id,
-                             adapter_contract_digest,executable_identity_digest,
-                             subject_kind,subject_ref_digest,subject_smoke_id,
-                             activation_configuration_id,
-                             activation_configuration_revision,
-                             activation_configuration_digest,
-                             activation_configuration_subject_kind,
-                             configuration_digest)
-                           VALUES(?,1,'adapter-n',?,?,'provider-smoke',?,
-                             'smoke-n','activation-config-n',1,
-                             'activation-config-digest-n','activation',?)""",
+                statement = """INSERT INTO adapter_effective_configurations(
+                     configuration_id,configuration_revision,adapter_id,
+                     adapter_contract_digest,executable_identity_digest,
+                     subject_kind,subject_ref_digest,subject_smoke_id,
+                     activation_configuration_id,
+                     activation_configuration_revision,
+                     activation_configuration_digest,
+                     activation_configuration_subject_kind,
+                     configuration_digest)
+                   VALUES(?,1,'adapter-n',?,?,'provider-smoke',?,
+                     'smoke-n','activation-config-n',1,
+                     'activation-config-digest-n','activation',?)"""
+                assert_fk_rejected(
+                    db,
+                    invalid_operation=lambda connection, crossing=crossing,
+                    contract=contract, executable=executable: connection.execute(
+                        statement,
                         (
                             f"smoke-cross-{crossing}",
                             contract,
@@ -1628,15 +1718,75 @@ class LaneAHeadsRouteMiscOracle(unittest.TestCase):
                             f"smoke-ref-{crossing}",
                             f"smoke-digest-{crossing}",
                         ),
-                    )
-                self.assertEqual(
-                    str(caught.exception),
-                    "FOREIGN KEY constraint failed",
+                    ),
+                    positive_control=lambda connection, crossing=crossing:
+                    connection.execute(
+                        statement,
+                        (
+                            f"smoke-positive-{crossing}",
+                            "contract-n",
+                            "executable-n",
+                            f"smoke-positive-ref-{crossing}",
+                            f"smoke-positive-digest-{crossing}",
+                        ),
+                    ),
+                    expected=frozenset(
+                        {
+                            ForeignKeySpec(
+                                "adapter_effective_configurations",
+                                (
+                                    "adapter_id",
+                                    "activation_configuration_subject_kind",
+                                    "activation_configuration_id",
+                                    "activation_configuration_revision",
+                                    "activation_configuration_digest",
+                                    "adapter_contract_digest",
+                                    "executable_identity_digest",
+                                ),
+                                "adapter_effective_configurations",
+                                (
+                                    "adapter_id",
+                                    "subject_kind",
+                                    "configuration_id",
+                                    "configuration_revision",
+                                    "configuration_digest",
+                                    "adapter_contract_digest",
+                                    "executable_identity_digest",
+                                ),
+                            )
+                        }
+                    ),
                 )
                 mark_case()
         self.assertEqual(db.execute("PRAGMA foreign_key_check").fetchall(), [])
 
     def test_effective_configuration_activation_parent_correlation(self) -> None:
+        activation_parent_fk = frozenset(
+            {
+                ForeignKeySpec(
+                    "adapter_effective_configurations",
+                    (
+                        "adapter_id",
+                        "activation_configuration_subject_kind",
+                        "activation_configuration_id",
+                        "activation_configuration_revision",
+                        "activation_configuration_digest",
+                        "adapter_contract_digest",
+                        "executable_identity_digest",
+                    ),
+                    "adapter_effective_configurations",
+                    (
+                        "adapter_id",
+                        "subject_kind",
+                        "configuration_id",
+                        "configuration_revision",
+                        "configuration_digest",
+                        "adapter_contract_digest",
+                        "executable_identity_digest",
+                    ),
+                )
+            }
+        )
         self.seed_adapter_primitives("adapter-a")
         self.seed_adapter_primitives("adapter-b")
         self.db.execute(
@@ -1739,7 +1889,7 @@ class LaneAHeadsRouteMiscOracle(unittest.TestCase):
                  'activation-with-parent-d')""",
             message=ACTIVATION_PARENT_CHECK_ERROR,
         )
-        self.reject(
+        self.reject_fk(
             smoke_sql,
             (
                 "cross-adapter-parent",
@@ -1756,10 +1906,29 @@ class LaneAHeadsRouteMiscOracle(unittest.TestCase):
                 "surface-adapter-b",
                 "cross-adapter-parent-d",
             ),
-            message="FOREIGN KEY constraint failed",
+            positive_parameters=(
+                "cross-adapter-parent",
+                "adapter-b",
+                "contract-adapter-b",
+                "executable-adapter-b",
+                "smoke-b",
+                "activation-config-adapter-b",
+                "activation-config-digest-adapter-b",
+                "body-adapter-b",
+                "permission-adapter-b",
+                "surface-id-adapter-b",
+                1,
+                "surface-adapter-b",
+                "cross-adapter-parent-d",
+            ),
+            cleanup_sql=(
+                "DELETE FROM adapter_effective_configurations "
+                "WHERE configuration_id=?"
+            ),
+            cleanup_parameters=("cross-adapter-parent",),
+            expected=activation_parent_fk,
         )
-        self.reject(
-            """INSERT INTO adapter_effective_configurations(
+        provider_action_sql = """INSERT INTO adapter_effective_configurations(
                  configuration_id,configuration_revision,adapter_id,
                  adapter_contract_digest,executable_identity_digest,
                  subject_kind,subject_action_adapter_id,subject_action_id,
@@ -1773,13 +1942,24 @@ class LaneAHeadsRouteMiscOracle(unittest.TestCase):
                  discovery_surface_digest,configuration_digest)
                VALUES('nonactivation-parent',1,'adapter-a',
                  'contract-adapter-a','executable-adapter-a','provider-action',
-                 'adapter-a','action-a','smoke-config-a',1,
-                 'smoke-config-digest-a','activation','body-adapter-a',
+                 'adapter-a','action-a',?,1,?,'activation','body-adapter-a',
                  'permission-adapter-a','surface-id-adapter-a',1,
-                 'surface-adapter-a','nonactivation-parent-d')""",
-            message="FOREIGN KEY constraint failed",
+                 'surface-adapter-a','nonactivation-parent-d')"""
+        self.reject_fk(
+            provider_action_sql,
+            ("smoke-config-a", "smoke-config-digest-a"),
+            positive_parameters=(
+                "activation-config-adapter-a",
+                "activation-config-digest-adapter-a",
+            ),
+            cleanup_sql=(
+                "DELETE FROM adapter_effective_configurations "
+                "WHERE configuration_id=?"
+            ),
+            cleanup_parameters=("nonactivation-parent",),
+            expected=activation_parent_fk,
         )
-        self.reject(
+        self.reject_fk(
             smoke_sql,
             (
                 "cross-parent-digest",
@@ -1796,7 +1976,27 @@ class LaneAHeadsRouteMiscOracle(unittest.TestCase):
                 "surface-adapter-b",
                 "cross-parent-digest-d",
             ),
-            message="FOREIGN KEY constraint failed",
+            positive_parameters=(
+                "cross-parent-digest",
+                "adapter-b",
+                "contract-adapter-b",
+                "executable-adapter-b",
+                "smoke-b",
+                "activation-config-adapter-b",
+                "activation-config-digest-adapter-b",
+                "body-adapter-b",
+                "permission-adapter-b",
+                "surface-id-adapter-b",
+                1,
+                "surface-adapter-b",
+                "cross-parent-digest-d",
+            ),
+            cleanup_sql=(
+                "DELETE FROM adapter_effective_configurations "
+                "WHERE configuration_id=?"
+            ),
+            cleanup_parameters=("cross-parent-digest",),
+            expected=activation_parent_fk,
         )
         lineage_smoke_sql = """INSERT INTO adapter_effective_configurations(
           configuration_id,configuration_revision,adapter_id,
@@ -1812,7 +2012,7 @@ class LaneAHeadsRouteMiscOracle(unittest.TestCase):
             'activation-config-digest-adapter-b','activation',
             'body-adapter-b','permission-adapter-b','surface-id-adapter-b',1,
             'surface-adapter-b',?)"""
-        self.reject(
+        self.reject_fk(
             lineage_smoke_sql,
             (
                 "cross-parent-contract",
@@ -1820,9 +2020,20 @@ class LaneAHeadsRouteMiscOracle(unittest.TestCase):
                 "executable-adapter-b",
                 "cross-parent-contract-d",
             ),
-            message="FOREIGN KEY constraint failed",
+            positive_parameters=(
+                "cross-parent-contract",
+                "contract-adapter-b",
+                "executable-adapter-b",
+                "cross-parent-contract-d",
+            ),
+            cleanup_sql=(
+                "DELETE FROM adapter_effective_configurations "
+                "WHERE configuration_id=?"
+            ),
+            cleanup_parameters=("cross-parent-contract",),
+            expected=activation_parent_fk,
         )
-        self.reject(
+        self.reject_fk(
             lineage_smoke_sql,
             (
                 "cross-parent-executable",
@@ -1830,7 +2041,18 @@ class LaneAHeadsRouteMiscOracle(unittest.TestCase):
                 "executable-adapter-a",
                 "cross-parent-executable-d",
             ),
-            message="FOREIGN KEY constraint failed",
+            positive_parameters=(
+                "cross-parent-executable",
+                "contract-adapter-b",
+                "executable-adapter-b",
+                "cross-parent-executable-d",
+            ),
+            cleanup_sql=(
+                "DELETE FROM adapter_effective_configurations "
+                "WHERE configuration_id=?"
+            ),
+            cleanup_parameters=("cross-parent-executable",),
+            expected=activation_parent_fk,
         )
         self.seed_preflight_and_configuration(
             "adapter-a", "action-valid", kind="generic"
@@ -1842,11 +2064,37 @@ class LaneAHeadsRouteMiscOracle(unittest.TestCase):
         self.seed_preflight_and_configuration(
             "adapter-a", "generic-before-action", kind="generic"
         )
-        self.reject(
-            "INSERT INTO provider_action_routes VALUES(" + ",".join("?" * 20) + ")",
-            self.route_values("adapter-a", "generic-before-action"),
-            message="FOREIGN KEY constraint failed",
+        route_statement = (
+            "INSERT INTO provider_action_routes VALUES(" + ",".join("?" * 20) + ")"
         )
+        route_values = self.route_values("adapter-a", "generic-before-action")
+
+        def insert_action_and_route(connection: sqlite3.Connection) -> None:
+            connection.execute(
+                "INSERT INTO provider_actions VALUES(?,?,?,?,0)",
+                ("adapter-a", "generic-before-action", "run-1", 1),
+            )
+            connection.execute(route_statement, route_values)
+
+        assert_fk_rejected(
+            self.db,
+            invalid_operation=lambda connection: connection.execute(
+                route_statement,
+                route_values,
+            ),
+            positive_control=insert_action_and_route,
+            expected=frozenset(
+                {
+                    ForeignKeySpec(
+                        "provider_action_routes",
+                        ("adapter_id", "action_id", "run_id"),
+                        "provider_actions",
+                        ("adapter_id", "action_id", "run_id"),
+                    )
+                }
+            ),
+        )
+        mark_case()
 
         self.seed_preflight_and_configuration(
             "adapter-a", "canonical-cert", kind="certifying"
@@ -1925,13 +2173,35 @@ class LaneAHeadsRouteMiscOracle(unittest.TestCase):
                 if name == "surface-digest":
                     values[11] = "surface-id-alt"
                 values[14] = f"dispatch-cross-{name}"
-                self.reject_dispatch(values)
+                positive_values = self.dispatch_values(
+                    "adapter-a",
+                    "action-a",
+                    ordinal,
+                )
+                positive_values[14] = f"dispatch-positive-{name}"
+                self.reject_dispatch(values, positive_values)
 
-        self.reject(
+        self.reject_fk(
             """INSERT INTO provider_action_route_observations
                VALUES('adapter-a','action-a','admission-action-b',
                  '{"proved":true}','observation-cross-admission')""",
-            message="FOREIGN KEY constraint failed",
+            positive_sql="""INSERT INTO provider_action_route_observations
+               VALUES('adapter-a','action-b','admission-action-b',
+                 '{"proved":true}','observation-positive-admission')""",
+            expected=frozenset(
+                {
+                    ForeignKeySpec(
+                        "provider_action_route_observations",
+                        ("adapter_id", "action_id", "admission_digest"),
+                        "provider_action_routes",
+                        (
+                            "adapter_id",
+                            "action_id",
+                            "deployed_route_admission_digest",
+                        ),
+                    )
+                }
+            ),
         )
 
         self.db.execute(
@@ -1959,10 +2229,60 @@ class LaneAHeadsRouteMiscOracle(unittest.TestCase):
         self.insert_dispatch(values)
         mark_case()
 
-    def reject_dispatch(self, values: Sequence[Any]) -> None:
-        with self.assertRaises(sqlite3.IntegrityError) as caught:
-            self.insert_dispatch(values)
-        self.assertEqual(str(caught.exception), "FOREIGN KEY constraint failed")
+    def reject_dispatch(
+        self,
+        values: Sequence[Any],
+        positive_values: Sequence[Any],
+    ) -> None:
+        assert_fk_rejected(
+            self.db,
+            invalid_operation=lambda connection: connection.execute(
+                "INSERT INTO provider_action_route_dispatches VALUES("
+                + ",".join("?" * 15)
+                + ")",
+                values,
+            ),
+            positive_control=lambda connection: connection.execute(
+                "INSERT INTO provider_action_route_dispatches VALUES("
+                + ",".join("?" * 15)
+                + ")",
+                positive_values,
+            ),
+            expected=frozenset(
+                {
+                    ForeignKeySpec(
+                        "provider_action_route_dispatches",
+                        (
+                            "adapter_id",
+                            "action_id",
+                            "admission_digest",
+                            "capability_body_digest",
+                            "effective_configuration_id",
+                            "effective_configuration_revision",
+                            "effective_configuration_ref_digest",
+                            "permission_profile_digest",
+                            "discovery_surface_evidence_id",
+                            "discovery_surface_evidence_revision",
+                            "discovery_surface_digest",
+                        ),
+                        "provider_action_routes",
+                        (
+                            "adapter_id",
+                            "action_id",
+                            "deployed_route_admission_digest",
+                            "capability_body_digest",
+                            "effective_configuration_id",
+                            "effective_configuration_revision",
+                            "effective_configuration_ref_digest",
+                            "permission_profile_digest",
+                            "discovery_surface_evidence_id",
+                            "discovery_surface_evidence_revision",
+                            "discovery_surface_digest",
+                        ),
+                    )
+                }
+            ),
+        )
         mark_case()
 
     def test_actual_route_result_reservation_and_review_heads(self) -> None:
@@ -2035,9 +2355,40 @@ class LaneAHeadsRouteMiscOracle(unittest.TestCase):
             observation="observation-review-a",
         )
         crossed_reservation[13] = "reservation-review-b"
+        matching_reservation = list(crossed_reservation)
+        matching_reservation[2] = 1
+        matching_reservation[3] = "native"
+        matching_reservation[13] = "reservation-review-a"
         self.reject_evidence(
             crossed_reservation,
-            "FOREIGN KEY constraint failed",
+            "structural-foreign-key",
+            positive_values=matching_reservation,
+            expected=frozenset(
+                {
+                    ForeignKeySpec(
+                        "provider_review_evidence",
+                        (
+                            "action_adapter_id",
+                            "action_id",
+                            "run_id",
+                            "target_generation",
+                            "slot",
+                            "attempt_generation",
+                            "finding_capacity_reservation_digest",
+                        ),
+                        "review_finding_capacity_reservations",
+                        (
+                            "adapter_id",
+                            "action_id",
+                            "run_id",
+                            "target_generation",
+                            "slot",
+                            "attempt_generation",
+                            "reservation_digest",
+                        ),
+                    )
+                }
+            ),
         )
 
         skipped_generation = self.evidence_values(
@@ -2087,7 +2438,29 @@ class LaneAHeadsRouteMiscOracle(unittest.TestCase):
         self,
         values: Sequence[Any],
         message: str,
+        *,
+        positive_values: Sequence[Any] | None = None,
+        expected: frozenset[ForeignKeySpec] | None = None,
     ) -> None:
+        if positive_values is not None and expected is not None:
+            assert_fk_rejected(
+                self.db,
+                invalid_operation=lambda connection: connection.execute(
+                    "INSERT INTO provider_review_evidence VALUES("
+                    + ",".join("?" * 18)
+                    + ")",
+                    values,
+                ),
+                positive_control=lambda connection: connection.execute(
+                    "INSERT INTO provider_review_evidence VALUES("
+                    + ",".join("?" * 18)
+                    + ")",
+                    positive_values,
+                ),
+                expected=expected,
+            )
+            mark_case()
+            return
         with self.assertRaises(sqlite3.IntegrityError) as caught:
             self.insert_evidence(values)
         self.assertEqual(str(caught.exception), message)
@@ -2102,19 +2475,54 @@ class LaneAHeadsRouteMiscOracle(unittest.TestCase):
             """UPDATE agent_adapter_bindings SET revision=revision+1
                WHERE run_id='run-1' AND agent_id='agent-1'"""
         )
-        with self.assertRaises(sqlite3.IntegrityError) as caught:
-            self.db.execute(
+        pressure_binding_fk = frozenset(
+            {
+                ForeignKeySpec(
+                    "provider_context_pressure_current",
+                    ("run_id", "agent_id", "adapter_id"),
+                    "agent_adapter_bindings",
+                    ("run_id", "agent_id", "adapter_id"),
+                )
+            }
+        )
+        assert_fk_rejected(
+            self.db,
+            invalid_operation=lambda connection: connection.execute(
                 """UPDATE agent_adapter_bindings SET adapter_id='adapter-crossed'
                    WHERE run_id='run-1' AND agent_id='agent-1'"""
-            )
-        self.assertEqual(str(caught.exception), "FOREIGN KEY constraint failed")
+            ),
+            positive_control=lambda connection: connection.execute(
+                """UPDATE agent_adapter_bindings SET adapter_id=adapter_id
+                   WHERE run_id='run-1' AND agent_id='agent-1'"""
+            ),
+            expected=pressure_binding_fk,
+        )
         mark_case()
-        with self.assertRaises(sqlite3.IntegrityError) as caught:
-            self.db.execute(
+
+        delete_db = sqlite3.connect(":memory:", isolation_level=None)
+        self.db.backup(delete_db)
+        delete_db.execute("PRAGMA foreign_keys=ON")
+
+        def clear_pressure_and_delete(connection: sqlite3.Connection) -> None:
+            connection.execute(
+                """DELETE FROM provider_context_pressure_current
+                   WHERE run_id='run-1' AND agent_id='agent-1'"""
+            )
+            connection.execute(
                 """DELETE FROM agent_adapter_bindings
                    WHERE run_id='run-1' AND agent_id='agent-1'"""
             )
-        self.assertEqual(str(caught.exception), "FOREIGN KEY constraint failed")
+
+        assert_fk_rejected(
+            delete_db,
+            invalid_operation=lambda connection: connection.execute(
+                """DELETE FROM agent_adapter_bindings
+                   WHERE run_id='run-1' AND agent_id='agent-1'"""
+            ),
+            positive_control=clear_pressure_and_delete,
+            expected=pressure_binding_fk,
+        )
+        delete_db.close()
         mark_case()
 
         for fault in ("before-clear", "after-clear", "after-binding-update"):
