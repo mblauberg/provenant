@@ -74,6 +74,9 @@ export type ProvisionedSeatRosterInput = {
   chairGeneration: number;
   chairLeaseId: string;
   bindings: ParsedSeatBinding[];
+  originKinds?: Partial<Record<McpSeat, NonNullable<SeatMetadata["originKind"]> | null>>;
+  expectedActiveGeneration?: string;
+  requireProvisionedOrigins?: boolean;
   expiresAt: string;
 };
 
@@ -272,6 +275,9 @@ export async function bindProvisionedSeatRoster(
     chairGeneration,
     chairLeaseId,
     bindings,
+    originKinds,
+    expectedActiveGeneration,
+    requireProvisionedOrigins,
     expiresAt,
   } = input;
   const { projectKey, projectPath } = await resolveSeatProject({
@@ -296,6 +302,26 @@ export async function bindProvisionedSeatRoster(
     stateDirectory: paths.stateDirectory,
     projectPath,
   });
+  if (
+    expectedActiveGeneration !== undefined &&
+    activeGeneration?.generation !== expectedActiveGeneration
+  ) {
+    throw new Error(
+      `active MCP seat generation changed before roster bind: expected ${expectedActiveGeneration}; ` +
+      `found ${activeGeneration?.generation ?? "none"}`,
+    );
+  }
+  const effectiveOriginKinds = originKinds ?? (
+    activeGeneration?.generation === generation
+      ? await readInstalledOriginKinds(paths, projectPath, generation, bindings)
+      : undefined
+  );
+  if (
+    requireProvisionedOrigins === true &&
+    bindings.some(({ seat }) => effectiveOriginKinds?.[seat] !== "provisioned")
+  ) {
+    throw new Error("mcp peer-provision refuses to renew a bootstrap-managed or unknown-origin roster");
+  }
   const expectedPreviousGeneration = activeGeneration?.generation === generation
     ? activeGeneration.previousGeneration
     : activeGeneration?.generation ?? null;
@@ -340,7 +366,9 @@ export async function bindProvisionedSeatRoster(
         projectPath,
         generation,
         previousGeneration: expectedPreviousGeneration,
-        originKind: "provisioned",
+        ...(effectiveOriginKinds?.[binding.seat] === null
+          ? {}
+          : { originKind: effectiveOriginKinds?.[binding.seat] ?? "provisioned" }),
         projectSessionId,
         sessionRevision,
         sessionGeneration,
@@ -399,6 +427,52 @@ export async function bindProvisionedSeatRoster(
   } finally {
     await bootstrap.close();
   }
+}
+
+async function readInstalledOriginKinds(
+  paths: FabricPaths,
+  projectPath: string,
+  generation: string,
+  bindings: ParsedSeatBinding[],
+): Promise<Partial<Record<McpSeat, NonNullable<SeatMetadata["originKind"]> | null>>> {
+  const originKinds: Partial<Record<McpSeat, NonNullable<SeatMetadata["originKind"]> | null>> = {};
+  for (const binding of bindings) {
+    const location = await resolveSeatPaths({
+      stateDirectory: paths.stateDirectory,
+      project: projectPath,
+      seat: binding.seat,
+    });
+    if (location.generation !== generation) {
+      throw new Error(`active MCP seat generation changed while reading origin for ${binding.seat}`);
+    }
+    const before = await lstat(location.metadataPath);
+    if (!before.isFile() || before.isSymbolicLink() || (before.mode & 0o077) !== 0) {
+      throw new Error(`MCP seat metadata must be a private regular file: ${location.metadataPath}`);
+    }
+    const handle = await open(location.metadataPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+    try {
+      const metadata: unknown = JSON.parse(await handle.readFile("utf8"));
+      if (
+        typeof metadata !== "object" ||
+        metadata === null ||
+        !("generation" in metadata) ||
+        metadata.generation !== generation ||
+        !("seat" in metadata) ||
+        metadata.seat !== binding.seat ||
+        ("originKind" in metadata &&
+          metadata.originKind !== "bootstrap" &&
+          metadata.originKind !== "provisioned")
+      ) {
+        throw new Error(`MCP seat metadata origin is invalid for ${binding.seat}`);
+      }
+      originKinds[binding.seat] = "originKind" in metadata
+        ? metadata.originKind as NonNullable<SeatMetadata["originKind"]>
+        : null;
+    } finally {
+      await handle.close();
+    }
+  }
+  return originKinds;
 }
 
 export async function mcpSeatPath(arguments_: string[], paths: FabricPaths): Promise<{

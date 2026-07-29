@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -8,7 +8,12 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { peerSeatAuthority } from "../../src/cli/observer-provision.ts";
 import type { FabricPaths } from "../../src/cli/paths.ts";
-import { installSeatGeneration, projectKey } from "../../src/cli/seat-store.ts";
+import {
+  installSeatGeneration,
+  projectKey,
+  resolveSeatPaths,
+  type SeatMetadata,
+} from "../../src/cli/seat-store.ts";
 import { Fabric } from "../../src/core/fabric.ts";
 
 const mocks = vi.hoisted(() => ({
@@ -40,7 +45,10 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map(async (root) => rm(root, { recursive: true, force: true })));
 });
 
-async function fixture(input: { peerExpiresAt?: string } = {}): Promise<{ project: string; paths: FabricPaths }> {
+async function fixture(input: {
+  peerExpiresAt?: string;
+  originKind?: "bootstrap" | "provisioned" | null;
+} = {}): Promise<{ project: string; paths: FabricPaths }> {
   const root = await realpath(await mkdtemp(join(tmpdir(), "fabric-peer-lifecycle-")));
   roots.push(root);
   const project = join(root, "project");
@@ -59,7 +67,7 @@ async function fixture(input: { peerExpiresAt?: string } = {}): Promise<{ projec
     projectPath: project,
     generation,
     previousGeneration: null,
-    originKind: "bootstrap" as const,
+    ...(input.originKind === null ? {} : { originKind: input.originKind ?? "bootstrap" as const }),
     projectSessionId: "session-one",
     sessionRevision: 1,
     sessionGeneration: 1,
@@ -96,10 +104,14 @@ async function fixture(input: { peerExpiresAt?: string } = {}): Promise<{ projec
   return { project, paths };
 }
 
-async function registeredPeerFixture(): Promise<{
+async function registeredPeerFixture(input: {
+  installPeer?: boolean;
+  chairOriginKind?: "bootstrap" | "provisioned";
+} = {}): Promise<{
   project: string;
   paths: FabricPaths;
   delegatedAuthorityId: string;
+  chairAuthorityExpiresAt: string;
 }> {
   const root = await realpath(await mkdtemp(join(tmpdir(), "fabric-peer-registration-")));
   roots.push(root);
@@ -137,24 +149,56 @@ async function registeredPeerFixture(): Promise<{
       .update(JSON.stringify({ projectKey: key, runId: roster.runId, seat: "agy" }))
       .digest("hex")
       .slice(0, 16)}`;
-    fabric.registerAgent(roster.runId, roster.chairAgentId, {
+    const registration = fabric.registerAgent(roster.runId, roster.chairAgentId, {
       agentId,
       authorityId: delegated.authorityId,
     });
-    await installSeatGeneration({
-      stateDirectory,
-      projectPath: project,
-      generation: roster.generation,
-      expectedPreviousGeneration: roster.expectedPreviousGeneration,
-      seats: [{
-        credential: chair.capability,
+    const databaseAfterRegistration = new Database(paths.databasePath, { readonly: true });
+    const registeredCapability = databaseAfterRegistration.prepare(`
+      SELECT principal_generation
+        FROM capabilities
+       WHERE token_hash=?
+    `).get(createHash("sha256").update(registration.capability).digest("hex")) as {
+      principal_generation: number;
+    };
+    databaseAfterRegistration.close();
+    const installedSeats: Array<{
+      credential: string;
+      metadata: Omit<SeatMetadata, "credentialPath">;
+    }> = [{
+      credential: chair.capability,
+      metadata: {
+        schemaVersion: 1,
+        projectKey: key,
+        projectPath: project,
+        generation: roster.generation,
+        previousGeneration: roster.expectedPreviousGeneration,
+        originKind: input.chairOriginKind ?? "bootstrap",
+        projectSessionId: roster.projectSessionId,
+        sessionRevision: roster.sessionRevision,
+        sessionGeneration: roster.sessionGeneration,
+        runId: roster.runId,
+        runRevision: roster.runRevision,
+        chairAgentId: roster.chairAgentId,
+        chairGeneration: roster.chairGeneration,
+        chairLeaseId: roster.chairLeaseId,
+        seat: "codex",
+        agentId: chair.agentId,
+        principalGeneration: chair.expectedPrincipalGeneration,
+        role: "chair",
+        expiresAt: roster.expiresAt,
+      },
+    }];
+    if (input.installPeer === true) {
+      installedSeats.unshift({
+        credential: registration.capability,
         metadata: {
           schemaVersion: 1,
           projectKey: key,
           projectPath: project,
           generation: roster.generation,
           previousGeneration: roster.expectedPreviousGeneration,
-          originKind: "bootstrap",
+          originKind: "provisioned",
           projectSessionId: roster.projectSessionId,
           sessionRevision: roster.sessionRevision,
           sessionGeneration: roster.sessionGeneration,
@@ -163,21 +207,139 @@ async function registeredPeerFixture(): Promise<{
           chairAgentId: roster.chairAgentId,
           chairGeneration: roster.chairGeneration,
           chairLeaseId: roster.chairLeaseId,
-          seat: "codex",
-          agentId: chair.agentId,
-          principalGeneration: chair.expectedPrincipalGeneration,
-          role: "chair",
+          seat: "agy",
+          agentId,
+          principalGeneration: registeredCapability.principal_generation,
+          role: "peer",
           expiresAt: roster.expiresAt,
         },
-      }],
+      });
+    }
+    await installSeatGeneration({
+      stateDirectory,
+      projectPath: project,
+      generation: roster.generation,
+      expectedPreviousGeneration: roster.expectedPreviousGeneration,
+      seats: installedSeats,
     });
-    return { project, paths, delegatedAuthorityId: delegated.authorityId };
+    return {
+      project,
+      paths,
+      delegatedAuthorityId: delegated.authorityId,
+      chairAuthorityExpiresAt: (JSON.parse(chairAuthority.authority_json) as { expiresAt: string }).expiresAt,
+    };
   } finally {
     await fabric.close();
   }
 }
 
 describe("MCP peer provision daemon lifecycle", () => {
+  it("enters the roster rebind path when an installed peer has an explicit expiry", async () => {
+    const value = await fixture({ originKind: "provisioned" });
+    mocks.connect.mockRejectedValueOnce(new Error("explicit expiry reached renewal"));
+
+    await expect(provisionMcpPeerSeats([
+      "--project", value.project,
+      "--seat", "claude",
+      "--expires-at", new Date(Date.now() + 30 * 60 * 1_000).toISOString(),
+    ], value.paths)).rejects.toThrow("explicit expiry reached renewal");
+    expect(mocks.connect).toHaveBeenCalledOnce();
+    expect(mocks.release).toHaveBeenCalledOnce();
+  });
+
+  it("preserves explicit provisioned origins while renewing a provisioned roster", async () => {
+    const value = await registeredPeerFixture({ installPeer: true, chairOriginKind: "provisioned" });
+    const close = vi.fn();
+    mocks.connect.mockResolvedValueOnce({ close });
+    mocks.bind.mockResolvedValueOnce({ generation: "renewed" });
+
+    await provisionMcpPeerSeats([
+      "--project", value.project,
+      "--seat", "agy",
+      "--expires-at", new Date(Date.now() + 30 * 60 * 1_000).toISOString(),
+    ], value.paths);
+
+    expect(mocks.bind).toHaveBeenCalledWith(expect.objectContaining({
+      originKinds: {
+        agy: "provisioned",
+        codex: "provisioned",
+      },
+    }), value.paths);
+    expect(close).toHaveBeenCalledOnce();
+    expect(mocks.release).toHaveBeenCalledOnce();
+  });
+
+  it("refuses explicit peer renewal for a bootstrap-managed mixed roster", async () => {
+    const value = await registeredPeerFixture({ installPeer: true });
+
+    await expect(provisionMcpPeerSeats([
+      "--project", value.project,
+      "--seat", "agy",
+      "--expires-at", new Date(Date.now() + 25 * 60 * 60 * 1_000).toISOString(),
+    ], value.paths)).rejects.toThrow(/refuses to renew.*bootstrap --seat codex/iu);
+    expect(mocks.connect).not.toHaveBeenCalled();
+    expect(mocks.bind).not.toHaveBeenCalled();
+    expect(mocks.release).not.toHaveBeenCalled();
+  });
+
+  it("refuses to rebind omitted origin metadata without a matching legacy marker", async () => {
+    const value = await fixture({ originKind: null });
+
+    await expect(provisionMcpPeerSeats([
+      "--project", value.project,
+      "--seat", "claude",
+      "--expires-at", new Date(Date.now() + 30 * 60 * 1_000).toISOString(),
+    ], value.paths)).rejects.toThrow(/origin is unknown.*bootstrap --seat codex/iu);
+    expect(mocks.connect).not.toHaveBeenCalled();
+    expect(mocks.bind).not.toHaveBeenCalled();
+    expect(mocks.release).not.toHaveBeenCalled();
+  });
+
+  it.each([null, "unknown"])(
+    "refuses invalid explicit origin metadata %j before daemon startup",
+    async (originKind) => {
+      const value = await fixture({ originKind: "provisioned" });
+      const location = await resolveSeatPaths({
+        stateDirectory: value.paths.stateDirectory,
+        project: value.project,
+        seat: "codex",
+      });
+      const metadata = JSON.parse(await readFile(location.metadataPath, "utf8")) as Record<string, unknown>;
+      metadata.originKind = originKind;
+      await writeFile(location.metadataPath, JSON.stringify(metadata), { mode: 0o600 });
+
+      await expect(provisionMcpPeerSeats([
+        "--project", value.project,
+        "--seat", "claude",
+        "--expires-at", new Date(Date.now() + 30 * 60 * 1_000).toISOString(),
+      ], value.paths)).rejects.toThrow("MCP seat metadata is invalid");
+      expect(mocks.connect).not.toHaveBeenCalled();
+      expect(mocks.bind).not.toHaveBeenCalled();
+      expect(mocks.release).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    ["past", () => new Date(Date.now() - 1_000).toISOString()],
+    ["over 31 days", () => new Date(Date.now() + 32 * 24 * 60 * 60 * 1_000).toISOString()],
+    ["after the chair authority", (authority: string) => new Date(Date.parse(authority) + 1).toISOString()],
+  ])("rejects an explicit expiry that is %s", async (_case, expiresAt) => {
+    const value = await registeredPeerFixture({ installPeer: true, chairOriginKind: "provisioned" });
+    const close = vi.fn();
+    mocks.connect.mockResolvedValueOnce({ close });
+
+    await expect(provisionMcpPeerSeats([
+      "--project", value.project,
+      "--seat", "agy",
+      "--expires-at", expiresAt(value.chairAuthorityExpiresAt),
+    ], value.paths)).rejects.toThrow(
+      "must be in the future, no more than 31 days away, and not outlive the chair authority",
+    );
+    expect(mocks.bind).not.toHaveBeenCalled();
+    expect(close).toHaveBeenCalledOnce();
+    expect(mocks.release).toHaveBeenCalledOnce();
+  });
+
   it("re-provisions an expired installed peer instead of returning stale metadata", async () => {
     const value = await fixture({ peerExpiresAt: "2000-01-01T00:00:00.000Z" });
     mocks.connect.mockRejectedValueOnce(new Error("expired peer requires provisioning"));

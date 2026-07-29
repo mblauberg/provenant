@@ -13,10 +13,12 @@ import {
   type ParsedSeatBinding,
 } from "./mcp-provision.js";
 import { peerSeatAuthority } from "./observer-provision.js";
+import { mcpBootstrapRenewalCommand } from "./mcp-roster-renewal.js";
 import type { FabricPaths } from "./paths.js";
 import {
   MCP_SEATS,
   parseMcpSeat,
+  readLegacyBootstrapSeatGeneration,
   resolveSeatPaths,
   type McpSeat,
   type SeatMetadata,
@@ -57,6 +59,15 @@ async function privateRead(path: string): Promise<string> {
   }
   const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
+    const opened = await handle.stat();
+    if (
+      !opened.isFile() ||
+      opened.dev !== before.dev ||
+      opened.ino !== before.ino ||
+      (opened.mode & 0o077) !== 0
+    ) {
+      throw new Error("peer provision source changed while opening");
+    }
     return await handle.readFile("utf8");
   } finally {
     await handle.close();
@@ -83,6 +94,7 @@ function seatMetadata(value: unknown): SeatMetadata {
     !("agentId" in value) || typeof value.agentId !== "string" ||
     !("principalGeneration" in value) || typeof value.principalGeneration !== "number" ||
     !("role" in value) || (value.role !== "chair" && value.role !== "peer") ||
+    ("originKind" in value && value.originKind !== "bootstrap" && value.originKind !== "provisioned") ||
     !("credentialPath" in value) || typeof value.credentialPath !== "string" ||
     !("expiresAt" in value) || typeof value.expiresAt !== "string"
   ) {
@@ -189,7 +201,52 @@ async function waitForRosterConvergence(): Promise<void> {
   await new Promise<void>((resolve) => setTimeout(resolve, ROSTER_CONVERGENCE_POLL_MS));
 }
 
-function parseArguments(arguments_: string[]): {
+async function installedOriginKinds(
+  paths: FabricPaths,
+  project: string,
+  chairSeat: McpSeat,
+  roster: InstalledSeat[],
+): Promise<Partial<Record<McpSeat, NonNullable<SeatMetadata["originKind"]>>>> {
+  const legacyBootstrapGeneration = await readLegacyBootstrapSeatGeneration({
+    stateDirectory: paths.stateDirectory,
+    projectPath: project,
+  });
+  const generations = new Set(roster.map(({ metadata }) => metadata.generation));
+  if (generations.size !== 1) {
+    throw new Error(`active MCP seat generation changed while reading origins for ${project}`);
+  }
+  const originKinds: Partial<Record<McpSeat, NonNullable<SeatMetadata["originKind"]>>> = {};
+  for (const { metadata } of roster) {
+    if (metadata.originKind !== undefined) {
+      originKinds[metadata.seat] = metadata.originKind;
+      continue;
+    }
+    if (legacyBootstrapGeneration === metadata.generation) {
+      originKinds[metadata.seat] = "bootstrap";
+      continue;
+    }
+    throw new Error(
+      `mcp peer-provision cannot rebind ${project} because seat ${metadata.seat} origin is unknown; ` +
+      `repair the bootstrap-managed roster with ${mcpBootstrapRenewalCommand(project, chairSeat)}`,
+    );
+  }
+  return originKinds;
+}
+
+function assertProvisionedRenewal(
+  project: string,
+  chairSeat: McpSeat,
+  originKinds: Partial<Record<McpSeat, NonNullable<SeatMetadata["originKind"]>>>,
+): void {
+  if (Object.values(originKinds).includes("bootstrap")) {
+    throw new Error(
+      `mcp peer-provision refuses to renew the bootstrap-managed roster for ${project}; ` +
+      `use ${mcpBootstrapRenewalCommand(project, chairSeat)}`,
+    );
+  }
+}
+
+export function parseMcpPeerProvisionArguments(arguments_: string[]): {
   project: string;
   seats: McpSeat[];
   expiresAt?: string;
@@ -221,15 +278,31 @@ export async function provisionMcpPeerSeats(
   arguments_: string[],
   paths: FabricPaths,
 ): Promise<McpProvisionOutput> {
-  const request = parseArguments(arguments_);
+  const request = parseMcpPeerProvisionArguments(arguments_);
   const initialRoster = await installedRoster(paths, request.project);
   const initialChair = initialRoster.find((member) => member.metadata.role === "chair");
   if (initialChair === undefined) throw new McpPeerProvisionChairRequiredError(request.project);
   if (request.seats.includes(initialChair.metadata.seat)) {
     throw new Error(`mcp peer-provision refuses to provision the active chair seat ${initialChair.metadata.seat}`);
   }
-  if (request.seats.every((seat) => initialRoster.some((member) => member.metadata.seat === seat))) {
+  if (
+    request.expiresAt === undefined &&
+    request.seats.every((seat) => initialRoster.some((member) => member.metadata.seat === seat))
+  ) {
     return rosterOutput(initialChair, initialRoster);
+  }
+  const initialOriginKinds = await installedOriginKinds(
+    paths,
+    initialChair.metadata.projectPath,
+    initialChair.metadata.seat,
+    initialRoster,
+  );
+  if (request.expiresAt !== undefined) {
+    assertProvisionedRenewal(
+      initialChair.metadata.projectPath,
+      initialChair.metadata.seat,
+      initialOriginKinds,
+    );
   }
   const daemonHandle = await startMcpProvisionDaemon(paths);
   const convergenceDeadline = Date.now() + ROSTER_CONVERGENCE_TIMEOUT_MS;
@@ -245,7 +318,23 @@ export async function provisionMcpPeerSeats(
           throw new Error(`mcp peer-provision refuses to provision the active chair seat ${chair.metadata.seat}`);
         }
         const present = new Set(roster.map(({ metadata }) => metadata.seat));
-        if (request.seats.every((seat) => present.has(seat))) return rosterOutput(chair, roster);
+        if (
+          request.expiresAt === undefined &&
+          request.seats.every((seat) => present.has(seat))
+        ) return rosterOutput(chair, roster);
+        const currentOriginKinds = await installedOriginKinds(
+          paths,
+          chair.metadata.projectPath,
+          chair.metadata.seat,
+          roster,
+        );
+        if (request.expiresAt !== undefined) {
+          assertProvisionedRenewal(
+            chair.metadata.projectPath,
+            chair.metadata.seat,
+            currentOriginKinds,
+          );
+        }
 
         const chairCapability = (await privateRead(chair.credentialPath)).trim();
         client = await connectFabricDaemon({
@@ -304,16 +393,19 @@ export async function provisionMcpPeerSeats(
             expectedPrincipalGeneration: capability.principal_generation,
           });
         }
-        const latestRoster = await installedRoster(paths, chair.metadata.projectPath);
         const bindings = new Map<McpSeat, ParsedSeatBinding>();
-        for (const { metadata } of latestRoster) {
+        const originKinds = { ...currentOriginKinds };
+        for (const { metadata } of roster) {
           bindings.set(metadata.seat, {
             seat: metadata.seat,
             agentId: metadata.agentId,
             expectedPrincipalGeneration: metadata.principalGeneration,
           });
         }
-        for (const binding of registeredBindings) bindings.set(binding.seat, binding);
+        for (const binding of registeredBindings) {
+          bindings.set(binding.seat, binding);
+          originKinds[binding.seat] = "provisioned";
+        }
         return await bindProvisionedSeatRoster({
           project: chair.metadata.projectPath,
           projectSessionId: chair.metadata.projectSessionId,
@@ -326,6 +418,9 @@ export async function provisionMcpPeerSeats(
           chairGeneration: chair.metadata.chairGeneration,
           chairLeaseId: chair.metadata.chairLeaseId,
           bindings: [...bindings.values()].sort((left, right) => left.seat.localeCompare(right.seat)),
+          originKinds,
+          expectedActiveGeneration: chair.metadata.generation,
+          requireProvisionedOrigins: request.expiresAt !== undefined,
           expiresAt,
         }, paths);
       } catch (error: unknown) {

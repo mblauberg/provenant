@@ -32,6 +32,10 @@ import { connectFabricDaemon } from "../daemon/client.js";
 import { privateDiscoveryPaths, readPrivateDiscovery } from "../daemon/private-discovery.js";
 import { preflightProtocolBuild } from "../daemon/protocol-build-preflight.js";
 import { readDiscoveryReceipt } from "./mcp-provision.js";
+import {
+  mcpBootstrapRenewalCommand,
+  mcpRosterRenewalCommand,
+} from "./mcp-roster-renewal.js";
 import type { FabricPaths } from "./paths.js";
 import { MCP_SEATS, resolveSeatPaths, type SeatMetadata } from "./seat-store.js";
 import { trustedWorkspaceRoots } from "./workspace-trust.js";
@@ -336,9 +340,15 @@ async function seatStatus(paths: FabricPaths, project: string): Promise<Array<Re
     }
   }
   const chairExists = [...registered.values()].some(({ role }) => role === "chair");
+  const renewalPeerSeat = [...registered.entries()]
+    .find(([, metadata]) => metadata.role === "peer")?.[0] as (typeof MCP_SEATS)[number] | undefined;
+  const bootstrapChairSeat = [...registered.entries()]
+    .find(([, metadata]) => metadata.role === "chair" && metadata.originKind !== "provisioned")
+    ?.[0] as (typeof MCP_SEATS)[number] | undefined;
   return MCP_SEATS.map((seat) => {
     const value = registered.get(seat);
     if (value !== undefined) {
+      const remainingMs = Date.parse(value.expiresAt) - Date.now();
       return {
         seat,
         agentId: value.agentId,
@@ -346,8 +356,22 @@ async function seatStatus(paths: FabricPaths, project: string): Promise<Array<Re
         originKind: value.originKind ?? "legacy-bootstrap",
         runId: value.runId,
         expiresAt: value.expiresAt,
-        active: Date.parse(value.expiresAt) > Date.now(),
+        active: remainingMs > 0,
         registered: true,
+        ...(value.originKind === "provisioned" &&
+          remainingMs > 0 &&
+          remainingMs <= 7 * 24 * 60 * 60 * 1_000 &&
+          renewalPeerSeat !== undefined
+          ? {
+              remedy: bootstrapChairSeat === undefined
+                ? mcpRosterRenewalCommand({
+                    project,
+                    peerSeat: renewalPeerSeat,
+                    currentExpiresAt: value.expiresAt,
+                  })
+                : mcpBootstrapRenewalCommand(project, bootstrapChairSeat),
+            }
+          : {}),
       };
     }
     return chairExists
