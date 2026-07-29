@@ -48,6 +48,24 @@ export type SeatGenerationPointer = {
   generation: string;
 };
 
+export class SeatGenerationChangedError extends Error {
+  constructor(
+    readonly projectPath: string,
+    readonly recordedGeneration: string | null,
+    readonly recordedPreviousGeneration: string | null,
+    readonly expectedGeneration: string | null,
+    phase: string,
+  ) {
+    super(
+      `active MCP seat generation changed ${phase}: project ${projectPath}; ` +
+      `recorded generation ${recordedGeneration ?? "none"}; ` +
+      `recorded previous generation ${recordedPreviousGeneration ?? "none"}; ` +
+      `expected generation ${expectedGeneration ?? "none"}`,
+    );
+    this.name = "SeatGenerationChangedError";
+  }
+}
+
 type LegacyBootstrapGenerationMarker = {
   schemaVersion: 1;
   projectKey: string;
@@ -179,6 +197,85 @@ async function readPrivateFile(path: string): Promise<string> {
   }
 }
 
+async function generationSeatExpiryState(input: {
+  directory: string;
+  generation: string;
+  projectKey: string;
+  projectPath: string;
+  nowMs: number;
+}): Promise<"expired" | "unexpired" | "mixed" | "invalid"> {
+  const generationDirectory = join(input.directory, "generations", input.generation);
+  try {
+    const directoryInfo = await lstat(generationDirectory);
+    if (
+      !directoryInfo.isDirectory() ||
+      directoryInfo.isSymbolicLink() ||
+      (directoryInfo.mode & 0o077) !== 0
+    ) {
+      return "invalid";
+    }
+    const entries = (await readdir(generationDirectory)).sort();
+    const metadataFiles = entries.filter((entry) => entry.endsWith(".json"));
+    if (metadataFiles.length === 0) return "invalid";
+    const expectedEntries = metadataFiles
+      .flatMap((entry) => [entry, `${entry.slice(0, -".json".length)}.cap`])
+      .sort();
+    if (
+      entries.length !== expectedEntries.length ||
+      entries.some((entry, index) => entry !== expectedEntries[index])
+    ) {
+      return "invalid";
+    }
+    let state: "expired" | "unexpired" | undefined;
+    for (const metadataFile of metadataFiles) {
+      const seat = metadataFile.slice(0, -".json".length);
+      if (!(MCP_SEATS as readonly string[]).includes(seat)) return "invalid";
+      const credentialPath = join(generationDirectory, `${seat}.cap`);
+      const credentialInfo = await lstat(credentialPath);
+      if (
+        !credentialInfo.isFile() ||
+        credentialInfo.isSymbolicLink() ||
+        (credentialInfo.mode & 0o077) !== 0
+      ) {
+        return "invalid";
+      }
+      const metadata: unknown = JSON.parse(await readPrivateFile(join(generationDirectory, metadataFile)));
+      if (
+        typeof metadata !== "object" ||
+        metadata === null ||
+        Array.isArray(metadata) ||
+        !("projectKey" in metadata) ||
+        metadata.projectKey !== input.projectKey ||
+        !("projectPath" in metadata) ||
+        metadata.projectPath !== input.projectPath ||
+        !("generation" in metadata) ||
+        metadata.generation !== input.generation ||
+        !("seat" in metadata) ||
+        metadata.seat !== seat ||
+        !("credentialPath" in metadata) ||
+        metadata.credentialPath !== credentialPath ||
+        !("expiresAt" in metadata) ||
+        typeof metadata.expiresAt !== "string"
+      ) {
+        return "invalid";
+      }
+      const expiresAt = Date.parse(metadata.expiresAt);
+      if (
+        !Number.isFinite(expiresAt) ||
+        new Date(expiresAt).toISOString() !== metadata.expiresAt
+      ) {
+        return "invalid";
+      }
+      const seatState = expiresAt <= input.nowMs ? "expired" : "unexpired";
+      if (state !== undefined && state !== seatState) return "mixed";
+      state = seatState;
+    }
+    return state ?? "invalid";
+  } catch {
+    return "invalid";
+  }
+}
+
 function parseGenerationPointer(pointer: unknown, pointerPath: string, key: string): SeatGenerationPointer {
   if (
     typeof pointer !== "object" || pointer === null || Array.isArray(pointer) ||
@@ -258,7 +355,13 @@ export async function markLegacyBootstrapSeatGeneration(input: {
   return await withPointerLock(root.directory, async () => {
     const active = await readActiveSeatGeneration(input);
     if (active?.generation !== input.generation) {
-      throw new Error("active MCP seat generation changed before legacy bootstrap marking");
+      throw new SeatGenerationChangedError(
+        root.projectPath,
+        active?.generation ?? null,
+        active?.previousGeneration ?? null,
+        input.generation,
+        "before legacy bootstrap marking",
+      );
     }
     // Replaying an already-marked generation must not rewrite the marker: the
     // lifecycle reports such a replay as unmutated, and an unconditional write
@@ -334,6 +437,8 @@ export async function installSeatGeneration(input: {
   expectedPreviousGeneration: string | null;
   seats: Array<{ metadata: Omit<SeatMetadata, "credentialPath">; credential: string }>;
   allowMissingPreviousGeneration?: boolean;
+  allowStaleGenerationReconciliation?: boolean;
+  now?: Date;
   beforeActivate?: () => void | Promise<void>;
 }): Promise<Array<{ seat: McpSeat; credentialPath: string; metadataPath: string }>> {
   if (!GENERATION_PATTERN.test(input.generation)) throw new Error("MCP seat generation is invalid");
@@ -342,6 +447,10 @@ export async function installSeatGeneration(input: {
   }
   if (input.expectedPreviousGeneration === input.generation) {
     throw new Error("MCP seat generation cannot replace itself");
+  }
+  const fixedNowMs = input.now?.getTime();
+  if (fixedNowMs !== undefined && !Number.isFinite(fixedNowMs)) {
+    throw new Error("MCP seat generation installation time is invalid");
   }
   if (input.seats.length === 0 || new Set(input.seats.map(({ metadata }) => metadata.seat)).size !== input.seats.length) {
     throw new Error("MCP seat generation must contain a non-empty distinct roster");
@@ -399,26 +508,77 @@ export async function installSeatGeneration(input: {
     await syncDirectory(generationDirectory);
     await syncDirectory(generationsDirectory);
     await withPointerLock(root.directory, async () => {
+      const cutoverNowMs = fixedNowMs ?? Date.now();
       const active = await readActiveSeatGeneration({
         stateDirectory: input.stateDirectory,
         projectPath: input.projectPath,
       });
       if (active?.generation === input.generation) {
         if (active.previousGeneration !== input.expectedPreviousGeneration) {
-          throw new Error("active MCP seat generation replay changed its predecessor");
+          const reconciledPredecessor = input.allowStaleGenerationReconciliation === true &&
+            active.previousGeneration !== null &&
+            await generationSeatExpiryState({
+              directory: root.directory,
+              generation: active.previousGeneration,
+              projectKey: root.projectKey,
+              projectPath: root.projectPath,
+              nowMs: cutoverNowMs,
+            }) === "expired" &&
+            await generationSeatExpiryState({
+              directory: root.directory,
+              generation: active.generation,
+              projectKey: root.projectKey,
+              projectPath: root.projectPath,
+              nowMs: cutoverNowMs,
+            }) === "unexpired";
+          if (!reconciledPredecessor) {
+            throw new SeatGenerationChangedError(
+              root.projectPath,
+              active.generation,
+              active.previousGeneration,
+              input.expectedPreviousGeneration,
+              "while replaying its predecessor",
+            );
+          }
         }
         return;
       }
       const crashConvergence = active === null &&
         input.expectedPreviousGeneration !== null &&
         input.allowMissingPreviousGeneration === true;
+      const staleGenerationReconciliation = active !== null &&
+        input.allowStaleGenerationReconciliation === true &&
+        await generationSeatExpiryState({
+          directory: root.directory,
+          generation: active.generation,
+          projectKey: root.projectKey,
+          projectPath: root.projectPath,
+          nowMs: cutoverNowMs,
+        }) === "expired" &&
+        await generationSeatExpiryState({
+          directory: root.directory,
+          generation: input.generation,
+          projectKey: root.projectKey,
+          projectPath: root.projectPath,
+          nowMs: cutoverNowMs,
+        }) === "unexpired";
       if (!crashConvergence && (active?.generation ?? null) !== input.expectedPreviousGeneration) {
-        throw new Error("active MCP seat generation changed before filesystem cutover");
+        if (!staleGenerationReconciliation) {
+          throw new SeatGenerationChangedError(
+            root.projectPath,
+            active?.generation ?? null,
+            active?.previousGeneration ?? null,
+            input.expectedPreviousGeneration,
+            "before filesystem cutover",
+          );
+        }
       }
       const pointer: SeatGenerationPointer = {
         schemaVersion: 1,
         projectKey: root.projectKey,
-        previousGeneration: input.expectedPreviousGeneration,
+        previousGeneration: staleGenerationReconciliation
+          ? active.generation
+          : input.expectedPreviousGeneration,
         generation: input.generation,
       };
       await atomicPrivateWrite(join(root.directory, "current.json"), `${JSON.stringify(pointer, null, 2)}\n`);
