@@ -1,6 +1,6 @@
 import Database from "better-sqlite3";
 import { createHash } from "node:crypto";
-import { lstat, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -230,18 +230,47 @@ describe("SQLite connection hardening", () => {
       code: "DATABASE_INSPECTION_UNSTABLE",
       preserved: false,
     }));
-    expect(inspections).toBe(3);
+    // Pins the bound: this writer perturbs the source on every attempt, so it
+    // can never converge and must stop after exactly the configured attempts.
+    expect(inspections).toBe(5);
   });
 
-  it("propagates a stable database format failure instead of inventing a schema mismatch", async () => {
+  it("classifies a file SQLite rejects as a database as incompatible so archive-and-fresh can repair it", async () => {
     const directory = await mkdtemp(join(tmpdir(), "agent-fabric-inspection-format-"));
     directories.push(directory);
     const path = join(directory, "fabric.sqlite3");
     await writeFile(path, "not a SQLite database\n", { mode: 0o600 });
 
-    expect(() => inspectFabricDatabaseForCutover(path)).toThrowError(
-      expect.objectContaining({ code: "SQLITE_NOTADB" }),
-    );
+    // archive-and-fresh consumes this classification to decide whether to
+    // archive, so a native SQLITE_NOTADB verdict must arrive as a structured
+    // incompatible result rather than as a throw. Letting it escape made the
+    // one tool that repairs an unusable database fail on an unusable database.
+    expect(inspectFabricDatabaseForCutover(path)).toMatchObject({
+      state: "incompatible",
+      mismatch: {
+        code: "SCHEMA_CUTOVER_REQUIRED",
+        fields: [{ field: "databaseFormat", actual: "file is not a database" }],
+      },
+    });
+  });
+
+  it("propagates a non-format read failure instead of proposing a destructive cutover", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "agent-fabric-inspection-unreadable-"));
+    directories.push(directory);
+    const path = join(directory, "fabric.sqlite3");
+    const seed = openFabricDatabase(path);
+    seed.close();
+    await chmod(path, 0o000);
+
+    // An unreadable database is an environment fault, not an incompatible one.
+    // It must never be relabelled as a condition whose remedy destroys it.
+    try {
+      expect(() => inspectFabricDatabaseForCutover(path)).toThrowError(
+        expect.objectContaining({ code: "EACCES" }),
+      );
+    } finally {
+      await chmod(path, 0o600);
+    }
   });
 
   it("runs bounded integrity checks after an unclean marker", async () => {
