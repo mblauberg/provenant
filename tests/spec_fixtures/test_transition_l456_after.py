@@ -11,6 +11,8 @@ from __future__ import annotations
 import sqlite3
 import unittest
 
+from assert_fk import ForeignKeySpec, assert_fk_rejected
+
 
 SCHEMA = r"""
 CREATE TABLE lifecycle_fresh_recovery_handoffs(
@@ -903,13 +905,46 @@ class TransitionLead456AfterTests(unittest.TestCase):
     ) -> None:
         db = database()
         prepare_arm(db, "terminal-fresh")
-        db.execute("BEGIN")
-        materialize_arm(db, "terminal-fresh", fresh_head=False,
-                        fresh_commit=False)
-        with self.assertRaises(sqlite3.IntegrityError) as caught:
-            insert_apply(db, "terminal-fresh", crossed_plain_terminal=True)
-        self.assertEqual(str(caught.exception), "FOREIGN KEY constraint failed")
-        db.rollback()
+
+        def crossed_apply(connection: sqlite3.Connection) -> None:
+            materialize_arm(connection, "terminal-fresh")
+            insert_apply(
+                connection,
+                "terminal-fresh",
+                crossed_plain_terminal=True,
+            )
+
+        def matching_apply(connection: sqlite3.Connection) -> None:
+            materialize_arm(connection, "terminal-fresh")
+            insert_apply(connection, "terminal-fresh")
+
+        assert_fk_rejected(
+            db,
+            invalid_operation=crossed_apply,
+            positive_control=matching_apply,
+            expected=frozenset(
+                {
+                    ForeignKeySpec(
+                        "lifecycle_transition_applies",
+                        (
+                            "receipt_batch_id",
+                            "apply_id",
+                            "batch_transition_kind",
+                            "apply_kind",
+                            "applied_mutation_plan_digest",
+                        ),
+                        "lifecycle_receipt_batches",
+                        (
+                            "batch_id",
+                            "planned_apply_id",
+                            "transition_kind",
+                            "planned_apply_kind",
+                            "mutation_plan_digest",
+                        ),
+                    )
+                }
+            ),
+        )
 
     def test_l4_terminal_fresh_terminal_and_fresh_plans_stay_distinct(
         self,
@@ -987,17 +1022,47 @@ class TransitionLead456AfterTests(unittest.TestCase):
             "INSERT INTO lifecycle_receipt_custody_effects VALUES (?,?,?,?)",
             ("batch-custody-b", "custody-effect-b", "custody-b", 2),
         )
-        with self.assertRaises(sqlite3.IntegrityError) as caught:
-            db.execute(
+        crossed_values = (
+            "batch-custody", 1, "custody-terminal", "custody",
+            "custody-b", 2, "custody-effect-b", None, None, None, None,
+        )
+        matching_values = (
+            "batch-custody-b", 1, "custody-terminal", "custody",
+            "custody-b", 2, "custody-effect-b", None, None, None, None,
+        )
+        assert_fk_rejected(
+            db,
+            invalid_operation=lambda connection: connection.execute(
                 "INSERT INTO lifecycle_receipt_intents "
                 "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                (
-                    "batch-custody", 1, "custody-terminal", "custody",
-                    "custody-b", 2, "custody-effect-b", None, None, None,
-                    None,
-                ),
-            )
-        self.assertEqual(str(caught.exception), "FOREIGN KEY constraint failed")
+                crossed_values,
+            ),
+            positive_control=lambda connection: connection.execute(
+                "INSERT INTO lifecycle_receipt_intents "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                matching_values,
+            ),
+            expected=frozenset(
+                {
+                    ForeignKeySpec(
+                        "lifecycle_receipt_intents",
+                        (
+                            "batch_id",
+                            "custody_effect_digest",
+                            "subject_owner_id",
+                            "subject_owner_revision",
+                        ),
+                        "lifecycle_receipt_custody_effects",
+                        (
+                            "batch_id",
+                            "effect_digest",
+                            "custody_id",
+                            "final_revision",
+                        ),
+                    )
+                }
+            ),
+        )
 
     def test_l5_extra_effect_before_completion_rejected(self) -> None:
         db = database()

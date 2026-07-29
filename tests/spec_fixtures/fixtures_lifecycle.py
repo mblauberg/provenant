@@ -34,6 +34,8 @@ import sqlite3
 import sys
 import traceback
 
+from assert_fk import ForeignKeySpec, assert_fk_rejected
+
 RESULTS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                              "results_lifecycle.txt")
 
@@ -901,33 +903,65 @@ def lead3():
         "lw-3", "{}", "t0",
     )
 
+    positive_params = (
+        *params[:24],
+        1,
+        "sem-gl-1",
+        "src-gl-1",
+        "src-gl-1",
+        *params[28:],
+    )
     try:
-        cur.execute(insert_sql, params)
-        con.commit()
+        assert_fk_rejected(
+            con,
+            invalid_operation=lambda connection: connection.execute(
+                insert_sql,
+                params,
+            ),
+            positive_control=lambda connection: connection.execute(
+                insert_sql,
+                positive_params,
+            ),
+            expected=frozenset(
+                {
+                    ForeignKeySpec(
+                        "lifecycle_review_adoption_reservations",
+                        (
+                            "project_session_id",
+                            "run_id",
+                            "agent_id",
+                            "decision_loss_after_id",
+                            "decision_loss_after_revision",
+                            "decision_loss_after_semantic_digest",
+                            "decision_loss_after_source_ref_digest",
+                        ),
+                        "lifecycle_generation_loss_revisions",
+                        (
+                            "project_session_id",
+                            "run_id",
+                            "agent_id",
+                            "generation_loss_id",
+                            "revision",
+                            "semantic_digest",
+                            "source_ref_digest",
+                        ),
+                    )
+                }
+            ),
+        )
+    except AssertionError as error:
         con.close()
         return "REJECTED", (
-            "prepare-time reservation insert unexpectedly succeeded -- the "
-            "ordering defect was NOT confirmed against this DDL"
+            "prepare-time reservation insert did not expose exactly the "
+            f"intended structural foreign key: {error}"
         )
-    except sqlite3.IntegrityError as e:
-        if str(e) != "FOREIGN KEY constraint failed":
-            con.close()
-            return "REJECTED", (
-                "prepare-time reservation insert hit the wrong constraint: "
-                f"{type(e).__name__}: {e}"
-            )
+    else:
         con.close()
         return "CONFIRMED", (
             "inserting the generation-loss reservation with "
             "decision_loss_after_revision=2 (the not-yet-materialized "
-            "recovered-adopted revision) was blocked: "
-            f"{type(e).__name__}: {e}"
-        )
-    except sqlite3.OperationalError as e:
-        con.close()
-        return "REJECTED", (
-            "prepare-time reservation insert hit an operational error instead "
-            f"of the required foreign key: {e}"
+            "recovered-adopted revision) was blocked by the exact "
+            "decision-loss-after structural foreign key"
         )
 
 

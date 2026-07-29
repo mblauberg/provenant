@@ -19,6 +19,7 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
+from assert_fk import ForeignKeySpec, assert_fk_rejected
 from spec_sources import AGENT_FABRIC_HARDENING, read_specs
 
 
@@ -431,22 +432,6 @@ def assert_foreign_keys_clean(connection: sqlite3.Connection) -> None:
     require(violations == [], f"foreign_key_check violations: {violations}")
 
 
-def expect_foreign_key_rejection(
-    connection: sqlite3.Connection,
-    operation: Callable[[], None],
-) -> None:
-    try:
-        operation()
-    except sqlite3.IntegrityError as error:
-        require(
-            str(error) == "FOREIGN KEY constraint failed",
-            f"wrong SQLite rejection: {error}",
-        )
-        connection.rollback()
-        return
-    raise OracleFailure("crossed tuple was accepted")
-
-
 def expect_not_null_rejection(
     connection: sqlite3.Connection,
     operation: Callable[[], None],
@@ -534,12 +519,61 @@ def l2_b_effect_mutations_are_rejected() -> None:
         try:
             mutant = dict(EFFECT)
             mutant[field] = f"crossed-{field}"
-            expect_foreign_key_rejection(
+            assert_fk_rejected(
                 connection,
-                lambda mutant=mutant: insert_row(
-                    connection,
+                invalid_operation=lambda db, mutant=mutant: insert_row(
+                    db,
                     "lifecycle_receipt_recovery_retirement_effects",
                     mutant,
+                ),
+                positive_control=lambda db: insert_row(
+                    db,
+                    "lifecycle_receipt_recovery_retirement_effects",
+                    EFFECT,
+                ),
+                expected=frozenset(
+                    {
+                        ForeignKeySpec(
+                            "lifecycle_receipt_recovery_retirement_effects",
+                            (
+                                "retirement_id",
+                                "planned_apply_id",
+                                "project_session_id",
+                                "run_id",
+                                "agent_id",
+                                "custody_id",
+                                "custody_revision",
+                                "custody_source_ref_digest",
+                                "custody_journal_digest",
+                                "finalized_disposition",
+                                "finalized_terminal_evidence_digest",
+                                "admission_digest",
+                                "transition_proof_digest",
+                                "mutation_plan_digest",
+                                "retirement_evidence_digest",
+                                "retirement_plan_digest",
+                            ),
+                            "lifecycle_recovery_retirement_plans",
+                            (
+                                "retirement_id",
+                                "planned_apply_id",
+                                "project_session_id",
+                                "run_id",
+                                "agent_id",
+                                "custody_id",
+                                "custody_revision",
+                                "custody_source_ref_digest",
+                                "custody_journal_digest",
+                                "finalized_disposition",
+                                "finalized_terminal_evidence_digest",
+                                "admission_digest",
+                                "transition_proof_digest",
+                                "mutation_plan_digest",
+                                "retirement_evidence_digest",
+                                "retirement_plan_digest",
+                            ),
+                        )
+                    }
                 ),
             )
             require(
@@ -547,8 +581,8 @@ def l2_b_effect_mutations_are_rejected() -> None:
                     "SELECT COUNT(*) "
                     "FROM lifecycle_receipt_recovery_retirement_effects"
                 ).fetchone()
-                == (0,),
-                f"mutated effect survived for {field}",
+                == (1,),
+                f"positive effect control missing for {field}",
             )
             assert_foreign_keys_clean(connection)
         finally:
@@ -560,22 +594,117 @@ def l2_c_result_mutations_are_rejected() -> None:
     for field in mutations:
         connection = baseline(with_effect=True)
         try:
+            insert_row(connection, "lifecycle_transition_applies", APPLY)
+            connection.commit()
             mutant = dict(RESULT)
             mutant[field] = f"crossed-{field}"
-            expect_foreign_key_rejection(
+            plan_fk = ForeignKeySpec(
+                "agent_lifecycle_recovery_retirements",
+                (
+                    "retirement_id",
+                    "receipt_apply_id",
+                    "project_session_id",
+                    "run_id",
+                    "agent_id",
+                    "custody_id",
+                    "custody_revision",
+                    "custody_source_ref_digest",
+                    "custody_journal_digest",
+                    "finalized_disposition",
+                    "finalized_terminal_evidence_digest",
+                    "admission_digest",
+                    "transition_proof_digest",
+                    "mutation_plan_digest",
+                    "retirement_evidence_digest",
+                    "retirement_plan_digest",
+                ),
+                "lifecycle_recovery_retirement_plans",
+                (
+                    "retirement_id",
+                    "planned_apply_id",
+                    "project_session_id",
+                    "run_id",
+                    "agent_id",
+                    "custody_id",
+                    "custody_revision",
+                    "custody_source_ref_digest",
+                    "custody_journal_digest",
+                    "finalized_disposition",
+                    "finalized_terminal_evidence_digest",
+                    "admission_digest",
+                    "transition_proof_digest",
+                    "mutation_plan_digest",
+                    "retirement_evidence_digest",
+                    "retirement_plan_digest",
+                ),
+            )
+            effect_fk = ForeignKeySpec(
+                "agent_lifecycle_recovery_retirements",
+                (
+                    "receipt_batch_id",
+                    "receipt_apply_id",
+                    "project_session_id",
+                    "run_id",
+                    "agent_id",
+                    "retirement_id",
+                    "retirement_plan_digest",
+                    "custody_id",
+                    "custody_revision",
+                    "custody_source_ref_digest",
+                    "custody_journal_digest",
+                    "finalized_disposition",
+                    "finalized_terminal_evidence_digest",
+                    "admission_digest",
+                    "transition_proof_digest",
+                    "mutation_plan_digest",
+                    "retirement_evidence_digest",
+                    "retirement_effect_digest",
+                ),
+                "lifecycle_receipt_recovery_retirement_effects",
+                (
+                    "batch_id",
+                    "planned_apply_id",
+                    "project_session_id",
+                    "run_id",
+                    "agent_id",
+                    "retirement_id",
+                    "retirement_plan_digest",
+                    "custody_id",
+                    "custody_revision",
+                    "custody_source_ref_digest",
+                    "custody_journal_digest",
+                    "finalized_disposition",
+                    "finalized_terminal_evidence_digest",
+                    "admission_digest",
+                    "transition_proof_digest",
+                    "mutation_plan_digest",
+                    "retirement_evidence_digest",
+                    "effect_digest",
+                ),
+            )
+            expected = {effect_fk}
+            if field != "retirement_effect_digest":
+                expected.add(plan_fk)
+            assert_fk_rejected(
                 connection,
-                lambda mutant=mutant: insert_row(
-                    connection,
+                invalid_operation=lambda db, mutant=mutant: insert_row(
+                    db,
                     "agent_lifecycle_recovery_retirements",
                     mutant,
                 ),
+                positive_control=lambda db: insert_row(
+                    db,
+                    "agent_lifecycle_recovery_retirements",
+                    RESULT,
+                ),
+                expected=frozenset(expected),
             )
             require(
                 connection.execute(
                     "SELECT COUNT(*) FROM agent_lifecycle_recovery_retirements"
                 ).fetchone()
-                == (0,),
-                f"mutated result survived for {field}",
+                == (1,),
+                f"positive result control missing for {field}",
             )
             assert_foreign_keys_clean(connection)
         finally:

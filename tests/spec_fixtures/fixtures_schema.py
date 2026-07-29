@@ -149,7 +149,11 @@ def check_lead2():
         return False
     except sqlite3.OperationalError as e:
         msg = str(e)
-        if "foreign key mismatch" in msg:
+        expected = (
+            'foreign key mismatch - "lifecycle_recovery_retirement_plans" '
+            'referencing "lifecycle_rotation_custody_revisions"'
+        )
+        if msg == expected:
             record("LEAD2", True,
                    "LEAD2: CONFIRMED (foreign key mismatch — FK targets non-unique tuple)")
             return True
@@ -659,7 +663,11 @@ def check_mf04_1():
         return False
     except sqlite3.OperationalError as e:
         msg = str(e)
-        if "foreign key mismatch" in msg:
+        expected = (
+            'foreign key mismatch - "operator_git_grants" referencing '
+            '"run_authority_revisions"'
+        )
+        if msg == expected:
             record("MF04-1", True, "MF04-1: CONFIRMED (foreign key mismatch — FK targets 6-col tuple with only a 4-col UNIQUE)")
             return True
         record("MF04-1", False, f"MF04-1: REJECTED err={msg} (unexpected error text)")
