@@ -77,6 +77,43 @@ export function observerAuthority(parent: AuthorityInput): AuthorityInput {
   };
 }
 
+const PEER_SEAT_ACTIONS = [
+  FABRIC_OPERATIONS.sendMessage,
+  FABRIC_OPERATIONS.createDiscussionGroup,
+  FABRIC_OPERATIONS.receiveMessages,
+  FABRIC_OPERATIONS.acknowledgeDelivery,
+  FABRIC_OPERATIONS.getMailboxState,
+  FABRIC_OPERATIONS.getTask,
+  FABRIC_OPERATIONS.getTeam,
+  FABRIC_OPERATIONS.whoami,
+  FABRIC_OPERATIONS.getRunStatus,
+  FABRIC_OPERATIONS.listTasks,
+  FABRIC_OPERATIONS.listAgents,
+  FABRIC_OPERATIONS.listReceipts,
+] as const;
+
+export function peerSeatAuthority(parent: AuthorityInput): AuthorityInput {
+  const parentActions = new Set(parent.actions);
+  return {
+    schemaVersion: 2,
+    approval: parent.approval,
+    workspaceRoots: [...parent.workspaceRoots],
+    sourcePaths: [],
+    artifactPaths: [],
+    actions: PEER_SEAT_ACTIONS.filter((action) => parentActions.has(action)),
+    deniedPaths: [...parent.deniedPaths],
+    deniedActions: [...parent.deniedActions],
+    prohibitedActions: [...parent.prohibitedActions],
+    disclosure: { level: "forbidden" },
+    secrets: { access: "none" },
+    deployment: { allowed: false },
+    irreversibleActions: { allowed: false },
+    network: { toolEgress: "none" },
+    expiresAt: parent.expiresAt,
+    budget: {},
+  };
+}
+
 export async function provisionObserverCredential(input: { project: string; paths: FabricPaths }): Promise<{
   schemaVersion: 1;
   runId: string;

@@ -141,6 +141,21 @@ describe("MCP capability loading", () => {
     await expect(resolveMcpCapability(environment, unprovisioned)).rejects.toThrow(/not provisioned/u);
   });
 
+  it("names the runnable peer provisioning path for an absent optional seat", async () => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), "fabric-mcp-peer-remedy-")));
+    cleanup.push(directory);
+    const stateDirectory = join(directory, "state");
+    const project = join(directory, "project root");
+    await Promise.all([mkdir(stateDirectory, { mode: 0o700 }), mkdir(project)]);
+
+    await expect(resolveMcpCapability({
+      AGENT_FABRIC_SEAT: "agy",
+      AGENT_FABRIC_STATE_DIRECTORY: stateDirectory,
+    }, project)).rejects.toThrow(
+      `"$HOME/.agents/scripts/agent-fabric" mcp peer-provision --project '${project}' --seat agy`,
+    );
+  });
+
   it("automatically renews a near-expiry or expired project seat", async () => {
     const directory = await mkdtemp(join(tmpdir(), "fabric-mcp-project-seat-expiry-"));
     cleanup.push(directory);

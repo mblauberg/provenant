@@ -36,6 +36,10 @@ function errorCode(error: unknown): string | undefined {
     : undefined;
 }
 
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", `'"'"'`)}'`;
+}
+
 async function readPrivateRegularFile(path: string): Promise<string> {
   let before: Awaited<ReturnType<typeof lstat>>;
   try {
@@ -149,8 +153,12 @@ async function resolveProjectSeatFile(
     if (parent === candidate) break;
     candidate = parent;
   }
+  const detail = `agent fabric MCP seat ${seat} is not provisioned for ${cwd} or an ancestor project`;
   throw new McpSeatNotProvisionedError(
-    `agent fabric MCP seat ${seat} is not provisioned for ${cwd} or an ancestor project`,
+    seat === "claude" || seat === "codex"
+      ? detail
+      : `${detail}; provision the peer seat with ` +
+        `"$HOME/.agents/scripts/agent-fabric" mcp peer-provision --project ${shellQuote(cwd)} --seat ${seat}`,
   );
 }
 
