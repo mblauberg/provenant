@@ -24,7 +24,7 @@ export class McpSeatNotProvisionedError extends Error {
 export class McpSeatRenewalRequiredError extends Error {
   readonly code = "MCP_SEAT_RENEWAL_REQUIRED" as const;
 
-  constructor(message: string) {
+  constructor(message: string, readonly projectPath: string) {
     super(message);
     this.name = "McpSeatRenewalRequiredError";
   }
@@ -139,6 +139,7 @@ async function resolveProjectSeatFile(
       if ((bootstrapSeat || verifiedLegacyBootstrapSeat) && remainingMs <= MCP_SEAT_RENEWAL_WINDOW_MS) {
         throw new McpSeatRenewalRequiredError(
           `agent fabric MCP seat ${seat} ${remainingMs <= 0 ? "expired" : "expires"} at ${metadata.expiresAt}`,
+          candidate,
         );
       }
       if (remainingMs <= 0) throw new Error(`agent fabric MCP seat ${seat} expired at ${metadata.expiresAt}`);
@@ -193,14 +194,14 @@ export async function resolveMcpCapability(
 export async function resolveRenewableMcpCapability(
   environment: NodeJS.ProcessEnv,
   cwd: string,
-  renew: () => Promise<unknown>,
+  renew: (projectPath: string) => Promise<unknown>,
   warn: (message: string) => void = () => undefined,
 ): Promise<string> {
   try {
     return await resolveMcpCapability(environment, cwd, warn);
   } catch (error: unknown) {
     if (!(error instanceof McpSeatRenewalRequiredError)) throw error;
-    await renew();
+    await renew(error.projectPath);
     return await resolveMcpCapability(environment, cwd, warn);
   }
 }
