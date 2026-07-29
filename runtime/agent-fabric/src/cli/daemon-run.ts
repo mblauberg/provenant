@@ -48,7 +48,7 @@ function daemonConfiguration(arguments_: string[]): DaemonStartOptions["configur
 }
 
 export async function runForegroundDaemon(arguments_: string[]): Promise<void> {
-  const paths = resolveFabricPaths();
+  const paths = resolveFabricPaths({ createDirectories: true });
   const configuration = daemonConfiguration(arguments_);
   let daemon: Awaited<ReturnType<typeof startFabricDaemon>> | undefined;
   let signalRequested = false;
