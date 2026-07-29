@@ -532,7 +532,6 @@ describe("provider session admission", () => {
       expect(existsSync(journalPath)).toBe(false);
       const database = new Database(databasePath, { readonly: true });
       try {
-        expect(database.prepare("SELECT COUNT(*) AS count FROM provider_lifecycle_intents").get()).toEqual({ count: 0 });
         expect(database.prepare("SELECT COUNT(*) AS count FROM provider_agent_custody").get()).toEqual({ count: 0 });
         expect(database.prepare("SELECT COUNT(*) AS count FROM agents WHERE agent_id='worker'").get()).toEqual({ count: 0 });
       } finally {

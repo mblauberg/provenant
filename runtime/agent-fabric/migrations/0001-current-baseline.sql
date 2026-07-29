@@ -5186,27 +5186,6 @@ CREATE TABLE provider_agent_custody (
       AND capability_expires_at IS NULL AND principal_generation IS NULL)
   )
 );
-
-CREATE TABLE provider_lifecycle_intents (
-  run_id TEXT NOT NULL REFERENCES runs(run_id),
-  action_id TEXT NOT NULL,
-  operation TEXT NOT NULL CHECK (operation IN ('spawn', 'attach')),
-  actor_agent_id TEXT NOT NULL,
-  target_agent_id TEXT NOT NULL,
-  authority_id TEXT NOT NULL REFERENCES authorities(authority_id),
-  adapter_id TEXT NOT NULL,
-  requested_resume_reference TEXT,
-  intent_hash TEXT NOT NULL,
-  status TEXT NOT NULL CHECK (status IN ('prepared', 'provider-terminal', 'finalized', 'quarantined')),
-  provider_resume_reference TEXT,
-  created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL,
-  PRIMARY KEY (adapter_id, action_id),
-  UNIQUE (run_id, adapter_id, action_id),
-  FOREIGN KEY (run_id, adapter_id, action_id)
-    REFERENCES provider_actions(run_id, adapter_id, action_id)
-);
-
 CREATE TABLE provider_session_turn_leases (
   run_id TEXT NOT NULL REFERENCES runs(run_id),
   agent_id TEXT NOT NULL,
@@ -9196,45 +9175,6 @@ CREATE TABLE review_profile_slots (
   CHECK ((slot = 'native' AND reviewer_family_relation = 'same-family-exempt') OR
     (slot != 'native' AND reviewer_family_relation = 'distinct-family-proved'))
 );
-
-CREATE TABLE review_portal_process_custody (
-  adapter_id TEXT NOT NULL,
-  action_id TEXT NOT NULL,
-  contract_digest TEXT NOT NULL,
-  daemon_instance_id TEXT NOT NULL,
-  supervisor_pid INTEGER NOT NULL CHECK (supervisor_pid > 0),
-  supervisor_start_time INTEGER NOT NULL,
-  provider_root_pid INTEGER NOT NULL CHECK (provider_root_pid > 0),
-  provider_root_start_time INTEGER NOT NULL,
-  process_group_id INTEGER NOT NULL CHECK (process_group_id > 0),
-  session_id INTEGER NOT NULL CHECK (session_id > 0),
-  executable_identity_digest TEXT NOT NULL,
-  ancestry_manifest_digest TEXT NOT NULL,
-  custody_directory_path TEXT NOT NULL,
-  custody_directory_device TEXT NOT NULL,
-  custody_directory_inode TEXT NOT NULL,
-  socket_basename TEXT NOT NULL,
-  socket_file_digest TEXT NOT NULL,
-  capsule_basename TEXT NOT NULL,
-  capsule_file_digest TEXT NOT NULL,
-  control_fd_number INTEGER NOT NULL CHECK (control_fd_number = 3),
-  connection_state TEXT NOT NULL CHECK (connection_state IN ('waiting','consumed','closed')),
-  process_state TEXT NOT NULL CHECK (process_state IN (
-    'preparing','running','terminating','cleaned','integrity-failure'
-  )),
-  cleanup_generation INTEGER NOT NULL CHECK (cleanup_generation >= 0),
-  cleanup_evidence_digest TEXT,
-  revision INTEGER NOT NULL CHECK (revision >= 1),
-  created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL,
-  PRIMARY KEY (adapter_id, action_id),
-  FOREIGN KEY (adapter_id, action_id) REFERENCES provider_action_pair_preflights(adapter_id, action_id),
-  CHECK (instr(socket_basename, '/') = 0 AND socket_basename NOT IN ('.','..')),
-  CHECK (instr(capsule_basename, '/') = 0 AND capsule_basename NOT IN ('.','..')),
-  CHECK ((process_state IN ('cleaned','integrity-failure')) =
-    (cleanup_evidence_digest IS NOT NULL))
-);
-
 CREATE TABLE provider_failure_substitution_events (
   adapter_id TEXT NOT NULL,
   action_id TEXT NOT NULL,
