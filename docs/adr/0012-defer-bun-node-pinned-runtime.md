@@ -16,9 +16,9 @@ Three findings carried the decision:
 
 1. **The adapter provenance trust boundary is proven around Node.** The
    compatibility registry (`runtime/agent-fabric/src/adapters/compatibility.ts`)
-   verifies wrapper Git provenance and artifact pins against Node+tsx
-   execution semantics, and pins `fabric_node >=24.15.0 <25` with
-   npm-lockfile integrity. Swapping the runtime family invalidates that
+   verifies wrapper Git provenance against Node+tsx execution semantics, while
+   `fabric_node >=24.15.0 <25` and npm-lockfile integrity bind the
+   runtime/dependency closure. Swapping the runtime family invalidates that
    proof, not just a version number.
 2. **Native addons sit on correctness-critical paths.** `fs-ext` `flock`
    backs daemon bootstrap election, and `better-sqlite3` backs every store.
@@ -32,10 +32,11 @@ Three findings carried the decision:
 
 ## Decision
 
-Defer Bun. Node remains the pinned runtime family for all fabric workspaces,
-with the existing compatibility pins and npm-lockfile integrity as the
-verification boundary. Revisit only with a concrete requirement that the
-Node-based fixes cannot meet, carried through a fresh compatibility proof.
+Defer Bun. Node remains the supported runtime family for all fabric workspaces,
+with npm-lockfile integrity and runtime adapter conformance as the verification
+boundary. Provider CLI versions and digests are not compatibility gates.
+Revisit only with a concrete requirement that the Node-based fixes cannot meet,
+carried through a fresh compatibility proof.
 
 Alternatives rejected for now:
 

@@ -22,8 +22,8 @@ its provenance.
   accept the result and authorise the first provider write grant.
 
 The matrix uses existing Fabric provider-action custody, adapter evidence,
-receipts and compatibility pins. It creates no parallel evaluator, receipt
-schema, activation registry or integrity manifest.
+receipts and runtime conformance records. It creates no parallel evaluator,
+receipt schema, activation registry or integrity manifest.
 
 The inert prerequisite is implemented as a trusted compiler input, not a
 caller payload field. Its workspace path must exactly match the request and

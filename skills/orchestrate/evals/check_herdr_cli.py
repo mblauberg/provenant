@@ -10,11 +10,7 @@ import shutil
 import subprocess
 import sys
 
-import yaml
-
-
 ROOT = Path(__file__).resolve().parents[3]
-DEFAULT_CONFIG = ROOT / "config" / "adapter-compatibility.yaml"
 DEFAULT_REFERENCE = ROOT / "skills" / "orchestrate" / "references" / "herdr-panes.md"
 HELP_GROUPS = ((), ("agent",), ("pane",), ("wait",), ("integration",), ("status",), ("api",))
 AGENT_WAIT_STATUSES = {"idle", "working", "blocked", "unknown"}
@@ -22,38 +18,7 @@ PANE_WAIT_STATUSES = AGENT_WAIT_STATUSES | {"done"}
 
 
 class ContractError(ValueError):
-    """A deterministic compatibility or command-surface mismatch."""
-
-
-def _load_pin(path: Path) -> tuple[str, int]:
-    try:
-        document = yaml.safe_load(path.read_text(encoding="utf-8"))
-        herdr = document["adapters"]["herdr"]
-        implementation = herdr["implementation"]
-        contract = herdr["contract"]
-        runtime = herdr["runtime_range"]
-    except (OSError, yaml.YAMLError, KeyError, TypeError) as exc:
-        raise ContractError(f"cannot read Herdr compatibility pin: {exc}") from exc
-
-    version = implementation.get("installed_version")
-    protocol = contract.get("protocol_version")
-    supported_versions = runtime.get("supported_cli_versions")
-    supported_protocols = runtime.get("supported_protocol_versions")
-    if not isinstance(version, str) or not version:
-        raise ContractError("installed_version must be a non-empty string")
-    if type(protocol) is not int:
-        raise ContractError("protocol_version must be an integer")
-    if not isinstance(supported_versions, list) or version not in supported_versions:
-        raise ContractError(
-            f"CLI pin {version} is not in supported_cli_versions {supported_versions!r}"
-        )
-    if not isinstance(supported_protocols, list) or protocol not in supported_protocols:
-        raise ContractError(
-            f"protocol pin {protocol} is not in supported_protocol_versions {supported_protocols!r}"
-        )
-    if contract.get("protocol") != "herdr-local-api":
-        raise ContractError("Herdr protocol must remain herdr-local-api")
-    return version, protocol
+    """A deterministic capability or command-surface mismatch."""
 
 
 def _resolve_binary(value: str | None) -> str | None:
@@ -172,55 +137,39 @@ def _validate_statuses(reference: str, surfaces: dict[str, str]) -> None:
         )
 
 
-def check(binary: str, config: Path, reference_path: Path) -> tuple[str, int]:
-    expected_version, protocol = _load_pin(config)
+def check(binary: str, reference_path: Path) -> str:
     reference = reference_path.read_text(encoding="utf-8")
     version_output = _invoke(binary, ("--version",)).strip()
     match = re.fullmatch(r"herdr\s+([^\s]+)", version_output)
     if not match:
         raise ContractError(f"cannot parse Herdr version output: {version_output!r}")
-    actual_version = match.group(1)
-    if actual_version != expected_version:
-        raise ContractError(
-            f"installed version {actual_version} conflicts with compatibility pin {expected_version}"
-        )
 
     surfaces = _help_surfaces(binary)
     _validate_documented_commands(reference, surfaces)
     _validate_statuses(reference, surfaces)
-    return expected_version, protocol
+    return match.group(1)
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--binary")
-    parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--reference", type=Path, default=DEFAULT_REFERENCE)
     args = parser.parse_args(argv)
 
-    try:
-        expected_version, protocol = _load_pin(args.config)
-    except ContractError as exc:
-        print(f"HERDR CLI CHECK: FAIL - {exc}")
-        return 1
-
     binary = _resolve_binary(args.binary)
     if binary is None:
-        print(
-            "HERDR CLI CHECK: SKIP - binary not found "
-            f"(expected version {expected_version}, protocol {protocol})"
-        )
+        print("HERDR CLI CHECK: SKIP - binary not found")
         return 0
 
     try:
-        version, protocol = check(binary, args.config, args.reference)
+        version = check(binary, args.reference)
     except (ContractError, OSError, subprocess.SubprocessError) as exc:
         print(f"HERDR CLI CHECK: FAIL - {exc}")
         return 1
 
     print(
         "HERDR CLI CHECK: PASS - "
-        f"version {version}, protocol {protocol}; version and group help only"
+        f"observed version {version}; required command surfaces available"
     )
     return 0
 

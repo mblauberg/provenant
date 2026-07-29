@@ -3,12 +3,9 @@
   "$id": "https://agent-harness.local/agent-fabric/v1/adapter-compatibility.schema.json",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "verification_date", "adapter_contract_version", "capability_fixture_version", "activation_policy", "adapters"],
+  "required": ["schema_version", "activation_policy", "adapters"],
   "properties": {
     "schema_version": {"const": 1},
-    "verification_date": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"},
-    "adapter_contract_version": {"const": 1},
-    "capability_fixture_version": {"const": 1},
     "activation_policy": {
       "type": "object",
       "additionalProperties": false,
@@ -25,8 +22,6 @@
     }
   },
   "$defs": {
-    "nullableString": {"anyOf": [{"type": "string"}, {"type": "null"}]},
-    "nullableSha256": {"anyOf": [{"type": "string", "pattern": "^[0-9a-f]{64}$"}, {"type": "null"}]},
     "stringArray": {"type": "array", "items": {"type": "string"}},
     "implementation": {
       "type": "object",
@@ -36,40 +31,19 @@
         "kind": {"type": "string"},
         "package": {"type": "string"},
         "command": {"type": "string"},
-        "installed_version": {"type": "string"},
-        "source_build": {"$ref": "#/$defs/nullableString"},
-        "resolved_artifact": {"type": "string"},
-        "entrypoint": {"type": "string"},
-        "entrypoint_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
         "wrapper_entrypoint": {"type": "string", "minLength": 1},
         "executable": {"type": "string"},
-        "executable_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-        "rpc_entrypoint": {"type": "string"},
-        "rpc_entrypoint_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-        "bundle_entrypoint": {"type": "string"},
-        "bundle_entrypoint_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
         "cursor_install_root": {"type": "string"},
         "provider_install_root": {"type": "string"},
-        "provider_identity": {"enum": ["apple-designated", "cursor-partial-signed-helpers", "owner-controlled-install-root"]},
-        "package_manifest": {"type": "string"},
-        "package_manifest_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+        "provider_identity": {"enum": ["apple-designated", "cursor-partial-signed-helpers", "owner-controlled-install-root"]}
       }
     },
     "contract": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["adapter_version", "protocol", "protocol_version", "capability_fixture_version"],
+      "required": ["protocol"],
       "properties": {
-        "adapter_version": {"const": 1},
-        "protocol": {"type": "string"},
-        "protocol_version": {"anyOf": [{"type": "string"}, {"type": "integer"}, {"type": "null"}]},
-        "schema_version": {"type": "integer"},
-        "schema_generator": {"type": "string"},
-        "schema_source": {"$ref": "#/$defs/nullableString"},
-        "schema_bundle": {"type": "string"},
-        "schema_sha256": {"$ref": "#/$defs/nullableSha256"},
-        "capability_fixture_version": {"const": 1},
-        "agent_engine": {"type": "string"}
+        "protocol": {"type": "string", "minLength": 1}
       }
     },
     "runtimeRange": {
@@ -79,8 +53,6 @@
       "properties": {
         "fabric_node": {"type": "string"},
         "upstream_node": {"type": "string"},
-        "supported_cli_versions": {"$ref": "#/$defs/stringArray"},
-        "supported_protocol_versions": {"type": "array", "items": {"type": "integer"}},
         "minimum_macos": {"type": "string"},
         "platforms": {"$ref": "#/$defs/stringArray"}
       }
@@ -99,25 +71,24 @@
     "adapter": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["enabled", "delivery_stage", "implementation", "contract", "runtime_range", "model_family_constraints", "official_source_url", "unresolved_pins"],
+      "required": ["enabled", "delivery_stage", "implementation", "contract", "runtime_range", "model_family_constraints", "official_source_url"],
       "properties": {
         "enabled": {"type": "boolean"},
+        "disabled_reason": {"type": "string", "minLength": 1},
         "delivery_stage": {"type": "integer", "minimum": 3, "maximum": 4},
         "implementation": {"$ref": "#/$defs/implementation"},
         "contract": {"$ref": "#/$defs/contract"},
         "runtime_range": {"$ref": "#/$defs/runtimeRange"},
         "model_family_constraints": {"$ref": "#/$defs/modelConstraints"},
-        "official_source_url": {"type": "string", "minLength": 1},
-        "unresolved_pins": {"$ref": "#/$defs/stringArray"}
+        "official_source_url": {"type": "string", "minLength": 1}
       },
       "allOf": [
         {
           "if": {
             "properties": {
-              "enabled": {"const": true},
-              "unresolved_pins": {"type": "array", "maxItems": 0}
+              "enabled": {"const": true}
             },
-            "required": ["enabled", "unresolved_pins"]
+            "required": ["enabled"]
           },
           "then": {
             "properties": {
@@ -128,13 +99,6 @@
                   "provider_identity": {"enum": ["apple-designated", "cursor-partial-signed-helpers", "owner-controlled-install-root"]}
                 },
                 "required": ["wrapper_entrypoint", "provider_identity"]
-              },
-              "contract": {
-                "type": "object",
-                "properties": {
-                  "protocol_version": {"oneOf": [{"type": "string", "minLength": 1}, {"type": "integer"}]}
-                },
-                "required": ["protocol_version"]
               }
             }
           }
@@ -158,8 +122,7 @@
               }
             }
           }
-        }
-        ,
+        },
         {
           "if": {
             "properties": {
@@ -176,33 +139,6 @@
                 "type": "object",
                 "properties": {"provider_install_root": {"type": "string"}},
                 "required": ["provider_install_root"]
-              }
-            }
-          }
-        }
-        ,
-        {
-          "if": {
-            "properties": {
-              "enabled": {"const": true},
-              "unresolved_pins": {"type": "array", "maxItems": 0},
-              "implementation": {
-                "type": "object",
-                "properties": {"kind": {"const": "npm-package"}},
-                "required": ["kind"]
-              }
-            },
-            "required": ["enabled", "unresolved_pins", "implementation"]
-          },
-          "then": {
-            "properties": {
-              "implementation": {
-                "type": "object",
-                "properties": {
-                  "entrypoint": {"type": "string"},
-                  "entrypoint_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
-                },
-                "required": ["entrypoint", "entrypoint_sha256"]
               }
             }
           }

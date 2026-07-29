@@ -219,13 +219,11 @@ when all of the following hold:
   review); and
 - the dependency list does not include `@anthropic-ai/claude-agent-sdk`.
 
-The SDK is excluded even at patch level (issue #195):
-[`config/adapter-compatibility.yaml`](../../config/adapter-compatibility.yaml)
-pins it by version, artifact, lock integrity, entrypoint and schema, and CI's
-portable-fixtures mode bypasses those pins, so a green SDK bump can still
-leave enabled Claude activation fail-closed until the pins are refreshed
-alongside it. The queued merge still lands only after `ci-status` reports
-green; that gate is the whole review pressure for these PRs.
+The SDK is excluded even at patch level (issue #195) because an adapter
+dependency update requires current runtime identity, handshake and capability
+evidence. A green SDK bump alone does not prove that enabled Claude activation
+will remain conformant. The queued merge still lands only after `ci-status`
+reports green; that gate is the whole review pressure for these PRs.
 
 ### After merge
 

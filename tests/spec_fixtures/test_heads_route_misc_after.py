@@ -228,7 +228,7 @@ CREATE TABLE adapter_capability_snapshots(
   snapshot_generation INTEGER NOT NULL CHECK(snapshot_generation>=1),
   snapshot_id TEXT NOT NULL,
   source TEXT NOT NULL CHECK(source IN
-    ('runtime-discovery','version-pinned-conformance','unavailable')),
+    ('runtime-discovery','capability-fixture','unavailable')),
   capability_body_digest TEXT NOT NULL,
   snapshot_json TEXT NOT NULL,
   capability_kind TEXT GENERATED ALWAYS AS
@@ -242,7 +242,7 @@ CREATE TABLE adapter_capability_snapshots(
   CHECK(capability_kind IS NOT NULL AND
     capability_kind IN ('available','unavailable')),
   CHECK((source='unavailable' AND capability_kind='unavailable') OR
-    (source IN ('runtime-discovery','version-pinned-conformance') AND
+    (source IN ('runtime-discovery','capability-fixture') AND
       capability_kind='available'))
 ) STRICT;
 
@@ -1400,7 +1400,7 @@ class LaneAHeadsRouteMiscOracle(unittest.TestCase):
     def test_capability_source_and_generated_kind_closed_matrix(self) -> None:
         legal = (
             ("runtime-discovery", "available"),
-            ("version-pinned-conformance", "available"),
+            ("capability-fixture", "available"),
             ("unavailable", "unavailable"),
         )
         generation = 1
@@ -1427,28 +1427,28 @@ class LaneAHeadsRouteMiscOracle(unittest.TestCase):
                 "runtime-discovery",
                 "unavailable",
                 """CHECK constraint failed: (source='unavailable' AND capability_kind='unavailable') OR
-    (source IN ('runtime-discovery','version-pinned-conformance') AND
+    (source IN ('runtime-discovery','capability-fixture') AND
       capability_kind='available')""",
             ),
             (
-                "version-pinned-conformance",
+                "capability-fixture",
                 "unavailable",
                 """CHECK constraint failed: (source='unavailable' AND capability_kind='unavailable') OR
-    (source IN ('runtime-discovery','version-pinned-conformance') AND
+    (source IN ('runtime-discovery','capability-fixture') AND
       capability_kind='available')""",
             ),
             (
                 "unavailable",
                 "available",
                 """CHECK constraint failed: (source='unavailable' AND capability_kind='unavailable') OR
-    (source IN ('runtime-discovery','version-pinned-conformance') AND
+    (source IN ('runtime-discovery','capability-fixture') AND
       capability_kind='available')""",
             ),
             (
                 "future-source",
                 "available",
                 """CHECK constraint failed: source IN
-    ('runtime-discovery','version-pinned-conformance','unavailable')""",
+    ('runtime-discovery','capability-fixture','unavailable')""",
             ),
             (
                 None,
@@ -1565,7 +1565,7 @@ class LaneAHeadsRouteMiscOracle(unittest.TestCase):
         self.assertEqual(
             str(caught.exception),
             """CHECK constraint failed: (source='unavailable' AND capability_kind='unavailable') OR
-    (source IN ('runtime-discovery','version-pinned-conformance') AND
+    (source IN ('runtime-discovery','capability-fixture') AND
       capability_kind='available')""",
         )
         mark_case()
@@ -1939,7 +1939,7 @@ class LaneAHeadsRouteMiscOracle(unittest.TestCase):
                  adapter_id,snapshot_generation,snapshot_id,source,
                  capability_body_digest,snapshot_json,snapshot_digest)
                VALUES('adapter-a',3,'snapshot-id-adapter-a-3',
-                 'version-pinned-conformance','body-adapter-a',
+                 'capability-fixture','body-adapter-a',
                  '{"capabilities":{"kind":"available"}}',
                  'snapshot-adapter-a-3')"""
         )

@@ -36,7 +36,7 @@ flowchart LR
 | Content | Owner |
 |---|---|
 | Task classes, tiers, roles, efforts, degradation policy | `orchestrate` skill, routing reference |
-| Alias tables, family/adapter preferences, activation pins | `config/model-routing.json` |
+| Alias tables, family/adapter preferences, activation gates | `config/model-routing.json` |
 | Resolution and receipt behaviour | `scripts/model-route` |
 | Review-pressure ladder and risk tiers | `HARNESS.md` |
 | Correlated-error caveat on cross-family review | `orchestrate` skill, routing reference |

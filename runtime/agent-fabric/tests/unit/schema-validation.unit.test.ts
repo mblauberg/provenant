@@ -110,7 +110,7 @@ describe("Stage 1 versioned JSON Schemas", () => {
       implementation: {
         executable: "${USER_HOME}/.local/bin/agy",
       },
-      contract: { protocol_version: "headless-cli" },
+      contract: { protocol: "agy-cli" },
       model_family_constraints: { allowed: ["google", "anthropic"] },
     });
     expect(adapters["cursor-agent"]).toMatchObject({
@@ -118,7 +118,7 @@ describe("Stage 1 versioned JSON Schemas", () => {
         executable: "${USER_HOME}/.local/bin/cursor-agent",
         cursor_install_root: "${USER_HOME}/.local/share/cursor-agent",
       },
-      contract: { protocol_version: "stream-json-cli" },
+      contract: { protocol: "cursor-agent-stream-json-cli" },
       model_family_constraints: {
         allowed: ["cursor-composer", "xai", "anthropic", "openai", "google"],
       },
@@ -129,7 +129,7 @@ describe("Stage 1 versioned JSON Schemas", () => {
         provider_install_root: "/opt/homebrew/Cellar/opencode",
         provider_identity: "owner-controlled-install-root",
       },
-      contract: { protocol_version: 1 },
+      contract: { protocol: "agent-client-protocol" },
       model_family_constraints: {
         allowed: ["generic-open"],
         allowed_model_patterns: ["opencode/*"],
@@ -137,28 +137,30 @@ describe("Stage 1 versioned JSON Schemas", () => {
     });
     expect(adapters["kiro-acp"]).toMatchObject({
       implementation: { executable: "${USER_HOME}/.local/bin/kiro-cli" },
-      contract: { protocol_version: 1 },
+      contract: { protocol: "agent-client-protocol" },
       model_family_constraints: { allowed: ["open-weight"] },
     });
     const claude = adapters["claude-agent-sdk"];
-    if (!isJsonObject(claude) || !isJsonObject(claude.implementation)) {
+    if (!isJsonObject(claude) || !isJsonObject(claude.implementation) || !isJsonObject(claude.contract)) {
       throw new TypeError("Claude implementation compatibility is invalid");
     }
-    expect(claude.implementation).not.toHaveProperty("lock_integrity_sha512");
+    expect(claude.implementation).not.toHaveProperty("installed_version");
+    expect(claude.implementation).not.toHaveProperty("entrypoint_sha256");
+    expect(claude.implementation).not.toHaveProperty("executable_sha256");
+    expect(claude.contract).not.toHaveProperty("protocol_version");
     expect(claude.contract).not.toHaveProperty("schema_sha256");
-    expect(claude.contract).not.toHaveProperty("schema_source");
 
-    const removedIntegrityPin = {
+    const legacyProviderPin = {
       ...compatibility,
       adapters: {
         ...adapters,
         "claude-agent-sdk": {
           ...claude,
-          implementation: { ...claude.implementation, lock_integrity_sha512: "not-a-sha512-digest" },
+          implementation: { ...claude.implementation, installed_version: "legacy-fixture-version" },
         },
       },
     };
-    expect(validateWithSchema(schema, removedIntegrityPin).valid).toBe(false);
+    expect(validateWithSchema(schema, legacyProviderPin).valid).toBe(false);
 
     const unknown = validateWithSchema(schema, {
       ...compatibility,

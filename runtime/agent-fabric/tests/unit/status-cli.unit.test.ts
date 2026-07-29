@@ -7,7 +7,6 @@ import { dirname, join, resolve } from "node:path";
 import { Duplex } from "node:stream";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { parse, stringify } from "yaml";
 import { MCP_BOOTSTRAP_CREDENTIALS_FEATURE } from "@local/agent-fabric-protocol";
 
 import { fabricDoctor as realFabricDoctor, fabricStatus } from "../../src/cli/status.ts";
@@ -83,10 +82,6 @@ class DoctorFixtureDaemonSocket extends Duplex {
     this.destroy();
     callback();
   }
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 type DoctorDependencies = NonNullable<Parameters<typeof realFabricDoctor>[2]>;
@@ -1208,26 +1203,24 @@ printf '%s\\n' '{"schema_version":1,"source":"claude subscription canary","obser
     expect(compared.map((pin) => pin.state)).toStrictEqual(["unknown", "unknown"]);
   });
 
-  it("treats an absent executable pin as clean and never compares the package version", async () => {
+  it("accepts an observed provider version change without comparing versions or digests", async () => {
     const value = await paths();
     const fixture = await createPortableActivatedPrimaryFixture();
     cleanup.push(fixture.directory);
-    const compatibility: unknown = parse(await readFile(fixture.compatibilityPath, "utf8"));
-    if (!isRecord(compatibility) || !isRecord(compatibility.adapters)) throw new TypeError("fixture YAML is invalid");
-    for (const adapterId of ["claude-agent-sdk", "codex-app-server"]) {
-      const adapter = compatibility.adapters[adapterId];
-      if (!isRecord(adapter) || !isRecord(adapter.implementation)) throw new TypeError("fixture adapter is invalid");
-      delete adapter.implementation.executable_sha256;
-      adapter.implementation.installed_version = "never-compare-this-package-version";
-    }
-    await writeFile(fixture.compatibilityPath, stringify(compatibility));
 
     const result = await fabricDoctor([
       "--agents-home", fixture.directory,
       "--trusted-config", fixture.configPath,
       "--compatibility", fixture.compatibilityPath,
       "--compatibility-schema", fixture.schemaPath,
-    ], value);
+    ], value, {
+      probeProviderInterface: async ({ adapterId }) => ({
+        adapterId,
+        conformant: true,
+        probe: "fixture",
+        version: "provider-auto-update-fixture",
+      }),
+    });
     expect(result).toMatchObject({
       healthy: true,
       providerIdentity: {
@@ -1237,7 +1230,7 @@ printf '%s\\n' '{"schema_version":1,"source":"claude subscription canary","obser
         ],
       },
     });
-    expect(JSON.stringify(result.providerIdentity)).not.toMatch(/absent|installed_version|never-compare/u);
+    expect(JSON.stringify(result.providerIdentity)).not.toMatch(/version|digest|sha256/u);
   });
 
   it("keeps a timed-out provider unknown and healthy while reporting the other adapter", async () => {
@@ -1368,7 +1361,7 @@ printf '%s\\n' '{"schema_version":1,"source":"claude subscription canary","obser
     });
   });
 
-  it("reports digest and assurance drift with the repair command only on drifted adapters", async () => {
+  it("ignores digest changes while still rejecting an identity assurance mismatch", async () => {
     const value = await paths();
     const fixture = await createPortableActivatedPrimaryFixture();
     cleanup.push(fixture.directory);
@@ -1384,9 +1377,7 @@ printf '%s\\n' '{"schema_version":1,"source":"claude subscription canary","obser
         regularFile: true,
         ownerUid: process.getuid?.() ?? 0,
         mode: 0o755,
-        sha256: adapterId === "claude-agent-sdk"
-          ? "0".repeat(64)
-          : createHash("sha256").update(await readFile(executable)).digest("hex"),
+        sha256: "0".repeat(64),
         assurance: adapterId === "codex-app-server" ? "partial-signed-helpers" : "full-vendor-identity",
         signing: [],
       }),
@@ -1397,8 +1388,8 @@ printf '%s\\n' '{"schema_version":1,"source":"claude subscription canary","obser
       code: "PROVIDER_IDENTITY_DRIFT",
       providerIdentity: {
         adapters: [
-          { adapterId: "claude-agent-sdk", state: "drifted", detail: expect.stringContaining("npm run compatibility:pin") },
-          { adapterId: "codex-app-server", state: "drifted", detail: expect.stringContaining("npm run compatibility:pin") },
+          { adapterId: "claude-agent-sdk", state: "clean" },
+          { adapterId: "codex-app-server", state: "drifted", detail: expect.stringContaining("provider_identity") },
         ],
       },
       checks: expect.arrayContaining([
@@ -1430,23 +1421,19 @@ printf '%s\\n' '{"schema_version":1,"source":"claude subscription canary","obser
       code: "PROVIDER_IDENTITY_DRIFT",
       providerIdentity: {
         adapters: [
-          { adapterId: "claude-agent-sdk", state: "drifted", detail: expect.stringContaining("npm run compatibility:pin") },
+          { adapterId: "claude-agent-sdk", state: "drifted", detail: expect.stringContaining("malformed contract response") },
           { adapterId: "codex-app-server", state: "unknown" },
         ],
       },
     });
     const adapters = (result.providerIdentity as { adapters: Array<{ state: string; detail: string }> }).adapters;
-    expect(adapters.find((item) => item.state === "unknown")?.detail).not.toContain("npm run compatibility:pin");
+    expect(adapters.every((item) => !item.detail.includes("npm run compatibility:pin"))).toBe(true);
   });
 
-  it("reports both dated sources against one advisory threshold without failing doctor", async () => {
+  it("reports model catalogue staleness without adapter pin metadata", async () => {
     const value = await paths();
     const fixture = await createPortableActivatedPrimaryFixture();
     cleanup.push(fixture.directory);
-    const compatibility: unknown = parse(await readFile(fixture.compatibilityPath, "utf8"));
-    if (!isRecord(compatibility)) throw new TypeError("fixture YAML is invalid");
-    compatibility.verification_date = "2026-06-01";
-    await writeFile(fixture.compatibilityPath, stringify(compatibility));
     await mkdir(join(fixture.directory, "config"), { recursive: true });
     await writeFile(
       join(fixture.directory, "config", "model-routing.json"),
@@ -1464,11 +1451,10 @@ printf '%s\\n' '{"schema_version":1,"source":"claude subscription canary","obser
       staleness: {
         advisory: true,
         thresholdDays: 30,
-        compatibility: { field: "verification_date", date: "2026-06-01", ageDays: 54, stale: true },
         modelRouting: { field: "catalog_date", date: "2026-06-24", ageDays: 31, stale: true },
       },
       checks: expect.arrayContaining([
-        expect.objectContaining({ id: "pin-staleness", status: "pass", code: "PIN_STALENESS_ADVISORY" }),
+        expect.objectContaining({ id: "source-staleness", status: "pass", code: "SOURCE_STALENESS_ADVISORY" }),
       ]),
     });
   });
@@ -1921,7 +1907,7 @@ printf '%s\\n' '{"schema_version":1,"source":"claude subscription canary","obser
       state: "idle",
       cause: {
         checkId: "provider-identity",
-        precondition: "each primary provider matches its pinned executable identity",
+        precondition: "each primary provider passes runtime identity and interface conformance checks",
         satisfied: false,
         code: "PROVIDER_IDENTITY_UNKNOWN",
         recoverable: false,

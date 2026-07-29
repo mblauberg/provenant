@@ -19,7 +19,6 @@
     "build:types": "tsc -b tsconfig.json",
     "schema:write": "node --import tsx runtime/agent-fabric-protocol/scripts/write-schema.mjs --write",
     "schema:check:generated": "node --import tsx runtime/agent-fabric-protocol/scripts/write-schema.mjs --check",
-    "compatibility:pin": "node runtime/agent-fabric/scripts/pin-primary-compatibility.mjs",
     "profile:pin": "tsx runtime/agent-fabric/scripts/pin-review-profile-models.ts",
     "profile:catalogue:pin": "node --import tsx runtime/agent-fabric/scripts/pin-review-profile-catalogue-digest.ts",
     "profile:catalogue:deploy": "node --import tsx runtime/agent-fabric/scripts/deploy-review-profile-catalogue.ts",

@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -15,10 +14,6 @@ import { commitFixtureRepository, writeWrapperPackageScaffold } from "../support
 
 function repositoryPath(relativePath: string): string {
   return fileURLToPath(new URL(`../../../../${relativePath}`, import.meta.url));
-}
-
-function sha256(value: string): string {
-  return createHash("sha256").update(value).digest("hex");
 }
 
 type ProvenanceFixture = {
@@ -39,15 +34,11 @@ afterEach(async () => {
 async function writeCompatibility(
   fixture: Omit<ProvenanceFixture, "repositoryCommit">,
   wrapperEntrypoint: string,
-  includeSchemaPin = true,
 ): Promise<void> {
   await writeFile(
     fixture.compatibilityPath,
     stringify({
       schema_version: 1,
-      verification_date: "2026-07-20",
-      adapter_contract_version: 1,
-      capability_fixture_version: 1,
       activation_policy: { real_adapters_require_separate_gate: true, default_enabled: false },
       adapters: {
         fixture: {
@@ -55,28 +46,16 @@ async function writeCompatibility(
           delivery_stage: 4,
           implementation: {
             kind: "fixture",
-            installed_version: "1",
             executable: fixture.executablePath,
-            executable_sha256: sha256("provider executable\n"),
             provider_identity: "apple-designated",
             wrapper_entrypoint: wrapperEntrypoint,
           },
           contract: {
-            adapter_version: 1,
             protocol: "fixture",
-            protocol_version: "1",
-            ...(includeSchemaPin
-              ? {
-                  schema_source: join(fixture.directory, "protocol.json"),
-                  schema_sha256: sha256('{"schema_version":1}\n'),
-                }
-              : {}),
-            capability_fixture_version: 1,
           },
           runtime_range: { platforms: [process.platform] },
           model_family_constraints: { allowed: ["fixture"], requires_explicit_model: true },
           official_source_url: "https://example.invalid",
-          unresolved_pins: [],
         },
       },
     }),
@@ -87,11 +66,9 @@ async function createProvenanceFixture(): Promise<ProvenanceFixture> {
   const directory = await mkdtemp(join(tmpdir(), "agent-fabric-wrapper-provenance-"));
   temporaryDirectories.push(directory);
   const wrapperPath = join(directory, "wrapper.js");
-  const schemaPath = join(directory, "protocol.json");
   const executablePath = join(directory, "provider");
   await Promise.all([
     writeFile(wrapperPath, 'export const execute = () => "safe";\n'),
-    writeFile(schemaPath, '{"schema_version":1}\n'),
     writeFile(executablePath, "provider executable\n"),
   ]);
   await writeWrapperPackageScaffold(directory);
@@ -129,13 +106,6 @@ describe("adapter wrapper Git provenance", () => {
         wrapperPath: "wrapper.js",
       }],
     });
-  });
-
-  it("accepts an enabled wrapper without a schema hash pin", async () => {
-    const fixture = await createProvenanceFixture();
-    await writeCompatibility(fixture, fixture.wrapperPath, false);
-
-    await expect(verify(fixture)).resolves.toMatchObject({ valid: true });
   });
 
   it("fails closed when the tracked wrapper is modified", async () => {

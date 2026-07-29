@@ -38,7 +38,6 @@ export interface HerdrCommandPort {
 
 export type HerdrCliBoundaryOptions = Readonly<{
   executable: string;
-  expectedVersion: string;
   expectedProtocol: number;
   projectId: string;
   projectSessionId: string;
@@ -70,8 +69,8 @@ export class HerdrCliBoundary implements HerdrControlPort, HerdrPresencePort {
   }
 
   async probe(): Promise<{ version: string; protocol: number }> {
-    await this.#snapshot();
-    return { version: this.#options.expectedVersion, protocol: this.#options.expectedProtocol };
+    const snapshot = await this.#snapshot();
+    return { version: snapshot.version as string, protocol: snapshot.protocol as number };
   }
 
   async lookupAction(actionId: ProviderActionId): Promise<HerdrEffectLookup> {
@@ -430,7 +429,8 @@ export class HerdrCliBoundary implements HerdrControlPort, HerdrPresencePort {
       ? result.snapshot
       : null;
     if (
-      snapshot === null || snapshot.version !== this.#options.expectedVersion ||
+      snapshot === null || typeof snapshot.version !== "string" ||
+      Buffer.byteLength(snapshot.version, "utf8") < 1 || Buffer.byteLength(snapshot.version, "utf8") > 256 ||
       snapshot.protocol !== this.#options.expectedProtocol ||
       !Array.isArray(snapshot.agents) || !Array.isArray(snapshot.panes) ||
       snapshot.agents.length > 256 || snapshot.panes.length > 256
@@ -476,7 +476,6 @@ function assertOptions(options: HerdrCliBoundaryOptions): void {
   for (const path of observerPaths) {
     if (path !== undefined && (!isAbsolute(path) || path.includes("\0"))) throw new TypeError("observer path must be absolute");
   }
-  if (!/^[0-9]+\.[0-9]+\.[0-9]+$/u.test(options.expectedVersion)) throw new TypeError("Herdr expected version is invalid");
   if (!Number.isSafeInteger(options.expectedProtocol) || options.expectedProtocol < 1) throw new TypeError("Herdr expected protocol is invalid");
 }
 

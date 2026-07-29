@@ -51,8 +51,8 @@ Connection is a staged, typed projection owned by the bootstrap, daemon and
 protocol clients. The Console presents these stages in order:
 
 1. configuration discovery;
-2. compatibility registry, external artifact pins and Git wrapper
-   provenance/source-span verification;
+2. compatibility registry, runtime provider identity/interface conformance and
+   Git wrapper provenance/source-span verification;
 3. daemon election and process readiness;
 4. socket or transport connection;
 5. protocol handshake and authentication;

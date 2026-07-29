@@ -125,19 +125,4 @@ describe("Stage 4 Kiro ACP adapter public contract", () => {
     });
   });
 
-  it("does not activate an enabled fixture while its ACP version/schema pins are unresolved", async () => {
-    const fixture = await createCursorKiroCompatibilityFixture({ unresolvedAdapters: ["kiro-acp"] });
-    try {
-      await expect(
-        verifyAdapterCompatibility({
-          compatibilityPath: fixture.compatibilityPath,
-          schemaPath: fixture.schemaPath,
-          adapterIds: ["kiro-acp"],
-          requireEnabled: true,
-        }),
-      ).rejects.toMatchObject({ code: "ADAPTER_PIN_UNRESOLVED" });
-    } finally {
-      await rm(fixture.directory, { recursive: true, force: true });
-    }
-  });
 });

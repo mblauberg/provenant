@@ -102,8 +102,6 @@ def load_adapter_compatibility(adapter: str) -> tuple[dict[str, Any] | None, str
     patterns = constraints.get("allowed_model_patterns", []) if isinstance(constraints, dict) else None
     if (
         not isinstance(entry.get("enabled"), bool)
-        or not isinstance(entry.get("unresolved_pins"), list)
-        or any(not isinstance(item, str) for item in entry.get("unresolved_pins", []))
         or not isinstance(allowed, list)
         or any(not isinstance(item, str) for item in allowed)
         or not isinstance(patterns, list)
@@ -113,7 +111,6 @@ def load_adapter_compatibility(adapter: str) -> tuple[dict[str, Any] | None, str
     return {
         "compatibility_adapter": compatibility_id,
         "enabled": entry["enabled"],
-        "unresolved_pins": entry["unresolved_pins"],
         "allowed_families": allowed,
         "allowed_model_patterns": patterns,
         # Fail closed on omission: only an explicit `false` opts an adapter
@@ -475,7 +472,6 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
         compatibility_metadata = {
             "compatibility_adapter": compatibility["compatibility_adapter"],
             "adapter_enabled": compatibility["enabled"],
-            "adapter_unresolved_pins": compatibility["unresolved_pins"],
         }
         if args.adapter_gate == "fabric":
             active_adapters, activation_status = load_active_adapters(Path(args.fabric_config))
@@ -493,7 +489,7 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
                 compatibility["compatibility_adapter"] in active_adapters
             )
         if account_default != (not compatibility["requires_explicit_model"]):
-            # The routing catalog and the compatibility pin must agree on
+            # The routing catalogue and adapter policy must agree on
             # account-default dispatch in both directions (#190).
             return emit_route(
                 {
@@ -647,19 +643,6 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
                 {
                     **base,
                     "status": "adapter_inactive",
-                    "endpoint_provider": endpoint,
-                    "model_family": family,
-                    "resolved_model": model,
-                    "identity_source": identity_source,
-                    **compatibility_metadata,
-                },
-                1,
-            )
-        if args.adapter_gate == "fabric" and compatibility["unresolved_pins"]:
-            return emit_route(
-                {
-                    **base,
-                    "status": "adapter_unresolved_pins",
                     "endpoint_provider": endpoint,
                     "model_family": family,
                     "resolved_model": model,
@@ -839,7 +822,7 @@ def parser() -> argparse.ArgumentParser:
         "--adapter-gate",
         choices=("fabric", "direct-cli"),
         default="fabric",
-        help="Apply fabric activation pins (default) or defer activation to a direct CLI caller.",
+        help="Apply Fabric activation and conformance gates (default) or defer activation to a direct CLI caller.",
     )
     command.add_argument(
         "--fabric-config",

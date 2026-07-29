@@ -2,7 +2,7 @@ import { join } from "node:path";
 import { readFile, rm, stat, unlink, writeFile } from "node:fs/promises";
 
 import { afterEach, describe, expect, it } from "vitest";
-import { parse, stringify } from "yaml";
+import { parse } from "yaml";
 
 import { runSourceCli } from "../support/cli-process.ts";
 import { createResolvedStage4Compatibility } from "../support/stage4-pi-agy-testkit.ts";
@@ -59,18 +59,6 @@ describe("adapter executable resolver CLI", () => {
     const result = await resolveFixtureExecutable(fixture);
 
     expect(result).toBe(executable);
-  });
-
-  it("ignores a stale observational executable digest", async () => {
-    const fixture = await createResolvedStage4Compatibility("agy");
-    fixtures.push(fixture);
-    const document = parse(await readFile(fixture.compatibilityPath, "utf8"));
-    document.adapters.agy.implementation.executable_sha256 = "b".repeat(64);
-    await writeFile(fixture.compatibilityPath, stringify(document));
-
-    const result = await resolveFixtureExecutable(fixture);
-
-    expect(result).toBe(await fixtureExecutable(fixture));
   });
 
   it("fails closed when the stable executable is missing", async () => {

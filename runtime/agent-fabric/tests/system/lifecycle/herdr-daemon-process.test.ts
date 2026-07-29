@@ -13,7 +13,7 @@ import {
 } from "../../../src/daemon/herdr-composition.ts";
 
 describe("production daemon Herdr composition", () => {
-  it("loads the optional production package through pinned daemon configuration", async () => {
+  it("loads the optional production package through capability-checked daemon configuration", async () => {
     const directory = await realpath(await mkdtemp(join(tmpdir(), "fabric-herdr-daemon-production-")));
     try {
       const stateDirectory = join(directory, "state");
@@ -23,8 +23,7 @@ describe("production daemon Herdr composition", () => {
       await mkdir(stateDirectory, { mode: 0o700 });
       await mkdir(projectRoot, { mode: 0o700 });
       const body = "#!/bin/sh\n" +
-        "if [ \"$1\" = \"--version\" ]; then printf '%s\\n' 'herdr 0.7.3'; exit 0; fi\n" +
-        "if [ \"$1 $2\" = \"api snapshot\" ]; then printf '%s' '{\"id\":\"fixture\",\"result\":{\"type\":\"session_snapshot\",\"snapshot\":{\"version\":\"0.7.3\",\"protocol\":16,\"agents\":[],\"panes\":[]}}}'; exit 0; fi\n" +
+        "if [ \"$1 $2\" = \"api snapshot\" ]; then printf '%s' '{\"id\":\"fixture\",\"result\":{\"type\":\"session_snapshot\",\"snapshot\":{\"version\":\"auto-updated-fixture\",\"protocol\":16,\"agents\":[],\"panes\":[]}}}'; exit 0; fi\n" +
         "exit 9\n";
       const consoleBody = "#!/bin/sh\nexit 0\n";
       await writeFile(executable, body, { encoding: "utf8", mode: 0o700 });
@@ -34,8 +33,6 @@ describe("production daemon Herdr composition", () => {
       const composition = composeHerdrDaemonIntegration({
         enabled: true,
         executable,
-        executableDigest: digest(body),
-        expectedVersion: "0.7.3",
         expectedProtocol: 16,
         consoleExecutable,
         consoleExecutableDigest: digest(consoleBody),
@@ -59,12 +56,10 @@ describe("production daemon Herdr composition", () => {
     }
   });
 
-  it("accepts a complete pinned observer configuration without treating its digest as a path", () => {
+  it("accepts a complete observer integrity configuration without treating its digest as a path", () => {
     expect(parseHerdrDaemonProcessConfiguration(JSON.stringify({
       enabled: true,
       executable: "/opt/herdr/bin/herdr",
-      executableDigest: `sha256:${"1".repeat(64)}`,
-      expectedVersion: "0.7.3",
       expectedProtocol: 16,
       consoleExecutable: "/opt/fabric/bin/agent-fabric-console",
       consoleExecutableDigest: `sha256:${"2".repeat(64)}`,

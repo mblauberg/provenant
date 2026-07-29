@@ -12,7 +12,7 @@ Promote the coordination-only agent fabric into a safely activated local model-e
 
 ## Required behaviour
 
-1. Every activated adapter is bound to Git wrapper provenance: the wrapper entrypoint is tracked source, verified tracked at the owning repository's HEAD and byte-identical to its committed content, and recorded as repository commit plus wrapper path in the composed adapter evidence. The verified first-party span covers the owning workspace package's src tree and every local workspace dependency's src tree (`@local/*` packages import their sources in the wrapper execution path via the `source` export condition), and provenance is re-derived immediately before every adapter process spawn. Untracked, ignored or locally modified wrapper code fails activation closed. Provider CLIs are admitted through their stable launcher, adapter-specific vendor identity and bounded non-answer interface; observed version and digest never gate a normal update. Protocol schemas and Fabric SDK libraries remain hash/lockfile verified. The tsx loader that executes tracked TypeScript source is a lockfile-pinned third-party dependency.
+1. Every activated adapter is bound to Git wrapper provenance: the wrapper entrypoint is tracked source, verified against the owning repository's HEAD and recorded as repository commit plus wrapper path in the composed adapter evidence. Provenance is re-derived immediately before every adapter process spawn, so an untracked or locally modified wrapper fails activation closed. Provider CLIs are admitted through their stable launcher, adapter-specific vendor identity and bounded non-answer interface; observed version and digest never gate a normal update. Protocol schemas and Fabric SDK libraries remain hash/lockfile verified. The tsx loader that executes tracked TypeScript source is a lockfile-pinned third-party dependency.
 2. Provider work uses the admitted absolute working directory and exact matched
    permission profile. Generic work may use write tools/edit modes only when its
    task authority and matched profile explicitly grant them; approval bypasses,
@@ -75,7 +75,7 @@ migration or new authority model.
 1. Claude Agent SDK.
 2. Codex app server.
 3. Cursor and Agy headless boundaries.
-4. Pi RPC isolation and compatibility pinning; runtime activation waits for an available trusted open-weight route.
+4. Pi RPC isolation and runtime capability conformance; activation waits for an available trusted open-weight route.
 5. Kiro ACP.
 6. Herdr observer.
 7. Coordinated seat renewal.
@@ -87,9 +87,11 @@ The current activated optional-reviewer identities are Agy
 `cursor-grok-4.5-high` (`xai`, high). They use the existing provider
 subscription sessions. Adapter subprocesses receive no ambient provider API
 key, and no provider credential is stored in Fabric. Activation remains exact:
-the installed CLI version, executable (and Cursor bundle), schema, wrapper
-provenance, explicit model, family and model-encoded effort must all match the
-checked contract or new work fails closed.
+the current executable identity, wrapper provenance, runtime handshake,
+negotiated protocol, capability checks, explicit model, family and
+model-encoded effort must all satisfy the checked contract or new work fails
+closed. Installed provider version and executable, bundle or schema digests are
+not compatibility gates.
 
 ## Non-goals
 
@@ -97,7 +99,7 @@ checked contract or new work fails closed.
 - No automatic public deployment or Git push.
 - No unbounded fabric message bodies in Herdr; local previews are capped and terminal-neutralised.
 - No authority extension by capability rotation or blind timer.
-- No fallback that bypasses a disabled, unresolved or mismatched adapter.
+- No fallback that bypasses a disabled, inactive or runtime-nonconformant adapter.
 
 ## Rollback
 
@@ -125,9 +127,10 @@ binds the activated executable/package, wrapper provenance, adapter contract,
 host/version, model catalogue, raw effort values, raw native-mode values,
 context boundary claims, orchestration bounds and enforceable permission
 source. The
-snapshot source is exactly `runtime-discovery` or
-`version-pinned-conformance`. A conformance fixture cannot be reported as
-runtime discovery. A `source/kind: unavailable` snapshot is persisted negative
+snapshot source is exactly `runtime-discovery` or `capability-fixture`. A
+capability fixture cannot be reported as runtime discovery and cannot admit an
+adapter whose current bounded non-answer interface fails. A
+`source/kind: unavailable` snapshot is persisted negative
 evidence but cannot activate the adapter or admit answer-bearing work. Expiry
 or contract drift removes the adapter from new automatic admission without
 rewriting prior receipts.

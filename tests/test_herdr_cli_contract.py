@@ -3,12 +3,8 @@ import stat
 import subprocess
 import sys
 
-import yaml
-
-
 ROOT = Path(__file__).resolve().parents[1]
 CHECKER = ROOT / "skills" / "orchestrate" / "evals" / "check_herdr_cli.py"
-CONFIG = ROOT / "config" / "adapter-compatibility.yaml"
 REFERENCE = ROOT / "skills" / "orchestrate" / "references" / "herdr-panes.md"
 
 ROOT_HELP = """\
@@ -56,7 +52,7 @@ herdr api schema [--json | --output PATH]
 def _fake_herdr(
     tmp_path: Path,
     *,
-    version: str = "0.7.3",
+    version: str = "fixture-version",
     agent_help: str = AGENT_HELP,
     pane_help: str = PANE_HELP,
     wait_help: str = WAIT_HELP,
@@ -97,8 +93,6 @@ def _run(binary: Path, *extra: str) -> subprocess.CompletedProcess[str]:
             str(CHECKER),
             "--binary",
             str(binary),
-            "--config",
-            str(CONFIG),
             "--reference",
             str(REFERENCE),
             *extra,
@@ -108,7 +102,7 @@ def _run(binary: Path, *extra: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def test_cli_gate_uses_only_version_and_group_help_without_a_live_session(tmp_path: Path) -> None:
+def test_cli_gate_uses_only_observed_version_and_capability_help_without_a_live_session(tmp_path: Path) -> None:
     fake, log = _fake_herdr(tmp_path)
     result = _run(fake)
 
@@ -134,13 +128,13 @@ def test_cli_gate_skips_cleanly_when_herdr_is_unavailable(tmp_path: Path) -> Non
     assert "binary not found" in result.stdout
 
 
-def test_cli_gate_fails_clearly_on_installed_version_conflict(tmp_path: Path) -> None:
-    fake, _ = _fake_herdr(tmp_path, version="0.7.4")
+def test_cli_gate_accepts_an_auto_updated_provider_version(tmp_path: Path) -> None:
+    fake, _ = _fake_herdr(tmp_path, version="future-fixture-version")
     result = _run(fake)
 
-    assert result.returncode == 1
-    assert "HERDR CLI CHECK: FAIL" in result.stdout
-    assert "installed version 0.7.4 conflicts with compatibility pin 0.7.3" in result.stdout
+    assert result.returncode == 0
+    assert "HERDR CLI CHECK: PASS" in result.stdout
+    assert "observed version future-fixture-version" in result.stdout
 
 
 def test_cli_gate_distinguishes_agent_idle_from_pane_done_wait_statuses(tmp_path: Path) -> None:
@@ -222,8 +216,6 @@ def test_cli_gate_rejects_a_documented_status_absent_from_help(tmp_path: Path) -
             str(CHECKER),
             "--binary",
             str(fake),
-            "--config",
-            str(CONFIG),
             "--reference",
             str(reference),
         ],
@@ -235,64 +227,7 @@ def test_cli_gate_rejects_a_documented_status_absent_from_help(tmp_path: Path) -
     assert "documented status tokens are absent from help: ['paused']" in result.stdout
 
 
-def test_cli_gate_rejects_an_internally_conflicting_protocol_pin(tmp_path: Path) -> None:
-    data = yaml.safe_load(CONFIG.read_text())
-    data["adapters"]["herdr"]["runtime_range"]["supported_protocol_versions"] = [17]
-    conflicting = tmp_path / "adapter-compatibility.yaml"
-    conflicting.write_text(yaml.safe_dump(data, sort_keys=False))
-    fake, log = _fake_herdr(tmp_path)
-
-    result = subprocess.run(
-        [
-            sys.executable,
-            str(CHECKER),
-            "--binary",
-            str(fake),
-            "--config",
-            str(conflicting),
-            "--reference",
-            str(REFERENCE),
-        ],
-        capture_output=True,
-        text=True,
-    )
-
-    assert result.returncode == 1
-    assert "protocol pin 16 is not in supported_protocol_versions [17]" in result.stdout
-    assert not log.exists(), "configuration conflicts must fail before invoking Herdr"
-
-
-def test_cli_gate_reads_version_and_protocol_from_the_compatibility_pin(tmp_path: Path) -> None:
-    data = yaml.safe_load(CONFIG.read_text())
-    herdr = data["adapters"]["herdr"]
-    herdr["implementation"]["installed_version"] = "9.9.9"
-    herdr["runtime_range"]["supported_cli_versions"] = ["9.9.9"]
-    herdr["contract"]["protocol_version"] = 99
-    herdr["runtime_range"]["supported_protocol_versions"] = [99]
-    changed = tmp_path / "adapter-compatibility.yaml"
-    changed.write_text(yaml.safe_dump(data, sort_keys=False))
-    fake, _ = _fake_herdr(tmp_path, version="9.9.9")
-
-    result = subprocess.run(
-        [
-            sys.executable,
-            str(CHECKER),
-            "--binary",
-            str(fake),
-            "--config",
-            str(changed),
-            "--reference",
-            str(REFERENCE),
-        ],
-        capture_output=True,
-        text=True,
-    )
-
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert "version 9.9.9, protocol 99" in result.stdout
-
-
-def test_installed_herdr_matches_the_declared_contract_or_skips_cleanly() -> None:
+def test_installed_herdr_capabilities_pass_or_skip_cleanly() -> None:
     result = subprocess.run(
         [sys.executable, str(CHECKER)],
         cwd=ROOT,

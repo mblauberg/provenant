@@ -34,7 +34,7 @@ export type ResolvedEffortV1 = CodecOutput<typeof RESOLVED_EFFORT_V1_CODEC>;
 const reasoningEffort = enumeration(["none", "low", "medium", "high", "xhigh", "max"]);
 const nullableReasoningEffort = nullable(reasoningEffort);
 const orchestrationMode = enumeration(["single", "native-subagents", "dynamic-workflow", "provider-multi-agent"]);
-const snapshotSource = enumeration(["runtime-discovery", "version-pinned-conformance", "unavailable"]);
+const snapshotSource = enumeration(["runtime-discovery", "capability-fixture", "unavailable"]);
 
 const effortNormalizationCodec = objectCodec({
   rawProviderEffort: id256,

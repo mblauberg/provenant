@@ -97,7 +97,7 @@ orchestrate `SKILL.md`; verdict unchanged):
 | orchestration-contract.md | keep | the declared public interface; dedup target |
 | dynamic-workflows.md | slim (advisory ~60 lines) | must retain: Workflow contract binding, saved-workflow conventions, pointers; drop restated native Workflow docs and the run-dir list duplicated from memory-scratchpad |
 | paired-primary.md | keep | replace its Fabric-vs-Herdr restatement with a pointer |
-| herdr-panes.md | keep | third-party CLI contract, version-pinned |
+| herdr-panes.md | keep | third-party CLI contract, capability-tested |
 | layering-and-context.md | keep | canonical for worker caps (3–5) |
 | retrieval-and-tool-routing.md | keep | worker-brief block becomes a pointer to orchestration-contract's worker contract |
 | verification.md | keep | absorbs debate-and-panels content |

@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -37,28 +36,13 @@ export function repositoryPath(relativePath: string): string {
   return fileURLToPath(new URL(`../../../../${relativePath}`, import.meta.url));
 }
 
-function sha256(value: string): string {
-  return createHash("sha256").update(value).digest("hex");
-}
-
 function compatibilityAdapter(options: {
   adapterId: string;
   implementationPath: string;
-  implementationHash: string;
-  entrypointPath?: string;
-  entrypointHash?: string;
-  schemaPath: string;
-  schemaHash: string;
 }): Record<string, unknown> {
   const implementation = {
     kind: "fixture-process",
-    installed_version: "1.0.0-fixture",
     executable: options.implementationPath,
-    executable_sha256: options.implementationHash,
-    ...(options.entrypointPath === undefined ? {} : {
-      entrypoint: options.entrypointPath,
-      entrypoint_sha256: options.entrypointHash,
-    }),
     provider_identity: "apple-designated",
   };
   return {
@@ -66,17 +50,11 @@ function compatibilityAdapter(options: {
     delivery_stage: 3,
     implementation,
     contract: {
-      adapter_version: 1,
       protocol: `${options.adapterId}-fixture`,
-      protocol_version: "1",
-      schema_source: options.schemaPath,
-      schema_sha256: options.schemaHash,
-      capability_fixture_version: 1,
     },
     runtime_range: { platforms: [process.platform] },
     model_family_constraints: { allowed: [], requires_explicit_model: true },
     official_source_url: "https://example.invalid/fixture",
-    unresolved_pins: [],
   };
 }
 
@@ -88,11 +66,8 @@ export async function createPrimaryCompatibilityFixture(): Promise<{
 }> {
   const directory = await mkdtemp(join(tmpdir(), "agent-fabric-primary-compatibility-"));
   const executablePath = join(directory, "fixture-adapter");
-  const protocolSchemaPath = join(directory, "fixture-protocol.json");
   const executableBytes = "fixture adapter executable\n";
-  const schemaBytes = `${JSON.stringify({ schemaVersion: 1, protocolVersion: 1 })}\n`;
   await writeFile(executablePath, executableBytes, { mode: 0o700 });
-  await writeFile(protocolSchemaPath, schemaBytes, { mode: 0o600 });
 
   const adapters = Object.fromEntries(
     ["claude-agent-sdk", "codex-app-server", "herdr"].map((adapterId) => [
@@ -100,13 +75,6 @@ export async function createPrimaryCompatibilityFixture(): Promise<{
       compatibilityAdapter({
         adapterId,
         implementationPath: executablePath,
-        implementationHash: sha256(executableBytes),
-        ...(adapterId === "claude-agent-sdk" ? {
-          entrypointPath: executablePath,
-          entrypointHash: sha256(executableBytes),
-        } : {}),
-        schemaPath: protocolSchemaPath,
-        schemaHash: sha256(schemaBytes),
       }),
     ]),
   );
@@ -115,9 +83,6 @@ export async function createPrimaryCompatibilityFixture(): Promise<{
     compatibilityPath,
     stringify({
       schema_version: 1,
-      verification_date: "2026-07-10",
-      adapter_contract_version: 1,
-      capability_fixture_version: 1,
       activation_policy: {
         real_adapters_require_separate_gate: true,
         default_enabled: false,
@@ -129,7 +94,7 @@ export async function createPrimaryCompatibilityFixture(): Promise<{
     directory,
     compatibilityPath,
     schemaPath: repositoryPath("runtime/agent-fabric/schemas/adapter-compatibility.schema.json"),
-    artifactPaths: [executablePath, protocolSchemaPath],
+    artifactPaths: [executablePath],
   };
 }
 

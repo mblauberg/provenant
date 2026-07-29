@@ -1,7 +1,6 @@
 import Database from "better-sqlite3";
 import { lstat, readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { parse } from "yaml";
 import {
   MCP_BOOTSTRAP_CREDENTIALS_FEATURE,
   assertRequiredResultShapeFeatures,
@@ -50,7 +49,7 @@ type ProviderInterfaceResult = Awaited<ReturnType<typeof probeProviderInterface>
 type ProviderObservation = { adapterId: string; requiredIdentity: string; identity?: ProviderIdentityResult; providerInterface?: ProviderInterfaceResult; identityError?: unknown; interfaceError?: unknown };
 type ProviderIdentityState = "clean" | "drifted" | "unknown";
 type ProviderIdentityObservation = { adapterId: string; state: ProviderIdentityState; detail: string };
-type DateStaleness = { field: "verification_date" | "catalog_date" | "observed_on"; date: string | null; ageDays: number | null; stale: boolean | null };
+type DateStaleness = { field: "catalog_date" | "observed_on"; date: string | null; ageDays: number | null; stale: boolean | null };
 type DoctorDaemonConnection = Pick<
   Awaited<ReturnType<typeof connectFabricDaemon>>,
   "initializeResult" | "probeBootstrapContract" | "close"
@@ -88,10 +87,10 @@ const PRECONDITIONS: Readonly<Record<string, string>> = {
   "protocol-build": "the local protocol dist is present and current for its build inputs",
   configuration: "the trusted Fabric configuration loads and names its adapters",
   "wrapper-loader": "every configured adapter wrapper loader is installed",
-  "adapter-compatibility": "adapter compatibility pins verify against the pinned schema",
+  "adapter-compatibility": "adapter activation metadata validates against the compatibility schema",
   "provider-conformance": "each configured provider executable answers its conformance probe",
-  "provider-identity": "each primary provider matches its pinned executable identity",
-  "pin-staleness": "compatibility and catalogue pin dates are within the advisory threshold",
+  "provider-identity": "each primary provider passes runtime identity and interface conformance checks",
+  "pin-staleness": "model catalogue and review-profile observation dates are within the advisory threshold",
   "state-directory": "the state directory is a private non-symlink directory",
   "runtime-directory": "the runtime directory is a private non-symlink directory",
   "database-integrity": "a byte-stable copy of the Fabric database is current-schema and passes its invariants",
@@ -131,7 +130,6 @@ const RECOVERABLE_CODES: ReadonlySet<string> = new Set([
 const PRIMARY_ADAPTER_IDS = ["claude-agent-sdk", "codex-app-server"] as const;
 const PROVIDER_PROBE_TIMEOUT_MS = 16_000;
 const STALENESS_THRESHOLD_DAYS = 30;
-const REPAIR_COMMAND = "npm run compatibility:pin";
 const PROFILE_PIN_REPAIR_COMMAND = "npm run profile:pin";
 const DAY_MS = 24 * 60 * 60 * 1000;
 const CACHED_REVIEW_PROFILE_PIN_PRECONDITION =
@@ -221,7 +219,7 @@ function probeFailure(error: unknown): { state: "drifted" | "unknown"; detail: s
   };
 }
 
-function primaryProviderState(observation: ProviderObservation, executableSha256: string | undefined): ProviderIdentityObservation {
+function primaryProviderState(observation: ProviderObservation): ProviderIdentityObservation {
   const drift: string[] = [];
   const unknown: string[] = [];
   for (const [probe, error] of [["identity", observation.identityError], ["interface", observation.interfaceError]] as const) {
@@ -230,9 +228,6 @@ function primaryProviderState(observation: ProviderObservation, executableSha256
     (failure.state === "drifted" ? drift : unknown).push(`${probe} probe ${failure.state === "drifted" ? "mismatch" : "unavailable"}: ${failure.detail}`);
   }
   if (observation.identity !== undefined) {
-    if (executableSha256 !== undefined && observation.identity.sha256 !== executableSha256) {
-      drift.push(`executable_sha256 expected ${executableSha256} observed ${observation.identity.sha256}`);
-    }
     if (observation.requiredIdentity === "apple-designated" &&
         observation.identity.assurance !== "full-vendor-identity") {
       drift.push(`provider_identity apple-designated observed assurance ${observation.identity.assurance}`);
@@ -240,14 +235,13 @@ function primaryProviderState(observation: ProviderObservation, executableSha256
   } else if (observation.identityError === undefined) unknown.push("identity probe did not complete");
   if (observation.providerInterface === undefined && observation.interfaceError === undefined) unknown.push("interface probe did not complete");
   if (drift.length > 0) {
-    return { adapterId: observation.adapterId, state: "drifted", detail: `${drift.join("; ")}; repair with ${REPAIR_COMMAND}` };
+    return { adapterId: observation.adapterId, state: "drifted", detail: drift.join("; ") };
   }
   if (unknown.length > 0) return { adapterId: observation.adapterId, state: "unknown", detail: unknown.join("; ") };
-  const matchedPin = executableSha256 === undefined ? "" : "executable_sha256 matched; ";
   return {
     adapterId: observation.adapterId,
     state: "clean",
-    detail: `${matchedPin}identity assurance ${observation.identity!.assurance}; interface ${observation.providerInterface!.probe} conformant`,
+    detail: `identity assurance ${observation.identity!.assurance}; interface ${observation.providerInterface!.probe} conformant`,
   };
 }
 
@@ -261,27 +255,14 @@ function dateStaleness(field: DateStaleness["field"], date: unknown, now: number
   return { field, date, ageDays, stale: ageDays > STALENESS_THRESHOLD_DAYS };
 }
 
-async function readDoctorMetadata(compatibilityPath: string, modelRoutingPath: string, adapterIds: readonly string[]): Promise<{ executablePins: Map<string, string>; verificationDate: unknown; catalogDate: unknown; modelRouting: unknown }> {
-  const executablePins = new Map<string, string>();
-  let document: unknown;
-  try {
-    document = parse(await readFile(compatibilityPath, "utf8"));
-  } catch {}
-  if (isRecord(document) && isRecord(document.adapters)) {
-    for (const adapterId of adapterIds) {
-      const adapter = document.adapters[adapterId];
-      if (!isRecord(adapter) || !isRecord(adapter.implementation)) continue;
-      const pin = adapter.implementation.executable_sha256;
-      if (typeof pin === "string") executablePins.set(adapterId, pin);
-    }
-  }
+async function readDoctorMetadata(modelRoutingPath: string): Promise<{ catalogDate: unknown; modelRouting: unknown }> {
   let catalogDate: unknown;
   let modelRouting: unknown;
   try {
     modelRouting = JSON.parse(await readFile(modelRoutingPath, "utf8"));
     if (isRecord(modelRouting)) catalogDate = modelRouting.catalog_date;
   } catch {}
-  return { executablePins, verificationDate: isRecord(document) ? document.verification_date : undefined, catalogDate, modelRouting };
+  return { catalogDate, modelRouting };
 }
 
 /**
@@ -740,9 +721,9 @@ export async function fabricDoctor(
     }
     return observations.join(" ");
   }));
-  const metadata = await readDoctorMetadata(selected.compatibility, selected.modelRouting, PRIMARY_ADAPTER_IDS);
+  const metadata = await readDoctorMetadata(selected.modelRouting);
   const providerIdentity = providerObservations.map((observation) =>
-    primaryProviderState(observation, metadata.executablePins.get(observation.adapterId)));
+    primaryProviderState(observation));
   const drifted = providerIdentity.some((item) => item.state === "drifted");
   const unknown = providerIdentity.some((item) => item.state === "unknown");
   checks.push({
@@ -790,16 +771,14 @@ export async function fabricDoctor(
     .filter((value): value is string => value !== null)
     .sort();
   const staleness = {
-    compatibility: dateStaleness("verification_date", metadata.verificationDate, now),
     modelRouting: dateStaleness("catalog_date", metadata.catalogDate, now),
     reviewProfile: dateStaleness("observed_on", observedDates[0], now),
   };
   checks.push({
-    id: "pin-staleness",
+    id: "source-staleness",
     status: "pass",
-    code: "PIN_STALENESS_ADVISORY",
+    code: "SOURCE_STALENESS_ADVISORY",
     detail: [
-      `verification_date=${staleness.compatibility.date ?? "unknown"} age_days=${String(staleness.compatibility.ageDays)}`,
       `catalog_date=${staleness.modelRouting.date ?? "unknown"} age_days=${String(staleness.modelRouting.ageDays)}`,
       `review_profile_observed_on=${staleness.reviewProfile.date ?? "unknown"} age_days=${String(staleness.reviewProfile.ageDays)}`,
       `threshold_days=${String(STALENESS_THRESHOLD_DAYS)}`,
@@ -871,7 +850,6 @@ export async function fabricDoctor(
     staleness: {
       advisory: true,
       thresholdDays: STALENESS_THRESHOLD_DAYS,
-      compatibility: staleness.compatibility,
       modelRouting: staleness.modelRouting,
       reviewProfile: staleness.reviewProfile,
     },
