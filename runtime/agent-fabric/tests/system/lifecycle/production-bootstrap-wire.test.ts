@@ -1,4 +1,4 @@
-import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { tmpdir } from "node:os";
@@ -19,6 +19,7 @@ import {
   startFabricDaemon,
   type FabricDaemonHandle,
 } from "../../../src/daemon/client.ts";
+import { openFabricDatabase } from "../../../src/persistence/sqlite.ts";
 import { digestCanonical } from "../../../src/review/canonical/index.ts";
 import { MCP_ROOT_AUTHORITY } from "../../support/mcp-testkit.ts";
 import { createCurrentSessionRun } from "../../support/current-session-testkit.ts";
@@ -149,10 +150,15 @@ async function waitForOwnerState(
   }
 }
 
-async function startBusyWalWriter(databasePath: string): Promise<ReturnType<typeof spawn>> {
+async function startBusyWalWriter(
+  databasePath: string,
+  waitForPath?: string,
+): Promise<ReturnType<typeof spawn>> {
   const script = `
     import Database from "better-sqlite3";
+    import { existsSync } from "node:fs";
     const database = new Database(process.argv[1]);
+    const waitForPath = process.argv[2];
     database.pragma("journal_mode = WAL");
     database.pragma("wal_autocheckpoint = 0");
     database.pragma("busy_timeout = 5000");
@@ -176,11 +182,22 @@ async function startBusyWalWriter(databasePath: string): Promise<ReturnType<type
       for (let attempt = 0; attempt < 64; attempt += 1) heartbeat.run();
       setImmediate(write);
     };
-    write();
+    const waitThenWrite = () => {
+      if (stopping) return;
+      if (waitForPath === undefined || existsSync(waitForPath)) write();
+      else setTimeout(waitThenWrite, 1);
+    };
+    waitThenWrite();
   `;
   const writer = spawn(
     process.execPath,
-    ["--input-type=module", "-e", script, databasePath],
+    [
+      "--input-type=module",
+      "-e",
+      script,
+      databasePath,
+      ...(waitForPath === undefined ? [] : [waitForPath]),
+    ],
     {
       cwd: fileURLToPath(new URL("../../..", import.meta.url)),
       stdio: ["ignore", "pipe", "pipe"],
@@ -705,6 +722,49 @@ describe("production daemon bootstrap wiring", () => {
       handles.push(...attached);
       expect(new Set(attached.map((handle) => handle.pid))).toEqual(new Set([owner.pid]));
       expect(attached.every((handle) => !handle.ownsProcess)).toBe(true);
+    } finally {
+      if (writer.exitCode === null && writer.signalCode === null) {
+        writer.kill("SIGTERM");
+        await new Promise<void>((resolvePromise) => writer.once("exit", () => resolvePromise()));
+      }
+    }
+  });
+
+  it("does not run cutover cleanup when concurrent inspection writes exhaust the retry bound", async () => {
+    const root = await mkdtemp(join(tmpdir(), "fabric-production-inspection-race-"));
+    roots.push(root);
+    const databaseDirectory = join(root, "database");
+    const databasePath = join(databaseDirectory, "fabric.sqlite3");
+    const stateDirectory = join(root, "state");
+    const runtimeDirectory = join(root, "runtime");
+    await mkdir(databaseDirectory, { mode: 0o700 });
+    const seed = openFabricDatabase(databasePath);
+    seed.prepare(`
+      INSERT INTO daemon_runtime_epochs(
+        instance_generation,instance_id,state,observed_global_revision,started_at,heartbeat_at,stopped_at
+      ) VALUES(1,'inspection-writer','running',NULL,1,1,NULL)
+    `).run();
+    seed.close();
+    const before = await readFile(databasePath);
+    const writer = await startBusyWalWriter(databasePath, stateDirectory);
+    try {
+      await expect(startFabricDaemon({
+        databasePath,
+        stateDirectory,
+        runtimeDirectory,
+        socketPath: join(runtimeDirectory, "fabric.sock"),
+        workspaceRoots: [root],
+      })).rejects.toMatchObject({
+        code: "DATABASE_INSPECTION_UNSTABLE",
+        preserved: false,
+      });
+      await expect(lstat(stateDirectory)).resolves.toMatchObject({ mode: expect.any(Number) });
+      await expect(lstat(runtimeDirectory)).resolves.toMatchObject({ mode: expect.any(Number) });
+      expect(await readdir(runtimeDirectory)).toEqual(expect.arrayContaining([
+        "daemon-election.attempts.jsonl",
+        "daemon-election.lease.json",
+      ]));
+      expect((await readFile(databasePath)).byteLength).toBe(before.byteLength);
     } finally {
       if (writer.exitCode === null && writer.signalCode === null) {
         writer.kill("SIGTERM");

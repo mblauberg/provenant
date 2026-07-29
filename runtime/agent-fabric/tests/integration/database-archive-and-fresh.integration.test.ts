@@ -722,8 +722,8 @@ describe("database archive-and-fresh cutover", () => {
         };
       },
     })).toThrowError(expect.objectContaining({
-      code: "SCHEMA_CUTOVER_REQUIRED",
-      preserved: true,
+      code: "DATABASE_INSPECTION_UNSTABLE",
+      preserved: false,
     }));
 
     expect(await sourceHashes(fixture.databasePath)).toEqual(racedHashes);

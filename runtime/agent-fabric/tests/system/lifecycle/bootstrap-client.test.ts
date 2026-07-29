@@ -5,7 +5,10 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { MCP_BOOTSTRAP_CREDENTIALS_FEATURE } from "@local/agent-fabric-protocol";
-import { attachOrStartDaemon } from "../../../src/daemon/bootstrap-client.ts";
+import {
+  attachOrStartDaemon,
+  BootstrapClientError,
+} from "../../../src/daemon/bootstrap-client.ts";
 import { BootstrapElection } from "../../../src/daemon/bootstrap-election.ts";
 
 const cleanup: string[] = [];
@@ -15,6 +18,19 @@ afterEach(async () => {
 });
 
 describe("attachOrStartDaemon", () => {
+  it("never grants destructive cleanup preservation semantics to inspection instability", () => {
+    const error = new BootstrapClientError(
+      "DATABASE_INSPECTION_UNSTABLE",
+      "database changed during inspection",
+      { cause: { preserved: true } },
+    );
+
+    expect(error).toMatchObject({
+      code: "DATABASE_INSPECTION_UNSTABLE",
+      preserved: false,
+    });
+  });
+
   it("fails typed build preflight before election or spawn", async () => {
     const root = await mkdtemp(join(tmpdir(), "fabric-bootstrap-preflight-"));
     cleanup.push(root);

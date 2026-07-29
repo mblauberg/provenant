@@ -109,6 +109,8 @@ const PRECONDITIONS: Readonly<Record<string, string>> = {
  * - `DAEMON_PROCESS_CRASHED` and `DAEMON_PROCESS_UNCLEAN_STOP`: terminal
  *   discovery carrying evidence that matches its ready receipt, which the
  *   ordinary spawn path replaces.
+ * - `DATABASE_INSPECTION_UNSTABLE`: the bounded read-only inspection did not
+ *   observe a stable source set; a later inspection may converge.
  *
  * Everything else is `blocked` and reported as needing a decision rather than
  * a retry. That deliberately excludes absent discovery, a stale socket and an
@@ -123,6 +125,7 @@ const RECOVERABLE_CODES: ReadonlySet<string> = new Set([
   "DAEMON_PROCESS_UNAVAILABLE",
   "DAEMON_PROCESS_CRASHED",
   "DAEMON_PROCESS_UNCLEAN_STOP",
+  "DATABASE_INSPECTION_UNSTABLE",
 ]);
 
 const PRIMARY_ADAPTER_IDS = ["claude-agent-sdk", "codex-app-server"] as const;
