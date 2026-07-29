@@ -56,7 +56,7 @@ succeeds.
 Substitute the project key for the affected project.
 
 ```sh
-seat_state_root=/Users/user/.local/state/agent-harness/fabric
+seat_state_root=$HOME/.local/state/agent-harness/fabric
 seat_project_key=<PROJECT-KEY>
 seat_pointer="$seat_state_root/seats/$seat_project_key/current.json"
 
@@ -92,7 +92,7 @@ rejected.
 ### 4. Verify
 
 ```sh
-seat_state_root=/Users/user/.local/state/agent-harness/fabric
+seat_state_root=$HOME/.local/state/agent-harness/fabric
 seat_project_key=<PROJECT-KEY>
 seat_pointer="$seat_state_root/seats/$seat_project_key/current.json"
 seat_generation=$(jq -r .generation "$seat_pointer")
