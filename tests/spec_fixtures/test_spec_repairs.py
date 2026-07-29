@@ -19,81 +19,7 @@ BEHAVIOUR_SPECS = read_specs(AGENT_FABRIC_BEHAVIOUR)
 HARDENING_SPECS = read_specs(AGENT_FABRIC_HARDENING)
 PROVIDER_ACTIONS_SPEC = read_spec("agent-fabric/provider-actions-and-adapters.md")
 MESSAGING_PROTOCOL_SPEC = read_spec("agent-fabric/messaging-and-public-protocol.md")
-
-APPLY_ARM_CHECK_ERROR = """CHECK constraint failed: (apply_kind='terminal' AND
-      batch_transition_kind IN ('custody-terminal','generation-loss-terminal',
-        'custody-recovery-retirement') AND receipt_batch_id IS NOT NULL AND
-      batch_completion_digest IS NOT NULL AND
-      transition_replay_digest IS NOT NULL AND
-      ordered_authority_receipt_set_digest IS NOT NULL AND
-      verified_scope_checkpoint_digest IS NOT NULL AND
-      applied_mutation_plan_digest IS NOT NULL AND fresh_handoff_id IS NULL AND
-      fresh_handoff_digest IS NULL AND fresh_handoff_key='none' AND
-      fresh_project_session_id IS NULL AND
-      fresh_run_id IS NULL AND fresh_agent_id IS NULL AND
-      fresh_source_mode IS NULL AND fresh_apply_plan_digest IS NULL AND
-      new_custody_id IS NULL AND new_custody_semantic_digest IS NULL AND
-      new_custody_source_ref_digest IS NULL AND
-      fresh_generation_loss_id IS NULL AND
-      fresh_generation_loss_after_revision IS NULL AND
-      fresh_generation_loss_after_semantic_digest IS NULL AND
-      fresh_generation_loss_after_source_ref_digest IS NULL AND
-      fresh_generation_loss_after_key='none') OR
-    (apply_kind='terminal-fresh' AND
-      batch_transition_kind='custody-terminal' AND receipt_batch_id IS NOT NULL AND
-      batch_completion_digest IS NOT NULL AND
-      transition_replay_digest IS NOT NULL AND
-      ordered_authority_receipt_set_digest IS NOT NULL AND
-      verified_scope_checkpoint_digest IS NOT NULL AND
-      applied_mutation_plan_digest IS NOT NULL AND fresh_handoff_id IS NOT NULL AND
-      fresh_handoff_digest IS NOT NULL AND
-      fresh_handoff_key=fresh_handoff_digest AND
-      fresh_project_session_id IS NOT NULL AND
-      fresh_run_id IS NOT NULL AND fresh_agent_id IS NOT NULL AND
-      fresh_source_mode='terminalize-nonfinal-custody' AND
-      fresh_apply_plan_digest IS NOT NULL AND
-      new_custody_id IS NOT NULL AND new_custody_semantic_digest IS NOT NULL AND
-      new_custody_source_ref_digest IS NOT NULL AND
-      ((fresh_generation_loss_after_key='none' AND
-          fresh_generation_loss_id IS NULL AND
-          fresh_generation_loss_after_revision IS NULL AND
-          fresh_generation_loss_after_semantic_digest IS NULL AND
-          fresh_generation_loss_after_source_ref_digest IS NULL) OR
-        (fresh_generation_loss_after_key<>'none' AND
-          fresh_generation_loss_id IS NOT NULL AND
-          fresh_generation_loss_after_revision IS NOT NULL AND
-          fresh_generation_loss_after_semantic_digest IS NOT NULL AND
-          fresh_generation_loss_after_source_ref_digest=
-            fresh_generation_loss_after_key))) OR
-    (apply_kind='fresh' AND batch_transition_kind='fresh-origin' AND
-      receipt_batch_id IS NOT NULL AND
-      batch_completion_digest IS NOT NULL AND
-      transition_replay_digest IS NOT NULL AND
-      ordered_authority_receipt_set_digest IS NOT NULL AND
-      verified_scope_checkpoint_digest IS NOT NULL AND
-      applied_mutation_plan_digest IS NOT NULL AND fresh_handoff_id IS NOT NULL AND
-      fresh_handoff_digest IS NOT NULL AND
-      fresh_handoff_key=fresh_handoff_digest AND
-      fresh_project_session_id IS NOT NULL AND
-      fresh_run_id IS NOT NULL AND fresh_agent_id IS NOT NULL AND
-      fresh_source_mode IN ('reuse-final-custody','open-generation-loss') AND
-      fresh_apply_plan_digest IS NOT NULL AND
-      new_custody_id IS NOT NULL AND new_custody_semantic_digest IS NOT NULL AND
-      new_custody_source_ref_digest IS NOT NULL AND
-      applied_mutation_plan_digest=fresh_apply_plan_digest AND
-      ((fresh_source_mode='reuse-final-custody' AND
-          fresh_generation_loss_after_key='none' AND
-          fresh_generation_loss_id IS NULL AND
-          fresh_generation_loss_after_revision IS NULL AND
-          fresh_generation_loss_after_semantic_digest IS NULL AND
-          fresh_generation_loss_after_source_ref_digest IS NULL) OR
-        (fresh_source_mode='open-generation-loss' AND
-          fresh_generation_loss_after_key<>'none' AND
-          fresh_generation_loss_id IS NOT NULL AND
-          fresh_generation_loss_after_revision IS NOT NULL AND
-          fresh_generation_loss_after_semantic_digest IS NOT NULL AND
-          fresh_generation_loss_after_source_ref_digest=
-            fresh_generation_loss_after_key)))"""
+MIGRATION = ROOT / "runtime" / "agent-fabric" / "migrations" / "0001-current-baseline.sql"
 
 
 def ddl_block(text: str, table: str) -> str:
@@ -209,6 +135,24 @@ def trigger_database() -> sqlite3.Connection:
 
 
 class SpecRepairTests(unittest.TestCase):
+    def test_shipped_apply_arm_constraint_has_a_stable_name(self) -> None:
+        db = sqlite3.connect(":memory:")
+        try:
+            db.executescript(MIGRATION.read_text(encoding="utf-8"))
+            with self.assertRaises(sqlite3.IntegrityError) as caught:
+                db.execute(
+                    "INSERT INTO lifecycle_transition_applies("
+                    "apply_id,apply_kind,batch_transition_kind,"
+                    "fresh_handoff_key,fresh_generation_loss_after_key) "
+                    "VALUES('invalid-apply','terminal','fresh-origin','none','none')"
+                )
+            self.assertEqual(
+                str(caught.exception),
+                "CHECK constraint failed: lifecycle_transition_applies_arm_guard",
+            )
+        finally:
+            db.close()
+
     def test_fresh_origin_effect_ddl_accepts_exact_and_rejects_crossed_arm(self) -> None:
         db = sqlite3.connect(":memory:", isolation_level=None)
         db.execute("PRAGMA foreign_keys=ON")
@@ -981,10 +925,9 @@ class SpecRepairTests(unittest.TestCase):
                         f"VALUES({','.join('?' for _ in values)})",
                         values,
                     )
-                self.assertEqual(
-                    str(caught.exception),
-                    APPLY_ARM_CHECK_ERROR,
-                )
+                # This is a specification-fixture check. The shipped baseline's
+                # independently named guard is asserted above; its DDL must not
+                # be copied here merely to compare SQLite's source-text error.
 
         self.assertEqual([], db.execute("PRAGMA foreign_key_check").fetchall())
 

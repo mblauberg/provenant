@@ -26,6 +26,13 @@ A table named by a specification but absent from the schema is reported
 separately rather than ignored, because an intersection-only comparison would
 silently pass the worst case — a table that does not exist at all.
 
+Foreign-key targets are checked independently. A specification may declare a
+table with ordinary ``CREATE TABLE`` SQL rather than the pseudo-DDL this gate
+compares to the migration; that is still a declaration for reference integrity.
+The shipped migration is also a declaration because it is the schema authority
+for this gate. Every ``REFERENCES`` target inside a specification DDL block
+must therefore be declared by either the specification corpus or the migration.
+
 CHECK is deliberately excluded. Its body is free-form SQL that the typeless
 specification dialect legitimately writes differently from the migration, so
 comparing it would report drift on every table and mean nothing. The key
@@ -71,6 +78,13 @@ SPEC_FILES = (
 # written immediately after another was skipped entirely — silently opting that
 # table out of this gate.
 SPEC_TABLE = re.compile(r"^([a-z_][a-z0-9_]*)\(\n(.*?)\n\)$", re.S | re.M)
+# Some specifications carry ordinary SQL DDL rather than the typeless
+# pseudo-SQL compared above. It is intentionally not added to the drift
+# comparison, but it does declare a valid foreign-key target.
+SPEC_CREATE_TABLE = re.compile(
+    r"^CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([a-z_][a-z0-9_]*)\s*\(\n(.*?)\n\);?$",
+    re.S | re.M | re.I,
+)
 IDENTIFIER = re.compile(r"^([a-z_][a-z0-9_]*)")
 # Key constraints, table-level and column-level.
 TABLE_KEY = re.compile(r"^(PRIMARY\s+KEY|UNIQUE)\s*\(([^)]*)\)", re.I)
@@ -208,6 +222,29 @@ def constraints(body: str) -> set[str]:
     return found
 
 
+def foreign_key_targets(body: str) -> set[str]:
+    """Return every table named by a FOREIGN KEY or inline REFERENCES clause."""
+    targets: set[str] = set()
+    for text in fragments(body):
+        if ELISION in text:
+            continue
+        table_fk = TABLE_FOREIGN_KEY.match(text)
+        if table_fk:
+            targets.add(table_fk.group(2))
+            continue
+        column_fk = COLUMN_REFERENCES.search(text)
+        if column_fk:
+            targets.add(column_fk.group(1))
+    return targets
+
+
+def dangling_foreign_key_targets(
+    referenced: set[str], declared: set[str], migration: dict[str, Table]
+) -> set[str]:
+    """Return spec targets declared by neither specification nor migration."""
+    return referenced - declared - set(migration)
+
+
 Table = tuple[set[str], set[str]]
 
 
@@ -265,26 +302,35 @@ def load_migration() -> dict[str, Table]:
     return tables
 
 
-def load_tables() -> tuple[dict[str, Table], dict[str, Table], list[str]]:
+def load_tables() -> tuple[dict[str, Table], dict[str, Table], list[str], set[str]]:
     migration = load_migration()
 
     spec: dict[str, Table] = {}
     elisions: list[str] = []
+    declared: set[str] = set()
+    referenced: set[str] = set()
     for name in SPEC_FILES:
         path = SPEC_DIR / name
         text = path.read_text(encoding="utf-8")
         for match in SPEC_TABLE.finditer(text):
             table = match.group(1)
+            declared.add(table)
+            referenced.update(foreign_key_targets(match.group(2)))
             found, elided = columns(match.group(2))
             if elided:
                 elisions.append(f"{path.relative_to(ROOT)}: {table} has an elided DDL block")
             spec[table] = (found, constraints(match.group(2)))
-    return spec, migration, elisions
+        for match in SPEC_CREATE_TABLE.finditer(text):
+            declared.add(match.group(1))
+            referenced.update(foreign_key_targets(match.group(2)))
+    return spec, migration, elisions, dangling_foreign_key_targets(
+        referenced, declared, migration
+    )
 
 
-def measure() -> tuple[dict[str, dict[str, list[str]]], list[str], list[str], int]:
-    """Return drift, elisions, specified-but-absent tables, and the shared count."""
-    spec, migration, elisions = load_tables()
+def measure() -> tuple[dict[str, dict[str, list[str]]], list[str], list[str], list[str], int]:
+    """Return drift, elisions, absent and dangling tables, and the shared count."""
+    spec, migration, elisions, dangling = load_tables()
     drift: dict[str, dict[str, list[str]]] = {}
     shared = sorted(set(spec) & set(migration))
     for table in shared:
@@ -298,7 +344,13 @@ def measure() -> tuple[dict[str, dict[str, list[str]]], list[str], list[str], in
         }
         if any(entry.values()):
             drift[table] = entry
-    return drift, sorted(elisions), sorted(set(spec) - set(migration)), len(shared)
+    return (
+        drift,
+        sorted(elisions),
+        sorted(set(spec) - set(migration)),
+        sorted(dangling),
+        len(shared),
+    )
 
 
 def load_baseline() -> dict:
@@ -309,11 +361,17 @@ def load_baseline() -> dict:
 
 def failures() -> list[str]:
     problems: list[str] = []
-    drift, elisions, absent, _ = measure()
+    drift, elisions, absent, dangling, _ = measure()
     baseline = load_baseline()
     allowed = baseline.get("drift", {})
     allowed_elisions = set(baseline.get("elided", []))
     allowed_absent = set(baseline.get("absent", []))
+
+    for table in dangling:
+        problems.append(
+            f"{table} is referenced by a specification FOREIGN KEY but is not declared "
+            "by the specification corpus or the migration"
+        )
 
     for table in absent:
         if table not in allowed_absent:
@@ -367,14 +425,15 @@ def failures() -> list[str]:
 
 
 def main() -> int:
-    drift, elisions, absent, shared = measure()
+    drift, elisions, absent, dangling, shared = measure()
 
     if "--write-baseline" in sys.argv:
         payload = {"drift": drift, "elided": elisions, "absent": absent}
         BASELINE.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         print(
             f"spec-schema-drift: wrote {BASELINE.name} with {len(drift)} drifting "
-            f"table(s), {len(elisions)} elided block(s) and {len(absent)} absent table(s)"
+            f"table(s), {len(elisions)} elided block(s), {len(absent)} absent table(s) "
+            f"and {len(dangling)} dangling reference(s)"
         )
         return 0
 
@@ -387,7 +446,8 @@ def main() -> int:
     print(
         f"spec-schema-drift: ok ({shared} shared tables, "
         f"{shared - len(drift)} agree exactly, {len(drift)} known-drifting, "
-        f"{len(elisions)} elided, {len(absent)} specified but absent)"
+        f"{len(elisions)} elided, {len(absent)} specified but absent, "
+        f"{len(dangling)} dangling references)"
     )
     return 0
 
