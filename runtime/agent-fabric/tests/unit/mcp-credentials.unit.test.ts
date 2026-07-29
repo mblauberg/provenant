@@ -202,6 +202,57 @@ describe("MCP capability loading", () => {
     }
   });
 
+  it("renews an inherited near-expiry seat at the resolved ancestor project", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "fabric-mcp-project-seat-nested-expiry-"));
+    cleanup.push(directory);
+    const stateDirectory = join(directory, "state");
+    const project = join(directory, "project");
+    const nested = join(project, "nested");
+    await Promise.all([mkdir(nested, { recursive: true }), mkdir(stateDirectory, { mode: 0o700 })]);
+    const projectPath = await realpath(project);
+    const nestedPath = await realpath(nested);
+    const { key, directory: seatDirectory } = await createCurrentSeatDirectory(
+      stateDirectory,
+      projectPath,
+      GENERATION_EXPIRY,
+    );
+    const credentialPath = join(seatDirectory, "codex.cap");
+    const capability = `afc_${"d".repeat(43)}`;
+    const metadataPath = join(seatDirectory, "codex.json");
+    const metadata = (expiresAt: string) => ({
+      schemaVersion: 1,
+      projectKey: key,
+      projectPath,
+      generation: GENERATION_EXPIRY,
+      previousGeneration: null,
+      originKind: "bootstrap",
+      projectSessionId: `session_bootstrap_${"a".repeat(32)}`,
+      runId: "run",
+      seat: "codex",
+      agentId: "codex",
+      role: "chair",
+      credentialPath,
+      expiresAt,
+    });
+    await writeFile(credentialPath, `${capability}\n`, { mode: 0o600 });
+    await writeFile(metadataPath, `${JSON.stringify(metadata(
+      new Date(Date.now() + 30 * 60 * 1_000).toISOString(),
+    ))}\n`, { mode: 0o600 });
+    const renew = vi.fn(async (_resolvedProjectPath: string) => {
+      await writeFile(metadataPath, `${JSON.stringify(metadata(
+        new Date(Date.now() + 24 * 60 * 60 * 1_000).toISOString(),
+      ))}\n`, { mode: 0o600 });
+    });
+
+    await expect(resolveRenewableMcpCapability(
+      { AGENT_FABRIC_SEAT: "codex", AGENT_FABRIC_STATE_DIRECTORY: stateDirectory },
+      nestedPath,
+      renew,
+    )).resolves.toBe(capability);
+    expect(renew).toHaveBeenCalledWith(projectPath);
+    expect(renew).not.toHaveBeenCalledWith(nestedPath);
+  });
+
   it.each([
     ["before the renewal window", 2 * 60 * 60 * 1_000, false],
     ["near expiry", 30 * 60 * 1_000, true],
