@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { randomUUID } from "node:crypto";
+import { lstat } from "node:fs/promises";
 import { createConnection } from "node:net";
 import { dirname } from "node:path";
 import type { HerdrSteerDispatchResult } from "@local/agent-fabric-protocol";
@@ -18,6 +19,8 @@ function option(arguments_: string[], name: string): string | undefined {
 
 async function servingSocketPath(runtimeDirectory: string, fallback: string): Promise<string> {
   try {
+    const runtime = await lstat(runtimeDirectory);
+    if (!runtime.isDirectory() || runtime.isSymbolicLink()) return fallback;
     const { privateDiscoveryPaths, readPrivateDiscovery, readPrivateDiscoveryOwner } =
       await import("../daemon/private-discovery.js");
     const discoveryPaths = privateDiscoveryPaths(runtimeDirectory);
@@ -200,7 +203,7 @@ async function main(arguments_: string[]): Promise<void> {
       import("./status.js"),
       import("./paths.js"),
     ]);
-    const output = await fabricDoctor(arguments_.slice(1), resolveFabricPaths({ createDirectories: false }));
+    const output = await fabricDoctor(arguments_.slice(1), resolveFabricPaths());
     process.stdout.write(`${JSON.stringify(output, null, 2)}\n`);
     if (output.healthy !== true) process.exitCode = 1;
     return;
@@ -246,7 +249,7 @@ async function main(arguments_: string[]): Promise<void> {
       import("./mcp-provision.js"),
       import("./paths.js"),
     ]);
-    const output = await provisionMcpSeats(arguments_.slice(2), resolveFabricPaths());
+    const output = await provisionMcpSeats(arguments_.slice(2), resolveFabricPaths({ createDirectories: true }));
     process.stdout.write(`${JSON.stringify(output, null, 2)}\n`);
     return;
   }
@@ -263,7 +266,7 @@ async function main(arguments_: string[]): Promise<void> {
     const output = await bootstrapMcpSeat({
       environment: { ...process.env, AGENT_FABRIC_SEAT: seat },
       cwd: process.cwd(),
-      paths: resolveFabricPaths(),
+      paths: resolveFabricPaths({ createDirectories: true }),
     });
     const { credential: _credential, credentials, ...safeOutput } = output;
     const publicOutput = {
@@ -295,7 +298,7 @@ async function main(arguments_: string[]): Promise<void> {
     const output = await inspectBootstrapMcpSeat({
       environment: { ...process.env, AGENT_FABRIC_SEAT: seat },
       cwd: process.cwd(),
-      paths: resolveFabricPaths({ createDirectories: false }),
+      paths: resolveFabricPaths(),
     });
     process.stdout.write(`${JSON.stringify(output, null, 2)}\n`);
     return;
@@ -317,7 +320,10 @@ async function main(arguments_: string[]): Promise<void> {
       import("./observer-provision.js"),
       import("./paths.js"),
     ]);
-    const output = await provisionObserverCredential({ project, paths: resolveFabricPaths() });
+    const output = await provisionObserverCredential({
+      project,
+      paths: resolveFabricPaths({ createDirectories: true }),
+    });
     process.stdout.write(`${JSON.stringify(output, null, 2)}\n`);
     return;
   }
@@ -326,7 +332,10 @@ async function main(arguments_: string[]): Promise<void> {
       import("./mcp-peer-provision.js"),
       import("./paths.js"),
     ]);
-    const output = await provisionMcpPeerSeats(arguments_.slice(2), resolveFabricPaths());
+    const output = await provisionMcpPeerSeats(
+      arguments_.slice(2),
+      resolveFabricPaths({ createDirectories: true }),
+    );
     process.stdout.write(`${JSON.stringify(output, null, 2)}\n`);
     return;
   }
@@ -335,7 +344,11 @@ async function main(arguments_: string[]): Promise<void> {
       import("./workspace-trust.js"),
       import("./paths.js"),
     ]);
-    const output = await runWorkspaceTrust(arguments_.slice(1), resolveFabricPaths());
+    const createsDirectories = arguments_[1] === "trust" || arguments_[1] === "revoke";
+    const output = await runWorkspaceTrust(
+      arguments_.slice(1),
+      resolveFabricPaths(createsDirectories ? { createDirectories: true } : {}),
+    );
     process.stdout.write(`${JSON.stringify(output, null, 2)}\n`);
     return;
   }
@@ -355,7 +368,7 @@ async function main(arguments_: string[]): Promise<void> {
     ]);
     const output = await runDatabaseArchiveAndFreshCli(
       arguments_.slice(2),
-      resolveFabricPaths({ createDirectories: false }).databasePath,
+      resolveFabricPaths().databasePath,
     );
     process.stdout.write(`${JSON.stringify(output.result, null, 2)}\n`);
     if (output.exitCode !== 0) process.exitCode = output.exitCode;

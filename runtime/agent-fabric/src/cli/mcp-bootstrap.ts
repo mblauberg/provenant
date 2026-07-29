@@ -28,6 +28,7 @@ import {
   parseMcpSeat,
   readActiveSeatGeneration,
   resolveSeatProject,
+  SeatGenerationChangedError,
   type SeatMetadata,
 } from "./seat-store.js";
 import { trustedWorkspaceIdentity } from "./workspace-trust.js";
@@ -594,7 +595,28 @@ export async function bootstrapMcpSeat(input: {
       expectedPreviousGeneration: result.expectedPreviousGeneration,
       seats,
       allowMissingPreviousGeneration: true,
+      allowStaleGenerationReconciliation: true,
+      ...(input.now === undefined ? {} : { now: input.now }),
     });
+    const generationChangedError = (cause: unknown): McpBootstrapError => {
+      const recordedGeneration = cause instanceof SeatGenerationChangedError
+        ? cause.recordedGeneration
+        : generationBefore?.generation ?? null;
+      const recordedPreviousGeneration = cause instanceof SeatGenerationChangedError
+        ? cause.recordedPreviousGeneration
+        : generationBefore?.previousGeneration ?? null;
+      return new McpBootstrapError(
+        "BOOTSTRAP_GENERATION_CHANGED",
+        `Fabric bootstrap could not complete the local seat cutover for project ${result.canonicalRoot}. ` +
+        `Recorded on-disk generation: ${recordedGeneration ?? "none"}. ` +
+        `Recorded on-disk previous generation: ${recordedPreviousGeneration ?? "none"}. ` +
+        `Daemon-expected prior generation: ${result.expectedPreviousGeneration ?? "none"}. ` +
+        `Daemon-computed generation: ${result.generation}. ` +
+        `Inspect ${seatProject.directory}/current.json and ${seatProject.directory}/generations, ` +
+        `confirm no other bootstrap is running, then escalate with those values before changing seat state.`,
+        { cause },
+      );
+    };
     let installed: Awaited<ReturnType<typeof installSeatGeneration>>;
     let legacyBootstrapProvenanceRecorded = false;
     try {
@@ -609,22 +631,14 @@ export async function bootstrapMcpSeat(input: {
             generation: result.generation,
           }) === "recorded";
         } catch (legacyCause: unknown) {
-          if (!(legacyCause instanceof Error) || !legacyCause.message.includes("active MCP seat generation changed")) {
+          if (!(legacyCause instanceof SeatGenerationChangedError)) {
             throw legacyCause;
           }
-          throw new McpBootstrapError(
-            "BOOTSTRAP_GENERATION_CHANGED",
-            "Fabric bootstrap seat generation changed during local cutover",
-            { cause: legacyCause },
-          );
+          throw generationChangedError(legacyCause);
         }
       } else {
-        if (!(cause instanceof Error) || !cause.message.includes("active MCP seat generation changed")) throw cause;
-        throw new McpBootstrapError(
-          "BOOTSTRAP_GENERATION_CHANGED",
-          "Fabric bootstrap seat generation changed during local cutover",
-          { cause },
-        );
+        if (!(cause instanceof SeatGenerationChangedError)) throw cause;
+        throw generationChangedError(cause);
       }
     }
     const selected = installed.find((candidate) => candidate.seat === seat);
