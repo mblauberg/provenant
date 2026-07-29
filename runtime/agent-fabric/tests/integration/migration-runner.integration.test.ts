@@ -102,7 +102,6 @@ describe("current schema baseline", () => {
       "review_finding_pages",
       "review_finding_set_pages",
       "review_finding_sets",
-      "review_portal_process_custody",
       "review_profile_slots",
       "review_profile_snapshots",
       "review_slot_heads",

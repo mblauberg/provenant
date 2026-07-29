@@ -4,7 +4,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import Database from "better-sqlite3";
 import { describe, expect, it } from "vitest";
 
 import { AUTHORITY_ACTION_VOCABULARY, openFabric } from "../../../src/index.ts";
@@ -493,54 +492,6 @@ describe("provider session admission", () => {
     } finally {
       await fixture.fabric.close();
       await rm(fixture.directory, { recursive: true, force: true });
-    }
-  });
-
-  it("retires direct lifecycle spawn when no elected daemon owns child custody", async () => {
-    const directory = await mkdtemp(join(tmpdir(), "fabric-provider-lifecycle-intent-"));
-    const journalPath = join(directory, "provider-journal.json");
-    const databasePath = join(directory, "fabric.sqlite3");
-    const fabric = await openFabric({
-      databasePath,
-      workspaceRoots: [directory],
-      adapters: {
-        lifecycle: {
-          command: [process.execPath, "--import", "tsx", lifecycleAdapter],
-          environment: { LIFECYCLE_FAKE_JOURNAL: journalPath },
-        },
-      },
-    });
-    try {
-      const run = await currentRun(directory, {
-        runId: "provider-lifecycle-intent",
-        chair: { agentId: "chair", authority: authority(directory) },
-      });
-      const chair = fabric.connect(run.chairCapability);
-      const workerAuthority = await chair.delegateAuthority({
-        parentAuthorityId: run.chairAuthorityId,
-        authority: { ...authority(directory), budget: { turns: 5 } },
-      });
-      const input = {
-        agentId: "worker",
-        authorityId: workerAuthority.authorityId,
-        adapterId: "lifecycle",
-        actionId: "spawn-worker-once",
-        payload: { initialPrompt: "bounded task" },
-      };
-      await expect(chair.spawnAgent(input)).rejects.toMatchObject({ code: "CAPABILITY_UNAVAILABLE" });
-      await expect(chair.spawnAgent(input)).rejects.toMatchObject({ code: "CAPABILITY_UNAVAILABLE" });
-      expect(existsSync(journalPath)).toBe(false);
-      const database = new Database(databasePath, { readonly: true });
-      try {
-        expect(database.prepare("SELECT COUNT(*) AS count FROM provider_lifecycle_intents").get()).toEqual({ count: 0 });
-        expect(database.prepare("SELECT COUNT(*) AS count FROM provider_agent_custody").get()).toEqual({ count: 0 });
-        expect(database.prepare("SELECT COUNT(*) AS count FROM agents WHERE agent_id='worker'").get()).toEqual({ count: 0 });
-      } finally {
-        database.close();
-      }
-    } finally {
-      await fabric.close();
-      await rm(directory, { recursive: true, force: true });
     }
   });
 

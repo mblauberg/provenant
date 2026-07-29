@@ -71,6 +71,5 @@ closed as unnegotiated. Unknown fields, observation arms, relationship values
 and reasons are rejected. Existing projection, team, task and agent shapes stay
 byte-compatible.
 
-This slice adds no persisted table or migration. Issue #381's queued
-`provider_lifecycle_intents` drop is therefore not bundled here; it remains for
-the next real migration.
+The `provider_lifecycle_intents` drop from issue #381 is included in this
+release.

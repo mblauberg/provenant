@@ -778,24 +778,6 @@ describe("current database baseline invariants", () => {
     database.close();
   });
 
-  it("cannot bind a dependent provider action through the wrong adapter", () => {
-    const database = openDatabase();
-    seedRun(database);
-    insertProviderAction(database, "adapter-a");
-
-    expect(() => database.prepare(`
-      INSERT INTO provider_lifecycle_intents(
-        run_id,action_id,operation,actor_agent_id,target_agent_id,
-        authority_id,adapter_id,intent_hash,status,created_at,updated_at
-      ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
-    `).run(
-      "run", "shared-action", "attach", "chair", "chair",
-      "authority", "adapter-b", "intent", "prepared", 1, 1,
-    )).toThrow("FOREIGN KEY constraint failed");
-
-    database.close();
-  });
-
   it("owns one immutable current coordination-policy revision", () => {
     const database = openDatabase();
     seedRun(database);

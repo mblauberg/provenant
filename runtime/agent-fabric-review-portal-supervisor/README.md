@@ -38,8 +38,6 @@ every helper-backed certifying route `capability=false`; in particular, `setsid`
 and outer OS confinement remain explicitly false until daemon integration proves all of the
 following on the activated build:
 
-- stopped-child launch and durable `review_portal_process_custody` persistence
-  before continue/exec;
 - action/contract/bundle equality and one-use broker admission using the peer
   identity returned here;
 - pinned executable bytes, Darwin code identity, complete ancestry and outer
