@@ -1,13 +1,17 @@
 import Database from "better-sqlite3";
 import { createHash } from "node:crypto";
-import { lstat, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
 import { openFabricDatabase } from "../../src/persistence/sqlite.ts";
-import { inspectFabricDatabase } from "../../src/core/migrations.ts";
+import {
+  inspectFabricDatabase,
+  inspectFabricDatabaseForCutover,
+  withPrivateDatabaseClone,
+} from "../../src/core/migrations.ts";
 
 const directories: string[] = [];
 
@@ -55,20 +59,36 @@ afterEach(async () => {
 });
 
 describe("SQLite connection hardening", () => {
-  it.each([
-    ["empty file", ""],
-    ["non-SQLite file", "not a SQLite database\n"],
-  ] as const)("rejects a pre-existing %s without mutation", async (_case, contents) => {
+  it("rejects a pre-existing empty file as incompatible without mutation", async () => {
     const directory = await mkdtemp(join(tmpdir(), "agent-fabric-cutover-invalid-"));
     directories.push(directory);
     const path = join(directory, "fabric.sqlite3");
-    await writeFile(path, contents, { mode: 0o640 });
+    await writeFile(path, "", { mode: 0o640 });
     const beforeBytes = await readFile(path);
     const beforeStat = await stat(path);
     const beforeEntries = await readdir(directory);
 
     expect(() => openFabricDatabase(path)).toThrowError(
       expect.objectContaining({ code: "SCHEMA_CUTOVER_REQUIRED", preserved: true }),
+    );
+
+    await expectExactFileBytes(path, beforeBytes);
+    expect((await stat(path)).mode).toBe(beforeStat.mode);
+    expect((await stat(path)).mtimeMs).toBe(beforeStat.mtimeMs);
+    expect(await readdir(directory)).toEqual(beforeEntries);
+  });
+
+  it("propagates a pre-existing non-SQLite format failure without mutation", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "agent-fabric-format-invalid-"));
+    directories.push(directory);
+    const path = join(directory, "fabric.sqlite3");
+    await writeFile(path, "not a SQLite database\n", { mode: 0o640 });
+    const beforeBytes = await readFile(path);
+    const beforeStat = await stat(path);
+    const beforeEntries = await readdir(directory);
+
+    expect(() => openFabricDatabase(path)).toThrowError(
+      expect.objectContaining({ code: "SQLITE_NOTADB" }),
     );
 
     await expectExactFileBytes(path, beforeBytes);
@@ -171,6 +191,86 @@ describe("SQLite connection hardening", () => {
 
     expect(await preservationSnapshot(directory)).toEqual(before);
     writer.close();
+  });
+
+  it("retries a concurrent source write without reporting a schema cutover", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "agent-fabric-inspection-retry-"));
+    directories.push(directory);
+    const path = join(directory, "fabric.sqlite3");
+    openFabricDatabase(path).close();
+    let inspections = 0;
+
+    const result = withPrivateDatabaseClone(path, () => {
+      inspections += 1;
+      if (inspections === 1) {
+        const writer = new Database(path);
+        writer.pragma("user_version = 1");
+        writer.close();
+      }
+      return "current";
+    });
+
+    expect(result).toBe("current");
+    expect(inspections).toBe(2);
+  });
+
+  it("surfaces bounded inspection instability without cutover preservation semantics", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "agent-fabric-inspection-unstable-"));
+    directories.push(directory);
+    const path = join(directory, "fabric.sqlite3");
+    openFabricDatabase(path).close();
+    let inspections = 0;
+
+    expect(() => withPrivateDatabaseClone(path, () => {
+      inspections += 1;
+      const writer = new Database(path);
+      writer.pragma(`user_version = ${String(inspections)}`);
+      writer.close();
+    })).toThrowError(expect.objectContaining({
+      code: "DATABASE_INSPECTION_UNSTABLE",
+      preserved: false,
+    }));
+    // Pins the bound: this writer perturbs the source on every attempt, so it
+    // can never converge and must stop after exactly the configured attempts.
+    expect(inspections).toBe(5);
+  });
+
+  it("classifies a file SQLite rejects as a database as incompatible so archive-and-fresh can repair it", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "agent-fabric-inspection-format-"));
+    directories.push(directory);
+    const path = join(directory, "fabric.sqlite3");
+    await writeFile(path, "not a SQLite database\n", { mode: 0o600 });
+
+    // archive-and-fresh consumes this classification to decide whether to
+    // archive, so a native SQLITE_NOTADB verdict must arrive as a structured
+    // incompatible result rather than as a throw. Letting it escape made the
+    // one tool that repairs an unusable database fail on an unusable database.
+    expect(inspectFabricDatabaseForCutover(path)).toMatchObject({
+      state: "incompatible",
+      mismatch: {
+        code: "SCHEMA_CUTOVER_REQUIRED",
+        fields: [{ field: "databaseFormat", actual: "file is not a database" }],
+      },
+    });
+  });
+
+  it("propagates a non-format read failure instead of proposing a destructive cutover", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "agent-fabric-inspection-unreadable-"));
+    directories.push(directory);
+    const path = join(directory, "fabric.sqlite3");
+    const seed = openFabricDatabase(path);
+    seed.close();
+    await chmod(path, 0o000);
+
+    // An unreadable database is an environment fault, not an incompatible one.
+    // It must never be relabelled as a condition whose remedy destroys it.
+    try {
+      expect(() => inspectFabricDatabaseForCutover(path)).toThrowError(
+        expect.objectContaining({ code: "EACCES" }),
+      );
+    } finally {
+      await chmod(path, 0o600);
+    }
   });
 
   it("runs bounded integrity checks after an unclean marker", async () => {

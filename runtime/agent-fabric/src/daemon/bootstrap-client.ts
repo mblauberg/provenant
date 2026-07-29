@@ -39,11 +39,13 @@ export class BootstrapClientError extends Error {
     super(message, options);
     this.name = "BootstrapClientError";
     this.code = code;
-    this.preserved = code === "SCHEMA_CUTOVER_REQUIRED" || (
-      typeof options?.cause === "object" &&
-      options.cause !== null &&
-      "preserved" in options.cause &&
-      options.cause.preserved === true
+    this.preserved = code !== "DATABASE_INSPECTION_UNSTABLE" && (
+      code === "SCHEMA_CUTOVER_REQUIRED" || (
+        typeof options?.cause === "object" &&
+        options.cause !== null &&
+        "preserved" in options.cause &&
+        options.cause.preserved === true
+      )
     );
   }
 }

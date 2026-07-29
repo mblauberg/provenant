@@ -50,7 +50,8 @@ type CatalogRow = Readonly<{
 
 export type SchemaBaselineErrorCode =
   | "SCHEMA_BASELINE_INVALID"
-  | "SCHEMA_CUTOVER_REQUIRED";
+  | "SCHEMA_CUTOVER_REQUIRED"
+  | "DATABASE_INSPECTION_UNSTABLE";
 
 export class SchemaBaselineError extends Error {
   readonly code: SchemaBaselineErrorCode;
@@ -212,6 +213,28 @@ function cutover(message: string, cause?: unknown): SchemaBaselineError {
   );
 }
 
+/**
+ * True when SQLite itself judged the file unusable as a database, as opposed to
+ * the environment failing to read it. These are the verdicts an archive-and-fresh
+ * cutover is designed to resolve.
+ */
+function sqliteFormatVerdict(error: unknown): boolean {
+  return (
+    errno(error, "SQLITE_NOTADB") ||
+    errno(error, "SQLITE_CORRUPT") ||
+    errno(error, "SQLITE_FORMAT") ||
+    errno(error, "SQLITE_ERROR")
+  );
+}
+
+function inspectionUnstable(message: string, cause?: unknown): SchemaBaselineError {
+  return new SchemaBaselineError(
+    "DATABASE_INSPECTION_UNSTABLE",
+    message,
+    cause === undefined ? undefined : { cause },
+  );
+}
+
 function currentSchemaRow(database: Database.Database): FabricSchemaRow {
   let rows: FabricSchemaRow[];
   try {
@@ -219,6 +242,7 @@ function currentSchemaRow(database: Database.Database): FabricSchemaRow {
       SELECT epoch,baseline_sha256,catalog_sha256 FROM fabric_schema
     `).all() as FabricSchemaRow[];
   } catch (error: unknown) {
+    if (!errno(error, "SQLITE_ERROR")) throw error;
     throw cutover("database does not contain the current schema epoch", error);
   }
   if (rows.length !== 1 || rows[0] === undefined) {
@@ -306,34 +330,65 @@ function metadataIdentity(
   };
 }
 
-function stableSourceFile(path: string, required: boolean): StableSourceFile | undefined {
+function stableSourceFile(
+  path: string,
+  required: boolean,
+  context: SourceReadContext,
+): StableSourceFile | undefined {
   let handle: number;
   try {
     handle = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
   } catch (error: unknown) {
     if (!required && errno(error, "ENOENT")) return undefined;
-    if (errno(error, "ELOOP")) throw cutover("database source contains a symbolic link", error);
+    if (required && context.presenceObserved && errno(error, "ENOENT")) {
+      throw inspectionUnstable(
+        "database source disappeared during read-only schema inspection",
+        error,
+      );
+    }
+    if (errno(error, "ELOOP")) {
+      // A symbolic link where a stable read already succeeded is a source-set
+      // race, not a standing property of the database.
+      throw context.stableReadObserved
+        ? inspectionUnstable("database source became a symbolic link during read-only schema inspection", error)
+        : cutover("database source contains a symbolic link", error);
+    }
     throw error;
   }
   try {
     const before = fstatSync(handle, { bigint: true });
     if (!before.isFile() || before.nlink !== 1n) {
-      throw cutover("database source is not a single-link regular file");
+      // Likewise, a type or link-count transition is only transient when an
+      // earlier full read observed a single-link regular file.
+      throw context.stableReadObserved
+        ? inspectionUnstable("database source stopped being a single-link regular file during read-only schema inspection")
+        : cutover("database source is not a single-link regular file");
     }
     const bytes = readFileSync(handle);
     const after = fstatSync(handle, { bigint: true });
     const beforeIdentity = metadataIdentity(before, bytes);
     const afterIdentity = metadataIdentity(after, bytes);
     if (JSON.stringify(beforeIdentity) !== JSON.stringify(afterIdentity)) {
-      throw cutover("database source changed while being cloned");
+      throw inspectionUnstable("database source changed while being cloned");
     }
-    const pathMetadata = lstatSync(path, { bigint: true });
+    let pathMetadata: BigIntStats;
+    try {
+      pathMetadata = lstatSync(path, { bigint: true });
+    } catch (error: unknown) {
+      if (errno(error, "ENOENT")) {
+        throw inspectionUnstable(
+          "database source disappeared during read-only schema inspection",
+          error,
+        );
+      }
+      throw error;
+    }
     if (!pathMetadata.isFile() || pathMetadata.isSymbolicLink()) {
-      throw cutover("database source identity changed while being cloned");
+      throw inspectionUnstable("database source identity changed while being cloned");
     }
     const pathIdentity = metadataIdentity(pathMetadata, bytes);
     if (JSON.stringify(afterIdentity) !== JSON.stringify(pathIdentity)) {
-      throw cutover("database source identity changed while being cloned");
+      throw inspectionUnstable("database source identity changed while being cloned");
     }
     return { bytes, identity: afterIdentity };
   } finally {
@@ -341,13 +396,44 @@ function stableSourceFile(path: string, required: boolean): StableSourceFile | u
   }
 }
 
-export function stableSourceSet(databasePath: string): StableSourceSet {
+/**
+ * Distinguishes what an earlier read of this source already established.
+ *
+ * `presenceObserved` means the required source was seen to exist. It is what
+ * separates "the database was never there" from "it disappeared under us".
+ *
+ * `stableReadObserved` is strictly stronger: a full stable read previously
+ * succeeded, so the source was a single-link regular file. Only then is a
+ * symlink, directory or link-count transition necessarily a race rather than a
+ * standing property. An `lstat` alone establishes presence, not stability, so
+ * the two are tracked separately.
+ */
+type SourceReadContext = Readonly<{
+  presenceObserved: boolean;
+  stableReadObserved: boolean;
+}>;
+
+const UNOBSERVED_SOURCE: SourceReadContext = { presenceObserved: false, stableReadObserved: false };
+const RECHECKED_SOURCE: SourceReadContext = { presenceObserved: true, stableReadObserved: true };
+
+function readStableSourceSet(
+  databasePath: string,
+  context: SourceReadContext,
+): StableSourceSet {
   const sources = new Map<SqliteSourceSuffix, StableSourceFile>();
   for (const suffix of SQLITE_SOURCE_SUFFIXES) {
-    const source = stableSourceFile(`${databasePath}${suffix}`, suffix === "");
+    const source = stableSourceFile(
+      `${databasePath}${suffix}`,
+      suffix === "",
+      context,
+    );
     if (source !== undefined) sources.set(suffix, source);
   }
   return sources;
+}
+
+export function stableSourceSet(databasePath: string): StableSourceSet {
+  return readStableSourceSet(databasePath, UNOBSERVED_SOURCE);
 }
 
 export function assertSameSourceSet(expected: StableSourceSet, actual: StableSourceSet): void {
@@ -374,7 +460,7 @@ export function assertSameSourceSet(expected: StableSourceSet, actual: StableSou
             sha256: source.identity.sha256,
           }
       );
-      throw cutover(
+      throw inspectionUnstable(
         `database source set changed during read-only schema inspection at suffix ${JSON.stringify(suffix)}: ` +
         `expected ${JSON.stringify(summary(before))}, actual ${JSON.stringify(summary(after))}`,
       );
@@ -390,18 +476,26 @@ export function stableSourceSetSha256(sources: StableSourceSet): string {
   return `sha256:${sha256(canonicalJson(identities))}`;
 }
 
-function createPrivateDatabaseClone(databasePath: string): Readonly<{
+function createPrivateDatabaseClone(
+  databasePath: string,
+  presenceObserved = false,
+): Readonly<{
   cloneDirectory: string;
   clonePath: string;
   sources: StableSourceSet;
 }> {
-  const sources = stableSourceSet(databasePath);
+  // The caller's prior `lstat` establishes presence only. This first read is
+  // what establishes stability, so it must not treat a standing symlink or
+  // hard-linked database as a transient race.
+  const sources = readStableSourceSet(databasePath, { presenceObserved, stableReadObserved: false });
   const cloneDirectory = mkdtempSync(join(tmpdir(), "agent-fabric-schema-inspection-"));
   chmodSync(cloneDirectory, 0o700);
   const clonePath = join(cloneDirectory, "fabric.sqlite3");
   try {
     const main = sources.get("");
-    if (main === undefined) throw cutover("database source disappeared during read-only schema inspection");
+    if (main === undefined) {
+      throw inspectionUnstable("database source disappeared during read-only schema inspection");
+    }
     writeFileSync(clonePath, main.bytes, { flag: "wx", mode: 0o600 });
     // WAL and a rollback journal carry committed/recovery state. SHM is
     // deliberately rebuilt inside the private directory instead of copying
@@ -412,12 +506,51 @@ function createPrivateDatabaseClone(databasePath: string): Readonly<{
         writeFileSync(`${clonePath}${suffix}`, sidecar.bytes, { flag: "wx", mode: 0o600 });
       }
     }
-    assertSameSourceSet(sources, stableSourceSet(databasePath));
+    assertSameSourceSet(sources, readStableSourceSet(databasePath, RECHECKED_SOURCE));
     return { cloneDirectory, clonePath, sources };
   } catch (error: unknown) {
     rmSync(cloneDirectory, { recursive: true, force: true });
     throw error;
   }
+}
+
+const DATABASE_INSPECTION_ATTEMPTS = 5;
+const DATABASE_INSPECTION_BACKOFF_MS = [10, 20, 40, 80] as const;
+
+/**
+ * Blocks the calling thread for the given delay.
+ *
+ * Inspection is synchronous all the way down to `openSync`/`readFileSync`, and
+ * every caller is a CLI entry point or daemon bootstrap rather than request
+ * serving, so a bounded sleep is preferable to making the whole inspection
+ * stack async. The total worst-case pause is 150ms.
+ */
+function sleepSync(milliseconds: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
+}
+
+/**
+ * Retries an inspection that observed an unstable source set.
+ *
+ * Retrying without pausing is close to useless against a live writer: the
+ * attempts land inside the same write, so a bounded backoff between them is
+ * what actually lets a busy-but-healthy database converge.
+ */
+function retryUnstableDatabaseInspection<T>(operation: () => T): T {
+  for (let attempt = 1; attempt <= DATABASE_INSPECTION_ATTEMPTS; attempt += 1) {
+    try {
+      return operation();
+    } catch (error: unknown) {
+      if (
+        !(error instanceof SchemaBaselineError) ||
+        error.code !== "DATABASE_INSPECTION_UNSTABLE" ||
+        attempt === DATABASE_INSPECTION_ATTEMPTS
+      ) throw error;
+      const backoff = DATABASE_INSPECTION_BACKOFF_MS[attempt - 1];
+      if (backoff !== undefined) sleepSync(backoff);
+    }
+  }
+  throw new Error("unreachable database inspection retry state");
 }
 
 /**
@@ -431,14 +564,22 @@ export function withPrivateDatabaseClone<T>(
   databasePath: string,
   operation: (clonePath: string) => T,
 ): T {
-  const clone = createPrivateDatabaseClone(databasePath);
-  try {
-    const result = operation(clone.clonePath);
-    assertSameSourceSet(clone.sources, stableSourceSet(databasePath));
-    return result;
-  } finally {
-    rmSync(clone.cloneDirectory, { recursive: true, force: true });
-  }
+  return retryUnstableDatabaseInspection(() => {
+    const clone = createPrivateDatabaseClone(databasePath);
+    try {
+      let result: T;
+      try {
+        result = operation(clone.clonePath);
+      } catch (error: unknown) {
+        assertSameSourceSet(clone.sources, readStableSourceSet(databasePath, RECHECKED_SOURCE));
+        throw error;
+      }
+      assertSameSourceSet(clone.sources, readStableSourceSet(databasePath, RECHECKED_SOURCE));
+      return result;
+    } finally {
+      rmSync(clone.cloneDirectory, { recursive: true, force: true });
+    }
+  });
 }
 
 /**
@@ -526,7 +667,7 @@ function observedSchemaValue(value: unknown): string | number | null {
  * Classifies a cutover candidate through the same private-clone boundary as the
  * runtime gate while retaining the exact expected/observed schema mismatch.
  */
-export function inspectFabricDatabaseForCutover(
+function inspectFabricDatabaseForCutoverOnce(
   databasePath: string,
 ): FabricDatabaseCutoverInspection {
   try {
@@ -539,19 +680,19 @@ export function inspectFabricDatabaseForCutover(
   let database: Database.Database | undefined;
   let clone: ReturnType<typeof createPrivateDatabaseClone> | undefined;
   try {
-    clone = createPrivateDatabaseClone(databasePath);
+    clone = createPrivateDatabaseClone(databasePath, true);
     try {
       database = new BetterSqlite3(clone.clonePath);
       database.pragma("trusted_schema = OFF");
       const objectCount = userSchemaObjectCount(database);
       if (objectCount === 0) {
-        assertSameSourceSet(clone.sources, stableSourceSet(databasePath));
+        assertSameSourceSet(clone.sources, readStableSourceSet(databasePath, RECHECKED_SOURCE));
         return { state: "empty", sources: clone.sources };
       }
 
       try {
         assertCurrentSchema(database);
-        assertSameSourceSet(clone.sources, stableSourceSet(databasePath));
+        assertSameSourceSet(clone.sources, readStableSourceSet(databasePath, RECHECKED_SOURCE));
         return { state: "current", sources: clone.sources };
       } catch (error: unknown) {
         if (
@@ -585,7 +726,7 @@ export function inspectFabricDatabaseForCutover(
         for (const [field, expected, observed] of comparisons) {
           if (expected !== observed) fields.push({ field, expected, actual: observed });
         }
-        assertSameSourceSet(clone.sources, stableSourceSet(databasePath));
+        assertSameSourceSet(clone.sources, readStableSourceSet(databasePath, RECHECKED_SOURCE));
         return {
           state: "incompatible",
           sources: clone.sources,
@@ -598,7 +739,12 @@ export function inspectFabricDatabaseForCutover(
       }
     } catch (error: unknown) {
       if (error instanceof SchemaBaselineError) throw error;
-      assertSameSourceSet(clone.sources, stableSourceSet(databasePath));
+      assertSameSourceSet(clone.sources, readStableSourceSet(databasePath, RECHECKED_SOURCE));
+      // A file SQLite itself rejects as malformed or not a database IS an
+      // incompatible database, and archive-and-fresh exists to repair exactly
+      // that. Only such native verdicts are classified; every other failure
+      // (permissions, I/O) propagates rather than being relabelled.
+      if (!sqliteFormatVerdict(error)) throw error;
       return {
         state: "incompatible",
         sources: clone.sources,
@@ -620,6 +766,14 @@ export function inspectFabricDatabaseForCutover(
       if (clone !== undefined) rmSync(clone.cloneDirectory, { recursive: true, force: true });
     }
   }
+}
+
+export function inspectFabricDatabaseForCutover(
+  databasePath: string,
+): FabricDatabaseCutoverInspection {
+  return retryUnstableDatabaseInspection(
+    () => inspectFabricDatabaseForCutoverOnce(databasePath),
+  );
 }
 
 /**
@@ -648,7 +802,7 @@ export type RetainedWorkCensus = Readonly<{
  * read-only private-clone boundary as the cutover inspection. It never opens
  * the live database and never reports a count it could not read.
  */
-export function inspectRetainedWork(databasePath: string): RetainedWorkCensus {
+function inspectRetainedWorkOnce(databasePath: string): RetainedWorkCensus {
   let database: Database.Database | undefined;
   let clone: ReturnType<typeof createPrivateDatabaseClone> | undefined;
   try {
@@ -667,7 +821,11 @@ export function inspectRetainedWork(databasePath: string): RetainedWorkCensus {
         }
       }),
     };
-  } catch {
+  } catch (error: unknown) {
+    if (
+      error instanceof SchemaBaselineError &&
+      error.code === "DATABASE_INSPECTION_UNSTABLE"
+    ) throw error;
     return { tables: RETAINED_WORK_TABLES.map((table) => ({ table, rows: null })) };
   } finally {
     try {
@@ -678,8 +836,11 @@ export function inspectRetainedWork(databasePath: string): RetainedWorkCensus {
   }
 }
 
-/** Read-only cutover gate used before any daemon/runtime mutation. */
-export function inspectFabricDatabase(databasePath: string): FabricDatabaseInspection {
+export function inspectRetainedWork(databasePath: string): RetainedWorkCensus {
+  return retryUnstableDatabaseInspection(() => inspectRetainedWorkOnce(databasePath));
+}
+
+function inspectFabricDatabaseOnce(databasePath: string): FabricDatabaseInspection {
   let before;
   try {
     before = lstatSync(databasePath);
@@ -695,16 +856,24 @@ export function inspectFabricDatabase(databasePath: string): FabricDatabaseInspe
   let database: Database.Database | undefined;
   let clone: ReturnType<typeof createPrivateDatabaseClone> | undefined;
   try {
-    clone = createPrivateDatabaseClone(databasePath);
+    clone = createPrivateDatabaseClone(databasePath, true);
     // SQLite may recover/checkpoint its private WAL or journal and may create a
     // private SHM file. It has no writable relationship with the source path.
     database = new BetterSqlite3(clone.clonePath);
     database.pragma("trusted_schema = OFF");
     assertCurrentSchema(database);
-    assertSameSourceSet(clone.sources, stableSourceSet(databasePath));
+    assertSameSourceSet(clone.sources, readStableSourceSet(databasePath, RECHECKED_SOURCE));
   } catch (error: unknown) {
-    if (error instanceof SchemaBaselineError) throw error;
-    throw cutover("database format or schema fingerprint is not current", error);
+    if (error instanceof SchemaBaselineError) {
+      if (error.code === "SCHEMA_CUTOVER_REQUIRED" && clone !== undefined) {
+        assertSameSourceSet(clone.sources, readStableSourceSet(databasePath, RECHECKED_SOURCE));
+      }
+      throw error;
+    }
+    if (clone !== undefined) {
+      assertSameSourceSet(clone.sources, readStableSourceSet(databasePath, RECHECKED_SOURCE));
+    }
+    throw error;
   } finally {
     try {
       database?.close();
@@ -712,7 +881,18 @@ export function inspectFabricDatabase(databasePath: string): FabricDatabaseInspe
       if (clone !== undefined) rmSync(clone.cloneDirectory, { recursive: true, force: true });
     }
   }
-  const after = lstatSync(databasePath);
+  let after;
+  try {
+    after = lstatSync(databasePath);
+  } catch (error: unknown) {
+    if (errno(error, "ENOENT")) {
+      throw inspectionUnstable(
+        "database source disappeared during read-only schema inspection",
+        error,
+      );
+    }
+    throw error;
+  }
   if (
     before.dev !== after.dev ||
     before.ino !== after.ino ||
@@ -720,7 +900,12 @@ export function inspectFabricDatabase(databasePath: string): FabricDatabaseInspe
     before.mtimeMs !== after.mtimeMs ||
     before.ctimeMs !== after.ctimeMs
   ) {
-    throw cutover("database identity changed during read-only schema inspection");
+    throw inspectionUnstable("database identity changed during read-only schema inspection");
   }
   return { state: "current" };
+}
+
+/** Read-only cutover gate used before any daemon/runtime mutation. */
+export function inspectFabricDatabase(databasePath: string): FabricDatabaseInspection {
+  return retryUnstableDatabaseInspection(() => inspectFabricDatabaseOnce(databasePath));
 }

@@ -73,9 +73,9 @@ pins external executable, package and schema artifacts by hash; repository-owned
 
 1. `0001-current-baseline.sql` creates the complete current schema from an absent database path. A checked-in manifest
    binds its file digest and canonical SQLite catalogue digest.
-2. Any pre-existing path is inspected read-only first. Empty, non-SQLite, earlier, future, missing-metadata or
-   catalogue-mismatched state returns `SCHEMA_CUTOVER_REQUIRED` before permission, WAL, marker, socket or sidecar
-   mutation.
+2. Any pre-existing path is inspected read-only first. Empty, earlier, future, missing-metadata or
+   catalogue-mismatched state returns `SCHEMA_CUTOVER_REQUIRED`; stable format or I/O failures retain their native
+   error, and source instability is retried before returning `DATABASE_INSPECTION_UNSTABLE`. None mutates the source.
 3. Exact current state may reopen read/write. Startup runs bounded integrity/foreign-key checks after an unclean marker.
    Long-lived connections run documented `PRAGMA optimize` maintenance.
 4. Query-plan tests prove the mailbox, task-owner/state, lease-expiry, event-cursor and unresolved-provider-action paths
