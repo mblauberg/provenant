@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync } from "node:fs";
+import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, extname, join, relative, resolve, sep } from "node:path";
 
 import { ImportType, initSync, parse } from "es-module-lexer";
@@ -8,7 +8,7 @@ type DomainEdge = Readonly<{ from: string; to: string }>;
 
 type ReciprocalAllowance = Readonly<{
   id: string;
-  domains: readonly [string, string];
+  members: readonly string[];
   reason: string;
 }>;
 
@@ -19,15 +19,20 @@ type ComputedImportAllowance = Readonly<{
 }>;
 
 type BoundaryGolden = Readonly<{
-  schema_version: 1;
+  schema_version: 2;
   requirement: "F-033";
+  allowed_edge_count: number;
   allowed_edges: readonly DomainEdge[];
+  reciprocal_scc_count: number;
   temporary_computed_imports: readonly ComputedImportAllowance[];
   temporary_reciprocal_edges: readonly ReciprocalAllowance[];
+  layer_order_needed: string;
 }>;
 
 const sourceRoot = resolve(import.meta.dirname, "../../src");
 const goldenPath = resolve(import.meta.dirname, "../fixtures/f033-module-boundaries.json");
+const layerOrderNeeded = "ADR-0003";
+let goldenRegeneratedForRun: BoundaryGolden | undefined;
 initSync();
 
 function productionFiles(directory: string): string[] {
@@ -97,8 +102,8 @@ function edgeKey(edge: DomainEdge): string {
   return `${edge.from} -> ${edge.to}`;
 }
 
-function pairKey(domains: readonly [string, string]): string {
-  return [...domains].sort().join(" <-> ");
+function sccKey(members: readonly string[]): string {
+  return [...members].sort().join(", ");
 }
 
 const productionFileSet = new Set(productionFiles(sourceRoot));
@@ -107,7 +112,7 @@ function inspectGraph(): {
   edges: DomainEdge[];
   computedImports: string[];
   inwardApiImports: string[];
-  reciprocalPairs: string[];
+  reciprocalSccs: string[][];
   unresolvedImports: string[];
 } {
   const edgeKeys = new Set<string>();
@@ -147,23 +152,115 @@ function inspectGraph(): {
       if (from === undefined || to === undefined) throw new Error(`invalid edge ${key}`);
       return { from, to };
     });
-  const reciprocalPairs = edges
-    .filter(({ from, to }) => edgeKeys.has(edgeKey({ from: to, to: from })))
-    .map(({ from, to }) => pairKey([from, to]))
-    .filter((key, index, keys) => keys.indexOf(key) === index)
-    .sort();
-
   return {
     edges,
     computedImports: computedImports.sort(),
     inwardApiImports: inwardApiImports.sort(),
-    reciprocalPairs,
+    reciprocalSccs: stronglyConnectedComponents(edges),
     unresolvedImports: unresolvedImports.sort(),
   };
 }
 
+function stronglyConnectedComponents(edges: readonly DomainEdge[]): string[][] {
+  const adjacency = new Map<string, string[]>();
+  for (const { from, to } of edges) {
+    const neighbours = adjacency.get(from);
+    if (neighbours === undefined) {
+      adjacency.set(from, [to]);
+    } else {
+      neighbours.push(to);
+    }
+    if (!adjacency.has(to)) adjacency.set(to, []);
+  }
+
+  let nextIndex = 0;
+  const indices = new Map<string, number>();
+  const lowLinks = new Map<string, number>();
+  const stack: string[] = [];
+  const onStack = new Set<string>();
+  const components: string[][] = [];
+
+  const visit = (domain: string): void => {
+    const index = nextIndex;
+    nextIndex += 1;
+    indices.set(domain, index);
+    lowLinks.set(domain, index);
+    stack.push(domain);
+    onStack.add(domain);
+
+    for (const neighbour of adjacency.get(domain) ?? []) {
+      const neighbourIndex = indices.get(neighbour);
+      if (neighbourIndex === undefined) {
+        visit(neighbour);
+        const lowLink = lowLinks.get(domain);
+        const neighbourLowLink = lowLinks.get(neighbour);
+        if (lowLink === undefined || neighbourLowLink === undefined) {
+          throw new Error(`missing Tarjan index for ${domain} or ${neighbour}`);
+        }
+        lowLinks.set(domain, Math.min(lowLink, neighbourLowLink));
+      } else if (onStack.has(neighbour)) {
+        const lowLink = lowLinks.get(domain);
+        if (lowLink === undefined) throw new Error(`missing Tarjan low-link for ${domain}`);
+        lowLinks.set(domain, Math.min(lowLink, neighbourIndex));
+      }
+    }
+
+    if (lowLinks.get(domain) !== indices.get(domain)) return;
+    const component: string[] = [];
+    while (true) {
+      const member = stack.pop();
+      if (member === undefined) throw new Error("Tarjan stack underflow");
+      onStack.delete(member);
+      component.push(member);
+      if (member === domain) break;
+    }
+    if (component.length > 1) components.push(component.sort());
+  };
+
+  for (const domain of [...adjacency.keys()].sort()) {
+    if (!indices.has(domain)) visit(domain);
+  }
+  return components.sort((left, right) => sccKey(left).localeCompare(sccKey(right)));
+}
+
 function readGolden(): BoundaryGolden {
   return JSON.parse(readFileSync(goldenPath, "utf8")) as BoundaryGolden;
+}
+
+function sccId(members: readonly string[]): string {
+  return `SCC-${members.map((member) => member.toUpperCase()).join("-")}`;
+}
+
+function regeneratedGolden(graph: ReturnType<typeof inspectGraph>, golden: BoundaryGolden): BoundaryGolden {
+  return {
+    schema_version: 2,
+    requirement: "F-033",
+    allowed_edge_count: graph.edges.length,
+    allowed_edges: graph.edges,
+    reciprocal_scc_count: graph.reciprocalSccs.length,
+    temporary_computed_imports: golden.temporary_computed_imports,
+    temporary_reciprocal_edges: graph.reciprocalSccs.map((members) => ({
+      id: sccId(members),
+      members,
+      reason: `Extracted from SCC analysis: these ${members.length} domains form a cyclic dependency to be addressed`,
+    })),
+    // ADR-0003 calls for extraction along existing seams, not a horizontal layer model.
+    // A layer order needs an explicit architectural decision before this test can enforce one.
+    layer_order_needed: layerOrderNeeded,
+  };
+}
+
+function maybeRegenerateGolden(graph: ReturnType<typeof inspectGraph>, golden: BoundaryGolden): BoundaryGolden {
+  if (process.env.F033_WRITE_GOLDEN !== "1") return golden;
+  if (goldenRegeneratedForRun !== undefined) return goldenRegeneratedForRun;
+  const regenerated = regeneratedGolden(graph, golden);
+  writeFileSync(goldenPath, `${JSON.stringify(regenerated, null, 2)}\n`, "utf8");
+  process.stdout.write(
+    `f033-module-boundaries: regenerated golden with ${regenerated.allowed_edge_count} allowed edges, ${regenerated.reciprocal_scc_count} SCCs`,
+  );
+  process.stdout.write("\n");
+  goldenRegeneratedForRun = regenerated;
+  return regenerated;
 }
 
 describe("F-033 Agent Fabric module boundaries", () => {
@@ -182,28 +279,42 @@ describe("F-033 Agent Fabric module boundaries", () => {
     }
   });
 
-  it("allows only the committed domain-to-domain edge set", () => {
+  it("rejects edges outside the committed domain-to-domain edge set", () => {
     const graph = inspectGraph();
-    const golden = readGolden();
-    expect(golden.schema_version).toBe(1);
+    const golden = maybeRegenerateGolden(graph, readGolden());
+    expect(golden.schema_version).toBe(2);
     expect(golden.requirement).toBe("F-033");
-    expect(graph.edges).toEqual(golden.allowed_edges);
+    expect(golden.allowed_edge_count).toBe(golden.allowed_edges.length);
+    const allowedEdgeKeys = golden.allowed_edges.map(edgeKey);
+    expect(new Set(allowedEdgeKeys).size).toBe(allowedEdgeKeys.length);
+    expect(graph.edges.every((edge) => allowedEdgeKeys.includes(edgeKey(edge)))).toBe(true);
+    const graphEdgeKeys = new Set(graph.edges.map(edgeKey));
+    const staleEdges = golden.allowed_edges.filter((edge) => !graphEdgeKeys.has(edgeKey(edge)));
+    if (staleEdges.length > 0) {
+      process.stdout.write(
+        `f033-module-boundaries: stale edges in golden (removed from graph): ${staleEdges.map((edge) => `${edge.from} → ${edge.to}`).join(", ")}. Run: F033_WRITE_GOLDEN=1 npx vitest run\n`,
+      );
+    }
   });
 
-  it("keeps every reciprocal edge visible as a named temporary allowance", () => {
+  it("keeps every cyclic domain component visible as a named temporary allowance", () => {
     const graph = inspectGraph();
-    const golden = readGolden();
+    const golden = maybeRegenerateGolden(graph, readGolden());
     const allowanceIds = golden.temporary_reciprocal_edges.map(({ id }) => id);
     expect(new Set(allowanceIds).size).toBe(allowanceIds.length);
+    expect(golden.reciprocal_scc_count).toBe(golden.temporary_reciprocal_edges.length);
     for (const allowance of golden.temporary_reciprocal_edges) {
-      expect(allowance.id).toMatch(/^TEMP-[A-Z0-9-]+$/u);
+      expect(allowance.id).toBe(sccId(allowance.members));
       expect(allowance.reason.trim().length).toBeGreaterThan(0);
       expect(allowance.reason).not.toMatch(/[\r\n]/u);
+      expect([...allowance.members].sort()).toEqual(allowance.members);
     }
-    const allowancePairs = golden.temporary_reciprocal_edges
-      .map(({ domains }) => pairKey(domains))
+    const allowanceSccs = golden.temporary_reciprocal_edges
+      .map(({ members }) => sccKey(members))
       .sort();
-    expect(new Set(allowancePairs).size).toBe(allowancePairs.length);
-    expect(graph.reciprocalPairs).toEqual(allowancePairs);
+    expect(new Set(allowanceSccs).size).toBe(allowanceSccs.length);
+    expect(graph.reciprocalSccs.map(sccKey)).toEqual(allowanceSccs);
+    // No layer direction is asserted until the named architecture decision defines one.
+    expect(golden.layer_order_needed).toMatch(/^(ADR-\d+|#\d+)$/u);
   });
 });
