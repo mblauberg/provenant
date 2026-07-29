@@ -146,5 +146,3 @@ unnegotiated. Unknown fields, observation arms, states and reasons are rejected.
 Existing projection, task, run, check, barrier, lease and workstream shapes stay
 byte-compatible.
 
-The `provider_lifecycle_intents` drop from issue #381 is included in this
-release.

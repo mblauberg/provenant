@@ -71,5 +71,3 @@ closed as unnegotiated. Unknown fields, observation arms, relationship values
 and reasons are rejected. Existing projection, team, task and agent shapes stay
 byte-compatible.
 
-The `provider_lifecycle_intents` drop from issue #381 is included in this
-release.
