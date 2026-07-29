@@ -29,11 +29,18 @@ vi.mock("../../src/daemon/client.js", () => ({
 }));
 
 import { bootstrapMcpSeat } from "../../src/cli/mcp-bootstrap.ts";
-import { projectKey } from "../../src/cli/seat-store.ts";
+import {
+  installSeatGeneration,
+  projectKey,
+  readActiveSeatGeneration,
+} from "../../src/cli/seat-store.ts";
 import { runWorkspaceTrust } from "../../src/cli/workspace-trust.ts";
 
 const roots: string[] = [];
 const GENERATION = "a".repeat(64);
+const STALE_GENERATION = "b".repeat(64);
+const DAEMON_EXPECTED_GENERATION = "c".repeat(64);
+const FRESH_GENERATION = "d".repeat(64);
 
 afterEach(async () => {
   daemon.result = undefined;
@@ -91,6 +98,45 @@ async function bootstrap(value: Awaited<ReturnType<typeof fixture>>) {
   });
 }
 
+async function installRecordedGeneration(input: {
+  value: Awaited<ReturnType<typeof fixture>>;
+  generation: string;
+  expiresAt: string;
+}): Promise<void> {
+  const result = daemon.result;
+  if (result === undefined) throw new Error("fake bootstrap result is missing");
+  await installSeatGeneration({
+    stateDirectory: input.value.paths.stateDirectory,
+    projectPath: input.value.projectRoot,
+    generation: input.generation,
+    expectedPreviousGeneration: null,
+    seats: [{
+      credential: `afc_${"b".repeat(43)}`,
+      metadata: {
+        schemaVersion: 1,
+        projectKey: projectKey(input.value.projectRoot),
+        projectPath: input.value.projectRoot,
+        generation: input.generation,
+        previousGeneration: null,
+        originKind: "bootstrap",
+        projectSessionId: result.projectSessionId,
+        sessionRevision: result.sessionRevision,
+        sessionGeneration: result.sessionGeneration,
+        runId: result.runId,
+        runRevision: result.runRevision,
+        chairAgentId: result.chairAgentId,
+        chairGeneration: result.chairGeneration,
+        chairLeaseId: result.chairLeaseId,
+        seat: "codex",
+        agentId: result.chairAgentId,
+        principalGeneration: 1,
+        role: "chair",
+        expiresAt: input.expiresAt,
+      },
+    }],
+  });
+}
+
 describe("legacy bootstrap provenance lifecycle action", () => {
   it("emits only for first recording while both legacy replays remain custody-unmutated", async () => {
     const value = await fixture();
@@ -117,5 +163,108 @@ describe("legacy bootstrap provenance lifecycle action", () => {
     expect(alreadyRecorded.receipt.actions.some(
       ({ action }) => action === "legacy-bootstrap-provenance",
     )).toBe(false);
+  });
+
+  it("reconciles an expired recorded generation during authorised bootstrap", async () => {
+    const value = await fixture();
+    await installRecordedGeneration({
+      value,
+      generation: STALE_GENERATION,
+      expiresAt: "2026-07-28T00:00:00.000Z",
+    });
+    daemon.result = {
+      ...daemon.result!,
+      expectedPreviousGeneration: DAEMON_EXPECTED_GENERATION,
+      generation: FRESH_GENERATION,
+      expiresAt: "2026-07-30T00:00:00.000Z",
+    };
+
+    const installed = await bootstrapMcpSeat({
+      environment: { AGENT_FABRIC_SEAT: "codex" },
+      cwd: value.projectRoot,
+      paths: value.paths,
+      now: new Date("2026-07-29T00:00:00.000Z"),
+      smokeDeadlineMs: 1,
+    });
+
+    expect(installed.generation).toBe(FRESH_GENERATION);
+    await expect(readActiveSeatGeneration({
+      stateDirectory: value.paths.stateDirectory,
+      projectPath: value.projectRoot,
+    })).resolves.toMatchObject({
+      previousGeneration: STALE_GENERATION,
+      generation: FRESH_GENERATION,
+    });
+    const metadataPath = join(
+      value.paths.stateDirectory,
+      "seats",
+      projectKey(value.projectRoot),
+      "generations",
+      FRESH_GENERATION,
+      "codex.json",
+    );
+    await expect(readFile(metadataPath, "utf8").then(JSON.parse)).resolves.toMatchObject({
+      generation: FRESH_GENERATION,
+      expiresAt: "2026-07-30T00:00:00.000Z",
+    });
+
+    const replayed = await bootstrapMcpSeat({
+      environment: { AGENT_FABRIC_SEAT: "codex" },
+      cwd: value.projectRoot,
+      paths: value.paths,
+      now: new Date("2026-07-29T00:00:00.000Z"),
+      smokeDeadlineMs: 1,
+    });
+    expect(replayed.generation).toBe(FRESH_GENERATION);
+    expect(replayed.receipt.actions.find(({ action }) => action === "seat-generation")).toMatchObject({
+      outcome: "replayed",
+      mutated: false,
+    });
+    await expect(readActiveSeatGeneration({
+      stateDirectory: value.paths.stateDirectory,
+      projectPath: value.projectRoot,
+    })).resolves.toMatchObject({
+      previousGeneration: STALE_GENERATION,
+      generation: FRESH_GENERATION,
+    });
+  });
+
+  it("rejects a live recorded generation with actionable bootstrap context", async () => {
+    const value = await fixture();
+    await installRecordedGeneration({
+      value,
+      generation: STALE_GENERATION,
+      expiresAt: "2026-07-30T00:00:00.000Z",
+    });
+    daemon.result = {
+      ...daemon.result!,
+      expectedPreviousGeneration: DAEMON_EXPECTED_GENERATION,
+      generation: FRESH_GENERATION,
+      expiresAt: "2026-07-30T00:00:00.000Z",
+    };
+
+    const failure = await bootstrapMcpSeat({
+      environment: { AGENT_FABRIC_SEAT: "codex" },
+      cwd: value.projectRoot,
+      paths: value.paths,
+      now: new Date("2026-07-29T00:00:00.000Z"),
+      smokeDeadlineMs: 1,
+    }).then(() => undefined, (error: unknown) => error);
+
+    expect(failure).toMatchObject({ code: "BOOTSTRAP_GENERATION_CHANGED" });
+    expect(failure).toBeInstanceOf(Error);
+    const message = (failure as Error).message;
+    expect(message).toContain(value.projectRoot);
+    expect(message).toContain(STALE_GENERATION);
+    expect(message).toContain(DAEMON_EXPECTED_GENERATION);
+    expect(message).toContain(FRESH_GENERATION);
+    expect(message).toContain("Inspect");
+    await expect(readActiveSeatGeneration({
+      stateDirectory: value.paths.stateDirectory,
+      projectPath: value.projectRoot,
+    })).resolves.toMatchObject({
+      previousGeneration: null,
+      generation: STALE_GENERATION,
+    });
   });
 });

@@ -2,7 +2,7 @@ import { lstat, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:f
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   installSeatGeneration,
@@ -195,6 +195,7 @@ describe("MCP seat generation store", () => {
         projectPath,
         generation: GENERATION_TWO,
         expectedPreviousGeneration: GENERATION_ONE,
+        allowStaleGenerationReconciliation: true,
         seats: [{ metadata: {
           ...metadata, runId: "run-two", generation: GENERATION_TWO, previousGeneration: GENERATION_ONE,
         }, credential: CAPABILITY_B }],
@@ -220,6 +221,131 @@ describe("MCP seat generation store", () => {
       await expect(readFile(active.metadataPath, "utf8").then(JSON.parse)).resolves.toMatchObject({ runId: "run-three" });
     } finally {
       releaseOlder?.();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("does not reconcile an expired recorded generation to an expired incoming generation", async () => {
+    const root = await mkdtemp(join(tmpdir(), "fabric-seat-expired-reconciliation-"));
+    try {
+      const stateDirectory = join(root, "state");
+      const requestedProjectPath = join(root, "project");
+      await mkdir(stateDirectory, { mode: 0o700 });
+      await mkdir(requestedProjectPath);
+      const projectPath = await realpath(requestedProjectPath);
+      const key = projectKey(projectPath);
+      const metadata = {
+        schemaVersion: 1 as const,
+        projectKey: key,
+        projectPath,
+        projectSessionId: "session-expired",
+        sessionRevision: 1,
+        sessionGeneration: 1,
+        runRevision: 1,
+        chairAgentId: "codex",
+        chairGeneration: 1,
+        chairLeaseId: "chair:run-expired:1",
+        seat: "codex" as const,
+        agentId: "codex",
+        principalGeneration: 1,
+        role: "chair" as const,
+        expiresAt: "2026-07-28T00:00:00.000Z",
+      };
+      await installSeatGeneration({
+        stateDirectory,
+        projectPath,
+        generation: GENERATION_ONE,
+        expectedPreviousGeneration: null,
+        seats: [{ metadata: {
+          ...metadata, runId: "run-one", generation: GENERATION_ONE, previousGeneration: null,
+        }, credential: CAPABILITY_A }],
+      });
+
+      await expect(installSeatGeneration({
+        stateDirectory,
+        projectPath,
+        generation: GENERATION_TWO,
+        expectedPreviousGeneration: GENERATION_THREE,
+        allowStaleGenerationReconciliation: true,
+        now: new Date("2026-07-29T00:00:00.000Z"),
+        seats: [{ metadata: {
+          ...metadata,
+          runId: "run-two",
+          generation: GENERATION_TWO,
+          previousGeneration: GENERATION_THREE,
+        }, credential: CAPABILITY_B }],
+      })).rejects.toThrow(/active MCP seat generation changed/u);
+
+      const active = await resolveSeatPaths({ stateDirectory, project: projectPath, seat: "codex" });
+      expect(active.generation).toBe(GENERATION_ONE);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("does not reconcile to an incoming generation that expires while staging", async () => {
+    const root = await mkdtemp(join(tmpdir(), "fabric-seat-staging-expiry-"));
+    vi.useFakeTimers();
+    vi.setSystemTime("2026-07-29T00:00:00.000Z");
+    try {
+      const stateDirectory = join(root, "state");
+      const requestedProjectPath = join(root, "project");
+      await mkdir(stateDirectory, { mode: 0o700 });
+      await mkdir(requestedProjectPath);
+      const projectPath = await realpath(requestedProjectPath);
+      const key = projectKey(projectPath);
+      const common = {
+        schemaVersion: 1 as const,
+        projectKey: key,
+        projectPath,
+        projectSessionId: "session-staging-expiry",
+        sessionRevision: 1,
+        sessionGeneration: 1,
+        runRevision: 1,
+        chairAgentId: "codex",
+        chairGeneration: 1,
+        chairLeaseId: "chair:run-staging-expiry:1",
+        seat: "codex" as const,
+        agentId: "codex",
+        principalGeneration: 1,
+        role: "chair" as const,
+      };
+      await installSeatGeneration({
+        stateDirectory,
+        projectPath,
+        generation: GENERATION_ONE,
+        expectedPreviousGeneration: null,
+        seats: [{ metadata: {
+          ...common,
+          runId: "run-one",
+          generation: GENERATION_ONE,
+          previousGeneration: null,
+          expiresAt: "2026-07-28T00:00:00.000Z",
+        }, credential: CAPABILITY_A }],
+      });
+
+      await expect(installSeatGeneration({
+        stateDirectory,
+        projectPath,
+        generation: GENERATION_TWO,
+        expectedPreviousGeneration: GENERATION_THREE,
+        allowStaleGenerationReconciliation: true,
+        beforeActivate: () => {
+          vi.setSystemTime("2026-07-29T00:02:00.000Z");
+        },
+        seats: [{ metadata: {
+          ...common,
+          runId: "run-two",
+          generation: GENERATION_TWO,
+          previousGeneration: GENERATION_THREE,
+          expiresAt: "2026-07-29T00:01:00.000Z",
+        }, credential: CAPABILITY_B }],
+      })).rejects.toThrow(/active MCP seat generation changed/u);
+
+      const active = await resolveSeatPaths({ stateDirectory, project: projectPath, seat: "codex" });
+      expect(active.generation).toBe(GENERATION_ONE);
+    } finally {
+      vi.useRealTimers();
       await rm(root, { recursive: true, force: true });
     }
   });
