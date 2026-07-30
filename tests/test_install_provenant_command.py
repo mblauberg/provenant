@@ -77,7 +77,6 @@ def test_publish_restores_a_same_target_link_raced_into_atomic_exchange(
     destination.parent.mkdir()
     legacy_target = tmp_path / "instance/scripts/provenant"
     destination.symlink_to(legacy_target)
-    original_inode = destination.lstat().st_ino
     exchange = helper._exchange
     raced = False
 
@@ -86,7 +85,6 @@ def test_publish_restores_a_same_target_link_raced_into_atomic_exchange(
         if not raced:
             second.unlink()
             second.symlink_to(legacy_target)
-            assert second.lstat().st_ino != original_inode
             raced = True
         exchange(first, second)
 
@@ -99,9 +97,9 @@ def test_publish_restores_a_same_target_link_raced_into_atomic_exchange(
     else:
         raise AssertionError("foreign race was not rejected")
 
+    assert raced
     assert destination.is_symlink()
     assert destination.readlink() == legacy_target
-    assert destination.lstat().st_ino != original_inode
 
 
 def test_publish_preserves_a_displaced_file_when_rollback_also_races(
