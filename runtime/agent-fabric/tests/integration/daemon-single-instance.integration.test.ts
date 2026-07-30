@@ -194,10 +194,15 @@ describe("daemon single-instance ownership", () => {
       try { process.kill(daemonPid, "SIGTERM"); } catch { /* already stopped */ }
       try {
         await waitForProcessExit(daemonPid, { timeoutMs: 5_000 });
-      } finally {
-        lines.close();
-        await rm(directory, { recursive: true, force: true });
+      } catch (error: unknown) {
+        console.warn(
+          `Failed to wait for process exit: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
       }
+      lines.close();
+      await rm(directory, { recursive: true, force: true });
     }
   });
 });

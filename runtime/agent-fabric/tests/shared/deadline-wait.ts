@@ -1,44 +1,29 @@
+export class DeadlineTimeoutError extends Error {
+  constructor(
+    readonly description: string,
+    readonly timeoutMs: number,
+  ) {
+    super(`${description} did not complete within ${String(timeoutMs)}ms`);
+    this.name = "DeadlineTimeoutError";
+  }
+}
+
 export async function waitUntil<T>(
   condition: () => Promise<T>,
   timeoutMs = 5_000,
   description = "Condition",
 ): Promise<T> {
   const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
+  for (;;) {
     const result = await condition();
     if (result) return result;
+    if (Date.now() >= deadline) {
+      throw new DeadlineTimeoutError(description, timeoutMs);
+    }
     const remainingMs = deadline - Date.now();
     if (remainingMs > 0) {
       await new Promise<void>((resolve) => setTimeout(resolve, Math.min(10, remainingMs)));
     }
-  }
-  throw new Error(`${description} did not complete within ${String(timeoutMs)}ms`);
-}
-
-export async function waitForFile(
-  filePath: string,
-  options: Readonly<{ timeoutMs?: number }> = {},
-): Promise<void> {
-  const timeoutMs = options.timeoutMs ?? 5_000;
-  const description = `File ${filePath}`;
-  try {
-    await waitUntil(async () => {
-      try {
-        await access(filePath);
-        return true;
-      } catch (error: unknown) {
-        if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
-        throw error;
-      }
-    }, timeoutMs, description);
-  } catch (error: unknown) {
-    if (
-      error instanceof Error &&
-      error.message === `${description} did not complete within ${String(timeoutMs)}ms`
-    ) {
-      throw new Error(`File did not appear: ${filePath} (waited ${String(timeoutMs)}ms)`);
-    }
-    throw error;
   }
 }
 
@@ -59,13 +44,9 @@ export async function waitForProcessExit(
       }
     }, timeoutMs, description);
   } catch (error: unknown) {
-    if (
-      error instanceof Error &&
-      error.message === `${description} did not complete within ${String(timeoutMs)}ms`
-    ) {
+    if (error instanceof DeadlineTimeoutError) {
       throw new Error(`Process ${String(pid)} did not exit (waited ${String(timeoutMs)}ms)`);
     }
     throw error;
   }
 }
-import { access } from "node:fs/promises";

@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 
 import { connectFabricDaemon, startFabricDaemon } from "../../src/index.ts";
-import { waitUntil } from "../shared/deadline-wait.ts";
+import { DeadlineTimeoutError, waitUntil } from "../shared/deadline-wait.ts";
 import { DAEMON_ROOT_AUTHORITY } from "../support/daemon-testkit.ts";
 import { createCurrentSessionRun } from "../support/current-session-testkit.ts";
 import { callTool, spawnMcpProxy } from "../support/mcp-testkit.ts";
@@ -227,10 +227,7 @@ describe("daemon adapter composition", () => {
             return true;
           }, timeoutMs, description);
         } catch (error: unknown) {
-          if (
-            error instanceof Error &&
-            error.message === `${description} did not complete within ${String(timeoutMs)}ms`
-          ) {
+          if (error instanceof DeadlineTimeoutError) {
             throw new Error(
               `Action did not reach terminal status (awaited ${String(timeoutMs)}ms), ` +
               `last status: ${lastStatus}`,

@@ -4,7 +4,7 @@ import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { digest } from "../../src/persistence/row-codec.ts";
-import { waitUntil } from "../shared/deadline-wait.ts";
+import { DeadlineTimeoutError, waitUntil } from "../shared/deadline-wait.ts";
 import { createLifecycleFixture, reopenLifecycleFabric } from "../support/lifecycle-testkit.ts";
 
 const cleanup: Array<() => Promise<void>> = [];
@@ -29,10 +29,7 @@ async function waitForProviderAction(
       return ["ambiguous", "terminal", "quarantined"].includes(action.status) ? action.status : "";
     }, timeoutMs, description);
   } catch (error: unknown) {
-    if (
-      error instanceof Error &&
-      error.message === `${description} did not complete within ${String(timeoutMs)}ms`
-    ) {
+    if (error instanceof DeadlineTimeoutError) {
       throw new Error(`Provider action ${actionId} did not settle (awaited ${String(timeoutMs)}ms)`);
     }
     throw error;
@@ -351,25 +348,25 @@ describe("provider-action owner boundary wiring", () => {
     const timeoutMs = 3_000;
     const description = "Action lookup start";
     let lookupCount = 0;
+    let lookupStarted = false;
     try {
       await waitUntil(async () => {
         const journal = JSON.parse(await readFile(fixture.providerJournalPath, "utf8")) as {
           actions?: Record<string, { lookupCount?: number }>;
         };
         lookupCount = journal.actions?.[actionId]?.lookupCount ?? 0;
-        return lookupCount >= 1;
+        lookupStarted = lookupCount >= 1;
+        return lookupStarted;
       }, timeoutMs, description);
     } catch (error: unknown) {
-      if (
-        error instanceof Error &&
-        error.message === `${description} did not complete within ${String(timeoutMs)}ms`
-      ) {
+      if (error instanceof DeadlineTimeoutError) {
         throw new Error(
           `Action lookup did not start: lookupCount=${String(lookupCount)} after ${String(timeoutMs)}ms`,
         );
       }
       throw error;
     }
+    expect(lookupStarted).toBe(true);
     const mutated = new Database(fixture.databasePath);
     mutated.pragma("foreign_keys = OFF");
     const immutableRouteTrigger = mutated.prepare(`

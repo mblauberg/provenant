@@ -21,7 +21,7 @@ import {
   normaliseLaunchChairAuthority,
 } from "../../../src/project-session/launch-custody.ts";
 import { canonicalJson } from "../../../src/persistence/row-codec.ts";
-import { waitUntil } from "../../shared/deadline-wait.ts";
+import { DeadlineTimeoutError, waitUntil } from "../../shared/deadline-wait.ts";
 import { TEST_AUTHORITY_V2_FIELDS } from "../../support/authority-v2-testkit.ts";
 import {
   terminateTrackedTestProcess,
@@ -300,13 +300,15 @@ describe("fresh Agent Fabric launch bootstrap", () => {
 
     const timeoutMs = 5_000;
     const description = "Peer readiness";
+    let peerReady = false;
     let finalFileState = "<missing>";
     try {
       await waitUntil(async () => {
         try {
           const value = await readFile(peerReadyPath, "utf8");
           finalFileState = JSON.stringify(value);
-          return value === "ready\n";
+          peerReady = value === "ready\n";
+          return peerReady;
         } catch (error: unknown) {
           if ((error as NodeJS.ErrnoException).code === "ENOENT") {
             finalFileState = "<missing>";
@@ -316,10 +318,7 @@ describe("fresh Agent Fabric launch bootstrap", () => {
         }
       }, timeoutMs, description);
     } catch (error: unknown) {
-      if (
-        error instanceof Error &&
-        error.message === `${description} did not complete within ${String(timeoutMs)}ms`
-      ) {
+      if (error instanceof DeadlineTimeoutError) {
         throw new Error(
           `Peer did not report ready (awaited ${String(timeoutMs)}ms); ` +
           `final file state: ${finalFileState}`,
@@ -327,6 +326,7 @@ describe("fresh Agent Fabric launch bootstrap", () => {
       }
       throw error;
     }
+    expect(peerReady).toBe(true);
 
     const database = new Database(paths.databasePath, { readonly: true, fileMustExist: true });
     const state = database.prepare(`
