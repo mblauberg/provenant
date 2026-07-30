@@ -8,6 +8,7 @@ from functools import lru_cache
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -16,7 +17,9 @@ from typing import Any
 
 OID = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
-ROOT = Path(__file__).resolve().parents[3]
+ROOT = Path(
+    os.environ.get("AGENT_FABRIC_PRODUCT_ROOT", Path(__file__).resolve().parents[3])
+).expanduser()
 GIT_ARTIFACT_FIELDS = {
     "id", "git_revision", "media_type", "artifact_type", "class", "owner", "retention",
 }
@@ -31,6 +34,12 @@ def _git_evidence():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def configure_product_root(root: Path) -> None:
+    global ROOT
+    ROOT = root
+    _git_evidence.cache_clear()
 
 
 def _fail(condition: bool, message: str, invalid_type: type[ValueError]) -> None:

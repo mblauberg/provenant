@@ -70,8 +70,13 @@ From the project root:
 
 ```sh
 "${AGENTS_HOME:-$HOME/.agents}/skills/deliver/scripts/validate_delivery.py" \
-  .agent-run/<id>/RUN.json --workspace-root "$PWD" --verify-hashes
+  .agent-run/<id>/RUN.json --workspace-root "$PWD" --verify-hashes \
+  --product-root "<product-root>"
 ```
+
+Installed skill callers may instead export `AGENT_FABRIC_PRODUCT_ROOT`. The
+explicit argument takes precedence and keeps product policy lookup independent
+of the installed skills root.
 
 User decisions link matching passing `kind: human` evidence. Deterministic
 evidence records an exit code and a receipt digest equal to its declared
@@ -140,9 +145,10 @@ The profile gate uses independently authored positive, negative and boundary
 cases rather than receipts emitted by the reference generator:
 
 ```sh
-python3 "${AGENTS_HOME:-$HOME/.agents}/scripts/validate_delivery_scenarios.py"
+provenant check
 ```
 
-Every expected outcome must match. The dataset covers each base profile in
-both directions, exercises the high-stakes overlay twice, and repeats
-stochastic or boundary cases where reproducibility matters.
+The harness gate includes the delivery scenario replay. Every expected outcome
+must match. The dataset covers each base profile in both directions, exercises
+the high-stakes overlay twice, and repeats stochastic or boundary cases where
+reproducibility matters.

@@ -33,9 +33,11 @@ version. When lineage matters, record `command -v playwright-cli` and
 ## Skill path (set once)
 
 ```bash
-export AGENTS_HOME="${AGENTS_HOME:-$HOME/.agents}"
-export PWCLI="$AGENTS_HOME/skills/playwright/scripts/playwright_cli.sh"
+export PWCLI="<installed-playwright-skill>/scripts/playwright_cli.sh"
 ```
+
+Replace `<installed-playwright-skill>` with the absolute skill directory
+disclosed by the client that loaded this skill.
 
 ## Core workflow
 

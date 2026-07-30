@@ -1301,7 +1301,7 @@ def test_public_scan_rejects_private_paths_secrets_and_unlicensed_skill(tmp_path
 
 def test_public_scan_accepts_portable_text_tree(tmp_path):
     seed_required(tmp_path)
-    (tmp_path / "safe.md").write_text("Use ${AGENTS_HOME:-$HOME/.agents}.\n")
+    (tmp_path / "safe.md").write_text("Use ${PROJECT_ROOT:-$PWD}.\n")
     assert scan_paths([*release_check.REQUIRED, "safe.md"], tmp_path) == []
 
 

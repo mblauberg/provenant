@@ -282,7 +282,7 @@ const recon = await agent(
     '   - design system: look for a design-system/ dir, design tokens, or a *-design skill. If present, capture its tokens path + one-line rules to honour.',
     '   - whether the slice is inside a git repo (for cross-family dispatch cwd). codex refuses non-git dirs and cf_dispatch does NOT forward a git-skip flag, so if a nearby git dir exists set gitCwd to it (the cf reviewer will cd there); only if NO git dir is reachable set gitCwd=null (codex then fails closed and the chain fails over to cursor).',
     '   - expand the protected-paths list with CONCRETE globs for this repo (these become recon.protectedPaths, the load-bearing per-repo protected list).',
-    '3. Resolve concrete Claude models with ${AGENTS_HOME:-$HOME/.agents}/scripts/model-route for flagship/lead, flagship/critical-review, workhorse/worker, and scout/scout. Return resolved_model values in modelRoutes.',
+    '3. Resolve concrete Claude models with `provenant route resolve` for flagship/lead, flagship/critical-review, workhorse/worker, and scout/scout. Return resolved_model values in modelRoutes.',
     '',
     NEVER_AUTOEDIT,
     'Record findings in the run-dir MANIFEST.md and traces/. ' + WORKER_CONTRACT,
