@@ -19,6 +19,7 @@ import { probeProviderInterface as realProbeProviderInterface } from "../../src/
 import { FLOCK_ELECTION_LOCK_PORT } from "../../src/daemon/bootstrap-election.ts";
 import { FabricDaemonClient } from "../../src/daemon/rpc-client.ts";
 import { FabricError } from "../../src/errors.ts";
+import { loadFabricConfig } from "../../src/config/index.ts";
 import { openFabric, startFabricDaemon } from "../../src/index.ts";
 import { PIN_OBSERVATION_CACHE_FILE } from "../../src/review/profile/pin-observer.ts";
 import { digestCanonical } from "../../src/review/canonical/index.ts";
@@ -347,7 +348,7 @@ describe("machine status and doctor", () => {
     vi.stubEnv("AGENT_FABRIC_INSTANCE_ROOT", undefined);
 
     expect(resolveStatusPaths([])).toMatchObject({
-      agentsHome: process.cwd(),
+      productRoot: process.cwd(),
       instanceRoot: process.cwd(),
     });
   });
@@ -2202,47 +2203,59 @@ printf '%s\\n' '{"schema_version":1,"source":"claude subscription canary","obser
       });
     } finally { await daemon.stop(); }
   });
-});
 
-  it("expands ${AGENTS_HOME} config token against the product root in split layout", async () => {
-    vi.stubEnv("AGENT_FABRIC_PRODUCT_ROOT", "/fixture/product");
-    vi.stubEnv("AGENT_FABRIC_INSTANCE_ROOT", "/fixture/instance");
+  it("expands the \${AGENTS_HOME} config token against the product root under split roots", async () => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), "fabric-split-token-")));
+    cleanup.push(root);
+    const globalPath = join(root, "agent-fabric.yaml");
+    await writeFile(globalPath, `${JSON.stringify({
+      schemaVersion: 1,
+      adapters: { codex: { command: ["codex", "app-server"] } },
+      allowedAdapters: ["codex"],
+      activeAdapters: ["codex"],
+      allowedProfiles: ["paired-visible"],
+      workspaceRoots: ["${AGENTS_HOME}/projects"],
+      limits: { maximumConcurrentProviderTurns: 8 },
+    })}\n`);
 
-    const paths = resolveStatusPaths([
-      "--product-root", "/fixture/product",
-      "--instance-root", "/fixture/instance",
+    const selected = resolveStatusPaths([
+      "--product-root", join(root, "product"),
+      "--instance-root", join(root, "instance"),
     ]);
+    const config = await loadFabricConfig({ globalPath, agentsHome: selected.productRoot });
 
-    // productRoot field now carries the product root
-    expect(paths.productRoot).toBe(resolve("/fixture/product"));
-    expect(paths.instanceRoot).toBe(resolve("/fixture/instance"));
-    
-    // Token expansion happens through loadFabricConfig with agentsHome parameter
-    // which receives the productRoot. This test verifies the field routing is correct.
-    // Actual token expansion is tested elsewhere; this pins the root binding.
+    expect(config.workspaceRoots).toEqual([join(root, "product", "projects")]);
   });
 });
 
 describe("split-root remedy rendering", () => {
-  it("renders remedies with the correct product root in split layout", async () => {
-    vi.stubEnv("AGENT_FABRIC_PRODUCT_ROOT", "/fixture/product");
-    vi.stubEnv("AGENT_FABRIC_INSTANCE_ROOT", "/fixture/instance");
+  it("renders seat remedies against the product root when roots are split", async () => {
+    const value = await paths();
+    const productRoot = resolve(import.meta.dirname, "../../../..");
+    const instanceRoot = join(dirname(value.stateDirectory), "instance");
+    await mkdir(join(instanceRoot, "config"), { recursive: true });
+    for (const name of ["agent-fabric.yaml", "adapter-compatibility.yaml"]) {
+      await writeFile(join(instanceRoot, "config", name), await readFile(join(productRoot, "config", name)));
+    }
+    const requestedProject = join(dirname(value.stateDirectory), "project root");
+    await mkdir(requestedProject, { recursive: true });
+    const project = await realpath(requestedProject);
 
-    const value = await fixture();
     const status = await fabricStatus(
-      ["--product-root", "/fixture/product", "--instance-root", "/fixture/instance", "--project", value.project],
+      ["--product-root", productRoot, "--instance-root", instanceRoot, "--project", project],
       value,
     );
 
-    const remedies = status.project.seats.flatMap((seat: Record<string, unknown>) => 
-      seat.remedy ? [seat.remedy as string] : []
-    );
-
-    // All remedies should contain the product root, not instance root or fused default
-    for (const remedy of remedies) {
-      expect(remedy).toContain("/fixture/product/scripts/agent-fabric");
-      expect(remedy).not.toContain("/fixture/instance");
-      expect(remedy).not.toContain("$HOME/.agents");
-    }
+    expect(status.project).toEqual({
+      path: project,
+      seats: expect.arrayContaining([{
+        seat: "agy",
+        registered: false,
+        active: false,
+        reason: "PROJECT_NOT_BOOTSTRAPPED",
+        remedy: `cd '${project}' && '${productRoot}/scripts/agent-fabric' bootstrap --seat codex`,
+      }]),
+    });
+    expect(JSON.stringify(status)).not.toContain(instanceRoot);
   });
 });

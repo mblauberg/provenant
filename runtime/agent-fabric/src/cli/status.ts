@@ -430,6 +430,8 @@ async function seatStatus(
 
 export async function fabricStatus(arguments_: string[], paths: FabricPaths): Promise<Record<string, unknown>> {
   const selected = resolveStatusPaths(arguments_);
+  // ${AGENTS_HOME} expands against the product root; instance-side config
+  // layering (localPath) is #530's scope.
   const config = await loadFabricConfig({ globalPath: selected.config, agentsHome: selected.productRoot });
   const roots = [...new Set([...config.workspaceRoots, ...await trustedWorkspaceRoots({ stateDirectory: paths.stateDirectory, executionProfile: config.executionProfile ?? "headless" })])].sort();
   const project = resolve(option(arguments_, "--project") ?? process.cwd());
