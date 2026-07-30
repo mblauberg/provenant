@@ -258,27 +258,27 @@ describe("split-layout startup path binding", () => {
 
   it("keeps a fused layout on exactly the paths it used before", () => {
     const options = defaultDaemonStartOptions(paths, {
-      agentsHomeFlag: "/home/user/.agents",
+      agentsHomeFlag: "/fixture/agents-home",
       environment: {},
       exists: () => true,
     });
 
     expect(options.configuration).toEqual({
-      globalConfigPath: "/home/user/.agents/config/agent-fabric.yaml",
-      compatibilityPath: "/home/user/.agents/config/adapter-compatibility.yaml",
+      globalConfigPath: "/fixture/agents-home/config/agent-fabric.yaml",
+      compatibilityPath: "/fixture/agents-home/config/adapter-compatibility.yaml",
       compatibilitySchemaPath:
-        "/home/user/.agents/runtime/agent-fabric/schemas/adapter-compatibility.schema.json",
-      agentsHome: "/home/user/.agents",
+        "/fixture/agents-home/runtime/agent-fabric/schemas/adapter-compatibility.schema.json",
+      agentsHome: "/fixture/agents-home",
     });
   });
 
   it("never offers the global layer back to itself as the local layer", () => {
     const configuration = resolveSplitConfiguration({
-      environment: { AGENTS_HOME: "/home/user/.agents" },
+      environment: { AGENTS_HOME: "/fixture/agents-home" },
       exists: () => true,
     });
 
-    expect(configuration.globalConfigPath).toBe("/home/user/.agents/config/agent-fabric.yaml");
+    expect(configuration.globalConfigPath).toBe("/fixture/agents-home/config/agent-fabric.yaml");
     expect(configuration.localConfigPath).toBeUndefined();
   });
 });
