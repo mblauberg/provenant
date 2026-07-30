@@ -19,7 +19,10 @@ def test_harness_python_selection_is_portable():
     checker = read("scripts/check-harness")
 
     assert "miniforge" not in checker
-    assert '"$ROOT/.venv/bin/python"' in checker
+    assert '"$PRODUCT_ROOT/.venv/bin/python"' in checker
+    assert 'PRODUCT_ROOT="${AGENT_FABRIC_PRODUCT_ROOT:-' in checker
+    assert 'SCRIPTS_ROOT="${PROVENANT_SCRIPTS_ROOT:-' in checker
+    assert 'SKILLS_ROOT="${PROVENANT_SKILLS_ROOT:-' in checker
     assert "command -v python3" in checker
     assert "import pytest, yaml" in checker
     assert "uv run --frozen --only-group test python" in checker

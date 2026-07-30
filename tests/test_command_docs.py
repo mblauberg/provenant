@@ -23,19 +23,13 @@ def test_delivery_and_implementation_guidance_names_receipt_and_safe_root():
         assert RECEIPT_AND_ARGS in source, path
 
 
-def test_readme_operator_commands_are_agents_home_safe():
-    # Assert the rule, not the wording. A reader runs README commands from their own
-    # project, so every harness script the README tells them to run must be
-    # $AGENTS_HOME-qualified: a bare `scripts/...` path resolves against their cwd,
-    # so it finds the wrong tree or nothing. Pinning this to a fixed list of commands
-    # is what broke it, once the operator detail moved to MAINTAINING.md.
+def test_readme_product_commands_follow_the_explicit_checkout():
     source = read("README.md")
     shell = "\n".join(re.findall(r"```sh\n(.*?)```", source, re.DOTALL))
-    invocations = [line.strip() for line in shell.splitlines() if "scripts/" in line]
-    assert invocations, "the README shows no harness commands to check"
-    unsafe = [line for line in invocations if "AGENTS_HOME" not in line]
-    assert unsafe == [], f"README runs harness scripts without $AGENTS_HOME: {unsafe}"
-    assert '"$AGENTS_HOME/scripts/install-harness"' in shell
+    assert 'cd "$HOME/Repos/personal/provenant"' in shell
+    assert "scripts/agent-fabric-warm" in shell
+    assert "scripts/install-harness" in shell
+    assert "AGENTS_HOME" not in shell
     assert "\nscripts/manage_installation.py" not in source
 
 
@@ -51,4 +45,5 @@ def test_managed_reconciliation_stays_documented_for_maintainers():
 
 def test_delivery_scenario_replay_command_is_portable():
     source = read("skills/deliver/references/contract.md")
-    assert 'python3 "${AGENTS_HOME:-$HOME/.agents}/scripts/validate_delivery_scenarios.py"' in source
+    assert "provenant check" in source
+    assert "${AGENTS_HOME:-$HOME/.agents}/scripts/validate_delivery_scenarios.py" not in source

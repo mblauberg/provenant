@@ -2,7 +2,9 @@ import json
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 import importlib.util
+import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 
@@ -2703,6 +2705,50 @@ def test_optional_adapter_preference_policy_is_ordered_and_native_first_for_fall
         "preferred": ["xai", "cursor-composer"],
         "fallback": {"anthropic": "claude", "openai": "codex", "google": "agy"},
     }
+
+
+def test_split_root_defaults_use_instance_routing_and_product_compatibility(tmp_path):
+    product_root = tmp_path / "product"
+    instance_root = tmp_path / "instance"
+    shutil.copytree(ROOT / "scripts", product_root / "scripts")
+    (product_root / "config").mkdir()
+    shutil.copy2(
+        ROOT / "config/adapter-compatibility.yaml",
+        product_root / "config/adapter-compatibility.yaml",
+    )
+    (instance_root / "config").mkdir(parents=True)
+    catalogue = json.loads((ROOT / "config/model-routing.json").read_text())
+    catalogue["catalog_date"] = "2099-01-01"
+    (instance_root / "config/model-routing.json").write_text(json.dumps(catalogue))
+    env = {
+        **os.environ,
+        "AGENT_FABRIC_PRODUCT_ROOT": str(product_root),
+        "AGENT_FABRIC_INSTANCE_ROOT": str(instance_root),
+    }
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(product_root / "scripts/model_route.py"),
+            "resolve",
+            "--adapter",
+            "claude",
+            "--alias",
+            "scout",
+            "--role",
+            "worker",
+            "--adapter-gate",
+            "direct-cli",
+        ],
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["catalog_date"] == "2099-01-01"
 
 
 def test_cursor_accepts_preferred_and_supported_fallback_families_without_model_name_locks():

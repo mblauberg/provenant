@@ -4,6 +4,7 @@ import importlib.util
 import json
 from pathlib import Path
 import re
+import shutil
 
 import pytest
 
@@ -1436,10 +1437,15 @@ def test_stochastic_evaluation_uses_bound_plan_for_profile_minimums(
         module.validate(candidate, ROOT, workspace_root=workspace_root, verify_hashes=True)
 
 
-def test_global_policy_root_cannot_be_replaced_by_project_registry(tmp_path):
+def test_explicit_product_policy_root_can_be_separate_from_installed_skills(tmp_path):
     module = load_validator()
-    with pytest.raises(module.Invalid, match="global policy root"):
-        module.validate(fixture(), tmp_path)
+    product_root = tmp_path / "product"
+    shutil.copytree(ROOT / "config", product_root / "config")
+    schema = "runtime/agent-fabric-protocol/schemas/authority-envelope.v2.schema.json"
+    (product_root / schema).parent.mkdir(parents=True)
+    shutil.copy2(ROOT / schema, product_root / schema)
+
+    module.validate(fixture(), product_root)
 
 
 def test_project_policy_can_only_add_a_digest_bound_profile_or_gate(tmp_path):
