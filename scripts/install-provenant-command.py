@@ -44,7 +44,10 @@ def _raw_snapshot(destination: Path) -> tuple[object, ...]:
         else:
             payload = b""
         after = destination.lstat()
-    except FileNotFoundError:
+    except OSError:
+        # A racer may delete the path or swap its type between the
+        # classifying lstat and the payload read; every such variant
+        # (ENOENT, EINVAL, EISDIR, ...) must land on the restore path.
         raise Collision(
             f"provenant command collision={destination}; "
             "changed during classification"

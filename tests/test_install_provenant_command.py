@@ -1,4 +1,5 @@
 import importlib.util
+import errno
 import os
 from pathlib import Path
 import subprocess
@@ -181,6 +182,29 @@ def test_publish_preserves_a_displaced_file_when_rollback_raises(
     recovery_paths = list(destination.parent.glob(".provenant.*"))
     assert len(recovery_paths) == 1
     assert recovery_paths[0].read_bytes() == foreign
+
+
+def test_snapshot_maps_a_racing_type_swap_to_a_collision(tmp_path, monkeypatch):
+    helper = load_helper()
+    destination = tmp_path / "bin/provenant"
+    destination.parent.mkdir()
+    legacy_target = tmp_path / "instance/scripts/provenant"
+    destination.symlink_to(legacy_target)
+    real_readlink = os.readlink
+
+    def swapped_before_read(path, *args, **kwargs):
+        if Path(path) == destination:
+            raise OSError(errno.EINVAL, "Invalid argument", str(path))
+        return real_readlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(helper.os, "readlink", swapped_before_read)
+
+    try:
+        helper._raw_snapshot(destination)
+    except helper.Collision as exc:
+        assert "changed during classification" in str(exc)
+    else:
+        raise AssertionError("racing type swap was not mapped to a collision")
 
 
 def test_snapshot_maps_a_racing_delete_to_a_collision(tmp_path, monkeypatch):
