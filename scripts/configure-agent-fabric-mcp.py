@@ -155,14 +155,25 @@ def registration(
     state_directory: Path,
     seat: str,
     client_label: str | None = None,
+    shim_path: Path | None = None,
 ) -> dict[str, Any]:
+    """Return a registration through the stable, relocation-safe Provenant shim.
+
+    ``agents_home`` remains part of the public call shape while existing
+    callers migrate; the registration intentionally contains no checkout path.
+    Tests may override ``shim_path`` without touching the live installation.
+    """
+    del agents_home
+    stable_shim = (shim_path or Path.home() / ".local/bin/provenant").expanduser()
+    if not stable_shim.is_absolute():
+        raise RegistrationError("stable Provenant shim path must be absolute")
     environment = {
         "AGENT_FABRIC_STATE_DIRECTORY": str(state_directory),
         "AGENT_FABRIC_SEAT": seat,
         "AGENT_FABRIC_CLIENT_LABEL": client_label or seat,
     }
     result: dict[str, Any] = {
-        "command": str(agents_home / "scripts" / "agent-fabric-mcp"),
+        "command": str(stable_shim),
         "env": environment,
     }
     if seat == "claude":
@@ -552,6 +563,7 @@ def main(argv: list[str] | None = None) -> int:
         "--state-directory", type=Path,
         default=Path(os.environ.get("AGENT_FABRIC_STATE_DIRECTORY", Path.home() / ".local/state/agent-harness/fabric")),
     )
+    parser.add_argument("--shim-path", type=Path, default=Path.home() / ".local/bin/provenant")
     parser.add_argument("--claude-config", type=Path, default=Path.home() / ".claude.json")
     parser.add_argument(
         "--codex-config", type=Path,
@@ -577,9 +589,15 @@ def main(argv: list[str] | None = None) -> int:
             raise RegistrationError("Agent Fabric MCP wrapper is missing from AGENTS_HOME")
         proposals: list[ConfigProposal] = []
         if args.platform in {"all", "claude"}:
-            proposals.append(claude_update(args.claude_config, registration(agents_home, state_directory, "claude")))
+            proposals.append(claude_update(
+                args.claude_config,
+                registration(agents_home, state_directory, "claude", shim_path=args.shim_path),
+            ))
         if args.platform in {"all", "codex"}:
-            proposals.append(codex_update(args.codex_config, registration(agents_home, state_directory, "codex")))
+            proposals.append(codex_update(
+                args.codex_config,
+                registration(agents_home, state_directory, "codex", shim_path=args.shim_path),
+            ))
         optional_configs = {
             "cursor": args.cursor_config,
             "agy": args.agy_config,
@@ -589,13 +607,25 @@ def main(argv: list[str] | None = None) -> int:
             if args.platform in {"all", client}:
                 proposals.append(json_client_update(
                     path,
-                    registration(agents_home, state_directory, "codex", client),
+                    registration(
+                        agents_home,
+                        state_directory,
+                        "codex",
+                        client,
+                        shim_path=args.shim_path,
+                    ),
                     client,
                 ))
         if args.platform in {"all", "opencode"}:
             proposals.append(opencode_update(
                 args.opencode_config,
-                registration(agents_home, state_directory, "codex", "opencode"),
+                registration(
+                    agents_home,
+                    state_directory,
+                    "codex",
+                    "opencode",
+                    shim_path=args.shim_path,
+                ),
             ))
         if args.check:
             missing = [proposal.client for proposal in proposals if proposal.status != "existing"]

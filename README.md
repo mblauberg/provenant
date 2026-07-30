@@ -96,7 +96,7 @@ installs. Pass `--mcp-clients all` to either one to register all six clients
 instead.
 
 Installation links each skill into `~/.claude/skills/` and `~/.codex/skills/`,
-and links the thin `provenant` command into
+and installs a managed copy of the thin `provenant` command in
 `${PROVENANT_BIN_DIR:-$HOME/.local/bin}`; it warns when that directory is not
 on `PATH`, and never edits shell startup files. If the installer exits non-zero,
 follow the message it prints: exit `3` flags a command collision, incompatible

@@ -24,6 +24,7 @@ def test_documented_fresh_checkout_sequence_produces_runnable_doctor(tmp_path):
     scripts.mkdir(parents=True)
     for name in (
         "agent-fabric",
+        "agent-fabric-mcp",
         "agent-fabric-protocol-build",
         "agent-fabric-protocol-preflight",
         "agent-fabric-warm",

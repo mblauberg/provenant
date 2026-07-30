@@ -3,6 +3,7 @@ import importlib.util
 import io
 import os
 from pathlib import Path
+import shutil
 import stat
 import subprocess
 import sys
@@ -13,6 +14,8 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "configure-agent-fabric-mcp.py"
+PROVENANT = ROOT / "scripts" / "provenant"
+DEFAULT_SHIM = Path.home() / ".local/bin/provenant"
 
 
 def load_configurer():
@@ -142,18 +145,18 @@ AGENT_FABRIC_CAPABILITY = "never-print-capability"
     }
     assert claude["mcpServers"]["agent-fabric"] == {
         "type": "stdio",
-        "command": str(ROOT / "scripts" / "agent-fabric-mcp"),
+        "command": str(DEFAULT_SHIM),
         "args": [],
         "env": {**expected_common, "AGENT_FABRIC_SEAT": "claude", "AGENT_FABRIC_CLIENT_LABEL": "claude"},
     }
     assert codex["mcp_servers"]["agent-fabric"] == {
-        "command": str(ROOT / "scripts" / "agent-fabric-mcp"),
+        "command": str(DEFAULT_SHIM),
         "env": {**expected_common, "AGENT_FABRIC_SEAT": "codex", "AGENT_FABRIC_CLIENT_LABEL": "codex"},
     }
     for client, path in json_configs.items():
         value = json.loads(path.read_text())
         assert value["mcpServers"]["agent-fabric"] == {
-            "command": str(ROOT / "scripts" / "agent-fabric-mcp"),
+            "command": str(DEFAULT_SHIM),
             "env": {**expected_common, "AGENT_FABRIC_SEAT": "codex", "AGENT_FABRIC_CLIENT_LABEL": client},
         }
         assert value["mcpServers"]["other"] == {"command": "other"}
@@ -161,7 +164,7 @@ AGENT_FABRIC_CAPABILITY = "never-print-capability"
     opencode = json.loads(opencode_config.read_text())
     assert opencode["mcp"]["agent-fabric"] == {
         "type": "local",
-        "command": [str(ROOT / "scripts" / "agent-fabric-mcp")],
+        "command": [str(DEFAULT_SHIM)],
         "enabled": True,
         "environment": {
             **expected_common,
@@ -182,6 +185,12 @@ AGENT_FABRIC_CAPABILITY = "never-print-capability"
     assert [line.split("platform=", 1)[1].split(" ", 1)[0] for line in receipts] == [
         "claude", "codex", "cursor", "agy", "kiro", "opencode",
     ]
+    assert str(ROOT) not in json.dumps([
+        claude["mcpServers"]["agent-fabric"],
+        codex["mcp_servers"]["agent-fabric"],
+        *(json.loads(path.read_text())["mcpServers"]["agent-fabric"] for path in json_configs.values()),
+        opencode["mcp"]["agent-fabric"],
+    ])
 
     original_claude = claude_config.read_bytes()
     original_codex = codex_config.read_bytes()
@@ -193,6 +202,115 @@ AGENT_FABRIC_CAPABILITY = "never-print-capability"
     assert codex_config.read_bytes() == original_codex
     assert {client: path.read_bytes() for client, path in json_configs.items()} == original_json
     assert opencode_config.read_bytes() == original_opencode
+
+
+def test_stable_registration_launches_after_product_relocation(tmp_path: Path) -> None:
+    configurer = load_configurer()
+    shim = tmp_path / "bin/provenant"
+    shim.parent.mkdir()
+    shutil.copy2(PROVENANT, shim)
+    old_product = tmp_path / "old-product"
+    wrapper = old_product / "scripts/agent-fabric-mcp"
+    wrapper.parent.mkdir(parents=True)
+    wrapper.write_text(
+        "#!/bin/sh\n"
+        "printf '%s\\n' \"$AGENT_FABRIC_SEAT|$AGENT_FABRIC_STATE_DIRECTORY|$AGENTS_HOME\"\n"
+    )
+    wrapper.chmod(0o755)
+    registration = configurer.registration(
+        old_product,
+        tmp_path / "state",
+        "codex",
+        shim_path=shim,
+    )
+    registered_command = registration["command"]
+
+    relocated_product = tmp_path / "relocated-product"
+    old_product.rename(relocated_product)
+    environment = {
+        **os.environ,
+        **registration["env"],
+        "AGENT_FABRIC_PRODUCT_ROOT": str(relocated_product),
+        "AGENTS_HOME": str(old_product),
+    }
+    launched = subprocess.run(
+        [registered_command],
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert registration["command"] == str(shim)
+    assert str(old_product) not in json.dumps(registration)
+    assert launched.returncode == 0, launched.stderr
+    assert launched.stdout == f"codex|{tmp_path / 'state'}|{relocated_product}\n"
+
+
+def test_stable_registration_reports_repair_for_missing_product(tmp_path: Path) -> None:
+    configurer = load_configurer()
+    shim = tmp_path / "bin/provenant"
+    shim.parent.mkdir()
+    shutil.copy2(PROVENANT, shim)
+    registration = configurer.registration(
+        tmp_path / "unused-product",
+        tmp_path / "state",
+        "codex",
+        shim_path=shim,
+    )
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in {"AGENT_FABRIC_PRODUCT_ROOT", "AGENTS_HOME"}
+    }
+    environment.update(registration["env"])
+    environment["HOME"] = str(tmp_path / "home")
+
+    launched = subprocess.run(
+        [registration["command"]],
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert launched.returncode != 0
+    assert "repair: set AGENT_FABRIC_PRODUCT_ROOT or AGENTS_HOME" in launched.stderr
+
+
+def test_present_empty_seat_still_enters_mcp_mode(tmp_path: Path) -> None:
+    shim = tmp_path / "bin/provenant"
+    shim.parent.mkdir()
+    shutil.copy2(PROVENANT, shim)
+    product = tmp_path / "product"
+    wrapper = product / "scripts/agent-fabric-mcp"
+    wrapper.parent.mkdir(parents=True)
+    wrapper.write_text("#!/bin/sh\nprintf 'mcp-mode:%s\\n' \"$AGENT_FABRIC_SEAT\"\n")
+    wrapper.chmod(0o755)
+    environment = {
+        **os.environ,
+        "AGENT_FABRIC_PRODUCT_ROOT": str(product),
+        "AGENT_FABRIC_SEAT": "",
+    }
+
+    launched = subprocess.run(
+        [str(shim)],
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert launched.returncode == 0, launched.stderr
+    assert launched.stdout == "mcp-mode:\n"
+
+
+def test_rejects_a_relative_stable_shim_path(tmp_path: Path) -> None:
+    result = run_configure(tmp_path, "--shim-path", "relative/provenant")
+
+    assert result.returncode == 3
+    assert "stable Provenant shim path must be absolute" in result.stderr
+    assert not any(path.exists() for path in all_client_paths(tmp_path).values())
 
 
 def test_check_reports_only_agent_fabric_entry_status(tmp_path: Path) -> None:

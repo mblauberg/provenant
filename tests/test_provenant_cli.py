@@ -32,7 +32,7 @@ print(json.dumps(payload, sort_keys=True))
 print("dummy stderr", file=sys.stderr)
 raise SystemExit(int(os.environ.get("PROVENANT_TEST_EXIT", "0")))
 """
-    for owner in ("model-route", "worktree", "check-harness", "agent-fabric"):
+    for owner in ("model-route", "worktree", "check-harness", "agent-fabric", "agent-fabric-mcp"):
         path = scripts / owner
         path.write_text(recorder)
         path.chmod(0o755)
@@ -98,6 +98,31 @@ def test_worktree_runs_from_arbitrary_cwd_without_changing_it(tmp_path):
     payload = json.loads(result.stdout)
     assert payload["argv"][1:] == ["check"]
     assert payload["cwd"] == str(caller_cwd)
+
+
+def test_installed_copy_ignores_same_named_commands_in_its_bin_directory(tmp_path):
+    checkout, _ = make_checkout(tmp_path)
+    product_owner = checkout / "scripts/agent-fabric"
+    product_owner.write_text("#!/bin/sh\nprintf '%s\\n' \"$AGENTS_HOME\"\n")
+    product_owner.chmod(0o755)
+    bin_dir = tmp_path / "stable-bin"
+    bin_dir.mkdir()
+    command = bin_dir / "provenant"
+    shutil.copy2(SOURCE, command)
+    shadow = bin_dir / "agent-fabric"
+    shadow.write_text("#!/bin/sh\nprintf 'wrong-bin-owner\\n'\n")
+    shadow.chmod(0o755)
+
+    result = invoke(
+        command,
+        "doctor",
+        cwd=tmp_path,
+        AGENT_FABRIC_PRODUCT_ROOT=str(checkout),
+        AGENTS_HOME=str(tmp_path / "stale-product"),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == f"{checkout}\n"
 
 
 @pytest.mark.parametrize(
