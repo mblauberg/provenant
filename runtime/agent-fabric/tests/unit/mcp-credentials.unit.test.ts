@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import Database from "better-sqlite3";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { resolveMcpCapability, resolveRenewableMcpCapability } from "../../src/mcp/credentials.ts";
@@ -15,6 +16,8 @@ const GENERATION_NEAREST = "a".repeat(64);
 const GENERATION_EXPIRY = "b".repeat(64);
 const GENERATION_EXPLICIT = "c".repeat(64);
 const GENERATION_MIGRATED = "d".repeat(64);
+const GENERATION_WINDOW = "e".repeat(64);
+const GENERATION_RECOVERY = "f".repeat(64);
 
 afterEach(async () => {
   await Promise.all(cleanup.splice(0).map((path) => rm(path, { recursive: true, force: true })));
@@ -407,6 +410,158 @@ describe("MCP capability loading", () => {
     ))}\n`, { mode: 0o600 });
     await expect(resolveRenewableMcpCapability(environment, projectPath, renew, warn)).rejects.toThrow(/expired/u);
     expect(renew).not.toHaveBeenCalled();
+  });
+
+  it("keeps a fresh short-lived provisioned roster quiet until its final quarter", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "fabric-mcp-warning-window-"));
+    cleanup.push(directory);
+    const stateDirectory = join(directory, "state");
+    const project = join(directory, "project");
+    await Promise.all([mkdir(project), mkdir(stateDirectory, { mode: 0o700 })]);
+    const projectPath = await realpath(project);
+    const { key, directory: seatDirectory } = await createCurrentSeatDirectory(
+      stateDirectory,
+      projectPath,
+      GENERATION_WINDOW,
+    );
+    const chairCredentialPath = join(seatDirectory, "codex.cap");
+    const peerCredentialPath = join(seatDirectory, "agy.cap");
+    await writeFile(chairCredentialPath, `afc_${"a".repeat(43)}\n`, { mode: 0o600 });
+    await writeFile(peerCredentialPath, `afc_${"b".repeat(43)}\n`, { mode: 0o600 });
+    const metadata = (expiresAt: string) => ({
+      schemaVersion: 1,
+      projectKey: key,
+      projectPath,
+      generation: GENERATION_WINDOW,
+      previousGeneration: null,
+      originKind: "provisioned",
+      projectSessionId: "session-window",
+      runId: "run-window",
+      seat: "codex",
+      agentId: "codex-chair",
+      role: "chair",
+      credentialPath: chairCredentialPath,
+      expiresAt,
+    });
+    const writeRoster = async (expiresAt: string) => {
+      await writeFile(join(seatDirectory, "codex.json"), `${JSON.stringify(metadata(expiresAt))}\n`, { mode: 0o600 });
+      await writeFile(join(seatDirectory, "agy.json"), `${JSON.stringify({
+        ...metadata(expiresAt),
+        seat: "agy",
+        agentId: "agy-peer",
+        role: "peer",
+        credentialPath: peerCredentialPath,
+      })}\n`, { mode: 0o600 });
+    };
+    const setMintedAt = (createdAt: number) => {
+      const database = new Database(join(stateDirectory, "fabric-v1.sqlite3"));
+      try {
+        // Only the columns the mint-time reader touches; the daemon schema is wider.
+        database.exec(
+          "CREATE TABLE IF NOT EXISTS mcp_seat_generations (generation TEXT PRIMARY KEY, created_at INTEGER NOT NULL)",
+        );
+        database.prepare(`
+          INSERT INTO mcp_seat_generations(generation, created_at) VALUES (?, ?)
+            ON CONFLICT(generation) DO UPDATE SET created_at=excluded.created_at
+        `).run(GENERATION_WINDOW, createdAt);
+      } finally {
+        database.close();
+      }
+    };
+    const environment = {
+      AGENT_FABRIC_SEAT: "codex",
+      AGENT_FABRIC_STATE_DIRECTORY: stateDirectory,
+      AGENT_FABRIC_PRODUCT_ROOT: directory,
+    };
+    const warn = vi.fn();
+
+    // A 24 hour roster with 23 hours remaining sits inside a fixed 7 day
+    // threshold for its entire life, so warning here says nothing (#526).
+    setMintedAt(Date.now() - 60 * 60 * 1_000);
+    await writeRoster(new Date(Date.now() + 23 * 60 * 60 * 1_000).toISOString());
+    await expect(resolveMcpCapability(environment, projectPath, warn)).resolves.toMatch(/^afc_/u);
+    expect(warn).not.toHaveBeenCalled();
+
+    // The same roster inside its final quarter names the renewal command.
+    setMintedAt(Date.now() - 19 * 60 * 60 * 1_000);
+    const expiringAt = new Date(Date.now() + 5 * 60 * 60 * 1_000).toISOString();
+    await writeRoster(expiringAt);
+    await expect(resolveMcpCapability(environment, projectPath, warn)).resolves.toMatch(/^afc_/u);
+    expect(warn).toHaveBeenCalledOnce();
+    const warning = String(warn.mock.calls[0]?.[0]);
+    const command = warning.split("renew the full roster with ")[1] ?? "";
+    const commandArguments = await shellCommandArguments(command, directory);
+    expect(commandArguments.slice(0, 2)).toEqual(["mcp", "peer-provision"]);
+    expect(parseMcpPeerProvisionArguments(commandArguments.slice(2))).toEqual({
+      project: projectPath,
+      seats: ["agy"],
+      expiresAt: new Date(Date.parse(expiringAt) + 23 * 24 * 60 * 60 * 1_000).toISOString(),
+    });
+  });
+
+  it("names a runnable recovery command when a provisioned roster has expired", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "fabric-mcp-expired-recovery-"));
+    cleanup.push(directory);
+    const stateDirectory = join(directory, "state");
+    const project = join(directory, "project");
+    await Promise.all([mkdir(project), mkdir(stateDirectory, { mode: 0o700 })]);
+    const projectPath = await realpath(project);
+    const { key, directory: seatDirectory } = await createCurrentSeatDirectory(
+      stateDirectory,
+      projectPath,
+      GENERATION_RECOVERY,
+    );
+    const chairCredentialPath = join(seatDirectory, "codex.cap");
+    const peerCredentialPath = join(seatDirectory, "agy.cap");
+    await writeFile(chairCredentialPath, `afc_${"a".repeat(43)}\n`, { mode: 0o600 });
+    await writeFile(peerCredentialPath, `afc_${"b".repeat(43)}\n`, { mode: 0o600 });
+    const expiredAt = new Date(Date.now() - 60 * 60 * 1_000).toISOString();
+    const metadata = {
+      schemaVersion: 1,
+      projectKey: key,
+      projectPath,
+      generation: GENERATION_RECOVERY,
+      previousGeneration: null,
+      originKind: "provisioned",
+      projectSessionId: "session-recovery",
+      runId: "run-recovery",
+      seat: "codex",
+      agentId: "codex-chair",
+      role: "chair",
+      credentialPath: chairCredentialPath,
+      expiresAt: expiredAt,
+    };
+    await writeFile(join(seatDirectory, "codex.json"), `${JSON.stringify(metadata)}\n`, { mode: 0o600 });
+    await writeFile(join(seatDirectory, "agy.json"), `${JSON.stringify({
+      ...metadata,
+      seat: "agy",
+      agentId: "agy-peer",
+      role: "peer",
+      credentialPath: peerCredentialPath,
+    })}\n`, { mode: 0o600 });
+
+    const error = await resolveMcpCapability({
+      AGENT_FABRIC_SEAT: "codex",
+      AGENT_FABRIC_STATE_DIRECTORY: stateDirectory,
+      AGENT_FABRIC_PRODUCT_ROOT: directory,
+    }, projectPath).then(
+      () => { throw new Error("expected the expired seat to be rejected"); },
+      (cause: unknown) => cause as Error,
+    );
+
+    expect(error.message).toContain(`agent fabric MCP seat codex expired at ${expiredAt}`);
+    expect(error.message).toContain("recover the roster with ");
+    const command = error.message.split("recover the roster with ")[1] ?? "";
+    const commandArguments = await shellCommandArguments(command, directory);
+    expect(commandArguments.slice(0, 2)).toEqual(["mcp", "peer-provision"]);
+    const parsed = parseMcpPeerProvisionArguments(commandArguments.slice(2));
+    expect(parsed).toMatchObject({ project: projectPath, seats: ["agy"] });
+    // The recovery expiry is measured from now, not the lapsed expiry, so the
+    // command stays valid however long ago the roster lapsed.
+    expect(Date.parse(String(parsed.expiresAt))).toBeGreaterThan(Date.now());
+    expect(Date.parse(String(parsed.expiresAt))).toBeLessThanOrEqual(
+      Date.now() + 31 * 24 * 60 * 60 * 1_000,
+    );
   });
 
   it("binds a global registry process to an explicit provisioned project path", async () => {

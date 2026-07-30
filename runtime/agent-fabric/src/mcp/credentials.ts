@@ -13,6 +13,7 @@ import {
   mcpBootstrapRenewalCommand,
   mcpRosterRenewalCommand,
   readChairAuthorityExpiresAt,
+  seatExpiryWarningDue,
 } from "../cli/mcp-roster-renewal.js";
 import { fabricCliCommand, resolveFabricRoots } from "../domain/fabric-roots.js";
 
@@ -139,6 +140,59 @@ async function renewalRoute(input: {
   return { kind: "provisioned", peerSeat: fallback, chairSeat };
 }
 
+// One remediation for a provisioned roster near or past expiry, shared by the
+// expiry error and the pre-expiry warning so the two paths cannot drift apart:
+// a bootstrap-managed sibling chair renews by bootstrap, an intact provisioned
+// roster renews (or recovers, once expired) by the emitted peer-provision
+// command, and a roster whose renewal cannot be emitted falls back to bootstrap.
+async function rosterRenewalAdvice(input: {
+  stateDirectory: string;
+  projectPath: string;
+  seat: McpSeat;
+  currentRole: unknown;
+  currentOriginKind: unknown;
+  runId: unknown;
+  chairAgentId: unknown;
+  expiresAt: string;
+  databasePath: string;
+  productRoot: string;
+}): Promise<{ kind: "bootstrap" | "renewal" | "unrenewable"; command: string }> {
+  const route = await renewalRoute({
+    stateDirectory: input.stateDirectory,
+    projectPath: input.projectPath,
+    currentSeat: input.seat,
+    currentRole: input.currentRole,
+    currentOriginKind: input.currentOriginKind,
+  });
+  if (route.kind === "bootstrap") {
+    return {
+      kind: "bootstrap",
+      command: mcpBootstrapRenewalCommand(input.projectPath, route.chairSeat, input.productRoot),
+    };
+  }
+  const chairAuthorityExpiresAt =
+    typeof input.runId === "string" && typeof input.chairAgentId === "string"
+      ? readChairAuthorityExpiresAt({
+          databasePath: input.databasePath,
+          runId: input.runId,
+          chairAgentId: input.chairAgentId,
+        })
+      : null;
+  const renewal = mcpRosterRenewalCommand({
+    project: input.projectPath,
+    peerSeat: route.peerSeat,
+    currentExpiresAt: input.expiresAt,
+    chairAuthorityExpiresAt,
+    productRoot: input.productRoot,
+  });
+  return renewal === null
+    ? {
+        kind: "unrenewable",
+        command: mcpBootstrapRenewalCommand(input.projectPath, route.chairSeat, input.productRoot),
+      }
+    : { kind: "renewal", command: renewal };
+}
+
 async function resolveProjectSeatFile(
   environment: NodeJS.ProcessEnv,
   cwd: string,
@@ -157,6 +211,9 @@ async function resolveProjectSeatFile(
     throw new Error("agent fabric MCP project path must be absolute");
   }
   const { productRoot } = resolveFabricRoots({ environment });
+  const databasePath = resolve(
+    environment.AGENT_FABRIC_DATABASE_PATH ?? join(stateDirectory, "fabric-v1.sqlite3"),
+  );
   let candidate = await realpath(resolve(configuredProject ?? cwd));
   for (;;) {
     try {
@@ -200,46 +257,46 @@ async function resolveProjectSeatFile(
           candidate,
         );
       }
-      if (remainingMs <= 0) throw new Error(`agent fabric MCP seat ${seat} expired at ${metadata.expiresAt}`);
-      if (!bootstrapSeat && !verifiedLegacyBootstrapSeat && remainingMs <= 7 * 24 * 60 * 60 * 1_000) {
-        const route = await renewalRoute({
-          stateDirectory,
-          projectPath: candidate,
-          currentSeat: seat as McpSeat,
-          currentRole: "role" in metadata ? metadata.role : undefined,
-          currentOriginKind: "originKind" in metadata ? metadata.originKind : undefined,
-        });
-        const chairAuthorityExpiresAt =
-          "runId" in metadata &&
-          typeof metadata.runId === "string" &&
-          "chairAgentId" in metadata &&
-          typeof metadata.chairAgentId === "string"
-            ? readChairAuthorityExpiresAt({
-                databasePath: resolve(
-                  environment.AGENT_FABRIC_DATABASE_PATH ?? join(stateDirectory, "fabric-v1.sqlite3"),
-                ),
-                runId: metadata.runId,
-                chairAgentId: metadata.chairAgentId,
-              })
-            : null;
-        const renewal = route.kind === "bootstrap"
-          ? null
-          : mcpRosterRenewalCommand({
-              project: candidate,
-              peerSeat: route.peerSeat,
-              currentExpiresAt: metadata.expiresAt,
-              chairAuthorityExpiresAt,
-              productRoot,
-            });
+      const adviceInput = {
+        stateDirectory,
+        projectPath: candidate,
+        seat: seat as McpSeat,
+        currentRole: "role" in metadata ? metadata.role : undefined,
+        currentOriginKind: "originKind" in metadata ? metadata.originKind : undefined,
+        runId: "runId" in metadata ? metadata.runId : undefined,
+        chairAgentId: "chairAgentId" in metadata ? metadata.chairAgentId : undefined,
+        expiresAt: metadata.expiresAt,
+        databasePath,
+        productRoot,
+      };
+      if (remainingMs <= 0) {
+        // Expiry must lead to a recoverable state, not a dead end: the error
+        // names the exact recovery command whenever one can be derived (#526).
+        const advice = await rosterRenewalAdvice(adviceInput).catch(() => null);
+        throw new Error(
+          `agent fabric MCP seat ${seat} expired at ${metadata.expiresAt}` +
+          (advice === null
+            ? ""
+            : advice.kind === "renewal"
+              ? `; recover the roster with ${advice.command}`
+              : `; the roster cannot be renewed in place; rebuild it with ${advice.command}`),
+        );
+      }
+      if (
+        !bootstrapSeat &&
+        !verifiedLegacyBootstrapSeat &&
+        seatExpiryWarningDue({
+          databasePath,
+          generation: paths.generation,
+          expiresAt: metadata.expiresAt,
+        })
+      ) {
+        const advice = await rosterRenewalAdvice(adviceInput);
         warn(
           `agent fabric MCP seat ${seat} expires at ${metadata.expiresAt}; ${
-            route.kind === "bootstrap"
-              ? `renew the full roster with ${mcpBootstrapRenewalCommand(candidate, route.chairSeat, productRoot)}`
-              : renewal === null
-                ? `the provisioned roster cannot be renewed; use ${
-                    mcpBootstrapRenewalCommand(candidate, route.chairSeat, productRoot)
-                  }`
-                : `renew the full roster with ${renewal}`
+            advice.kind === "unrenewable"
+              ? `the provisioned roster cannot be renewed; use ${advice.command}`
+              : `renew the full roster with ${advice.command}`
           }`,
         );
       }

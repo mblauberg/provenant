@@ -37,6 +37,7 @@ import {
   mcpBootstrapRenewalCommand,
   mcpRosterRenewalCommand,
   readChairAuthorityExpiresAt,
+  seatExpiryWarningDue,
 } from "./mcp-roster-renewal.js";
 import type { FabricPaths } from "./paths.js";
 import { fabricCliCommand, resolveFabricRoots } from "../domain/fabric-roots.js";
@@ -407,9 +408,15 @@ async function seatStatus(
         expiresAt: value.expiresAt,
         active: remainingMs > 0,
         registered: true,
+        // The warning window derives from the roster's own lifetime so it can
+        // distinguish plenty-of-time from act-now, and an expired seat keeps
+        // its remedy because expiry is recoverable, not a dead end (#526).
         ...(value.originKind === "provisioned" &&
-          remainingMs > 0 &&
-          remainingMs <= 7 * 24 * 60 * 60 * 1_000 &&
+          seatExpiryWarningDue({
+            databasePath: paths.databasePath,
+            generation: value.generation,
+            expiresAt: value.expiresAt,
+          }) &&
           renewalPeerSeat !== undefined
           ? {
               remedy: bootstrapChairSeat === undefined

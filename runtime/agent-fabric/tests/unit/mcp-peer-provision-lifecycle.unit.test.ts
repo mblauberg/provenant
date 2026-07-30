@@ -47,6 +47,7 @@ afterEach(async () => {
 
 async function fixture(input: {
   peerExpiresAt?: string;
+  expiresAt?: string;
   originKind?: "bootstrap" | "provisioned" | null;
 } = {}): Promise<{ project: string; paths: FabricPaths }> {
   const root = await realpath(await mkdtemp(join(tmpdir(), "fabric-peer-lifecycle-")));
@@ -77,7 +78,7 @@ async function fixture(input: {
     chairGeneration: 1,
     chairLeaseId: "chair:run-one:1",
     principalGeneration: 1,
-    expiresAt: "2099-01-01T00:00:00.000Z",
+    expiresAt: input.expiresAt ?? "2099-01-01T00:00:00.000Z",
   };
   await installSeatGeneration({
     stateDirectory,
@@ -107,9 +108,12 @@ async function fixture(input: {
 async function registeredPeerFixture(input: {
   installPeer?: boolean;
   chairOriginKind?: "bootstrap" | "provisioned";
+  installedExpiresAt?: string;
 } = {}): Promise<{
   project: string;
   paths: FabricPaths;
+  generation: string;
+  sessionRevision: number;
   delegatedAuthorityId: string;
   chairAuthorityExpiresAt: string;
 }> {
@@ -186,7 +190,7 @@ async function registeredPeerFixture(input: {
         agentId: chair.agentId,
         principalGeneration: chair.expectedPrincipalGeneration,
         role: "chair",
-        expiresAt: roster.expiresAt,
+        expiresAt: input.installedExpiresAt ?? roster.expiresAt,
       },
     }];
     if (input.installPeer === true) {
@@ -211,7 +215,7 @@ async function registeredPeerFixture(input: {
           agentId,
           principalGeneration: registeredCapability.principal_generation,
           role: "peer",
-          expiresAt: roster.expiresAt,
+          expiresAt: input.installedExpiresAt ?? roster.expiresAt,
         },
       });
     }
@@ -225,6 +229,8 @@ async function registeredPeerFixture(input: {
     return {
       project,
       paths,
+      generation: roster.generation,
+      sessionRevision: roster.sessionRevision,
       delegatedAuthorityId: delegated.authorityId,
       chairAuthorityExpiresAt: (JSON.parse(chairAuthority.authority_json) as { expiresAt: string }).expiresAt,
     };
@@ -338,6 +344,93 @@ describe("MCP peer provision daemon lifecycle", () => {
     expect(mocks.bind).not.toHaveBeenCalled();
     expect(close).toHaveBeenCalledOnce();
     expect(mocks.release).toHaveBeenCalledOnce();
+  });
+
+  it("recovers an expired provisioned roster without a chair connection", async () => {
+    const value = await registeredPeerFixture({
+      installPeer: true,
+      chairOriginKind: "provisioned",
+      installedExpiresAt: new Date(Date.now() - 60_000).toISOString(),
+    });
+    mocks.bind.mockResolvedValueOnce({ generation: "recovered" });
+    const requestedExpiry = new Date(Date.now() + 30 * 60 * 1_000).toISOString();
+
+    await provisionMcpPeerSeats([
+      "--project", value.project,
+      "--seat", "agy",
+      "--expires-at", requestedExpiry,
+    ], value.paths);
+
+    // The expired chair credential is unusable by definition, so recovery
+    // never opens a chair connection; the daemon's own bootstrap-capability
+    // gate authorises the rebind, exactly as it does for mcp provision.
+    expect(mocks.connect).not.toHaveBeenCalled();
+    expect(mocks.bind).toHaveBeenCalledWith(expect.objectContaining({
+      expiresAt: requestedExpiry,
+      sessionRevision: value.sessionRevision,
+      expectedActiveGeneration: value.generation,
+      requireProvisionedOrigins: true,
+      originKinds: { agy: "provisioned", codex: "provisioned" },
+    }), value.paths);
+    expect(mocks.release).toHaveBeenCalledOnce();
+  });
+
+  it("refuses to register a new seat while the roster is expired", async () => {
+    const value = await registeredPeerFixture({
+      installPeer: true,
+      chairOriginKind: "provisioned",
+      installedExpiresAt: new Date(Date.now() - 60_000).toISOString(),
+    });
+
+    await expect(provisionMcpPeerSeats([
+      "--project", value.project,
+      "--seat", "cursor",
+      "--expires-at", new Date(Date.now() + 30 * 60 * 1_000).toISOString(),
+    ], value.paths)).rejects.toThrow(/roster expired at .*recover the roster first/u);
+    expect(mocks.connect).not.toHaveBeenCalled();
+    expect(mocks.bind).not.toHaveBeenCalled();
+    expect(mocks.release).toHaveBeenCalledOnce();
+  });
+
+  it("renews with the live session revision rather than the stored one", async () => {
+    const value = await registeredPeerFixture({ installPeer: true, chairOriginKind: "provisioned" });
+    const database = new Database(value.paths.databasePath);
+    try {
+      database.prepare("UPDATE project_sessions SET revision=revision+1").run();
+    } finally {
+      database.close();
+    }
+    const close = vi.fn();
+    mocks.connect.mockResolvedValueOnce({ close });
+    mocks.bind.mockResolvedValueOnce({ generation: "renewed" });
+
+    await provisionMcpPeerSeats([
+      "--project", value.project,
+      "--seat", "agy",
+      "--expires-at", new Date(Date.now() + 30 * 60 * 1_000).toISOString(),
+    ], value.paths);
+
+    // The stored metadata still records the mint-time revision; the daemon
+    // compares against the live one, so the bind must carry the live value.
+    expect(mocks.bind).toHaveBeenCalledWith(expect.objectContaining({
+      sessionRevision: value.sessionRevision + 1,
+    }), value.paths);
+    expect(close).toHaveBeenCalledOnce();
+    expect(mocks.release).toHaveBeenCalledOnce();
+  });
+
+  it("advises recovery when a bare request meets an expired provisioned roster", async () => {
+    const past = new Date(Date.now() - 60_000).toISOString();
+    const value = await fixture({ originKind: "provisioned", expiresAt: past, peerExpiresAt: past });
+
+    await expect(provisionMcpPeerSeats([
+      "--project", value.project, "--seat", "agy",
+    ], value.paths)).rejects.toThrow(
+      /requires an active chair seat.*expired at .*can be recovered with .*--seat claude --expires-at/u,
+    );
+    expect(mocks.connect).not.toHaveBeenCalled();
+    expect(mocks.bind).not.toHaveBeenCalled();
+    expect(mocks.release).not.toHaveBeenCalled();
   });
 
   it("re-provisions an expired installed peer instead of returning stale metadata", async () => {
