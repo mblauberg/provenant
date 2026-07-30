@@ -63,6 +63,16 @@ def write_executable(path, body):
     path.chmod(path.stat().st_mode | stat.S_IXUSR)
 
 
+def fabric_free_env():
+    # Stripping the fabric variables stops an inherited developer instance
+    # from steering these evals through an installed provenant command.
+    return {
+        key: value
+        for key, value in os.environ.items()
+        if key != "AGENTS_HOME" and not key.startswith("AGENT_FABRIC_")
+    }
+
+
 def run_dispatch_with_stub(
     stub,
     role="reviewer",
@@ -77,14 +87,8 @@ def run_dispatch_with_stub(
         if provenant_stub is not None:
             write_executable(bin_dir / "provenant", provenant_stub)
         out = tmp / "out.txt"
-        # PATH precedence keeps the checkout's stubs first; stripping the
-        # fabric variables stops an inherited developer instance from
-        # steering the checkout's provenant stub at foreign roots.
-        env = {
-            key: value
-            for key, value in os.environ.items()
-            if key != "AGENTS_HOME" and not key.startswith("AGENT_FABRIC_")
-        }
+        # PATH precedence keeps the checkout's stubs first.
+        env = fabric_free_env()
         env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
         command = [
                 str(SCRIPT),
@@ -317,7 +321,7 @@ def test_claude_oauth_fallback_uses_verifier_system_prompt():
             """,
         )
         out = tmp / "out.txt"
-        env = os.environ.copy()
+        env = fabric_free_env()
         env["PATH"] = f"{bin_dir}:{env['PATH']}"
         result = subprocess.run(
             [
@@ -373,7 +377,7 @@ def test_default_failure_retains_only_the_declared_output_tempfile():
         tmp = Path(td)
         temp_root = tmp / "tmp"
         temp_root.mkdir()
-        env = os.environ.copy()
+        env = fabric_free_env()
         env["TMPDIR"] = str(temp_root)
         result = subprocess.run(
             [str(SCRIPT), "--tool", "kiro", "--orchestrator-family", "codex", "--prompt", "Review"],
@@ -438,7 +442,7 @@ def test_cursor_model_provider_prevents_disguised_same_family_review():
         bin_dir = tmp / "bin"
         bin_dir.mkdir()
         write_executable(bin_dir / "cursor-agent", "#!/usr/bin/env bash\necho OK\n")
-        env = os.environ.copy()
+        env = fabric_free_env()
         env["PATH"] = f"{bin_dir}:{env['PATH']}"
         result = subprocess.run(
             [
@@ -476,7 +480,7 @@ def test_cursor_distinct_model_records_adapter_and_provider_family():
             f"#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" > {args_file}\necho OK\n",
         )
         out = tmp / "out.txt"
-        env = os.environ.copy()
+        env = fabric_free_env()
         env["PATH"] = f"{bin_dir}:{env['PATH']}"
         result = subprocess.run(
             [
@@ -525,7 +529,7 @@ def test_explicit_output_path_preserves_adapter_failure_diagnostics():
             "#!/usr/bin/env bash\necho 'simulated adapter failure' >&2\nexit 9\n",
         )
         out = tmp / "review.txt"
-        env = os.environ.copy()
+        env = fabric_free_env()
         env["PATH"] = f"{bin_dir}:{env['PATH']}"
         result = subprocess.run(
             [
@@ -569,7 +573,7 @@ def test_unwritable_output_path_cannot_certify_success():
             echo OK
             """,
         )
-        env = os.environ.copy()
+        env = fabric_free_env()
         env["PATH"] = f"{bin_dir}:{env['PATH']}"
         result = subprocess.run(
             [str(SCRIPT), "--tool", "codex", "--orchestrator-family", "anthropic", "--out", str(tmp / "missing" / "out.txt"), "--prompt", "Review"],
@@ -604,7 +608,7 @@ def test_resolved_role_effort_reaches_codex_adapter_and_receipt():
             echo OK
             ''',
         )
-        env = os.environ.copy()
+        env = fabric_free_env()
         env["PATH"] = f"{bin_dir}:{env['PATH']}"
         result = subprocess.run(
             [
@@ -656,7 +660,7 @@ def test_codex_capability_discovery_failure_blocks_execution_with_receipt():
             exit 9
             ''',
         )
-        env = os.environ.copy()
+        env = fabric_free_env()
         env["PATH"] = f"{bin_dir}:{env['PATH']}"
         result = subprocess.run(
             [
@@ -703,7 +707,7 @@ def test_mixed_malformed_codex_capabilities_block_execution_with_receipt():
             exit 9
             ''',
         )
-        env = os.environ.copy()
+        env = fabric_free_env()
         env["PATH"] = f"{bin_dir}:{env['PATH']}"
         result = subprocess.run(
             [
@@ -748,7 +752,7 @@ def test_unrelated_codex_model_without_efforts_blocks_execution_with_receipt():
             exit 9
             ''',
         )
-        env = os.environ.copy()
+        env = fabric_free_env()
         env["PATH"] = f"{bin_dir}:{env['PATH']}"
         result = subprocess.run(
             [
@@ -793,7 +797,7 @@ def test_duplicate_codex_discovery_member_blocks_execution_with_receipt():
             exit 9
             ''',
         )
-        env = os.environ.copy()
+        env = fabric_free_env()
         env["PATH"] = f"{bin_dir}:{env['PATH']}"
         result = subprocess.run(
             [
@@ -838,7 +842,7 @@ def test_codex_explicit_model_rejection_never_reports_it_as_resolved():
             exit 9
             ''',
         )
-        env = os.environ.copy()
+        env = fabric_free_env()
         env["PATH"] = f"{bin_dir}:{env['PATH']}"
         result = subprocess.run(
             [
@@ -877,7 +881,7 @@ def test_interrupted_dispatch_cleans_internal_tempfiles():
         bin_dir.mkdir()
         temp_root.mkdir()
         write_executable(bin_dir / "codex", "#!/usr/bin/env bash\nsleep 10\n")
-        env = os.environ.copy()
+        env = fabric_free_env()
         env["PATH"] = f"{bin_dir}:{env['PATH']}"
         env["TMPDIR"] = str(temp_root)
         proc = subprocess.Popen(
@@ -1079,11 +1083,7 @@ def test_non_git_fallback_routes_via_product_root_model_route():
             """,
         )
         write_executable(bin_dir / "python3", f'#!/bin/sh\nexec {sys.executable} "$@"\n')
-        env = {
-            key: value
-            for key, value in os.environ.items()
-            if key != "AGENTS_HOME" and not key.startswith("AGENT_FABRIC_")
-        }
+        env = fabric_free_env()
         env["PATH"] = f"{bin_dir}:/usr/bin:/bin"
         # cf_dispatch.sh appends $HOME/.local/bin and $HOME/bin to PATH;
         # point HOME at the sandbox so an installed provenant cannot leak in.
