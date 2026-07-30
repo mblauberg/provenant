@@ -70,6 +70,58 @@ def terminalise_reference_evaluation(run, status="failed"):
     return binding
 
 
+def with_repair_cycles(candidate, cycles):
+    candidate["state_history"] = candidate["state_history"][:-1]
+    minute = 6
+    for _ in range(cycles):
+        candidate["state_history"].extend([
+            {
+                "state": "repairing",
+                "at": f"2026-07-10T00:{minute:02d}:00Z",
+                "evidence_ids": ["tests"],
+            },
+            {
+                "state": "verifying",
+                "at": f"2026-07-10T00:{minute + 1:02d}:00Z",
+                "evidence_ids": ["tests"],
+            },
+            {
+                "state": "reviewing",
+                "at": f"2026-07-10T00:{minute + 2:02d}:00Z",
+                "evidence_ids": ["tests"],
+            },
+        ])
+        minute += 3
+    candidate["state_history"].append({
+        "state": "awaiting_acceptance",
+        "at": f"2026-07-10T00:{minute:02d}:00Z",
+        "evidence_ids": [item["id"] for item in candidate["evidence"]],
+    })
+    candidate["repair_cycles"] = cycles
+    return candidate
+
+
+def at_risk_tier(candidate, risk_tier):
+    candidate["risk_tier"] = risk_tier
+    if risk_tier == "routine":
+        candidate["risk_assessment"] = {
+            "blast_radius": "local",
+            "reversibility": "easy",
+            "data_sensitivity": "public",
+            "migration": "none",
+            "oracle_quality": "strong",
+            "external_effects": "none",
+            "critical_surface": "none",
+        }
+    if risk_tier == "terminal":
+        targeted = next(
+            review for review in candidate["reviews"]
+            if review["role"] == "targeted"
+        )
+        targeted["lenses"].extend(["adversarial"])
+    return candidate
+
+
 def test_delivery_authority_v2_maps_to_the_cross_language_golden():
     module = load(AUTHORITY_MAPPER_PATH, "authority_mapping")
     delivery = json.loads((AUTHORITY_FIXTURE_ROOT / "delivery-authority.json").read_text())
@@ -614,6 +666,64 @@ def test_repair_cycle_count_must_match_history():
     candidate["repair_cycles"] = 0
     with pytest.raises(module.Invalid, match="repair_cycles"):
         module.validate(candidate, ROOT)
+
+
+@pytest.mark.parametrize(
+    ("risk_tier", "cycles"),
+    [
+        pytest.param("routine", 2, id="routine-at-2"),
+        pytest.param("substantial", 4, id="substantial-at-4"),
+        pytest.param("crucial", 5, id="crucial-at-5"),
+        pytest.param("terminal", 5, id="terminal-at-5"),
+    ],
+)
+def test_repair_cycle_budget_accepts_tier_boundary(risk_tier, cycles):
+    module = load_validator()
+    candidate = at_risk_tier(with_repair_cycles(fixture(), cycles), risk_tier)
+
+    module.validate(candidate, ROOT)
+
+
+@pytest.mark.parametrize(
+    ("risk_tier", "cycles", "budget"),
+    [
+        pytest.param("routine", 3, 2, id="routine-at-3"),
+        pytest.param("substantial", 5, 4, id="substantial-at-5"),
+        pytest.param("crucial", 6, 5, id="crucial-at-6"),
+        pytest.param("terminal", 6, 5, id="terminal-at-6"),
+    ],
+)
+def test_repair_cycle_budget_rejects_first_cycle_over_tier_limit(
+    risk_tier, cycles, budget,
+):
+    module = load_validator()
+    candidate = at_risk_tier(with_repair_cycles(fixture(), cycles), risk_tier)
+    message = (
+        rf"repair_cycles {cycles} exceeds budget for {risk_tier} tier "
+        rf"\(max {budget}\)"
+    )
+
+    with pytest.raises(module.Invalid, match=message):
+        module.validate(candidate, ROOT)
+
+
+@pytest.mark.parametrize(
+    ("cycles", "message"),
+    [
+        pytest.param(True, "repair_cycles must be an integer, got bool", id="bool"),
+        pytest.param(None, "repair_cycles must be an integer, got NoneType", id="none"),
+        pytest.param("2", "repair_cycles must be an integer, got str", id="string"),
+        pytest.param(-1, "repair_cycles must be non-negative, got -1", id="negative"),
+    ],
+)
+def test_repair_cycles_shape_errors_are_distinct_from_budget_overrun(cycles, message):
+    module = load_validator()
+    candidate = fixture()
+    candidate["repair_cycles"] = cycles
+
+    with pytest.raises(module.Invalid, match=re.escape(message)) as excinfo:
+        module.validate(candidate, ROOT)
+    assert "exceeds budget" not in str(excinfo.value)
 
 
 def test_partial_delivery_delegation_is_rejected():

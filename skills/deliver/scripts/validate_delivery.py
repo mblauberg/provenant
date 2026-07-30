@@ -25,6 +25,7 @@ IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 SAFE_CLASSES = {"canonical", "evidence", "handoff", "scratch", "external"}
 REVIEW_ROLES = {"targeted", "other-primary", "distinct-family"}
 RISKS = ("routine", "substantial", "crucial", "terminal")
+REPAIR_BUDGETS = {"routine": 2, "substantial": 4, "crucial": 5, "terminal": 5}
 NORMAL_STATES = (
     "draft", "scoped", "approved", "executing", "verifying", "reviewing",
     "repairing", "awaiting_acceptance", "accepted", "awaiting_release",
@@ -845,19 +846,18 @@ def validate(
     )
     profile = registry["profiles"].get(run.get("profile"))
     fail(profile is None, "unknown delivery profile")
-    fail(run.get("risk_tier") not in RISKS, "risk_tier is invalid")
+    risk_tier = run.get("risk_tier")
+    fail(risk_tier not in RISKS, "risk_tier is invalid")
     fail(run.get("chair_family") not in PRIMARY_FAMILIES, "chair_family must be a primary family (openai or anthropic)")
     fail(run.get("status") not in set(NORMAL_STATES) | SIDE_STATES, "status is invalid")
     repairs = run.get("repair_cycles")
-    fail(isinstance(repairs, bool) or not isinstance(repairs, int) or not 0 <= repairs <= 2, "repair_cycles must be between 0 and 2")
+    fail(isinstance(repairs, bool) or not isinstance(repairs, int), f"repair_cycles must be an integer, got {type(repairs).__name__}")
+    fail(repairs < 0, f"repair_cycles must be non-negative, got {repairs}")
+    fail(repairs > REPAIR_BUDGETS[risk_tier], f"repair_cycles {repairs} exceeds budget for {risk_tier} tier (max {REPAIR_BUDGETS[risk_tier]})")
     fail(not isinstance(run.get("escaped_defect"), bool), "escaped_defect must be boolean")
-    policy_validation.validate_risk(
-        run, ROOT, risks=RISKS, invalid_type=Invalid,
-    )
+    policy_validation.validate_risk(run, ROOT, risks=RISKS, invalid_type=Invalid)
     authority = _mapping(run.get("authority"), "authority")
-    policy_validation.validate_authority(
-        authority, run, ROOT, invalid_type=Invalid,
-    )
+    policy_validation.validate_authority(authority, run, ROOT, invalid_type=Invalid)
     allowed_artifact_paths = [_safe_path(item, "authority.allowed_artifact_paths") for item in authority["allowed_artifact_paths"]]
     allowed_source_paths = [_safe_path(item, "authority.allowed_source_paths") for item in authority["allowed_source_paths"]]
     artifacts = _validate_artifacts(
@@ -870,8 +870,7 @@ def validate(
     )
     _validate_history(run)
     _validate_checkpoint(run, artifacts, receipt_dir=receipt_dir, workspace_root=workspace_root)
-    normal_states = [item["state"] for item in run["state_history"] if item["state"] in NORMAL_STATES]
-    furthest = max(NORMAL_STATES.index(state) for state in normal_states)
+    furthest = max(NORMAL_STATES.index(item["state"]) for item in run["state_history"] if item["state"] in NORMAL_STATES)
     approved_reached = furthest >= NORMAL_STATES.index("approved")
     reviewing_reached = furthest >= NORMAL_STATES.index("reviewing")
     acceptance_reached = furthest >= NORMAL_STATES.index("awaiting_acceptance")
