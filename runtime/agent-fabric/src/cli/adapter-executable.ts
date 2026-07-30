@@ -1,4 +1,3 @@
-import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 
 import { verifyAdapterCompatibility } from "../adapters/compatibility.js";
@@ -6,10 +5,13 @@ import { loadFabricConfig } from "../config/index.js";
 import { FabricError } from "../errors.js";
 import { verifyProviderConformance } from "../adapters/provider-conformance.js";
 import { loadAdapterModelConstraints } from "../adapters/model-selection.js";
+import { resolveFabricRoots } from "./root-resolution.js";
 
 const VALUE_OPTIONS = [
   "--adapter",
   "--agents-home",
+  "--product-root",
+  "--instance-root",
   "--config",
   "--compatibility",
   "--compatibility-schema",
@@ -47,20 +49,22 @@ export async function resolveAdapterExecutableCli(
   if (adapterId === undefined) {
     throw new Error("adapter executable requires --adapter <id>");
   }
-  const agentsHome = resolve(
-    parsed["--agents-home"] ?? process.env.AGENTS_HOME ?? join(homedir(), ".agents"),
-  );
+  const { productRoot, instanceRoot } = resolveFabricRoots({
+    agentsHomeFlag: parsed["--agents-home"],
+    productRootFlag: parsed["--product-root"],
+    instanceRootFlag: parsed["--instance-root"],
+  });
   const compatibilityPath = resolve(
-    parsed["--compatibility"] ?? join(agentsHome, "config", "adapter-compatibility.yaml"),
+    parsed["--compatibility"] ?? join(instanceRoot, "config", "adapter-compatibility.yaml"),
   );
   const configPath = resolve(
-    parsed["--config"] ?? join(agentsHome, "config", "agent-fabric.yaml"),
+    parsed["--config"] ?? join(instanceRoot, "config", "agent-fabric.yaml"),
   );
   const schemaPath = resolve(
     parsed["--compatibility-schema"] ??
-      join(agentsHome, "runtime", "agent-fabric", "schemas", "adapter-compatibility.schema.json"),
+      join(productRoot, "runtime", "agent-fabric", "schemas", "adapter-compatibility.schema.json"),
   );
-  const config = await loadFabricConfig({ globalPath: configPath, agentsHome });
+  const config = await loadFabricConfig({ globalPath: configPath, agentsHome: productRoot });
   if (!config.adapterIds.includes(adapterId)) {
     throw new FabricError("ADAPTER_DISABLED", `adapter is not active in trusted Fabric configuration: ${adapterId}`);
   }

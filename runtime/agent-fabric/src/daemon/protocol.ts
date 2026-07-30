@@ -8,6 +8,7 @@ import {
   parseAuthorityEnvelopeV2,
   type OperatorAction,
 } from "@local/agent-fabric-protocol";
+import { fabricCliCommand } from "../cli/root-resolution.js";
 
 export { isRecord } from "../domain/record.js";
 export {
@@ -725,7 +726,7 @@ export function bootstrapMcpSeatInput(params: Record<string, unknown>): Bootstra
   if (seat !== "claude" && seat !== "codex") {
     throw new TypeError(
       `MCP bootstrap creates only chair seats claude or codex; run ` +
-      `"$HOME/.agents/scripts/agent-fabric" mcp peer-provision ` +
+      `${fabricCliCommand()} mcp peer-provision ` +
       `--project '${canonicalRoot.replaceAll("'", `'"'"'`)}' --seat ${seat} instead`,
     );
   }

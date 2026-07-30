@@ -38,6 +38,7 @@ import {
   readChairAuthorityExpiresAt,
 } from "./mcp-roster-renewal.js";
 import type { FabricPaths } from "./paths.js";
+import { fabricCliCommand, resolveFabricRoots } from "./root-resolution.js";
 import { MCP_SEATS, resolveSeatPaths, type SeatMetadata } from "./seat-store.js";
 import { trustedWorkspaceRoots } from "./workspace-trust.js";
 
@@ -177,20 +178,21 @@ function generationIdentityMatches(
     && ready.socketPath === owner.socketPath;
 }
 
-function agentsHome(arguments_: string[]): string {
-  return resolve(option(arguments_, "--agents-home") ?? process.env.AGENTS_HOME ?? process.cwd());
-}
-
-function pathsFor(arguments_: string[]): { agentsHome: string; config: string; compatibility: string; compatibilitySchema: string; modelRouting: string; reviewProfile: string } {
-  const home = agentsHome(arguments_);
+export function resolveStatusPaths(arguments_: string[]): { agentsHome: string; instanceRoot: string; config: string; compatibility: string; compatibilitySchema: string; modelRouting: string; reviewProfile: string } {
+  const { productRoot, instanceRoot } = resolveFabricRoots({
+    agentsHomeFlag: option(arguments_, "--agents-home"),
+    productRootFlag: option(arguments_, "--product-root"),
+    instanceRootFlag: option(arguments_, "--instance-root"),
+  });
   return {
-    agentsHome: home,
-    config: resolve(option(arguments_, "--trusted-config") ?? join(home, "config", "agent-fabric.yaml")),
-    compatibility: resolve(option(arguments_, "--compatibility") ?? join(home, "config", "adapter-compatibility.yaml")),
-    compatibilitySchema: resolve(option(arguments_, "--compatibility-schema") ?? join(home, "runtime", "agent-fabric", "schemas", "adapter-compatibility.schema.json")),
-    modelRouting: join(home, "config", "model-routing.json"),
+    agentsHome: productRoot,
+    instanceRoot,
+    config: resolve(option(arguments_, "--trusted-config") ?? join(instanceRoot, "config", "agent-fabric.yaml")),
+    compatibility: resolve(option(arguments_, "--compatibility") ?? join(instanceRoot, "config", "adapter-compatibility.yaml")),
+    compatibilitySchema: resolve(option(arguments_, "--compatibility-schema") ?? join(productRoot, "runtime", "agent-fabric", "schemas", "adapter-compatibility.schema.json")),
+    modelRouting: join(instanceRoot, "config", "model-routing.json"),
     reviewProfile: resolve(option(arguments_, "--review-profile")
-      ?? join(home, "config", "review-profiles", "certifying-review-four-slot-v1.json")),
+      ?? join(instanceRoot, "config", "review-profiles", "certifying-review-four-slot-v1.json")),
   };
 }
 
@@ -327,7 +329,11 @@ function shellQuote(value: string): string {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
 
-async function seatStatus(paths: FabricPaths, project: string): Promise<Array<Record<string, unknown>>> {
+async function seatStatus(
+  paths: FabricPaths,
+  project: string,
+  productRoot: string,
+): Promise<Array<Record<string, unknown>>> {
   const registered = new Map<string, SeatMetadata>();
   for (const seat of MCP_SEATS) {
     try {
@@ -381,13 +387,14 @@ async function seatStatus(paths: FabricPaths, project: string): Promise<Array<Re
                       peerSeat: renewalPeerSeat,
                       currentExpiresAt: value.expiresAt,
                       chairAuthorityExpiresAt,
+                      productRoot,
                     });
                     return renewal ??
                       `the provisioned roster cannot be renewed; use ${
-                        mcpBootstrapRenewalCommand(project, provisionedChairSeat ?? "codex")
+                        mcpBootstrapRenewalCommand(project, provisionedChairSeat ?? "codex", productRoot)
                       }`;
                   })()
-                : mcpBootstrapRenewalCommand(project, bootstrapChairSeat),
+                : mcpBootstrapRenewalCommand(project, bootstrapChairSeat, productRoot),
             }
           : {}),
       };
@@ -398,20 +405,20 @@ async function seatStatus(paths: FabricPaths, project: string): Promise<Array<Re
           registered: false,
           active: false,
           reason: "PEER_SEAT_NOT_PROVISIONED",
-          remedy: `"$HOME/.agents/scripts/agent-fabric" mcp peer-provision --project ${shellQuote(project)} --seat ${seat}`,
+          remedy: `${fabricCliCommand({ productRootFlag: productRoot })} mcp peer-provision --project ${shellQuote(project)} --seat ${seat}`,
         }
       : {
           seat,
           registered: false,
           active: false,
           reason: "PROJECT_NOT_BOOTSTRAPPED",
-          remedy: `cd ${shellQuote(project)} && "$HOME/.agents/scripts/agent-fabric" bootstrap --seat codex`,
+          remedy: `cd ${shellQuote(project)} && ${fabricCliCommand({ productRootFlag: productRoot })} bootstrap --seat codex`,
         };
   });
 }
 
 export async function fabricStatus(arguments_: string[], paths: FabricPaths): Promise<Record<string, unknown>> {
-  const selected = pathsFor(arguments_);
+  const selected = resolveStatusPaths(arguments_);
   const config = await loadFabricConfig({ globalPath: selected.config, agentsHome: selected.agentsHome });
   const roots = [...new Set([...config.workspaceRoots, ...await trustedWorkspaceRoots({ stateDirectory: paths.stateDirectory, executionProfile: config.executionProfile ?? "headless" })])].sort();
   const project = resolve(option(arguments_, "--project") ?? process.cwd());
@@ -423,7 +430,7 @@ export async function fabricStatus(arguments_: string[], paths: FabricPaths): Pr
     configuredAdapters: config.adapterIds,
     activeAdapters: daemon.activeAdapters,
     trustedWorkspaceRoots: roots,
-    project: { path: project, seats: await seatStatus(paths, project) },
+    project: { path: project, seats: await seatStatus(paths, project, selected.agentsHome) },
   };
 }
 
@@ -673,7 +680,7 @@ export async function fabricDoctor(
   paths: FabricPaths,
   dependencies: DoctorDependencies = {},
 ): Promise<Record<string, unknown>> {
-  const selected = pathsFor(arguments_);
+  const selected = resolveStatusPaths(arguments_);
   const consumeProviderQuota = arguments_.includes("--consume-provider-quota");
   let adapterIds: string[] = [];
   let adapterCommands: string[][] = [];
@@ -776,7 +783,7 @@ export async function fabricDoctor(
     precondition: precondition("provider-identity"),
   });
   const pinReport = await reviewProfilePins(
-    selected.agentsHome,
+    selected.instanceRoot,
     selected.reviewProfile,
     metadata.modelRouting,
     consumeProviderQuota

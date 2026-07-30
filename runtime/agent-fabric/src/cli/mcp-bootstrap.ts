@@ -22,6 +22,7 @@ import {
 } from "../core/migrations.js";
 import { defaultDaemonStartOptions } from "./default-daemon-options.js";
 import type { FabricPaths } from "./paths.js";
+import { fabricCliCommand } from "./root-resolution.js";
 import {
   installSeatGeneration,
   markLegacyBootstrapSeatGeneration,
@@ -262,7 +263,10 @@ async function looksLikeRepositoryCollection(canonicalRoot: string): Promise<boo
   return false;
 }
 
-async function workspaceTrustRecoveryMessage(canonicalRoot: string): Promise<string> {
+async function workspaceTrustRecoveryMessage(
+  canonicalRoot: string,
+  environment: NodeJS.ProcessEnv = process.env,
+): Promise<string> {
   const home = await realpath(homedir());
   if (canonicalRoot === parse(canonicalRoot).root) {
     return `Fabric bootstrap cannot proceed from ${shellQuote(canonicalRoot)}: the filesystem root can never be trusted because root-wide authority is forbidden by policy. Choose the exact repository root or current non-Git project directory instead`;
@@ -284,9 +288,9 @@ async function workspaceTrustRecoveryMessage(canonicalRoot: string): Promise<str
     return `Fabric bootstrap cannot proceed from ${shellQuote(canonicalRoot)} because it looks like a parent collection of several repositories; policy forbids trusting a parent or collection directory. Run fabric_bootstrap again from inside the specific project it actually needs`;
   }
   if (workspace !== null && workspace.root !== canonicalRoot) {
-    return `Fabric bootstrap requires the exact current project root to be trusted; run "$HOME/.agents/scripts/agent-fabric" workspace trust ${shellQuote(workspace.root)}; then retry fabric_bootstrap from ${shellQuote(workspace.root)}`;
+    return `Fabric bootstrap requires the exact current project root to be trusted; run ${fabricCliCommand({ environment })} workspace trust ${shellQuote(workspace.root)}; then retry fabric_bootstrap from ${shellQuote(workspace.root)}`;
   }
-  return `Fabric bootstrap requires the exact current project root to be trusted; run "$HOME/.agents/scripts/agent-fabric" workspace trust ${shellQuote(workspace?.root ?? canonicalRoot)}; then retry fabric_bootstrap`;
+  return `Fabric bootstrap requires the exact current project root to be trusted; run ${fabricCliCommand({ environment })} workspace trust ${shellQuote(workspace?.root ?? canonicalRoot)}; then retry fabric_bootstrap`;
 }
 
 export function isSchemaCutoverRefusal(error: unknown): boolean {
@@ -295,7 +299,11 @@ export function isSchemaCutoverRefusal(error: unknown): boolean {
     "preserved" in error && error.preserved === true;
 }
 
-export function schemaCutoverGate(databasePath: string, cause: unknown): SchemaCutoverGate {
+export function schemaCutoverGate(
+  databasePath: string,
+  cause: unknown,
+  environment: NodeJS.ProcessEnv = process.env,
+): SchemaCutoverGate {
   const inspection = inspectFabricDatabaseForCutover(databasePath);
   const mismatch = inspection.state === "incompatible"
     ? inspection.mismatch
@@ -326,7 +334,7 @@ export function schemaCutoverGate(databasePath: string, cause: unknown): SchemaC
       "Nothing is deleted: the archive keeps every source byte, and the cutover refuses if the source set changed since this report.",
       "The command asks for ARCHIVE-AND-FRESH on its controlling terminal and refuses non-interactive execution unless an explicit named-principal unattended approval assertion is supplied.",
     ],
-    command: `"$HOME/.agents/scripts/agent-fabric" database archive-and-fresh --archive ABSOLUTE_NEW_DIRECTORY` +
+    command: `${fabricCliCommand({ environment })} database archive-and-fresh --archive ABSOLUTE_NEW_DIRECTORY` +
       (sourceSetSha256 === null ? "" : ` --confirm-source-set ${sourceSetSha256}`),
     displaced: false,
   };
@@ -438,7 +446,7 @@ export async function inspectBootstrapMcpSeat(input: {
   if (seat !== "claude" && seat !== "codex") {
     throw new Error(
       `MCP bootstrap creates only chair seats claude or codex; run ` +
-      `"$HOME/.agents/scripts/agent-fabric" mcp peer-provision --project ${shellQuote(input.cwd)} --seat ${seat} instead`,
+      `${fabricCliCommand({ environment: input.environment })} mcp peer-provision --project ${shellQuote(input.cwd)} --seat ${seat} instead`,
     );
   }
   const canonicalRoot = await realpath(input.cwd);
@@ -502,7 +510,7 @@ export async function bootstrapMcpSeat(input: {
   if (seat !== "claude" && seat !== "codex") {
     throw new Error(
       `MCP bootstrap creates only chair seats claude or codex; run ` +
-      `"$HOME/.agents/scripts/agent-fabric" mcp peer-provision --project ${shellQuote(input.cwd)} --seat ${seat} instead`,
+      `${fabricCliCommand({ environment: input.environment })} mcp peer-provision --project ${shellQuote(input.cwd)} --seat ${seat} instead`,
     );
   }
   const canonicalRoot = await realpath(input.cwd);
@@ -513,7 +521,7 @@ export async function bootstrapMcpSeat(input: {
       canonicalRoot,
     });
   } catch (cause: unknown) {
-    const message = await workspaceTrustRecoveryMessage(canonicalRoot).catch(
+    const message = await workspaceTrustRecoveryMessage(canonicalRoot, input.environment).catch(
       () => `Fabric bootstrap cannot safely determine the trust boundary for ${shellQuote(canonicalRoot)}, so no trust command is suggested. Inspect the workspace and retry from the exact repository root or current non-Git project directory`,
     );
     throw new McpBootstrapError(
@@ -532,12 +540,12 @@ export async function bootstrapMcpSeat(input: {
   let daemonHandle: Awaited<ReturnType<typeof startFabricDaemon>>;
   try {
     daemonHandle = await startFabricDaemon(
-      defaultDaemonStartOptions(input.paths, input.environment.AGENTS_HOME),
+      defaultDaemonStartOptions(input.paths, { environment: input.environment }),
     );
   } catch (cause: unknown) {
     if (!isSchemaCutoverRefusal(cause)) throw cause;
     throw new McpBootstrapSchemaCutoverGateError(
-      schemaCutoverGate(input.paths.databasePath, cause),
+      schemaCutoverGate(input.paths.databasePath, cause, input.environment),
       { cause },
     );
   }

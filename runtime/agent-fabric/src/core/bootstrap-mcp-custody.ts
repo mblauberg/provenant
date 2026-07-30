@@ -4,6 +4,7 @@ import type Database from "better-sqlite3";
 import { FABRIC_OPERATIONS } from "../domain/operations.js";
 import type { AuthorityInput } from "../domain/types.js";
 import { FabricError } from "../errors.js";
+import { fabricCliCommand } from "../domain/fabric-roots.js";
 import { currentMcpSeatGeneration } from "./mcp-seat-generation.js";
 import type { BootstrapMcpSeatInput, BootstrapMcpSeatResult, CurrentMcpSeatBindingInput, CurrentMcpSeatBindingResult } from "./contracts.js";
 
@@ -82,7 +83,7 @@ export function bootstrapCurrentMcpSeat(custody: BootstrapMcpCustody, input: Boo
       throw new FabricError(
         "AUTHENTICATION_FAILED",
         `bootstrap creates only chair seats claude or codex; run ` +
-        `"$HOME/.agents/scripts/agent-fabric" mcp peer-provision ` +
+        `${fabricCliCommand()} mcp peer-provision ` +
         `--project ${shellQuote(input.canonicalRoot)} --seat ${input.seat} instead`,
       );
     }
