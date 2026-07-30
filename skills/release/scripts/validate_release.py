@@ -8,6 +8,7 @@ from datetime import datetime
 import importlib.util
 import json
 import math
+import os
 from pathlib import Path
 import re
 import shlex
@@ -15,7 +16,10 @@ import sys
 from typing import Any
 
 
-ROOT = Path(__file__).resolve().parents[3]
+PRODUCT_ROOT = Path(
+    os.environ.get("AGENT_FABRIC_PRODUCT_ROOT", Path(__file__).resolve().parents[3])
+).expanduser()
+SKILLS_ROOT = Path(__file__).resolve().parents[2]
 WINDOW_DURATION = re.compile(r"^(\d+)([smhd])$")
 GIT_OID = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -24,7 +28,7 @@ RELEASE_GIT_ARTIFACT_FIELDS = {"id", "git_revision", "acceptance_receipt"}
 
 
 def load_delivery_validator():
-    path = ROOT / "skills" / "deliver" / "scripts" / "validate_delivery.py"
+    path = SKILLS_ROOT / "deliver" / "scripts" / "validate_delivery.py"
     spec = importlib.util.spec_from_file_location("release_delivery_validator", path)
     if not spec or not spec.loader:
         raise RuntimeError("cannot load delivery validator")
@@ -190,7 +194,7 @@ def accepted_artifact_errors(
             if live_root and project_policy.get("path") else None
         )
         DELIVERY_VALIDATOR.validate(
-            delivery, ROOT, receipt_dir=receipt_path.parent,
+            delivery, PRODUCT_ROOT, receipt_dir=receipt_path.parent,
             workspace_root=live_root, project_policy_path=project_policy_path,
             verify_hashes=True,
         )
@@ -347,13 +351,15 @@ def operation_errors(
 def validate(
     receipt: dict[str, Any], gate: str, base_dir: Path | None = None,
     workspace_root: Path | None = None,
-    *, structural_only: bool = False,
+    *, structural_only: bool = False, product_root: Path = PRODUCT_ROOT,
 ) -> list[str]:
     """Validate a generic accepted-artifact promotion receipt.
 
     ``structural_only`` is for isolated policy tests. It deliberately skips the
     live accepted-delivery binding and therefore cannot certify promotion.
     """
+    global PRODUCT_ROOT
+    PRODUCT_ROOT = product_root
     errors: list[str] = []
     if receipt.get("schema_version") != 2:
         errors.append("schema_version must be 2")
@@ -677,13 +683,20 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("receipt", type=Path)
     parser.add_argument("--gate", choices=("ready", "complete"), default="ready")
     parser.add_argument("--workspace-root", type=Path, default=Path.cwd())
+    parser.add_argument("--product-root", type=Path, default=PRODUCT_ROOT)
     args = parser.parse_args(argv)
     try:
         receipt = json.loads(args.receipt.read_text())
     except (OSError, json.JSONDecodeError) as exc:
         print(f"invalid release receipt: {exc}", file=sys.stderr)
         return 2
-    errors = validate(receipt if isinstance(receipt, dict) else {}, args.gate, args.receipt.parent, args.workspace_root.resolve())
+    errors = validate(
+        receipt if isinstance(receipt, dict) else {},
+        args.gate,
+        args.receipt.parent,
+        args.workspace_root.resolve(),
+        product_root=args.product_root.resolve(),
+    )
     if errors:
         for error in errors:
             print(f"FAIL: {error}", file=sys.stderr)
