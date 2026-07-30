@@ -77,7 +77,14 @@ def run_dispatch_with_stub(
         if provenant_stub is not None:
             write_executable(bin_dir / "provenant", provenant_stub)
         out = tmp / "out.txt"
-        env = os.environ.copy()
+        # PATH precedence keeps the checkout's stubs first; stripping the
+        # fabric variables stops an inherited developer instance from
+        # steering the checkout's provenant stub at foreign roots.
+        env = {
+            key: value
+            for key, value in os.environ.items()
+            if key != "AGENTS_HOME" and not key.startswith("AGENT_FABRIC_")
+        }
         env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
         command = [
                 str(SCRIPT),
