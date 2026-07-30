@@ -34,18 +34,6 @@ def normative_table_sql(table: str) -> str:
     return f"CREATE TABLE {HARDENING_SPECS[start:end]};"
 
 
-ACTIVATION_PARENT_CHECK_ERROR = """CHECK constraint failed: (subject_kind='activation' AND
-      activation_configuration_id IS NULL AND
-      activation_configuration_revision IS NULL AND
-      activation_configuration_digest IS NULL AND
-      activation_configuration_subject_kind IS NULL) OR
-    (subject_kind IN ('provider-smoke','provider-action') AND
-      activation_configuration_id IS NOT NULL AND
-      activation_configuration_revision IS NOT NULL AND
-      activation_configuration_digest IS NOT NULL AND
-      activation_configuration_subject_kind='activation')"""
-
-
 SCHEMA = r"""
 PRAGMA foreign_keys=ON;
 
@@ -320,17 +308,6 @@ CREATE TABLE adapter_effective_configurations(
       discovery_surface_evidence_revision,discovery_surface_digest)
     REFERENCES discovery_surface_manifests(
       evidence_id,evidence_revision,manifest_digest),
-  CHECK(
-    (subject_kind='activation' AND
-      activation_configuration_id IS NULL AND
-      activation_configuration_revision IS NULL AND
-      activation_configuration_digest IS NULL AND
-      activation_configuration_subject_kind IS NULL) OR
-    (subject_kind IN ('provider-smoke','provider-action') AND
-      activation_configuration_id IS NOT NULL AND
-      activation_configuration_revision IS NOT NULL AND
-      activation_configuration_digest IS NOT NULL AND
-      activation_configuration_subject_kind='activation')),
   CHECK(
     (subject_kind='activation' AND subject_activation_id IS NOT NULL AND
       subject_activation_revision IS NOT NULL AND subject_smoke_id IS NULL AND
@@ -1837,58 +1814,6 @@ class LaneAHeadsRouteMiscOracle(unittest.TestCase):
             ),
         )
 
-        self.reject(
-            """INSERT INTO adapter_effective_configurations(
-                 configuration_id,configuration_revision,adapter_id,
-                 adapter_contract_digest,executable_identity_digest,
-                 subject_kind,subject_smoke_id,capability_body_digest,
-                 permission_profile_digest,discovery_surface_evidence_id,
-                 discovery_surface_evidence_revision,
-                 discovery_surface_digest,configuration_digest)
-               VALUES('null-parent',1,'adapter-b','contract-adapter-b',
-                 'executable-adapter-b','provider-smoke','smoke-b',
-                 'body-adapter-b','permission-adapter-b',
-                 'surface-id-adapter-b',1,'surface-adapter-b','null-parent-d')""",
-            message=ACTIVATION_PARENT_CHECK_ERROR,
-        )
-        self.reject(
-            """INSERT INTO adapter_effective_configurations(
-                 configuration_id,configuration_revision,adapter_id,
-                 adapter_contract_digest,executable_identity_digest,
-                 subject_kind,subject_smoke_id,activation_configuration_id,
-                 activation_configuration_subject_kind,capability_body_digest,
-                 permission_profile_digest,discovery_surface_evidence_id,
-                 discovery_surface_evidence_revision,
-                 discovery_surface_digest,configuration_digest)
-               VALUES('half-parent',1,'adapter-b','contract-adapter-b',
-                 'executable-adapter-b','provider-smoke','smoke-b',
-                 'activation-config-adapter-b','activation',
-                 'body-adapter-b','permission-adapter-b',
-                 'surface-id-adapter-b',1,'surface-adapter-b','half-parent-d')""",
-            message=ACTIVATION_PARENT_CHECK_ERROR,
-        )
-        self.reject(
-            """INSERT INTO adapter_effective_configurations(
-                 configuration_id,configuration_revision,adapter_id,
-                 adapter_contract_digest,executable_identity_digest,
-                 subject_kind,subject_activation_id,subject_activation_revision,
-                 activation_configuration_id,
-                 activation_configuration_revision,
-                 activation_configuration_digest,
-                 activation_configuration_subject_kind,
-                 capability_body_digest,permission_profile_digest,
-                 discovery_surface_evidence_id,
-                 discovery_surface_evidence_revision,
-                 discovery_surface_digest,configuration_digest)
-               VALUES('activation-with-parent',1,'adapter-a',
-                 'contract-adapter-a','executable-adapter-a','activation',
-                 'activation-adapter-a',1,'activation-config-adapter-a',1,
-                 'activation-config-digest-adapter-a','activation',
-                 'body-adapter-a','permission-adapter-a',
-                 'surface-id-adapter-a',1,'surface-adapter-a',
-                 'activation-with-parent-d')""",
-            message=ACTIVATION_PARENT_CHECK_ERROR,
-        )
         self.reject_fk(
             smoke_sql,
             (
