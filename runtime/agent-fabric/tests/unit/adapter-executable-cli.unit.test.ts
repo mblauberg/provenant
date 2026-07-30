@@ -62,21 +62,25 @@ describe("adapter executable resolver CLI", () => {
     expect(result).toBe(executable);
   });
 
-  it("loads configuration from the instance root and schemas from the product root", async () => {
+  it("loads shipped configuration, compatibility and schemas from the product root", async () => {
+    // ADR 0019: the shipped configuration and the compatibility policy are
+    // product-owned, so a valid split instance holds neither and this command
+    // must still resolve.
     const fixture = await createResolvedStage4Compatibility("agy");
     fixtures.push(fixture);
     const instanceRoot = join(fixture.directory, "instance");
     const productRoot = join(fixture.directory, "product");
     await Promise.all([
       mkdir(join(instanceRoot, "config"), { recursive: true }),
+      mkdir(join(productRoot, "config"), { recursive: true }),
       mkdir(join(productRoot, "runtime", "agent-fabric", "schemas"), { recursive: true }),
     ]);
     await Promise.all([
       writeFile(
-        join(instanceRoot, "config", "agent-fabric.yaml"),
+        join(productRoot, "config", "agent-fabric.yaml"),
         "schemaVersion: 1\nallowedAdapters: [agy]\nactiveAdapters: [agy]\n",
       ),
-      copyFile(fixture.compatibilityPath, join(instanceRoot, "config", "adapter-compatibility.yaml")),
+      copyFile(fixture.compatibilityPath, join(productRoot, "config", "adapter-compatibility.yaml")),
       copyFile(
         fixture.schemaPath,
         join(productRoot, "runtime", "agent-fabric", "schemas", "adapter-compatibility.schema.json"),
@@ -92,6 +96,43 @@ describe("adapter executable resolver CLI", () => {
     });
 
     expect(result).toBe(await fixtureExecutable(fixture));
+  });
+
+  it("refuses an adapter the instance layer narrowed away", async () => {
+    const fixture = await createResolvedStage4Compatibility("agy");
+    fixtures.push(fixture);
+    const instanceRoot = join(fixture.directory, "narrowing-instance");
+    const productRoot = join(fixture.directory, "narrowing-product");
+    await Promise.all([
+      mkdir(join(instanceRoot, "config"), { recursive: true }),
+      mkdir(join(productRoot, "config"), { recursive: true }),
+      mkdir(join(productRoot, "runtime", "agent-fabric", "schemas"), { recursive: true }),
+    ]);
+    await Promise.all([
+      writeFile(
+        join(productRoot, "config", "agent-fabric.yaml"),
+        "schemaVersion: 1\nallowedAdapters: [agy]\nactiveAdapters: [agy]\n",
+      ),
+      writeFile(
+        join(instanceRoot, "config", "agent-fabric.yaml"),
+        "schemaVersion: 1\nactiveAdapters: []\n",
+      ),
+      copyFile(fixture.compatibilityPath, join(productRoot, "config", "adapter-compatibility.yaml")),
+      copyFile(
+        fixture.schemaPath,
+        join(productRoot, "runtime", "agent-fabric", "schemas", "adapter-compatibility.schema.json"),
+      ),
+    ]);
+
+    // The daemon would not start this adapter, so this command must not hand
+    // back an executable for it either.
+    await expect(resolveAdapterExecutableCli([
+      "--adapter", "agy",
+      "--product-root", productRoot,
+      "--instance-root", instanceRoot,
+    ], {
+      verifyProvider: async () => ({} as never),
+    })).rejects.toMatchObject({ code: "ADAPTER_DISABLED" });
   });
 
   it("gives explicit --agents-home precedence over AGENT_FABRIC_PRODUCT_ROOT", async () => {

@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 import { verifyAdapterCompatibility } from "../adapters/compatibility.js";
@@ -55,18 +56,28 @@ export async function resolveAdapterExecutableCli(
     instanceRootFlag: parsed["--instance-root"],
   });
   const compatibilityPath = resolve(
-    parsed["--compatibility"] ?? join(instanceRoot, "config", "adapter-compatibility.yaml"),
+    parsed["--compatibility"] ?? join(productRoot, "config", "adapter-compatibility.yaml"),
   );
-  const configPath = resolve(
-    parsed["--config"] ?? join(instanceRoot, "config", "agent-fabric.yaml"),
-  );
+  const pinnedConfig = parsed["--config"];
+  const configPath = resolve(pinnedConfig ?? join(productRoot, "config", "agent-fabric.yaml"));
+  const instanceConfigPath = resolve(join(instanceRoot, "config", "agent-fabric.yaml"));
+  const localConfigPath =
+    pinnedConfig === undefined && instanceConfigPath !== configPath && existsSync(instanceConfigPath)
+      ? instanceConfigPath
+      : undefined;
   const schemaPath = resolve(
     parsed["--compatibility-schema"] ??
       join(productRoot, "runtime", "agent-fabric", "schemas", "adapter-compatibility.schema.json"),
   );
-  // #528 keeps ${AGENTS_HOME} as the product-side compatibility token. #530
-  // owns the separate instance-root token wiring for trusted workspace roots.
-  const config = await loadFabricConfig({ globalPath: configPath, agentsHome: productRoot });
+  // #528 keeps ${AGENTS_HOME} as the product-side token; ADR 0019 makes the
+  // shipped configuration and compatibility product-owned and the instance file
+  // a narrowing layer. Composing both here means this command agrees with the
+  // daemon about whether an adapter is active.
+  const config = await loadFabricConfig({
+    globalPath: configPath,
+    ...(localConfigPath === undefined ? {} : { localPath: localConfigPath }),
+    agentsHome: productRoot,
+  });
   if (!config.adapterIds.includes(adapterId)) {
     throw new FabricError("ADAPTER_DISABLED", `adapter is not active in trusted Fabric configuration: ${adapterId}`);
   }

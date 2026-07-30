@@ -398,6 +398,25 @@ so an installed target root is a sufficient import root. A whole-directory
 projection already exposes it and keeps no manifest at all.
 Provider bootstraps remain small and share the same precedence sentence.
 
+Every installed file class has one owner: a product-shipped projection, an
+instance-owned file, or a product template seeded once and instance-owned
+thereafter ([ADR 0019](adr/0019-installed-file-class-ownership.md)).
+`scripts/instance_installation.py` owns the instance side. It writes the
+path-free, committable desired state at `config/installation.json`: product
+name, version and install mode, `fused` when the instance root and product root
+are one tree. It seeds `AGENTS.md`, `config/model-preferences.json` and
+`config/model-routing.json` only when they are absent. Neither is ever
+rewritten by a later install; Git is the drift detector, so there is no
+hash-drift check and no merge. The installation receipt stays the opposite
+artifact: absolute target roots and digests for one machine, ignored and never
+committed. The same class holds `.agent-fabric/product-root.json`, the pointer
+to this machine's product checkout, rewritten on every install so that
+committed instance state never carries an absolute machine path and relocating
+the product is always a re-run of the installer. Split-layout startup binds the product root for the global
+configuration layer, the compatibility policy, the schemas and `${AGENTS_HOME}`,
+and offers the instance's own `config/agent-fabric.yaml` as the local layer of
+the existing typed narrowing-only merge.
+
 ## Project Fabric Console
 
 The Console remains a projection-only executable over the public

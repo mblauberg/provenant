@@ -177,8 +177,44 @@ function expandTrustedWorkspaceRoots(config: ConfigDocument, agentsHome: string 
   };
 }
 
+/**
+ * The instance layer selects from the product's adapters; it never defines one.
+ *
+ * ADR 0019 makes the instance layer narrowing-only, and an adapter entry is the
+ * one place a trusted layer names an executable. Overlaying a local entry would
+ * let the instance substitute the command behind an adapter the product
+ * activated, which is widening of the most consequential kind: the same adapter
+ * id, the same allow-list, a different program. Restating the product's exact
+ * entry is allowed, so an instance file may be authored as a narrowed copy of
+ * the product's.
+ */
+function rejectAdapterCommandOverride(
+  globalConfig: ConfigDocument,
+  localConfig: ConfigDocument,
+): void {
+  if (localConfig.adapters === undefined) return;
+  for (const [adapterId, entry] of Object.entries(localConfig.adapters)) {
+    const shipped = globalConfig.adapters?.[adapterId];
+    if (shipped === undefined) {
+      throw new FabricError(
+        "CONFIG_WIDENING_FORBIDDEN",
+        `local configuration introduced an adapter the product does not define: ${adapterId}`,
+        { field: `adapters.${adapterId}` },
+      );
+    }
+    if (JSON.stringify(entry) !== JSON.stringify(shipped)) {
+      throw new FabricError(
+        "CONFIG_WIDENING_FORBIDDEN",
+        `local configuration altered a product adapter command: ${adapterId}`,
+        { field: `adapters.${adapterId}.command` },
+      );
+    }
+  }
+}
+
 function mergeTrustedConfig(globalConfig: ConfigDocument, localConfig: ConfigDocument | undefined): ConfigDocument {
   if (localConfig === undefined) return globalConfig;
+  rejectAdapterCommandOverride(globalConfig, localConfig);
   const intersect = (globalValues: string[] | undefined, localValues: string[] | undefined): string[] | undefined => {
     if (globalValues === undefined) return localValues === undefined ? undefined : [];
     if (localValues === undefined) return globalValues;
@@ -204,7 +240,9 @@ function mergeTrustedConfig(globalConfig: ConfigDocument, localConfig: ConfigDoc
   return {
     ...globalConfig,
     ...localConfig,
-    adapters: { ...globalConfig.adapters, ...localConfig.adapters },
+    // The product owns the adapter map outright; the guard above has already
+    // proved the local layer neither added to it nor changed it.
+    ...(globalConfig.adapters === undefined ? {} : { adapters: globalConfig.adapters }),
     ...(allowedAdapters === undefined ? {} : { allowedAdapters }),
     ...(activeAdapters === undefined ? {} : { activeAdapters }),
     ...(allowedProfiles === undefined ? {} : { allowedProfiles }),

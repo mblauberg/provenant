@@ -1,4 +1,5 @@
 import Database from "better-sqlite3";
+import { existsSync } from "node:fs";
 import { lstat, readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import {
@@ -178,7 +179,17 @@ function generationIdentityMatches(
     && ready.socketPath === owner.socketPath;
 }
 
-export function resolveStatusPaths(arguments_: string[]): { productRoot: string; instanceRoot: string; config: string; compatibility: string; compatibilitySchema: string; modelRouting: string; reviewProfile: string } {
+/**
+ * Diagnostics compose configuration exactly as daemon startup does.
+ *
+ * `config` is the product's shipped layer and `localConfig` is the instance's
+ * narrowing layer, present only when the instance ships one and the operator
+ * has not pinned a single file with `--trusted-config` (ADR 0019). Reading one
+ * layer instead would let `status` and `doctor` report a widened policy the
+ * daemon refuses to start on, or fail on a split instance that is perfectly
+ * valid because it holds no product-owned file at all.
+ */
+export function resolveStatusPaths(arguments_: string[]): { productRoot: string; instanceRoot: string; config: string; localConfig: string | undefined; compatibility: string; compatibilitySchema: string; modelRouting: string; reviewProfile: string } {
   const agentsHomeFlag = option(arguments_, "--agents-home");
   const productRootFlag = option(arguments_, "--product-root");
   const instanceRootFlag = option(arguments_, "--instance-root");
@@ -195,15 +206,25 @@ export function resolveStatusPaths(arguments_: string[]): { productRoot: string;
     productRootFlag,
     instanceRootFlag,
   });
+  const pinnedConfig = option(arguments_, "--trusted-config");
+  const config = resolve(pinnedConfig ?? join(productRoot, "config", "agent-fabric.yaml"));
+  const instanceConfig = resolve(join(instanceRoot, "config", "agent-fabric.yaml"));
   return {
     productRoot,
     instanceRoot,
-    config: resolve(option(arguments_, "--trusted-config") ?? join(instanceRoot, "config", "agent-fabric.yaml")),
-    compatibility: resolve(option(arguments_, "--compatibility") ?? join(instanceRoot, "config", "adapter-compatibility.yaml")),
+    config,
+    localConfig:
+      pinnedConfig === undefined && instanceConfig !== config && existsSync(instanceConfig)
+        ? instanceConfig
+        : undefined,
+    compatibility: resolve(option(arguments_, "--compatibility") ?? join(productRoot, "config", "adapter-compatibility.yaml")),
     compatibilitySchema: resolve(option(arguments_, "--compatibility-schema") ?? join(productRoot, "runtime", "agent-fabric", "schemas", "adapter-compatibility.schema.json")),
     modelRouting: join(instanceRoot, "config", "model-routing.json"),
+    // Review profiles are product-shipped (ADR 0019). Resolving them under the
+    // instance made `status` and `doctor` fail deterministically on a correct
+    // split install, which simply does not hold this product-owned file.
     reviewProfile: resolve(option(arguments_, "--review-profile")
-      ?? join(instanceRoot, "config", "review-profiles", "certifying-review-four-slot-v1.json")),
+      ?? join(productRoot, "config", "review-profiles", "certifying-review-four-slot-v1.json")),
   };
 }
 
@@ -430,9 +451,14 @@ async function seatStatus(
 
 export async function fabricStatus(arguments_: string[], paths: FabricPaths): Promise<Record<string, unknown>> {
   const selected = resolveStatusPaths(arguments_);
-  // ${AGENTS_HOME} expands against the product root; instance-side config
-  // layering (localPath) is #530's scope.
-  const config = await loadFabricConfig({ globalPath: selected.config, agentsHome: selected.productRoot });
+  // ${AGENTS_HOME} expands against the product root (#528); the layering is the
+  // same composition daemon startup performs, so a widening instance file is
+  // refused here exactly as the daemon would refuse it.
+  const config = await loadFabricConfig({
+    globalPath: selected.config,
+    ...(selected.localConfig === undefined ? {} : { localPath: selected.localConfig }),
+    agentsHome: selected.productRoot,
+  });
   const roots = [...new Set([...config.workspaceRoots, ...await trustedWorkspaceRoots({ stateDirectory: paths.stateDirectory, executionProfile: config.executionProfile ?? "headless" })])].sort();
   const project = resolve(option(arguments_, "--project") ?? process.cwd());
   const daemon = await daemonState(paths);
@@ -716,7 +742,13 @@ export async function fabricDoctor(
     return "protocol dist is present and current for its build inputs";
   }));
   checks.push(await check("configuration", async () => {
-    const config = await loadFabricConfig({ globalPath: selected.config, agentsHome: selected.productRoot });
+    // Same composition as daemon startup, so this check answers the question an
+    // operator is actually asking: would the daemon accept this configuration.
+    const config = await loadFabricConfig({
+      globalPath: selected.config,
+      ...(selected.localConfig === undefined ? {} : { localPath: selected.localConfig }),
+      agentsHome: selected.productRoot,
+    });
     adapterIds = config.adapterIds;
     adapterCommands = adapterIds.map((adapterId) => config.adapterCommands[adapterId] ?? []);
   }));
@@ -796,7 +828,11 @@ export async function fabricDoctor(
     precondition: precondition("provider-identity"),
   });
   const pinReport = await reviewProfilePins(
-    selected.instanceRoot,
+    // The catalogue is product-shipped and `selected.reviewProfile` resolves
+    // under the product root, so the root this path is validated against must
+    // be the product root too. Passing the instance root made doctor reject its
+    // own resolved path with ARTIFACT_PATH_FORBIDDEN on a split install.
+    selected.productRoot,
     selected.reviewProfile,
     metadata.modelRouting,
     consumeProviderQuota

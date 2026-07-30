@@ -353,21 +353,25 @@ describe("machine status and doctor", () => {
     });
   });
 
-  it("derives instance configuration and product assets from separate roots", () => {
+  it("derives shipped policy from the product root and instance state from the instance root", () => {
+    // ADR 0019: the shipped configuration and compatibility are product-owned;
+    // model routing stays instance-owned. No instance file exists at this
+    // fixture path, so no local layer is offered.
     expect(resolveStatusPaths([
       "--product-root", "/fixture/product",
       "--instance-root", "/fixture/instance",
     ])).toEqual({
       productRoot: resolve("/fixture/product"),
       instanceRoot: resolve("/fixture/instance"),
-      config: resolve("/fixture/instance/config/agent-fabric.yaml"),
-      compatibility: resolve("/fixture/instance/config/adapter-compatibility.yaml"),
+      config: resolve("/fixture/product/config/agent-fabric.yaml"),
+      localConfig: undefined,
+      compatibility: resolve("/fixture/product/config/adapter-compatibility.yaml"),
       compatibilitySchema: resolve(
         "/fixture/product/runtime/agent-fabric/schemas/adapter-compatibility.schema.json",
       ),
       modelRouting: resolve("/fixture/instance/config/model-routing.json"),
       reviewProfile: resolve(
-        "/fixture/instance/config/review-profiles/certifying-review-four-slot-v1.json",
+        "/fixture/product/config/review-profiles/certifying-review-four-slot-v1.json",
       ),
     });
   });
@@ -2257,5 +2261,54 @@ describe("split-root remedy rendering", () => {
       }]),
     });
     expect(JSON.stringify(status)).not.toContain(instanceRoot);
+  });
+});
+
+describe("split-root review-profile catalogue", () => {
+  it("validates the product-shipped catalogue against the product root", async () => {
+    // ADR 0019 makes the catalogue product-shipped, so `resolveStatusPaths`
+    // resolves it under the product root. The root it is *validated* against
+    // has to agree: validating a product path against the instance root makes
+    // doctor reject its own resolved path with ARTIFACT_PATH_FORBIDDEN, which
+    // is a deterministic failure on every correct split install.
+    const value = await paths();
+    const fixture = await createPortableActivatedPrimaryFixture();
+    cleanup.push(fixture.directory);
+    await writeReviewProfileFixture(fixture.directory);
+    await writeReviewProfileDeploymentRecord(fixture.directory);
+
+    // A split instance holds its own model routing and none of the product's
+    // shipped policy.
+    const instanceRoot = join(dirname(value.stateDirectory), "profile-instance");
+    await mkdir(join(instanceRoot, "config"), { recursive: true });
+    await writeFile(
+      join(instanceRoot, "config", "model-routing.json"),
+      await readFile(join(fixture.directory, "config", "model-routing.json"), "utf8"),
+    );
+
+    const result = await fabricDoctor([
+      "--consume-provider-quota",
+      "--product-root", fixture.directory,
+      "--instance-root", instanceRoot,
+      "--trusted-config", fixture.configPath,
+      "--compatibility", fixture.compatibilityPath,
+      "--compatibility-schema", fixture.schemaPath,
+    ], value, {
+      preflightProtocolBuild: async () => undefined,
+      observeReviewProfilePin: async ({ providerFamily }) => ({
+        status: "observed",
+        model: providerFamily === "anthropic" ? "claude-opus-5" : "gpt-5.6-sol",
+        detail: "fixture",
+      }),
+    });
+
+    expect(result).toMatchObject({
+      reviewProfilePins: {
+        catalogueDeployment: {
+          status: "verified",
+          profile: "config/review-profiles/certifying-review-four-slot-v1.json",
+        },
+      },
+    });
   });
 });

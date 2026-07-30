@@ -134,6 +134,13 @@ case ":${PATH:-}:" in
   *) echo "warning: $provenant_bin_dir is not on PATH" >&2 ;;
 esac
 
+# Seed the instance side before projecting anything into the client home. The
+# desired state and the seeded templates are instance-owned once written (ADR
+# 0019), so this is a no-op on every install after the first. `instance_root` is
+# resolved once, above, on the contract #529 established.
+"$ROOT/scripts/instance_installation.py" seed \
+  --product-root "$ROOT" --instance-root "$instance_root" --summary
+
 mkdir -p "$platform_home"
 "$ROOT/scripts/install-skills" --target "$platform_home/skills"
 if [[ "$PLATFORM" == "claude" ]]; then
@@ -145,7 +152,41 @@ if [[ "$PLATFORM" == "codex" ]]; then
 fi
 "$ROOT/scripts/configure-agent-fabric-mcp.py" "${mcp_args[@]}"
 
-bootstrap="Read and follow \`$ROOT/AGENTS.md\` and \`$ROOT/HARNESS.md\` before making orchestration, delegation, model-routing or memory decisions. Platform/system policy and explicit user authority lead; the nearest project instruction may specialise or strengthen the global harness but may not silently broaden authority, weaken safety gates or redefine global cross-project memory policy."
+# AGENTS.md is instance-owned once seeded and HARNESS.md stays product-shipped
+# (ADR 0019), so the client reads doctrine from the instance and the harness
+# constitution from the product. In a fused layout both roots are one directory,
+# so this is the text that was always emitted.
+instance_doctrine="$instance_root/AGENTS.md"
+# Every installer before this one wrote the product path here. That text is
+# stale, not foreign, so it is migrated rather than refused: refusing it would
+# break every upgrade from a previous install. In a fused layout the two paths
+# are the same string and the migration is a byte-for-byte no-op.
+legacy_doctrine="$ROOT/AGENTS.md"
+bootstrap="Read and follow \`$instance_doctrine\` and \`$ROOT/HARNESS.md\` before making orchestration, delegation, model-routing or memory decisions. Platform/system policy and explicit user authority lead; the nearest project instruction may specialise or strengthen the global harness but may not silently broaden authority, weaken safety gates or redefine global cross-project memory policy."
+
+migrate_instructions() {
+  # Replace only the exact legacy path, leaving anything the user wrote around
+  # it untouched. Scanning left to right and never rescanning replaced text
+  # keeps this correct even when one path contains the other.
+  local temporary
+  temporary=$(mktemp "$(dirname "$instructions")/.instructions.XXXXXX")
+  if ! LEGACY_DOCTRINE="$legacy_doctrine" INSTANCE_DOCTRINE="$instance_doctrine" awk '
+    BEGIN { legacy = ENVIRON["LEGACY_DOCTRINE"]; instance = ENVIRON["INSTANCE_DOCTRINE"] }
+    {
+      out = ""; rest = $0
+      while ((at = index(rest, legacy)) > 0) {
+        out = out substr(rest, 1, at - 1) instance
+        rest = substr(rest, at + length(legacy))
+      }
+      print out rest
+    }
+  ' "$instructions" > "$temporary"; then
+    rm -f "$temporary"
+    return 1
+  fi
+  cat "$temporary" > "$instructions"
+  rm -f "$temporary"
+}
 
 if [[ ! -e "$instructions" && ! -L "$instructions" ]]; then
   {
@@ -154,10 +195,18 @@ if [[ ! -e "$instructions" && ! -L "$instructions" ]]; then
     echo "$bootstrap"
   } > "$instructions"
   echo "instructions created=$instructions"
-elif [[ -L "$instructions" && "$instructions" -ef "$ROOT/AGENTS.md" ]]; then
+elif [[ -L "$instructions" ]] && { [[ "$instructions" -ef "$instance_doctrine" ]] || [[ "$instructions" -ef "$legacy_doctrine" ]]; }; then
+  # A link the user made to either doctrine file already resolves to doctrine;
+  # repointing someone's deliberate symlink is more than an upgrade should do.
   echo "instructions existing=$instructions"
-elif grep -Fq "$ROOT/AGENTS.md" "$instructions" && grep -Fq "$ROOT/HARNESS.md" "$instructions"; then
+elif grep -Fq "$instance_doctrine" "$instructions" && grep -Fq "$ROOT/HARNESS.md" "$instructions"; then
   echo "instructions existing=$instructions"
+elif grep -Fq "$legacy_doctrine" "$instructions" && grep -Fq "$ROOT/HARNESS.md" "$instructions"; then
+  if ! migrate_instructions; then
+    echo "instructions unmigrated=$instructions" >&2
+    exit 3
+  fi
+  echo "instructions migrated=$instructions"
 else
   echo "instructions preserved=$instructions" >&2
   echo "add this line to that file:" >&2
