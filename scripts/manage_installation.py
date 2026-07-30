@@ -326,6 +326,15 @@ def _prepare_renames(
         old, new = rename["from"], rename["to"]
         if old not in managed or new not in skills:
             continue
+        # A manifest-recorded custom name stays custom-owned even while its
+        # projected link is missing, so a managed rename may never claim it.
+        if new in manifest["custom"]:
+            raise InstallError(
+                f"managed rename target {new} is a recorded custom skill: "
+                f"manually restore {new} from "
+                f"{manifest['custom'][new]['source_target']} or retire the "
+                "custom record via --custom-source before renaming onto it"
+            )
         old_destination = target / old
         new_destination = target / new
         old_source = Path(managed[old]["source_target"])

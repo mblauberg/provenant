@@ -165,6 +165,33 @@ def test_flagless_run_does_not_handoff_recorded_custom_name_to_managed(tmp_path)
     }
 
 
+def test_flagless_reconcile_rename_cannot_take_over_missing_custom_name(tmp_path):
+    source = tiny_source(tmp_path)
+    custom_source = custom_skill_source(tmp_path, "gamma")
+    target = tmp_path / "installed"
+    assert manager(
+        target, "install", source, custom_source=custom_source
+    ).returncode == 0
+    # The recorded custom projection disappears outside the harness, so the
+    # rename target looks free even though the manifest still owns the name.
+    (target / "gamma").unlink()
+    shutil.move(str(source / "alpha"), str(source / "gamma"))
+    renames = tmp_path / "renames.json"
+    renames.write_text(json.dumps({
+        "schema_version": 1, "renames": [{"from": "alpha", "to": "gamma"}],
+    }))
+
+    result = manager(target, "reconcile", source, renames)
+
+    assert result.returncode != 0
+    assert "gamma" in result.stderr
+    manifest = json.loads(manifest_for(target).read_text())
+    assert "gamma" not in manifest["managed"]
+    assert "gamma" in manifest["custom"]
+    assert not (target / "gamma").exists()
+    assert not (target / "gamma").is_symlink()
+
+
 def test_removing_instance_source_prunes_its_projected_link(tmp_path):
     target = tmp_path / "skills"
     custom_source = custom_skill_source(tmp_path)
@@ -177,6 +204,7 @@ def test_removing_instance_source_prunes_its_projected_link(tmp_path):
     assert not (target / "instance-skill").exists()
     manifest = json.loads(manifest_for(target).read_text())
     assert "instance-skill" not in manifest["managed"]
+    assert "instance-skill" not in manifest["custom"]
 
 
 def test_modified_instance_link_is_refused_instead_of_replaced(tmp_path):
