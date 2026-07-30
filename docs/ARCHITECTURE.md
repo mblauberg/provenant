@@ -392,6 +392,10 @@ claimed, overwritten or automatically removed; changed managed targets fail for
 user resolution. A staged temporary link is atomically replaced into place
 before the manifest is written; rerunning the installer reconciles any partial
 result.
+The managed catalogue is the skills plus the `skills/_shared` library they
+import. A per-entry layout links and receipt-tracks that library like any skill,
+so an installed target root is a sufficient import root. A whole-directory
+projection already exposes it and keeps no manifest at all.
 Provider bootstraps remain small and share the same precedence sentence.
 
 ## Project Fabric Console
