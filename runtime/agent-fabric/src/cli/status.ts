@@ -828,7 +828,11 @@ export async function fabricDoctor(
     precondition: precondition("provider-identity"),
   });
   const pinReport = await reviewProfilePins(
-    selected.instanceRoot,
+    // The catalogue is product-shipped and `selected.reviewProfile` resolves
+    // under the product root, so the root this path is validated against must
+    // be the product root too. Passing the instance root made doctor reject its
+    // own resolved path with ARTIFACT_PATH_FORBIDDEN on a split install.
+    selected.productRoot,
     selected.reviewProfile,
     metadata.modelRouting,
     consumeProviderQuota

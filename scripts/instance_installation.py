@@ -88,6 +88,12 @@ def write_pointer(product_root: Path, instance_root: Path) -> dict[str, Any]:
     """
     try:
         write_pointer_file(Path(instance_root), Path(product_root))
+    except InstallError:
+        raise
+    except ValueError as exc:
+        # The shared writer refuses a pointer directory that escapes the
+        # instance root; surface it as a conflict rather than a traceback.
+        raise InstallError(str(exc)) from exc
     except OSError as exc:
         raise InstallError(f"product pointer is not writable: {exc}") from exc
     document = read_pointer(instance_root)
@@ -366,15 +372,32 @@ def execute(action: str, product_root: Path, instance_root: Path) -> dict[str, A
     }
 
 
+def default_instance_root(environment: dict[str, str] | None = None) -> Path:
+    """The instance root when the caller names none.
+
+    Same precedence as `install-harness`: an explicit instance root, then the
+    agents home, then `~/.agents`. Defaulting to the product checkout instead
+    would reinstate the fused assumption whenever this runs standalone, and
+    quietly seed the product tree rather than the user's instance.
+    """
+    values = os.environ if environment is None else environment
+    for name in ("AGENT_FABRIC_INSTANCE_ROOT", "AGENTS_HOME"):
+        value = values.get(name)
+        if value:
+            return Path(value)
+    return Path.home() / ".agents"
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=("seed", "show"))
     parser.add_argument("--product-root", type=Path, default=ROOT)
-    parser.add_argument("--instance-root", type=Path, default=ROOT)
+    parser.add_argument("--instance-root", type=Path, default=None)
     parser.add_argument("--summary", action="store_true")
     args = parser.parse_args(argv)
+    instance_root = args.instance_root if args.instance_root is not None else default_instance_root()
     try:
-        result = execute(args.action, args.product_root, args.instance_root)
+        result = execute(args.action, args.product_root, instance_root)
     except (OSError, InstallError) as exc:
         print(f"conflicting: {exc}", file=sys.stderr)
         return 3
@@ -384,7 +407,7 @@ def main(argv: list[str] | None = None) -> int:
             f"instance mode={result['mode']} "
             f"desired-state={result['desired_state_state']} "
             f"seeded={created} existing={len(result['seeded']) - created} "
-            f"root={args.instance_root}"
+            f"root={instance_root}"
         )
     else:
         print(json.dumps(result, indent=2, sort_keys=True))

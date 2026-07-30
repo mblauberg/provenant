@@ -6,6 +6,7 @@ write the real `~/.agents`, `~/.claude` or `~/.codex`.
 
 from pathlib import Path
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -465,3 +466,63 @@ def test_the_installer_seeds_a_scratch_instance_root(tmp_path):
 
     assert result["desired_state"]["product"]["version"] == "0.0.1"
     assert result["mode"] == "split"
+
+
+def test_the_standalone_cli_defaults_the_instance_root_to_the_instance_not_the_product(tmp_path):
+    """Defaulting to the product checkout would reinstate the fused assumption.
+
+    Run standalone, this would otherwise seed the product tree rather than the
+    user's instance, which is exactly the confusion ADR 0019 removes.
+    """
+    home = tmp_path / "home"
+    (home / ".agents").mkdir(parents=True)
+
+    assert instance.default_instance_root({}) == Path.home() / ".agents"
+    assert instance.default_instance_root(
+        {"AGENTS_HOME": str(home / ".agents")}
+    ) == home / ".agents"
+    # An explicit instance root outranks the agents home.
+    assert instance.default_instance_root({
+        "AGENT_FABRIC_INSTANCE_ROOT": str(tmp_path / "explicit"),
+        "AGENTS_HOME": str(home / ".agents"),
+    }) == tmp_path / "explicit"
+
+
+def test_the_standalone_cli_seeds_the_environment_instance_root(tmp_path):
+    product = build_product(tmp_path)
+    instance_root = tmp_path / "env-instance"
+    instance_root.mkdir()
+    environment = {
+        **os.environ,
+        "AGENT_FABRIC_INSTANCE_ROOT": str(instance_root),
+    }
+
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), "seed", "--product-root", str(product), "--summary"],
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert f"root={instance_root}" in result.stdout
+    # The product tree is not the thing that got seeded.
+    assert (instance_root / "config" / "installation.json").is_file()
+    assert not (product / "config" / "installation.json").exists()
+
+
+def test_a_symlinked_pointer_directory_is_refused_by_the_seeder(tmp_path):
+    product = build_product(tmp_path)
+    instance_root = tmp_path / "instance"
+    instance_root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (instance_root / ".agent-fabric").symlink_to(outside, target_is_directory=True)
+
+    result = run("seed", product, instance_root)
+
+    assert result.returncode == 3
+    assert "escapes the instance root" in result.stderr
+    assert "Traceback" not in result.stderr
+    assert list(outside.iterdir()) == []

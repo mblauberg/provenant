@@ -111,14 +111,23 @@ format no matter which entry point produced it.
 
 **On the hardening around these writes.** Instance files are staged beside their
 destination and renamed into place, and the resolved parent directory is
-required to stay inside the resolved instance root. That closes a
-check-then-write window and a symlinked-parent redirection. Neither is a
-privilege boundary: an attacker able to plant a symlink or swap a directory
-inside the instance root already holds the user's own privileges on the user's
-own machine, which is the threat model [ADR
+required to stay inside the resolved instance root. The pointer writer carries
+the same containment guard, because it reaches through that parent three times
+(the `mkdir`, the `.gitignore`, and the staged pointer) and `mkdir` follows a
+symlink like any other path. Together these close a symlinked-parent
+redirection and narrow a check-then-write window.
+
+None of it is a privilege boundary. An attacker able to plant a symlink or swap
+a directory inside the instance root already holds the user's own privileges on
+the user's own machine, which is the threat model [ADR
 0001](0001-personal-first-product-compatible.md) accepts. The guards are here
 because they are cheap and because they turn a silent misdirected write into a
-loud refusal, not because anything downstream relies on them.
+loud refusal, not because anything downstream relies on them. One residual gap
+is accepted on the same grounds and recorded rather than fixed: a destination
+checked as absent can still be replaced between the check and the rename, so the
+seeder reports `existing` for a path an attacker created in that window. The
+rename cannot be redirected, so the outcome is a skipped seed, not a misdirected
+write.
 
 **Note on the two rows that both involve the installer writing a file.** They
 are not the same mechanism. The desired state is *created* by the installer as
