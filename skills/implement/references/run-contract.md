@@ -27,8 +27,12 @@ Validate from the project root:
 
 ```sh
 "${AGENTS_HOME:-$HOME/.agents}/skills/deliver/scripts/validate_delivery.py" \
-  .agent-run/<id>/RUN.json --workspace-root "$PWD" --verify-hashes
+  .agent-run/<id>/RUN.json --workspace-root "$PWD" --verify-hashes \
+  --product-root "<product-root>"
 ```
+
+Installed skill callers may export `AGENT_FABRIC_PRODUCT_ROOT` instead. An
+explicit `--product-root` takes precedence.
 
 ## Receipt portability
 
