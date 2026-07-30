@@ -89,7 +89,7 @@ describe("Fabric root resolution", () => {
       .toBe(`'/fixture/product root'"'"'s/scripts/agent-fabric'`);
   });
 
-  it("derives daemon configuration from the instance root and schemas from the product root", () => {
+  it("derives shipped daemon configuration and schemas from the product root", () => {
     const paths = {
       stateDirectory: "/fixture/state",
       runtimeDirectory: "/fixture/state/runtime",
@@ -97,6 +97,9 @@ describe("Fabric root resolution", () => {
       socketPath: "/fixture/state/runtime/fabric.sock",
     };
 
+    // ADR 0019 assigns the shipped configuration and the compatibility policy
+    // to the product; the instance contributes only a narrowing local layer,
+    // and here no such file exists, so none is offered.
     expect(defaultDaemonStartOptions(paths, {
       environment: {
         AGENT_FABRIC_PRODUCT_ROOT: "/fixture/product",
@@ -105,8 +108,8 @@ describe("Fabric root resolution", () => {
     })).toEqual({
       ...paths,
       configuration: {
-        globalConfigPath: resolve("/fixture/instance/config/agent-fabric.yaml"),
-        compatibilityPath: resolve("/fixture/instance/config/adapter-compatibility.yaml"),
+        globalConfigPath: resolve("/fixture/product/config/agent-fabric.yaml"),
+        compatibilityPath: resolve("/fixture/product/config/adapter-compatibility.yaml"),
         compatibilitySchemaPath: resolve(
           "/fixture/product/runtime/agent-fabric/schemas/adapter-compatibility.schema.json",
         ),

@@ -409,7 +409,10 @@ are one tree. It seeds `AGENTS.md`, `config/model-preferences.json` and
 rewritten by a later install; Git is the drift detector, so there is no
 hash-drift check and no merge. The installation receipt stays the opposite
 artifact: absolute target roots and digests for one machine, ignored and never
-committed. Split-layout startup binds the product root for the global
+committed. The same class holds `.agent-fabric/product-root.json`, the pointer
+to this machine's product checkout, rewritten on every install so that
+committed instance state never carries an absolute machine path and relocating
+the product is always a re-run of the installer. Split-layout startup binds the product root for the global
 configuration layer, the compatibility policy, the schemas and `${AGENTS_HOME}`,
 and offers the instance's own `config/agent-fabric.yaml` as the local layer of
 the existing typed narrowing-only merge.

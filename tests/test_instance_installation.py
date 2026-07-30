@@ -191,10 +191,77 @@ def test_seeding_never_writes_a_receipt_into_the_instance_root(tmp_path):
     }
     assert written == {
         "config/installation.json",
+        ".agent-fabric/product-root.json",
         "AGENTS.md",
         "config/model-preferences.json",
         "config/model-routing.json",
     }
+
+
+def test_the_product_path_lives_only_in_the_ignored_pointer(tmp_path):
+    """Committed instance state never carries an absolute machine path."""
+    product = build_product(tmp_path)
+    instance_root = tmp_path / "instance"
+    instance_root.mkdir()
+
+    result = seed(product, instance_root)
+
+    assert result["product_pointer"] == {
+        "schema_version": 1,
+        "product_root": str(product.resolve()),
+    }
+    pointer = instance_root / ".agent-fabric" / "product-root.json"
+    assert json.loads(pointer.read_text())["product_root"] == str(product.resolve())
+
+    committed = {
+        path
+        for path in instance_root.rglob("*")
+        if path.is_file() and ".agent-fabric" not in path.parts
+    }
+    assert committed, "the seeded instance should carry committed files"
+    for path in committed:
+        assert str(product.resolve()) not in path.read_text()
+
+
+def test_the_pointer_is_rewritten_rather_than_seeded_once(tmp_path):
+    """Relocating the product is always a re-run of the installer."""
+    product = build_product(tmp_path)
+    instance_root = tmp_path / "instance"
+    instance_root.mkdir()
+    seed(product, instance_root)
+
+    relocated = tmp_path / "relocated"
+    shutil.copytree(product, relocated)
+    result = seed(relocated, instance_root)
+
+    assert result["product_pointer"]["product_root"] == str(relocated.resolve())
+    assert instance.read_pointer(instance_root)["product_root"] == str(relocated.resolve())
+    # The committed desired state is untouched by the relocation.
+    assert result["desired_state_state"] == "existing"
+
+
+def test_the_pointer_directory_is_ignored_by_git():
+    ignored = (ROOT / ".gitignore").read_text().splitlines()
+    assert ".agent-fabric/" in ignored
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        {"schema_version": 2, "product_root": "/opt/provenant"},
+        {"schema_version": 1, "product_root": "relative/product"},
+        {"schema_version": 1, "product_root": "/opt/provenant", "extra": 1},
+    ],
+)
+def test_an_invalid_pointer_is_rejected_rather_than_trusted(tmp_path, document):
+    instance_root = tmp_path / "instance"
+    (instance_root / ".agent-fabric").mkdir(parents=True)
+    (instance_root / ".agent-fabric" / "product-root.json").write_text(
+        json.dumps(document) + "\n"
+    )
+
+    with pytest.raises(instance.InstallError, match="product pointer is invalid"):
+        instance.read_pointer(instance_root)
 
 
 def test_a_fused_layout_seeds_no_template_over_itself(tmp_path):

@@ -21,3 +21,5 @@ node_modules/
 # artifact is the path-free desired state at config/installation.json.
 .agent-harness-installation.json
 .agent-harness-workflows-installation.json
+# The pointer to this machine's product checkout, rewritten on every install.
+.agent-fabric/

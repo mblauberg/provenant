@@ -51,6 +51,15 @@ SEEDED_FILES = (
     "config/model-routing.json",
 )
 
+#: Machine-local pointer to the product checkout, in the receipt class rather
+#: than the committed one. Committed instance state never carries an absolute
+#: machine path, so the path a consumer needs lives here, is ignored, and is
+#: rewritten on every install. Relocating the product is therefore always
+#: "re-run install-harness", never an edit to a committed file or a client
+#: configuration.
+POINTER_RELATIVE = (".agent-fabric", "product-root.json")
+POINTER_SCHEMA_VERSION = 1
+
 
 class InstallError(ValueError):
     pass
@@ -58,6 +67,39 @@ class InstallError(ValueError):
 
 def desired_state_path(instance_root: Path) -> Path:
     return Path(instance_root).joinpath(*DESIRED_STATE_RELATIVE)
+
+
+def pointer_path(instance_root: Path) -> Path:
+    return Path(instance_root).joinpath(*POINTER_RELATIVE)
+
+
+def write_pointer(product_root: Path, instance_root: Path) -> dict[str, Any]:
+    """Rewrite the machine-local product pointer on every install."""
+    document = {
+        "schema_version": POINTER_SCHEMA_VERSION,
+        "product_root": str(Path(product_root).resolve()),
+    }
+    _write_json(pointer_path(instance_root), document)
+    return document
+
+
+def read_pointer(instance_root: Path) -> dict[str, Any] | None:
+    path = pointer_path(instance_root)
+    if not path.exists():
+        return None
+    try:
+        document = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        raise InstallError(f"product pointer is unreadable: {exc}") from exc
+    if (
+        not isinstance(document, dict)
+        or document.get("schema_version") != POINTER_SCHEMA_VERSION
+        or set(document) != {"schema_version", "product_root"}
+        or not isinstance(document.get("product_root"), str)
+        or not Path(document["product_root"]).is_absolute()
+    ):
+        raise InstallError("product pointer is invalid")
+    return document
 
 
 def install_mode(product_root: Path, instance_root: Path) -> str:
@@ -237,6 +279,7 @@ def execute(action: str, product_root: Path, instance_root: Path) -> dict[str, A
             "mode": install_mode(product_root, instance_root),
             "desired_state": desired,
             "desired_state_state": "existing" if desired is not None else "missing",
+            "product_pointer": read_pointer(instance_root),
             "seeded": [
                 {
                     "path": relative,
@@ -256,6 +299,7 @@ def execute(action: str, product_root: Path, instance_root: Path) -> dict[str, A
         "mode": install_mode(product_root, instance_root),
         "desired_state": desired,
         "desired_state_state": state,
+        "product_pointer": write_pointer(product_root, instance_root),
         "seeded": seed_instance_files(product_root, instance_root),
     }
 

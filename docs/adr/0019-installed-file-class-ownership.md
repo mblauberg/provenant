@@ -64,6 +64,18 @@ and is never committed anywhere.
 | desired state (product version, mode) | instance-owned, committed |
 | installation receipts, generated `skills/` projection, client links | machine-local, ignored |
 
+The machine-local, ignored class in the last row also holds the product
+pointer, `<instance root>/.agent-fabric/product-root.json`: a schema-versioned
+file carrying the absolute path of this machine's product checkout, written by
+`install-harness` on every install.
+
+That pointer exists to keep one invariant absolute. **Committed instance state
+never contains an absolute machine path.** The path a consumer needs is real and
+has to live somewhere, so it lives in the receipt class, where it is ignored and
+regenerated. Relocating the product is therefore always "re-run
+`install-harness`", never an edit to a committed file and never an edit to a
+client configuration.
+
 That table is the decision. The three owners mean:
 
 **Product-shipped projection.** The product repository is the only writer. The
@@ -114,18 +126,20 @@ home-relative path; that is enforced on write and on read, not merely
 documented.
 
 The consequence readers should not miss: a path-free file cannot tell a
-consumer where the product is. It tells them the mode, and in `fused` mode the
-product root is the instance root. In `split` mode the product root is not
-derivable from this file and must come from `--product-root` or
-`AGENT_FABRIC_PRODUCT_ROOT`. Any consumer resolving a product root reads the
-mode and then the environment, in that order.
+consumer where the product is. It carries intent, not location. Location comes
+from the machine-local product pointer described above, and the resolution order
+a consumer uses is:
 
-That is the read contract this file offers, and it refines rather than replaces
-the provisional chain the relocation-safe MCP shim already uses
-(`AGENT_FABRIC_PRODUCT_ROOT`, then `AGENTS_HOME`, then `~/.agents`; [issue
-#529](https://github.com/mblauberg/provenant/issues/529)). A consumer that reads
-this file first can answer `fused` without consulting the environment at all,
-and falls back to that same chain for `split`.
+1. `AGENT_FABRIC_PRODUCT_ROOT` in the environment, or an explicit
+   `--product-root`;
+2. `<instance root>/.agent-fabric/product-root.json`;
+3. `AGENTS_HOME` in the environment;
+4. `~/.agents`.
+
+That is the contract the relocation-safe MCP shim resolves against ([issue
+#529](https://github.com/mblauberg/provenant/issues/529)), and it is why a
+relocated product needs no client-configuration rewrite: only step 2 moved, and
+`install-harness` rewrote it.
 
 *The installation receipt* is machine-local: it records the absolute target
 root, per-entry source paths, content digests and install timestamps for what
@@ -160,9 +174,10 @@ precisely the state the seeded-once rule refuses to keep.
 The installer now writes the desired-state file when it is absent and leaves it
 alone forever after, seeds `AGENTS.md`, `config/model-preferences.json` and
 `config/model-routing.json` into the instance root only when they are absent,
-and continues to write its receipt outside the instance repository.
-`.gitignore` names both receipt files so that a receipt landing inside an
-instance tree cannot be committed by accident.
+rewrites the machine-local product pointer on every run, and continues to write
+its receipt outside the instance repository. `.gitignore` names both receipt
+files and the `.agent-fabric/` pointer directory, so nothing in the receipt
+class can be committed by accident.
 
 Split-layout startup binds the product root for the global config layer,
 `adapter-compatibility.yaml`, the compatibility schema and the `${AGENTS_HOME}`
