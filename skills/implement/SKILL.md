@@ -19,7 +19,7 @@ Require:
 If missing, use `scope`; never infer owner decisions.
 
 For active service or safety impact, user-approved containment may parallelise
-verification and review. Gates and authority still apply; name a
+verification and review. Gates and authority apply; name a
 reconciliation run.
 
 ## Loop
@@ -32,8 +32,9 @@ reconciliation run.
    for behaviour-preserving structure and `diagnose` for unknown causes.
    Migrations may need behaviour tests and equivalence evidence. Use
    `orchestrate` when decomposition helps; adapt topology inside authority.
-   For a version-sensitive external interface, apply
-   [source grounding](references/source-grounding.md).
+   For a version-sensitive external interface or migration, apply
+   [source grounding](references/source-grounding.md) and
+   [migration compatibility](references/migration-compatibility.md).
 3. Run deterministic checks; map each criterion to evidence. When required, run
    `evaluate` and attach its passing receipt.
 4. Invoke read-only `code-review` under the current `HARNESS.md` risk ladder.

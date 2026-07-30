@@ -16,37 +16,39 @@ explicit user approval. If intent is unsettled, use `scope`.
 
 Select base profile from `config/delivery-profiles.json`: `software`,
 `research`, `analysis`, `document` or `agent-product`. Add high-stakes
-overlay when source authority or privacy matters.
+overlay when source authority, privacy or qualified review matters. Projects
+strengthen, never weaken gates. Use explicit independent
+`not_applicable` form for fabric_relationships rather than inventing.
 
 ## Lifecycle
 
 1. Create `.agent-run/<id>/RUN.json` from `templates/RUN.template.json` and
-   bind intent, design and authority by digest. For coordinated projects, bind
+   bind intent, design and authority by digest. When coordinated, bind
    `fabric_relationships` to project session, coordination run and workstream
    IDs per [the receipt contract](references/contract.md).
 2. Record each state transition. No state may jump an approval, evidence,
    review, acceptance or release gate.
-3. Execute through relevant skills. Software routes through
-   `implement`; stochastic behaviour through `evaluate`; failures use
-   `diagnose`; substantial parallel work may use `orchestrate`.
+3. Execute through relevant skills. Software routes through `implement`;
+   stochastic behaviour through `evaluate`; failures use `diagnose`;
+   substantial parallel work uses `orchestrate`.
 4. Produce profile-required deterministic evidence before judgement evidence.
    Every gate links to a typed artifact or receipt. At acceptance, a stochastic
    gate must bind and hash-verify a passing canonical `evaluation-run` receipt;
    copied scores or sampling metadata are not evidence. Retain failed or
    incomplete evaluation receipts as non-gating history.
-5. Review independently with lenses selected from the dependency cone.
+5. Review independently with lenses from the dependency cone.
    Substantial+ follows `HARNESS.md`: targeted lenses plus the other primary;
-   distinct-family review is used when available, with terminal pressure made
+   distinct-family review when available, with terminal pressure made
    stronger and skipped optional legs recorded.
-6. Repair under a scaled budget per risk tier; see `references/run-contract.md`. Scope/design drift returns to the user gate.
+6. Repair under a risk-tier scaled budget; see `../implement/references/run-contract.md`. Scope/design drift returns to the user gate.
 7. Validate from the project root with
    `"${AGENTS_HOME:-$HOME/.agents}/skills/deliver/scripts/validate_delivery.py"
-   .agent-run/<id>/RUN.json --workspace-root "$PWD" --verify-hashes` (plus a
+   .agent-run/<id>/RUN.json --workspace-root "$PWD" --verify-hashes` (plus
    digest-bound `--project-policy` when used).
    `awaiting_acceptance` is machine-ready, not complete.
 8. User acceptance and external release are separate. Define observation
    before release; close only after its evidence window passes. Feed incidents
-   and recurrence into `retrospect` and the next scoped cycle.
+   into `retrospect`.
 
 ## Boundaries
 
