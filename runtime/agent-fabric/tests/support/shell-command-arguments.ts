@@ -15,7 +15,12 @@ export async function shellCommandArguments(command: string, temporaryRoot: stri
     "",
   ].join("\n"));
   await chmod(script, 0o700);
-  const { stdout } = await execFileAsync("/bin/sh", ["-c", command], {
+  const quotedExecutable = /'(?:[^']|'"'"')*\/scripts\/agent-fabric'/u;
+  const executable = command.match(quotedExecutable)?.[0];
+  const rewritten = executable === undefined
+    ? command
+    : command.replace(executable, JSON.stringify(script));
+  const { stdout } = await execFileAsync("/bin/sh", ["-c", rewritten], {
     env: { ...process.env, HOME: home },
   });
   const parsed: unknown = JSON.parse(stdout);

@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "requirement": "F-033",
-  "allowed_edge_count": 132,
+  "allowed_edge_count": 133,
   "allowed_edges": [
     {
       "from": "adapters",
@@ -346,6 +346,10 @@
     {
       "from": "mcp",
       "to": "cli"
+    },
+    {
+      "from": "mcp",
+      "to": "domain"
     },
     {
       "from": "operator",

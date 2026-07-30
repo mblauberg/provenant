@@ -14,6 +14,7 @@ import {
   mcpRosterRenewalCommand,
   readChairAuthorityExpiresAt,
 } from "../cli/mcp-roster-renewal.js";
+import { fabricCliCommand, resolveFabricRoots } from "../domain/fabric-roots.js";
 
 const CAPABILITY_PATTERN = /^af[bc]_[A-Za-z0-9_-]{43}$/u;
 const MCP_SEAT_RENEWAL_WINDOW_MS = 60 * 60 * 1_000;
@@ -155,6 +156,7 @@ async function resolveProjectSeatFile(
   if (configuredProject !== undefined && !isAbsolute(configuredProject)) {
     throw new Error("agent fabric MCP project path must be absolute");
   }
+  const { productRoot } = resolveFabricRoots({ environment });
   let candidate = await realpath(resolve(configuredProject ?? cwd));
   for (;;) {
     try {
@@ -227,14 +229,15 @@ async function resolveProjectSeatFile(
               peerSeat: route.peerSeat,
               currentExpiresAt: metadata.expiresAt,
               chairAuthorityExpiresAt,
+              productRoot,
             });
         warn(
           `agent fabric MCP seat ${seat} expires at ${metadata.expiresAt}; ${
             route.kind === "bootstrap"
-              ? `renew the full roster with ${mcpBootstrapRenewalCommand(candidate, route.chairSeat)}`
+              ? `renew the full roster with ${mcpBootstrapRenewalCommand(candidate, route.chairSeat, productRoot)}`
               : renewal === null
                 ? `the provisioned roster cannot be renewed; use ${
-                    mcpBootstrapRenewalCommand(candidate, route.chairSeat)
+                    mcpBootstrapRenewalCommand(candidate, route.chairSeat, productRoot)
                   }`
                 : `renew the full roster with ${renewal}`
           }`,
@@ -253,7 +256,7 @@ async function resolveProjectSeatFile(
     seat === "claude" || seat === "codex"
       ? detail
       : `${detail}; provision the peer seat with ` +
-        `"$HOME/.agents/scripts/agent-fabric" mcp peer-provision --project ${shellQuote(cwd)} --seat ${seat}`,
+        `${fabricCliCommand({ productRootFlag: productRoot })} mcp peer-provision --project ${shellQuote(cwd)} --seat ${seat}`,
   );
 }
 

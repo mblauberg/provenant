@@ -20,8 +20,9 @@ export type DaemonBootstrapEnvironment = {
   daemonInstanceGeneration: number;
 };
 
-type DaemonChildStartOptions = {
+export type DaemonChildStartOptions = {
   databasePath: string;
+  productRoot: string;
   stateDirectory: string;
   runtimeDirectory: string;
   socketPath: string;
@@ -47,7 +48,7 @@ export type SpawnedDaemonChild = {
   terminate(): Promise<void>;
 };
 
-function childEnvironment(
+export function childEnvironment(
   options: DaemonChildStartOptions,
   bootstrapCapability: string,
   lockPaths: string[],
@@ -56,6 +57,7 @@ function childEnvironment(
 ): NodeJS.ProcessEnv {
   const environment: NodeJS.ProcessEnv = {
     AGENT_FABRIC_DATABASE_PATH: options.databasePath,
+    AGENT_FABRIC_PRODUCT_ROOT: options.productRoot,
     AGENT_FABRIC_SOCKET_PATH: options.socketPath,
     AGENT_FABRIC_STATE_DIRECTORY: options.stateDirectory,
     AGENT_FABRIC_RUNTIME_DIRECTORY: options.runtimeDirectory,

@@ -5,6 +5,7 @@ import { lstat, open } from "node:fs/promises";
 
 import { readStoredAuthority } from "../authority/stored-authority.js";
 import { connectFabricDaemon } from "../daemon/client.js";
+import { resolveFabricRoots } from "../domain/fabric-roots.js";
 import type { AuthorityInput } from "../domain/types.js";
 import {
   bindProvisionedSeatRoster,
@@ -209,6 +210,7 @@ async function installedOriginKinds(
   project: string,
   chairSeat: McpSeat,
   roster: InstalledSeat[],
+  productRoot: string,
 ): Promise<Partial<Record<McpSeat, NonNullable<SeatMetadata["originKind"]>>>> {
   const legacyBootstrapGeneration = await readLegacyBootstrapSeatGeneration({
     stateDirectory: paths.stateDirectory,
@@ -230,7 +232,7 @@ async function installedOriginKinds(
     }
     throw new Error(
       `mcp peer-provision cannot rebind ${project} because seat ${metadata.seat} origin is unknown; ` +
-      `repair the bootstrap-managed roster with ${mcpBootstrapRenewalCommand(project, chairSeat)}`,
+      `repair the bootstrap-managed roster with ${mcpBootstrapRenewalCommand(project, chairSeat, productRoot)}`,
     );
   }
   return originKinds;
@@ -240,11 +242,12 @@ function assertProvisionedRenewal(
   project: string,
   chairSeat: McpSeat,
   originKinds: Partial<Record<McpSeat, NonNullable<SeatMetadata["originKind"]>>>,
+  productRoot: string,
 ): void {
   if (Object.values(originKinds).includes("bootstrap")) {
     throw new Error(
       `mcp peer-provision refuses to renew the bootstrap-managed roster for ${project}; ` +
-      `use ${mcpBootstrapRenewalCommand(project, chairSeat)}`,
+      `use ${mcpBootstrapRenewalCommand(project, chairSeat, productRoot)}`,
     );
   }
 }
@@ -281,6 +284,7 @@ export async function provisionMcpPeerSeats(
   arguments_: string[],
   paths: FabricPaths,
 ): Promise<McpProvisionOutput> {
+  const { productRoot } = resolveFabricRoots({});
   const request = parseMcpPeerProvisionArguments(arguments_);
   const initialRoster = await installedRoster(paths, request.project);
   const initialChair = initialRoster.find((member) => member.metadata.role === "chair");
@@ -299,12 +303,14 @@ export async function provisionMcpPeerSeats(
     initialChair.metadata.projectPath,
     initialChair.metadata.seat,
     initialRoster,
+    productRoot,
   );
   if (request.expiresAt !== undefined) {
     assertProvisionedRenewal(
       initialChair.metadata.projectPath,
       initialChair.metadata.seat,
       initialOriginKinds,
+      productRoot,
     );
   }
   const daemonHandle = await startMcpProvisionDaemon(paths);
@@ -330,12 +336,14 @@ export async function provisionMcpPeerSeats(
           chair.metadata.projectPath,
           chair.metadata.seat,
           roster,
+          productRoot,
         );
         if (request.expiresAt !== undefined) {
           assertProvisionedRenewal(
             chair.metadata.projectPath,
             chair.metadata.seat,
             currentOriginKinds,
+            productRoot,
           );
         }
 

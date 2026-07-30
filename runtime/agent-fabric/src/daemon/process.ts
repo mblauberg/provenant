@@ -126,6 +126,7 @@ function localAuthenticatedSubjectHash(key: string): `sha256:${string}` {
 }
 
 const databasePath = process.env.AGENT_FABRIC_DATABASE_PATH;
+const productRoot = process.env.AGENT_FABRIC_PRODUCT_ROOT;
 const socketPath = process.env.AGENT_FABRIC_SOCKET_PATH;
 const stateDirectory = process.env.AGENT_FABRIC_STATE_DIRECTORY;
 const runtimeDirectory = process.env.AGENT_FABRIC_RUNTIME_DIRECTORY;
@@ -161,6 +162,7 @@ const daemonInstanceGeneration = Number(daemonInstanceGenerationValue);
 
 if (
   databasePath === undefined ||
+  productRoot === undefined ||
   socketPath === undefined ||
   stateDirectory === undefined ||
   runtimeDirectory === undefined ||
@@ -318,6 +320,7 @@ const fabric = await (async () => {
         });
     opened = await openFabric({
       databasePath,
+      productRoot,
       fabricSocketPath: socketPath,
       capabilityKey,
       executionProfile,
@@ -441,7 +444,7 @@ const servePrivateControlConnection = (socket: Socket): void => {
         case "bindCurrentMcpSeats":
           return fabric.bindCurrentMcpSeats(bindCurrentMcpSeatsInput(request.params));
         case "bootstrapMcpSeat": {
-          const bootstrapInput = bootstrapMcpSeatInput(request.params);
+          const bootstrapInput = bootstrapMcpSeatInput(request.params, productRoot);
           const trustedInput = await withTrustedLocalSubject(bootstrapInput);
           return fabric.bootstrapTrustedCurrentMcpSeat(bootstrapInput, {
             canonicalRoot: trustedInput.canonicalRoot,

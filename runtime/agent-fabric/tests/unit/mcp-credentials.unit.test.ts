@@ -153,8 +153,9 @@ describe("MCP capability loading", () => {
     await expect(resolveMcpCapability({
       AGENT_FABRIC_SEAT: "agy",
       AGENT_FABRIC_STATE_DIRECTORY: stateDirectory,
+      AGENT_FABRIC_PRODUCT_ROOT: directory,
     }, project)).rejects.toThrow(
-      `"$HOME/.agents/scripts/agent-fabric" mcp peer-provision --project '${project}' --seat agy`,
+      `'${directory}/scripts/agent-fabric' mcp peer-provision --project '${project}' --seat agy`,
     );
   });
 
@@ -188,7 +189,11 @@ describe("MCP capability loading", () => {
       credentialPath,
       expiresAt,
     });
-    const environment = { AGENT_FABRIC_SEAT: "codex", AGENT_FABRIC_STATE_DIRECTORY: stateDirectory };
+    const environment = {
+      AGENT_FABRIC_SEAT: "codex",
+      AGENT_FABRIC_STATE_DIRECTORY: stateDirectory,
+      AGENT_FABRIC_PRODUCT_ROOT: directory,
+    };
     for (const expiresAt of [
       new Date(Date.now() + 30 * 60 * 1_000).toISOString(),
       new Date(Date.now() - 1_000).toISOString(),
@@ -353,7 +358,11 @@ describe("MCP capability loading", () => {
       credentialPath,
       expiresAt,
     });
-    const environment = { AGENT_FABRIC_SEAT: "codex", AGENT_FABRIC_STATE_DIRECTORY: stateDirectory };
+    const environment = {
+      AGENT_FABRIC_SEAT: "codex",
+      AGENT_FABRIC_STATE_DIRECTORY: stateDirectory,
+      AGENT_FABRIC_PRODUCT_ROOT: directory,
+    };
     const renew = vi.fn(async () => undefined);
     const warn = vi.fn();
     const expiringAt = new Date(Date.now() + 30 * 60 * 1_000).toISOString();
@@ -370,12 +379,12 @@ describe("MCP capability loading", () => {
     await expect(resolveRenewableMcpCapability(environment, projectPath, renew, warn)).resolves.toMatch(/^afc_/u);
     expect(renew).not.toHaveBeenCalled();
     expect(warn).toHaveBeenCalledWith(expect.stringContaining(
-      `"$HOME/.agents/scripts/agent-fabric" mcp peer-provision --project '${projectPath}' ` +
+      `'${directory}/scripts/agent-fabric' mcp peer-provision --project '${projectPath}' ` +
       "--seat agy --expires-at ",
     ));
     const warning = warn.mock.calls[0]?.[0];
     expect(typeof warning).toBe("string");
-    const command = String(warning).slice(String(warning).indexOf(`"$HOME/.agents/scripts/agent-fabric"`));
+    const command = String(warning).split("renew the full roster with ")[1] ?? "";
     const commandArguments = await shellCommandArguments(command, directory);
     expect(commandArguments.slice(0, 2)).toEqual(["mcp", "peer-provision"]);
     expect(parseMcpPeerProvisionArguments(commandArguments.slice(2))).toEqual({
