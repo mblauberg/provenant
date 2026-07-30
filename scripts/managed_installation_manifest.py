@@ -15,6 +15,14 @@ from typing import Any
 MANIFEST_NAME = ".agent-harness-installation.json"
 SKILL_NAME = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
+# Shared library directories sit beside the skills, carry no SKILL.md and are
+# never renamed through the skill rename registry, so they keep their own name.
+SHARED_NAMES = ("_shared",)
+
+
+def is_managed_name(name: str) -> bool:
+    """Managed entries are the skills plus the shared libraries beside them."""
+    return name in SHARED_NAMES or bool(SKILL_NAME.fullmatch(name))
 
 
 class InstallError(ValueError):
@@ -82,7 +90,7 @@ def load_manifest(target: Path) -> dict[str, Any]:
         raise InstallError("installation manifest belongs to a different target root")
     required_entry = {"owner", "source_target", "source_sha256", "installed_at", "history"}
     for name, item in data["managed"].items():
-        if not isinstance(name, str) or not SKILL_NAME.fullmatch(name):
+        if not isinstance(name, str) or not is_managed_name(name):
             raise InstallError("installation manifest contains an invalid skill name")
         if (
             not isinstance(item, dict)

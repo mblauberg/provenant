@@ -2,6 +2,7 @@ from pathlib import Path
 import json
 import shutil
 import subprocess
+import sys
 
 import pytest
 
@@ -9,6 +10,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "install-skills"
 MANAGER = ROOT / "scripts" / "manage_installation.py"
+SHARED = "_shared"
 
 
 def run(target: Path):
@@ -22,11 +24,16 @@ def run(target: Path):
     )
 
 
+def catalogue_names():
+    """Skills plus the shared library every per-entry layout must also carry."""
+    return {path.parent.name for path in (ROOT / "skills").glob("*/SKILL.md")} | {SHARED}
+
+
 def test_installer_links_every_skill_and_is_idempotent(tmp_path):
     target = tmp_path / "skills"
     first = run(target)
     assert first.returncode == 0, first.stderr
-    expected = {path.parent.name for path in (ROOT / "skills").glob("*/SKILL.md")}
+    expected = catalogue_names()
     assert {path.name for path in target.iterdir()} == expected
     assert all((target / name).is_symlink() for name in expected)
     assert f"linked={len(expected)} existing=0" in first.stdout
@@ -135,8 +142,113 @@ def test_directory_symlink_to_canonical_skills_is_preserved_without_manifest(tmp
     assert target.is_symlink()
     assert target.resolve() == fixture_root / "skills"
     assert "skills existing=" in result.stdout
+    # The projection exposes the shared library with the skills, so this layout
+    # owns no per-entry manifest row for it.
+    assert (target / SHARED / "review_ladder.py").is_file()
     assert not (fixture_root / ".agent-harness-installation.json").exists()
     assert not (platform_home / ".agent-harness-installation.json").exists()
+
+
+def test_per_entry_layout_installs_and_tracks_the_shared_library(tmp_path):
+    target = tmp_path / "skills"
+    assert run(target).returncode == 0
+
+    link = target / SHARED
+    assert link.is_symlink()
+    assert link.resolve() == (ROOT / "skills" / SHARED).resolve()
+    entry = json.loads(manifest_for(target).read_text())["managed"][SHARED]
+    assert entry["owner"] == "agent-harness"
+    assert entry["source_target"] == str((ROOT / "skills" / SHARED).resolve())
+    assert len(entry["source_sha256"]) == 64
+
+
+def test_check_fails_on_a_missing_shared_library_and_install_repairs_it(tmp_path):
+    target = tmp_path / "skills"
+    assert run(target).returncode == 0
+    (target / SHARED).unlink()
+
+    missing = manager(target, "check")
+
+    assert missing.returncode == 3
+    report = json.loads(missing.stdout)
+    assert {item["name"]: item["state"] for item in report["items"]}[SHARED] == "missing"
+
+    assert run(target).returncode == 0
+    assert (target / SHARED).resolve() == (ROOT / "skills" / SHARED).resolve()
+
+
+def test_stale_shared_library_content_is_relinked_and_redigested(tmp_path):
+    source = tiny_source(tmp_path)
+    shared = source / SHARED
+    shared.mkdir()
+    (shared / "review_ladder.py").write_text("VALUE = 1\n")
+    target = tmp_path / "installed"
+    assert manager(target, "install", source).returncode == 0
+    first = json.loads(manifest_for(target).read_text())["managed"][SHARED]
+
+    (shared / "review_ladder.py").write_text("VALUE = 2\n")
+    plan = json.loads(manager(target, "plan", source).stdout)
+    assert {item["name"]: item["state"] for item in plan["items"]}[SHARED] == "stale"
+
+    assert manager(target, "install", source).returncode == 0
+    second = json.loads(manifest_for(target).read_text())["managed"][SHARED]
+    assert second["source_sha256"] != first["source_sha256"]
+
+
+def test_uninstall_managed_reclaims_the_shared_library(tmp_path):
+    target = tmp_path / "skills"
+    assert run(target).returncode == 0
+
+    result = manager(target, "uninstall-managed")
+
+    assert result.returncode == 0, result.stderr
+    assert not (target / SHARED).exists()
+    assert json.loads(manifest_for(target).read_text())["managed"] == {}
+
+
+def test_installed_per_entry_layout_is_a_sufficient_import_root_for_shared(tmp_path):
+    target = tmp_path / "skills"
+    assert run(target).returncode == 0
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys; sys.path.insert(0, sys.argv[1]);"
+            " import _shared.review_ladder, _shared.review_panel;"
+            " print(_shared.review_ladder.__file__)",
+            str(target),
+        ],
+        cwd=tmp_path,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip().startswith(str(target))
+
+
+@pytest.mark.parametrize(
+    "consumer",
+    ["orchestrate/scripts/run_dir_finalize.py", "deliver/scripts/validate_delivery.py"],
+)
+def test_known_shared_consumers_execute_from_the_installed_layout(tmp_path, consumer):
+    target = tmp_path / "skills"
+    assert run(target).returncode == 0
+
+    result = subprocess.run(
+        [sys.executable, str(target / consumer), "--help"],
+        cwd=tmp_path,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "usage:" in result.stdout
 
 
 def test_installer_requires_a_target():

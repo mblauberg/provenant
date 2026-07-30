@@ -85,6 +85,11 @@ def expected_skills():
     return {path.parent.name for path in (ROOT / "skills").glob("*/SKILL.md")}
 
 
+def expected_installed_entries():
+    """A per-entry layout carries the skills plus the shared library they import."""
+    return expected_skills() | {"_shared"}
+
+
 def _ambient_skill_names(texts, available):
     code_words = set()
     singleton_code_names = set()
@@ -136,7 +141,7 @@ def test_installs_claude_skills_and_global_instructions_idempotently(tmp_path):
     command = bin_dir / "provenant"
     assert command.is_symlink()
     assert command.resolve() == ROOT / "scripts" / "provenant"
-    assert {path.name for path in (config / "skills").iterdir()} == expected_skills()
+    assert {path.name for path in (config / "skills").iterdir()} == expected_installed_entries()
     workflows = config / "workflows"
     assert {path.name for path in workflows.iterdir()} == WORKFLOW_NAMES
     for name in WORKFLOW_NAMES:
@@ -176,7 +181,7 @@ def test_installs_codex_skills_and_global_instructions(tmp_path):
     codex_config.write_text("[custom]\nvalue = 'preserved'\n")
     result = run("codex", tmp_path, CODEX_HOME=str(config))
     assert result.returncode == 0, result.stderr
-    assert {path.name for path in (config / "skills").iterdir()} == expected_skills()
+    assert {path.name for path in (config / "skills").iterdir()} == expected_installed_entries()
     assert not (tmp_path / ".claude" / "workflows").exists()
     assert not (config / "workflows").exists()
     assert not (config / ".agent-harness-workflows-installation.json").exists()
@@ -445,7 +450,7 @@ def test_ambient_skill_names_resolve_on_both_installed_platform_layouts(
 
     installed_root = config / "skills"
     installed_names = {path.name for path in installed_root.iterdir()}
-    assert installed_names == expected_skills()
+    assert installed_names == expected_installed_entries()
     resolver_root = Path(
         resolver_template.replace("$HOME", str(home)).replace("<name>/", "")
     )
@@ -549,7 +554,7 @@ def test_codex_skill_override_preserves_symlinked_config(tmp_path):
     assert result.returncode == 0, result.stderr
     assert codex_config.is_symlink()
     assert target.read_text().count('name = "skill-creator"') == 1
-    assert {path.name for path in (config / "skills").iterdir()} == expected_skills()
+    assert {path.name for path in (config / "skills").iterdir()} == expected_installed_entries()
 
 
 # A discriminating payload: CRLF line endings and no trailing newline. Any
@@ -572,7 +577,7 @@ def test_preserves_existing_instructions_and_prints_merge_line(tmp_path):
     assert "instructions preserved=" in result.stderr
     assert str(ROOT / "AGENTS.md") in result.stderr
     assert str(ROOT / "HARNESS.md") in result.stderr
-    assert {path.name for path in (config / "skills").iterdir()} == expected_skills()
+    assert {path.name for path in (config / "skills").iterdir()} == expected_installed_entries()
 
 
 def test_preserves_existing_codex_instructions_and_prints_merge_line(tmp_path):
@@ -590,7 +595,7 @@ def test_preserves_existing_codex_instructions_and_prints_merge_line(tmp_path):
     assert "instructions preserved=" in result.stderr
     assert str(ROOT / "AGENTS.md") in result.stderr
     assert str(ROOT / "HARNESS.md") in result.stderr
-    assert {path.name for path in (config / "skills").iterdir()} == expected_skills()
+    assert {path.name for path in (config / "skills").iterdir()} == expected_installed_entries()
 
 
 def test_accepts_claude_instruction_symlink_to_canonical_agents_file(tmp_path):

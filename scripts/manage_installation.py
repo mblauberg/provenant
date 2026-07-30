@@ -21,6 +21,7 @@ except ModuleNotFoundError as exc:
 
 ROOT = Path(__file__).resolve().parents[1]
 SKILL_NAME = manifest_io.SKILL_NAME
+SHARED_NAMES = manifest_io.SHARED_NAMES
 InstallError = manifest_io.InstallError
 _now = manifest_io.now
 _sha_skill = manifest_io.sha_skill
@@ -43,6 +44,24 @@ def _skills(source: Path) -> dict[str, Path]:
     if any(not SKILL_NAME.fullmatch(name) for name in skills):
         raise InstallError("source contains an invalid skill name")
     return skills
+
+
+def _shared(source: Path) -> dict[str, Path]:
+    """Report shared libraries the skills import; they carry no SKILL.md."""
+    return {
+        name: (source / name).resolve()
+        for name in SHARED_NAMES
+        if (source / name).is_dir() and not (source / name).is_symlink()
+    }
+
+
+def _catalogue(source: Path) -> dict[str, Path]:
+    """Every directory a per-entry installation owns: skills and shared libraries.
+
+    A whole-directory projection exposes both without a manifest, so the
+    catalogue only drives per-entry layouts.
+    """
+    return {**_skills(source), **_shared(source)}
 
 
 def _same_link(destination: Path, source: Path) -> bool:
@@ -79,10 +98,10 @@ def _plan(
     target: Path,
     manifest: dict[str, Any],
 ) -> list[dict[str, str]]:
-    skills = _skills(source)
+    catalogue = _catalogue(source)
     managed = manifest["managed"]
     items: list[dict[str, str]] = []
-    for name, source_path in skills.items():
+    for name, source_path in catalogue.items():
         destination = target / name
         entry = managed.get(name)
         if entry is None:
@@ -96,7 +115,7 @@ def _plan(
         else:
             state = "conflicting"
         items.append({"name": name, "state": state})
-    for name in sorted(set(managed) - set(skills)):
+    for name in sorted(set(managed) - set(catalogue)):
         destination = target / name
         if _same_link(destination, Path(managed[name].get("source_target", "/missing"))):
             state = "retired-managed"
@@ -114,9 +133,9 @@ def _integrity(
     manifest: dict[str, Any],
 ) -> list[dict[str, str]]:
     """Report the installed catalogue without claiming ownership of foreign entries."""
-    skills = _skills(source)
+    catalogue = _catalogue(source)
     items: list[dict[str, str]] = []
-    for name, source_path in skills.items():
+    for name, source_path in catalogue.items():
         destination = target / name
         if _same_link(destination, source_path):
             state = "present"
@@ -134,7 +153,7 @@ def _integrity(
     if target.is_dir():
         for destination in sorted(target.iterdir()):
             name = destination.name
-            if name == ".DS_Store" or name in skills or not destination.is_symlink():
+            if name == ".DS_Store" or name in catalogue or not destination.is_symlink():
                 continue
             try:
                 destination.resolve(strict=False).relative_to(source)
@@ -270,14 +289,14 @@ def execute(
         _apply_renames(manifest, rename_operations)
         items = _plan(source, target, manifest)
     if action in {"install", "reconcile"}:
-        skills = _skills(source)
+        catalogue = _catalogue(source)
         for item in items:
             name, state = item["name"], item["state"]
             if state in {"missing", "stale"}:
                 destination = target / name
-                _replace_link(destination, skills[name])
+                _replace_link(destination, catalogue[name])
                 history = list(manifest["managed"].get(name, {}).get("history", []))
-                manifest["managed"][name] = _entry(name, skills[name], history)
+                manifest["managed"][name] = _entry(name, catalogue[name], history)
                 changed.append(name)
             elif state == "retired-managed":
                 (target / name).unlink()
