@@ -48,7 +48,7 @@ body:
     id: commit
     attributes:
       label: Harness commit
-      description: 'Output of: git -C "${AGENTS_HOME:-$HOME/.agents}" rev-parse --short HEAD'
+      description: 'From the Provenant product checkout, run: git rev-parse --short HEAD'
       placeholder: 0ea935f
     validations:
       required: true

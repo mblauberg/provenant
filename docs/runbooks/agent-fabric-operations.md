@@ -829,8 +829,8 @@ must be a future ISO timestamp no more than 31 days away and cannot outlive any
 bound agent's authority:
 
 ```sh
-scripts/agent-fabric mcp provision \
-  --project "$HOME/.agents" \
+provenant fabric mcp provision \
+  --project "<project-root>" \
   --project-session-id '<current project-session ID>' \
   --session-revision '<current session revision>' \
   --session-generation '<current session generation>' \

@@ -130,7 +130,7 @@ adapter cannot be enabled merely because the shared degradation test passes.
 
 ## Stage gates
 
-Run from `${AGENTS_HOME:-$HOME/.agents}`. Each gate is cumulative: `npm test`
+Run from the Provenant product checkout. Each gate is cumulative: `npm test`
 executes all deterministic `.test.ts` files implemented through the current
 stage.
 
