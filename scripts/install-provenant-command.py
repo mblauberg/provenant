@@ -82,15 +82,15 @@ def _owned_snapshot(
     if stat.S_ISLNK(mode):
         if _normalised_link(destination) == legacy_target:
             return "legacy-link", snapshot
-        raise Collision(f"provenant command collision={destination}")
+        raise Collision(f"provenant command collision={destination}; remove or repoint the link to continue")
     if not stat.S_ISREG(mode):
-        raise Collision(f"provenant command collision={destination}")
+        raise Collision(f"provenant command collision={destination}; remove the file to continue")
     content = snapshot[5]
     if content == source.read_bytes():
         return "existing", snapshot
     if MANAGED_MARKER in content.splitlines():
         return "managed-file", snapshot
-    raise Collision(f"provenant command collision={destination}")
+    raise Collision(f"provenant command collision={destination}; remove or replace the file to continue")
 
 
 def classify(source: Path, destination: Path, legacy_target: Path) -> str:
