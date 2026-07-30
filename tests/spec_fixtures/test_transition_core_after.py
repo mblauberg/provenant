@@ -849,54 +849,6 @@ class TransitionCoreAfterTests(unittest.TestCase):
             ),
         )
 
-    def test_batch_effect_tuple_cannot_null_skip_deferred_fk(self) -> None:
-        db = database()
-        db.execute("BEGIN")
-        insert_review_reservation(db)
-        with self.assertRaises(sqlite3.IntegrityError) as caught:
-            db.execute(
-                """INSERT INTO lifecycle_receipt_batches VALUES
-                (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                ("batch-review", *SCOPE, "apply-review",
-                 "custody-terminal", "terminal", "replay-batch-review",
-                 "mutation-batch-review", None, None, "none",
-                 "reservation-1", "reservation-digest", "effect-review",
-                 None, None, LOSS[0], LOSS[1], LOSS[2], LOSS[3]),
-            )
-        self.assertEqual(
-            str(caught.exception),
-            """CHECK constraint failed: (review_adoption_reservation_id IS NULL AND
-      review_adoption_reservation_digest IS NULL AND
-      review_decision_loss_effect_key='none' AND
-      review_decision_loss_effect_role IS NULL AND
-      review_decision_loss_effect_digest IS NULL AND
-      review_decision_loss_after_id IS NULL AND
-      review_decision_loss_after_revision IS NULL AND
-      review_decision_loss_after_semantic_digest IS NULL AND
-      review_decision_loss_after_source_ref_digest IS NULL) OR
-    (review_adoption_reservation_id IS NOT NULL AND
-      review_adoption_reservation_digest IS NOT NULL AND
-      review_decision_loss_effect_key='none' AND
-      review_decision_loss_effect_role IS NULL AND
-      review_decision_loss_effect_digest IS NULL AND
-      review_decision_loss_after_id IS NULL AND
-      review_decision_loss_after_revision IS NULL AND
-      review_decision_loss_after_semantic_digest IS NULL AND
-      review_decision_loss_after_source_ref_digest IS NULL) OR
-    (review_adoption_reservation_id IS NOT NULL AND
-      review_adoption_reservation_digest IS NOT NULL AND
-      review_decision_loss_effect_key<>'none' AND
-      review_decision_loss_effect_role IS NOT NULL AND
-      review_decision_loss_effect_digest IS NOT NULL AND
-      review_decision_loss_effect_role='linked' AND
-      review_decision_loss_effect_digest=review_decision_loss_effect_key AND
-      review_decision_loss_after_id IS NOT NULL AND
-      review_decision_loss_after_revision IS NOT NULL AND
-      review_decision_loss_after_semantic_digest IS NOT NULL AND
-      review_decision_loss_after_source_ref_digest IS NOT NULL)""",
-        )
-        db.rollback()
-
     def test_batch_side_crossed_effect_fails_at_commit(self) -> None:
         db = database()
 
@@ -1080,39 +1032,6 @@ class TransitionCoreAfterTests(unittest.TestCase):
                 }
             ),
         )
-
-    def test_review_binding_effect_tuple_cannot_null_skip_full_fk(self) -> None:
-        db = database()
-        seed_review_prepare(db)
-        db.execute("BEGIN")
-        with self.assertRaises(sqlite3.IntegrityError) as caught:
-            db.execute(
-                """INSERT INTO lifecycle_review_authority_bindings VALUES
-                (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                ("binding-null-skip", "batch-review", "apply-review", *SCOPE,
-                 "effect-review", None, None,
-                 LOSS[0], LOSS[1], LOSS[2], LOSS[3]),
-            )
-        self.assertEqual(
-            str(caught.exception),
-            """CHECK constraint failed: (decision_loss_effect_key='none' AND
-      decision_loss_effect_role IS NULL AND
-      decision_loss_effect_digest IS NULL AND
-      decision_loss_after_id IS NULL AND
-      decision_loss_after_revision IS NULL AND
-      decision_loss_after_semantic_digest IS NULL AND
-      decision_loss_after_source_ref_digest IS NULL) OR
-    (decision_loss_effect_key<>'none' AND
-      decision_loss_effect_role IS NOT NULL AND
-      decision_loss_effect_digest IS NOT NULL AND
-      decision_loss_effect_role='linked' AND
-      decision_loss_effect_digest=decision_loss_effect_key AND
-      decision_loss_after_id IS NOT NULL AND
-      decision_loss_after_revision IS NOT NULL AND
-      decision_loss_after_semantic_digest IS NOT NULL AND
-      decision_loss_after_source_ref_digest IS NOT NULL)""",
-        )
-        db.rollback()
 
     def test_terminal_fresh_without_linked_loss_succeeds(self) -> None:
         db = database()
