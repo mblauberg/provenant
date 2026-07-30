@@ -173,7 +173,7 @@ def test_root_harness_checker_is_available():
 
 def test_dispatchers_use_the_stable_product_command_and_local_skill_helpers():
     dispatcher = (ROOT / "skills" / "orchestrate" / "scripts" / "cf_dispatch.sh").read_text()
-    assert 'route_cmd=(provenant route resolve' in dispatcher
+    assert 'resolve_routing' in dispatcher  # tries provenant, falls back to model_route.py
     assert '"$SCRIPT_DIR/codex_capabilities.py"' in dispatcher
     assert "AGENTS_ROOT" not in dispatcher
     assert "HARNESS_ROOT" not in dispatcher
