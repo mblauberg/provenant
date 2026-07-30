@@ -29,14 +29,22 @@ _load_manifest = manifest_io.load_manifest
 _entry = manifest_io.entry
 
 
-def _skills(source: Path) -> dict[str, Path]:
+def _skills(
+    source: Path,
+    *,
+    optional: bool = False,
+    validate_content: bool = True,
+) -> dict[str, Path]:
     if not source.is_dir():
+        if optional and not source.exists() and not source.is_symlink():
+            return {}
         raise InstallError("source must be an existing skill directory")
-    for child in sorted(source.rglob("*")):
-        if child.is_symlink():
-            raise InstallError(
-                f"skill source contains a symlink: {child.relative_to(source)}"
-            )
+    if validate_content:
+        for child in sorted(source.rglob("*")):
+            if child.is_symlink():
+                raise InstallError(
+                    f"skill source contains a symlink: {child.relative_to(source)}"
+                )
     skills = {
         path.parent.name: path.parent.resolve()
         for path in sorted(source.glob("*/SKILL.md"))
@@ -55,13 +63,36 @@ def _shared(source: Path) -> dict[str, Path]:
     }
 
 
-def _catalogue(source: Path) -> dict[str, Path]:
+def _catalogues(
+    source: Path,
+    custom_source: Path | None = None,
+) -> tuple[dict[str, Path], dict[str, Path]]:
     """Every directory a per-entry installation owns: skills and shared libraries.
 
     A whole-directory projection exposes both without a manifest, so the
     catalogue only drives per-entry layouts.
     """
-    return {**_skills(source), **_shared(source)}
+    managed = {**_skills(source), **_shared(source)}
+    custom = (
+        _skills(custom_source, optional=True, validate_content=False)
+        if custom_source is not None
+        else {}
+    )
+    collisions = sorted(set(managed) & set(custom))
+    if collisions:
+        details = "; ".join(
+            f"{managed[name]} conflicts with {custom[name]}" for name in collisions
+        )
+        raise InstallError(f"skill source name collision: {details}")
+    return managed, custom
+
+
+def _catalogue(
+    source: Path,
+    custom_source: Path | None = None,
+) -> dict[str, Path]:
+    managed, custom = _catalogues(source, custom_source)
+    return {**managed, **custom}
 
 
 def _same_link(destination: Path, source: Path) -> bool:
@@ -94,18 +125,38 @@ def _replace_link(destination: Path, source: Path) -> None:
 
 
 def _plan(
-    source: Path,
+    managed_catalogue: dict[str, Path],
+    custom_catalogue: dict[str, Path],
     target: Path,
     manifest: dict[str, Any],
+    *,
+    custom_source_provided: bool,
 ) -> list[dict[str, str]]:
-    catalogue = _catalogue(source)
     managed = manifest["managed"]
+    custom = manifest["custom"]
     items: list[dict[str, str]] = []
-    for name, source_path in catalogue.items():
+    for name, source_path in managed_catalogue.items():
+        if not custom_source_provided and name in custom:
+            continue
         destination = target / name
         entry = managed.get(name)
         if entry is None:
-            state = "unmanaged" if destination.exists() or destination.is_symlink() else "missing"
+            previous_custom = custom.get(name)
+            if previous_custom is not None and name not in custom_catalogue:
+                if _same_link(
+                    destination, Path(previous_custom["source_target"])
+                ):
+                    state = "custom-to-managed"
+                elif destination.exists() or destination.is_symlink():
+                    state = "conflicting"
+                else:
+                    state = "missing"
+            else:
+                state = (
+                    "unmanaged"
+                    if destination.exists() or destination.is_symlink()
+                    else "missing"
+                )
         elif _same_link(destination, source_path):
             state = "managed" if entry.get("source_sha256") == _sha_skill(source_path) else "stale"
         elif destination.is_symlink() and not destination.exists():
@@ -115,7 +166,9 @@ def _plan(
         else:
             state = "conflicting"
         items.append({"name": name, "state": state})
-    for name in sorted(set(managed) - set(catalogue)):
+    for name in sorted(
+        set(managed) - set(managed_catalogue) - set(custom_catalogue)
+    ):
         destination = target / name
         if _same_link(destination, Path(managed[name].get("source_target", "/missing"))):
             state = "retired-managed"
@@ -124,31 +177,95 @@ def _plan(
         else:
             state = "conflicting"
         items.append({"name": name, "state": state})
+    for name, source_path in custom_catalogue.items():
+        destination = target / name
+        entry = custom.get(name)
+        if entry is None:
+            previous_managed = managed.get(name)
+            if previous_managed is not None and name not in managed_catalogue:
+                if _same_link(
+                    destination, Path(previous_managed["source_target"])
+                ):
+                    state = "managed-to-custom"
+                else:
+                    state = "conflicting"
+            elif _same_link(destination, source_path):
+                state = "custom-untracked"
+            elif destination.exists() or destination.is_symlink():
+                state = "conflicting"
+            else:
+                state = "custom-missing"
+        else:
+            recorded_source = Path(entry["source_target"])
+            if recorded_source.resolve() != source_path:
+                state = (
+                    "custom-rebind"
+                    if _same_link(destination, recorded_source)
+                    else "custom-conflicting"
+                )
+            else:
+                state = (
+                    "custom"
+                    if _same_link(destination, source_path)
+                    else "custom-conflicting"
+                )
+        items.append({"name": name, "state": state})
+    if custom_source_provided:
+        for name in sorted(
+            set(custom) - set(custom_catalogue) - set(managed_catalogue)
+        ):
+            destination = target / name
+            old_source = Path(custom[name]["source_target"])
+            state = (
+                "custom-retired"
+                if _same_link(destination, old_source)
+                else "custom-retired-missing"
+                if not destination.exists() and not destination.is_symlink()
+                else "custom-conflicting"
+            )
+            items.append({"name": name, "state": state})
     return items
 
 
 def _integrity(
-    source: Path,
+    managed_catalogue: dict[str, Path],
+    custom_catalogue: dict[str, Path],
     target: Path,
     manifest: dict[str, Any],
 ) -> list[dict[str, str]]:
     """Report the installed catalogue without claiming ownership of foreign entries."""
-    catalogue = _catalogue(source)
+    catalogue = {**managed_catalogue, **custom_catalogue}
     items: list[dict[str, str]] = []
     for name, source_path in catalogue.items():
         destination = target / name
-        if _same_link(destination, source_path):
+        owner = "custom" if name in custom_catalogue else "managed"
+        if owner == "custom" and (
+            not source_path.is_dir()
+            or not (source_path / "SKILL.md").is_file()
+        ):
+            state = "missing-source"
+        elif _same_link(destination, source_path):
             state = "present"
         elif not destination.exists() and not destination.is_symlink():
             state = "missing"
         elif destination.is_symlink():
             state = "foreign"
+        elif name in custom_catalogue:
+            state = "noncanonical"
         else:
             try:
                 state = "present" if _sha_skill(destination) == _sha_skill(source_path) else "noncanonical"
             except (OSError, InstallError):
                 state = "noncanonical"
-        items.append({"name": name, "scope": "required", "state": state})
+        items.append(
+            {
+                "name": name,
+                "owner": owner,
+                "scope": "required",
+                "source_target": str(source_path),
+                "state": state,
+            }
+        )
 
     if target.is_dir():
         for destination in sorted(target.iterdir()):
@@ -156,7 +273,12 @@ def _integrity(
             if name == ".DS_Store" or name in catalogue or not destination.is_symlink():
                 continue
             try:
-                destination.resolve(strict=False).relative_to(source)
+                resolved = destination.resolve(strict=False)
+                if not any(
+                    resolved.is_relative_to(source_path.parent)
+                    for source_path in catalogue.values()
+                ):
+                    raise ValueError
                 state = "noncanonical"
             except (OSError, ValueError):
                 state = "foreign"
@@ -204,6 +326,15 @@ def _prepare_renames(
         old, new = rename["from"], rename["to"]
         if old not in managed or new not in skills:
             continue
+        # A manifest-recorded custom name stays custom-owned even while its
+        # projected link is missing, so a managed rename may never claim it.
+        if new in manifest["custom"]:
+            raise InstallError(
+                f"managed rename target {new} is a recorded custom skill: "
+                f"manually restore {new} from "
+                f"{manifest['custom'][new]['source_target']} or retire the "
+                "custom record via --custom-source before renaming onto it"
+            )
         old_destination = target / old
         new_destination = target / new
         old_source = Path(managed[old]["source_target"])
@@ -255,19 +386,71 @@ def execute(
     source: Path,
     target: Path,
     renames: Path | None = None,
+    custom_source: Path | None = None,
 ) -> dict[str, Any]:
-    if action not in {"plan", "check", "install", "reconcile", "uninstall-managed"}:
+    if action not in {
+        "validate-sources",
+        "plan",
+        "check",
+        "install",
+        "reconcile",
+        "uninstall-managed",
+    }:
         raise InstallError(f"unsupported action: {action}")
     source = Path(source)
     if source.is_symlink():
         raise InstallError("skill source contains a symlink: source")
     source = source.resolve()
+    if custom_source is not None:
+        custom_source = Path(custom_source)
+        if custom_source.is_symlink():
+            raise InstallError("skill source contains a symlink: custom source")
+        custom_source = custom_source.resolve()
+    managed_catalogue, custom_catalogue = _catalogues(source, custom_source)
+    custom_source_provided = custom_source is not None
+    if action == "validate-sources":
+        return {
+            "schema_version": 1,
+            "action": action,
+            "items": [
+                {"name": name, "source": str(path)}
+                for name, path in {
+                    **managed_catalogue,
+                    **custom_catalogue,
+                }.items()
+            ],
+            "changed": [],
+        }
     target = Path(target).resolve()
     manifest = _load_manifest(target)
     if action == "plan":
-        return {"schema_version": 1, "action": action, "items": _plan(source, target, manifest), "changed": []}
+        return {
+            "schema_version": 1,
+            "action": action,
+            "items": _plan(
+                managed_catalogue,
+                custom_catalogue,
+                target,
+                manifest,
+                custom_source_provided=custom_source_provided,
+            ),
+            "changed": [],
+        }
     if action == "check":
-        items = _integrity(source, target, manifest)
+        integrity_custom_catalogue = (
+            custom_catalogue
+            if custom_source_provided
+            else {
+                name: Path(entry["source_target"])
+                for name, entry in manifest["custom"].items()
+            }
+        )
+        items = _integrity(
+            managed_catalogue,
+            integrity_custom_catalogue,
+            target,
+            manifest,
+        )
         return {
             "schema_version": 1,
             "action": action,
@@ -275,28 +458,64 @@ def execute(
             "items": items,
             "changed": [],
         }
-    target.mkdir(parents=True, exist_ok=True)
     rename_operations: list[dict[str, Any]] = []
     if action == "reconcile":
         rename_operations = _prepare_renames(source, target, manifest, _load_renames(renames))
-    items = _plan(source, target, manifest)
+    items = _plan(
+        managed_catalogue,
+        custom_catalogue,
+        target,
+        manifest,
+        custom_source_provided=custom_source_provided,
+    )
     renamed_old = {operation["old"] for operation in rename_operations}
-    conflicts = [item["name"] for item in items if item["state"] == "conflicting" and item["name"] not in renamed_old]
+    custom_conflicts = [
+        item["name"]
+        for item in items
+        if item["state"] == "custom-conflicting"
+        and item["name"] not in renamed_old
+    ]
+    if custom_conflicts:
+        remedies = "; ".join(
+            "manually restore "
+            f"{name} from {manifest['custom'][name]['source_target']} "
+            "or provide --custom-source pointing to the intended custom skills directory"
+            for name in custom_conflicts
+        )
+        raise InstallError(f"custom targets changed outside harness: {remedies}")
+    conflicts = [
+        item["name"]
+        for item in items
+        if item["state"] == "conflicting"
+        and item["name"] not in renamed_old
+    ]
     if conflicts:
-        raise InstallError("conflicting managed targets: " + ", ".join(conflicts))
+        raise InstallError(
+            "conflicting managed targets changed outside harness: "
+            + ", ".join(conflicts)
+        )
+    target.mkdir(parents=True, exist_ok=True)
     changed: list[str] = [operation["new"] for operation in rename_operations]
     if rename_operations:
         _apply_renames(manifest, rename_operations)
-        items = _plan(source, target, manifest)
+        items = _plan(
+            managed_catalogue,
+            custom_catalogue,
+            target,
+            manifest,
+            custom_source_provided=custom_source_provided,
+        )
     if action in {"install", "reconcile"}:
-        catalogue = _catalogue(source)
         for item in items:
             name, state = item["name"], item["state"]
-            if state in {"missing", "stale"}:
+            if state in {"missing", "stale", "custom-to-managed"}:
                 destination = target / name
-                _replace_link(destination, catalogue[name])
+                _replace_link(destination, managed_catalogue[name])
                 history = list(manifest["managed"].get(name, {}).get("history", []))
-                manifest["managed"][name] = _entry(name, catalogue[name], history)
+                manifest["managed"][name] = _entry(
+                    name, managed_catalogue[name], history
+                )
+                manifest["custom"].pop(name, None)
                 changed.append(name)
             elif state == "retired-managed":
                 (target / name).unlink()
@@ -304,6 +523,30 @@ def execute(
                 changed.append(name)
             elif state == "retired-missing":
                 del manifest["managed"][name]
+                changed.append(name)
+            elif state in {
+                "custom-missing",
+                "custom-untracked",
+                "custom-rebind",
+                "managed-to-custom",
+            }:
+                if state in {
+                    "custom-missing",
+                    "custom-rebind",
+                    "managed-to-custom",
+                }:
+                    _replace_link(target / name, custom_catalogue[name])
+                manifest["custom"][name] = {
+                    "source_target": str(custom_catalogue[name])
+                }
+                manifest["managed"].pop(name, None)
+                changed.append(name)
+            elif state == "custom-retired":
+                (target / name).unlink()
+                del manifest["custom"][name]
+                changed.append(name)
+            elif state == "custom-retired-missing":
+                del manifest["custom"][name]
                 changed.append(name)
     elif action == "uninstall-managed":
         for name, entry in list(manifest["managed"].items()):
@@ -316,20 +559,50 @@ def execute(
                 raise InstallError(f"conflicting managed target changed outside harness: {name}")
             else:
                 del manifest["managed"][name]
-    _write_manifest(target, manifest)
-    return {"schema_version": 1, "action": action, "items": _plan(source, target, manifest), "changed": changed}
+                changed.append(name)
+    if changed:
+        _write_manifest(target, manifest)
+    return {
+        "schema_version": 1,
+        "action": action,
+        "items": _plan(
+            managed_catalogue,
+            custom_catalogue,
+            target,
+            manifest,
+            custom_source_provided=custom_source_provided,
+        ),
+        "changed": changed,
+    }
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("plan", "check", "install", "reconcile", "uninstall-managed"))
+    parser.add_argument(
+        "action",
+        choices=(
+            "validate-sources",
+            "plan",
+            "check",
+            "install",
+            "reconcile",
+            "uninstall-managed",
+        ),
+    )
     parser.add_argument("--target", required=True, type=Path)
     parser.add_argument("--source", type=Path, default=ROOT / "skills")
+    parser.add_argument("--custom-source", type=Path)
     parser.add_argument("--renames", type=Path)
     parser.add_argument("--summary", action="store_true")
     args = parser.parse_args(argv)
     try:
-        result = execute(args.action, args.source, args.target, args.renames)
+        result = execute(
+            args.action,
+            args.source,
+            args.target,
+            args.renames,
+            args.custom_source,
+        )
     except (OSError, InstallError) as exc:
         print(f"conflicting: {exc}", file=sys.stderr)
         return 3
@@ -340,6 +613,25 @@ def main(argv: list[str] | None = None) -> int:
             print(f"warning: unmanaged skill links outside catalogue: {detail}", file=sys.stderr)
     if args.action == "check" and not result["ok"]:
         print(json.dumps(result, indent=2))
+        custom_failures = [
+            item
+            for item in result["items"]
+            if item.get("owner") == "custom"
+            and item["scope"] == "required"
+            and item["state"] != "present"
+        ]
+        if custom_failures:
+            remedies = "; ".join(
+                "manually restore "
+                f"{item['name']} from {item['source_target']} "
+                "or provide --custom-source pointing to the intended custom skills directory"
+                for item in custom_failures
+            )
+            print(
+                f"conflicting: custom skill installation integrity failed: {remedies}",
+                file=sys.stderr,
+            )
+            return 3
         failures = ", ".join(
             f'{item["name"]}={item["state"]}'
             for item in result["items"]
@@ -352,7 +644,10 @@ def main(argv: list[str] | None = None) -> int:
             print(f"skills checked={len(result['items'])} target={args.target}")
             return 0
         linked = len(result["changed"])
-        existing = sum(item["state"] in {"managed", "unmanaged"} for item in result["items"]) - linked
+        existing = sum(
+            item["state"] in {"managed", "unmanaged", "custom"}
+            for item in result["items"]
+        ) - linked
         print(f"skills linked={linked} existing={existing} target={args.target}")
     else:
         print(json.dumps(result, indent=2))

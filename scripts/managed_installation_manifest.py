@@ -68,6 +68,7 @@ def empty_manifest(target: Path) -> dict[str, Any]:
         "target_root": str(target.resolve()),
         "updated_at": now(),
         "managed": {},
+        "custom": {},
     }
 
 
@@ -88,6 +89,9 @@ def load_manifest(target: Path) -> dict[str, Any]:
         raise InstallError("installation manifest is invalid or not owned by agent-harness")
     if data.get("target_root") != str(target.resolve()):
         raise InstallError("installation manifest belongs to a different target root")
+    custom = data.setdefault("custom", {})
+    if not isinstance(custom, dict):
+        raise InstallError("installation manifest custom links are invalid")
     required_entry = {"owner", "source_target", "source_sha256", "installed_at", "history"}
     for name, item in data["managed"].items():
         if not isinstance(name, str) or not is_managed_name(name):
@@ -108,6 +112,16 @@ def load_manifest(target: Path) -> dict[str, Any]:
             raise InstallError(f"installation manifest digest is invalid: {name}")
         if not isinstance(item.get("history"), list):
             raise InstallError(f"installation manifest history is invalid: {name}")
+    for name, item in custom.items():
+        if not isinstance(name, str) or not SKILL_NAME.fullmatch(name):
+            raise InstallError("installation manifest contains an invalid custom skill name")
+        if (
+            not isinstance(item, dict)
+            or set(item) != {"source_target"}
+            or not isinstance(item.get("source_target"), str)
+            or not Path(item["source_target"]).is_absolute()
+        ):
+            raise InstallError(f"installation manifest custom link is invalid: {name}")
     return data
 
 
