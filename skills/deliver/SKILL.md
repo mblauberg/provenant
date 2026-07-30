@@ -17,8 +17,9 @@ explicit user approval. If intent is unsettled, use `scope`.
 Select base profile from `config/delivery-profiles.json`: `software`,
 `research`, `analysis`, `document` or `agent-product`. Add high-stakes
 overlay when source authority, privacy or qualified review matters. Projects
-strengthen, never weaken gates. Use explicit independent
-`not_applicable` form for fabric_relationships rather than inventing.
+may strengthen a profile, never weaken kernel gates silently. Use explicit
+independent `not_applicable` form for fabric_relationships rather than
+inventing.
 
 ## Lifecycle
 
@@ -40,7 +41,8 @@ strengthen, never weaken gates. Use explicit independent
    Substantial+ follows `HARNESS.md`: targeted lenses plus the other primary;
    distinct-family review when available, with terminal pressure made
    stronger and skipped optional legs recorded.
-6. Repair under a risk-tier scaled budget; see `../implement/references/run-contract.md`. Scope/design drift returns to the user gate.
+6. Repair under a risk-tier scaled budget defined by the `implement` skill's
+   run contract. Scope/design drift returns to the user gate.
 7. Validate from the project root with
    `"${AGENTS_HOME:-$HOME/.agents}/skills/deliver/scripts/validate_delivery.py"
    .agent-run/<id>/RUN.json --workspace-root "$PWD" --verify-hashes` (plus

@@ -707,6 +707,25 @@ def test_repair_cycle_budget_rejects_first_cycle_over_tier_limit(
         module.validate(candidate, ROOT)
 
 
+@pytest.mark.parametrize(
+    ("cycles", "message"),
+    [
+        pytest.param(True, "repair_cycles must be an integer, got bool", id="bool"),
+        pytest.param(None, "repair_cycles must be an integer, got NoneType", id="none"),
+        pytest.param("2", "repair_cycles must be an integer, got str", id="string"),
+        pytest.param(-1, "repair_cycles must be non-negative, got -1", id="negative"),
+    ],
+)
+def test_repair_cycles_shape_errors_are_distinct_from_budget_overrun(cycles, message):
+    module = load_validator()
+    candidate = fixture()
+    candidate["repair_cycles"] = cycles
+
+    with pytest.raises(module.Invalid, match=re.escape(message)) as excinfo:
+        module.validate(candidate, ROOT)
+    assert "exceeds budget" not in str(excinfo.value)
+
+
 def test_partial_delivery_delegation_is_rejected():
     module = load_validator()
     candidate = fixture()
