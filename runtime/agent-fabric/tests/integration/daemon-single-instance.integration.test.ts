@@ -9,6 +9,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { startFabricDaemon } from "../../src/index.ts";
 import { forceStartFabricDaemonForTests } from "../../src/daemon/client.ts";
+import { waitForProcessExit } from "../shared/deadline-wait.ts";
 
 const cleanup: Array<() => Promise<void>> = [];
 const launcherHelper = fileURLToPath(new URL("../support/daemon-launcher-helper.ts", import.meta.url));
@@ -191,13 +192,14 @@ describe("daemon single-instance ownership", () => {
       expect(() => process.kill(daemonPid, 0)).not.toThrow();
     } finally {
       try { process.kill(daemonPid, "SIGTERM"); } catch { /* already stopped */ }
-      for (let attempt = 0; attempt < 50; attempt += 1) {
-        try {
-          process.kill(daemonPid, 0);
-          await new Promise((resolve) => setTimeout(resolve, 20));
-        } catch {
-          break;
-        }
+      try {
+        await waitForProcessExit(daemonPid, { timeoutMs: 5_000 });
+      } catch (error: unknown) {
+        console.warn(
+          `Failed to wait for process exit: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
       }
       lines.close();
       await rm(directory, { recursive: true, force: true });
