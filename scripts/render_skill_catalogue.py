@@ -40,13 +40,13 @@ class CatalogueError(ValueError):
     pass
 
 
-def installed_skills() -> list[str]:
+def installed_skills(skills_dir: Path = SKILLS_DIR) -> list[str]:
     """The single source of truth: one directory with a SKILL.md is one skill."""
-    if not SKILLS_DIR.is_dir():
-        raise CatalogueError(f"missing skills directory: {SKILLS_DIR}")
+    if not skills_dir.is_dir():
+        raise CatalogueError(f"missing skills directory: {skills_dir}")
     names = sorted(
         path.parent.name
-        for path in SKILLS_DIR.glob("*/SKILL.md")
+        for path in skills_dir.glob("*/SKILL.md")
         if path.parent.name not in NOT_A_SKILL
     )
     if not names:
@@ -184,8 +184,8 @@ def audit_unmarked_counts(text: str, count: int) -> None:
         )
 
 
-def render(text: str) -> tuple[str, int, int]:
-    skills = installed_skills()
+def render(text: str, skills_dir: Path = SKILLS_DIR) -> tuple[str, int, int]:
+    skills = installed_skills(skills_dir)
     head, block, tail = split_readme(text)
     assigned = assign(skills, parse_areas(block))
     # Reject any count this script does not own, before rewriting the ones it does.
@@ -213,10 +213,11 @@ def main(argv: list[str] | None = None) -> int:
         help="report drift and exit non-zero without writing anything",
     )
     parser.add_argument("--readme", type=Path, default=README_PATH)
+    parser.add_argument("--skills-root", type=Path, default=SKILLS_DIR)
     args = parser.parse_args(argv)
     try:
         current = args.readme.read_text()
-        rendered, count, areas = render(current)
+        rendered, count, areas = render(current, args.skills_root)
     except (OSError, CatalogueError) as exc:
         print(f"FAIL: {exc}", file=sys.stderr)
         return 1
