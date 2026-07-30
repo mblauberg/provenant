@@ -223,6 +223,31 @@ def test_installs_codex_skills_and_global_instructions(tmp_path):
     assert codex_config.read_text() == configured
 
 
+def test_codex_install_projects_instance_custom_skill_without_managed_ownership(
+    tmp_path,
+):
+    config = tmp_path / "codex-home"
+    custom_skill = instance_root_for(tmp_path) / "custom-skills" / "local-skill"
+    custom_skill.mkdir(parents=True)
+    (custom_skill / "SKILL.md").write_text(
+        "---\nname: local-skill\ndescription: Instance-owned test skill.\n---\n"
+    )
+
+    result = run("codex", tmp_path, CODEX_HOME=str(config))
+
+    assert result.returncode == 0, result.stderr
+    installed = config / "skills" / "local-skill"
+    assert installed.is_symlink()
+    assert installed.resolve() == custom_skill.resolve()
+    manifest = json.loads(
+        (config / ".agent-harness-installation.json").read_text()
+    )
+    assert "local-skill" not in manifest["managed"]
+    assert manifest["custom"]["local-skill"] == {
+        "source_target": str(custom_skill.resolve())
+    }
+
+
 def test_claude_workflow_upgrade_relinks_a_previously_managed_file(tmp_path):
     config = tmp_path / "claude-config"
     first = run("claude", tmp_path, CLAUDE_CONFIG_DIR=str(config))
@@ -688,6 +713,34 @@ def test_refuses_provenant_command_collision_before_any_mutation(tmp_path):
     assert collision.read_text() == "user-owned\n"
     assert not config.exists()
     assert not (tmp_path / ".claude.json").exists()
+
+
+def test_skill_source_collision_preflights_before_harness_mutation(tmp_path):
+    config = tmp_path / "codex-home"
+    bin_dir = tmp_path / "bin"
+    custom_scope = instance_root_for(tmp_path) / "custom-skills" / "scope"
+    custom_scope.mkdir(parents=True)
+    (custom_scope / "SKILL.md").write_text(
+        "---\nname: scope\ndescription: Colliding instance skill.\n---\n"
+    )
+
+    result = run(
+        "codex",
+        tmp_path,
+        CODEX_HOME=str(config),
+        PROVENANT_BIN_DIR=str(bin_dir),
+    )
+
+    assert result.returncode == 3
+    assert str((ROOT / "skills" / "scope").resolve()) in result.stderr
+    assert str(custom_scope.resolve()) in result.stderr
+    assert not (bin_dir / "provenant").exists()
+    assert not (
+        instance_root_for(tmp_path) / ".agent-fabric" / "product-root.json"
+    ).exists()
+    assert not (instance_root_for(tmp_path) / "AGENTS.md").exists()
+    assert not (config / "skills").exists()
+    assert not (config / ".agent-harness-installation.json").exists()
 
 
 def test_rejects_a_relative_provenant_bin_directory_before_mutation(tmp_path):

@@ -67,6 +67,13 @@ case "$instance_root" in
   *) echo "Agent Fabric instance root must be absolute" >&2; exit 3 ;;
 esac
 
+# Validate the complete skill namespace before publishing the command, product
+# pointer, seeded instance files, client links or installation receipt.
+"$ROOT/scripts/manage_installation.py" validate-sources \
+  --source "$ROOT/skills" \
+  --custom-source "$instance_root/custom-skills" \
+  --target "$platform_home/skills" >/dev/null
+
 # Refuse a command collision before any installation mutation.
 if [[ -e "$provenant_command" || -L "$provenant_command" ]]; then
   if [[ -L "$provenant_command" ]]; then
@@ -142,7 +149,9 @@ esac
   --product-root "$ROOT" --instance-root "$instance_root" --summary
 
 mkdir -p "$platform_home"
-"$ROOT/scripts/install-skills" --target "$platform_home/skills"
+"$ROOT/scripts/install-skills" \
+  --target "$platform_home/skills" \
+  --custom-source "$instance_root/custom-skills"
 if [[ "$PLATFORM" == "claude" ]]; then
   "$ROOT/scripts/install-workflows" --target "$platform_home/workflows"
 fi

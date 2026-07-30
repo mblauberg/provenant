@@ -3,9 +3,10 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TARGET=""
+CUSTOM_SOURCE=""
 
 usage() {
-  echo "usage: install-skills --target <global-skills-directory>" >&2
+  echo "usage: install-skills --target <global-skills-directory> [--custom-source <instance-custom-skills-directory>]" >&2
 }
 
 while [[ $# -gt 0 ]]; do
@@ -13,6 +14,11 @@ while [[ $# -gt 0 ]]; do
     --target)
       [[ $# -ge 2 ]] || { usage; exit 2; }
       TARGET="$2"
+      shift 2
+      ;;
+    --custom-source)
+      [[ $# -ge 2 ]] || { usage; exit 2; }
+      CUSTOM_SOURCE="$2"
       shift 2
       ;;
     -h|--help)
@@ -27,22 +33,28 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n "$TARGET" ]] || { usage; exit 2; }
+manager_args=(--source "$ROOT/skills" --target "$TARGET")
+if [[ -n "$CUSTOM_SOURCE" ]]; then
+  manager_args+=(--custom-source "$CUSTOM_SOURCE")
+fi
 
 # Claude installations may intentionally expose the canonical skill tree as
 # one directory-level symlink. Preserve that layout instead of resolving the
 # target into the source tree and treating source directories as unmanaged.
 if [[ -L "$TARGET" ]] \
   && [[ "$(cd "$TARGET" && pwd -P)" == "$(cd "$ROOT/skills" && pwd -P)" ]]; then
+  if [[ -n "$CUSTOM_SOURCE" ]]; then
+    "$ROOT/scripts/manage_installation.py" validate-sources \
+      "${manager_args[@]}" >/dev/null
+  fi
   echo "skills existing=directory-link target=$TARGET"
   exit 0
 fi
 
 "$ROOT/scripts/manage_installation.py" install \
-  --source "$ROOT/skills" \
-  --target "$TARGET" \
+  "${manager_args[@]}" \
   --summary
 
 exec "$ROOT/scripts/manage_installation.py" check \
-  --source "$ROOT/skills" \
-  --target "$TARGET" \
+  "${manager_args[@]}" \
   --summary

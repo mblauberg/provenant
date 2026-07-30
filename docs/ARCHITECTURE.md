@@ -396,6 +396,14 @@ The managed catalogue is the skills plus the `skills/_shared` library they
 import. A per-entry layout links and receipt-tracks that library like any skill,
 so an installed target root is a sufficient import root. A whole-directory
 projection already exposes it and keeps no manifest at all.
+Instance-owned `custom-skills/` entries join the per-entry projection without
+becoming product-managed manifest entries. Their machine-local link records
+contain source paths but no content digest: installation discovers names and
+links directories without validating third-party content. Product resources
+used by a linked skill remain addressed through `AGENTS_HOME`, which must name
+the product root; helpers that resolve their own symlink may derive the same
+root directly. A product and instance skill with the same name fails before
+the target directory or installation receipt is mutated.
 Provider bootstraps remain small and share the same precedence sentence.
 
 Every installed file class has one owner: a product-shipped projection, an
