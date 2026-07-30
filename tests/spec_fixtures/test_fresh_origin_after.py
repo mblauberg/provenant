@@ -12,7 +12,6 @@ Stable output is one case ID per passing case followed by a fixed summary.
 from __future__ import annotations
 
 import hashlib
-import itertools
 import json
 from pathlib import Path
 import re
@@ -480,33 +479,6 @@ CREATE TABLE receipt_batches(
   CHECK((fresh_handoff_id IS NULL)=(fresh_handoff_digest IS NULL)),
   CHECK((fresh_handoff_id IS NULL)=(fresh_handoff_source_mode IS NULL)),
   CHECK((recovery_retirement_id IS NULL)=(recovery_retirement_digest IS NULL)),
-  CHECK(
-    (transition_kind='custody-terminal' AND secondary_intent_kind='none' AND
-      receipt_intent_count=1 AND review_reservation_id IS NULL AND
-      fresh_handoff_id IS NULL AND recovery_retirement_id IS NULL) OR
-    (transition_kind='custody-terminal' AND
-      secondary_intent_kind='review-adoption-decision' AND
-      receipt_intent_count=2 AND review_reservation_id IS NOT NULL AND
-      fresh_handoff_id IS NULL AND recovery_retirement_id IS NULL) OR
-    (transition_kind='custody-terminal' AND
-      secondary_intent_kind='fresh-origin' AND receipt_intent_count=2 AND
-      review_reservation_id IS NULL AND fresh_handoff_id IS NOT NULL AND
-      fresh_handoff_source_mode='terminalize-nonfinal-custody' AND
-      recovery_retirement_id IS NULL) OR
-    (transition_kind='generation-loss-terminal' AND
-      secondary_intent_kind='none' AND receipt_intent_count=1 AND
-      review_reservation_id IS NULL AND fresh_handoff_id IS NULL AND
-      recovery_retirement_id IS NULL) OR
-    (transition_kind='custody-recovery-retirement' AND
-      secondary_intent_kind='none' AND receipt_intent_count=1 AND
-      review_reservation_id IS NULL AND fresh_handoff_id IS NULL AND
-      recovery_retirement_id IS NOT NULL) OR
-    (transition_kind='fresh-origin' AND secondary_intent_kind='none' AND
-      receipt_intent_count=1 AND review_reservation_id IS NULL AND
-      fresh_handoff_id IS NOT NULL AND fresh_handoff_source_mode IN
-        ('reuse-final-custody','open-generation-loss') AND
-      recovery_retirement_id IS NULL)
-  ),
   FOREIGN KEY(review_reservation_id,review_reservation_digest)
     REFERENCES review_reservations(reservation_id,reservation_digest),
   FOREIGN KEY(fresh_handoff_id,fresh_handoff_digest,planned_apply_id,
@@ -633,16 +605,6 @@ CREATE TABLE batch_completions(
     REFERENCES fresh_origin_effects(
       batch_id,receipt_ordinal,effect_role,effect_digest),
   CHECK(
-    (secondary_intent_kind='none' AND receipt_intent_count=1 AND
-      ordinal_two IS NULL AND ordinal_two_kind IS NULL AND
-      ordinal_two_intent_digest IS NULL AND ordinal_two_subject_digest IS NULL AND
-      ordinal_two_receipt_digest IS NULL) OR
-    (secondary_intent_kind<>'none' AND receipt_intent_count=2 AND
-      ordinal_two=2 AND ordinal_two_kind=secondary_intent_kind AND
-      ordinal_two_intent_digest IS NOT NULL AND ordinal_two_subject_digest IS NOT NULL AND
-      ordinal_two_receipt_digest IS NOT NULL)
-  ),
-  CHECK(
     (transition_kind='custody-terminal' AND primary_effect_kind='custody' AND
       primary_fresh_ordinal IS NULL AND primary_fresh_role IS NULL AND
       primary_fresh_digest IS NULL AND
@@ -688,45 +650,10 @@ def relational_db() -> sqlite3.Connection:
     return connection
 
 
-BATCH_LEGAL_ARM_ERROR = """CHECK constraint failed: (transition_kind='custody-terminal' AND secondary_intent_kind='none' AND
-      receipt_intent_count=1 AND review_reservation_id IS NULL AND
-      fresh_handoff_id IS NULL AND recovery_retirement_id IS NULL) OR
-    (transition_kind='custody-terminal' AND
-      secondary_intent_kind='review-adoption-decision' AND
-      receipt_intent_count=2 AND review_reservation_id IS NOT NULL AND
-      fresh_handoff_id IS NULL AND recovery_retirement_id IS NULL) OR
-    (transition_kind='custody-terminal' AND
-      secondary_intent_kind='fresh-origin' AND receipt_intent_count=2 AND
-      review_reservation_id IS NULL AND fresh_handoff_id IS NOT NULL AND
-      fresh_handoff_source_mode='terminalize-nonfinal-custody' AND
-      recovery_retirement_id IS NULL) OR
-    (transition_kind='generation-loss-terminal' AND
-      secondary_intent_kind='none' AND receipt_intent_count=1 AND
-      review_reservation_id IS NULL AND fresh_handoff_id IS NULL AND
-      recovery_retirement_id IS NULL) OR
-    (transition_kind='custody-recovery-retirement' AND
-      secondary_intent_kind='none' AND receipt_intent_count=1 AND
-      review_reservation_id IS NULL AND fresh_handoff_id IS NULL AND
-      recovery_retirement_id IS NOT NULL) OR
-    (transition_kind='fresh-origin' AND secondary_intent_kind='none' AND
-      receipt_intent_count=1 AND review_reservation_id IS NULL AND
-      fresh_handoff_id IS NOT NULL AND fresh_handoff_source_mode IN
-        ('reuse-final-custody','open-generation-loss') AND
-      recovery_retirement_id IS NULL)"""
-
 INTENT_ORDINAL_ERROR = """CHECK constraint failed: (ordinal=1 AND kind=batch_transition_kind) OR
     (ordinal=2 AND batch_intent_count=2 AND
       batch_secondary_intent_kind<>'none' AND
       kind=batch_secondary_intent_kind)"""
-
-COMPLETION_ORDINAL_ERROR = """CHECK constraint failed: (secondary_intent_kind='none' AND receipt_intent_count=1 AND
-      ordinal_two IS NULL AND ordinal_two_kind IS NULL AND
-      ordinal_two_intent_digest IS NULL AND ordinal_two_subject_digest IS NULL AND
-      ordinal_two_receipt_digest IS NULL) OR
-    (secondary_intent_kind<>'none' AND receipt_intent_count=2 AND
-      ordinal_two=2 AND ordinal_two_kind=secondary_intent_kind AND
-      ordinal_two_intent_digest IS NOT NULL AND ordinal_two_subject_digest IS NOT NULL AND
-      ordinal_two_receipt_digest IS NOT NULL)"""
 
 
 def insert_parents(
@@ -796,59 +723,6 @@ def insert_batch(
         ),
     )
     return batch
-
-
-def legal_arm(
-    transition_kind: str,
-    secondary_kind: str,
-    count: int,
-    review: bool,
-    handoff_mode: str | None,
-    retirement: bool,
-) -> bool:
-    return (
-        transition_kind == "custody-terminal"
-        and secondary_kind == "none"
-        and count == 1
-        and not review
-        and handoff_mode is None
-        and not retirement
-    ) or (
-        transition_kind == "custody-terminal"
-        and secondary_kind == "review-adoption-decision"
-        and count == 2
-        and review
-        and handoff_mode is None
-        and not retirement
-    ) or (
-        transition_kind == "custody-terminal"
-        and secondary_kind == "fresh-origin"
-        and count == 2
-        and not review
-        and handoff_mode == "terminalize-nonfinal-custody"
-        and not retirement
-    ) or (
-        transition_kind == "generation-loss-terminal"
-        and secondary_kind == "none"
-        and count == 1
-        and not review
-        and handoff_mode is None
-        and not retirement
-    ) or (
-        transition_kind == "custody-recovery-retirement"
-        and secondary_kind == "none"
-        and count == 1
-        and not review
-        and handoff_mode is None
-        and retirement
-    ) or (
-        transition_kind == "fresh-origin"
-        and secondary_kind == "none"
-        and count == 1
-        and not review
-        and handoff_mode in ("reuse-final-custody", "open-generation-loss")
-        and not retirement
-    )
 
 
 def insert_intent_and_receipt(
@@ -1662,52 +1536,6 @@ def exactly_seven_batch_arms_accept() -> None:
     connection.close()
 
 
-@case("FO-S02")
-def every_non_table_batch_combination_rejects_by_check() -> None:
-    connection = relational_db()
-    transitions = (
-        "custody-terminal",
-        "generation-loss-terminal",
-        "custody-recovery-retirement",
-        "fresh-origin",
-    )
-    secondaries = ("none", "fresh-origin", "review-adoption-decision")
-    modes = (
-        None,
-        "terminalize-nonfinal-custody",
-        "reuse-final-custody",
-        "open-generation-loss",
-    )
-    accepted = 0
-    rejected = 0
-    for index, values in enumerate(
-        itertools.product(transitions, secondaries, (1, 2), (False, True), modes, (False, True))
-    ):
-        transition, secondary, count, review, mode, retirement = values
-        expected = legal_arm(transition, secondary, count, review, mode, retirement)
-        operation = lambda index=index, values=values: insert_batch(
-            connection,
-            f"cart-{index}",
-            values[0],
-            values[1],
-            values[2],
-            values[3],
-            values[4],
-            values[5],
-        )
-        if expected:
-            operation()
-            accepted += 1
-        else:
-            expect_integrity(operation, BATCH_LEGAL_ARM_ERROR)
-            rejected += 1
-    require(accepted == 7, f"cartesian oracle admitted {accepted}, expected 7")
-    require(rejected == 377, f"cartesian oracle rejected {rejected}, expected 377")
-    require(connection.execute("PRAGMA foreign_key_check").fetchall() == [],
-            "cartesian FK check is not empty")
-    connection.close()
-
-
 @case("FO-S03")
 def pure_fresh_is_count_one_primary_and_terminal_fresh_has_ordinal_two() -> None:
     connection = relational_db()
@@ -1748,13 +1576,6 @@ def pure_fresh_is_count_one_primary_and_terminal_fresh_has_ordinal_two() -> None
 
     expect_integrity(wrong_ordinal_two, INTENT_ORDINAL_ERROR)
 
-    def incomplete_completion() -> None:
-        insert_completion(
-            connection, terminal, "custody-terminal", 2, "fresh-origin",
-            terminal_first, None, D77
-        )
-
-    expect_integrity(incomplete_completion, COMPLETION_ORDINAL_ERROR)
     terminal_second = insert_intent_and_receipt(
         connection, terminal, 2, "fresh-origin", "custody-terminal", 2,
         "fresh-origin"
