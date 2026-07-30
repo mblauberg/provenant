@@ -4,6 +4,7 @@ import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { digest } from "../../src/persistence/row-codec.ts";
+import { waitUntil } from "../shared/deadline-wait.ts";
 import { createLifecycleFixture, reopenLifecycleFabric } from "../support/lifecycle-testkit.ts";
 
 const cleanup: Array<() => Promise<void>> = [];
@@ -16,16 +17,26 @@ async function waitForProviderAction(
   fixture: Awaited<ReturnType<typeof createLifecycleFixture>>,
   actionId: string,
 ): Promise<string> {
-  for (let attempt = 0; attempt < 100; attempt += 1) {
-    const action = await fixture.chair.getProviderAction({
-      adapterId: "fake-lifecycle",
-      actionId,
-      expectedActionKind: "non-review",
-    });
-    if (["ambiguous", "terminal", "quarantined"].includes(action.status)) return action.status;
-    await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
+  const timeoutMs = 5_000;
+  const description = `Provider action ${actionId} settlement`;
+  try {
+    return await waitUntil(async () => {
+      const action = await fixture.chair.getProviderAction({
+        adapterId: "fake-lifecycle",
+        actionId,
+        expectedActionKind: "non-review",
+      });
+      return ["ambiguous", "terminal", "quarantined"].includes(action.status) ? action.status : "";
+    }, timeoutMs, description);
+  } catch (error: unknown) {
+    if (
+      error instanceof Error &&
+      error.message === `${description} did not complete within ${String(timeoutMs)}ms`
+    ) {
+      throw new Error(`Provider action ${actionId} did not settle (awaited ${String(timeoutMs)}ms)`);
+    }
+    throw error;
   }
-  throw new Error(`provider action did not settle: ${actionId}`);
 }
 
 function bindCertifyingReviewOwner(
@@ -337,18 +348,28 @@ describe("provider-action owner boundary wiring", () => {
 
     restarted = await reopenLifecycleFabric(fixture);
     const recovery = restarted.recoverStartupState();
-    let lookupStarted = false;
-    for (let attempt = 0; attempt < 100; attempt += 1) {
-      const journal = JSON.parse(await readFile(fixture.providerJournalPath, "utf8")) as {
-        actions?: Record<string, { lookupCount?: number }>;
-      };
-      if ((journal.actions?.[actionId]?.lookupCount ?? 0) >= 1) {
-        lookupStarted = true;
-        break;
+    const timeoutMs = 3_000;
+    const description = "Action lookup start";
+    let lookupCount = 0;
+    try {
+      await waitUntil(async () => {
+        const journal = JSON.parse(await readFile(fixture.providerJournalPath, "utf8")) as {
+          actions?: Record<string, { lookupCount?: number }>;
+        };
+        lookupCount = journal.actions?.[actionId]?.lookupCount ?? 0;
+        return lookupCount >= 1;
+      }, timeoutMs, description);
+    } catch (error: unknown) {
+      if (
+        error instanceof Error &&
+        error.message === `${description} did not complete within ${String(timeoutMs)}ms`
+      ) {
+        throw new Error(
+          `Action lookup did not start: lookupCount=${String(lookupCount)} after ${String(timeoutMs)}ms`,
+        );
       }
-      await new Promise((resolvePromise) => setTimeout(resolvePromise, 5));
+      throw error;
     }
-    expect(lookupStarted).toBe(true);
     const mutated = new Database(fixture.databasePath);
     mutated.pragma("foreign_keys = OFF");
     const immutableRouteTrigger = mutated.prepare(`

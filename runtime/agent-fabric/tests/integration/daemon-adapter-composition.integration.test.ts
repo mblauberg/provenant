@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 
 import { connectFabricDaemon, startFabricDaemon } from "../../src/index.ts";
+import { waitUntil } from "../shared/deadline-wait.ts";
 import { DAEMON_ROOT_AUTHORITY } from "../support/daemon-testkit.ts";
 import { createCurrentSessionRun } from "../support/current-session-testkit.ts";
 import { callTool, spawnMcpProxy } from "../support/mcp-testkit.ts";
@@ -201,25 +202,41 @@ describe("daemon adapter composition", () => {
         expect(liveReconcile.structured.status).toBe("dispatched");
 
         await chairProxy.close();
-        chairProxy = await spawnMcpProxy({
+        const reconnectedChairProxy = await spawnMcpProxy({
           socketPath,
           capability: run.chairCapability,
           label: "daemon-ephemeral-review-chair-reconnected",
         });
+        chairProxy = reconnectedChairProxy;
 
+        const timeoutMs = 10_000;
+        const description = "Action terminal status";
+        let lastStatus = "not observed";
         let terminal: Awaited<ReturnType<typeof callTool>> | undefined;
-        for (let attempt = 0; attempt < 160; attempt += 1) {
-          const observed = await callTool(chairProxy.client, "fabric_provider_action_read", {
-            adapterId: "fake",
-            actionId: "daemon-ephemeral-review:spawn",
-            expectedActionKind: "non-review",
-          });
-          expect(observed.isError, observed.text).toBe(false);
-          if (observed.structured.status === "terminal") {
+        try {
+          await waitUntil(async () => {
+            const observed = await callTool(reconnectedChairProxy.client, "fabric_provider_action_read", {
+              adapterId: "fake",
+              actionId: "daemon-ephemeral-review:spawn",
+              expectedActionKind: "non-review",
+            });
+            expect(observed.isError, observed.text).toBe(false);
+            lastStatus = String(observed.structured.status);
+            if (observed.structured.status !== "terminal") return false;
             terminal = observed;
-            break;
+            return true;
+          }, timeoutMs, description);
+        } catch (error: unknown) {
+          if (
+            error instanceof Error &&
+            error.message === `${description} did not complete within ${String(timeoutMs)}ms`
+          ) {
+            throw new Error(
+              `Action did not reach terminal status (awaited ${String(timeoutMs)}ms), ` +
+              `last status: ${lastStatus}`,
+            );
           }
-          await new Promise((resolvePromise) => setTimeout(resolvePromise, 25));
+          throw error;
         }
         expect(terminal?.structured).toMatchObject({
           actionRef: { adapterId: "fake", actionId: "daemon-ephemeral-review:spawn" },
