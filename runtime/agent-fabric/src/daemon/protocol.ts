@@ -8,6 +8,7 @@ import {
   parseAuthorityEnvelopeV2,
   type OperatorAction,
 } from "@local/agent-fabric-protocol";
+import { fabricCliCommand } from "../domain/fabric-roots.js";
 
 export { isRecord } from "../domain/record.js";
 export {
@@ -718,14 +719,17 @@ export function bindCurrentMcpSeatsInput(params: Record<string, unknown>): Curre
   };
 }
 
-export function bootstrapMcpSeatInput(params: Record<string, unknown>): BootstrapMcpSeatInput {
+export function bootstrapMcpSeatInput(
+  params: Record<string, unknown>,
+  productRoot: string,
+): BootstrapMcpSeatInput {
   exactFields(params, ["canonicalRoot", "trustRecordDigest", "seat", "expiresAt"], "MCP zero-state bootstrap");
   const canonicalRoot = requiredString(params, "canonicalRoot");
   const seat = requiredString(params, "seat");
   if (seat !== "claude" && seat !== "codex") {
     throw new TypeError(
       `MCP bootstrap creates only chair seats claude or codex; run ` +
-      `"$HOME/.agents/scripts/agent-fabric" mcp peer-provision ` +
+      `${fabricCliCommand({ productRootFlag: productRoot })} mcp peer-provision ` +
       `--project '${canonicalRoot.replaceAll("'", `'"'"'`)}' --seat ${seat} instead`,
     );
   }

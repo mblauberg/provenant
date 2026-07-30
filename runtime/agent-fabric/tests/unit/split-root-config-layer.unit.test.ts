@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 
 import { loadFabricConfig } from "../../src/config/index.ts";
 import { defaultDaemonStartOptions } from "../../src/cli/default-daemon-options.ts";
-import { resolveSplitConfiguration, resolveSplitRoots } from "../../src/cli/split-config-paths.ts";
+import { resolveSplitConfiguration } from "../../src/cli/split-config-paths.ts";
 
 /**
  * ADR 0019 splits the shipped configuration from the instance's own layer: the
@@ -207,11 +207,10 @@ describe("split-layout startup path binding", () => {
     const split = await makeSplit("binding");
     await writeYamlishJson(split.localPath, { schemaVersion: 1 });
 
-    const options = defaultDaemonStartOptions(paths, undefined, {
-      environment: {
-        AGENT_FABRIC_PRODUCT_ROOT: split.productRoot,
-        AGENT_FABRIC_INSTANCE_ROOT: split.instanceRoot,
-      },
+    const options = defaultDaemonStartOptions(paths, {
+      productRootFlag: split.productRoot,
+      instanceRootFlag: split.instanceRoot,
+      environment: {},
     });
 
     expect(options.configuration).toEqual({
@@ -229,21 +228,37 @@ describe("split-layout startup path binding", () => {
     });
   });
 
-  it("omits the local layer when the instance ships no configuration file", async () => {
-    const split = await makeSplit("binding-absent");
+  it("resolves the same split from the root environment variables alone", async () => {
+    const split = await makeSplit("binding-environment");
+    await writeYamlishJson(split.localPath, { schemaVersion: 1 });
 
-    const options = defaultDaemonStartOptions(paths, undefined, {
+    const configuration = resolveSplitConfiguration({
       environment: {
         AGENT_FABRIC_PRODUCT_ROOT: split.productRoot,
         AGENT_FABRIC_INSTANCE_ROOT: split.instanceRoot,
       },
     });
 
+    expect(configuration.globalConfigPath).toBe(split.globalPath);
+    expect(configuration.localConfigPath).toBe(split.localPath);
+    expect(configuration.agentsHome).toBe(split.productRoot);
+  });
+
+  it("omits the local layer when the instance ships no configuration file", async () => {
+    const split = await makeSplit("binding-absent");
+
+    const options = defaultDaemonStartOptions(paths, {
+      productRootFlag: split.productRoot,
+      instanceRootFlag: split.instanceRoot,
+      environment: {},
+    });
+
     expect(options.configuration?.localConfigPath).toBeUndefined();
   });
 
   it("keeps a fused layout on exactly the paths it used before", () => {
-    const options = defaultDaemonStartOptions(paths, "/home/user/.agents", {
+    const options = defaultDaemonStartOptions(paths, {
+      agentsHomeFlag: "/home/user/.agents",
       environment: {},
       exists: () => true,
     });
@@ -257,25 +272,13 @@ describe("split-layout startup path binding", () => {
     });
   });
 
-  it("lets an explicit instance root outrank a generic agents home", () => {
-    const roots = resolveSplitRoots({
-      agentsHomeValue: "/opt/product",
-      environment: { AGENT_FABRIC_INSTANCE_ROOT: "/home/user/.agents" },
+  it("never offers the global layer back to itself as the local layer", () => {
+    const configuration = resolveSplitConfiguration({
+      environment: { AGENTS_HOME: "/home/user/.agents" },
+      exists: () => true,
     });
 
-    expect(roots).toEqual({ productRoot: "/opt/product", instanceRoot: "/home/user/.agents" });
-  });
-
-  it("falls back to the agents home for both roots when nothing else is set", () => {
-    expect(resolveSplitRoots({ agentsHomeValue: "/opt/agents", environment: {} })).toEqual({
-      productRoot: "/opt/agents",
-      instanceRoot: "/opt/agents",
-    });
-  });
-
-  it("rejects a relative root rather than resolving it against the daemon's cwd", () => {
-    expect(() =>
-      resolveSplitRoots({ environment: { AGENT_FABRIC_PRODUCT_ROOT: "relative/product" } }),
-    ).toThrow(/must be an absolute path/u);
+    expect(configuration.globalConfigPath).toBe("/home/user/.agents/config/agent-fabric.yaml");
+    expect(configuration.localConfigPath).toBeUndefined();
   });
 });

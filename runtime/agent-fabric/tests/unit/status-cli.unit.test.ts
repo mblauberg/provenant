@@ -9,12 +9,17 @@ import { Duplex } from "node:stream";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { MCP_BOOTSTRAP_CREDENTIALS_FEATURE } from "@local/agent-fabric-protocol";
 
-import { fabricDoctor as realFabricDoctor, fabricStatus } from "../../src/cli/status.ts";
+import {
+  fabricDoctor as realFabricDoctor,
+  fabricStatus,
+  resolveStatusPaths,
+} from "../../src/cli/status.ts";
 import type { FabricPaths } from "../../src/cli/paths.ts";
 import { probeProviderInterface as realProbeProviderInterface } from "../../src/adapters/provider-interface.ts";
 import { FLOCK_ELECTION_LOCK_PORT } from "../../src/daemon/bootstrap-election.ts";
 import { FabricDaemonClient } from "../../src/daemon/rpc-client.ts";
 import { FabricError } from "../../src/errors.ts";
+import { loadFabricConfig } from "../../src/config/index.ts";
 import { openFabric, startFabricDaemon } from "../../src/index.ts";
 import { PIN_OBSERVATION_CACHE_FILE } from "../../src/review/profile/pin-observer.ts";
 import { digestCanonical } from "../../src/review/canonical/index.ts";
@@ -27,7 +32,10 @@ import { parseMcpPeerProvisionArguments } from "../../src/cli/mcp-peer-provision
 import { shellCommandArguments } from "../support/shell-command-arguments.ts";
 
 const cleanup: string[] = [];
-afterEach(async () => Promise.all(cleanup.splice(0).map((path) => rm(path, { recursive: true, force: true }))));
+afterEach(async () => {
+  vi.unstubAllEnvs();
+  await Promise.all(cleanup.splice(0).map((path) => rm(path, { recursive: true, force: true })));
+});
 
 class DoctorFixtureDaemonSocket extends Duplex {
   readonly methods: string[] = [];
@@ -334,6 +342,36 @@ async function writeActiveGeneration(value: FabricPaths): Promise<void> {
 }
 
 describe("machine status and doctor", () => {
+  it("defaults status and doctor paths to process.cwd() when no root is configured", () => {
+    vi.stubEnv("AGENTS_HOME", undefined);
+    vi.stubEnv("AGENT_FABRIC_PRODUCT_ROOT", undefined);
+    vi.stubEnv("AGENT_FABRIC_INSTANCE_ROOT", undefined);
+
+    expect(resolveStatusPaths([])).toMatchObject({
+      productRoot: process.cwd(),
+      instanceRoot: process.cwd(),
+    });
+  });
+
+  it("derives instance configuration and product assets from separate roots", () => {
+    expect(resolveStatusPaths([
+      "--product-root", "/fixture/product",
+      "--instance-root", "/fixture/instance",
+    ])).toEqual({
+      productRoot: resolve("/fixture/product"),
+      instanceRoot: resolve("/fixture/instance"),
+      config: resolve("/fixture/instance/config/agent-fabric.yaml"),
+      compatibility: resolve("/fixture/instance/config/adapter-compatibility.yaml"),
+      compatibilitySchema: resolve(
+        "/fixture/product/runtime/agent-fabric/schemas/adapter-compatibility.schema.json",
+      ),
+      modelRouting: resolve("/fixture/instance/config/model-routing.json"),
+      reviewProfile: resolve(
+        "/fixture/instance/config/review-profiles/certifying-review-four-slot-v1.json",
+      ),
+    });
+  });
+
   it("reports configured adapters, exact roots and secret-free seat metadata", async () => {
     const value = await paths();
     const agentsHome = resolve(import.meta.dirname, "../../../..");
@@ -364,7 +402,7 @@ describe("machine status and doctor", () => {
         registered: false,
         active: false,
         reason: "PROJECT_NOT_BOOTSTRAPPED",
-        remedy: `cd '${project}' && "$HOME/.agents/scripts/agent-fabric" bootstrap --seat codex`,
+        remedy: `cd '${project}' && '${agentsHome}/scripts/agent-fabric' bootstrap --seat codex`,
       }]),
     });
   });
@@ -427,7 +465,7 @@ describe("machine status and doctor", () => {
       registered: false,
       active: false,
       reason: "PEER_SEAT_NOT_PROVISIONED",
-      remedy: `"$HOME/.agents/scripts/agent-fabric" mcp peer-provision --project '${project}' --seat agy`,
+      remedy: `'${agentsHome}/scripts/agent-fabric' mcp peer-provision --project '${project}' --seat agy`,
     });
     expect(JSON.stringify(status)).not.toMatch(/af[bc]_[A-Za-z0-9_-]{43}|credentialPath/u);
   });
@@ -996,6 +1034,8 @@ describe("machine status and doctor", () => {
     });
     expect(result).toMatchObject({ exitCode: 0, signal: null, stderr: "" });
     expect(result.stdout).toContain("--consume-provider-quota");
+    expect(result.stdout).toContain("--product-root PATH");
+    expect(result.stdout).toContain("--instance-root PATH");
     expect(result.stdout).toContain("run live provider capability probes and refresh the private cache");
   });
 
@@ -2162,5 +2202,60 @@ printf '%s\\n' '{"schema_version":1,"source":"claude subscription canary","obser
         activeAdapters: ["live-only"],
       });
     } finally { await daemon.stop(); }
+  });
+
+  it("expands the \${AGENTS_HOME} config token against the product root under split roots", async () => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), "fabric-split-token-")));
+    cleanup.push(root);
+    const globalPath = join(root, "agent-fabric.yaml");
+    await writeFile(globalPath, `${JSON.stringify({
+      schemaVersion: 1,
+      adapters: { codex: { command: ["codex", "app-server"] } },
+      allowedAdapters: ["codex"],
+      activeAdapters: ["codex"],
+      allowedProfiles: ["paired-visible"],
+      workspaceRoots: ["${AGENTS_HOME}/projects"],
+      limits: { maximumConcurrentProviderTurns: 8 },
+    })}\n`);
+
+    const selected = resolveStatusPaths([
+      "--product-root", join(root, "product"),
+      "--instance-root", join(root, "instance"),
+    ]);
+    const config = await loadFabricConfig({ globalPath, agentsHome: selected.productRoot });
+
+    expect(config.workspaceRoots).toEqual([join(root, "product", "projects")]);
+  });
+});
+
+describe("split-root remedy rendering", () => {
+  it("renders seat remedies against the product root when roots are split", async () => {
+    const value = await paths();
+    const productRoot = resolve(import.meta.dirname, "../../../..");
+    const instanceRoot = join(dirname(value.stateDirectory), "instance");
+    await mkdir(join(instanceRoot, "config"), { recursive: true });
+    for (const name of ["agent-fabric.yaml", "adapter-compatibility.yaml"]) {
+      await writeFile(join(instanceRoot, "config", name), await readFile(join(productRoot, "config", name)));
+    }
+    const requestedProject = join(dirname(value.stateDirectory), "project root");
+    await mkdir(requestedProject, { recursive: true });
+    const project = await realpath(requestedProject);
+
+    const status = await fabricStatus(
+      ["--product-root", productRoot, "--instance-root", instanceRoot, "--project", project],
+      value,
+    );
+
+    expect(status.project).toEqual({
+      path: project,
+      seats: expect.arrayContaining([{
+        seat: "agy",
+        registered: false,
+        active: false,
+        reason: "PROJECT_NOT_BOOTSTRAPPED",
+        remedy: `cd '${project}' && '${productRoot}/scripts/agent-fabric' bootstrap --seat codex`,
+      }]),
+    });
+    expect(JSON.stringify(status)).not.toContain(instanceRoot);
   });
 });

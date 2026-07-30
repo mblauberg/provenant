@@ -120,6 +120,13 @@ derivable from this file and must come from `--product-root` or
 `AGENT_FABRIC_PRODUCT_ROOT`. Any consumer resolving a product root reads the
 mode and then the environment, in that order.
 
+That is the read contract this file offers, and it refines rather than replaces
+the provisional chain the relocation-safe MCP shim already uses
+(`AGENT_FABRIC_PRODUCT_ROOT`, then `AGENTS_HOME`, then `~/.agents`; [issue
+#529](https://github.com/mblauberg/provenant/issues/529)). A consumer that reads
+this file first can answer `fused` without consulting the environment at all,
+and falls back to that same chain for `split`.
+
 *The installation receipt* is machine-local: it records the absolute target
 root, per-entry source paths, content digests and install timestamps for what
 is actually on this machine right now. It is written beside the installed
@@ -164,11 +171,25 @@ two roots are the same directory, so every one of those bindings resolves where
 it resolved before and the change is a no-op until an instance root actually
 differs.
 
-An explicit `AGENT_FABRIC_INSTANCE_ROOT` outranks a generic agents-home input
-when resolving the instance root. After the split `AGENTS_HOME` names the
-product, because it is the token the shipped adapter commands expand against, so
-without that ordering a split layout would collapse back to fused whenever
-`AGENTS_HOME` was set, which is always.
+Root resolution itself is `resolveFabricRoots`
+(`runtime/agent-fabric/src/domain/fabric-roots.ts`, [issue
+#528](https://github.com/mblauberg/provenant/issues/528)): flag, then
+`AGENT_FABRIC_PRODUCT_ROOT` or `AGENT_FABRIC_INSTANCE_ROOT`, then `AGENTS_HOME`,
+then `~/.agents`. This decision adds no second resolver. One consequence of that
+precedence is worth stating plainly: an `--agents-home` flag sets both roots, so
+a split layout is expressed by the two explicit root inputs, not by
+`AGENTS_HOME`, which after the split names the product because it is the token
+the shipped adapter commands expand against.
+
+Two read paths still diverge from that binding and are recorded rather than
+changed here. `provenant status` and `provenant doctor` load a single
+configuration layer, and `resolveStatusPaths` binds it to the instance root, so
+a diagnostic validates the instance file against the trusted global schema while
+startup treats the same file as narrowing-only. Both call sites now carry a
+comment naming the divergence. Separately the MCP server resolves its roots
+ambiently (`runtime/agent-fabric/src/mcp/credentials.ts:159`); that path belongs
+to [issue #529](https://github.com/mblauberg/provenant/issues/529) and is
+referenced here only so the table is complete.
 
 Two consequences fall to [issue
 #532](https://github.com/mblauberg/provenant/issues/532) rather than to this

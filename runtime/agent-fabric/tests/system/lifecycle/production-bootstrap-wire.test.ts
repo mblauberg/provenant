@@ -514,6 +514,7 @@ describe("production daemon bootstrap wiring", () => {
       env: {
         PATH: process.env.PATH ?? "/usr/bin:/bin",
         HOME: process.env.HOME ?? root,
+        AGENT_FABRIC_PRODUCT_ROOT: root,
         AGENT_FABRIC_DATABASE_PATH: databasePath,
         AGENT_FABRIC_SOCKET_PATH: socketPath,
         AGENT_FABRIC_STATE_DIRECTORY: stateDirectory,
@@ -569,6 +570,7 @@ describe("production daemon bootstrap wiring", () => {
       env: {
         PATH: process.env.PATH ?? "/usr/bin:/bin",
         HOME: process.env.HOME ?? root,
+        AGENT_FABRIC_PRODUCT_ROOT: root,
         AGENT_FABRIC_DATABASE_PATH: join(stateDirectory, "fabric.sqlite3"),
         AGENT_FABRIC_SOCKET_PATH: join(runtimeDirectory, "f.sock"),
         AGENT_FABRIC_STATE_DIRECTORY: stateDirectory,

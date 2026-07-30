@@ -12,6 +12,7 @@ export type Clock = () => number | Date;
 export type FabricOpenOptions = {
   databasePath: string;
   workspaceRoots: string[];
+  productRoot?: string;
   clock?: Clock;
   adapters?: Record<string, {
     command: string[];

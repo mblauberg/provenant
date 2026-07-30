@@ -7,6 +7,7 @@ import Database from "better-sqlite3";
 import { MCP_BOOTSTRAP_CREDENTIALS_FEATURE } from "@local/agent-fabric-protocol";
 
 import type { FabricOpenOptions } from "../domain/types.js";
+import { resolveFabricRoots } from "../domain/fabric-roots.js";
 import { inspectFabricDatabase } from "../core/migrations.js";
 import { FabricRemoteError } from "../transport/ndjson-rpc.js";
 import { attachOrStartDaemon, type DaemonHandshakeResult } from "./bootstrap-client.js";
@@ -212,6 +213,7 @@ export async function releaseDaemonLocks(locks: DaemonLock[]): Promise<void> {
 }
 
 type PreparedDaemonStart = DaemonStartOptions & {
+  productRoot: string;
   adapters: NonNullable<FabricOpenOptions["adapters"]>;
   executionProfile: string;
   maximumConcurrentProviderTurns: number;
@@ -260,6 +262,9 @@ async function prepareDaemonStart(options: DaemonStartOptions): Promise<Prepared
     throw new TypeError("lifecycle receipt authority ID must not be empty");
   }
   const databasePath = safeDatabasePath(options.databasePath);
+  const productRoot = resolveFabricRoots({
+    agentsHomeFlag: options.configuration?.agentsHome,
+  }).productRoot;
   let adapters = options.adapters ?? {};
   let executionProfile = options.executionProfile ?? "headless";
   let maximumConcurrentProviderTurns = options.maximumConcurrentProviderTurns ?? 8;
@@ -278,6 +283,7 @@ async function prepareDaemonStart(options: DaemonStartOptions): Promise<Prepared
   return {
     ...options,
     databasePath,
+    productRoot,
     adapters,
     executionProfile,
     maximumConcurrentProviderTurns,
