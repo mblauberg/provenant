@@ -13,7 +13,6 @@ from lib.product_root_resolver import load_pointer_file
 
 
 REPAIR = (
-    "product-root pointer is missing or invalid; "
     "repair: re-run install-harness from the product checkout, "
     "or set AGENT_FABRIC_PRODUCT_ROOT"
 )

@@ -309,7 +309,7 @@ def test_stable_registration_reports_repair_for_missing_product(tmp_path: Path) 
     )
 
     assert launched.returncode != 0
-    assert "product-root pointer is missing or invalid" in launched.stderr
+    assert "Agent Fabric MCP target is missing or not executable" in launched.stderr
     assert "repair: re-run install-harness from the product checkout" in launched.stderr
 
 
@@ -475,6 +475,7 @@ def test_platform_all_revalidates_codex_after_writing_claude(tmp_path: Path, mon
     result = configurer.main([
         "--agents-home", str(ROOT),
         "--state-directory", str(tmp_path / "state"),
+        "--shim-path", str(stable_shim(tmp_path)),
         "--claude-config", str(claude_config),
         "--codex-config", str(codex_config),
     ])
@@ -523,6 +524,7 @@ def test_first_client_post_install_failure_reports_partial_state(
         "--platform", "claude",
         "--agents-home", str(ROOT),
         "--state-directory", str(tmp_path / "state"),
+        "--shim-path", str(stable_shim(tmp_path)),
         "--claude-config", str(config),
     ])
 
@@ -578,6 +580,7 @@ def test_existing_drift_before_any_commit_uses_non_partial_conflict(
         "--platform", "claude",
         "--agents-home", str(ROOT),
         "--state-directory", str(tmp_path / "state"),
+        "--shim-path", str(stable_shim(tmp_path)),
         "--claude-config", str(config),
     ]
     assert configurer.main(arguments) == 0
