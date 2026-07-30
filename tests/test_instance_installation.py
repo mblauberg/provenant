@@ -192,6 +192,7 @@ def test_seeding_never_writes_a_receipt_into_the_instance_root(tmp_path):
     assert written == {
         "config/installation.json",
         ".agent-fabric/product-root.json",
+        ".agent-fabric/.gitignore",
         "AGENTS.md",
         "config/model-preferences.json",
         "config/model-routing.json",
@@ -245,6 +246,47 @@ def test_the_pointer_directory_is_ignored_by_git():
     assert ".agent-fabric/" in ignored
 
 
+def test_a_fresh_split_instance_ignores_its_pointer_without_help(tmp_path):
+    """Ignore rules do not cross repository roots, so the rule ships with it.
+
+    An independent instance repository has never heard of the product
+    checkout's .gitignore. The pointer carries an absolute machine path, so its
+    directory has to be self-ignoring wherever the instance happens to live.
+    """
+    product = build_product(tmp_path)
+    instance_root = tmp_path / "instance"
+    instance_root.mkdir()
+    subprocess.run(
+        ["git", "init", "-q"], cwd=instance_root, check=True, capture_output=True
+    )
+
+    seed(product, instance_root)
+
+    pointer = instance_root / ".agent-fabric" / "product-root.json"
+    assert (instance_root / ".agent-fabric" / ".gitignore").read_text() == "*\n"
+    check = subprocess.run(
+        ["git", "check-ignore", "-q", str(pointer)],
+        cwd=instance_root,
+        capture_output=True,
+    )
+    assert check.returncode == 0, "git does not ignore the pointer in a fresh instance"
+
+    # And nothing in the pointer directory can reach the index.
+    staged = subprocess.run(
+        ["git", "add", "-A"], cwd=instance_root, capture_output=True, text=True
+    )
+    assert staged.returncode == 0, staged.stderr
+    tracked = subprocess.run(
+        ["git", "diff", "--cached", "--name-only"],
+        cwd=instance_root,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.split()
+    assert not any(name.startswith(".agent-fabric/") for name in tracked), tracked
+    assert "config/installation.json" in tracked
+
+
 @pytest.mark.parametrize(
     "document",
     [
@@ -272,6 +314,39 @@ def test_a_fused_layout_seeds_no_template_over_itself(tmp_path):
 
     assert {item["state"] for item in result["seeded"]} == {"existing"}
     assert (product / "AGENTS.md").read_text() == original
+
+
+def test_a_symlinked_destination_never_redirects_a_seeded_write(tmp_path):
+    """Staging and renaming means the destination path cannot be hijacked."""
+    product = build_product(tmp_path)
+    instance_root = tmp_path / "instance"
+    instance_root.mkdir()
+    outside = tmp_path / "outside.md"
+    outside.write_text("do not touch\n")
+    # A symlink standing where the seeder is about to write. `exists()` follows
+    # it, so this is reported as existing rather than copied through.
+    (instance_root / "AGENTS.md").symlink_to(outside)
+
+    result = seed(product, instance_root)
+
+    assert outside.read_text() == "do not touch\n"
+    states = {item["path"]: item["state"] for item in result["seeded"]}
+    assert states["AGENTS.md"] == "existing"
+
+
+def test_seeding_fails_with_a_clean_message_when_the_instance_is_readonly(tmp_path):
+    product = build_product(tmp_path)
+    instance_root = tmp_path / "instance"
+    instance_root.mkdir(mode=0o500)
+    try:
+        result = run("seed", product, instance_root)
+    finally:
+        instance_root.chmod(0o700)
+
+    assert result.returncode == 3
+    assert "conflicting:" in result.stderr
+    assert "not writable" in result.stderr
+    assert "Traceback" not in result.stderr
 
 
 def test_show_reports_the_instance_without_writing_it(tmp_path):

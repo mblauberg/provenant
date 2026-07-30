@@ -120,7 +120,11 @@ if [[ "$PLATFORM" == "codex" ]]; then
 fi
 "$ROOT/scripts/configure-agent-fabric-mcp.py" "${mcp_args[@]}"
 
-bootstrap="Read and follow \`$ROOT/AGENTS.md\` and \`$ROOT/HARNESS.md\` before making orchestration, delegation, model-routing or memory decisions. Platform/system policy and explicit user authority lead; the nearest project instruction may specialise or strengthen the global harness but may not silently broaden authority, weaken safety gates or redefine global cross-project memory policy."
+# AGENTS.md is instance-owned once seeded and HARNESS.md stays product-shipped
+# (ADR 0019), so the client reads doctrine from the instance and the harness
+# constitution from the product. In a fused layout both roots are one directory,
+# so this is the text that was always emitted.
+bootstrap="Read and follow \`$instance_root/AGENTS.md\` and \`$ROOT/HARNESS.md\` before making orchestration, delegation, model-routing or memory decisions. Platform/system policy and explicit user authority lead; the nearest project instruction may specialise or strengthen the global harness but may not silently broaden authority, weaken safety gates or redefine global cross-project memory policy."
 
 if [[ ! -e "$instructions" && ! -L "$instructions" ]]; then
   {
@@ -129,9 +133,9 @@ if [[ ! -e "$instructions" && ! -L "$instructions" ]]; then
     echo "$bootstrap"
   } > "$instructions"
   echo "instructions created=$instructions"
-elif [[ -L "$instructions" && "$instructions" -ef "$ROOT/AGENTS.md" ]]; then
+elif [[ -L "$instructions" && "$instructions" -ef "$instance_root/AGENTS.md" ]]; then
   echo "instructions existing=$instructions"
-elif grep -Fq "$ROOT/AGENTS.md" "$instructions" && grep -Fq "$ROOT/HARNESS.md" "$instructions"; then
+elif grep -Fq "$instance_root/AGENTS.md" "$instructions" && grep -Fq "$ROOT/HARNESS.md" "$instructions"; then
   echo "instructions existing=$instructions"
 else
   echo "instructions preserved=$instructions" >&2

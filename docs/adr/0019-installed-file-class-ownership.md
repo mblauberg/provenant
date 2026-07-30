@@ -64,17 +64,44 @@ and is never committed anywhere.
 | desired state (product version, mode) | instance-owned, committed |
 | installation receipts, generated `skills/` projection, client links | machine-local, ignored |
 
-The machine-local, ignored class in the last row also holds the product
-pointer, `<instance root>/.agent-fabric/product-root.json`: a schema-versioned
-file carrying the absolute path of this machine's product checkout, written by
-`install-harness` on every install.
+The table above is the approved decision and does not change. Two further
+artifacts are members of classes it already names, recorded here so the
+classification is exhaustive against what the installer actually writes.
 
-That pointer exists to keep one invariant absolute. **Committed instance state
-never contains an absolute machine path.** The path a consumer needs is real and
-has to live somewhere, so it lives in the receipt class, where it is ignored and
-regenerated. Relocating the product is therefore always "re-run
-`install-harness`", never an edit to a committed file and never an edit to a
-client configuration.
+**Client links, in the last row, cover the generated client instruction files**
+as well as symlinks: `~/.claude/CLAUDE.md` and `~/.codex/AGENTS.md`. The
+installer may create either as a symlink to the instance `AGENTS.md` or as a
+small generated file naming it, and an existing user-authored file is preserved
+untouched. Both forms are machine-local: they name absolute paths on this
+machine, they are never committed by either repository, and they carry no
+content of their own. Because `AGENTS.md` is instance-owned after seeding, that
+generated text points at the instance copy, while `HARNESS.md` stays product-
+shipped and is addressed in the product. A client that read the product
+`AGENTS.md` instead would never see the user's own doctrine, which is the
+failure this decision exists to prevent.
+
+**The product pointer, also in the last row**, is
+`<instance root>/.agent-fabric/product-root.json`: a schema-versioned file
+carrying the absolute path of this machine's product checkout, written by
+`install-harness` on every install. That pointer exists to keep one invariant
+absolute. **Committed instance state never contains an absolute machine path.**
+The path a consumer needs is real and has to live somewhere, so it lives in the
+receipt class, where it is ignored and regenerated. Relocating the product is
+therefore always "re-run `install-harness`", never an edit to a committed file
+and never an edit to a client configuration.
+
+Its directory carries its own `.gitignore` of `*`. Git ignore rules do not
+cross repository roots, so the product checkout's `.gitignore` says nothing
+about an independent instance repository; the rule has to travel with the file
+it protects.
+
+**Note on the two rows that both involve the installer writing a file.** They
+are not the same mechanism. The desired state is *created* by the installer as
+the instance's own intent: no product template exists for it, and its content
+describes the instance rather than the product. The `AGENTS.md` class is
+*projected once*: a product template is copied, and from that moment the copy is
+the instance's. Both are written exactly once and never rewritten, but the first
+is authored and the second is inherited.
 
 That table is the decision. The three owners mean:
 
@@ -156,12 +183,29 @@ listener and the credential selector may be set.
 
 An instance may ship its own `config/agent-fabric.yaml`. Normal daemon startup
 passes it as `localPath` into the existing `loadFabricConfig` merge. It gets
-the rule that merge already implements and no other: allow-lists intersect so
-an adapter absent from the product list cannot be added, `activeAdapters`
-outside the resulting allow-list raises `CONFIG_WIDENING_FORBIDDEN`, workspace
-roots must be contained within a product root, and the concurrency limit takes
-the minimum of the two. An absent instance file resolves to exactly the
-product-only configuration.
+the rule that merge already implements: allow-lists intersect so an adapter
+absent from the product list cannot be added, `activeAdapters` outside the
+resulting allow-list raises `CONFIG_WIDENING_FORBIDDEN`, workspace roots must be
+contained within a product root, and the concurrency limit takes the minimum of
+the two. An absent instance file resolves to exactly the product-only
+configuration.
+
+One rule is added, because the merge as inherited did not enforce narrowing on
+the field that matters most. **The instance layer selects from the product's
+adapters; it never defines one.** A local `adapters` entry naming an adapter the
+product does not define, or altering the command of one it does, raises
+`CONFIG_WIDENING_FORBIDDEN`. The inherited merge overlaid the local adapter map
+over the product's, so an instance file could keep the adapter id, keep the
+allow-list, and substitute the program behind it. Nothing else in the merge
+would notice: the id is allowed, the id is active, and the daemon would execute
+whatever the instance named. That is widening of the most consequential kind,
+because an adapter entry is the one place a trusted layer names an executable,
+and it is the reason a local layer cannot be granted this field at all.
+
+Restating the product's exact entry is permitted rather than rejected. An
+instance file authored by copying the product's and then narrowing it is the
+expected way to write one, and an identical entry substitutes nothing. The check
+is on difference, not on presence.
 
 No second merge engine is introduced, for any file class. Where a class needs
 layered behaviour it uses this merge; where it does not, it is whole-file owned
@@ -196,15 +240,23 @@ a split layout is expressed by the two explicit root inputs, not by
 `AGENTS_HOME`, which after the split names the product because it is the token
 the shipped adapter commands expand against.
 
-Two read paths still diverge from that binding and are recorded rather than
-changed here. `provenant status` and `provenant doctor` load a single
-configuration layer, and `resolveStatusPaths` binds it to the instance root, so
-a diagnostic validates the instance file against the trusted global schema while
-startup treats the same file as narrowing-only. Both call sites now carry a
-comment naming the divergence. Separately the MCP server resolves its roots
-ambiently (`runtime/agent-fabric/src/mcp/credentials.ts:159`); that path belongs
-to [issue #529](https://github.com/mblauberg/provenant/issues/529) and is
-referenced here only so the table is complete.
+Layering is uniform across every consumer that reads trusted configuration.
+`provenant status`, `provenant doctor` and `agent-fabric adapter executable`
+compose the product global layer with the optional instance local layer exactly
+as daemon startup does, and bind `adapter-compatibility.yaml` to the product.
+A diagnostic that read one layer would answer a different question from the one
+an operator is asking. On a split machine it could report a healthy widened view
+the daemon would refuse to start on, fail on a valid instance that holds no
+product-owned file, or silently omit adapters the product activated. When an
+operator pins a single file with `--trusted-config` or `--config`, that file is
+the whole configuration and no local layer is added, because naming one file is
+a request to inspect exactly that file.
+
+`model-routing.json` stays bound to the instance root, matching its row in the
+table. Separately the MCP server resolves its roots ambiently
+(`runtime/agent-fabric/src/mcp/credentials.ts:159`); that path belongs to [issue
+#529](https://github.com/mblauberg/provenant/issues/529) and is referenced here
+only so the table is complete.
 
 Two consequences fall to [issue
 #532](https://github.com/mblauberg/provenant/issues/532) rather than to this
@@ -275,3 +327,17 @@ floor is not tracked by any automated check.
   adapter commands are declared, and a local layer that can add a command is a
   local layer that can execute arbitrary code with daemon authority. An
   instance needing a new adapter changes the product.
+- **Rejecting an `adapters` key in the local layer outright**, rather than
+  rejecting only entries that differ from the product's. Rejected because the
+  natural way to author an instance layer is to copy the product's file and
+  delete what you do not want, and a strict rejection would refuse that file for
+  restating entries it changes nothing about. Difference is the property that
+  matters; presence is not.
+- **Recomputing `mode` in the desired state on every install**, so that a
+  fused-to-split migration is picked up automatically. Rejected because it
+  contradicts the ownership this ADR establishes. Desired state is the
+  instance's intent, and an installer that rewrites it is no longer reading the
+  instance's intent but its own. Location is not intent: a migration changes
+  where the product lives, which the machine-local pointer already records and
+  `install-harness` already rewrites. A user who genuinely wants to change the
+  declared mode edits one committed line, and Git shows it.

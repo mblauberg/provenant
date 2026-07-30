@@ -76,7 +76,7 @@ describe("runtime configuration schema validation", () => {
     });
   });
 
-  it("lets a trusted local layer replace commands while intersecting authority sets and limits", async () => {
+  it("keeps product adapter commands while intersecting authority sets and limits", async () => {
     const root = await mkdtemp(join(tmpdir(), "fabric-runtime-local-config-"));
     const globalRoot = join(root, "global-root");
     const localRoot = join(globalRoot, "local-root");
@@ -94,9 +94,10 @@ describe("runtime configuration schema validation", () => {
     });
     await writeJson(localPath, {
       schemaVersion: 1,
+      // Restating the product's exact entry is permitted, so an instance file
+      // may be authored as a narrowed copy of the product's (ADR 0019).
       adapters: {
-        codex: { command: ["codex", "local"] },
-        claude: { command: ["claude"] },
+        codex: { command: ["codex", "global"] },
       },
       allowedAdapters: ["codex", "claude"],
       activeAdapters: ["codex", "claude"],
@@ -108,7 +109,7 @@ describe("runtime configuration schema validation", () => {
     await expect(loadFabricConfig({ globalPath, localPath })).resolves.toMatchObject({
       adapterIds: ["codex"],
       adapterCommands: {
-        codex: ["codex", "local"],
+        codex: ["codex", "global"],
       },
       workspaceRoots: [join(await realpath(root), "global-root", "local-root")],
       limits: { maximumConcurrentProviderTurns: 6 },

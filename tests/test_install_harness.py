@@ -689,3 +689,62 @@ def test_warns_when_provenant_bin_directory_is_outside_path(tmp_path):
     assert (bin_dir / "provenant").resolve() == ROOT / "scripts" / "provenant"
     assert not (tmp_path / ".zshrc").exists()
     assert not (tmp_path / ".bashrc").exists()
+
+
+def test_split_install_points_client_instructions_at_the_instance_agents_md(tmp_path):
+    """AGENTS.md is instance-owned once seeded, so the client must read that copy.
+
+    Binding the bootstrap text to the product copy would mean an instance edit
+    never reaches Claude or Codex, which is the failure the ownership split
+    exists to prevent (ADR 0019). HARNESS.md stays product-shipped.
+    """
+    config = tmp_path / "claude-config"
+    bin_dir = tmp_path / "custom-bin"
+    instance_root = tmp_path / "instance"
+    instance_root.mkdir()
+
+    result = run(
+        "claude",
+        tmp_path,
+        CLAUDE_CONFIG_DIR=str(config),
+        PROVENANT_BIN_DIR=str(bin_dir),
+        PATH=f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+        AGENT_FABRIC_INSTANCE_ROOT=str(instance_root),
+    )
+
+    assert result.returncode == 0, result.stderr
+    seeded = instance_root / "AGENTS.md"
+    assert seeded.is_file(), "the split instance should have been seeded"
+    assert seeded.read_text() == (ROOT / "AGENTS.md").read_text()
+
+    content = (config / "CLAUDE.md").read_text()
+    assert str(seeded) in content
+    assert str(ROOT / "HARNESS.md") in content
+    # The product copy is not what the client is told to read.
+    assert str(ROOT / "AGENTS.md") not in content
+
+    # An instance edit reaches the client, because the client reads that file.
+    seeded.write_text("# My own doctrine\n")
+    assert (config / "CLAUDE.md").read_text() == content
+    assert seeded.read_text() == "# My own doctrine\n"
+
+
+def test_split_install_is_idempotent_over_its_own_instructions(tmp_path):
+    config = tmp_path / "claude-config"
+    bin_dir = tmp_path / "custom-bin"
+    instance_root = tmp_path / "instance"
+    instance_root.mkdir()
+    environment = {
+        "CLAUDE_CONFIG_DIR": str(config),
+        "PROVENANT_BIN_DIR": str(bin_dir),
+        "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+        "AGENT_FABRIC_INSTANCE_ROOT": str(instance_root),
+    }
+
+    first = run("claude", tmp_path, **environment)
+    assert first.returncode == 0, first.stderr
+    second = run("claude", tmp_path, **environment)
+
+    assert second.returncode == 0, second.stderr
+    instructions = config / "CLAUDE.md"
+    assert f"instructions existing={instructions}" in second.stdout

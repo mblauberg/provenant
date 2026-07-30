@@ -25,7 +25,6 @@ import argparse
 import json
 import os
 from pathlib import Path
-import shutil
 import sys
 import tempfile
 from typing import Any
@@ -74,12 +73,20 @@ def pointer_path(instance_root: Path) -> Path:
 
 
 def write_pointer(product_root: Path, instance_root: Path) -> dict[str, Any]:
-    """Rewrite the machine-local product pointer on every install."""
+    """Rewrite the machine-local product pointer on every install.
+
+    The directory carries its own `.gitignore` of `*`. Ignore rules do not cross
+    repository roots, so the product checkout's `.gitignore` says nothing about
+    an independent instance repository; a self-contained rule keeps the absolute
+    path uncommittable wherever the instance lives.
+    """
     document = {
         "schema_version": POINTER_SCHEMA_VERSION,
         "product_root": str(Path(product_root).resolve()),
     }
-    _write_json(pointer_path(instance_root), document)
+    path = pointer_path(instance_root)
+    _write_text(path.parent / ".gitignore", "*\n")
+    _write_json(path, document)
     return document
 
 
@@ -203,27 +210,49 @@ def load_desired_state(instance_root: Path) -> dict[str, Any] | None:
     return validate_desired_state(document)
 
 
-def _write_json(path: Path, document: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+def _publish(path: Path, write: Any, mode: str = "w") -> None:
+    """Stage beside the destination, then rename over it.
+
+    Renaming replaces whatever is at the destination, including a symlink, so a
+    path checked a moment ago cannot be turned into a redirection to somewhere
+    outside the instance root before the bytes land.
+    """
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise InstallError(f"instance directory is not writable: {exc}") from exc
     temporary: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(
-            "w",
+            mode,
             dir=path.parent,
             prefix=f".{path.name}.",
             suffix=".tmp",
             delete=False,
         ) as handle:
             temporary = Path(handle.name)
-            json.dump(document, handle, indent=2, sort_keys=True)
-            handle.write("\n")
+            write(handle)
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, path)
         temporary = None
+    except OSError as exc:
+        raise InstallError(f"instance file is not writable: {path.name}: {exc}") from exc
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)
+
+
+def _write_json(path: Path, document: dict[str, Any]) -> None:
+    def write(handle: Any) -> None:
+        json.dump(document, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+
+    _publish(path, write)
+
+
+def _write_text(path: Path, text: str) -> None:
+    _publish(path, lambda handle: handle.write(text))
 
 
 def seed_desired_state(product_root: Path, instance_root: Path) -> tuple[str, dict[str, Any]]:
@@ -260,8 +289,14 @@ def seed_instance_files(product_root: Path, instance_root: Path) -> list[dict[st
             continue
         if not source.is_file():
             raise InstallError(f"product template is missing: {relative}")
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(source, destination)
+        try:
+            template = source.read_bytes()
+        except OSError as exc:
+            raise InstallError(f"product template is unreadable: {relative}: {exc}") from exc
+        # Stage and rename rather than copying onto the checked path: between
+        # the existence check above and the write, a symlink planted at the
+        # destination would otherwise redirect the bytes out of the instance.
+        _publish(destination, lambda handle, data=template: handle.write(data), mode="wb")
         results.append({"path": relative, "state": "created"})
     return results
 

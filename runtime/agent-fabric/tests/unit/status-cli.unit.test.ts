@@ -353,15 +353,19 @@ describe("machine status and doctor", () => {
     });
   });
 
-  it("derives instance configuration and product assets from separate roots", () => {
+  it("derives shipped policy from the product root and instance state from the instance root", () => {
+    // ADR 0019: the shipped configuration and compatibility are product-owned;
+    // model routing stays instance-owned. No instance file exists at this
+    // fixture path, so no local layer is offered.
     expect(resolveStatusPaths([
       "--product-root", "/fixture/product",
       "--instance-root", "/fixture/instance",
     ])).toEqual({
       productRoot: resolve("/fixture/product"),
       instanceRoot: resolve("/fixture/instance"),
-      config: resolve("/fixture/instance/config/agent-fabric.yaml"),
-      compatibility: resolve("/fixture/instance/config/adapter-compatibility.yaml"),
+      config: resolve("/fixture/product/config/agent-fabric.yaml"),
+      localConfig: undefined,
+      compatibility: resolve("/fixture/product/config/adapter-compatibility.yaml"),
       compatibilitySchema: resolve(
         "/fixture/product/runtime/agent-fabric/schemas/adapter-compatibility.schema.json",
       ),
