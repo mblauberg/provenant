@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import { readFile, rm, stat, unlink, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, readFile, rm, stat, unlink, writeFile } from "node:fs/promises";
 
 import { afterEach, describe, expect, it } from "vitest";
 import { parse } from "yaml";
@@ -59,6 +59,38 @@ describe("adapter executable resolver CLI", () => {
     const result = await resolveFixtureExecutable(fixture);
 
     expect(result).toBe(executable);
+  });
+
+  it("loads configuration from the instance root and schemas from the product root", async () => {
+    const fixture = await createResolvedStage4Compatibility("agy");
+    fixtures.push(fixture);
+    const instanceRoot = join(fixture.directory, "instance");
+    const productRoot = join(fixture.directory, "product");
+    await Promise.all([
+      mkdir(join(instanceRoot, "config"), { recursive: true }),
+      mkdir(join(productRoot, "runtime", "agent-fabric", "schemas"), { recursive: true }),
+    ]);
+    await Promise.all([
+      writeFile(
+        join(instanceRoot, "config", "agent-fabric.yaml"),
+        "schemaVersion: 1\nallowedAdapters: [agy]\nactiveAdapters: [agy]\n",
+      ),
+      copyFile(fixture.compatibilityPath, join(instanceRoot, "config", "adapter-compatibility.yaml")),
+      copyFile(
+        fixture.schemaPath,
+        join(productRoot, "runtime", "agent-fabric", "schemas", "adapter-compatibility.schema.json"),
+      ),
+    ]);
+
+    const result = await resolveAdapterExecutableCli([
+      "--adapter", "agy",
+      "--product-root", productRoot,
+      "--instance-root", instanceRoot,
+    ], {
+      verifyProvider: async () => ({} as never),
+    });
+
+    expect(result).toBe(await fixtureExecutable(fixture));
   });
 
   it("fails closed when the stable executable is missing", async () => {

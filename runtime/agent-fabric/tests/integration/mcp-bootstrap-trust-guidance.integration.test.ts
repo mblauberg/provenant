@@ -20,7 +20,10 @@ function paths(root: string) {
 async function bootstrapFailure(cwd: string, root: string): Promise<Error & { code?: string }> {
   try {
     await bootstrapMcpSeat({
-      environment: { AGENT_FABRIC_SEAT: "codex" },
+      environment: {
+        AGENT_FABRIC_SEAT: "codex",
+        AGENT_FABRIC_PRODUCT_ROOT: join(root, "product"),
+      },
       cwd,
       paths: paths(root),
     });
@@ -46,12 +49,15 @@ describe("MCP bootstrap workspace-trust guidance", () => {
     await mkdir(project, { recursive: true });
 
     await expect(bootstrapMcpSeat({
-      environment: { AGENT_FABRIC_SEAT: "codex" },
+      environment: {
+        AGENT_FABRIC_SEAT: "codex",
+        AGENT_FABRIC_PRODUCT_ROOT: join(root, "product"),
+      },
       cwd: project,
       paths: paths(root),
     })).rejects.toMatchObject({
       code: "WORKSPACE_NOT_TRUSTED",
-      message: `Fabric bootstrap requires the exact current project root to be trusted; run "$HOME/.agents/scripts/agent-fabric" workspace trust '${root}'; then retry fabric_bootstrap from '${root}'`,
+      message: `Fabric bootstrap requires the exact current project root to be trusted; run '${join(root, "product", "scripts", "agent-fabric")}' workspace trust '${root}'; then retry fabric_bootstrap from '${root}'`,
     });
   });
 

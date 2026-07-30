@@ -1,17 +1,23 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { FabricClient } from "../../src/core/fabric.ts";
 import { bootstrapMcpSeatInput, dispatchClientMethod } from "../../src/daemon/protocol.ts";
 
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
+
 describe("daemon provider action protocol", () => {
   it("names an exact shell-safe peer-provision remedy for optional bootstrap seats", () => {
+    vi.stubEnv("AGENT_FABRIC_PRODUCT_ROOT", "/fixture/product");
+
     expect(() => bootstrapMcpSeatInput({
       canonicalRoot: "/tmp/project root's",
       trustRecordDigest: `sha256:${"a".repeat(64)}`,
       seat: "agy",
       expiresAt: "2026-07-19T00:00:00.000Z",
     })).toThrow(
-      `"$HOME/.agents/scripts/agent-fabric" mcp peer-provision ` +
+      `'/fixture/product/scripts/agent-fabric' mcp peer-provision ` +
       `--project '/tmp/project root'"'"'s' --seat agy`,
     );
   });

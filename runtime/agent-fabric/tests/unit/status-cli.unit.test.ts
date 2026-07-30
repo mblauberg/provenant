@@ -9,7 +9,11 @@ import { Duplex } from "node:stream";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { MCP_BOOTSTRAP_CREDENTIALS_FEATURE } from "@local/agent-fabric-protocol";
 
-import { fabricDoctor as realFabricDoctor, fabricStatus } from "../../src/cli/status.ts";
+import {
+  fabricDoctor as realFabricDoctor,
+  fabricStatus,
+  resolveStatusPaths,
+} from "../../src/cli/status.ts";
 import type { FabricPaths } from "../../src/cli/paths.ts";
 import { probeProviderInterface as realProbeProviderInterface } from "../../src/adapters/provider-interface.ts";
 import { FLOCK_ELECTION_LOCK_PORT } from "../../src/daemon/bootstrap-election.ts";
@@ -334,6 +338,25 @@ async function writeActiveGeneration(value: FabricPaths): Promise<void> {
 }
 
 describe("machine status and doctor", () => {
+  it("derives instance configuration and product assets from separate roots", () => {
+    expect(resolveStatusPaths([
+      "--product-root", "/fixture/product",
+      "--instance-root", "/fixture/instance",
+    ])).toEqual({
+      agentsHome: resolve("/fixture/product"),
+      instanceRoot: resolve("/fixture/instance"),
+      config: resolve("/fixture/instance/config/agent-fabric.yaml"),
+      compatibility: resolve("/fixture/instance/config/adapter-compatibility.yaml"),
+      compatibilitySchema: resolve(
+        "/fixture/product/runtime/agent-fabric/schemas/adapter-compatibility.schema.json",
+      ),
+      modelRouting: resolve("/fixture/instance/config/model-routing.json"),
+      reviewProfile: resolve(
+        "/fixture/instance/config/review-profiles/certifying-review-four-slot-v1.json",
+      ),
+    });
+  });
+
   it("reports configured adapters, exact roots and secret-free seat metadata", async () => {
     const value = await paths();
     const agentsHome = resolve(import.meta.dirname, "../../../..");
@@ -364,7 +387,7 @@ describe("machine status and doctor", () => {
         registered: false,
         active: false,
         reason: "PROJECT_NOT_BOOTSTRAPPED",
-        remedy: `cd '${project}' && "$HOME/.agents/scripts/agent-fabric" bootstrap --seat codex`,
+        remedy: `cd '${project}' && '${agentsHome}/scripts/agent-fabric' bootstrap --seat codex`,
       }]),
     });
   });
@@ -427,7 +450,7 @@ describe("machine status and doctor", () => {
       registered: false,
       active: false,
       reason: "PEER_SEAT_NOT_PROVISIONED",
-      remedy: `"$HOME/.agents/scripts/agent-fabric" mcp peer-provision --project '${project}' --seat agy`,
+      remedy: `'${agentsHome}/scripts/agent-fabric' mcp peer-provision --project '${project}' --seat agy`,
     });
     expect(JSON.stringify(status)).not.toMatch(/af[bc]_[A-Za-z0-9_-]{43}|credentialPath/u);
   });
@@ -996,6 +1019,8 @@ describe("machine status and doctor", () => {
     });
     expect(result).toMatchObject({ exitCode: 0, signal: null, stderr: "" });
     expect(result.stdout).toContain("--consume-provider-quota");
+    expect(result.stdout).toContain("--product-root PATH");
+    expect(result.stdout).toContain("--instance-root PATH");
     expect(result.stdout).toContain("run live provider capability probes and refresh the private cache");
   });
 
