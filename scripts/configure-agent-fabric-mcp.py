@@ -582,21 +582,29 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         agents_home = args.agents_home.resolve(strict=True)
+        shim_path = args.shim_path.expanduser()
+        if not shim_path.is_absolute():
+            raise RegistrationError("stable Provenant shim path must be absolute")
+        if (
+            not args.preflight
+            and (not shim_path.is_file() or not os.access(shim_path, os.X_OK))
+        ):
+            raise RegistrationError(
+                f"stable Provenant shim is missing or not executable at {shim_path}"
+            )
         state_directory = args.state_directory.expanduser()
         if not state_directory.is_absolute():
             raise RegistrationError("Agent Fabric state directory must be absolute")
-        if not (agents_home / "scripts" / "agent-fabric-mcp").is_file():
-            raise RegistrationError("Agent Fabric MCP wrapper is missing from AGENTS_HOME")
         proposals: list[ConfigProposal] = []
         if args.platform in {"all", "claude"}:
             proposals.append(claude_update(
                 args.claude_config,
-                registration(agents_home, state_directory, "claude", shim_path=args.shim_path),
+                registration(agents_home, state_directory, "claude", shim_path=shim_path),
             ))
         if args.platform in {"all", "codex"}:
             proposals.append(codex_update(
                 args.codex_config,
-                registration(agents_home, state_directory, "codex", shim_path=args.shim_path),
+                registration(agents_home, state_directory, "codex", shim_path=shim_path),
             ))
         optional_configs = {
             "cursor": args.cursor_config,
@@ -612,7 +620,7 @@ def main(argv: list[str] | None = None) -> int:
                         state_directory,
                         "codex",
                         client,
-                        shim_path=args.shim_path,
+                        shim_path=shim_path,
                     ),
                     client,
                 ))
@@ -624,7 +632,7 @@ def main(argv: list[str] | None = None) -> int:
                     state_directory,
                     "codex",
                     "opencode",
-                    shim_path=args.shim_path,
+                    shim_path=shim_path,
                 ),
             ))
         if args.check:

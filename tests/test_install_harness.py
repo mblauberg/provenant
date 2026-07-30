@@ -12,6 +12,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "install-harness"
+PROVENANT_TEMPLATE = ROOT / "scripts" / "provenant.template"
 WORKFLOW_SCRIPT = ROOT / "scripts" / "install-workflows"
 WORKFLOW_NAMES = {
     "codebase-polish.js",
@@ -141,7 +142,11 @@ def test_installs_claude_skills_and_global_instructions_idempotently(tmp_path):
     command = bin_dir / "provenant"
     assert command.is_file()
     assert not command.is_symlink()
-    assert command.read_bytes() == (ROOT / "scripts" / "provenant").read_bytes()
+    assert command.read_bytes() == PROVENANT_TEMPLATE.read_bytes()
+    assert json.loads((tmp_path / ".agents/.agent-fabric/product-root.json").read_text()) == {
+        "product_root": str(ROOT),
+        "schema_version": 1,
+    }
     assert {path.name for path in (config / "skills").iterdir()} == expected_installed_entries()
     workflows = config / "workflows"
     assert {path.name for path in workflows.iterdir()} == WORKFLOW_NAMES
@@ -695,7 +700,25 @@ def test_upgrades_the_checkout_bound_provenant_symlink_to_a_stable_copy(tmp_path
     assert result.returncode == 0, result.stderr
     assert command.is_file()
     assert not command.is_symlink()
-    assert command.read_bytes() == (ROOT / "scripts/provenant").read_bytes()
+    assert command.read_bytes() == PROVENANT_TEMPLATE.read_bytes()
+    assert f"command updated={command}" in result.stdout
+
+
+def test_upgrades_a_byte_identical_foreign_symlink_to_a_managed_copy(tmp_path):
+    bin_dir = tmp_path / ".local/bin"
+    bin_dir.mkdir(parents=True)
+    foreign = tmp_path / "foreign/provenant"
+    foreign.parent.mkdir()
+    shutil.copy2(PROVENANT_TEMPLATE, foreign)
+    command = bin_dir / "provenant"
+    command.symlink_to(foreign)
+
+    result = run("codex", tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    assert command.is_file()
+    assert not command.is_symlink()
+    assert command.read_bytes() == PROVENANT_TEMPLATE.read_bytes()
     assert f"command updated={command}" in result.stdout
 
 
@@ -716,6 +739,6 @@ def test_warns_when_provenant_bin_directory_is_outside_path(tmp_path):
     command = bin_dir / "provenant"
     assert command.is_file()
     assert not command.is_symlink()
-    assert command.read_bytes() == (ROOT / "scripts/provenant").read_bytes()
+    assert command.read_bytes() == PROVENANT_TEMPLATE.read_bytes()
     assert not (tmp_path / ".zshrc").exists()
     assert not (tmp_path / ".bashrc").exists()

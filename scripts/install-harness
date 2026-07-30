@@ -54,18 +54,28 @@ esac
 
 provenant_bin_dir="${PROVENANT_BIN_DIR:-$HOME/.local/bin}"
 provenant_command="$provenant_bin_dir/provenant"
-provenant_source="$ROOT/scripts/provenant"
+provenant_source="$ROOT/scripts/provenant.template"
 provenant_marker="# Managed by scripts/install-harness; local edits to an installed copy are not preserved."
 provenant_status="installed"
+instance_root="${AGENT_FABRIC_INSTANCE_ROOT:-${AGENTS_HOME:-$HOME/.agents}}"
 case "$provenant_bin_dir" in
   /*) ;;
   *) echo "PROVENANT_BIN_DIR must be absolute" >&2; exit 3 ;;
 esac
+case "$instance_root" in
+  /*) ;;
+  *) echo "Agent Fabric instance root must be absolute" >&2; exit 3 ;;
+esac
 
 # Refuse a command collision before any installation mutation.
 if [[ -e "$provenant_command" || -L "$provenant_command" ]]; then
-  if [[ -L "$provenant_command" && "$(readlink "$provenant_command")" == "$provenant_source" ]]; then
-    provenant_status="updated"
+  if [[ -L "$provenant_command" ]]; then
+    if [[ -f "$provenant_command" ]] && grep -Fqx "$provenant_marker" "$provenant_command"; then
+      provenant_status="updated"
+    else
+      echo "provenant command collision=$provenant_command" >&2
+      exit 3
+    fi
   elif [[ -f "$provenant_command" ]] && grep -Fqx "$provenant_marker" "$provenant_command"; then
     if cmp -s "$provenant_source" "$provenant_command"; then
       provenant_status="existing"
@@ -117,6 +127,8 @@ else
   trap - EXIT
   echo "command $provenant_status=$provenant_command"
 fi
+"$ROOT/scripts/write-product-root-pointer.py" "$instance_root" "$ROOT"
+echo "product root pointer updated=$instance_root/.agent-fabric/product-root.json"
 case ":${PATH:-}:" in
   *":$provenant_bin_dir:"*) ;;
   *) echo "warning: $provenant_bin_dir is not on PATH" >&2 ;;
