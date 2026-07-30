@@ -2,9 +2,11 @@
 """Behaviour tests for cf_dispatch.sh with stubbed CLIs."""
 import json
 import os
+import shutil
 import signal
 import stat
 import subprocess
+import sys
 import tempfile
 import textwrap
 import time
@@ -1039,6 +1041,72 @@ def test_run_dir_init_force_does_not_clobber_existing_manifest():
         gate = (run_dir / "FINAL_GATE.md").read_text(encoding="utf-8")
         for row in REQUIRED_GATE_ROWS:
             assert row in gate
+
+
+def test_non_git_fallback_routes_via_product_root_model_route():
+    # From a non-git copy of the product tree, with no provenant on PATH,
+    # dispatch must fall back to <product root>/scripts/model_route.py.
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        product = tmp / "product"
+        shutil.copytree(
+            HERE.parent / "scripts",
+            product / "skills" / "orchestrate" / "scripts",
+        )
+        shutil.copytree(PRODUCT_ROOT / "config", product / "config")
+        (product / "scripts").mkdir()
+        for name in (
+            "model_route.py",
+            "model_route_catalog.py",
+            "model_route_preferences.py",
+        ):
+            shutil.copy2(PRODUCT_ROOT / "scripts" / name, product / "scripts" / name)
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        write_executable(
+            bin_dir / "claude",
+            """\
+            #!/usr/bin/env bash
+            cat >/dev/null
+            echo "OK"
+            """,
+        )
+        write_executable(bin_dir / "python3", f'#!/bin/sh\nexec {sys.executable} "$@"\n')
+        env = {
+            key: value
+            for key, value in os.environ.items()
+            if key != "AGENTS_HOME" and not key.startswith("AGENT_FABRIC_")
+        }
+        env["PATH"] = f"{bin_dir}:/usr/bin:/bin"
+        # cf_dispatch.sh appends $HOME/.local/bin and $HOME/bin to PATH;
+        # point HOME at the sandbox so an installed provenant cannot leak in.
+        env["HOME"] = str(tmp)
+        out = tmp / "out.txt"
+        result = subprocess.run(
+            [
+                str(product / "skills" / "orchestrate" / "scripts" / "cf_dispatch.sh"),
+                "--tool",
+                "claude",
+                "--orchestrator-family",
+                "codex",
+                "--role",
+                "reviewer",
+                "--out",
+                str(out),
+                "--prompt",
+                "Reply exactly OK",
+            ],
+            cwd=str(tmp),
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        record = json.loads(result.stdout)
+        assert result.returncode == 0, result.stderr
+        assert record["status"] == "ok"
+        assert record["resolved_model"]
+        assert out.read_text(encoding="utf-8").strip() == "OK"
 
 
 if __name__ == "__main__":

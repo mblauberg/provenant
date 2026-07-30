@@ -260,8 +260,8 @@ resolve_routing() {
   fi
 
   # Try relative path from script directory (should resolve to product root)
-  if [ -f "$SCRIPT_DIR/../../scripts/model_route.py" ]; then
-    product_root="$(CDPATH= cd -- "$SCRIPT_DIR/../../" && pwd)"
+  if [ -f "$SCRIPT_DIR/../../../scripts/model_route.py" ]; then
+    product_root="$(CDPATH= cd -- "$SCRIPT_DIR/../../.." && pwd)"
     cmd=(python3 "$product_root/scripts/model_route.py" "resolve" "${route_args[@]}")
     AGENT_FABRIC_PRODUCT_ROOT="$product_root" "${cmd[@]}" 2>>"$diag_file"
     return $?
