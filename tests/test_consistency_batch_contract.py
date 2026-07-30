@@ -12,7 +12,8 @@ def test_repair_budget_has_one_enforced_limit():
     architecture = read("docs/ARCHITECTURE.md")
 
     assert "up to 5 for complex work" not in architecture
-    assert "at most 2 cycles" in architecture
+    assert "routine 2 cycles, substantial 4, and crucial and terminal 5" in architecture
+    assert "at most 2 repair cycles" not in architecture
 
 
 def test_harness_python_selection_is_portable():
