@@ -12,6 +12,7 @@ from pathlib import Path
 
 
 HERE = Path(__file__).resolve().parent
+PRODUCT_ROOT = HERE.parents[2]
 SCRIPT = HERE.parent / "scripts" / "cf_dispatch.sh"
 RUN_DIR_SCRIPT = HERE.parent / "scripts" / "run_dir_init.sh"
 DISPATCH_SCHEMA = {
@@ -60,15 +61,22 @@ def write_executable(path, body):
     path.chmod(path.stat().st_mode | stat.S_IXUSR)
 
 
-def run_dispatch_with_stub(stub, role="reviewer", extra_args=None):
+def run_dispatch_with_stub(
+    stub,
+    role="reviewer",
+    extra_args=None,
+    provenant_stub=None,
+):
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
         bin_dir = tmp / "bin"
         bin_dir.mkdir()
         write_executable(bin_dir / "claude", stub)
+        if provenant_stub is not None:
+            write_executable(bin_dir / "provenant", provenant_stub)
         out = tmp / "out.txt"
         env = os.environ.copy()
-        env["PATH"] = f"{bin_dir}:{env['PATH']}"
+        env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
         command = [
                 str(SCRIPT),
                 "--tool",
@@ -93,6 +101,25 @@ def run_dispatch_with_stub(stub, role="reviewer", extra_args=None):
         )
         record = json.loads(result.stdout)
         return result, record, out.read_text(encoding="utf-8") if out.exists() else ""
+
+
+def test_invalid_routing_output_returns_a_structured_failure_record():
+    stub = """\
+        #!/usr/bin/env bash
+        echo "provider must not run" >&2
+        exit 9
+    """
+    result, record, _ = run_dispatch_with_stub(
+        stub,
+        provenant_stub="""\
+            #!/usr/bin/env bash
+            exit 127
+        """,
+    )
+
+    assert result.returncode != 0
+    assert record["status"] == "routing_record_invalid"
+    assert record["read_only_guarantee"] == "none"
 
 
 def test_claude_other_primary_uses_opus_without_implicit_fable_route():
