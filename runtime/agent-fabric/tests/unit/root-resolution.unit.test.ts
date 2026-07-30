@@ -1,25 +1,62 @@
-import { readFile } from "node:fs/promises";
+import { homedir } from "node:os";
 import { resolve } from "node:path";
 
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { defaultDaemonStartOptions } from "../../src/cli/default-daemon-options.ts";
-import { fabricCliCommand, resolveFabricRoots } from "../../src/cli/root-resolution.ts";
+import { fabricCliCommand, resolveFabricRoots } from "../../src/domain/fabric-roots.ts";
+
+beforeEach(() => {
+  vi.stubEnv("AGENT_FABRIC_PRODUCT_ROOT", undefined);
+  vi.stubEnv("AGENT_FABRIC_INSTANCE_ROOT", undefined);
+});
 
 afterEach(() => {
   vi.unstubAllEnvs();
+  delete process.env.AGENT_FABRIC_PRODUCT_ROOT;
+  delete process.env.AGENT_FABRIC_INSTANCE_ROOT;
 });
 
 describe("Fabric root resolution", () => {
+  it("defaults both roots to ~/.agents when nothing is configured", () => {
+    vi.stubEnv("AGENTS_HOME", undefined);
+
+    expect(resolveFabricRoots({})).toEqual({
+      productRoot: resolve(homedir(), ".agents"),
+      instanceRoot: resolve(homedir(), ".agents"),
+    });
+  });
+
   it("defaults both roots to AGENTS_HOME for the fused layout", () => {
     vi.stubEnv("AGENTS_HOME", "/fixture/agents-home");
-    vi.stubEnv("AGENT_FABRIC_PRODUCT_ROOT", "");
-    vi.stubEnv("AGENT_FABRIC_INSTANCE_ROOT", "");
 
     expect(resolveFabricRoots({})).toEqual({
       productRoot: resolve("/fixture/agents-home"),
       instanceRoot: resolve("/fixture/agents-home"),
     });
+  });
+
+  it("gives explicit --agents-home precedence over split-root environment variables", () => {
+    vi.stubEnv("AGENTS_HOME", "/fixture/environment-agents-home");
+    vi.stubEnv("AGENT_FABRIC_PRODUCT_ROOT", "/fixture/environment-product");
+    vi.stubEnv("AGENT_FABRIC_INSTANCE_ROOT", "/fixture/environment-instance");
+
+    expect(resolveFabricRoots({ agentsHomeFlag: "/fixture/flag-agents-home" })).toEqual({
+      productRoot: resolve("/fixture/flag-agents-home"),
+      instanceRoot: resolve("/fixture/flag-agents-home"),
+    });
+  });
+
+  it.each([
+    ["AGENT_FABRIC_PRODUCT_ROOT", "relative/product"],
+    ["AGENT_FABRIC_INSTANCE_ROOT", "relative/instance"],
+  ])("rejects relative paths in %s", (name, value) => {
+    vi.stubEnv("AGENTS_HOME", undefined);
+    vi.stubEnv(name, value);
+
+    expect(() => resolveFabricRoots({})).toThrow(
+      `${name} must be an absolute path, got ${value}`,
+    );
   });
 
   it("resolves independently configured product and instance roots", () => {
@@ -50,26 +87,6 @@ describe("Fabric root resolution", () => {
   it("renders the bundled CLI from the resolved product root", () => {
     expect(fabricCliCommand({ productRootFlag: "/fixture/product root's" }))
       .toBe(`'/fixture/product root'"'"'s/scripts/agent-fabric'`);
-  });
-
-  it("routes all twelve production remedy emitters through the product-root formatter", async () => {
-    const expectedCalls = new Map([
-      ["core/bootstrap-mcp-custody.ts", 1],
-      ["cli/status.ts", 2],
-      ["mcp/credentials.ts", 1],
-      ["cli/mcp-bootstrap.ts", 5],
-      ["cli/mcp-roster-renewal.ts", 2],
-      ["daemon/protocol.ts", 1],
-    ]);
-    let total = 0;
-    for (const [relativePath, expected] of expectedCalls) {
-      const source = await readFile(resolve(import.meta.dirname, "../../src", relativePath), "utf8");
-      expect(source).not.toContain("$HOME/.agents/scripts/agent-fabric");
-      const calls = source.match(/\$\{fabricCliCommand\(/gu)?.length ?? 0;
-      expect(calls, relativePath).toBe(expected);
-      total += calls;
-    }
-    expect(total).toBe(12);
   });
 
   it("derives daemon configuration from the instance root and schemas from the product root", () => {

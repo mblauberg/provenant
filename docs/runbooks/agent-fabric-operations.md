@@ -242,6 +242,10 @@ exactly three environment variables:
 - `AGENT_FABRIC_SEAT`
 - `AGENT_FABRIC_CLIENT_LABEL`
 
+`AGENT_FABRIC_PRODUCT_ROOT` and `AGENT_FABRIC_INSTANCE_ROOT` are CLI root
+selection controls, not client-registry variables. Do not add them to the
+three-variable global MCP registration.
+
 `AGENT_FABRIC_PROJECT_PATH` is not a fourth global variable. It is permitted
 only in an explicit, separately managed project-scoped compatibility entry for
 a client that cannot preserve workspace cwd; that entry must never be reused
@@ -354,6 +358,15 @@ env AGENT_FABRIC_RUNTIME_DIRECTORY="$HOME/.local/state/agent-harness/fabric/runt
   --compatibility-schema "$HOME/.agents/runtime/agent-fabric/schemas/adapter-compatibility.schema.json" \
   --agents-home "$HOME/.agents"
 ```
+
+CLI root selection supports `--product-root PATH` for runtime code, bundled
+scripts and schemas, and `--instance-root PATH` for configuration and mutable
+instance state. The matching environment variables are
+`AGENT_FABRIC_PRODUCT_ROOT` and `AGENT_FABRIC_INSTANCE_ROOT`; both must be
+absolute paths. Resolution order is the specific root flag, `--agents-home`,
+the matching split-root environment variable, `AGENTS_HOME`, then
+`~/.agents`. Direct `status` and `doctor` source invocation retains its legacy
+`process.cwd()` fallback when none of those controls is configured.
 
 Do not start this command merely because a pane or PID is absent. Re-run
 `status` and `doctor`; on-demand bootstrap or the existing supervisor owns the
@@ -532,6 +545,10 @@ The preflight checks, in order,
 check. Steering remains fire-and-forget; answer-bearing work stays in Fabric
 request/reply.
 
+The split-root variables described under daemon supervision configure the
+owning CLI process only. They are not part of this three-variable Herdr or MCP
+client identity contract.
+
 Herdr provides pane visibility and process supervision. Fabric events are
 rendered by the explicit least-privilege `fabric-events` observer described
 below; MCP tool responses and the SQLite-backed fabric remain authoritative.
@@ -655,7 +672,7 @@ project session is ready to launch:
 1. Resolve the owning Git root (`git rev-parse --show-toplevel`), or the
    canonical current project directory when no repository exists. Inspect that
    exact root and, when absent, establish trust with
-   `$HOME/.agents/scripts/agent-fabric workspace trust "$project_root"` before
+   `"${AGENT_FABRIC_PRODUCT_ROOT:-${AGENTS_HOME:-$HOME/.agents}}/scripts/agent-fabric" workspace trust "$project_root"` before
    opening the Console. This first-use step is automatic under the global
    harness; never substitute a parent, wildcard, home directory or sibling
    collection.
@@ -715,6 +732,10 @@ Confirm exactly three global variables: `AGENT_FABRIC_STATE_DIRECTORY`,
 That fourth variable is valid only in an explicit project-scoped compatibility
 entry for a client that cannot preserve cwd. Never print capability files or
 unrelated registry values.
+
+Also confirm the CLI-only `AGENT_FABRIC_PRODUCT_ROOT` and
+`AGENT_FABRIC_INSTANCE_ROOT` controls are absent from global client
+registrations.
 
 Resolve the active credential and metadata paths for one project seat without
 printing the capability:

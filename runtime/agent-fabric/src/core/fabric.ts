@@ -24,6 +24,7 @@ import {
 } from "@local/agent-fabric-protocol";
 
 import { readStoredAuthority } from "../authority/stored-authority.js";
+import { resolveFabricRoots } from "../domain/fabric-roots.js";
 
 import type {
   AuthorityInput,
@@ -705,6 +706,7 @@ export class Fabric {
   readonly #database: Database.Database;
   readonly #workspaceRoots: string[];
   readonly #clock: () => number;
+  readonly #productRoot: string;
   readonly #adapters: NonNullable<FabricOpenOptions["adapters"]>;
   readonly #readPolicy: FabricReadPolicy;
   readonly #commandJournal: CommandJournal;
@@ -759,6 +761,7 @@ export class Fabric {
 
   constructor(options: FabricRuntimeOpenOptions) {
     const clock = options.clock ?? Date.now;
+    this.#productRoot = resolveFabricRoots({ productRootFlag: options.productRoot }).productRoot;
     this.#clock = () => {
       const value = clock();
       return value instanceof Date ? value.getTime() : value;
@@ -2278,6 +2281,7 @@ export class Fabric {
     return bootstrapMcpSeatCustody({
       database: this.#database,
       clock: this.#clock,
+      productRoot: this.#productRoot,
       workspaceRoots: this.#workspaceRoots,
       capabilityKey: this.#capabilityKey,
       canonicalWorkspaceRoot,

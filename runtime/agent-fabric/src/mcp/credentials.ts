@@ -14,7 +14,7 @@ import {
   mcpRosterRenewalCommand,
   readChairAuthorityExpiresAt,
 } from "../cli/mcp-roster-renewal.js";
-import { fabricCliCommand, resolveFabricRoots } from "../cli/root-resolution.js";
+import { fabricCliCommand, resolveFabricRoots } from "../domain/fabric-roots.js";
 
 const CAPABILITY_PATTERN = /^af[bc]_[A-Za-z0-9_-]{43}$/u;
 const MCP_SEAT_RENEWAL_WINDOW_MS = 60 * 60 * 1_000;

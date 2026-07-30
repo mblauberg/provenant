@@ -31,7 +31,10 @@ import { parseMcpPeerProvisionArguments } from "../../src/cli/mcp-peer-provision
 import { shellCommandArguments } from "../support/shell-command-arguments.ts";
 
 const cleanup: string[] = [];
-afterEach(async () => Promise.all(cleanup.splice(0).map((path) => rm(path, { recursive: true, force: true }))));
+afterEach(async () => {
+  vi.unstubAllEnvs();
+  await Promise.all(cleanup.splice(0).map((path) => rm(path, { recursive: true, force: true })));
+});
 
 class DoctorFixtureDaemonSocket extends Duplex {
   readonly methods: string[] = [];
@@ -338,6 +341,17 @@ async function writeActiveGeneration(value: FabricPaths): Promise<void> {
 }
 
 describe("machine status and doctor", () => {
+  it("defaults status and doctor paths to process.cwd() when no root is configured", () => {
+    vi.stubEnv("AGENTS_HOME", undefined);
+    vi.stubEnv("AGENT_FABRIC_PRODUCT_ROOT", undefined);
+    vi.stubEnv("AGENT_FABRIC_INSTANCE_ROOT", undefined);
+
+    expect(resolveStatusPaths([])).toMatchObject({
+      agentsHome: process.cwd(),
+      instanceRoot: process.cwd(),
+    });
+  });
+
   it("derives instance configuration and product assets from separate roots", () => {
     expect(resolveStatusPaths([
       "--product-root", "/fixture/product",

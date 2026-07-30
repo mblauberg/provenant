@@ -1,7 +1,7 @@
 import Database from "better-sqlite3";
 
 import { readStoredAuthority } from "../authority/stored-authority.js";
-import { fabricCliCommand } from "./root-resolution.js";
+import { fabricCliCommand } from "../domain/fabric-roots.js";
 import type { McpSeat } from "./seat-store.js";
 
 // The warning starts at seven days. Extending the stored expiry by 23 days
@@ -73,7 +73,7 @@ export function mcpRosterRenewalCommand(input: {
   currentExpiresAt: string;
   chairAuthorityExpiresAt: string | null;
   now?: number;
-  productRoot?: string;
+  productRoot: string;
 }): string | null {
   const currentExpiresAt = Date.parse(input.currentExpiresAt);
   if (!Number.isFinite(currentExpiresAt)) throw new Error("MCP roster expiry is invalid");
@@ -90,7 +90,7 @@ export function mcpRosterRenewalCommand(input: {
 export function mcpBootstrapRenewalCommand(
   project: string,
   chairSeat: McpSeat,
-  productRoot?: string,
+  productRoot: string,
 ): string {
   return `cd ${shellQuote(project)} && ${fabricCliCommand({ productRootFlag: productRoot })} bootstrap --seat ${chairSeat}`;
 }

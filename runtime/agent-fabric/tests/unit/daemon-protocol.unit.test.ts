@@ -9,14 +9,14 @@ afterEach(() => {
 
 describe("daemon provider action protocol", () => {
   it("names an exact shell-safe peer-provision remedy for optional bootstrap seats", () => {
-    vi.stubEnv("AGENT_FABRIC_PRODUCT_ROOT", "/fixture/product");
+    vi.stubEnv("AGENT_FABRIC_PRODUCT_ROOT", "/fixture/wrong-product");
 
     expect(() => bootstrapMcpSeatInput({
       canonicalRoot: "/tmp/project root's",
       trustRecordDigest: `sha256:${"a".repeat(64)}`,
       seat: "agy",
       expiresAt: "2026-07-19T00:00:00.000Z",
-    })).toThrow(
+    }, "/fixture/product")).toThrow(
       `'/fixture/product/scripts/agent-fabric' mcp peer-provision ` +
       `--project '/tmp/project root'"'"'s' --seat agy`,
     );

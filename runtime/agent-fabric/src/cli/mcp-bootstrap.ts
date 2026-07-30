@@ -22,7 +22,7 @@ import {
 } from "../core/migrations.js";
 import { defaultDaemonStartOptions } from "./default-daemon-options.js";
 import type { FabricPaths } from "./paths.js";
-import { fabricCliCommand } from "./root-resolution.js";
+import { fabricCliCommand } from "../domain/fabric-roots.js";
 import {
   installSeatGeneration,
   markLegacyBootstrapSeatGeneration,

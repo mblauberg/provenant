@@ -1,5 +1,5 @@
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 
 export type FabricRoots = {
   productRoot: string;
@@ -15,7 +15,9 @@ export type FabricRootResolutionOptions = {
 
 function environmentPath(environment: NodeJS.ProcessEnv, name: string): string | undefined {
   const value = environment[name];
-  return value === undefined || value.length === 0 ? undefined : resolve(value);
+  if (value === undefined || value.length === 0) return undefined;
+  if (!isAbsolute(value)) throw new TypeError(`${name} must be an absolute path, got ${value}`);
+  return resolve(value);
 }
 
 function optionalPath(value: string | undefined): string | undefined {
@@ -24,19 +26,22 @@ function optionalPath(value: string | undefined): string | undefined {
 
 export function resolveFabricRoots(options: FabricRootResolutionOptions): FabricRoots {
   const environment = options.environment ?? process.env;
-  const agentsHome =
-    optionalPath(options.agentsHomeFlag) ??
-    environmentPath(environment, "AGENTS_HOME") ??
-    resolve(join(homedir(), ".agents"));
+  const agentsHomeFlag = optionalPath(options.agentsHomeFlag);
+  const agentsHomeEnvironment = environmentPath(environment, "AGENTS_HOME");
+  const defaultRoot = resolve(join(homedir(), ".agents"));
   return {
     productRoot:
       optionalPath(options.productRootFlag) ??
+      agentsHomeFlag ??
       environmentPath(environment, "AGENT_FABRIC_PRODUCT_ROOT") ??
-      agentsHome,
+      agentsHomeEnvironment ??
+      defaultRoot,
     instanceRoot:
       optionalPath(options.instanceRootFlag) ??
+      agentsHomeFlag ??
       environmentPath(environment, "AGENT_FABRIC_INSTANCE_ROOT") ??
-      agentsHome,
+      agentsHomeEnvironment ??
+      defaultRoot,
   };
 }
 

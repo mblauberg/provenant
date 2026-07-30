@@ -38,7 +38,7 @@ import {
   readChairAuthorityExpiresAt,
 } from "./mcp-roster-renewal.js";
 import type { FabricPaths } from "./paths.js";
-import { fabricCliCommand, resolveFabricRoots } from "./root-resolution.js";
+import { fabricCliCommand, resolveFabricRoots } from "../domain/fabric-roots.js";
 import { MCP_SEATS, resolveSeatPaths, type SeatMetadata } from "./seat-store.js";
 import { trustedWorkspaceRoots } from "./workspace-trust.js";
 
@@ -179,11 +179,25 @@ function generationIdentityMatches(
 }
 
 export function resolveStatusPaths(arguments_: string[]): { agentsHome: string; instanceRoot: string; config: string; compatibility: string; compatibilitySchema: string; modelRouting: string; reviewProfile: string } {
+  const agentsHomeFlag = option(arguments_, "--agents-home");
+  const productRootFlag = option(arguments_, "--product-root");
+  const instanceRootFlag = option(arguments_, "--instance-root");
+  const hasConfiguredRoot = [
+    agentsHomeFlag,
+    productRootFlag,
+    instanceRootFlag,
+    process.env.AGENTS_HOME,
+    process.env.AGENT_FABRIC_PRODUCT_ROOT,
+    process.env.AGENT_FABRIC_INSTANCE_ROOT,
+  ].some((value) => value !== undefined && value.length > 0);
   const { productRoot, instanceRoot } = resolveFabricRoots({
-    agentsHomeFlag: option(arguments_, "--agents-home"),
-    productRootFlag: option(arguments_, "--product-root"),
-    instanceRootFlag: option(arguments_, "--instance-root"),
+    agentsHomeFlag: agentsHomeFlag ?? (hasConfiguredRoot ? undefined : process.cwd()),
+    productRootFlag,
+    instanceRootFlag,
   });
+  // During the #528 compatibility phase, loadFabricConfig still expands
+  // ${AGENTS_HOME} against product assets. Split instance-root token wiring is
+  // owned by #530; keeping this binding preserves the fused layout meanwhile.
   return {
     agentsHome: productRoot,
     instanceRoot,

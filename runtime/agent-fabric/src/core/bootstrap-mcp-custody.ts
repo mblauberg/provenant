@@ -17,6 +17,7 @@ const MCP_SEAT_RENEWAL_WINDOW_MS = 60 * 60 * 1_000;
 export type BootstrapMcpCustody = {
   database: Database.Database;
   clock: () => number;
+  productRoot: string;
   workspaceRoots: readonly string[];
   capabilityKey: string;
   canonicalWorkspaceRoot: (root: string) => string;
@@ -83,7 +84,7 @@ export function bootstrapCurrentMcpSeat(custody: BootstrapMcpCustody, input: Boo
       throw new FabricError(
         "AUTHENTICATION_FAILED",
         `bootstrap creates only chair seats claude or codex; run ` +
-        `${fabricCliCommand()} mcp peer-provision ` +
+        `${fabricCliCommand({ productRootFlag: custody.productRoot })} mcp peer-provision ` +
         `--project ${shellQuote(input.canonicalRoot)} --seat ${input.seat} instead`,
       );
     }

@@ -5,7 +5,7 @@ import { loadFabricConfig } from "../config/index.js";
 import { FabricError } from "../errors.js";
 import { verifyProviderConformance } from "../adapters/provider-conformance.js";
 import { loadAdapterModelConstraints } from "../adapters/model-selection.js";
-import { resolveFabricRoots } from "./root-resolution.js";
+import { resolveFabricRoots } from "../domain/fabric-roots.js";
 
 const VALUE_OPTIONS = [
   "--adapter",
@@ -64,6 +64,8 @@ export async function resolveAdapterExecutableCli(
     parsed["--compatibility-schema"] ??
       join(productRoot, "runtime", "agent-fabric", "schemas", "adapter-compatibility.schema.json"),
   );
+  // #528 keeps ${AGENTS_HOME} as the product-side compatibility token. #530
+  // owns the separate instance-root token wiring for trusted workspace roots.
   const config = await loadFabricConfig({ globalPath: configPath, agentsHome: productRoot });
   if (!config.adapterIds.includes(adapterId)) {
     throw new FabricError("ADAPTER_DISABLED", `adapter is not active in trusted Fabric configuration: ${adapterId}`);

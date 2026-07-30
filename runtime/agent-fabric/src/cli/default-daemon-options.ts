@@ -2,7 +2,7 @@ import { join } from "node:path";
 
 import type { DaemonStartOptions } from "../daemon/client.js";
 import type { FabricPaths } from "./paths.js";
-import { resolveFabricRoots } from "./root-resolution.js";
+import { resolveFabricRoots } from "../domain/fabric-roots.js";
 
 export function defaultDaemonStartOptions(
   paths: FabricPaths,
