@@ -220,19 +220,12 @@ CREATE TABLE adapter_capability_snapshots(
     ('runtime-discovery','capability-fixture','unavailable')),
   capability_body_digest TEXT NOT NULL,
   snapshot_json TEXT NOT NULL,
-  capability_kind TEXT GENERATED ALWAYS AS
-    (json_extract(snapshot_json,'$.capabilities.kind')) STORED NOT NULL,
   snapshot_digest TEXT NOT NULL,
   PRIMARY KEY(adapter_id,snapshot_generation),
   UNIQUE(snapshot_id),
   UNIQUE(snapshot_digest),
   UNIQUE(adapter_id,snapshot_generation,snapshot_digest,
-    capability_body_digest),
-  CHECK(capability_kind IS NOT NULL AND
-    capability_kind IN ('available','unavailable')),
-  CHECK((source='unavailable' AND capability_kind='unavailable') OR
-    (source IN ('runtime-discovery','capability-fixture') AND
-      capability_kind='available'))
+    capability_body_digest)
 ) STRICT;
 
 CREATE TABLE discovery_surface_manifests(
@@ -1461,113 +1454,6 @@ class LaneAHeadsRouteMiscOracle(unittest.TestCase):
         )
         self.assert_foreign_keys_clean()
 
-    def test_capability_source_and_generated_kind_closed_matrix(self) -> None:
-        legal = (
-            ("runtime-discovery", "available"),
-            ("capability-fixture", "available"),
-            ("unavailable", "unavailable"),
-        )
-        generation = 1
-        for source, kind in legal:
-            with self.subTest(source=source, kind=kind):
-                self.accept(
-                    """INSERT INTO adapter_capability_snapshots(
-                         adapter_id,snapshot_generation,snapshot_id,source,
-                         capability_body_digest,snapshot_json,snapshot_digest)
-                       VALUES('cap-adapter',?,?,?,?,?,?)""",
-                    (
-                        generation,
-                        f"cap-id-{generation}",
-                        source,
-                        f"cap-body-{generation}",
-                        f'{{"capabilities":{{"kind":"{kind}"}}}}',
-                        f"cap-digest-{generation}",
-                    ),
-                )
-                generation += 1
-
-        invalid = (
-            (
-                "runtime-discovery",
-                "unavailable",
-                """CHECK constraint failed: (source='unavailable' AND capability_kind='unavailable') OR
-    (source IN ('runtime-discovery','capability-fixture') AND
-      capability_kind='available')""",
-            ),
-            (
-                "capability-fixture",
-                "unavailable",
-                """CHECK constraint failed: (source='unavailable' AND capability_kind='unavailable') OR
-    (source IN ('runtime-discovery','capability-fixture') AND
-      capability_kind='available')""",
-            ),
-            (
-                "unavailable",
-                "available",
-                """CHECK constraint failed: (source='unavailable' AND capability_kind='unavailable') OR
-    (source IN ('runtime-discovery','capability-fixture') AND
-      capability_kind='available')""",
-            ),
-            (
-                "future-source",
-                "available",
-                """CHECK constraint failed: source IN
-    ('runtime-discovery','capability-fixture','unavailable')""",
-            ),
-            (
-                None,
-                "available",
-                "NOT NULL constraint failed: adapter_capability_snapshots.source",
-            ),
-            (
-                "runtime-discovery",
-                "future-kind",
-                """CHECK constraint failed: capability_kind IS NOT NULL AND
-    capability_kind IN ('available','unavailable')""",
-            ),
-        )
-        for source, kind, message in invalid:
-            with self.subTest(source=source, kind=kind):
-                self.reject(
-                    """INSERT INTO adapter_capability_snapshots(
-                         adapter_id,snapshot_generation,snapshot_id,source,
-                         capability_body_digest,snapshot_json,snapshot_digest)
-                       VALUES('invalid-adapter',?,?,?,?,?,?)""",
-                    (
-                        generation,
-                        f"invalid-id-{generation}",
-                        source,
-                        f"invalid-body-{generation}",
-                        f'{{"capabilities":{{"kind":"{kind}"}}}}',
-                        f"invalid-digest-{generation}",
-                    ),
-                    message=message,
-                )
-                generation += 1
-        self.reject(
-            """INSERT INTO adapter_capability_snapshots(
-                 adapter_id,snapshot_generation,snapshot_id,source,
-                 capability_body_digest,snapshot_json,snapshot_digest)
-               VALUES('null-kind',1,'null-kind-id','runtime-discovery',
-                 'null-kind-body','{"capabilities":{}}','null-kind-digest')""",
-            message=(
-                "NOT NULL constraint failed: "
-                "adapter_capability_snapshots.capability_kind"
-            ),
-        )
-        self.reject(
-            """INSERT INTO adapter_capability_snapshots(
-                 adapter_id,snapshot_generation,snapshot_id,source,
-                 capability_body_digest,snapshot_json,capability_kind,
-                 snapshot_digest)
-               VALUES('forged-kind',1,'forged-kind-id','runtime-discovery',
-                 'forged-kind-body','{"capabilities":{"kind":"available"}}',
-                 'available','forged-kind-digest')""",
-            error=sqlite3.OperationalError,
-            message='cannot INSERT into generated column "capability_kind"',
-        )
-        self.assert_foreign_keys_clean()
-
     def test_normative_adapter_integrity_ddl_executes_exactly(self) -> None:
         db = sqlite3.connect(":memory:", isolation_level=None)
         self.addCleanup(db.close)
@@ -1616,24 +1502,6 @@ class LaneAHeadsRouteMiscOracle(unittest.TestCase):
                  'runtime-discovery',
                  '{"capabilities":{"kind":"available"}}','snapshot-d-n')"""
         )
-        with self.assertRaises(sqlite3.IntegrityError) as caught:
-            db.execute(
-                """INSERT INTO adapter_capability_snapshots(
-                     adapter_id,snapshot_generation,snapshot_id,
-                     adapter_contract_digest,host_id,host_version,source,
-                     snapshot_json,snapshot_digest)
-                   VALUES('adapter-n',2,'snapshot-n-2','contract-n','host-n','1',
-                     'unavailable',
-                     '{"capabilities":{"kind":"available"}}','snapshot-d-n-2')"""
-            )
-        self.assertEqual(
-            str(caught.exception),
-            """CHECK constraint failed: (source='unavailable' AND capability_kind='unavailable') OR
-    (source IN ('runtime-discovery','capability-fixture') AND
-      capability_kind='available')""",
-        )
-        mark_case()
-
         db.execute(
             "INSERT INTO adapter_activation_subjects VALUES('adapter-n','activation-n',1)"
         )
@@ -2234,13 +2102,6 @@ class LaneAHeadsRouteMiscOracle(unittest.TestCase):
             """INSERT INTO review_slot_heads VALUES(
                  'run-1',1,'native',1,'evidence-1',1,'adapter-a','review-a',
                  'terminal','finding-empty','finding-empty',1)"""
-        )
-        self.reject(
-            """INSERT INTO review_slot_heads VALUES(
-                 'run-1',3,'native',1,NULL,0,NULL,NULL,NULL,
-                 'finding-empty','finding-empty',1)""",
-            message="""CHECK constraint failed: (head_generation=0 AND head_evidence_id IS NULL) OR
-    (head_generation>=1 AND head_evidence_id IS NOT NULL)""",
         )
         self.assert_foreign_keys_clean()
 

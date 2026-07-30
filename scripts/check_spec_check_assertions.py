@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import ast
 from pathlib import Path
+import re
 import sqlite3
 import sys
 
@@ -19,14 +20,22 @@ MIGRATION = (
     / "0001-current-baseline.sql"
 )
 CHECK_ERROR_PREFIX = "CHECK constraint failed:"
-UNVERIFIABLE_ERROR_BODY = "<non-static *_ERROR value>"
+UNVERIFIABLE_ERROR_BODY = "<value is not a static string>"
+INLINE_ERROR_LABEL = "<inline>"
 
 CheckAssertion = tuple[Path, int, str, str]
 
 
 def normalise_sql(text: str) -> str:
-    """Collapse whitespace in SQL text for comparison."""
-    return " ".join(text.split())
+    """Normalise SQL text so only token differences remain.
+
+    Whitespace is collapsed and then removed around operators and punctuation,
+    because the migration and the fixtures space these differently and a spacing
+    difference is not a fabricated constraint. The same transform is applied to
+    both sides, so the comparison stays honest about which tokens are present.
+    """
+    collapsed = " ".join(text.split())
+    return re.sub(r"\s*(<=|>=|<>|!=|[=<>+\-*/,()])\s*", r"\1", collapsed)
 
 
 def static_string(node: ast.expr) -> str | None:
@@ -41,37 +50,71 @@ def static_string(node: ast.expr) -> str | None:
     return None
 
 
-def check_assertions(fixtures: Path) -> list[CheckAssertion]:
-    """Extract ``*_ERROR`` CHECK messages and flag uninspectable values."""
-    assertions: list[CheckAssertion] = []
-    for fixture in sorted(fixtures.rglob("*.py")):
-        tree = ast.parse(fixture.read_text(encoding="utf-8"), filename=str(fixture))
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Assign):
-                targets = node.targets
-            elif isinstance(node, ast.AnnAssign):
-                targets = [node.target]
-            else:
-                continue
-            names = [
-                target.id
-                for target in targets
-                if isinstance(target, ast.Name) and target.id.endswith("_ERROR")
-            ]
-            if not names:
-                continue
-            value = static_string(node.value)
-            if value is None:
-                for name in names:
-                    assertions.append(
-                        (fixture, node.lineno, name, UNVERIFIABLE_ERROR_BODY)
-                    )
-                continue
-            if CHECK_ERROR_PREFIX not in value:
-                continue
+def _error_constant_names(node: ast.AST) -> list[str]:
+    """Return the ``*_ERROR`` names a statement assigns, if any."""
+    if isinstance(node, ast.Assign):
+        targets: list[ast.expr] = list(node.targets)
+    elif isinstance(node, ast.AnnAssign):
+        targets = [node.target]
+    else:
+        return []
+    return [
+        target.id
+        for target in targets
+        if isinstance(target, ast.Name) and target.id.endswith("_ERROR")
+    ]
+
+
+def _collect(node: ast.AST, fixture: Path, assertions: list[CheckAssertion]) -> None:
+    """Record every CHECK assertion reachable from ``node``.
+
+    A CHECK assertion is any string carrying the SQLite CHECK failure prefix,
+    named or inline. An f-string carrying that prefix cannot be compared against
+    the migration, so it is recorded as unverifiable and fails the gate rather
+    than being skipped.
+    """
+    names = _error_constant_names(node)
+    if names:
+        assert isinstance(node, (ast.Assign, ast.AnnAssign))
+        value = None if node.value is None else static_string(node.value)
+        if value is None:
+            for name in names:
+                assertions.append((fixture, node.lineno, name, UNVERIFIABLE_ERROR_BODY))
+            return
+        if CHECK_ERROR_PREFIX in value:
             body = normalise_sql(value.split(CHECK_ERROR_PREFIX, 1)[1])
             for name in names:
                 assertions.append((fixture, node.lineno, name, body))
+        return
+
+    if isinstance(node, ast.expr):
+        value = static_string(node)
+        if value is not None:
+            if CHECK_ERROR_PREFIX in value:
+                body = normalise_sql(value.split(CHECK_ERROR_PREFIX, 1)[1])
+                assertions.append((fixture, node.lineno, INLINE_ERROR_LABEL, body))
+            return
+        if isinstance(node, ast.JoinedStr) and any(
+            isinstance(part, ast.Constant)
+            and isinstance(part.value, str)
+            and CHECK_ERROR_PREFIX in part.value
+            for part in node.values
+        ):
+            assertions.append(
+                (fixture, node.lineno, INLINE_ERROR_LABEL, UNVERIFIABLE_ERROR_BODY)
+            )
+            return
+
+    for child in ast.iter_child_nodes(node):
+        _collect(child, fixture, assertions)
+
+
+def check_assertions(fixtures: Path) -> list[CheckAssertion]:
+    """Extract every CHECK message asserted by the fixtures, named or inline."""
+    assertions: list[CheckAssertion] = []
+    for fixture in sorted(fixtures.rglob("*.py")):
+        tree = ast.parse(fixture.read_text(encoding="utf-8"), filename=str(fixture))
+        _collect(tree, fixture, assertions)
     return sorted(assertions)
 
 
@@ -161,6 +204,15 @@ def complete_check_constraints(sql: str) -> set[str]:
                 if opening < len(sql) and sql[opening] == "(":
                     body, closing = _parenthesised_body(sql, opening)
                     constraints.add(normalise_sql(body))
+                    # SQLite reports a named constraint by its name rather than
+                    # by its body, so the name is an equally valid assertion.
+                    named = re.search(
+                        r"CONSTRAINT\s+([A-Za-z_][A-Za-z0-9_]*)\s*$",
+                        sql[:index],
+                        re.IGNORECASE,
+                    )
+                    if named is not None:
+                        constraints.add(normalise_sql(named.group(1)))
                     index = closing + 1
                     continue
         index += 1
