@@ -46,6 +46,18 @@ if [[ -L "$TARGET" ]] \
   if [[ -n "$CUSTOM_SOURCE" ]]; then
     "$ROOT/scripts/manage_installation.py" validate-sources \
       "${manager_args[@]}" >/dev/null
+    skipped_custom=()
+    for skill_file in "$CUSTOM_SOURCE"/*/SKILL.md; do
+      [[ -f "$skill_file" ]] || continue
+      skipped_custom+=("$(basename "$(dirname "$skill_file")")")
+    done
+    if [[ ${#skipped_custom[@]} -gt 0 ]]; then
+      skipped_names=""
+      for name in "${skipped_custom[@]}"; do
+        skipped_names="${skipped_names}${skipped_names:+, }${name}"
+      done
+      echo "warning: directory-link layout skipped custom skills: $skipped_names" >&2
+    fi
   fi
   echo "skills existing=directory-link target=$TARGET"
   exit 0
