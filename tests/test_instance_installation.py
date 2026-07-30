@@ -486,6 +486,13 @@ def test_the_standalone_cli_defaults_the_instance_root_to_the_instance_not_the_p
         "AGENT_FABRIC_INSTANCE_ROOT": str(tmp_path / "explicit"),
         "AGENTS_HOME": str(home / ".agents"),
     }) == tmp_path / "explicit"
+    # A relative value would resolve against the caller's working directory,
+    # seeding whatever tree the command happens to run from. Refused, the same
+    # as install-harness and the provenant stub.
+    with pytest.raises(instance.InstallError, match="AGENTS_HOME must be an absolute path"):
+        instance.default_instance_root({"AGENTS_HOME": "."})
+    with pytest.raises(instance.InstallError, match="AGENT_FABRIC_INSTANCE_ROOT must be an absolute path"):
+        instance.default_instance_root({"AGENT_FABRIC_INSTANCE_ROOT": "relative/instance"})
 
 
 def test_the_standalone_cli_seeds_the_environment_instance_root(tmp_path):

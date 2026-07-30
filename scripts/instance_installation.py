@@ -384,7 +384,12 @@ def default_instance_root(environment: dict[str, str] | None = None) -> Path:
     for name in ("AGENT_FABRIC_INSTANCE_ROOT", "AGENTS_HOME"):
         value = values.get(name)
         if value:
-            return Path(value)
+            root = Path(value).expanduser()
+            if not root.is_absolute():
+                raise InstallError(
+                    f"{name} must be an absolute path, not {value!r}"
+                )
+            return root
     return Path.home() / ".agents"
 
 
