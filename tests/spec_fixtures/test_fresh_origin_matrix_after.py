@@ -19,6 +19,7 @@ import tempfile
 import threading
 from typing import Any, Callable, Iterable
 
+from assert_fk import ForeignKeySpec, assert_fk_rejected
 import test_fresh_origin_after as core
 
 
@@ -1173,11 +1174,54 @@ def fresh_completion_rejects_absent_wrong_or_crossed_effect() -> None:
     first = core.insert_intent_and_receipt(
         connection, batch, 1, "fresh-origin", "fresh-origin", 1, "none"
     )
-    core.expect_integrity(
-        lambda: core.insert_completion(
-            connection, batch, "fresh-origin", 1, "none", first, None, core.D66
+
+    def completion_without_effect(db: sqlite3.Connection) -> None:
+        core.insert_completion(
+            db,
+            batch,
+            "fresh-origin",
+            1,
+            "none",
+            first,
+            None,
+            core.D66,
+        )
+
+    def completion_with_effect(db: sqlite3.Connection) -> None:
+        db.execute(
+            "INSERT INTO fresh_origin_effects VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                batch,
+                1,
+                "fresh-origin",
+                1,
+                "none",
+                "handoff-s05-absent",
+                core.D22,
+                "apply-s05-absent",
+                "reuse-final-custody",
+                "primary",
+                core.D66,
+            ),
+        )
+        completion_without_effect(db)
+
+    completion_effect_fk = ForeignKeySpec(
+        "batch_completions",
+        (
+            "batch_id",
+            "primary_fresh_ordinal",
+            "primary_fresh_role",
+            "primary_fresh_digest",
         ),
-        "FOREIGN KEY constraint failed",
+        "fresh_origin_effects",
+        ("batch_id", "receipt_ordinal", "effect_role", "effect_digest"),
+    )
+    assert_fk_rejected(
+        connection,
+        invalid_operation=completion_without_effect,
+        positive_control=completion_with_effect,
+        expected=frozenset({completion_effect_fk}),
     )
     connection.close()
 
@@ -1213,12 +1257,29 @@ def fresh_completion_rejects_absent_wrong_or_crossed_effect() -> None:
         "SELECT intent_digest,subject_digest,receipt_digest FROM authority_receipts "
         "WHERE batch_id=? AND ordinal=1", (first_prepared["batchId"],)
     ).fetchone()
-    core.expect_integrity(
-        lambda: core.insert_completion(
-            connection, first_prepared["batchId"], "fresh-origin", 1, "none",
-            first_receipt, None, second_prepared["effectDigest"]
+    assert_fk_rejected(
+        connection,
+        invalid_operation=lambda db: core.insert_completion(
+            db,
+            first_prepared["batchId"],
+            "fresh-origin",
+            1,
+            "none",
+            first_receipt,
+            None,
+            second_prepared["effectDigest"],
         ),
-        "FOREIGN KEY constraint failed",
+        positive_control=lambda db: core.insert_completion(
+            db,
+            first_prepared["batchId"],
+            "fresh-origin",
+            1,
+            "none",
+            first_receipt,
+            None,
+            first_prepared["effectDigest"],
+        ),
+        expected=frozenset({completion_effect_fk}),
     )
     core.expect_integrity(
         lambda: connection.execute(
@@ -1238,19 +1299,54 @@ def pure_fresh_apply_requires_completion_authorization() -> None:
     prepared = prepare_fresh_apply(
         connection, "s06", "reuse-final-custody", authorize=False
     )
-    try:
-        apply_prepared(connection, prepared)
-    except sqlite3.IntegrityError as error:
-        require(
-            str(error) == "FOREIGN KEY constraint failed",
-            f"wrong unauthorized apply reason: {error}",
+    writes = connection.execute(
+        "SELECT ordinal,relation_name,row_key,row_revision,post_digest "
+        "FROM planned_writes WHERE apply_id=? ORDER BY ordinal",
+        (prepared["applyId"],),
+    ).fetchall()
+
+    def insert_writes_and_marker(db: sqlite3.Connection) -> None:
+        for row in writes:
+            db.execute(
+                "INSERT INTO semantic_writes VALUES(?,?,?,?,?,?)",
+                (prepared["applyId"], *row),
+            )
+        insert_apply_marker(db, prepared)
+
+    def authorize_and_apply(db: sqlite3.Connection) -> None:
+        db.execute(
+            "INSERT INTO batch_authorizations VALUES(?,?,?)",
+            (
+                prepared["batchId"],
+                prepared["completionDigest"],
+                prepared["authorizationDigest"],
+            ),
         )
-    else:
-        raise core.OracleFailure("unauthorized fresh apply accepted")
-    require(fresh_post_counts(connection, prepared)["writes"] == 0,
-            "unauthorized apply left semantic rows")
-    require(fresh_post_counts(connection, prepared)["applies"] == 0,
-            "unauthorized apply left marker")
+        insert_writes_and_marker(db)
+
+    assert_fk_rejected(
+        connection,
+        invalid_operation=insert_writes_and_marker,
+        positive_control=authorize_and_apply,
+        expected=frozenset(
+            {
+                ForeignKeySpec(
+                    "transition_applies",
+                    ("batch_id", "completion_digest", "authorization_digest"),
+                    "batch_authorizations",
+                    ("batch_id", "completion_digest", "authorization_digest"),
+                )
+            }
+        ),
+    )
+    require(
+        fresh_post_counts(connection, prepared)["writes"] == prepared["writeCount"],
+        "positive authorization control did not persist semantic rows",
+    )
+    require(
+        fresh_post_counts(connection, prepared)["applies"] == 1,
+        "positive authorization control did not persist the marker",
+    )
     connection.close()
 
 
@@ -1420,15 +1516,52 @@ def every_apply_child_and_marker_fault_rolls_back_then_retries_once() -> None:
         "apply-children-incomplete",
     )
     connection.rollback()
-    connection.execute("BEGIN IMMEDIATE")
-    core.expect_integrity(
-        lambda: connection.execute(
+    first_planned = connection.execute(
+        "SELECT ordinal,relation_name,row_key,row_revision,post_digest "
+        "FROM planned_writes WHERE apply_id=? ORDER BY ordinal LIMIT 1",
+        (prepared["applyId"],),
+    ).fetchone()
+    assert first_planned is not None
+    apply_prepared(connection, prepared)
+    connection.execute(
+        "DELETE FROM semantic_writes WHERE apply_id=? AND ordinal=?",
+        (prepared["applyId"], first_planned[0]),
+    )
+    assert_fk_rejected(
+        connection,
+        invalid_operation=lambda db: db.execute(
             "INSERT INTO semantic_writes VALUES(?,?,?,?,?,?)",
             (prepared["applyId"], 99, "commit", "extra", 1, core.D00),
         ),
-        "FOREIGN KEY constraint failed",
+        positive_control=lambda db: db.execute(
+            "INSERT INTO semantic_writes VALUES(?,?,?,?,?,?)",
+            (prepared["applyId"], *first_planned),
+        ),
+        expected=frozenset(
+            {
+                ForeignKeySpec(
+                    "semantic_writes",
+                    (
+                        "apply_id",
+                        "ordinal",
+                        "relation_name",
+                        "row_key",
+                        "row_revision",
+                        "post_digest",
+                    ),
+                    "planned_writes",
+                    (
+                        "apply_id",
+                        "ordinal",
+                        "relation_name",
+                        "row_key",
+                        "row_revision",
+                        "post_digest",
+                    ),
+                )
+            }
+        ),
     )
-    connection.rollback()
     connection.close()
 
 

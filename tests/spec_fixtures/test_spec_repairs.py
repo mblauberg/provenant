@@ -5,6 +5,7 @@ from pathlib import Path
 import sqlite3
 import unittest
 
+from assert_fk import ForeignKeySpec, assert_fk_rejected
 from spec_sources import (
     AGENT_FABRIC_BEHAVIOUR,
     AGENT_FABRIC_HARDENING,
@@ -429,9 +430,61 @@ class SpecRepairTests(unittest.TestCase):
         crossed_open = list(additional_arms[0][2])
         crossed_open[16] = "crossed-admission"
         crossed_open[-1] = "effect-crossed-admission"
-        with self.assertRaises(sqlite3.IntegrityError) as caught:
-            db.execute(statement, crossed_open)
-        self.assertEqual(str(caught.exception), "FOREIGN KEY constraint failed")
+        assert_fk_rejected(
+            db,
+            invalid_operation=lambda connection: connection.execute(
+                statement,
+                crossed_open,
+            ),
+            positive_control=lambda connection: connection.execute(
+                statement,
+                additional_arms[0][2],
+            ),
+            expected=frozenset(
+                {
+                    ForeignKeySpec(
+                        "lifecycle_receipt_fresh_origin_effects",
+                        (
+                            "handoff_id",
+                            "handoff_digest",
+                            "planned_apply_id",
+                            "project_session_id",
+                            "run_id",
+                            "agent_id",
+                            "source_mode",
+                            "recovery_source_kind",
+                            "recovery_source_ref_digest",
+                            "source_journal_digest",
+                            "new_custody_id",
+                            "new_custody_semantic_digest",
+                            "new_custody_source_ref_digest",
+                            "affected_generation_loss_after_key",
+                            "admission_digest",
+                            "fresh_apply_plan_digest",
+                        ),
+                        "lifecycle_fresh_recovery_handoffs",
+                        (
+                            "handoff_id",
+                            "handoff_digest",
+                            "planned_apply_id",
+                            "project_session_id",
+                            "run_id",
+                            "agent_id",
+                            "source_mode",
+                            "recovery_source_kind",
+                            "recovery_source_ref_digest",
+                            "source_journal_digest",
+                            "new_custody_id",
+                            "new_custody_semantic_digest",
+                            "new_custody_source_ref_digest",
+                            "affected_generation_loss_after_key",
+                            "admission_digest",
+                            "fresh_apply_plan_digest",
+                        ),
+                    )
+                }
+            ),
+        )
 
         with self.assertRaises(sqlite3.IntegrityError) as caught:
             db.execute(
@@ -772,7 +825,15 @@ class SpecRepairTests(unittest.TestCase):
             """
         )
         db.execute("CREATE TABLE " + ddl_block(HARDENING_SPECS, "lifecycle_receipt_batches"))
-        db.execute("CREATE TABLE " + ddl_block(HARDENING_SPECS, "lifecycle_transition_applies"))
+        apply_ddl = ddl_block(HARDENING_SPECS, "lifecycle_transition_applies")
+        unnamed_guard = "  CHECK((apply_kind='terminal' AND"
+        self.assertEqual(apply_ddl.count(unnamed_guard), 1)
+        apply_ddl = apply_ddl.replace(
+            unnamed_guard,
+            "  CONSTRAINT lifecycle_transition_applies_arm_guard "
+            "CHECK((apply_kind='terminal' AND",
+        )
+        db.execute("CREATE TABLE " + apply_ddl)
 
         handoff_columns = (
             "handoff_id,handoff_digest,planned_apply_id,project_session_id,run_id,"
@@ -925,9 +986,13 @@ class SpecRepairTests(unittest.TestCase):
                         f"VALUES({','.join('?' for _ in values)})",
                         values,
                     )
-                # This is a specification-fixture check. The shipped baseline's
-                # independently named guard is asserted above; its DDL must not
-                # be copied here merely to compare SQLite's source-text error.
+                self.assertEqual(
+                    str(caught.exception),
+                    "CHECK constraint failed: "
+                    "lifecycle_transition_applies_arm_guard",
+                )
+                # Keep the specification-owned CHECK body, but assert the
+                # shipped baseline's stable constraint identity.
 
         self.assertEqual([], db.execute("PRAGMA foreign_key_check").fetchall())
 
@@ -1503,6 +1568,7 @@ class SpecRepairTests(unittest.TestCase):
             ("session", "run", "agent", "loss", 1, "abandoned",
              "direct-open", "semantic", "source", "journal"),
         )
+        db.commit()
 
         for label, statement, values, message in (
             (
@@ -1547,7 +1613,7 @@ class SpecRepairTests(unittest.TestCase):
                 "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                 ("session", "run", "agent", "missing-custody", 1, "finalized",
                  "adopted", "semantic", "source", "journal", 1, 1),
-                "FOREIGN KEY constraint failed",
+                "structural-foreign-key",
             ),
             (
                 "loss-missing-parent",
@@ -1555,13 +1621,82 @@ class SpecRepairTests(unittest.TestCase):
                 "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                 ("session", "run", "agent", "missing-loss", 1, "abandoned",
                  "direct-open", "semantic", "source", "journal", 1, 1),
-                "FOREIGN KEY constraint failed",
+                "structural-foreign-key",
             ),
         ):
             with self.subTest(label=label):
-                with self.assertRaises(sqlite3.IntegrityError) as caught:
-                    db.execute(statement, values)
-                self.assertEqual(str(caught.exception), message)
+                if message != "structural-foreign-key":
+                    with self.assertRaises(sqlite3.IntegrityError) as caught:
+                        db.execute(statement, values)
+                    self.assertEqual(str(caught.exception), message)
+                    db.rollback()
+                    continue
+                custody = label.startswith("custody")
+                positive_values = (
+                    (
+                        "session", "run", "agent", "custody", 1, "finalized",
+                        "adopted", "semantic", "source", "journal", 1, 1,
+                    )
+                    if custody
+                    else (
+                        "session", "run", "agent", "loss", 1, "abandoned",
+                        "direct-open", "semantic", "source", "journal", 1, 1,
+                    )
+                )
+                child_table = (
+                    "lifecycle_rotation_custody_heads"
+                    if custody
+                    else "lifecycle_generation_loss_heads"
+                )
+                parent_table = (
+                    "lifecycle_rotation_custody_revisions"
+                    if custody
+                    else "lifecycle_generation_loss_revisions"
+                )
+                owner_column = "custody_id" if custody else "generation_loss_id"
+                state_column = "state"
+                disposition_column = (
+                    "disposition_code" if custody else "abandon_kind_code"
+                )
+                assert_fk_rejected(
+                    db,
+                    invalid_operation=lambda connection, statement=statement,
+                    values=values: connection.execute(statement, values),
+                    positive_control=lambda connection, statement=statement,
+                    values=positive_values: connection.execute(statement, values),
+                    expected=frozenset(
+                        {
+                            ForeignKeySpec(
+                                child_table,
+                                (
+                                    "project_session_id",
+                                    "run_id",
+                                    "agent_id",
+                                    owner_column,
+                                    "current_revision",
+                                    state_column,
+                                    disposition_column,
+                                    "semantic_digest",
+                                    "source_ref_digest",
+                                    "journal_digest",
+                                ),
+                                parent_table,
+                                (
+                                    "project_session_id",
+                                    "run_id",
+                                    "agent_id",
+                                    owner_column,
+                                    "revision",
+                                    state_column,
+                                    disposition_column,
+                                    "semantic_digest",
+                                    "source_ref_digest",
+                                    "journal_digest",
+                                ),
+                            )
+                        }
+                    ),
+                )
         self.assertEqual([], db.execute("PRAGMA foreign_key_check").fetchall())
 
     def test_normative_review_evidence_ddl_and_missing_target_parent(self) -> None:
@@ -1595,10 +1730,6 @@ class SpecRepairTests(unittest.TestCase):
                 binding_digest,task_id,bundle_digest,profile_digest));
             CREATE TABLE review_finding_sets(
               finding_set_digest PRIMARY KEY);
-            CREATE UNIQUE INDEX provider_action_route_review_evidence_parent
-              ON provider_action_routes(
-                adapter_id,action_id,route_receipt_digest,
-                deployed_route_admission_digest);
         """)
         db.execute(
             "CREATE TABLE "
@@ -1711,19 +1842,44 @@ class SpecRepairTests(unittest.TestCase):
             )
 
         insert_evidence(evidence)
-        db.execute(
-            "INSERT INTO review_slot_heads VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            ("run", 1, "native", 0, None, 0, None, None, None,
-             "empty-set", "empty-set", None, None, 1, "updated-at"),
-        )
-        with self.assertRaises(sqlite3.IntegrityError) as caught:
-            db.execute(
+        db.commit()
+        assert_fk_rejected(
+            db,
+            invalid_operation=lambda connection: connection.execute(
                 "INSERT INTO review_slot_heads VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 ("run", 2, "native", 1, "fabricated-evidence", 0,
                  None, None, None, "empty-set", "empty-set", None, None,
                  1, "updated-at"),
-            )
-        self.assertEqual(str(caught.exception), "FOREIGN KEY constraint failed")
+            ),
+            positive_control=lambda connection: connection.execute(
+                "INSERT INTO review_slot_heads VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                ("run", 1, "native", 1, "evidence", 0,
+                 None, None, None, "empty-set", "empty-set", None, None,
+                 1, "updated-at"),
+            ),
+            expected=frozenset(
+                {
+                    ForeignKeySpec(
+                        "review_slot_heads",
+                        (
+                            "run_id",
+                            "target_generation",
+                            "slot",
+                            "head_generation",
+                            "head_evidence_id",
+                        ),
+                        "provider_review_evidence",
+                        (
+                            "run_id",
+                            "target_generation",
+                            "slot",
+                            "new_head_generation",
+                            "evidence_id",
+                        ),
+                    )
+                }
+            ),
+        )
         self.assertEqual([], db.execute("PRAGMA foreign_key_check").fetchall())
 
     def test_new_route_sections_have_unique_requirement_anchors(self) -> None:

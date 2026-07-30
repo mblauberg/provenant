@@ -20,6 +20,8 @@ import sqlite3
 import tempfile
 from typing import Any, Callable, Iterable
 
+from assert_fk import ForeignKeySpec, assert_fk_rejected
+
 
 class OracleFailure(AssertionError):
     """A fixture invariant failed."""
@@ -1781,33 +1783,89 @@ def pure_fresh_is_count_one_primary_and_terminal_fresh_has_ordinal_two() -> None
 def preparation_dependencies_force_handoff_then_batch_then_effect_then_intents() -> None:
     connection = relational_db()
 
-    def batch_without_handoff() -> None:
-        connection.execute(
+    def insert_order_batch(db: sqlite3.Connection) -> None:
+        db.execute(
             """INSERT INTO receipt_batches VALUES(
               'batch-order','apply-order','fresh-origin',1,'none',
               NULL,NULL,'handoff-order',?,'reuse-final-custody',NULL,NULL,?,?)""",
             (D22, D44, D55),
         )
 
-    expect_integrity(batch_without_handoff, "FOREIGN KEY constraint failed")
+    def insert_handoff_and_batch(db: sqlite3.Connection) -> None:
+        db.execute(
+            "INSERT INTO fresh_handoffs VALUES(?,?,?,?)",
+            ("handoff-order", D22, "apply-order", "reuse-final-custody"),
+        )
+        insert_order_batch(db)
+
+    assert_fk_rejected(
+        connection,
+        invalid_operation=insert_order_batch,
+        positive_control=insert_handoff_and_batch,
+        expected=frozenset(
+            {
+                ForeignKeySpec(
+                    "receipt_batches",
+                    (
+                        "fresh_handoff_id",
+                        "fresh_handoff_digest",
+                        "planned_apply_id",
+                        "fresh_handoff_source_mode",
+                    ),
+                    "fresh_handoffs",
+                    (
+                        "handoff_id",
+                        "handoff_digest",
+                        "planned_apply_id",
+                        "source_mode",
+                    ),
+                )
+            }
+        ),
+    )
+    connection.close()
+
+    connection = relational_db()
     connection.execute(
         "INSERT INTO fresh_handoffs VALUES(?,?,?,?)",
         ("handoff-order", D22, "apply-order", "reuse-final-custody"),
     )
 
-    def effect_before_batch() -> None:
-        connection.execute(
+    def insert_order_effect(db: sqlite3.Connection) -> None:
+        db.execute(
             "INSERT INTO fresh_origin_effects VALUES(?,?,?,?,?,?,?,?,?,?,?)",
             ("batch-order", 1, "fresh-origin", 1, "none", "handoff-order", D22,
              "apply-order", "reuse-final-custody", "primary", D66),
         )
 
-    expect_integrity(effect_before_batch, "FOREIGN KEY constraint failed")
-    batch_without_handoff()
-    connection.execute(
-        "INSERT INTO fresh_origin_effects VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-        ("batch-order", 1, "fresh-origin", 1, "none", "handoff-order", D22,
-         "apply-order", "reuse-final-custody", "primary", D66),
+    def insert_batch_and_effect(db: sqlite3.Connection) -> None:
+        insert_order_batch(db)
+        insert_order_effect(db)
+
+    assert_fk_rejected(
+        connection,
+        invalid_operation=insert_order_effect,
+        positive_control=insert_batch_and_effect,
+        expected=frozenset(
+            {
+                ForeignKeySpec(
+                    "fresh_origin_effects",
+                    (
+                        "batch_id",
+                        "batch_transition_kind",
+                        "batch_intent_count",
+                        "batch_secondary_intent_kind",
+                    ),
+                    "receipt_batches",
+                    (
+                        "batch_id",
+                        "transition_kind",
+                        "receipt_intent_count",
+                        "secondary_intent_kind",
+                    ),
+                )
+            }
+        ),
     )
     insert_intent_and_receipt(
         connection, "batch-order", 1, "fresh-origin", "fresh-origin", 1, "none"
