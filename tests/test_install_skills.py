@@ -213,6 +213,7 @@ def test_installed_per_entry_layout_is_a_sufficient_import_root_for_shared(tmp_p
     result = subprocess.run(
         [
             sys.executable,
+            "-I",
             "-c",
             "import sys; sys.path.insert(0, sys.argv[1]);"
             " import _shared.review_ladder, _shared.review_panel;"
@@ -230,25 +231,60 @@ def test_installed_per_entry_layout_is_a_sufficient_import_root_for_shared(tmp_p
     assert result.stdout.strip().startswith(str(target))
 
 
-@pytest.mark.parametrize(
-    "consumer",
-    ["orchestrate/scripts/run_dir_finalize.py", "deliver/scripts/validate_delivery.py"],
+CONSUMERS = (
+    "orchestrate/scripts/run_dir_finalize.py",
+    "deliver/scripts/validate_delivery.py",
 )
-def test_known_shared_consumers_execute_from_the_installed_layout(tmp_path, consumer):
-    target = tmp_path / "skills"
-    assert run(target).returncode == 0
 
-    result = subprocess.run(
-        [sys.executable, str(target / consumer), "--help"],
-        cwd=tmp_path,
+
+def materialise(target: Path, product: Path):
+    """Copy the receipt-tracked entries into a layout of real directories.
+
+    A symlinked entry is not enough to prove ownership: both known consumers
+    canonicalise their own file before importing `_shared`, so a symlink
+    resolves back into the source tree and the source copy satisfies the import
+    whether or not the installer owns it. Materialising exactly what the
+    manifest declares makes the installed catalogue the resolved root, so a
+    catalogue that omitted `_shared` would produce a broken layout here.
+    """
+    managed = json.loads(manifest_for(target).read_text())["managed"]
+    installed = product / "skills"
+    installed.mkdir(parents=True)
+    for name in managed:
+        shutil.copytree(target / name, installed / name, symlinks=False)
+    return installed
+
+
+def consumer_help(script: Path, cwd: Path):
+    return subprocess.run(
+        [sys.executable, str(script), "--help"],
+        cwd=cwd,
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         check=False,
     )
 
-    assert result.returncode == 0, result.stderr
-    assert "usage:" in result.stdout
+
+def test_materialised_per_entry_layout_makes_the_shared_library_load_bearing(tmp_path):
+    target = tmp_path / "skills"
+    assert run(target).returncode == 0
+    installed = materialise(target, tmp_path / "product")
+
+    for consumer in CONSUMERS:
+        result = consumer_help(installed / consumer, tmp_path)
+        assert result.returncode == 0, f"{consumer}: {result.stderr}"
+        assert "usage:" in result.stdout
+
+    # Removing only the installed shared library must break both consumers,
+    # which is what proves the installed copy - not the source tree - satisfied
+    # the import above.
+    shutil.rmtree(installed / SHARED)
+
+    for consumer in CONSUMERS:
+        result = consumer_help(installed / consumer, tmp_path)
+        assert result.returncode != 0, f"{consumer} ran without the shared library"
+        assert "No module named '_shared'" in result.stderr
 
 
 def test_installer_requires_a_target():
@@ -539,15 +575,18 @@ def test_manifest_key_traversal_fails_before_uninstall_mutation(tmp_path):
     target.mkdir()
     victim = tmp_path / "victim"
     victim.symlink_to(source / "alpha")
+    # Every other top-level field must be valid, including the bound target
+    # root, so the rejection can only come from the managed-name guard itself.
     manifest_for(target).write_text(json.dumps({
         "schema_version": 1,
         "owner": "agent-harness",
+        "target_root": str(target.resolve()),
         "updated_at": "2026-07-10T00:00:00Z",
         "managed": {"../victim": {"owner": "agent-harness", "source_target": str(source / "alpha"), "source_sha256": "a" * 64, "installed_at": "2026-07-10T00:00:00Z", "history": []}},
     }))
     result = manager(target, "uninstall-managed", source)
     assert result.returncode == 3
-    assert "manifest" in result.stderr
+    assert "installation manifest contains an invalid skill name" in result.stderr
     assert victim.is_symlink()
 
 
