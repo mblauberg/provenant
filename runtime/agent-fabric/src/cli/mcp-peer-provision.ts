@@ -13,7 +13,7 @@ import {
   type ParsedSeatBinding,
 } from "./mcp-provision.js";
 import { peerSeatAuthority } from "./observer-provision.js";
-import { mcpBootstrapRenewalCommand } from "./mcp-roster-renewal.js";
+import { MAXIMUM_SEAT_LIFETIME_MS, mcpBootstrapRenewalCommand } from "./mcp-roster-renewal.js";
 import type { FabricPaths } from "./paths.js";
 import {
   MCP_SEATS,
@@ -24,7 +24,6 @@ import {
   type SeatMetadata,
 } from "./seat-store.js";
 
-const MAXIMUM_SEAT_LIFETIME_MS = 31 * 24 * 60 * 60 * 1_000;
 const ROSTER_CONVERGENCE_TIMEOUT_MS = 5_000;
 const ROSTER_CONVERGENCE_POLL_MS = 25;
 
@@ -162,7 +161,11 @@ function rosterOutput(chair: InstalledSeat, roster: InstalledSeat[]): McpProvisi
   };
 }
 
-function peerExpiry(requested: string | undefined, parent: AuthorityInput, currentExpiresAt: string): string {
+export function peerExpiry(
+  requested: string | undefined,
+  parent: AuthorityInput,
+  currentExpiresAt: string,
+): string {
   const value = requested ?? currentExpiresAt;
   const expiresAt = Date.parse(value);
   const now = Date.now();

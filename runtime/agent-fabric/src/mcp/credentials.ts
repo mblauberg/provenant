@@ -1,6 +1,6 @@
 import { constants } from "node:fs";
 import { lstat, open, realpath } from "node:fs/promises";
-import { dirname, isAbsolute, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 
 import {
   MCP_SEATS,
@@ -12,6 +12,7 @@ import {
 import {
   mcpBootstrapRenewalCommand,
   mcpRosterRenewalCommand,
+  readChairAuthorityExpiresAt,
 } from "../cli/mcp-roster-renewal.js";
 
 const CAPABILITY_PATTERN = /^af[bc]_[A-Za-z0-9_-]{43}$/u;
@@ -95,9 +96,10 @@ async function renewalRoute(input: {
   currentOriginKind: unknown;
 }): Promise<
   | { kind: "bootstrap"; chairSeat: McpSeat }
-  | { kind: "provisioned"; peerSeat: McpSeat }
+  | { kind: "provisioned"; peerSeat: McpSeat; chairSeat: McpSeat }
 > {
   let peerSeat = input.currentRole === "peer" ? input.currentSeat : undefined;
+  let chairSeat = input.currentRole === "chair" ? input.currentSeat : undefined;
   let bootstrapChairSeat = input.currentRole === "chair" && input.currentOriginKind !== "provisioned"
     ? input.currentSeat
     : undefined;
@@ -121,6 +123,7 @@ async function renewalRoute(input: {
         if (metadata.role === "chair" && (!("originKind" in metadata) || metadata.originKind === "bootstrap")) {
           bootstrapChairSeat = seat;
         }
+        if (metadata.role === "chair") chairSeat = seat;
         if (metadata.role === "peer") peerSeat ??= seat;
       }
     } catch {
@@ -131,7 +134,8 @@ async function renewalRoute(input: {
   if (bootstrapChairSeat !== undefined) return { kind: "bootstrap", chairSeat: bootstrapChairSeat };
   const fallback = peerSeat ?? MCP_SEATS.find((seat) => seat !== input.currentSeat);
   if (fallback === undefined) throw new Error("MCP roster has no renewable peer seat");
-  return { kind: "provisioned", peerSeat: fallback };
+  if (chairSeat === undefined) throw new Error("MCP roster has no renewable chair seat");
+  return { kind: "provisioned", peerSeat: fallback, chairSeat };
 }
 
 async function resolveProjectSeatFile(
@@ -203,15 +207,36 @@ async function resolveProjectSeatFile(
           currentRole: "role" in metadata ? metadata.role : undefined,
           currentOriginKind: "originKind" in metadata ? metadata.originKind : undefined,
         });
+        const chairAuthorityExpiresAt =
+          "runId" in metadata &&
+          typeof metadata.runId === "string" &&
+          "chairAgentId" in metadata &&
+          typeof metadata.chairAgentId === "string"
+            ? readChairAuthorityExpiresAt({
+                databasePath: resolve(
+                  environment.AGENT_FABRIC_DATABASE_PATH ?? join(stateDirectory, "fabric-v1.sqlite3"),
+                ),
+                runId: metadata.runId,
+                chairAgentId: metadata.chairAgentId,
+              })
+            : null;
+        const renewal = route.kind === "bootstrap"
+          ? null
+          : mcpRosterRenewalCommand({
+              project: candidate,
+              peerSeat: route.peerSeat,
+              currentExpiresAt: metadata.expiresAt,
+              chairAuthorityExpiresAt,
+            });
         warn(
-          `agent fabric MCP seat ${seat} expires at ${metadata.expiresAt}; renew the full roster with ${
+          `agent fabric MCP seat ${seat} expires at ${metadata.expiresAt}; ${
             route.kind === "bootstrap"
-              ? mcpBootstrapRenewalCommand(candidate, route.chairSeat)
-              : mcpRosterRenewalCommand({
-                  project: candidate,
-                  peerSeat: route.peerSeat,
-                  currentExpiresAt: metadata.expiresAt,
-                })
+              ? `renew the full roster with ${mcpBootstrapRenewalCommand(candidate, route.chairSeat)}`
+              : renewal === null
+                ? `the provisioned roster cannot be renewed; use ${
+                    mcpBootstrapRenewalCommand(candidate, route.chairSeat)
+                  }`
+                : `renew the full roster with ${renewal}`
           }`,
         );
       }

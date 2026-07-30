@@ -35,6 +35,7 @@ import { readDiscoveryReceipt } from "./mcp-provision.js";
 import {
   mcpBootstrapRenewalCommand,
   mcpRosterRenewalCommand,
+  readChairAuthorityExpiresAt,
 } from "./mcp-roster-renewal.js";
 import type { FabricPaths } from "./paths.js";
 import { MCP_SEATS, resolveSeatPaths, type SeatMetadata } from "./seat-store.js";
@@ -345,6 +346,16 @@ async function seatStatus(paths: FabricPaths, project: string): Promise<Array<Re
   const bootstrapChairSeat = [...registered.entries()]
     .find(([, metadata]) => metadata.role === "chair" && metadata.originKind !== "provisioned")
     ?.[0] as (typeof MCP_SEATS)[number] | undefined;
+  const provisionedChair = [...registered.entries()]
+    .find(([, metadata]) => metadata.role === "chair" && metadata.originKind === "provisioned");
+  const provisionedChairSeat = provisionedChair?.[0] as (typeof MCP_SEATS)[number] | undefined;
+  const chairAuthorityExpiresAt = provisionedChair === undefined
+    ? null
+    : readChairAuthorityExpiresAt({
+        databasePath: paths.databasePath,
+        runId: provisionedChair[1].runId,
+        chairAgentId: provisionedChair[1].chairAgentId,
+      });
   return MCP_SEATS.map((seat) => {
     const value = registered.get(seat);
     if (value !== undefined) {
@@ -364,11 +375,18 @@ async function seatStatus(paths: FabricPaths, project: string): Promise<Array<Re
           renewalPeerSeat !== undefined
           ? {
               remedy: bootstrapChairSeat === undefined
-                ? mcpRosterRenewalCommand({
-                    project,
-                    peerSeat: renewalPeerSeat,
-                    currentExpiresAt: value.expiresAt,
-                  })
+                ? (() => {
+                    const renewal = mcpRosterRenewalCommand({
+                      project,
+                      peerSeat: renewalPeerSeat,
+                      currentExpiresAt: value.expiresAt,
+                      chairAuthorityExpiresAt,
+                    });
+                    return renewal ??
+                      `the provisioned roster cannot be renewed; use ${
+                        mcpBootstrapRenewalCommand(project, provisionedChairSeat ?? "codex")
+                      }`;
+                  })()
                 : mcpBootstrapRenewalCommand(project, bootstrapChairSeat),
             }
           : {}),
