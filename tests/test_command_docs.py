@@ -26,7 +26,7 @@ def test_delivery_and_implementation_guidance_names_receipt_and_safe_root():
 def test_readme_product_commands_follow_the_explicit_checkout():
     source = read("README.md")
     shell = "\n".join(re.findall(r"```sh\n(.*?)```", source, re.DOTALL))
-    assert 'cd "$HOME/Repos/personal/provenant"' in shell
+    assert 'cd "<PRODUCT_ROOT>"' in shell
     assert "scripts/agent-fabric-warm" in shell
     assert "scripts/install-harness" in shell
     assert "AGENTS_HOME" not in shell

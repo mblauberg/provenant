@@ -71,8 +71,8 @@ Requirements:
 Install either platform independently, or both:
 
 ```sh
-git clone https://github.com/mblauberg/provenant.git "$HOME/Repos/personal/provenant"
-cd "$HOME/Repos/personal/provenant"
+git clone https://github.com/mblauberg/provenant.git "<PRODUCT_ROOT>"
+cd "<PRODUCT_ROOT>"
 
 # install the pinned workspace dependencies and compile Fabric
 npm ci
@@ -115,7 +115,7 @@ workflow.
 <summary>Filesystem layout, Codex config and uninstall</summary>
 
 ```text
-~/Repos/personal/provenant/       product checkout
+<PRODUCT_ROOT>/                product checkout
   HARNESS.md                      product constitution
   runtime/  skills/  workflows/
   scripts/  config/
