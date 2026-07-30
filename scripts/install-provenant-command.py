@@ -36,13 +36,19 @@ def _raw_snapshot(destination: Path) -> tuple[object, ...]:
         before = destination.lstat()
     except FileNotFoundError:
         return ("absent",)
-    if stat.S_ISLNK(before.st_mode):
-        payload = os.fsencode(os.readlink(destination))
-    elif stat.S_ISREG(before.st_mode):
-        payload = destination.read_bytes()
-    else:
-        payload = b""
-    after = destination.lstat()
+    try:
+        if stat.S_ISLNK(before.st_mode):
+            payload = os.fsencode(os.readlink(destination))
+        elif stat.S_ISREG(before.st_mode):
+            payload = destination.read_bytes()
+        else:
+            payload = b""
+        after = destination.lstat()
+    except FileNotFoundError:
+        raise Collision(
+            f"provenant command collision={destination}; "
+            "changed during classification"
+        ) from None
     snapshot = (
         before.st_dev,
         before.st_ino,
