@@ -519,6 +519,29 @@ def test_the_standalone_cli_seeds_the_environment_instance_root(tmp_path):
     assert not (product / "config" / "installation.json").exists()
 
 
+def test_the_standalone_cli_refuses_a_relative_environment_instance_root(tmp_path):
+    """The refusal must arrive through the CLI contract, not a traceback.
+
+    `default_instance_root` raising outside the handler would surface a stack
+    trace with exit 1 instead of the `conflicting:` exit-3 contract every other
+    refusal uses.
+    """
+    product = build_product(tmp_path)
+    environment = {**os.environ, "AGENTS_HOME": "relative/instance"}
+
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), "seed", "--product-root", str(product)],
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 3, result.stderr
+    assert "conflicting: AGENTS_HOME must be an absolute path" in result.stderr
+    assert "Traceback" not in result.stderr
+
+
 def test_a_symlinked_pointer_directory_is_refused_by_the_seeder(tmp_path):
     product = build_product(tmp_path)
     instance_root = tmp_path / "instance"

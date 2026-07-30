@@ -400,8 +400,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--instance-root", type=Path, default=None)
     parser.add_argument("--summary", action="store_true")
     args = parser.parse_args(argv)
-    instance_root = args.instance_root if args.instance_root is not None else default_instance_root()
     try:
+        instance_root = (
+            args.instance_root
+            if args.instance_root is not None
+            else default_instance_root()
+        )
         result = execute(args.action, args.product_root, instance_root)
     except (OSError, InstallError) as exc:
         print(f"conflicting: {exc}", file=sys.stderr)
