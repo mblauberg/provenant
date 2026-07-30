@@ -6,11 +6,14 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 from typing import Any
 
 
-ROOT = Path(__file__).resolve().parents[3]
+ROOT = Path(
+    os.environ.get("AGENT_FABRIC_PRODUCT_ROOT", Path(__file__).resolve().parents[3])
+).expanduser()
 AGENTIC_RISKS = (
     "goal-hijack", "tool-misuse", "excessive-privilege", "supply-chain",
     "code-execution", "memory-context-poisoning", "insecure-inter-agent-communication",

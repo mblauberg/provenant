@@ -11,7 +11,7 @@ from typing import Any
 
 
 ROOT = Path(__file__).resolve().parents[3]
-EVALUATION_TEMPLATE = ROOT / "skills" / "evaluate" / "templates" / "EVALUATION.template.json"
+SKILLS_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _artifact(artifact_id: str, suffix: str = "json") -> dict[str, Any]:
@@ -30,8 +30,10 @@ def make_reference_evaluation(
     delivery_run_id: str, root: Path = ROOT, *, repetitions: int = 3,
     sample_size: int = 10, evaluation_id: str = "EVAL-REFERENCE",
     status: str = "pass", time_offset_minutes: int = 0,
+    skills_root: Path = SKILLS_ROOT,
 ) -> dict[str, Any]:
-    value = json.loads((root / EVALUATION_TEMPLATE.relative_to(ROOT)).read_text())
+    template = skills_root / "evaluate" / "templates" / "EVALUATION.template.json"
+    value = json.loads(template.read_text())
     value["evaluation_id"] = evaluation_id
     value["decision"]["enclosing_delivery_run_id"] = delivery_run_id
     value["created_at"] = "2026-07-10T00:02:00Z"
@@ -283,7 +285,7 @@ def _materialise_evaluation(value: dict[str, Any], root: Path) -> None:
 def materialise_evaluation_binding(
     run: dict[str, Any], workspace_root: Path, root: Path = ROOT, *,
     binding_index: int = 0, repetitions: int = 3, sample_size: int = 10,
-    time_offset_minutes: int = 0,
+    time_offset_minutes: int = 0, skills_root: Path = SKILLS_ROOT,
 ) -> dict[str, Any]:
     """Materialise one non-planned assurance binding and return its receipt."""
     binding = run["assurance"]["evaluations"][binding_index]
@@ -297,7 +299,7 @@ def materialise_evaluation_binding(
     evaluation = make_reference_evaluation(
         run["run_id"], root, repetitions=repetitions, sample_size=sample_size,
         evaluation_id=binding["evaluation_id"], status=receipt_status,
-        time_offset_minutes=time_offset_minutes,
+        time_offset_minutes=time_offset_minutes, skills_root=skills_root,
     )
     target = workspace_root / evaluation_artifact["path"]
     _materialise_evaluation(evaluation, target.parent)
@@ -369,6 +371,7 @@ def _materialise_deterministic_evidence_bundle(
 def materialise_reference_run(
     run: dict[str, Any], workspace_root: Path, root: Path = ROOT, *,
     evaluation_repetitions: int = 3, evaluation_sample_size: int = 10,
+    skills_root: Path = SKILLS_ROOT,
 ) -> dict[str, Any]:
     """Write every local reference artifact and replace placeholders with live digests."""
     workspace_root.mkdir(parents=True, exist_ok=True)
@@ -386,6 +389,7 @@ def materialise_reference_run(
         materialise_evaluation_binding(
             run, workspace_root, root, binding_index=index,
             repetitions=evaluation_repetitions, sample_size=evaluation_sample_size,
+            skills_root=skills_root,
         )
     _materialise_deterministic_evidence_bundle(
         run, by_id["evidence-bundle"], workspace_root,
