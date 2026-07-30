@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
 import sys
 from typing import Any
@@ -17,11 +18,14 @@ class CleanupError(ValueError):
     pass
 
 
-ROOT = Path(__file__).resolve().parents[3]
+PRODUCT_ROOT = Path(
+    os.environ.get("AGENT_FABRIC_PRODUCT_ROOT", Path(__file__).resolve().parents[3])
+).expanduser()
+SKILLS_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _delivery_validator():
-    path = ROOT / "skills" / "deliver" / "scripts" / "validate_delivery.py"
+    path = SKILLS_ROOT / "deliver" / "scripts" / "validate_delivery.py"
     spec = importlib.util.spec_from_file_location("cleanup_delivery_validator", path)
     if not spec or not spec.loader:
         raise CleanupError("cannot load delivery validator")
@@ -48,6 +52,7 @@ def cleanup(
     authority_evidence: str = "",
     approved_plan_sha256: str = "",
     now: datetime | None = None,
+    product_root: Path = PRODUCT_ROOT,
 ) -> dict[str, Any]:
     receipt_path = receipt_path.resolve()
     run_dir = receipt_path.parent
@@ -60,7 +65,9 @@ def cleanup(
         raise CleanupError("cleanup requires a canonical delivery RUN artifact manifest")
     validator = _delivery_validator()
     try:
-        validator.validate(run, ROOT, receipt_dir=run_dir, workspace_root=workspace_root)
+        validator.validate(
+            run, product_root, receipt_dir=run_dir, workspace_root=workspace_root,
+        )
     except validator.Invalid as exc:
         raise CleanupError(f"valid terminal delivery receipt required: {exc}") from exc
     if run.get("status") != "closed":
@@ -139,6 +146,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--authorised-by", default="")
     parser.add_argument("--authority-evidence", default="")
     parser.add_argument("--approved-plan-sha256", default="")
+    parser.add_argument("--product-root", type=Path, default=PRODUCT_ROOT)
     args = parser.parse_args(argv)
     try:
         result = cleanup(
@@ -148,6 +156,7 @@ def main(argv: list[str] | None = None) -> int:
             authorised_by=args.authorised_by,
             authority_evidence=args.authority_evidence,
             approved_plan_sha256=args.approved_plan_sha256,
+            product_root=args.product_root.resolve(),
         )
     except CleanupError as exc:
         print(f"FAIL: {exc}", file=sys.stderr)

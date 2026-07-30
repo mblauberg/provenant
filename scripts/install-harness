@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+PRODUCT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PLATFORM=""
 MCP_CLIENTS="primary"
 
@@ -54,9 +54,7 @@ esac
 
 provenant_bin_dir="${PROVENANT_BIN_DIR:-$HOME/.local/bin}"
 provenant_command="$provenant_bin_dir/provenant"
-provenant_source="$ROOT/scripts/provenant.template"
-provenant_marker="# Managed by scripts/install-harness; local edits to an installed copy are not preserved."
-provenant_status="installed"
+provenant_source="$PRODUCT_ROOT/scripts/provenant.template"
 instance_root="${AGENT_FABRIC_INSTANCE_ROOT:-${AGENTS_HOME:-$HOME/.agents}}"
 case "$provenant_bin_dir" in
   /*) ;;
@@ -67,26 +65,15 @@ case "$instance_root" in
   *) echo "Agent Fabric instance root must be absolute" >&2; exit 3 ;;
 esac
 
-# Refuse a command collision before any installation mutation.
-if [[ -e "$provenant_command" || -L "$provenant_command" ]]; then
-  if [[ -L "$provenant_command" ]]; then
-    if [[ -f "$provenant_command" ]] && grep -Fqx "$provenant_marker" "$provenant_command"; then
-      provenant_status="updated"
-    else
-      echo "provenant command collision=$provenant_command" >&2
-      exit 3
-    fi
-  elif [[ -f "$provenant_command" ]] && grep -Fqx "$provenant_marker" "$provenant_command"; then
-    if cmp -s "$provenant_source" "$provenant_command"; then
-      provenant_status="existing"
-    else
-      provenant_status="updated"
-    fi
-  else
-    echo "provenant command collision=$provenant_command" >&2
-    exit 3
-  fi
-fi
+# Refuse a command collision before any installation mutation. Publication
+# revalidates this state and uses atomic no-replace or exchange primitives.
+legacy_provenant_target="$instance_root/scripts/provenant"
+provenant_preflight="$(
+  "$PRODUCT_ROOT/scripts/install-provenant-command.py" classify \
+    --source "$provenant_source" \
+    --destination "$provenant_command" \
+    --legacy-target "$legacy_provenant_target"
+)" || exit 3
 
 state_directory="${AGENT_FABRIC_STATE_DIRECTORY:-$HOME/.local/state/agent-harness/fabric}"
 claude_mcp_config="${CLAUDE_MCP_CONFIG:-$HOME/.claude.json}"
@@ -97,7 +84,7 @@ fi
 codex_mcp_config="${CODEX_MCP_CONFIG:-${CODEX_HOME:-$HOME/.codex}/config.toml}"
 mcp_args=(
   --platform "$mcp_platform"
-  --agents-home "$ROOT"
+  --agents-home "$PRODUCT_ROOT"
   --state-directory "$state_directory"
   --shim-path "$provenant_command"
   --claude-config "$claude_mcp_config"
@@ -108,26 +95,23 @@ mcp_args=(
   --opencode-config "${OPENCODE_MCP_CONFIG:-$HOME/.config/opencode/opencode.jsonc}"
 )
 
-"$ROOT/scripts/configure-agent-fabric-mcp.py" "${mcp_args[@]}" --preflight
+"$PRODUCT_ROOT/scripts/configure-agent-fabric-mcp.py" "${mcp_args[@]}" --preflight
 
 if [[ "$PLATFORM" == "codex" ]]; then
-  "$ROOT/scripts/configure-codex-skill-overrides.py" --preflight \
+  "$PRODUCT_ROOT/scripts/configure-codex-skill-overrides.py" --preflight \
     --config "$platform_home/config.toml"
 fi
 
 mkdir -p "$provenant_bin_dir"
-if [[ "$provenant_status" == "existing" ]]; then
-  echo "command existing=$provenant_command"
-else
-  provenant_temporary=$(mktemp "$provenant_bin_dir/.provenant.XXXXXX")
-  trap 'rm -f "$provenant_temporary"' EXIT
-  cp "$provenant_source" "$provenant_temporary"
-  chmod 755 "$provenant_temporary"
-  mv -f "$provenant_temporary" "$provenant_command"
-  trap - EXIT
-  echo "command $provenant_status=$provenant_command"
-fi
-"$ROOT/scripts/write-product-root-pointer.py" "$instance_root" "$ROOT"
+provenant_status="$(
+  "$PRODUCT_ROOT/scripts/install-provenant-command.py" publish \
+    --source "$provenant_source" \
+    --destination "$provenant_command" \
+    --legacy-target "$legacy_provenant_target" \
+    --expected "$provenant_preflight"
+)" || exit 3
+echo "command $provenant_status=$provenant_command"
+"$PRODUCT_ROOT/scripts/write-product-root-pointer.py" "$instance_root" "$PRODUCT_ROOT"
 echo "product root pointer updated=$instance_root/.agent-fabric/product-root.json"
 case ":${PATH:-}:" in
   *":$provenant_bin_dir:"*) ;;
@@ -138,19 +122,19 @@ esac
 # desired state and the seeded templates are instance-owned once written (ADR
 # 0019), so this is a no-op on every install after the first. `instance_root` is
 # resolved once, above, on the contract #529 established.
-"$ROOT/scripts/instance_installation.py" seed \
-  --product-root "$ROOT" --instance-root "$instance_root" --summary
+"$PRODUCT_ROOT/scripts/instance_installation.py" seed \
+  --product-root "$PRODUCT_ROOT" --instance-root "$instance_root" --summary
 
 mkdir -p "$platform_home"
-"$ROOT/scripts/install-skills" --target "$platform_home/skills"
+"$PRODUCT_ROOT/scripts/install-skills" --target "$platform_home/skills"
 if [[ "$PLATFORM" == "claude" ]]; then
-  "$ROOT/scripts/install-workflows" --target "$platform_home/workflows"
+  "$PRODUCT_ROOT/scripts/install-workflows" --target "$platform_home/workflows"
 fi
 if [[ "$PLATFORM" == "codex" ]]; then
-  "$ROOT/scripts/configure-codex-skill-overrides.py" \
+  "$PRODUCT_ROOT/scripts/configure-codex-skill-overrides.py" \
     --config "$platform_home/config.toml"
 fi
-"$ROOT/scripts/configure-agent-fabric-mcp.py" "${mcp_args[@]}"
+"$PRODUCT_ROOT/scripts/configure-agent-fabric-mcp.py" "${mcp_args[@]}"
 
 # AGENTS.md is instance-owned once seeded and HARNESS.md stays product-shipped
 # (ADR 0019), so the client reads doctrine from the instance and the harness
@@ -161,8 +145,8 @@ instance_doctrine="$instance_root/AGENTS.md"
 # stale, not foreign, so it is migrated rather than refused: refusing it would
 # break every upgrade from a previous install. In a fused layout the two paths
 # are the same string and the migration is a byte-for-byte no-op.
-legacy_doctrine="$ROOT/AGENTS.md"
-bootstrap="Read and follow \`$instance_doctrine\` and \`$ROOT/HARNESS.md\` before making orchestration, delegation, model-routing or memory decisions. Platform/system policy and explicit user authority lead; the nearest project instruction may specialise or strengthen the global harness but may not silently broaden authority, weaken safety gates or redefine global cross-project memory policy."
+legacy_doctrine="$PRODUCT_ROOT/AGENTS.md"
+bootstrap="Read and follow \`$instance_doctrine\` and \`$PRODUCT_ROOT/HARNESS.md\` before making orchestration, delegation, model-routing or memory decisions. Platform/system policy and explicit user authority lead; the nearest project instruction may specialise or strengthen the global harness but may not silently broaden authority, weaken safety gates or redefine global cross-project memory policy."
 
 migrate_instructions() {
   # Replace only the exact legacy path, leaving anything the user wrote around
@@ -199,9 +183,9 @@ elif [[ -L "$instructions" ]] && { [[ "$instructions" -ef "$instance_doctrine" ]
   # A link the user made to either doctrine file already resolves to doctrine;
   # repointing someone's deliberate symlink is more than an upgrade should do.
   echo "instructions existing=$instructions"
-elif grep -Fq "$instance_doctrine" "$instructions" && grep -Fq "$ROOT/HARNESS.md" "$instructions"; then
+elif grep -Fq "$instance_doctrine" "$instructions" && grep -Fq "$PRODUCT_ROOT/HARNESS.md" "$instructions"; then
   echo "instructions existing=$instructions"
-elif grep -Fq "$legacy_doctrine" "$instructions" && grep -Fq "$ROOT/HARNESS.md" "$instructions"; then
+elif grep -Fq "$legacy_doctrine" "$instructions" && grep -Fq "$PRODUCT_ROOT/HARNESS.md" "$instructions"; then
   if ! migrate_instructions; then
     echo "instructions unmigrated=$instructions" >&2
     exit 3

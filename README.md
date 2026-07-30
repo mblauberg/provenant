@@ -71,16 +71,15 @@ Requirements:
 Install either platform independently, or both:
 
 ```sh
-git clone https://github.com/mblauberg/provenant.git "$HOME/.agents"
-export AGENTS_HOME="$HOME/.agents"   # optional override; the installed harness defaults here
-cd "$AGENTS_HOME"
+git clone https://github.com/mblauberg/provenant.git "<PRODUCT_ROOT>"
+cd "<PRODUCT_ROOT>"
 
 # install the pinned workspace dependencies and compile Fabric
 npm ci
-"$AGENTS_HOME/scripts/agent-fabric-warm"
+scripts/agent-fabric-warm
 
-"$AGENTS_HOME/scripts/install-harness" --platform claude
-"$AGENTS_HOME/scripts/install-harness" --platform codex
+scripts/install-harness --platform claude
+scripts/install-harness --platform codex
 
 # discover commands, then verify Fabric
 provenant help
@@ -98,10 +97,13 @@ instead.
 Installation links each skill into `~/.claude/skills/` and `~/.codex/skills/`,
 and installs a managed copy of the thin `provenant` command in
 `${PROVENANT_BIN_DIR:-$HOME/.local/bin}`; it warns when that directory is not
-on `PATH`, and never edits shell startup files. If the installer exits non-zero,
-follow the message it prints: exit `3` flags a command collision, incompatible
-instruction target, or managed skill-link conflict, and instruction conflicts
-include the bootstrap line to add.
+on `PATH`, and never edits shell startup files. During an upgrade, the installer
+replaces only the legacy link that exactly names
+`<instance-root>/scripts/provenant`, including a dangling link. It preserves
+other files and links as user-owned. If the installer exits
+non-zero, follow the message it prints: exit `3` flags a command collision,
+incompatible instruction target, or managed skill-link conflict, and
+instruction conflicts include the bootstrap line to add.
 
 `provenant doctor` checks Fabric configuration and enabled adapters (identity
 and non-answer interfaces, not login or quota); Provenant never sets or persists
@@ -113,32 +115,36 @@ workflow.
 <summary>Filesystem layout, Codex config and uninstall</summary>
 
 ```text
-~/.agents/                cloned once
-  HARNESS.md    the constitution
-  AGENTS.md     the ambient global instructions
-  skills/       one folder per skill
-  workflows/    repository-managed Claude workflows
-  scripts/      install, route, check
-  config/       risk, routing, profiles
-     |
-     |  scripts/install-harness
-     v
-  ~/.claude/skills/     symlinks
-  ~/.codex/skills/      symlinks
-  ~/.claude/workflows/  symlinks
+<PRODUCT_ROOT>/                product checkout
+  HARNESS.md                      product constitution
+  runtime/  skills/  workflows/
+  scripts/  config/
+          |
+          | scripts/install-harness
+          v
+~/.agents/                        thin instance
+  AGENTS.md                       instance-owned instructions
+  config/                         instance-owned configuration
+  .agent-fabric/product-root.json machine-local product pointer
+
+~/.claude/skills/                 managed links
+~/.codex/skills/                  managed links
+~/.claude/workflows/              managed links
+~/.local/bin/provenant            managed command
 ```
 
 The Codex installer appends one block to `~/.codex/config.toml` disabling
 Codex's bundled `skill-creator`, leaving `skill-craft` canonical; the rest of
 that file is preserved.
 
-`"$AGENTS_HOME/scripts/manage_installation.py" uninstall-managed --target
-<skills-dir>` reclaims the harness-owned skill links and nothing else. The
-bootstrap line and the Codex block remain until removed by hand.
+From the product checkout,
+`scripts/manage_installation.py uninstall-managed --target <skills-dir>`
+reclaims the harness-owned skill links and nothing else. The bootstrap line and
+the Codex block remain until removed by hand.
 
 Before first use, the agent trusts only the exact canonical Git root (or
-non-Git directory) with `$HOME/.agents/scripts/agent-fabric workspace trust`,
-then calls `fabric_bootstrap` when no seat exists. If bootstrap runs first,
+non-Git directory) with `provenant fabric workspace trust`, then calls
+`fabric_bootstrap` when no seat exists. If bootstrap runs first,
 `WORKSPACE_NOT_TRUSTED` provides the recovery command. The same connection
 exposes Fabric tools; no project files are needed.
 

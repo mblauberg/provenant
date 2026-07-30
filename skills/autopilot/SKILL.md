@@ -45,8 +45,8 @@ clean exit; otherwise use a lighter-weight skill.
 
 Bootstrap authorises only mission-declared isolation. The constitution
 pre-authorises source-repo implementation branches and worktrees, created via
-`${AGENTS_HOME:-$HOME/.agents}/scripts/worktree`; deletion beyond post-merge
-pruning, integration and shared-branch pushes stay gated.
+`provenant worktree`; deletion beyond post-merge pruning, integration and
+shared-branch pushes stay gated.
 
 ## Operating loop
 

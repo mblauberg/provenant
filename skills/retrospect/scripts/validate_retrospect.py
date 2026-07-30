@@ -8,6 +8,7 @@ import hashlib
 import importlib.util
 import json
 import math
+import os
 import re
 import sys
 from datetime import datetime
@@ -36,7 +37,10 @@ DESTINATIONS = {
 }
 FORBIDDEN_KEYS = {"prompt", "prompts", "message", "messages", "response", "responses", "transcript", "transcripts", "tool_arguments", "raw_content"}
 HASH = re.compile(r"^[0-9a-f]{64}$")
-HARNESS_ROOT = Path(__file__).resolve().parents[3]
+PRODUCT_ROOT = Path(
+    os.environ.get("AGENT_FABRIC_PRODUCT_ROOT", Path(__file__).resolve().parents[3])
+).expanduser()
+SKILLS_ROOT = Path(__file__).resolve().parents[2]
 
 
 class Invalid(ValueError):
@@ -277,7 +281,7 @@ def validate(
 
 
 def _delivery_validator():
-    path = HARNESS_ROOT / "skills" / "deliver" / "scripts" / "validate_delivery.py"
+    path = SKILLS_ROOT / "deliver" / "scripts" / "validate_delivery.py"
     spec = importlib.util.spec_from_file_location("retrospect_delivery_validator", path)
     fail(not spec or not spec.loader, "canonical delivery validator is unavailable")
     module = importlib.util.module_from_spec(spec)
@@ -311,6 +315,7 @@ def _delivery_project_policy_path(
 def verify_hashes(
     data: dict[str, Any], base_dir: Path, *, expected_cycle_id: str | None = None,
     expected_profile: str | None = None, workspace_root: Path | None = None,
+    product_root: Path = PRODUCT_ROOT,
 ) -> None:
     """Verify linked evidence and intervention receipts against the run directory."""
     base = base_dir.resolve()
@@ -355,7 +360,7 @@ def verify_hashes(
         project_policy_path = _delivery_project_policy_path(receipt, source["id"], workspace_root)
         try:
             delivery_validator.validate(
-                receipt, HARNESS_ROOT, receipt_dir=target.parent,
+                receipt, product_root, receipt_dir=target.parent,
                 workspace_root=workspace_root or base,
                 project_policy_path=project_policy_path,
                 verify_hashes=False, validate_retrospective=False,
@@ -378,12 +383,17 @@ def main() -> int:
         "--workspace-root", type=Path, default=Path.cwd(),
         help="workspace root used to resolve digest-bound project policies",
     )
+    parser.add_argument("--product-root", type=Path, default=PRODUCT_ROOT)
     args = parser.parse_args()
     try:
         data = json.loads(args.receipt.read_text())
         validate(data, args.gate)
         if not args.schema_only:
-            verify_hashes(data, args.receipt.parent, workspace_root=args.workspace_root.resolve())
+            verify_hashes(
+                data, args.receipt.parent,
+                workspace_root=args.workspace_root.resolve(),
+                product_root=args.product_root.resolve(),
+            )
     except (OSError, json.JSONDecodeError, Invalid) as exc:
         print(f"FAIL: {exc}", file=sys.stderr)
         return 1

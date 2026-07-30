@@ -4,6 +4,9 @@ import importlib.util
 import json
 from pathlib import Path
 import re
+import shutil
+import subprocess
+import sys
 
 import pytest
 
@@ -1129,6 +1132,11 @@ def test_closed_crucial_or_incident_cycle_requires_retrospective_linkage(tmp_pat
 
 def test_required_retrospective_cannot_borrow_another_delivery_cycle(tmp_path):
     module = load_validator()
+    product_root = tmp_path / "separate-product"
+    shutil.copytree(ROOT / "config", product_root / "config")
+    schema = "runtime/agent-fabric-protocol/schemas/authority-envelope.v2.schema.json"
+    (product_root / schema).parent.mkdir(parents=True)
+    shutil.copy2(ROOT / schema, product_root / schema)
     candidate = fixture("agent-product", tmp_path)
     candidate["risk_tier"] = "crucial"
     candidate["status"] = "closed"
@@ -1181,7 +1189,9 @@ def test_required_retrospective_cannot_borrow_another_delivery_cycle(tmp_path):
     })
     candidate["retrospective"] = {"status": "no-change", "artifact_id": "retrospective", "digest": retro_digest}
     with pytest.raises(module.Invalid, match="current delivery cycle"):
-        module.validate(candidate, ROOT, workspace_root=tmp_path, verify_hashes=True)
+        module.validate(
+            candidate, product_root, workspace_root=tmp_path, verify_hashes=True,
+        )
 
 
 def test_checkpoint_and_observation_substates_follow_lifecycle_state():
@@ -1546,10 +1556,15 @@ def test_stochastic_evaluation_uses_bound_plan_for_profile_minimums(
         module.validate(candidate, ROOT, workspace_root=workspace_root, verify_hashes=True)
 
 
-def test_global_policy_root_cannot_be_replaced_by_project_registry(tmp_path):
+def test_explicit_product_policy_root_can_be_separate_from_installed_skills(tmp_path):
     module = load_validator()
-    with pytest.raises(module.Invalid, match="global policy root"):
-        module.validate(fixture(), tmp_path)
+    product_root = tmp_path / "product"
+    shutil.copytree(ROOT / "config", product_root / "config")
+    schema = "runtime/agent-fabric-protocol/schemas/authority-envelope.v2.schema.json"
+    (product_root / schema).parent.mkdir(parents=True)
+    shutil.copy2(ROOT / schema, product_root / schema)
+
+    module.validate(fixture(), product_root)
 
 
 def test_project_policy_can_only_add_a_digest_bound_profile_or_gate(tmp_path):
@@ -1630,3 +1645,37 @@ def test_project_defined_technical_profile_cannot_bypass_artifact_security(tmp_p
     candidate["project_policy"] = {"path": "delivery-policy.json", "digest": "sha256:" + hashlib.sha256(raw).hexdigest()}
     with pytest.raises(module.Invalid, match="unclassified artifact type"):
         module.validate(candidate, ROOT, workspace_root=tmp_path, project_policy_path=overlay_path)
+
+
+def test_pass_output_binds_resolved_product_root(tmp_path):
+    product_copy = tmp_path / "copy" / "product"
+    shutil.copytree(ROOT / "config", product_copy / "config")
+    shutil.copytree(
+        ROOT / "runtime" / "agent-fabric-protocol" / "schemas",
+        product_copy / "runtime" / "agent-fabric-protocol" / "schemas",
+    )
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    runs = load(REFERENCE_RUNS_PATH, "reference_runs_product_root_cli")
+    run = runs.make_reference_run("agent-product", product_copy)
+    materialiser = load(REFERENCE_EVALUATION_PATH, "reference_evaluation_product_root_cli")
+    materialiser.materialise_reference_run(run, workspace, product_copy)
+    receipt = workspace / "receipt.json"
+    receipt.write_text(json.dumps(run))
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(VALIDATOR_PATH),
+            str(receipt),
+            "--workspace-root",
+            str(workspace),
+            "--product-root",
+            str(product_copy),
+            "--verify-hashes",
+        ],
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.startswith("PASS: delivery-v1 delivery receipt"), result.stdout
+    assert f"(product_root={product_copy.resolve()})" in result.stdout

@@ -409,11 +409,11 @@ const boot = await agent(
     'CLAUDE.md, README. Report the NARROWEST meaningful test lane, lint/type cmd, formatter, any design ' +
     'system entry point, and any rules that forbid auto-editing specific files.\n' +
     '5. Resolve concrete Claude models by running the global model router four times:\n' +
-    '   model-route resolve --adapter claude --alias flagship --role lead\n' +
-    '   model-route resolve --adapter claude --alias flagship --role critical-review\n' +
-    '   model-route resolve --adapter claude --alias workhorse --role worker\n' +
-    '   model-route resolve --adapter claude --alias scout --role scout\n' +
-    '   Use ${AGENTS_HOME:-$HOME/.agents}/scripts/model-route. Return each resolved_model in modelRoutes.\n' +
+    '   provenant route resolve --adapter claude --alias flagship --role lead\n' +
+    '   provenant route resolve --adapter claude --alias flagship --role critical-review\n' +
+    '   provenant route resolve --adapter claude --alias workhorse --role worker\n' +
+    '   provenant route resolve --adapter claude --alias scout --role scout\n' +
+    '   Return each resolved_model in modelRoutes.\n' +
     'Return the structured result only.',
   { label: 'bootstrap', phase: 'Bootstrap', schema: BOOTSTRAP_SCHEMA },
 )
