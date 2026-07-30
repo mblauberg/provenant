@@ -1,7 +1,7 @@
 import { join } from "node:path";
-import { readFile, rm, stat, unlink, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, readFile, rm, stat, unlink, writeFile } from "node:fs/promises";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { parse } from "yaml";
 
 import { runSourceCli } from "../support/cli-process.ts";
@@ -14,6 +14,7 @@ type Fixture = Awaited<ReturnType<typeof createResolvedStage4Compatibility>>;
 const fixtures: Fixture[] = [];
 
 afterEach(async () => {
+  vi.unstubAllEnvs();
   await Promise.all(fixtures.splice(0).map((fixture) => rm(fixture.directory, { recursive: true, force: true })));
 });
 
@@ -59,6 +60,69 @@ describe("adapter executable resolver CLI", () => {
     const result = await resolveFixtureExecutable(fixture);
 
     expect(result).toBe(executable);
+  });
+
+  it("loads configuration from the instance root and schemas from the product root", async () => {
+    const fixture = await createResolvedStage4Compatibility("agy");
+    fixtures.push(fixture);
+    const instanceRoot = join(fixture.directory, "instance");
+    const productRoot = join(fixture.directory, "product");
+    await Promise.all([
+      mkdir(join(instanceRoot, "config"), { recursive: true }),
+      mkdir(join(productRoot, "runtime", "agent-fabric", "schemas"), { recursive: true }),
+    ]);
+    await Promise.all([
+      writeFile(
+        join(instanceRoot, "config", "agent-fabric.yaml"),
+        "schemaVersion: 1\nallowedAdapters: [agy]\nactiveAdapters: [agy]\n",
+      ),
+      copyFile(fixture.compatibilityPath, join(instanceRoot, "config", "adapter-compatibility.yaml")),
+      copyFile(
+        fixture.schemaPath,
+        join(productRoot, "runtime", "agent-fabric", "schemas", "adapter-compatibility.schema.json"),
+      ),
+    ]);
+
+    const result = await resolveAdapterExecutableCli([
+      "--adapter", "agy",
+      "--product-root", productRoot,
+      "--instance-root", instanceRoot,
+    ], {
+      verifyProvider: async () => ({} as never),
+    });
+
+    expect(result).toBe(await fixtureExecutable(fixture));
+  });
+
+  it("gives explicit --agents-home precedence over AGENT_FABRIC_PRODUCT_ROOT", async () => {
+    const fixture = await createResolvedStage4Compatibility("agy");
+    fixtures.push(fixture);
+    const agentsHome = join(fixture.directory, "explicit-agents-home");
+    await Promise.all([
+      mkdir(join(agentsHome, "config"), { recursive: true }),
+      mkdir(join(agentsHome, "runtime", "agent-fabric", "schemas"), { recursive: true }),
+    ]);
+    await Promise.all([
+      writeFile(
+        join(agentsHome, "config", "agent-fabric.yaml"),
+        "schemaVersion: 1\nallowedAdapters: [agy]\nactiveAdapters: [agy]\n",
+      ),
+      copyFile(fixture.compatibilityPath, join(agentsHome, "config", "adapter-compatibility.yaml")),
+      copyFile(
+        fixture.schemaPath,
+        join(agentsHome, "runtime", "agent-fabric", "schemas", "adapter-compatibility.schema.json"),
+      ),
+    ]);
+    vi.stubEnv("AGENT_FABRIC_PRODUCT_ROOT", join(fixture.directory, "wrong-product"));
+
+    const result = await resolveAdapterExecutableCli([
+      "--adapter", "agy",
+      "--agents-home", agentsHome,
+    ], {
+      verifyProvider: async () => ({} as never),
+    });
+
+    expect(result).toBe(await fixtureExecutable(fixture));
   });
 
   it("fails closed when the stable executable is missing", async () => {

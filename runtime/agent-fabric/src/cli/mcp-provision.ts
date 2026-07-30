@@ -85,11 +85,11 @@ export async function startMcpProvisionDaemon(
   environment: NodeJS.ProcessEnv = process.env,
 ): Promise<Awaited<ReturnType<typeof startFabricDaemon>>> {
   try {
-    return await startFabricDaemon(defaultDaemonStartOptions(paths, environment.AGENTS_HOME));
+    return await startFabricDaemon(defaultDaemonStartOptions(paths, { environment }));
   } catch (cause: unknown) {
     if (!isSchemaCutoverRefusal(cause)) throw cause;
     throw new McpBootstrapSchemaCutoverGateError(
-      schemaCutoverGate(paths.databasePath, cause),
+      schemaCutoverGate(paths.databasePath, cause, environment),
       { cause },
     );
   }

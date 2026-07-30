@@ -618,7 +618,10 @@ export async function openLocalOperatorConsoleSession(
   try {
     daemon = await startFabricDaemon({
       ...(options.daemon === undefined
-        ? defaultDaemonStartOptions(paths, options.agentsHome ?? process.env.AGENTS_HOME)
+        ? defaultDaemonStartOptions(paths, {
+            agentsHomeFlag: options.agentsHome,
+            environment: process.env,
+          })
         : { ...paths, ...options.daemon }),
     });
   } catch (error: unknown) {

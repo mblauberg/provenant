@@ -27,9 +27,11 @@ async function emittedExpiry(input: {
   const command = mcpRosterRenewalCommand({
     project: "/fixture/project with spaces",
     peerSeat: "agy",
+    productRoot: "/fixture/product",
     ...input,
   });
   if (command === null) return null;
+  expect(command).toContain("'/fixture/product/scripts/agent-fabric'");
 
   const temporaryRoot = await mkdtemp(join(tmpdir(), "fabric-roster-renewal-"));
   cleanup.push(temporaryRoot);

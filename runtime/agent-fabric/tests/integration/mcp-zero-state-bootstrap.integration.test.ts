@@ -100,7 +100,10 @@ describe("zero-state MCP bootstrap", () => {
     const root = await realpath(temporaryRoot);
     const stateDirectory = join(root, "state");
     await expect(bootstrapMcpSeat({
-      environment: { AGENT_FABRIC_SEAT: "codex" },
+      environment: {
+        AGENT_FABRIC_SEAT: "codex",
+        AGENT_FABRIC_PRODUCT_ROOT: join(root, "product"),
+      },
       cwd: root,
       paths: {
         stateDirectory,
@@ -110,7 +113,7 @@ describe("zero-state MCP bootstrap", () => {
       },
     })).rejects.toMatchObject({
       code: "WORKSPACE_NOT_TRUSTED",
-      message: `Fabric bootstrap requires the exact current project root to be trusted; run "$HOME/.agents/scripts/agent-fabric" workspace trust '${root}'; then retry fabric_bootstrap`,
+      message: `Fabric bootstrap requires the exact current project root to be trusted; run '${join(root, "product", "scripts", "agent-fabric")}' workspace trust '${root}'; then retry fabric_bootstrap`,
     });
   });
 
@@ -126,7 +129,10 @@ describe("zero-state MCP bootstrap", () => {
     let message = "";
     try {
       await bootstrapMcpSeat({
-        environment: { AGENT_FABRIC_SEAT: "codex" },
+        environment: {
+          AGENT_FABRIC_SEAT: "codex",
+          AGENT_FABRIC_PRODUCT_ROOT: join(home, ".agents"),
+        },
         cwd: project,
         paths: {
           stateDirectory: join(temporaryRoot, "state"),

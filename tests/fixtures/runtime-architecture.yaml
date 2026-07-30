@@ -1,5 +1,7 @@
 source_size_ceilings:
-  runtime/agent-fabric/src/core/fabric.ts: 5846
+  # 5846 -> 5850: #528 threads the resolved product root through core fabric
+  # so child processes inherit it; reviewed growth, not drift.
+  runtime/agent-fabric/src/core/fabric.ts: 5850
   runtime/agent-fabric/src/operator/action-store.ts: 1640
   runtime/agent-fabric/src/operator/projection-store.ts: 1945
   runtime/agent-fabric/src/operator/typed-git-service.ts: 2004
