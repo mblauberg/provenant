@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { copyFile, lstat, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -7,6 +8,7 @@ import { promisify } from "node:util";
 import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
 
+import { shellCommandArguments } from "../../support/shell-command-arguments.ts";
 import { terminateTrackedTestProcess, trackTestProcess } from "../../support/test-process-registry.ts";
 
 const execFileAsync = promisify(execFile);
@@ -310,6 +312,137 @@ describe("MCP peer provisioning from a fresh project", () => {
     } finally {
       database.close();
     }
+  });
+
+  it("recovers an expired provisioned roster with the advertised renewal command", async () => {
+    const value = await fixture();
+    await cli(value, ["workspace", "trust", value.project]);
+    await cli(value, ["bootstrap", "--seat", "codex"]);
+    const bootstrapPid = await trackCurrentDaemon(value);
+    await terminateTrackedTestProcess(bootstrapPid);
+    daemonPids.delete(bootstrapPid);
+
+    const rosterResult = await cli(value, [
+      "mcp", "peer-provision", "--project", value.project, "--seat", "agy",
+    ]);
+    const roster = JSON.parse(rosterResult.stdout) as {
+      generation: string;
+      projectSessionId: string;
+      sessionRevision: number;
+      sessionGeneration: number;
+      runId: string;
+      runRevision: number;
+      chairSeat: string;
+      chairAgentId: string;
+      chairGeneration: number;
+      chairLeaseId: string;
+      seats: Array<{
+        seat: string;
+        agentId: string;
+        principalGeneration: number;
+        metadataPath: string;
+      }>;
+    };
+    // Convert the whole roster to provisioned origins, the shape that renews
+    // manually rather than through bootstrap interception.
+    const provisionedResult = await cli(value, [
+      "mcp", "provision",
+      "--project", value.project,
+      "--project-session-id", roster.projectSessionId,
+      "--session-revision", String(roster.sessionRevision),
+      "--session-generation", String(roster.sessionGeneration),
+      "--run-id", roster.runId,
+      "--run-revision", String(roster.runRevision),
+      "--chair-seat", roster.chairSeat,
+      "--chair-agent-id", roster.chairAgentId,
+      "--chair-generation", String(roster.chairGeneration),
+      "--chair-lease-id", roster.chairLeaseId,
+      "--seat-bindings", roster.seats
+        .map(({ seat, agentId, principalGeneration }) => `${seat}=${agentId}@${String(principalGeneration)}`)
+        .join(","),
+      "--expires-at", new Date(Date.now() + 20 * 60 * 1_000).toISOString(),
+    ]);
+    const provisioned = JSON.parse(provisionedResult.stdout) as typeof roster;
+    await trackCurrentDaemon(value);
+
+    // Lapse the roster exactly as time would: the seat metadata, the
+    // generation record and the generation's seat credentials all move into
+    // the past. The agents' underlying capabilities outlive the roster, as in
+    // a real provisioned run, so the material for recovery stays live.
+    const expiredAt = new Date(Date.now() - 60 * 60 * 1_000).toISOString();
+    for (const seat of provisioned.seats) {
+      const metadata = JSON.parse(await readFile(seat.metadataPath, "utf8")) as Record<string, unknown>;
+      metadata.expiresAt = expiredAt;
+      await writeFile(seat.metadataPath, `${JSON.stringify(metadata, null, 2)}\n`, { mode: 0o600 });
+    }
+    const database = new Database(value.databasePath);
+    try {
+      const expiredMs = Date.parse(expiredAt);
+      // The generation records themselves are immutable by trigger and are
+      // never consulted for liveness; the operative expiry surfaces are the
+      // seat metadata files above and the credential rows here.
+      database.prepare(`
+        UPDATE capabilities SET expires_at=?
+         WHERE token_hash IN (SELECT token_hash FROM mcp_seat_generation_members WHERE generation=?)
+      `).run(expiredMs, provisioned.generation);
+      for (const seat of provisioned.seats) {
+        database.prepare(`
+          INSERT INTO capabilities(token_hash, run_id, agent_id, principal_generation, expires_at)
+          VALUES (?, ?, ?, ?, ?)
+        `).run(
+          createHash("sha256").update(`recovery-fixture-${seat.seat}`).digest("hex"),
+          roster.runId,
+          seat.agentId,
+          seat.principalGeneration,
+          Date.now() + 24 * 60 * 60 * 1_000,
+        );
+      }
+    } finally {
+      database.close();
+    }
+
+    // The bare request is no longer a dead end: it names the exact recovery
+    // command, and that command recovers the roster in place.
+    const refusal = await cliFailure(value, [
+      "mcp", "peer-provision", "--project", value.project, "--seat", "agy",
+    ]);
+    const advertised = refusal.stderr.match(/can be recovered with (.+)$/mu)?.[1];
+    expect(advertised).toBeDefined();
+    const recoveryArguments = await shellCommandArguments(String(advertised), value.stateDirectory);
+    expect(recoveryArguments.slice(0, 2)).toEqual(["mcp", "peer-provision"]);
+    expect(recoveryArguments).toContain("--expires-at");
+
+    const recoveredResult = await cli(value, recoveryArguments);
+    const recovered = JSON.parse(recoveredResult.stdout) as typeof roster & { expiresAt: string };
+    await trackCurrentDaemon(value);
+    expect(recovered).toMatchObject({
+      expectedPreviousGeneration: provisioned.generation,
+      seats: provisioned.seats.map(({ seat, agentId, principalGeneration }) => ({
+        seat,
+        agentId,
+        principalGeneration,
+      })),
+    });
+    expect(recovered.generation).not.toBe(provisioned.generation);
+    expect(Date.parse(recovered.expiresAt)).toBeGreaterThan(Date.now());
+    expect(recoveredResult.stdout).not.toMatch(/af[bc]_[A-Za-z0-9_-]{43}/u);
+
+    const verify = new Database(value.databasePath, { readonly: true, fileMustExist: true });
+    try {
+      expect(verify.prepare(`
+        SELECT previous_generation FROM mcp_seat_generations WHERE generation=?
+      `).get(recovered.generation)).toEqual({ previous_generation: provisioned.generation });
+      expect(verify.prepare("SELECT generation FROM mcp_active_seat_generations").get())
+        .toEqual({ generation: recovered.generation });
+    } finally {
+      verify.close();
+    }
+
+    // The recovered roster behaves like any healthy roster again.
+    const replay = await cli(value, [
+      "mcp", "peer-provision", "--project", value.project, "--seat", "agy",
+    ]);
+    expect(JSON.parse(replay.stdout)).toEqual(JSON.parse(recoveredResult.stdout));
   });
 
   it("keeps chair-seat and revoked-lease failures on their real enforcement paths", async () => {

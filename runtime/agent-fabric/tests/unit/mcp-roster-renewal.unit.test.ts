@@ -2,13 +2,17 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
 
 import type { AuthorityInput } from "../../src/domain/types.ts";
 import { parseMcpPeerProvisionArguments, peerExpiry } from "../../src/cli/mcp-peer-provision.ts";
 import {
   MAXIMUM_SEAT_LIFETIME_MS,
+  SEAT_EXPIRY_WARNING_CAP_MS,
   mcpRosterRenewalCommand,
+  seatExpiryWarningDue,
+  seatExpiryWarningWindowMs,
 } from "../../src/cli/mcp-roster-renewal.ts";
 import { shellCommandArguments } from "../support/shell-command-arguments.ts";
 
@@ -125,5 +129,110 @@ describe("MCP roster renewal command", () => {
 
     expect(expiresAt).toBe(chairAuthorityExpiresAt);
     expect(Date.parse(String(expiresAt)) - now).toBe(MAXIMUM_SEAT_LIFETIME_MS);
+  });
+
+  it("emits a recovery expiry measured from now for an expired roster", async () => {
+    const now = Date.now();
+    const expiresAt = await emittedExpiry({
+      now,
+      currentExpiresAt: new Date(now - 30 * DAY_MS).toISOString(),
+      chairAuthorityExpiresAt: new Date(now + 365 * DAY_MS).toISOString(),
+    });
+
+    expect(expiresAt).toBe(new Date(now + 23 * DAY_MS).toISOString());
+  });
+});
+
+describe("seat expiry warning window", () => {
+  function generationDatabase(root: string, generation: string, createdAt: number): string {
+    const databasePath = join(root, "fabric-v1.sqlite3");
+    const database = new Database(databasePath);
+    try {
+      // Only the columns the reader touches; the production schema is wider.
+      database.exec(
+        "CREATE TABLE IF NOT EXISTS mcp_seat_generations (generation TEXT PRIMARY KEY, created_at INTEGER NOT NULL)",
+      );
+      database.prepare(
+        "INSERT INTO mcp_seat_generations(generation, created_at) VALUES (?, ?)",
+      ).run(generation, createdAt);
+    } finally {
+      database.close();
+    }
+    return databasePath;
+  }
+
+  it("scales the window to the final quarter of the roster's lifetime", () => {
+    const now = Date.now();
+    const window = seatExpiryWarningWindowMs({
+      mintedAt: new Date(now - 1 * 60 * 60 * 1_000).toISOString(),
+      expiresAt: new Date(now + 23 * 60 * 60 * 1_000).toISOString(),
+    });
+
+    expect(window).toBe(6 * 60 * 60 * 1_000);
+  });
+
+  it("caps the window at seven days for a long-lived roster", () => {
+    const now = Date.now();
+    expect(seatExpiryWarningWindowMs({
+      mintedAt: new Date(now).toISOString(),
+      expiresAt: new Date(now + MAXIMUM_SEAT_LIFETIME_MS).toISOString(),
+    })).toBe(SEAT_EXPIRY_WARNING_CAP_MS);
+  });
+
+  it.each([
+    ["missing", null],
+    ["unparseable", "not-a-time"],
+    ["not before the expiry", "2099-01-01T00:00:00.000Z"],
+  ])("falls back to the capped window when the mint time is %s", (_case, mintedAt) => {
+    expect(seatExpiryWarningWindowMs({
+      mintedAt,
+      expiresAt: "2099-01-01T00:00:00.000Z",
+    })).toBe(SEAT_EXPIRY_WARNING_CAP_MS);
+  });
+
+  it("keeps a fresh 24 hour roster out of the warning window for three quarters of its life", async () => {
+    // Under a fixed 7 day threshold this roster would warn from mint to
+    // expiry, so the warning would carry no information (#526).
+    const root = await mkdtemp(join(tmpdir(), "fabric-warning-window-"));
+    cleanup.push(root);
+    const now = Date.now();
+    const generation = "a".repeat(64);
+    const databasePath = generationDatabase(root, generation, now - 60 * 60 * 1_000);
+    const expiresAt = new Date(now + 23 * 60 * 60 * 1_000).toISOString();
+
+    expect(seatExpiryWarningDue({ databasePath, generation, expiresAt, now })).toBe(false);
+    expect(seatExpiryWarningDue({
+      databasePath,
+      generation,
+      expiresAt,
+      now: now + 18 * 60 * 60 * 1_000,
+    })).toBe(true);
+  });
+
+  it("treats an expired roster as due and an unreadable database as the capped window", async () => {
+    const root = await mkdtemp(join(tmpdir(), "fabric-warning-window-fallback-"));
+    cleanup.push(root);
+    const now = Date.now();
+    const generation = "b".repeat(64);
+    const missingDatabasePath = join(root, "missing.sqlite3");
+
+    expect(seatExpiryWarningDue({
+      databasePath: generationDatabase(root, generation, now - 60 * 60 * 1_000),
+      generation,
+      expiresAt: new Date(now - 1_000).toISOString(),
+      now,
+    })).toBe(true);
+    expect(seatExpiryWarningDue({
+      databasePath: missingDatabasePath,
+      generation,
+      expiresAt: new Date(now + 6 * 24 * 60 * 60 * 1_000).toISOString(),
+      now,
+    })).toBe(true);
+    expect(seatExpiryWarningDue({
+      databasePath: missingDatabasePath,
+      generation,
+      expiresAt: new Date(now + 8 * 24 * 60 * 60 * 1_000).toISOString(),
+      now,
+    })).toBe(false);
   });
 });

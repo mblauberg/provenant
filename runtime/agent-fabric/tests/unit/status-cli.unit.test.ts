@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { Duplex } from "node:stream";
 
+import Database from "better-sqlite3";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { MCP_BOOTSTRAP_CREDENTIALS_FEATURE } from "@local/agent-fabric-protocol";
 
@@ -533,6 +534,138 @@ describe("machine status and doctor", () => {
       seats: ["agy"],
       expiresAt: new Date(Date.parse(expiresAt) + 23 * 24 * 60 * 60 * 1_000).toISOString(),
     });
+  });
+
+  it("derives the renewal remedy window from the roster's own recorded lifetime", async () => {
+    const value = await paths();
+    const agentsHome = resolve(import.meta.dirname, "../../../..");
+    const requestedProject = join(dirname(value.stateDirectory), "window project");
+    await mkdir(requestedProject);
+    const project = await realpath(requestedProject);
+    const generation = "c".repeat(64);
+    // A 24 hour roster with 23 hours remaining: inside a fixed 7 day threshold
+    // for its whole life, but outside its own final quarter (#526).
+    const expiresAt = new Date(Date.now() + 23 * 60 * 60 * 1_000).toISOString();
+    const database = new Database(value.databasePath);
+    try {
+      // The fixture row stands alone: only generation and created_at are read.
+      database.pragma("foreign_keys = OFF");
+      database.prepare(`
+        INSERT INTO mcp_seat_generations(
+          generation,project_id,project_session_id,session_revision,session_generation,
+          run_id,run_revision,chair_agent_id,chair_generation,chair_lease_id,previous_generation,
+          binding_json,binding_digest,expires_at,created_at
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+      `).run(
+        generation, "project-window", "session-window", 1, 1,
+        "run-window", 1, "codex-chair", 1, "chair:run-window:1", null,
+        "{}", `sha256:${"c".repeat(64)}`, Date.parse(expiresAt),
+        Date.now() - 60 * 60 * 1_000,
+      );
+    } finally {
+      database.close();
+    }
+    const common = {
+      schemaVersion: 1 as const,
+      projectKey: projectKey(project),
+      projectPath: project,
+      generation,
+      previousGeneration: null,
+      originKind: "provisioned" as const,
+      projectSessionId: "session-window",
+      sessionRevision: 1,
+      sessionGeneration: 1,
+      runId: "run-window",
+      runRevision: 1,
+      chairAgentId: "codex-chair",
+      chairGeneration: 1,
+      chairLeaseId: "chair:run-window:1",
+      principalGeneration: 1,
+      expiresAt,
+    };
+    await installSeatGeneration({
+      stateDirectory: value.stateDirectory,
+      projectPath: project,
+      generation,
+      expectedPreviousGeneration: null,
+      seats: [
+        {
+          credential: `afc_${"a".repeat(43)}`,
+          metadata: { ...common, seat: "agy", agentId: "agy-peer", role: "peer" },
+        },
+        {
+          credential: `afc_${"b".repeat(43)}`,
+          metadata: { ...common, seat: "codex", agentId: "codex-chair", role: "chair" },
+        },
+      ],
+    });
+
+    const status = await fabricStatus(["--agents-home", agentsHome, "--project", project], value);
+    const seats = (status.project as { seats: Array<Record<string, unknown>> }).seats;
+    const chair = seats.find(({ seat }) => seat === "codex");
+    expect(chair).toMatchObject({ registered: true, active: true, originKind: "provisioned" });
+    expect(chair).not.toHaveProperty("remedy");
+  });
+
+  it("reports a recovery remedy for an expired provisioned roster", async () => {
+    const value = await paths();
+    const agentsHome = resolve(import.meta.dirname, "../../../..");
+    const requestedProject = join(dirname(value.stateDirectory), "expired project");
+    await mkdir(requestedProject);
+    const project = await realpath(requestedProject);
+    const generation = "d".repeat(64);
+    const expiresAt = new Date(Date.now() - 60 * 60 * 1_000).toISOString();
+    const common = {
+      schemaVersion: 1 as const,
+      projectKey: projectKey(project),
+      projectPath: project,
+      generation,
+      previousGeneration: null,
+      originKind: "provisioned" as const,
+      projectSessionId: "session-expired",
+      sessionRevision: 1,
+      sessionGeneration: 1,
+      runId: "run-expired",
+      runRevision: 1,
+      chairAgentId: "codex-chair",
+      chairGeneration: 1,
+      chairLeaseId: "chair:run-expired:1",
+      principalGeneration: 1,
+      expiresAt,
+    };
+    await installSeatGeneration({
+      stateDirectory: value.stateDirectory,
+      projectPath: project,
+      generation,
+      expectedPreviousGeneration: null,
+      seats: [
+        {
+          credential: `afc_${"a".repeat(43)}`,
+          metadata: { ...common, seat: "agy", agentId: "agy-peer", role: "peer" },
+        },
+        {
+          credential: `afc_${"b".repeat(43)}`,
+          metadata: { ...common, seat: "codex", agentId: "codex-chair", role: "chair" },
+        },
+      ],
+    });
+
+    const status = await fabricStatus(["--agents-home", agentsHome, "--project", project], value);
+    const seats = (status.project as { seats: Array<Record<string, unknown>> }).seats;
+    const chair = seats.find(({ seat }) => seat === "codex");
+    // Expiry is recoverable, not a dead end: the seat is inactive but still
+    // names the exact command that recovers the roster (#526).
+    expect(chair).toMatchObject({
+      registered: true,
+      active: false,
+      originKind: "provisioned",
+      remedy: expect.stringContaining("mcp peer-provision"),
+    });
+    const commandArguments = await shellCommandArguments(String(chair?.remedy), dirname(value.stateDirectory));
+    expect(commandArguments.slice(0, 2)).toEqual(["mcp", "peer-provision"]);
+    const parsed = parseMcpPeerProvisionArguments(commandArguments.slice(2));
+    expect(parsed).toMatchObject({ project, seats: ["agy"] });
+    expect(Date.parse(String(parsed.expiresAt))).toBeGreaterThan(Date.now());
   });
 
   it("reports a healthy typed on-demand idle state when every preflight passes", async () => {

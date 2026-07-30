@@ -14,7 +14,12 @@ import {
   type ParsedSeatBinding,
 } from "./mcp-provision.js";
 import { peerSeatAuthority } from "./observer-provision.js";
-import { MAXIMUM_SEAT_LIFETIME_MS, mcpBootstrapRenewalCommand } from "./mcp-roster-renewal.js";
+import {
+  MAXIMUM_SEAT_LIFETIME_MS,
+  mcpBootstrapRenewalCommand,
+  mcpRosterRenewalCommand,
+  readChairAuthorityExpiresAt,
+} from "./mcp-roster-renewal.js";
 import type { FabricPaths } from "./paths.js";
 import {
   MCP_SEATS,
@@ -37,10 +42,11 @@ type InstalledSeat = {
 export class McpPeerProvisionChairRequiredError extends Error {
   readonly code = "MCP_CHAIR_SEAT_REQUIRED" as const;
 
-  constructor(project: string) {
+  constructor(project: string, recovery?: string) {
     super(
       `MCP peer provisioning requires an active chair seat for ${project}; ` +
-      `run agent-fabric bootstrap --seat claude or agent-fabric bootstrap --seat codex from that project`,
+      `run agent-fabric bootstrap --seat claude or agent-fabric bootstrap --seat codex from that project` +
+      (recovery === undefined ? "" : `; ${recovery}`),
     );
     this.name = "McpPeerProvisionChairRequiredError";
   }
@@ -103,7 +109,11 @@ function seatMetadata(value: unknown): SeatMetadata {
   return value as SeatMetadata;
 }
 
-async function installedRoster(paths: FabricPaths, project: string): Promise<InstalledSeat[]> {
+async function installedRoster(
+  paths: FabricPaths,
+  project: string,
+  options: { includeExpired?: boolean } = {},
+): Promise<InstalledSeat[]> {
   const roster: InstalledSeat[] = [];
   for (const seat of MCP_SEATS) {
     try {
@@ -120,7 +130,10 @@ async function installedRoster(paths: FabricPaths, project: string): Promise<Ins
       ) {
         throw new Error(`MCP seat metadata does not match the active ${seat} path`);
       }
-      if (!(Date.parse(metadata.expiresAt) > Date.now())) continue;
+      // A renewal request must still see an expired roster: recovery reuses
+      // the installed identity, so filtering it out here would leave expiry a
+      // dead end that only a lineage-discarding bootstrap could exit (#526).
+      if (options.includeExpired !== true && !(Date.parse(metadata.expiresAt) > Date.now())) continue;
       roster.push({
         metadata,
         credentialPath: location.credentialPath,
@@ -131,6 +144,102 @@ async function installedRoster(paths: FabricPaths, project: string): Promise<Ins
     }
   }
   return roster.sort((left, right) => left.metadata.seat.localeCompare(right.metadata.seat));
+}
+
+// When no active chair exists but an expired provisioned roster does, the
+// refusal names the recovery command instead of steering the operator to a
+// bootstrap that would discard the roster's peer seats and lineage (#526).
+async function chairRequiredError(
+  paths: FabricPaths,
+  project: string,
+  productRoot: string,
+): Promise<McpPeerProvisionChairRequiredError> {
+  try {
+    const roster = await installedRoster(paths, project, { includeExpired: true });
+    const chair = roster.find((member) => member.metadata.role === "chair");
+    const peer = roster.find((member) => member.metadata.role === "peer");
+    if (
+      chair !== undefined &&
+      peer !== undefined &&
+      !(Date.parse(chair.metadata.expiresAt) > Date.now()) &&
+      roster.every((member) => member.metadata.originKind === "provisioned")
+    ) {
+      const recovery = mcpRosterRenewalCommand({
+        project: chair.metadata.projectPath,
+        peerSeat: peer.metadata.seat,
+        currentExpiresAt: chair.metadata.expiresAt,
+        chairAuthorityExpiresAt: readChairAuthorityExpiresAt({
+          databasePath: paths.databasePath,
+          runId: chair.metadata.runId,
+          chairAgentId: chair.metadata.chairAgentId,
+        }),
+        productRoot,
+      });
+      if (recovery !== null) {
+        return new McpPeerProvisionChairRequiredError(
+          project,
+          `the installed roster expired at ${chair.metadata.expiresAt} and can be recovered with ${recovery}`,
+        );
+      }
+    }
+  } catch {
+    // Recovery advice is best-effort; the base refusal stands on its own.
+  }
+  return new McpPeerProvisionChairRequiredError(project);
+}
+
+// The stored seat metadata records the session identity as it stood when the
+// generation was minted, while the daemon compares a rebind against the live
+// session revision. A renewal therefore reads the live identity from the
+// database; the stored value cannot be transcribed into a working bind once
+// the session has advanced (#526).
+function liveRosterIdentity(
+  database: Database.Database,
+  metadata: SeatMetadata,
+): Pick<
+  SeatMetadata,
+  "sessionRevision" | "sessionGeneration" | "runRevision" | "chairGeneration" | "chairLeaseId"
+> {
+  const row = database.prepare(`
+    SELECT session.revision AS session_revision, session.generation AS session_generation,
+           run.revision AS run_revision, run.chair_agent_id, run.chair_generation, run.chair_lease_id
+      FROM project_sessions session
+      JOIN runs run ON run.project_session_id=session.project_session_id
+     WHERE session.project_session_id=? AND run.run_id=?
+  `).get(metadata.projectSessionId, metadata.runId) as {
+    session_revision?: unknown;
+    session_generation?: unknown;
+    run_revision?: unknown;
+    chair_agent_id?: unknown;
+    chair_generation?: unknown;
+    chair_lease_id?: unknown;
+  } | undefined;
+  if (row === undefined) {
+    throw new Error(
+      `MCP roster session or run no longer exists for ${metadata.projectPath}; ` +
+      `rebuild the roster with a fresh bootstrap`,
+    );
+  }
+  if (
+    !Number.isSafeInteger(row.session_revision) ||
+    !Number.isSafeInteger(row.session_generation) ||
+    !Number.isSafeInteger(row.run_revision) ||
+    !Number.isSafeInteger(row.chair_generation) ||
+    typeof row.chair_lease_id !== "string" ||
+    row.chair_agent_id !== metadata.chairAgentId
+  ) {
+    throw new Error(
+      `MCP roster chair identity changed for ${metadata.projectPath}; ` +
+      `rebuild the roster with a fresh bootstrap`,
+    );
+  }
+  return {
+    sessionRevision: row.session_revision as number,
+    sessionGeneration: row.session_generation as number,
+    runRevision: row.run_revision as number,
+    chairGeneration: row.chair_generation as number,
+    chairLeaseId: row.chair_lease_id,
+  };
 }
 
 function rosterOutput(chair: InstalledSeat, roster: InstalledSeat[]): McpProvisionOutput {
@@ -286,9 +395,12 @@ export async function provisionMcpPeerSeats(
 ): Promise<McpProvisionOutput> {
   const { productRoot } = resolveFabricRoots({});
   const request = parseMcpPeerProvisionArguments(arguments_);
-  const initialRoster = await installedRoster(paths, request.project);
+  const renewalRequested = request.expiresAt !== undefined;
+  const initialRoster = await installedRoster(paths, request.project, {
+    includeExpired: renewalRequested,
+  });
   const initialChair = initialRoster.find((member) => member.metadata.role === "chair");
-  if (initialChair === undefined) throw new McpPeerProvisionChairRequiredError(request.project);
+  if (initialChair === undefined) throw await chairRequiredError(paths, request.project, productRoot);
   if (request.seats.includes(initialChair.metadata.seat)) {
     throw new Error(`mcp peer-provision refuses to provision the active chair seat ${initialChair.metadata.seat}`);
   }
@@ -320,9 +432,11 @@ export async function provisionMcpPeerSeats(
       let client: Awaited<ReturnType<typeof connectFabricDaemon>> | undefined;
       let database: Database.Database | undefined;
       try {
-        const roster = await installedRoster(paths, request.project);
+        const roster = await installedRoster(paths, request.project, {
+          includeExpired: renewalRequested,
+        });
         const chair = roster.find((member) => member.metadata.role === "chair");
-        if (chair === undefined) throw new McpPeerProvisionChairRequiredError(request.project);
+        if (chair === undefined) throw await chairRequiredError(paths, request.project, productRoot);
         if (request.seats.includes(chair.metadata.seat)) {
           throw new Error(`mcp peer-provision refuses to provision the active chair seat ${chair.metadata.seat}`);
         }
@@ -347,11 +461,27 @@ export async function provisionMcpPeerSeats(
           );
         }
 
-        const chairCapability = (await privateRead(chair.credentialPath)).trim();
-        client = await connectFabricDaemon({
-          socketPath: daemonHandle.address.path,
-          capability: chairCapability,
-        });
+        const chairExpired = !(Date.parse(chair.metadata.expiresAt) > Date.now());
+        const missingSeats = request.seats.filter((seat) => !present.has(seat));
+        if (chairExpired && missingSeats.length > 0) {
+          throw new Error(
+            `mcp peer-provision cannot register new seats for ${chair.metadata.projectPath} ` +
+            `because the roster expired at ${chair.metadata.expiresAt}; ` +
+            `recover the roster first by replaying --expires-at with an installed seat, then add the new seats`,
+          );
+        }
+        // Registering a new seat delegates from the chair, which needs the
+        // live chair credential. A pure renewal registers nothing, and once
+        // the roster has expired that credential is unusable by definition, so
+        // recovery proceeds on the installed roster and the daemon's own
+        // bootstrap-capability gate instead (#526).
+        if (!chairExpired) {
+          const chairCapability = (await privateRead(chair.credentialPath)).trim();
+          client = await connectFabricDaemon({
+            socketPath: daemonHandle.address.path,
+            capability: chairCapability,
+          });
+        }
         database = new Database(paths.databasePath, { readonly: true, fileMustExist: true });
         const authorityRow = database.prepare(`
       SELECT agent.authority_id,authority.authority_json,authority.authority_hash
@@ -370,9 +500,20 @@ export async function provisionMcpPeerSeats(
         const parentAuthorityId = authorityRow.authority_id;
         const parentAuthority = readStoredAuthority(authorityRow, "chair authority");
         const expiresAt = peerExpiry(request.expiresAt, parentAuthority, chair.metadata.expiresAt);
+        const identity = renewalRequested
+          ? liveRosterIdentity(database, chair.metadata)
+          : {
+              sessionRevision: chair.metadata.sessionRevision,
+              sessionGeneration: chair.metadata.sessionGeneration,
+              runRevision: chair.metadata.runRevision,
+              chairGeneration: chair.metadata.chairGeneration,
+              chairLeaseId: chair.metadata.chairLeaseId,
+            };
         const registeredBindings: ParsedSeatBinding[] = [];
-        for (const seat of request.seats) {
-          if (present.has(seat)) continue;
+        for (const seat of missingSeats) {
+          if (client === undefined) {
+            throw new Error("mcp peer-provision requires a chair connection to register new seats");
+          }
           const agentId = peerAgentId(chair.metadata.projectKey, chair.metadata.runId, seat);
           const delegated = await client.delegateAuthority({
             parentAuthorityId,
@@ -420,14 +561,14 @@ export async function provisionMcpPeerSeats(
         return await bindProvisionedSeatRoster({
           project: chair.metadata.projectPath,
           projectSessionId: chair.metadata.projectSessionId,
-          sessionRevision: chair.metadata.sessionRevision,
-          sessionGeneration: chair.metadata.sessionGeneration,
+          sessionRevision: identity.sessionRevision,
+          sessionGeneration: identity.sessionGeneration,
           runId: chair.metadata.runId,
-          runRevision: chair.metadata.runRevision,
+          runRevision: identity.runRevision,
           chairSeat: chair.metadata.seat,
           chairAgentId: chair.metadata.chairAgentId,
-          chairGeneration: chair.metadata.chairGeneration,
-          chairLeaseId: chair.metadata.chairLeaseId,
+          chairGeneration: identity.chairGeneration,
+          chairLeaseId: identity.chairLeaseId,
           bindings: [...bindings.values()].sort((left, right) => left.seat.localeCompare(right.seat)),
           originKinds,
           expectedActiveGeneration: chair.metadata.generation,
