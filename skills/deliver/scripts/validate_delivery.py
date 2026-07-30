@@ -20,7 +20,6 @@ SKILLS_ROOT = Path(__file__).resolve().parents[2]
 ROOT = Path(os.environ.get("AGENT_FABRIC_PRODUCT_ROOT", Path(__file__).resolve().parents[3])).expanduser()
 sys.path.insert(0, str(SKILLS_ROOT))
 from _shared.review_ladder import PRIMARY_FAMILIES, check_review_ladder
-
 POLICY_VALIDATION_PATH = Path(__file__).with_name("delivery_policy_validation.py")
 DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
@@ -971,6 +970,7 @@ def validate(
             validator.verify_hashes(
                 data, target.parent, expected_cycle_id=run["run_id"],
                 expected_profile=run["profile"], workspace_root=workspace_root,
+                product_root=root,
             )
         except validator.Invalid as exc:
             raise Invalid(f"retrospective artifact failed its contract: {exc}") from exc

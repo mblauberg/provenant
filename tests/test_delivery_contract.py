@@ -1020,6 +1020,11 @@ def test_closed_crucial_or_incident_cycle_requires_retrospective_linkage(tmp_pat
 
 def test_required_retrospective_cannot_borrow_another_delivery_cycle(tmp_path):
     module = load_validator()
+    product_root = tmp_path / "separate-product"
+    shutil.copytree(ROOT / "config", product_root / "config")
+    schema = "runtime/agent-fabric-protocol/schemas/authority-envelope.v2.schema.json"
+    (product_root / schema).parent.mkdir(parents=True)
+    shutil.copy2(ROOT / schema, product_root / schema)
     candidate = fixture("agent-product", tmp_path)
     candidate["risk_tier"] = "crucial"
     candidate["status"] = "closed"
@@ -1072,7 +1077,9 @@ def test_required_retrospective_cannot_borrow_another_delivery_cycle(tmp_path):
     })
     candidate["retrospective"] = {"status": "no-change", "artifact_id": "retrospective", "digest": retro_digest}
     with pytest.raises(module.Invalid, match="current delivery cycle"):
-        module.validate(candidate, ROOT, workspace_root=tmp_path, verify_hashes=True)
+        module.validate(
+            candidate, product_root, workspace_root=tmp_path, verify_hashes=True,
+        )
 
 
 def test_checkpoint_and_observation_substates_follow_lifecycle_state():
