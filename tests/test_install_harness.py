@@ -57,9 +57,19 @@ AMBIENT_NON_SKILL_CODE_NAMES = frozenset(
 )
 
 
+def instance_root_for(home: Path) -> Path:
+    """Where `install-harness` seeds the instance under a scratch HOME."""
+    return home / ".agents"
+
+
 def run(platform: str, home: Path, *arguments: str, **extra_env):
     env = os.environ.copy()
-    env.update({"HOME": str(home), **extra_env})
+    env.update({"HOME": str(home)})
+    # Pin the instance root to the scratch HOME rather than inheriting whatever
+    # AGENTS_HOME the developer or CI happens to export. Without this an ambient
+    # AGENTS_HOME would make the installer seed a real instance under test.
+    env["AGENT_FABRIC_INSTANCE_ROOT"] = str(instance_root_for(home))
+    env.update(extra_env)
     return subprocess.run(
         [str(SCRIPT), "--platform", platform, *arguments],
         cwd=ROOT,
@@ -159,7 +169,9 @@ def test_installs_claude_skills_and_global_instructions_idempotently(tmp_path):
     assert set(workflow_manifest["managed"]) == WORKFLOW_NAMES
     instructions = config / "CLAUDE.md"
     content = instructions.read_text()
-    assert str(ROOT / "AGENTS.md") in content
+    # Doctrine is read from the seeded instance copy; the harness constitution
+    # stays product-shipped (ADR 0019).
+    assert str(instance_root_for(tmp_path) / "AGENTS.md") in content
     assert str(ROOT / "HARNESS.md") in content
     registration = json.loads((tmp_path / ".claude.json").read_text())["mcpServers"]["agent-fabric"]
     assert registration["command"] == str(command)
@@ -581,7 +593,7 @@ def test_preserves_existing_instructions_and_prints_merge_line(tmp_path):
     # both ambient files (AC-P2 existing-unmanaged arm).
     assert instructions.read_bytes() == UNMANAGED_BYTES
     assert "instructions preserved=" in result.stderr
-    assert str(ROOT / "AGENTS.md") in result.stderr
+    assert str(instance_root_for(tmp_path) / "AGENTS.md") in result.stderr
     assert str(ROOT / "HARNESS.md") in result.stderr
     assert {path.name for path in (config / "skills").iterdir()} == expected_installed_entries()
 
@@ -599,7 +611,7 @@ def test_preserves_existing_codex_instructions_and_prints_merge_line(tmp_path):
     assert result.returncode == 3
     assert instructions.read_bytes() == UNMANAGED_BYTES
     assert "instructions preserved=" in result.stderr
-    assert str(ROOT / "AGENTS.md") in result.stderr
+    assert str(instance_root_for(tmp_path) / "AGENTS.md") in result.stderr
     assert str(ROOT / "HARNESS.md") in result.stderr
     assert {path.name for path in (config / "skills").iterdir()} == expected_installed_entries()
 
@@ -801,3 +813,81 @@ def test_split_install_is_idempotent_over_its_own_instructions(tmp_path):
     assert second.returncode == 0, second.stderr
     instructions = config / "CLAUDE.md"
     assert f"instructions existing={instructions}" in second.stdout
+
+
+LEGACY_BOOTSTRAP = (
+    "Read and follow `{product}/AGENTS.md` and `{product}/HARNESS.md` before making "
+    "orchestration, delegation, model-routing or memory decisions. Platform/system "
+    "policy and explicit user authority lead; the nearest project instruction may "
+    "specialise or strengthen the global harness but may not silently broaden "
+    "authority, weaken safety gates or redefine global cross-project memory policy."
+)
+
+
+def test_upgrade_migrates_pre_530_instructions_instead_of_refusing_them(tmp_path):
+    """An install written by an earlier installer must still upgrade.
+
+    The old bootstrap text names the product AGENTS.md, which matches neither
+    acceptance branch of the instance-owned check. Refusing it would break every
+    upgrade deterministically, so it is stale rather than foreign: migrate it.
+    """
+    config = tmp_path / "claude-config"
+    config.mkdir()
+    instructions = config / "CLAUDE.md"
+    instructions.write_text(
+        "# Provenant\n\n"
+        + LEGACY_BOOTSTRAP.format(product=ROOT)
+        + "\n\n## My own notes\n\nKeep this paragraph exactly as written.\n"
+    )
+
+    result = run("claude", tmp_path, CLAUDE_CONFIG_DIR=str(config))
+
+    assert result.returncode == 0, result.stderr
+    assert f"instructions migrated={instructions}" in result.stdout
+    migrated = instructions.read_text()
+    seeded = instance_root_for(tmp_path) / "AGENTS.md"
+    assert str(seeded) in migrated
+    assert f"{ROOT}/AGENTS.md" not in migrated
+    # The harness constitution stays product-shipped, and user prose survives.
+    assert f"{ROOT}/HARNESS.md" in migrated
+    assert "Keep this paragraph exactly as written." in migrated
+
+    # A second run recognises its own output and stops migrating.
+    second = run("claude", tmp_path, CLAUDE_CONFIG_DIR=str(config))
+    assert second.returncode == 0, second.stderr
+    assert f"instructions existing={instructions}" in second.stdout
+    assert instructions.read_text() == migrated
+
+
+def test_a_fused_upgrade_leaves_legacy_instructions_byte_stable(tmp_path):
+    """When both roots are one directory the two forms coincide: no rewrite."""
+    config = tmp_path / "claude-config"
+    config.mkdir()
+    instructions = config / "CLAUDE.md"
+    original = "# Provenant\n\n" + LEGACY_BOOTSTRAP.format(product=ROOT) + "\n"
+    instructions.write_bytes(original.encode())
+
+    result = run(
+        "claude",
+        tmp_path,
+        CLAUDE_CONFIG_DIR=str(config),
+        AGENT_FABRIC_INSTANCE_ROOT=str(ROOT),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert f"instructions existing={instructions}" in result.stdout
+    assert instructions.read_bytes() == original.encode()
+
+
+def test_a_genuinely_foreign_instructions_file_is_still_refused(tmp_path):
+    """Migration must not become a licence to rewrite user-authored files."""
+    config = tmp_path / "claude-config"
+    config.mkdir()
+    instructions = config / "CLAUDE.md"
+    instructions.write_bytes(UNMANAGED_BYTES)
+
+    result = run("claude", tmp_path, CLAUDE_CONFIG_DIR=str(config))
+
+    assert result.returncode == 3
+    assert instructions.read_bytes() == UNMANAGED_BYTES
+    assert "instructions preserved=" in result.stderr

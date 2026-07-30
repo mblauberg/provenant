@@ -11,7 +11,7 @@ Options:
   --consume-provider-quota  run live provider capability probes and refresh the private cache
   --product-root PATH       root for runtime code, schemas and bundled scripts
   --instance-root PATH      root for configuration and trust roots
-  --review-profile PATH     must name instanceRoot/config/review-profiles/certifying-review-four-slot-v1.json
+  --review-profile PATH     must name productRoot/config/review-profiles/certifying-review-four-slot-v1.json
   --help, -h                show this help`;
 
 function option(arguments_: string[], name: string): string | undefined {

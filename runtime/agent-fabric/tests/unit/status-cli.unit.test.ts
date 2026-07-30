@@ -371,7 +371,7 @@ describe("machine status and doctor", () => {
       ),
       modelRouting: resolve("/fixture/instance/config/model-routing.json"),
       reviewProfile: resolve(
-        "/fixture/instance/config/review-profiles/certifying-review-four-slot-v1.json",
+        "/fixture/product/config/review-profiles/certifying-review-four-slot-v1.json",
       ),
     });
   });

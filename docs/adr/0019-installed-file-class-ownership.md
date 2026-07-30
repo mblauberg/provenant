@@ -80,6 +80,16 @@ shipped and is addressed in the product. A client that read the product
 `AGENTS.md` instead would never see the user's own doctrine, which is the
 failure this decision exists to prevent.
 
+Every installer before this decision wrote the product path into that file. That
+text is stale, not foreign, so an upgrade migrates it in place rather than
+refusing it: only the exact legacy path is rewritten, anything the user wrote
+around it survives, and in a fused layout the two paths are the same string so
+the file is untouched. Refusing it would have broken every upgrade from an
+earlier install, which is a worse failure than the one being fixed. A symlink
+the user made to either doctrine file is left alone, because repointing someone's
+deliberate link is more than an upgrade should do, and a genuinely user-authored
+file is still preserved and still fails closed.
+
 **The product pointer, also in the last row**, is
 `<instance root>/.agent-fabric/product-root.json`: a schema-versioned file
 carrying the absolute path of this machine's product checkout, written by
@@ -90,10 +100,25 @@ receipt class, where it is ignored and regenerated. Relocating the product is
 therefore always "re-run `install-harness`", never an edit to a committed file
 and never an edit to a client configuration.
 
-Its directory carries its own `.gitignore` of `*`. Git ignore rules do not
-cross repository roots, so the product checkout's `.gitignore` says nothing
-about an independent instance repository; the rule has to travel with the file
-it protects.
+Its directory carries its own `.gitignore` of `*`, written before the pointer
+itself so no window exists in which the absolute path is stageable. Git ignore
+rules do not cross repository roots, so the product checkout's `.gitignore` says
+nothing about an independent instance repository; the rule has to travel with
+the file it protects. The pointer has exactly one writer,
+`scripts/lib/product_root_resolver.py`, shared with [issue
+#529](https://github.com/mblauberg/provenant/issues/529), so the file has one
+format no matter which entry point produced it.
+
+**On the hardening around these writes.** Instance files are staged beside their
+destination and renamed into place, and the resolved parent directory is
+required to stay inside the resolved instance root. That closes a
+check-then-write window and a symlinked-parent redirection. Neither is a
+privilege boundary: an attacker able to plant a symlink or swap a directory
+inside the instance root already holds the user's own privileges on the user's
+own machine, which is the threat model [ADR
+0001](0001-personal-first-product-compatible.md) accepts. The guards are here
+because they are cheap and because they turn a silent misdirected write into a
+loud refusal, not because anything downstream relies on them.
 
 **Note on the two rows that both involve the installer writing a file.** They
 are not the same mechanism. The desired state is *created* by the installer as
@@ -252,8 +277,11 @@ operator pins a single file with `--trusted-config` or `--config`, that file is
 the whole configuration and no local layer is added, because naming one file is
 a request to inspect exactly that file.
 
-`model-routing.json` stays bound to the instance root, matching its row in the
-table. Separately the MCP server resolves its roots ambiently
+The review-profile catalogue is bound to the product root, matching its row in
+the table; `model-routing.json` stays bound to the instance root, matching its
+own. Resolving the catalogue under the instance made `status` and `doctor` fail
+deterministically on a correct split install, because a split instance does not
+carry that product-owned file at all. Separately the MCP server resolves its roots ambiently
 (`runtime/agent-fabric/src/mcp/credentials.ts:159`); that path belongs to [issue
 #529](https://github.com/mblauberg/provenant/issues/529) and is referenced here
 only so the table is complete.

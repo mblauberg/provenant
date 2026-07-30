@@ -38,10 +38,18 @@ def load_pointer_file(instance_root: Path) -> Path | None:
 
 
 def write_pointer_file(instance_root: Path, product_root: Path) -> None:
-    """Atomically record the product root for one machine-local instance."""
+    """Atomically record the product root for one machine-local instance.
+
+    The directory carries its own `.gitignore` of `*`, written before the
+    pointer so no window exists in which the absolute path is stageable. Ignore
+    rules do not cross repository roots, so a rule in the product checkout says
+    nothing about an independent instance repository; it has to travel with the
+    file it protects (ADR 0019).
+    """
     resolved_product = product_root.expanduser().resolve(strict=True)
     pointer = instance_root.expanduser() / POINTER_RELATIVE_PATH
     pointer.parent.mkdir(parents=True, exist_ok=True)
+    (pointer.parent / ".gitignore").write_text("*\n")
     descriptor, temporary_name = tempfile.mkstemp(
         prefix=".product-root.",
         suffix=".tmp",

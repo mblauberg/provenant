@@ -76,6 +76,13 @@ describe("runtime configuration schema validation", () => {
     });
   });
 
+  // This case is not independently discriminating: because the local entry
+  // restates the product command exactly, the pre-ADR-0019 overlay would have
+  // satisfied it too. It pins the surrounding intersection behaviour. The
+  // discriminating coverage for adapter-command ownership lives in
+  // split-root-config-layer.unit.test.ts ("cannot admit an adapter command the
+  // product does not ship" and "refuses to let the instance swap the command
+  // behind an active product adapter").
   it("keeps product adapter commands while intersecting authority sets and limits", async () => {
     const root = await mkdtemp(join(tmpdir(), "fabric-runtime-local-config-"));
     const globalRoot = join(root, "global-root");

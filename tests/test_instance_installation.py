@@ -334,6 +334,28 @@ def test_a_symlinked_destination_never_redirects_a_seeded_write(tmp_path):
     assert states["AGENTS.md"] == "existing"
 
 
+def test_a_symlinked_parent_directory_cannot_carry_a_write_out_of_the_instance(tmp_path):
+    """Renaming is only as contained as the directory it happens in.
+
+    Hardening, not a privilege boundary: swapping a directory inside the
+    instance root already needs the user's own privileges. It is cheap and it
+    makes the failure loud.
+    """
+    product = build_product(tmp_path)
+    instance_root = tmp_path / "instance"
+    instance_root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    # config/ is where the desired state lands; point it out of the instance.
+    (instance_root / "config").symlink_to(outside, target_is_directory=True)
+
+    result = run("seed", product, instance_root)
+
+    assert result.returncode == 3
+    assert "escapes the instance root" in result.stderr
+    assert list(outside.iterdir()) == [], "nothing may be written through the swap"
+
+
 def test_seeding_fails_with_a_clean_message_when_the_instance_is_readonly(tmp_path):
     product = build_product(tmp_path)
     instance_root = tmp_path / "instance"
@@ -424,7 +446,11 @@ def test_install_harness_seeding_leaves_a_seeded_instance_untouched(tmp_path):
 def test_the_installer_seeds_a_scratch_instance_root(tmp_path):
     """`install-harness` honours AGENT_FABRIC_INSTANCE_ROOT for the instance side."""
     source = (ROOT / "scripts" / "install-harness").read_text()
-    assert 'instance_root="${AGENT_FABRIC_INSTANCE_ROOT:-$ROOT}"' in source
+    # The instance root is resolved once, on the contract #529 established.
+    assert 'instance_root="${AGENT_FABRIC_INSTANCE_ROOT:-${AGENTS_HOME:-$HOME/.agents}}"' in source
+    assert source.count("instance_root=$") + source.count('instance_root="$') == 1, (
+        "install-harness must resolve the instance root exactly once"
+    )
     assert "scripts/instance_installation.py\" seed" in source
 
     product = tmp_path / "product"

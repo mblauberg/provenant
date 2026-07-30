@@ -356,6 +356,38 @@ describe("diagnostics compose the same layers as daemon startup", () => {
     expect(selected.modelRouting).toBe(join(split.instanceRoot, "config", "model-routing.json"));
   });
 
+  it("resolves the review-profile catalogue under the product root", async () => {
+    // Review profiles are product-shipped. Resolving them under the instance
+    // made status and doctor fail on a correct split install, which does not
+    // carry this product-owned file at all.
+    const split = await makeSplit("diagnostic-review-profile");
+
+    const { selected } = await diagnosticConfig(split);
+
+    expect(selected.reviewProfile).toBe(
+      join(
+        split.productRoot,
+        "config",
+        "review-profiles",
+        "certifying-review-four-slot-v1.json",
+      ),
+    );
+    expect(selected.reviewProfile.startsWith(split.instanceRoot)).toBe(false);
+  });
+
+  it("still honours an explicit review-profile path", async () => {
+    const split = await makeSplit("diagnostic-review-profile-flag");
+    const pinned = join(split.root, "pinned-profile.json");
+
+    const selected = resolveStatusPaths([
+      "--product-root", split.productRoot,
+      "--instance-root", split.instanceRoot,
+      "--review-profile", pinned,
+    ]);
+
+    expect(selected.reviewProfile).toBe(pinned);
+  });
+
   it("surfaces a widening instance file rather than reporting the widened view", async () => {
     const split = await makeSplit("diagnostic-widening");
     await writeYamlishJson(split.localPath, {

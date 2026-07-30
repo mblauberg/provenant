@@ -29,6 +29,12 @@ import sys
 import tempfile
 from typing import Any
 
+try:
+    from scripts.lib.product_root_resolver import write_pointer_file
+except ModuleNotFoundError:  # invoked as a script rather than as a package
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from lib.product_root_resolver import write_pointer_file  # type: ignore[no-redef]
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -75,18 +81,18 @@ def pointer_path(instance_root: Path) -> Path:
 def write_pointer(product_root: Path, instance_root: Path) -> dict[str, Any]:
     """Rewrite the machine-local product pointer on every install.
 
-    The directory carries its own `.gitignore` of `*`. Ignore rules do not cross
-    repository roots, so the product checkout's `.gitignore` says nothing about
-    an independent instance repository; a self-contained rule keeps the absolute
-    path uncommittable wherever the instance lives.
+    The pointer has exactly one writer, `product_root_resolver.write_pointer_file`
+    (#529), which also lays down the directory's own `.gitignore`. Reproducing
+    the write here would give the same file two formats, so this defers to it and
+    reports what it wrote.
     """
-    document = {
-        "schema_version": POINTER_SCHEMA_VERSION,
-        "product_root": str(Path(product_root).resolve()),
-    }
-    path = pointer_path(instance_root)
-    _write_text(path.parent / ".gitignore", "*\n")
-    _write_json(path, document)
+    try:
+        write_pointer_file(Path(instance_root), Path(product_root))
+    except OSError as exc:
+        raise InstallError(f"product pointer is not writable: {exc}") from exc
+    document = read_pointer(instance_root)
+    if document is None:
+        raise InstallError("product pointer was not written")
     return document
 
 
@@ -210,17 +216,37 @@ def load_desired_state(instance_root: Path) -> dict[str, Any] | None:
     return validate_desired_state(document)
 
 
-def _publish(path: Path, write: Any, mode: str = "w") -> None:
+def _publish(path: Path, write: Any, mode: str = "w", contain: Path | None = None) -> None:
     """Stage beside the destination, then rename over it.
 
     Renaming replaces whatever is at the destination, including a symlink, so a
     path checked a moment ago cannot be turned into a redirection to somewhere
     outside the instance root before the bytes land.
+
+    The rename is only as contained as the directory it happens in, though, and
+    `mkdir` follows a symlinked parent. So when a containing root is given, the
+    resolved parent is required to stay inside the resolved root: a swapped
+    `config/` or `.agent-fabric/` directory is refused rather than followed.
+
+    This is hardening, not a privilege boundary. Anyone able to swap a directory
+    inside the instance root already holds the user's own privileges on the
+    user's own machine, which is the threat model in ADR 0001. It is cheap and
+    it makes the failure loud, so it is worth doing; it is not load-bearing.
     """
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
         raise InstallError(f"instance directory is not writable: {exc}") from exc
+    if contain is not None:
+        try:
+            root = Path(contain).resolve(strict=True)
+            parent = path.parent.resolve(strict=True)
+        except OSError as exc:
+            raise InstallError(f"instance directory is unresolvable: {exc}") from exc
+        if parent != root and root not in parent.parents:
+            raise InstallError(
+                f"instance path escapes the instance root: {path.name} resolves under {parent}"
+            )
     temporary: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(
@@ -243,16 +269,12 @@ def _publish(path: Path, write: Any, mode: str = "w") -> None:
             temporary.unlink(missing_ok=True)
 
 
-def _write_json(path: Path, document: dict[str, Any]) -> None:
+def _write_json(path: Path, document: dict[str, Any], contain: Path | None = None) -> None:
     def write(handle: Any) -> None:
         json.dump(document, handle, indent=2, sort_keys=True)
         handle.write("\n")
 
-    _publish(path, write)
-
-
-def _write_text(path: Path, text: str) -> None:
-    _publish(path, lambda handle: handle.write(text))
+    _publish(path, write, contain=contain)
 
 
 def seed_desired_state(product_root: Path, instance_root: Path) -> tuple[str, dict[str, Any]]:
@@ -267,7 +289,7 @@ def seed_desired_state(product_root: Path, instance_root: Path) -> tuple[str, di
     if existing is not None:
         return "existing", existing
     document = validate_desired_state(build_desired_state(product_root, instance_root))
-    _write_json(desired_state_path(instance_root), document)
+    _write_json(desired_state_path(instance_root), document, contain=Path(instance_root))
     return "created", document
 
 
@@ -296,7 +318,12 @@ def seed_instance_files(product_root: Path, instance_root: Path) -> list[dict[st
         # Stage and rename rather than copying onto the checked path: between
         # the existence check above and the write, a symlink planted at the
         # destination would otherwise redirect the bytes out of the instance.
-        _publish(destination, lambda handle, data=template: handle.write(data), mode="wb")
+        _publish(
+            destination,
+            lambda handle, data=template: handle.write(data),
+            mode="wb",
+            contain=instance_root,
+        )
         results.append({"path": relative, "state": "created"})
     return results
 

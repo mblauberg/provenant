@@ -220,8 +220,11 @@ export function resolveStatusPaths(arguments_: string[]): { productRoot: string;
     compatibility: resolve(option(arguments_, "--compatibility") ?? join(productRoot, "config", "adapter-compatibility.yaml")),
     compatibilitySchema: resolve(option(arguments_, "--compatibility-schema") ?? join(productRoot, "runtime", "agent-fabric", "schemas", "adapter-compatibility.schema.json")),
     modelRouting: join(instanceRoot, "config", "model-routing.json"),
+    // Review profiles are product-shipped (ADR 0019). Resolving them under the
+    // instance made `status` and `doctor` fail deterministically on a correct
+    // split install, which simply does not hold this product-owned file.
     reviewProfile: resolve(option(arguments_, "--review-profile")
-      ?? join(instanceRoot, "config", "review-profiles", "certifying-review-four-slot-v1.json")),
+      ?? join(productRoot, "config", "review-profiles", "certifying-review-four-slot-v1.json")),
   };
 }
 
