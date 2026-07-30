@@ -190,6 +190,36 @@ describe("seat expiry warning window", () => {
     })).toBe(SEAT_EXPIRY_WARNING_CAP_MS);
   });
 
+  it("falls back to the capped window when the mint time is in the future", () => {
+    // A corrupted-but-parseable future created_at is not a lifetime. Honouring
+    // it here would yield a (10h - 1h) / 4 window and silently shrink the
+    // warning period, so it must fall back to legacy fixed-cap behaviour.
+    const now = Date.now();
+    expect(seatExpiryWarningWindowMs({
+      mintedAt: new Date(now + 60 * 60 * 1_000).toISOString(),
+      expiresAt: new Date(now + 10 * 60 * 60 * 1_000).toISOString(),
+      now,
+    })).toBe(SEAT_EXPIRY_WARNING_CAP_MS);
+  });
+
+  it("keeps warning under the capped window when created_at is corrupted into the future", async () => {
+    const root = await mkdtemp(join(tmpdir(), "fabric-warning-window-future-mint-"));
+    cleanup.push(root);
+    const now = Date.now();
+    const generation = "c".repeat(64);
+    // created_at five days in the future, expiry six days away: the corrupted
+    // lifetime quarter would be six hours and the roster would stay silent for
+    // almost its whole remaining life; legacy capped behaviour warns now.
+    const databasePath = generationDatabase(root, generation, now + 5 * 24 * 60 * 60 * 1_000);
+
+    expect(seatExpiryWarningDue({
+      databasePath,
+      generation,
+      expiresAt: new Date(now + 6 * 24 * 60 * 60 * 1_000).toISOString(),
+      now,
+    })).toBe(true);
+  });
+
   it("keeps a fresh 24 hour roster out of the warning window for three quarters of its life", async () => {
     // Under a fixed 7 day threshold this roster would warn from mint to
     // expiry, so the warning would carry no information (#526).

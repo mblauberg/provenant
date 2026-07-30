@@ -25,12 +25,21 @@ const SEAT_EXPIRY_WARNING_LIFETIME_DIVISOR = 4;
 export function seatExpiryWarningWindowMs(input: {
   mintedAt: string | null;
   expiresAt: string;
+  now?: number;
 }): number {
   const expiresAt = Date.parse(input.expiresAt);
   const mintedAt = input.mintedAt === null ? Number.NaN : Date.parse(input.mintedAt);
-  if (!Number.isFinite(expiresAt) || !Number.isFinite(mintedAt) || mintedAt >= expiresAt) {
+  const now = input.now ?? Date.now();
+  if (
+    !Number.isFinite(expiresAt) ||
+    !Number.isFinite(mintedAt) ||
+    mintedAt >= expiresAt ||
+    mintedAt > now
+  ) {
     // Without a readable mint time the lifetime is unknown, so the capped
-    // fixed window is the only defensible fallback.
+    // fixed window is the only defensible fallback. A mint time in the future
+    // is corruption rather than a lifetime: honouring it would silently
+    // shrink the warning window, so it falls back the same way.
     return SEAT_EXPIRY_WARNING_CAP_MS;
   }
   return Math.min(
@@ -68,13 +77,15 @@ export function seatExpiryWarningDue(input: {
   expiresAt: string;
   now?: number;
 }): boolean {
-  const remainingMs = Date.parse(input.expiresAt) - (input.now ?? Date.now());
+  const now = input.now ?? Date.now();
+  const remainingMs = Date.parse(input.expiresAt) - now;
   // The window never exceeds the cap, so a roster with more than the cap
   // remaining is cleared without a database read.
   if (Number.isNaN(remainingMs) || remainingMs > SEAT_EXPIRY_WARNING_CAP_MS) return false;
   return remainingMs <= seatExpiryWarningWindowMs({
     mintedAt: readSeatGenerationMintedAt(input),
     expiresAt: input.expiresAt,
+    now,
   });
 }
 
