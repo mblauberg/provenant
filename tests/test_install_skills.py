@@ -256,8 +256,10 @@ def materialise(target: Path, product: Path):
 
 
 def consumer_help(script: Path, cwd: Path):
+    # -I isolates the interpreter, so an inherited PYTHONPATH or a user-site
+    # .pth cannot satisfy the import and make the negative leg vacuous.
     return subprocess.run(
-        [sys.executable, str(script), "--help"],
+        [sys.executable, "-I", str(script), "--help"],
         cwd=cwd,
         text=True,
         stdout=subprocess.PIPE,
