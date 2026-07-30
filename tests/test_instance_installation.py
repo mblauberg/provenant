@@ -1,0 +1,299 @@
+"""Ownership contracts for the instance side of an installation (ADR 0019).
+
+Every test here runs against scratch roots. Nothing in this file may read or
+write the real `~/.agents`, `~/.claude` or `~/.codex`.
+"""
+
+from pathlib import Path
+import json
+import shutil
+import subprocess
+import sys
+
+import pytest
+
+
+ROOT = Path(__file__).resolve().parents[1]
+SCRIPT = ROOT / "scripts" / "instance_installation.py"
+
+sys.path.insert(0, str(ROOT / "scripts"))
+import instance_installation as instance  # noqa: E402
+
+
+def build_product(tmp_path: Path) -> Path:
+    """A minimal product tree carrying exactly the templates the seeder reads."""
+    product = tmp_path / "product"
+    (product / "config").mkdir(parents=True)
+    (product / "package.json").write_text(json.dumps({"version": "1.2.3"}) + "\n")
+    (product / "AGENTS.md").write_text("# Product doctrine\n")
+    (product / "config" / "model-preferences.json").write_text('{"shipped": true}\n')
+    (product / "config" / "model-routing.json").write_text('{"shipped": true}\n')
+    return product
+
+
+def run(action: str, product: Path, instance_root: Path, *extra: str):
+    return subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT),
+            action,
+            "--product-root",
+            str(product),
+            "--instance-root",
+            str(instance_root),
+            *extra,
+        ],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+
+
+def seed(product: Path, instance_root: Path) -> dict:
+    result = run("seed", product, instance_root)
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
+def test_desired_state_is_seeded_with_product_version_and_split_mode(tmp_path):
+    product = build_product(tmp_path)
+    instance_root = tmp_path / "instance"
+    instance_root.mkdir()
+
+    result = seed(product, instance_root)
+
+    assert result["desired_state_state"] == "created"
+    assert result["mode"] == "split"
+    written = json.loads((instance_root / "config" / "installation.json").read_text())
+    assert written == {
+        "schema_version": 1,
+        "contract": "installation-desired-state",
+        "product": {"name": "provenant", "version": "1.2.3"},
+        "mode": "split",
+    }
+
+
+def test_desired_state_records_a_fused_layout_when_the_roots_are_one_tree(tmp_path):
+    product = build_product(tmp_path)
+
+    result = seed(product, product)
+
+    assert result["desired_state"]["mode"] == "fused"
+
+
+def test_desired_state_is_path_free_and_therefore_committable(tmp_path):
+    product = build_product(tmp_path)
+    instance_root = tmp_path / "instance"
+    instance_root.mkdir()
+    seed(product, instance_root)
+
+    text = (instance_root / "config" / "installation.json").read_text()
+
+    # The machine-specific facts are exactly what must not survive a commit.
+    for machine_local in (str(tmp_path), str(product), str(instance_root), "/", "~"):
+        assert machine_local not in text, f"desired state leaked {machine_local!r}"
+
+
+def test_desired_state_rejects_an_absolute_path_in_any_field(tmp_path):
+    document = {
+        "schema_version": 1,
+        "contract": "installation-desired-state",
+        "product": {"name": "provenant", "version": "1.2.3", "ref": "/opt/provenant"},
+        "mode": "split",
+    }
+
+    with pytest.raises(instance.InstallError, match="path-free"):
+        instance.validate_desired_state(document)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("schema_version", 2),
+        ("contract", "installation-receipt"),
+        ("mode", "linked"),
+    ],
+)
+def test_desired_state_rejects_an_unsupported_header(field, value):
+    document = {
+        "schema_version": 1,
+        "contract": "installation-desired-state",
+        "product": {"name": "provenant", "version": "1.2.3"},
+        "mode": "split",
+    }
+    document[field] = value
+
+    with pytest.raises(instance.InstallError):
+        instance.validate_desired_state(document)
+
+
+def test_desired_state_is_never_rewritten_on_a_later_install(tmp_path):
+    product = build_product(tmp_path)
+    instance_root = tmp_path / "instance"
+    instance_root.mkdir()
+    seed(product, instance_root)
+    path = instance_root / "config" / "installation.json"
+    # The instance pins an older product than the one now installing.
+    pinned = {
+        "schema_version": 1,
+        "contract": "installation-desired-state",
+        "product": {"name": "provenant", "version": "1.0.0", "ref": "v1.0.0"},
+        "mode": "split",
+    }
+    path.write_text(json.dumps(pinned, indent=2) + "\n")
+    (product / "package.json").write_text(json.dumps({"version": "9.9.9"}) + "\n")
+
+    result = seed(product, instance_root)
+
+    assert result["desired_state_state"] == "existing"
+    assert json.loads(path.read_text()) == pinned
+
+
+def test_seeded_files_are_written_once_and_never_overwritten_on_update(tmp_path):
+    product = build_product(tmp_path)
+    instance_root = tmp_path / "instance"
+    instance_root.mkdir()
+
+    first = seed(product, instance_root)
+
+    assert {item["path"]: item["state"] for item in first["seeded"]} == {
+        "AGENTS.md": "created",
+        "config/model-preferences.json": "created",
+        "config/model-routing.json": "created",
+    }
+    for relative in instance.SEEDED_FILES:
+        assert (instance_root / relative).read_text() == (product / relative).read_text()
+
+    # The user edits their copies and the product ships new templates.
+    for relative in instance.SEEDED_FILES:
+        (instance_root / relative).write_text("mine\n")
+        (product / relative).write_text("newer product template\n")
+
+    second = seed(product, instance_root)
+
+    assert {item["state"] for item in second["seeded"]} == {"existing"}
+    for relative in instance.SEEDED_FILES:
+        assert (instance_root / relative).read_text() == "mine\n"
+
+
+def test_seeding_never_writes_a_receipt_into_the_instance_root(tmp_path):
+    product = build_product(tmp_path)
+    instance_root = tmp_path / "instance"
+    instance_root.mkdir()
+
+    seed(product, instance_root)
+
+    written = {
+        path.relative_to(instance_root).as_posix()
+        for path in instance_root.rglob("*")
+        if path.is_file()
+    }
+    assert written == {
+        "config/installation.json",
+        "AGENTS.md",
+        "config/model-preferences.json",
+        "config/model-routing.json",
+    }
+
+
+def test_a_fused_layout_seeds_no_template_over_itself(tmp_path):
+    product = build_product(tmp_path)
+    original = (product / "AGENTS.md").read_text()
+
+    result = seed(product, product)
+
+    assert {item["state"] for item in result["seeded"]} == {"existing"}
+    assert (product / "AGENTS.md").read_text() == original
+
+
+def test_show_reports_the_instance_without_writing_it(tmp_path):
+    product = build_product(tmp_path)
+    instance_root = tmp_path / "instance"
+    instance_root.mkdir()
+
+    result = run("show", product, instance_root)
+
+    assert result.returncode == 0, result.stderr
+    reported = json.loads(result.stdout)
+    assert reported["desired_state_state"] == "missing"
+    assert reported["desired_state"] is None
+    assert list(instance_root.iterdir()) == []
+
+
+def test_an_unreadable_desired_state_fails_rather_than_being_replaced(tmp_path):
+    product = build_product(tmp_path)
+    instance_root = tmp_path / "instance"
+    (instance_root / "config").mkdir(parents=True)
+    corrupt = instance_root / "config" / "installation.json"
+    corrupt.write_text("{not json\n")
+
+    result = run("seed", product, instance_root)
+
+    assert result.returncode == 3
+    assert "desired state is unreadable" in result.stderr
+    assert corrupt.read_text() == "{not json\n"
+
+
+def test_a_missing_product_template_is_a_conflict_not_a_silent_skip(tmp_path):
+    product = build_product(tmp_path)
+    (product / "config" / "model-routing.json").unlink()
+    instance_root = tmp_path / "instance"
+    instance_root.mkdir()
+
+    result = run("seed", product, instance_root)
+
+    assert result.returncode == 3
+    assert "product template is missing: config/model-routing.json" in result.stderr
+
+
+def test_the_repository_ships_a_valid_fused_desired_state():
+    """This checkout is itself a fused instance, so its desired state must load."""
+    document = instance.load_desired_state(ROOT)
+
+    assert document is not None
+    assert document["mode"] == "fused"
+    assert document["product"]["version"] == instance.product_version(ROOT)
+
+
+def test_install_harness_seeding_leaves_a_seeded_instance_untouched(tmp_path):
+    """The installer step is a no-op against an instance that already has state."""
+    product = build_product(tmp_path)
+    instance_root = tmp_path / "instance"
+    instance_root.mkdir()
+    seed(product, instance_root)
+    before = {
+        path: path.read_bytes()
+        for path in sorted(instance_root.rglob("*"))
+        if path.is_file()
+    }
+
+    result = run("seed", product, instance_root, "--summary")
+
+    assert result.returncode == 0, result.stderr
+    assert "desired-state=existing seeded=0 existing=3" in result.stdout
+    assert {
+        path: path.read_bytes()
+        for path in sorted(instance_root.rglob("*"))
+        if path.is_file()
+    } == before
+
+
+def test_the_installer_seeds_a_scratch_instance_root(tmp_path):
+    """`install-harness` honours AGENT_FABRIC_INSTANCE_ROOT for the instance side."""
+    source = (ROOT / "scripts" / "install-harness").read_text()
+    assert 'instance_root="${AGENT_FABRIC_INSTANCE_ROOT:-$ROOT}"' in source
+    assert "scripts/instance_installation.py\" seed" in source
+
+    product = tmp_path / "product"
+    shutil.copytree(ROOT / "config", product / "config", symlinks=True)
+    (product / "package.json").write_text(json.dumps({"version": "0.0.1"}) + "\n")
+    (product / "AGENTS.md").write_text("# doctrine\n")
+    (product / "config" / "installation.json").unlink()
+    instance_root = tmp_path / "instance"
+    instance_root.mkdir()
+
+    result = seed(product, instance_root)
+
+    assert result["desired_state"]["product"]["version"] == "0.0.1"
+    assert result["mode"] == "split"

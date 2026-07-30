@@ -102,6 +102,13 @@ case ":${PATH:-}:" in
   *) echo "warning: $provenant_bin_dir is not on PATH" >&2 ;;
 esac
 
+# Seed the instance side before projecting anything into the client home. The
+# desired state and the seeded templates are instance-owned once written (ADR
+# 0019), so this is a no-op on every install after the first.
+instance_root="${AGENT_FABRIC_INSTANCE_ROOT:-$ROOT}"
+"$ROOT/scripts/instance_installation.py" seed \
+  --product-root "$ROOT" --instance-root "$instance_root" --summary
+
 mkdir -p "$platform_home"
 "$ROOT/scripts/install-skills" --target "$platform_home/skills"
 if [[ "$PLATFORM" == "claude" ]]; then
