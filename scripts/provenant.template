@@ -1,0 +1,103 @@
+#!/usr/bin/env python3
+# Managed by scripts/install-harness; local edits to an installed copy are not preserved.
+"""Stable Provenant resolver and checkout delegator."""
+
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+import sys
+from typing import NoReturn
+
+
+REPAIR = (
+    "repair: re-run install-harness from the product checkout, "
+    "or set AGENT_FABRIC_PRODUCT_ROOT"
+)
+
+
+def instance_root() -> Path:
+    configured = os.environ.get("AGENT_FABRIC_INSTANCE_ROOT")
+    if configured is None:
+        configured = os.environ.get("AGENTS_HOME")
+    candidate = Path(configured).expanduser() if configured is not None else Path.home() / ".agents"
+    if not candidate.is_absolute():
+        raise ValueError(f"instance root must be an absolute path, got {configured}; {REPAIR}")
+    return candidate.resolve()
+
+
+def pointer_product_root(root: Path) -> Path | None:
+    try:
+        value = json.loads((root / ".agent-fabric/product-root.json").read_text())
+        if (
+            not isinstance(value, dict)
+            or type(value.get("schema_version")) is not int
+            or value["schema_version"] != 1
+            or not isinstance(value.get("product_root"), str)
+        ):
+            return None
+        candidate = Path(value["product_root"]).expanduser()
+        if not candidate.is_absolute() or not candidate.exists():
+            return None
+        return candidate
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+
+
+def resolve_product_root(root: Path) -> Path:
+    configured = os.environ.get("AGENT_FABRIC_PRODUCT_ROOT")
+    agents_home = os.environ.get("AGENTS_HOME")
+    if configured is not None:
+        candidate = Path(configured).expanduser()
+        label = "AGENT_FABRIC_PRODUCT_ROOT"
+    else:
+        pointed = pointer_product_root(root)
+        if pointed is not None:
+            candidate = pointed
+            label = "product-root pointer"
+        elif agents_home is not None:
+            candidate = Path(agents_home).expanduser()
+            label = "AGENTS_HOME"
+        else:
+            candidate = Path.home() / ".agents"
+            label = "~/.agents"
+    if not candidate.is_absolute():
+        raise ValueError(f"{label} must be an absolute path, got {candidate}; {REPAIR}")
+    candidate = candidate.resolve()
+    wrapper = candidate / "scripts/agent-fabric-mcp"
+    if not wrapper.is_file() or not os.access(wrapper, os.X_OK):
+        raise ValueError(f"Agent Fabric MCP target is missing or not executable at {wrapper}; {REPAIR}")
+    return candidate
+
+
+def execute(path: Path, arguments: list[str], product_root: Path, root: Path) -> NoReturn:
+    environment = os.environ.copy()
+    environment["AGENT_FABRIC_PRODUCT_ROOT"] = str(product_root)
+    environment.setdefault("AGENT_FABRIC_INSTANCE_ROOT", str(root))
+    environment["AGENTS_HOME"] = str(product_root)
+    try:
+        os.execve(path, [str(path), *arguments], environment)
+    except OSError as exc:
+        print(f"provenant: cannot execute {path}: {exc.strerror or exc}; {REPAIR}", file=sys.stderr)
+        raise SystemExit(3) from None
+
+
+def main(arguments: list[str]) -> int:
+    try:
+        root = instance_root()
+        product_root = resolve_product_root(root)
+    except ValueError as exc:
+        print(f"provenant: {exc}", file=sys.stderr)
+        return 3
+    if not arguments and "AGENT_FABRIC_SEAT" in os.environ:
+        target = product_root / "scripts/agent-fabric-mcp"
+        delegated_arguments: list[str] = []
+    else:
+        target = product_root / "scripts/provenant"
+        delegated_arguments = arguments
+    execute(target, delegated_arguments, product_root, root)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

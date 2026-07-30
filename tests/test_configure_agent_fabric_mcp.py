@@ -3,6 +3,7 @@ import importlib.util
 import io
 import os
 from pathlib import Path
+import shutil
 import stat
 import subprocess
 import sys
@@ -13,6 +14,16 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "configure-agent-fabric-mcp.py"
+PROVENANT_TEMPLATE = ROOT / "scripts" / "provenant.template"
+
+
+def stable_shim(tmp_path: Path) -> Path:
+    shim = tmp_path / "bin/provenant"
+    shim.parent.mkdir(exist_ok=True)
+    if not shim.exists():
+        shutil.copy2(PROVENANT_TEMPLATE, shim)
+        shim.chmod(0o755)
+    return shim
 
 
 def load_configurer():
@@ -25,11 +36,13 @@ def load_configurer():
 
 
 def run_configure(tmp_path: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
+    shim = stable_shim(tmp_path)
     return subprocess.run(
         [
             str(SCRIPT),
             "--agents-home", str(ROOT),
             "--state-directory", str(tmp_path / "state"),
+            "--shim-path", str(shim),
             "--claude-config", str(tmp_path / "claude.json"),
             "--codex-config", str(tmp_path / "codex.toml"),
             "--cursor-config", str(tmp_path / "cursor.json"),
@@ -78,6 +91,7 @@ def all_client_arguments(tmp_path: Path, paths: dict[str, Path]) -> list[str]:
     return [
         "--agents-home", str(ROOT),
         "--state-directory", str(tmp_path / "state"),
+        "--shim-path", str(stable_shim(tmp_path)),
         "--claude-config", str(paths["claude"]),
         "--codex-config", str(paths["codex"]),
         "--cursor-config", str(paths["cursor"]),
@@ -88,6 +102,7 @@ def all_client_arguments(tmp_path: Path, paths: dict[str, Path]) -> list[str]:
 
 
 def test_configures_all_global_clients_without_a_fixed_project_path(tmp_path: Path) -> None:
+    shim = stable_shim(tmp_path)
     claude_config = tmp_path / "claude.json"
     codex_config = tmp_path / "codex.toml"
     json_configs = {
@@ -142,18 +157,18 @@ AGENT_FABRIC_CAPABILITY = "never-print-capability"
     }
     assert claude["mcpServers"]["agent-fabric"] == {
         "type": "stdio",
-        "command": str(ROOT / "scripts" / "agent-fabric-mcp"),
+        "command": str(shim),
         "args": [],
         "env": {**expected_common, "AGENT_FABRIC_SEAT": "claude", "AGENT_FABRIC_CLIENT_LABEL": "claude"},
     }
     assert codex["mcp_servers"]["agent-fabric"] == {
-        "command": str(ROOT / "scripts" / "agent-fabric-mcp"),
+        "command": str(shim),
         "env": {**expected_common, "AGENT_FABRIC_SEAT": "codex", "AGENT_FABRIC_CLIENT_LABEL": "codex"},
     }
     for client, path in json_configs.items():
         value = json.loads(path.read_text())
         assert value["mcpServers"]["agent-fabric"] == {
-            "command": str(ROOT / "scripts" / "agent-fabric-mcp"),
+            "command": str(shim),
             "env": {**expected_common, "AGENT_FABRIC_SEAT": "codex", "AGENT_FABRIC_CLIENT_LABEL": client},
         }
         assert value["mcpServers"]["other"] == {"command": "other"}
@@ -161,7 +176,7 @@ AGENT_FABRIC_CAPABILITY = "never-print-capability"
     opencode = json.loads(opencode_config.read_text())
     assert opencode["mcp"]["agent-fabric"] == {
         "type": "local",
-        "command": [str(ROOT / "scripts" / "agent-fabric-mcp")],
+        "command": [str(shim)],
         "enabled": True,
         "environment": {
             **expected_common,
@@ -182,6 +197,12 @@ AGENT_FABRIC_CAPABILITY = "never-print-capability"
     assert [line.split("platform=", 1)[1].split(" ", 1)[0] for line in receipts] == [
         "claude", "codex", "cursor", "agy", "kiro", "opencode",
     ]
+    assert str(ROOT) not in json.dumps([
+        claude["mcpServers"]["agent-fabric"],
+        codex["mcp_servers"]["agent-fabric"],
+        *(json.loads(path.read_text())["mcpServers"]["agent-fabric"] for path in json_configs.values()),
+        opencode["mcp"]["agent-fabric"],
+    ])
 
     original_claude = claude_config.read_bytes()
     original_codex = codex_config.read_bytes()
@@ -193,6 +214,161 @@ AGENT_FABRIC_CAPABILITY = "never-print-capability"
     assert codex_config.read_bytes() == original_codex
     assert {client: path.read_bytes() for client, path in json_configs.items()} == original_json
     assert opencode_config.read_bytes() == original_opencode
+
+
+def test_stable_registration_launches_after_product_relocation(tmp_path: Path) -> None:
+    configurer = load_configurer()
+    shim = stable_shim(tmp_path)
+    instance_root = tmp_path / "instance"
+    pointer = instance_root / ".agent-fabric/product-root.json"
+    pointer.parent.mkdir(parents=True)
+    old_product = tmp_path / "old-product"
+    wrapper = old_product / "scripts/agent-fabric-mcp"
+    wrapper.parent.mkdir(parents=True)
+    wrapper.write_text(
+        "#!/bin/sh\n"
+        "printf '%s\\n' \"$AGENT_FABRIC_SEAT|$AGENT_FABRIC_STATE_DIRECTORY|$AGENTS_HOME\"\n"
+    )
+    wrapper.chmod(0o755)
+    registration = configurer.registration(
+        old_product,
+        tmp_path / "state",
+        "codex",
+        shim_path=shim,
+    )
+    registered_command = registration["command"]
+    original_registration = json.dumps(registration, sort_keys=True)
+    pointer.write_text(json.dumps({
+        "schema_version": 1,
+        "product_root": str(old_product),
+    }))
+
+    relocated_product = tmp_path / "relocated-product"
+    old_product.rename(relocated_product)
+    pointer.write_text(json.dumps({
+        "schema_version": 1,
+        "product_root": str(relocated_product),
+    }))
+    environment = {
+        **{
+            key: value for key, value in os.environ.items()
+            if key not in {
+                "AGENT_FABRIC_PRODUCT_ROOT",
+                "AGENT_FABRIC_INSTANCE_ROOT",
+                "AGENTS_HOME",
+            }
+        },
+        **registration["env"],
+        "HOME": str(tmp_path / "home"),
+        "AGENT_FABRIC_INSTANCE_ROOT": str(instance_root),
+    }
+    launched = subprocess.run(
+        [registered_command],
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert registration["command"] == str(shim)
+    assert str(old_product) not in json.dumps(registration)
+    assert json.dumps(registration, sort_keys=True) == original_registration
+    assert "AGENT_FABRIC_PRODUCT_ROOT" not in environment
+    assert "AGENTS_HOME" not in environment
+    assert launched.returncode == 0, launched.stderr
+    assert launched.stdout == f"codex|{tmp_path / 'state'}|{relocated_product}\n"
+
+
+def test_stable_registration_reports_repair_for_missing_product(tmp_path: Path) -> None:
+    configurer = load_configurer()
+    shim = stable_shim(tmp_path)
+    registration = configurer.registration(
+        tmp_path / "unused-product",
+        tmp_path / "state",
+        "codex",
+        shim_path=shim,
+    )
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in {
+            "AGENT_FABRIC_PRODUCT_ROOT",
+            "AGENT_FABRIC_INSTANCE_ROOT",
+            "AGENTS_HOME",
+        }
+    }
+    environment.update(registration["env"])
+    environment["HOME"] = str(tmp_path / "home")
+
+    launched = subprocess.run(
+        [registration["command"]],
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert launched.returncode != 0
+    assert "Agent Fabric MCP target is missing or not executable" in launched.stderr
+    assert "repair: re-run install-harness from the product checkout" in launched.stderr
+
+
+def test_present_empty_seat_still_enters_mcp_mode(tmp_path: Path) -> None:
+    shim = stable_shim(tmp_path)
+    product = tmp_path / "product"
+    wrapper = product / "scripts/agent-fabric-mcp"
+    wrapper.parent.mkdir(parents=True)
+    wrapper.write_text("#!/bin/sh\nprintf 'mcp-mode:%s\\n' \"$AGENT_FABRIC_SEAT\"\n")
+    wrapper.chmod(0o755)
+    environment = {
+        **os.environ,
+        "AGENT_FABRIC_PRODUCT_ROOT": str(product),
+        "AGENT_FABRIC_SEAT": "",
+    }
+
+    launched = subprocess.run(
+        [str(shim)],
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert launched.returncode == 0, launched.stderr
+    assert launched.stdout == "mcp-mode:\n"
+
+
+def test_rejects_a_relative_stable_shim_path(tmp_path: Path) -> None:
+    result = run_configure(tmp_path, "--shim-path", "relative/provenant")
+
+    assert result.returncode == 3
+    assert "stable Provenant shim path must be absolute" in result.stderr
+    assert not any(path.exists() for path in all_client_paths(tmp_path).values())
+
+
+def test_check_rejects_a_missing_stable_shim(tmp_path: Path) -> None:
+    configured = run_configure(tmp_path)
+    assert configured.returncode == 0, configured.stderr
+    missing = tmp_path / "missing/provenant"
+
+    checked = run_configure(tmp_path, "--shim-path", str(missing), "--check")
+
+    assert checked.returncode == 3
+    assert f"stable Provenant shim is missing or not executable at {missing}" in checked.stderr
+
+
+def test_configuration_does_not_require_wrapper_under_agents_home(tmp_path: Path) -> None:
+    instance_root = tmp_path / "instance-without-product"
+    instance_root.mkdir()
+
+    configured = run_configure(
+        tmp_path,
+        "--platform", "codex",
+        "--agents-home", str(instance_root),
+    )
+
+    assert configured.returncode == 0, configured.stderr
+    assert "Agent Fabric MCP wrapper is missing from AGENTS_HOME" not in configured.stderr
 
 
 def test_check_reports_only_agent_fabric_entry_status(tmp_path: Path) -> None:
@@ -299,6 +475,7 @@ def test_platform_all_revalidates_codex_after_writing_claude(tmp_path: Path, mon
     result = configurer.main([
         "--agents-home", str(ROOT),
         "--state-directory", str(tmp_path / "state"),
+        "--shim-path", str(stable_shim(tmp_path)),
         "--claude-config", str(claude_config),
         "--codex-config", str(codex_config),
     ])
@@ -347,6 +524,7 @@ def test_first_client_post_install_failure_reports_partial_state(
         "--platform", "claude",
         "--agents-home", str(ROOT),
         "--state-directory", str(tmp_path / "state"),
+        "--shim-path", str(stable_shim(tmp_path)),
         "--claude-config", str(config),
     ])
 
@@ -402,6 +580,7 @@ def test_existing_drift_before_any_commit_uses_non_partial_conflict(
         "--platform", "claude",
         "--agents-home", str(ROOT),
         "--state-directory", str(tmp_path / "state"),
+        "--shim-path", str(stable_shim(tmp_path)),
         "--claude-config", str(config),
     ]
     assert configurer.main(arguments) == 0

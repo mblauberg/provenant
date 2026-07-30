@@ -12,6 +12,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "install-harness"
+PROVENANT_TEMPLATE = ROOT / "scripts" / "provenant.template"
 WORKFLOW_SCRIPT = ROOT / "scripts" / "install-workflows"
 WORKFLOW_NAMES = {
     "codebase-polish.js",
@@ -139,8 +140,13 @@ def test_installs_claude_skills_and_global_instructions_idempotently(tmp_path):
     )
     assert first.returncode == 0, first.stderr
     command = bin_dir / "provenant"
-    assert command.is_symlink()
-    assert command.resolve() == ROOT / "scripts" / "provenant"
+    assert command.is_file()
+    assert not command.is_symlink()
+    assert command.read_bytes() == PROVENANT_TEMPLATE.read_bytes()
+    assert json.loads((tmp_path / ".agents/.agent-fabric/product-root.json").read_text()) == {
+        "product_root": str(ROOT),
+        "schema_version": 1,
+    }
     assert {path.name for path in (config / "skills").iterdir()} == expected_installed_entries()
     workflows = config / "workflows"
     assert {path.name for path in workflows.iterdir()} == WORKFLOW_NAMES
@@ -156,7 +162,7 @@ def test_installs_claude_skills_and_global_instructions_idempotently(tmp_path):
     assert str(ROOT / "AGENTS.md") in content
     assert str(ROOT / "HARNESS.md") in content
     registration = json.loads((tmp_path / ".claude.json").read_text())["mcpServers"]["agent-fabric"]
-    assert registration["command"] == str(ROOT / "scripts" / "agent-fabric-mcp")
+    assert registration["command"] == str(command)
     assert registration["env"] == {
         "AGENT_FABRIC_CLIENT_LABEL": "claude",
         "AGENT_FABRIC_SEAT": "claude",
@@ -192,7 +198,7 @@ def test_installs_codex_skills_and_global_instructions(tmp_path):
     assert "enabled = false" in configured
     registration = tomllib.loads(configured)["mcp_servers"]["agent-fabric"]
     assert registration == {
-        "command": str(ROOT / "scripts" / "agent-fabric-mcp"),
+        "command": str(tmp_path / ".local/bin/provenant"),
         "env": {
             "AGENT_FABRIC_CLIENT_LABEL": "codex",
             "AGENT_FABRIC_SEAT": "codex",
@@ -487,7 +493,7 @@ def test_all_mcp_clients_are_an_explicit_subscription_native_opt_in(tmp_path):
         assert "AGENT_FABRIC_PROJECT_PATH" not in registration["env"]
     opencode = json.loads((tmp_path / ".config/opencode/opencode.jsonc").read_text())
     registration = opencode["mcp"]["agent-fabric"]
-    assert registration["command"] == [str(ROOT / "scripts" / "agent-fabric-mcp")]
+    assert registration["command"] == [str(tmp_path / ".local/bin/provenant")]
     assert registration["environment"]["AGENT_FABRIC_SEAT"] == "codex"
     assert registration["environment"]["AGENT_FABRIC_CLIENT_LABEL"] == "opencode"
     assert all("API_KEY" not in key for key in registration["environment"])
@@ -672,6 +678,50 @@ def test_refuses_provenant_command_collision_before_any_mutation(tmp_path):
     assert not (tmp_path / ".claude.json").exists()
 
 
+def test_rejects_a_relative_provenant_bin_directory_before_mutation(tmp_path):
+    relative_bin = "relative-provenant-bin"
+
+    result = run("codex", tmp_path, PROVENANT_BIN_DIR=relative_bin)
+
+    assert result.returncode == 3
+    assert "PROVENANT_BIN_DIR must be absolute" in result.stderr
+    assert not (ROOT / relative_bin).exists()
+    assert not (tmp_path / ".codex").exists()
+
+
+def test_upgrades_the_checkout_bound_provenant_symlink_to_a_stable_copy(tmp_path):
+    bin_dir = tmp_path / ".local/bin"
+    bin_dir.mkdir(parents=True)
+    command = bin_dir / "provenant"
+    command.symlink_to(ROOT / "scripts/provenant")
+
+    result = run("codex", tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    assert command.is_file()
+    assert not command.is_symlink()
+    assert command.read_bytes() == PROVENANT_TEMPLATE.read_bytes()
+    assert f"command updated={command}" in result.stdout
+
+
+def test_upgrades_a_byte_identical_foreign_symlink_to_a_managed_copy(tmp_path):
+    bin_dir = tmp_path / ".local/bin"
+    bin_dir.mkdir(parents=True)
+    foreign = tmp_path / "foreign/provenant"
+    foreign.parent.mkdir()
+    shutil.copy2(PROVENANT_TEMPLATE, foreign)
+    command = bin_dir / "provenant"
+    command.symlink_to(foreign)
+
+    result = run("codex", tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    assert command.is_file()
+    assert not command.is_symlink()
+    assert command.read_bytes() == PROVENANT_TEMPLATE.read_bytes()
+    assert f"command updated={command}" in result.stdout
+
+
 def test_warns_when_provenant_bin_directory_is_outside_path(tmp_path):
     config = tmp_path / "claude-config"
     bin_dir = tmp_path / "not-on-path"
@@ -686,6 +736,9 @@ def test_warns_when_provenant_bin_directory_is_outside_path(tmp_path):
 
     assert result.returncode == 0, result.stderr
     assert f"warning: {bin_dir} is not on PATH" in result.stderr
-    assert (bin_dir / "provenant").resolve() == ROOT / "scripts" / "provenant"
+    command = bin_dir / "provenant"
+    assert command.is_file()
+    assert not command.is_symlink()
+    assert command.read_bytes() == PROVENANT_TEMPLATE.read_bytes()
     assert not (tmp_path / ".zshrc").exists()
     assert not (tmp_path / ".bashrc").exists()

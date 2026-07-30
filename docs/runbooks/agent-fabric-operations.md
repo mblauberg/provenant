@@ -246,6 +246,28 @@ exactly three environment variables:
 selection controls, not client-registry variables. Do not add them to the
 three-variable global MCP registration.
 
+The registered command is the managed stable shim at
+`${PROVENANT_BIN_DIR:-$HOME/.local/bin}/provenant`. `install-harness` installs
+that shim as a regular file and writes the receipt-class, machine-local pointer
+at `<instance-root>/.agent-fabric/product-root.json`:
+
+```json
+{"schema_version": 1, "product_root": "/absolute/product/path"}
+```
+
+The instance root is selected from `AGENT_FABRIC_INSTANCE_ROOT`, inherited
+`AGENTS_HOME`, then `~/.agents`. The shim resolves the product root from
+`AGENT_FABRIC_PRODUCT_ROOT`, the pointer file, inherited `AGENTS_HOME`, then
+`~/.agents`. Invalid, relative, stale or unreadable pointers are ignored.
+The shim passes the resolved product and instance roots to the checkout-owned
+command so split-root configuration remains intact.
+
+After moving the product checkout, re-run `scripts/install-harness` from the
+new checkout. The installer atomically updates the pointer and managed shim;
+do not rewrite any MCP client registry. If launch reports a missing or invalid
+pointer, re-run the installer first, or set `AGENT_FABRIC_PRODUCT_ROOT` as an
+explicit recovery override.
+
 `AGENT_FABRIC_PROJECT_PATH` is not a fourth global variable. It is permitted
 only in an explicit, separately managed project-scoped compatibility entry for
 a client that cannot preserve workspace cwd; that entry must never be reused
@@ -383,7 +405,7 @@ AGENT_FABRIC_SOCKET_PATH=<same socket>
 AGENT_FABRIC_STATE_DIRECTORY=<private fabric state directory>
 AGENT_FABRIC_SEAT=<claude|codex>
 AGENT_FABRIC_CLIENT_LABEL=<agy|claude|codex|cursor|kiro|opencode>
-scripts/agent-fabric-mcp
+~/.local/bin/provenant
 ```
 
 The seat selects one of Fabric's two primary MCP identities. The client label

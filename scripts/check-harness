@@ -24,6 +24,7 @@ else
 fi
 
 cd "$ROOT"
+"${PYTHON[@]}" scripts/check-provenant-install.py
 "${PYTHON[@]}" scripts/check_harness.py
 "${PYTHON[@]}" scripts/check_specs.py
 "${PYTHON[@]}" scripts/check_adr_index.py
