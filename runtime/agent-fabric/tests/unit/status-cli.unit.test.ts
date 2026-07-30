@@ -357,7 +357,7 @@ describe("machine status and doctor", () => {
       "--product-root", "/fixture/product",
       "--instance-root", "/fixture/instance",
     ])).toEqual({
-      agentsHome: resolve("/fixture/product"),
+      agentsHome: resolve("/fixture/instance"),
       instanceRoot: resolve("/fixture/instance"),
       config: resolve("/fixture/instance/config/agent-fabric.yaml"),
       compatibility: resolve("/fixture/instance/config/adapter-compatibility.yaml"),
@@ -2203,3 +2203,21 @@ printf '%s\\n' '{"schema_version":1,"source":"claude subscription canary","obser
     } finally { await daemon.stop(); }
   });
 });
+
+  it("expands config tokens against the instance root, not product root", () => {
+    vi.stubEnv("AGENT_FABRIC_PRODUCT_ROOT", "/fixture/product");
+    vi.stubEnv("AGENT_FABRIC_INSTANCE_ROOT", "/fixture/instance");
+
+    const paths = resolveStatusPaths([
+      "--product-root", "/fixture/product",
+      "--instance-root", "/fixture/instance",
+    ]);
+
+    // agentsHome field is used for ${AGENTS_HOME} expansion in config
+    expect(paths.agentsHome).toBe(resolve("/fixture/instance"));
+    // workspaceRoots in config.yaml is instance-side, so it should expand from instance root
+    expect(paths.modelRouting).toBe(join(resolve("/fixture/instance"), "config", "model-routing.json"));
+    expect(paths.reviewProfile).toContain(resolve("/fixture/instance"));
+    // But schemas are product-side
+    expect(paths.compatibilitySchema).toContain(resolve("/fixture/product"));
+  });

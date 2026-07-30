@@ -195,11 +195,8 @@ export function resolveStatusPaths(arguments_: string[]): { agentsHome: string; 
     productRootFlag,
     instanceRootFlag,
   });
-  // During the #528 compatibility phase, loadFabricConfig still expands
-  // ${AGENTS_HOME} against product assets. Split instance-root token wiring is
-  // owned by #530; keeping this binding preserves the fused layout meanwhile.
   return {
-    agentsHome: productRoot,
+    agentsHome: instanceRoot,
     instanceRoot,
     config: resolve(option(arguments_, "--trusted-config") ?? join(instanceRoot, "config", "agent-fabric.yaml")),
     compatibility: resolve(option(arguments_, "--compatibility") ?? join(instanceRoot, "config", "adapter-compatibility.yaml")),
