@@ -672,7 +672,7 @@ project session is ready to launch:
 1. Resolve the owning Git root (`git rev-parse --show-toplevel`), or the
    canonical current project directory when no repository exists. Inspect that
    exact root and, when absent, establish trust with
-   `"${AGENT_FABRIC_PRODUCT_ROOT:-${AGENTS_HOME:-$HOME/.agents}}/scripts/agent-fabric" workspace trust "$project_root"` before
+   `"$HOME/.agents/scripts/agent-fabric" workspace trust "$project_root"` before
    opening the Console. This first-use step is automatic under the global
    harness; never substitute a parent, wildcard, home directory or sibling
    collection.

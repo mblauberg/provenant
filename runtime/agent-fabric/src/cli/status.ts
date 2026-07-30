@@ -178,7 +178,7 @@ function generationIdentityMatches(
     && ready.socketPath === owner.socketPath;
 }
 
-export function resolveStatusPaths(arguments_: string[]): { agentsHome: string; instanceRoot: string; config: string; compatibility: string; compatibilitySchema: string; modelRouting: string; reviewProfile: string } {
+export function resolveStatusPaths(arguments_: string[]): { productRoot: string; instanceRoot: string; config: string; compatibility: string; compatibilitySchema: string; modelRouting: string; reviewProfile: string } {
   const agentsHomeFlag = option(arguments_, "--agents-home");
   const productRootFlag = option(arguments_, "--product-root");
   const instanceRootFlag = option(arguments_, "--instance-root");
@@ -196,7 +196,7 @@ export function resolveStatusPaths(arguments_: string[]): { agentsHome: string; 
     instanceRootFlag,
   });
   return {
-    agentsHome: instanceRoot,
+    productRoot,
     instanceRoot,
     config: resolve(option(arguments_, "--trusted-config") ?? join(instanceRoot, "config", "agent-fabric.yaml")),
     compatibility: resolve(option(arguments_, "--compatibility") ?? join(instanceRoot, "config", "adapter-compatibility.yaml")),
@@ -430,7 +430,7 @@ async function seatStatus(
 
 export async function fabricStatus(arguments_: string[], paths: FabricPaths): Promise<Record<string, unknown>> {
   const selected = resolveStatusPaths(arguments_);
-  const config = await loadFabricConfig({ globalPath: selected.config, agentsHome: selected.agentsHome });
+  const config = await loadFabricConfig({ globalPath: selected.config, agentsHome: selected.productRoot });
   const roots = [...new Set([...config.workspaceRoots, ...await trustedWorkspaceRoots({ stateDirectory: paths.stateDirectory, executionProfile: config.executionProfile ?? "headless" })])].sort();
   const project = resolve(option(arguments_, "--project") ?? process.cwd());
   const daemon = await daemonState(paths);
@@ -441,7 +441,7 @@ export async function fabricStatus(arguments_: string[], paths: FabricPaths): Pr
     configuredAdapters: config.adapterIds,
     activeAdapters: daemon.activeAdapters,
     trustedWorkspaceRoots: roots,
-    project: { path: project, seats: await seatStatus(paths, project, selected.agentsHome) },
+    project: { path: project, seats: await seatStatus(paths, project, selected.productRoot) },
   };
 }
 
@@ -714,14 +714,14 @@ export async function fabricDoctor(
     return "protocol dist is present and current for its build inputs";
   }));
   checks.push(await check("configuration", async () => {
-    const config = await loadFabricConfig({ globalPath: selected.config, agentsHome: selected.agentsHome });
+    const config = await loadFabricConfig({ globalPath: selected.config, agentsHome: selected.productRoot });
     adapterIds = config.adapterIds;
     adapterCommands = adapterIds.map((adapterId) => config.adapterCommands[adapterId] ?? []);
   }));
   checks.push(await check("wrapper-loader", async () => {
     const loaderParts = [...new Set(adapterCommands.flat().filter((part) => part.includes("node_modules/tsx/dist/loader.mjs")))];
     for (const part of loaderParts) {
-      const loaderPath = part.startsWith("${AGENTS_HOME}/") ? join(selected.agentsHome, part.slice("${AGENTS_HOME}/".length)) : part;
+      const loaderPath = part.startsWith("${AGENTS_HOME}/") ? join(selected.productRoot, part.slice("${AGENTS_HOME}/".length)) : part;
       try {
         await lstat(loaderPath);
       } catch {
@@ -799,13 +799,13 @@ export async function fabricDoctor(
     metadata.modelRouting,
     consumeProviderQuota
       ? dependencies.observeReviewProfilePin ?? createCapabilityPinObserver({
-          agentsHome: selected.agentsHome,
+          agentsHome: selected.productRoot,
           cacheDirectory: paths.stateDirectory,
           forceLive: true,
           ...(dependencies.now === undefined ? {} : { now: dependencies.now }),
         })
       : createCapabilityPinObserver({
-          agentsHome: selected.agentsHome,
+          agentsHome: selected.productRoot,
           cacheDirectory: paths.stateDirectory,
           cacheOnly: true,
           ...(dependencies.now === undefined ? {} : { now: dependencies.now }),

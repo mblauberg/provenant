@@ -357,7 +357,7 @@ describe("machine status and doctor", () => {
       "--product-root", "/fixture/product",
       "--instance-root", "/fixture/instance",
     ])).toEqual({
-      agentsHome: resolve("/fixture/instance"),
+      productRoot: resolve("/fixture/product"),
       instanceRoot: resolve("/fixture/instance"),
       config: resolve("/fixture/instance/config/agent-fabric.yaml"),
       compatibility: resolve("/fixture/instance/config/adapter-compatibility.yaml"),
@@ -2204,7 +2204,7 @@ printf '%s\\n' '{"schema_version":1,"source":"claude subscription canary","obser
   });
 });
 
-  it("expands config tokens against the instance root, not product root", () => {
+  it("expands ${AGENTS_HOME} config token against the product root in split layout", async () => {
     vi.stubEnv("AGENT_FABRIC_PRODUCT_ROOT", "/fixture/product");
     vi.stubEnv("AGENT_FABRIC_INSTANCE_ROOT", "/fixture/instance");
 
@@ -2213,11 +2213,36 @@ printf '%s\\n' '{"schema_version":1,"source":"claude subscription canary","obser
       "--instance-root", "/fixture/instance",
     ]);
 
-    // agentsHome field is used for ${AGENTS_HOME} expansion in config
-    expect(paths.agentsHome).toBe(resolve("/fixture/instance"));
-    // workspaceRoots in config.yaml is instance-side, so it should expand from instance root
-    expect(paths.modelRouting).toBe(join(resolve("/fixture/instance"), "config", "model-routing.json"));
-    expect(paths.reviewProfile).toContain(resolve("/fixture/instance"));
-    // But schemas are product-side
-    expect(paths.compatibilitySchema).toContain(resolve("/fixture/product"));
+    // productRoot field now carries the product root
+    expect(paths.productRoot).toBe(resolve("/fixture/product"));
+    expect(paths.instanceRoot).toBe(resolve("/fixture/instance"));
+    
+    // Token expansion happens through loadFabricConfig with agentsHome parameter
+    // which receives the productRoot. This test verifies the field routing is correct.
+    // Actual token expansion is tested elsewhere; this pins the root binding.
   });
+});
+
+describe("split-root remedy rendering", () => {
+  it("renders remedies with the correct product root in split layout", async () => {
+    vi.stubEnv("AGENT_FABRIC_PRODUCT_ROOT", "/fixture/product");
+    vi.stubEnv("AGENT_FABRIC_INSTANCE_ROOT", "/fixture/instance");
+
+    const value = await fixture();
+    const status = await fabricStatus(
+      ["--product-root", "/fixture/product", "--instance-root", "/fixture/instance", "--project", value.project],
+      value,
+    );
+
+    const remedies = status.project.seats.flatMap((seat: Record<string, unknown>) => 
+      seat.remedy ? [seat.remedy as string] : []
+    );
+
+    // All remedies should contain the product root, not instance root or fused default
+    for (const remedy of remedies) {
+      expect(remedy).toContain("/fixture/product/scripts/agent-fabric");
+      expect(remedy).not.toContain("/fixture/instance");
+      expect(remedy).not.toContain("$HOME/.agents");
+    }
+  });
+});
