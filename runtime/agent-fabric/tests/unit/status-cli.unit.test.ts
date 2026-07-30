@@ -23,6 +23,8 @@ import { FABRIC_PROTOCOL_LIMITS } from "../../src/transport/bounded-ndjson.ts";
 import { createPortableActivatedPrimaryFixture } from "../support/primary-adapter-testkit.ts";
 import { runSourceCli } from "../support/cli-process.ts";
 import { installSeatGeneration, projectKey } from "../../src/cli/seat-store.ts";
+import { parseMcpPeerProvisionArguments } from "../../src/cli/mcp-peer-provision.ts";
+import { shellCommandArguments } from "../support/shell-command-arguments.ts";
 
 const cleanup: string[] = [];
 afterEach(async () => Promise.all(cleanup.splice(0).map((path) => rm(path, { recursive: true, force: true }))));
@@ -428,6 +430,67 @@ describe("machine status and doctor", () => {
       remedy: `"$HOME/.agents/scripts/agent-fabric" mcp peer-provision --project '${project}' --seat agy`,
     });
     expect(JSON.stringify(status)).not.toMatch(/af[bc]_[A-Za-z0-9_-]{43}|credentialPath/u);
+  });
+
+  it("reports a parser-valid renewal remedy for a provisioned roster nearing expiry", async () => {
+    const value = await paths();
+    const agentsHome = resolve(import.meta.dirname, "../../../..");
+    const requestedProject = join(dirname(value.stateDirectory), "renewal project");
+    await mkdir(requestedProject);
+    const project = await realpath(requestedProject);
+    const generation = "b".repeat(64);
+    const expiresAt = new Date(Date.now() + 30 * 60 * 1_000).toISOString();
+    const common = {
+      schemaVersion: 1 as const,
+      projectKey: projectKey(project),
+      projectPath: project,
+      generation,
+      previousGeneration: null,
+      originKind: "provisioned" as const,
+      projectSessionId: "session-renewal",
+      sessionRevision: 1,
+      sessionGeneration: 1,
+      runId: "run-renewal",
+      runRevision: 1,
+      chairAgentId: "codex-chair",
+      chairGeneration: 1,
+      chairLeaseId: "chair:run-renewal:1",
+      principalGeneration: 1,
+      expiresAt,
+    };
+    await installSeatGeneration({
+      stateDirectory: value.stateDirectory,
+      projectPath: project,
+      generation,
+      expectedPreviousGeneration: null,
+      seats: [
+        {
+          credential: `afc_${"a".repeat(43)}`,
+          metadata: { ...common, seat: "agy", agentId: "agy-peer", role: "peer" },
+        },
+        {
+          credential: `afc_${"b".repeat(43)}`,
+          metadata: { ...common, seat: "codex", agentId: "codex-chair", role: "chair" },
+        },
+      ],
+    });
+
+    const status = await fabricStatus(["--agents-home", agentsHome, "--project", project], value);
+    const seats = (status.project as { seats: Array<Record<string, unknown>> }).seats;
+    const chair = seats.find(({ seat }) => seat === "codex");
+    expect(chair).toMatchObject({
+      registered: true,
+      active: true,
+      originKind: "provisioned",
+      remedy: expect.stringContaining("mcp peer-provision"),
+    });
+    const commandArguments = await shellCommandArguments(String(chair?.remedy), dirname(value.stateDirectory));
+    expect(commandArguments.slice(0, 2)).toEqual(["mcp", "peer-provision"]);
+    expect(parseMcpPeerProvisionArguments(commandArguments.slice(2))).toEqual({
+      project,
+      seats: ["agy"],
+      expiresAt: new Date(Date.parse(expiresAt) + 23 * 24 * 60 * 60 * 1_000).toISOString(),
+    });
   });
 
   it("reports a healthy typed on-demand idle state when every preflight passes", async () => {

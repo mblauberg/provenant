@@ -140,6 +140,8 @@ describe("MCP peer provisioning from a fresh project", () => {
       "mcp", "peer-provision", "--project", value.project, "--seat", "agy",
     ]);
     const first = JSON.parse(firstResult.stdout) as {
+      expectedPreviousGeneration: string | null;
+      generation: string;
       projectSessionId: string;
       sessionRevision: number;
       sessionGeneration: number;
@@ -149,6 +151,7 @@ describe("MCP peer provisioning from a fresh project", () => {
       chairAgentId: string;
       chairGeneration: number;
       chairLeaseId: string;
+      expiresAt: string;
       seats: Array<{
         seat: string;
         role: string;
@@ -166,6 +169,10 @@ describe("MCP peer provisioning from a fresh project", () => {
       expect((await lstat(seat.credentialPath)).mode & 0o777).toBe(0o600);
       expect((await lstat(seat.metadataPath)).mode & 0o777).toBe(0o600);
     }
+    expect(Object.fromEntries(await Promise.all(first.seats.map(async ({ seat, metadataPath }) => [
+      seat,
+      (JSON.parse(await readFile(metadataPath, "utf8")) as { originKind: string }).originKind,
+    ] as const)))).toEqual({ agy: "provisioned", codex: "bootstrap" });
     await trackCurrentDaemon(value);
     const afterFirst = counts(value.databasePath);
 
@@ -176,8 +183,7 @@ describe("MCP peer provisioning from a fresh project", () => {
     expect(counts(value.databasePath)).toEqual(afterFirst);
     expect(secondResult.stdout).not.toMatch(/af[bc]_[A-Za-z0-9_-]{43}/u);
 
-    const renewalExpiry = new Date(Date.now() + 30 * 60 * 1_000).toISOString();
-    await cli(value, [
+    const exactProvisionReplay = await cli(value, [
       "mcp", "provision",
       "--project", value.project,
       "--project-session-id", first.projectSessionId,
@@ -192,14 +198,87 @@ describe("MCP peer provisioning from a fresh project", () => {
       "--seat-bindings", first.seats
         .map(({ seat, agentId, principalGeneration }) => `${seat}=${agentId}@${String(principalGeneration)}`)
         .join(","),
+      "--expires-at", first.expiresAt,
+    ]);
+    expect(JSON.parse(exactProvisionReplay.stdout)).toEqual(JSON.parse(firstResult.stdout));
+    expect(counts(value.databasePath)).toEqual(afterFirst);
+
+    const provisionedExpiry = new Date(Date.now() + 20 * 60 * 1_000).toISOString();
+    const provisionedResult = await cli(value, [
+      "mcp", "provision",
+      "--project", value.project,
+      "--project-session-id", first.projectSessionId,
+      "--session-revision", String(first.sessionRevision),
+      "--session-generation", String(first.sessionGeneration),
+      "--run-id", first.runId,
+      "--run-revision", String(first.runRevision),
+      "--chair-seat", first.chairSeat,
+      "--chair-agent-id", first.chairAgentId,
+      "--chair-generation", String(first.chairGeneration),
+      "--chair-lease-id", first.chairLeaseId,
+      "--seat-bindings", first.seats
+        .map(({ seat, agentId, principalGeneration }) => `${seat}=${agentId}@${String(principalGeneration)}`)
+        .join(","),
+      "--expires-at", provisionedExpiry,
+    ]);
+    const provisioned = JSON.parse(provisionedResult.stdout) as typeof first;
+    expect(Object.fromEntries(await Promise.all(provisioned.seats.map(async ({ seat, metadataPath }) => [
+      seat,
+      (JSON.parse(await readFile(metadataPath, "utf8")) as { originKind: string }).originKind,
+    ] as const)))).toEqual({ agy: "provisioned", codex: "provisioned" });
+
+    const renewalExpiry = new Date(Date.now() + 30 * 60 * 1_000).toISOString();
+    const renewalResult = await cli(value, [
+      "mcp", "peer-provision",
+      "--project", value.project,
+      "--seat", "agy",
       "--expires-at", renewalExpiry,
     ]);
-    const renewalResult = await cli(value, ["bootstrap", "--seat", "codex"]);
     const renewal = JSON.parse(renewalResult.stdout) as {
-      credentials: Array<{ seat: string }>;
+      expectedPreviousGeneration: string | null;
+      generation: string;
+      expiresAt: string;
+      seats: Array<{
+        seat: string;
+        agentId: string;
+        principalGeneration: number;
+        metadataPath: string;
+      }>;
     };
-    expect(renewal.credentials.map(({ seat }) => seat)).toEqual(["agy", "codex"]);
+    expect(renewal).toMatchObject({
+      expectedPreviousGeneration: provisioned.generation,
+      expiresAt: renewalExpiry,
+      seats: provisioned.seats.map(({ seat, agentId, principalGeneration }) => ({
+        seat,
+        agentId,
+        principalGeneration,
+      })),
+    });
+    expect(renewal.generation).not.toBe(first.generation);
+    expect(Object.fromEntries(await Promise.all(renewal.seats.map(async ({ seat, metadataPath }) => [
+      seat,
+      (JSON.parse(await readFile(metadataPath, "utf8")) as { originKind: string }).originKind,
+    ] as const)))).toEqual({ agy: "provisioned", codex: "provisioned" });
     expect(renewalResult.stdout).not.toMatch(/af[bc]_[A-Za-z0-9_-]{43}/u);
+
+    const database = new Database(value.databasePath, { readonly: true, fileMustExist: true });
+    try {
+      expect(database.prepare(`
+        SELECT previous_generation
+          FROM mcp_seat_generations
+         WHERE generation=?
+      `).get(renewal.generation)).toEqual({ previous_generation: provisioned.generation });
+      expect(database.prepare(`
+        SELECT count(*) AS count
+          FROM capabilities
+         WHERE revoked_at IS NOT NULL
+           AND token_hash IN (
+             SELECT token_hash FROM mcp_seat_generation_members WHERE generation=?
+           )
+      `).get(provisioned.generation)).toEqual({ count: provisioned.seats.length });
+    } finally {
+      database.close();
+    }
   });
 
   it("converges concurrent optional seat additions without silently dropping either seat", async () => {

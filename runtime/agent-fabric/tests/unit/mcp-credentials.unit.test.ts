@@ -7,6 +7,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { resolveMcpCapability, resolveRenewableMcpCapability } from "../../src/mcp/credentials.ts";
 import { markLegacyBootstrapSeatGeneration } from "../../src/cli/seat-store.ts";
+import { parseMcpPeerProvisionArguments } from "../../src/cli/mcp-peer-provision.ts";
+import { shellCommandArguments } from "../support/shell-command-arguments.ts";
 
 const cleanup: string[] = [];
 const GENERATION_NEAREST = "a".repeat(64);
@@ -354,10 +356,33 @@ describe("MCP capability loading", () => {
     const environment = { AGENT_FABRIC_SEAT: "codex", AGENT_FABRIC_STATE_DIRECTORY: stateDirectory };
     const renew = vi.fn(async () => undefined);
     const warn = vi.fn();
-    await writeFile(metadataPath, `${JSON.stringify(metadata(new Date(Date.now() + 30 * 60 * 1_000).toISOString()))}\n`, { mode: 0o600 });
+    const expiringAt = new Date(Date.now() + 30 * 60 * 1_000).toISOString();
+    await writeFile(metadataPath, `${JSON.stringify(metadata(expiringAt))}\n`, { mode: 0o600 });
+    const peerCredentialPath = join(seatDirectory, "agy.cap");
+    await writeFile(peerCredentialPath, `afc_${"e".repeat(43)}\n`, { mode: 0o600 });
+    await writeFile(join(seatDirectory, "agy.json"), `${JSON.stringify({
+      ...metadata(expiringAt),
+      seat: "agy",
+      agentId: "agy-peer",
+      role: "peer",
+      credentialPath: peerCredentialPath,
+    })}\n`, { mode: 0o600 });
     await expect(resolveRenewableMcpCapability(environment, projectPath, renew, warn)).resolves.toMatch(/^afc_/u);
     expect(renew).not.toHaveBeenCalled();
-    expect(warn).toHaveBeenCalledOnce();
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining(
+      `"$HOME/.agents/scripts/agent-fabric" mcp peer-provision --project '${projectPath}' ` +
+      "--seat agy --expires-at ",
+    ));
+    const warning = warn.mock.calls[0]?.[0];
+    expect(typeof warning).toBe("string");
+    const command = String(warning).slice(String(warning).indexOf(`"$HOME/.agents/scripts/agent-fabric"`));
+    const commandArguments = await shellCommandArguments(command, directory);
+    expect(commandArguments.slice(0, 2)).toEqual(["mcp", "peer-provision"]);
+    expect(parseMcpPeerProvisionArguments(commandArguments.slice(2))).toEqual({
+      project: projectPath,
+      seats: ["agy"],
+      expiresAt: new Date(Date.parse(expiringAt) + 23 * 24 * 60 * 60 * 1_000).toISOString(),
+    });
     await writeFile(metadataPath, `${JSON.stringify(metadata(new Date(Date.now() - 1_000).toISOString()))}\n`, { mode: 0o600 });
     await expect(resolveRenewableMcpCapability(environment, projectPath, renew, warn)).rejects.toThrow(/expired/u);
     expect(renew).not.toHaveBeenCalled();
