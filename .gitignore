@@ -6,6 +6,7 @@
 .venv/
 skills/.backups/
 .agent-run/
+.agent-fabric/product-root.json
 .worktrees/
 .public-release-fable-review.md
 .claude/settings.local.json

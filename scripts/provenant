@@ -1,23 +1,75 @@
-#!/bin/sh
-set -eu
+#!/usr/bin/env python3
+# Managed by scripts/install-harness; local edits to an installed copy are not preserved.
+"""Stable Provenant command and Agent Fabric MCP entrypoint."""
 
-script_path=$0
-while [ -L "$script_path" ]; do
-  link=$(readlink "$script_path")
-  case "$link" in
-    /*) script_path=$link ;;
-    *) script_path=$(dirname -- "$script_path")/$link ;;
-  esac
-done
-script_dir=$(CDPATH= cd -- "$(dirname -- "$script_path")" && pwd)
+from __future__ import annotations
 
-usage() {
-  echo "usage: provenant <help|route|worktree|check|fabric|doctor> [arguments...]" >&2
-}
+import os
+from pathlib import Path
+import sys
+from typing import NoReturn
 
-help() {
-  cat <<'EOF'
-usage: provenant <command> [arguments...]
+from lib.product_root_resolver import load_pointer_file
+
+
+REPAIR = (
+    "repair: re-run install-harness from the product checkout, "
+    "or set AGENT_FABRIC_PRODUCT_ROOT"
+)
+
+
+def resolve_product_root(instance_root: Path | None = None) -> Path:
+    """Resolve the product root.
+
+    Precedence is ``AGENT_FABRIC_PRODUCT_ROOT``, the instance pointer,
+    ``AGENTS_HOME``, then ``~/.agents``.
+    The selected root must contain an executable ``scripts/agent-fabric-mcp``.
+    """
+    configured = os.environ.get("AGENT_FABRIC_PRODUCT_ROOT")
+    agents_home = os.environ.get("AGENTS_HOME")
+    configured_instance = os.environ.get("AGENT_FABRIC_INSTANCE_ROOT")
+    if instance_root is None:
+        instance_value = configured_instance if configured_instance is not None else agents_home
+        instance_root = (
+            Path(instance_value).expanduser()
+            if instance_value is not None
+            else Path.home() / ".agents"
+        )
+    if not instance_root.is_absolute():
+        raise ValueError(f"instance root must be an absolute path, got {instance_root}; {REPAIR}")
+    resolved_instance = instance_root.resolve()
+    pointed = load_pointer_file(resolved_instance)
+
+    if configured is not None:
+        candidate = Path(configured).expanduser()
+        if not candidate.is_absolute():
+            raise ValueError(
+                f"AGENT_FABRIC_PRODUCT_ROOT must be an absolute path, got {configured}; {REPAIR}"
+            )
+        candidate = candidate.resolve()
+    elif pointed is not None:
+        candidate = pointed.resolve()
+    elif agents_home is not None:
+        candidate = Path(agents_home).expanduser()
+        if not candidate.is_absolute():
+            raise ValueError(f"AGENTS_HOME must be an absolute path, got {agents_home}; {REPAIR}")
+        candidate = candidate.resolve()
+    else:
+        candidate = (Path.home() / ".agents").resolve()
+
+    wrapper = candidate / "scripts/agent-fabric-mcp"
+    if not wrapper.is_file() or not os.access(wrapper, os.X_OK):
+        raise ValueError(f"Agent Fabric MCP target is missing or not executable at {wrapper}; {REPAIR}")
+    return candidate
+
+
+def usage() -> None:
+    print("usage: provenant <help|route|worktree|check|fabric|doctor> [arguments...]", file=sys.stderr)
+
+
+def help_text() -> None:
+    print(
+        """usage: provenant <command> [arguments...]
 
 Thin front door; each command delegates to its existing owner:
   route ...      scripts/model-route ...
@@ -28,36 +80,75 @@ Thin front door; each command delegates to its existing owner:
 
 Fabric clients and providers are separate roles.
 Kiro: optional subscription-native provider (ACP v1).
-OpenCode: optional provider for explicit opencode/* account models (ACP v1).
-EOF
-}
+OpenCode: optional provider for explicit opencode/* account models (ACP v1)."""
+    )
 
-[ "$#" -gt 0 ] || { usage; exit 2; }
-command=$1
-shift
 
-case "$command" in
-  help|-h|--help)
-    [ "$#" -eq 0 ] || { usage; exit 2; }
-    help
-    ;;
-  route)
-    exec "$script_dir/model-route" "$@"
-    ;;
-  worktree)
-    exec "$script_dir/worktree" "$@"
-    ;;
-  check)
-    exec "$script_dir/check-harness" "$@"
-    ;;
-  fabric)
-    exec "$script_dir/agent-fabric" "$@"
-    ;;
-  doctor)
-    exec "$script_dir/agent-fabric" doctor "$@"
-    ;;
-  *)
-    usage
-    exit 2
-    ;;
-esac
+def execute(path: Path, arguments: list[str], product_root: Path | None = None) -> NoReturn:
+    try:
+        if product_root is None:
+            os.execv(path, [str(path), *arguments])
+        environment = os.environ.copy()
+        environment["AGENT_FABRIC_PRODUCT_ROOT"] = str(product_root)
+        inherited_agents_home = os.environ.get("AGENTS_HOME")
+        if inherited_agents_home is not None and "AGENT_FABRIC_INSTANCE_ROOT" not in os.environ:
+            environment["AGENT_FABRIC_INSTANCE_ROOT"] = inherited_agents_home
+        environment["AGENTS_HOME"] = str(product_root)
+        os.execve(path, [str(path), *arguments], environment)
+    except OSError as exc:
+        print(f"provenant: cannot execute {path}: {exc.strerror or exc}; {REPAIR}", file=sys.stderr)
+        raise SystemExit(3) from None
+
+
+def dispatcher_directory(command: str) -> tuple[Path, Path | None]:
+    local_scripts = Path(__file__).resolve().parent
+    if (local_scripts / "agent-fabric-mcp").is_file() and (local_scripts / command).is_file():
+        return local_scripts, None
+    product_root = resolve_product_root()
+    return product_root / "scripts", product_root
+
+
+def main(arguments: list[str]) -> int:
+    if not arguments and "AGENT_FABRIC_SEAT" in os.environ:
+        try:
+            product_root = resolve_product_root()
+        except ValueError as exc:
+            print(f"provenant: {exc}", file=sys.stderr)
+            return 3
+        wrapper = product_root / "scripts/agent-fabric-mcp"
+        execute(wrapper, [], product_root)
+
+    if not arguments:
+        usage()
+        return 2
+
+    command, *command_arguments = arguments
+    if command in {"help", "-h", "--help"}:
+        if command_arguments:
+            usage()
+            return 2
+        help_text()
+        return 0
+
+    owners = {
+        "route": ("model-route", []),
+        "worktree": ("worktree", []),
+        "check": ("check-harness", []),
+        "fabric": ("agent-fabric", []),
+        "doctor": ("agent-fabric", ["doctor"]),
+    }
+    owner = owners.get(command)
+    if owner is None:
+        usage()
+        return 2
+    owner_command, prefix = owner
+    try:
+        scripts, product_root = dispatcher_directory(owner_command)
+    except ValueError as exc:
+        print(f"provenant: {exc}", file=sys.stderr)
+        return 3
+    execute(scripts / owner_command, [*prefix, *command_arguments], product_root)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))
