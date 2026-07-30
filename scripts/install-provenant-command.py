@@ -44,10 +44,18 @@ def _raw_snapshot(destination: Path) -> tuple[object, ...]:
         else:
             payload = b""
         after = destination.lstat()
-    except OSError:
+    except OSError as exc:
         # A racer may delete the path or swap its type between the
-        # classifying lstat and the payload read; every such variant
-        # (ENOENT, EINVAL, EISDIR, ...) must land on the restore path.
+        # classifying lstat and the payload read; only those variants
+        # belong on the restore path. Unrelated failures such as an
+        # unreadable foreign file must keep their true errno.
+        if exc.errno not in (
+            errno.ENOENT,
+            errno.EINVAL,
+            errno.EISDIR,
+            errno.ENOTDIR,
+        ):
+            raise
         raise Collision(
             f"provenant command collision={destination}; "
             "changed during classification"

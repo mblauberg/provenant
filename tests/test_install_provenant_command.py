@@ -207,6 +207,31 @@ def test_snapshot_maps_a_racing_type_swap_to_a_collision(tmp_path, monkeypatch):
         raise AssertionError("racing type swap was not mapped to a collision")
 
 
+def test_snapshot_propagates_a_non_race_read_failure(tmp_path, monkeypatch):
+    helper = load_helper()
+    destination = tmp_path / "bin/provenant"
+    destination.parent.mkdir()
+    legacy_target = tmp_path / "instance/scripts/provenant"
+    destination.symlink_to(legacy_target)
+    real_readlink = os.readlink
+
+    def denied_before_read(path, *args, **kwargs):
+        if Path(path) == destination:
+            raise PermissionError(errno.EACCES, "Permission denied", str(path))
+        return real_readlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(helper.os, "readlink", denied_before_read)
+
+    try:
+        helper._raw_snapshot(destination)
+    except PermissionError:
+        pass
+    except helper.Collision:
+        raise AssertionError("non-race read failure was masked as a collision")
+    else:
+        raise AssertionError("non-race read failure was swallowed")
+
+
 def test_snapshot_maps_a_racing_delete_to_a_collision(tmp_path, monkeypatch):
     helper = load_helper()
     destination = tmp_path / "bin/provenant"
@@ -217,7 +242,9 @@ def test_snapshot_maps_a_racing_delete_to_a_collision(tmp_path, monkeypatch):
 
     def deleted_before_read(path, *args, **kwargs):
         if Path(path) == destination:
-            raise FileNotFoundError(path)
+            raise FileNotFoundError(
+                errno.ENOENT, "No such file or directory", str(path)
+            )
         return real_readlink(path, *args, **kwargs)
 
     monkeypatch.setattr(helper.os, "readlink", deleted_before_read)
