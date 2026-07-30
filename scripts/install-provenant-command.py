@@ -31,23 +31,70 @@ def _normalised_link(destination: Path) -> Path:
     return Path(os.path.abspath(value))
 
 
-def classify(source: Path, destination: Path, legacy_target: Path) -> str:
+def _raw_snapshot(destination: Path) -> tuple[object, ...]:
     try:
-        mode = destination.lstat().st_mode
+        before = destination.lstat()
     except FileNotFoundError:
-        return "absent"
+        return ("absent",)
+    if stat.S_ISLNK(before.st_mode):
+        payload = os.fsencode(os.readlink(destination))
+    elif stat.S_ISREG(before.st_mode):
+        payload = destination.read_bytes()
+    else:
+        payload = b""
+    after = destination.lstat()
+    snapshot = (
+        before.st_dev,
+        before.st_ino,
+        before.st_mode,
+        before.st_size,
+        before.st_mtime_ns,
+        payload,
+    )
+    if (
+        before.st_dev,
+        before.st_ino,
+        before.st_mode,
+        before.st_size,
+        before.st_mtime_ns,
+        before.st_ctime_ns,
+    ) != (
+        after.st_dev,
+        after.st_ino,
+        after.st_mode,
+        after.st_size,
+        after.st_mtime_ns,
+        after.st_ctime_ns,
+    ):
+        raise Collision(f"provenant command collision={destination}; changed during classification")
+    return snapshot
+
+
+def _owned_snapshot(
+    source: Path,
+    destination: Path,
+    legacy_target: Path,
+) -> tuple[str, tuple[object, ...]]:
+    snapshot = _raw_snapshot(destination)
+    if snapshot == ("absent",):
+        return "absent", snapshot
+    mode = snapshot[2]
     if stat.S_ISLNK(mode):
         if _normalised_link(destination) == legacy_target:
-            return "legacy-link"
+            return "legacy-link", snapshot
         raise Collision(f"provenant command collision={destination}")
     if not stat.S_ISREG(mode):
         raise Collision(f"provenant command collision={destination}")
-    content = destination.read_bytes()
+    content = snapshot[5]
     if content == source.read_bytes():
-        return "existing"
+        return "existing", snapshot
     if MANAGED_MARKER in content.splitlines():
-        return "managed-file"
+        return "managed-file", snapshot
     raise Collision(f"provenant command collision={destination}")
+
+
+def classify(source: Path, destination: Path, legacy_target: Path) -> str:
+    return _owned_snapshot(source, destination, legacy_target)[0]
 
 
 def _exchange(first: Path, second: Path) -> None:
@@ -85,6 +132,20 @@ def _sync_directory(path: Path) -> None:
         os.close(descriptor)
 
 
+def _restore_after_mismatch(
+    temporary: Path,
+    destination: Path,
+    prepared_snapshot: tuple[object, ...],
+) -> bool:
+    if _raw_snapshot(destination) != prepared_snapshot:
+        return False
+    _exchange(temporary, destination)
+    if _raw_snapshot(temporary) != prepared_snapshot:
+        _exchange(temporary, destination)
+        return False
+    return True
+
+
 def publish(
     source: Path,
     destination: Path,
@@ -93,7 +154,7 @@ def publish(
 ) -> str:
     if expected not in OWNED_STATES:
         raise Collision(f"invalid expected Provenant command state: {expected}")
-    current = classify(source, destination, legacy_target)
+    current, original_snapshot = _owned_snapshot(source, destination, legacy_target)
     if current != expected:
         raise Collision(
             f"provenant command collision={destination}; "
@@ -108,12 +169,14 @@ def publish(
         dir=destination.parent,
     )
     temporary = Path(temporary_name)
+    preserve_temporary = False
     try:
         with os.fdopen(descriptor, "wb") as stream:
             stream.write(source.read_bytes())
             stream.flush()
             os.fsync(stream.fileno())
         temporary.chmod(0o755)
+        prepared_snapshot = _raw_snapshot(temporary)
         if current == "absent":
             try:
                 os.link(temporary, destination)
@@ -124,27 +187,46 @@ def publish(
                 ) from exc
         else:
             _exchange(temporary, destination)
+            preserve_temporary = True
             try:
-                displaced = classify(source, temporary, legacy_target)
-            except Collision:
-                _exchange(temporary, destination)
-                raise Collision(
-                    f"provenant command collision={destination}; "
-                    "changed during atomic publication"
-                ) from None
-            if displaced != current:
-                _exchange(temporary, destination)
-                raise Collision(
-                    f"provenant command collision={destination}; "
-                    "changed during atomic publication"
+                displaced, displaced_snapshot = _owned_snapshot(
+                    source, temporary, legacy_target,
                 )
+            except Collision:
+                restored = _restore_after_mismatch(
+                    temporary, destination, prepared_snapshot,
+                )
+                preserve_temporary = not restored
+                recovery = (
+                    f"; displaced path preserved={temporary}"
+                    if preserve_temporary else ""
+                )
+                raise Collision(
+                    f"provenant command collision={destination}; "
+                    f"changed during atomic publication{recovery}"
+                ) from None
+            if displaced != current or displaced_snapshot != original_snapshot:
+                restored = _restore_after_mismatch(
+                    temporary, destination, prepared_snapshot,
+                )
+                preserve_temporary = not restored
+                recovery = (
+                    f"; displaced path preserved={temporary}"
+                    if preserve_temporary else ""
+                )
+                raise Collision(
+                    f"provenant command collision={destination}; "
+                    f"changed during atomic publication{recovery}"
+                )
+            preserve_temporary = False
         _sync_directory(destination.parent)
         return "installed" if current == "absent" else "updated"
     finally:
-        try:
-            temporary.unlink()
-        except FileNotFoundError:
-            pass
+        if not preserve_temporary:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
 
 
 def parser() -> argparse.ArgumentParser:
