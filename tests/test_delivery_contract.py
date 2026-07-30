@@ -5,6 +5,8 @@ import json
 from pathlib import Path
 import re
 import shutil
+import subprocess
+import sys
 
 import pytest
 
@@ -1536,8 +1538,34 @@ def test_project_defined_technical_profile_cannot_bypass_artifact_security(tmp_p
 
 
 def test_pass_output_binds_resolved_product_root(tmp_path):
-    # Verify validate_delivery.py accepts and uses explicit product_root parameter
-    module = load_validator()
-    candidate = fixture("agent-product", tmp_path)
-    # Should complete without error when product_root is passed explicitly
-    module.validate(candidate, ROOT, workspace_root=tmp_path, verify_hashes=True)
+    product_copy = tmp_path / "copy" / "product"
+    shutil.copytree(ROOT / "config", product_copy / "config")
+    shutil.copytree(
+        ROOT / "runtime" / "agent-fabric-protocol" / "schemas",
+        product_copy / "runtime" / "agent-fabric-protocol" / "schemas",
+    )
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    runs = load(REFERENCE_RUNS_PATH, "reference_runs_product_root_cli")
+    run = runs.make_reference_run("agent-product", product_copy)
+    materialiser = load(REFERENCE_EVALUATION_PATH, "reference_evaluation_product_root_cli")
+    materialiser.materialise_reference_run(run, workspace, product_copy)
+    receipt = workspace / "receipt.json"
+    receipt.write_text(json.dumps(run))
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(VALIDATOR_PATH),
+            str(receipt),
+            "--workspace-root",
+            str(workspace),
+            "--product-root",
+            str(product_copy),
+            "--verify-hashes",
+        ],
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.startswith("PASS: delivery-v1 delivery receipt"), result.stdout
+    assert f"(product_root={product_copy.resolve()})" in result.stdout

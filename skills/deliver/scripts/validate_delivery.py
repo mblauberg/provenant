@@ -992,7 +992,7 @@ def main(argv: list[str] | None = None) -> int:
     except (OSError, json.JSONDecodeError, Invalid) as exc:
         print(f"FAIL: {exc}", file=sys.stderr)
         return 1
-    print(f"PASS: {kind} delivery receipt")
+    print(f"PASS: {kind} delivery receipt (product_root={args.product_root.resolve()})")
     return 0
 
 
