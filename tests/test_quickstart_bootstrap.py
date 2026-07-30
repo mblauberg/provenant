@@ -12,8 +12,8 @@ def test_documented_fresh_checkout_sequence_produces_runnable_doctor(tmp_path):
     readme = (ROOT / "README.md").read_text()
     commands = [
         'npm ci',
-        '"$AGENTS_HOME/scripts/agent-fabric-warm"',
-        '"$AGENTS_HOME/scripts/install-harness" --platform claude',
+        'scripts/agent-fabric-warm',
+        'scripts/install-harness --platform claude',
         'provenant doctor',
     ]
     positions = [readme.index(command) for command in commands]

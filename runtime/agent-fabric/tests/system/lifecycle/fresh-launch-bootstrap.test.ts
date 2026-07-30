@@ -21,6 +21,7 @@ import {
   normaliseLaunchChairAuthority,
 } from "../../../src/project-session/launch-custody.ts";
 import { canonicalJson } from "../../../src/persistence/row-codec.ts";
+import { DeadlineTimeoutError, waitUntil } from "../../shared/deadline-wait.ts";
 import { TEST_AUTHORITY_V2_FIELDS } from "../../support/authority-v2-testkit.ts";
 import {
   terminateTrackedTestProcess,
@@ -297,14 +298,33 @@ describe("fresh Agent Fabric launch bootstrap", () => {
     });
     await writeFile(peerTriggerPath, "create-peer\n", { mode: 0o600 });
 
+    const timeoutMs = 5_000;
+    const description = "Peer readiness";
     let peerReady = false;
-    for (let attempt = 0; attempt < 100; attempt += 1) {
-      peerReady = await readFile(peerReadyPath, "utf8").then(
-        (value) => value === "ready\n",
-        () => false,
-      );
-      if (peerReady) break;
-      await new Promise((resolve) => setTimeout(resolve, 10));
+    let finalFileState = "<missing>";
+    try {
+      await waitUntil(async () => {
+        try {
+          const value = await readFile(peerReadyPath, "utf8");
+          finalFileState = JSON.stringify(value);
+          peerReady = value === "ready\n";
+          return peerReady;
+        } catch (error: unknown) {
+          if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+            finalFileState = "<missing>";
+            return false;
+          }
+          throw error;
+        }
+      }, timeoutMs, description);
+    } catch (error: unknown) {
+      if (error instanceof DeadlineTimeoutError) {
+        throw new Error(
+          `Peer did not report ready (awaited ${String(timeoutMs)}ms); ` +
+          `final file state: ${finalFileState}`,
+        );
+      }
+      throw error;
     }
     expect(peerReady).toBe(true);
 

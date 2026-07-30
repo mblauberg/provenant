@@ -4,6 +4,9 @@ import importlib.util
 import json
 from pathlib import Path
 import re
+import shutil
+import subprocess
+import sys
 
 import pytest
 
@@ -68,6 +71,58 @@ def terminalise_reference_evaluation(run, status="failed"):
         },
     })
     return binding
+
+
+def with_repair_cycles(candidate, cycles):
+    candidate["state_history"] = candidate["state_history"][:-1]
+    minute = 6
+    for _ in range(cycles):
+        candidate["state_history"].extend([
+            {
+                "state": "repairing",
+                "at": f"2026-07-10T00:{minute:02d}:00Z",
+                "evidence_ids": ["tests"],
+            },
+            {
+                "state": "verifying",
+                "at": f"2026-07-10T00:{minute + 1:02d}:00Z",
+                "evidence_ids": ["tests"],
+            },
+            {
+                "state": "reviewing",
+                "at": f"2026-07-10T00:{minute + 2:02d}:00Z",
+                "evidence_ids": ["tests"],
+            },
+        ])
+        minute += 3
+    candidate["state_history"].append({
+        "state": "awaiting_acceptance",
+        "at": f"2026-07-10T00:{minute:02d}:00Z",
+        "evidence_ids": [item["id"] for item in candidate["evidence"]],
+    })
+    candidate["repair_cycles"] = cycles
+    return candidate
+
+
+def at_risk_tier(candidate, risk_tier):
+    candidate["risk_tier"] = risk_tier
+    if risk_tier == "routine":
+        candidate["risk_assessment"] = {
+            "blast_radius": "local",
+            "reversibility": "easy",
+            "data_sensitivity": "public",
+            "migration": "none",
+            "oracle_quality": "strong",
+            "external_effects": "none",
+            "critical_surface": "none",
+        }
+    if risk_tier == "terminal":
+        targeted = next(
+            review for review in candidate["reviews"]
+            if review["role"] == "targeted"
+        )
+        targeted["lenses"].extend(["adversarial"])
+    return candidate
 
 
 def test_delivery_authority_v2_maps_to_the_cross_language_golden():
@@ -616,6 +671,64 @@ def test_repair_cycle_count_must_match_history():
         module.validate(candidate, ROOT)
 
 
+@pytest.mark.parametrize(
+    ("risk_tier", "cycles"),
+    [
+        pytest.param("routine", 2, id="routine-at-2"),
+        pytest.param("substantial", 4, id="substantial-at-4"),
+        pytest.param("crucial", 5, id="crucial-at-5"),
+        pytest.param("terminal", 5, id="terminal-at-5"),
+    ],
+)
+def test_repair_cycle_budget_accepts_tier_boundary(risk_tier, cycles):
+    module = load_validator()
+    candidate = at_risk_tier(with_repair_cycles(fixture(), cycles), risk_tier)
+
+    module.validate(candidate, ROOT)
+
+
+@pytest.mark.parametrize(
+    ("risk_tier", "cycles", "budget"),
+    [
+        pytest.param("routine", 3, 2, id="routine-at-3"),
+        pytest.param("substantial", 5, 4, id="substantial-at-5"),
+        pytest.param("crucial", 6, 5, id="crucial-at-6"),
+        pytest.param("terminal", 6, 5, id="terminal-at-6"),
+    ],
+)
+def test_repair_cycle_budget_rejects_first_cycle_over_tier_limit(
+    risk_tier, cycles, budget,
+):
+    module = load_validator()
+    candidate = at_risk_tier(with_repair_cycles(fixture(), cycles), risk_tier)
+    message = (
+        rf"repair_cycles {cycles} exceeds budget for {risk_tier} tier "
+        rf"\(max {budget}\)"
+    )
+
+    with pytest.raises(module.Invalid, match=message):
+        module.validate(candidate, ROOT)
+
+
+@pytest.mark.parametrize(
+    ("cycles", "message"),
+    [
+        pytest.param(True, "repair_cycles must be an integer, got bool", id="bool"),
+        pytest.param(None, "repair_cycles must be an integer, got NoneType", id="none"),
+        pytest.param("2", "repair_cycles must be an integer, got str", id="string"),
+        pytest.param(-1, "repair_cycles must be non-negative, got -1", id="negative"),
+    ],
+)
+def test_repair_cycles_shape_errors_are_distinct_from_budget_overrun(cycles, message):
+    module = load_validator()
+    candidate = fixture()
+    candidate["repair_cycles"] = cycles
+
+    with pytest.raises(module.Invalid, match=re.escape(message)) as excinfo:
+        module.validate(candidate, ROOT)
+    assert "exceeds budget" not in str(excinfo.value)
+
+
 def test_partial_delivery_delegation_is_rejected():
     module = load_validator()
     candidate = fixture()
@@ -1019,6 +1132,11 @@ def test_closed_crucial_or_incident_cycle_requires_retrospective_linkage(tmp_pat
 
 def test_required_retrospective_cannot_borrow_another_delivery_cycle(tmp_path):
     module = load_validator()
+    product_root = tmp_path / "separate-product"
+    shutil.copytree(ROOT / "config", product_root / "config")
+    schema = "runtime/agent-fabric-protocol/schemas/authority-envelope.v2.schema.json"
+    (product_root / schema).parent.mkdir(parents=True)
+    shutil.copy2(ROOT / schema, product_root / schema)
     candidate = fixture("agent-product", tmp_path)
     candidate["risk_tier"] = "crucial"
     candidate["status"] = "closed"
@@ -1071,7 +1189,9 @@ def test_required_retrospective_cannot_borrow_another_delivery_cycle(tmp_path):
     })
     candidate["retrospective"] = {"status": "no-change", "artifact_id": "retrospective", "digest": retro_digest}
     with pytest.raises(module.Invalid, match="current delivery cycle"):
-        module.validate(candidate, ROOT, workspace_root=tmp_path, verify_hashes=True)
+        module.validate(
+            candidate, product_root, workspace_root=tmp_path, verify_hashes=True,
+        )
 
 
 def test_checkpoint_and_observation_substates_follow_lifecycle_state():
@@ -1436,10 +1556,15 @@ def test_stochastic_evaluation_uses_bound_plan_for_profile_minimums(
         module.validate(candidate, ROOT, workspace_root=workspace_root, verify_hashes=True)
 
 
-def test_global_policy_root_cannot_be_replaced_by_project_registry(tmp_path):
+def test_explicit_product_policy_root_can_be_separate_from_installed_skills(tmp_path):
     module = load_validator()
-    with pytest.raises(module.Invalid, match="global policy root"):
-        module.validate(fixture(), tmp_path)
+    product_root = tmp_path / "product"
+    shutil.copytree(ROOT / "config", product_root / "config")
+    schema = "runtime/agent-fabric-protocol/schemas/authority-envelope.v2.schema.json"
+    (product_root / schema).parent.mkdir(parents=True)
+    shutil.copy2(ROOT / schema, product_root / schema)
+
+    module.validate(fixture(), product_root)
 
 
 def test_project_policy_can_only_add_a_digest_bound_profile_or_gate(tmp_path):
@@ -1520,3 +1645,37 @@ def test_project_defined_technical_profile_cannot_bypass_artifact_security(tmp_p
     candidate["project_policy"] = {"path": "delivery-policy.json", "digest": "sha256:" + hashlib.sha256(raw).hexdigest()}
     with pytest.raises(module.Invalid, match="unclassified artifact type"):
         module.validate(candidate, ROOT, workspace_root=tmp_path, project_policy_path=overlay_path)
+
+
+def test_pass_output_binds_resolved_product_root(tmp_path):
+    product_copy = tmp_path / "copy" / "product"
+    shutil.copytree(ROOT / "config", product_copy / "config")
+    shutil.copytree(
+        ROOT / "runtime" / "agent-fabric-protocol" / "schemas",
+        product_copy / "runtime" / "agent-fabric-protocol" / "schemas",
+    )
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    runs = load(REFERENCE_RUNS_PATH, "reference_runs_product_root_cli")
+    run = runs.make_reference_run("agent-product", product_copy)
+    materialiser = load(REFERENCE_EVALUATION_PATH, "reference_evaluation_product_root_cli")
+    materialiser.materialise_reference_run(run, workspace, product_copy)
+    receipt = workspace / "receipt.json"
+    receipt.write_text(json.dumps(run))
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(VALIDATOR_PATH),
+            str(receipt),
+            "--workspace-root",
+            str(workspace),
+            "--product-root",
+            str(product_copy),
+            "--verify-hashes",
+        ],
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.startswith("PASS: delivery-v1 delivery receipt"), result.stdout
+    assert f"(product_root={product_copy.resolve()})" in result.stdout

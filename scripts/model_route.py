@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from fnmatch import fnmatchcase
 import importlib.util
 import json
+import os
 from pathlib import Path
 import re
 import sys
@@ -16,10 +17,15 @@ from typing import Any
 import yaml
 
 
-ROOT = Path(__file__).resolve().parents[1]
-CATALOG_PATH = ROOT / "config" / "model-routing.json"
-COMPATIBILITY_PATH = ROOT / "config" / "adapter-compatibility.yaml"
-FABRIC_CONFIG_PATH = ROOT / "config" / "agent-fabric.yaml"
+PRODUCT_ROOT = Path(
+    os.environ.get("AGENT_FABRIC_PRODUCT_ROOT", Path(__file__).resolve().parents[1])
+).expanduser()
+INSTANCE_ROOT = Path(
+    os.environ.get("AGENT_FABRIC_INSTANCE_ROOT", PRODUCT_ROOT)
+).expanduser()
+CATALOG_PATH = INSTANCE_ROOT / "config" / "model-routing.json"
+COMPATIBILITY_PATH = PRODUCT_ROOT / "config" / "adapter-compatibility.yaml"
+FABRIC_CONFIG_PATH = PRODUCT_ROOT / "config" / "agent-fabric.yaml"
 COMPATIBILITY_ADAPTER_IDS = {
     "claude": "claude-agent-sdk",
     "codex": "codex-app-server",
@@ -79,16 +85,18 @@ risk_tier_overrides_are_valid = _catalog_validation.risk_tier_overrides_are_vali
 override_scan_families = _catalog_validation.override_scan_families
 
 
-def load_catalog() -> dict[str, Any]:
-    return json.loads(CATALOG_PATH.read_text())
+def load_catalog(path: Path | None = None) -> dict[str, Any]:
+    return json.loads((path or CATALOG_PATH).read_text())
 
 
-def load_adapter_compatibility(adapter: str) -> tuple[dict[str, Any] | None, str]:
+def load_adapter_compatibility(
+    adapter: str, path: Path | None = None,
+) -> tuple[dict[str, Any] | None, str]:
     compatibility_id = COMPATIBILITY_ADAPTER_IDS.get(adapter)
     if compatibility_id is None:
         return None, "adapter_compatibility_unknown"
     try:
-        data = yaml.safe_load(COMPATIBILITY_PATH.read_text())
+        data = yaml.safe_load((path or COMPATIBILITY_PATH).read_text())
     except (OSError, yaml.YAMLError):
         return None, "adapter_compatibility_unavailable"
     if not isinstance(data, dict) or data.get("schema_version") != 1:
@@ -459,7 +467,9 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
             2,
         )
     if args.adapter in COMPATIBILITY_ADAPTER_IDS:
-        compatibility, compatibility_status = load_adapter_compatibility(args.adapter)
+        compatibility, compatibility_status = load_adapter_compatibility(
+            args.adapter, Path(args.adapter_compatibility),
+        )
         if compatibility_status:
             return emit_route(
                 {
@@ -829,7 +839,19 @@ def parser() -> argparse.ArgumentParser:
         default=str(FABRIC_CONFIG_PATH),
         help=argparse.SUPPRESS,
     )
-    _preferences.add_selection_parser(commands, ROOT / "config" / "model-preferences.json")
+    command.add_argument(
+        "--catalog",
+        default=str(CATALOG_PATH),
+        help=argparse.SUPPRESS,
+    )
+    command.add_argument(
+        "--adapter-compatibility",
+        default=str(COMPATIBILITY_PATH),
+        help=argparse.SUPPRESS,
+    )
+    _preferences.add_selection_parser(
+        commands, INSTANCE_ROOT / "config" / "model-preferences.json",
+    )
     return root
 
 
@@ -838,7 +860,7 @@ def main(argv: list[str] | None = None) -> int:
     args = argument_parser.parse_args(argv)
     if args.command == "select":
         return _preferences.select(args, TASK_CLASS_POLICY, ALIAS_ORDER, EFFORT_ORDER)
-    catalog = load_catalog()
+    catalog = load_catalog(Path(args.catalog))
     if args.command == "resolve":
         def reject(status: str, *, alias: str = "", effort: str = "", message: str = "") -> int:
             record = {

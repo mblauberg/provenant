@@ -56,8 +56,11 @@ at substantial-change closure, and when any of these signals appears:
 Use the read-only auditor from any project root:
 
 ```sh
-python3 "${AGENTS_HOME:-$HOME/.agents}/skills/session/scripts/context_audit.py" .
+python3 "<installed-session-skill>/scripts/context_audit.py" .
 ```
+
+Replace `<installed-session-skill>` with the absolute skill directory disclosed
+by the client that loaded this skill.
 
 For a canonical `delivery-run` receipt, preview expired manifest-owned scratch with
 `cleanup_run_artifacts.py RUN.json`. Execution additionally requires
@@ -72,7 +75,7 @@ adoption of advisory caps.
 The project root's `.worktrees/` is protected Git infrastructure, not context
 or scratch. The auditor does not descend into sibling checkouts. Inspect and
 remove an authorised worktree from its own root with
-`${AGENTS_HOME:-$HOME/.agents}/scripts/worktree`; never prune its directory as
+`provenant worktree`; never prune its directory as
 an ignored cache or delete it with a filesystem command.
 
 ## Freshness and invalidation

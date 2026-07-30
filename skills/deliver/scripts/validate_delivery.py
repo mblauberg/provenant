@@ -10,21 +10,23 @@ import hashlib
 import importlib.util
 import json
 import math
+import os
 from pathlib import Path
 import re
 import sys
 from typing import Any
 
-ROOT = Path(__file__).resolve().parents[3]
-sys.path.insert(0, str(ROOT / "skills"))
+SKILLS_ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(os.environ.get("AGENT_FABRIC_PRODUCT_ROOT", Path(__file__).resolve().parents[3])).expanduser()
+sys.path.insert(0, str(SKILLS_ROOT))
 from _shared.review_ladder import PRIMARY_FAMILIES, check_review_ladder
-
 POLICY_VALIDATION_PATH = Path(__file__).with_name("delivery_policy_validation.py")
 DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 SAFE_CLASSES = {"canonical", "evidence", "handoff", "scratch", "external"}
 REVIEW_ROLES = {"targeted", "other-primary", "distinct-family"}
 RISKS = ("routine", "substantial", "crucial", "terminal")
+REPAIR_BUDGETS = {"routine": 2, "substantial": 4, "crucial": 5, "terminal": 5}
 NORMAL_STATES = (
     "draft", "scoped", "approved", "executing", "verifying", "reviewing",
     "repairing", "awaiting_acceptance", "accepted", "awaiting_release",
@@ -54,7 +56,6 @@ EVALUATION_BINDING_FIELDS = {
     "status", "anchored_at", "evidence_id", "evaluation_artifact_id",
     "evaluation_id", "evaluation_digest", "plan_digest",
 }
-
 class Invalid(ValueError):
     pass
 
@@ -107,7 +108,7 @@ def _policy_validation_module():
     return module
 
 def _retrospect_validator():
-    path = ROOT / "skills" / "retrospect" / "scripts" / "validate_retrospect.py"
+    path = SKILLS_ROOT / "retrospect" / "scripts" / "validate_retrospect.py"
     spec = importlib.util.spec_from_file_location("delivery_retrospect_validator", path)
     fail(not spec or not spec.loader, "retrospective validator is unavailable")
     module = importlib.util.module_from_spec(spec)
@@ -115,14 +116,13 @@ def _retrospect_validator():
     return module
 
 def _evaluate_validator():
-    path = ROOT / "skills" / "evaluate" / "scripts" / "validate_evaluation.py"
+    path = SKILLS_ROOT / "evaluate" / "scripts" / "validate_evaluation.py"
     spec = importlib.util.spec_from_file_location("delivery_evaluate_validator", path)
     fail(not spec or not spec.loader, "evaluation validator is unavailable")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     fail(not callable(getattr(module, "validate", None)), "evaluation validator API is unavailable")
     return module
-
 
 @lru_cache(maxsize=1)
 def _software_delivery_validator():
@@ -474,10 +474,10 @@ def _validate_reviews(run: dict[str, Any], evidence: dict[str, dict[str, Any]], 
     if ladder_errors:
         raise Invalid(ladder_errors[0])
 
-def _validate_security(run: dict[str, Any], registry: dict[str, Any], profile: dict[str, Any], artifacts: dict[str, dict[str, Any]], evidence: dict[str, dict[str, Any]], *, required: bool) -> None:
+def _validate_security(run: dict[str, Any], registry: dict[str, Any], profile: dict[str, Any], artifacts: dict[str, dict[str, Any]], evidence: dict[str, dict[str, Any]], *, required: bool, product_root: Path) -> None:
     security = _mapping(run.get("security"), "security")
     checks = _list(security.get("checks"), "security.checks")
-    policy_path = ROOT / "config" / "security-evidence.json"
+    policy_path = product_root / "config" / "security-evidence.json"
     policy = json.loads(policy_path.read_text())
     expected_policy_digest = "sha256:" + hashlib.sha256(policy_path.read_bytes()).hexdigest()
     fail(security.get("policy_sha256") != expected_policy_digest, "security policy digest does not match the global selector policy")
@@ -831,13 +831,13 @@ def validate(
     validate_retrospective: bool = True,
 ) -> None:
     fail(not isinstance(run, dict), "RUN root must be an object")
-    fail(root.resolve() != ROOT.resolve(), "global policy root cannot be replaced by a project registry")
+    _software_delivery_validator().configure_product_root(root)
     fail(run.get("schema_version") != 1 or run.get("contract") != "delivery-run", "delivery receipt must use contract delivery-run schema_version 1")
     fail(not run.get("run_id"), "run_id is required")
     policy_validation = _policy_validation_module()
     policy_validation.validate_fabric_relationships(run, invalid_type=Invalid)
     registry = policy_validation.apply_project_policy(
-        policy_validation.load_profiles(ROOT, invalid_type=Invalid),
+        policy_validation.load_profiles(root, invalid_type=Invalid),
         run,
         project_policy_path=project_policy_path,
         workspace_root=workspace_root or receipt_dir,
@@ -845,19 +845,18 @@ def validate(
     )
     profile = registry["profiles"].get(run.get("profile"))
     fail(profile is None, "unknown delivery profile")
-    fail(run.get("risk_tier") not in RISKS, "risk_tier is invalid")
+    risk_tier = run.get("risk_tier")
+    fail(risk_tier not in RISKS, "risk_tier is invalid")
     fail(run.get("chair_family") not in PRIMARY_FAMILIES, "chair_family must be a primary family (openai or anthropic)")
     fail(run.get("status") not in set(NORMAL_STATES) | SIDE_STATES, "status is invalid")
     repairs = run.get("repair_cycles")
-    fail(isinstance(repairs, bool) or not isinstance(repairs, int) or not 0 <= repairs <= 2, "repair_cycles must be between 0 and 2")
+    fail(isinstance(repairs, bool) or not isinstance(repairs, int), f"repair_cycles must be an integer, got {type(repairs).__name__}")
+    fail(repairs < 0, f"repair_cycles must be non-negative, got {repairs}")
+    fail(repairs > REPAIR_BUDGETS[risk_tier], f"repair_cycles {repairs} exceeds budget for {risk_tier} tier (max {REPAIR_BUDGETS[risk_tier]})")
     fail(not isinstance(run.get("escaped_defect"), bool), "escaped_defect must be boolean")
-    policy_validation.validate_risk(
-        run, ROOT, risks=RISKS, invalid_type=Invalid,
-    )
+    policy_validation.validate_risk(run, root, risks=RISKS, invalid_type=Invalid)
     authority = _mapping(run.get("authority"), "authority")
-    policy_validation.validate_authority(
-        authority, run, ROOT, invalid_type=Invalid,
-    )
+    policy_validation.validate_authority(authority, run, root, invalid_type=Invalid)
     allowed_artifact_paths = [_safe_path(item, "authority.allowed_artifact_paths") for item in authority["allowed_artifact_paths"]]
     allowed_source_paths = [_safe_path(item, "authority.allowed_source_paths") for item in authority["allowed_source_paths"]]
     artifacts = _validate_artifacts(
@@ -870,8 +869,7 @@ def validate(
     )
     _validate_history(run)
     _validate_checkpoint(run, artifacts, receipt_dir=receipt_dir, workspace_root=workspace_root)
-    normal_states = [item["state"] for item in run["state_history"] if item["state"] in NORMAL_STATES]
-    furthest = max(NORMAL_STATES.index(state) for state in normal_states)
+    furthest = max(NORMAL_STATES.index(item["state"]) for item in run["state_history"] if item["state"] in NORMAL_STATES)
     approved_reached = furthest >= NORMAL_STATES.index("approved")
     reviewing_reached = furthest >= NORMAL_STATES.index("reviewing")
     acceptance_reached = furthest >= NORMAL_STATES.index("awaiting_acceptance")
@@ -927,7 +925,7 @@ def validate(
         }
         review_ids = {item.get("evidence_id") for item in run["reviews"] if item.get("status") == "pass" and item.get("role") in REVIEW_ROLES}
         fail(not (profile_ids | review_ids) <= set(final_transition["evidence_ids"]), "awaiting_acceptance transition lacks profile or review evidence")
-    _validate_security(run, registry, profile, artifacts, evidence, required=acceptance_reached)
+    _validate_security(run, registry, profile, artifacts, evidence, required=acceptance_reached, product_root=root)
     _validate_measures_assurance(
         run, profile, evidence, artifacts, required=acceptance_reached,
         artifact_root=workspace_root or receipt_dir, verify_hashes=verify_hashes,
@@ -971,6 +969,7 @@ def validate(
             validator.verify_hashes(
                 data, target.parent, expected_cycle_id=run["run_id"],
                 expected_profile=run["profile"], workspace_root=workspace_root,
+                product_root=root,
             )
         except validator.Invalid as exc:
             raise Invalid(f"retrospective artifact failed its contract: {exc}") from exc
@@ -983,15 +982,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--verify-hashes", action="store_true")
     parser.add_argument("--workspace-root", type=Path, default=Path.cwd())
     parser.add_argument("--project-policy", type=Path)
+    parser.add_argument("--product-root", type=Path, default=ROOT)
     args = parser.parse_args(argv)
     try:
         run = json.loads(args.receipt.read_text())
-        validate(run, ROOT, receipt_dir=args.receipt.parent.resolve(), workspace_root=args.workspace_root.resolve(), project_policy_path=args.project_policy, verify_hashes=args.verify_hashes)
+        validate(run, args.product_root.resolve(), receipt_dir=args.receipt.parent.resolve(), workspace_root=args.workspace_root.resolve(), project_policy_path=args.project_policy, verify_hashes=args.verify_hashes)
         kind = "delivery-v1"
     except (OSError, json.JSONDecodeError, Invalid) as exc:
         print(f"FAIL: {exc}", file=sys.stderr)
         return 1
-    print(f"PASS: {kind} delivery receipt")
+    print(f"PASS: {kind} delivery receipt (product_root={args.product_root.resolve()})")
     return 0
 
 

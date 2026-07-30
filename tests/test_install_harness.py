@@ -223,6 +223,31 @@ def test_installs_codex_skills_and_global_instructions(tmp_path):
     assert codex_config.read_text() == configured
 
 
+def test_codex_install_projects_instance_custom_skill_without_managed_ownership(
+    tmp_path,
+):
+    config = tmp_path / "codex-home"
+    custom_skill = instance_root_for(tmp_path) / "custom-skills" / "local-skill"
+    custom_skill.mkdir(parents=True)
+    (custom_skill / "SKILL.md").write_text(
+        "---\nname: local-skill\ndescription: Instance-owned test skill.\n---\n"
+    )
+
+    result = run("codex", tmp_path, CODEX_HOME=str(config))
+
+    assert result.returncode == 0, result.stderr
+    installed = config / "skills" / "local-skill"
+    assert installed.is_symlink()
+    assert installed.resolve() == custom_skill.resolve()
+    manifest = json.loads(
+        (config / ".agent-harness-installation.json").read_text()
+    )
+    assert "local-skill" not in manifest["managed"]
+    assert manifest["custom"]["local-skill"] == {
+        "source_target": str(custom_skill.resolve())
+    }
+
+
 def test_claude_workflow_upgrade_relinks_a_previously_managed_file(tmp_path):
     config = tmp_path / "claude-config"
     first = run("claude", tmp_path, CLAUDE_CONFIG_DIR=str(config))
@@ -619,14 +644,17 @@ def test_preserves_existing_codex_instructions_and_prints_merge_line(tmp_path):
 def test_accepts_claude_instruction_symlink_to_canonical_agents_file(tmp_path):
     config = tmp_path / "claude-config"
     config.mkdir()
+    instance_agents = tmp_path / ".agents/AGENTS.md"
+    instance_agents.parent.mkdir()
+    instance_agents.write_text("# Instance instructions\n")
     instructions = config / "CLAUDE.md"
-    instructions.symlink_to(ROOT / "AGENTS.md")
+    instructions.symlink_to(instance_agents)
 
     result = run("claude", tmp_path, CLAUDE_CONFIG_DIR=str(config))
 
     assert result.returncode == 0, result.stderr
     assert instructions.is_symlink()
-    assert instructions.resolve() == ROOT / "AGENTS.md"
+    assert instructions.resolve() == instance_agents
     assert f"instructions existing={instructions}" in result.stdout
     assert "add this line" not in result.stderr
 
@@ -634,14 +662,17 @@ def test_accepts_claude_instruction_symlink_to_canonical_agents_file(tmp_path):
 def test_accepts_codex_instruction_symlink_to_canonical_agents_file(tmp_path):
     config = tmp_path / "codex-home"
     config.mkdir()
+    instance_agents = tmp_path / ".agents/AGENTS.md"
+    instance_agents.parent.mkdir()
+    instance_agents.write_text("# Instance instructions\n")
     instructions = config / "AGENTS.md"
-    instructions.symlink_to(ROOT / "AGENTS.md")
+    instructions.symlink_to(instance_agents)
 
     result = run("codex", tmp_path, CODEX_HOME=str(config))
 
     assert result.returncode == 0, result.stderr
     assert instructions.is_symlink()
-    assert instructions.resolve() == ROOT / "AGENTS.md"
+    assert instructions.resolve() == instance_agents
     assert f"instructions existing={instructions}" in result.stdout
     assert "add this line" not in result.stderr
 
@@ -690,6 +721,34 @@ def test_refuses_provenant_command_collision_before_any_mutation(tmp_path):
     assert not (tmp_path / ".claude.json").exists()
 
 
+def test_skill_source_collision_preflights_before_harness_mutation(tmp_path):
+    config = tmp_path / "codex-home"
+    bin_dir = tmp_path / "bin"
+    custom_scope = instance_root_for(tmp_path) / "custom-skills" / "scope"
+    custom_scope.mkdir(parents=True)
+    (custom_scope / "SKILL.md").write_text(
+        "---\nname: scope\ndescription: Colliding instance skill.\n---\n"
+    )
+
+    result = run(
+        "codex",
+        tmp_path,
+        CODEX_HOME=str(config),
+        PROVENANT_BIN_DIR=str(bin_dir),
+    )
+
+    assert result.returncode == 3
+    assert str((ROOT / "skills" / "scope").resolve()) in result.stderr
+    assert str(custom_scope.resolve()) in result.stderr
+    assert not (bin_dir / "provenant").exists()
+    assert not (
+        instance_root_for(tmp_path) / ".agent-fabric" / "product-root.json"
+    ).exists()
+    assert not (instance_root_for(tmp_path) / "AGENTS.md").exists()
+    assert not (config / "skills").exists()
+    assert not (config / ".agent-harness-installation.json").exists()
+
+
 def test_rejects_a_relative_provenant_bin_directory_before_mutation(tmp_path):
     relative_bin = "relative-provenant-bin"
 
@@ -701,13 +760,18 @@ def test_rejects_a_relative_provenant_bin_directory_before_mutation(tmp_path):
     assert not (tmp_path / ".codex").exists()
 
 
-def test_upgrades_the_checkout_bound_provenant_symlink_to_a_stable_copy(tmp_path):
+def test_upgrades_a_dangling_legacy_instance_link_to_a_stable_copy(tmp_path):
     bin_dir = tmp_path / ".local/bin"
     bin_dir.mkdir(parents=True)
+    instance_root = tmp_path / "custom-instance"
     command = bin_dir / "provenant"
-    command.symlink_to(ROOT / "scripts/provenant")
+    command.symlink_to(instance_root / "scripts/provenant")
 
-    result = run("codex", tmp_path)
+    result = run(
+        "codex",
+        tmp_path,
+        AGENT_FABRIC_INSTANCE_ROOT=str(instance_root),
+    )
 
     assert result.returncode == 0, result.stderr
     assert command.is_file()
@@ -716,7 +780,29 @@ def test_upgrades_the_checkout_bound_provenant_symlink_to_a_stable_copy(tmp_path
     assert f"command updated={command}" in result.stdout
 
 
-def test_upgrades_a_byte_identical_foreign_symlink_to_a_managed_copy(tmp_path):
+def test_upgrades_an_equivalent_relative_legacy_instance_link(tmp_path):
+    bin_dir = tmp_path / "custom-bin"
+    bin_dir.mkdir()
+    instance_root = tmp_path / "custom-instance"
+    command = bin_dir / "provenant"
+    relative_target = os.path.relpath(instance_root / "scripts/provenant", bin_dir)
+    command.symlink_to(relative_target)
+
+    result = run(
+        "codex",
+        tmp_path,
+        AGENT_FABRIC_INSTANCE_ROOT=str(instance_root),
+        PROVENANT_BIN_DIR=str(bin_dir),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert command.is_file()
+    assert not command.is_symlink()
+    assert command.read_bytes() == PROVENANT_TEMPLATE.read_bytes()
+    assert f"command updated={command}" in result.stdout
+
+
+def test_rejects_a_byte_identical_foreign_symlink_without_clobbering_it(tmp_path):
     bin_dir = tmp_path / ".local/bin"
     bin_dir.mkdir(parents=True)
     foreign = tmp_path / "foreign/provenant"
@@ -724,14 +810,15 @@ def test_upgrades_a_byte_identical_foreign_symlink_to_a_managed_copy(tmp_path):
     shutil.copy2(PROVENANT_TEMPLATE, foreign)
     command = bin_dir / "provenant"
     command.symlink_to(foreign)
+    original_target = command.readlink()
 
     result = run("codex", tmp_path)
 
-    assert result.returncode == 0, result.stderr
-    assert command.is_file()
-    assert not command.is_symlink()
-    assert command.read_bytes() == PROVENANT_TEMPLATE.read_bytes()
-    assert f"command updated={command}" in result.stdout
+    assert result.returncode == 3
+    assert "collision" in result.stderr
+    assert command.is_symlink()
+    assert command.readlink() == original_target
+    assert foreign.read_bytes() == PROVENANT_TEMPLATE.read_bytes()
 
 
 def test_warns_when_provenant_bin_directory_is_outside_path(tmp_path):

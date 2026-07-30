@@ -13,9 +13,12 @@ MANAGER = ROOT / "scripts" / "manage_installation.py"
 SHARED = "_shared"
 
 
-def run(target: Path):
+def run(target: Path, custom_source: Path | None = None):
+    command = [str(SCRIPT), "--target", str(target)]
+    if custom_source is not None:
+        command.extend(["--custom-source", str(custom_source)])
     return subprocess.run(
-        [str(SCRIPT), "--target", str(target)],
+        command,
         cwd=ROOT,
         text=True,
         stdout=subprocess.PIPE,
@@ -27,6 +30,16 @@ def run(target: Path):
 def catalogue_names():
     """Skills plus the shared library every per-entry layout must also carry."""
     return {path.parent.name for path in (ROOT / "skills").glob("*/SKILL.md")} | {SHARED}
+
+
+def custom_skill_source(tmp_path: Path, name: str = "instance-skill"):
+    source = tmp_path / "custom-skills"
+    skill = source / name
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text(
+        f"---\nname: {name}\ndescription: Instance-owned test skill.\n---\n"
+    )
+    return source
 
 
 def test_installer_links_every_skill_and_is_idempotent(tmp_path):
@@ -41,6 +54,221 @@ def test_installer_links_every_skill_and_is_idempotent(tmp_path):
     second = run(target)
     assert second.returncode == 0, second.stderr
     assert f"linked=0 existing={len(expected)}" in second.stdout
+
+
+def test_instance_skill_appears_in_per_entry_layout_without_managed_ownership(tmp_path):
+    target = tmp_path / "skills"
+    custom_source = custom_skill_source(tmp_path)
+
+    result = run(target, custom_source)
+
+    assert result.returncode == 0, result.stderr
+    link = target / "instance-skill"
+    assert link.is_symlink()
+    assert link.resolve() == (custom_source / "instance-skill").resolve()
+    manifest = json.loads(manifest_for(target).read_text())
+    assert "instance-skill" not in manifest["managed"]
+
+
+def test_source_name_collision_aborts_before_link_or_receipt_mutation(tmp_path):
+    target = tmp_path / "skills"
+    target.mkdir()
+    marker = target / "keep"
+    marker.write_text("untouched\n")
+    custom_source = custom_skill_source(tmp_path, "scope")
+
+    result = run(target, custom_source)
+
+    assert result.returncode == 3
+    assert str((ROOT / "skills" / "scope").resolve()) in result.stderr
+    assert str((custom_source / "scope").resolve()) in result.stderr
+    assert {path.name for path in target.iterdir()} == {"keep"}
+    assert marker.read_text() == "untouched\n"
+    assert not manifest_for(target).exists()
+
+
+def test_second_two_source_run_is_a_filesystem_no_op(tmp_path):
+    target = tmp_path / "skills"
+    custom_source = custom_skill_source(tmp_path)
+    first = run(target, custom_source)
+    assert first.returncode == 0, first.stderr
+    manifest = manifest_for(target)
+    before_manifest = manifest.read_bytes()
+    before_manifest_mtime = manifest.stat().st_mtime_ns
+    before_links = {
+        path.name: path.lstat().st_mtime_ns
+        for path in target.iterdir()
+        if path.is_symlink()
+    }
+
+    second = run(target, custom_source)
+
+    assert second.returncode == 0, second.stderr
+    assert "linked=0" in second.stdout
+    assert manifest.read_bytes() == before_manifest
+    assert manifest.stat().st_mtime_ns == before_manifest_mtime
+    assert {
+        path.name: path.lstat().st_mtime_ns
+        for path in target.iterdir()
+        if path.is_symlink()
+    } == before_links
+
+
+def test_flagless_run_preserves_custom_link_and_manifest_receipt(tmp_path):
+    source = tiny_source(tmp_path)
+    custom_source = custom_skill_source(tmp_path)
+    target = tmp_path / "installed"
+    assert manager(
+        target, "install", source, custom_source=custom_source
+    ).returncode == 0
+    custom_link = target / "instance-skill"
+    manifest = manifest_for(target)
+    before_link_mtime = custom_link.lstat().st_mtime_ns
+    before_manifest = manifest.read_bytes()
+    before_manifest_mtime = manifest.stat().st_mtime_ns
+
+    result = manager(target, "install", source)
+
+    assert result.returncode == 0, result.stderr
+    assert custom_link.is_symlink()
+    assert custom_link.resolve() == (custom_source / "instance-skill").resolve()
+    assert custom_link.lstat().st_mtime_ns == before_link_mtime
+    assert manifest.read_bytes() == before_manifest
+    assert manifest.stat().st_mtime_ns == before_manifest_mtime
+    assert "instance-skill" not in {
+        item["name"] for item in json.loads(result.stdout)["items"]
+    }
+
+
+def test_flagless_run_does_not_handoff_recorded_custom_name_to_managed(tmp_path):
+    source = tiny_source(tmp_path)
+    custom_source = custom_skill_source(tmp_path, "gamma")
+    target = tmp_path / "installed"
+    assert manager(
+        target, "install", source, custom_source=custom_source
+    ).returncode == 0
+    managed_gamma = source / "gamma"
+    managed_gamma.mkdir()
+    (managed_gamma / "SKILL.md").write_text(
+        "---\nname: gamma\ndescription: Newly managed collision.\n---\n"
+    )
+    custom_link = target / "gamma"
+    manifest_before = manifest_for(target).read_bytes()
+
+    result = manager(target, "install", source)
+
+    assert result.returncode == 0, result.stderr
+    assert custom_link.resolve() == (custom_source / "gamma").resolve()
+    assert manifest_for(target).read_bytes() == manifest_before
+    assert "gamma" not in {
+        item["name"] for item in json.loads(result.stdout)["items"]
+    }
+
+
+def test_flagless_reconcile_rename_cannot_take_over_missing_custom_name(tmp_path):
+    source = tiny_source(tmp_path)
+    custom_source = custom_skill_source(tmp_path, "gamma")
+    target = tmp_path / "installed"
+    assert manager(
+        target, "install", source, custom_source=custom_source
+    ).returncode == 0
+    # The recorded custom projection disappears outside the harness, so the
+    # rename target looks free even though the manifest still owns the name.
+    (target / "gamma").unlink()
+    shutil.move(str(source / "alpha"), str(source / "gamma"))
+    renames = tmp_path / "renames.json"
+    renames.write_text(json.dumps({
+        "schema_version": 1, "renames": [{"from": "alpha", "to": "gamma"}],
+    }))
+
+    result = manager(target, "reconcile", source, renames)
+
+    assert result.returncode != 0
+    assert "gamma" in result.stderr
+    manifest = json.loads(manifest_for(target).read_text())
+    assert "gamma" not in manifest["managed"]
+    assert "gamma" in manifest["custom"]
+    assert not (target / "gamma").exists()
+    assert not (target / "gamma").is_symlink()
+
+
+def test_removing_instance_source_prunes_its_projected_link(tmp_path):
+    target = tmp_path / "skills"
+    custom_source = custom_skill_source(tmp_path)
+    assert run(target, custom_source).returncode == 0
+    shutil.rmtree(custom_source)
+
+    result = run(target, custom_source)
+
+    assert result.returncode == 0, result.stderr
+    assert not (target / "instance-skill").exists()
+    manifest = json.loads(manifest_for(target).read_text())
+    assert "instance-skill" not in manifest["managed"]
+    assert "instance-skill" not in manifest["custom"]
+
+
+def test_modified_instance_link_is_refused_instead_of_replaced(tmp_path):
+    target = tmp_path / "skills"
+    custom_source = custom_skill_source(tmp_path)
+    assert run(target, custom_source).returncode == 0
+    foreign_target = tmp_path / "modified-out-of-band"
+    foreign_target.mkdir()
+    link = target / "instance-skill"
+    link.unlink()
+    link.symlink_to(foreign_target)
+    manifest_before = manifest_for(target).read_bytes()
+
+    result = run(target, custom_source)
+
+    assert result.returncode == 3
+    assert "changed outside harness" in result.stderr
+    assert link.resolve() == foreign_target.resolve()
+    assert manifest_for(target).read_bytes() == manifest_before
+
+
+def test_missing_custom_link_error_names_manual_restore_or_source_remedy(tmp_path):
+    target = tmp_path / "skills"
+    custom_source = custom_skill_source(tmp_path)
+    assert run(target, custom_source).returncode == 0
+    link = target / "instance-skill"
+    link.unlink()
+    manifest_before = manifest_for(target).read_bytes()
+
+    result = run(target)
+
+    assert result.returncode == 3
+    assert (
+        f"manually restore instance-skill from "
+        f"{(custom_source / 'instance-skill').resolve()}"
+    ) in result.stderr
+    assert (
+        "or provide --custom-source pointing to the intended custom skills directory"
+        in result.stderr
+    )
+    assert not link.exists()
+    assert manifest_for(target).read_bytes() == manifest_before
+
+
+def test_flagless_check_rejects_missing_recorded_custom_source(tmp_path):
+    target = tmp_path / "skills"
+    custom_source = custom_skill_source(tmp_path)
+    assert run(target, custom_source).returncode == 0
+    shutil.rmtree(custom_source / "instance-skill")
+    manifest_before = manifest_for(target).read_bytes()
+
+    result = run(target)
+
+    assert result.returncode == 3
+    assert (
+        f"manually restore instance-skill from "
+        f"{(custom_source / 'instance-skill').resolve()}"
+    ) in result.stderr
+    assert (
+        "or provide --custom-source pointing to the intended custom skills directory"
+        in result.stderr
+    )
+    assert (target / "instance-skill").is_symlink()
+    assert manifest_for(target).read_bytes() == manifest_before
 
 
 def test_installer_preserves_existing_entries(tmp_path):
@@ -146,6 +374,93 @@ def test_directory_symlink_to_canonical_skills_is_preserved_without_manifest(tmp
     # owns no per-entry manifest row for it.
     assert (target / SHARED / "review_ladder.py").is_file()
     assert not (fixture_root / ".agent-harness-installation.json").exists()
+    assert not (platform_home / ".agent-harness-installation.json").exists()
+
+
+def test_directory_symlink_layout_warns_about_skipped_custom_skills(tmp_path):
+    fixture_root = tmp_path / "agents"
+    scripts = fixture_root / "scripts"
+    scripts.mkdir(parents=True)
+    shutil.copy2(SCRIPT, scripts / "install-skills")
+    shutil.copy2(MANAGER, scripts / "manage_installation.py")
+    shutil.copy2(
+        ROOT / "scripts" / "managed_installation_manifest.py",
+        scripts / "managed_installation_manifest.py",
+    )
+    shutil.copytree(ROOT / "skills", fixture_root / "skills")
+    custom_source = custom_skill_source(fixture_root)
+    platform_home = tmp_path / "claude"
+    platform_home.mkdir()
+    target = platform_home / "skills"
+    target.symlink_to(fixture_root / "skills", target_is_directory=True)
+
+    result = subprocess.run(
+        [
+            str(scripts / "install-skills"),
+            "--target",
+            str(target),
+            "--custom-source",
+            str(custom_source),
+        ],
+        cwd=fixture_root,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert (
+        "warning: directory-link layout skipped custom skills: instance-skill"
+        in result.stderr
+    )
+    assert target.is_symlink()
+    assert target.resolve() == fixture_root / "skills"
+    assert not (platform_home / ".agent-harness-installation.json").exists()
+
+
+def test_directory_symlink_layout_rejects_two_source_name_collision(tmp_path):
+    fixture_root = tmp_path / "agents"
+    scripts = fixture_root / "scripts"
+    scripts.mkdir(parents=True)
+    shutil.copy2(SCRIPT, scripts / "install-skills")
+    shutil.copy2(MANAGER, scripts / "manage_installation.py")
+    shutil.copy2(
+        ROOT / "scripts" / "managed_installation_manifest.py",
+        scripts / "managed_installation_manifest.py",
+    )
+    shutil.copytree(ROOT / "skills", fixture_root / "skills")
+    custom_source = fixture_root / "custom-skills"
+    custom_scope = custom_source / "scope"
+    custom_scope.mkdir(parents=True)
+    (custom_scope / "SKILL.md").write_text(
+        "---\nname: scope\ndescription: Colliding instance skill.\n---\n"
+    )
+    platform_home = tmp_path / "claude"
+    platform_home.mkdir()
+    target = platform_home / "skills"
+    target.symlink_to(fixture_root / "skills", target_is_directory=True)
+
+    result = subprocess.run(
+        [
+            str(scripts / "install-skills"),
+            "--target",
+            str(target),
+            "--custom-source",
+            str(custom_source),
+        ],
+        cwd=fixture_root,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+
+    assert result.returncode == 3
+    assert str((fixture_root / "skills" / "scope").resolve()) in result.stderr
+    assert str(custom_scope.resolve()) in result.stderr
+    assert target.is_symlink()
+    assert target.resolve() == fixture_root / "skills"
     assert not (platform_home / ".agent-harness-installation.json").exists()
 
 
@@ -302,12 +617,20 @@ def test_installer_requires_a_target():
     assert "usage:" in result.stderr
 
 
-def manager(target: Path, action: str, source: Path | None = None, renames: Path | None = None):
+def manager(
+    target: Path,
+    action: str,
+    source: Path | None = None,
+    renames: Path | None = None,
+    custom_source: Path | None = None,
+):
     command = [str(MANAGER), action, "--target", str(target)]
     if source:
         command.extend(["--source", str(source)])
     if renames:
         command.extend(["--renames", str(renames)])
+    if custom_source:
+        command.extend(["--custom-source", str(custom_source)])
     return subprocess.run(command, cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
 
 
@@ -511,6 +834,116 @@ def test_retired_missing_entry_does_not_block_uninstall(tmp_path):
     result = manager(target, "uninstall-managed", source)
     assert result.returncode == 0, result.stderr
     assert json.loads(manifest_for(target).read_text())["managed"] == {}
+
+
+def test_uninstall_persists_when_every_managed_link_is_already_missing(tmp_path):
+    source = tiny_source(tmp_path)
+    target = tmp_path / "installed"
+    assert manager(target, "install", source).returncode == 0
+    for name in ("alpha", "beta"):
+        (target / name).unlink()
+
+    result = manager(target, "uninstall-managed", source)
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(manifest_for(target).read_text())["managed"] == {}
+
+
+def test_removed_custom_skill_can_handoff_to_new_managed_skill_in_one_run(
+    tmp_path,
+):
+    source = tiny_source(tmp_path)
+    custom_source = custom_skill_source(tmp_path, "gamma")
+    target = tmp_path / "installed"
+    assert manager(
+        target, "install", source, custom_source=custom_source
+    ).returncode == 0
+    shutil.rmtree(custom_source / "gamma")
+    managed_gamma = source / "gamma"
+    managed_gamma.mkdir()
+    (managed_gamma / "SKILL.md").write_text(
+        "---\nname: gamma\ndescription: Product-managed replacement.\n---\n"
+    )
+
+    result = manager(target, "install", source, custom_source=custom_source)
+
+    assert result.returncode == 0, result.stderr
+    assert (target / "gamma").resolve() == managed_gamma.resolve()
+    manifest = json.loads(manifest_for(target).read_text())
+    assert "gamma" in manifest["managed"]
+    assert "gamma" not in manifest["custom"]
+
+
+def test_custom_source_rebind_updates_only_an_unchanged_recorded_link(tmp_path):
+    source = tiny_source(tmp_path)
+    first_custom = custom_skill_source(tmp_path / "first", "local-skill")
+    second_custom = custom_skill_source(tmp_path / "second", "local-skill")
+    target = tmp_path / "installed"
+    assert manager(
+        target, "install", source, custom_source=first_custom
+    ).returncode == 0
+
+    result = manager(target, "install", source, custom_source=second_custom)
+
+    assert result.returncode == 0, result.stderr
+    assert (target / "local-skill").resolve() == (
+        second_custom / "local-skill"
+    ).resolve()
+    manifest = json.loads(manifest_for(target).read_text())
+    assert manifest["custom"]["local-skill"]["source_target"] == str(
+        (second_custom / "local-skill").resolve()
+    )
+
+
+def test_custom_rebind_refuses_out_of_band_repoint_to_new_desired_source(
+    tmp_path,
+):
+    source = tiny_source(tmp_path)
+    first_custom = custom_skill_source(tmp_path / "first", "local-skill")
+    second_custom = custom_skill_source(tmp_path / "second", "local-skill")
+    target = tmp_path / "installed"
+    assert manager(
+        target, "install", source, custom_source=first_custom
+    ).returncode == 0
+    link = target / "local-skill"
+    link.unlink()
+    link.symlink_to(second_custom / "local-skill")
+    manifest_before = manifest_for(target).read_bytes()
+
+    result = manager(target, "install", source, custom_source=second_custom)
+
+    assert result.returncode == 3
+    assert "changed outside harness" in result.stderr
+    assert link.resolve() == (second_custom / "local-skill").resolve()
+    assert manifest_for(target).read_bytes() == manifest_before
+
+
+def test_removed_managed_skill_can_handoff_to_new_custom_skill_in_one_run(
+    tmp_path,
+):
+    source = tiny_source(tmp_path)
+    custom_source = tmp_path / "custom-skills"
+    custom_source.mkdir()
+    target = tmp_path / "installed"
+    assert manager(
+        target, "install", source, custom_source=custom_source
+    ).returncode == 0
+    shutil.rmtree(source / "alpha")
+    custom_alpha = custom_source / "alpha"
+    custom_alpha.mkdir()
+    (custom_alpha / "SKILL.md").write_text(
+        "---\nname: alpha\ndescription: Instance-owned replacement.\n---\n"
+    )
+
+    result = manager(target, "install", source, custom_source=custom_source)
+
+    assert result.returncode == 0, result.stderr
+    assert (target / "alpha").resolve() == custom_alpha.resolve()
+    manifest = json.loads(manifest_for(target).read_text())
+    assert "alpha" not in manifest["managed"]
+    assert manifest["custom"]["alpha"] == {
+        "source_target": str(custom_alpha.resolve())
+    }
 
 
 def test_full_skill_tree_digest_marks_reference_change_stale(tmp_path):

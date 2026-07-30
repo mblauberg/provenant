@@ -219,7 +219,7 @@ function bootstrapPrompt() {
     '   - If no git repo exists anywhere reachable, set gitCwd="" (empty). Cross-family will then fall back to cursor/agy or record CROSS-FAMILY-NOT-RUN; there is NO --skip-git-repo-check flag.',
     '   Do not hard-code any project layout — discover this at runtime.',
     '',
-    '3. Resolve concrete Claude models with ${AGENTS_HOME:-$HOME/.agents}/scripts/model-route for:',
+    '3. Resolve concrete Claude models with `provenant route resolve` for:',
     '   flagship/lead, flagship/critical-review, workhorse/worker, scout/scout. Return resolved_model values in modelRoutes.',
     '',
     'Return ONLY the structured object. Do not paste file contents.',
