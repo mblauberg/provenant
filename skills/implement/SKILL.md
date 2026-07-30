@@ -29,21 +29,17 @@ reconciliation run.
    [run-contract.md](references/run-contract.md). Routine minor work may proceed
    without `RUN.json` unless the user or project policy requests one.
 2. Keep an adaptive plan. Use `tdd` for observable change, `refactor`
-   for approved behaviour-preserving structure and `diagnose` for unknown
-   causes. Migrations may also need behaviour tests and equivalence evidence.
-   Use `orchestrate` when decomposition or independent coverage helps; adapt
-   topology/order inside authority. For a version-sensitive external interface
-   or migration, apply
-   [source grounding](references/source-grounding.md) and
-   [migration compatibility](references/migration-compatibility.md).
+   for behaviour-preserving structure and `diagnose` for unknown causes.
+   Migrations may need behaviour tests and equivalence evidence. Use
+   `orchestrate` when decomposition helps; adapt topology inside authority.
+   For external interface, apply [source grounding](references/source-grounding.md).
 3. Run deterministic checks; map each criterion to evidence. When required, run
    `evaluate` and attach its passing receipt.
 4. Invoke read-only `code-review` under the current `HARNESS.md` risk ladder.
-   Its adaptive topology load-bears. Record adapter, actual family, omissions
-   and substitutions.
-5. Repair blockers, then repeat verification and review. Stop after at most two
-   repair cycles (a guardrail, not a target; see `references/run-contract.md`)
-   or on scope/design drift; return evidence to the user or `scope`.
+   Record adapter, actual family, omissions and substitutions.
+5. Repair blockers, then repeat verification and review. Stop at the scaled
+   budget per risk tier (see `run-contract.md`). Budgets are guardrails, not
+   targets; return evidence to user or `scope` on drift.
 6. Update owned docs for behavioural, architectural, operational or decision
    change. For substantial+ apply `session`: refresh the recovery checkpoint,
    audit context, graduate durable findings and classify retained/ephemeral

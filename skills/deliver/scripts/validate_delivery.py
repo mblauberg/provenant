@@ -25,6 +25,7 @@ IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 SAFE_CLASSES = {"canonical", "evidence", "handoff", "scratch", "external"}
 REVIEW_ROLES = {"targeted", "other-primary", "distinct-family"}
 RISKS = ("routine", "substantial", "crucial", "terminal")
+REPAIR_BUDGETS = {"routine": 2, "substantial": 4, "crucial": 5, "terminal": 5}
 NORMAL_STATES = (
     "draft", "scoped", "approved", "executing", "verifying", "reviewing",
     "repairing", "awaiting_acceptance", "accepted", "awaiting_release",
@@ -123,7 +124,6 @@ def _evaluate_validator():
     fail(not callable(getattr(module, "validate", None)), "evaluation validator API is unavailable")
     return module
 
-
 @lru_cache(maxsize=1)
 def _software_delivery_validator():
     spec = importlib.util.spec_from_file_location("software_delivery_validation", Path(__file__).with_name("software_delivery_validation.py"))
@@ -131,7 +131,6 @@ def _software_delivery_validator():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
-
 
 def _load_bound_json(raw: bytes, field: str) -> dict[str, Any]:
     def no_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -147,7 +146,6 @@ def _load_bound_json(raw: bytes, field: str) -> dict[str, Any]:
         raise Invalid(f"{field} is not readable JSON: {exc}") from exc
     fail(not isinstance(value, dict), f"{field} root must be an object")
     return value
-
 
 def _validate_artifacts(
     artifacts: list[Any], *, workspace_root: Path | None, verify_hashes: bool,
@@ -200,7 +198,6 @@ def _validate_artifacts(
     fail(not any(item.get("class") == "canonical" for item in by_id.values()), "profile requires a canonical outcome artifact")
     return by_id
 
-
 def _validate_history(run: dict[str, Any]) -> None:
     history = _list(run.get("state_history"), "state_history")
     fail(not history, "state_history must be non-empty")
@@ -236,7 +233,6 @@ def _validate_history(run: dict[str, Any]) -> None:
             fail(degradation.get("kind") not in {"kernel_degraded", "runtime_degraded"}, "degraded run requires a typed degradation kind")
             if degradation.get("kind") == "kernel_degraded":
                 fail(not degradation.get("fallback_skill"), "kernel_degraded requires the specialised fallback skill")
-
 
 def _validate_checkpoint(
     run: dict[str, Any], artifacts: dict[str, dict[str, Any]], *,
@@ -283,7 +279,6 @@ def _validate_checkpoint(
                 break
         fail(not live, f"checkpoint artifact {path} must be declared or live inside the run/workspace root")
 
-
 def _validate_intent_design(run: dict[str, Any], artifacts: dict[str, dict[str, Any]], evidence: dict[str, dict[str, Any]]) -> None:
     intent = _mapping(run.get("intent"), "intent")
     approval = _mapping(intent.get("approval"), "intent.approval")
@@ -323,7 +318,6 @@ def _validate_intent_design(run: dict[str, Any], artifacts: dict[str, dict[str, 
             fail(not linked or linked.get("kind") != "human" or linked.get("status") != "pass" or linked.get("gate") != f"one-way-door:{door.get('id')}", f"one-way door {index} must link matching passing human evidence")
             if door.get("status") == "deferred":
                 fail(not door.get("approved_by") or not door.get("reason"), f"deferred one-way door {index} requires human approval and reason")
-
 
 def _validate_evidence(
     run: dict[str, Any], profile: dict[str, Any], artifacts: dict[str, dict[str, Any]],
@@ -819,7 +813,6 @@ def _validate_measures_assurance(
             "stochastic acceptance requires at least one complete passing evaluation",
         )
 
-
 def validate(
     run: Any,
     root: Path = ROOT,
@@ -845,11 +838,17 @@ def validate(
     )
     profile = registry["profiles"].get(run.get("profile"))
     fail(profile is None, "unknown delivery profile")
-    fail(run.get("risk_tier") not in RISKS, "risk_tier is invalid")
+    risk_tier = run.get("risk_tier")
+    fail(risk_tier not in RISKS, "risk_tier is invalid")
     fail(run.get("chair_family") not in PRIMARY_FAMILIES, "chair_family must be a primary family (openai or anthropic)")
     fail(run.get("status") not in set(NORMAL_STATES) | SIDE_STATES, "status is invalid")
     repairs = run.get("repair_cycles")
-    fail(isinstance(repairs, bool) or not isinstance(repairs, int) or not 0 <= repairs <= 2, "repair_cycles must be between 0 and 2")
+    max_cycles = REPAIR_BUDGETS[risk_tier]
+    fail(
+        isinstance(repairs, bool) or not isinstance(repairs, int)
+        or not 0 <= repairs <= max_cycles,
+        f"repair_cycles {repairs} exceeds budget for {risk_tier} tier (max {max_cycles})",
+    )
     fail(not isinstance(run.get("escaped_defect"), bool), "escaped_defect must be boolean")
     policy_validation.validate_risk(
         run, ROOT, risks=RISKS, invalid_type=Invalid,
@@ -975,8 +974,6 @@ def validate(
         except validator.Invalid as exc:
             raise Invalid(f"retrospective artifact failed its contract: {exc}") from exc
         fail(data.get("status") != retrospective.get("status"), "retrospective status does not match its artifact")
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("receipt", type=Path)
@@ -993,7 +990,5 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     print(f"PASS: {kind} delivery receipt")
     return 0
-
-
 if __name__ == "__main__":
     raise SystemExit(main())

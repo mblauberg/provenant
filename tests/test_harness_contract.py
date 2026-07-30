@@ -187,7 +187,11 @@ def test_claude_workflows_use_router_and_safe_implement_loop():
         assert "model-route" in text
         assert "claude-haiku-" not in text
     implementation = (WORKFLOWS / "implement-run.js").read_text()
-    assert "cycle <= 2" in implementation
+    assert "cycle <= maxRepairCycles" in implementation
+    assert "routine: 2" in implementation
+    assert "substantial: 4" in implementation
+    assert "crucial: 5" in implementation
+    assert "terminal: 5" in implementation
     assert "state: 'awaiting-human'" in implementation
     assert "git checkout" not in implementation
     assert "git restore" not in implementation
