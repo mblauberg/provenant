@@ -14,7 +14,7 @@
 //   3. implement     -> a builder agent emits PATCHES to patches/ (never edits source directly).
 //   4. review        -> independent code-review lenses + other-family reviewer.
 //   5. verify        -> objective checks mapped to acceptance criteria.
-//   6. repair        -> at most two repair/reverify/re-review cycles.
+//   6. repair        -> risk-tier budget: substantial 4, crucial/terminal 5 cycles.
 //   7. apply-gate    -> a SINGLE SERIAL applier auto-applies LOW-risk patches after checks pass,
 //                       guarding on a clean target worktree + `git apply --check` before each apply;
 //                       HIGH-risk patches (and any that drift / fail --check) are left validated +
@@ -44,6 +44,13 @@ export const meta = {
     { title: 'Human gate' },
   ],
 }
+
+const REPAIR_BUDGETS = Object.freeze({
+  routine: 2,
+  substantial: 4,
+  crucial: 5,
+  terminal: 5,
+})
 
 // ---------------------------------------------------------------------------
 // Structured-output schemas (each agent that returns data is forced through one).
@@ -402,11 +409,11 @@ const boot = await agent(
     'CLAUDE.md, README. Report the NARROWEST meaningful test lane, lint/type cmd, formatter, any design ' +
     'system entry point, and any rules that forbid auto-editing specific files.\n' +
     '5. Resolve concrete Claude models by running the global model router four times:\n' +
-    '   model-route resolve --adapter claude --alias flagship --role lead\n' +
-    '   model-route resolve --adapter claude --alias flagship --role critical-review\n' +
-    '   model-route resolve --adapter claude --alias workhorse --role worker\n' +
-    '   model-route resolve --adapter claude --alias scout --role scout\n' +
-    '   Use ${AGENTS_HOME:-$HOME/.agents}/scripts/model-route. Return each resolved_model in modelRoutes.\n' +
+    '   provenant route resolve --adapter claude --alias flagship --role lead\n' +
+    '   provenant route resolve --adapter claude --alias flagship --role critical-review\n' +
+    '   provenant route resolve --adapter claude --alias workhorse --role worker\n' +
+    '   provenant route resolve --adapter claude --alias scout --role scout\n' +
+    '   Return each resolved_model in modelRoutes.\n' +
     'Return the structured result only.',
   { label: 'bootstrap', phase: 'Bootstrap', schema: BOOTSTRAP_SCHEMA },
 )
@@ -424,6 +431,7 @@ if (!boot.riskPreflightPassed || !['substantial', 'crucial', 'terminal'].include
   return
 }
 const effectiveRisk = boot.effectiveRisk
+const maxRepairCycles = REPAIR_BUDGETS[effectiveRisk]
 log(`Run dir: ${runDir} | repo: ${boot.repoRoot} | test lane: ${conv.testLane || '(none found)'}`)
 
 const CHECKPOINT_SCHEMA = {
@@ -572,7 +580,7 @@ if (!built || !built.patches || built.patches.length === 0) {
 log(`Implement: ${built.patches.length} patch(es) emitted.`)
 await checkpoint('implement-complete', 'run independent review and verification', [], [built.path, ...built.patches.map((p) => p.patchPath)].filter(Boolean))
 
-// --- Phases 4-5: review + verify, with at most two repair/re-review cycles. ---
+// --- Phases 4-5: review + verify under the risk-tier repair budget. ---
 const REVIEW_ANGLES = [
   { angle: 'correctness', model: models.criticalReviewer, cf: '', required: true, lens: 'correctness, invariants and failure paths' },
   { angle: 'regression-and-structure', model: models.criticalReviewer, cf: '', required: true, lens: 'dependency-cone regressions, ownership, state/types, atomicity and simplification' },
@@ -589,7 +597,7 @@ let checksPass = false
 let repairCycles = 0
 let patchDigest = ''
 
-for (let cycle = 0; cycle <= 2; cycle += 1) {
+for (let cycle = 0; cycle <= maxRepairCycles; cycle += 1) {
   patchDigest = JSON.stringify(built.patches)
   phase('Review')
   await checkpoint(`review-${cycle}-dispatch`, 'reconcile reviewer results', REVIEW_ANGLES.map((r) => `review:${cycle}:${r.angle}`), [])
@@ -659,7 +667,7 @@ for (let cycle = 0; cycle <= 2; cycle += 1) {
   checksPass = !!(verify && verify.passed)
   await checkpoint(`verify-${cycle}-complete`, checksPass && blocking === 0 ? 'prepare serial apply' : 'repair blocking findings', [], [verify && verify.path].filter(Boolean))
   if (checksPass && blocking === 0) break
-  if (cycle === 2) break
+  if (cycle === maxRepairCycles) break
 
   phase('Repair')
   await checkpoint(`repair-${cycle + 1}-dispatch`, 'reconcile replacement patches', [`repair:${cycle + 1}`], [])

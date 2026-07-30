@@ -9,8 +9,6 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
-HARNESS_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
-AGENTS_ROOT="${AGENTS_HOME:-$HARNESS_ROOT}"
 
 usage() {
   cat <<'EOF'
@@ -230,6 +228,50 @@ require_cmd() {
   fi
 }
 
+resolve_routing() {
+  # Resolve model routing via provenant if available, else via scripts/model_route.py from product root.
+  # Returns JSON. If neither method is available, returns status="model_routing_unavailable".
+  local tool="$1" alias="$2" role="$3" lead_family="$4" diag_file="$5"
+  local model="$6" effort="$7" risk_tier="$8" capabilities_file="$9"
+  local -a cmd route_args
+
+  route_args=(--adapter "$tool" --alias "$alias" --role "$role" --lead-family "$lead_family" --require-distinct --adapter-gate direct-cli)
+  [ -n "$model" ] && route_args+=(--model "$model")
+  [ -n "$effort" ] && route_args+=(--effort "$effort")
+  [ -n "$risk_tier" ] && route_args+=(--risk-tier "$risk_tier")
+  [ -n "$capabilities_file" ] && [ -f "$capabilities_file" ] && route_args+=(--capabilities-file "$capabilities_file")
+
+  # Try provenant first if available
+  if command -v provenant >/dev/null 2>&1; then
+    cmd=(provenant route resolve "${route_args[@]}")
+    "${cmd[@]}" 2>>"$diag_file"
+    return $?
+  fi
+
+  # Fall back to scripts/model_route.py from product root
+  # Locate product root via git if possible, else try relative to this script
+  local product_root
+  if product_root="$(cd "$SCRIPT_DIR" && git rev-parse --show-toplevel 2>/dev/null)"; then
+    if [ -f "$product_root/scripts/model_route.py" ]; then
+      cmd=(python3 "$product_root/scripts/model_route.py" "resolve" "${route_args[@]}")
+      AGENT_FABRIC_PRODUCT_ROOT="$product_root" "${cmd[@]}" 2>>"$diag_file"
+      return $?
+    fi
+  fi
+
+  # Try relative path from script directory (should resolve to product root)
+  if [ -f "$SCRIPT_DIR/../../../scripts/model_route.py" ]; then
+    product_root="$(CDPATH= cd -- "$SCRIPT_DIR/../../.." && pwd)"
+    cmd=(python3 "$product_root/scripts/model_route.py" "resolve" "${route_args[@]}")
+    AGENT_FABRIC_PRODUCT_ROOT="$product_root" "${cmd[@]}" 2>>"$diag_file"
+    return $?
+  fi
+
+  # Unable to find routing capability; return typed status
+  printf '{"status":"model_routing_unavailable","reason":"neither provenant nor scripts/model_route.py found"}\n'
+  return 127
+}
+
 run_one() {  # $1 tool $2 model $3 effort -> writes clean answer to OUT, echoes JSON, returns 0/1
   local tool="$1" model="$2" effort="$3" tmpdir raw diag combined clean rc status opath guarantee family endpoint identity effort_substitution substitution requested_model requested_effort effort_source effort_capability_source route_json route_rc route_fields capabilities_file fallback_model primary_model catalog_model model_selection policy_override route_risk_tier
   model="$(resolve_model "$tool" "$model")"
@@ -269,24 +311,16 @@ run_one() {  # $1 tool $2 model $3 effort -> writes clean answer to OUT, echoes 
     echo "$tool disabled: pass --orchestrator-family so cross-family status can be proven" >"$diag"
     rc=1
   else
-    local -a route_cmd
-    route_cmd=("$AGENTS_ROOT/scripts/model-route" resolve
-      --adapter "$tool" --alias "$MODEL_ALIAS" --role "$ROUTE_ROLE"
-      --lead-family "$ORCH_FAMILY" --require-distinct --adapter-gate direct-cli)
     if [ "$tool" = "codex" ]; then
       capabilities_file="$tmpdir/codex-capabilities.json"
-      if ! "$AGENTS_ROOT/skills/orchestrate/scripts/codex_capabilities.py" \
+      if ! "$SCRIPT_DIR/codex_capabilities.py" \
         --out "$capabilities_file" >>"$diag" 2>&1; then
         rm -f "$capabilities_file"
       fi
-      route_cmd+=(--capabilities-file "$capabilities_file")
     fi
-    [ -n "$effort" ] && route_cmd+=(--effort "$effort")
-    [ -n "$model" ] && route_cmd+=(--model "$model")
-    [ -n "$RISK_TIER" ] && route_cmd+=(--risk-tier "$RISK_TIER")
-    route_json="$("${route_cmd[@]}" 2>>"$diag")"
-      route_rc=$?
-      route_fields="$(printf '%s' "$route_json" | python3 -c 'import json,sys; r=json.load(sys.stdin); print("|".join(str(r.get(k,"")) for k in ("status","resolved_model","model_family","endpoint_provider","identity_source","requested_effort","effort","effort_source","effort_capability_source","effort_substitution","substitution","fallback_model","catalog_model","model_selection","risk_tier","policy_override")))')"
+    route_json="$(resolve_routing "$tool" "$MODEL_ALIAS" "$ROUTE_ROLE" "$ORCH_FAMILY" "$diag" "$model" "$effort" "$RISK_TIER" "$capabilities_file")"
+    route_rc=$?
+    if route_fields="$(printf '%s' "$route_json" | python3 -c 'import json,sys; r=json.load(sys.stdin); print("|".join(str(r.get(k,"")) for k in ("status","resolved_model","model_family","endpoint_provider","identity_source","requested_effort","effort","effort_source","effort_capability_source","effort_substitution","substitution","fallback_model","catalog_model","model_selection","risk_tier","policy_override")))' 2>>"$diag")"; then
       IFS='|' read -r status model family endpoint identity requested_effort effort effort_source effort_capability_source effort_substitution substitution fallback_model catalog_model model_selection route_risk_tier policy_override <<<"$route_fields"
       [ -n "$requested_model" ] || requested_model="$model"
       if [ "$route_rc" -ne 0 ]; then
@@ -294,118 +328,124 @@ run_one() {  # $1 tool $2 model $3 effort -> writes clean answer to OUT, echoes 
         printf '%s\n' "$route_json" >>"$diag"
         rc=1
       else
-    status=""
-    case "$tool" in
-    claude)
-      guarantee="enforced"
-      local claude_verifier_system_prompt
-      claude_verifier_system_prompt="You are a non-interactive cross-family verifier. You may use only Read, Grep, and Glob to inspect the requested workspace. Do not mutate files, use shell commands, call Task/tool/function abstractions, or launch subagents. Answer only the requested final verification text from the supplied prompt."
-      if ! require_cmd claude "$diag"; then
-        status="tool_not_found"
-        rc=127
-      else
-        CLAUDE_CODE_DISABLE_WORKFLOWS=1 claude -p --bare --disable-slash-commands \
-          --no-session-persistence --permission-mode plan --tools "Read,Grep,Glob" \
-          --system-prompt "$claude_verifier_system_prompt" \
-          ${model:+--model "$model"} ${effort:+--effort "$effort"} \
-          <"$PROMPT_TMP" >"$raw" 2>"$diag"; rc=$?
+        status=""
+        case "$tool" in
+        claude)
+          guarantee="enforced"
+          local claude_verifier_system_prompt
+          claude_verifier_system_prompt="You are a non-interactive cross-family verifier. You may use only Read, Grep, and Glob to inspect the requested workspace. Do not mutate files, use shell commands, call Task/tool/function abstractions, or launch subagents. Answer only the requested final verification text from the supplied prompt."
+          if ! require_cmd claude "$diag"; then
+            status="tool_not_found"
+            rc=127
+          else
+            CLAUDE_CODE_DISABLE_WORKFLOWS=1 claude -p --bare --disable-slash-commands \
+              --no-session-persistence --permission-mode plan --tools "Read,Grep,Glob" \
+              --system-prompt "$claude_verifier_system_prompt" \
+              ${model:+--model "$model"} ${effort:+--effort "$effort"} \
+              <"$PROMPT_TMP" >"$raw" 2>"$diag"; rc=$?
+          fi
+          if [ "${status:-}" != "tool_not_found" ] && [ "$rc" -ne 0 ] && [ -n "$fallback_model" ] && cat "$raw" "$diag" | grep -Eqi "$model_fail_sig"; then
+            primary_model="$model"
+            : >"$raw"
+            : >"$diag"
+            model="$fallback_model"
+            identity="runtime-provider-fallback"
+            substitution="${substitution:+$substitution; }$primary_model unavailable; used $fallback_model"
+            CLAUDE_CODE_DISABLE_WORKFLOWS=1 claude -p --bare --disable-slash-commands \
+              --no-session-persistence --permission-mode plan --tools "Read,Grep,Glob" \
+              --system-prompt "$claude_verifier_system_prompt" \
+              --model "$model" ${effort:+--effort "$effort"} \
+              <"$PROMPT_TMP" >"$raw" 2>"$diag"; rc=$?
+          fi
+          if [ "${status:-}" != "tool_not_found" ] && [ "$rc" -ne 0 ] && cat "$raw" "$diag" | grep -Eqi "$fail_sig"; then
+            if CLAUDE_CODE_DISABLE_WORKFLOWS=1 claude auth status 2>/dev/null | grep -Eq '"loggedIn"[[:space:]]*:[[:space:]]*true'; then
+              : >"$raw"
+              : >"$diag"
+              guarantee="oauth_safe_mode"
+              CLAUDE_CODE_DISABLE_WORKFLOWS=1 claude -p --safe-mode --no-session-persistence --permission-mode plan \
+                --disable-slash-commands --tools "Read,Grep,Glob" \
+                --system-prompt "$claude_verifier_system_prompt" \
+                ${model:+--model "$model"} ${effort:+--effort "$effort"} \
+              <"$PROMPT_TMP" >"$raw" 2>"$diag"; rc=$?
+            fi
+          fi
+          if [ "$rc" -ne 0 ] && [ -n "$fallback_model" ] && [ "$model" = "$requested_model" ] && cat "$raw" "$diag" | grep -Eqi "$model_fail_sig"; then
+            primary_model="$model"
+            : >"$raw"
+            : >"$diag"
+            model="$fallback_model"
+            identity="runtime-provider-fallback"
+            substitution="${substitution:+$substitution; }$primary_model unavailable; used $fallback_model"
+            if [ "$guarantee" = "oauth_safe_mode" ]; then
+              CLAUDE_CODE_DISABLE_WORKFLOWS=1 claude -p --safe-mode --no-session-persistence --permission-mode plan \
+                --disable-slash-commands --tools "Read,Grep,Glob" --system-prompt "$claude_verifier_system_prompt" \
+                --model "$model" ${effort:+--effort "$effort"} <"$PROMPT_TMP" >"$raw" 2>"$diag"; rc=$?
+            else
+              CLAUDE_CODE_DISABLE_WORKFLOWS=1 claude -p --bare --disable-slash-commands \
+                --no-session-persistence --permission-mode plan --tools "Read,Grep,Glob" --system-prompt "$claude_verifier_system_prompt" \
+                --model "$model" ${effort:+--effort "$effort"} <"$PROMPT_TMP" >"$raw" 2>"$diag"; rc=$?
+            fi
+          fi ;;
+        codex)
+          guarantee="enforced"
+          if ! require_cmd codex "$diag"; then
+            status="tool_not_found"
+            rc=127
+          else
+            codex exec -s read-only --ignore-user-config --ignore-rules --ephemeral ${model:+-m "$model"} \
+              ${effort:+-c model_reasoning_effort="$effort"} \
+              - <"$PROMPT_TMP" >"$raw" 2>"$diag"; rc=$?
+          fi ;;
+        cursor)
+          guarantee="enforced"
+          if ! require_cmd cursor-agent "$diag"; then
+            status="tool_not_found"
+            rc=127
+          else
+            cursor-agent -p --trust --mode ask --sandbox enabled --output-format text \
+              ${model:+--model "$model"} "$(cat "$PROMPT_TMP")" </dev/null >"$raw" 2>"$diag"; rc=$?
+          fi ;;
+        kiro)
+          guarantee="none"
+          if [ "${CF_DISPATCH_ENABLE_KIRO:-0}" != "1" ]; then
+            status="unsafe_by_default"
+            echo "kiro disabled: no hard read-only mode verified in current local help" >"$diag"
+            rc=1
+          else
+            guarantee="best_effort"
+            if ! require_cmd kiro-cli "$diag"; then
+              status="tool_not_found"
+              rc=127
+            else
+              kiro-cli chat --no-interactive ${model:+--model "$model"} ${effort:+--effort "$effort"} \
+                "$(cat "$PROMPT_TMP")" </dev/null >"$raw" 2>"$diag"; rc=$?
+            fi
+          fi ;;
+        copilot)
+          guarantee="none"
+          if [ "${CF_DISPATCH_ENABLE_COPILOT:-0}" != "1" ]; then
+            status="unsafe_by_default"
+            echo "copilot disabled: non-interactive mode may require broad tool permissions" >"$diag"
+            rc=1
+          else
+            guarantee="prompt_only"
+            if ! require_cmd copilot "$diag"; then
+              status="tool_not_found"
+              rc=127
+            else
+              copilot -p "$PROMPT" --mode plan --silent --disable-builtin-mcps \
+                --available-tools='' --disallow-temp-dir ${model:+--model "$model"} ${effort:+--effort "$effort"} \
+                </dev/null >"$raw" 2>"$diag"; rc=$?
+            fi
+          fi ;;
+        *) emit_record "$tool" "$model" "$effort" "unknown_tool" 1 "" "none" "$family" "$endpoint" "$identity" "$effort_substitution" "$requested_effort" "$effort_source" "$effort_capability_source"; rm -f "$raw" "$diag"; return 1;;
+        esac
       fi
-      if [ "${status:-}" != "tool_not_found" ] && [ "$rc" -ne 0 ] && [ -n "$fallback_model" ] && cat "$raw" "$diag" | grep -Eqi "$model_fail_sig"; then
-        primary_model="$model"
-        : >"$raw"
-        : >"$diag"
-        model="$fallback_model"
-        identity="runtime-provider-fallback"
-        substitution="${substitution:+$substitution; }$primary_model unavailable; used $fallback_model"
-        CLAUDE_CODE_DISABLE_WORKFLOWS=1 claude -p --bare --disable-slash-commands \
-          --no-session-persistence --permission-mode plan --tools "Read,Grep,Glob" \
-          --system-prompt "$claude_verifier_system_prompt" \
-          --model "$model" ${effort:+--effort "$effort"} \
-          <"$PROMPT_TMP" >"$raw" 2>"$diag"; rc=$?
-      fi
-      if [ "${status:-}" != "tool_not_found" ] && [ "$rc" -ne 0 ] && cat "$raw" "$diag" | grep -Eqi "$fail_sig"; then
-        if CLAUDE_CODE_DISABLE_WORKFLOWS=1 claude auth status 2>/dev/null | grep -Eq '"loggedIn"[[:space:]]*:[[:space:]]*true'; then
-          : >"$raw"
-          : >"$diag"
-          guarantee="oauth_safe_mode"
-          CLAUDE_CODE_DISABLE_WORKFLOWS=1 claude -p --safe-mode --no-session-persistence --permission-mode plan \
-            --disable-slash-commands --tools "Read,Grep,Glob" \
-            --system-prompt "$claude_verifier_system_prompt" \
-            ${model:+--model "$model"} ${effort:+--effort "$effort"} \
-          <"$PROMPT_TMP" >"$raw" 2>"$diag"; rc=$?
-        fi
-      fi
-      if [ "$rc" -ne 0 ] && [ -n "$fallback_model" ] && [ "$model" = "$requested_model" ] && cat "$raw" "$diag" | grep -Eqi "$model_fail_sig"; then
-        primary_model="$model"
-        : >"$raw"
-        : >"$diag"
-        model="$fallback_model"
-        identity="runtime-provider-fallback"
-        substitution="${substitution:+$substitution; }$primary_model unavailable; used $fallback_model"
-        if [ "$guarantee" = "oauth_safe_mode" ]; then
-          CLAUDE_CODE_DISABLE_WORKFLOWS=1 claude -p --safe-mode --no-session-persistence --permission-mode plan \
-            --disable-slash-commands --tools "Read,Grep,Glob" --system-prompt "$claude_verifier_system_prompt" \
-            --model "$model" ${effort:+--effort "$effort"} <"$PROMPT_TMP" >"$raw" 2>"$diag"; rc=$?
-        else
-          CLAUDE_CODE_DISABLE_WORKFLOWS=1 claude -p --bare --disable-slash-commands \
-            --no-session-persistence --permission-mode plan --tools "Read,Grep,Glob" --system-prompt "$claude_verifier_system_prompt" \
-            --model "$model" ${effort:+--effort "$effort"} <"$PROMPT_TMP" >"$raw" 2>"$diag"; rc=$?
-        fi
-      fi ;;
-    codex)
-      guarantee="enforced"
-      if ! require_cmd codex "$diag"; then
-        status="tool_not_found"
-        rc=127
-      else
-        codex exec -s read-only --ignore-user-config --ignore-rules --ephemeral ${model:+-m "$model"} \
-          ${effort:+-c model_reasoning_effort="$effort"} \
-          - <"$PROMPT_TMP" >"$raw" 2>"$diag"; rc=$?
-      fi ;;
-    cursor)
-      guarantee="enforced"
-      if ! require_cmd cursor-agent "$diag"; then
-        status="tool_not_found"
-        rc=127
-      else
-        cursor-agent -p --trust --mode ask --sandbox enabled --output-format text \
-          ${model:+--model "$model"} "$(cat "$PROMPT_TMP")" </dev/null >"$raw" 2>"$diag"; rc=$?
-      fi ;;
-    kiro)
+    else
       guarantee="none"
-      if [ "${CF_DISPATCH_ENABLE_KIRO:-0}" != "1" ]; then
-        status="unsafe_by_default"
-        echo "kiro disabled: no hard read-only mode verified in current local help" >"$diag"
-        rc=1
-      else
-        guarantee="best_effort"
-        if ! require_cmd kiro-cli "$diag"; then
-          status="tool_not_found"
-          rc=127
-        else
-          kiro-cli chat --no-interactive ${model:+--model "$model"} ${effort:+--effort "$effort"} \
-            "$(cat "$PROMPT_TMP")" </dev/null >"$raw" 2>"$diag"; rc=$?
-        fi
-      fi ;;
-    copilot)
-      guarantee="none"
-      if [ "${CF_DISPATCH_ENABLE_COPILOT:-0}" != "1" ]; then
-        status="unsafe_by_default"
-        echo "copilot disabled: non-interactive mode may require broad tool permissions" >"$diag"
-        rc=1
-      else
-        guarantee="prompt_only"
-        if ! require_cmd copilot "$diag"; then
-          status="tool_not_found"
-          rc=127
-        else
-          copilot -p "$PROMPT" --mode plan --silent --disable-builtin-mcps \
-            --available-tools='' --disallow-temp-dir ${model:+--model "$model"} ${effort:+--effort "$effort"} \
-            </dev/null >"$raw" 2>"$diag"; rc=$?
-        fi
-      fi ;;
-      *) emit_record "$tool" "$model" "$effort" "unknown_tool" 1 "" "none" "$family" "$endpoint" "$identity" "$effort_substitution" "$requested_effort" "$effort_source" "$effort_capability_source"; rm -f "$raw" "$diag"; return 1;;
-    esac
+      status="routing_record_invalid"
+      echo "model routing returned no valid JSON record" >>"$diag"
+      rc=1
     fi
   fi
 

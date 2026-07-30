@@ -81,7 +81,7 @@ def test_first_use_fabric_docs_explain_bootstrap_trust_recovery():
     assert "WORKSPACE_NOT_TRUSTED" in agents
     assert "retry `fabric_bootstrap`" in agents
     assert "WORKSPACE_NOT_TRUSTED" in readme
-    assert "$HOME/.agents/scripts/agent-fabric workspace trust" in readme
+    assert "provenant fabric workspace trust" in readme
 
 
 def test_subagent_dispatch_contract_requires_task_class_bound_route_and_receipt():
@@ -171,10 +171,12 @@ def test_root_harness_checker_is_available():
     assert checker.stat().st_mode & 0o111
 
 
-def test_dispatchers_default_to_their_checkout_not_a_home_install():
+def test_dispatchers_use_the_stable_product_command_and_local_skill_helpers():
     dispatcher = (ROOT / "skills" / "orchestrate" / "scripts" / "cf_dispatch.sh").read_text()
-    assert 'AGENTS_ROOT="${AGENTS_HOME:-$HARNESS_ROOT}"' in dispatcher
-    assert '${AGENTS_HOME:-$HOME/.agents}/scripts/model-route' not in dispatcher
+    assert 'resolve_routing' in dispatcher  # tries provenant, falls back to model_route.py
+    assert '"$SCRIPT_DIR/codex_capabilities.py"' in dispatcher
+    assert "AGENTS_ROOT" not in dispatcher
+    assert "HARNESS_ROOT" not in dispatcher
 
 
 @pytest.mark.skipif(
@@ -184,10 +186,15 @@ def test_dispatchers_default_to_their_checkout_not_a_home_install():
 def test_claude_workflows_use_router_and_safe_implement_loop():
     for name in ("implement-run.js", "codebase-polish.js", "cross-verify.js"):
         text = (WORKFLOWS / name).read_text()
-        assert "model-route" in text
+        assert "provenant route resolve" in text
+        assert '${AGENTS_HOME:-$HOME/.agents}/scripts/model-route' not in text
         assert "claude-haiku-" not in text
     implementation = (WORKFLOWS / "implement-run.js").read_text()
-    assert "cycle <= 2" in implementation
+    assert "cycle <= maxRepairCycles" in implementation
+    assert "routine: 2" in implementation
+    assert "substantial: 4" in implementation
+    assert "crucial: 5" in implementation
+    assert "terminal: 5" in implementation
     assert "state: 'awaiting-human'" in implementation
     assert "git checkout" not in implementation
     assert "git restore" not in implementation
@@ -343,7 +350,7 @@ def _catalogue_check(readme_text: str, tmp_path: Path) -> int:
     readme = tmp_path / "README.md"
     readme.write_text(readme_text)
     return subprocess.run(
-        [sys.executable, str(ROOT / "scripts" / "render_skill_catalogue.py"), "--check", "--readme", str(readme)],
+        [sys.executable, str(ROOT / "scripts" / "render_skill_catalogue.py"), "--check", "--readme", str(readme), "--skills-root", str(ROOT / "skills")],
         capture_output=True,
         text=True,
     ).returncode
@@ -392,7 +399,7 @@ def test_catalogue_gate_never_rewrites_a_number_it_does_not_own(tmp_path):
     ))
     before = readme.read_text()
     result = subprocess.run(
-        [sys.executable, str(ROOT / "scripts" / "render_skill_catalogue.py"), "--readme", str(readme)],
+        [sys.executable, str(ROOT / "scripts" / "render_skill_catalogue.py"), "--readme", str(readme), "--skills-root", str(ROOT / "skills")],
         capture_output=True,
         text=True,
     )

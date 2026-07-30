@@ -4,12 +4,12 @@ Always invoke through the wrapper script. It applies `PLAYWRIGHT_CLI_SESSION`
 and the authorised-npx policy that the bare CLI does not:
 
 ```bash
-export AGENTS_HOME="${AGENTS_HOME:-$HOME/.agents}"
-export PWCLI="$AGENTS_HOME/skills/playwright/scripts/playwright_cli.sh"
+export PWCLI="<installed-playwright-skill>/scripts/playwright_cli.sh"
 "$PWCLI" --help
 ```
 
-This harness resolves skills under `${AGENTS_HOME:-$HOME/.agents}/skills`.
+Replace `<installed-playwright-skill>` with the absolute skill directory
+disclosed by the client that loaded this skill.
 
 Optional convenience alias:
 

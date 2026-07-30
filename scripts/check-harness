@@ -8,11 +8,21 @@ if [[ "${1:-}" == "--doctor" ]]; then
 fi
 [[ $# -eq 0 ]] || { echo "usage: check-harness [--doctor]" >&2; exit 2; }
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+PRODUCT_ROOT="${AGENT_FABRIC_PRODUCT_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
+SCRIPTS_ROOT="${PROVENANT_SCRIPTS_ROOT:-$PRODUCT_ROOT/scripts}"
+SKILLS_ROOT="${PROVENANT_SKILLS_ROOT:-$PRODUCT_ROOT/skills}"
+DOCS_ROOT="${PROVENANT_DOCS_ROOT:-$PRODUCT_ROOT/docs}"
+TESTS_ROOT="${PROVENANT_TESTS_ROOT:-$PRODUCT_ROOT/tests}"
+for component_root in "$PRODUCT_ROOT" "$SCRIPTS_ROOT" "$SKILLS_ROOT" "$DOCS_ROOT" "$TESTS_ROOT"; do
+  [[ "$component_root" == /* ]] || {
+    echo "check-harness: component roots must be absolute: $component_root" >&2
+    exit 3
+  }
+done
 if [[ -x "${HARNESS_PYTHON:-}" ]]; then
   PYTHON=("$HARNESS_PYTHON")
-elif [[ -x "$ROOT/.venv/bin/python" ]]; then
-  PYTHON=("$ROOT/.venv/bin/python")
+elif [[ -x "$PRODUCT_ROOT/.venv/bin/python" ]]; then
+  PYTHON=("$PRODUCT_ROOT/.venv/bin/python")
 elif PYTHON3="$(command -v python3 2>/dev/null)" &&
      "$PYTHON3" -c 'import pytest, yaml' >/dev/null 2>&1; then
   PYTHON=("$PYTHON3")
@@ -23,52 +33,54 @@ else
   exit 3
 fi
 
-cd "$ROOT"
-"${PYTHON[@]}" scripts/check-provenant-install.py
-"${PYTHON[@]}" scripts/check_harness.py
-"${PYTHON[@]}" scripts/check_specs.py
-"${PYTHON[@]}" scripts/check_adr_index.py
-"${PYTHON[@]}" scripts/check_spec_schema_drift.py
-"${PYTHON[@]}" scripts/check_spec_check_assertions.py
-"${PYTHON[@]}" skills/orchestrate/evals/check_skill_triggers.py
+cd "$PRODUCT_ROOT"
+"${PYTHON[@]}" "$SCRIPTS_ROOT/check-provenant-install.py"
+"${PYTHON[@]}" "$SCRIPTS_ROOT/check_harness.py"
+"${PYTHON[@]}" "$SCRIPTS_ROOT/check_specs.py"
+"${PYTHON[@]}" "$SCRIPTS_ROOT/check_adr_index.py"
+"${PYTHON[@]}" "$SCRIPTS_ROOT/check_spec_schema_drift.py"
+"${PYTHON[@]}" "$SCRIPTS_ROOT/check_spec_check_assertions.py"
+"${PYTHON[@]}" "$SKILLS_ROOT/orchestrate/evals/check_skill_triggers.py"
 # Lifecycle-skill alignment is a deterministic current-tree gate. Historical
 # provider routing evidence stays immutable under docs/archive and is not
 # rewritten or treated as a live-catalogue result.
-"${PYTHON[@]}" skills/orchestrate/evals/lifecycle_skill_evaluation.py validate-inputs
-"${PYTHON[@]}" skills/orchestrate/evals/lifecycle_skill_evaluation.py probe
+"${PYTHON[@]}" "$SKILLS_ROOT/orchestrate/evals/lifecycle_skill_evaluation.py" validate-inputs
+"${PYTHON[@]}" "$SKILLS_ROOT/orchestrate/evals/lifecycle_skill_evaluation.py" probe
 
 while IFS= read -r -d '' script; do
   case "$script" in
     *cross-family.sh) sh -n "$script" ;;
     *) bash -n "$script" ;;
   esac
-done < <(find skills -type f -name '*.sh' -print0)
+done < <(find "$SKILLS_ROOT" -type f -name '*.sh' -print0)
 
-"$ROOT/scripts/check-skill-javascript" skills
+"$SCRIPTS_ROOT/check-skill-javascript" "$SKILLS_ROOT"
 if [[ -d "$HOME/.claude/workflows" ]]; then
   while IFS= read -r -d '' workflow; do
     node --check "$workflow" >/dev/null
   done < <(find "$HOME/.claude/workflows" -maxdepth 1 -type f -name '*.js' -print0)
 fi
 
-"${PYTHON[@]}" scripts/public_release_check.py
-"${PYTHON[@]}" scripts/static-security-check.py
-"${PYTHON[@]}" scripts/validate_delivery_scenarios.py
-"${PYTHON[@]}" scripts/render_skill_catalogue.py --check
+"${PYTHON[@]}" "$SCRIPTS_ROOT/public_release_check.py"
+"${PYTHON[@]}" "$SCRIPTS_ROOT/static-security-check.py"
+"${PYTHON[@]}" "$SCRIPTS_ROOT/validate_delivery_scenarios.py" \
+  --product-root "$PRODUCT_ROOT" --skills-root "$SKILLS_ROOT"
+"${PYTHON[@]}" "$SCRIPTS_ROOT/render_skill_catalogue.py" --check \
+  --readme "$PRODUCT_ROOT/README.md" --skills-root "$SKILLS_ROOT"
 # House style is gated on the root documents and on every skill front door.
 # skills/*/references/ and docs/ are not yet clean and are not gated.
-"${PYTHON[@]}" skills/engineering-writing/scripts/check_engineering_style.py \
-  README.md \
-  HARNESS.md \
-  MAINTAINING.md \
-  AGENTS.md \
-  docs/ARCHITECTURE.md \
-  skills/*/SKILL.md
+"${PYTHON[@]}" "$SKILLS_ROOT/engineering-writing/scripts/check_engineering_style.py" \
+  "$PRODUCT_ROOT/README.md" \
+  "$PRODUCT_ROOT/HARNESS.md" \
+  "$PRODUCT_ROOT/MAINTAINING.md" \
+  "$PRODUCT_ROOT/AGENTS.md" \
+  "$DOCS_ROOT/ARCHITECTURE.md" \
+  "$SKILLS_ROOT"/*/SKILL.md
 
 "${PYTHON[@]}" -m pytest -q \
-  tests \
-  skills/implement/tests/test_checkpoint_run.py \
-  skills/orchestrate/evals/test_cf_dispatch.py
+  "$TESTS_ROOT" \
+  "$SKILLS_ROOT/implement/tests/test_checkpoint_run.py" \
+  "$SKILLS_ROOT/orchestrate/evals/test_cf_dispatch.py"
 
 if [[ "$DOCTOR" == true ]]; then
   echo "environment doctor"
@@ -85,10 +97,10 @@ if [[ "$DOCTOR" == true ]]; then
   else
     echo "herdr=WARN not found"
   fi
-  "$ROOT/scripts/model-route" resolve --adapter claude --alias flagship --role lead || true
+  provenant route resolve --adapter claude --alias flagship --role lead || true
   caps="$(mktemp)"
-  if "$ROOT/skills/orchestrate/scripts/codex_capabilities.py" --out "$caps"; then
-    "$ROOT/scripts/model-route" resolve --adapter codex --alias flagship --role lead --capabilities-file "$caps" || true
+  if "$SKILLS_ROOT/orchestrate/scripts/codex_capabilities.py" --out "$caps"; then
+    provenant route resolve --adapter codex --alias flagship --role lead --capabilities-file "$caps" || true
   else
     echo "codex-capabilities=WARN discovery failed"
   fi

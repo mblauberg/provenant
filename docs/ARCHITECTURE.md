@@ -46,7 +46,7 @@ which is advisory and recorded when unavailable or skipped.
 ```mermaid
 flowchart TB
     accTitle: The full delivery lifecycle and its three user gates
-    accDescr: Session prepares context and scope produces the specification, risk tier and authority. A user gate approves the specification or sends it back to scope. Inside the deliver kernel, execute runs implement, tdd, refactor or diagnose, then deterministic verification runs, then a separate conditional evaluate gate runs only when behaviour is stochastic or judgement bearing, then independent targeted review and other-primary review run in fresh contexts that never authored the work. Review pressure scales with risk according to HARNESS.md, with stronger targeted and adversarial pressure at terminal. A failed check or blocking finding returns to execute for at most 2 repair cycles — a guardrail against unbounded loops, not a target. The user acceptance gate accepts, rescopes or stops. Any external action needs a separate user authorisation before release and observation. A failed observation opens diagnose. Every path that returns work to scope, a structural review finding, a rescope at the acceptance gate, diagnostic evidence and the retrospect flywheel, converges on one back-to-scope collector rather than five separate return edges.
+    accDescr: Session prepares context and scope produces the specification, risk tier and authority. A user gate approves the specification or sends it back to scope. Inside the deliver kernel, execute runs implement, tdd, refactor or diagnose, then deterministic verification runs, then a separate conditional evaluate gate runs only when behaviour is stochastic or judgement bearing, then independent targeted review and other-primary review run in fresh contexts that never authored the work. Review pressure scales with risk according to HARNESS.md, with stronger targeted and adversarial pressure at terminal. A failed check or blocking finding returns to execute under the risk-tier repair budget: routine 2 cycles, substantial 4, and crucial and terminal 5 — a guardrail against unbounded loops, not a target. The user acceptance gate accepts, rescopes or stops. Any external action needs a separate user authorisation before release and observation. A failed observation opens diagnose. Every path that returns work to scope, a structural review finding, a rescope at the acceptance gate, diagnostic evidence and the retrospect flywheel, converges on one back-to-scope collector rather than five separate return edges.
     SE(["session"]) --> SC["scope<br/>spec, risk tier, authority"]
     SC --> G1{{"USER GATE<br/>approve spec, risk tier, one-way doors"}}
     G1 -. "send back" .-> SC
@@ -61,7 +61,7 @@ flowchart TB
       Q == "yes" ==> EV["evaluate<br/>repeatable judgement gate"]
       EV -. "failed" .-> EX
       EV --> RV["review<br/>independent, fresh context<br/>targeted lenses plus other primary at substantial+"]
-      RV -. "repair, at most 2 cycles" .-> EX
+      RV -. "repair by tier: routine 2, substantial 4, crucial/terminal 5" .-> EX
     end
 
     RV --> G2{{"USER GATE<br/>acceptance"}}
