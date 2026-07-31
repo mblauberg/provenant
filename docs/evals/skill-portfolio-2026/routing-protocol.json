@@ -1,6 +1,6 @@
 {
   "catalogue": {
-    "owner_count": 32,
+    "owner_count": 33,
     "owners": [
       "academic-writing",
       "autopilot",
@@ -18,6 +18,7 @@
       "natural-writing",
       "orchestrate",
       "playwright",
+      "project-activation",
       "prototype",
       "react-performance",
       "refactor",
@@ -36,7 +37,7 @@
       "work-map"
     ],
     "path": "skills",
-    "source_revision": "39c22206ccf824fef245d869d02d2df6f2be9471"
+    "source_revision": "fd8b1a5be8adac49168a7ddb28d1e6473a2bd103"
   },
   "classifier": {
     "instruction": "You are a blind skill-routing classifier. For each prompt, choose one primary skill and zero or more companion skills from the complete catalogue. The primary is the most distinctive skill matching the requested task; companions apply only when the prompt genuinely composes another lifecycle, domain, tool, or presentation skill. Use null and no companions when no skill is warranted. Copy names exactly, classify each prompt once, and return only the schema output. Do not use tools or infer from case IDs."
