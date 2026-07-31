@@ -8,6 +8,11 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
+
+import manage_installation as installation_manager  # noqa: E402
+
+
 SCRIPT = ROOT / "scripts" / "install-skills"
 MANAGER = ROOT / "scripts" / "manage_installation.py"
 SHARED = "_shared"
@@ -745,6 +750,85 @@ def test_reconcile_applies_safe_managed_rename_with_history(tmp_path):
     assert manifest["managed"]["gamma"]["history"][-1]["from"] == "alpha"
     assert not (target / "alpha").exists()
     assert (target / "gamma").resolve() == (source / "gamma").resolve()
+
+
+def test_reconcile_rechecks_managed_conflicts_after_rename(tmp_path, monkeypatch):
+    source = tiny_source(tmp_path)
+    target = tmp_path / "installed"
+    assert manager(target, "install", source).returncode == 0
+    (source / "alpha").rename(source / "gamma")
+    delta = source / "delta"
+    delta.mkdir()
+    (delta / "SKILL.md").write_text(
+        "---\nname: delta\ndescription: Added after the original install.\n---\n"
+    )
+    renames = tmp_path / "renames.json"
+    renames.write_text(
+        json.dumps({"schema_version": 1, "renames": [{"from": "alpha", "to": "gamma"}]})
+    )
+    foreign = tmp_path / "foreign-managed"
+    foreign.mkdir()
+    manifest_before = manifest_for(target).read_bytes()
+    original_apply = installation_manager._apply_renames
+
+    def apply_and_interleave(manifest, operations):
+        original_apply(manifest, operations)
+        (target / "beta").unlink()
+        (target / "beta").symlink_to(foreign)
+
+    monkeypatch.setattr(installation_manager, "_apply_renames", apply_and_interleave)
+
+    with pytest.raises(
+        installation_manager.InstallError,
+        match="^conflicting managed targets changed outside harness: beta$",
+    ):
+        installation_manager.execute("reconcile", source, target, renames)
+
+    assert (target / "beta").resolve() == foreign.resolve()
+    assert not (target / "delta").exists()
+    assert manifest_for(target).read_bytes() == manifest_before
+
+
+def test_reconcile_rechecks_custom_conflicts_after_rename(tmp_path, monkeypatch):
+    source = tiny_source(tmp_path)
+    custom_source = custom_skill_source(tmp_path)
+    target = tmp_path / "installed"
+    assert manager(target, "install", source, custom_source=custom_source).returncode == 0
+    (source / "alpha").rename(source / "gamma")
+    delta = source / "delta"
+    delta.mkdir()
+    (delta / "SKILL.md").write_text(
+        "---\nname: delta\ndescription: Added after the original install.\n---\n"
+    )
+    renames = tmp_path / "renames.json"
+    renames.write_text(
+        json.dumps({"schema_version": 1, "renames": [{"from": "alpha", "to": "gamma"}]})
+    )
+    foreign = tmp_path / "foreign-custom"
+    foreign.mkdir()
+    manifest_before = manifest_for(target).read_bytes()
+    original_apply = installation_manager._apply_renames
+
+    def apply_and_interleave(manifest, operations):
+        original_apply(manifest, operations)
+        (target / "instance-skill").unlink()
+        (target / "instance-skill").symlink_to(foreign)
+
+    monkeypatch.setattr(installation_manager, "_apply_renames", apply_and_interleave)
+
+    with pytest.raises(installation_manager.InstallError) as error:
+        installation_manager.execute(
+            "reconcile", source, target, renames, custom_source
+        )
+
+    assert str(error.value) == (
+        "custom targets changed outside harness: manually restore instance-skill from "
+        f"{(custom_source / 'instance-skill').resolve()} or provide --custom-source "
+        "pointing to the intended custom skills directory"
+    )
+    assert (target / "instance-skill").resolve() == foreign.resolve()
+    assert not (target / "delta").exists()
+    assert manifest_for(target).read_bytes() == manifest_before
 
 
 def test_reconcile_preserves_compatible_unmanaged_rename_target(tmp_path):

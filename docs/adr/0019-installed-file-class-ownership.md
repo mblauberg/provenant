@@ -1,8 +1,8 @@
 # ADR 0019: Installed file-class ownership by product, instance, or seeded template
 
-**Status:** Accepted 2026-07-30 (user, issue #530); applies [ADR
-0001](0001-personal-first-product-compatible.md) and [ADR
-0004](0004-per-domain-truth-owners.md)
+**Status:** Accepted 2026-07-30 (user, issue #530); amended 2026-07-31 (user,
+issue #561); applies [ADR 0001](0001-personal-first-product-compatible.md) and
+[ADR 0004](0004-per-domain-truth-owners.md)
 
 ## Context
 
@@ -128,6 +128,23 @@ checked as absent can still be replaced between the check and the rename, so the
 seeder reports `existing` for a path an attacker created in that window. The
 rename cannot be redirected, so the outcome is a skipped seed, not a misdirected
 write.
+
+**On reconcile's two checks.** A `reconcile` first checks the plan, applies
+declared renames, then recomputes and checks the plan again before it acts on
+the remaining items. The second check uses the post-rename ownership state, so
+an observed managed or custom conflict is refused before any later link or
+manifest mutation.
+
+This closes the window in which the rename itself changes what the first plan
+says. It does not make reconcile atomic. The target tree can still change after
+the final check and before the next link replacement, unlink or manifest write,
+so a concurrent actor can still make that write operate on a different state
+from the one checked. That residual is accepted on the same grounds and
+recorded rather than fixed: the installer has no multi-path transaction, and
+closing this last interval would need a locking or snapshot design outside
+issue #561. The checks turn a conflict observed at either plan boundary into a
+loud refusal, but they do not establish a privilege boundary or a
+concurrent-writer guarantee.
 
 **Note on the two rows that both involve the installer writing a file.** They
 are not the same mechanism. The desired state is *created* by the installer as

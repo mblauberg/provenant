@@ -290,6 +290,39 @@ def _write_manifest(target: Path, manifest: dict[str, Any]) -> None:
     manifest_io.write_manifest(target, manifest)
 
 
+def _raise_on_conflicts(
+    items: list[dict[str, str]],
+    manifest: dict[str, Any],
+    *,
+    excluded_names: set[str],
+) -> None:
+    custom_conflicts = [
+        item["name"]
+        for item in items
+        if item["state"] == "custom-conflicting"
+        and item["name"] not in excluded_names
+    ]
+    if custom_conflicts:
+        remedies = "; ".join(
+            "manually restore "
+            f"{name} from {manifest['custom'][name]['source_target']} "
+            "or provide --custom-source pointing to the intended custom skills directory"
+            for name in custom_conflicts
+        )
+        raise InstallError(f"custom targets changed outside harness: {remedies}")
+    conflicts = [
+        item["name"]
+        for item in items
+        if item["state"] == "conflicting"
+        and item["name"] not in excluded_names
+    ]
+    if conflicts:
+        raise InstallError(
+            "conflicting managed targets changed outside harness: "
+            + ", ".join(conflicts)
+        )
+
+
 def _load_renames(path: Path | None) -> list[dict[str, str]]:
     if path is None:
         return []
@@ -469,31 +502,7 @@ def execute(
         custom_source_provided=custom_source_provided,
     )
     renamed_old = {operation["old"] for operation in rename_operations}
-    custom_conflicts = [
-        item["name"]
-        for item in items
-        if item["state"] == "custom-conflicting"
-        and item["name"] not in renamed_old
-    ]
-    if custom_conflicts:
-        remedies = "; ".join(
-            "manually restore "
-            f"{name} from {manifest['custom'][name]['source_target']} "
-            "or provide --custom-source pointing to the intended custom skills directory"
-            for name in custom_conflicts
-        )
-        raise InstallError(f"custom targets changed outside harness: {remedies}")
-    conflicts = [
-        item["name"]
-        for item in items
-        if item["state"] == "conflicting"
-        and item["name"] not in renamed_old
-    ]
-    if conflicts:
-        raise InstallError(
-            "conflicting managed targets changed outside harness: "
-            + ", ".join(conflicts)
-        )
+    _raise_on_conflicts(items, manifest, excluded_names=renamed_old)
     target.mkdir(parents=True, exist_ok=True)
     changed: list[str] = [operation["new"] for operation in rename_operations]
     if rename_operations:
@@ -505,6 +514,7 @@ def execute(
             manifest,
             custom_source_provided=custom_source_provided,
         )
+        _raise_on_conflicts(items, manifest, excluded_names=set())
     if action in {"install", "reconcile"}:
         for item in items:
             name, state = item["name"], item["state"]

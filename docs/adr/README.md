@@ -7,7 +7,7 @@ cross-reference dependency. ADRs 0009–0010 were ratified later, on 2026-07-15;
 ADRs 0011–0012 were ratified on 2026-07-16; ADR 0013 was ratified on
 2026-07-18; ADR 0014 was ratified on 2026-07-20; ADRs 0015–0016 were ratified
 on 2026-07-21; ADRs 0017–0018 were ratified on 2026-07-28; ADR 0019 was
-ratified on 2026-07-30.
+ratified on 2026-07-30 and amended on 2026-07-31.
 
 | ADR | Title | Status |
 |---|---|---|
@@ -29,4 +29,4 @@ ratified on 2026-07-30.
 | [0016](0016-gate-b-restate-permanent-by-design.md) | Keep GATE-B' skipped by design after the RESTATE decision | Accepted |
 | [0017](0017-specifications-own-non-derivable-intent.md) | Specifications own non-derivable intent only | Accepted |
 | [0018](0018-accept-portal-stdio-v1-launch-custody.md) | Accept `portal-stdio-v1` as review-portal launch custody | Accepted |
-| [0019](0019-installed-file-class-ownership.md) | Installed file-class ownership by product, instance, or seeded template | Accepted |
+| [0019](0019-installed-file-class-ownership.md) | Installed file-class ownership by product, instance, or seeded template | Accepted (amended 2026-07-31) |
