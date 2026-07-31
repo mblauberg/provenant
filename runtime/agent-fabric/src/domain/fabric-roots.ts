@@ -44,6 +44,12 @@ export function resolveFabricRoots(options: FabricRootResolutionOptions): Fabric
   };
 }
 
+export function hasExplicitInstanceRoot(options: FabricRootResolutionOptions = {}): boolean {
+  const environment = options.environment ?? process.env;
+  return optionalPath(options.instanceRootFlag) !== undefined
+    || environmentPath(environment, "AGENT_FABRIC_INSTANCE_ROOT") !== undefined;
+}
+
 function shellQuote(value: string): string {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
 }

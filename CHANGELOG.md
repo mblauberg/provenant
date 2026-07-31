@@ -88,6 +88,10 @@ The current pre-release tree includes:
 
 ### Changed
 
+- `AGENTS_HOME` now names only the product root. When it names a non-`~/.agents`
+  checkout without an explicit instance root, the next `install-harness` run
+  seeds the instance at `~/.agents` instead of changing that checkout, while
+  preserving the worktree separation invariant (#549).
 - Applied the `writing-great-skills` doctrine across the catalogue (epic #124):
   merged `skill-audit` + `skill-authoring` into the branched `skill-craft`,
   merged `frontend-design` + `frontend-review` into the branched `ui-ux-design`,

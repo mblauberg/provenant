@@ -728,6 +728,8 @@ def test_inherited_agents_home_stale_dist_keeps_the_exact_refusal(
         os.utime(diagnosed / manifest, (now, now))
     _mark_install_root(diagnosed)
     _write(diagnosed / "node_modules/.keep")
+    (diagnosed / "scripts").mkdir()
+    shutil.copy2(PROTOCOL_BUILD, diagnosed / "scripts/agent-fabric-protocol-build")
     npm_marker, env = _repair_fixture(
         tmp_path,
         diagnosed,
@@ -1978,6 +1980,30 @@ def test_protocol_preflight_reports_a_partial_install_as_typed_and_repairable(
 
     assert result.returncode == 78
     assert "AGENT_FABRIC_PREFLIGHT_INCOMPLETE" in result.stderr
+
+
+def test_protocol_preflight_does_not_emit_a_missing_repair_script(
+    tmp_path: Path,
+) -> None:
+    root, _marker, _fake_node = _fixture(
+        tmp_path,
+        launcher_mode="packaged",
+        protocol_dist="missing",
+    )
+    (root / "scripts/agent-fabric-protocol-build").unlink()
+
+    result = subprocess.run(
+        [str(root / "scripts/agent-fabric-protocol-preflight")],
+        env={**os.environ, "AGENTS_HOME": str(root)},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 78
+    assert "AGENT_FABRIC_PROTOCOL_BUILD_INCOMPLETE" in result.stderr
+    assert "agent-fabric-protocol-build" in result.stderr
+    assert "repair: AGENTS_HOME=" not in result.stderr
     assert "scripts/lib" in result.stderr
 
 

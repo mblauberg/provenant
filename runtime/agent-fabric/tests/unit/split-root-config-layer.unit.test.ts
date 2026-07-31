@@ -309,14 +309,21 @@ describe("split-layout startup path binding", () => {
 
   it("never offers the global layer back to itself as the local layer", () => {
     const configuration = resolveSplitConfiguration({
-      environment: {
-        AGENTS_HOME: "/fixture/agents-home",
-        AGENT_FABRIC_INSTANCE_ROOT: "/fixture/agents-home",
-      },
+      environment: { AGENTS_HOME: "/fixture/agents-home" },
       exists: () => true,
     });
 
     expect(configuration.globalConfigPath).toBe("/fixture/agents-home/config/agent-fabric.yaml");
+    expect(configuration.localConfigPath).toBeUndefined();
+  });
+
+  it("does not offer the default instance layer to an AGENTS_HOME worktree", () => {
+    const configuration = resolveSplitConfiguration({
+      environment: { AGENTS_HOME: "/fixture/worktree" },
+      exists: () => true,
+    });
+
+    expect(configuration.globalConfigPath).toBe("/fixture/worktree/config/agent-fabric.yaml");
     expect(configuration.localConfigPath).toBeUndefined();
   });
 });

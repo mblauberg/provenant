@@ -40,7 +40,7 @@ import {
   seatExpiryWarningDue,
 } from "./mcp-roster-renewal.js";
 import type { FabricPaths } from "./paths.js";
-import { fabricCliCommand, resolveFabricRoots } from "../domain/fabric-roots.js";
+import { fabricCliCommand, hasExplicitInstanceRoot, resolveFabricRoots } from "../domain/fabric-roots.js";
 import { MCP_SEATS, resolveSeatPaths, type SeatMetadata } from "./seat-store.js";
 import { trustedWorkspaceRoots } from "./workspace-trust.js";
 
@@ -184,11 +184,12 @@ function generationIdentityMatches(
  * Diagnostics compose configuration exactly as daemon startup does.
  *
  * `config` is the product's shipped layer and `localConfig` is the instance's
- * narrowing layer, present only when the instance ships one and the operator
- * has not pinned a single file with `--trusted-config` (ADR 0019). Reading one
- * layer instead would let `status` and `doctor` report a widened policy the
- * daemon refuses to start on, or fail on a split instance that is perfectly
- * valid because it holds no product-owned file at all.
+ * narrowing layer, present only when the instance root was explicitly selected,
+ * the instance ships a layer and the operator has not pinned a single file
+ * with `--trusted-config` (ADR 0019). Reading one layer instead would let
+ * `status` and `doctor` report a widened policy the daemon refuses to start on,
+ * or fail on a split instance that is perfectly valid because it holds no
+ * product-owned file at all.
  */
 export function resolveStatusPaths(arguments_: string[]): { productRoot: string; instanceRoot: string; config: string; localConfig: string | undefined; compatibility: string; compatibilitySchema: string; modelRouting: string; reviewProfile: string } {
   const agentsHomeFlag = option(arguments_, "--agents-home");
@@ -202,11 +203,12 @@ export function resolveStatusPaths(arguments_: string[]): { productRoot: string;
     process.env.AGENT_FABRIC_PRODUCT_ROOT,
     process.env.AGENT_FABRIC_INSTANCE_ROOT,
   ].some((value) => value !== undefined && value.length > 0);
-  const { productRoot, instanceRoot } = resolveFabricRoots({
+  const rootOptions = {
     agentsHomeFlag: agentsHomeFlag ?? (hasConfiguredRoot ? undefined : process.cwd()),
     productRootFlag,
     instanceRootFlag,
-  });
+  };
+  const { productRoot, instanceRoot } = resolveFabricRoots(rootOptions);
   const pinnedConfig = option(arguments_, "--trusted-config");
   const config = resolve(pinnedConfig ?? join(productRoot, "config", "agent-fabric.yaml"));
   const instanceConfig = resolve(join(instanceRoot, "config", "agent-fabric.yaml"));
@@ -215,7 +217,10 @@ export function resolveStatusPaths(arguments_: string[]): { productRoot: string;
     instanceRoot,
     config,
     localConfig:
-      pinnedConfig === undefined && instanceConfig !== config && existsSync(instanceConfig)
+      pinnedConfig === undefined
+        && hasExplicitInstanceRoot(rootOptions)
+        && instanceConfig !== config
+        && existsSync(instanceConfig)
         ? instanceConfig
         : undefined,
     compatibility: resolve(option(arguments_, "--compatibility") ?? join(productRoot, "config", "adapter-compatibility.yaml")),

@@ -173,7 +173,7 @@ configuration_contract:
   unknown_keys: error
   trusted_layers:
     - ${AGENTS_HOME}/config/agent-fabric.yaml
-    - ${XDG_CONFIG_HOME}/agent-fabric/local.yaml
+    - <instance-root>/config/agent-fabric.yaml
   untrusted_project_layer: <project>/.agents/agent-fabric.yaml
   run_layer: validated-run-authority-envelope
   merge_rules:

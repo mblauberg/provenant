@@ -259,10 +259,11 @@ class can be committed by accident.
 
 Split-layout startup binds the product root for the global config layer,
 `adapter-compatibility.yaml`, the compatibility schema and the `${AGENTS_HOME}`
-token, and the instance root for the local layer. In today's fused layout the
-two roots are the same directory, so every one of those bindings resolves where
-it resolved before and the change is a no-op until an instance root actually
-differs.
+token, and the instance root for the local layer. The fused layout still has
+both roots equal, with both defaulting to `~/.agents`. After this change
+`AGENTS_HOME` selects only the product root, so an ambient value naming another
+checkout leaves the instance root at `~/.agents` and makes the bindings split
+even without an explicit instance-root selection.
 
 Root resolution itself is `resolveFabricRoots`
 (`runtime/agent-fabric/src/domain/fabric-roots.ts`, [issue

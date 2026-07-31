@@ -27,7 +27,7 @@ herdr_dist="$herdr_root/dist/bin.js"
 console_root="$agents_home/runtime/agent-fabric-console"
 console_dist="$console_root/dist/bin.js"
 build_lock_library="$script_dir/lib/agent-fabric-protocol-build-lock.sh"
-repair_command="AGENTS_HOME=\"$agents_home\" \"$script_dir/agent-fabric-warm\""
+repair_command="AGENTS_HOME=\"$agents_home\" \"$agents_home/scripts/agent-fabric-warm\""
 
 . "$script_dir/lib/agent-fabric-workspace-freshness.sh"
 

@@ -6,7 +6,7 @@ import { loadFabricConfig } from "../config/index.js";
 import { FabricError } from "../errors.js";
 import { verifyProviderConformance } from "../adapters/provider-conformance.js";
 import { loadAdapterModelConstraints } from "../adapters/model-selection.js";
-import { resolveFabricRoots } from "../domain/fabric-roots.js";
+import { hasExplicitInstanceRoot, resolveFabricRoots } from "../domain/fabric-roots.js";
 
 const VALUE_OPTIONS = [
   "--adapter",
@@ -50,11 +50,12 @@ export async function resolveAdapterExecutableCli(
   if (adapterId === undefined) {
     throw new Error("adapter executable requires --adapter <id>");
   }
-  const { productRoot, instanceRoot } = resolveFabricRoots({
+  const rootOptions = {
     agentsHomeFlag: parsed["--agents-home"],
     productRootFlag: parsed["--product-root"],
     instanceRootFlag: parsed["--instance-root"],
-  });
+  };
+  const { productRoot, instanceRoot } = resolveFabricRoots(rootOptions);
   const compatibilityPath = resolve(
     parsed["--compatibility"] ?? join(productRoot, "config", "adapter-compatibility.yaml"),
   );
@@ -62,7 +63,10 @@ export async function resolveAdapterExecutableCli(
   const configPath = resolve(pinnedConfig ?? join(productRoot, "config", "agent-fabric.yaml"));
   const instanceConfigPath = resolve(join(instanceRoot, "config", "agent-fabric.yaml"));
   const localConfigPath =
-    pinnedConfig === undefined && instanceConfigPath !== configPath && existsSync(instanceConfigPath)
+    pinnedConfig === undefined
+      && hasExplicitInstanceRoot(rootOptions)
+      && instanceConfigPath !== configPath
+      && existsSync(instanceConfigPath)
       ? instanceConfigPath
       : undefined;
   const schemaPath = resolve(

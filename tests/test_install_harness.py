@@ -65,9 +65,9 @@ def instance_root_for(home: Path) -> Path:
 def run(platform: str, home: Path, *arguments: str, **extra_env):
     env = os.environ.copy()
     env.update({"HOME": str(home)})
-    # Pin the instance root to the scratch HOME rather than inheriting whatever
-    # AGENTS_HOME the developer or CI happens to export. Without this an ambient
-    # AGENTS_HOME would make the installer seed a real instance under test.
+    # Keep the instance root deterministic in the scratch HOME. AGENTS_HOME now
+    # names only the product root, but an explicit instance value also keeps the
+    # test independent of any caller-provided instance selection.
     env["AGENT_FABRIC_INSTANCE_ROOT"] = str(instance_root_for(home))
     env.update(extra_env)
     return subprocess.run(
