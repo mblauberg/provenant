@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const candidates = [
@@ -40,6 +40,30 @@ export function protocolBuildPreflightPassed() {
   if (result.error !== undefined) throw result.error;
   if (result.status !== 0) {
     process.exitCode = result.status ?? 1;
+    return false;
+  }
+
+  const attestationPath = join(
+    installRoot,
+    "runtime",
+    "agent-fabric",
+    "scripts",
+    "verify-npm-ci-attestation.mjs",
+  );
+  if (!existsSync(attestationPath)) {
+    process.stderr.write(
+      "AGENT_FABRIC_PREFLIGHT_INCOMPLETE: missing runtime/agent-fabric/scripts/verify-npm-ci-attestation.mjs\n"
+      + "repair: reinstall the harness scripts directory, including runtime/agent-fabric/scripts/lib\n",
+    );
+    process.exitCode = 78;
+    return false;
+  }
+  const attestation = spawnSync(process.execPath, [attestationPath, installRoot], {
+    stdio: "inherit",
+  });
+  if (attestation.error !== undefined) throw attestation.error;
+  if (attestation.status !== 0) {
+    process.exitCode = attestation.status ?? 1;
     return false;
   }
   return true;

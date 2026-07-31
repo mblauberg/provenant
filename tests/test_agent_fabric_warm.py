@@ -32,6 +32,15 @@ def _fixture(tmp_path: Path) -> tuple[Path, Path, Path]:
     if SCRIPT_LIBRARY_DIR.exists():
         shutil.copytree(SCRIPT_LIBRARY_DIR, root / "scripts/lib")
 
+    # These tests own the warm rebuild predicate, not npm-install
+    # attestation. Keep that boundary focused with a passing verifier double;
+    # the real verifier's fail-closed behaviour is covered by
+    # test_agent_fabric_entrypoint_attestation.py.
+    _write(
+        root / "runtime/agent-fabric/scripts/verify-npm-ci-attestation.mjs",
+        "// Passing verifier double for warm-predicate tests.\n",
+    )
+
     # The wrapper treats node_modules as the installation readiness gate.
     (root / "node_modules").mkdir()
     protocol_source = root / "runtime/agent-fabric-protocol/src/index.ts"

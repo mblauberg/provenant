@@ -283,20 +283,24 @@ class can be committed by accident.
 
 Split-layout startup binds the product root for the global config layer,
 `adapter-compatibility.yaml`, the compatibility schema and the `${AGENTS_HOME}`
-token, and the instance root for the local layer. In today's fused layout the
-two roots are the same directory, so every one of those bindings resolves where
-it resolved before and the change is a no-op until an instance root actually
-differs.
+token, and the instance root for the local layer. The fused layout still has
+both roots equal, with both defaulting to `~/.agents`. After this change
+`AGENTS_HOME` selects only the product root, so an ambient value naming another
+checkout leaves the instance root at `~/.agents` and makes the bindings split
+even without an explicit instance-root selection.
 
 Root resolution itself is `resolveFabricRoots`
 (`runtime/agent-fabric/src/domain/fabric-roots.ts`, [issue
-#528](https://github.com/mblauberg/provenant/issues/528)): flag, then
-`AGENT_FABRIC_PRODUCT_ROOT` or `AGENT_FABRIC_INSTANCE_ROOT`, then `AGENTS_HOME`,
-then `~/.agents`. This decision adds no second resolver. One consequence of that
-precedence is worth stating plainly: an `--agents-home` flag sets both roots, so
-a split layout is expressed by the two explicit root inputs, not by
-`AGENTS_HOME`, which after the split names the product because it is the token
-the shipped adapter commands expand against.
+#528](https://github.com/mblauberg/provenant/issues/528)): an explicit
+`--product-root` or `--instance-root` flag, then `--agents-home` for both roots,
+then the matching `AGENT_FABRIC_PRODUCT_ROOT` or `AGENT_FABRIC_INSTANCE_ROOT`,
+then `AGENTS_HOME` for the product root, then `~/.agents` for any root still
+unresolved. This decision adds no second resolver. The instance root has no
+`AGENTS_HOME` fallback. One consequence of that precedence is worth stating
+plainly: an `--agents-home` flag sets both roots, so a split layout is
+expressed by the two explicit root inputs, not by `AGENTS_HOME`, which after
+the split names the product because it is the token the shipped adapter
+commands expand against.
 
 Layering is uniform across every consumer that reads trusted configuration.
 `provenant status`, `provenant doctor` and `agent-fabric adapter executable`

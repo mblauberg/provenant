@@ -46,8 +46,24 @@ raise SystemExit(int(os.environ.get("PROVENANT_TEST_EXIT", "0")))
     return checkout, command
 
 
+#: Every test here asserts what the dispatcher itself does with the fabric root
+#: variables, so inheriting them from the ambient environment makes the file
+#: answer a different question than it asks. The split-root CI job exports
+#: `AGENT_FABRIC_INSTANCE_ROOT` for the whole job, which is exactly the case
+#: that caught this: three tests asserting an unset instance root read the
+#: job's own instance instead. Scrub them, then let each test name what it
+#: wants.
+AMBIENT_ROOT_VARIABLES = (
+    "AGENT_FABRIC_INSTANCE_ROOT",
+    "AGENT_FABRIC_PRODUCT_ROOT",
+    "AGENTS_HOME",
+)
+
+
 def invoke(command: Path, *args: str, cwd: Path, stdin: str = "", **env_updates: str):
     env = os.environ.copy()
+    for name in AMBIENT_ROOT_VARIABLES:
+        env.pop(name, None)
     env.update(env_updates)
     return subprocess.run(
         [str(command), *args],
@@ -163,11 +179,100 @@ def test_split_root_preserves_instance_root_for_mcp_child(tmp_path):
         cwd=tmp_path,
         AGENT_FABRIC_SEAT="codex",
         AGENT_FABRIC_PRODUCT_ROOT=str(checkout),
-        AGENTS_HOME=str(instance_root),
+        AGENT_FABRIC_INSTANCE_ROOT=str(instance_root),
+        AGENTS_HOME=str(checkout),
     )
 
     assert result.returncode == 0, result.stderr
     assert result.stdout == f"{instance_root}|{checkout}|{checkout}\n"
+
+
+def test_installed_stub_does_not_materialize_the_default_instance_root(tmp_path):
+    checkout, _ = make_checkout(tmp_path)
+    command = install_stub(tmp_path)
+    wrapper = checkout / "scripts/agent-fabric-mcp"
+    wrapper.write_text(
+        "#!/bin/sh\n"
+        "printf '%s|%s|%s\\n' "
+        '"${AGENT_FABRIC_INSTANCE_ROOT-<unset>}" '
+        '"${AGENT_FABRIC_PRODUCT_ROOT-<unset>}" '
+        '"${AGENTS_HOME-<unset>}"\n'
+    )
+    wrapper.chmod(0o755)
+
+    result = invoke(
+        command,
+        cwd=tmp_path,
+        AGENT_FABRIC_SEAT="codex",
+        AGENT_FABRIC_PRODUCT_ROOT=str(checkout),
+        AGENTS_HOME=str(checkout),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == f"<unset>|{checkout}|{checkout}\n"
+
+
+def test_checkout_dispatcher_does_not_inherit_agents_home_as_instance_root(tmp_path):
+    dispatcher = tmp_path / "dispatcher"
+    dispatcher_scripts = dispatcher / "scripts"
+    dispatcher_scripts.mkdir(parents=True)
+    shutil.copy2(SOURCE, dispatcher_scripts / "provenant")
+    shutil.copytree(ROOT / "scripts/lib", dispatcher_scripts / "lib")
+
+    product, _ = make_checkout(tmp_path / "product")
+    owner = product / "scripts/agent-fabric"
+    owner.write_text(
+        "#!/bin/sh\n"
+        "printf '%s|%s|%s\\n' "
+        '"${AGENT_FABRIC_INSTANCE_ROOT-<unset>}" '
+        '"${AGENT_FABRIC_PRODUCT_ROOT-<unset>}" '
+        '"${AGENTS_HOME-<unset>}"\n'
+    )
+    owner.chmod(0o755)
+
+    result = invoke(
+        dispatcher_scripts / "provenant",
+        "fabric",
+        cwd=tmp_path,
+        AGENT_FABRIC_PRODUCT_ROOT=str(product),
+        AGENTS_HOME=str(product),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == f"<unset>|{product}|{product}\n"
+
+
+def test_checkout_dispatcher_resolves_the_instance_pointer_without_agents_home_fallback(tmp_path):
+    dispatcher = tmp_path / "dispatcher"
+    dispatcher_scripts = dispatcher / "scripts"
+    dispatcher_scripts.mkdir(parents=True)
+    shutil.copy2(SOURCE, dispatcher_scripts / "provenant")
+    shutil.copytree(ROOT / "scripts/lib", dispatcher_scripts / "lib")
+
+    ambient_product, _ = make_checkout(tmp_path / "ambient-product")
+    pointed_product, _ = make_checkout(tmp_path / "pointed-product")
+    home = tmp_path / "home"
+    pointer = home / ".agents/.agent-fabric/product-root.json"
+    pointer.parent.mkdir(parents=True)
+    pointer.write_text(json.dumps({
+        "schema_version": 1,
+        "product_root": str(pointed_product),
+    }))
+    for product, marker in ((ambient_product, "ambient"), (pointed_product, "pointed")):
+        owner = product / "scripts/agent-fabric"
+        owner.write_text(f"#!/bin/sh\nprintf '%s\\n' {marker}\n")
+        owner.chmod(0o755)
+
+    result = invoke(
+        dispatcher_scripts / "provenant",
+        "fabric",
+        cwd=tmp_path,
+        HOME=str(home),
+        AGENTS_HOME=str(ambient_product),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "pointed\n"
 
 
 def test_explicit_product_root_overrides_instance_pointer_and_agents_home(tmp_path):

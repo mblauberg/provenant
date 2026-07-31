@@ -138,3 +138,29 @@ resolve_tsx_loader() {
     _aftsx_dir=$_aftsx_parent
   done
 }
+
+# resolve_attested_tsx_loader PRODUCT_ROOT
+#
+# Dependency attestation covers exactly PRODUCT_ROOT/node_modules. Launchers
+# that rely on that receipt must not use the broader workspace walk above:
+# doing so could select a package-local shadow tree whose bytes were never
+# included in the receipt. The accepted loader's real path must also remain
+# inside the attested tree, so a symlink cannot redirect execution to mutable
+# bytes outside it.
+resolve_attested_tsx_loader() {
+  _aftsx_attested_root=$(_aftsx_physical "$1")
+  _aftsx_attested_modules="$_aftsx_attested_root/node_modules"
+  _aftsx_attested_modules_real=$(_aftsx_physical "$_aftsx_attested_modules")
+  _aftsx_attested_candidate="$_aftsx_attested_modules/tsx/dist/loader.mjs"
+  [ -f "$_aftsx_attested_candidate" ] || return 1
+  _aftsx_attested_accepted=$(_aftsx_validate "$_aftsx_attested_candidate") || return 1
+  case "$_aftsx_attested_accepted" in
+    "$_aftsx_attested_modules_real/.bin" | "$_aftsx_attested_modules_real/.bin"/*)
+      return 1
+      ;;
+    "$_aftsx_attested_modules_real"/*)
+      printf '%s\n' "$_aftsx_attested_accepted"
+      ;;
+    *) return 1 ;;
+  esac
+}

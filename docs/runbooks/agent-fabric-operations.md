@@ -31,7 +31,7 @@ acceptance, release or publication.
 ## Preflight
 
 ```sh
-npm ci --no-audit --no-fund
+scripts/install-agent-fabric-dependencies
 npm run build
 npm run check
 npm run test:evaluation
@@ -42,6 +42,11 @@ git diff --check
 python3 skills/deliver/scripts/validate_delivery.py \
   '<canonical-run>/RUN.json' --workspace-root "$PWD" --verify-hashes
 ```
+
+The dependency helper runs the root `npm ci` and records the npm-install
+attestation used by the bare-Node launch gates. If the product commit,
+lockfile, package integrity values or installed execution tree changes, rerun
+the helper before launching Fabric.
 
 Then verify the selected compatibility entries. The adapter registry records
 activation policy, stable launch paths, runtime requirements and provider
@@ -255,8 +260,8 @@ at `<instance-root>/.agent-fabric/product-root.json`:
 {"schema_version": 1, "product_root": "/absolute/product/path"}
 ```
 
-The instance root is selected from `AGENT_FABRIC_INSTANCE_ROOT`, inherited
-`AGENTS_HOME`, then `~/.agents`. The shim resolves the product root from
+The instance root is selected from `AGENT_FABRIC_INSTANCE_ROOT`, then
+`~/.agents`. The shim resolves the product root from
 `AGENT_FABRIC_PRODUCT_ROOT`, the pointer file, inherited `AGENTS_HOME`, then
 `~/.agents`. Invalid, relative, stale or unreadable pointers are ignored.
 The shim passes the resolved product and instance roots to the checkout-owned
@@ -345,7 +350,7 @@ the supported host, restore the package closure and verify both boundaries
 with:
 
 ```sh
-npm ci --no-audit --no-fund
+scripts/install-agent-fabric-dependencies
 npm run compatibility:check:primary
 ```
 
@@ -385,10 +390,12 @@ CLI root selection supports `--product-root PATH` for runtime code, bundled
 scripts and schemas, and `--instance-root PATH` for configuration and mutable
 instance state. The matching environment variables are
 `AGENT_FABRIC_PRODUCT_ROOT` and `AGENT_FABRIC_INSTANCE_ROOT`; both must be
-absolute paths. Resolution order is the specific root flag, `--agents-home`,
-the matching split-root environment variable, `AGENTS_HOME`, then
-`~/.agents`. Direct `status` and `doctor` source invocation retains its legacy
-`process.cwd()` fallback when none of those controls is configured.
+absolute paths. Resolution order is the matching specific root flag, then
+`--agents-home` for both roots, then the matching split-root environment
+variable. `AGENTS_HOME` is a product-root fallback only; an unresolved instance
+root falls back to `~/.agents`. Direct `status` and `doctor` source invocation
+retains its legacy `process.cwd()` fallback when none of those controls is
+configured.
 
 Do not start this command merely because a pane or PID is absent. Re-run
 `status` and `doctor`; on-demand bootstrap or the existing supervisor owns the

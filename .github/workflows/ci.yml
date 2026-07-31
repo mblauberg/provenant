@@ -120,7 +120,6 @@ jobs:
             split-root:
               - *ci-contract
               - *node-workspace
-              - '.github/split-root-known-red.txt'
               - '.github/split-root-known-red-ts.txt'
               - '.github/split-root-known-flaky.txt'
               - 'config/**'
@@ -303,34 +302,16 @@ jobs:
       - name: Run full Python suite under split roots
         env:
           HARNESS_PYTHON: ${{ github.workspace }}/.venv/bin/python
+        # No deselect list and no inverse gate any more.  Both entries of
+        # `.github/split-root-known-red.txt` were owned by #563 and both went
+        # green with the root-pairing fix in this change, which the inverse gate
+        # reported as `NOW PASSING, remove from the ledger` before failing the
+        # job.  That is the gate working, so the ledger and its machinery are
+        # deleted here rather than kept empty: a Python split-root failure now
+        # simply fails this step, which is what should have happened all along.
         run: |
           set -euo pipefail
-          deselect=()
-          while read -r node _owner; do
-            deselect+=("--deselect=$node")
-          done < <(grep -vE '^[[:space:]]*(#|$)' .github/split-root-known-red.txt)
-          printf 'deselected known-red cases: %d\n' "${#deselect[@]}"
-          printf '  %s\n' ${deselect[@]+"${deselect[@]}"}
-          $HARNESS_PYTHON -m pytest tests/ -q ${deselect[@]+"${deselect[@]}"}
-      - name: Assert every known-red case is still red
-        env:
-          HARNESS_PYTHON: ${{ github.workspace }}/.venv/bin/python
-        run: |
-          set -euo pipefail
-          # Inverse gate.  A deselected case that starts PASSING means the
-          # owning issue landed, and the ledger entry has to be deleted in that
-          # PR.  Without this step the deselect list would quietly outlive the
-          # bugs it names, which is the failure mode this whole job exists for.
-          status=0
-          while read -r node owner; do
-            if $HARNESS_PYTHON -m pytest "$node" -q >/dev/null 2>&1; then
-              printf 'NOW PASSING, remove from the ledger: %s (%s)\n' "$node" "$owner"
-              status=1
-            else
-              printf 'still red as recorded: %s (%s)\n' "$node" "$owner"
-            fi
-          done < <(grep -vE '^\s*(#|$)' .github/split-root-known-red.txt)
-          exit "$status"
+          $HARNESS_PYTHON -m pytest tests/ -q
       - name: Run full workspace suite under split roots
         env:
           # vitest colours its summary on this runner, and the escape codes sit
@@ -393,29 +374,19 @@ jobs:
             exit 1
           }
           printf 'split-root failures accounted for exactly: %d\n' "$expected"
-      - name: Run split-root TypeScript oracle with exact expected failure
+      - name: Run split-root TypeScript oracle
         working-directory: runtime/agent-fabric
         env:
           NO_COLOR: "1"
           FORCE_COLOR: "0"
-        run: |
-          set -o pipefail
-          set +e
-          # Strip colour before matching.  vitest pads AND colours its summary,
-          # so escape codes land between "Tests" and the count and a grep over
-          # the raw output can never match, however careful the pattern is.
-          output="$(npx vitest run --config vitest.split-root.config.ts 2>&1 | perl -pe 's/\e\[[0-9;]*[A-Za-z]//g; s/\^\[\[[0-9;]*[A-Za-z]//g')"
-          status=$?
-          set -e
-          printf '%s\n' "$output"
-          test "$status" -eq 1
-          # vitest pads its summary columns, so match on a whitespace-tolerant
-          # pattern.  Pin the count of failures, not the count of passes: a new
-          # oracle probe must not have to edit this step, but a second failure
-          # or a green run must break it.
-          grep -F 'does not offer a defaulted instance layer as an explicit narrowing layer' <<<"$output"
-          grep -Eq 'Test Files +1 failed \(1\)' <<<"$output"
-          grep -Eq 'Tests +1 failed \|' <<<"$output"
+        # The oracle used to be pinned to exactly one named failure, because
+        # `does not offer a defaulted instance layer as an explicit narrowing
+        # layer` was the fail-open defect #549 owned and had not yet fixed. That
+        # pin has done its job: the probe passes, so the pin is deleted here
+        # rather than left to rot into a gate that asserts a bug still exists.
+        # The oracle is now an ordinary must-be-green step, and any regression
+        # in it fails this job on its own merits.
+        run: npx vitest run --config vitest.split-root.config.ts
 
   review-portal-supervisor:
     name: Review portal supervisor (${{ matrix.os }})
