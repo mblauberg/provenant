@@ -559,6 +559,7 @@ def gate_revert_probe(
     if not probes:
         raise GateError("revert-probe found no changed production hunks")
     survivors: list[DiffHunk] = []
+    inconclusive: list[DiffHunk] = []
     for index, hunk in enumerate(probes, 1):
         with _temporary_tree(source_root, scratch_root) as directory:
             probe_root = Path(directory)
@@ -570,15 +571,43 @@ def gate_revert_probe(
             results = _run_suite(commands, probe_root, tests)
         for result in results:
             _print_output(result)
-        if not _all_assertion_failures(results):
+        # Three outcomes, and only one of them is a finding.
+        #
+        # A SURVIVOR is a suite that stayed GREEN with the hunk reverted: the
+        # tests genuinely do not constrain the change, which is what this gate
+        # exists to catch. A red made of assertion failures KILLED the hunk.
+        #
+        # Anything else is INCONCLUSIVE, not a survivor. Reverting a hunk can
+        # break the very import the tests need, and a suite that could not run
+        # is evidence of nothing. Counting that as a survivor reports "this
+        # change is unconstrained" on evidence that says only "I could not
+        # tell", which is the failure this gate is supposed to prevent, not
+        # commit.
+        failures = [result for result in results if result.returncode != 0]
+        if not failures:
             survivors.append(hunk)
-            print(f"HUNK {index} path={hunk.path} status=INVALID")
+            print(f"HUNK {index} path={hunk.path} status=SURVIVED suite stayed green")
+        elif any(result.classification is not FailureClass.ASSERTION for result in failures):
+            inconclusive.append(hunk)
+            print(f"HUNK {index} path={hunk.path} status=INCONCLUSIVE non-assertion red")
+        elif len(failures) != len(results):
+            # Mixed evidence: one target caught the revert and another stayed
+            # green. Ambiguous is not good enough, so this stays a finding.
+            survivors.append(hunk)
+            print(f"HUNK {index} path={hunk.path} status=SURVIVED mixed evidence")
         else:
             print(f"HUNK {index} path={hunk.path} status=KILLED")
     if survivors:
-        print(f"REVERT_PROBE: FAIL hunks={len(probes)} survivors={len(survivors)}")
+        print(
+            f"REVERT_PROBE: FAIL hunks={len(probes)} survivors={len(survivors)} "
+            f"inconclusive={len(inconclusive)}"
+        )
         return 1
-    print(f"REVERT_PROBE: PASS hunks={len(probes)} killed={len(probes)} survivors=0")
+    print(
+        f"REVERT_PROBE: PASS hunks={len(probes)} "
+        f"killed={len(probes) - len(inconclusive)} survivors=0 "
+        f"inconclusive={len(inconclusive)}"
+    )
     return 0
 
 

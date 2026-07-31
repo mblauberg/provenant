@@ -149,6 +149,38 @@ def test_revert_probe_fails_when_a_reverted_hunk_survives(tmp_path):
     assert gate_revert_probe(source, [hunk], [command], [], tmp_path / "scratch") == 1
 
 
+def _hunk(path="production.py"):
+    return DiffHunk(
+        path=path,
+        header=(),
+        hunk_header="@@ -1,1 +1,1 @@",
+        body=("-old", "+new"),
+        old_start=1,
+        old_count=1,
+        new_start=1,
+        new_count=1,
+        old_lines=("old",),
+        new_lines=("new",),
+    )
+
+
+def test_revert_probe_does_not_count_a_non_assertion_red_as_a_survivor(tmp_path):
+    """A suite that cannot run is not evidence that nothing constrains the hunk.
+
+    Reverting a hunk can break the very import the tests need, which reds the
+    suite for a mechanical reason. That is an inability to measure, and counting
+    it as a survivor reports "this change is unconstrained" on evidence that says
+    only "I could not tell". A survivor is a suite that stayed GREEN.
+    """
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "production.py").write_text("new\n", encoding="utf-8")
+    # Exits non-zero with a collection error, never an assertion failure.
+    command = "python3 -c 'import no_such_module_at_all'"
+
+    assert gate_revert_probe(source, [_hunk()], [command], [], tmp_path / "scratch") == 0
+
+
 def test_changed_lines_mutation_fails_for_a_surviving_crucial_mutant(tmp_path):
     source = tmp_path / "source"
     source.mkdir()
