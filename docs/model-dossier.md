@@ -77,16 +77,20 @@ not read an absent `Watch out for` as an endorsement.
 - **Cost:** flagship-tier.
 - **Reach:** `codex` adapter (preferred), `cursor` as fallback; `openai` family.
 
-### GPT-5.6 Luna (OpenAI scout)
+### GPT-5.6 Luna (OpenAI workhorse and scout)
 
-- **Good at:** a cheaper Sol with similar limitations. Good for parallel
-  fan-out where you want several Sol-shaped opinions and cannot pay for several
-  Sols. Suits trivial and well-bounded slices.
+- **Good at:** a cheaper Sol with similar limitations. Since the roughly 80%
+  price cut of July 2026 it is the family workhorse of choice at `high` or
+  `xhigh` effort, and the preferred destination for high-token legwork across
+  families. Still the fan-out pick where you want several Sol-shaped opinions
+  and cannot pay for several Sols.
 - **Watch out for:** the same over-engineering tendency as Sol, at lower
   capability. A loose brief gets the same sprawl with less of the correctness
-  that redeems it.
-- **Cost:** cheap; the point of using it.
-- **Reach:** `codex` adapter, `openai` family, `scout` alias.
+  that redeems it; raised effort narrows that gap but a tight brief closes it.
+  Effort must be raised explicitly at dispatch — the catalogue's task-class
+  efforts would hand it `medium`.
+- **Cost:** cheap, and far cheaper than it was; the point of using it.
+- **Reach:** `codex` adapter, `openai` family, `workhorse` and `scout` aliases.
 
 ### Sonnet 5 (Anthropic workhorse)
 
