@@ -40,7 +40,7 @@ flowchart TB
     U(["User request"]) --> LOOP["Delivery loop<br/>scope · implement · verify · review"]
     LOOP --> OUT(["Scoped, verified,<br/>independently reviewed change"])
     H["HARNESS.md — the constitution<br/>authority · lifecycle · review pressure"] -. "sets the rules" .-> LOOP
-    SK["Skills library — 32 Agent Skills<br/>one procedure per task, loaded on match"] -. "supplies the procedure" .-> LOOP
+    SK["Skills library — 33 Agent Skills<br/>one procedure per task, loaded on match"] -. "supplies the procedure" .-> LOOP
     F["Agent Fabric — cross-provider execution<br/>Claude Code and Codex review each other;<br/>optional providers stay separately activated"] -. "runs and reviews the work" .-> LOOP
     classDef out fill:#1f6f43,stroke:#4fd08a,color:#ffffff,stroke-width:2px
     class OUT out
@@ -49,7 +49,7 @@ flowchart TB
 - **Harness:** [`HARNESS.md`](HARNESS.md) is the constitution. It sets
   authority, the delivery lifecycle, and how much review pressure each risk tier
   owes, and stays small so it can be read every session.
-- **Skills:** the <!--skills-->32<!--/skills--> Agent Skills are task-specific
+- **Skills:** the <!--skills-->33<!--/skills--> Agent Skills are task-specific
   procedures, one folder with a `SKILL.md` each. Only the one-line descriptions
   sit in permanent context; a full body loads only when the task matches it.
 - **Agent Fabric:** cross-provider execution and durable coordination, so the
@@ -142,11 +142,11 @@ From the product checkout,
 reclaims the harness-owned skill links and nothing else. The bootstrap line and
 the Codex block remain until removed by hand.
 
-Before first use, the agent trusts only the exact canonical Git root (or
-non-Git directory) with `provenant fabric workspace trust`, then calls
-`fabric_bootstrap` when no seat exists. If bootstrap runs first,
-`WORKSPACE_NOT_TRUSTED` provides the recovery command. The same connection
-exposes Fabric tools; no project files are needed.
+Before first use, run `provenant project activate [PATH]`. It trusts the Git or
+non-Git root in the existing registry. Activation does not bootstrap seats. Use
+`fabric_bootstrap`; low-level trust remains
+`provenant fabric workspace trust`. If bootstrap runs first,
+`WORKSPACE_NOT_TRUSTED` provides recovery.
 
 </details>
 
@@ -252,11 +252,11 @@ direct command-line calls are a preflight or a recorded degraded fallback.
 
 ## Skill library
 
-The full <!--skills-->32<!--/skills-->-skill catalogue, grouped by area:
+The full <!--skills-->33<!--/skills-->-skill catalogue, grouped by area:
 
 <!-- skill-catalogue:start -->
 <details>
-<summary>All 32 skills</summary>
+<summary>All 33 skills</summary>
 
 | Area | Skills |
 |---|---|
@@ -266,6 +266,7 @@ The full <!--skills-->32<!--/skills-->-skill catalogue, grouped by area:
 | Design and diagrams | [`ui-ux-design`](skills/ui-ux-design/SKILL.md), [`prototype`](skills/prototype/SKILL.md), [`d2-diagrams`](skills/d2-diagrams/SKILL.md), [`uml-diagrams`](skills/uml-diagrams/SKILL.md) |
 | Web engineering | [`playwright`](skills/playwright/SKILL.md), [`react-performance`](skills/react-performance/SKILL.md), [`tanstack-query`](skills/tanstack-query/SKILL.md), [`typescript-clean-code`](skills/typescript-clean-code/SKILL.md), [`web-stack-conventions`](skills/web-stack-conventions/SKILL.md) |
 | Harness development | [`grill-me`](skills/grill-me/SKILL.md), [`skill-craft`](skills/skill-craft/SKILL.md) |
+| Project operations | [`project-activation`](skills/project-activation/SKILL.md) |
 | Presentation | [`caveman`](skills/caveman/SKILL.md) |
 
 </details>

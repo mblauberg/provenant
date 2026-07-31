@@ -188,6 +188,20 @@ function isConnectionFailure(error: unknown): boolean {
 }
 
 async function main(arguments_: string[]): Promise<void> {
+  if (arguments_[0] === "project" && (arguments_[1] === "activate" || arguments_[1] === "status")) {
+    const action = arguments_[1];
+    if (arguments_.length > 3) throw new Error(`project ${action} accepts at most one path`);
+    const projectPath = arguments_[2] ?? process.cwd();
+    const [{ resolveFabricPaths }, project] = await Promise.all([
+      import("./paths.js"),
+      import("./project.js"),
+    ]);
+    const output = action === "activate"
+      ? await project.runProjectActivate(projectPath, resolveFabricPaths())
+      : await project.runProjectStatus(projectPath, resolveFabricPaths());
+    process.stdout.write(`${JSON.stringify(output, null, 2)}\n`);
+    return;
+  }
   if (arguments_[0] === "status") {
     const [{ fabricStatus }, { resolveFabricPaths }] = await Promise.all([
       import("./status.js"),
@@ -256,7 +270,7 @@ async function main(arguments_: string[]): Promise<void> {
       import("./mcp-provision.js"),
       import("./paths.js"),
     ]);
-    const output = await provisionMcpSeats(arguments_.slice(2), resolveFabricPaths({ createDirectories: true }));
+    const output = await provisionMcpSeats(arguments_.slice(2), resolveFabricPaths());
     process.stdout.write(`${JSON.stringify(output, null, 2)}\n`);
     return;
   }
@@ -273,7 +287,7 @@ async function main(arguments_: string[]): Promise<void> {
     const output = await bootstrapMcpSeat({
       environment: { ...process.env, AGENT_FABRIC_SEAT: seat },
       cwd: process.cwd(),
-      paths: resolveFabricPaths({ createDirectories: true }),
+      paths: resolveFabricPaths(),
     });
     const { credential: _credential, credentials, ...safeOutput } = output;
     const publicOutput = {
@@ -329,7 +343,7 @@ async function main(arguments_: string[]): Promise<void> {
     ]);
     const output = await provisionObserverCredential({
       project,
-      paths: resolveFabricPaths({ createDirectories: true }),
+      paths: resolveFabricPaths(),
     });
     process.stdout.write(`${JSON.stringify(output, null, 2)}\n`);
     return;
@@ -341,7 +355,7 @@ async function main(arguments_: string[]): Promise<void> {
     ]);
     const output = await provisionMcpPeerSeats(
       arguments_.slice(2),
-      resolveFabricPaths({ createDirectories: true }),
+      resolveFabricPaths(),
     );
     process.stdout.write(`${JSON.stringify(output, null, 2)}\n`);
     return;
@@ -382,7 +396,7 @@ async function main(arguments_: string[]): Promise<void> {
     return;
   }
   throw new Error(
-    "usage: agent-fabric status [--project PATH] [--agents-home PATH] [--product-root PATH] [--instance-root PATH] [--trusted-config PATH] [--compatibility PATH] [--compatibility-schema PATH] | doctor [--consume-provider-quota] [--project PATH] [--agents-home PATH] [--product-root PATH] [--instance-root PATH] [--trusted-config PATH] [--compatibility PATH] [--compatibility-schema PATH] | bootstrap --seat claude|codex [--inspect] | inspect [--database PATH] [--runtime-directory PATH] [--json] | adapter executable --adapter ID [--agents-home PATH] [--product-root PATH] [--instance-root PATH] [--config PATH] [--compatibility PATH] [--compatibility-schema PATH] | adapter invocation --adapter agy|cursor|kiro [agy: --mode plan|accept-edits --model MODEL --prompt TEXT [--resume-reference REF] [--log-file PATH] [--cwd PATH] [--timeout-ms MS] | cursor: --mode plan|ask --model MODEL --prompt TEXT [--resume-reference REF] [--cwd PATH] [--timeout-ms MS] | kiro: --model MODEL --agent-engine v2 [--cwd PATH] [--timeout-ms MS]] [--agents-home PATH] [--product-root PATH] [--instance-root PATH] [--config PATH] [--compatibility PATH] [--compatibility-schema PATH] | workspace trust|inspect|status|list|revoke [PATH] | retention status|preview [--database PATH] | retention archive --run-id ID --output ABSOLUTE_DIRECTORY [--database PATH] | database archive-and-fresh [--database PATH] --archive ABSOLUTE_NEW_DIRECTORY [--confirm-source-set sha256:DIGEST] [--unattended-approval-asserted-by PRINCIPAL] | receipt verify --run-receipt PATH | daemon run (...) | observe --socket PATH --capability-file PATH --run-id ID --cursor PATH [--once] [--interval-ms N] | herdr steer (...) | mcp provision --project PATH --project-session-id ID --session-revision N --session-generation N --run-id ID --run-revision N --chair-seat SEAT --chair-agent-id ID --chair-generation N --chair-lease-id ID --seat-bindings SEAT=AGENT@GENERATION,... --expires-at ISO_TIMESTAMP | mcp peer-provision --project PATH --seat SEAT [--seat SEAT ...] [--expires-at ISO_TIMESTAMP] | mcp seat-path --project PATH --seat SEAT",
+    "usage: agent-fabric project activate|status [PATH] | status [--project PATH] [--agents-home PATH] [--product-root PATH] [--instance-root PATH] [--trusted-config PATH] [--compatibility PATH] [--compatibility-schema PATH] | doctor [--consume-provider-quota] [--project PATH] [--agents-home PATH] [--product-root PATH] [--instance-root PATH] [--trusted-config PATH] [--compatibility PATH] [--compatibility-schema PATH] | bootstrap --seat claude|codex [--inspect] | inspect [--database PATH] [--runtime-directory PATH] [--json] | adapter executable --adapter ID [--agents-home PATH] [--product-root PATH] [--instance-root PATH] [--config PATH] [--compatibility PATH] [--compatibility-schema PATH] | adapter invocation --adapter agy|cursor|kiro [agy: --mode plan|accept-edits --model MODEL --prompt TEXT [--resume-reference REF] [--log-file PATH] [--cwd PATH] [--timeout-ms MS] | cursor: --mode plan|ask --model MODEL --prompt TEXT [--resume-reference REF] [--cwd PATH] [--timeout-ms MS] | kiro: --model MODEL --agent-engine v2 [--cwd PATH] [--timeout-ms MS]] [--agents-home PATH] [--product-root PATH] [--instance-root PATH] [--config PATH] [--compatibility PATH] [--compatibility-schema PATH] | workspace trust|inspect|status|list|revoke [PATH] | retention status|preview [--database PATH] | retention archive --run-id ID --output ABSOLUTE_DIRECTORY [--database PATH] | database archive-and-fresh [--database PATH] --archive ABSOLUTE_NEW_DIRECTORY [--confirm-source-set sha256:DIGEST] [--unattended-approval-asserted-by PRINCIPAL] | receipt verify --run-receipt PATH | daemon run (...) | observe --socket PATH --capability-file PATH --run-id ID --cursor PATH [--once] [--interval-ms N] | herdr steer (...) | mcp provision --project PATH --project-session-id ID --session-revision N --session-generation N --run-id ID --run-revision N --chair-seat SEAT --chair-agent-id ID --chair-generation N --chair-lease-id ID --seat-bindings SEAT=AGENT@GENERATION,... --expires-at ISO_TIMESTAMP | mcp peer-provision --project PATH --seat SEAT [--seat SEAT ...] [--expires-at ISO_TIMESTAMP] | mcp seat-path --project PATH --seat SEAT",
   );
 }
 

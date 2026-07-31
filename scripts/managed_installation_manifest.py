@@ -122,6 +122,14 @@ def load_manifest(target: Path) -> dict[str, Any]:
             or not Path(item["source_target"]).is_absolute()
         ):
             raise InstallError(f"installation manifest custom link is invalid: {name}")
+    # Ensure managed and custom skill names are disjoint
+    managed_names = set(data["managed"].keys())
+    custom_names = set(custom.keys())
+    overlap = managed_names & custom_names
+    if overlap:
+        raise InstallError(
+            f"installation manifest contains overlapping managed and custom skill names: {', '.join(sorted(overlap))}"
+        )
     return data
 
 

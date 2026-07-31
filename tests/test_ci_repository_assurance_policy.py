@@ -69,6 +69,7 @@ LOCAL_ACTION = re.compile(r"^\./\.github/actions/[a-z0-9-]+$")
 FILTERED_JOBS = {
     "harness": "harness",
     "fabric": "fabric",
+    "split-root": "split-root",
     "console": "console",
     "herdr": "herdr",
     "review-portal-supervisor": "review-portal-supervisor",
@@ -109,6 +110,7 @@ JOB_PERMISSIONS = {
     "detect-changes": {"pull-requests": "read"},
     "harness": {"contents": "read"},
     "fabric": {"contents": "read"},
+    "split-root": {"contents": "read"},
     "review-portal-supervisor": {"contents": "read"},
     "console": {"contents": "read"},
     "herdr": {"contents": "read"},
