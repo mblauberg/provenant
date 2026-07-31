@@ -360,7 +360,7 @@ describe("project activation front doors", () => {
       trusted: true,
       trustedRoot: await realpath(value.project),
     });
-    expect(JSON.parse(await readFile(join(value.paths.stateDirectory, "trusted-workspaces.json")))).toMatchObject({
+    expect(JSON.parse(await readFile(join(value.paths.stateDirectory, "trusted-workspaces.json"), "utf8"))).toMatchObject({
       entries: [expect.objectContaining({ canonicalPath: await realpath(value.project) })],
     });
   });
