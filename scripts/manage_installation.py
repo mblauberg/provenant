@@ -293,6 +293,7 @@ def _write_manifest(target: Path, manifest: dict[str, Any]) -> None:
 def _raise_on_conflicts(
     items: list[dict[str, str]],
     manifest: dict[str, Any],
+    target: Path,
     *,
     excluded_names: set[str],
 ) -> None:
@@ -395,8 +396,37 @@ def _prepare_renames(
             "create_new": create_new,
             "manage_new": new in managed or new in creating,
             "entry": _entry(new, skills[new], list(target_history[new])),
+            "old_entry": managed[old],  # Store for potential rollback
         })
     return operations
+
+
+def _rollback_renames(
+    manifest: dict[str, Any],
+    operations: list[dict[str, Any]],
+) -> None:
+    """Undo the filesystem and manifest changes from _apply_renames."""
+    # Undo manifest changes (in reverse order)
+    for operation in reversed(operations):
+        # Restore the old entry if it was removed
+        if operation["manage_new"]:
+            manifest["managed"].pop(operation["new"], None)
+        # Restore the original old entry
+        manifest["managed"][operation["old"]] = operation.get("old_entry")
+    
+    # Undo filesystem changes (in reverse order)
+    for operation in reversed(operations):
+        # If we created a new symlink, remove it
+        if operation["create_new"] and operation["new_destination"].is_symlink():
+            operation["new_destination"].unlink()
+        # Restore the old symlink that was unlinked
+        if operation["old_destination"].exists() or operation["old_destination"].is_symlink():
+            # Already exists, don't restore (shouldn't happen)
+            pass
+        else:
+            # Restore the old symlink
+            operation["old_destination"].symlink_to(operation["old_source"])
+
 
 
 def _apply_renames(
@@ -502,7 +532,7 @@ def execute(
         custom_source_provided=custom_source_provided,
     )
     renamed_old = {operation["old"] for operation in rename_operations}
-    _raise_on_conflicts(items, manifest, excluded_names=renamed_old)
+    _raise_on_conflicts(items, manifest, target, excluded_names=renamed_old)
     target.mkdir(parents=True, exist_ok=True)
     changed: list[str] = [operation["new"] for operation in rename_operations]
     if rename_operations:
@@ -514,7 +544,12 @@ def execute(
             manifest,
             custom_source_provided=custom_source_provided,
         )
-        _raise_on_conflicts(items, manifest, excluded_names=set())
+        try:
+            _raise_on_conflicts(items, manifest, target, excluded_names=set())
+        except InstallError:
+            # Rollback filesystem and manifest changes before re-raising
+            _rollback_renames(manifest, rename_operations)
+            raise
     if action in {"install", "reconcile"}:
         for item in items:
             name, state = item["name"], item["state"]

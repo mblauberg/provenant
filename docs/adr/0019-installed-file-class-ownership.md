@@ -129,22 +129,29 @@ seeder reports `existing` for a path an attacker created in that window. The
 rename cannot be redirected, so the outcome is a skipped seed, not a misdirected
 write.
 
-**On reconcile's two checks.** A `reconcile` first checks the plan, applies
-declared renames, then recomputes and checks the plan again before it acts on
-the remaining items. The second check uses the post-rename ownership state, so
-an observed managed or custom conflict is refused before any later link or
-manifest mutation.
+**On reconcile's two checks and rename rollback.** A `reconcile` first checks
+the plan against the manifest. If accepted, it applies declared renames to the
+target tree and manifest, recomputes the plan against the new manifest, and
+checks again. The first check prevents a rename that the pre-rename plan says
+conflicts. The second check catches a conflict that the rename itself created:
+an item can shift from "missing" or "stale" to "conflicting" or
+"custom-conflicting" because the renames changed what the installer believes
+the tree contains.
 
-This closes the window in which the rename itself changes what the first plan
-says. It does not make reconcile atomic. The target tree can still change after
-the final check and before the next link replacement, unlink or manifest write,
-so a concurrent actor can still make that write operate on a different state
-from the one checked. That residual is accepted on the same grounds and
-recorded rather than fixed: the installer has no multi-path transaction, and
-closing this last interval would need a locking or snapshot design outside
-issue #561. The checks turn a conflict observed at either plan boundary into a
-loud refusal, but they do not establish a privilege boundary or a
-concurrent-writer guarantee.
+If the second check detects a conflict, the installer rolls back: it unlinks
+the new symlinks it created, restores the old symlinks it removed, and removes
+the manifest entries for the new names and restores the entries for the old
+names. The tree is then exactly as it was before the `reconcile` ran. Re-running
+the same command will check the first plan against the original tree. The
+conflict will be caught by the FIRST check on retry, with no partial tree or
+skip-on-retry logic needed.
+
+This does not make reconcile atomic. The residual window after the second check
+passes but before the manifest is written is accepted: the installer has no
+multi-path transaction, and closing that interval would need a locking or
+snapshot design outside issue #561. The checks turn a conflict observed at
+either plan boundary into a loud refusal, but they do not establish a privilege
+boundary or a concurrent-writer guarantee.
 
 **Note on the two rows that both involve the installer writing a file.** They
 are not the same mechanism. The desired state is *created* by the installer as
