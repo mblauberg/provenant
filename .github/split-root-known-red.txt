@@ -1,0 +1,20 @@
+# Known-red ledger for the split-root contract rig (#593).
+#
+# Format: <pytest node id> <owning issue>
+#
+# These cases fail when the product root and the instance root are genuinely
+# different directories, and pass in a fused checkout.  They are deselected
+# from the split-root suite run so the job can gate the rest, and then run
+# individually by the "Assert every known-red case is still red" step: if one
+# starts passing, that step fails and the entry must be deleted in the same PR
+# that fixed it.  Nothing here is a skip.  Do not add an entry without an
+# owning issue, and do not add one to silence a failure you have not diagnosed.
+#
+# Both current entries are the same class: the test pins the instance root by
+# setting AGENTS_HOME, but an ambient AGENT_FABRIC_INSTANCE_ROOT outranks it,
+# so under split roots the test reads the ambient root and no longer tests what
+# it claims to.  In a fused checkout the two are the same directory and the
+# test passes by coincidence.  These must be made hermetic before #565 cutover.
+
+tests/test_instance_installation.py::test_the_standalone_cli_refuses_a_relative_environment_instance_root #563
+tests/test_provenant_cli.py::test_split_root_preserves_instance_root_for_mcp_child #563

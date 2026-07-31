@@ -120,6 +120,7 @@ jobs:
             split-root:
               - *ci-contract
               - *node-workspace
+              - '.github/split-root-known-red.txt'
               - 'config/**'
               - 'runtime/agent-fabric/**'
               - 'scripts/**'
@@ -242,6 +243,9 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          # Retained-receipt tests resolve `origin/main` and historical blobs,
+          # so this job needs the same full history the harness job takes.
+          fetch-depth: 0
       - name: Set up Node.js workspace
         uses: ./.github/actions/setup-node-workspace
       - name: Build workspace
@@ -282,18 +286,48 @@ jobs:
             '  - codex-app-server' \
             'allowedProfiles:' \
             '  - headless' > "$split_instance/config/agent-fabric.yaml"
+          # Export the two roots and nothing else.  The seeding above needs a
+          # split HOME, CODEX_HOME and PROVENANT_BIN_DIR, but exporting those
+          # to later steps makes the suite fail on the ambient installer
+          # environment rather than on the split roots, which is not what this
+          # job is for.  GITHUB_ENV cannot unset a variable, so AGENTS_HOME is
+          # simply never written: writing it empty sets it to the empty string,
+          # which `herdr_prompt.sh` correctly rejects as not absolute.
           {
-            echo "HOME=$HOME"
-            echo "CODEX_HOME=$CODEX_HOME"
             echo "AGENT_FABRIC_PRODUCT_ROOT=$AGENT_FABRIC_PRODUCT_ROOT"
             echo "AGENT_FABRIC_INSTANCE_ROOT=$AGENT_FABRIC_INSTANCE_ROOT"
-            echo "AGENTS_HOME="
-            echo "PATH=$PATH"
           } >> "$GITHUB_ENV"
       - name: Run full Python suite under split roots
         env:
           HARNESS_PYTHON: ${{ github.workspace }}/.venv/bin/python
-        run: $HARNESS_PYTHON -m pytest tests/ -q
+        run: |
+          set -euo pipefail
+          deselect=()
+          while read -r node _owner; do
+            deselect+=("--deselect=$node")
+          done < <(grep -vE '^[[:space:]]*(#|$)' .github/split-root-known-red.txt)
+          printf 'deselected known-red cases: %d\n' "${#deselect[@]}"
+          printf '  %s\n' ${deselect[@]+"${deselect[@]}"}
+          $HARNESS_PYTHON -m pytest tests/ -q ${deselect[@]+"${deselect[@]}"}
+      - name: Assert every known-red case is still red
+        env:
+          HARNESS_PYTHON: ${{ github.workspace }}/.venv/bin/python
+        run: |
+          set -euo pipefail
+          # Inverse gate.  A deselected case that starts PASSING means the
+          # owning issue landed, and the ledger entry has to be deleted in that
+          # PR.  Without this step the deselect list would quietly outlive the
+          # bugs it names, which is the failure mode this whole job exists for.
+          status=0
+          while read -r node owner; do
+            if $HARNESS_PYTHON -m pytest "$node" -q >/dev/null 2>&1; then
+              printf 'NOW PASSING, remove from the ledger: %s (%s)\n' "$node" "$owner"
+              status=1
+            else
+              printf 'still red as recorded: %s (%s)\n' "$node" "$owner"
+            fi
+          done < <(grep -vE '^\s*(#|$)' .github/split-root-known-red.txt)
+          exit "$status"
       - name: Run full workspace suite under split roots
         run: npm test
       - name: Run split-root TypeScript oracle with exact expected failure
