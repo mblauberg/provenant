@@ -40,7 +40,6 @@ export function resolveFabricRoots(options: FabricRootResolutionOptions): Fabric
       optionalPath(options.instanceRootFlag) ??
       agentsHomeFlag ??
       environmentPath(environment, "AGENT_FABRIC_INSTANCE_ROOT") ??
-      agentsHomeEnvironment ??
       defaultRoot,
   };
 }

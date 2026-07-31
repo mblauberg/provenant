@@ -37,7 +37,7 @@ fi
 
 protocol_root="$agents_home/runtime/agent-fabric-protocol"
 protocol_dist="$protocol_root/dist/index.js"
-repair_command="AGENTS_HOME=\"$agents_home\" \"$script_dir/agent-fabric-protocol-build\""
+repair_command="AGENTS_HOME=\"$agents_home\" \"$agents_home/scripts/agent-fabric-protocol-build\""
 
 protocol_build_block() {
   echo "AGENT_FABRIC_PROTOCOL_BUILD_STALE: local @local/agent-fabric-protocol dist is missing, unloadable, or stale against its build inputs" >&2

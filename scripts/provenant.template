@@ -19,8 +19,6 @@ REPAIR = (
 
 def instance_root() -> Path:
     configured = os.environ.get("AGENT_FABRIC_INSTANCE_ROOT")
-    if configured is None:
-        configured = os.environ.get("AGENTS_HOME")
     candidate = Path(configured).expanduser() if configured is not None else Path.home() / ".agents"
     if not candidate.is_absolute():
         raise ValueError(f"instance root must be an absolute path, got {configured}; {REPAIR}")

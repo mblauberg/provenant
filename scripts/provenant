@@ -21,15 +21,16 @@ REPAIR = (
 def resolve_product_root(instance_root: Path | None = None) -> Path:
     """Resolve the product root.
 
-    Precedence is ``AGENT_FABRIC_PRODUCT_ROOT``, the instance pointer,
-    ``AGENTS_HOME``, then ``~/.agents``.
+    The instance root is selected by ``AGENT_FABRIC_INSTANCE_ROOT`` or
+    ``~/.agents``. Product resolution then uses ``AGENT_FABRIC_PRODUCT_ROOT``,
+    the instance pointer, ``AGENTS_HOME``, or ``~/.agents``.
     The selected root must contain an executable ``scripts/agent-fabric-mcp``.
     """
     configured = os.environ.get("AGENT_FABRIC_PRODUCT_ROOT")
     agents_home = os.environ.get("AGENTS_HOME")
     configured_instance = os.environ.get("AGENT_FABRIC_INSTANCE_ROOT")
     if instance_root is None:
-        instance_value = configured_instance if configured_instance is not None else agents_home
+        instance_value = configured_instance
         instance_root = (
             Path(instance_value).expanduser()
             if instance_value is not None
@@ -90,9 +91,6 @@ def execute(path: Path, arguments: list[str], product_root: Path | None = None) 
             os.execv(path, [str(path), *arguments])
         environment = os.environ.copy()
         environment["AGENT_FABRIC_PRODUCT_ROOT"] = str(product_root)
-        inherited_agents_home = os.environ.get("AGENTS_HOME")
-        if inherited_agents_home is not None and "AGENT_FABRIC_INSTANCE_ROOT" not in os.environ:
-            environment["AGENT_FABRIC_INSTANCE_ROOT"] = inherited_agents_home
         environment["AGENTS_HOME"] = str(product_root)
         os.execve(path, [str(path), *arguments], environment)
     except OSError as exc:

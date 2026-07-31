@@ -55,7 +55,7 @@ esac
 provenant_bin_dir="${PROVENANT_BIN_DIR:-$HOME/.local/bin}"
 provenant_command="$provenant_bin_dir/provenant"
 provenant_source="$PRODUCT_ROOT/scripts/provenant.template"
-instance_root="${AGENT_FABRIC_INSTANCE_ROOT:-${AGENTS_HOME:-$HOME/.agents}}"
+instance_root="${AGENT_FABRIC_INSTANCE_ROOT:-$HOME/.agents}"
 case "$provenant_bin_dir" in
   /*) ;;
   *) echo "PROVENANT_BIN_DIR must be absolute" >&2; exit 3 ;;

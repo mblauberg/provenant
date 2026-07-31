@@ -27,12 +27,12 @@ describe("Fabric root resolution", () => {
     });
   });
 
-  it("defaults both roots to AGENTS_HOME for the fused layout", () => {
+  it("uses AGENTS_HOME only for the product root", () => {
     vi.stubEnv("AGENTS_HOME", "/fixture/agents-home");
 
     expect(resolveFabricRoots({})).toEqual({
       productRoot: resolve("/fixture/agents-home"),
-      instanceRoot: resolve("/fixture/agents-home"),
+      instanceRoot: resolve(homedir(), ".agents"),
     });
   });
 

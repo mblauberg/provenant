@@ -266,13 +266,16 @@ differs.
 
 Root resolution itself is `resolveFabricRoots`
 (`runtime/agent-fabric/src/domain/fabric-roots.ts`, [issue
-#528](https://github.com/mblauberg/provenant/issues/528)): flag, then
-`AGENT_FABRIC_PRODUCT_ROOT` or `AGENT_FABRIC_INSTANCE_ROOT`, then `AGENTS_HOME`,
-then `~/.agents`. This decision adds no second resolver. One consequence of that
-precedence is worth stating plainly: an `--agents-home` flag sets both roots, so
-a split layout is expressed by the two explicit root inputs, not by
-`AGENTS_HOME`, which after the split names the product because it is the token
-the shipped adapter commands expand against.
+#528](https://github.com/mblauberg/provenant/issues/528)): an explicit
+`--product-root` or `--instance-root` flag, then `--agents-home` for both roots,
+then the matching `AGENT_FABRIC_PRODUCT_ROOT` or `AGENT_FABRIC_INSTANCE_ROOT`,
+then `AGENTS_HOME` for the product root, then `~/.agents` for any root still
+unresolved. This decision adds no second resolver. The instance root has no
+`AGENTS_HOME` fallback. One consequence of that precedence is worth stating
+plainly: an `--agents-home` flag sets both roots, so a split layout is
+expressed by the two explicit root inputs, not by `AGENTS_HOME`, which after
+the split names the product because it is the token the shipped adapter
+commands expand against.
 
 Layering is uniform across every consumer that reads trusted configuration.
 `provenant status`, `provenant doctor` and `agent-fabric adapter executable`

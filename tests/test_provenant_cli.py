@@ -163,7 +163,8 @@ def test_split_root_preserves_instance_root_for_mcp_child(tmp_path):
         cwd=tmp_path,
         AGENT_FABRIC_SEAT="codex",
         AGENT_FABRIC_PRODUCT_ROOT=str(checkout),
-        AGENTS_HOME=str(instance_root),
+        AGENT_FABRIC_INSTANCE_ROOT=str(instance_root),
+        AGENTS_HOME=str(checkout),
     )
 
     assert result.returncode == 0, result.stderr
