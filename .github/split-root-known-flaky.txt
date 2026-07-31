@@ -1,0 +1,12 @@
+# Tests that fail intermittently on this runner regardless of the roots, one
+# name per line, then the issue that owns the fix.
+#
+# This ledger exists only so a known flake does not read as an unexplained
+# regression in the split-root failure set.  It does NOT excuse a failure: the
+# gate still requires every entry above in split-root-known-red-ts.txt to fail,
+# and still breaks on any failure named by neither ledger.
+#
+# Proven flaky by rerunning an identical commit: main at fa0ae8b0 failed and
+# went green on a rerun with no code change.  See #603.
+does not run cutover cleanup when concurrent inspection writes exhaust the retry bound #603
+closes attached sockets and exits without waiting for clients to disconnect first #603
