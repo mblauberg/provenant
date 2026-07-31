@@ -20,7 +20,8 @@ import { describe, expect, it } from "vitest";
 
 type WaitAllowance = Readonly<{
   id: string;
-  site: string;
+  /** Matches an offence `detail` exactly: the same string the failure prints. */
+  detail: string;
   reason: string;
 }>;
 
@@ -213,8 +214,48 @@ function clockDecidesTheLoop(span: LoopSpan): boolean {
     && (/\b(if|while|return|break|throw|continue)\b/u.test(line) || /[<>]=?/u.test(line)));
 }
 
-const SLEEP_STATEMENT = /^await\s+(?:new\s+Promise\b[\s\S]*?|(?:delay|sleep|setTimeout|pause)\s*\()/u;
+/**
+ * Every way this suite can schedule a wait. A counter-bounded loop calling an
+ * aliased `node:timers/promises` sleep is a deadline loop just as much as one
+ * calling `setTimeout`, so the loop rule and the statement rule share this
+ * vocabulary. `settle` counts inside a loop — a quiescence window in a loop is
+ * a poll — but not as a statement, where it is the sanctioned form.
+ */
+const SLEEP_CALL = /\b(?:setTimeout|setInterval|delay|sleep|pause)\s*\(/u;
+const SLEEP_IN_LOOP = /\b(?:setTimeout|setInterval|delay|sleep|pause|settle)\s*\(/u;
+const SLEEP_STATEMENT = /^await\s+(?:new\s+Promise\b|(?:delay|sleep|setTimeout|pause)\s*\()/u;
 const ASSERTION_STATEMENT = /^(?:await\s+)?expect(?:\.\w+)?\s*\(/u;
+
+type LogicalLine = Readonly<{ text: string; line: number }>;
+
+/**
+ * Join a wrapped statement back into one line, so that a formatter breaking
+ * `await new Promise((resolve) =>` from `setTimeout(resolve, 20));` cannot slip
+ * a sleep past a line-at-a-time rule. Whitespace is collapsed and the original
+ * starting line is kept for reporting.
+ */
+function logicalLines(masked: string): LogicalLine[] {
+  const joined: LogicalLine[] = [];
+  const lines = masked.split("\n");
+  let buffer = "";
+  let startLine = 1;
+  let depth = 0;
+  for (let index = 0; index < lines.length; index += 1) {
+    const raw = (lines[index] ?? "").trim();
+    if (buffer === "") startLine = index + 1;
+    buffer = buffer === "" ? raw : `${buffer} ${raw}`;
+    for (const character of raw) {
+      if (character === "(" || character === "[") depth += 1;
+      else if (character === ")" || character === "]") depth -= 1;
+    }
+    if (depth > 0) continue;
+    depth = 0;
+    joined.push({ text: buffer.trim(), line: startLine });
+    buffer = "";
+  }
+  if (buffer.trim().length > 0) joined.push({ text: buffer.trim(), line: startLine });
+  return joined;
+}
 
 function scan(path: string): Offence[] {
   const source = readFileSync(path, "utf8");
@@ -227,7 +268,7 @@ function scan(path: string): Offence[] {
     // clock reading inside it can be a deadline.
     if (iteratesCollection(span)) continue;
     const line = lineOf(masked, span.index);
-    if (span.body.includes("setTimeout(")) {
+    if (SLEEP_IN_LOOP.test(span.body)) {
       offences.push({
         site,
         rule: "hand-rolled-deadline-loop",
@@ -245,18 +286,16 @@ function scan(path: string): Offence[] {
     }
   }
 
-  const lines = masked.split("\n");
-  for (let cursor = 0; cursor < lines.length; cursor += 1) {
-    const statement = (lines[cursor] ?? "").trim();
+  const statements = logicalLines(masked).filter((entry) => entry.text.length > 0);
+  for (let cursor = 0; cursor < statements.length; cursor += 1) {
+    const statement = statements[cursor]?.text ?? "";
     if (!SLEEP_STATEMENT.test(statement)) continue;
-    if (statement.includes("new Promise") && !statement.includes("setTimeout")) continue;
-    let lookahead = cursor + 1;
-    while (lookahead < lines.length && (lines[lookahead] ?? "").trim().length === 0) lookahead += 1;
-    if (!ASSERTION_STATEMENT.test((lines[lookahead] ?? "").trim())) continue;
+    if (statement.includes("new Promise") && !SLEEP_CALL.test(statement)) continue;
+    if (!ASSERTION_STATEMENT.test(statements[cursor + 1]?.text ?? "")) continue;
     offences.push({
       site,
       rule: "sleep-and-assert",
-      detail: `${site}:${String(cursor + 1)} sleeps then asserts`,
+      detail: `${site}:${String(statements[cursor]?.line ?? 0)} sleeps then asserts`,
     });
   }
 
@@ -270,14 +309,23 @@ function readGolden(): WaiterGolden {
 function scanTestTree(): Offence[] {
   return testFiles(testRoot)
     .flatMap(scan)
+    // The port is not unscanned: it is held to the stricter shape test below,
+    // which pins its single timer. Scanning it here would only flag itself.
     .filter((offence) => offence.site !== waitPort)
     .sort((left, right) => left.detail.localeCompare(right.detail));
 }
 
 describe("#558 one waiter for the fabric test suite", () => {
+  it("enumerates the test tree, so a broken glob cannot pass by scanning nothing", () => {
+    // A zero-match scan satisfies every other assertion here silently.
+    const files = testFiles(testRoot);
+    expect(files.length, "test tree enumeration collapsed").toBeGreaterThan(250);
+    expect(files.some((path) => path.endsWith(`${sep}deadline-wait.ts`))).toBe(true);
+  });
+
   it("refuses a hand-rolled deadline loop or a bare sleep-and-assert", () => {
     const golden = readGolden();
-    const allowed = new Set(golden.temporary_hand_rolled_waits.map((allowance) => allowance.site));
+    const allowed = new Set(golden.temporary_hand_rolled_waits.map((allowance) => allowance.detail));
     const offences = scanTestTree().filter((offence) => !allowed.has(offence.detail));
     expect(
       offences.map((offence) => `${offence.rule}: ${offence.detail}`),
@@ -294,8 +342,8 @@ describe("#558 one waiter for the fabric test suite", () => {
       expect(allowance.id).toMatch(/^TEMP-[A-Z0-9-]+$/u);
       expect(allowance.reason.trim().length).toBeGreaterThan(0);
       expect(allowance.reason).not.toMatch(/[\r\n]/u);
-      expect(detected, `stale allowance ${allowance.id}: ${allowance.site} no longer offends`)
-        .toContain(allowance.site);
+      expect(detected, `stale allowance ${allowance.id}: ${allowance.detail} no longer offends`)
+        .toContain(allowance.detail);
     }
     const ids = golden.temporary_hand_rolled_waits.map((allowance) => allowance.id);
     expect(new Set(ids).size).toBe(ids.length);
@@ -308,6 +356,8 @@ describe("#558 one waiter for the fabric test suite", () => {
     expect(offences.map((offence) => offence.rule).sort()).toEqual([
       "hand-rolled-deadline-loop",
       "hand-rolled-deadline-loop",
+      "hand-rolled-deadline-loop",
+      "sleep-and-assert",
       "sleep-and-assert",
     ]);
   });

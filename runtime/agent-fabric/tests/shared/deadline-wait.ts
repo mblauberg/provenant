@@ -44,6 +44,12 @@ export class DeadlineTimeoutError extends Error {
  * exactly one definition.
  *
  * The condition is always evaluated at least once, including at `timeoutMs` 0.
+ *
+ * The runtime test is **truthiness**, so a condition may signal "not yet" with
+ * any falsy value. The declared `NonNullable<T>` therefore states less than the
+ * check enforces: it strips only `null` and `undefined`. A caller must not ask
+ * this to return a falsy value, because it would be indistinguishable from
+ * "not yet" and would wait out the deadline instead.
  */
 export async function waitUntil<T>(
   condition: () => Promise<T> | T,

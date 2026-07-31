@@ -21,6 +21,7 @@ import type {
   LifecycleIntegrityReceiptAuthorityPort,
 } from "../../src/index.ts";
 import { servePublicProtocolConnection } from "../../src/daemon/public-protocol.ts";
+import { waitUntil } from "../shared/deadline-wait.ts";
 
 import { createCurrentSessionRun } from "./current-session-testkit.ts";
 import { TEST_AUTHORITY_V2_FIELDS } from "./authority-v2-testkit.ts";
@@ -347,28 +348,33 @@ export async function createLifecycleFixture(
   };
 }
 
-async function waitUntilFileExists(path: string): Promise<void> {
+/**
+ * Wait for a barrier file: `fs.watch` for latency, the deadline port for safety.
+ *
+ * The watch alone could hang forever on a missed event, with no diagnostic
+ * beyond Vitest's outer timeout. Racing it against `waitUntil` keeps the fast
+ * path, catches a missed event on the next poll, and fails a file that never
+ * appears with a DeadlineTimeoutError naming it.
+ *
+ * The budget sits inside Vitest's 15s test timeout with headroom to spare, so
+ * the diagnostic reaches the report, but stays loose enough that a loaded
+ * machine does not turn a slow barrier into a failure.
+ */
+async function waitUntilFileExists(path: string, timeoutMs = 10_000): Promise<void> {
   if (existsSync(path)) return;
-  await new Promise<void>((resolvePromise, reject) => {
-    const watcher = watch(dirname(path));
-    let settled = false;
-    const finish = (): void => {
-      if (settled) return;
-      settled = true;
-      watcher.close();
-      resolvePromise();
-    };
-    watcher.on("change", () => {
-      if (existsSync(path)) finish();
-    });
-    watcher.once("error", (error) => {
-      if (settled) return;
-      settled = true;
-      watcher.close();
-      reject(error);
-    });
-    if (existsSync(path)) finish();
-  });
+  const watcher = watch(dirname(path));
+  try {
+    await Promise.race([
+      new Promise<true>((resolvePromise, reject) => {
+        watcher.on("change", () => { if (existsSync(path)) resolvePromise(true); });
+        watcher.once("error", reject);
+        if (existsSync(path)) resolvePromise(true);
+      }),
+      waitUntil(() => existsSync(path), timeoutMs, `Barrier file ${path}`),
+    ]);
+  } finally {
+    watcher.close();
+  }
 }
 
 function mcpFailure(outcome: Awaited<ReturnType<typeof callTool>>): Error & { code?: string } {

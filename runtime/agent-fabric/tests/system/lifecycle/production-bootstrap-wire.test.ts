@@ -892,7 +892,7 @@ describe("production daemon bootstrap wiring", () => {
     } catch (error: unknown) {
       if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
     }
-    await new Promise<void>((resolvePromise) => setTimeout(resolvePromise, 250));
+    await settle(250, "SIGHUP to the launcher's process group never reaches the released daemon");
 
     try {
       const attached = await startFabricDaemon(options);
