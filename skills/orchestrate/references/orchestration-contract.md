@@ -81,7 +81,10 @@ role names) live only in the adapters.
 
 Every dispatched worker states task class, route tier, catalog model identity,
 effort, route receipt, identity, objective, authority, paths, output, checks,
-stop condition and budget. The binding is invalid if any route field is absent;
+stop condition and budget. A worker that changes code or other observable
+behaviour also names its governing skill (for example, `tdd` under
+`implement`); the binding is invalid when that field is absent or ambiguous.
+The binding is invalid if any route field is absent;
 validate payloads and never infer permission. Codex account-default transport
 omits a literal model while its receipt retains catalog identity and effective
 effort. Claude records the runtime-discovered effective model and the admitted

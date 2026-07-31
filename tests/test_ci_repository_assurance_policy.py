@@ -778,6 +778,24 @@ def test_harness_python_test_dependencies_install_locked_and_cached() -> None:
     assert {"pytest", "pyyaml"} <= locked
 
 
+def test_harness_job_runs_demonstrated_change_gates_with_a_merge_base_and_scratch_root() -> None:
+    document = _workflow()
+    harness_steps = _steps(_job(document, "harness"))
+    gate_step = next(
+        (step for step in harness_steps if "scripts/check-test-gates right-reason-red" in str(step.get("run", ""))),
+        None,
+    )
+    assert gate_step is not None, "harness job must run the demonstrated change gates"
+    command = str(gate_step["run"])
+    for gate in ("right-reason-red", "revert-probe"):
+        assert f"scripts/check-test-gates {gate}" in command
+    assert "--base \"$CHANGE_GATE_BASE\"" in command
+    assert "--scratch-root \"$scratch\"" in command
+    assert "--test-command-py" in command
+    assert "--test-command-ts" in command
+    assert gate_step.get("env", {}).get("CHANGE_GATE_BASE")
+
+
 def test_clean_ci_builds_locked_protocol_before_daemon_typecheck() -> None:
     document = _workflow()
     fabric_steps = _steps(_job(document, "fabric"))

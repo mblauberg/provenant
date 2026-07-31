@@ -28,7 +28,9 @@ reconciliation run.
    `../deliver/templates/RUN.template.json`, set profile `software`, and follow
    [run-contract.md](references/run-contract.md). Routine minor work may proceed
    without `RUN.json` unless the user or project policy requests one.
-2. Keep an adaptive plan. Use `tdd` for observable change, `refactor`
+2. Keep an adaptive plan. Name the governing skill in the worker contract
+   before changing code. Invoke `tdd` for every new or changed observable
+   behaviour, and use `refactor`
    for behaviour-preserving structure and `diagnose` for unknown causes.
    Migrations may need behaviour tests and equivalence evidence. Use
    `orchestrate` when decomposition helps; adapt topology inside authority.

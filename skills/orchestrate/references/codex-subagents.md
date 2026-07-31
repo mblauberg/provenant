@@ -68,6 +68,7 @@ effort:            <effective effort from route receipt>
 route-receipt:     <path or receipt identity>
 scope:             <files / sources / task slice>
 write-scope:       read-only | exact owned paths
+governing-skill:   <skill owning the change; required for write workers>
 must-not:          <shared writes, destructive commands, stale sources>
 output-path:       <run-dir>/findings/<name>.md
 return:            3-6 bullets, surprises, unresolved, file path

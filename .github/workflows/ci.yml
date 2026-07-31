@@ -170,6 +170,39 @@ jobs:
         env:
           HARNESS_PYTHON: ${{ github.workspace }}/.venv/bin/python
         run: scripts/check-harness
+      - name: Run change gates
+        env:
+          HARNESS_PYTHON: ${{ github.workspace }}/.venv/bin/python
+          CHANGE_GATE_BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          set -euo pipefail
+          lock="$RUNNER_TEMP/provenant-change-gates.lock"
+          release() { rm -rf "$lock"; }
+          while true; do
+            if mkdir "$lock" 2>/dev/null; then
+              echo $$ > "$lock/pid"
+              trap release EXIT INT TERM HUP
+              break
+            fi
+            holder=$(cat "$lock/pid" 2>/dev/null)
+            if [ -n "$holder" ] && ! kill -0 "$holder" 2>/dev/null; then
+              echo "breaking gate lock held by dead pid $holder"
+              rm -rf "$lock"
+              continue
+            fi
+            sleep 30
+          done
+          scratch="$RUNNER_TEMP/provenant-change-gates"
+          scripts/check-test-gates right-reason-red \
+            --base "$CHANGE_GATE_BASE" --scratch-root "$scratch" \
+            --test-command-py "$HARNESS_PYTHON -m pytest {test} -q" \
+            --test-command-ts "npm exec vitest run {test}"
+          scripts/check-test-gates revert-probe \
+            --base "$CHANGE_GATE_BASE" --scratch-root "$scratch" \
+            --test-command-py "$HARNESS_PYTHON -m pytest {test} -q" \
+            --test-command-ts "npm exec vitest run {test}"
+          release
+          trap - EXIT INT TERM HUP
 
   fabric:
     name: Agent fabric TypeScript, tests and audit
