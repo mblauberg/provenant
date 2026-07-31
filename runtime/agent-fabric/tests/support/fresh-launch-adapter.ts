@@ -8,6 +8,10 @@ import {
   type AuthorityInput,
 } from "@local/agent-fabric-protocol";
 import {
+  DeadlineTimeoutError,
+  waitUntil,
+} from "../shared/deadline-wait.ts";
+import {
   chairLaunchAttestationDigest,
   chairLaunchChallengeDigest,
 } from "../../src/adapters/providers/types.js";
@@ -48,10 +52,17 @@ async function createClaudePeer(): Promise<void> {
     optionalFeatures: [],
   });
   try {
-    for (let attempt = 0; attempt < 500 && !existsSync(requiredPeerTriggerPath); attempt += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 10));
+    try {
+      await waitUntil(
+        () => existsSync(requiredPeerTriggerPath),
+        5_000,
+        "Fresh launch peer trigger",
+        { pollIntervalMs: 10 },
+      );
+    } catch (error: unknown) {
+      if (!(error instanceof DeadlineTimeoutError)) throw error;
+      throw new Error("fresh launch peer trigger timed out", { cause: error });
     }
-    if (!existsSync(requiredPeerTriggerPath)) throw new Error("fresh launch peer trigger timed out");
     const team = await transport.call(FABRIC_OPERATIONS.createTeam, {
       teamId: "team_fresh_claude_01",
       leader: { agentId: "claude_fresh_peer_01", authority: peerAuthority },

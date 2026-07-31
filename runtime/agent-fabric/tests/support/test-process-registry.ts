@@ -1,3 +1,5 @@
+import { DeadlineTimeoutError, waitUntil } from "../shared/deadline-wait.ts";
+
 const tracked = new Map<number, string>();
 let exitHookInstalled = false;
 
@@ -53,9 +55,11 @@ export async function terminateTrackedTestProcess(pid: number): Promise<void> {
     } catch {
       // It exited between the probe and signal.
     }
-    const deadline = Date.now() + 500;
-    while (processExists(pid) && Date.now() < deadline) {
-      await new Promise((resolve) => setTimeout(resolve, 10));
+    try {
+      await waitUntil(() => !processExists(pid), 500, `Tracked process ${String(pid)} exit`);
+    } catch (error: unknown) {
+      // A process that outlives its grace window is escalated below, not reported.
+      if (!(error instanceof DeadlineTimeoutError)) throw error;
     }
     if (processExists(pid)) {
       try {

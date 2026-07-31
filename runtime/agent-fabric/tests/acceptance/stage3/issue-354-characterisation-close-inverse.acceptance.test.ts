@@ -1,6 +1,7 @@
 import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
 
+import { settle } from "../../shared/deadline-wait.ts";
 import {
   createLifecycleFixture,
   writeLifecycleCheckpoint,
@@ -109,7 +110,7 @@ describe("S1 CLOSE: shared close fence and owned-operation drain", () => {
     const order: string[] = [];
     const closing = fixture.fabric.close().then(() => order.push("closed"));
     // While the continuation is blocked, close() must not resolve (it awaits the owned-map drain).
-    await new Promise((resolve) => setTimeout(resolve, 300));
+    await settle(300, "close() must not resolve while the continuation is blocked");
     expect(order).toEqual([]);
     order.push("released");
     await fixture.providerSpawnBarrier!.release();

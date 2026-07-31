@@ -1,29 +1,17 @@
 import { spawn } from "node:child_process";
-import { access, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
+import { waitForFile } from "../../shared/deadline-wait.ts";
 import { runSourceCli } from "../../support/cli-process.ts";
 import { createPrimaryCompatibilityFixture } from "../../support/primary-adapter-testkit.ts";
 
 const packageRoot = fileURLToPath(new URL("../../../", import.meta.url));
 const sourceCli = fileURLToPath(new URL("../../../src/cli/main.ts", import.meta.url));
-
-async function waitForFile(path: string): Promise<void> {
-  const deadline = Date.now() + 8_000;
-  while (Date.now() < deadline) {
-    try {
-      await access(path);
-      return;
-    } catch {
-      await new Promise((resolve) => setTimeout(resolve, 20));
-    }
-  }
-  throw new Error(`timed out waiting for ${path}`);
-}
 
 describe("foreground daemon CLI", () => {
   it("runs core-only from resolved paths and publishes a private discovery receipt", async () => {
@@ -48,7 +36,7 @@ describe("foreground daemon CLI", () => {
       child.once("close", (code, signal) => resolve({ code, signal }));
     });
     try {
-      await waitForFile(discoveryPath);
+      await waitForFile(discoveryPath, { timeoutMs: 8_000, pollIntervalMs: 20 });
       const receipt: unknown = JSON.parse(await readFile(discoveryPath, "utf8"));
       expect(receipt).toMatchObject({
         schemaVersion: 1,
