@@ -354,11 +354,16 @@ jobs:
           set -e
           printf '%s\n' "$output"
           test "$status" -ne 0
+          # Match ONLY within vitest's FAIL lines.  Searching the whole output
+          # matches the test name in its passing tick line just as happily, so
+          # the inverse gate below could never detect an entry going green,
+          # which is the one thing it exists to do.
+          failures="$(grep -E '^[[:space:]]*FAIL ' <<<"$output" || true)"
           expected=0
           while IFS= read -r line; do
             name="${line% #*}"
             owner="${line##* }"
-            if grep -Fq "$name" <<<"$output"; then
+            if grep -Fq "$name" <<<"$failures"; then
               printf 'still red as recorded: %s (%s)\n' "$name" "$owner"
               expected=$((expected + 1))
             else
@@ -373,7 +378,7 @@ jobs:
           while IFS= read -r line; do
             name="${line% #*}"
             owner="${line##* }"
-            if grep -Fq "$name" <<<"$output"; then
+            if grep -Fq "$name" <<<"$failures"; then
               printf 'known flake fired, not counted as a split-root finding: %s (%s)\n' "$name" "$owner"
               expected=$((expected + 1))
             fi
@@ -384,7 +389,7 @@ jobs:
           # the whole point.
           grep -Eq "Tests +${expected} failed \|" <<<"$output" || {
             printf 'FAILURE SET DOES NOT MATCH THE LEDGERS: expected %d\n' "$expected"
-            grep -E '^ FAIL ' <<<"$output" || true
+            printf '%s\n' "$failures"
             exit 1
           }
           printf 'split-root failures accounted for exactly: %d\n' "$expected"

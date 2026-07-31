@@ -22,4 +22,3 @@ recovers an expired provisioned roster with the advertised renewal command #563
 keeps chair-seat and revoked-lease failures on their real enforcement paths #563
 rejects a live non-bootstrap capability on the expired-roster rebind gate #563
 starts the on-demand daemon when provisioning begins from the healthy idle state #563
-renews credentials on the same explicit run and rejects a one-seat binding #563
