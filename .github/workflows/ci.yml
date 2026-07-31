@@ -122,6 +122,7 @@ jobs:
               - *node-workspace
               - '.github/split-root-known-red.txt'
               - '.github/split-root-known-red-ts.txt'
+              - '.github/split-root-known-flaky.txt'
               - 'config/**'
               - 'runtime/agent-fabric/**'
               - 'scripts/**'
@@ -353,11 +354,16 @@ jobs:
           set -e
           printf '%s\n' "$output"
           test "$status" -ne 0
+          # Match ONLY within vitest's FAIL lines.  Searching the whole output
+          # matches the test name in its passing tick line just as happily, so
+          # the inverse gate below could never detect an entry going green,
+          # which is the one thing it exists to do.
+          failures="$(grep -E '^[[:space:]]*FAIL ' <<<"$output" || true)"
           expected=0
           while IFS= read -r line; do
             name="${line% #*}"
             owner="${line##* }"
-            if grep -Fq "$name" <<<"$output"; then
+            if grep -Fq "$name" <<<"$failures"; then
               printf 'still red as recorded: %s (%s)\n' "$name" "$owner"
               expected=$((expected + 1))
             else
@@ -365,10 +371,28 @@ jobs:
               exit 1
             fi
           done < <(grep -vE '^[[:space:]]*(#|$)' .github/split-root-known-red-ts.txt)
+          # A known flake is not evidence of anything, but it does change the
+          # arithmetic, so count the ones that actually fired rather than
+          # tolerating a range.  An entry that did not fire adds nothing, so a
+          # flake ledger cannot be used to absorb a real regression.
+          while IFS= read -r line; do
+            name="${line% #*}"
+            owner="${line##* }"
+            if grep -Fq "$name" <<<"$failures"; then
+              printf 'known flake fired, not counted as a split-root finding: %s (%s)\n' "$name" "$owner"
+              expected=$((expected + 1))
+            fi
+          done < <(grep -vE '^[[:space:]]*(#|$)' .github/split-root-known-flaky.txt)
           # vitest pads its summary columns, so match on a whitespace-tolerant
-          # pattern rather than a fixed number of spaces.
-          grep -Eq "Tests +${expected} failed \|" <<<"$output"
-          printf 'split-root failures match the ledger exactly: %d\n' "$expected"
+          # pattern rather than a fixed number of spaces.  Any failure named by
+          # neither ledger makes this count wrong and breaks the step, which is
+          # the whole point.
+          grep -Eq "Tests +${expected} failed \|" <<<"$output" || {
+            printf 'FAILURE SET DOES NOT MATCH THE LEDGERS: expected %d\n' "$expected"
+            printf '%s\n' "$failures"
+            exit 1
+          }
+          printf 'split-root failures accounted for exactly: %d\n' "$expected"
       - name: Run split-root TypeScript oracle with exact expected failure
         working-directory: runtime/agent-fabric
         env:
