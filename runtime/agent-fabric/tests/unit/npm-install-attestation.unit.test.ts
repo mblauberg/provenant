@@ -135,12 +135,13 @@ describe("npm install attestation", () => {
     await expect(checkNpmInstallAttestation(root)).resolves.toMatchObject({ reason: "package-sri" });
   });
 
-  it("reports installed execution-tree byte drift but excludes npm .bin shims", async () => {
+  it("reports installed execution-tree byte drift, including npm .bin shims", async () => {
     const root = await createFixture();
     await writeNpmInstallAttestation(root);
-    await writeFile(join(root, "node_modules", ".bin", "tsx"), "changed ignored shim\n");
-    await expect(checkNpmInstallAttestation(root)).resolves.toBeUndefined();
+    await writeFile(join(root, "node_modules", ".bin", "tsx"), "changed shim\n");
+    await expect(checkNpmInstallAttestation(root)).resolves.toMatchObject({ reason: "installed-tree" });
 
+    await writeNpmInstallAttestation(root);
     await writeFile(join(root, "node_modules", "tsx", "dist", "loader.mjs"), "export {}; // tampered\n");
     await expect(checkNpmInstallAttestation(root)).resolves.toMatchObject({ reason: "installed-tree" });
   });

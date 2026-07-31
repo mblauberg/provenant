@@ -28,6 +28,11 @@ def _fixture(tmp_path: Path) -> tuple[Path, tuple[Path, Path]]:
         root / "runtime/agent-fabric-console/bin/agent-fabric-console.js",
     )
     _copy(
+        ROOT / "scripts/agent-fabric-warm",
+        root / "scripts/agent-fabric-warm",
+    )
+    shutil.copytree(ROOT / "scripts/lib", root / "scripts/lib")
+    _copy(
         ROOT / "runtime/agent-fabric/scripts/verify-npm-ci-attestation.mjs",
         root / "runtime/agent-fabric/scripts/verify-npm-ci-attestation.mjs",
     )
@@ -45,11 +50,14 @@ def _fixture(tmp_path: Path) -> tuple[Path, tuple[Path, Path]]:
     preflight.chmod(0o755)
     (root / "node_modules/.keep").parent.mkdir(parents=True, exist_ok=True)
     (root / "node_modules/.keep").write_text("fixture\n", encoding="utf-8")
+    (root / "node_modules/.bin").mkdir()
+    (root / "node_modules/.bin/tsc").write_text("original shim\n", encoding="utf-8")
     (root / "runtime/agent-fabric/package.json").write_text("{}\n", encoding="utf-8")
     (root / "package.json").write_text('{"type":"module"}\n', encoding="utf-8")
     (root / "package-lock.json").write_text(
         '{"lockfileVersion":3,"packages":{}}\n', encoding="utf-8"
     )
+    (root / "tsconfig.json").write_text('{"files":[]}\n', encoding="utf-8")
     for name, output in (("herdr", "herdr"), ("console", "console")):
         dist = root / f"runtime/agent-fabric-{name}/dist/bin.js"
         dist.parent.mkdir(parents=True, exist_ok=True)
@@ -92,7 +100,7 @@ def test_herdr_and_console_gate_compiled_dist_before_import(tmp_path: Path) -> N
         assert result.returncode == 0, result.stderr
         assert result.stdout == f"{wrapper.parts[-3].removeprefix('agent-fabric-')} dist\n"
 
-    (root / "node_modules/tampered.js").write_text("tampered\n", encoding="utf-8")
+    (root / "node_modules/.bin/tsc").write_text("tampered shim\n", encoding="utf-8")
     for wrapper in wrappers:
         result = subprocess.run(
             [NODE, str(wrapper)], cwd=root, env=environment, capture_output=True, text=True, check=False
@@ -100,3 +108,42 @@ def test_herdr_and_console_gate_compiled_dist_before_import(tmp_path: Path) -> N
         assert result.returncode == 1
         assert "NPM_INSTALL_ATTESTATION_MISMATCH" in result.stderr
         assert result.stdout == ""
+
+
+def test_warm_refuses_failed_attestation_before_rebuild(tmp_path: Path) -> None:
+    root, _ = _fixture(tmp_path)
+    marker = tmp_path / "npm-invoked"
+    bin_dir = tmp_path / "bin"
+    fake_npm = bin_dir / "npm"
+    fake_npm.parent.mkdir()
+    fake_npm.write_text(
+        "#!/bin/sh\n"
+        'printf "%s\\n" "$*" > "$WARM_TEST_MARKER"\n'
+        "exit 99\n",
+        encoding="utf-8",
+    )
+    fake_npm.chmod(0o755)
+    environment = {
+        **os.environ,
+        "AGENTS_HOME": str(root),
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        "WARM_TEST_MARKER": str(marker),
+    }
+
+    # A missing dist would make warm rebuild if it reached the staleness
+    # predicate. Tampering after the real attestation was written must stop it
+    # before npm can run.
+    (root / "node_modules/.bin/tsc").write_text("tampered shim\n", encoding="utf-8")
+    result = subprocess.run(
+        [str(root / "scripts/agent-fabric-warm")],
+        cwd=root,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert not marker.exists(), "warm must not rebuild after failed attestation"
+    assert "NPM_INSTALL_ATTESTATION_MISMATCH" in result.stderr
+    assert result.stdout == ""

@@ -48,7 +48,6 @@ async function collectInstalledEntries(root, directory, entries) {
   for await (const directoryEntry of handle) {
     const path = join(directory, directoryEntry.name);
     const relativePath = canonicalRelativePath(root, path);
-    if (relativePath === ".bin" || relativePath.startsWith(".bin/")) continue;
     const metadata = await lstat(path);
     if (metadata.isDirectory()) {
       await collectInstalledEntries(root, path, entries);
