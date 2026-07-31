@@ -1,4 +1,5 @@
 import hashlib
+from collections.abc import Mapping
 
 import pytest
 import importlib.util
@@ -35,6 +36,7 @@ def test_validator_and_producer_consume_one_digest_bound_lifecycle_contract():
 
     assert producer_contract.LIFECYCLE_CONTRACT_DIGEST == expected_digest
     assert validator.LIFECYCLE_CONTRACT_DIGEST == producer_contract.LIFECYCLE_CONTRACT_DIGEST
+    assert validator.LIFECYCLE_CONTRACT is validator._lifecycle_contract_module().LIFECYCLE_CONTRACT
     assert validator.LIFECYCLE_CONTRACT["contract_digest"] == expected_digest
     assert validator.LIFECYCLE_CONTRACT["transitions"] == producer_contract.LIFECYCLE_CONTRACT["transitions"]
     expected_transitions = {
@@ -48,9 +50,27 @@ def test_validator_and_producer_consume_one_digest_bound_lifecycle_contract():
     assert validator.TRANSITIONS == expected_transitions
 
 
+def test_lifecycle_contract_rejects_top_level_mutation():
+    contract = load(LOADER_PATH, "lifecycle_contract_top_level_mutation").LIFECYCLE_CONTRACT
+    with pytest.raises(TypeError):
+        contract["contract_digest"] = "sha256:drift"
+
+
+def test_lifecycle_contract_rejects_nested_transition_mutation():
+    contract = load(LOADER_PATH, "lifecycle_contract_transition_mutation").LIFECYCLE_CONTRACT
+    with pytest.raises(TypeError):
+        contract["transitions"][0]["to_state"] = "closed"
+
+
+def test_lifecycle_contract_rejects_nested_evidence_list_mutation():
+    contract = load(LOADER_PATH, "lifecycle_contract_evidence_mutation").LIFECYCLE_CONTRACT
+    with pytest.raises(TypeError):
+        contract["transitions"][4]["required_evidence_kinds"][0] = "tampered"
+
+
 def test_lifecycle_contract_preserves_the_pinned_state_graph_and_five_invariants():
     contract = load(LOADER_PATH, "lifecycle_contract_shape").LIFECYCLE_CONTRACT
-    assert contract["states"] == [
+    assert list(contract["states"]) == [
         "draft", "scoped", "approved", "executing", "verifying", "reviewing",
         "repairing", "awaiting_acceptance", "accepted", "awaiting_release",
         "observing", "closed",
@@ -82,7 +102,15 @@ def contract_module():
 
 def mutated(**changes):
     module = contract_module()
-    value = {key: item for key, item in module.LIFECYCLE_CONTRACT.items() if key != "contract_digest"}
+    def mutable(item):
+        if isinstance(item, Mapping):
+            return {key: mutable(value) for key, value in item.items()}
+        if isinstance(item, tuple):
+            return [mutable(value) for value in item]
+        return item
+
+    value = mutable(module.LIFECYCLE_CONTRACT)
+    value.pop("contract_digest")
     value.update(changes)
     return module, value
 
