@@ -9,7 +9,7 @@ Current deterministic gate: 2026-07-16
 Command:
 
 ```sh
-/opt/homebrew/bin/pytest -q tests/test_lifecycle_skill_alignment.py
+python3 -m pytest -q tests/test_lifecycle_skill_alignment.py
 ```
 
 Result: `1 failed, 1 passed`. The focused lifecycle route/portability fixtures
