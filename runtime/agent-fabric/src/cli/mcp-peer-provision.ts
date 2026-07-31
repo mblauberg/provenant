@@ -18,7 +18,7 @@ import {
   MAXIMUM_SEAT_LIFETIME_MS,
   mcpBootstrapRenewalCommand,
   mcpRosterRenewalCommand,
-  readChairAuthorityExpiresAt,
+  openRosterReadPort,
 } from "./mcp-roster-renewal.js";
 import type { FabricPaths } from "./paths.js";
 import {
@@ -164,15 +164,23 @@ async function chairRequiredError(
       !(Date.parse(chair.metadata.expiresAt) > Date.now()) &&
       roster.every((member) => member.metadata.originKind === "provisioned")
     ) {
+      // This refusal performs exactly one lookup, so its request-scoped read
+      // port opens and closes around that single read.
+      const rosterPort = openRosterReadPort(paths.databasePath);
+      let chairAuthorityExpiresAt: string | null;
+      try {
+        chairAuthorityExpiresAt = rosterPort.chairAuthorityExpiresAt({
+          runId: chair.metadata.runId,
+          chairAgentId: chair.metadata.chairAgentId,
+        });
+      } finally {
+        rosterPort.close();
+      }
       const recovery = mcpRosterRenewalCommand({
         project: chair.metadata.projectPath,
         peerSeat: peer.metadata.seat,
         currentExpiresAt: chair.metadata.expiresAt,
-        chairAuthorityExpiresAt: readChairAuthorityExpiresAt({
-          databasePath: paths.databasePath,
-          runId: chair.metadata.runId,
-          chairAgentId: chair.metadata.chairAgentId,
-        }),
+        chairAuthorityExpiresAt,
         productRoot,
       });
       if (recovery !== null) {
