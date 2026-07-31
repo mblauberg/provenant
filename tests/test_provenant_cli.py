@@ -46,8 +46,24 @@ raise SystemExit(int(os.environ.get("PROVENANT_TEST_EXIT", "0")))
     return checkout, command
 
 
+#: Every test here asserts what the dispatcher itself does with the fabric root
+#: variables, so inheriting them from the ambient environment makes the file
+#: answer a different question than it asks. The split-root CI job exports
+#: `AGENT_FABRIC_INSTANCE_ROOT` for the whole job, which is exactly the case
+#: that caught this: three tests asserting an unset instance root read the
+#: job's own instance instead. Scrub them, then let each test name what it
+#: wants.
+AMBIENT_ROOT_VARIABLES = (
+    "AGENT_FABRIC_INSTANCE_ROOT",
+    "AGENT_FABRIC_PRODUCT_ROOT",
+    "AGENTS_HOME",
+)
+
+
 def invoke(command: Path, *args: str, cwd: Path, stdin: str = "", **env_updates: str):
     env = os.environ.copy()
+    for name in AMBIENT_ROOT_VARIABLES:
+        env.pop(name, None)
     env.update(env_updates)
     return subprocess.run(
         [str(command), *args],

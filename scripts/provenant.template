@@ -69,10 +69,16 @@ def resolve_product_root(root: Path) -> Path:
     return candidate
 
 
-def execute(path: Path, arguments: list[str], product_root: Path, root: Path) -> NoReturn:
+def execute(path: Path, arguments: list[str], product_root: Path) -> NoReturn:
     environment = os.environ.copy()
     environment["AGENT_FABRIC_PRODUCT_ROOT"] = str(product_root)
-    environment.setdefault("AGENT_FABRIC_INSTANCE_ROOT", str(root))
+    # Deliberately NOT defaulted. The copy above already carries an instance
+    # root the user actually chose, so writing one here can only invent a
+    # choice nobody made, and it hands the child an EXPLICIT selection where
+    # there was a default. That is the fail-open shape this issue exists to
+    # remove: downstream, an explicit instance root used to be licence enough
+    # to layer its config over an unrelated product (#563). The child applies
+    # the same default for itself when the variable is absent.
     environment["AGENTS_HOME"] = str(product_root)
     try:
         os.execve(path, [str(path), *arguments], environment)
@@ -94,7 +100,7 @@ def main(arguments: list[str]) -> int:
     else:
         target = product_root / "scripts/provenant"
         delegated_arguments = arguments
-    execute(target, delegated_arguments, product_root, root)
+    execute(target, delegated_arguments, product_root)
 
 
 if __name__ == "__main__":
