@@ -114,4 +114,3 @@ def _validate_evidence(
             matches = [item for item in by_id.values() if item.get("gate") == gate and item.get("status") == "pass"]
             fail(not matches or any(item.get("kind") != kind for item in matches), f"profile gate {gate} requires passing {kind} evidence")
     return by_id
-

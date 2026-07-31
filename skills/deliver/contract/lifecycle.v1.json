@@ -1,0 +1,233 @@
+{
+  "schema_version": 1,
+  "contract": "delivery-lifecycle",
+  "version": "v1",
+  "source": {
+    "state_graph": "docs/specs/harness/lifecycle.md:91-95",
+    "state_graph_status": "pinned"
+  },
+  "states": [
+    "draft",
+    "scoped",
+    "approved",
+    "executing",
+    "verifying",
+    "reviewing",
+    "repairing",
+    "awaiting_acceptance",
+    "accepted",
+    "awaiting_release",
+    "observing",
+    "closed"
+  ],
+  "side_states": ["blocked", "cancelled", "degraded"],
+  "terminal_states": ["closed"],
+  "transitions": [
+    {
+      "state": "draft",
+      "transition": "draft -> scoped",
+      "to_state": "scoped",
+      "required_evidence_kinds": [],
+      "permitted_writer": "delivery-producer",
+      "freshness_rule": {"mode": "monotonic", "timestamp_field": "at"}
+    },
+    {
+      "state": "scoped",
+      "transition": "scoped -> approved",
+      "to_state": "approved",
+      "required_evidence_kinds": [],
+      "permitted_writer": "delivery-producer",
+      "freshness_rule": {"mode": "monotonic", "timestamp_field": "at"},
+      "approval_artifact": {
+        "artifact_source": "intent.artifact",
+        "design_artifact_source": "design.artifact_id",
+        "artifact_is_approval": true,
+        "human_evidence_is_attestation": true
+      }
+    },
+    {
+      "state": "approved",
+      "transition": "approved -> executing",
+      "to_state": "executing",
+      "required_evidence_kinds": [],
+      "permitted_writer": "delivery-producer",
+      "freshness_rule": {"mode": "monotonic", "timestamp_field": "at"}
+    },
+    {
+      "state": "executing",
+      "transition": "executing -> verifying",
+      "to_state": "verifying",
+      "required_evidence_kinds": [],
+      "permitted_writer": "delivery-producer",
+      "freshness_rule": {"mode": "monotonic", "timestamp_field": "at"}
+    },
+    {
+      "state": "verifying",
+      "transition": "verifying -> reviewing",
+      "to_state": "reviewing",
+      "required_evidence_kinds": ["deterministic"],
+      "required_evidence_gates": [],
+      "permitted_writer": "delivery-producer",
+      "freshness_rule": {
+        "mode": "after_repair",
+        "repair_state": "repairing",
+        "evidence_timestamp_field": "finished_at",
+        "missing_timestamp": "chair-ratification-required"
+      }
+    },
+    {
+      "state": "verifying",
+      "transition": "verifying -> executing",
+      "to_state": "executing",
+      "required_evidence_kinds": [],
+      "permitted_writer": "delivery-producer",
+      "freshness_rule": {"mode": "monotonic", "timestamp_field": "at"}
+    },
+    {
+      "state": "reviewing",
+      "transition": "reviewing -> repairing",
+      "to_state": "repairing",
+      "required_evidence_kinds": [],
+      "permitted_writer": "delivery-producer",
+      "freshness_rule": {"mode": "monotonic", "timestamp_field": "at"}
+    },
+    {
+      "state": "reviewing",
+      "transition": "reviewing -> awaiting_acceptance",
+      "to_state": "awaiting_acceptance",
+      "required_evidence_kinds": ["deterministic", "judgement"],
+      "required_evidence_gates": [],
+      "permitted_writer": "delivery-producer",
+      "freshness_rule": {
+        "mode": "after_repair",
+        "repair_state": "repairing",
+        "evidence_timestamp_field": "finished_at",
+        "missing_timestamp": "chair-ratification-required"
+      }
+    },
+    {
+      "state": "repairing",
+      "transition": "repairing -> verifying",
+      "to_state": "verifying",
+      "required_evidence_kinds": [],
+      "permitted_writer": "delivery-producer",
+      "freshness_rule": {
+        "mode": "repair-boundary",
+        "repair_state": "repairing",
+        "next_gate_requires_fresh_evidence": true
+      }
+    },
+    {
+      "state": "awaiting_acceptance",
+      "transition": "awaiting_acceptance -> accepted",
+      "to_state": "accepted",
+      "required_evidence_kinds": ["human"],
+      "required_evidence_gates": ["human-acceptance"],
+      "permitted_writer": "delivery-producer",
+      "freshness_rule": {"mode": "monotonic", "timestamp_field": "at"}
+    },
+    {
+      "state": "awaiting_acceptance",
+      "transition": "awaiting_acceptance -> repairing",
+      "to_state": "repairing",
+      "required_evidence_kinds": [],
+      "permitted_writer": "delivery-producer",
+      "freshness_rule": {"mode": "repair-boundary", "repair_state": "repairing"}
+    },
+    {
+      "state": "accepted",
+      "transition": "accepted -> awaiting_release",
+      "to_state": "awaiting_release",
+      "required_evidence_kinds": [],
+      "permitted_writer": "delivery-producer",
+      "freshness_rule": {"mode": "monotonic", "timestamp_field": "at"}
+    },
+    {
+      "state": "awaiting_release",
+      "transition": "awaiting_release -> observing",
+      "to_state": "observing",
+      "required_evidence_kinds": ["human"],
+      "required_evidence_gates": ["human-release"],
+      "permitted_writer": "delivery-producer",
+      "freshness_rule": {"mode": "monotonic", "timestamp_field": "at"}
+    },
+    {
+      "state": "observing",
+      "transition": "observing -> closed",
+      "to_state": "closed",
+      "required_evidence_kinds": ["observation"],
+      "required_evidence_gates": [],
+      "permitted_writer": "delivery-producer",
+      "freshness_rule": {
+        "mode": "observation-window",
+        "evidence_timestamp_field": "observed_at",
+        "must_be_between": ["observation.started_at", "observation.ended_at"]
+      },
+      "close_gate": {
+        "observation": "pass",
+        "acceptance": "approved",
+        "release": "approved",
+        "retrospective": "required-by-risk-or-incident-policy"
+      },
+      "retrospective_policy": {
+        "risk_tiers": ["crucial", "terminal"],
+        "when_incident": true,
+        "when_escaped_defect": true,
+        "minimum_human_corrections": 2
+      }
+    }
+  ],
+  "invariants": {
+    "evidence_freshness_after_repair": {
+      "status": "pinned",
+      "decision_status": "chair-ratification-required",
+      "rule": "Evidence used to complete a post-repair review must be produced at or after the latest repairing transition.",
+      "transition_rows": ["repairing -> verifying", "verifying -> reviewing", "reviewing -> awaiting_acceptance"],
+      "evidence_timestamp_field": "finished_at",
+      "missing_timestamp": "chair-ratification-required"
+    },
+    "approval_artifact": {
+      "status": "pinned",
+      "decision_status": "chair-ratification-required",
+      "rule": "The digest-bound intent artifact is the approved artifact. When design is required its own digest-bound design artifact is approved alongside it and is a distinct artifact; requiring the two to be the same artifact would make a lawful shape unreachable. Human approval evidence attests each decision and is never a substitute for the artifact.",
+      "transition_rows": ["scoped -> approved"],
+      "artifact_sources": ["intent.artifact", "design.artifact_id"],
+      "approval_evidence_gates": ["intent-approval", "design-approval"]
+    },
+    "amended_artifact_redigest": {
+      "status": "pinned",
+      "decision_status": "confident",
+      "rule": "An amended artifact invalidates its recorded digest. A consumer must recompute the live SHA-256 and rebind the artifact before accepting a later gate; it must not carry a stale digest forward.",
+      "transition_rows": ["scoped -> approved", "verifying -> reviewing", "reviewing -> awaiting_acceptance", "observing -> closed"],
+      "digest_algorithm": "sha256",
+      "stale_digest_action": "reject",
+      "producer_rebind_path": "phase-2-producer-integration"
+    },
+    "artifact_content_inspection": {
+      "status": "pinned",
+      "decision_status": "chair-ratification-required",
+      "rule": "Evidence artifact bytes must be inspected where the evidence claim depends on their content; an empty, unreadable or non-corresponding observation artifact cannot support a passing measurement.",
+      "transition_rows": ["observing -> closed"],
+      "content_rules": [
+        "observation artifact is local JSON",
+        "observation artifact gate matches evidence.gate",
+        "observation artifact measured_value matches evidence.measured_value"
+      ]
+    },
+    "closed_gate": {
+      "status": "pinned",
+      "decision_status": "chair-ratification-required",
+      "rule": "closed requires passing observation, prior human acceptance and release approval, and a closed or no-change retrospective whenever risk, incident, escaped defect or repeated correction policy requires one.",
+      "transition_rows": ["observing -> closed"],
+      "required_gates": ["observation", "human-acceptance", "human-release"],
+      "conditional_gate": "retrospective"
+    }
+  },
+  "amendment_policy": {
+    "recorded_digest": "sha256:exact-live-artifact-bytes",
+    "amendment_action": "recompute-and-rebind",
+    "validator_option": "--verify-hashes",
+    "stale_binding": "reject",
+    "future_producer_requirement": "use this loader and re-digest before the next gate"
+  }
+}
