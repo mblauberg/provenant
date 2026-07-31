@@ -377,6 +377,37 @@ describe("machine status and doctor", () => {
     });
   });
 
+  it("offers a paired default instance layer when product root is selected explicitly", async () => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), "fabric-status-paired-")));
+    cleanup.push(root);
+    const productRoot = join(root, "product");
+    const home = join(root, "home");
+    const instanceRoot = join(home, ".agents");
+    const localConfig = join(instanceRoot, "config", "agent-fabric.yaml");
+    await Promise.all([
+      mkdir(join(instanceRoot, ".agent-fabric"), { recursive: true }),
+      mkdir(join(productRoot, "config"), { recursive: true }),
+      mkdir(join(instanceRoot, "config"), { recursive: true }),
+    ]);
+    await Promise.all([
+      writeFile(join(productRoot, "config", "agent-fabric.yaml"), "schemaVersion: 1\n"),
+      writeFile(localConfig, "schemaVersion: 1\nactiveAdapters: [agy]\n"),
+      writeFile(
+        join(instanceRoot, ".agent-fabric", "product-root.json"),
+        JSON.stringify({ schema_version: 1, product_root: productRoot }),
+      ),
+    ]);
+
+    vi.stubEnv("HOME", home);
+    vi.stubEnv("AGENT_FABRIC_INSTANCE_ROOT", undefined);
+
+    expect(resolveStatusPaths(["--product-root", productRoot])).toMatchObject({
+      productRoot,
+      instanceRoot,
+      localConfig,
+    });
+  });
+
   it("reports configured adapters, exact roots and secret-free seat metadata", async () => {
     const value = await paths();
     const agentsHome = resolve(import.meta.dirname, "../../../..");

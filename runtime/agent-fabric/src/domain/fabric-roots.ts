@@ -27,22 +27,40 @@ function optionalPath(value: string | undefined): string | undefined {
 export function resolveFabricRoots(options: FabricRootResolutionOptions): FabricRoots {
   const environment = options.environment ?? process.env;
   const agentsHomeFlag = optionalPath(options.agentsHomeFlag);
-  const agentsHomeEnvironment = environmentPath(environment, "AGENTS_HOME");
   const defaultRoot = resolve(join(homedir(), ".agents"));
   return {
     productRoot:
       optionalPath(options.productRootFlag) ??
       agentsHomeFlag ??
       environmentPath(environment, "AGENT_FABRIC_PRODUCT_ROOT") ??
-      agentsHomeEnvironment ??
+      environmentPath(environment, "AGENTS_HOME") ??
       defaultRoot,
     instanceRoot:
       optionalPath(options.instanceRootFlag) ??
       agentsHomeFlag ??
       environmentPath(environment, "AGENT_FABRIC_INSTANCE_ROOT") ??
-      agentsHomeEnvironment ??
       defaultRoot,
   };
+}
+
+/**
+ * An instance layer is legitimate when its machine-local pointer names the
+ * resolved product. Filesystem access stays outside this domain module; the
+ * caller supplies both paths already canonicalised, because the two sides are
+ * produced by different tools: `install-harness` records
+ * `product_root.resolve(strict=True)`, which follows symlinks, while a product
+ * root taken from a flag or the environment is only lexically resolved. Comparing
+ * those two directly reports a genuinely paired instance as unpaired whenever the
+ * product is reached through a symlink, and the local layer then silently
+ * disappears.
+ */
+export function isInstanceRootPaired(
+  canonicalProductRoot: string | undefined,
+  pointerProductRoot: string | undefined,
+): boolean {
+  return canonicalProductRoot !== undefined
+    && pointerProductRoot !== undefined
+    && canonicalProductRoot === pointerProductRoot;
 }
 
 function shellQuote(value: string): string {

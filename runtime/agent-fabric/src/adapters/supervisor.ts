@@ -3,6 +3,7 @@ import { isAbsolute } from "node:path";
 
 import { AdapterProcessTransport } from "./process.js";
 import { verifySpawnWrapperProvenance } from "./compatibility.js";
+import { verifyNpmInstallAttestation } from "./npm-install-attestation-verifier.js";
 import { DEFAULT_PROVIDER_TURN_TIMEOUT_MS, providerTurnResponseTimeoutMs } from "./provider-deadlines.js";
 import {
   chairActionKey,
@@ -34,12 +35,14 @@ export type AdapterProcessDefinition = {
   environment: Record<string, string>;
   modelPolicy?: AdapterModelPolicy;
   wrapperProvenance?: { repositoryCommit: string; wrapperPath: string };
+  npmInstallProductRoot?: string;
 };
 
 export type AdapterSupervisorOptions = {
   controlTimeoutMs?: number;
   providerTurnTimeoutMs?: number;
   bridgeHealthIntervalMs?: number;
+  verifyNpmInstall?: typeof verifyNpmInstallAttestation;
 };
 
 export type AdapterChairLaunchRequest = {
@@ -132,20 +135,23 @@ export class AdapterSupervisor {
   readonly #controlTimeoutMs: number;
   readonly #providerTurnTimeoutMs: number;
   readonly #bridgeHealthIntervalMs: number;
+  readonly #verifyNpmInstall: typeof verifyNpmInstallAttestation;
   readonly #bridgeHealthTimer: NodeJS.Timeout;
   #bridgeHealthAuditInFlight = false;
 
   /**
-   * Every adapter process spawn re-derives wrapper provenance immediately
-   * beforehand and requires it to match the provenance verified at
-   * composition, so a wrapper mutated between composition and spawn fails
-   * closed instead of executing.
+   * Every adapter process spawn rechecks npm-installed execution bytes and
+   * re-derives wrapper provenance immediately beforehand. Drift after daemon
+   * composition therefore fails closed instead of executing.
    */
   async #openTransport(
     adapterId: string,
     definition: AdapterProcessDefinition,
     environment?: Record<string, string>,
   ): Promise<AdapterProcessTransport> {
+    if (definition.npmInstallProductRoot !== undefined) {
+      await this.#verifyNpmInstall(definition.npmInstallProductRoot);
+    }
     if (definition.wrapperProvenance !== undefined) {
       await verifySpawnWrapperProvenance({
         adapterId,
@@ -154,9 +160,9 @@ export class AdapterSupervisor {
       });
     }
     // Accepted residual (verify->exec swap race): a narrow TOCTOU window remains
-    // between this re-verification and the transport's own exec of the wrapper
+    // between these re-verifications and the transport's own exec of the
     // command below. An attacker with concurrent write access could swap the
-    // wrapper bytes inside that window. Full closure needs snapshot execution
+    // loader or wrapper bytes inside that window. Full closure needs snapshot execution
     // (spawning from a verified, immutable copy) and is out of scope for #132.
     return new AdapterProcessTransport(environment === undefined ? definition : { ...definition, environment });
   }
@@ -166,6 +172,7 @@ export class AdapterSupervisor {
     this.#controlTimeoutMs = options.controlTimeoutMs ?? DEFAULT_CONTROL_TIMEOUT_MS;
     this.#providerTurnTimeoutMs = options.providerTurnTimeoutMs ?? DEFAULT_PROVIDER_TURN_TIMEOUT_MS;
     this.#bridgeHealthIntervalMs = options.bridgeHealthIntervalMs ?? DEFAULT_BRIDGE_HEALTH_INTERVAL_MS;
+    this.#verifyNpmInstall = options.verifyNpmInstall ?? verifyNpmInstallAttestation;
     if (!Number.isFinite(this.#bridgeHealthIntervalMs) || this.#bridgeHealthIntervalMs <= 0) {
       throw new TypeError("bridgeHealthIntervalMs must be positive");
     }

@@ -40,7 +40,7 @@ The proposed fabric makes those contracts executable while preserving the existi
   multiple authorities.
 - Permit direct agent-to-agent communication without treating messages as
   permission grants.
-- Keep model and effort routing in `config/model-routing.json`.
+- Keep model and effort routing in `<instance-root>/config/model-routing.json`.
 - Add providers through capability-advertising adapters, not provider-specific
   skills.
 - Preserve project-owned artifacts and curated project documentation.
@@ -54,7 +54,7 @@ The proposed fabric makes those contracts executable while preserving the existi
 - Global peer-to-peer broadcast or consensus-based ownership.
 - Guaranteed structured push into an unmanaged interactive TUI.
 - Replacement of Claude Code, Codex, Herdr or provider-native subagents.
-- A new model catalogue separate from `config/model-routing.json`.
+- A new model catalogue separate from `<instance-root>/config/model-routing.json`.
 - Physical filesystem isolation. Coordination leases complement, but do not
   replace, runtime sandboxes and operating-system controls.
 - Automatic public release, deployment, provider login or subscription use.
@@ -124,7 +124,7 @@ Claude or Codex MCP process
 ### Source layout
 
 ```text
-~/.agents/
+<product-root>/
   runtime/agent-fabric/
     package.json
     src/core/fabric.ts
@@ -147,9 +147,10 @@ Claude or Codex MCP process
     src/operation-codecs.ts  # stable public import point
     src/operation-codecs/    # codec owner
   config/agent-fabric.yaml
-  config/model-routing.json
   scripts/agent-fabric
   scripts/agent-fabric-mcp
+<instance-root>/
+  config/model-routing.json
 ```
 
 ### Runtime layout
@@ -173,7 +174,7 @@ configuration_contract:
   unknown_keys: error
   trusted_layers:
     - ${AGENTS_HOME}/config/agent-fabric.yaml
-    - ${XDG_CONFIG_HOME}/agent-fabric/local.yaml
+    - <instance-root>/config/agent-fabric.yaml
   untrusted_project_layer: <project>/.agents/agent-fabric.yaml
   run_layer: validated-run-authority-envelope
   merge_rules:
@@ -201,7 +202,7 @@ secrets:
     - operating-system-keychain
   permitted_in_yaml: false
 routing:
-  source: ~/.agents/config/model-routing.json
+  source: <instance-root>/config/model-routing.json
 ```
 
 ## Performance and resource policy

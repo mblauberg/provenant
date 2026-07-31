@@ -5,6 +5,7 @@ import { loadAdapterModelConstraints } from "../adapters/model-selection.js";
 import { loadFabricConfig } from "../config/index.js";
 import { trustedWorkspaceRoots } from "../cli/workspace-trust.js";
 import { verifyProviderConformance } from "../adapters/provider-conformance.js";
+import { verifyNpmInstallAttestation } from "../adapters/npm-install-attestation-verifier.js";
 
 type AdapterMap = NonNullable<FabricOpenOptions["adapters"]>;
 
@@ -60,6 +61,10 @@ export function parseDaemonAdapters(serialized: string | undefined): AdapterMap 
     if (wrapperProvenance !== undefined && (!isRecord(wrapperProvenance) || typeof wrapperProvenance.repositoryCommit !== "string" || typeof wrapperProvenance.wrapperPath !== "string")) {
       throw new TypeError(`daemon adapter wrapper provenance is invalid for ${adapterId}`);
     }
+    const npmInstallProductRoot = candidate.npmInstallProductRoot;
+    if (npmInstallProductRoot !== undefined && typeof npmInstallProductRoot !== "string") {
+      throw new TypeError(`daemon adapter npm install product root is invalid for ${adapterId}`);
+    }
     adapters[adapterId] = {
       command: candidate.command,
       environment: candidate.environment as Record<string, string>,
@@ -67,6 +72,7 @@ export function parseDaemonAdapters(serialized: string | undefined): AdapterMap 
       ...(wrapperProvenance === undefined ? {} : {
         wrapperProvenance: wrapperProvenance as NonNullable<AdapterMap[string]["wrapperProvenance"]>,
       }),
+      ...(npmInstallProductRoot === undefined ? {} : { npmInstallProductRoot }),
     };
   }
   return adapters;
@@ -82,6 +88,7 @@ export async function composeDaemonConfiguration(options: {
   agentsHome: string;
   stateDirectory?: string;
   verifyProvider?: typeof verifyProviderConformance;
+  verifyNpmInstall?: typeof verifyNpmInstallAttestation;
 }): Promise<{ adapters: AdapterMap; executionProfile: string; maximumConcurrentProviderTurns: number; workspaceRoots: string[] }> {
   const trustedConfigOptions = {
     globalPath: options.globalConfigPath,
@@ -110,6 +117,9 @@ export async function composeDaemonConfiguration(options: {
     ? candidateConfig
     : await loadFabricConfig({ ...configOptions, additionalWorkspaceRoots: eligibleLocalTrustedRoots });
   const verification = await verifyAdapterCompatibility({ compatibilityPath: options.compatibilityPath, schemaPath: options.compatibilitySchemaPath, adapterIds: config.adapterIds, requireEnabled: true });
+  if (config.adapterIds.length > 0) {
+    await (options.verifyNpmInstall ?? verifyNpmInstallAttestation)(options.agentsHome);
+  }
   const provenanceByAdapter = new Map(verification.wrapperProvenance.map((item) => [item.adapterId, item]));
   const adapters = Object.fromEntries(await Promise.all(config.adapterIds.map(async (adapterId) => {
     const command = config.adapterCommands[adapterId];
@@ -172,6 +182,7 @@ export async function composeDaemonConfiguration(options: {
         repositoryCommit: provenance.repositoryCommit,
         wrapperPath: provenance.wrapperPath,
       },
+      npmInstallProductRoot: options.agentsHome,
     }] as const;
   })));
   return {

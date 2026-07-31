@@ -375,13 +375,14 @@ def execute(action: str, product_root: Path, instance_root: Path) -> dict[str, A
 def default_instance_root(environment: dict[str, str] | None = None) -> Path:
     """The instance root when the caller names none.
 
-    Same precedence as `install-harness`: an explicit instance root, then the
-    agents home, then `~/.agents`. Defaulting to the product checkout instead
-    would reinstate the fused assumption whenever this runs standalone, and
-    quietly seed the product tree rather than the user's instance.
+    The instance root is selected by an explicit instance-root environment
+    variable, then `~/.agents`. `AGENTS_HOME` names the product root and is not
+    an instance fallback. Defaulting to the product checkout instead would
+    reinstate the fused assumption whenever this runs standalone, and quietly
+    seed the product tree rather than the user's instance.
     """
     values = os.environ if environment is None else environment
-    for name in ("AGENT_FABRIC_INSTANCE_ROOT", "AGENTS_HOME"):
+    for name in ("AGENT_FABRIC_INSTANCE_ROOT",):
         value = values.get(name)
         if value:
             root = Path(value).expanduser()

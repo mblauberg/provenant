@@ -53,6 +53,10 @@ async function makeSplit(label: string): Promise<Split> {
     workspaceRoots: [workspace],
     limits: { maximumConcurrentProviderTurns: 8 },
   });
+  await writeYamlishJson(join(instanceRoot, ".agent-fabric", "product-root.json"), {
+    schema_version: 1,
+    product_root: productRoot,
+  });
   return {
     root,
     productRoot,
@@ -279,6 +283,39 @@ describe("split-layout startup path binding", () => {
     expect(configuration.agentsHome).toBe(split.productRoot);
   });
 
+  it("offers a paired instance layer when --agents-home names the instance beside an explicit product", async () => {
+    const split = await makeSplit("binding-agents-home-flag");
+    await writeYamlishJson(split.localPath, { schemaVersion: 1 });
+
+    const configuration = resolveSplitConfiguration({
+      productRootFlag: split.productRoot,
+      agentsHomeFlag: split.instanceRoot,
+      environment: {},
+    });
+
+    expect(configuration.globalConfigPath).toBe(split.globalPath);
+    expect(configuration.localConfigPath).toBe(split.localPath);
+  });
+
+  it("rejects an instance pointer paired with a different product", async () => {
+    const split = await makeSplit("binding-mismatched-pointer");
+    await writeYamlishJson(split.localPath, { schemaVersion: 1 });
+    const otherProduct = join(split.root, "other-product");
+    await mkdir(otherProduct, { recursive: true });
+    await writeYamlishJson(join(split.instanceRoot, ".agent-fabric", "product-root.json"), {
+      schema_version: 1,
+      product_root: otherProduct,
+    });
+
+    const configuration = resolveSplitConfiguration({
+      productRootFlag: split.productRoot,
+      instanceRootFlag: split.instanceRoot,
+      environment: {},
+    });
+
+    expect(configuration.localConfigPath).toBeUndefined();
+  });
+
   it("omits the local layer when the instance ships no configuration file", async () => {
     const split = await makeSplit("binding-absent");
 
@@ -308,12 +345,53 @@ describe("split-layout startup path binding", () => {
   });
 
   it("never offers the global layer back to itself as the local layer", () => {
+    const root = "/fixture/agents-home";
     const configuration = resolveSplitConfiguration({
-      environment: { AGENTS_HOME: "/fixture/agents-home" },
+      productRootFlag: root,
+      instanceRootFlag: root,
+      readFile: () => JSON.stringify({ schema_version: 1, product_root: root }),
       exists: () => true,
     });
 
-    expect(configuration.globalConfigPath).toBe("/fixture/agents-home/config/agent-fabric.yaml");
+    expect(configuration.globalConfigPath).toBe(`${root}/config/agent-fabric.yaml`);
+    expect(configuration.localConfigPath).toBeUndefined();
+  });
+
+  it("offers a paired default instance layer when the product is selected through AGENTS_HOME", async () => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), "fabric-default-instance-")));
+    const productRoot = join(root, "product");
+    const home = join(root, "home");
+    const instanceRoot = join(home, ".agents");
+    const localPath = join(instanceRoot, "config", "agent-fabric.yaml");
+    await writeYamlishJson(join(productRoot, "config", "agent-fabric.yaml"), { schemaVersion: 1 });
+    await writeYamlishJson(localPath, { schemaVersion: 1, activeAdapters: ["codex"] });
+    await writeYamlishJson(join(instanceRoot, ".agent-fabric", "product-root.json"), {
+      schema_version: 1,
+      product_root: productRoot,
+    });
+
+    const previousHome = process.env.HOME;
+    process.env.HOME = home;
+    try {
+      const configuration = resolveSplitConfiguration({
+        environment: { AGENTS_HOME: productRoot },
+      });
+
+      expect(configuration.globalConfigPath).toBe(join(productRoot, "config", "agent-fabric.yaml"));
+      expect(configuration.localConfigPath).toBe(localPath);
+    } finally {
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+    }
+  });
+
+  it("does not offer the default instance layer to an AGENTS_HOME worktree", () => {
+    const configuration = resolveSplitConfiguration({
+      environment: { AGENTS_HOME: "/fixture/worktree" },
+      exists: () => true,
+    });
+
+    expect(configuration.globalConfigPath).toBe("/fixture/worktree/config/agent-fabric.yaml");
     expect(configuration.localConfigPath).toBeUndefined();
   });
 });

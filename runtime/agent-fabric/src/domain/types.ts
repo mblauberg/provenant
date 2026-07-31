@@ -19,6 +19,7 @@ export type FabricOpenOptions = {
     environment: Record<string, string>;
     modelPolicy?: { allowedFamilies: string[]; allowedModelPatterns: string[]; requiresExplicitModel: boolean };
     wrapperProvenance?: { repositoryCommit: string; wrapperPath: string };
+    npmInstallProductRoot?: string;
   }>;
   capabilityKey?: string;
   executionProfile?: string;
@@ -84,6 +85,7 @@ export type FabricErrorCode =
   | "ADAPTER_INTERFACE_MISMATCH"
   | "ADAPTER_INTERFACE_PROBE_INCOMPLETE"
   | "ADAPTER_PATH_UNSAFE"
+  | "NPM_INSTALL_ATTESTATION_MISMATCH"
   | "ADAPTER_MODEL_REQUIRED"
   | "ADAPTER_FAMILY_FORBIDDEN"
   | "BARRIER_PRECONDITION_FAILED"
