@@ -278,14 +278,15 @@ jobs:
           test -f "$split_instance/config/model-preferences.json"
           test "$AGENT_FABRIC_PRODUCT_ROOT" != "$AGENT_FABRIC_INSTANCE_ROOT"
           printf 'product root: %s\ninstance root: %s\n' "$AGENT_FABRIC_PRODUCT_ROOT" "$AGENT_FABRIC_INSTANCE_ROOT"
-          printf '%s\n' \
-            'schemaVersion: 1' \
-            'allowedAdapters:' \
-            '  - codex-app-server' \
-            'activeAdapters:' \
-            '  - codex-app-server' \
-            'allowedProfiles:' \
-            '  - headless' > "$split_instance/config/agent-fabric.yaml"
+          # The instance layer is whatever `install-harness` actually seeds and
+          # nothing more.  An earlier revision hand-wrote an instance
+          # `agent-fabric.yaml` naming `codex-app-server`, which put an adapter
+          # back into `allowedAdapters` for acceptance tests that deliberately
+          # set it to `[]`, and they then failed reaching for a provider
+          # executable.  That was the rig inventing a config layer the split
+          # install does not create, so the suite failed on the fixture rather
+          # than on the roots.
+          test ! -e "$split_instance/config/agent-fabric.yaml"
           # Export the two roots and nothing else.  The seeding above needs a
           # split HOME, CODEX_HOME and PROVENANT_BIN_DIR, but exporting those
           # to later steps makes the suite fail on the ambient installer
