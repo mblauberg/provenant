@@ -120,7 +120,6 @@ jobs:
             split-root:
               - *ci-contract
               - *node-workspace
-              - '.github/split-root-known-red.txt'
               - '.github/split-root-known-red-ts.txt'
               - '.github/split-root-known-flaky.txt'
               - 'config/**'
@@ -303,34 +302,16 @@ jobs:
       - name: Run full Python suite under split roots
         env:
           HARNESS_PYTHON: ${{ github.workspace }}/.venv/bin/python
+        # No deselect list and no inverse gate any more.  Both entries of
+        # `.github/split-root-known-red.txt` were owned by #563 and both went
+        # green with the root-pairing fix in this change, which the inverse gate
+        # reported as `NOW PASSING, remove from the ledger` before failing the
+        # job.  That is the gate working, so the ledger and its machinery are
+        # deleted here rather than kept empty: a Python split-root failure now
+        # simply fails this step, which is what should have happened all along.
         run: |
           set -euo pipefail
-          deselect=()
-          while read -r node _owner; do
-            deselect+=("--deselect=$node")
-          done < <(grep -vE '^[[:space:]]*(#|$)' .github/split-root-known-red.txt)
-          printf 'deselected known-red cases: %d\n' "${#deselect[@]}"
-          printf '  %s\n' ${deselect[@]+"${deselect[@]}"}
-          $HARNESS_PYTHON -m pytest tests/ -q ${deselect[@]+"${deselect[@]}"}
-      - name: Assert every known-red case is still red
-        env:
-          HARNESS_PYTHON: ${{ github.workspace }}/.venv/bin/python
-        run: |
-          set -euo pipefail
-          # Inverse gate.  A deselected case that starts PASSING means the
-          # owning issue landed, and the ledger entry has to be deleted in that
-          # PR.  Without this step the deselect list would quietly outlive the
-          # bugs it names, which is the failure mode this whole job exists for.
-          status=0
-          while read -r node owner; do
-            if $HARNESS_PYTHON -m pytest "$node" -q >/dev/null 2>&1; then
-              printf 'NOW PASSING, remove from the ledger: %s (%s)\n' "$node" "$owner"
-              status=1
-            else
-              printf 'still red as recorded: %s (%s)\n' "$node" "$owner"
-            fi
-          done < <(grep -vE '^\s*(#|$)' .github/split-root-known-red.txt)
-          exit "$status"
+          $HARNESS_PYTHON -m pytest tests/ -q
       - name: Run full workspace suite under split roots
         env:
           # vitest colours its summary on this runner, and the escape codes sit
