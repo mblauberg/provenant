@@ -8,6 +8,7 @@ import { verifyProviderConformance } from "../adapters/provider-conformance.js";
 import { loadAdapterModelConstraints } from "../adapters/model-selection.js";
 import { resolveFabricRoots } from "../domain/fabric-roots.js";
 import { hasPairedInstanceRoot, type RootPairingDependencies } from "./instance-root-pairing.js";
+import { verifyNpmInstallAttestation } from "../adapters/npm-install-attestation-verifier.js";
 
 const VALUE_OPTIONS = [
   "--adapter",
@@ -47,6 +48,7 @@ export async function resolveAdapterExecutableCli(
   dependencies: {
     verifyProvider?: typeof verifyProviderConformance;
     rootPairing?: RootPairingDependencies;
+    verifyNpmInstall?: typeof verifyNpmInstallAttestation;
   } = {},
 ): Promise<string> {
   const parsed = parseArguments(arguments_);
@@ -102,6 +104,7 @@ export async function resolveAdapterExecutableCli(
       `activated adapter has no provider executable: ${adapterId}`,
     );
   }
+  await (dependencies.verifyNpmInstall ?? verifyNpmInstallAttestation)(productRoot);
   const policy = await loadAdapterModelConstraints({ compatibilityPath, schemaPath, adapterId, requireEnabled: true });
   await (dependencies.verifyProvider ?? verifyProviderConformance)({
     adapterId,

@@ -13,7 +13,8 @@
   "files": [
     "dist",
     "migrations",
-    "schemas"
+    "schemas",
+    "scripts/lib/npm-install-attestation.mjs"
   ],
   "exports": {
     ".": {

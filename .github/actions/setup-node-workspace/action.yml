@@ -20,4 +20,4 @@ runs:
         test "$(npm --version)" = "11.12.1"
     - name: Install locked workspace dependencies
       shell: bash
-      run: npm ci --no-audit --no-fund
+      run: scripts/install-agent-fabric-dependencies

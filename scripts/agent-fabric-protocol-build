@@ -32,9 +32,13 @@ verify_repair_script() {
 verify_repair_script
 
 [ -d "$agents_home/node_modules" ] || {
-  echo "agent-fabric protocol build needs dependencies: run 'npm ci' in \"$agents_home\" first" >&2
+  echo "agent-fabric protocol build needs dependencies: rerun \"$agents_home/scripts/install-agent-fabric-dependencies\" first" >&2
   exit 1
 }
+# Protocol preflight may invoke this build before either TypeScript launcher
+# reaches its own source-fallback gate. Verify here, before npm can import any
+# dependency-controlled build tooling.
+node "$agents_home/runtime/agent-fabric/scripts/verify-npm-ci-attestation.mjs" "$agents_home"
 [ -f "$freshness_library" ] || {
   echo "agent-fabric protocol build cannot record freshness: missing $freshness_library" >&2
   exit 1

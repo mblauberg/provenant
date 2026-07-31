@@ -781,7 +781,7 @@ export async function fabricDoctor(
       } catch {
         throw new Error(
           `tsx loader is missing: ${loaderPath}. Adapter wrappers execute tracked TypeScript source through tsx; ` +
-          "reinstall dependencies including devDependencies (npm ci, not npm ci --omit=dev).",
+          `rerun ${join(selected.productRoot, "scripts", "install-agent-fabric-dependencies")}.`,
         );
       }
     }

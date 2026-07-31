@@ -1,6 +1,7 @@
 import json
 import os
 from pathlib import Path
+import shutil
 import stat
 import subprocess
 
@@ -154,6 +155,25 @@ def test_prompt_helper_delegates_help_to_fabric(tmp_path):
 def test_real_fabric_client_fails_closed_when_daemon_is_unavailable(tmp_path):
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
+    attestation_log = tmp_path / "attestation.log"
+    real_node = shutil.which("node")
+    assert real_node is not None
+    # This test owns the real client's daemon-unavailable response, not the
+    # commit-bound install attestation. Pass only that verifier invocation
+    # through a test double, then delegate every other Node call to the real
+    # executable. Entrypoint attestation has dedicated fail-closed coverage.
+    fake_node = bin_dir / "node"
+    fake_node.write_text(
+        "#!/bin/sh\n"
+        'case "$1" in\n'
+        "  */verify-npm-ci-attestation.mjs)\n"
+        f'    printf "%s\\n" "$1" >> "{attestation_log}"\n'
+        "    exit 0\n"
+        "    ;;\n"
+        "esac\n"
+        f'exec "{real_node}" "$@"\n'
+    )
+    fake_node.chmod(fake_node.stat().st_mode | stat.S_IXUSR)
     herdr_log = tmp_path / "herdr.log"
     fake_herdr = bin_dir / "herdr"
     fake_herdr.write_text(
@@ -163,6 +183,7 @@ def test_real_fabric_client_fails_closed_when_daemon_is_unavailable(tmp_path):
     )
     fake_herdr.chmod(fake_herdr.stat().st_mode | stat.S_IXUSR)
     env = os.environ.copy()
+    env["AGENTS_HOME"] = str(ROOT)
     env["AGENT_FABRIC_PRODUCT_ROOT"] = str(ROOT)
     env["AGENT_FABRIC_SOCKET_PATH"] = str(tmp_path / "missing-fabric.sock")
     env["AGENT_FABRIC_CAPABILITY"] = "afb_" + "A" * 43
@@ -197,4 +218,7 @@ def test_real_fabric_client_fails_closed_when_daemon_is_unavailable(tmp_path):
     # The reason names the failed check; the trailing syscall code varies by
     # platform (e.g. ENOENT, ECONNREFUSED, EINVAL).
     assert payload["reason"].startswith("daemon connection check failed: ")
+    assert attestation_log.read_text().endswith(
+        "/runtime/agent-fabric/scripts/verify-npm-ci-attestation.mjs\n"
+    )
     assert not herdr_log.exists()

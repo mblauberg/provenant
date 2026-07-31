@@ -42,6 +42,7 @@ async function resolveFixtureExecutable(fixture: Fixture) {
     "--compatibility", fixture.compatibilityPath,
     "--compatibility-schema", fixture.schemaPath,
   ], {
+    verifyNpmInstall: async () => undefined,
     verifyProvider: async (input) => {
       try { await stat(input.executable); } catch (error: unknown) {
         throw new FabricError("ADAPTER_ARTIFACT_MISSING", "provider executable is unavailable", { cause: error });
@@ -52,6 +53,38 @@ async function resolveFixtureExecutable(fixture: Fixture) {
 }
 
 describe("adapter executable resolver CLI", () => {
+  it("refuses adapter admission when npm install attestation is missing", async () => {
+    const fixture = await createResolvedStage4Compatibility("agy");
+    fixtures.push(fixture);
+    const productRoot = join(fixture.directory, "product-without-attestation");
+    await Promise.all([
+      mkdir(join(productRoot, "config"), { recursive: true }),
+      mkdir(join(productRoot, "runtime", "agent-fabric", "schemas"), { recursive: true }),
+    ]);
+    await Promise.all([
+      writeFile(
+        join(productRoot, "config", "agent-fabric.yaml"),
+        "schemaVersion: 1\nallowedAdapters: [agy]\nactiveAdapters: [agy]\n",
+      ),
+      copyFile(fixture.compatibilityPath, join(productRoot, "config", "adapter-compatibility.yaml")),
+      copyFile(
+        fixture.schemaPath,
+        join(productRoot, "runtime", "agent-fabric", "schemas", "adapter-compatibility.schema.json"),
+      ),
+    ]);
+
+    await expect(resolveAdapterExecutableCli([
+      "--adapter", "agy",
+      "--product-root", productRoot,
+      "--instance-root", productRoot,
+    ], {
+      verifyProvider: async () => ({} as never),
+    })).rejects.toMatchObject({
+      code: "NPM_INSTALL_ATTESTATION_MISMATCH",
+      message: expect.stringContaining("rerun:"),
+    });
+  });
+
   it("prints the activated stable compatibility executable after validation", async () => {
     const fixture = await createResolvedStage4Compatibility("agy");
     fixtures.push(fixture);
@@ -93,6 +126,7 @@ describe("adapter executable resolver CLI", () => {
       "--product-root", productRoot,
       "--instance-root", instanceRoot,
     ], {
+      verifyNpmInstall: async () => undefined,
       verifyProvider: async () => ({} as never),
     });
 
@@ -179,6 +213,7 @@ describe("adapter executable resolver CLI", () => {
       "--adapter", "agy",
       "--product-root", productRoot,
     ], {
+      verifyNpmInstall: async () => undefined,
       verifyProvider: async () => ({} as never),
     })).rejects.toMatchObject({ code: "ADAPTER_DISABLED" });
   });
@@ -208,6 +243,7 @@ describe("adapter executable resolver CLI", () => {
       "--adapter", "agy",
       "--agents-home", agentsHome,
     ], {
+      verifyNpmInstall: async () => undefined,
       verifyProvider: async () => ({} as never),
     });
 
