@@ -189,7 +189,7 @@
     "approval_artifact": {
       "status": "pinned",
       "decision_status": "chair-ratification-required",
-      "rule": "The digest-bound intent artifact, and the same artifact when design is required, is the approved artifact; human approval evidence attests the decision and is not a substitute artifact.",
+      "rule": "The digest-bound intent artifact is the approved artifact. When design is required its own digest-bound design artifact is approved alongside it and is a distinct artifact; requiring the two to be the same artifact would make a lawful shape unreachable. Human approval evidence attests each decision and is never a substitute for the artifact.",
       "transition_rows": ["scoped -> approved"],
       "artifact_sources": ["intent.artifact", "design.artifact_id"],
       "approval_evidence_gates": ["intent-approval", "design-approval"]
