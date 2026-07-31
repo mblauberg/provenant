@@ -17,6 +17,7 @@ const COMMON_OPTIONS = new Set([
   "--compatibility",
   "--compatibility-schema",
 ]);
+const MAX_NODE_TIMER_MS = 2_147_483_647;
 
 function parseOptionPairs(arguments_: string[]): Map<string, string> {
   const parsed = new Map<string, string>();
@@ -48,6 +49,11 @@ function optionalTimeout(parsed: ReadonlyMap<string, string>, provider: string):
   const timeoutMs = Number(value);
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) {
     throw new Error(`adapter invocation for ${provider} received invalid timeout-ms value: ${value}`);
+  }
+  if (timeoutMs > MAX_NODE_TIMER_MS) {
+    throw new Error(
+      `adapter invocation for ${provider} received invalid timeout-ms value: ${value}; maximum is ${String(MAX_NODE_TIMER_MS)}ms`,
+    );
   }
   return timeoutMs;
 }
@@ -85,6 +91,9 @@ export async function resolveAdapterInvocationCli(
   }
   if (provider === "copilot") {
     throw new Error("copilot is not supported; it has no adapter");
+  }
+  if (provider === "opencode-acp") {
+    throw new Error("provider opencode-acp is registered but has no invocation payload");
   }
   if (provider !== "agy" && provider !== "cursor" && provider !== "kiro" && provider !== "pi") {
     throw new Error(`unknown provider: ${provider}`);

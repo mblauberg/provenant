@@ -184,6 +184,116 @@ describe("adapter invocation resolver CLI", () => {
     });
   });
 
+  it("builds the minimal Agy invocation without optional fields", async () => {
+    const fixture = await createResolvedStage4Compatibility("agy");
+    fixtures.push(fixture);
+    const configPath = join(fixture.directory, "agent-fabric.yaml");
+    await writeFile(configPath, "schemaVersion: 1\nallowedAdapters: [agy]\nactiveAdapters: [agy]\n");
+
+    await expect(resolveAdapterInvocationCli([
+      "--adapter", "agy",
+      "--agents-home", fixture.directory,
+      "--product-root", fixture.directory,
+      "--instance-root", fixture.directory,
+      "--config", configPath,
+      "--compatibility", fixture.compatibilityPath,
+      "--compatibility-schema", fixture.schemaPath,
+      "--mode", "accept-edits",
+      "--model", "gemini",
+      "--prompt", "review",
+    ], {
+      verifyProvider: vi.fn(async () => ({} as never)),
+    })).resolves.toStrictEqual({
+      executable: await fixtureExecutable(fixture, "agy"),
+      args: [
+        "--sandbox",
+        "--mode", "accept-edits",
+        "--model", "gemini",
+        "--print-timeout", "1800s",
+        "--print", "review",
+      ],
+    });
+  });
+
+  it("builds the minimal Cursor invocation without optional fields", async () => {
+    const fixture = await createCursorKiroCompatibilityFixture();
+    fixtures.push(fixture);
+    const configPath = join(fixture.directory, "agent-fabric.yaml");
+    await writeFile(
+      configPath,
+      "schemaVersion: 1\nallowedAdapters: [cursor-agent]\nactiveAdapters: [cursor-agent]\n",
+    );
+
+    await expect(resolveAdapterInvocationCli([
+      "--adapter", "cursor",
+      "--agents-home", fixture.directory,
+      "--config", configPath,
+      "--compatibility", fixture.compatibilityPath,
+      "--compatibility-schema", fixture.schemaPath,
+      "--mode", "plan",
+      "--model", "composer",
+      "--prompt", "review",
+    ], {
+      verifyProvider: vi.fn(async () => ({} as never)),
+    })).resolves.toStrictEqual({
+      executable: await fixtureExecutable(fixture, "cursor-agent"),
+      args: [
+        "--print",
+        "--output-format", "stream-json",
+        "--sandbox", "enabled",
+        "--trust",
+        "--mode", "plan",
+        "--model", "composer",
+        "review",
+      ],
+    });
+  });
+
+  it("builds the minimal Kiro invocation without optional fields", async () => {
+    const fixture = await createCursorKiroCompatibilityFixture();
+    fixtures.push(fixture);
+    const configPath = join(fixture.directory, "agent-fabric.yaml");
+    await writeFile(
+      configPath,
+      "schemaVersion: 1\nallowedAdapters: [kiro-acp]\nactiveAdapters: [kiro-acp]\n",
+    );
+
+    await expect(resolveAdapterInvocationCli([
+      "--adapter", "kiro",
+      "--agents-home", fixture.directory,
+      "--config", configPath,
+      "--compatibility", fixture.compatibilityPath,
+      "--compatibility-schema", fixture.schemaPath,
+      "--model", "qwen3-coder",
+      "--agent-engine", "v2",
+    ], {
+      verifyProvider: vi.fn(async () => ({} as never)),
+    })).resolves.toStrictEqual({
+      executable: await fixtureExecutable(fixture, "kiro-acp"),
+      args: ["acp", "--agent-engine", "v2", "--model", "qwen3-coder"],
+    });
+  });
+
+  it("builds the minimal Pi RPC invocation without optional fields", async () => {
+    const fixture = await createResolvedStage4Compatibility("pi-rpc");
+    fixtures.push(fixture);
+    const configPath = join(fixture.directory, "agent-fabric.yaml");
+    await writeFile(configPath, "schemaVersion: 1\nallowedAdapters: [pi-rpc]\nactiveAdapters: [pi-rpc]\n");
+
+    await expect(resolveAdapterInvocationCli([
+      "--adapter", "pi",
+      "--agents-home", fixture.directory,
+      "--config", configPath,
+      "--compatibility", fixture.compatibilityPath,
+      "--compatibility-schema", fixture.schemaPath,
+    ], {
+      verifyProvider: vi.fn(async () => ({} as never)),
+    })).resolves.toStrictEqual({
+      executable: await fixtureExecutable(fixture, "pi-rpc"),
+      args: ["--mode", "rpc"],
+    });
+  });
+
   it.each([
     ["agy", ["--mode", "plan", "--model", "gemini", "--prompt", "review", "--agent-engine", "v2"], "--agent-engine"],
     ["cursor", ["--mode", "plan", "--model", "composer", "--prompt", "review", "--log-file", "agy.log"], "--log-file"],
@@ -200,6 +310,12 @@ describe("adapter invocation resolver CLI", () => {
     await expect(resolveAdapterInvocationCli([
       "--adapter", "unknown",
     ])).rejects.toThrow("unknown provider: unknown");
+  });
+
+  it("explains when a registered provider has no invocation payload", async () => {
+    await expect(resolveAdapterInvocationCli([
+      "--adapter", "opencode-acp",
+    ])).rejects.toThrow("provider opencode-acp is registered but has no invocation payload");
   });
 
   it("requires a provider selection", async () => {
@@ -224,12 +340,51 @@ describe("adapter invocation resolver CLI", () => {
     expect(result.stderr).toContain("copilot is not supported; it has no adapter");
   });
 
+  it("emits a successful JSON payload through the main CLI dispatch", async () => {
+    const payload = {
+      executable: "/fixture/agy",
+      args: ["--sandbox", "--mode", "plan", "--model", "gemini", "--print-timeout", "1800s", "--print", "review"],
+    };
+    vi.doMock("../../../src/cli/adapter-invocation.ts", () => ({
+      resolveAdapterInvocationCli: vi.fn(async () => payload),
+    }));
+    vi.resetModules();
+    const stdout = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    const previousArgv = process.argv;
+    const previousExitCode = process.exitCode;
+    process.argv = [process.execPath, "main.ts", "adapter", "invocation", "--adapter", "agy"];
+    process.exitCode = undefined;
+    try {
+      await import("../../../src/cli/main.ts");
+      expect(stdout.mock.calls.map(([chunk]) => String(chunk)).join("")).toBe(`${JSON.stringify(payload)}\n`);
+    } finally {
+      process.argv = previousArgv;
+      process.exitCode = previousExitCode;
+      stdout.mockRestore();
+      vi.doUnmock("../../../src/cli/adapter-invocation.ts");
+      vi.resetModules();
+    }
+  });
+
+  it("enumerates provider options in the main CLI usage", async () => {
+    const result = await runSourceCli([]);
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain(
+      "adapter invocation --adapter agy|cursor|kiro|pi [agy: --mode plan|accept-edits --model MODEL --prompt TEXT",
+    );
+    expect(result.stderr).toContain("cursor: --mode plan|ask --model MODEL --prompt TEXT");
+    expect(result.stderr).toContain("kiro: --model MODEL --agent-engine v2");
+    expect(result.stderr).toContain("pi: [--cwd PATH] [--timeout-ms MS]");
+  });
+
   it.each([
     ["agy", ["--model", "gemini", "--prompt", "review"], "--mode"],
     ["agy", ["--mode", "plan", "--prompt", "review"], "--model"],
     ["agy", ["--mode", "plan", "--model", "gemini"], "--prompt"],
     ["cursor", ["--model", "composer", "--prompt", "review"], "--mode"],
     ["cursor", ["--mode", "ask", "--prompt", "review"], "--model"],
+    ["cursor", ["--mode", "ask", "--model", "composer"], "--prompt"],
     ["kiro", ["--agent-engine", "v2"], "--model"],
     ["kiro", ["--model", "qwen"], "--agent-engine"],
   ])("refuses a missing required %s field before compatibility I/O", async (provider, providerArguments, field) => {
@@ -244,6 +399,7 @@ describe("adapter invocation resolver CLI", () => {
     ["agy", ["--mode", "plan", "--model", "gemini", "--prompt", " \t "], "--prompt"],
     ["cursor", ["--mode", "ask", "--model", "\t", "--prompt", "review"], "--model"],
     ["kiro", ["--model", "  ", "--agent-engine", "v2"], "--model"],
+    ["kiro", ["--model", "qwen", "--agent-engine", " \t "], "--agent-engine"],
   ])("refuses a blank required %s field before compatibility I/O", async (provider, providerArguments, field) => {
     await expect(resolveAdapterInvocationCli([
       "--adapter", provider,
@@ -267,5 +423,50 @@ describe("adapter invocation resolver CLI", () => {
       "--adapter", "pi",
       "--timeout-ms", "0",
     ])).rejects.toThrow("adapter invocation for pi received invalid timeout-ms value: 0");
+  });
+
+  it.each(["1.5", "not-a-number"])("refuses a non-integer timeout value: %s", async (value) => {
+    await expect(resolveAdapterInvocationCli([
+      "--adapter", "pi",
+      "--timeout-ms", value,
+    ])).rejects.toThrow(`adapter invocation for pi received invalid timeout-ms value: ${value}`);
+  });
+
+  it("refuses a timeout above Node's timer maximum", async () => {
+    await expect(resolveAdapterInvocationCli([
+      "--adapter", "pi",
+      "--timeout-ms", "2147483648",
+    ])).rejects.toThrow(
+      "adapter invocation for pi received invalid timeout-ms value: 2147483648; maximum is 2147483647ms",
+    );
+  });
+
+  it("rejects a trailing option flag", async () => {
+    await expect(resolveAdapterInvocationCli([
+      "--adapter", "pi",
+      "--cwd",
+    ])).rejects.toThrow("adapter invocation requires a value for --cwd");
+  });
+
+  it("rejects an empty option value", async () => {
+    await expect(resolveAdapterInvocationCli([
+      "--adapter", "pi",
+      "--cwd", "",
+    ])).rejects.toThrow("adapter invocation requires a value for --cwd");
+  });
+
+  it("rejects an option value beginning with a dash", async () => {
+    await expect(resolveAdapterInvocationCli([
+      "--adapter", "pi",
+      "--cwd", "--not-a-path",
+    ])).rejects.toThrow("adapter invocation requires a value for --cwd");
+  });
+
+  it("rejects a duplicated option", async () => {
+    await expect(resolveAdapterInvocationCli([
+      "--adapter", "pi",
+      "--cwd", "/one",
+      "--cwd", "/two",
+    ])).rejects.toThrow("adapter invocation received duplicate option: --cwd");
   });
 });
