@@ -92,6 +92,10 @@ Use panels to create independent defect pressure. Do not treat panel agreement a
 - Let weak/cheap models scout; do not let them veto stronger grounded work.
 - Escalate real disagreement to objective checks, a stronger judge, or the user.
 - Prefer sparse, bounded communication over open-ended debate loops.
+- Independent agreement is not verification. For load-bearing rule, statute or spec text, N
+  agents agreeing from secondary reads never substitutes for one read of the primary text, and
+  limb, division and jurisdiction splits within one instrument are a recurring trap. Apply a
+  repo-wide correction only after the primary-text check.
 
 ### Vote handling
 
