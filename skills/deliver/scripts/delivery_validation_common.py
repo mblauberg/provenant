@@ -17,32 +17,13 @@ ROOT = Path(os.environ.get("AGENT_FABRIC_PRODUCT_ROOT", Path(__file__).resolve()
 sys.path.insert(0, str(SKILLS_ROOT))
 from _shared.review_ladder import PRIMARY_FAMILIES, check_review_ladder
 POLICY_VALIDATION_PATH = Path(__file__).with_name("delivery_policy_validation.py")
+LIFECYCLE_CONTRACT_LOADER_PATH = SKILLS_ROOT / "deliver" / "contract" / "lifecycle.py"
 DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 SAFE_CLASSES = {"canonical", "evidence", "handoff", "scratch", "external"}
 REVIEW_ROLES = {"targeted", "other-primary", "distinct-family"}
 RISKS = ("routine", "substantial", "crucial", "terminal")
 REPAIR_BUDGETS = {"routine": 2, "substantial": 4, "crucial": 5, "terminal": 5}
-NORMAL_STATES = (
-    "draft", "scoped", "approved", "executing", "verifying", "reviewing",
-    "repairing", "awaiting_acceptance", "accepted", "awaiting_release",
-    "observing", "closed",
-)
-SIDE_STATES = {"blocked", "cancelled", "degraded"}
-TRANSITIONS = {
-    "draft": {"scoped"},
-    "scoped": {"approved"},
-    "approved": {"executing"},
-    "executing": {"verifying"},
-    "verifying": {"reviewing", "executing"},
-    "reviewing": {"repairing", "awaiting_acceptance"},
-    "repairing": {"verifying"},
-    "awaiting_acceptance": {"accepted", "repairing"},
-    "accepted": {"awaiting_release"},
-    "awaiting_release": {"observing"},
-    "observing": {"closed"},
-    "closed": set(),
-}
 AGENTIC_RISKS = {
     "goal-hijack", "tool-misuse", "excessive-privilege", "supply-chain",
     "code-execution", "memory-context-poisoning", "insecure-inter-agent-communication",
@@ -55,9 +36,40 @@ EVALUATION_BINDING_FIELDS = {
 class Invalid(ValueError):
     pass
 
+
+@lru_cache(maxsize=1)
+def _lifecycle_contract_module():
+    spec = importlib.util.spec_from_file_location(
+        "delivery_lifecycle_contract", LIFECYCLE_CONTRACT_LOADER_PATH,
+    )
+    fail(spec is None or spec.loader is None, "delivery lifecycle contract loader is unavailable")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@lru_cache(maxsize=1)
+def load_lifecycle_contract() -> dict[str, Any]:
+    return _lifecycle_contract_module().load_lifecycle_contract()
+
+
+
 def fail(condition: bool, message: str) -> None:
     if condition:
         raise Invalid(message)
+
+
+LIFECYCLE_CONTRACT = load_lifecycle_contract()
+LIFECYCLE_CONTRACT_DIGEST = LIFECYCLE_CONTRACT["contract_digest"]
+NORMAL_STATES = tuple(LIFECYCLE_CONTRACT["states"])
+SIDE_STATES = frozenset(LIFECYCLE_CONTRACT["side_states"])
+TRANSITIONS = {
+    state: {
+        row["to_state"] for row in LIFECYCLE_CONTRACT["transitions"]
+        if row["state"] == state
+    }
+    for state in NORMAL_STATES
+}
 
 def _mapping(value: Any, field: str) -> dict[str, Any]:
     fail(not isinstance(value, dict), f"{field} must be an object")
@@ -143,5 +155,3 @@ def _load_bound_json(raw: bytes, field: str) -> dict[str, Any]:
         raise Invalid(f"{field} is not readable JSON: {exc}") from exc
     fail(not isinstance(value, dict), f"{field} root must be an object")
     return value
-
-

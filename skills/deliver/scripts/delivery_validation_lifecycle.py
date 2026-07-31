@@ -10,6 +10,7 @@ from delivery_validation_common import (
     _mapping, _safe_path, _utc, fail,
 )
 
+
 def _validate_history(run: dict[str, Any]) -> None:
     history = _list(run.get("state_history"), "state_history")
     fail(not history, "state_history must be non-empty")
@@ -132,6 +133,3 @@ def _validate_intent_design(run: dict[str, Any], artifacts: dict[str, dict[str, 
             fail(not linked or linked.get("kind") != "human" or linked.get("status") != "pass" or linked.get("gate") != f"one-way-door:{door.get('id')}", f"one-way door {index} must link matching passing human evidence")
             if door.get("status") == "deferred":
                 fail(not door.get("approved_by") or not door.get("reason"), f"deferred one-way door {index} requires human approval and reason")
-
-
-
