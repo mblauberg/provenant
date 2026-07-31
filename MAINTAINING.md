@@ -19,6 +19,26 @@ platform-specific.
 Changes to the ambient `AGENTS.md` or `HARNESS.md` apply from the next session.
 A live session retains the prior constitution until restart.
 
+## Documentation tiers
+
+Documentation claims sit in three tiers, and the third is deliberate:
+
+1. **Derived.** Marked regions rendered from source constants: the README
+   skill catalogue (`scripts/render_skill_catalogue.py`) and the delivery
+   state machine and risk-factor table in `docs/ARCHITECTURE.md`
+   (`scripts/render_doc_projections.py`). Edit the source, run the renderer
+   with `--write`, and never edit the region by hand; `scripts/check-harness`
+   fails on drift and on a deleted marker, and CI never writes.
+2. **Drift-checked.** Claims compared against source without being generated:
+   the ADR index, the spec schema baseline, the review-pressure tables, the
+   machine-checking sentence and the repair budgets
+   (`scripts/check_doc_constants.py`), and every repository path cited in
+   `docs/ARCHITECTURE.md` and `README.md` (`scripts/check_doc_paths.py`).
+   `HARNESS.md` stays in this tier because its hard line cap leaves no room
+   for markers.
+3. **Unchecked prose.** Design intent and rationale carry no machine gate,
+   on purpose; review keeps them honest, not tooling.
+
 ## Change a skill
 
 1. Confirm the capability belongs globally and is not better kept in a project.
