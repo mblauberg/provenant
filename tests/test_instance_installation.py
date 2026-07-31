@@ -448,7 +448,7 @@ def test_the_installer_seeds_a_scratch_instance_root(tmp_path):
     """`install-harness` honours AGENT_FABRIC_INSTANCE_ROOT for the instance side."""
     source = (ROOT / "scripts" / "install-harness").read_text()
     # The instance root is resolved once, on the contract #529 established.
-    assert 'instance_root="${AGENT_FABRIC_INSTANCE_ROOT:-${AGENTS_HOME:-$HOME/.agents}}"' in source
+    assert 'instance_root="${AGENT_FABRIC_INSTANCE_ROOT:-$HOME/.agents}"' in source
     assert source.count("instance_root=$") + source.count('instance_root="$') == 1, (
         "install-harness must resolve the instance root exactly once"
     )
@@ -478,19 +478,19 @@ def test_the_standalone_cli_defaults_the_instance_root_to_the_instance_not_the_p
     (home / ".agents").mkdir(parents=True)
 
     assert instance.default_instance_root({}) == Path.home() / ".agents"
+    # AGENTS_HOME names the product root and must not select the instance.
     assert instance.default_instance_root(
         {"AGENTS_HOME": str(home / ".agents")}
-    ) == home / ".agents"
-    # An explicit instance root outranks the agents home.
+    ) == Path.home() / ".agents"
+    # An explicit instance root is the only environment override.
     assert instance.default_instance_root({
         "AGENT_FABRIC_INSTANCE_ROOT": str(tmp_path / "explicit"),
         "AGENTS_HOME": str(home / ".agents"),
     }) == tmp_path / "explicit"
-    # A relative value would resolve against the caller's working directory,
-    # seeding whatever tree the command happens to run from. Refused, the same
-    # as install-harness and the provenant stub.
-    with pytest.raises(instance.InstallError, match="AGENTS_HOME must be an absolute path"):
-        instance.default_instance_root({"AGENTS_HOME": "."})
+    # A relative AGENTS_HOME is not an instance input and is ignored here.
+    assert instance.default_instance_root({"AGENTS_HOME": "relative/product"}) == Path.home() / ".agents"
+    # A relative explicit instance value would resolve against the caller's
+    # working directory, so it is refused.
     with pytest.raises(instance.InstallError, match="AGENT_FABRIC_INSTANCE_ROOT must be an absolute path"):
         instance.default_instance_root({"AGENT_FABRIC_INSTANCE_ROOT": "relative/instance"})
 
@@ -527,7 +527,7 @@ def test_the_standalone_cli_refuses_a_relative_environment_instance_root(tmp_pat
     refusal uses.
     """
     product = build_product(tmp_path)
-    environment = {**os.environ, "AGENTS_HOME": "relative/instance"}
+    environment = {**os.environ, "AGENT_FABRIC_INSTANCE_ROOT": "relative/instance"}
 
     result = subprocess.run(
         [sys.executable, str(SCRIPT), "seed", "--product-root", str(product)],
@@ -538,7 +538,7 @@ def test_the_standalone_cli_refuses_a_relative_environment_instance_root(tmp_pat
     )
 
     assert result.returncode == 3, result.stderr
-    assert "conflicting: AGENTS_HOME must be an absolute path" in result.stderr
+    assert "conflicting: AGENT_FABRIC_INSTANCE_ROOT must be an absolute path" in result.stderr
     assert "Traceback" not in result.stderr
 
 

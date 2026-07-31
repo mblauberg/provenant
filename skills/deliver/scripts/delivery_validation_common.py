@@ -48,18 +48,12 @@ def _lifecycle_contract_module():
     return module
 
 
-@lru_cache(maxsize=1)
-def load_lifecycle_contract() -> dict[str, Any]:
-    return _lifecycle_contract_module().load_lifecycle_contract()
-
-
-
 def fail(condition: bool, message: str) -> None:
     if condition:
         raise Invalid(message)
 
 
-LIFECYCLE_CONTRACT = load_lifecycle_contract()
+LIFECYCLE_CONTRACT = _lifecycle_contract_module().LIFECYCLE_CONTRACT
 LIFECYCLE_CONTRACT_DIGEST = LIFECYCLE_CONTRACT["contract_digest"]
 NORMAL_STATES = tuple(LIFECYCLE_CONTRACT["states"])
 SIDE_STATES = frozenset(LIFECYCLE_CONTRACT["side_states"])

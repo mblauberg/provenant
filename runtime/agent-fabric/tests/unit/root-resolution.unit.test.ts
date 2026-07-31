@@ -27,12 +27,12 @@ describe("Fabric root resolution", () => {
     });
   });
 
-  it("defaults both roots to AGENTS_HOME for the fused layout", () => {
+  it("uses AGENTS_HOME only for the product root", () => {
     vi.stubEnv("AGENTS_HOME", "/fixture/agents-home");
 
     expect(resolveFabricRoots({})).toEqual({
       productRoot: resolve("/fixture/agents-home"),
-      instanceRoot: resolve("/fixture/agents-home"),
+      instanceRoot: resolve(homedir(), ".agents"),
     });
   });
 
@@ -57,6 +57,21 @@ describe("Fabric root resolution", () => {
     expect(() => resolveFabricRoots({})).toThrow(
       `${name} must be an absolute path, got ${value}`,
     );
+  });
+
+  it("does not validate lower-precedence environment paths that a flag overrides", () => {
+    expect(resolveFabricRoots({
+      productRootFlag: "/fixture/flag-product",
+      instanceRootFlag: "/fixture/flag-instance",
+      environment: {
+        AGENTS_HOME: "relative/agents-home",
+        AGENT_FABRIC_PRODUCT_ROOT: "relative/product",
+        AGENT_FABRIC_INSTANCE_ROOT: "relative/instance",
+      },
+    })).toEqual({
+      productRoot: resolve("/fixture/flag-product"),
+      instanceRoot: resolve("/fixture/flag-instance"),
+    });
   });
 
   it("resolves independently configured product and instance roots", () => {

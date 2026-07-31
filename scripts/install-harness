@@ -1,7 +1,20 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PRODUCT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+script_path=$0
+while [[ -L "$script_path" ]]; do
+  link=$(readlink "$script_path")
+  case "$link" in
+    /*) script_path=$link ;;
+    *) script_path=$(dirname "$script_path")/$link ;;
+  esac
+done
+PRODUCT_ROOT="$(CDPATH= cd -- "$(dirname "$script_path")/.." && pwd)"
+if [[ -f "$PRODUCT_ROOT/.git" && "${PROVENANT_ALLOW_LINKED_WORKTREE_INSTALL:-}" != 1 ]]; then
+  echo "install-harness refuses a linked worktree product root: $PRODUCT_ROOT" >&2
+  echo "repair: run from the canonical checkout, or explicitly acknowledge with PROVENANT_ALLOW_LINKED_WORKTREE_INSTALL=1" >&2
+  exit 3
+fi
 PLATFORM=""
 MCP_CLIENTS="primary"
 
@@ -55,7 +68,7 @@ esac
 provenant_bin_dir="${PROVENANT_BIN_DIR:-$HOME/.local/bin}"
 provenant_command="$provenant_bin_dir/provenant"
 provenant_source="$PRODUCT_ROOT/scripts/provenant.template"
-instance_root="${AGENT_FABRIC_INSTANCE_ROOT:-${AGENTS_HOME:-$HOME/.agents}}"
+instance_root="${AGENT_FABRIC_INSTANCE_ROOT:-$HOME/.agents}"
 case "$provenant_bin_dir" in
   /*) ;;
   *) echo "PROVENANT_BIN_DIR must be absolute" >&2; exit 3 ;;

@@ -7,6 +7,8 @@ import { FabricError } from "../errors.js";
 import { verifyProviderConformance } from "../adapters/provider-conformance.js";
 import { loadAdapterModelConstraints } from "../adapters/model-selection.js";
 import { resolveFabricRoots } from "../domain/fabric-roots.js";
+import { hasPairedInstanceRoot, type RootPairingDependencies } from "./instance-root-pairing.js";
+import { verifyNpmInstallAttestation } from "../adapters/npm-install-attestation-verifier.js";
 
 const VALUE_OPTIONS = [
   "--adapter",
@@ -43,18 +45,23 @@ function parseArguments(arguments_: string[]): Partial<Record<ValueOption, strin
 
 export async function resolveAdapterExecutableCli(
   arguments_: string[],
-  dependencies: { verifyProvider?: typeof verifyProviderConformance } = {},
+  dependencies: {
+    verifyProvider?: typeof verifyProviderConformance;
+    rootPairing?: RootPairingDependencies;
+    verifyNpmInstall?: typeof verifyNpmInstallAttestation;
+  } = {},
 ): Promise<string> {
   const parsed = parseArguments(arguments_);
   const adapterId = parsed["--adapter"];
   if (adapterId === undefined) {
     throw new Error("adapter executable requires --adapter <id>");
   }
-  const { productRoot, instanceRoot } = resolveFabricRoots({
+  const rootOptions = {
     agentsHomeFlag: parsed["--agents-home"],
     productRootFlag: parsed["--product-root"],
     instanceRootFlag: parsed["--instance-root"],
-  });
+  };
+  const { productRoot, instanceRoot } = resolveFabricRoots(rootOptions);
   const compatibilityPath = resolve(
     parsed["--compatibility"] ?? join(productRoot, "config", "adapter-compatibility.yaml"),
   );
@@ -62,7 +69,10 @@ export async function resolveAdapterExecutableCli(
   const configPath = resolve(pinnedConfig ?? join(productRoot, "config", "agent-fabric.yaml"));
   const instanceConfigPath = resolve(join(instanceRoot, "config", "agent-fabric.yaml"));
   const localConfigPath =
-    pinnedConfig === undefined && instanceConfigPath !== configPath && existsSync(instanceConfigPath)
+    pinnedConfig === undefined
+      && hasPairedInstanceRoot({ productRoot, instanceRoot }, dependencies.rootPairing)
+      && instanceConfigPath !== configPath
+      && existsSync(instanceConfigPath)
       ? instanceConfigPath
       : undefined;
   const schemaPath = resolve(
@@ -94,6 +104,7 @@ export async function resolveAdapterExecutableCli(
       `activated adapter has no provider executable: ${adapterId}`,
     );
   }
+  await (dependencies.verifyNpmInstall ?? verifyNpmInstallAttestation)(productRoot);
   const policy = await loadAdapterModelConstraints({ compatibilityPath, schemaPath, adapterId, requireEnabled: true });
   await (dependencies.verifyProvider ?? verifyProviderConformance)({
     adapterId,

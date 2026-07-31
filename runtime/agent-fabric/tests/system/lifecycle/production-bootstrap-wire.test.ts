@@ -163,8 +163,11 @@ async function startBusyWalWriter(
     process.stdout.write("ready\\n");
     const write = () => {
       if (stopping) return;
-      for (let attempt = 0; attempt < 64; attempt += 1) heartbeat.run();
-      setImmediate(write);
+      heartbeat.run();
+      // Keep the source changing for the bounded inspection retry window
+      // without allowing the WAL sidecar to grow until SQLite rejects a
+      // partial snapshot before the retry-bound assertion can run.
+      setTimeout(write, 1);
     };
     const waitThenWrite = () => {
       if (stopping) return;

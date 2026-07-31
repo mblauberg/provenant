@@ -74,8 +74,8 @@ Install either platform independently, or both:
 git clone https://github.com/mblauberg/provenant.git "<PRODUCT_ROOT>"
 cd "<PRODUCT_ROOT>"
 
-# install the pinned workspace dependencies and compile Fabric
-npm ci
+# install, attest and compile the pinned workspace dependencies
+scripts/install-agent-fabric-dependencies
 scripts/agent-fabric-warm
 
 scripts/install-harness --platform claude

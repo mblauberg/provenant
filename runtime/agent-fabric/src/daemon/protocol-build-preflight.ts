@@ -7,11 +7,10 @@ const execFileAsync = promisify(execFile);
 const preflightPath = fileURLToPath(
   new URL("../../../../scripts/agent-fabric-protocol-preflight", import.meta.url),
 );
-// The dist this process will import is the one beside this module, which is not
-// necessarily the tree named by an ambient AGENTS_HOME: that variable selects a
-// config/state home and callers legitimately point it at a synthetic one. The
-// preflight defaults agents_home to AGENTS_HOME, so leaving it inherited judges
-// a tree whose freshness says nothing about the code already loaded here.
+// The dist this process will import belongs to the product tree beside this
+// module. AGENTS_HOME names product code for the shipped adapter commands, but
+// this preflight is bound to the code-adjacent product root so its freshness
+// check cannot be redirected to a different product selection.
 const installRoot = fileURLToPath(new URL("../../../../", import.meta.url)).replace(/\/$/u, "");
 
 export class ProtocolBuildPreflightError extends Error {
