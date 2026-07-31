@@ -125,7 +125,7 @@
     "attempts_started": 0,
     "blocked_reason": "FABRIC-ROUNDTRIP-UNAVAILABLE",
     "cases": 18,
-    "catalogue_owner_count": 32,
+    "catalogue_owner_count": 33,
     "dataset": "routing-holdout.yaml",
     "dependencies": [
       "https://github.com/mblauberg/provenant/issues/330"
