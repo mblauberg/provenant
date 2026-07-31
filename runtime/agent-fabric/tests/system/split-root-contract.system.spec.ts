@@ -5,8 +5,29 @@ import { describe, expect, it } from "vitest";
 import { resolveSplitConfiguration } from "../../src/cli/split-config-paths.ts";
 import { resolveStatusPaths } from "../../src/cli/status.ts";
 
+/**
+ * Pairing dependencies for a fixture whose paths do not exist on disk. The
+ * production readers are `readFileSync` and `realpathSync`, so a fixture path
+ * would otherwise be judged unpaired for the uninteresting reason that it is
+ * not there. `pointerProduct` is what the instance's machine-local pointer
+ * claims; omit it to model an instance carrying no pointer at all.
+ */
+function pairing(pointerProduct?: string) {
+  return {
+    exists: () => true,
+    realpath: (path: string) => path,
+    readFile: (path: string) => {
+      if (!pointerProduct || !path.endsWith("/.agent-fabric/product-root.json")) {
+        const error: NodeJS.ErrnoException = new Error(`ENOENT: ${path}`);
+        error.code = "ENOENT";
+        throw error;
+      }
+      return JSON.stringify({ schema_version: 1, product_root: pointerProduct });
+    },
+  };
+}
+
 describe("split-root contract rig", () => {
-  // EXPECTED FAILURE: #549 owns the fail-open defaulted-instance-layer fix.
   it("does not offer a defaulted instance layer as an explicit narrowing layer", () => {
     const configuration = resolveSplitConfiguration({
       environment: {
@@ -47,20 +68,41 @@ describe("split-root contract rig", () => {
     expect(selected.modelRouting.startsWith(`${productRoot}/`)).toBe(false);
   });
 
-  it("offers the instance layer only for split roots and never for fused roots", () => {
+  /**
+   * Split roots are necessary but not sufficient. Before #563 this contract
+   * read "split roots offer the layer", and that was the fail-open rule itself:
+   * any instance root that happened to be set could narrow an unrelated
+   * product. The instance must also be PAIRED, meaning its machine-local
+   * pointer names the product in use. Both original properties are kept below,
+   * and the unpaired case is added, so this reads as a strictly stronger
+   * contract rather than one relaxed to match new code.
+   */
+  it("offers the instance layer only for paired split roots, never for fused or unpaired ones", () => {
     const split = resolveSplitConfiguration({
       productRootFlag: "/fixture/product",
       instanceRootFlag: "/fixture/instance",
-      exists: () => true,
+      ...pairing("/fixture/product"),
     });
     const fused = resolveSplitConfiguration({
       productRootFlag: "/fixture/product",
       instanceRootFlag: "/fixture/product",
-      exists: () => true,
+      ...pairing("/fixture/product"),
+    });
+    const unpaired = resolveSplitConfiguration({
+      productRootFlag: "/fixture/product",
+      instanceRootFlag: "/fixture/instance",
+      ...pairing("/fixture/other-product"),
+    });
+    const unpointed = resolveSplitConfiguration({
+      productRootFlag: "/fixture/product",
+      instanceRootFlag: "/fixture/instance",
+      ...pairing(),
     });
 
     expect(split.localConfigPath).toBe("/fixture/instance/config/agent-fabric.yaml");
     expect(fused.localConfigPath).toBeUndefined();
+    expect(unpaired.localConfigPath).toBeUndefined();
+    expect(unpointed.localConfigPath).toBeUndefined();
   });
 
   it("does not let an irrelevant instance-root move change product-owned answers", () => {

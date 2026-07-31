@@ -65,10 +65,11 @@ def instance_root_for(home: Path) -> Path:
 def run(platform: str, home: Path, *arguments: str, **extra_env):
     env = os.environ.copy()
     env.update({"HOME": str(home)})
-    # Pin the instance root to the scratch HOME rather than inheriting whatever
-    # AGENTS_HOME the developer or CI happens to export. Without this an ambient
-    # AGENTS_HOME would make the installer seed a real instance under test.
+    # Keep the instance root deterministic in the scratch HOME. AGENTS_HOME now
+    # names only the product root, but an explicit instance value also keeps the
+    # test independent of any caller-provided instance selection.
     env["AGENT_FABRIC_INSTANCE_ROOT"] = str(instance_root_for(home))
+    env["PROVENANT_ALLOW_LINKED_WORKTREE_INSTALL"] = "1"
     env.update(extra_env)
     return subprocess.run(
         [str(SCRIPT), "--platform", platform, *arguments],
@@ -79,6 +80,36 @@ def run(platform: str, home: Path, *arguments: str, **extra_env):
         stderr=subprocess.PIPE,
         check=False,
     )
+
+
+def test_install_harness_requires_acknowledgement_for_a_linked_worktree(tmp_path):
+    product = tmp_path / "product"
+    scripts = product / "scripts"
+    scripts.mkdir(parents=True)
+    shutil.copy2(SCRIPT, scripts / "install-harness")
+    (product / ".git").write_text("gitdir: /canonical/.git/worktrees/issue-549\n")
+    command = tmp_path / "bin/install-harness"
+    command.parent.mkdir()
+    command.symlink_to(scripts / "install-harness")
+
+    env = os.environ.copy()
+    env.update({
+        "HOME": str(tmp_path / "home"),
+        "PROVENANT_BIN_DIR": str(tmp_path / "bin-out"),
+    })
+    env.pop("PROVENANT_ALLOW_LINKED_WORKTREE_INSTALL", None)
+    result = subprocess.run(
+        [str(command), "--platform", "claude"],
+        cwd=tmp_path,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+
+    assert result.returncode == 3
+    assert "linked worktree" in result.stderr
 
 
 def run_workflow_installer(target: Path):

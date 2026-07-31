@@ -686,7 +686,7 @@ def test_ci_runs_complete_harness_and_fabric_gates() -> None:
         index for index, command in enumerate(setup_commands) if "npm install --global npm@11.12.1" in command
     )
     install_index = next(
-        index for index, command in enumerate(setup_commands) if "npm ci --no-audit --no-fund" in command
+        index for index, command in enumerate(setup_commands) if "scripts/install-agent-fabric-dependencies" in command
     )
     assert pin_index < install_index
     assert 'test "$(npm --version)" = "11.12.1"' in setup_commands[pin_index]
@@ -1038,10 +1038,11 @@ def test_live_workspace_guides_use_only_the_root_install_and_build_graph() -> No
         source = guide.read_text(encoding="utf-8")
         assert "npm --prefix" not in source, guide
         assert not re.search(r"(?m)^npm install(?:\s|$)", source), guide
+        assert not re.search(r"(?m)^npm ci(?:\s|$)", source), guide
 
     operations = WORKSPACE_GUIDES[0].read_text(encoding="utf-8")
     for command in (
-        "npm ci --no-audit --no-fund",
+        "scripts/install-agent-fabric-dependencies",
         "npm run build",
         "npm run check",
     ):

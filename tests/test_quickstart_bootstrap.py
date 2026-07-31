@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 def test_documented_fresh_checkout_sequence_produces_runnable_doctor(tmp_path):
     readme = (ROOT / "README.md").read_text()
     commands = [
-        'npm ci',
+        'scripts/install-agent-fabric-dependencies',
         'scripts/agent-fabric-warm',
         'scripts/install-harness --platform claude',
         'provenant doctor',
@@ -28,6 +28,7 @@ def test_documented_fresh_checkout_sequence_produces_runnable_doctor(tmp_path):
         "agent-fabric-protocol-build",
         "agent-fabric-protocol-preflight",
         "agent-fabric-warm",
+        "install-agent-fabric-dependencies",
         "provenant",
     ):
         shutil.copy2(ROOT / "scripts" / name, scripts / name)
@@ -43,8 +44,41 @@ def test_documented_fresh_checkout_sequence_produces_runnable_doctor(tmp_path):
         "agent-fabric-console",
     ):
         (checkout / "runtime" / workspace).mkdir(parents=True)
-    for manifest in ("package.json", "package-lock.json", "tsconfig.json"):
-        (checkout / manifest).write_text("{}\n")
+    (checkout / "runtime" / "agent-fabric" / "scripts").mkdir(parents=True)
+    (checkout / "runtime" / "agent-fabric" / "scripts" / "lib").mkdir(parents=True)
+    shutil.copy2(
+        ROOT / "runtime" / "agent-fabric" / "scripts" / "write-npm-ci-attestation.mjs",
+        checkout / "runtime" / "agent-fabric" / "scripts" / "write-npm-ci-attestation.mjs",
+    )
+    shutil.copy2(
+        ROOT / "runtime" / "agent-fabric" / "scripts" / "verify-npm-ci-attestation.mjs",
+        checkout / "runtime" / "agent-fabric" / "scripts" / "verify-npm-ci-attestation.mjs",
+    )
+    shutil.copy2(
+        ROOT / "runtime" / "agent-fabric" / "scripts" / "lib" / "npm-install-attestation.mjs",
+        checkout / "runtime" / "agent-fabric" / "scripts" / "lib" / "npm-install-attestation.mjs",
+    )
+    (checkout / "package.json").write_text("{}\n")
+    (checkout / "package-lock.json").write_text(
+        json.dumps({"name": "fixture", "lockfileVersion": 3, "packages": {}}) + "\n"
+    )
+    (checkout / "tsconfig.json").write_text("{}\n")
+    subprocess.run(["git", "init", "-q"], cwd=checkout, check=True)
+    subprocess.run(["git", "add", "."], cwd=checkout, check=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=Quickstart Test",
+            "-c",
+            "user.email=quickstart@example.invalid",
+            "commit",
+            "-qm",
+            "fixture",
+        ],
+        cwd=checkout,
+        check=True,
+    )
 
     fake_bin = tmp_path / "fake-bin"
     fake_bin.mkdir()
@@ -75,7 +109,7 @@ def test_documented_fresh_checkout_sequence_produces_runnable_doctor(tmp_path):
     installed_bin = tmp_path / "installed-bin"
     installed_bin.mkdir()
     (installed_bin / "provenant").symlink_to(scripts / "provenant")
-    subprocess.run(["npm", "ci"], cwd=checkout, env=env, check=True)
+    subprocess.run([str(scripts / "install-agent-fabric-dependencies")], cwd=checkout, env=env, check=True)
     warmed = subprocess.run(
         [str(scripts / "agent-fabric-warm")], cwd=checkout, env=env, text=True, capture_output=True, check=False
     )

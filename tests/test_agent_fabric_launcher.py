@@ -19,6 +19,9 @@ BUILD_LOCK_LIBRARY = SCRIPT_LIBRARY_DIR / "agent-fabric-protocol-build-lock.sh"
 TSX_LOADER_LIBRARY = SCRIPT_LIBRARY_DIR / "agent-fabric-tsx-loader.sh"
 PREFLIGHT = REPO_ROOT / "scripts" / "agent-fabric-protocol-preflight"
 PROTOCOL_BUILD = REPO_ROOT / "scripts" / "agent-fabric-protocol-build"
+ATTESTATION_VERIFY = REPO_ROOT / "runtime/agent-fabric/scripts/verify-npm-ci-attestation.mjs"
+ATTESTATION_WRITE = REPO_ROOT / "runtime/agent-fabric/scripts/write-npm-ci-attestation.mjs"
+ATTESTATION_LIBRARY = REPO_ROOT / "runtime/agent-fabric/scripts/lib/npm-install-attestation.mjs"
 PROTOCOL_BIN_PREFLIGHT = (
     REPO_ROOT
     / "runtime/agent-fabric-protocol/bin/protocol-build-preflight.js"
@@ -60,6 +63,15 @@ def _wait_for_glob(directory: Path, pattern: str, *, timeout: float = 10) -> Pat
     raise AssertionError(f"timed out waiting for test handshake: {directory / pattern}")
 
 
+def _copy_attestation_scripts(root: Path) -> None:
+    attestation_scripts = root / "runtime/agent-fabric/scripts"
+    attestation_scripts.mkdir(parents=True)
+    (attestation_scripts / "lib").mkdir()
+    shutil.copy2(ATTESTATION_VERIFY, attestation_scripts / ATTESTATION_VERIFY.name)
+    shutil.copy2(ATTESTATION_WRITE, attestation_scripts / ATTESTATION_WRITE.name)
+    shutil.copy2(ATTESTATION_LIBRARY, attestation_scripts / "lib/npm-install-attestation.mjs")
+
+
 def _copy_launcher_scripts(root: Path) -> None:
     scripts = root / "scripts"
     scripts.mkdir(parents=True)
@@ -69,6 +81,33 @@ def _copy_launcher_scripts(root: Path) -> None:
     # adding a scripts/lib file broke this fixture rather than exercising the
     # launcher it is meant to test.
     shutil.copytree(SCRIPT_LIBRARY_DIR, scripts / "lib")
+    _copy_attestation_scripts(root)
+
+
+def _commit_fixture(root: Path) -> None:
+    subprocess.run(["git", "init", "--quiet"], cwd=root, check=True)
+    subprocess.run(
+        ["git", "config", "user.name", "Agent Fabric Fixture"],
+        cwd=root,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "agent-fabric-fixture@example.invalid"],
+        cwd=root,
+        check=True,
+    )
+    subprocess.run(["git", "add", "."], cwd=root, check=True)
+    subprocess.run(["git", "commit", "--quiet", "-m", "fixture"], cwd=root, check=True)
+
+
+def _write_fixture_attestation(root: Path) -> None:
+    subprocess.run(
+        ["node", str(root / "runtime/agent-fabric/scripts/write-npm-ci-attestation.mjs"), str(root)],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
 
 
 def _fixture(
@@ -90,11 +129,12 @@ def _fixture(
     # resolution checks it: the loader path is executed, so a bare file of the
     # right name is not evidence that it is really tsx.
     _write(root / "node_modules/tsx/dist/loader.mjs")
+    _write(root / "node_modules/.keep")
     _write(root / "node_modules/tsx/package.json", '{"name":"tsx","version":"4.0.0"}\n')
     now = 1_700_000_000
     for manifest, content in {
         "package.json": '{"type":"module"}\n',
-        "package-lock.json": '{"lockfileVersion":3}\n',
+        "package-lock.json": '{"lockfileVersion":3,"packages":{}}\n',
         "tsconfig.json": '{"files":[]}\n',
     }.items():
         _write(root / manifest, content)
@@ -109,6 +149,9 @@ def _fixture(
         output_time = now + 20 if protocol_dist == "current" else now - 20
         os.utime(protocol_output, (output_time, output_time))
 
+    _commit_fixture(root)
+    _write_fixture_attestation(root)
+
     marker = tmp_path / "daemon-election-attempt"
     fake_node = tmp_path / "bin" / "node"
     # The stub exists to capture the final exec, not to stand in for node
@@ -121,6 +164,7 @@ def _fixture(
         "#!/bin/sh\n"
         '[ "${1:-}" != "--input-type=module" ] || exit 0\n'
         f'[ "${{1:-}}" != "-e" ] || exec "{real_node}" "$@"\n'
+        f'case "${{1:-}}" in */verify-npm-ci-attestation.mjs|*/write-npm-ci-attestation.mjs) exec "{real_node}" "$@" ;; esac\n'
         "printf '%s\\n' \"$@\" > \"$LAUNCHER_TEST_MARKER\"\n"
         "if [ -n \"${LAUNCHER_TEST_ENV_MARKER:-}\" ]; then\n"
         "  printf '%s\\n%s\\n' \"${AGENT_FABRIC_PROTOCOL_BUILD_VERDICT:-}\" "
@@ -165,7 +209,11 @@ def _real_source_fixture(tmp_path: Path, protocol_dist: str) -> Path:
         '"import":"./dist/index.js"}}}\n',
     )
     _write(protocol_root / "src/index.ts", 'export const fixtureValue = "source";\n')
+    _write(root / "package.json", '{"type":"module"}\n')
+    _write(root / "package-lock.json", '{"lockfileVersion":3,"packages":{}}\n')
     now = 1_700_000_000
+    os.utime(root / "package.json", (now, now))
+    os.utime(root / "package-lock.json", (now, now))
     os.utime(protocol_root / "package.json", (now, now))
     os.utime(protocol_root / "src/index.ts", (now, now))
     if protocol_dist != "missing":
@@ -182,11 +230,33 @@ def _real_source_fixture(tmp_path: Path, protocol_dist: str) -> Path:
     ).stdout.strip()
     node_modules = root / "node_modules"
     (node_modules / "@local").mkdir(parents=True)
-    (node_modules / "tsx").symlink_to(Path(tsx_package_json).parent, target_is_directory=True)
+    shutil.copytree(Path(tsx_package_json).parent, node_modules / "tsx", symlinks=True)
+    shutil.copytree(REPO_ROOT / "node_modules/esbuild", node_modules / "esbuild", symlinks=True)
+    esbuild_root = REPO_ROOT / "node_modules/@esbuild"
+    esbuild_packages = sorted(
+        (
+            package
+            for package in esbuild_root.iterdir()
+            if package.is_dir()
+        )
+        if esbuild_root.is_dir()
+        else ()
+    )
+    if not esbuild_packages:
+        pytest.skip("no platform-specific esbuild package is installed under node_modules/@esbuild")
+    (node_modules / "@esbuild").mkdir()
+    for package in esbuild_packages:
+        shutil.copytree(
+            package,
+            node_modules / "@esbuild" / package.name,
+            symlinks=True,
+        )
     (node_modules / "@local/agent-fabric-protocol").symlink_to(
         protocol_root,
         target_is_directory=True,
     )
+    _commit_fixture(root)
+    _write_fixture_attestation(root)
     return root
 
 
@@ -213,19 +283,19 @@ def _copy_protocol_consumer(root: Path, package: str) -> tuple[Path, Path]:
     return executable, marker
 
 
-def _stale_refusal(agents_home: Path, script_root: Path | None = None) -> str:
-    scripts = script_root or agents_home
+def _stale_refusal(agents_home: Path) -> str:
     return (
         "AGENT_FABRIC_PROTOCOL_BUILD_STALE: local "
         "@local/agent-fabric-protocol dist is missing, unloadable, or stale "
         "against its build inputs\n"
         f'repair: AGENTS_HOME="{agents_home}" '
-        f'"{scripts / "scripts/agent-fabric-protocol-build"}"\n'
+        f'"{agents_home / "scripts/agent-fabric-protocol-build"}"\n'
     )
 
 
 def _mark_install_root(root: Path) -> None:
-    (root / ".git").mkdir()
+    if not (root / ".git").exists():
+        _commit_fixture(root)
 
 
 def _use_derived_agents_home(env: dict[str, str]) -> None:
@@ -316,6 +386,26 @@ def test_packaged_launcher_accepts_current_protocol_dist(tmp_path: Path) -> None
     ]
 
 
+def test_packaged_launcher_rejects_tampered_node_modules_before_dist(
+    tmp_path: Path,
+) -> None:
+    root, marker, fake_node = _fixture(
+        tmp_path,
+        launcher_mode="packaged",
+        protocol_dist="current",
+    )
+    with (root / "node_modules/tsx/dist/loader.mjs").open("a", encoding="utf-8") as stream:
+        stream.write("tampered\n")
+
+    result = _run(root, marker, fake_node)
+
+    assert result.returncode == 1
+    assert result.stdout == ""
+    assert "NPM_INSTALL_ATTESTATION_MISMATCH" in result.stderr
+    assert "node_modules was modified after npm ci" in result.stderr
+    assert not marker.exists()
+
+
 @pytest.mark.parametrize("package", sorted(CONSUMER_BINS))
 @pytest.mark.parametrize("protocol_dist", ["missing", "stale"])
 def test_node_bin_consumers_preflight_protocol_before_import(
@@ -382,6 +472,31 @@ def test_packaged_doctor_runs_with_stale_protocol_verdict_and_exact_repair(
         launcher_mode="packaged",
         protocol_dist="stale",
     )
+
+    result = _run(root, marker, fake_node)
+
+    assert result.returncode == 0, result.stderr
+    assert marker.read_text(encoding="utf-8").splitlines() == [
+        str(root / "runtime/agent-fabric/dist/cli/main.js"),
+        "doctor",
+    ]
+    assert marker.with_name("launcher-environment").read_text(
+        encoding="utf-8",
+    ).splitlines() == [
+        "stale",
+        f'AGENTS_HOME="{root}" "{root / "scripts/agent-fabric-protocol-build"}"',
+    ]
+
+
+def test_doctor_reports_stale_protocol_when_repair_script_is_missing(
+    tmp_path: Path,
+) -> None:
+    root, marker, fake_node = _fixture(
+        tmp_path,
+        launcher_mode="packaged",
+        protocol_dist="stale",
+    )
+    (root / "scripts/agent-fabric-protocol-build").unlink()
 
     result = _run(root, marker, fake_node)
 
@@ -674,6 +789,7 @@ def test_linked_worktree_stale_dist_keeps_the_exact_refusal(
         launcher_mode="packaged",
         protocol_dist="stale",
     )
+    shutil.rmtree(root / ".git")
     _write(root / ".git", "gitdir: /external/common/worktrees/fixture\n")
     npm_marker, env = _repair_fixture(
         tmp_path,
@@ -698,9 +814,10 @@ def test_linked_worktree_stale_dist_keeps_the_exact_refusal(
         check=False,
     )
 
-    assert result.returncode == 78
+    assert result.returncode == 1
     assert result.stdout == ""
-    assert result.stderr == _stale_refusal(root)
+    assert "NPM_INSTALL_ATTESTATION_MISMATCH" in result.stderr
+    assert "product commit cannot be verified" in result.stderr
     assert not npm_marker.exists(), "a linked worktree must never autobuild"
     assert not marker.exists()
 
@@ -722,13 +839,17 @@ def test_inherited_agents_home_stale_dist_keeps_the_exact_refusal(
     os.utime(protocol_root / "src/index.ts", (now, now))
     for manifest, content in {
         "package.json": '{"type":"module"}\n',
-        "package-lock.json": '{"lockfileVersion":3}\n',
+        "package-lock.json": '{"lockfileVersion":3,"packages":{}}\n',
         "tsconfig.json": '{"files":[]}\n',
     }.items():
         _write(diagnosed / manifest, content)
         os.utime(diagnosed / manifest, (now, now))
     _mark_install_root(diagnosed)
     _write(diagnosed / "node_modules/.keep")
+    (diagnosed / "scripts").mkdir()
+    shutil.copy2(PROTOCOL_BUILD, diagnosed / "scripts/agent-fabric-protocol-build")
+    _copy_attestation_scripts(diagnosed)
+    _write_fixture_attestation(diagnosed)
     npm_marker, env = _repair_fixture(
         tmp_path,
         diagnosed,
@@ -753,7 +874,7 @@ def test_inherited_agents_home_stale_dist_keeps_the_exact_refusal(
 
     assert result.returncode == 78
     assert result.stdout == ""
-    assert result.stderr == _stale_refusal(diagnosed, script_root)
+    assert result.stderr == _stale_refusal(diagnosed)
     assert not npm_marker.exists(), "an inherited AGENTS_HOME must never autobuild"
     assert not marker.exists()
 
@@ -1922,19 +2043,22 @@ def test_failed_protocol_repair_leaves_the_workspace_honestly_stale(
 
 
 def test_protocol_preflight_repair_names_the_diagnosed_tree(tmp_path: Path) -> None:
-    """AGENTS_HOME is not always the tree the scripts live in.
+    """A repair uses the product tree whose protocol build was diagnosed.
 
-    Naming the bare script sends an operator to rebuild a different checkout
-    and leaves the diagnosed one stale — reachable whenever worktrees are in
-    play, which is this repository's normal working mode.
+    AGENTS_HOME names the product code tree, so the emitted command must use the
+    same tree for both the environment and build script. A preflight can be
+    invoked from a different checkout, which is reachable whenever worktrees
+    are in play, but a split instance is selected by
+    AGENT_FABRIC_INSTANCE_ROOT, not AGENTS_HOME; this preflight has no
+    instance-root input.
     """
     root, _marker, _fake_node = _fixture(
         tmp_path,
         launcher_mode="packaged",
         protocol_dist="missing",
     )
-    diagnosed = tmp_path / "other-tree"
-    diagnosed.mkdir()
+    diagnosed = tmp_path / "diagnosed-product"
+    _copy_launcher_scripts(diagnosed)
 
     result = subprocess.run(
         [str(root / "scripts/agent-fabric-protocol-preflight")],
@@ -1947,7 +2071,7 @@ def test_protocol_preflight_repair_names_the_diagnosed_tree(tmp_path: Path) -> N
     assert result.returncode == 78
     assert (
         f'repair: AGENTS_HOME="{diagnosed}" '
-        f'"{root / "scripts/agent-fabric-protocol-build"}"'
+        f'"{diagnosed / "scripts/agent-fabric-protocol-build"}"'
     ) in result.stderr
 
 
@@ -1976,6 +2100,31 @@ def test_protocol_preflight_reports_a_partial_install_as_typed_and_repairable(
 
     assert result.returncode == 78
     assert "AGENT_FABRIC_PREFLIGHT_INCOMPLETE" in result.stderr
+    assert "scripts/lib" in result.stderr
+
+
+def test_protocol_preflight_does_not_emit_a_missing_repair_script(
+    tmp_path: Path,
+) -> None:
+    root, _marker, _fake_node = _fixture(
+        tmp_path,
+        launcher_mode="packaged",
+        protocol_dist="missing",
+    )
+    (root / "scripts/agent-fabric-protocol-build").unlink()
+
+    result = subprocess.run(
+        [str(root / "scripts/agent-fabric-protocol-preflight")],
+        env={**os.environ, "AGENTS_HOME": str(root)},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 78
+    assert "AGENT_FABRIC_PROTOCOL_BUILD_INCOMPLETE" in result.stderr
+    assert "agent-fabric-protocol-build" in result.stderr
+    assert "repair: AGENTS_HOME=" not in result.stderr
     assert "scripts/lib" in result.stderr
 
 

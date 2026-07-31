@@ -16,8 +16,6 @@ TEMPLATE = ROOT / "scripts/provenant.template"
 
 def main() -> int:
     instance_value = os.environ.get("AGENT_FABRIC_INSTANCE_ROOT")
-    if instance_value is None:
-        instance_value = os.environ.get("AGENTS_HOME")
     instance_root = (
         Path(instance_value).expanduser()
         if instance_value is not None

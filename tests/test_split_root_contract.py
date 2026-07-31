@@ -75,10 +75,6 @@ def test_model_route_reads_instance_catalogue_without_an_instance_environment_ov
     assert json.loads(result.stdout)["catalog_date"] == "2099-12-31"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="#563 owns the installed-wrapper root contract; defaulting must not manufacture explicit instance selection",
-)
 def test_installed_wrapper_does_not_promote_default_instance_root_to_explicit_environment(tmp_path: Path) -> None:
     product = tmp_path / "product"
     scripts = product / "scripts"
