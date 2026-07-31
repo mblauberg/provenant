@@ -10,15 +10,13 @@ import hashlib
 import json
 import os
 import re
-import selectors
 import shlex
 import subprocess
 import sys
 import tempfile
-import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +24,7 @@ SCRIPTS_DIR = str(Path(__file__).resolve().parent)
 if SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, SCRIPTS_DIR)
 import delivery_receipt_lifecycle as lifecycle
+import delivery_receipt_process as process_runner
 
 PRODUCT_ROOT = Path(__file__).resolve().parents[3]
 TEMPLATE_PATH = Path(__file__).resolve().parents[1] / "templates" / "RUN.template.json"
@@ -36,9 +35,24 @@ SAFE_CLASSES = {"canonical", "evidence", "handoff", "scratch", "external"}
 REVIEW_ROLES = {"targeted", "other-primary", "distinct-family"}
 RISKS = ("routine", "substantial", "crucial", "terminal")
 BIND_SECTIONS = dict(
-    design="design", incident="incident", retrospective="retrospective",
+    design="design", incident="incident", measures="measures",
+    retrospective="retrospective",
     **{"assurance-plan": "assurance", "security-plan": "security",
        "observation-plan": "observation", "software-delivery": "software_delivery"},
+)
+BIND_GATE_STATES = {
+    "design": "approved",
+    "incident": "closed",
+    "measures": "awaiting_acceptance",
+    "retrospective": "closed",
+    "assurance-plan": "awaiting_acceptance",
+    "security-plan": "awaiting_acceptance",
+    "observation-plan": "observing",
+    "software-delivery": "accepted",
+}
+OBSERVATION_PLAN_FIELDS = (
+    "window", "signals", "thresholds", "owner", "containment", "privacy",
+    "close_condition",
 )
 MAX_LOG_BYTES = 64 * 1024
 EVIDENCE_TIMEOUT_SECONDS = 30 * 60
@@ -75,6 +89,23 @@ def utc_now() -> str:
 
 def digest_bytes(raw: bytes) -> str:
     return "sha256:" + hashlib.sha256(raw).hexdigest()
+
+
+def _utc(value: Any, field: str) -> datetime:
+    if not isinstance(value, str) or not value.endswith("Z"):
+        raise ReceiptError(f"{field} must be a UTC timestamp")
+    try:
+        parsed = datetime.fromisoformat(value[:-1])
+    except ValueError as exc:
+        raise ReceiptError(f"{field} must be an ISO UTC timestamp") from exc
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _reject_future_timestamp(value: Any, field: str) -> None:
+    if _utc(value, field) > datetime.now(timezone.utc) + timedelta(minutes=5):
+        raise ReceiptError(f"{field} exceeds the future timestamp tolerance")
 
 
 def require_identifier(value: str, field: str) -> str:
@@ -118,6 +149,29 @@ def safe_workspace_path(workspace: Path, value: str, field: str) -> tuple[Path, 
     except ValueError as exc:
         raise ReceiptError(f"{field} escapes the workspace") from exc
     return target, path.as_posix().rstrip("/")
+
+
+def ensure_allowed_artifact_target(
+    run: dict[str, Any], workspace: Path, target: Path,
+) -> None:
+    target = target.resolve()
+    authority = run.get("authority")
+    scopes = authority.get("allowed_artifact_paths") if isinstance(authority, dict) else None
+    if not isinstance(scopes, list) or not scopes:
+        raise ReceiptError("authority.allowed_artifact_paths must be a non-empty list")
+    roots: list[Path] = []
+    for scope in scopes:
+        if not isinstance(scope, str):
+            raise ReceiptError("authority.allowed_artifact_paths contains an invalid path")
+        root, _relative = safe_workspace_path(
+            workspace, scope, "authority.allowed_artifact_paths",
+        )
+        roots.append(root)
+    if not any(
+        target == root or target.is_relative_to(root)
+        for root in roots
+    ):
+        raise ReceiptError("artifact path leaves authority.allowed_artifact_paths")
 
 
 def resolve_run_dir(value: str | Path, *, run_id: str | None = None) -> tuple[Path, Path]:
@@ -207,7 +261,7 @@ def load_run(run_dir: Path) -> dict[str, Any]:
     return run
 
 
-def ensure_immutable_risk(run: dict[str, Any]) -> None:
+def ensure_immutable_risk(run: dict[str, Any], workspace: Path) -> None:
     history = run.get("state_history")
     if not isinstance(history, list) or not history or not isinstance(history[0], dict):
         raise ReceiptError("state_history must retain its initial draft row")
@@ -215,10 +269,12 @@ def ensure_immutable_risk(run: dict[str, Any]) -> None:
     if initial not in RISKS or run.get("risk_tier") != initial:
         raise ReceiptError("risk tier is immutable after init")
     derived = derive_risk(run.get("risk_assessment", {}))
+    override = run.get("risk_override")
     if RISKS.index(initial) < RISKS.index(derived):
-        override = run.get("risk_override")
         if not isinstance(override, dict):
             raise ReceiptError("approved human risk override is missing")
+        validate_override(override, derived)
+    if isinstance(override, dict) and override.get("status") == "approved":
         validate_override(override, derived)
         linked = [
             item for item in run.get("evidence", [])
@@ -230,6 +286,31 @@ def ensure_immutable_risk(run: dict[str, Any]) -> None:
         ]
         if len(linked) != 1:
             raise ReceiptError("approved human risk override evidence is missing")
+        artifact_id = linked[0].get("artifact_id")
+        artifacts = [
+            item for item in run.get("artifacts", [])
+            if isinstance(item, dict) and item.get("id") == artifact_id
+        ]
+        if len(artifacts) != 1 or not artifacts[0].get("path"):
+            raise ReceiptError("approved human risk override artifact is missing")
+        target, _relative = safe_workspace_path(
+            workspace, artifacts[0]["path"], "risk override artifact",
+        )
+        ensure_allowed_artifact_target(run, workspace, target)
+        raw = target.read_bytes() if target.is_file() else b""
+        if not raw or artifacts[0].get("digest") != digest_bytes(raw):
+            raise ReceiptError(
+                "risk override artifact digest does not match live bytes"
+            )
+    corrections = run.get("human_corrections")
+    if not isinstance(corrections, list):
+        raise ReceiptError("human_corrections must be a list")
+    for index, correction in enumerate(corrections):
+        if not isinstance(correction, dict):
+            raise ReceiptError(f"human_corrections[{index}] must be an object")
+        _reject_future_timestamp(
+            correction.get("at"), f"human_corrections[{index}].at",
+        )
 
 
 def mutate_run(
@@ -241,8 +322,9 @@ def mutate_run(
         raise ReceiptError("run-dir does not exist")
     with run_lock(run_dir):
         run = load_run(run_dir)
-        ensure_immutable_risk(run)
+        ensure_immutable_risk(run, workspace)
         result = mutation(run, run_dir, workspace) or {}
+        ensure_immutable_risk(run, workspace)
         write_json_atomic(run_dir / "RUN.json", run)
         return result
 
@@ -348,6 +430,7 @@ def command_init(args: argparse.Namespace) -> dict[str, Any]:
         raise ReceiptError("intent must reference an existing non-empty file")
     assessment = load_json_argument(args.risk_assessment, "risk-assessment")
     authority = load_json_argument(args.authority, "authority")
+    ensure_allowed_artifact_target({"authority": authority}, workspace, intent_path)
     relationships = (
         load_json_argument(args.fabric_relationships, "fabric-relationships")
         if args.fabric_relationships
@@ -373,6 +456,25 @@ def command_init(args: argparse.Namespace) -> dict[str, Any]:
         override, override_artifact, override_evidence = materialise_risk_override(
             load_json_argument(args.risk_override, "risk-override"), workspace, derived,
         )
+        override_target, _relative = safe_workspace_path(
+            workspace, override_artifact["path"], "risk override artifact",
+        )
+        ensure_allowed_artifact_target(
+            {"authority": authority}, workspace, override_target,
+        )
+        reserved_evidence_ids = {
+            str(authority.get("evidence", "")),
+            "intent-approval",
+            "design-approval",
+            "human-acceptance",
+            "human-release",
+        }
+        if override_artifact["id"] == "intent":
+            raise ReceiptError("risk override artifact id conflicts with reserved intent")
+        if override_evidence["id"] in reserved_evidence_ids:
+            raise ReceiptError(
+                "risk override evidence id conflicts with a reserved approval id"
+            )
     elif args.risk_override:
         raise ReceiptError("risk-override is only valid below the derived tier")
 
@@ -450,6 +552,27 @@ def command_bind(args: argparse.Namespace) -> dict[str, Any]:
     value = load_json_argument(args.from_json, args.section)
 
     def apply(run: dict[str, Any], _run_dir: Path, _workspace: Path) -> dict[str, Any]:
+        gate_state = BIND_GATE_STATES[args.section]
+        gate_passed = any(
+            isinstance(item, dict) and item.get("state") == gate_state
+            for item in run.get("state_history", [])
+        )
+        replacement = run.get(section) != value
+        if args.section == "observation-plan" and gate_passed:
+            current = run.get(section)
+            closed = any(
+                isinstance(item, dict) and item.get("state") == "closed"
+                for item in run.get("state_history", [])
+            )
+            if not closed:
+                replacement = (
+                    not isinstance(current, dict)
+                    or any(current.get(field) != value.get(field)
+                           for field in OBSERVATION_PLAN_FIELDS)
+                )
+        if gate_passed and replacement:
+            name = args.section.removesuffix("-plan")
+            raise ReceiptError(f"{name} lifecycle gate has passed")
         run[section] = value
         return {"section": args.section}
 
@@ -469,6 +592,7 @@ def command_artifact_add(args: argparse.Namespace) -> dict[str, Any]:
         ):
             raise ReceiptError(f"artifact id already exists: {artifact_id}")
         target, relative = safe_workspace_path(workspace, args.path, "artifact path")
+        ensure_allowed_artifact_target(run, workspace, target)
         if not target.is_file():
             raise ReceiptError("artifact path must reference an existing file")
         raw = target.read_bytes()
@@ -526,6 +650,13 @@ def bundle_artifact(
     run: dict[str, Any], artifact_id: str, workspace: Path,
 ) -> tuple[dict[str, Any], Path]:
     artifact = find_artifact(run, artifact_id)
+    if any(
+        isinstance(item, dict)
+        and item.get("gate") == "risk-override"
+        and item.get("artifact_id") == artifact_id
+        for item in run.get("evidence", [])
+    ):
+        raise ReceiptError("risk override artifact cannot be a deterministic bundle")
     if (
         artifact.get("class") != "evidence"
         or artifact.get("artifact_type") != "evidence"
@@ -536,6 +667,7 @@ def bundle_artifact(
     target, _relative = safe_workspace_path(
         workspace, artifact["path"], "evidence bundle path",
     )
+    ensure_allowed_artifact_target(run, workspace, target)
     return artifact, target
 
 
@@ -564,7 +696,22 @@ def rebuild_bundle(
     }
     raw = (json.dumps(bundle, indent=2) + "\n").encode()
     digest = digest_bytes(raw)
-    target = target.parent / f"{artifact_id}.{digest.removeprefix('sha256:')}.json"
+    changed_references: list[str] = []
+    for item in rows:
+        if item["result"].get("receipt_digest") != digest:
+            references = evidence_references(run, item["id"])
+            if references:
+                changed_references.append(
+                    f"{item['id']} is referenced by {', '.join(references)}"
+                )
+    if changed_references:
+        raise ReceiptError(
+            "evidence " + "; ".join(changed_references)
+        )
+    target = (
+        target.parent / f"{artifact_id}.{digest.removeprefix('sha256:')}.json"
+    ).resolve()
+    ensure_allowed_artifact_target(run, workspace, target)
     artifact["path"] = target.relative_to(workspace).as_posix()
     artifact["digest"] = digest
     for item in rows:
@@ -573,45 +720,11 @@ def rebuild_bundle(
 
 
 def execute_bounded(
-    command: list[str], *, timeout_seconds: float = EVIDENCE_TIMEOUT_SECONDS,
+    command: list[str], *, cwd: Path, timeout_seconds: float = EVIDENCE_TIMEOUT_SECONDS,
 ) -> tuple[int, str, str]:
-    if not command:
-        raise ReceiptError("evidence run requires a command after --")
-    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    assert process.stdout is not None and process.stderr is not None
-    selector = selectors.DefaultSelector()
-    selector.register(process.stdout, selectors.EVENT_READ, 0)
-    selector.register(process.stderr, selectors.EVENT_READ, 1)
-    buffers = [bytearray(), bytearray()]
-    deadline = time.monotonic() + timeout_seconds
-    try:
-        while selector.get_map():
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                process.kill()
-                process.wait()
-                raise ReceiptError(
-                    f"evidence command timed out after {timeout_seconds:g} seconds"
-                )
-            for key, _mask in selector.select(min(0.1, remaining)):
-                chunk = os.read(key.fileobj.fileno(), 8192)
-                if not chunk:
-                    selector.unregister(key.fileobj)
-                    continue
-                buffer = buffers[key.data]
-                buffer.extend(chunk)
-                if len(buffer) > MAX_LOG_BYTES:
-                    del buffer[:-MAX_LOG_BYTES]
-        exit_code = process.wait()
-    finally:
-        selector.close()
-        if process.poll() is None:
-            process.kill()
-            process.wait()
-    return (
-        exit_code,
-        buffers[0].decode("utf-8", errors="replace"),
-        buffers[1].decode("utf-8", errors="replace"),
+    return process_runner.execute_bounded(
+        command, cwd=cwd, timeout_seconds=timeout_seconds,
+        max_log_bytes=MAX_LOG_BYTES, error_type=ReceiptError,
     )
 
 
@@ -625,7 +738,7 @@ def command_evidence_run(args: argparse.Namespace) -> dict[str, Any]:
     run_dir, workspace = resolve_run_dir(args.run_dir)
     with run_lock(run_dir):
         run = load_run(run_dir)
-        ensure_immutable_risk(run)
+        ensure_immutable_risk(run, workspace)
         ensure_new_evidence_id(run, evidence_id)
         bundle_artifact(run, args.artifact_id, workspace)
         for source in source_paths:
@@ -633,7 +746,8 @@ def command_evidence_run(args: argparse.Namespace) -> dict[str, Any]:
             if not target.exists():
                 raise ReceiptError(f"evidence source does not exist: {source}")
         started = utc_now()
-        exit_code, stdout, stderr = execute_bounded(command)
+        exit_code, stdout, stderr = execute_bounded(command, cwd=workspace)
+        ensure_immutable_risk(run, workspace)
         finished = utc_now()
         if datetime.fromisoformat(finished[:-1]) <= datetime.fromisoformat(started[:-1]):
             raise ReceiptError("evidence timestamps must strictly increase")
@@ -655,6 +769,7 @@ def command_evidence_run(args: argparse.Namespace) -> dict[str, Any]:
         run["evidence"].append(row)
         target, bundle, digest = rebuild_bundle(run, args.artifact_id, workspace)
         write_bundle_atomic(target, bundle)
+        ensure_immutable_risk(run, workspace)
         write_json_atomic(run_dir / "RUN.json", run)
     return {
         "evidence_id": evidence_id,
@@ -767,7 +882,7 @@ def command_evidence_remove(args: argparse.Namespace) -> dict[str, Any]:
     run_dir, workspace = resolve_run_dir(args.run_dir)
     with run_lock(run_dir):
         run = load_run(run_dir)
-        ensure_immutable_risk(run)
+        ensure_immutable_risk(run, workspace)
         row = find_evidence(run, evidence_id)
         references = evidence_references(run, evidence_id)
         if references:
@@ -779,6 +894,7 @@ def command_evidence_remove(args: argparse.Namespace) -> dict[str, Any]:
         if row.get("kind") == "deterministic":
             bundle_update = rebuild_bundle(run, row["artifact_id"], workspace)
             write_bundle_atomic(bundle_update[0], bundle_update[1])
+        ensure_immutable_risk(run, workspace)
         write_json_atomic(run_dir / "RUN.json", run)
     return {"evidence_id": evidence_id, "removed": True}
 
@@ -788,9 +904,10 @@ def command_evidence_rebuild(args: argparse.Namespace) -> dict[str, Any]:
     run_dir, workspace = resolve_run_dir(args.run_dir)
     with run_lock(run_dir):
         run = load_run(run_dir)
-        ensure_immutable_risk(run)
+        ensure_immutable_risk(run, workspace)
         target, bundle, digest = rebuild_bundle(run, artifact_id, workspace)
         write_bundle_atomic(target, bundle)
+        ensure_immutable_risk(run, workspace)
         write_json_atomic(run_dir / "RUN.json", run)
     return {"artifact_id": artifact_id, "digest": digest}
 
@@ -801,7 +918,7 @@ def profile_judgement_gate(profile: str) -> str:
 
 def add_review_artifact(
     run: dict[str, Any], workspace: Path, *, artifact_id: str, path: str,
-) -> tuple[dict[str, Any], str, str]:
+) -> tuple[dict[str, Any], str, str, bytes]:
     return lifecycle.add_review_artifact(
         run, workspace, artifact_id=artifact_id, path=path, api=globals(),
     )
@@ -809,23 +926,62 @@ def add_review_artifact(
 
 def command_review_add(args: argparse.Namespace) -> dict[str, Any]:
     review_id = require_identifier(args.review_id, "review id")
-    require_identifier(args.reviewer_id, "reviewer-id")
+    if not args.adapter:
+        raise ReceiptError("review requires non-empty --adapter")
+    if not args.provider_family:
+        raise ReceiptError("review requires non-empty --provider-family")
+    if args.role == "distinct-family" and args.provider_family in {"openai", "anthropic"}:
+        raise ReceiptError("distinct-family review must use a non-primary family")
+    if args.status == "pass":
+        missing = [
+            option for option in ("artifact", "route_receipt", "reviewer_id", "model")
+            if not getattr(args, option)
+        ]
+        if missing:
+            raise ReceiptError(
+                "passing review requires " + ", ".join(
+                    f"--{option.replace('_', '-')}" for option in missing
+                )
+            )
+        require_identifier(args.reviewer_id, "reviewer-id")
+    elif not args.reason:
+        raise ReceiptError(f"{args.status} review requires --reason")
 
     def apply(run: dict[str, Any], _run_dir: Path, workspace: Path) -> dict[str, Any]:
-        ensure_new_evidence_id(run, review_id)
+        if any(
+            isinstance(item, dict) and item.get("id") == review_id
+            for item in [*run.get("reviews", []), *run.get("evidence", [])]
+        ):
+            raise ReceiptError(f"review id already exists: {review_id}")
         if not args.lenses or any(not lens for lens in args.lenses):
             raise ReceiptError("review requires at least one non-empty lens")
+        if args.status != "pass":
+            run["reviews"].append({
+                "id": review_id,
+                "role": args.role,
+                "provider_family": args.provider_family,
+                "adapter": args.adapter,
+                "model": args.model or "",
+                "reviewer_id": args.reviewer_id or "",
+                "independent_of_authorship": True,
+                "lenses": list(dict.fromkeys(args.lenses)),
+                "status": args.status,
+                "evidence_id": "",
+                "reason": args.reason,
+                "route_receipt_digest": "",
+            })
+            return {"review_id": review_id, "evidence_id": ""}
         review_artifact_id = f"{review_id}.artifact"
         route_artifact_id = f"{review_id}.route"
-        _artifact, review_path, review_digest = add_review_artifact(
+        _artifact, review_path, review_digest, _review_raw = add_review_artifact(
             run, workspace, artifact_id=review_artifact_id, path=args.artifact,
         )
-        _route, route_path, route_digest = add_review_artifact(
+        _route, route_path, route_digest, route_raw = add_review_artifact(
             run, workspace, artifact_id=route_artifact_id, path=args.route_receipt,
         )
         try:
-            route = json.loads((workspace / route_path).read_text())
-        except (OSError, json.JSONDecodeError) as exc:
+            route = json.loads(route_raw)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise ReceiptError(f"route receipt must be readable JSON: {exc}") from exc
         if (
             not isinstance(route, dict)
@@ -837,6 +993,10 @@ def command_review_add(args: argparse.Namespace) -> dict[str, Any]:
             or route.get("certification_eligible") is not True
         ):
             raise ReceiptError("route receipt identity does not match review lineage")
+        if args.role == "other-primary" and route.get("cross_family") is not True:
+            raise ReceiptError(
+                "other-primary review requires a cross-family route receipt"
+            )
         lineage = {
             "adapter": args.adapter,
             "provider_family": args.provider_family,
@@ -934,6 +1094,19 @@ def build_parser() -> argparse.ArgumentParser:
     evidence_human.add_argument("--source", dest="sources", action="append", default=[])
     evidence_human.set_defaults(handler=command_evidence_human)
 
+    evidence_observation = evidence_commands.add_parser("observation")
+    evidence_observation.add_argument("--run-dir", required=True)
+    evidence_observation.add_argument("--id", dest="evidence_id", required=True)
+    evidence_observation.add_argument("--gate", required=True)
+    evidence_observation.add_argument("--artifact-id", required=True)
+    evidence_observation.add_argument("--measured-value", type=float, required=True)
+    evidence_observation.add_argument(
+        "--source", dest="sources", action="append", required=True,
+    )
+    evidence_observation.set_defaults(
+        handler=lambda args: lifecycle.command_evidence_observation(args, globals()),
+    )
+
     evidence_remove = evidence_commands.add_parser("remove")
     evidence_remove.add_argument("--run-dir", required=True)
     evidence_remove.add_argument("--id", dest="evidence_id", required=True)
@@ -950,13 +1123,17 @@ def build_parser() -> argparse.ArgumentParser:
     review_add.add_argument("--run-dir", required=True)
     review_add.add_argument("--id", dest="review_id", required=True)
     review_add.add_argument("--role", choices=sorted(REVIEW_ROLES), required=True)
-    review_add.add_argument("--artifact", required=True)
-    review_add.add_argument("--route-receipt", required=True)
-    review_add.add_argument("--reviewer-id", required=True)
+    review_add.add_argument("--artifact")
+    review_add.add_argument("--route-receipt")
+    review_add.add_argument("--reviewer-id")
     review_add.add_argument("--adapter", required=True)
     review_add.add_argument("--provider-family", required=True)
-    review_add.add_argument("--model", required=True)
+    review_add.add_argument("--model")
     review_add.add_argument("--lens", dest="lenses", action="append", required=True)
+    review_add.add_argument(
+        "--status", choices=("pass", "failed", "unavailable", "skipped"), default="pass",
+    )
+    review_add.add_argument("--reason", default="")
     review_add.set_defaults(handler=command_review_add)
 
     checkpoint = subcommands.add_parser("checkpoint")

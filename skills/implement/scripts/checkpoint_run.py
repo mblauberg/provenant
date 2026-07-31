@@ -8,7 +8,7 @@ import fcntl
 import json
 import os
 import tempfile
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -29,7 +29,7 @@ def _update_locked(path: Path, current_slice: str, next_action: str, in_flight: 
         raise ValueError("RUN.json must be a canonical delivery-run v1 receipt")
     checkpoint = run.get("checkpoint")
     if not isinstance(checkpoint, dict):
-        raise ValueError("RUN.json checkpoint must be an object")
+        raise ValueError("RUN.json checkpoint must be an object")  # noqa: TRY004
     generation = checkpoint.get("generation")
     if not isinstance(generation, int) or isinstance(generation, bool) or generation < 0:
         raise ValueError("checkpoint.generation must be a non-negative integer")
@@ -37,16 +37,30 @@ def _update_locked(path: Path, current_slice: str, next_action: str, in_flight: 
         raise ValueError("in-flight IDs and artifact paths must be non-empty strings")
     existing_artifacts = checkpoint.get("artifact_paths")
     if not isinstance(existing_artifacts, list):
-        raise ValueError("checkpoint.artifact_paths must be a list")
+        raise ValueError("checkpoint.artifact_paths must be a list")  # noqa: TRY004
     merged = list(dict.fromkeys([*existing_artifacts, *artifacts]))
+    workspace = (
+        root.parent.parent
+        if root.parent.name == ".agent-run"
+        else root
+    ).resolve()
     for value in merged:
-        target = Path(value)
-        target = target if target.is_absolute() else root / target
-        try:
-            target.resolve().relative_to(root)
-        except ValueError as exc:
-            raise ValueError(f"artifact path escapes run directory: {value}") from exc
-        if not target.is_file():
+        candidate = Path(value)
+        if candidate.is_absolute() or ".." in candidate.parts or not value:
+            raise ValueError(
+                f"artifact path must be safe and workspace-relative: {value}"
+            )
+        targets = [(root / candidate).resolve(), (workspace / candidate).resolve()]
+        safe_targets = []
+        for target in targets:
+            try:
+                target.relative_to(workspace)
+            except ValueError:
+                continue
+            safe_targets.append(target)
+        if not safe_targets:
+            raise ValueError(f"artifact path escapes workspace: {value}")
+        if not any(target.is_file() for target in safe_targets):
             raise ValueError(f"artifact path does not exist: {value}")
     checkpoint.update({
         "generation": generation + 1,
@@ -55,7 +69,7 @@ def _update_locked(path: Path, current_slice: str, next_action: str, in_flight: 
         "in_flight": in_flight,
         "artifact_paths": merged,
     })
-    run["updated_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    run["updated_at"] = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     temp_path: Path | None = None
     try:
         with tempfile.NamedTemporaryFile("w", dir=root, prefix=".RUN.", suffix=".tmp", delete=False) as handle:
@@ -107,7 +121,7 @@ def main(argv: list[str] | None = None) -> int:
         in_flight = json.loads(args.in_flight_json)
         artifacts = json.loads(args.artifact_paths_json)
         if not isinstance(in_flight, list) or not isinstance(artifacts, list):
-            raise ValueError("JSON arguments must be arrays")
+            raise ValueError("JSON arguments must be arrays")  # noqa: TRY004
         result = update(args.run, args.current_slice, args.next_action, in_flight, artifacts)
     except (OSError, ValueError, json.JSONDecodeError, KeyError) as exc:
         print(json.dumps({"verified": False, "error": str(exc)}))

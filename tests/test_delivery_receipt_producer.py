@@ -3,12 +3,15 @@ import importlib.util
 import json
 import subprocess
 import sys
+import time
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 PRODUCER = ROOT / "skills" / "deliver" / "scripts" / "delivery_receipt.py"
+VALIDATOR = ROOT / "skills" / "deliver" / "scripts" / "validate_delivery.py"
 
 
 def run_cli(workspace: Path, *args: str) -> subprocess.CompletedProcess[str]:
@@ -23,6 +26,14 @@ def run_cli(workspace: Path, *args: str) -> subprocess.CompletedProcess[str]:
 
 def load_producer():
     spec = importlib.util.spec_from_file_location("delivery_receipt_under_test", PRODUCER)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader
+    spec.loader.exec_module(module)
+    return module
+
+
+def load_validator():
+    spec = importlib.util.spec_from_file_location("validate_delivery_for_producer", VALIDATOR)
     module = importlib.util.module_from_spec(spec)
     assert spec.loader
     spec.loader.exec_module(module)
@@ -413,6 +424,7 @@ def test_bounded_execution_times_out_and_truncates_output():
     with pytest.raises(module.ReceiptError, match="timed out"):
         module.execute_bounded(
             [sys.executable, "-c", "import time; time.sleep(60)"],
+            cwd=ROOT,
             timeout_seconds=0.05,
         )
     noisy_command = (
@@ -423,10 +435,84 @@ def test_bounded_execution_times_out_and_truncates_output():
         sys.executable,
         "-c",
         noisy_command,
-    ])
+    ], cwd=ROOT)
     assert exit_code == 0
     assert len(stdout.encode()) <= module.MAX_LOG_BYTES
     assert len(stderr.encode()) <= module.MAX_LOG_BYTES
+
+
+def test_bounded_execution_enforces_deadline_after_output_closes():
+    module = load_producer()
+    command = [
+        sys.executable,
+        "-c",
+        "import os,time; os.close(1); os.close(2); time.sleep(0.2)",
+    ]
+    started = time.monotonic()
+
+    with pytest.raises(module.ReceiptError, match="timed out"):
+        module.execute_bounded(command, cwd=ROOT, timeout_seconds=0.05)
+
+    assert time.monotonic() - started < 0.25
+
+
+def test_bounded_execution_kills_descendants_on_timeout(tmp_path):
+    module = load_producer()
+    ready = tmp_path / "descendant-ready"
+    marker = tmp_path / "descendant-survived"
+    child = (
+        "import pathlib,signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+        f"pathlib.Path({str(ready)!r}).write_text('ready'); time.sleep(0.6); "
+        f"pathlib.Path({str(marker)!r}).write_text('alive')"
+    )
+    parent = (
+        "import pathlib,subprocess,sys,time; "
+        f"subprocess.Popen([sys.executable,'-c',{child!r}]); "
+        f"ready=pathlib.Path({str(ready)!r}); "
+        "deadline=time.monotonic()+0.5; "
+        "\nwhile not ready.exists() and time.monotonic()<deadline: time.sleep(0.005)"
+        "\ntime.sleep(60)"
+    )
+
+    with pytest.raises(module.ReceiptError, match="timed out"):
+        module.execute_bounded(
+            [sys.executable, "-c", parent], cwd=tmp_path, timeout_seconds=0.25,
+        )
+    time.sleep(0.7)
+
+    assert ready.exists()
+    assert not marker.exists()
+
+
+def test_evidence_run_executes_from_receipt_workspace(tmp_path):
+    run_dir = initialise(tmp_path)
+    bundle_path = run_dir / "evidence.json"
+    bundle_path.write_text(
+        '{"schema_version":1,"contract":"deterministic-evidence-bundle","checks":[]}\n'
+    )
+    assert add_artifact(
+        tmp_path, run_dir, "evidence-bundle", ".agent-run/DEL-TEST/evidence.json"
+    ).returncode == 0
+    outside = tmp_path.parent / f"{tmp_path.name}-outside"
+    outside.mkdir()
+
+    result = subprocess.run(
+        [
+            sys.executable, str(PRODUCER), "evidence", "run",
+            "--run-dir", str(run_dir), "--id", "tests", "--gate", "tests",
+            "--artifact-id", "evidence-bundle", "--source", "intent.md", "--",
+            sys.executable, "-c",
+            "from pathlib import Path; Path('workspace-marker').write_text('ok')",
+        ],
+        cwd=outside,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "workspace-marker").read_text() == "ok"
+    assert not (outside / "workspace-marker").exists()
 
 
 def test_human_evidence_links_existing_nonempty_artifact(tmp_path):
@@ -604,6 +690,77 @@ def test_review_add_refuses_route_receipt_lineage_mismatch(tmp_path):
 
     assert result.returncode == 1
     assert "route receipt identity does not match review lineage" in result.stderr
+
+
+def test_review_add_records_reasoned_skip_without_judgement_evidence(tmp_path):
+    run_dir = initialise(tmp_path)
+
+    result = run_cli(
+        tmp_path, "review", "add", "--run-dir", str(run_dir),
+        "--id", "distinct-family-skip", "--role", "distinct-family",
+        "--adapter", "gemini", "--provider-family", "google",
+        "--lens", "blind-spots", "--status", "skipped",
+        "--reason", "provider quota unavailable",
+    )
+
+    assert result.returncode == 0, result.stderr
+    receipt = json.loads((run_dir / "RUN.json").read_text())
+    assert receipt["reviews"][-1]["status"] == "skipped"
+    assert receipt["reviews"][-1]["reason"] == "provider quota unavailable"
+    assert not any(
+        item["id"] == "distinct-family-skip" for item in receipt["evidence"]
+    )
+    load_validator()._validate_reviews(receipt, {}, required=False)
+
+
+@pytest.mark.parametrize(
+    ("adapter", "family", "expected"),
+    [
+        ("", "google", "adapter"),
+        ("gemini", "", "provider-family"),
+        ("native-subagent", "openai", "non-primary"),
+    ],
+)
+def test_review_add_refuses_invalid_distinct_family_skip_lineage(
+    tmp_path, adapter, family, expected,
+):
+    run_dir = initialise(tmp_path)
+
+    result = run_cli(
+        tmp_path, "review", "add", "--run-dir", str(run_dir),
+        "--id", "distinct-family-skip", "--role", "distinct-family",
+        "--adapter", adapter, "--provider-family", family,
+        "--lens", "blind-spots", "--status", "skipped",
+        "--reason", "provider quota unavailable",
+    )
+
+    assert result.returncode == 1
+    assert expected in result.stderr
+
+
+def test_review_ladder_accepts_reasoned_distinct_family_skip():
+    module = load_producer()
+    run = {
+        "risk_tier": "crucial",
+        "chair_family": "openai",
+        "reviews": [
+            {
+                "role": "targeted", "provider_family": "openai",
+                "status": "pass", "lenses": ["correctness", "tests"], "reason": "",
+            },
+            {
+                "role": "other-primary", "provider_family": "anthropic",
+                "status": "pass", "lenses": ["architecture"], "reason": "",
+            },
+            {
+                "role": "distinct-family", "provider_family": "google",
+                "status": "skipped", "lenses": ["blind-spots"],
+                "reason": "provider quota unavailable",
+            },
+        ],
+    }
+
+    assert module.lifecycle.review_ladder_error(run) is None
 
 
 def test_checkpoint_transition_show_and_refusals(tmp_path):
@@ -849,6 +1006,307 @@ def test_transition_refuses_adjacent_acceptance_gate_without_required_evidence(t
 
     assert refused.returncode == 1
     assert "awaiting_acceptance gate is not satisfied" in refused.stderr
+
+
+def test_transition_uses_conditional_evidence_and_risk_review_ladder(tmp_path):
+    run_dir = initialise(tmp_path)
+    module = load_producer()
+    receipt_path = run_dir / "RUN.json"
+    receipt = json.loads(receipt_path.read_text())
+    receipt["profile"] = "document"
+    receipt["artifacts"].append({
+        "id": "page",
+        "path": "intent.md",
+        "media_type": "text/html",
+        "artifact_type": "html",
+        "digest": digest_bytes_for_test((tmp_path / "intent.md").read_bytes()),
+        "class": "canonical",
+        "owner": "delivery-chair",
+        "retention": "project-policy",
+    })
+    receipt["evidence"].append({
+        "id": "render",
+        "kind": "deterministic",
+        "gate": "render",
+        "status": "pass",
+    })
+
+    error = module.lifecycle.transition_gate_error(
+        receipt, "reviewing", {"render"}, vars(module),
+    )
+
+    assert error == "reviewing deterministic gate is not satisfied"
+    receipt["risk_tier"] = "substantial"
+    receipt["reviews"] = [{
+        "role": "targeted",
+        "provider_family": "openai",
+        "status": "pass",
+        "lenses": ["correctness"],
+        "reason": "",
+    }]
+    assert "targeted lenses" in module.lifecycle.review_ladder_error(receipt)
+
+
+def test_transition_refuses_wrong_kind_gate_and_invalid_measure_rows(tmp_path):
+    run_dir = initialise(tmp_path)
+    module = load_producer()
+    receipt = json.loads((run_dir / "RUN.json").read_text())
+    receipt["evidence"] = [
+        {"id": "tests", "kind": "deterministic", "gate": "tests", "status": "pass"},
+        {"id": "wrong-tests", "kind": "human", "gate": "tests", "status": "pass"},
+        {
+            "id": "review-1",
+            "kind": "judgement",
+            "gate": "code-review",
+            "status": "pass",
+        },
+    ]
+    assert module.lifecycle.transition_gate_error(
+        receipt, "reviewing", {"tests", "wrong-tests"}, vars(module),
+    ) == "reviewing deterministic gate is not satisfied"
+    receipt["reviews"] = [{
+        "role": "targeted",
+        "provider_family": "openai",
+        "status": "pass",
+        "evidence_id": "review-1",
+        "lenses": ["correctness"],
+    }]
+    receipt["measures"] = {
+        "outcome": [{
+            "id": "functional-correctness",
+            "status": "pass",
+            "evidence_id": "tests",
+            "evidence_kind": "deterministic",
+            "value": 1,
+            "target": "pass",
+            "aggregation": "single",
+        }, {
+            "id": "extra",
+            "status": "fail",
+            "evidence_id": "tests",
+            "evidence_kind": "deterministic",
+            "value": 0,
+            "target": "pass",
+            "aggregation": "single",
+        }],
+        "trajectory": [{
+            "id": "verification-completion",
+            "status": "pass",
+            "evidence_id": "tests",
+            "evidence_kind": "deterministic",
+            "value": 1,
+            "target": "pass",
+            "aggregation": "single",
+        }],
+    }
+    profile = module.lifecycle.profile_requirements(
+        receipt, module.PROFILE_PATH, module.ReceiptError,
+    )
+    assert not module.lifecycle.measures_gate_ready(
+        receipt, profile, {"tests", "review-1"},
+    )
+
+
+@pytest.mark.parametrize("value", ["nan", "inf", "-inf"])
+def test_observation_evidence_refuses_non_finite_measurement(tmp_path, value):
+    run_dir = initialise(tmp_path)
+
+    result = run_cli(
+        tmp_path, "evidence", "observation", "--run-dir", str(run_dir),
+        "--id", "observation-1", "--gate", "task-success",
+        "--artifact-id", "intent", f"--measured-value={value}",
+        "--source", "intent.md",
+    )
+
+    assert result.returncode == 1
+    assert "measured value must be finite" in result.stderr
+
+
+def test_init_refuses_risk_override_identifier_collisions(tmp_path):
+    (tmp_path / "intent.md").write_text("# Intent\n")
+    (tmp_path / "risk-approval.json").write_text('{"approved":true}\n')
+    assessment = routine_assessment()
+    assessment["critical_surface"] = "build-release-gate"
+    base = init_args()
+    base[base.index("--risk-assessment") + 1] = json.dumps(assessment)
+
+    def attempt(evidence_id: str, artifact_id: str):
+        return run_cli(
+            tmp_path, *base, "--risk-tier", "routine", "--risk-override",
+            json.dumps({
+                "status": "approved",
+                "approved_by": "human-owner",
+                "evidence": evidence_id,
+                "reason": "bounded downgrade",
+                "artifact": "risk-approval.json",
+                "artifact_id": artifact_id,
+            }),
+        )
+
+    evidence_collision = attempt("authority-approval", "risk-artifact")
+    artifact_collision = attempt("risk-approval", "intent")
+
+    assert evidence_collision.returncode == 1
+    assert "reserved approval id" in evidence_collision.stderr
+    assert artifact_collision.returncode == 1
+    assert "reserved intent" in artifact_collision.stderr
+
+
+def test_producer_can_reach_validator_compatible_closed_state(tmp_path):
+    test_end_to_end_producer_receipt_passes_independent_validator(tmp_path)
+    run_dir = tmp_path / ".agent-run" / "DEL-E2E"
+    measures = {
+        "outcome": [{
+            "id": "functional-correctness",
+            "status": "pass",
+            "evidence_id": "tests",
+            "evidence_kind": "deterministic",
+            "value": 1,
+            "target": "pass",
+            "aggregation": "single-run",
+        }],
+        "trajectory": [{
+            "id": "verification-completion",
+            "status": "pass",
+            "evidence_id": "tests",
+            "evidence_kind": "deterministic",
+            "value": 1,
+            "target": "complete",
+            "aggregation": "single-run",
+        }],
+    }
+    (tmp_path / "measures.json").write_text(json.dumps(measures))
+    bound = run_cli(
+        tmp_path, "bind", "--run-dir", str(run_dir), "--section", "measures",
+        "--from", "measures.json",
+    )
+    assert bound.returncode == 0, bound.stderr
+    awaiting = run_cli(
+        tmp_path, "transition", "--run-dir", str(run_dir),
+        "--to", "awaiting_acceptance", "--evidence", "tests",
+        "--evidence", "review-1",
+    )
+    assert awaiting.returncode == 0, awaiting.stderr
+
+    for evidence_id, gate in (
+        ("acceptance-approval", "human-acceptance"),
+        ("release-approval", "human-release"),
+    ):
+        added = run_cli(
+            tmp_path, "evidence", "human", "--run-dir", str(run_dir),
+            "--id", evidence_id, "--gate", gate, "--artifact-id", "approval",
+            "--approver", "human-owner", "--source", "approval.json",
+        )
+        assert added.returncode == 0, added.stderr
+    empty_observation = {
+        "status": "active",
+        "window": {"kind": "event-count", "minimum": 1},
+        "signals": ["task-success"],
+        "thresholds": {"task-success": {"direction": "gte", "limit": 1}},
+        "owner": "human-owner",
+        "containment": "revert",
+        "privacy": "aggregate",
+        "close_condition": "task succeeds",
+        "started_at": "",
+        "ended_at": "",
+        "observed_events": 0,
+        "evidence_ids": [],
+    }
+    (tmp_path / "observation.json").write_text(json.dumps(empty_observation))
+    assert run_cli(
+        tmp_path, "bind", "--run-dir", str(run_dir),
+        "--section", "observation-plan", "--from", "observation.json",
+    ).returncode == 0
+    for state, evidence_id in (
+        ("accepted", "acceptance-approval"),
+        ("awaiting_release", None),
+        ("observing", "release-approval"),
+    ):
+        args = ["transition", "--run-dir", str(run_dir), "--to", state]
+        if evidence_id:
+            args.extend(["--evidence", evidence_id])
+        transitioned = run_cli(tmp_path, *args)
+        assert transitioned.returncode == 0, transitioned.stderr
+
+    receipt = json.loads((run_dir / "RUN.json").read_text())
+    observing_at = receipt["state_history"][-1]["at"]
+    empty_refused = run_cli(
+        tmp_path, "transition", "--run-dir", str(run_dir), "--to", "closed",
+    )
+    assert empty_refused.returncode == 1
+    assert "closed observation gate is not satisfied" in empty_refused.stderr
+
+    measured = run_cli(
+        tmp_path, "evidence", "observation", "--run-dir", str(run_dir),
+        "--id", "observed-task-success", "--gate", "task-success",
+        "--artifact-id", "approval", "--measured-value", "1",
+        "--source", "approval.json",
+    )
+    assert measured.returncode == 0, measured.stderr
+    receipt = json.loads((run_dir / "RUN.json").read_text())
+    observed_at = next(
+        item["observed_at"] for item in receipt["evidence"]
+        if item["id"] == "observed-task-success"
+    )
+    empty_observation.update({
+        "status": "pass",
+        "started_at": observing_at,
+        "ended_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+        "observed_events": 1,
+        "evidence_ids": ["observed-task-success"],
+    })
+    assert empty_observation["started_at"] <= observed_at <= empty_observation["ended_at"]
+    (tmp_path / "observation.json").write_text(json.dumps(empty_observation))
+    assert run_cli(
+        tmp_path, "bind", "--run-dir", str(run_dir),
+        "--section", "observation-plan", "--from", "observation.json",
+    ).returncode == 0
+    receipt = json.loads((run_dir / "RUN.json").read_text())
+    empty_observation["started_at"] = receipt["state_history"][0]["at"]
+    (tmp_path / "observation.json").write_text(json.dumps(empty_observation))
+    assert run_cli(
+        tmp_path, "bind", "--run-dir", str(run_dir),
+        "--section", "observation-plan", "--from", "observation.json",
+    ).returncode == 0
+    early_window = run_cli(
+        tmp_path, "transition", "--run-dir", str(run_dir), "--to", "closed",
+        "--evidence", "observed-task-success",
+    )
+    assert early_window.returncode == 1
+    assert "closed observation gate is not satisfied" in early_window.stderr
+    empty_observation["started_at"] = observing_at
+    empty_observation["thresholds"]["task-success"]["limit"] = float("-inf")
+    (tmp_path / "observation.json").write_text(json.dumps(empty_observation))
+    changed_plan = run_cli(
+        tmp_path, "bind", "--run-dir", str(run_dir),
+        "--section", "observation-plan", "--from", "observation.json",
+    )
+    assert changed_plan.returncode == 1
+    assert "observation lifecycle gate has passed" in changed_plan.stderr
+    empty_observation["thresholds"]["task-success"]["limit"] = 1
+    (tmp_path / "observation.json").write_text(json.dumps(empty_observation))
+    assert run_cli(
+        tmp_path, "bind", "--run-dir", str(run_dir),
+        "--section", "observation-plan", "--from", "observation.json",
+    ).returncode == 0
+    closed = run_cli(
+        tmp_path, "transition", "--run-dir", str(run_dir), "--to", "closed",
+        "--evidence", "observed-task-success",
+    )
+    assert closed.returncode == 0, closed.stderr
+
+    validated = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "skills" / "deliver" / "scripts" / "validate_delivery.py"),
+            str(run_dir / "RUN.json"), "--workspace-root", str(tmp_path),
+            "--product-root", str(ROOT), "--verify-hashes",
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert validated.returncode == 0, validated.stderr + validated.stdout
 
 
 @pytest.mark.parametrize(
