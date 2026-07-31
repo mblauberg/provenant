@@ -13,14 +13,21 @@ provenant project status [PATH]
 ```
 
 The path defaults to the current directory. Activation resolves the canonical
-Git repository root, or the exact current directory for a non-Git project, and
-then delegates trust to Fabric's existing workspace-trust owner. It does not
+Git repository root for the widening guard, or the exact current directory for
+a non-Git project, and then delegates trust for the exact requested directory
+to Fabric's existing workspace-trust owner. It does not
 create a second registry, infer trust, prompt implicitly, or bootstrap a seat.
 
 Read the report fields as follows:
 
 - `trustedRoot` is the exact root recorded in `trusted-workspaces.json`.
-- `configRoot` is independent: the nearest ancestor containing `.provenant/`.
+- `requestedPath` is the exact canonical directory named by the user.
+- `canonicalRepositoryRoot` is the canonical Git root used by the widening
+  guard. `repositoryRootTrusted` separately reports whether that ancestor is
+  trusted.
+- `gitProbe` distinguishes a repository, a confirmed non-repository, and an
+  unavailable Git probe. An unavailable probe is reported in
+  `missingDependencies` and is not treated as proof of a non-Git project.
 - `seatExists` reports whether an active Fabric seat generation is present.
 - `fabricReady` is true only when both the trust gate and an active seat are
   present. `missingDependencies` names the remaining setup.

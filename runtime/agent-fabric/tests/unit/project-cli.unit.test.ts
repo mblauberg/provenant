@@ -1,12 +1,14 @@
-import { access, chmod, mkdir, mkdtemp, readFile, realpath, rm, symlink } from "node:fs/promises";
+import { access, chmod, mkdir, mkdtemp, readFile, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { execFile } from "node:child_process";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { runProjectActivate, runProjectStatus, resolveProjectRoots } from "../../src/cli/project.ts";
+import { runWorkspaceTrust } from "../../src/cli/workspace-trust.ts";
+import { projectKey } from "../../src/cli/seat-store.ts";
 import { parseCliJson, runSourceCli } from "../support/cli-process.ts";
 
 const execFileAsync = promisify(execFile);
@@ -49,8 +51,12 @@ describe("project activation front doors", () => {
       trustedRoot: await realpath(value.project),
       canonicalRepositoryRoot: await realpath(value.project),
       isGitRepository: false,
+      gitProbe: "not-repository",
+      gitProbeError: null,
       seatExists: false,
       fabricReady: false,
+      fabricReadiness: "bootstrap a Fabric seat after activation",
+      trustedWorkspaceRoots: [await realpath(value.project)],
       missingDependencies: ["active Fabric seat"],
     });
     expect(result.message).toContain("Trusted project root");
@@ -68,6 +74,7 @@ describe("project activation front doors", () => {
       message: expect.stringContaining("already trusted; no changes made"),
     });
     expect(second.trustRecordDigest).toBe(first.trustRecordDigest);
+    expect(second.trustRecordDigest).not.toBeNull();
   });
 
   it("keeps the canonical Git root separate from the requested project identity", async () => {
@@ -83,6 +90,8 @@ describe("project activation front doors", () => {
       requestedPath: await realpath(workingDirectory),
       canonicalRepositoryRoot: await realpath(repositoryRoot),
       isGitRepository: true,
+      gitProbe: "repository",
+      gitProbeError: null,
     });
   });
 
@@ -106,10 +115,152 @@ describe("project activation front doors", () => {
     await expect(readFile(registryPath, "utf8")).resolves.toBe(registryBefore);
   });
 
-  it("does not report an inert config root", async () => {
+  it("reports trust for the named directory separately from its trusted Git ancestor", async () => {
+    const value = await fixture();
+    const repositoryRoot = join(value.root, "repository");
+    const requestedProject = join(repositoryRoot, "nested-project");
+    await mkdir(requestedProject, { recursive: true, mode: 0o700 });
+    await execFileAsync("git", ["init", "--quiet", repositoryRoot]);
+    await runProjectActivate(repositoryRoot, value.paths);
+    const repositoryPath = await realpath(repositoryRoot);
+    const seatDirectory = join(value.paths.stateDirectory, "seats", projectKey(repositoryPath));
+    await mkdir(seatDirectory, { recursive: true, mode: 0o700 });
+    await writeFile(join(seatDirectory, "current.json"), `${JSON.stringify({
+      schemaVersion: 1,
+      projectKey: projectKey(repositoryPath),
+      previousGeneration: null,
+      generation: "a".repeat(64),
+    })}\n`, { mode: 0o600 });
+
+    const result = await runProjectStatus(requestedProject, value.paths);
+
+    expect(result).toMatchObject({
+      requestedPath: await realpath(requestedProject),
+      canonicalRepositoryRoot: await realpath(repositoryRoot),
+      trusted: false,
+      status: "untrusted",
+      trustedRoot: null,
+      repositoryRootTrusted: true,
+      trustedWorkspaceRoots: [await realpath(repositoryRoot)],
+      seatExists: true,
+      seat: { exists: true, generation: "a".repeat(64) },
+      fabricReady: false,
+      fabricReadiness: "trust the exact requested project directory before using Fabric",
+    });
+  });
+
+  it("reports expired and identity-drifted trust records as untrusted status", async () => {
+    const expired = await fixture();
+    await runWorkspaceTrust(
+      ["trust", expired.project, "--expires-at", "2020-01-01T00:00:00.000Z"],
+      expired.paths,
+      new Date("2019-01-01T00:00:00.000Z"),
+    );
+    await expect(runProjectStatus(expired.project, expired.paths)).resolves.toMatchObject({
+      status: "untrusted",
+      trusted: false,
+      trustedRoot: null,
+      missingDependencies: expect.arrayContaining(["workspace trust"]),
+    });
+
+    const drifted = await fixture();
+    await runProjectActivate(drifted.project, drifted.paths);
+    await rename(drifted.project, join(drifted.root, "project-original"));
+    await mkdir(drifted.project, { mode: 0o700 });
+    await expect(runProjectStatus(drifted.project, drifted.paths)).resolves.toMatchObject({
+      status: "untrusted",
+      trusted: false,
+      trustedRoot: null,
+      missingDependencies: expect.arrayContaining(["workspace trust"]),
+    });
+  });
+
+  it.each([
+    "workspace trust record is expired",
+    "workspace trust record does not allow the requested profile",
+    "workspace trust record no longer matches the live root identity",
+  ])("classifies %s as untrusted project status", async (message) => {
+    const value = await fixture();
+    await expect(runProjectStatus(value.project, value.paths, {
+      identity: async () => {
+        throw new Error(message);
+      },
+    })).resolves.toMatchObject({
+      status: "untrusted",
+      trusted: false,
+      trustedRoot: null,
+      missingDependencies: expect.arrayContaining(["workspace trust"]),
+    });
+  });
+
+  it("does not swallow an unexpected trust inspection error", async () => {
     const value = await fixture();
 
-    await expect(resolveProjectRoots(value.project)).resolves.not.toHaveProperty("configRoot");
+    await expect(runProjectStatus(value.project, value.paths, {
+      identity: async () => {
+        throw new Error("unexpected trust inspection failure");
+      },
+    })).rejects.toThrow(/project status could not inspect.*unexpected trust inspection failure/u);
+  });
+
+  it("reports when the Git repository probe is unavailable instead of calling it a non-Git project", async () => {
+    const value = await fixture();
+    vi.stubEnv("PATH", value.root);
+    try {
+      await expect(runProjectActivate(value.project, value.paths)).resolves.toMatchObject({
+        isGitRepository: false,
+        gitProbe: "unavailable",
+        gitProbeError: expect.stringContaining("git"),
+        missingDependencies: expect.arrayContaining(["Git repository probe unavailable"]),
+      });
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("revokes a trust record if the trust owner reports a different canonical path", async () => {
+    const value = await fixture();
+    const substitutedDirectory = join(value.root, "substituted");
+    await mkdir(substitutedDirectory, { mode: 0o700 });
+    const substituted = await realpath(substitutedDirectory);
+    const revoked: string[] = [];
+
+    await expect(runProjectActivate(value.project, value.paths, new Date(), {
+      trust: async () => ({ trusted: true, entry: { canonicalPath: substituted } }),
+      revoke: async (arguments_: string[]) => {
+        revoked.push(arguments_[1] ?? "");
+        return { revoked: true };
+      },
+    })).rejects.toThrow(/trust recorded.*requested path/u);
+    expect(revoked).toEqual([await realpath(substituted)]);
+  });
+
+  it("reports rollback when status inspection fails after adding trust", async () => {
+    const value = await fixture();
+
+    await expect(runProjectActivate(value.project, value.paths, new Date(), {
+      status: async () => {
+        throw new Error("unexpected status inspection failure");
+      },
+    })).rejects.toThrow(/trust was added.*revoked.*unexpected status inspection failure/u);
+    await expect(runWorkspaceTrust(["list"], value.paths)).resolves.toMatchObject({ entries: [] });
+  });
+
+  it("rolls back when the guarded path becomes a symlink after trust is recorded", async () => {
+    const value = await fixture();
+    const originalDirectory = join(value.root, "project-original");
+    const replacementDirectory = join(value.root, "project-replacement");
+    await mkdir(replacementDirectory, { mode: 0o700 });
+
+    await expect(runProjectActivate(value.project, value.paths, new Date(), {
+      trust: async (arguments_, paths, now) => {
+        const result = await runWorkspaceTrust(arguments_, paths, now);
+        await rename(value.project, originalDirectory);
+        await symlink(replacementDirectory, value.project);
+        return result;
+      },
+    })).rejects.toThrow(/trust was added.*revoked.*symbolic-link/u);
+    await expect(runWorkspaceTrust(["list"], value.paths)).resolves.toMatchObject({ entries: [] });
   });
 
   it("refuses unsupported filesystem-wide roots with an actionable message", async () => {
@@ -169,5 +320,69 @@ describe("project activation front doors", () => {
       status: "untrusted",
       fabricReady: false,
     });
+  });
+
+  it("rejects a project CLI invocation with more than one path", async () => {
+    const value = await fixture();
+    const result = await runSourceCli(["project", "status", value.project, "extra"], {
+      environment: {
+        AGENT_FABRIC_STATE_DIRECTORY: value.paths.stateDirectory,
+        AGENT_FABRIC_RUNTIME_DIRECTORY: value.paths.runtimeDirectory,
+      },
+    });
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr).toContain("project status accepts at most one path");
+  });
+
+  it("rejects a file path before project activation can grant trust", async () => {
+    const value = await fixture();
+    const file = join(value.root, "not-a-directory");
+    await writeFile(file, "not a directory");
+
+    await expect(runProjectActivate(file, value.paths)).rejects.toThrow(
+      /project path is not a directory/u,
+    );
+  });
+
+  it("activates through the main CLI dispatch and records the trusted root", async () => {
+    const value = await fixture();
+    const result = await runSourceCli(["project", "activate", value.project], {
+      environment: {
+        AGENT_FABRIC_STATE_DIRECTORY: value.paths.stateDirectory,
+        AGENT_FABRIC_RUNTIME_DIRECTORY: value.paths.runtimeDirectory,
+      },
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(parseCliJson(result)).toMatchObject({
+      action: "trusted",
+      trusted: true,
+      trustedRoot: await realpath(value.project),
+    });
+    expect(JSON.parse(await readFile(join(value.paths.stateDirectory, "trusted-workspaces.json")))).toMatchObject({
+      entries: [expect.objectContaining({ canonicalPath: await realpath(value.project) })],
+    });
+  });
+
+  it("does not create Fabric state when a Git-root-widening activation is refused", async () => {
+    const value = await fixture();
+    const stateDirectory = join(value.root, "not-created-state");
+    const runtimeDirectory = join(value.root, "not-created-runtime");
+    const repositoryRoot = join(value.root, "repository");
+    const requestedProject = join(repositoryRoot, "nested-project");
+    await mkdir(requestedProject, { recursive: true, mode: 0o700 });
+    await execFileAsync("git", ["init", "--quiet", repositoryRoot]);
+
+    const result = await runSourceCli(["project", "activate", requestedProject], {
+      environment: {
+        AGENT_FABRIC_STATE_DIRECTORY: stateDirectory,
+        AGENT_FABRIC_RUNTIME_DIRECTORY: runtimeDirectory,
+      },
+    });
+
+    expect(result.exitCode).not.toBe(0);
+    await expect(access(stateDirectory)).rejects.toThrow();
+    await expect(access(runtimeDirectory)).rejects.toThrow();
   });
 });
