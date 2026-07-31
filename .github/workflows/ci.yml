@@ -393,29 +393,19 @@ jobs:
             exit 1
           }
           printf 'split-root failures accounted for exactly: %d\n' "$expected"
-      - name: Run split-root TypeScript oracle with exact expected failure
+      - name: Run split-root TypeScript oracle
         working-directory: runtime/agent-fabric
         env:
           NO_COLOR: "1"
           FORCE_COLOR: "0"
-        run: |
-          set -o pipefail
-          set +e
-          # Strip colour before matching.  vitest pads AND colours its summary,
-          # so escape codes land between "Tests" and the count and a grep over
-          # the raw output can never match, however careful the pattern is.
-          output="$(npx vitest run --config vitest.split-root.config.ts 2>&1 | perl -pe 's/\e\[[0-9;]*[A-Za-z]//g; s/\^\[\[[0-9;]*[A-Za-z]//g')"
-          status=$?
-          set -e
-          printf '%s\n' "$output"
-          test "$status" -eq 1
-          # vitest pads its summary columns, so match on a whitespace-tolerant
-          # pattern.  Pin the count of failures, not the count of passes: a new
-          # oracle probe must not have to edit this step, but a second failure
-          # or a green run must break it.
-          grep -F 'does not offer a defaulted instance layer as an explicit narrowing layer' <<<"$output"
-          grep -Eq 'Test Files +1 failed \(1\)' <<<"$output"
-          grep -Eq 'Tests +1 failed \|' <<<"$output"
+        # The oracle used to be pinned to exactly one named failure, because
+        # `does not offer a defaulted instance layer as an explicit narrowing
+        # layer` was the fail-open defect #549 owned and had not yet fixed. That
+        # pin has done its job: the probe passes, so the pin is deleted here
+        # rather than left to rot into a gate that asserts a bug still exists.
+        # The oracle is now an ordinary must-be-green step, and any regression
+        # in it fails this job on its own merits.
+        run: npx vitest run --config vitest.split-root.config.ts
 
   review-portal-supervisor:
     name: Review portal supervisor (${{ matrix.os }})
