@@ -93,6 +93,13 @@ claim, source, confidence, issues and validation. Certification needs a
 non-authoring reviewer plus verified evidence; best-effort routes only scout,
 they do not certify.
 
+A worker's final act before idling is its report: the digest plus artifact
+path through its return channel or a direct message to the chair, or an
+explicit failure report. Going idle without one is a contract breach, not a
+neutral state. A chair observing idle-without-report verifies the deliverable
+directly from the filesystem, then queries the worker once; completion is
+judged from the verified artifact, never inferred from silence.
+
 ## Non-goals
 
 This contract does not prescribe a topology (single chair, paired-primary, or

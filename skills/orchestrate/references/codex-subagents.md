@@ -37,6 +37,11 @@ project uses them. Do not assume a custom agent exists; discover current tools a
   Codex subagents inside Codex.
 - Use `codex exec -s read-only --ephemeral` as a noninteractive verifier only when the orchestrator is
   another family.
+- Under `-s read-only`, a synthesis written via `apply_patch` is rejected and the content is
+  unrecoverable. Analysis and report workers therefore emit the full report to stdout and the
+  dispatching wrapper persists it to the run directory. A `codex exec` run that outlives its
+  foreground window is recovered by waiting on the detached PID (`worker-liveness.md`), never by
+  relaunching beside it.
 - For many slices, dispatch native subagents in adaptive waves and keep full outputs in run-dir files.
   After each reduce step, decide whether to widen, narrow, repair, verify, document, or stop.
 - For orchestrated work, run cross-family reviewers alongside native subagents when data policy and

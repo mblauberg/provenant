@@ -379,6 +379,9 @@ def test_readme_headline_skill_count_matches_the_skills_on_disk(tmp_path):
         ("a skill missing from the table", lambda text: text.replace("[`caveman`](skills/caveman/SKILL.md)", "")),
         ("a skill in the table that is not on disk", lambda text: text.replace("[`caveman`](skills/caveman/SKILL.md)", "[`caveman`](skills/caveman/SKILL.md), [`ghost`](skills/ghost/SKILL.md)")),
         ("a second catalogue block", lambda text: text + "\n<!-- skill-catalogue:start -->\n| Area | Skills |\n<!-- skill-catalogue:end -->\n"),
+        # Marker deletion must not opt the README out of the drift gate: an absent
+        # region is a loud failure, never a silent skip.
+        ("the marked region deleted outright", lambda text: re.sub(r"<!-- skill-catalogue:start -->.*?<!-- skill-catalogue:end -->", "", text, flags=re.DOTALL)),
     ),
 )
 def test_catalogue_gate_rejects_every_known_way_the_count_can_rot(name, mutate, tmp_path):
