@@ -22,6 +22,10 @@ case "$AGENTS_ROOT" in /*) ;; *) echo "AGENTS_HOME must be absolute" >&2; exit 2
 FABRIC_ROOT="$AGENTS_ROOT/runtime/agent-fabric"
 DIST_MCP="$FABRIC_ROOT/dist/mcp/main.js"
 
+# Verify before any protocol autobuild, compiled import, or source-tree loader.
+# This verifier uses only Node built-ins.
+node "$FABRIC_ROOT/scripts/verify-npm-ci-attestation.mjs" "$AGENTS_ROOT"
+
 # A stale protocol dist surfaces here as a SyntaxError about a missing export,
 # which the wrapper's caller reports as a JSON parse failure naming nothing
 # about builds. Gate on the same predicate the launcher uses. Preserve whether
@@ -52,9 +56,9 @@ TSX_LOADER_LIBRARY="$SCRIPT_DIR/lib/agent-fabric-tsx-loader.sh"
 }
 . "$TSX_LOADER_LIBRARY"
 
-TSX_LOADER=$(resolve_tsx_loader "$FABRIC_ROOT" "$AGENTS_ROOT") || {
-  echo "agent-fabric-mcp found no tsx package for \"$FABRIC_ROOT\" within \"$(resolve_tsx_loader_boundary "$AGENTS_ROOT")\"" >&2
-  echo "repair: run 'npm ci' in the repository root that owns this workspace" >&2
+TSX_LOADER=$(resolve_attested_tsx_loader "$AGENTS_ROOT") || {
+  echo "agent-fabric-mcp found no valid tsx loader inside the attested tree \"$AGENTS_ROOT/node_modules\"" >&2
+  echo "repair: rerun \"$AGENTS_ROOT/scripts/install-agent-fabric-dependencies\"" >&2
   exit 1
 }
 

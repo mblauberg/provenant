@@ -7,6 +7,7 @@ import { FabricError } from "../errors.js";
 import { verifyProviderConformance } from "../adapters/provider-conformance.js";
 import { loadAdapterModelConstraints } from "../adapters/model-selection.js";
 import { resolveFabricRoots } from "../domain/fabric-roots.js";
+import { verifyNpmInstallAttestation } from "../adapters/npm-install-attestation-verifier.js";
 
 const VALUE_OPTIONS = [
   "--adapter",
@@ -43,7 +44,10 @@ function parseArguments(arguments_: string[]): Partial<Record<ValueOption, strin
 
 export async function resolveAdapterExecutableCli(
   arguments_: string[],
-  dependencies: { verifyProvider?: typeof verifyProviderConformance } = {},
+  dependencies: {
+    verifyProvider?: typeof verifyProviderConformance;
+    verifyNpmInstall?: typeof verifyNpmInstallAttestation;
+  } = {},
 ): Promise<string> {
   const parsed = parseArguments(arguments_);
   const adapterId = parsed["--adapter"];
@@ -94,6 +98,7 @@ export async function resolveAdapterExecutableCli(
       `activated adapter has no provider executable: ${adapterId}`,
     );
   }
+  await (dependencies.verifyNpmInstall ?? verifyNpmInstallAttestation)(productRoot);
   const policy = await loadAdapterModelConstraints({ compatibilityPath, schemaPath, adapterId, requireEnabled: true });
   await (dependencies.verifyProvider ?? verifyProviderConformance)({
     adapterId,

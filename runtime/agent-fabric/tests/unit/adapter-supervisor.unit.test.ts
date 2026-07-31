@@ -17,6 +17,29 @@ const EXPECTED_CHAIR_PRINCIPAL = {
 } as const;
 
 describe("persistent adapter supervision", () => {
+  it("refuses a drifted npm install immediately before adapter process spawn", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "agent-fabric-supervisor-npm-attestation-"));
+    const countPath = join(directory, "starts.txt");
+    const verifyNpmInstall = vi.fn(async () => {
+      throw new Error("NPM_INSTALL_ATTESTATION_MISMATCH: fixture drift");
+    });
+    const supervisor = new AdapterSupervisor({
+      fake: {
+        command: [process.execPath, "--import", "tsx", fixturePath],
+        environment: { SUPERVISOR_COUNT_PATH: countPath },
+        npmInstallProductRoot: "/fixture/product",
+      },
+    }, { verifyNpmInstall });
+    try {
+      await expect(supervisor.request("fake", "one", {})).rejects.toThrow("NPM_INSTALL_ATTESTATION_MISMATCH");
+      expect(verifyNpmInstall).toHaveBeenCalledWith("/fixture/product");
+      await expect(readFile(countPath, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await supervisor.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("reuses one healthy adapter process across requests", async () => {
     const directory = await mkdtemp(join(tmpdir(), "agent-fabric-supervisor-"));
     const countPath = join(directory, "starts.txt");

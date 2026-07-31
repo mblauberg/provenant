@@ -14,6 +14,21 @@ import {
 } from "../support/primary-adapter-testkit.ts";
 
 describe("daemon trusted adapter composition", () => {
+  it("refuses adapter composition when npm install attestation is missing", async () => {
+    const fixture = await createPortableActivatedPrimaryFixture();
+    try {
+      await expect(composeDaemonAdapters({
+        globalConfigPath: fixture.configPath,
+        compatibilityPath: fixture.compatibilityPath,
+        compatibilitySchemaPath: fixture.schemaPath,
+        agentsHome: fixture.directory,
+        verifyProvider: async () => ({} as never),
+      })).rejects.toMatchObject({ code: "NPM_INSTALL_ATTESTATION_MISMATCH" });
+    } finally {
+      await rm(fixture.directory, { recursive: true, force: true });
+    }
+  });
+
   it("composes only the explicitly activated and runtime-conformant adapters", async () => {
     const fixture = await createPortableActivatedPrimaryFixture();
     const verifyProvider = vi.fn(async () => ({}) as never);
@@ -23,6 +38,7 @@ describe("daemon trusted adapter composition", () => {
         compatibilityPath: fixture.compatibilityPath,
         compatibilitySchemaPath: fixture.schemaPath,
         agentsHome: fixture.directory,
+        verifyNpmInstall: async () => undefined,
         verifyProvider,
       });
       expect(Object.keys(adapters).sort()).toEqual(
@@ -42,6 +58,7 @@ describe("daemon trusted adapter composition", () => {
         compatibilityPath: fixture.compatibilityPath,
         compatibilitySchemaPath: fixture.schemaPath,
         agentsHome: fixture.directory,
+        verifyNpmInstall: async () => undefined,
         verifyProvider: async () => {
           throw new FabricError("ADAPTER_INTERFACE_MISMATCH", "fixture handshake failed");
         },
@@ -71,6 +88,7 @@ describe("daemon trusted adapter composition", () => {
         compatibilitySchemaPath: fixture.schemaPath,
         agentsHome,
         stateDirectory: join(directory, "state"),
+        verifyNpmInstall: async () => undefined,
         verifyProvider: async () => ({}) as never,
       })).resolves.toMatchObject({ workspaceRoots: expectedRoots });
     } finally {
@@ -115,6 +133,7 @@ describe("daemon trusted adapter composition", () => {
         compatibilityPath: fixture.compatibilityPath,
         compatibilitySchemaPath: fixture.schemaPath,
         agentsHome: fixture.directory,
+        verifyNpmInstall: async () => undefined,
         verifyProvider: async () => ({}) as never,
       });
       expect(composed["codex-app-server"]).toMatchObject({
@@ -131,6 +150,7 @@ describe("daemon trusted adapter composition", () => {
           repositoryCommit: fixtureCommit,
           wrapperPath: "fixture-adapter",
         },
+        npmInstallProductRoot: fixture.directory,
       });
     } finally {
       await rm(fixture.directory, { recursive: true, force: true });
