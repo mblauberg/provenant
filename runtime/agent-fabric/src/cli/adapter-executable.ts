@@ -6,7 +6,8 @@ import { loadFabricConfig } from "../config/index.js";
 import { FabricError } from "../errors.js";
 import { verifyProviderConformance } from "../adapters/provider-conformance.js";
 import { loadAdapterModelConstraints } from "../adapters/model-selection.js";
-import { hasExplicitInstanceRoot, resolveFabricRoots } from "../domain/fabric-roots.js";
+import { resolveFabricRoots } from "../domain/fabric-roots.js";
+import { hasPairedInstanceRoot, type RootPairingDependencies } from "./instance-root-pairing.js";
 
 const VALUE_OPTIONS = [
   "--adapter",
@@ -43,7 +44,10 @@ function parseArguments(arguments_: string[]): Partial<Record<ValueOption, strin
 
 export async function resolveAdapterExecutableCli(
   arguments_: string[],
-  dependencies: { verifyProvider?: typeof verifyProviderConformance } = {},
+  dependencies: {
+    verifyProvider?: typeof verifyProviderConformance;
+    rootPairing?: RootPairingDependencies;
+  } = {},
 ): Promise<string> {
   const parsed = parseArguments(arguments_);
   const adapterId = parsed["--adapter"];
@@ -64,7 +68,7 @@ export async function resolveAdapterExecutableCli(
   const instanceConfigPath = resolve(join(instanceRoot, "config", "agent-fabric.yaml"));
   const localConfigPath =
     pinnedConfig === undefined
-      && hasExplicitInstanceRoot(rootOptions)
+      && hasPairedInstanceRoot({ productRoot, instanceRoot }, dependencies.rootPairing)
       && instanceConfigPath !== configPath
       && existsSync(instanceConfigPath)
       ? instanceConfigPath

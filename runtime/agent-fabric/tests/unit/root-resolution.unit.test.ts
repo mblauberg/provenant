@@ -59,6 +59,21 @@ describe("Fabric root resolution", () => {
     );
   });
 
+  it("does not validate lower-precedence environment paths that a flag overrides", () => {
+    expect(resolveFabricRoots({
+      productRootFlag: "/fixture/flag-product",
+      instanceRootFlag: "/fixture/flag-instance",
+      environment: {
+        AGENTS_HOME: "relative/agents-home",
+        AGENT_FABRIC_PRODUCT_ROOT: "relative/product",
+        AGENT_FABRIC_INSTANCE_ROOT: "relative/instance",
+      },
+    })).toEqual({
+      productRoot: resolve("/fixture/flag-product"),
+      instanceRoot: resolve("/fixture/flag-instance"),
+    });
+  });
+
   it("resolves independently configured product and instance roots", () => {
     vi.stubEnv("AGENTS_HOME", "/fixture/agents-home");
     vi.stubEnv("AGENT_FABRIC_PRODUCT_ROOT", "/fixture/product");

@@ -49,8 +49,8 @@ verify_repair_script() {
 }
 
 protocol_build_block() {
-  echo "AGENT_FABRIC_PROTOCOL_BUILD_STALE: local @local/agent-fabric-protocol dist is missing, unloadable, or stale against its build inputs" >&2
   verify_repair_script
+  echo "AGENT_FABRIC_PROTOCOL_BUILD_STALE: local @local/agent-fabric-protocol dist is missing, unloadable, or stale against its build inputs" >&2
   echo "repair: $repair_command" >&2
   exit 78
 }
@@ -104,7 +104,6 @@ if workspace_is_stale "$protocol_root" "$protocol_dist"; then
   if [ "${AGENT_FABRIC_PROTOCOL_PREFLIGHT_MODE:-}" = doctor ]; then
     # Doctor reports repair state for operators and callers; it must not mutate
     # the condition it was asked to diagnose, even at the owned install root.
-    verify_repair_script
     printf '%s\n' "$repair_command"
     exit 0
   fi

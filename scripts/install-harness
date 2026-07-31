@@ -1,7 +1,20 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PRODUCT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+script_path=$0
+while [[ -L "$script_path" ]]; do
+  link=$(readlink "$script_path")
+  case "$link" in
+    /*) script_path=$link ;;
+    *) script_path=$(dirname "$script_path")/$link ;;
+  esac
+done
+PRODUCT_ROOT="$(CDPATH= cd -- "$(dirname "$script_path")/.." && pwd)"
+if [[ -f "$PRODUCT_ROOT/.git" && "${PROVENANT_ALLOW_LINKED_WORKTREE_INSTALL:-}" != 1 ]]; then
+  echo "install-harness refuses a linked worktree product root: $PRODUCT_ROOT" >&2
+  echo "repair: run from the canonical checkout, or explicitly acknowledge with PROVENANT_ALLOW_LINKED_WORKTREE_INSTALL=1" >&2
+  exit 3
+fi
 PLATFORM=""
 MCP_CLIENTS="primary"
 

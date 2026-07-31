@@ -397,6 +397,31 @@ def test_packaged_doctor_runs_with_stale_protocol_verdict_and_exact_repair(
     ]
 
 
+def test_doctor_reports_stale_protocol_when_repair_script_is_missing(
+    tmp_path: Path,
+) -> None:
+    root, marker, fake_node = _fixture(
+        tmp_path,
+        launcher_mode="packaged",
+        protocol_dist="stale",
+    )
+    (root / "scripts/agent-fabric-protocol-build").unlink()
+
+    result = _run(root, marker, fake_node)
+
+    assert result.returncode == 0, result.stderr
+    assert marker.read_text(encoding="utf-8").splitlines() == [
+        str(root / "runtime/agent-fabric/dist/cli/main.js"),
+        "doctor",
+    ]
+    assert marker.with_name("launcher-environment").read_text(
+        encoding="utf-8",
+    ).splitlines() == [
+        "stale",
+        f'AGENTS_HOME="{root}" "{root / "scripts/agent-fabric-protocol-build"}"',
+    ]
+
+
 def test_doctor_hard_blocks_when_protocol_dist_is_unloadable(tmp_path: Path) -> None:
     root, marker, _fake_node = _fixture(
         tmp_path,
@@ -1980,6 +2005,7 @@ def test_protocol_preflight_reports_a_partial_install_as_typed_and_repairable(
 
     assert result.returncode == 78
     assert "AGENT_FABRIC_PREFLIGHT_INCOMPLETE" in result.stderr
+    assert "scripts/lib" in result.stderr
 
 
 def test_protocol_preflight_does_not_emit_a_missing_repair_script(

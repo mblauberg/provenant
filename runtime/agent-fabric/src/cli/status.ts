@@ -40,7 +40,8 @@ import {
   seatExpiryWarningDue,
 } from "./mcp-roster-renewal.js";
 import type { FabricPaths } from "./paths.js";
-import { fabricCliCommand, hasExplicitInstanceRoot, resolveFabricRoots } from "../domain/fabric-roots.js";
+import { fabricCliCommand, resolveFabricRoots } from "../domain/fabric-roots.js";
+import { hasPairedInstanceRoot } from "./instance-root-pairing.js";
 import { MCP_SEATS, resolveSeatPaths, type SeatMetadata } from "./seat-store.js";
 import { trustedWorkspaceRoots } from "./workspace-trust.js";
 
@@ -218,7 +219,7 @@ export function resolveStatusPaths(arguments_: string[]): { productRoot: string;
     config,
     localConfig:
       pinnedConfig === undefined
-        && hasExplicitInstanceRoot(rootOptions)
+        && hasPairedInstanceRoot({ productRoot, instanceRoot })
         && instanceConfig !== config
         && existsSync(instanceConfig)
         ? instanceConfig

@@ -27,14 +27,13 @@ function optionalPath(value: string | undefined): string | undefined {
 export function resolveFabricRoots(options: FabricRootResolutionOptions): FabricRoots {
   const environment = options.environment ?? process.env;
   const agentsHomeFlag = optionalPath(options.agentsHomeFlag);
-  const agentsHomeEnvironment = environmentPath(environment, "AGENTS_HOME");
   const defaultRoot = resolve(join(homedir(), ".agents"));
   return {
     productRoot:
       optionalPath(options.productRootFlag) ??
       agentsHomeFlag ??
       environmentPath(environment, "AGENT_FABRIC_PRODUCT_ROOT") ??
-      agentsHomeEnvironment ??
+      environmentPath(environment, "AGENTS_HOME") ??
       defaultRoot,
     instanceRoot:
       optionalPath(options.instanceRootFlag) ??
@@ -44,10 +43,16 @@ export function resolveFabricRoots(options: FabricRootResolutionOptions): Fabric
   };
 }
 
-export function hasExplicitInstanceRoot(options: FabricRootResolutionOptions = {}): boolean {
-  const environment = options.environment ?? process.env;
-  return optionalPath(options.instanceRootFlag) !== undefined
-    || environmentPath(environment, "AGENT_FABRIC_INSTANCE_ROOT") !== undefined;
+/**
+ * An instance layer is legitimate when its machine-local pointer names the
+ * resolved product. Filesystem access stays outside this domain module; the
+ * caller supplies the pointer value after reading it.
+ */
+export function isInstanceRootPaired(
+  roots: FabricRoots,
+  pointerProductRoot: string | undefined,
+): boolean {
+  return pointerProductRoot !== undefined && resolve(pointerProductRoot) === roots.productRoot;
 }
 
 function shellQuote(value: string): string {

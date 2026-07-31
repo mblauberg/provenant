@@ -18,7 +18,18 @@ protocol_dist="$protocol_root/dist/index.js"
 manifest_stamp="$protocol_root/dist/.root-manifests.sha256"
 freshness_library="$script_dir/lib/agent-fabric-workspace-freshness.sh"
 build_lock_library="$script_dir/lib/agent-fabric-protocol-build-lock.sh"
-repair_command="AGENTS_HOME=\"$agents_home\" \"$agents_home/scripts/agent-fabric-protocol-build\""
+repair_script="$agents_home/scripts/agent-fabric-protocol-build"
+repair_command="AGENTS_HOME=\"$agents_home\" \"$repair_script\""
+
+verify_repair_script() {
+  if [ ! -x "$repair_script" ]; then
+    echo "AGENT_FABRIC_PROTOCOL_BUILD_INCOMPLETE: missing \"$repair_script\"" >&2
+    echo "repair: reinstall the harness scripts directory, including scripts/lib" >&2
+    exit 78
+  fi
+}
+
+verify_repair_script
 
 [ -d "$agents_home/node_modules" ] || {
   echo "agent-fabric protocol build needs dependencies: run 'npm ci' in \"$agents_home\" first" >&2

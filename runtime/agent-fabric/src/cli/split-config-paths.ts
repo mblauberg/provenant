@@ -2,18 +2,12 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 
 import type { DaemonStartOptions } from "../daemon/client.js";
-import {
-  hasExplicitInstanceRoot,
-  resolveFabricRoots,
-  type FabricRootResolutionOptions,
-} from "../domain/fabric-roots.js";
+import { resolveFabricRoots, type FabricRootResolutionOptions } from "../domain/fabric-roots.js";
+import { hasPairedInstanceRoot, type RootPairingDependencies } from "./instance-root-pairing.js";
 
 export type SplitConfiguration = NonNullable<DaemonStartOptions["configuration"]>;
 
-export type SplitConfigurationOptions = FabricRootResolutionOptions & {
-  /** Injected for tests; production reads the filesystem. */
-  exists?: ((path: string) => boolean) | undefined;
-};
+export type SplitConfigurationOptions = FabricRootResolutionOptions & RootPairingDependencies;
 
 /**
  * Bind every configuration path to the root that owns its file class.
@@ -26,10 +20,11 @@ export type SplitConfigurationOptions = FabricRootResolutionOptions & {
  * as narrowing: allow-lists intersect, workspace roots must stay contained and
  * limits take the minimum.
  *
- * The local layer is offered only when the instance root was explicitly
- * selected, the file exists and it is not the very file already loaded as the
- * global layer. A default `~/.agents` instance must not become a local layer
- * for an unrelated product tree selected through `AGENTS_HOME`.
+ * The local layer is offered only when the instance pointer pairs the resolved
+ * instance with the resolved product, the file exists and it is not the very
+ * file already loaded as the global layer. A default `~/.agents` instance must
+ * not become a local layer for an unrelated product tree selected through
+ * `AGENTS_HOME`.
  */
 export function resolveSplitConfiguration(
   options: SplitConfigurationOptions = {},
@@ -38,7 +33,7 @@ export function resolveSplitConfiguration(
   const { productRoot, instanceRoot } = resolveFabricRoots(options);
   const globalConfigPath = join(productRoot, "config", "agent-fabric.yaml");
   const localConfigPath = join(instanceRoot, "config", "agent-fabric.yaml");
-  const offerLocal = hasExplicitInstanceRoot(options)
+  const offerLocal = hasPairedInstanceRoot({ productRoot, instanceRoot }, options)
     && localConfigPath !== globalConfigPath
     && exists(localConfigPath);
   return {
