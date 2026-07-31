@@ -4,8 +4,14 @@ from __future__ import annotations
 
 from typing import Any
 
-from _shared.review_ladder import check_review_ladder
-from delivery_validation_common import REVIEW_ROLES, Invalid, _list, _mapping, fail
+from delivery_validation_common import (
+    REVIEW_ROLES,
+    Invalid,
+    _list,
+    _mapping,
+    check_review_ladder,
+    fail,
+)
 
 def _validate_reviews(run: dict[str, Any], evidence: dict[str, dict[str, Any]], *, required: bool) -> None:
     reviews = []
