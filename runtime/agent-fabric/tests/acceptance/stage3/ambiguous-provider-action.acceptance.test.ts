@@ -11,6 +11,7 @@ import {
   createLifecycleFixture,
   reopenLifecycleFabric,
 } from "../../support/lifecycle-testkit.ts";
+import { settle, waitUntil } from "../../shared/deadline-wait.ts";
 import { admitProviderActionFixture } from "../../support/provider-action-fixture.ts";
 
 const cleanup: Array<() => Promise<void>> = [];
@@ -127,13 +128,10 @@ async function waitForProviderAction(
   actionId: string,
   adapterId = "fake-lifecycle",
 ): Promise<ObservedProviderAction> {
-  const deadline = Date.now() + 5_000;
-  while (Date.now() < deadline) {
+  return await waitUntil(async () => {
     const action = await readProviderAction(client, actionId, adapterId);
-    if (["terminal", "ambiguous", "quarantined"].includes(action.status)) return action;
-    await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
-  }
-  throw new Error(`provider action did not settle: ${actionId}`);
+    return ["terminal", "ambiguous", "quarantined"].includes(action.status) ? action : undefined;
+  }, 5_000, `Provider action ${actionId} settlement`);
 }
 
 function readProviderAction(
@@ -1938,7 +1936,7 @@ describe("NFR-004/AC-011 Stage 3 durable provider actions", () => {
     await expect(waitForProviderAction(fixture.chair, "provider-review-ambiguous-cap:one"))
       .resolves.toMatchObject({ status: "ambiguous" });
     await expect(dispatch("two", secondAuthority.authorityId)).resolves.toMatchObject({ status: "prepared" });
-    await new Promise((resolvePromise) => setTimeout(resolvePromise, 150));
+    await settle(150, "the second review never executes while the first holds the capability");
     await expect(readProviderAction(fixture.chair, "provider-review-ambiguous-cap:two"))
       .resolves.toMatchObject({ status: "prepared", executionCount: 0 });
 
@@ -2152,7 +2150,7 @@ describe("NFR-004/AC-011 Stage 3 durable provider actions", () => {
       },
       commandId: "provider-review-external-capacity:dispatch",
     })).resolves.toMatchObject({ status: "prepared" });
-    await new Promise((resolvePromise) => setTimeout(resolvePromise, 150));
+    await settle(150, "the review never executes while external turn capacity is held");
     await expect(readProviderAction(fixture.chair, actionId))
       .resolves.toMatchObject({ status: "prepared", executionCount: 0 });
 
@@ -3139,7 +3137,7 @@ describe("NFR-004/AC-011 Stage 3 durable provider actions", () => {
     }
     await expect(readFile(fixture.providerJournalPath, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
     if (boundary === "provider-action-owner:before-deferred-claim") {
-      await new Promise((resolvePromise) => setTimeout(resolvePromise, 150));
+      await settle(150, "no deferred claim lands before recovery inspects the boundary");
       await expect(fixture.fabric.recoverStartupState()).resolves.toMatchObject({ actionsReconciled: 1 });
       const specialisedRecovery = await waitForProviderAction(fixture.chair, activeActionId);
       expect(specialisedRecovery.status).not.toBe("prepared");

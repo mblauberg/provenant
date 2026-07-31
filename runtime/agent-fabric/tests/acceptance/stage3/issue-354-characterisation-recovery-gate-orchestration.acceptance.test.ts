@@ -13,12 +13,12 @@ import {
   createLifecycleFixture,
   reopenLifecycleFabric,
 } from "../../support/lifecycle-testkit.ts";
+import { eventually } from "../../shared/deadline-wait.ts";
 import {
   actionSnapshot,
   bindProviderAgentOwner,
   closeFixture,
   corruptOwner,
-  eventually,
   readFakeJournal,
   seedProviderAction,
 } from "../../support/w354-characterisation-testkit.ts";

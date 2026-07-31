@@ -1,0 +1,24 @@
+// Fixture for tests/unit/w558-test-waiters.unit.test.ts. Not compiled, not run:
+// it holds exactly the shapes the guard must refuse, so that a scanner which
+// quietly stops matching fails loudly instead of passing everything.
+
+export async function handRolledPoll(ready: () => boolean): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    if (ready()) return;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error("timed out");
+}
+
+export function spinUntilElapsed(budgetMs: number): void {
+  const startedAt = performance.now();
+  for (;;) {
+    if (performance.now() - startedAt >= budgetMs) return;
+  }
+}
+
+export async function sleepThenAssert(expect: (value: unknown) => { toBe: (other: unknown) => void }): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  expect(1).toBe(1);
+}

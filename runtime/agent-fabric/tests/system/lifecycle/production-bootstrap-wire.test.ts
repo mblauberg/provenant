@@ -21,6 +21,13 @@ import {
 } from "../../../src/daemon/client.ts";
 import { openFabricDatabase } from "../../../src/persistence/sqlite.ts";
 import { digestCanonical } from "../../../src/review/canonical/index.ts";
+import {
+  settle,
+  waitForFile,
+  waitForProcessExit,
+  waitUntil,
+  type WaitOptions,
+} from "../../shared/deadline-wait.ts";
 import { MCP_ROOT_AUTHORITY } from "../../support/mcp-testkit.ts";
 import { createCurrentSessionRun } from "../../support/current-session-testkit.ts";
 
@@ -107,47 +114,24 @@ async function launchAndReleaseFromSeparateProcess(
   return { pid: result.pid, launcherPid };
 }
 
-async function waitForProcessExit(pid: number): Promise<void> {
-  const deadline = Date.now() + 10_000;
-  for (;;) {
-    try {
-      process.kill(pid, 0);
-    } catch (error: unknown) {
-      if ((error as NodeJS.ErrnoException).code === "ESRCH") return;
-      throw error;
-    }
-    if (Date.now() >= deadline) throw new Error(`timed out waiting for process ${String(pid)} to exit`);
-    await new Promise<void>((resolvePromise) => setTimeout(resolvePromise, 20));
-  }
-}
-
-async function waitForFile(path: string): Promise<string> {
-  const deadline = Date.now() + 10_000;
-  for (;;) {
-    try {
-      return await readFile(path, "utf8");
-    } catch (error: unknown) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    }
-    if (Date.now() >= deadline) throw new Error(`timed out waiting for ${path}`);
-    await new Promise<void>((resolvePromise) => setTimeout(resolvePromise, 20));
-  }
-}
+const WIRE_WAIT: WaitOptions & Readonly<{ timeoutMs: number }> = {
+  timeoutMs: 10_000,
+  pollIntervalMs: 20,
+};
 
 async function waitForOwnerState(
   runtimeDirectory: string,
   state: "stopped" | "crashed",
 ): Promise<Record<string, unknown>> {
   const path = join(runtimeDirectory, "fabric-v1.discovery-owner.json");
-  const deadline = Date.now() + 10_000;
-  for (;;) {
+  return await waitUntil(async () => {
     try {
       const value = JSON.parse(await readFile(path, "utf8")) as Record<string, unknown>;
-      if (value.state === state) return value;
-    } catch { /* not durable yet */ }
-    if (Date.now() >= deadline) throw new Error(`timed out waiting for discovery ${state}`);
-    await new Promise<void>((resolvePromise) => setTimeout(resolvePromise, 20));
-  }
+      return value.state === state ? value : undefined;
+    } catch {
+      return undefined; // not durable yet
+    }
+  }, WIRE_WAIT.timeoutMs, `Discovery owner ${state}`, WIRE_WAIT);
 }
 
 async function startBusyWalWriter(
@@ -832,7 +816,7 @@ describe("production daemon bootstrap wiring", () => {
     };
 
     const abandoned = await launchAndReleaseFromSeparateProcess(options, false);
-    await waitForProcessExit(abandoned.pid);
+    await waitForProcessExit(abandoned.pid, WIRE_WAIT);
     const restarted = await startFabricDaemon(options);
     handles.push(restarted);
     expect(restarted.pid).not.toBe(abandoned.pid);
@@ -868,13 +852,13 @@ describe("production daemon bootstrap wiring", () => {
       },
     );
     if (launcher.pid === undefined) throw new Error("custody launcher pid is unavailable");
-    const daemonPid = Number((await waitForFile(barrierPath)).trim());
+    const daemonPid = Number((await waitForFile(barrierPath, WIRE_WAIT)).trim());
     expect(Number.isSafeInteger(daemonPid)).toBe(true);
     expect(await readdir(options.runtimeDirectory)).not.toContain("fabric-v1.discovery.json");
 
     process.kill(launcher.pid, "SIGKILL");
-    await waitForProcessExit(launcher.pid);
-    await waitForProcessExit(daemonPid);
+    await waitForProcessExit(launcher.pid, WIRE_WAIT);
+    await waitForProcessExit(daemonPid, WIRE_WAIT);
     await rm(barrierPath, { force: true });
     await expect(stat(options.socketPath)).rejects.toMatchObject({ code: "ENOENT" });
 
@@ -921,7 +905,7 @@ describe("production daemon bootstrap wiring", () => {
       } catch (error: unknown) {
         if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
       }
-      await waitForProcessExit(pid);
+      await waitForProcessExit(pid, WIRE_WAIT);
     }
   });
 
@@ -951,7 +935,7 @@ describe("production daemon bootstrap wiring", () => {
     await bootstrap.close();
 
     process.kill(daemon.pid, "SIGTERM");
-    await new Promise<void>((resolvePromise) => setTimeout(resolvePromise, 250));
+    await settle(250, "SIGTERM does not stop a daemon with authoritative run work in flight");
     expect(() => process.kill(daemon.pid, 0)).not.toThrow();
     const owner = JSON.parse(await readFile(
       join(options.runtimeDirectory, "fabric-v1.discovery-owner.json"),
@@ -976,14 +960,7 @@ describe("production daemon bootstrap wiring", () => {
 
     const { pid: crashedPid } = await launchAndReleaseFromSeparateProcess(options);
     process.kill(crashedPid, "SIGKILL");
-    for (;;) {
-      try {
-        process.kill(crashedPid, 0);
-        await new Promise<void>((resolvePromise) => setTimeout(resolvePromise, 20));
-      } catch {
-        break;
-      }
-    }
+    await waitForProcessExit(crashedPid, WIRE_WAIT);
     const restarted = await startFabricDaemon(options);
     handles.push(restarted);
     expect(restarted.pid).not.toBe(crashedPid);
