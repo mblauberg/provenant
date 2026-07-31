@@ -1,0 +1,12 @@
+schema_version: 1
+target_skill: project-activation
+cases:
+  - {id: q5881, relation: positive, prompt: "Activate this Provenant project and tell me whether its Fabric trust and seat are ready.", tags: [direct], expected: {primary_skill: project-activation, companion_skills: []}}
+  - {id: q5882, relation: positive, prompt: "Check the trust status of the current project with provenant project status.", tags: [direct], expected: {primary_skill: project-activation, companion_skills: []}}
+  - {id: q5886, relation: positive, prompt: "Use the project activation front door for this non-Git directory.", tags: [direct], expected: {primary_skill: project-activation, companion_skills: []}}
+  - {id: q5883, relation: negative, prompt: "Revoke a low-level workspace trust record from the Fabric registry.", tags: [adjacent], expected: {primary_skill: implement, companion_skills: []}}
+  - {id: q5884, relation: negative, prompt: "Bootstrap a new Fabric MCP chair seat for Codex.", tags: [adjacent], expected: {primary_skill: implement, companion_skills: []}}
+  - {id: q5887, relation: negative, prompt: "Change the trusted workspace registry implementation itself.", tags: [adjacent], expected: {primary_skill: implement, companion_skills: []}}
+  - {id: q5885, relation: boundary, prompt: "Activate the project, then explicitly bootstrap its missing Fabric seat.", tags: [composition], expected: {primary_skill: project-activation, companion_skills: [implement]}}
+  - {id: q5888, relation: boundary, prompt: "Inspect project activation status and then review the CLI diff for defects.", tags: [composition], expected: {primary_skill: project-activation, companion_skills: [code-review]}}
+  - {id: q5889, relation: boundary, prompt: "Activate a project and document the remaining manual seat setup.", tags: [composition], expected: {primary_skill: project-activation, companion_skills: [engineering-writing]}}

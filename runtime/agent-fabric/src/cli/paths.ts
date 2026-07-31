@@ -37,3 +37,9 @@ export function resolveFabricPaths(options: { createDirectories?: boolean } = {}
     socketPath: join(runtimeDirectory, "fabric-v1.sock"),
   };
 }
+
+export function ensureFabricPaths(paths: FabricPaths): FabricPaths {
+  privateDirectory(paths.stateDirectory);
+  privateDirectory(paths.runtimeDirectory);
+  return paths;
+}
