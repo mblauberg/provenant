@@ -62,7 +62,7 @@ expiry and ownership before reuse.
 
 Periodic hygiene is opt-in; record owner, cadence, scope, resource cap, last
 success and disable condition. It may audit/archive classified artifacts and
-refresh indexes, but not commit, deploy, communicate externally or delete
+refresh indexes, but not commit, deploy, communicate or delete
 unknown files. Staleness becomes visible state, not catch-up churn.
 
 Put project knowledge in project docs; follow
@@ -70,7 +70,7 @@ Put project knowledge in project docs; follow
 
 ## Adapter-absent path
 
-Without optional Console, Herdr or GitHub, use canonical project artifacts and
-emit the skill-owned kind in
-[portable-workflow.v1.json](portable-workflow.v1.json). It is resumable handoff
-evidence, not live task truth.
+Without adapters, emit the skill-owned kind in
+[portable-workflow.v1.json](portable-workflow.v1.json). Validate
+`accepted_artifact_identity`. Output proves context only, not handoff or task
+truth. Keep canonical context separate.

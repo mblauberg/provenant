@@ -42,10 +42,12 @@ have.
 
 ## Decision
 
-`portal-stdio-v1`, together with the Rust supervisor's peer-identity,
-path-custody and control-FD guarantees, is the accepted review-portal launch
-custody posture. The specified three-frame pre-exec registration handshake is
-not built and will not be built.
+`portal-stdio-v1` is the accepted review-portal launch boundary. The production
+binary proves exact argv and environment, closed inherited descriptors, one
+AF_UNIX connection and bounded opaque LF relay. Peer identity, ancestry,
+termination and path custody are test-evidenced helper APIs until a production
+caller wires them into launch custody. The specified three-frame pre-exec
+registration handshake is not built and will not be built.
 
 The threat it was designed to close is real and is not being closed. Between
 the moment the daemon decides to launch a provider and the moment `execve`
@@ -76,7 +78,7 @@ task, and no periodic review is scheduled.
 
 ## Consequences
 
-Custody today is what the Rust crate proves, and that is not nothing:
+Production custody today is limited to what the binary calls:
 
 - the argv contract is closed. `parse_portal_invocation`
   (`src/lib.rs:315`) accepts exactly `["portal-stdio-v1"]` and rejects
@@ -96,27 +98,10 @@ Custody today is what the Rust crate proves, and that is not nothing:
   running helper, and the crate never forks or execs a child that could
   inherit one. It is recorded here as available, not as shipped launch
   contract.
-- peer identity is proved from the kernel, not claimed on the wire.
-  `observe_peer` (`src/lib.rs:1161`) reads local peer credentials — on Darwin
-  `LOCAL_PEERPID` and `LOCAL_PEERTOKEN` (`src/lib.rs:2168`–`2177`) — and binds
-  effective UID/GID, PID, start token, process group and session;
-  `verify_process_within_custody` (`src/lib.rs:1189`) rejects an ancestry that
-  left the expected custody root. `tests/peer_identity.rs` and
-  `tests/process_custody.rs:150` cover both, including `setsid` and reparent
-  escape.
-- path custody is phase-durable rather than presence-inferred.
-  `advance_custody_removal` (`src/lib.rs:500`) advances one persisted phase per
-  call under a no-follow directory descriptor, requires a distinct
-  same-filesystem private claim directory, equality-checks the
-  `CUSTODY_CLAIM_NAME_CODEC = "agent-fabric-custody-claim-v1"`
-  (`src/lib.rs:23`) basename, refuses an entry whose link count is not one, and
-  fsyncs before each transition. `tests/path_custody.rs` carries the crash,
-  hard-link, swap and cross-device races.
-- termination is bounded and group-wide. `terminate_process_group_and_reap`
-  (`src/lib.rs:1080`) sends `SIGTERM` to the group, waits
-  `TERMINATION_GRACE = 250 ms`, sends `SIGKILL` and reaps within
-  `REAP_DEADLINE = 250 ms` (`src/lib.rs:21`–`22`), proving descendant absence;
-  `cleanup_on_control_eof` (`src/lib.rs:1138`) is the control-EOF entry point.
+- peer identity, ancestry, path custody and termination remain library helpers
+  with tests, not production launch guarantees. The crate README keeps their
+  certifying routes inactive until daemon integration proves the required
+  wiring.
 - the relay stays opaque. `read_lf_frame` (`src/lib.rs:1509`) bounds every
   frame by `MAX_LF_FRAME_BYTES` (`src/lib.rs:19`) and parses no JSON, MCP or
   UTF-8; TypeScript remains the sole semantic parser.

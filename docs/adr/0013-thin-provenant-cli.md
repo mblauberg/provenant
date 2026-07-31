@@ -13,9 +13,9 @@ execution layer would have duplicated Fabric and routing ownership.
 
 ## Decision
 
-Use a thin installed `provenant` front door for command discovery. It exposes
-only the existing harness entry points and transfers control without changing
-their contracts:
+Use a thin managed `provenant` front door for command discovery. It exposes
+the existing harness entry points and transfers control without changing their
+contracts:
 
 ```text
 provenant help
@@ -24,6 +24,7 @@ provenant route [existing model-route arguments]
 provenant worktree [existing worktree arguments]
 provenant check [existing check-harness arguments]
 provenant fabric [existing agent-fabric arguments]
+provenant project [existing agent-fabric project arguments]
 ```
 
 `provenant` owns command names and help text. The existing commands remain the
@@ -36,8 +37,9 @@ sole behavioural owners:
 | `worktree` | `scripts/worktree` |
 | `check` | `scripts/check-harness` |
 | `fabric` | `scripts/agent-fabric` |
+| `project` | `scripts/agent-fabric project` |
 
-The installed symlink must resolve the wrapper's real checkout without changing
+The managed resolver must resolve the wrapper's real checkout without changing
 the caller's working directory. `doctor` prefixes its arguments with
 `scripts/agent-fabric doctor`; `route`, `worktree`, `check` and `fabric` pass
 every argument after the subcommand unchanged. Each delegation
@@ -91,18 +93,21 @@ It does not modify the existing commands or their callers.
 
 The slice is required to retain these measurements:
 
-1. All five delegated commands execute the documented existing owner.
+1. All six delegated commands execute the documented existing owner.
 2. Representative success, usage-error and downstream-failure cases preserve
    stdout, stderr and exit status exactly.
 3. The same tests pass from the Provenant root, an unrelated Git repository and
    a non-repository temporary directory.
 4. Existing direct command tests and calls remain unchanged.
-5. `provenant help` identifies the five behavioural owners and distinguishes
+5. `provenant help` identifies the six behavioural owners and distinguishes
    Fabric clients from providers.
 
-Any expansion beyond these commands or ownership boundaries requires a separate
-decision. Usage evidence may justify improving discovery text, but does not by
-itself authorise execution, fallback, scheduling or state behaviour here.
+`project` is part of the managed resolver's accepted command set and delegates
+to `scripts/agent-fabric project`. Legacy symlinks are migration inputs only.
+Any further expansion beyond these commands or ownership boundaries requires a
+separate decision. Usage evidence may justify improving discovery text, but
+does not by itself authorise execution, fallback, scheduling or state behaviour
+here.
 
 ## Alternatives and trade-offs
 

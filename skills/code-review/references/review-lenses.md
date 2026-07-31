@@ -41,8 +41,10 @@ change depends on it, worsens it, or makes it newly dangerous.
 
 ### The 1,000-line cap
 
-A source file over 1,000 lines is a finding, not a matter of taste. A test file
-over 1,000 lines is a warning.
+A source file over 1,000 lines is a mandatory inspection signal, not a finding
+by itself. Report a finding only when the size exposes a concrete cohesion,
+ownership, reviewability or change-risk defect. A test file over 1,000 lines is
+also an inspection signal.
 
 The reason is mechanical, not aesthetic: a file no model can hold in context is a
 file no model can review. Past the cap, review silently degrades from "read this

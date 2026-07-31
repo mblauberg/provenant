@@ -33,7 +33,9 @@ Both branches follow this without restating it in two voices:
   catalogue-description lever is governed in `MAINTAINING.md`; link it,
   don't restate the number here.
 - **Token model, three-tier:** always-loaded frontmatter, triggered branch
-  body, one-hop `references/` depth. Never nest a second reference level.
+  body, and entrypoint references loaded at one hop. Reference documents may
+  link to sibling references, but that depth is not recursively enforced by
+  `check_harness.py`.
 - **Reuse boundary:** global skills express cross-project triggers, procedures
   and gates. Convert contextual values into parameters, keep examples
   synthetic and leave project policy local. Global promotion requires evidence

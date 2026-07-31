@@ -64,8 +64,9 @@ Concretely:
   definitions, intended failure semantics, security boundaries and explicit
   requirement matrices.
 - Any structure a specification does still restate is gated against its owner.
-  `scripts/check_spec_schema_drift.py` compares specification DDL to the
-  migration and ratchets, so a second copy that survives cannot silently diverge.
+  `scripts/check_spec_schema_drift.py` ratchets table presence, column sets and
+  ordered primary-key, unique and foreign-key signatures. Excluded schema
+  properties and surrounding prose remain review-owned.
 - A requirement that is normative but unimplemented is an open GitHub issue, not
   a present-tense sentence in a specification.
 - `docs/invariants/agent-fabric.md` is the retention pattern: a durable claim, the
@@ -73,9 +74,10 @@ Concretely:
 
 ## Consequences
 
-The corpus loses the class of drift between prose schema and shipped schema,
-because the duplicate is removed where it is pure restatement and gated where it
-survives.
+The corpus loses the covered class of drift between prose schema and shipped
+schema, because the duplicate is removed where it is pure restatement and gated
+where it survives. Excluded schema properties and surrounding prose still need
+review against their owners.
 
 Readers lose the convenience of a prose tour of the schema sitting beside its
 narrative, and must open the migration or the generated catalogue for concrete

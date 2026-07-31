@@ -63,8 +63,9 @@ Replace `<installed-session-skill>` with the absolute skill directory disclosed
 by the client that loaded this skill.
 
 For a canonical `delivery-run` receipt, preview expired manifest-owned scratch with
-`cleanup_run_artifacts.py RUN.json`. Execution additionally requires
-`--execute --authorised-by ... --authority-evidence ...`; it never removes
+`cleanup_run_artifacts.py RUN.json`. Capture `plan_sha256`, then execute with
+`--execute --approved-plan-sha256 sha256:... --authorised-by ...
+--authority-evidence ...`; it never removes
 unknown, canonical, evidence, handoff or external artifacts.
 
 Thresholds are signals, not deletion authority. Project instructions may tune

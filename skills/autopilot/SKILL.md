@@ -43,10 +43,10 @@ clean exit; otherwise use a lighter-weight skill.
    missions record `HERDR-NOT-USED: external driver; filesystem state is
    authoritative` in `STATE.md`.
 
-Bootstrap authorises only mission-declared isolation. The constitution
-pre-authorises source-repo implementation branches and worktrees, created via
-`provenant worktree`; deletion beyond post-merge pruning, integration and
-shared-branch pushes stay gated.
+Bootstrap authorises only mission-declared isolation. Source-repository
+implementation branches and linked worktrees are covered by standing authority
+and use `provenant worktree`; project restrictions, other worktrees and
+destructive cleanup remain separately gated.
 
 ## Operating loop
 
