@@ -7,10 +7,16 @@ import argparse
 import fcntl
 import json
 import os
+import sys
 import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+DELIVERY_SCRIPTS = str(Path(__file__).resolve().parents[2] / "deliver" / "scripts")
+if DELIVERY_SCRIPTS not in sys.path:
+    sys.path.insert(0, DELIVERY_SCRIPTS)
+import delivery_receipt as receipt_producer
 
 
 def fsync_directory(path: Path) -> None:
@@ -27,6 +33,13 @@ def _update_locked(path: Path, current_slice: str, next_action: str, in_flight: 
     run = json.loads(path.read_text())
     if not isinstance(run, dict) or run.get("contract") != "delivery-run" or run.get("schema_version") != 1:
         raise ValueError("RUN.json must be a canonical delivery-run v1 receipt")
+    workspace = (
+        root.parent.parent
+        if root.parent.name == ".agent-run"
+        else root
+    ).resolve()
+    receipt_producer.ensure_immutable_risk(run, workspace)
+    receipt_producer.ensure_run_open(run)
     checkpoint = run.get("checkpoint")
     if not isinstance(checkpoint, dict):
         raise ValueError("RUN.json checkpoint must be an object")  # noqa: TRY004
@@ -39,11 +52,6 @@ def _update_locked(path: Path, current_slice: str, next_action: str, in_flight: 
     if not isinstance(existing_artifacts, list):
         raise ValueError("checkpoint.artifact_paths must be a list")  # noqa: TRY004
     merged = list(dict.fromkeys([*existing_artifacts, *artifacts]))
-    workspace = (
-        root.parent.parent
-        if root.parent.name == ".agent-run"
-        else root
-    ).resolve()
     for value in merged:
         candidate = Path(value)
         if candidate.is_absolute() or ".." in candidate.parts or not value:

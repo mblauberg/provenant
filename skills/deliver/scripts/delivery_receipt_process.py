@@ -12,7 +12,12 @@ from pathlib import Path
 POST_EXIT_DRAIN_SECONDS = 0.1
 
 
-def terminate_process_group(process: subprocess.Popen[bytes]) -> None:
+def terminate_process_group(
+    process: subprocess.Popen[bytes],
+    *,
+    timeout_seconds: float,
+    error_type: type[ValueError],
+) -> None:
     deadline = time.monotonic() + 0.1
     try:
         os.killpg(process.pid, signal.SIGTERM)
@@ -30,7 +35,13 @@ def terminate_process_group(process: subprocess.Popen[bytes]) -> None:
         os.killpg(process.pid, signal.SIGKILL)
     except ProcessLookupError:
         pass
-    process.wait()
+    try:
+        process.wait(timeout=timeout_seconds)
+    except subprocess.TimeoutExpired:
+        raise error_type(
+            "evidence process did not exit after SIGKILL within "
+            f"{timeout_seconds:g} seconds"
+        ) from None
 
 
 def execute_bounded(
@@ -63,8 +74,10 @@ def execute_bounded(
         while selector.get_map():
             if process.poll() is not None and not group_terminated:
                 exit_code = process.returncode
-                terminate_process_group(process)
                 group_terminated = True
+                terminate_process_group(
+                    process, timeout_seconds=timeout_seconds, error_type=error_type,
+                )
                 drain_deadline = time.monotonic() + POST_EXIT_DRAIN_SECONDS
             active_deadline = drain_deadline if drain_deadline is not None else deadline
             remaining = active_deadline - time.monotonic()
@@ -91,12 +104,18 @@ def execute_bounded(
                     f"evidence command timed out after {timeout_seconds:g} seconds"
                 ) from None
     finally:
-        if not group_terminated:
-            terminate_process_group(process)
-        for key in list(selector.get_map().values()):
-            selector.unregister(key.fileobj)
-            key.fileobj.close()
-        selector.close()
+        try:
+            if not group_terminated:
+                group_terminated = True
+                terminate_process_group(
+                    process, timeout_seconds=timeout_seconds, error_type=error_type,
+                )
+        finally:
+            for key in list(selector.get_map().values()):
+                selector.unregister(key.fileobj)
+            process.stdout.close()
+            process.stderr.close()
+            selector.close()
     return (
         exit_code,
         buffers[0].decode("utf-8", errors="replace"),

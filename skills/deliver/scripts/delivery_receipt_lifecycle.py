@@ -40,6 +40,7 @@ def add_review_artifact(
     target, relative = api["safe_workspace_path"](
         workspace, path, "review artifact path",
     )
+    api["ensure_allowed_source_target"](run, workspace, target)
     api["ensure_allowed_artifact_target"](run, workspace, target)
     raw = target.read_bytes() if target.is_file() else b""
     if not raw:
@@ -113,6 +114,20 @@ def command_checkpoint_set(args: Any, api: dict[str, Any]) -> dict[str, Any]:
     return api["mutate_run"](args.run_dir, apply)
 
 
+def artifact_corroborates_measurement(
+    value: Any, gate: str, measured_value: float,
+) -> bool:
+    if not isinstance(value, dict) or value.get("gate") != gate:
+        return False
+    recorded = value.get("measured_value")
+    return (
+        not isinstance(recorded, bool)
+        and isinstance(recorded, (int, float))
+        and math.isfinite(recorded)
+        and recorded == measured_value
+    )
+
+
 def command_evidence_observation(
     args: Any, api: dict[str, Any],
 ) -> dict[str, Any]:
@@ -133,11 +148,23 @@ def command_evidence_observation(
             raise api["ReceiptError"](
                 "observation evidence artifact must match existing non-empty bytes"
             )
+        try:
+            artifact_content = json.loads(raw)
+        except (TypeError, UnicodeDecodeError, json.JSONDecodeError):
+            artifact_content = None
+        if not artifact_corroborates_measurement(
+            artifact_content, args.gate, args.measured_value,
+        ):
+            raise api["ReceiptError"](
+                "observation evidence artifact does not corroborate measured value "
+                f"{args.measured_value:g}"
+            )
         sources: list[str] = []
         for source in args.sources:
             source_target, relative = api["safe_workspace_path"](
                 workspace, source, "observation evidence source",
             )
+            api["ensure_allowed_source_target"](run, workspace, source_target)
             if not source_target.exists():
                 raise api["ReceiptError"](
                     f"observation evidence source does not exist: {source}"
@@ -375,7 +402,7 @@ def observation_gate_ready(
 
 def transition_gate_error(
     run: dict[str, Any], target: str, cited: set[str], api: dict[str, Any],
-    *, proposed_at: str | None = None,
+    *, proposed_at: str | None = None, workspace: Path | None = None,
 ) -> str | None:
     profile = profile_requirements(run, api["PROFILE_PATH"], api["ReceiptError"])
     if target == "approved":
@@ -387,9 +414,37 @@ def transition_gate_error(
             return "approved gate is not satisfied"
         if run["risk_tier"] in {"substantial", "crucial", "terminal"}:
             design = run.get("design", {})
+            design_approval_row = next((
+                item for item in passing_evidence(
+                    run, gate="design-approval", kind="human",
+                )
+                if item.get("id") == design.get("evidence")
+            ), None)
+            design_artifact = artifact_map(run).get(design.get("artifact_id"))
+            live_digest = (
+                design_artifact.get("digest")
+                if isinstance(design_artifact, dict)
+                else None
+            )
+            if workspace is not None and isinstance(design_artifact, dict):
+                path = design_artifact.get("path")
+                if isinstance(path, str) and path:
+                    try:
+                        target_path, _relative = api["safe_workspace_path"](
+                            workspace, path, "design artifact",
+                        )
+                        raw = target_path.read_bytes() if target_path.is_file() else b""
+                    except OSError:
+                        raw = b""
+                    live_digest = api["digest_bytes"](raw) if raw else None
             if (
                 design.get("status") != "approved"
-                or not passing_evidence(run, gate="design-approval", kind="human")
+                or design_approval_row is None
+                or design_artifact is None
+                or design_approval_row.get("artifact_id") != design.get("artifact_id")
+                or design_artifact.get("digest") != live_digest
+                or design.get("digest") != live_digest
+                or design_approval_row.get("artifact_digest") != live_digest
             ):
                 return "approved design gate is not satisfied"
     if target == "reviewing":
@@ -399,13 +454,32 @@ def transition_gate_error(
             if isinstance(item, dict)
             and item.get("status") == "pass"
             and item.get("gate") in required
+            and item.get("id") in cited
         ]
         if (
             {item["gate"] for item in rows} != required
             or any(item.get("kind") != "deterministic" for item in rows)
-            or not {item["id"] for item in rows} <= cited
         ):
             return "reviewing deterministic gate is not satisfied"
+        latest_repair = next((
+            item for item in reversed(run.get("state_history", []))
+            if isinstance(item, dict) and item.get("state") == "repairing"
+        ), None)
+        if latest_repair is not None:
+            repair_at = parse_utc(
+                latest_repair.get("at"), "repairing transition timestamp",
+                api["ReceiptError"],
+            )
+            for item in rows:
+                if parse_utc(
+                    item.get("finished_at"),
+                    f"deterministic evidence {item['id']} finished_at",
+                    api["ReceiptError"],
+                ) < repair_at:
+                    return (
+                        f"reviewing deterministic gate {item['gate']} evidence "
+                        f"predates repairing transition at {latest_repair['at']}"
+                    )
     if target == "awaiting_acceptance":
         profile_evidence = required_profile_evidence(run, profile)
         required_gates = {
@@ -481,7 +555,7 @@ def transition_gate_error(
 def command_transition(args: Any, api: dict[str, Any]) -> dict[str, Any]:
     evidence_ids = list(dict.fromkeys(args.evidence_ids))
 
-    def apply(run: dict[str, Any], _run_dir: Path, _workspace: Path) -> dict[str, Any]:
+    def apply(run: dict[str, Any], _run_dir: Path, workspace: Path) -> dict[str, Any]:
         current = run.get("status")
         if args.target not in api["TRANSITIONS"].get(current, set()):
             raise api["ReceiptError"](
@@ -510,6 +584,7 @@ def command_transition(args: Any, api: dict[str, Any]) -> dict[str, Any]:
             raise api["ReceiptError"]("transition timestamp must strictly increase")
         gate_error = transition_gate_error(
             run, args.target, set(evidence_ids), api, proposed_at=timestamp,
+            workspace=workspace,
         )
         if gate_error:
             raise api["ReceiptError"](gate_error)

@@ -246,6 +246,53 @@ def test_artifact_scope_rejects_symlink_that_resolves_outside_declared_root(tmp_
     assert "leaves authority.allowed_artifact_paths" in result.stderr
 
 
+def test_evidence_source_scope_rejects_symlink_outside_declared_root(tmp_path):
+    support = helpers()
+    run_dir = support.initialise(tmp_path)
+    receipt_path = run_dir / "RUN.json"
+    receipt = json.loads(receipt_path.read_text())
+    receipt["authority"]["allowed_source_paths"] = ["allowed"]
+    receipt_path.write_text(json.dumps(receipt))
+    (tmp_path / "allowed").mkdir()
+    (tmp_path / "disallowed").mkdir()
+    (tmp_path / "disallowed" / "secret").write_text("secret\n")
+    (tmp_path / "allowed" / "link").symlink_to("../disallowed/secret")
+    bundle_path = run_dir / "evidence.json"
+    bundle_path.write_text(
+        '{"schema_version":1,"contract":"deterministic-evidence-bundle","checks":[]}\n'
+    )
+    assert support.add_artifact(
+        tmp_path, run_dir, "evidence-bundle", ".agent-run/DEL-TEST/evidence.json"
+    ).returncode == 0
+    marker = tmp_path / "evidence-command-ran"
+
+    result = run_cli(
+        tmp_path,
+        "evidence",
+        "run",
+        "--run-dir",
+        str(run_dir),
+        "--id",
+        "tests",
+        "--gate",
+        "tests",
+        "--artifact-id",
+        "evidence-bundle",
+        "--source",
+        "allowed/link",
+        "--",
+        sys.executable,
+        "-c",
+        f"from pathlib import Path; Path({str(marker)!r}).write_text('ran')",
+    )
+
+    assert result.returncode == 1
+    assert "evidence source leaves authority.allowed_source_paths" in result.stderr
+    assert not marker.exists()
+    receipt = json.loads(receipt_path.read_text())
+    assert not any(item.get("id") == "tests" for item in receipt["evidence"])
+
+
 def initialise_downgraded_run(tmp_path: Path) -> tuple[Path, Path]:
     support = helpers()
     (tmp_path / "intent.md").write_text("# Intent\n")
@@ -304,6 +351,7 @@ def test_mutation_rechecks_risk_override_after_evidence_command(tmp_path):
     assert support.add_artifact(
         tmp_path, run_dir, "evidence-bundle", ".agent-run/DEL-TEST/evidence.json"
     ).returncode == 0
+    before = sorted(run_dir.iterdir())
 
     result = run_cli(
         tmp_path,
@@ -329,6 +377,7 @@ def test_mutation_rechecks_risk_override_after_evidence_command(tmp_path):
     assert "risk override artifact digest does not match live bytes" in result.stderr
     receipt = json.loads((run_dir / "RUN.json").read_text())
     assert not any(item["id"] == "tests" for item in receipt["evidence"])
+    assert sorted(run_dir.iterdir()) == before
 
 
 def test_rebuild_refuses_risk_override_artifact_as_bundle(tmp_path):
@@ -346,6 +395,308 @@ def test_rebuild_refuses_risk_override_artifact_as_bundle(tmp_path):
 
     assert result.returncode == 1
     assert "risk override artifact cannot be a deterministic bundle" in result.stderr
+
+
+def test_deterministic_bundle_refuses_human_evidence_artifact(tmp_path):
+    support = helpers()
+    run_dir = support.initialise(tmp_path)
+    approval_path = tmp_path / "approval.json"
+    approval_path.write_text('{"approved":true}\n')
+    assert support.add_artifact(
+        tmp_path, run_dir, "approval", "approval.json"
+    ).returncode == 0
+    accepted = run_cli(
+        tmp_path,
+        "evidence",
+        "human",
+        "--run-dir",
+        str(run_dir),
+        "--id",
+        "acceptance",
+        "--gate",
+        "human-acceptance",
+        "--artifact-id",
+        "approval",
+        "--approver",
+        "human-owner",
+        "--source",
+        "approval.json",
+    )
+    assert accepted.returncode == 0, accepted.stderr
+    before = json.loads((run_dir / "RUN.json").read_text())
+    before_artifact = next(
+        item for item in before["artifacts"] if item["id"] == "approval"
+    )
+    before_files = sorted(run_dir.iterdir())
+    marker = tmp_path / "deterministic-command-ran"
+
+    result = run_cli(
+        tmp_path,
+        "evidence",
+        "run",
+        "--run-dir",
+        str(run_dir),
+        "--id",
+        "tests",
+        "--gate",
+        "tests",
+        "--artifact-id",
+        "approval",
+        "--source",
+        "approval.json",
+        "--",
+        sys.executable,
+        "-c",
+        f"from pathlib import Path; Path({str(marker)!r}).write_text('ran')",
+    )
+
+    assert result.returncode == 1
+    assert "human evidence artifact cannot be a deterministic bundle" in result.stderr
+    assert not marker.exists()
+    assert sorted(run_dir.iterdir()) == before_files
+    current = json.loads((run_dir / "RUN.json").read_text())
+    assert next(
+        item for item in current["artifacts"] if item["id"] == "approval"
+    ) == before_artifact
+    assert not any(item.get("id") == "tests" for item in current["evidence"])
+
+
+def test_closed_run_refuses_artifact_and_checkpoint_mutations(tmp_path):
+    support = helpers()
+    run_dir = support.initialise(tmp_path)
+    receipt_path = run_dir / "RUN.json"
+    receipt = json.loads(receipt_path.read_text())
+    receipt["status"] = "closed"
+    receipt["state_history"].append({
+        "state": "closed",
+        "at": timestamp(timedelta(seconds=-1)),
+        "evidence_ids": [],
+        "risk_tier": receipt["risk_tier"],
+    })
+    receipt_path.write_text(json.dumps(receipt))
+    (tmp_path / "late.json").write_text("{}\n")
+
+    artifact = support.add_artifact(
+        tmp_path, run_dir, "late-artifact", "late.json"
+    )
+    checkpoint = run_cli(
+        tmp_path,
+        "checkpoint",
+        "set",
+        "--run-dir",
+        str(run_dir),
+        "--current-slice",
+        "post-close",
+        "--next-action",
+        "should refuse",
+        "--in-flight",
+        "late-work",
+    )
+
+    assert artifact.returncode == 1
+    assert checkpoint.returncode == 1
+    assert "closed run is immutable" in artifact.stderr
+    assert "closed run is immutable" in checkpoint.stderr
+    current = json.loads(receipt_path.read_text())
+    assert not any(
+        item.get("id") == "late-artifact" for item in current["artifacts"]
+    )
+    assert current["checkpoint"] == receipt["checkpoint"]
+
+
+def test_closed_run_refuses_manual_evidence_mutations(tmp_path):
+    support = helpers()
+    run_dir = support.initialise(tmp_path)
+    bundle_path = run_dir / "evidence.json"
+    bundle_path.write_text(
+        '{"schema_version":1,"contract":"deterministic-evidence-bundle","checks":[]}\n'
+    )
+    added = support.add_artifact(
+        tmp_path, run_dir, "evidence-bundle", ".agent-run/DEL-TEST/evidence.json"
+    )
+    assert added.returncode == 0, added.stderr
+    executed = run_cli(
+        tmp_path,
+        "evidence",
+        "run",
+        "--run-dir",
+        str(run_dir),
+        "--id",
+        "tests",
+        "--gate",
+        "tests",
+        "--artifact-id",
+        "evidence-bundle",
+        "--source",
+        "intent.md",
+        "--",
+        sys.executable,
+        "-c",
+        "pass",
+    )
+    assert executed.returncode == 0, executed.stderr
+    receipt_path = run_dir / "RUN.json"
+    receipt = json.loads(receipt_path.read_text())
+    receipt["status"] = "closed"
+    receipt["state_history"].append({
+        "state": "closed",
+        "at": timestamp(timedelta(seconds=-1)),
+        "evidence_ids": [],
+        "risk_tier": receipt["risk_tier"],
+    })
+    receipt_path.write_text(json.dumps(receipt))
+    before_receipt = receipt_path.read_bytes()
+    before_files = sorted(
+        (path.relative_to(run_dir).as_posix(), path.read_bytes())
+        for path in run_dir.iterdir()
+        if path.is_file() and path.name != ".RUN.lock"
+    )
+    marker = tmp_path / "closed-command-ran"
+
+    results = [
+        run_cli(
+            tmp_path,
+            "evidence",
+            "run",
+            "--run-dir",
+            str(run_dir),
+            "--id",
+            "late-tests",
+            "--gate",
+            "tests",
+            "--artifact-id",
+            "evidence-bundle",
+            "--source",
+            "intent.md",
+            "--",
+            sys.executable,
+            "-c",
+            f"from pathlib import Path; Path({str(marker)!r}).write_text('ran')",
+        ),
+        run_cli(
+            tmp_path,
+            "evidence",
+            "remove",
+            "--run-dir",
+            str(run_dir),
+            "--id",
+            "tests",
+        ),
+        run_cli(
+            tmp_path,
+            "evidence",
+            "rebuild",
+            "--run-dir",
+            str(run_dir),
+            "--artifact-id",
+            "evidence-bundle",
+        ),
+    ]
+
+    assert all(result.returncode == 1 for result in results)
+    assert all("closed run is immutable" in result.stderr for result in results)
+    assert not marker.exists()
+    assert receipt_path.read_bytes() == before_receipt
+    assert sorted(
+        (path.relative_to(run_dir).as_posix(), path.read_bytes())
+        for path in run_dir.iterdir()
+        if path.is_file() and path.name != ".RUN.lock"
+    ) == before_files
+
+
+@pytest.mark.parametrize(
+    "mutation", [
+        "valid",
+        "artifact-id",
+        "artifact-digest",
+        "approval-digest",
+        "live-bytes",
+    ],
+)
+def test_substantial_approved_gate_binds_design_approval_artifact(tmp_path, mutation):
+    support = helpers()
+    (tmp_path / "intent.md").write_text("# Intent\n")
+    initialised = run_cli(
+        tmp_path, *support.init_args(), "--risk-tier", "substantial",
+    )
+    assert initialised.returncode == 0, initialised.stderr
+    run_dir = tmp_path / ".agent-run" / "DEL-TEST"
+    intent_approved = run_cli(
+        tmp_path,
+        "evidence",
+        "human",
+        "--run-dir",
+        str(run_dir),
+        "--id",
+        "intent-approval",
+        "--gate",
+        "intent-approval",
+        "--artifact-id",
+        "intent",
+        "--approver",
+        "human-owner",
+        "--source",
+        "intent.md",
+    )
+    assert intent_approved.returncode == 0, intent_approved.stderr
+    artifact_id = "intent"
+    if mutation == "artifact-id":
+        (tmp_path / "approval.json").write_text('{"approved":true}\n')
+        added = support.add_artifact(
+            tmp_path, run_dir, "approval", "approval.json"
+        )
+        assert added.returncode == 0, added.stderr
+        artifact_id = "approval"
+    approved = run_cli(
+        tmp_path,
+        "evidence",
+        "human",
+        "--run-dir",
+        str(run_dir),
+        "--id",
+        "design-approval",
+        "--gate",
+        "design-approval",
+        "--artifact-id",
+        artifact_id,
+        "--approver",
+        "human-owner",
+        "--source",
+        "intent.md",
+    )
+    assert approved.returncode == 0, approved.stderr
+    receipt_path = run_dir / "RUN.json"
+    if mutation == "artifact-digest":
+        receipt = json.loads(receipt_path.read_text())
+        intent = next(
+            item for item in receipt["artifacts"] if item["id"] == "intent"
+        )
+        intent["digest"] = "sha256:" + "b" * 64
+        receipt_path.write_text(json.dumps(receipt))
+    elif mutation == "approval-digest":
+        receipt = json.loads(receipt_path.read_text())
+        design_approval = next(
+            item for item in receipt["evidence"]
+            if item["id"] == "design-approval"
+        )
+        design_approval["artifact_digest"] = "sha256:" + "b" * 64
+        receipt_path.write_text(json.dumps(receipt))
+    elif mutation == "live-bytes":
+        (tmp_path / "intent.md").write_text("# Changed intent\n")
+    scoped = run_cli(
+        tmp_path, "transition", "--run-dir", str(run_dir), "--to", "scoped",
+    )
+    assert scoped.returncode == 0, scoped.stderr
+
+    result = run_cli(
+        tmp_path, "transition", "--run-dir", str(run_dir), "--to", "approved",
+    )
+
+    if mutation == "valid":
+        assert result.returncode == 0, result.stderr
+    else:
+        assert result.returncode == 1
+        assert "approved design gate is not satisfied" in result.stderr
 
 
 def review_args(
@@ -447,23 +798,110 @@ def test_bounded_execution_kills_descendants_after_successful_leader_exit(tmp_pa
     assert not marker.exists()
 
 
+def test_post_sigkill_wait_uses_executor_timeout(monkeypatch):
+    module = producer()
+    waits = []
+
+    class StuckProcess:
+        pid = 12345
+
+        def wait(self, timeout=None):
+            waits.append(timeout)
+            raise subprocess.TimeoutExpired(["stuck-process"], timeout)
+
+    monkeypatch.setattr(module.process_runner.os, "killpg", lambda _pid, _signal: None)
+    monkeypatch.setattr(module.process_runner.time, "sleep", lambda _seconds: None)
+
+    with pytest.raises(
+        module.ReceiptError,
+        match="did not exit after SIGKILL within 0.25 seconds",
+    ):
+        module.process_runner.terminate_process_group(
+            StuckProcess(), timeout_seconds=0.25, error_type=module.ReceiptError,
+        )
+
+    assert waits == [0.1, 0.25]
+
+
+def test_bounded_execution_closes_resources_when_termination_raises(
+    tmp_path, monkeypatch,
+):
+    module = producer()
+    real_selector = module.process_runner.selectors.DefaultSelector
+    real_popen = module.process_runner.subprocess.Popen
+    real_terminate = module.process_runner.terminate_process_group
+    selectors = []
+    processes = []
+    termination_attempts = []
+
+    class TrackingSelector:
+        def __init__(self):
+            self.inner = real_selector()
+            self.closed = False
+            selectors.append(self)
+
+        def __getattr__(self, name):
+            return getattr(self.inner, name)
+
+        def close(self):
+            self.closed = True
+            self.inner.close()
+
+    def tracking_popen(*args, **kwargs):
+        process = real_popen(*args, **kwargs)
+        processes.append(process)
+        return process
+
+    def failing_terminate(process, *, timeout_seconds, error_type):
+        termination_attempts.append(process.pid)
+        real_terminate(
+            process, timeout_seconds=timeout_seconds, error_type=error_type,
+        )
+        raise error_type("forced termination failure")
+
+    monkeypatch.setattr(
+        module.process_runner.selectors, "DefaultSelector", TrackingSelector,
+    )
+    monkeypatch.setattr(module.process_runner.subprocess, "Popen", tracking_popen)
+    monkeypatch.setattr(
+        module.process_runner, "terminate_process_group", failing_terminate,
+    )
+
+    with pytest.raises(module.ReceiptError, match="forced termination failure"):
+        module.execute_bounded(
+            [sys.executable, "-c", "pass"],
+            cwd=tmp_path,
+            timeout_seconds=1,
+        )
+
+    assert len(termination_attempts) == 1
+    assert selectors[0].closed
+    assert processes[0].stdout is not None and processes[0].stdout.closed
+    assert processes[0].stderr is not None and processes[0].stderr.closed
+
+
 def test_bounded_execution_preserves_success_while_cleaning_descendants(tmp_path):
     module = producer()
+    ready = tmp_path / "descendant-ready"
     child = (
-        "import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+        "import pathlib,signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+        f"pathlib.Path({str(ready)!r}).write_text('ready'); "
         "time.sleep(1)"
     )
     leader = (
-        "import subprocess,sys,time; "
+        "import pathlib,subprocess,sys,time; "
         f"subprocess.Popen([sys.executable,'-c',{child!r}]); "
-        "time.sleep(0.02)"
+        f"ready=pathlib.Path({str(ready)!r}); "
+        "deadline=time.monotonic()+0.5; "
+        "\nwhile not ready.exists() and time.monotonic()<deadline: time.sleep(0.005)"
     )
 
     exit_code, _stdout, _stderr = module.execute_bounded(
-        [sys.executable, "-c", leader], cwd=tmp_path, timeout_seconds=0.08,
+        [sys.executable, "-c", leader], cwd=tmp_path, timeout_seconds=1,
     )
 
     assert exit_code == 0
+    assert ready.exists()
 
 
 def test_bounded_execution_stops_draining_pipes_from_escaped_descendant(tmp_path):
@@ -486,7 +924,7 @@ def test_bounded_execution_stops_draining_pipes_from_escaped_descendant(tmp_path
 
     try:
         exit_code, _stdout, _stderr = module.execute_bounded(
-            [sys.executable, "-c", leader], cwd=tmp_path, timeout_seconds=0.08,
+            [sys.executable, "-c", leader], cwd=tmp_path, timeout_seconds=1,
         )
     finally:
         if child_pid.exists():
@@ -539,7 +977,7 @@ def test_bind_refuses_to_change_closed_observation_results(tmp_path):
     )
 
     assert result.returncode == 1
-    assert "observation lifecycle gate has passed" in result.stderr
+    assert "closed run is immutable" in result.stderr
     assert json.loads(receipt_path.read_text())["observation"] == original
 
 

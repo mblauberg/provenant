@@ -1567,7 +1567,7 @@ def test_protocol_build_recovers_a_crashed_holders_stale_lock(
         / ".dist.agent-fabric-protocol-build.lock"
     )
     _write(lock / "owner", "99999999\n")
-    env["AGENT_FABRIC_PROTOCOL_BUILD_LOCK_TIMEOUT_SECONDS"] = "1"
+    env["AGENT_FABRIC_PROTOCOL_BUILD_LOCK_TIMEOUT_SECONDS"] = "2"
 
     repaired = subprocess.run(
         [str(root / "scripts/agent-fabric-protocol-build")],

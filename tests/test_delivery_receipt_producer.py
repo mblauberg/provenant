@@ -517,7 +517,9 @@ def test_evidence_run_executes_from_receipt_workspace(tmp_path):
 
 def test_human_evidence_links_existing_nonempty_artifact(tmp_path):
     run_dir = initialise(tmp_path)
-    (tmp_path / "approval.json").write_text('{"approved":true}\n')
+    (tmp_path / "approval.json").write_text(
+        '{"approved":true,"approver":"human-owner"}\n'
+    )
     assert add_artifact(
         tmp_path, run_dir, "approval", "approval.json"
     ).returncode == 0
@@ -546,6 +548,62 @@ def test_human_evidence_links_existing_nonempty_artifact(tmp_path):
     assert evidence["kind"] == "human"
     assert evidence["approver"] == "human-owner"
     assert evidence["artifact_id"] == "approval"
+    assert evidence["artifact_digest"] == next(
+        item["digest"] for item in receipt["artifacts"] if item["id"] == "approval"
+    )
+
+
+def test_authority_approval_refuses_uncorroborated_approver(tmp_path):
+    run_dir = initialise(tmp_path)
+    (tmp_path / "approval.json").write_text(
+        '{"approved":false,"approver":"forged-person"}\n'
+    )
+    added = add_artifact(tmp_path, run_dir, "approval", "approval.json")
+    assert added.returncode == 0, added.stderr
+
+    refused = run_cli(
+        tmp_path, "evidence", "human", "--run-dir", str(run_dir),
+        "--id", "forged-authority-approval", "--gate", "authority-approval",
+        "--artifact-id", "approval", "--approver", "forged-person",
+        "--source", "approval.json",
+    )
+
+    assert refused.returncode == 1
+    assert (
+        "authority approval artifact does not corroborate approver forged-person"
+        in refused.stderr
+    )
+    receipt = json.loads((run_dir / "RUN.json").read_text())
+    assert receipt["authority"]["approved_by"] == "human-owner"
+    assert all(
+        item.get("id") != "forged-authority-approval"
+        for item in receipt["evidence"]
+    )
+
+
+def test_authority_approval_refuses_blank_approver(tmp_path):
+    run_dir = initialise(tmp_path)
+    (tmp_path / "approval.json").write_text(
+        '{"approved":true,"approver":""}\n'
+    )
+    added = add_artifact(tmp_path, run_dir, "approval", "approval.json")
+    assert added.returncode == 0, added.stderr
+
+    refused = run_cli(
+        tmp_path, "evidence", "human", "--run-dir", str(run_dir),
+        "--id", "blank-authority-approval", "--gate", "authority-approval",
+        "--artifact-id", "approval", "--approver", "",
+        "--source", "approval.json",
+    )
+
+    assert refused.returncode == 1
+    assert "authority approval requires a non-empty approver" in refused.stderr
+    receipt = json.loads((run_dir / "RUN.json").read_text())
+    assert receipt["authority"]["approved_by"] == "human-owner"
+    assert all(
+        item.get("id") != "blank-authority-approval"
+        for item in receipt["evidence"]
+    )
 
 
 def test_evidence_remove_refuses_referenced_id_and_rebuild_updates_digest(tmp_path):
@@ -592,7 +650,9 @@ def test_evidence_remove_refuses_referenced_id_and_rebuild_updates_digest(tmp_pa
 
 def test_evidence_remove_refuses_authority_and_review_references(tmp_path):
     run_dir = initialise(tmp_path)
-    (tmp_path / "approval.json").write_text('{"approved":true}\n')
+    (tmp_path / "approval.json").write_text(
+        '{"approved":true,"approver":"human-owner"}\n'
+    )
     assert add_artifact(tmp_path, run_dir, "approval", "approval.json").returncode == 0
     assert run_cli(
         tmp_path, "evidence", "human", "--run-dir", str(run_dir),
@@ -898,7 +958,10 @@ def test_init_accepts_structurally_approved_human_risk_override(tmp_path):
 
 
 def test_end_to_end_producer_receipt_passes_independent_validator(tmp_path):
-    approval_raw = b'{"approved":true}\n'
+    approval_raw = (
+        b'{"approved":true,"approver":"human-owner","gate":"task-success",'
+        b'"measured_value":1}\n'
+    )
     auth = authority("DEL-E2E")
     auth["evidence_digest"] = digest_bytes_for_test(approval_raw)
     args = init_args("DEL-E2E")
@@ -992,6 +1055,62 @@ def test_end_to_end_producer_receipt_passes_independent_validator(tmp_path):
         check=False,
     )
     assert validated.returncode == 0, validated.stderr + validated.stdout
+
+
+def test_reviewing_refuses_evidence_predating_repair(tmp_path):
+    test_end_to_end_producer_receipt_passes_independent_validator(tmp_path)
+    run_dir = tmp_path / ".agent-run" / "DEL-E2E"
+    for state in ("repairing", "verifying"):
+        transitioned = run_cli(
+            tmp_path, "transition", "--run-dir", str(run_dir), "--to", state,
+        )
+        assert transitioned.returncode == 0, transitioned.stderr
+    receipt = json.loads((run_dir / "RUN.json").read_text())
+    repair_at = receipt["state_history"][-2]["at"]
+
+    refused = run_cli(
+        tmp_path, "transition", "--run-dir", str(run_dir), "--to", "reviewing",
+        "--evidence", "tests",
+    )
+
+    assert refused.returncode == 1
+    assert (
+        f"deterministic gate tests evidence predates repairing transition at {repair_at}"
+        in refused.stderr
+    )
+
+
+def test_reviewing_accepts_evidence_after_repair(tmp_path):
+    test_end_to_end_producer_receipt_passes_independent_validator(tmp_path)
+    run_dir = tmp_path / ".agent-run" / "DEL-E2E"
+    for state in ("repairing", "verifying"):
+        transitioned = run_cli(
+            tmp_path, "transition", "--run-dir", str(run_dir), "--to", state,
+        )
+        assert transitioned.returncode == 0, transitioned.stderr
+    bundle = run_dir / "evidence-after-repair.json"
+    bundle.write_text(
+        '{"schema_version":1,"contract":"deterministic-evidence-bundle","checks":[]}\n'
+    )
+    added = add_artifact(
+        tmp_path, run_dir, "evidence-after-repair",
+        ".agent-run/DEL-E2E/evidence-after-repair.json",
+    )
+    assert added.returncode == 0, added.stderr
+    executed = run_cli(
+        tmp_path, "evidence", "run", "--run-dir", str(run_dir),
+        "--id", "tests-after-repair", "--gate", "tests",
+        "--artifact-id", "evidence-after-repair", "--source", "intent.md",
+        "--", sys.executable, "-c", "print('pass')",
+    )
+    assert executed.returncode == 0, executed.stderr
+
+    transitioned = run_cli(
+        tmp_path, "transition", "--run-dir", str(run_dir), "--to", "reviewing",
+        "--evidence", "tests-after-repair",
+    )
+
+    assert transitioned.returncode == 0, transitioned.stderr
 
 
 def test_transition_refuses_adjacent_acceptance_gate_without_required_evidence(tmp_path):
@@ -1120,6 +1239,56 @@ def test_observation_evidence_refuses_non_finite_measurement(tmp_path, value):
 
     assert result.returncode == 1
     assert "measured value must be finite" in result.stderr
+
+
+def test_observation_evidence_refuses_uncorroborated_measurement(tmp_path):
+    run_dir = initialise(tmp_path)
+    (tmp_path / "measurement.json").write_text(
+        '{"thresholds":{"task-success":1},"observations":{"task-success":0}}\n'
+    )
+    added = add_artifact(
+        tmp_path, run_dir, "measurement", "measurement.json",
+    )
+    assert added.returncode == 0, added.stderr
+
+    refused = run_cli(
+        tmp_path, "evidence", "observation", "--run-dir", str(run_dir),
+        "--id", "observation-1", "--gate", "task-success",
+        "--artifact-id", "measurement", "--measured-value", "1",
+        "--source", "measurement.json",
+    )
+
+    assert refused.returncode == 1
+    assert (
+        "observation evidence artifact does not corroborate measured value 1"
+        in refused.stderr
+    )
+    receipt = json.loads((run_dir / "RUN.json").read_text())
+    assert all(item.get("id") != "observation-1" for item in receipt["evidence"])
+
+
+def test_observation_evidence_refuses_precision_collapsed_measurement(tmp_path):
+    run_dir = initialise(tmp_path)
+    (tmp_path / "measurement.json").write_text(
+        '{"gate":"task-success","measured_value":9007199254740993}\n'
+    )
+    added = add_artifact(
+        tmp_path, run_dir, "measurement", "measurement.json",
+    )
+    assert added.returncode == 0, added.stderr
+
+    refused = run_cli(
+        tmp_path, "evidence", "observation", "--run-dir", str(run_dir),
+        "--id", "observation-1", "--gate", "task-success",
+        "--artifact-id", "measurement",
+        "--measured-value", "9007199254740992",
+        "--source", "measurement.json",
+    )
+
+    assert refused.returncode == 1
+    assert "does not corroborate measured value" in refused.stderr
+    receipt = json.loads((run_dir / "RUN.json").read_text())
+    assert all(item.get("id") != "observation-1" for item in receipt["evidence"])
 
 
 def test_init_refuses_risk_override_identifier_collisions(tmp_path):

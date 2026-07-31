@@ -174,6 +174,29 @@ def ensure_allowed_artifact_target(
         raise ReceiptError("artifact path leaves authority.allowed_artifact_paths")
 
 
+def ensure_allowed_source_target(
+    run: dict[str, Any], workspace: Path, target: Path,
+) -> None:
+    target = target.resolve()
+    authority = run.get("authority")
+    scopes = authority.get("allowed_source_paths") if isinstance(authority, dict) else None
+    if not isinstance(scopes, list) or not scopes:
+        raise ReceiptError("authority.allowed_source_paths must be a non-empty list")
+    roots: list[Path] = []
+    for scope in scopes:
+        if not isinstance(scope, str):
+            raise ReceiptError("authority.allowed_source_paths contains an invalid path")
+        root, _relative = safe_workspace_path(
+            workspace, scope, "authority.allowed_source_paths",
+        )
+        roots.append(root)
+    if not any(
+        target == root or target.is_relative_to(root)
+        for root in roots
+    ):
+        raise ReceiptError("evidence source leaves authority.allowed_source_paths")
+
+
 def resolve_run_dir(value: str | Path, *, run_id: str | None = None) -> tuple[Path, Path]:
     candidate = Path(value)
     resolved = candidate.resolve()
@@ -313,6 +336,11 @@ def ensure_immutable_risk(run: dict[str, Any], workspace: Path) -> None:
         )
 
 
+def ensure_run_open(run: dict[str, Any]) -> None:
+    if run.get("status") == "closed":
+        raise ReceiptError("closed run is immutable")
+
+
 def mutate_run(
     run_dir_value: str | Path,
     mutation: Callable[[dict[str, Any], Path, Path], dict[str, Any] | None],
@@ -323,6 +351,7 @@ def mutate_run(
     with run_lock(run_dir):
         run = load_run(run_dir)
         ensure_immutable_risk(run, workspace)
+        ensure_run_open(run)
         result = mutation(run, run_dir, workspace) or {}
         ensure_immutable_risk(run, workspace)
         write_json_atomic(run_dir / "RUN.json", run)
@@ -404,6 +433,7 @@ def materialise_risk_override(
         "status": "pass",
         "method": f"existing risk override artifact attributed to {cleaned['approved_by']}",
         "artifact_id": artifact_id,
+        "artifact_digest": artifact["digest"],
         "source_paths": [],
         "approver": cleaned["approved_by"],
         "recorded_at": utc_now(),
@@ -657,6 +687,13 @@ def bundle_artifact(
         for item in run.get("evidence", [])
     ):
         raise ReceiptError("risk override artifact cannot be a deterministic bundle")
+    if any(
+        isinstance(item, dict)
+        and item.get("kind") == "human"
+        and item.get("artifact_id") == artifact_id
+        for item in run.get("evidence", [])
+    ):
+        raise ReceiptError("human evidence artifact cannot be a deterministic bundle")
     if (
         artifact.get("class") != "evidence"
         or artifact.get("artifact_type") != "evidence"
@@ -739,10 +776,12 @@ def command_evidence_run(args: argparse.Namespace) -> dict[str, Any]:
     with run_lock(run_dir):
         run = load_run(run_dir)
         ensure_immutable_risk(run, workspace)
+        ensure_run_open(run)
         ensure_new_evidence_id(run, evidence_id)
         bundle_artifact(run, args.artifact_id, workspace)
         for source in source_paths:
             target, _relative = safe_workspace_path(workspace, source, "evidence source")
+            ensure_allowed_source_target(run, workspace, target)
             if not target.exists():
                 raise ReceiptError(f"evidence source does not exist: {source}")
         started = utc_now()
@@ -795,11 +834,30 @@ def command_evidence_human(args: argparse.Namespace) -> dict[str, Any]:
             raise ReceiptError("human evidence artifact must be existing and non-empty")
         if artifact.get("digest") != digest_bytes(raw):
             raise ReceiptError("human evidence artifact digest does not match live bytes")
+        if args.gate == "authority-approval":
+            if not args.approver.strip():
+                raise ReceiptError(
+                    "authority approval requires a non-empty approver"
+                )
+            try:
+                artifact_content = json.loads(raw)
+            except (TypeError, UnicodeDecodeError, json.JSONDecodeError):
+                artifact_content = None
+            if not (
+                isinstance(artifact_content, dict)
+                and artifact_content.get("approved") is True
+                and artifact_content.get("approver") == args.approver
+            ):
+                raise ReceiptError(
+                    "authority approval artifact does not corroborate approver "
+                    f"{args.approver}"
+                )
         sources: list[str] = []
         for source in args.sources:
             source_target, relative = safe_workspace_path(
                 workspace, source, "human evidence source",
             )
+            ensure_allowed_source_target(run, workspace, source_target)
             if not source_target.exists():
                 raise ReceiptError(f"human evidence source does not exist: {source}")
             sources.append(relative)
@@ -810,6 +868,7 @@ def command_evidence_human(args: argparse.Namespace) -> dict[str, Any]:
             "status": "pass",
             "method": f"existing approval artifact attributed to {args.approver}",
             "artifact_id": args.artifact_id,
+            "artifact_digest": artifact["digest"],
             "source_paths": list(dict.fromkeys(sources)),
             "approver": args.approver,
             "recorded_at": utc_now(),
@@ -883,6 +942,7 @@ def command_evidence_remove(args: argparse.Namespace) -> dict[str, Any]:
     with run_lock(run_dir):
         run = load_run(run_dir)
         ensure_immutable_risk(run, workspace)
+        ensure_run_open(run)
         row = find_evidence(run, evidence_id)
         references = evidence_references(run, evidence_id)
         if references:
@@ -905,6 +965,7 @@ def command_evidence_rebuild(args: argparse.Namespace) -> dict[str, Any]:
     with run_lock(run_dir):
         run = load_run(run_dir)
         ensure_immutable_risk(run, workspace)
+        ensure_run_open(run)
         target, bundle, digest = rebuild_bundle(run, artifact_id, workspace)
         write_bundle_atomic(target, bundle)
         ensure_immutable_risk(run, workspace)
