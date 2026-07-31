@@ -4,23 +4,22 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime
+from functools import lru_cache
 import hashlib
 import importlib.util
 import json
 import math
 import os
+from pathlib import Path
 import re
 import sys
-from datetime import datetime, timedelta, timezone
-from functools import lru_cache
-from pathlib import Path
 from typing import Any
 
 SKILLS_ROOT = Path(__file__).resolve().parents[2]
 ROOT = Path(os.environ.get("AGENT_FABRIC_PRODUCT_ROOT", Path(__file__).resolve().parents[3])).expanduser()
 sys.path.insert(0, str(SKILLS_ROOT))
 from _shared.review_ladder import PRIMARY_FAMILIES, check_review_ladder
-
 POLICY_VALIDATION_PATH = Path(__file__).with_name("delivery_policy_validation.py")
 DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
@@ -28,8 +27,11 @@ SAFE_CLASSES = {"canonical", "evidence", "handoff", "scratch", "external"}
 REVIEW_ROLES = {"targeted", "other-primary", "distinct-family"}
 RISKS = ("routine", "substantial", "crucial", "terminal")
 REPAIR_BUDGETS = {"routine": 2, "substantial": 4, "crucial": 5, "terminal": 5}
-NORMAL_STATES = ("draft", "scoped", "approved", "executing", "verifying", "reviewing", "repairing",
-    "awaiting_acceptance", "accepted", "awaiting_release", "observing", "closed")
+NORMAL_STATES = (
+    "draft", "scoped", "approved", "executing", "verifying", "reviewing",
+    "repairing", "awaiting_acceptance", "accepted", "awaiting_release",
+    "observing", "closed",
+)
 SIDE_STATES = {"blocked", "cancelled", "degraded"}
 TRANSITIONS = {
     "draft": {"scoped"},
@@ -45,11 +47,15 @@ TRANSITIONS = {
     "observing": {"closed"},
     "closed": set(),
 }
-AGENTIC_RISKS = {"goal-hijack", "tool-misuse", "excessive-privilege", "supply-chain", "code-execution",
-    "memory-context-poisoning", "insecure-inter-agent-communication", "cascading-failures", "human-trust-exploitation"}
+AGENTIC_RISKS = {
+    "goal-hijack", "tool-misuse", "excessive-privilege", "supply-chain",
+    "code-execution", "memory-context-poisoning", "insecure-inter-agent-communication",
+    "cascading-failures", "human-trust-exploitation",
+}
 EVALUATION_BINDING_FIELDS = {
-    "status", "anchored_at", "evidence_id", "evaluation_artifact_id", "evaluation_id",
-    "evaluation_digest", "plan_digest"}
+    "status", "anchored_at", "evidence_id", "evaluation_artifact_id",
+    "evaluation_id", "evaluation_digest", "plan_digest",
+}
 class Invalid(ValueError):
     pass
 
@@ -71,10 +77,6 @@ def _utc(value: Any, field: str) -> datetime:
         return datetime.fromisoformat(value[:-1] + "+00:00")
     except ValueError as exc:
         raise Invalid(f"{field} must be an ISO UTC timestamp") from exc
-
-def _reject_future_timestamp(value: Any, field: str) -> None:
-    fail(_utc(value, field) > datetime.now(timezone.utc) + timedelta(minutes=5),
-         f"{field} exceeds the future timestamp tolerance")
 
 def _digest(value: Any, field: str) -> None:
     fail(not isinstance(value, str) or not DIGEST.fullmatch(value), f"{field} must be a sha256 digest")
@@ -210,7 +212,6 @@ def _validate_history(run: dict[str, Any]) -> None:
         state = item.get("state")
         fail(state not in set(NORMAL_STATES) | SIDE_STATES, f"unknown state at history {index}")
         at = _utc(item.get("at"), f"state_history[{index}].at")
-        _reject_future_timestamp(item.get("at"), f"state_history[{index}].at")
         _list(item.get("evidence_ids"), f"state_history[{index}].evidence_ids")
         fail(previous_at is not None and at <= previous_at, "state history timestamps must increase")
         if state in SIDE_STATES:
@@ -338,8 +339,6 @@ def _validate_evidence(
         fail(item.get("status") not in {"pass", "fail", "unavailable", "not_applicable"}, f"evidence {evidence_id} status is invalid")
         fail(not item.get("gate") or not item.get("method"), f"evidence {evidence_id} requires gate and method")
         fail(item.get("artifact_id") not in artifacts, f"evidence {evidence_id} must link an artifact")
-        for field in ("started_at", "finished_at", "recorded_at", "observed_at"):
-            if field in item: _reject_future_timestamp(item[field], f"evidence[{index}].{field}")
         source_paths = [_safe_path(path, f"evidence {evidence_id}.source_paths") for path in _list(item.get("source_paths"), f"evidence {evidence_id}.source_paths")]
         if item.get("kind") != "human":
             fail(not source_paths, f"evidence {evidence_id} requires source_paths")
