@@ -203,11 +203,28 @@ describe("project activation front doors", () => {
     })).rejects.toThrow(/project status could not inspect.*unexpected trust inspection failure/u);
   });
 
-  it("reports when the Git repository probe is unavailable instead of calling it a non-Git project", async () => {
+  it("refuses activation when the Git repository probe is unavailable", async () => {
     const value = await fixture();
     vi.stubEnv("PATH", value.root);
     try {
-      await expect(runProjectActivate(value.project, value.paths)).resolves.toMatchObject({
+      const roots = await resolveProjectRoots(value.project);
+      expect(roots.gitProbe).toBe("unavailable");
+      expect(roots.gitProbeError).not.toBeNull();
+      await expect(runProjectActivate(value.project, value.paths)).rejects.toThrow(
+        `project activation refused: Git repository probe was unavailable (${roots.gitProbeError}); ` +
+        `to trust the requested project deliberately, run provenant fabric workspace trust ${roots.requestedPath}; no trust was added.`,
+      );
+      await expect(access(join(value.paths.stateDirectory, "trusted-workspaces.json"))).rejects.toThrow();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("reports an unavailable Git repository probe in project status", async () => {
+    const value = await fixture();
+    vi.stubEnv("PATH", value.root);
+    try {
+      await expect(runProjectStatus(value.project, value.paths)).resolves.toMatchObject({
         isGitRepository: false,
         gitProbe: "unavailable",
         gitProbeError: expect.stringContaining("git"),
@@ -218,21 +235,69 @@ describe("project activation front doors", () => {
     }
   });
 
+  it("passes the canonical requested path to the trust writer", async () => {
+    const value = await fixture();
+    const linked = join(value.root, "linked-project");
+    await symlink(value.project, linked);
+    const received: string[] = [];
+
+    await expect(runProjectActivate(linked, value.paths, new Date(), {
+      trust: async (arguments_, paths, now) => {
+        received.push(arguments_[1] ?? "");
+        return await runWorkspaceTrust(arguments_, paths, now);
+      },
+    })).resolves.toMatchObject({
+      action: "trusted",
+      requestedPath: await realpath(value.project),
+    });
+    expect(received).toEqual([await realpath(value.project)]);
+  });
+
   it("revokes a trust record if the trust owner reports a different canonical path", async () => {
     const value = await fixture();
     const substitutedDirectory = join(value.root, "substituted");
     await mkdir(substitutedDirectory, { mode: 0o700 });
     const substituted = await realpath(substitutedDirectory);
+
+    await expect(runProjectActivate(value.project, value.paths, new Date(), {
+      trust: async (_arguments_, paths, now) => await runWorkspaceTrust(["trust", substituted], paths, now),
+    })).rejects.toThrow(/trust recorded.*requested path/u);
+
+    const registry = JSON.parse(await readFile(join(value.paths.stateDirectory, "trusted-workspaces.json"), "utf8")) as {
+      entries: { canonicalPath: string }[];
+    };
+    expect(registry.entries).toEqual([]);
+  });
+
+  it("does not revoke pre-existing trust when the trust owner reports a mismatch", async () => {
+    const value = await fixture();
+    const substitutedDirectory = join(value.root, "pre-existing-substituted");
+    await mkdir(substitutedDirectory, { mode: 0o700 });
+    const substituted = await realpath(substitutedDirectory);
     const revoked: string[] = [];
 
     await expect(runProjectActivate(value.project, value.paths, new Date(), {
-      trust: async () => ({ trusted: true, entry: { canonicalPath: substituted } }),
+      trust: async () => ({ trusted: true, alreadyTrusted: true, entry: { canonicalPath: substituted } }),
       revoke: async (arguments_: string[]) => {
         revoked.push(arguments_[1] ?? "");
         return { revoked: true };
       },
-    })).rejects.toThrow(/trust recorded.*requested path/u);
-    expect(revoked).toEqual([await realpath(substituted)]);
+    })).rejects.toThrow(/trust was not revoked because it pre-existed/u);
+    expect(revoked).toEqual([]);
+  });
+
+  it("refuses a mismatch without a canonical path and revokes nothing", async () => {
+    const value = await fixture();
+    const revoked: string[] = [];
+
+    await expect(runProjectActivate(value.project, value.paths, new Date(), {
+      trust: async () => ({ trusted: true }),
+      revoke: async (arguments_: string[]) => {
+        revoked.push(arguments_[1] ?? "");
+        return { revoked: true };
+      },
+    })).rejects.toThrow(/no canonical path was recorded; trust was not revoked/u);
+    expect(revoked).toEqual([]);
   });
 
   it("reports rollback when status inspection fails after adding trust", async () => {
@@ -243,6 +308,25 @@ describe("project activation front doors", () => {
         throw new Error("unexpected status inspection failure");
       },
     })).rejects.toThrow(/trust was added.*revoked.*unexpected status inspection failure/u);
+    await expect(runWorkspaceTrust(["list"], value.paths)).resolves.toMatchObject({ entries: [] });
+  });
+
+  it("does not report successful activation when the live trust identity is replaced", async () => {
+    const value = await fixture();
+    const originalDirectory = join(value.root, "identity-original");
+    const replacementDirectory = join(value.root, "identity-replacement");
+    await mkdir(replacementDirectory, { mode: 0o700 });
+
+    await expect(runProjectActivate(value.project, value.paths, new Date(), {
+      trust: async (arguments_, paths, now) => {
+        const result = await runWorkspaceTrust(arguments_, paths, now);
+        await rename(value.project, originalDirectory);
+        await rename(replacementDirectory, value.project);
+        return result;
+      },
+    })).rejects.toThrow(
+      /project activation failed after trust was added; trust was revoked: project status reported that workspace trust is not live/u,
+    );
     await expect(runWorkspaceTrust(["list"], value.paths)).resolves.toMatchObject({ entries: [] });
   });
 
@@ -271,22 +355,67 @@ describe("project activation front doors", () => {
     );
   });
 
-  it("preserves the trust owner's symbolic-link-root refusal", async () => {
+  it("does not create Fabric state when home-wide activation is refused", async () => {
+    const value = await fixture();
+    const stateDirectory = join(value.root, "refused-home-state");
+    const runtimeDirectory = join(value.root, "refused-home-runtime");
+    const paths = {
+      stateDirectory,
+      runtimeDirectory,
+      databasePath: join(stateDirectory, "fabric-v1.sqlite3"),
+      socketPath: join(runtimeDirectory, "fabric-v1.sock"),
+    };
+
+    await expect(runProjectActivate(homedir(), paths)).rejects.toThrow();
+    await expect(access(stateDirectory), "D5: refused home-wide activation must not create the Fabric state directory").rejects.toThrow();
+    await expect(access(runtimeDirectory), "D5: refused home-wide activation must not create the Fabric runtime directory").rejects.toThrow();
+  });
+
+  it("does not create Fabric state when symlink-root activation is refused", async () => {
+    const value = await fixture();
+    const stateDirectory = join(value.root, "refused-symlink-state");
+    const runtimeDirectory = join(value.root, "refused-symlink-runtime");
+    const paths = {
+      stateDirectory,
+      runtimeDirectory,
+      databasePath: join(stateDirectory, "fabric-v1.sqlite3"),
+      socketPath: join(runtimeDirectory, "fabric-v1.sock"),
+    };
+    const originalDirectory = join(value.root, "symlink-original");
+    const replacementDirectory = join(value.root, "symlink-replacement");
+    await mkdir(replacementDirectory, { mode: 0o700 });
+
+    await expect(runProjectActivate(value.project, paths, new Date(), {
+      trust: async (arguments_, trustPaths, now) => {
+        await rename(value.project, originalDirectory);
+        await symlink(replacementDirectory, value.project);
+        return await runWorkspaceTrust(arguments_, trustPaths, now);
+      },
+    })).rejects.toThrow(/symbolic-link root/u);
+    await expect(access(stateDirectory), "D5: refused symlink-root activation must not create the Fabric state directory").rejects.toThrow();
+    await expect(access(runtimeDirectory), "D5: refused symlink-root activation must not create the Fabric runtime directory").rejects.toThrow();
+  });
+
+  it("canonicalizes a symbolic-link project path before activation", async () => {
     const value = await fixture();
     const linked = join(value.root, "linked-project");
     await symlink(value.project, linked);
 
-    await expect(runProjectActivate(linked, value.paths)).rejects.toThrow(
-      /symbolic-link root/u,
-    );
+    await expect(runProjectActivate(linked, value.paths)).resolves.toMatchObject({
+      action: "trusted",
+      requestedPath: await realpath(value.project),
+      trustedRoot: await realpath(value.project),
+    });
   });
 
-  it("preserves the trust owner's lexical ancestor refusal", async () => {
+  it("canonicalizes a lexical project-path alias before activation", async () => {
     const value = await fixture();
 
-    await expect(runProjectActivate(`${value.project}/..`, value.paths)).rejects.toThrow(
-      /lexical ancestor broadening/u,
-    );
+    await expect(runProjectActivate(`${value.project}/..`, value.paths)).resolves.toMatchObject({
+      action: "trusted",
+      requestedPath: await realpath(value.root),
+      trustedRoot: await realpath(value.root),
+    });
   });
 
   it("keeps status read-only and reports missing trust and seat dependencies", async () => {

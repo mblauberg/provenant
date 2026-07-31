@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 import { promisify } from "node:util";
 
 import { readActiveSeatGeneration } from "./seat-store.js";
-import { ensureFabricPaths, type FabricPaths } from "./paths.js";
+import type { FabricPaths } from "./paths.js";
 import {
   runWorkspaceTrust,
   trustedWorkspaceIdentity,
@@ -203,6 +203,12 @@ export async function runProjectActivate(
   } = {},
 ): Promise<ProjectStatus & { action: "trusted" | "already-trusted"; message: string }> {
   const roots = await resolveProjectRoots(path);
+  if (roots.gitProbe === "unavailable") {
+    throw new Error(
+      `project activation refused: Git repository probe was unavailable (${roots.gitProbeError}); ` +
+      `to trust the requested project deliberately, run provenant fabric workspace trust ${roots.requestedPath}; no trust was added.`,
+    );
+  }
   if (roots.canonicalRepositoryRoot !== roots.requestedPath) {
     throw new Error(
       `project activation refused: requested project root ${roots.requestedPath} differs from Git repository root ${roots.canonicalRepositoryRoot}; ` +
@@ -210,13 +216,12 @@ export async function runProjectActivate(
       `to trust the repository deliberately, run provenant fabric workspace trust ${roots.canonicalRepositoryRoot}; no trust was added.`,
     );
   }
-  ensureFabricPaths(paths);
   const trust = dependencies.trust ?? runWorkspaceTrust;
   const revoke = dependencies.revoke ?? runWorkspaceTrust;
   const status = dependencies.status ?? projectStatusFromRoots;
   let trustResult: Record<string, unknown>;
   try {
-    trustResult = await trust(["trust", path], paths, now);
+    trustResult = await trust(["trust", roots.requestedPath], paths, now);
   } catch (error: unknown) {
     throw new Error(
       `project activation refused for ${roots.canonicalRepositoryRoot}: ${errorDetail(error)}. ` +
@@ -231,7 +236,19 @@ export async function runProjectActivate(
     ? recordedEntry.canonicalPath
     : null;
   if (recordedCanonicalPath !== roots.requestedPath) {
-    const revokePath = recordedCanonicalPath ?? roots.requestedPath;
+    if (recordedCanonicalPath === null) {
+      throw new Error(
+        `project activation refused: trust recorded no canonical path instead of requested path ${roots.requestedPath}; ` +
+        "no canonical path was recorded; trust was not revoked.",
+      );
+    }
+    if (alreadyTrusted) {
+      throw new Error(
+        `project activation refused: trust recorded ${recordedCanonicalPath} instead of requested path ${roots.requestedPath}; ` +
+        "trust was not revoked because it pre-existed.",
+      );
+    }
+    const revokePath = recordedCanonicalPath;
     try {
       const revokeResult = await revoke(["revoke", revokePath], paths, now);
       if (revokeResult.revoked !== true) throw new Error("trust revoke was not confirmed");
@@ -249,6 +266,7 @@ export async function runProjectActivate(
   let report: ProjectStatus;
   try {
     report = await status(roots, paths);
+    if (!report.trusted) throw new Error("project status reported that workspace trust is not live");
   } catch (error: unknown) {
     if (alreadyTrusted) {
       throw new Error(
