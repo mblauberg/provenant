@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { lstat, realpath } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { resolve } from "node:path";
 import { promisify } from "node:util";
 
 import { readActiveSeatGeneration } from "./seat-store.js";
@@ -16,7 +16,6 @@ const execFileAsync = promisify(execFile);
 export type ProjectRoots = {
   requestedPath: string;
   canonicalRepositoryRoot: string;
-  configRoot: string | null;
   isGitRepository: boolean;
 };
 
@@ -62,36 +61,12 @@ async function gitRepositoryRoot(path: string): Promise<string | null> {
   }
 }
 
-async function nearestConfigRoot(start: string): Promise<string | null> {
-  let cursor = start;
-  for (;;) {
-    try {
-      const info = await lstat(join(cursor, ".provenant"));
-      if (info.isDirectory() && !info.isSymbolicLink()) return cursor;
-    } catch {
-      // An absent marker is ordinary while walking toward the filesystem root.
-    }
-    const parent = dirname(cursor);
-    if (parent === cursor) return null;
-    cursor = parent;
-  }
-}
-
 export async function resolveProjectRoots(path = process.cwd()): Promise<ProjectRoots> {
-  if (path.split(/[\\/]/u).includes("..")) {
-    throw new Error("workspace trust refuses lexical ancestor broadening");
-  }
-  const requested = resolve(path);
-  const requestedInfo = await lstat(requested);
-  if (requestedInfo.isSymbolicLink()) {
-    throw new Error("workspace trust does not accept a symbolic-link root");
-  }
   const requestedPath = await canonicalDirectory(path);
   const repositoryRoot = await gitRepositoryRoot(requestedPath);
   return {
     requestedPath,
     canonicalRepositoryRoot: repositoryRoot ?? requestedPath,
-    configRoot: await nearestConfigRoot(requestedPath),
     isGitRepository: repositoryRoot !== null,
   };
 }
@@ -174,9 +149,16 @@ export async function runProjectActivate(
   now = new Date(),
 ): Promise<ProjectStatus & { action: "trusted" | "already-trusted"; message: string }> {
   const roots = await resolveProjectRoots(path);
+  if (roots.isGitRepository && roots.canonicalRepositoryRoot !== roots.requestedPath) {
+    throw new Error(
+      `project activation refused: requested project root ${roots.requestedPath} differs from Git repository root ${roots.canonicalRepositoryRoot}; ` +
+      `to trust the requested project deliberately, run provenant fabric workspace trust ${roots.requestedPath}; ` +
+      `to trust the repository deliberately, run provenant fabric workspace trust ${roots.canonicalRepositoryRoot}; no trust was added.`,
+    );
+  }
   let trustResult: Record<string, unknown>;
   try {
-    trustResult = await runWorkspaceTrust(["trust", roots.canonicalRepositoryRoot], paths, now);
+    trustResult = await runWorkspaceTrust(["trust", path], paths, now);
   } catch (error: unknown) {
     throw new Error(
       `project activation refused for ${roots.canonicalRepositoryRoot}: ${errorDetail(error)}. ` +

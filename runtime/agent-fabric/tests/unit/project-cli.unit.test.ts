@@ -1,4 +1,4 @@
-import { access, chmod, mkdir, mkdtemp, realpath, rm, symlink } from "node:fs/promises";
+import { access, chmod, mkdir, mkdtemp, readFile, realpath, rm, symlink } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -70,7 +70,7 @@ describe("project activation front doors", () => {
     expect(second.trustRecordDigest).toBe(first.trustRecordDigest);
   });
 
-  it("keeps the canonical Git root and the nearest config root as separate identities", async () => {
+  it("keeps the canonical Git root separate from the requested project identity", async () => {
     const value = await fixture();
     const repositoryRoot = join(value.root, "repository");
     const configRoot = join(repositoryRoot, "nested-project");
@@ -82,12 +82,34 @@ describe("project activation front doors", () => {
     await expect(resolveProjectRoots(workingDirectory)).resolves.toEqual({
       requestedPath: await realpath(workingDirectory),
       canonicalRepositoryRoot: await realpath(repositoryRoot),
-      configRoot: await realpath(configRoot),
       isGitRepository: true,
     });
-    const activated = await runProjectActivate(workingDirectory, value.paths);
-    expect(activated.trustedRoot).toBe(await realpath(repositoryRoot));
-    expect(activated.configRoot).toBe(await realpath(configRoot));
+  });
+
+  it("refuses Git-root widening and leaves the trust registry unchanged", async () => {
+    const value = await fixture();
+    await runProjectActivate(value.project, value.paths);
+    const registryPath = join(value.paths.stateDirectory, "trusted-workspaces.json");
+    const registryBefore = await readFile(registryPath, "utf8");
+    const repositoryRoot = join(value.root, "repository");
+    const requestedProject = join(repositoryRoot, "nested-project");
+    await mkdir(requestedProject, { recursive: true, mode: 0o700 });
+    await execFileAsync("git", ["init", "--quiet", repositoryRoot]);
+    const canonicalRequestedProject = await realpath(requestedProject);
+    const canonicalRepositoryRoot = await realpath(repositoryRoot);
+
+    await expect(runProjectActivate(requestedProject, value.paths)).rejects.toThrow(
+      `requested project root ${canonicalRequestedProject} differs from Git repository root ${canonicalRepositoryRoot}; ` +
+      `to trust the requested project deliberately, run provenant fabric workspace trust ${canonicalRequestedProject}; ` +
+      `to trust the repository deliberately, run provenant fabric workspace trust ${canonicalRepositoryRoot}; no trust was added.`,
+    );
+    await expect(readFile(registryPath, "utf8")).resolves.toBe(registryBefore);
+  });
+
+  it("does not report an inert config root", async () => {
+    const value = await fixture();
+
+    await expect(resolveProjectRoots(value.project)).resolves.not.toHaveProperty("configRoot");
   });
 
   it("refuses unsupported filesystem-wide roots with an actionable message", async () => {
