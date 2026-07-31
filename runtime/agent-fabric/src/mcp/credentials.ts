@@ -12,8 +12,9 @@ import {
 import {
   mcpBootstrapRenewalCommand,
   mcpRosterRenewalCommand,
-  readChairAuthorityExpiresAt,
+  openRosterReadPort,
   seatExpiryWarningDue,
+  type RosterReadPort,
 } from "../cli/mcp-roster-renewal.js";
 import { fabricCliCommand, resolveFabricRoots } from "../domain/fabric-roots.js";
 
@@ -154,7 +155,7 @@ async function rosterRenewalAdvice(input: {
   runId: unknown;
   chairAgentId: unknown;
   expiresAt: string;
-  databasePath: string;
+  rosterPort: RosterReadPort;
   productRoot: string;
 }): Promise<{ kind: "bootstrap" | "renewal" | "unrenewable"; command: string }> {
   const route = await renewalRoute({
@@ -172,8 +173,7 @@ async function rosterRenewalAdvice(input: {
   }
   const chairAuthorityExpiresAt =
     typeof input.runId === "string" && typeof input.chairAgentId === "string"
-      ? readChairAuthorityExpiresAt({
-          databasePath: input.databasePath,
+      ? input.rosterPort.chairAuthorityExpiresAt({
           runId: input.runId,
           chairAgentId: input.chairAgentId,
         })
@@ -215,98 +215,106 @@ async function resolveProjectSeatFile(
     environment.AGENT_FABRIC_DATABASE_PATH ?? join(stateDirectory, "fabric-v1.sqlite3"),
   );
   let candidate = await realpath(resolve(configuredProject ?? cwd));
-  for (;;) {
-    try {
-      const paths = await resolveSeatPaths({ stateDirectory, project: candidate, seat: seat as (typeof MCP_SEATS)[number] });
-      const metadataPath = paths.metadataPath;
-      const metadataText = await readPrivateRegularFile(metadataPath);
-      const metadata: unknown = JSON.parse(metadataText);
-      const credentialPath = paths.credentialPath;
-      if (
-        typeof metadata !== "object" ||
-        metadata === null ||
-        !("schemaVersion" in metadata) ||
-        metadata.schemaVersion !== 1 ||
-        !("projectPath" in metadata) ||
-        metadata.projectPath !== candidate ||
-        !("projectKey" in metadata) ||
-        metadata.projectKey !== projectKey(candidate) ||
-        !("generation" in metadata) ||
-        metadata.generation !== paths.generation ||
-        !("previousGeneration" in metadata) ||
-        (metadata.previousGeneration !== null &&
-          (typeof metadata.previousGeneration !== "string" || !/^[0-9a-f]{64}$/u.test(metadata.previousGeneration))) ||
-        ("originKind" in metadata && metadata.originKind !== "bootstrap" && metadata.originKind !== "provisioned") ||
-        !("seat" in metadata) ||
-        metadata.seat !== seat ||
-        !("credentialPath" in metadata) ||
-        metadata.credentialPath !== credentialPath ||
-        !("expiresAt" in metadata) ||
-        typeof metadata.expiresAt !== "string" ||
-        !Number.isFinite(Date.parse(metadata.expiresAt))
-      ) {
-        throw new Error(`agent fabric MCP seat metadata is invalid for project ${candidate}`);
-      }
-      const remainingMs = Date.parse(metadata.expiresAt) - Date.now();
-      const bootstrapSeat = "originKind" in metadata && metadata.originKind === "bootstrap";
-      const verifiedLegacyBootstrapSeat = !("originKind" in metadata) &&
-        await readLegacyBootstrapSeatGeneration({ stateDirectory, projectPath: candidate }) === paths.generation;
-      if ((bootstrapSeat || verifiedLegacyBootstrapSeat) && remainingMs <= MCP_SEAT_RENEWAL_WINDOW_MS) {
-        throw new McpSeatRenewalRequiredError(
-          `agent fabric MCP seat ${seat} ${remainingMs <= 0 ? "expired" : "expires"} at ${metadata.expiresAt}`,
-          candidate,
-        );
-      }
-      const adviceInput = {
-        stateDirectory,
-        projectPath: candidate,
-        seat: seat as McpSeat,
-        currentRole: "role" in metadata ? metadata.role : undefined,
-        currentOriginKind: "originKind" in metadata ? metadata.originKind : undefined,
-        runId: "runId" in metadata ? metadata.runId : undefined,
-        chairAgentId: "chairAgentId" in metadata ? metadata.chairAgentId : undefined,
-        expiresAt: metadata.expiresAt,
-        databasePath,
-        productRoot,
-      };
-      if (remainingMs <= 0) {
-        // Expiry must lead to a recoverable state, not a dead end: the error
-        // names the exact recovery command whenever one can be derived (#526).
-        const advice = await rosterRenewalAdvice(adviceInput).catch(() => null);
-        throw new Error(
-          `agent fabric MCP seat ${seat} expired at ${metadata.expiresAt}` +
-          (advice === null
-            ? ""
-            : advice.kind === "renewal"
-              ? `; recover the roster with ${advice.command}`
-              : `; the roster cannot be renewed in place; rebuild it with ${advice.command}`),
-        );
-      }
-      if (
-        !bootstrapSeat &&
-        !verifiedLegacyBootstrapSeat &&
-        seatExpiryWarningDue({
-          databasePath,
-          generation: paths.generation,
+  // One read port serves every renewal lookup this request performs; the
+  // expiry error and the pre-expiry warning both read through it, and the
+  // finally closes it on the success path and on every throw.
+  const rosterPort = openRosterReadPort(databasePath);
+  try {
+    for (;;) {
+      try {
+        const paths = await resolveSeatPaths({ stateDirectory, project: candidate, seat: seat as (typeof MCP_SEATS)[number] });
+        const metadataPath = paths.metadataPath;
+        const metadataText = await readPrivateRegularFile(metadataPath);
+        const metadata: unknown = JSON.parse(metadataText);
+        const credentialPath = paths.credentialPath;
+        if (
+          typeof metadata !== "object" ||
+          metadata === null ||
+          !("schemaVersion" in metadata) ||
+          metadata.schemaVersion !== 1 ||
+          !("projectPath" in metadata) ||
+          metadata.projectPath !== candidate ||
+          !("projectKey" in metadata) ||
+          metadata.projectKey !== projectKey(candidate) ||
+          !("generation" in metadata) ||
+          metadata.generation !== paths.generation ||
+          !("previousGeneration" in metadata) ||
+          (metadata.previousGeneration !== null &&
+            (typeof metadata.previousGeneration !== "string" || !/^[0-9a-f]{64}$/u.test(metadata.previousGeneration))) ||
+          ("originKind" in metadata && metadata.originKind !== "bootstrap" && metadata.originKind !== "provisioned") ||
+          !("seat" in metadata) ||
+          metadata.seat !== seat ||
+          !("credentialPath" in metadata) ||
+          metadata.credentialPath !== credentialPath ||
+          !("expiresAt" in metadata) ||
+          typeof metadata.expiresAt !== "string" ||
+          !Number.isFinite(Date.parse(metadata.expiresAt))
+        ) {
+          throw new Error(`agent fabric MCP seat metadata is invalid for project ${candidate}`);
+        }
+        const remainingMs = Date.parse(metadata.expiresAt) - Date.now();
+        const bootstrapSeat = "originKind" in metadata && metadata.originKind === "bootstrap";
+        const verifiedLegacyBootstrapSeat = !("originKind" in metadata) &&
+          await readLegacyBootstrapSeatGeneration({ stateDirectory, projectPath: candidate }) === paths.generation;
+        if ((bootstrapSeat || verifiedLegacyBootstrapSeat) && remainingMs <= MCP_SEAT_RENEWAL_WINDOW_MS) {
+          throw new McpSeatRenewalRequiredError(
+            `agent fabric MCP seat ${seat} ${remainingMs <= 0 ? "expired" : "expires"} at ${metadata.expiresAt}`,
+            candidate,
+          );
+        }
+        const adviceInput = {
+          stateDirectory,
+          projectPath: candidate,
+          seat: seat as McpSeat,
+          currentRole: "role" in metadata ? metadata.role : undefined,
+          currentOriginKind: "originKind" in metadata ? metadata.originKind : undefined,
+          runId: "runId" in metadata ? metadata.runId : undefined,
+          chairAgentId: "chairAgentId" in metadata ? metadata.chairAgentId : undefined,
           expiresAt: metadata.expiresAt,
-        })
-      ) {
-        const advice = await rosterRenewalAdvice(adviceInput);
-        warn(
-          `agent fabric MCP seat ${seat} expires at ${metadata.expiresAt}; ${
-            advice.kind === "unrenewable"
-              ? `the provisioned roster cannot be renewed; use ${advice.command}`
-              : `renew the full roster with ${advice.command}`
-          }`,
-        );
+          rosterPort,
+          productRoot,
+        };
+        if (remainingMs <= 0) {
+          // Expiry must lead to a recoverable state, not a dead end: the error
+          // names the exact recovery command whenever one can be derived (#526).
+          const advice = await rosterRenewalAdvice(adviceInput).catch(() => null);
+          throw new Error(
+            `agent fabric MCP seat ${seat} expired at ${metadata.expiresAt}` +
+            (advice === null
+              ? ""
+              : advice.kind === "renewal"
+                ? `; recover the roster with ${advice.command}`
+                : `; the roster cannot be renewed in place; rebuild it with ${advice.command}`),
+          );
+        }
+        if (
+          !bootstrapSeat &&
+          !verifiedLegacyBootstrapSeat &&
+          seatExpiryWarningDue({
+            port: rosterPort,
+            generation: paths.generation,
+            expiresAt: metadata.expiresAt,
+          })
+        ) {
+          const advice = await rosterRenewalAdvice(adviceInput);
+          warn(
+            `agent fabric MCP seat ${seat} expires at ${metadata.expiresAt}; ${
+              advice.kind === "unrenewable"
+                ? `the provisioned roster cannot be renewed; use ${advice.command}`
+                : `renew the full roster with ${advice.command}`
+            }`,
+          );
+        }
+        return credentialPath;
+      } catch (error: unknown) {
+        if (errorCode(error) !== "ENOENT") throw error;
       }
-      return credentialPath;
-    } catch (error: unknown) {
-      if (errorCode(error) !== "ENOENT") throw error;
+      const parent = dirname(candidate);
+      if (parent === candidate) break;
+      candidate = parent;
     }
-    const parent = dirname(candidate);
-    if (parent === candidate) break;
-    candidate = parent;
+  } finally {
+    rosterPort.close();
   }
   const detail = `agent fabric MCP seat ${seat} is not provisioned for ${cwd} or an ancestor project`;
   throw new McpSeatNotProvisionedError(

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -11,9 +12,11 @@ import {
   MAXIMUM_SEAT_LIFETIME_MS,
   SEAT_EXPIRY_WARNING_CAP_MS,
   mcpRosterRenewalCommand,
+  openRosterReadPort,
   seatExpiryWarningDue,
   seatExpiryWarningWindowMs,
 } from "../../src/cli/mcp-roster-renewal.ts";
+import { ROOT_AUTHORITY } from "../support/stage1-fixture.ts";
 import { shellCommandArguments } from "../support/shell-command-arguments.ts";
 
 const DAY_MS = 24 * 60 * 60 * 1_000;
@@ -22,6 +25,44 @@ const cleanup: string[] = [];
 afterEach(async () => {
   await Promise.all(cleanup.splice(0).map(async (path) => rm(path, { recursive: true, force: true })));
 });
+
+function generationDatabase(root: string, generation: string, createdAt: number): string {
+  const databasePath = join(root, "fabric-v1.sqlite3");
+  const database = new Database(databasePath);
+  try {
+    // Only the columns the reader touches; the production schema is wider.
+    database.exec(
+      "CREATE TABLE IF NOT EXISTS mcp_seat_generations (generation TEXT PRIMARY KEY, created_at INTEGER NOT NULL)",
+    );
+    database.prepare(
+      "INSERT INTO mcp_seat_generations(generation, created_at) VALUES (?, ?)",
+    ).run(generation, createdAt);
+  } finally {
+    database.close();
+  }
+  return databasePath;
+}
+
+// The one warning check in these tests still opens the port itself, so every
+// assertion exercises the request-scoped surface production code passes in.
+function warningDue(input: {
+  databasePath: string;
+  generation: string;
+  expiresAt: string;
+  now: number;
+}): boolean {
+  const port = openRosterReadPort(input.databasePath);
+  try {
+    return seatExpiryWarningDue({
+      port,
+      generation: input.generation,
+      expiresAt: input.expiresAt,
+      now: input.now,
+    });
+  } finally {
+    port.close();
+  }
+}
 
 async function emittedExpiry(input: {
   now: number;
@@ -144,23 +185,6 @@ describe("MCP roster renewal command", () => {
 });
 
 describe("seat expiry warning window", () => {
-  function generationDatabase(root: string, generation: string, createdAt: number): string {
-    const databasePath = join(root, "fabric-v1.sqlite3");
-    const database = new Database(databasePath);
-    try {
-      // Only the columns the reader touches; the production schema is wider.
-      database.exec(
-        "CREATE TABLE IF NOT EXISTS mcp_seat_generations (generation TEXT PRIMARY KEY, created_at INTEGER NOT NULL)",
-      );
-      database.prepare(
-        "INSERT INTO mcp_seat_generations(generation, created_at) VALUES (?, ?)",
-      ).run(generation, createdAt);
-    } finally {
-      database.close();
-    }
-    return databasePath;
-  }
-
   it("scales the window to the final quarter of the roster's lifetime", () => {
     const now = Date.now();
     const window = seatExpiryWarningWindowMs({
@@ -212,7 +236,7 @@ describe("seat expiry warning window", () => {
     // almost its whole remaining life; legacy capped behaviour warns now.
     const databasePath = generationDatabase(root, generation, now + 5 * 24 * 60 * 60 * 1_000);
 
-    expect(seatExpiryWarningDue({
+    expect(warningDue({
       databasePath,
       generation,
       expiresAt: new Date(now + 6 * 24 * 60 * 60 * 1_000).toISOString(),
@@ -230,8 +254,8 @@ describe("seat expiry warning window", () => {
     const databasePath = generationDatabase(root, generation, now - 60 * 60 * 1_000);
     const expiresAt = new Date(now + 23 * 60 * 60 * 1_000).toISOString();
 
-    expect(seatExpiryWarningDue({ databasePath, generation, expiresAt, now })).toBe(false);
-    expect(seatExpiryWarningDue({
+    expect(warningDue({ databasePath, generation, expiresAt, now })).toBe(false);
+    expect(warningDue({
       databasePath,
       generation,
       expiresAt,
@@ -246,23 +270,119 @@ describe("seat expiry warning window", () => {
     const generation = "b".repeat(64);
     const missingDatabasePath = join(root, "missing.sqlite3");
 
-    expect(seatExpiryWarningDue({
+    expect(warningDue({
       databasePath: generationDatabase(root, generation, now - 60 * 60 * 1_000),
       generation,
       expiresAt: new Date(now - 1_000).toISOString(),
       now,
     })).toBe(true);
-    expect(seatExpiryWarningDue({
+    expect(warningDue({
       databasePath: missingDatabasePath,
       generation,
       expiresAt: new Date(now + 6 * 24 * 60 * 60 * 1_000).toISOString(),
       now,
     })).toBe(true);
-    expect(seatExpiryWarningDue({
+    expect(warningDue({
       databasePath: missingDatabasePath,
       generation,
       expiresAt: new Date(now + 8 * 24 * 60 * 60 * 1_000).toISOString(),
       now,
     })).toBe(false);
+  });
+});
+
+describe("roster read port", () => {
+  function canonicalJson(value: unknown): string {
+    if (value === null || typeof value === "boolean" || typeof value === "number" || typeof value === "string") {
+      return JSON.stringify(value);
+    }
+    if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+    if (typeof value === "object") {
+      const record = value as Record<string, unknown>;
+      return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`).join(",")}}`;
+    }
+    throw new TypeError("roster read port fixture value is not JSON-compatible");
+  }
+
+  function authorityDatabase(root: string): string {
+    const databasePath = join(root, "fabric-v1.sqlite3");
+    const database = new Database(databasePath);
+    try {
+      // Only the columns the reader touches; the production schema is wider.
+      database.exec(
+        "CREATE TABLE agents (run_id TEXT, agent_id TEXT, authority_id TEXT);" +
+        "CREATE TABLE authorities (run_id TEXT, authority_id TEXT, authority_json TEXT, authority_hash TEXT)",
+      );
+      const authorityJson = canonicalJson(ROOT_AUTHORITY);
+      database.prepare(
+        "INSERT INTO agents(run_id, agent_id, authority_id) VALUES (?, ?, ?)",
+      ).run("run-port", "codex-chair", "authority-port");
+      database.prepare(
+        "INSERT INTO authorities(run_id, authority_id, authority_json, authority_hash) VALUES (?, ?, ?, ?)",
+      ).run(
+        "run-port",
+        "authority-port",
+        authorityJson,
+        createHash("sha256").update(authorityJson).digest("hex"),
+      );
+    } finally {
+      database.close();
+    }
+    return databasePath;
+  }
+
+  it("reads the chair authority expiry and answers a missing agent with null", async () => {
+    const root = await mkdtemp(join(tmpdir(), "fabric-roster-read-port-"));
+    cleanup.push(root);
+    const port = openRosterReadPort(authorityDatabase(root));
+    try {
+      expect(port.chairAuthorityExpiresAt({ runId: "run-port", chairAgentId: "codex-chair" }))
+        .toBe(ROOT_AUTHORITY.expiresAt);
+      expect(port.chairAuthorityExpiresAt({ runId: "run-port", chairAgentId: "absent" })).toBeNull();
+    } finally {
+      port.close();
+    }
+  });
+
+  it("serves every lookup in its scope over the one connection it opened", async () => {
+    // The database file is unlinked between the two lookups, so only the
+    // connection the first lookup opened can answer the second: a port that
+    // reopened per lookup would return null instead.
+    const root = await mkdtemp(join(tmpdir(), "fabric-roster-read-port-reuse-"));
+    cleanup.push(root);
+    const generation = "e".repeat(64);
+    const createdAt = Date.now() - 60 * 60 * 1_000;
+    const databasePath = generationDatabase(root, generation, createdAt);
+    const port = openRosterReadPort(databasePath);
+    try {
+      expect(port.seatGenerationMintedAt(generation)).toBe(new Date(createdAt).toISOString());
+      await rm(databasePath);
+      expect(port.seatGenerationMintedAt(generation)).toBe(new Date(createdAt).toISOString());
+    } finally {
+      port.close();
+    }
+  });
+
+  it("answers every lookup with null when the database is absent", async () => {
+    const root = await mkdtemp(join(tmpdir(), "fabric-roster-read-port-absent-"));
+    cleanup.push(root);
+    const port = openRosterReadPort(join(root, "missing.sqlite3"));
+    try {
+      expect(port.seatGenerationMintedAt("f".repeat(64))).toBeNull();
+      expect(port.chairAuthorityExpiresAt({ runId: "run-port", chairAgentId: "codex-chair" })).toBeNull();
+    } finally {
+      port.close();
+    }
+  });
+
+  it("refuses lookups once closed and tolerates a second close", async () => {
+    const root = await mkdtemp(join(tmpdir(), "fabric-roster-read-port-closed-"));
+    cleanup.push(root);
+    const generation = "a".repeat(64);
+    const port = openRosterReadPort(generationDatabase(root, generation, Date.now()));
+    expect(port.seatGenerationMintedAt(generation)).not.toBeNull();
+    port.close();
+    port.close();
+    expect(() => port.seatGenerationMintedAt(generation)).toThrow("MCP roster read port is closed");
   });
 });
