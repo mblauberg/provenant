@@ -31,7 +31,7 @@ acceptance, release or publication.
 ## Preflight
 
 ```sh
-npm ci --no-audit --no-fund
+scripts/install-agent-fabric-dependencies
 npm run build
 npm run check
 npm run test:evaluation
@@ -42,6 +42,11 @@ git diff --check
 python3 skills/deliver/scripts/validate_delivery.py \
   '<canonical-run>/RUN.json' --workspace-root "$PWD" --verify-hashes
 ```
+
+The dependency helper runs the root `npm ci` and records the npm-install
+attestation used by the bare-Node launch gates. If the product commit,
+lockfile, package integrity values or installed execution tree changes, rerun
+the helper before launching Fabric.
 
 Then verify the selected compatibility entries. The adapter registry records
 activation policy, stable launch paths, runtime requirements and provider
@@ -345,7 +350,7 @@ the supported host, restore the package closure and verify both boundaries
 with:
 
 ```sh
-npm ci --no-audit --no-fund
+scripts/install-agent-fabric-dependencies
 npm run compatibility:check:primary
 ```
 

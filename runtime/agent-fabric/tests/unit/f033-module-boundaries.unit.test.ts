@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, extname, join, relative, resolve, sep } from "node:path";
 
 import { ImportType, initSync, parse } from "es-module-lexer";
@@ -30,6 +30,7 @@ type BoundaryGolden = Readonly<{
 }>;
 
 const sourceRoot = resolve(import.meta.dirname, "../../src");
+const packageRoot = resolve(sourceRoot, "..");
 const goldenPath = resolve(import.meta.dirname, "../fixtures/f033-module-boundaries.json");
 const layerOrderNeeded = "ADR-0003";
 let goldenRegeneratedForRun: BoundaryGolden | undefined;
@@ -87,7 +88,12 @@ function resolveProductionImport(importer: string, specifier: string): string | 
     : extname(unresolved) === ".ts"
       ? [unresolved]
       : [`${unresolved}.ts`, join(unresolved, "index.ts")];
-  return candidates.find((candidate) => productionFileSet.has(candidate));
+  return candidates.find((candidate) => productionFileSet.has(candidate))
+    ?? (extname(unresolved) === ".mjs" &&
+      unresolved.startsWith(`${packageRoot}${sep}`) &&
+      existsSync(unresolved)
+      ? unresolved
+      : undefined);
 }
 
 function domainOf(path: string): string {
@@ -136,6 +142,7 @@ function inspectGraph(): {
         unresolvedImports.push(location);
         continue;
       }
+      if (!productionFileSet.has(imported)) continue;
       if (imported === join(sourceRoot, "index.ts") && importer !== imported) {
         inwardApiImports.push(location);
       }

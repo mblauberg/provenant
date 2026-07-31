@@ -14,6 +14,8 @@ agents_home=${AGENTS_HOME:-"$(dirname -- "$script_dir")"}
 case "$agents_home" in /*) ;; *) echo "AGENTS_HOME must be absolute" >&2; exit 2 ;; esac
 package_root="$agents_home/runtime/agent-fabric"
 
+node "$package_root/scripts/verify-npm-ci-attestation.mjs" "$agents_home"
+
 unset AGENT_FABRIC_PROTOCOL_BUILD_VERDICT AGENT_FABRIC_PROTOCOL_BUILD_REPAIR
 if [ "${1:-}" = doctor ]; then
   protocol_repair=$(
@@ -43,9 +45,9 @@ tsx_loader_library="$script_dir/lib/agent-fabric-tsx-loader.sh"
 }
 . "$tsx_loader_library"
 
-tsx_loader=$(resolve_tsx_loader "$package_root" "$agents_home") || {
-  echo "agent-fabric found no tsx package for \"$package_root\" within \"$(resolve_tsx_loader_boundary "$agents_home")\"" >&2
-  echo "repair: run 'npm ci' in the repository root that owns this workspace" >&2
+tsx_loader=$(resolve_attested_tsx_loader "$agents_home") || {
+  echo "agent-fabric found no valid tsx loader inside the attested tree \"$agents_home/node_modules\"" >&2
+  echo "repair: rerun \"$agents_home/scripts/install-agent-fabric-dependencies\"" >&2
   exit 1
 }
 

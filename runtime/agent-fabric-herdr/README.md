@@ -143,7 +143,7 @@ fallback supplies neither delivery evidence nor barrier satisfaction.
 Run from the repository root.
 
 ```sh
-npm ci --ignore-scripts --no-audit --no-fund
+scripts/install-agent-fabric-dependencies
 npm run check --workspace=@local/agent-fabric-herdr
 ```
 

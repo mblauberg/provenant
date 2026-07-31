@@ -13,6 +13,7 @@ type Fixture = Awaited<ReturnType<typeof createResolvedStage4Compatibility>> |
   Awaited<ReturnType<typeof createCursorKiroCompatibilityFixture>>;
 
 const fixtures: Fixture[] = [];
+const passNpmInstallVerification = async (): Promise<void> => undefined;
 
 afterEach(async () => {
   await Promise.all(fixtures.splice(0).map((fixture) => rm(fixture.directory, { recursive: true, force: true })));
@@ -59,6 +60,7 @@ describe("adapter invocation resolver CLI", () => {
       "--timeout-ms", "90000",
     ], {
       verifyProvider,
+      verifyNpmInstall: passNpmInstallVerification,
     });
 
     expect(verifyProvider).toHaveBeenCalledWith(expect.objectContaining({ adapterId: "agy" }));
@@ -101,6 +103,7 @@ describe("adapter invocation resolver CLI", () => {
       "--timeout-ms", "45000",
     ], {
       verifyProvider,
+      verifyNpmInstall: passNpmInstallVerification,
     });
 
     expect(verifyProvider).toHaveBeenCalledWith(expect.objectContaining({ adapterId: "cursor-agent" }));
@@ -143,6 +146,7 @@ describe("adapter invocation resolver CLI", () => {
       "--timeout-ms", "30000",
     ], {
       verifyProvider,
+      verifyNpmInstall: passNpmInstallVerification,
     });
 
     expect(verifyProvider).toHaveBeenCalledWith(expect.objectContaining({ adapterId: "kiro-acp" }));
@@ -185,6 +189,7 @@ describe("adapter invocation resolver CLI", () => {
       "--prompt", "review",
     ], {
       verifyProvider: vi.fn(async () => ({} as never)),
+      verifyNpmInstall: passNpmInstallVerification,
     })).resolves.toStrictEqual({
       executable: await fixtureExecutable(fixture, "agy"),
       args: [
@@ -215,7 +220,9 @@ describe("adapter invocation resolver CLI", () => {
       "--mode", "plan",
       "--model", "gemini",
       "--prompt", "review",
-    ])).rejects.toThrow(`provider signature is invalid: ${executable}`);
+    ], {
+      verifyNpmInstall: passNpmInstallVerification,
+    })).rejects.toThrow(`provider signature is invalid: ${executable}`);
   });
 
   it("builds the minimal Cursor invocation without optional fields", async () => {
@@ -238,6 +245,7 @@ describe("adapter invocation resolver CLI", () => {
       "--prompt", "review",
     ], {
       verifyProvider: vi.fn(async () => ({} as never)),
+      verifyNpmInstall: passNpmInstallVerification,
     })).resolves.toStrictEqual({
       executable: await fixtureExecutable(fixture, "cursor-agent"),
       args: [
@@ -271,6 +279,7 @@ describe("adapter invocation resolver CLI", () => {
       "--agent-engine", "v2",
     ], {
       verifyProvider: vi.fn(async () => ({} as never)),
+      verifyNpmInstall: passNpmInstallVerification,
     })).resolves.toStrictEqual({
       executable: await fixtureExecutable(fixture, "kiro-acp"),
       args: ["acp", "--agent-engine", "v2", "--model", "qwen3-coder"],

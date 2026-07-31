@@ -4,7 +4,6 @@ import {
   buildKiroAcpInvocation,
   type ProviderInvocation,
 } from "../adapters/providers/optional/invocations.js";
-import { verifyProviderConformance } from "../adapters/provider-conformance.js";
 import { resolveAdapterExecutableCli } from "./adapter-executable.js";
 
 const COMMON_OPTIONS = new Set([
@@ -17,6 +16,7 @@ const COMMON_OPTIONS = new Set([
   "--compatibility-schema",
 ]);
 const MAX_NODE_TIMER_MS = 2_147_483_647;
+type AdapterInvocationDependencies = NonNullable<Parameters<typeof resolveAdapterExecutableCli>[1]>;
 
 function parseOptionPairs(arguments_: string[]): Map<string, string> {
   const parsed = new Map<string, string>();
@@ -81,7 +81,7 @@ function executableArguments(parsed: ReadonlyMap<string, string>, adapterId: str
 
 export async function resolveAdapterInvocationCli(
   arguments_: string[],
-  dependencies: { verifyProvider?: typeof verifyProviderConformance } = {},
+  dependencies: AdapterInvocationDependencies = {},
 ): Promise<ProviderInvocation> {
   const parsed = parseOptionPairs(arguments_);
   const provider = parsed.get("--adapter");

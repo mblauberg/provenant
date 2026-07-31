@@ -18,6 +18,8 @@ agents_home=${AGENTS_HOME:-"$(dirname -- "$script_dir")"}
 case "$agents_home" in /*) ;; *) echo "AGENTS_HOME must be absolute" >&2; exit 2 ;; esac
 package_root="$agents_home/runtime/agent-fabric"
 
+node "$package_root/scripts/verify-npm-ci-attestation.mjs" "$agents_home"
+
 dist_cli="$package_root/dist/cli/main.js"
 dist_mcp="$package_root/dist/mcp/main.js"
 protocol_root="$agents_home/runtime/agent-fabric-protocol"
@@ -45,7 +47,7 @@ if [ "$workspace_stale" = false ]; then
 fi
 
 if [ ! -d "$agents_home/node_modules" ]; then
-  echo "agent-fabric dist stale and node_modules missing; run 'npm ci' in $agents_home first" >&2
+  echo "agent-fabric dist stale and node_modules missing; rerun $agents_home/scripts/install-agent-fabric-dependencies first" >&2
   exit 1
 fi
 
