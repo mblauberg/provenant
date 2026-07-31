@@ -1,4 +1,6 @@
 import hashlib
+
+import pytest
 import importlib.util
 import os
 from pathlib import Path
@@ -72,3 +74,36 @@ def test_lifecycle_contract_preserves_the_pinned_state_graph_and_five_invariants
         <= set(row)
         for row in contract["transitions"]
     )
+
+
+def contract_module():
+    return load(LOADER_PATH, "lifecycle_contract_validation")
+
+
+def mutated(**changes):
+    module = contract_module()
+    value = {key: item for key, item in module.LIFECYCLE_CONTRACT.items() if key != "contract_digest"}
+    value.update(changes)
+    return module, value
+
+
+def test_the_loader_rejects_a_contract_that_names_a_state_twice():
+    module, value = mutated()
+    value["states"] = [*value["states"], "closed"]
+    with pytest.raises(module.LifecycleContractError, match="names .* twice|duplicate state"):
+        module._validate_contract(value)
+
+
+def test_the_loader_rejects_terminal_states_that_are_not_states():
+    module, value = mutated(terminal_states=["closed", "abandoned"])
+    with pytest.raises(module.LifecycleContractError, match="terminal_states"):
+        module._validate_contract(value)
+
+
+def test_the_loader_rejects_terminal_states_that_disagree_with_the_transition_graph():
+    # `accepted` has an outgoing row, so calling it terminal is a contract that
+    # contradicts itself. Nothing read this field before, so it could drift
+    # freely inside the very artifact that exists to stop drift.
+    module, value = mutated(terminal_states=["closed", "accepted"])
+    with pytest.raises(module.LifecycleContractError, match="terminal_states"):
+        module._validate_contract(value)

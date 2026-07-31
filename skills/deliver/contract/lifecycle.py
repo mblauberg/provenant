@@ -40,6 +40,9 @@ def _validate_contract(value: dict[str, Any]) -> None:
     states = value.get("states")
     if not isinstance(states, list) or not states or any(not isinstance(item, str) for item in states):
         raise LifecycleContractError("lifecycle contract states must be non-empty strings")
+    if len(set(states)) != len(states):
+        repeated = sorted({item for item in states if states.count(item) > 1})
+        raise LifecycleContractError(f"lifecycle contract names {repeated} twice in states")
     side_states = value.get("side_states")
     if not isinstance(side_states, list) or any(not isinstance(item, str) for item in side_states):
         raise LifecycleContractError("lifecycle contract side_states must be strings")
@@ -72,6 +75,21 @@ def _validate_contract(value: dict[str, Any]) -> None:
             raise LifecycleContractError(f"transition row {index} permitted_writer is required")
         if not isinstance(row["freshness_rule"], dict) or not row["freshness_rule"].get("mode"):
             raise LifecycleContractError(f"transition row {index} freshness_rule is required")
+    # `terminal_states` was declared in the artifact and read by nothing, so it
+    # could drift freely inside the very file that exists to stop drift. Bind it
+    # to the graph: a terminal state is exactly a state with no outgoing row.
+    terminal = value.get("terminal_states")
+    if not isinstance(terminal, list) or any(not isinstance(item, str) for item in terminal):
+        raise LifecycleContractError("lifecycle contract terminal_states must be strings")
+    unknown = sorted(set(terminal) - set(states))
+    if unknown:
+        raise LifecycleContractError(f"lifecycle contract terminal_states names unknown states {unknown}")
+    derived = {state for state in states if not any(row["state"] == state for row in rows)}
+    if set(terminal) != derived:
+        raise LifecycleContractError(
+            f"lifecycle contract terminal_states {sorted(terminal)} disagrees with the "
+            f"transition graph, which has no outgoing row for {sorted(derived)}",
+        )
     invariants = value.get("invariants")
     expected_invariants = {
         "evidence_freshness_after_repair", "approval_artifact",
