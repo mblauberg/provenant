@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
-import { existsSync, realpathSync } from "node:fs";
+import { existsSync, realpathSync, statSync } from "node:fs";
 import { isAbsolute, relative, resolve } from "node:path";
-import { basename, dirname } from "node:path";
+import { basename, dirname, join } from "node:path";
 
 import type { ErrorObject, ValidateFunction } from "ajv";
 import { Ajv2020 } from "ajv/dist/2020.js";
@@ -93,6 +93,44 @@ function validationField(error: ErrorObject | undefined): string | undefined {
 
 async function parseDocument(path: string): Promise<unknown> {
   return parse(await readFile(path, "utf8"));
+}
+
+function isDirectory(path: string): boolean {
+  try {
+    return statSync(path).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+function isFile(path: string): boolean {
+  try {
+    return statSync(path).isFile();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Find the nearest project configuration from a working directory.
+ *
+ * The first ancestor containing a `.provenant/` directory is the project root.
+ * The walk then stops, even when that directory is empty, and never falls
+ * through to an outer project root. This makes nested projects independent and
+ * keeps an absent or empty project layer a no-op.
+ */
+export function discoverProjectConfigPath(workingDirectory = process.cwd()): string | undefined {
+  let cursor = canonicalConfigPath(workingDirectory);
+  while (true) {
+    const projectDirectory = join(cursor, ".provenant");
+    if (isDirectory(projectDirectory)) {
+      const configPath = join(projectDirectory, "agent-fabric.yaml");
+      return isFile(configPath) ? canonicalConfigPath(configPath) : undefined;
+    }
+    const parent = dirname(cursor);
+    if (parent === cursor) return undefined;
+    cursor = parent;
+  }
 }
 
 async function validateDocument(value: unknown, layer: ConfigLayer): Promise<ConfigDocument> {
@@ -306,6 +344,7 @@ export async function loadFabricConfig(options: {
   localPath?: string;
   projectPath?: string;
   runPath?: string;
+  workingDirectory?: string;
   agentsHome?: string;
   additionalWorkspaceRoots?: string[];
 }): Promise<ResolvedFabricConfig> {
@@ -341,8 +380,9 @@ export async function loadFabricConfig(options: {
     ...(options.additionalWorkspaceRoots ?? []).map(canonicalConfigPath),
   ])].sort();
 
+  const projectPath = options.projectPath ?? discoverProjectConfigPath(options.workingDirectory);
   for (const [layer, path] of [
-    ["project", options.projectPath],
+    ["project", projectPath],
     ["run", options.runPath],
   ] as const) {
     if (path === undefined) continue;

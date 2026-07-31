@@ -465,16 +465,17 @@ async function seatStatus(
 
 export async function fabricStatus(arguments_: string[], paths: FabricPaths): Promise<Record<string, unknown>> {
   const selected = resolveStatusPaths(arguments_);
+  const project = resolve(option(arguments_, "--project") ?? process.cwd());
   // ${AGENTS_HOME} expands against the product root (#528); the layering is the
   // same composition daemon startup performs, so a widening instance file is
   // refused here exactly as the daemon would refuse it.
   const config = await loadFabricConfig({
     globalPath: selected.config,
     ...(selected.localConfig === undefined ? {} : { localPath: selected.localConfig }),
+    workingDirectory: project,
     agentsHome: selected.productRoot,
   });
   const roots = [...new Set([...config.workspaceRoots, ...await trustedWorkspaceRoots({ stateDirectory: paths.stateDirectory, executionProfile: config.executionProfile ?? "headless" })])].sort();
-  const project = resolve(option(arguments_, "--project") ?? process.cwd());
   const daemon = await daemonState(paths);
   return {
     schemaVersion: 1,
@@ -734,6 +735,7 @@ export async function fabricDoctor(
   dependencies: DoctorDependencies = {},
 ): Promise<Record<string, unknown>> {
   const selected = resolveStatusPaths(arguments_);
+  const workingDirectory = resolve(option(arguments_, "--project") ?? process.cwd());
   const consumeProviderQuota = arguments_.includes("--consume-provider-quota");
   let adapterIds: string[] = [];
   let adapterCommands: string[][] = [];
@@ -761,6 +763,7 @@ export async function fabricDoctor(
     const config = await loadFabricConfig({
       globalPath: selected.config,
       ...(selected.localConfig === undefined ? {} : { localPath: selected.localConfig }),
+      workingDirectory,
       agentsHome: selected.productRoot,
     });
     adapterIds = config.adapterIds;
