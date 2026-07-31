@@ -2,7 +2,6 @@ import {
   buildAgyInvocation,
   buildCursorInvocation,
   buildKiroAcpInvocation,
-  buildPiRpcLaunch,
   type ProviderInvocation,
 } from "../adapters/providers/optional/invocations.js";
 import { verifyProviderConformance } from "../adapters/provider-conformance.js";
@@ -95,23 +94,13 @@ export async function resolveAdapterInvocationCli(
   if (provider === "opencode-acp") {
     throw new Error("provider opencode-acp is registered but has no invocation payload");
   }
-  if (provider !== "agy" && provider !== "cursor" && provider !== "kiro" && provider !== "pi") {
-    throw new Error(`unknown provider: ${provider}`);
-  }
-
   if (provider === "pi") {
-    assertAllowedOptions(parsed, provider, new Set(["--cwd", "--timeout-ms"]));
-    const cwd = parsed.get("--cwd");
-    const timeoutMs = optionalTimeout(parsed, provider);
-    const executable = await resolveAdapterExecutableCli(
-      executableArguments(parsed, "pi-rpc"),
-      dependencies,
+    throw new Error(
+      "provider pi is registered but has no provider conformance policy and is disabled in the adapter compatibility config",
     );
-    return buildPiRpcLaunch({
-      executable,
-      ...(cwd === undefined ? {} : { cwd }),
-      ...(timeoutMs === undefined ? {} : { timeoutMs }),
-    });
+  }
+  if (provider !== "agy" && provider !== "cursor" && provider !== "kiro") {
+    throw new Error(`unknown provider: ${provider}`);
   }
 
   if (provider === "kiro") {

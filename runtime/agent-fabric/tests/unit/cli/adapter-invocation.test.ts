@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import { readFile, rm, writeFile } from "node:fs/promises";
+import { readFile, realpath, rm, writeFile } from "node:fs/promises";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { parse } from "yaml";
@@ -154,34 +154,16 @@ describe("adapter invocation resolver CLI", () => {
     });
   });
 
-  it("builds a Pi RPC launch from only common launch options", async () => {
-    const fixture = await createResolvedStage4Compatibility("pi-rpc");
-    fixtures.push(fixture);
-    const configPath = join(fixture.directory, "agent-fabric.yaml");
-    await writeFile(
-      configPath,
-      "schemaVersion: 1\nallowedAdapters: [pi-rpc]\nactiveAdapters: [pi-rpc]\n",
-    );
-    const verifyProvider = vi.fn(async () => ({} as never));
-
-    const invocation = await resolveAdapterInvocationCli([
+  it.each([
+    ["with common launch options", ["--cwd", "/fixture/worktree", "--timeout-ms", "15000"]],
+    ["without optional launch options", []],
+  ])("refuses Pi %s because it has no provider conformance policy", async (_description, options) => {
+    await expect(resolveAdapterInvocationCli([
       "--adapter", "pi",
-      "--config", configPath,
-      "--compatibility", fixture.compatibilityPath,
-      "--compatibility-schema", fixture.schemaPath,
-      "--cwd", "/fixture/worktree",
-      "--timeout-ms", "15000",
-    ], {
-      verifyProvider,
-    });
-
-    expect(verifyProvider).toHaveBeenCalledWith(expect.objectContaining({ adapterId: "pi-rpc" }));
-    expect(invocation).toEqual({
-      executable: await fixtureExecutable(fixture, "pi-rpc"),
-      args: ["--mode", "rpc"],
-      cwd: "/fixture/worktree",
-      timeoutMs: 15_000,
-    });
+      ...options,
+    ])).rejects.toThrow(
+      "provider pi is registered but has no provider conformance policy and is disabled in the adapter compatibility config",
+    );
   });
 
   it("builds the minimal Agy invocation without optional fields", async () => {
@@ -213,6 +195,27 @@ describe("adapter invocation resolver CLI", () => {
         "--print", "review",
       ],
     });
+  });
+
+  it("uses the default provider conformance path for a supported Agy provider", async () => {
+    const fixture = await createResolvedStage4Compatibility("agy");
+    fixtures.push(fixture);
+    const configPath = join(fixture.directory, "agent-fabric.yaml");
+    await writeFile(configPath, "schemaVersion: 1\nallowedAdapters: [agy]\nactiveAdapters: [agy]\n");
+    const executable = await realpath(await fixtureExecutable(fixture, "agy"));
+
+    await expect(resolveAdapterInvocationCli([
+      "--adapter", "agy",
+      "--agents-home", fixture.directory,
+      "--product-root", fixture.directory,
+      "--instance-root", fixture.directory,
+      "--config", configPath,
+      "--compatibility", fixture.compatibilityPath,
+      "--compatibility-schema", fixture.schemaPath,
+      "--mode", "plan",
+      "--model", "gemini",
+      "--prompt", "review",
+    ])).rejects.toThrow(`provider signature is invalid: ${executable}`);
   });
 
   it("builds the minimal Cursor invocation without optional fields", async () => {
@@ -274,31 +277,10 @@ describe("adapter invocation resolver CLI", () => {
     });
   });
 
-  it("builds the minimal Pi RPC invocation without optional fields", async () => {
-    const fixture = await createResolvedStage4Compatibility("pi-rpc");
-    fixtures.push(fixture);
-    const configPath = join(fixture.directory, "agent-fabric.yaml");
-    await writeFile(configPath, "schemaVersion: 1\nallowedAdapters: [pi-rpc]\nactiveAdapters: [pi-rpc]\n");
-
-    await expect(resolveAdapterInvocationCli([
-      "--adapter", "pi",
-      "--agents-home", fixture.directory,
-      "--config", configPath,
-      "--compatibility", fixture.compatibilityPath,
-      "--compatibility-schema", fixture.schemaPath,
-    ], {
-      verifyProvider: vi.fn(async () => ({} as never)),
-    })).resolves.toStrictEqual({
-      executable: await fixtureExecutable(fixture, "pi-rpc"),
-      args: ["--mode", "rpc"],
-    });
-  });
-
   it.each([
     ["agy", ["--mode", "plan", "--model", "gemini", "--prompt", "review", "--agent-engine", "v2"], "--agent-engine"],
     ["cursor", ["--mode", "plan", "--model", "composer", "--prompt", "review", "--log-file", "agy.log"], "--log-file"],
     ["kiro", ["--model", "qwen", "--agent-engine", "v2", "--mode", "plan"], "--mode"],
-    ["pi", ["--model", "qwen"], "--model"],
   ])("refuses fields outside the %s invocation shape", async (provider, providerArguments, unknownOption) => {
     await expect(resolveAdapterInvocationCli([
       "--adapter", provider,
@@ -371,11 +353,10 @@ describe("adapter invocation resolver CLI", () => {
 
     expect(result.exitCode).toBe(1);
     expect(result.stderr).toContain(
-      "adapter invocation --adapter agy|cursor|kiro|pi [agy: --mode plan|accept-edits --model MODEL --prompt TEXT",
+      "adapter invocation --adapter agy|cursor|kiro [agy: --mode plan|accept-edits --model MODEL --prompt TEXT",
     );
     expect(result.stderr).toContain("cursor: --mode plan|ask --model MODEL --prompt TEXT");
     expect(result.stderr).toContain("kiro: --model MODEL --agent-engine v2");
-    expect(result.stderr).toContain("pi: [--cwd PATH] [--timeout-ms MS]");
   });
 
   it.each([
@@ -420,53 +401,63 @@ describe("adapter invocation resolver CLI", () => {
 
   it("refuses a non-positive timeout before compatibility I/O", async () => {
     await expect(resolveAdapterInvocationCli([
-      "--adapter", "pi",
+      "--adapter", "agy",
+      "--mode", "plan",
+      "--model", "gemini",
+      "--prompt", "review",
       "--timeout-ms", "0",
-    ])).rejects.toThrow("adapter invocation for pi received invalid timeout-ms value: 0");
+    ])).rejects.toThrow("adapter invocation for agy received invalid timeout-ms value: 0");
   });
 
   it.each(["1.5", "not-a-number"])("refuses a non-integer timeout value: %s", async (value) => {
     await expect(resolveAdapterInvocationCli([
-      "--adapter", "pi",
+      "--adapter", "agy",
+      "--mode", "plan",
+      "--model", "gemini",
+      "--prompt", "review",
       "--timeout-ms", value,
-    ])).rejects.toThrow(`adapter invocation for pi received invalid timeout-ms value: ${value}`);
+    ])).rejects.toThrow(`adapter invocation for agy received invalid timeout-ms value: ${value}`);
   });
 
   it("refuses a timeout above Node's timer maximum", async () => {
     await expect(resolveAdapterInvocationCli([
-      "--adapter", "pi",
+      "--adapter", "agy",
+      "--mode", "plan",
+      "--model", "gemini",
+      "--prompt", "review",
       "--timeout-ms", "2147483648",
     ])).rejects.toThrow(
-      "adapter invocation for pi received invalid timeout-ms value: 2147483648; maximum is 2147483647ms",
+      "adapter invocation for agy received invalid timeout-ms value: 2147483648; maximum is 2147483647ms",
     );
   });
 
   it("rejects a trailing option flag", async () => {
     await expect(resolveAdapterInvocationCli([
-      "--adapter", "pi",
+      "--adapter", "agy",
       "--cwd",
     ])).rejects.toThrow("adapter invocation requires a value for --cwd");
   });
 
   it("rejects an empty option value", async () => {
     await expect(resolveAdapterInvocationCli([
-      "--adapter", "pi",
+      "--adapter", "agy",
       "--cwd", "",
     ])).rejects.toThrow("adapter invocation requires a value for --cwd");
   });
 
   it("rejects an option value beginning with a dash", async () => {
     await expect(resolveAdapterInvocationCli([
-      "--adapter", "pi",
+      "--adapter", "agy",
       "--cwd", "--not-a-path",
     ])).rejects.toThrow("adapter invocation requires a value for --cwd");
   });
 
   it("rejects a duplicated option", async () => {
     await expect(resolveAdapterInvocationCli([
-      "--adapter", "pi",
+      "--adapter", "agy",
       "--cwd", "/one",
       "--cwd", "/two",
     ])).rejects.toThrow("adapter invocation received duplicate option: --cwd");
   });
+
 });
