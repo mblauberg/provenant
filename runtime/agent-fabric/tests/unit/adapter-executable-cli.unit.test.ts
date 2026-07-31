@@ -105,6 +105,7 @@ describe("adapter executable resolver CLI", () => {
     const productRoot = join(fixture.directory, "product");
     await Promise.all([
       mkdir(join(instanceRoot, "config"), { recursive: true }),
+      mkdir(join(instanceRoot, ".agent-fabric"), { recursive: true }),
       mkdir(join(productRoot, "config"), { recursive: true }),
       mkdir(join(productRoot, "runtime", "agent-fabric", "schemas"), { recursive: true }),
     ]);
@@ -139,10 +140,57 @@ describe("adapter executable resolver CLI", () => {
     const productRoot = join(fixture.directory, "narrowing-product");
     await Promise.all([
       mkdir(join(instanceRoot, "config"), { recursive: true }),
+      mkdir(join(instanceRoot, ".agent-fabric"), { recursive: true }),
       mkdir(join(productRoot, "config"), { recursive: true }),
       mkdir(join(productRoot, "runtime", "agent-fabric", "schemas"), { recursive: true }),
     ]);
     await Promise.all([
+      writeFile(
+        join(productRoot, "config", "agent-fabric.yaml"),
+        "schemaVersion: 1\nallowedAdapters: [agy]\nactiveAdapters: [agy]\n",
+      ),
+      writeFile(
+        join(instanceRoot, "config", "agent-fabric.yaml"),
+        "schemaVersion: 1\nactiveAdapters: []\n",
+      ),
+      writeFile(
+        join(instanceRoot, ".agent-fabric", "product-root.json"),
+        JSON.stringify({ schema_version: 1, product_root: productRoot }),
+      ),
+      copyFile(fixture.compatibilityPath, join(productRoot, "config", "adapter-compatibility.yaml")),
+      copyFile(
+        fixture.schemaPath,
+        join(productRoot, "runtime", "agent-fabric", "schemas", "adapter-compatibility.schema.json"),
+      ),
+    ]);
+
+    // The daemon would not start this adapter, so this command must not hand
+    // back an executable for it either.
+    await expect(resolveAdapterExecutableCli([
+      "--adapter", "agy",
+      "--product-root", productRoot,
+      "--instance-root", instanceRoot,
+    ], {
+      verifyProvider: async () => ({} as never),
+    })).rejects.toMatchObject({ code: "ADAPTER_DISABLED" });
+  });
+
+  it("applies a paired default instance layer without an instance environment variable", async () => {
+    const fixture = await createResolvedStage4Compatibility("agy");
+    fixtures.push(fixture);
+    const productRoot = join(fixture.directory, "product");
+    const instanceRoot = join(fixture.directory, ".agents");
+    await Promise.all([
+      mkdir(join(instanceRoot, "config"), { recursive: true }),
+      mkdir(join(instanceRoot, ".agent-fabric"), { recursive: true }),
+      mkdir(join(productRoot, "config"), { recursive: true }),
+      mkdir(join(productRoot, "runtime", "agent-fabric", "schemas"), { recursive: true }),
+    ]);
+    await Promise.all([
+      writeFile(
+        join(instanceRoot, ".agent-fabric", "product-root.json"),
+        JSON.stringify({ schema_version: 1, product_root: productRoot }),
+      ),
       writeFile(
         join(productRoot, "config", "agent-fabric.yaml"),
         "schemaVersion: 1\nallowedAdapters: [agy]\nactiveAdapters: [agy]\n",
@@ -158,12 +206,12 @@ describe("adapter executable resolver CLI", () => {
       ),
     ]);
 
-    // The daemon would not start this adapter, so this command must not hand
-    // back an executable for it either.
+    vi.stubEnv("HOME", fixture.directory);
+    vi.stubEnv("AGENT_FABRIC_INSTANCE_ROOT", undefined);
+
     await expect(resolveAdapterExecutableCli([
       "--adapter", "agy",
       "--product-root", productRoot,
-      "--instance-root", instanceRoot,
     ], {
       verifyNpmInstall: async () => undefined,
       verifyProvider: async () => ({} as never),

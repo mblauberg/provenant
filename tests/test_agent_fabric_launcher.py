@@ -283,14 +283,13 @@ def _copy_protocol_consumer(root: Path, package: str) -> tuple[Path, Path]:
     return executable, marker
 
 
-def _stale_refusal(agents_home: Path, script_root: Path | None = None) -> str:
-    scripts = script_root or agents_home
+def _stale_refusal(agents_home: Path) -> str:
     return (
         "AGENT_FABRIC_PROTOCOL_BUILD_STALE: local "
         "@local/agent-fabric-protocol dist is missing, unloadable, or stale "
         "against its build inputs\n"
         f'repair: AGENTS_HOME="{agents_home}" '
-        f'"{scripts / "scripts/agent-fabric-protocol-build"}"\n'
+        f'"{agents_home / "scripts/agent-fabric-protocol-build"}"\n'
     )
 
 
@@ -473,6 +472,31 @@ def test_packaged_doctor_runs_with_stale_protocol_verdict_and_exact_repair(
         launcher_mode="packaged",
         protocol_dist="stale",
     )
+
+    result = _run(root, marker, fake_node)
+
+    assert result.returncode == 0, result.stderr
+    assert marker.read_text(encoding="utf-8").splitlines() == [
+        str(root / "runtime/agent-fabric/dist/cli/main.js"),
+        "doctor",
+    ]
+    assert marker.with_name("launcher-environment").read_text(
+        encoding="utf-8",
+    ).splitlines() == [
+        "stale",
+        f'AGENTS_HOME="{root}" "{root / "scripts/agent-fabric-protocol-build"}"',
+    ]
+
+
+def test_doctor_reports_stale_protocol_when_repair_script_is_missing(
+    tmp_path: Path,
+) -> None:
+    root, marker, fake_node = _fixture(
+        tmp_path,
+        launcher_mode="packaged",
+        protocol_dist="stale",
+    )
+    (root / "scripts/agent-fabric-protocol-build").unlink()
 
     result = _run(root, marker, fake_node)
 
@@ -822,6 +846,8 @@ def test_inherited_agents_home_stale_dist_keeps_the_exact_refusal(
         os.utime(diagnosed / manifest, (now, now))
     _mark_install_root(diagnosed)
     _write(diagnosed / "node_modules/.keep")
+    (diagnosed / "scripts").mkdir()
+    shutil.copy2(PROTOCOL_BUILD, diagnosed / "scripts/agent-fabric-protocol-build")
     _copy_attestation_scripts(diagnosed)
     _write_fixture_attestation(diagnosed)
     npm_marker, env = _repair_fixture(
@@ -848,7 +874,7 @@ def test_inherited_agents_home_stale_dist_keeps_the_exact_refusal(
 
     assert result.returncode == 78
     assert result.stdout == ""
-    assert result.stderr == _stale_refusal(diagnosed, script_root)
+    assert result.stderr == _stale_refusal(diagnosed)
     assert not npm_marker.exists(), "an inherited AGENTS_HOME must never autobuild"
     assert not marker.exists()
 
@@ -2017,19 +2043,22 @@ def test_failed_protocol_repair_leaves_the_workspace_honestly_stale(
 
 
 def test_protocol_preflight_repair_names_the_diagnosed_tree(tmp_path: Path) -> None:
-    """AGENTS_HOME is not always the tree the scripts live in.
+    """A repair uses the product tree whose protocol build was diagnosed.
 
-    Naming the bare script sends an operator to rebuild a different checkout
-    and leaves the diagnosed one stale — reachable whenever worktrees are in
-    play, which is this repository's normal working mode.
+    AGENTS_HOME names the product code tree, so the emitted command must use the
+    same tree for both the environment and build script. A preflight can be
+    invoked from a different checkout, which is reachable whenever worktrees
+    are in play, but a split instance is selected by
+    AGENT_FABRIC_INSTANCE_ROOT, not AGENTS_HOME; this preflight has no
+    instance-root input.
     """
     root, _marker, _fake_node = _fixture(
         tmp_path,
         launcher_mode="packaged",
         protocol_dist="missing",
     )
-    diagnosed = tmp_path / "other-tree"
-    diagnosed.mkdir()
+    diagnosed = tmp_path / "diagnosed-product"
+    _copy_launcher_scripts(diagnosed)
 
     result = subprocess.run(
         [str(root / "scripts/agent-fabric-protocol-preflight")],
@@ -2042,7 +2071,7 @@ def test_protocol_preflight_repair_names_the_diagnosed_tree(tmp_path: Path) -> N
     assert result.returncode == 78
     assert (
         f'repair: AGENTS_HOME="{diagnosed}" '
-        f'"{root / "scripts/agent-fabric-protocol-build"}"'
+        f'"{diagnosed / "scripts/agent-fabric-protocol-build"}"'
     ) in result.stderr
 
 
@@ -2071,6 +2100,31 @@ def test_protocol_preflight_reports_a_partial_install_as_typed_and_repairable(
 
     assert result.returncode == 78
     assert "AGENT_FABRIC_PREFLIGHT_INCOMPLETE" in result.stderr
+    assert "scripts/lib" in result.stderr
+
+
+def test_protocol_preflight_does_not_emit_a_missing_repair_script(
+    tmp_path: Path,
+) -> None:
+    root, _marker, _fake_node = _fixture(
+        tmp_path,
+        launcher_mode="packaged",
+        protocol_dist="missing",
+    )
+    (root / "scripts/agent-fabric-protocol-build").unlink()
+
+    result = subprocess.run(
+        [str(root / "scripts/agent-fabric-protocol-preflight")],
+        env={**os.environ, "AGENTS_HOME": str(root)},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 78
+    assert "AGENT_FABRIC_PROTOCOL_BUILD_INCOMPLETE" in result.stderr
+    assert "agent-fabric-protocol-build" in result.stderr
+    assert "repair: AGENTS_HOME=" not in result.stderr
     assert "scripts/lib" in result.stderr
 
 

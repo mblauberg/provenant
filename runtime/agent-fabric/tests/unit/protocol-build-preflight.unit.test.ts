@@ -13,12 +13,10 @@ afterEach(async () => {
 });
 
 describe("protocol build preflight", () => {
-  it("judges the tree it was loaded from, not an ambient AGENTS_HOME", async () => {
-    // AGENTS_HOME selects a config/state home, and callers legitimately point it
-    // at a synthetic one that holds no code at all — the MCP lifecycle tests do
-    // exactly that. The dist this process will import is the one beside this
-    // module, so that is the only tree whose freshness is evidence about it.
-    // Inheriting AGENTS_HOME instead reports every such caller as stale.
+  it("judges the code-adjacent product tree, not a different product root", async () => {
+    // AGENTS_HOME names product code, but this process imports the dist beside
+    // this module. That code-adjacent product root is the only tree whose
+    // freshness is evidence about the loaded protocol package.
     const home = await mkdtemp("/tmp/afb-preflight-");
     roots.push(home);
     const previous = process.env.AGENTS_HOME;

@@ -88,6 +88,28 @@ The current pre-release tree includes:
 
 ### Changed
 
+- `AGENTS_HOME` now names only the product root. When it names a non-`~/.agents`
+  checkout without an explicit instance root, the next `install-harness` run
+  seeds the instance at `~/.agents` and rewrites that instance's machine-local
+  product pointer to the selected checkout. Linked worktrees are refused unless
+  the operator explicitly acknowledges the pointer rewrite (#549).
+  **Breaking, with a migration.** `AGENTS_HOME` previously doubled as an
+  instance-root fallback. A setup that relied on that second sense, with
+  `AGENTS_HOME` naming the instance and no `AGENT_FABRIC_INSTANCE_ROOT` set,
+  now resolves its instance to `~/.agents`, and the configuration under the old
+  location stops being layered. To keep the old instance, name it explicitly
+  with `AGENT_FABRIC_INSTANCE_ROOT`; to adopt the new default, re-run
+  `install-harness`. Both roots were ambiguous precisely because one variable
+  meant two things, which is what this change ends.
+- An instance contributes its local configuration layer only when its
+  machine-local `.agent-fabric/product-root.json` pointer names the product
+  actually in use, rather than whenever an instance root happened to be set
+  explicitly. Both paths are canonicalised before comparison, so a product
+  reached through a symlink still pairs. A pointer that is absent leaves the
+  instance quietly unpaired, but one that is present and cannot be read,
+  parsed or recognised now raises rather than silently dropping the layer:
+  local configuration can only narrow, so failing quiet would widen the
+  effective limits (#549, #563).
 - Applied the `writing-great-skills` doctrine across the catalogue (epic #124):
   merged `skill-audit` + `skill-authoring` into the branched `skill-craft`,
   merged `frontend-design` + `frontend-review` into the branched `ui-ux-design`,
