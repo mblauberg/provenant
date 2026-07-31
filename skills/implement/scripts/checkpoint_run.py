@@ -4,11 +4,12 @@
 from __future__ import annotations
 
 import argparse
-from datetime import datetime, timezone
+import fcntl
 import json
 import os
-from pathlib import Path
 import tempfile
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 
@@ -20,7 +21,7 @@ def fsync_directory(path: Path) -> None:
         os.close(descriptor)
 
 
-def update(path: Path, current_slice: str, next_action: str, in_flight: list[Any], artifacts: list[Any]) -> dict[str, Any]:
+def _update_locked(path: Path, current_slice: str, next_action: str, in_flight: list[Any], artifacts: list[Any]) -> dict[str, Any]:
     path = path.resolve()
     root = path.parent
     run = json.loads(path.read_text())
@@ -80,6 +81,18 @@ def update(path: Path, current_slice: str, next_action: str, in_flight: list[Any
         actual.get("artifact_paths") == merged,
     ))
     return {"path": str(path), "generation": generation + 1, "verified": verified}
+
+
+def update(path: Path, current_slice: str, next_action: str, in_flight: list[Any], artifacts: list[Any]) -> dict[str, Any]:
+    """Compatibility writer sharing the producer's in-directory receipt lock."""
+    path = path.resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with (path.parent / ".RUN.lock").open("a+") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            return _update_locked(path, current_slice, next_action, in_flight, artifacts)
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
 
 def main(argv: list[str] | None = None) -> int:

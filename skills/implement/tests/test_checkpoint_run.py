@@ -27,6 +27,7 @@ def test_checkpoint_updates_atomically_and_verifies(tmp_path):
     data = json.loads(run.read_text())
     assert data["checkpoint"]["generation"] == 1
     assert data["checkpoint"]["artifact_paths"] == ["RUN.json", "review.md"]
+    assert (tmp_path / ".RUN.lock").is_file()
 
 
 def test_checkpoint_rejects_missing_or_escaping_artifacts(tmp_path):
