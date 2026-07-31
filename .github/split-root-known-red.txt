@@ -10,11 +10,20 @@
 # that fixed it.  Nothing here is a skip.  Do not add an entry without an
 # owning issue, and do not add one to silence a failure you have not diagnosed.
 #
-# Both current entries are the same class: the test pins the instance root by
-# setting AGENTS_HOME, but an ambient AGENT_FABRIC_INSTANCE_ROOT outranks it,
-# so under split roots the test reads the ambient root and no longer tests what
-# it claims to.  In a fused checkout the two are the same directory and the
-# test passes by coincidence.  These must be made hermetic before #565 cutover.
+# Both current entries are the same class, and the class is an open question
+# rather than a known-bad test.  Each caller sets AGENTS_HOME explicitly to
+# select an instance root, and an ambient AGENT_FABRIC_INSTANCE_ROOT outranks
+# it, so the explicit selection is silently ignored.  Today that is invisible:
+# the two roots are the same directory, no ambient instance root is exported,
+# and the tests pass by coincidence.  After #565 an exported instance root is
+# the normal state, so this precedence decides whether a user who sets
+# AGENTS_HOME gets the root they asked for.
+#
+# The tests encode one answer (explicit AGENTS_HOME wins); the runtime
+# implements another (ambient AGENT_FABRIC_INSTANCE_ROOT wins).  #563 owns
+# choosing, and must then fix whichever side is wrong.  This rig deliberately
+# does not assume which - it only makes the disagreement fail out loud instead
+# of resolving itself by coincidence.
 
 tests/test_instance_installation.py::test_the_standalone_cli_refuses_a_relative_environment_instance_root #563
 tests/test_provenant_cli.py::test_split_root_preserves_instance_root_for_mcp_child #563
