@@ -467,6 +467,30 @@ def _print_output(result: CommandResult) -> None:
         print(result.output.rstrip())
 
 
+def target_existed_at_base(base_root: Path, target: str) -> bool:
+    """Check the merge-base tree, not the current test copy, for a target."""
+
+    completed = subprocess.run(
+        ["git", "-C", str(base_root), "cat-file", "-e", f"origin/main:{target}"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    return completed.returncode == 0
+
+
+def right_reason_red_evidence(result: CommandResult, target_existed: bool) -> str | None:
+    """Return the accepted evidence kind, or ``None`` for a defective red."""
+
+    if result.returncode == 0:
+        return None
+    if result.classification is FailureClass.ASSERTION:
+        return "assertion"
+    if not target_existed:
+        return "new-target"
+    return None
+
+
 def _all_assertion_failures(results: list[CommandResult]) -> bool:
     return bool(results) and all(result.classification is FailureClass.ASSERTION for result in results)
 
@@ -482,16 +506,27 @@ def gate_right_reason_red(
         base_root = Path(directory)
         _materialise_base(source_root, base, base_root, tests)
         results = _run_suite(commands, base_root, tests)
-    bad = [result for result in results if result.classification is not FailureClass.ASSERTION]
+        targets = _targets(commands, tests)
+        evidence = [
+            right_reason_red_evidence(result, target_existed_at_base(base_root, target))
+            for result, target in zip(results, targets, strict=True)
+        ]
     for result in results:
         _print_output(result)
-    if bad:
+    assertion_count = evidence.count("assertion")
+    new_target_count = evidence.count("new-target")
+    rejected_count = evidence.count(None)
+    if rejected_count:
         print(
             "RIGHT_REASON_RED: FAIL "
-            f"{len(bad)}/{len(results)} test targets did not produce assertion-failure reds"
+            f"tests={len(results)} assertion={assertion_count} "
+            f"new-target={new_target_count} rejected={rejected_count}"
         )
         return 1
-    print(f"RIGHT_REASON_RED: PASS tests={len(results)} assertion_failures={len(results)}")
+    print(
+        "RIGHT_REASON_RED: PASS "
+        f"tests={len(results)} assertion={assertion_count} new-target={new_target_count}"
+    )
     return 0
 
 

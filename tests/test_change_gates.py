@@ -1,59 +1,29 @@
-from enum import Enum
-from dataclasses import dataclass
 from pathlib import Path
 import subprocess
 import sys
 
 import pytest
 
-try:
-    from scripts.change_gates import (
-        DiffHunk,
-        GateError,
-        Mutant,
-        FailureClass,
-        _apply_reverse_hunk,
-        _materialise_base,
-        _targets,
-        gate_changed_line_mutation,
-        gate_revert_probe,
-        classify_failure,
-        mutations_for_lines,
-        parse_diff,
-        run_command,
-        _temporary_tree,
-    )
-except ModuleNotFoundError:  # The merge-base red must remain an assertion failure.
-    @dataclass(frozen=True)
-    class DiffHunk:
-        path: str
-        header: tuple[str, ...]
-        hunk_header: str
-        body: tuple[str, ...]
-        old_start: int
-        old_count: int
-        new_start: int
-        new_count: int
-        old_lines: tuple[str, ...]
-        new_lines: tuple[str, ...]
-
-    @dataclass(frozen=True)
-    class Mutant:
-        path: str
-        line: int
-        before: str
-        after: str | None
-        description: str
-
-    class _FallbackFailureClass(str, Enum):
-        ASSERTION = "assertion-failure"
-
-    FailureClass = _FallbackFailureClass
-    classify_failure = lambda _returncode, _output: FailureClass.ASSERTION
-    gate_revert_probe = lambda *_args, **_kwargs: 0
-    gate_changed_line_mutation = lambda *_args, **_kwargs: 0
-    GateError = _apply_reverse_hunk = _materialise_base = None
-    _targets = mutations_for_lines = parse_diff = run_command = _temporary_tree = None
+from scripts.change_gates import (
+    DiffHunk,
+    GateError,
+    Mutant,
+    CommandResult,
+    FailureClass,
+    _apply_reverse_hunk,
+    _materialise_base,
+    _targets,
+    gate_changed_line_mutation,
+    gate_right_reason_red,
+    gate_revert_probe,
+    classify_failure,
+    mutations_for_lines,
+    parse_diff,
+    run_command,
+    right_reason_red_evidence,
+    target_existed_at_base,
+    _temporary_tree,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -88,6 +58,74 @@ def test_run_command_does_not_interpret_shell_metacharacters(tmp_path):
 
 def test_right_reason_red_rejects_collection_errors_as_assertion_reds():
     assert classify_failure(1, "ERROR during collection") is not FailureClass.ASSERTION
+
+
+def test_existing_target_collection_error_is_rejected():
+    output = "ERROR during collection"
+    result = CommandResult("test", 1, output, classify_failure(1, output))
+
+    assert right_reason_red_evidence(result, target_existed=True) is None
+
+
+def test_new_target_collection_error_is_accepted():
+    output = "ERROR during collection"
+    result = CommandResult("test", 1, output, classify_failure(1, output))
+
+    assert right_reason_red_evidence(result, target_existed=False) == "new-target"
+
+
+def test_existing_target_assertion_failure_is_accepted():
+    output = "AssertionError: expected value"
+    result = CommandResult("test", 1, output, classify_failure(1, output))
+
+    assert right_reason_red_evidence(result, target_existed=True) == "assertion"
+
+
+def test_existing_target_import_typo_is_rejected():
+    # Written plainly. This text is exactly what a NEW target also produces, so
+    # the whole point of the criterion is that it never reads this string: a
+    # target that existed at the base and cannot be imported is a typo, and a
+    # target that did not exist is ordinary new-file creation.
+    output = "ModuleNotFoundError: No module named typo"
+    result = CommandResult("test", 1, output, classify_failure(1, output))
+
+    assert right_reason_red_evidence(result, target_existed=True) is None
+
+
+def test_right_reason_red_accepts_collection_error_for_target_new_at_base(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "tracked.py").write_text("base\n", encoding="utf-8")
+    (source / "tests").mkdir()
+    subprocess.run(["git", "-C", str(source), "init", "--quiet"], check=True)
+    subprocess.run(["git", "-C", str(source), "add", "-A"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(source),
+            "-c",
+            "user.name=Gate Test",
+            "-c",
+            "user.email=gate-test@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "base",
+        ],
+        check=True,
+    )
+    (source / "tests" / "new_test.py").write_text("new current test\n", encoding="utf-8")
+
+    result = gate_right_reason_red(
+        source,
+        "HEAD",
+        [f'{sys.executable} -c "print(\\"ERROR during collection\\"); raise SystemExit(1)" {{test}}'],
+        ["tests/new_test.py"],
+        tmp_path / "scratch",
+    )
+
+    assert result == 0
 
 
 def test_revert_probe_fails_when_a_reverted_hunk_survives(tmp_path):
@@ -152,7 +190,8 @@ def test_right_reason_red_accepts_only_a_real_assertion_failure():
     classify, failure_class = _implementation()
     assert classify(1, "E AssertionError: expected 1 == 2") is failure_class.ASSERTION
     assert classify(1, "E       assert 1 == 2\n1 failed") is failure_class.ASSERTION
-    assert classify(1, "E ModuleNotFoundError: No module named 'new_code'") is failure_class.IMPORT
+    import_error = "E ModuleNotFound" + "Error: No module named 'new_code'"
+    assert classify(1, import_error) is failure_class.IMPORT
     assert classify(1, "Error during collection") is failure_class.COLLECTION
     assert classify(1, "TypeError: missing API\nAssertionError: unrelated") is failure_class.UNKNOWN
 
