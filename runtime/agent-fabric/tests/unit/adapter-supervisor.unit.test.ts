@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 
 import { AdapterSupervisor } from "../../src/adapters/supervisor.ts";
+import { settle } from "../shared/deadline-wait.ts";
 
 const fixturePath = fileURLToPath(new URL("../support/supervisor-fixture.ts", import.meta.url));
 const ATTESTATION_CHALLENGE = "cd".repeat(32);
@@ -446,7 +447,7 @@ describe("persistent adapter supervision", () => {
         providerSessionGeneration: 1,
         bridgeGeneration: 1,
       }, "retained adapter transport closed");
-      await new Promise((resolve) => setTimeout(resolve, 50));
+      await settle(50, "no second chair bridge loss callback follows the first");
       expect(loss).toHaveBeenCalledOnce();
     } finally {
       await supervisor.close();

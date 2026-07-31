@@ -1,0 +1,43 @@
+// Fixture for tests/unit/w558-test-waiters.unit.test.ts. Not compiled, not run:
+// it holds exactly the shapes the guard must refuse, so that a scanner which
+// quietly stops matching fails loudly instead of passing everything.
+
+export async function handRolledPoll(ready: () => boolean): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    if (ready()) return;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error("timed out");
+}
+
+export function spinUntilElapsed(budgetMs: number): void {
+  const startedAt = performance.now();
+  for (;;) {
+    if (performance.now() - startedAt >= budgetMs) return;
+  }
+}
+
+export async function sleepThenAssert(expect: (value: unknown) => { toBe: (other: unknown) => void }): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  expect(1).toBe(1);
+}
+
+// Evasion 1 (confirmed in review): a counter-bounded loop whose sleep is an
+// aliased node:timers/promises import, never the literal setTimeout.
+export async function counterBoundedPoll(ready: () => boolean): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (ready()) return;
+    await delay(10);
+  }
+  throw new Error("timed out");
+}
+
+// Evasion 2 (confirmed in review): a formatter wrapping the sleep across lines.
+export async function wrappedSleepThenAssert(
+  expect: (value: unknown) => { toBe: (other: unknown) => void },
+): Promise<void> {
+  await new Promise((resolve) =>
+    setTimeout(resolve, 20));
+  expect(1).toBe(1);
+}

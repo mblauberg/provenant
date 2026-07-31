@@ -12,6 +12,7 @@ import { openFabric, type Fabric, type FabricClient } from "../../../src/index.t
 import { servePublicProtocolConnection } from "../../../src/daemon/public-protocol.ts";
 import { canonicalJson } from "../../../src/persistence/row-codec.ts";
 import { AtomicDeliveryStore } from "../../../src/results/store.ts";
+import { eventually } from "../../shared/deadline-wait.ts";
 import {
   TestLifecycleReceiptAuthority,
   type LifecycleReceiptAuthorityCorruption,
@@ -42,21 +43,6 @@ type ConfiguredFixture = {
 afterEach(async () => {
   await Promise.all(cleanup.splice(0).map((close) => close()));
 });
-
-async function eventually(assertion: () => Promise<void> | void, timeoutMs = 8_000): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  let failure: unknown;
-  while (Date.now() < deadline) {
-    try {
-      await assertion();
-      return;
-    } catch (error: unknown) {
-      failure = error;
-      await new Promise((resolve) => setTimeout(resolve, 25));
-    }
-  }
-  throw failure;
-}
 
 function expectUnverifiedCommittingAdvanceRejected(database: Database.Database, runId: string, agentId: string): void {
   expect(() => database.prepare(`

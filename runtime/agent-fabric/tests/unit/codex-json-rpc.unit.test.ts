@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { CodexJsonRpcConnection } from "../../src/adapters/providers/codex-json-rpc.ts";
+import { settle } from "../shared/deadline-wait.ts";
 
 const FAKE_SERVER = String.raw`
 const readline = require("node:readline");
@@ -60,7 +61,7 @@ describe("Codex JSON-RPC notification consumption", () => {
     try {
       await connection.initialize();
       await connection.request("emit", {});
-      await new Promise((resolve) => setTimeout(resolve, 20));
+      await settle(20, "fake server buffers both notifications before the first consume");
 
       await expect(connection.waitForNotification("thread/compacted", () => true, 100))
         .resolves.toMatchObject({ sequence: 1 });
