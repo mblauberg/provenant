@@ -232,12 +232,25 @@ def _real_source_fixture(tmp_path: Path, protocol_dist: str) -> Path:
     (node_modules / "@local").mkdir(parents=True)
     shutil.copytree(Path(tsx_package_json).parent, node_modules / "tsx", symlinks=True)
     shutil.copytree(REPO_ROOT / "node_modules/esbuild", node_modules / "esbuild", symlinks=True)
-    (node_modules / "@esbuild").mkdir()
-    shutil.copytree(
-        REPO_ROOT / "node_modules/@esbuild/darwin-arm64",
-        node_modules / "@esbuild/darwin-arm64",
-        symlinks=True,
+    esbuild_root = REPO_ROOT / "node_modules/@esbuild"
+    esbuild_packages = sorted(
+        (
+            package
+            for package in esbuild_root.iterdir()
+            if package.is_dir()
+        )
+        if esbuild_root.is_dir()
+        else ()
     )
+    if not esbuild_packages:
+        pytest.skip("no platform-specific esbuild package is installed under node_modules/@esbuild")
+    (node_modules / "@esbuild").mkdir()
+    for package in esbuild_packages:
+        shutil.copytree(
+            package,
+            node_modules / "@esbuild" / package.name,
+            symlinks=True,
+        )
     (node_modules / "@local/agent-fabric-protocol").symlink_to(
         protocol_root,
         target_is_directory=True,
