@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from copy import deepcopy
 import hashlib
 import json
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 
@@ -99,19 +99,25 @@ def _validate_contract(value: dict[str, Any]) -> None:
         raise LifecycleContractError("lifecycle contract must name all five lifecycle invariants")
 
 
-def load_lifecycle_contract() -> dict[str, Any]:
-    """Return a validated contract copy with its exact file digest attached."""
+def _freeze(value: Any) -> Any:
+    if isinstance(value, dict):
+        return MappingProxyType({key: _freeze(item) for key, item in value.items()})
+    if isinstance(value, list):
+        return tuple(_freeze(item) for item in value)
+    return value
+
+
+def load_lifecycle_contract() -> MappingProxyType:
+    """Return the validated contract as a deeply immutable digest-bound object."""
     try:
         raw = CONTRACT_PATH.read_bytes()
     except OSError as exc:
         raise LifecycleContractError(f"cannot read {CONTRACT_PATH}: {exc}") from exc
     value = _load_json(raw)
     _validate_contract(value)
-    result = deepcopy(value)
-    result["contract_digest"] = "sha256:" + hashlib.sha256(raw).hexdigest()
-    return result
+    value["contract_digest"] = "sha256:" + hashlib.sha256(raw).hexdigest()
+    return _freeze(value)
 
 
 LIFECYCLE_CONTRACT = load_lifecycle_contract()
 LIFECYCLE_CONTRACT_DIGEST = LIFECYCLE_CONTRACT["contract_digest"]
-
