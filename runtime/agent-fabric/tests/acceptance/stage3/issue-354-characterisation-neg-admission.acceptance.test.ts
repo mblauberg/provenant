@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { ProviderActionAdmissionCoordinator } from "../../../src/application/provider-action-admission.ts";
 import type { ProviderActionInsert } from "../../../src/application/provider-action-admission.ts";
 import { createLifecycleFixture } from "../../support/lifecycle-testkit.ts";
+import { eventually } from "../../shared/deadline-wait.ts";
 import {
   actionSnapshot,
   bindMinimalLifecycleOwner,
@@ -11,7 +12,6 @@ import {
   closeFixture,
   corruptOwner,
   durableSnapshot,
-  eventually,
   readFakeJournal,
   seedProviderAction,
 } from "../../support/w354-characterisation-testkit.ts";

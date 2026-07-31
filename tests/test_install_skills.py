@@ -8,6 +8,11 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
+
+import manage_installation as installation_manager  # noqa: E402
+
+
 SCRIPT = ROOT / "scripts" / "install-skills"
 MANAGER = ROOT / "scripts" / "manage_installation.py"
 SHARED = "_shared"
@@ -747,6 +752,85 @@ def test_reconcile_applies_safe_managed_rename_with_history(tmp_path):
     assert (target / "gamma").resolve() == (source / "gamma").resolve()
 
 
+def test_reconcile_rechecks_managed_conflicts_after_rename(tmp_path, monkeypatch):
+    source = tiny_source(tmp_path)
+    target = tmp_path / "installed"
+    assert manager(target, "install", source).returncode == 0
+    (source / "alpha").rename(source / "gamma")
+    delta = source / "delta"
+    delta.mkdir()
+    (delta / "SKILL.md").write_text(
+        "---\nname: delta\ndescription: Added after the original install.\n---\n"
+    )
+    renames = tmp_path / "renames.json"
+    renames.write_text(
+        json.dumps({"schema_version": 1, "renames": [{"from": "alpha", "to": "gamma"}]})
+    )
+    foreign = tmp_path / "foreign-managed"
+    foreign.mkdir()
+    manifest_before = manifest_for(target).read_bytes()
+    original_apply = installation_manager._apply_renames
+
+    def apply_and_interleave(manifest, operations):
+        original_apply(manifest, operations)
+        (target / "beta").unlink()
+        (target / "beta").symlink_to(foreign)
+
+    monkeypatch.setattr(installation_manager, "_apply_renames", apply_and_interleave)
+
+    with pytest.raises(
+        installation_manager.InstallError,
+        match="^conflicting managed targets changed outside harness: beta$",
+    ):
+        installation_manager.execute("reconcile", source, target, renames)
+
+    assert (target / "beta").resolve() == foreign.resolve()
+    assert not (target / "delta").exists()
+    assert manifest_for(target).read_bytes() == manifest_before
+
+
+def test_reconcile_rechecks_custom_conflicts_after_rename(tmp_path, monkeypatch):
+    source = tiny_source(tmp_path)
+    custom_source = custom_skill_source(tmp_path)
+    target = tmp_path / "installed"
+    assert manager(target, "install", source, custom_source=custom_source).returncode == 0
+    (source / "alpha").rename(source / "gamma")
+    delta = source / "delta"
+    delta.mkdir()
+    (delta / "SKILL.md").write_text(
+        "---\nname: delta\ndescription: Added after the original install.\n---\n"
+    )
+    renames = tmp_path / "renames.json"
+    renames.write_text(
+        json.dumps({"schema_version": 1, "renames": [{"from": "alpha", "to": "gamma"}]})
+    )
+    foreign = tmp_path / "foreign-custom"
+    foreign.mkdir()
+    manifest_before = manifest_for(target).read_bytes()
+    original_apply = installation_manager._apply_renames
+
+    def apply_and_interleave(manifest, operations):
+        original_apply(manifest, operations)
+        (target / "instance-skill").unlink()
+        (target / "instance-skill").symlink_to(foreign)
+
+    monkeypatch.setattr(installation_manager, "_apply_renames", apply_and_interleave)
+
+    with pytest.raises(installation_manager.InstallError) as error:
+        installation_manager.execute(
+            "reconcile", source, target, renames, custom_source
+        )
+
+    assert str(error.value) == (
+        "custom targets changed outside harness: manually restore instance-skill from "
+        f"{(custom_source / 'instance-skill').resolve()} or provide --custom-source "
+        "pointing to the intended custom skills directory"
+    )
+    assert (target / "instance-skill").resolve() == foreign.resolve()
+    assert not (target / "delta").exists()
+    assert manifest_for(target).read_bytes() == manifest_before
+
+
 def test_reconcile_preserves_compatible_unmanaged_rename_target(tmp_path):
     source = tiny_source(tmp_path)
     target = tmp_path / "installed"
@@ -1054,3 +1138,110 @@ def test_installer_refuses_symlinked_source_content(tmp_path):
     assert "skill source contains a symlink" in result.stderr
     assert not (target / "alpha").exists()
     assert not manifest_for(target).exists()
+
+
+
+
+def test_reconcile_reruns_after_managed_conflict_refusal(tmp_path, monkeypatch):
+    """Verify that re-running reconcile after a conflict refusal retries cleanly."""
+    source = tiny_source(tmp_path)
+    target = tmp_path / "installed"
+    assert manager(target, "install", source).returncode == 0
+    (source / "alpha").rename(source / "gamma")
+    renames = tmp_path / "renames.json"
+    renames.write_text(
+        json.dumps({"schema_version": 1, "renames": [{"from": "alpha", "to": "gamma"}]})
+    )
+    
+    # Set up monkeypatch to create a conflict during the second check
+    foreign = tmp_path / "foreign-managed"
+    foreign.mkdir()
+    manifest_before = manifest_for(target).read_bytes()
+    original_apply = installation_manager._apply_renames
+
+    def apply_and_interleave(manifest, operations):
+        original_apply(manifest, operations)
+        (target / "beta").unlink()
+        (target / "beta").symlink_to(foreign)
+
+    monkeypatch.setattr(installation_manager, "_apply_renames", apply_and_interleave)
+
+    # First run: should fail and rollback
+    with pytest.raises(
+        installation_manager.InstallError,
+        match="^conflicting managed targets changed outside harness:",
+    ):
+        installation_manager.execute("reconcile", source, target, renames)
+
+    # After rollback, tree should be unchanged: alpha link exists, gamma doesn't
+    assert (target / "alpha").resolve() == source / "alpha"
+    assert not (target / "gamma").exists()
+    assert manifest_for(target).read_bytes() == manifest_before
+
+    # Remove the monkeypatch and fix the conflict
+    monkeypatch.setattr(installation_manager, "_apply_renames", original_apply)
+    (target / "beta").unlink()
+    (target / "beta").symlink_to(source / "beta")
+
+    # Second run: should succeed
+    result = manager(target, "reconcile", source, renames)
+    assert result.returncode == 0
+
+    # Verify the manifest is now correct: gamma is managed, alpha is gone
+    updated_manifest = json.loads(manifest_for(target).read_bytes())
+    assert "gamma" in updated_manifest["managed"]
+    assert "alpha" not in updated_manifest["managed"]
+    assert (target / "gamma").resolve() == source / "gamma"
+
+
+def test_reconcile_reruns_after_custom_conflict_refusal(tmp_path, monkeypatch):
+    """Verify that re-running reconcile after a custom conflict refusal retries cleanly."""
+    source = tiny_source(tmp_path)
+    custom_source = custom_skill_source(tmp_path)
+    target = tmp_path / "installed"
+    assert manager(target, "install", source, custom_source=custom_source).returncode == 0
+    (source / "alpha").rename(source / "gamma")
+    renames = tmp_path / "renames.json"
+    renames.write_text(
+        json.dumps({"schema_version": 1, "renames": [{"from": "alpha", "to": "gamma"}]})
+    )
+    
+    # Set up monkeypatch to create a conflict during the second check
+    foreign = tmp_path / "foreign-custom"
+    foreign.mkdir()
+    manifest_before = manifest_for(target).read_bytes()
+    original_apply = installation_manager._apply_renames
+
+    def apply_and_interleave(manifest, operations):
+        original_apply(manifest, operations)
+        (target / "instance-skill").unlink()
+        (target / "instance-skill").symlink_to(foreign)
+
+    monkeypatch.setattr(installation_manager, "_apply_renames", apply_and_interleave)
+
+    # First run: should fail and rollback
+    with pytest.raises(
+        installation_manager.InstallError,
+        match="^custom targets changed outside harness:",
+    ):
+        installation_manager.execute("reconcile", source, target, renames, custom_source)
+
+    # After rollback, tree should be unchanged: alpha link exists, gamma doesn't
+    assert (target / "alpha").resolve() == source / "alpha"
+    assert not (target / "gamma").exists()
+    assert manifest_for(target).read_bytes() == manifest_before
+
+    # Remove the monkeypatch and fix the conflict
+    monkeypatch.setattr(installation_manager, "_apply_renames", original_apply)
+    (target / "instance-skill").unlink()
+    (target / "instance-skill").symlink_to(custom_source / "instance-skill")
+
+    # Second run: should succeed
+    result = manager(target, "reconcile", source, renames, custom_source)
+    assert result.returncode == 0
+
+    # Verify the manifest is now correct: gamma is managed, alpha is gone
+    updated_manifest = json.loads(manifest_for(target).read_bytes())
+    assert "gamma" in updated_manifest["managed"]
+    assert "alpha" not in updated_manifest["managed"]
+    assert (target / "gamma").resolve() == source / "gamma"

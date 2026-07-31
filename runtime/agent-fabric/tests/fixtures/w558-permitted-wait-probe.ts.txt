@@ -1,0 +1,42 @@
+// Fixture for tests/unit/w558-test-waiters.unit.test.ts. Not compiled, not run:
+// it holds the shapes the guard must NOT refuse, so that tightening the scanner
+// cannot quietly start rejecting legitimate test code.
+
+import { settle, waitUntil } from "../shared/deadline-wait.ts";
+
+// A child process script. It contains a loop, a timer and a wall-clock read,
+// but it is a string: the guard must see through the template literal.
+const CHILD_SCRIPT = `
+  const deadline = Date.now() + 1_000;
+  while (Date.now() < deadline) {
+    setTimeout(() => process.exit(0), 5);
+  }
+  const retry = () => setTimeout(retry, 1);
+  retry();
+`;
+
+export function childScript(): string {
+  return CHILD_SCRIPT;
+}
+
+// Walking a collection is not waiting, even when it mints wall-clock values:
+// expiry stamps are civil time and stay on Date.
+export function expiries(offsetsMs: readonly number[]): string[] {
+  const stamps: string[] = [];
+  for (const offsetMs of offsetsMs) {
+    stamps.push(new Date(Date.now() + offsetMs).toISOString());
+  }
+  return stamps;
+}
+
+// A comment mentioning a deadline loop, `while (Date.now() < deadline)`, and a
+// setTimeout, must not trip the scanner. Nor must a regex like /setTimeout\(/u
+// or the string "while (Date.now() < deadline) { setTimeout(f, 1); }".
+export async function waits(
+  ready: () => boolean,
+  expect: (value: unknown) => { toBe: (other: unknown) => void },
+): Promise<void> {
+  await waitUntil(ready, 5_000, "Fixture readiness");
+  await settle(25, "prove no further callback arrives");
+  expect(ready()).toBe(true);
+}

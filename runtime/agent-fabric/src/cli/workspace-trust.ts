@@ -5,7 +5,7 @@ import { chmod, lstat, open, realpath, rename, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, parse, resolve, sep } from "node:path";
 
-import type { FabricPaths } from "./paths.js";
+import { ensureFabricPaths, type FabricPaths } from "./paths.js";
 
 const PROFILE_PATTERN = /^[a-z][a-z0-9-]{0,63}$/u;
 const DEFAULT_PROFILES = ["headless", "observed", "interactive", "paired-visible", "paired-observed"];
@@ -110,9 +110,14 @@ async function writeRegistry(path: string, registry: WorkspaceTrustRegistry): Pr
   }
   try {
     await rename(temporary, path);
-    await chmod(path, 0o600);
-    const directory = await open(dirname(path), constants.O_RDONLY);
-    try { await directory.sync(); } finally { await directory.close(); }
+    // The temporary inode was created privately, so rename is the visibility
+    // commit point. These follow-up operations improve durability or repair
+    // metadata, but must not turn a visible grant into a reported refusal.
+    try { await chmod(path, 0o600); } catch { /* best effort after commit */ }
+    try {
+      const directory = await open(dirname(path), constants.O_RDONLY);
+      try { await directory.sync(); } finally { await directory.close(); }
+    } catch { /* directory fsync is best effort after commit */ }
   } finally {
     await rm(temporary, { force: true });
   }
@@ -295,6 +300,7 @@ export async function runWorkspaceTrust(
     // recovery: the only remaining escape was hand-editing the registry.
     const resolvedPath = resolve(requested);
     const canonicalCandidate = await bestEffortCanonicalPath(resolvedPath);
+    ensureFabricPaths(paths);
     return await withRegistryMutationLock(paths.stateDirectory, async () => {
       const current = await readRegistry(registryPath);
       const doomed = current.entries.filter(
@@ -318,6 +324,7 @@ export async function runWorkspaceTrust(
     return { schemaVersion: 1, canonicalPath, trusted, expired, entry: existing ?? null };
   }
   if (action !== "trust") throw new Error("workspace command must be trust, inspect, status, list or revoke");
+  ensureFabricPaths(paths);
   const profileValue = option(arguments_, "--profiles");
   const requestedProfiles = profileValue?.split(",")
     .map((profile) => profile.trim())

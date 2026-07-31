@@ -48,31 +48,85 @@ export function seatExpiryWarningWindowMs(input: {
   );
 }
 
-// The mint time is read from the daemon's generation record rather than stored
-// in seat metadata, because replayed generations must stay byte-identical on
-// disk while created_at is already immutable per generation in the database.
-export function readSeatGenerationMintedAt(input: {
-  databasePath: string;
-  generation: string;
-}): string | null {
-  let database: Database.Database | undefined;
-  try {
-    database = new Database(input.databasePath, { readonly: true, fileMustExist: true });
-    const row = database.prepare(
-      "SELECT created_at FROM mcp_seat_generations WHERE generation=?",
-    ).get(input.generation) as { created_at?: unknown } | undefined;
-    return typeof row?.created_at === "number" && Number.isFinite(row.created_at)
-      ? new Date(row.created_at).toISOString()
-      : null;
-  } catch {
-    return null;
-  } finally {
-    database?.close();
-  }
+// One readonly connection serving every renewal lookup within a single MCP
+// request or status composition. The owner opens a fresh port per request and
+// closes it in a finally, so nothing is cached across daemon generation
+// changes: the next request always observes the database anew. The connection
+// itself opens lazily on first lookup, so a request whose fast path never
+// reaches the database opens nothing, and it is then reused so a roster of
+// seats costs one open instead of one per lookup. One connection, one scope:
+// not a pool.
+export type RosterReadPort = {
+  seatGenerationMintedAt(generation: string): string | null;
+  chairAuthorityExpiresAt(input: { runId: string; chairAgentId: string }): string | null;
+  close(): void;
+};
+
+export function openRosterReadPort(databasePath: string): RosterReadPort {
+  let connection: Database.Database | null | undefined;
+  let closed = false;
+  const database = (): Database.Database | null => {
+    if (closed) throw new Error("MCP roster read port is closed");
+    if (connection === undefined) {
+      try {
+        connection = new Database(databasePath, { readonly: true, fileMustExist: true });
+      } catch {
+        // An absent or unreadable database yields null lookups for the rest
+        // of this request, matching the per-lookup readers this port replaced.
+        connection = null;
+      }
+    }
+    return connection;
+  };
+  return {
+    // The mint time is read from the daemon's generation record rather than
+    // stored in seat metadata, because replayed generations must stay
+    // byte-identical on disk while created_at is already immutable per
+    // generation in the database.
+    seatGenerationMintedAt(generation: string): string | null {
+      const reader = database();
+      if (reader === null) return null;
+      try {
+        const row = reader.prepare(
+          "SELECT created_at FROM mcp_seat_generations WHERE generation=?",
+        ).get(generation) as { created_at?: unknown } | undefined;
+        return typeof row?.created_at === "number" && Number.isFinite(row.created_at)
+          ? new Date(row.created_at).toISOString()
+          : null;
+      } catch {
+        return null;
+      }
+    },
+    chairAuthorityExpiresAt(input: { runId: string; chairAgentId: string }): string | null {
+      const reader = database();
+      if (reader === null) return null;
+      try {
+        const row = reader.prepare(`
+          SELECT authority.authority_json, authority.authority_hash
+            FROM agents agent
+            JOIN authorities authority
+              ON authority.run_id=agent.run_id AND authority.authority_id=agent.authority_id
+           WHERE agent.run_id=? AND agent.agent_id=?
+        `).get(input.runId, input.chairAgentId) as {
+          authority_json?: unknown;
+          authority_hash?: unknown;
+        } | undefined;
+        return row === undefined ? null : readStoredAuthority(row, "chair authority").expiresAt;
+      } catch {
+        return null;
+      }
+    },
+    close(): void {
+      if (closed) return;
+      closed = true;
+      connection?.close();
+      connection = undefined;
+    },
+  };
 }
 
 export function seatExpiryWarningDue(input: {
-  databasePath: string;
+  port: RosterReadPort;
   generation: string;
   expiresAt: string;
   now?: number;
@@ -83,7 +137,7 @@ export function seatExpiryWarningDue(input: {
   // remaining is cleared without a database read.
   if (Number.isNaN(remainingMs) || remainingMs > SEAT_EXPIRY_WARNING_CAP_MS) return false;
   return remainingMs <= seatExpiryWarningWindowMs({
-    mintedAt: readSeatGenerationMintedAt(input),
+    mintedAt: input.port.seatGenerationMintedAt(input.generation),
     expiresAt: input.expiresAt,
     now,
   });
@@ -91,32 +145,6 @@ export function seatExpiryWarningDue(input: {
 
 function shellQuote(value: string): string {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
-}
-
-export function readChairAuthorityExpiresAt(input: {
-  databasePath: string;
-  runId: string;
-  chairAgentId: string;
-}): string | null {
-  let database: Database.Database | undefined;
-  try {
-    database = new Database(input.databasePath, { readonly: true, fileMustExist: true });
-    const row = database.prepare(`
-      SELECT authority.authority_json, authority.authority_hash
-        FROM agents agent
-        JOIN authorities authority
-          ON authority.run_id=agent.run_id AND authority.authority_id=agent.authority_id
-       WHERE agent.run_id=? AND agent.agent_id=?
-    `).get(input.runId, input.chairAgentId) as {
-      authority_json?: unknown;
-      authority_hash?: unknown;
-    } | undefined;
-    return row === undefined ? null : readStoredAuthority(row, "chair authority").expiresAt;
-  } catch {
-    return null;
-  } finally {
-    database?.close();
-  }
 }
 
 // Clamps a requested expiry to every bound peerExpiry enforces, so that a command

@@ -36,7 +36,7 @@ import { readDiscoveryReceipt } from "./mcp-provision.js";
 import {
   mcpBootstrapRenewalCommand,
   mcpRosterRenewalCommand,
-  readChairAuthorityExpiresAt,
+  openRosterReadPort,
   seatExpiryWarningDue,
 } from "./mcp-roster-renewal.js";
 import type { FabricPaths } from "./paths.js";
@@ -394,72 +394,79 @@ async function seatStatus(
   const provisionedChair = [...registered.entries()]
     .find(([, metadata]) => metadata.role === "chair" && metadata.originKind === "provisioned");
   const provisionedChairSeat = provisionedChair?.[0] as (typeof MCP_SEATS)[number] | undefined;
-  const chairAuthorityExpiresAt = provisionedChair === undefined
-    ? null
-    : readChairAuthorityExpiresAt({
-        databasePath: paths.databasePath,
-        runId: provisionedChair[1].runId,
-        chairAgentId: provisionedChair[1].chairAgentId,
-      });
-  return MCP_SEATS.map((seat) => {
-    const value = registered.get(seat);
-    if (value !== undefined) {
-      const remainingMs = Date.parse(value.expiresAt) - Date.now();
-      return {
-        seat,
-        agentId: value.agentId,
-        role: value.role,
-        originKind: value.originKind ?? "legacy-bootstrap",
-        runId: value.runId,
-        expiresAt: value.expiresAt,
-        active: remainingMs > 0,
-        registered: true,
-        // The warning window derives from the roster's own lifetime so it can
-        // distinguish plenty-of-time from act-now, and an expired seat keeps
-        // its remedy because expiry is recoverable, not a dead end (#526).
-        ...(value.originKind === "provisioned" &&
-          seatExpiryWarningDue({
-            databasePath: paths.databasePath,
-            generation: value.generation,
-            expiresAt: value.expiresAt,
-          }) &&
-          renewalPeerSeat !== undefined
-          ? {
-              remedy: bootstrapChairSeat === undefined
-                ? (() => {
-                    const renewal = mcpRosterRenewalCommand({
-                      project,
-                      peerSeat: renewalPeerSeat,
-                      currentExpiresAt: value.expiresAt,
-                      chairAuthorityExpiresAt,
-                      productRoot,
-                    });
-                    return renewal ??
-                      `the provisioned roster cannot be renewed; use ${
-                        mcpBootstrapRenewalCommand(project, provisionedChairSeat ?? "codex", productRoot)
-                      }`;
-                  })()
-                : mcpBootstrapRenewalCommand(project, bootstrapChairSeat, productRoot),
-            }
-          : {}),
-      };
-    }
-    return chairExists
-      ? {
+  // One read port serves the chair authority ceiling and every seat's warning
+  // check within this status composition; the finally closes it once the
+  // roster rows are built.
+  const rosterPort = openRosterReadPort(paths.databasePath);
+  try {
+    const chairAuthorityExpiresAt = provisionedChair === undefined
+      ? null
+      : rosterPort.chairAuthorityExpiresAt({
+          runId: provisionedChair[1].runId,
+          chairAgentId: provisionedChair[1].chairAgentId,
+        });
+    return MCP_SEATS.map((seat) => {
+      const value = registered.get(seat);
+      if (value !== undefined) {
+        const remainingMs = Date.parse(value.expiresAt) - Date.now();
+        return {
           seat,
-          registered: false,
-          active: false,
-          reason: "PEER_SEAT_NOT_PROVISIONED",
-          remedy: `${fabricCliCommand({ productRootFlag: productRoot })} mcp peer-provision --project ${shellQuote(project)} --seat ${seat}`,
-        }
-      : {
-          seat,
-          registered: false,
-          active: false,
-          reason: "PROJECT_NOT_BOOTSTRAPPED",
-          remedy: `cd ${shellQuote(project)} && ${fabricCliCommand({ productRootFlag: productRoot })} bootstrap --seat codex`,
+          agentId: value.agentId,
+          role: value.role,
+          originKind: value.originKind ?? "legacy-bootstrap",
+          runId: value.runId,
+          expiresAt: value.expiresAt,
+          active: remainingMs > 0,
+          registered: true,
+          // The warning window derives from the roster's own lifetime so it can
+          // distinguish plenty-of-time from act-now, and an expired seat keeps
+          // its remedy because expiry is recoverable, not a dead end (#526).
+          ...(value.originKind === "provisioned" &&
+            seatExpiryWarningDue({
+              port: rosterPort,
+              generation: value.generation,
+              expiresAt: value.expiresAt,
+            }) &&
+            renewalPeerSeat !== undefined
+            ? {
+                remedy: bootstrapChairSeat === undefined
+                  ? (() => {
+                      const renewal = mcpRosterRenewalCommand({
+                        project,
+                        peerSeat: renewalPeerSeat,
+                        currentExpiresAt: value.expiresAt,
+                        chairAuthorityExpiresAt,
+                        productRoot,
+                      });
+                      return renewal ??
+                        `the provisioned roster cannot be renewed; use ${
+                          mcpBootstrapRenewalCommand(project, provisionedChairSeat ?? "codex", productRoot)
+                        }`;
+                    })()
+                  : mcpBootstrapRenewalCommand(project, bootstrapChairSeat, productRoot),
+              }
+            : {}),
         };
-  });
+      }
+      return chairExists
+        ? {
+            seat,
+            registered: false,
+            active: false,
+            reason: "PEER_SEAT_NOT_PROVISIONED",
+            remedy: `${fabricCliCommand({ productRootFlag: productRoot })} mcp peer-provision --project ${shellQuote(project)} --seat ${seat}`,
+          }
+        : {
+            seat,
+            registered: false,
+            active: false,
+            reason: "PROJECT_NOT_BOOTSTRAPPED",
+            remedy: `cd ${shellQuote(project)} && ${fabricCliCommand({ productRootFlag: productRoot })} bootstrap --seat codex`,
+          };
+    });
+  } finally {
+    rosterPort.close();
+  }
 }
 
 export async function fabricStatus(arguments_: string[], paths: FabricPaths): Promise<Record<string, unknown>> {

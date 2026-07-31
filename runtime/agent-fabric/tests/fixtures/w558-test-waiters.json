@@ -1,0 +1,6 @@
+{
+  "schema_version": 1,
+  "issue": "#558",
+  "wait_port": "shared/deadline-wait.ts",
+  "temporary_hand_rolled_waits": []
+}

@@ -65,7 +65,7 @@ def resolve_product_root(instance_root: Path | None = None) -> Path:
 
 
 def usage() -> None:
-    print("usage: provenant <help|route|worktree|check|fabric|doctor> [arguments...]", file=sys.stderr)
+    print("usage: provenant <help|route|worktree|check|fabric|doctor|project> [arguments...]", file=sys.stderr)
 
 
 def help_text() -> None:
@@ -78,6 +78,7 @@ Thin front door; each command delegates to its existing owner:
   check ...      scripts/check-harness ...
   fabric ...     scripts/agent-fabric ...
   doctor ...     scripts/agent-fabric doctor ...
+  project ...    scripts/agent-fabric project ...
 
 Fabric clients and providers are separate roles.
 Kiro: optional subscription-native provider (ACP v1).
@@ -134,6 +135,7 @@ def main(arguments: list[str]) -> int:
         "check": ("check-harness", []),
         "fabric": ("agent-fabric", []),
         "doctor": ("agent-fabric", ["doctor"]),
+        "project": ("agent-fabric", ["project"]),
     }
     owner = owners.get(command)
     if owner is None:

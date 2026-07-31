@@ -3,22 +3,8 @@ import { realpathSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
+import { eventually } from "../../shared/deadline-wait.ts";
 import { createRetainedLifecycleCallbackFixture } from "../../support/lifecycle-testkit.ts";
-
-async function eventually(assertion: () => void, timeoutMs = 5_000): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  let failure: unknown;
-  while (Date.now() < deadline) {
-    try {
-      assertion();
-      return;
-    } catch (error: unknown) {
-      failure = error;
-      await new Promise((resolve) => setTimeout(resolve, 25));
-    }
-  }
-  throw failure;
-}
 
 describe("Stage 3 retained provider lifecycle callback", () => {
   it("returns one durable accepted-suspended receipt from the actual retained send_turn principal", async () => {
@@ -139,7 +125,7 @@ describe("Stage 3 retained provider lifecycle callback", () => {
         } finally {
           database.close();
         }
-      });
+      }, 5_000, "retained lifecycle callback durable state");
     } finally {
       await fixture.close();
     }
