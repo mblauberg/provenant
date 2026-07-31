@@ -44,6 +44,7 @@ jobs:
       # and warm caches on the default branch for pull requests to reuse.
       harness: ${{ github.event_name == 'push' && 'true' || steps.filter.outputs.harness }}
       fabric: ${{ github.event_name == 'push' && 'true' || steps.filter.outputs.fabric }}
+      split-root: ${{ github.event_name == 'push' && 'true' || steps.filter.outputs.split-root }}
       console: ${{ github.event_name == 'push' && 'true' || steps.filter.outputs.console }}
       herdr: ${{ github.event_name == 'push' && 'true' || steps.filter.outputs.herdr }}
       review-portal-supervisor: ${{ github.event_name == 'push' && 'true' || steps.filter.outputs.review-portal-supervisor }}
@@ -116,6 +117,13 @@ jobs:
               - 'scripts/model_route_catalog.py'
               - 'scripts/model_route_preferences.py'
               - 'skills/deliver/scripts/**'
+            split-root:
+              - *ci-contract
+              - *node-workspace
+              - 'config/**'
+              - 'runtime/agent-fabric/**'
+              - 'scripts/**'
+              - 'tests/**'
             console:
               - *ci-contract
               - *node-workspace
@@ -220,6 +228,90 @@ jobs:
         run: npm run test:load --workspace=@local/agent-fabric
       - name: Audit production dependencies
         run: npm audit --workspace=@local/agent-fabric --omit=dev --audit-level=high
+
+  split-root:
+    name: Split-root contract rig
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    needs: detect-changes
+    if: needs.detect-changes.outputs.split-root == 'true'
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Node.js workspace
+        uses: ./.github/actions/setup-node-workspace
+      - name: Build workspace
+        run: npm run build
+      - name: Set up uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - name: Install locked harness test dependencies
+        run: uv sync --locked --only-group test
+      - name: Provision genuinely split roots through install-harness
+        run: |
+          set -euo pipefail
+          split_parent="$(mktemp -d "${RUNNER_TEMP}/provenant-split.XXXXXX")"
+          split_home="$split_parent/home"
+          split_instance="$split_parent/instance"
+          mkdir -p "$split_home/.codex" "$split_instance"
+          export HOME="$split_home"
+          export CODEX_HOME="$split_home/.codex"
+          export PROVENANT_BIN_DIR="$split_home/.local/bin"
+          export AGENT_FABRIC_PRODUCT_ROOT="$GITHUB_WORKSPACE"
+          export AGENT_FABRIC_INSTANCE_ROOT="$split_instance"
+          unset AGENTS_HOME
+          export PATH="$PROVENANT_BIN_DIR:$PATH"
+          scripts/install-harness --platform codex
+          test -f "$split_instance/AGENTS.md"
+          test -f "$split_instance/config/model-routing.json"
+          test -f "$split_instance/config/model-preferences.json"
+          test "$AGENT_FABRIC_PRODUCT_ROOT" != "$AGENT_FABRIC_INSTANCE_ROOT"
+          printf 'product root: %s\ninstance root: %s\n' "$AGENT_FABRIC_PRODUCT_ROOT" "$AGENT_FABRIC_INSTANCE_ROOT"
+          printf '%s\n' \
+            'schemaVersion: 1' \
+            'allowedAdapters:' \
+            '  - codex-app-server' \
+            'activeAdapters:' \
+            '  - codex-app-server' \
+            'allowedProfiles:' \
+            '  - headless' > "$split_instance/config/agent-fabric.yaml"
+          {
+            echo "HOME=$HOME"
+            echo "CODEX_HOME=$CODEX_HOME"
+            echo "AGENT_FABRIC_PRODUCT_ROOT=$AGENT_FABRIC_PRODUCT_ROOT"
+            echo "AGENT_FABRIC_INSTANCE_ROOT=$AGENT_FABRIC_INSTANCE_ROOT"
+            echo "AGENTS_HOME="
+            echo "PATH=$PATH"
+          } >> "$GITHUB_ENV"
+      - name: Run full Python suite under split roots
+        env:
+          HARNESS_PYTHON: ${{ github.workspace }}/.venv/bin/python
+        run: $HARNESS_PYTHON -m pytest tests/ -q
+      - name: Run full workspace suite under split roots
+        run: npm test
+      - name: Run split-root TypeScript oracle with exact expected failure
+        working-directory: runtime/agent-fabric
+        run: |
+          set +e
+          output="$(npx vitest run --config vitest.split-root.config.ts 2>&1)"
+          status=$?
+          set -e
+          printf '%s\n' "$output"
+          test "$status" -eq 1
+          # vitest pads its summary columns, so match on a whitespace-tolerant
+          # pattern.  Pin the count of failures, not the count of passes: a new
+          # oracle probe must not have to edit this step, but a second failure
+          # or a green run must break it.
+          grep -F 'does not offer a defaulted instance layer as an explicit narrowing layer' <<<"$output"
+          grep -Eq 'Test Files +1 failed \(1\)' <<<"$output"
+          grep -Eq 'Tests +1 failed \|' <<<"$output"
 
   review-portal-supervisor:
     name: Review portal supervisor (${{ matrix.os }})
@@ -351,6 +443,7 @@ jobs:
       - detect-changes
       - harness
       - fabric
+      - split-root
       - review-portal-supervisor
       - console
       - herdr
