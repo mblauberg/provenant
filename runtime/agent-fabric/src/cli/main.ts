@@ -197,7 +197,7 @@ async function main(arguments_: string[]): Promise<void> {
       import("./project.js"),
     ]);
     const output = action === "activate"
-      ? await project.runProjectActivate(projectPath, resolveFabricPaths({ createDirectories: true }))
+      ? await project.runProjectActivate(projectPath, resolveFabricPaths())
       : await project.runProjectStatus(projectPath, resolveFabricPaths());
     process.stdout.write(`${JSON.stringify(output, null, 2)}\n`);
     return;
@@ -270,7 +270,7 @@ async function main(arguments_: string[]): Promise<void> {
       import("./mcp-provision.js"),
       import("./paths.js"),
     ]);
-    const output = await provisionMcpSeats(arguments_.slice(2), resolveFabricPaths({ createDirectories: true }));
+    const output = await provisionMcpSeats(arguments_.slice(2), resolveFabricPaths());
     process.stdout.write(`${JSON.stringify(output, null, 2)}\n`);
     return;
   }
@@ -287,7 +287,7 @@ async function main(arguments_: string[]): Promise<void> {
     const output = await bootstrapMcpSeat({
       environment: { ...process.env, AGENT_FABRIC_SEAT: seat },
       cwd: process.cwd(),
-      paths: resolveFabricPaths({ createDirectories: true }),
+      paths: resolveFabricPaths(),
     });
     const { credential: _credential, credentials, ...safeOutput } = output;
     const publicOutput = {
@@ -343,7 +343,7 @@ async function main(arguments_: string[]): Promise<void> {
     ]);
     const output = await provisionObserverCredential({
       project,
-      paths: resolveFabricPaths({ createDirectories: true }),
+      paths: resolveFabricPaths(),
     });
     process.stdout.write(`${JSON.stringify(output, null, 2)}\n`);
     return;
@@ -355,7 +355,7 @@ async function main(arguments_: string[]): Promise<void> {
     ]);
     const output = await provisionMcpPeerSeats(
       arguments_.slice(2),
-      resolveFabricPaths({ createDirectories: true }),
+      resolveFabricPaths(),
     );
     process.stdout.write(`${JSON.stringify(output, null, 2)}\n`);
     return;
