@@ -67,6 +67,18 @@ fi
   --product-root "$PRODUCT_ROOT" --skills-root "$SKILLS_ROOT"
 "${PYTHON[@]}" "$SCRIPTS_ROOT/render_skill_catalogue.py" --check \
   --readme "$PRODUCT_ROOT/README.md" --skills-root "$SKILLS_ROOT"
+# Derived doc regions and drift gates (issue #548). --check renders in memory
+# and diffs; CI never writes. Maintainers regenerate with --write.
+"${PYTHON[@]}" "$SCRIPTS_ROOT/render_doc_projections.py" --check \
+  --architecture "$DOCS_ROOT/ARCHITECTURE.md" --skills-root "$SKILLS_ROOT"
+"${PYTHON[@]}" "$SCRIPTS_ROOT/check_doc_constants.py" \
+  --architecture "$DOCS_ROOT/ARCHITECTURE.md" \
+  --harness "$PRODUCT_ROOT/HARNESS.md" \
+  --readme "$PRODUCT_ROOT/README.md" \
+  --skills-root "$SKILLS_ROOT"
+"${PYTHON[@]}" "$SCRIPTS_ROOT/check_doc_paths.py" \
+  --root "$PRODUCT_ROOT" \
+  "$DOCS_ROOT/ARCHITECTURE.md" "$PRODUCT_ROOT/README.md"
 # House style is gated on the root documents and on every skill front door.
 # skills/*/references/ and docs/ are not yet clean and are not gated.
 "${PYTHON[@]}" "$SKILLS_ROOT/engineering-writing/scripts/check_engineering_style.py" \

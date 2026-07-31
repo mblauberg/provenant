@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { servePublicProtocolConnection } from "../../../src/daemon/public-protocol.ts";
 import type { Fabric, FabricClient } from "../../../src/index.ts";
+import { eventually } from "../../shared/deadline-wait.ts";
 import { TestLifecycleReceiptAuthority } from "../../support/lifecycle-receipt-authority-fake.ts";
 import {
   createLifecycleFixture,
@@ -17,21 +18,6 @@ import {
 } from "../../support/lifecycle-testkit.ts";
 
 const cleanup: Array<() => Promise<void>> = [];
-
-async function eventually(assertion: () => Promise<void> | void, timeoutMs = 8_000): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  let failure: unknown;
-  while (Date.now() < deadline) {
-    try {
-      await assertion();
-      return;
-    } catch (error: unknown) {
-      failure = error;
-      await new Promise((resolve) => setTimeout(resolve, 25));
-    }
-  }
-  throw failure;
-}
 
 async function restartWithReceiptAuthority(fixture: LifecycleFixture): Promise<{
   fabric: Fabric;

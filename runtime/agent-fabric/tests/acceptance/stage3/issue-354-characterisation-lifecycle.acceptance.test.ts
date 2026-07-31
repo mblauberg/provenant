@@ -6,10 +6,10 @@ import {
   createLifecycleFixture,
   writeLifecycleCheckpoint,
 } from "../../support/lifecycle-testkit.ts";
+import { eventually } from "../../shared/deadline-wait.ts";
 import {
   actionSnapshot,
   closeFixture,
-  eventually,
   readFakeJournal,
 } from "../../support/w354-characterisation-testkit.ts";
 

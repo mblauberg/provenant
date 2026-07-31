@@ -34,27 +34,35 @@ the array is not a preference, it is a stale note.
 
 ## Current preferences
 
-**Token-heavy legwork goes to OpenAI.** Reading a lot to produce a report,
-exhaustive inventories, mechanical sweeps: these are cheaper there and Claude's
-budget is better spent on judgement. `gpt-5.6-terra` is the default workhorse
-and should stay it.
+**Token-heavy legwork goes to OpenAI, and the workhorse there is
+`gpt-5.6-luna` at raised effort.** Reading a lot to produce a report, exhaustive
+inventories, mechanical sweeps: these are cheaper there and Claude's budget is
+better spent on judgement. Luna's price was cut by roughly 80% in July 2026,
+which makes Luna at `high` or `xhigh` the best value in the family for
+high-token work; go to `max` when a leg genuinely deserves it. `gpt-5.6-terra`
+stays admissible but is no longer the preferred default.
 
-The standing wish is `gpt-5.6-luna` **at xhigh effort** as a workhorse — cheap
-model, effort turned up, rather than a more expensive model at medium. That is
-not expressible yet: effort is fixed per task class, so ordering Luna ahead of
-Terra in the catalogue would buy Luna at *medium*, which is a downgrade rather
-than the trade intended. Until a task class can carry an effort range, ask for
-Luna and a raised effort explicitly when a leg suits it, and leave the default
-alone.
+That is the old standing wish made real by the price cut, and the mechanical
+caveat that blocked it still holds: effort is fixed per task class, so ordering
+Luna first in the catalogue array would buy Luna at *medium*, a downgrade
+rather than the trade intended. The catalogue order is therefore left alone on
+purpose. Ask for Luna and the raised effort explicitly at dispatch, and record
+the pair in the receipt. A cheap model with the effort dial up beats a dearer
+model at medium.
 
-**`gpt-5.6-sol` is the stronger OpenAI model, not the faster one.** Give it the
-slices that are genuinely hard. `luna` is for trivial and mechanical work.
+**`gpt-5.6-sol` stays the OpenAI flagship, reserved for critical and
+high-stakes slices.** Give it the work that is genuinely hard or where a miss
+is expensive; everything below that now belongs to Luna at raised effort.
 Getting this backwards wastes both.
 
-**Prefer Opus at low or medium effort over Sonnet.** For workhorse work where
-the family lands on Anthropic, Opus at a lower effort tends to beat Sonnet at a
-higher one. The catalogue lists Opus under `anthropic.aliases.workhorse` so this
-is a real option rather than a flagship-only escape hatch.
+**Anthropic minds are for judgement, not volume.** Keep Opus and Fable for
+chairing, adjudication, synthesis and critical review, and reach for them less
+often on lower-stakes tasks: Haiku and Sonnet are not priced well enough to be
+the cheap alternative, so menial and high-token slices route to Luna instead.
+Where workhorse work must stay Anthropic, prefer Opus at low or medium effort
+over Sonnet at a higher one. The catalogue lists Opus under
+`anthropic.aliases.workhorse` so this is a real option rather than a
+flagship-only escape hatch.
 
 **Orchestration stays with Anthropic**, at flagship and high effort. Decomposition,
 synthesis and final calls are the chair's job.

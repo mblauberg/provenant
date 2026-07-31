@@ -8,6 +8,7 @@ import Database from "better-sqlite3";
 import { describe, expect, it } from "vitest";
 
 import { AUTHORITY_ACTION_VOCABULARY, openFabric } from "../../../src/index.ts";
+import { settle } from "../../shared/deadline-wait.ts";
 import { TEST_AUTHORITY_V2_FIELDS } from "../../support/authority-v2-testkit.ts";
 import { createCurrentSessionRun } from "../../support/current-session-testkit.ts";
 import { createLifecycleFixture, reopenLifecycleFabric } from "../../support/lifecycle-testkit.ts";
@@ -439,7 +440,7 @@ describe("provider session admission", () => {
         payload: { agentId: "worker", providerSessionGeneration: 1, instruction: "first" },
         commandId: "turn:first",
       });
-      await new Promise((resolve) => setTimeout(resolve, 20));
+      await settle(20, "the first turn claims the provider session before the second dispatches");
 
       await expect(chair.dispatchProviderAction({
         certifyingReview: null,

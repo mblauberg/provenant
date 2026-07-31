@@ -5,17 +5,22 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
-import difflib
 from pathlib import Path
 import re
 import sys
+
+try:
+    from scripts.lib.projection import ProjectionError, project, split_marked_region
+except ModuleNotFoundError:  # run directly: sys.path[0] is scripts/
+    from lib.projection import ProjectionError, project, split_marked_region  # type: ignore[no-redef]
 
 
 ROOT = Path(__file__).resolve().parents[1]
 README_PATH = ROOT / "README.md"
 SKILLS_DIR = ROOT / "skills"
-START_MARKER = "<!-- skill-catalogue:start -->"
-END_MARKER = "<!-- skill-catalogue:end -->"
+MARKER = "skill-catalogue"
+START_MARKER = f"<!-- {MARKER}:start -->"
+END_MARKER = f"<!-- {MARKER}:end -->"
 # skills/_shared holds resources reused by several skills. It has no SKILL.md and
 # the installer never links it, so it is not a skill and never appears in the count.
 NOT_A_SKILL = {"_shared"}
@@ -36,7 +41,7 @@ UNMARKED_COUNT = re.compile(
 )
 
 
-class CatalogueError(ValueError):
+class CatalogueError(ProjectionError):
     pass
 
 
@@ -55,18 +60,7 @@ def installed_skills(skills_dir: Path = SKILLS_DIR) -> list[str]:
 
 
 def split_readme(text: str) -> tuple[str, str, str]:
-    # Exactly one pair. A second block would sit outside the rendered region and drift
-    # unchecked, which is the same class of bug as an unguarded headline integer.
-    starts, ends = text.count(START_MARKER), text.count(END_MARKER)
-    if starts != 1 or ends != 1:
-        raise CatalogueError(
-            f"README needs exactly one {START_MARKER} / {END_MARKER} pair, "
-            f"found {starts} start and {ends} end markers"
-        )
-    start, end = text.find(START_MARKER), text.find(END_MARKER)
-    if end < start:
-        raise CatalogueError(f"README has {END_MARKER} before {START_MARKER}")
-    return text[: start + len(START_MARKER)], text[start + len(START_MARKER) : end], text[end:]
+    return split_marked_region(text, MARKER, name="README")
 
 
 def parse_areas(block: str) -> list[tuple[str, list[str]]]:
@@ -218,19 +212,16 @@ def main(argv: list[str] | None = None) -> int:
     try:
         current = args.readme.read_text()
         rendered, count, areas = render(current, args.skills_root)
-    except (OSError, CatalogueError) as exc:
+        # The primitive re-asserts the marked region, so deleting the markers
+        # fails the gate here even if a future render path stops splitting.
+        report = project(args.readme, MARKER, rendered, args.check, source="skills/")
+    except (OSError, ProjectionError) as exc:
         print(f"FAIL: {exc}", file=sys.stderr)
         return 1
     name = args.readme.name
     if args.check:
-        if rendered != current:
-            diff = difflib.unified_diff(
-                current.splitlines(keepends=True),
-                rendered.splitlines(keepends=True),
-                fromfile=f"{name} (on disk)",
-                tofile=f"{name} (rendered from skills/)",
-            )
-            sys.stdout.writelines(diff)
+        if report:
+            sys.stdout.writelines(report)
             print(
                 f"FAIL: {name} skill catalogue is stale; run scripts/render_skill_catalogue.py",
                 file=sys.stderr,
@@ -238,8 +229,7 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         print(f"PASS: {name} catalogue and headline count match {count} skills in {areas} areas")
         return 0
-    if rendered != current:
-        args.readme.write_text(rendered)
+    if report:
         print(f"rendered: {name} updated to {count} skills in {areas} areas")
     else:
         print(f"rendered: {name} already matches {count} skills in {areas} areas")

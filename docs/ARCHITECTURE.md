@@ -26,6 +26,26 @@ and adversarial pressure. `HARNESS.md` owns the ladder and
 The three gold gates are the only places a user must decide; everything inside
 the `deliver` kernel is agent work bound to one receipt.
 
+The tier is derived rather than declared. `scope` rates every factor in
+`config/risk-policy.json`, the highest tier any rating maps to is the run's
+minimum tier, and a lower declared tier needs a user-approved override carrying
+an approver, a reason and evidence. The table between the markers is rendered
+from that file by `scripts/render_doc_projections.py`.
+
+<!-- risk-factor-table:start -->
+
+| Factor | `routine` | `substantial` | `crucial` | `terminal` |
+|---|---|---|---|---|
+| blast radius | `local` | `multi-module` | `shared-system` | `production` |
+| reversibility | `easy` | `moderate` | `hard` | `irreversible` |
+| data sensitivity | `public` | `internal` | `confidential` | `regulated` |
+| migration | `none` | `reversible` | `stateful` | `destructive` |
+| oracle quality | `strong` | `mixed` | `weak` |  |
+| external effects | `none` |  | `reversible` | `irreversible` |
+| critical surface | `none` | `public-contract` | `auth-security`, `privacy`, `financial`, `legal`, `build-release-gate` | `life-safety` |
+
+<!-- risk-factor-table:end -->
+
 One palette carries the whole document. Every diagram below uses it, and no
 colour means two things:
 
@@ -133,8 +153,11 @@ base profiles.
 The state machine is enforced rather than advisory.
 `skills/deliver/scripts/validate_delivery.py` holds the transition table and
 rejects a receipt whose recorded history jumps a gate, so the states below are
-the ones a run can actually occupy.
+the ones a run can actually occupy. The diagram body between the markers is
+rendered from those constants by `scripts/render_doc_projections.py`; the
+accessibility text, palette, class lines and edge labels stay hand-written.
 
+<!-- delivery-state-machine:start -->
 ```mermaid
 stateDiagram-v2
     accTitle: The delivery-run state machine
@@ -175,6 +198,7 @@ stateDiagram-v2
     class blocked,cancelled,degraded interrupt
     class closed inert
 ```
+<!-- delivery-state-machine:end -->
 
 The three side states are drawn apart from the lifecycle on purpose. Any normal
 state may be interrupted into `blocked`, `cancelled` or `degraded`, so wiring

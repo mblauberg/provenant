@@ -182,21 +182,6 @@ export async function readFakeJournal(path: string): Promise<Record<string, unkn
   }
 }
 
-export async function eventually(assertion: () => Promise<void> | void, timeoutMs = 8_000): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  let failure: unknown;
-  while (Date.now() < deadline) {
-    try {
-      await assertion();
-      return;
-    } catch (error: unknown) {
-      failure = error;
-      await new Promise((resolve) => setTimeout(resolve, 25));
-    }
-  }
-  throw failure;
-}
-
 export function owner(databasePath: string, ref: ProviderActionRef): string {
   const database = new Database(databasePath, { readonly: true });
   try {

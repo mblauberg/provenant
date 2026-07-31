@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 
 import { afterEach, describe, expect, it } from "vitest";
 
+import { settle } from "../../shared/deadline-wait.ts";
 import { BootstrapElection, FLOCK_ELECTION_LOCK_PORT } from "../../../src/daemon/bootstrap-election.ts";
 
 const cleanup: string[] = [];
@@ -218,7 +219,7 @@ describe("bootstrap election receipts", () => {
         line === "1" ? resolve() : reject(new Error(`unexpected generation: ${line}`));
       });
     });
-    await new Promise((resolve) => setTimeout(resolve, 120));
+    await settle(120, "the holder's 80ms lease expires while it still holds the kernel lock");
     const contender = new BootstrapElection({
       runtimeDirectory,
       leaseDurationMs: 80,
