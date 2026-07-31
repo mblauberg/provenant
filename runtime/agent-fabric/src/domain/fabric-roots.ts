@@ -46,13 +46,21 @@ export function resolveFabricRoots(options: FabricRootResolutionOptions): Fabric
 /**
  * An instance layer is legitimate when its machine-local pointer names the
  * resolved product. Filesystem access stays outside this domain module; the
- * caller supplies the pointer value after reading it.
+ * caller supplies both paths already canonicalised, because the two sides are
+ * produced by different tools: `install-harness` records
+ * `product_root.resolve(strict=True)`, which follows symlinks, while a product
+ * root taken from a flag or the environment is only lexically resolved. Comparing
+ * those two directly reports a genuinely paired instance as unpaired whenever the
+ * product is reached through a symlink, and the local layer then silently
+ * disappears.
  */
 export function isInstanceRootPaired(
-  roots: FabricRoots,
+  canonicalProductRoot: string | undefined,
   pointerProductRoot: string | undefined,
 ): boolean {
-  return pointerProductRoot !== undefined && resolve(pointerProductRoot) === roots.productRoot;
+  return canonicalProductRoot !== undefined
+    && pointerProductRoot !== undefined
+    && canonicalProductRoot === pointerProductRoot;
 }
 
 function shellQuote(value: string): string {
