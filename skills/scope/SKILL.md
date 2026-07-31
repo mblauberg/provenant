@@ -68,14 +68,15 @@ interfaces through project-native locks/constraints. Link or cache permitted
 authoritative material with source, version/date and digest; never vendor
 without licence and redistribution authority.
 
-Before handoff confirm: branches decided/parked; explicit exclusions/failure
-modes; machine-readable authority/risk; anchored evidence; user approval of
-spec and one-way doors. Execution handoff is digest-bound to exact approved
-scope, decisions and authority; change creates a new revision and gate.
+Before handoff: branches decided/parked; exclusions/failure modes;
+machine-readable authority/risk; anchored evidence; user approval of spec and
+one-way doors. Execution handoff is digest-bound to approved scope,
+decisions and authority; change creates a new revision and gate.
 
 ## Adapter-absent path
 
 Without optional Console, Herdr or GitHub, use canonical project artifacts and
 emit the skill-owned kind in
-[portable-workflow.v1.json](portable-workflow.v1.json). It records scope
-evidence; never supplies user approval.
+[portable-workflow.v1.json](portable-workflow.v1.json). The runner validates
+declared fields, including `accepted_artifact_identity`. Output proves context
+only, not scope evidence or approval.

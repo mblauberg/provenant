@@ -34,8 +34,8 @@ resulting system, not the changed lines alone.
    nullable modes, casts hiding invariants, thin wrappers, parallel flows, and
    abstractions adding concepts without reducing complexity.
 7. Ask whether a proven reframe could delete branches, state, layers, or
-   duplicated flows. Size is a signal, not a defect. Past 1000 lines a source
-   file **is** a finding; tests only warn.
+   duplicated flows. More than 1,000 lines warrants inspection, not a finding.
+   Report a concrete cohesion, ownership, reviewability or change-risk defect.
 8. Check tests and verification against the acceptance criteria. Confirm the
    trajectory: relevant deterministic checks ran and their results are
    available. Never infer coverage from a green summary alone.

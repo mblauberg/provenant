@@ -30,10 +30,12 @@ Documentation claims sit in three tiers, and the third is deliberate:
    with `--write`, and never edit the region by hand; `scripts/check-harness`
    fails on drift and on a deleted marker, and CI never writes.
 2. **Drift-checked.** Claims compared against source without being generated:
-   the ADR index, the spec schema baseline, the review-pressure tables, the
-   machine-checking sentence and the repair budgets
-   (`scripts/check_doc_constants.py`), and every repository path cited in
-   `docs/ARCHITECTURE.md` and `README.md` (`scripts/check_doc_paths.py`).
+   the ADR index, the spec schema baseline, tier row names and order, selected
+   constants, the machine-checking sentence and the repair budgets
+   (`scripts/check_doc_constants.py`), plus relative Markdown links and
+   recognised outside-fence inline paths in `docs/ARCHITECTURE.md` and
+   `README.md` (`scripts/check_doc_paths.py`). Table prose, fenced commands and
+   placeholders remain review-owned.
    `HARNESS.md` stays in this tier because its hard line cap leaves no room
    for markers.
 3. **Unchecked prose.** Design intent and rationale carry no machine gate,
@@ -115,8 +117,10 @@ live backup folders as the normal safety boundary.
 
 Record a public rename in `config/skill-renames.json`. Test the managed
 reconciliation path; do not rely on users deleting or replacing global links by
-hand. Preview with `scripts/manage_installation.py plan`, then reconcile with the
-rename registry. Never claim or overwrite an unmanaged target.
+hand. Run `scripts/manage_installation.py plan --target <skills-dir>`, then
+`reconcile --target <skills-dir> --renames config/skill-renames.json`. Ordinary
+installation does not apply the rename registry.
+Never claim or overwrite an unmanaged target.
 
 ## Change the delivery kernel
 
@@ -154,10 +158,18 @@ requirement; this ADR must be revisited in any public-release checklist.
 
 ## Verify and release
 
-Run the checkout gates:
+Run the checkout gates, or require exact-head `ci-status`:
 
 ```sh
 scripts/check-harness
+npm run check
+npm run test:evaluation --workspace=@local/agent-fabric
+npm run test:load --workspace=@local/agent-fabric
+npm audit --workspace=@local/agent-fabric --omit=dev --audit-level=high
+cargo fmt --manifest-path runtime/agent-fabric-review-portal-supervisor/Cargo.toml --check
+cargo metadata --manifest-path runtime/agent-fabric-review-portal-supervisor/Cargo.toml --locked --offline --no-deps --format-version 1
+cargo clippy --manifest-path runtime/agent-fabric-review-portal-supervisor/Cargo.toml --locked --offline --all-targets -- -D warnings
+cargo test --manifest-path runtime/agent-fabric-review-portal-supervisor/Cargo.toml --locked --offline
 scripts/static-security-check.py
 scripts/public-release-check
 git diff --check

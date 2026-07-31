@@ -130,9 +130,9 @@ adapter cannot be enabled merely because the shared degradation test passes.
 
 ## Stage gates
 
-Run from the Provenant product checkout. Each gate is cumulative: `npm test`
-executes all deterministic `.test.ts` files implemented through the current
-stage.
+Run from the Provenant product checkout. Each gate is cumulative: the default
+tests exclude evaluation and performance/load suites, which have dedicated
+commands below.
 
 ### Every stage
 
@@ -184,7 +184,7 @@ Vitest suite:
 
 | Evidence | Current command/artifact |
 |---|---|
-| Registered five-seat health | `node runtime/agent-fabric/smoke/registered-mcp-health.mjs` with `AGENT_FABRIC_PROJECT_KEY` |
+| Registered-seat health | `node runtime/agent-fabric/smoke/registered-mcp-health.mjs` with `AGENT_FABRIC_PROJECT_KEY`; checks every seat in the current generation, not an expected five-seat set |
 | Registered Codex/Claude round trip | `node runtime/agent-fabric/smoke/registered-mcp-roundtrip.mjs` with `AGENT_FABRIC_PROJECT_KEY` |
 | Live workstation adapter capabilities | `cd runtime/agent-fabric && AGENT_FABRIC_LIVE_COMPATIBILITY_SMOKE=1 npx vitest run tests/integration/adapter-compatibility.live-smoke.test.ts` |
 | Agy Gemini / Cursor Grok provider-backed turns | Local-only Fabric request/reply evidence after runtime capability, subscription-auth and seat checks; never enabled in CI |

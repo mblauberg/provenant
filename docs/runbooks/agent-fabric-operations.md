@@ -112,10 +112,12 @@ advisory without being called satisfied.
 
 `recovering` is deliberately narrow, and covers only states an ordinary
 bootstrap actually converges: an active bootstrap or shutdown transition
-another owner is completing, active discovery whose PID is dead, and terminal
-crashed or unclean-stop discovery that the ordinary spawn path replaces. Absent
-discovery, a stale socket and an unreachable socket under a live PID are
-`blocked`, because reconciliation returns false for all three and bootstrap
+another owner is completing, active discovery whose PID is dead, terminal
+crashed or unclean-stop discovery that the ordinary spawn path replaces, and a
+database inspection whose bounded source set changed and may converge on retry.
+Absent discovery is idle when election and socket are also absent. Absent
+discovery paired with a stale socket or an unreachable socket under a live PID
+is `blocked`, because reconciliation returns false for all three and bootstrap
 then raises `BOOTSTRAP_RECONCILIATION_REQUIRED` or `BOOTSTRAP_READY_UNREACHABLE`
 — reporting them as `recovering` would send a zero-touch caller into an
 infinite retry. An incompatible incumbent, an ambiguous generation, a schema
@@ -401,7 +403,6 @@ a shutdown/start race from serving one durable store.
 Every client uses a separate stdio proxy process:
 
 ```text
-AGENT_FABRIC_SOCKET_PATH=<same socket>
 AGENT_FABRIC_STATE_DIRECTORY=<private fabric state directory>
 AGENT_FABRIC_SEAT=<claude|codex>
 AGENT_FABRIC_CLIENT_LABEL=<agy|claude|codex|cursor|kiro|opencode>
@@ -410,7 +411,9 @@ AGENT_FABRIC_CLIENT_LABEL=<agy|claude|codex|cursor|kiro|opencode>
 
 The seat selects one of Fabric's two primary MCP identities. The client label
 identifies the connecting surface; optional clients use the `codex` seat and
-retain their own label.
+the socket path is derived from the state directory unless
+`AGENT_FABRIC_SOCKET_PATH` is explicitly set as a low-level override. Optional
+clients retain their own label.
 
 Reviewed operator launch custody creates the project session, run and one
 generation-fenced chair. Agents cannot create runs through MCP. Peers receive
@@ -810,14 +813,18 @@ node smoke/registered-mcp-health.mjs ../..
 node smoke/registered-mcp-roundtrip.mjs ../..
 ```
 
-The health smoke checks all five seats, tool/resource discovery and readable
-run state. The round-trip smoke sends and acknowledges Codex to Claude and
+The health smoke checks every seat present in the current generation, plus
+tool/resource discovery and readable run state. It does not verify an expected
+five-seat set. The round-trip smoke sends and acknowledges Codex to Claude and
 Claude to Codex mailbox messages through separate MCP proxies.
 
 ## Renew seats
 
-Bind a new immutable seat generation to the exact current operator-launched
-project session and coordination run before the current credentials expire.
+For initial operator provisioning, bind a new immutable seat generation to the
+exact current operator-launched project session and coordination run. Use the
+low-level `mcp provision` command below for that operation. Routine or expired
+provisioned-roster renewal uses `mcp peer-provision --project ... --seat ...
+--expires-at ...`; bootstrap-origin rosters renew through bootstrap.
 After launch reaches committed status, use the current `seatProvisioning`
 descriptor returned by `operatorActionStatus` for the session/run revisions,
 generations, chair identity and active chair lease. This descriptor is a
