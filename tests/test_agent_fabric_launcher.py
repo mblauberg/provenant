@@ -1566,20 +1566,38 @@ def test_protocol_build_recovers_a_crashed_holders_stale_lock(
         / "runtime/agent-fabric-protocol"
         / ".dist.agent-fabric-protocol-build.lock"
     )
+    hooks = tmp_path / "crashed-holder-hooks"
+    hooks.mkdir()
+    # A PID that cannot exist is the deterministic crashed-holder witness; the
+    # hook ordering below makes both the stale observation and reclaim visible.
     _write(lock / "owner", "99999999\n")
-    env["AGENT_FABRIC_PROTOCOL_BUILD_LOCK_TIMEOUT_SECONDS"] = "1"
+    env["AGENT_FABRIC_PROTOCOL_BUILD_LOCK_TEST_HOOK_DIRECTORY"] = str(hooks)
+    env["AGENT_FABRIC_PROTOCOL_BUILD_LOCK_TIMEOUT_SECONDS"] = "20"
 
-    repaired = subprocess.run(
+    repaired_process = subprocess.Popen(
         [str(root / "scripts/agent-fabric-protocol-build")],
         cwd=root,
         env=env,
         text=True,
-        capture_output=True,
-        check=False,
-        timeout=10,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
     )
+    try:
+        _wait_for_path(hooks / f"{repaired_process.pid}.dead-owner-observed.ready")
+        assert lock.is_dir(), "stale holder must remain observable before recovery"
+        _write(hooks / f"{repaired_process.pid}.dead-owner-observed.continue")
+        _wait_for_path(hooks / f"{repaired_process.pid}.dead-owner-remove.ready")
+        _write(hooks / f"{repaired_process.pid}.dead-owner-remove.continue")
+        _wait_for_path(hooks / f"{repaired_process.pid}.dead-owner-removed.ready")
+        _wait_for_path(hooks / f"{repaired_process.pid}.owner-publish.ready")
+        _write(hooks / f"{repaired_process.pid}.owner-publish.continue")
+        _repaired_stdout, repaired_stderr = repaired_process.communicate(timeout=10)
+    finally:
+        if repaired_process.poll() is None:
+            repaired_process.terminate()
+            repaired_process.communicate(timeout=5)
 
-    assert repaired.returncode == 0, repaired.stderr
+    assert repaired_process.returncode == 0, repaired_stderr
     assert npm_marker.read_text(encoding="utf-8").splitlines() == [
         "run build --workspace=@local/agent-fabric-protocol",
     ]

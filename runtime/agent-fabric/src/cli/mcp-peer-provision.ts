@@ -30,7 +30,7 @@ import {
   type SeatMetadata,
 } from "./seat-store.js";
 
-const ROSTER_CONVERGENCE_TIMEOUT_MS = 5_000;
+const ROSTER_CONVERGENCE_MAX_ATTEMPTS = 200;
 const ROSTER_CONVERGENCE_POLL_MS = 25;
 
 type InstalledSeat = {
@@ -434,7 +434,7 @@ export async function provisionMcpPeerSeats(
     );
   }
   const daemonHandle = await startMcpProvisionDaemon(paths);
-  const convergenceDeadline = Date.now() + ROSTER_CONVERGENCE_TIMEOUT_MS;
+  let convergenceAttempts = 0;
   try {
     while (true) {
       let client: Awaited<ReturnType<typeof connectFabricDaemon>> | undefined;
@@ -586,8 +586,9 @@ export async function provisionMcpPeerSeats(
       } catch (error: unknown) {
         if (
           (!rosterCasChanged(error) && !chairCredentialChanged(error)) ||
-          Date.now() >= convergenceDeadline
+          convergenceAttempts >= ROSTER_CONVERGENCE_MAX_ATTEMPTS
         ) throw error;
+        convergenceAttempts += 1;
         await waitForRosterConvergence();
       } finally {
         try {

@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import Database from "better-sqlite3";
 import type { Sha256Digest } from "@local/agent-fabric-protocol";
 
@@ -212,6 +212,7 @@ async function startBusyWalWriter(
 }
 
 afterEach(async () => {
+  vi.unstubAllEnvs();
   await Promise.allSettled(handles.splice(0).reverse().map(async (handle) => handle.stop()));
   await Promise.allSettled(roots.splice(0).map(async (root) => rm(root, { recursive: true, force: true })));
 });
@@ -717,6 +718,7 @@ describe("production daemon bootstrap wiring", () => {
   });
 
   it("does not run cutover cleanup when concurrent inspection writes exhaust the retry bound", async () => {
+    vi.stubEnv("AGENT_FABRIC_TEST_DATABASE_INSPECTION_ATTEMPTS", "1");
     const root = await mkdtemp(join(tmpdir(), "fabric-production-inspection-race-"));
     roots.push(root);
     const databaseDirectory = join(root, "database");

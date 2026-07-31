@@ -517,6 +517,15 @@ function createPrivateDatabaseClone(
 const DATABASE_INSPECTION_ATTEMPTS = 5;
 const DATABASE_INSPECTION_BACKOFF_MS = [10, 20, 40, 80] as const;
 
+function databaseInspectionAttempts(): number {
+  const configured = process.env.NODE_ENV === "test"
+    ? Number.parseInt(process.env.AGENT_FABRIC_TEST_DATABASE_INSPECTION_ATTEMPTS ?? "", 10)
+    : Number.NaN;
+  return Number.isSafeInteger(configured) && configured > 0
+    ? configured
+    : DATABASE_INSPECTION_ATTEMPTS;
+}
+
 /**
  * Blocks the calling thread for the given delay.
  *
@@ -537,14 +546,15 @@ function sleepSync(milliseconds: number): void {
  * what actually lets a busy-but-healthy database converge.
  */
 function retryUnstableDatabaseInspection<T>(operation: () => T): T {
-  for (let attempt = 1; attempt <= DATABASE_INSPECTION_ATTEMPTS; attempt += 1) {
+  const attempts = databaseInspectionAttempts();
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
     try {
       return operation();
     } catch (error: unknown) {
       if (
         !(error instanceof SchemaBaselineError) ||
         error.code !== "DATABASE_INSPECTION_UNSTABLE" ||
-        attempt === DATABASE_INSPECTION_ATTEMPTS
+        attempt === attempts
       ) throw error;
       const backoff = DATABASE_INSPECTION_BACKOFF_MS[attempt - 1];
       if (backoff !== undefined) sleepSync(backoff);
