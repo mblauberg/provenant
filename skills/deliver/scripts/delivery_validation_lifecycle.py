@@ -6,9 +6,17 @@ from pathlib import Path
 from typing import Any
 
 from delivery_validation_common import (
-    Invalid, NORMAL_STATES, SIDE_STATES, TRANSITIONS, _digest, _list,
-    _mapping, _safe_path, _utc, fail,
+    Invalid, LIFECYCLE_CONTRACT, NORMAL_STATES, SIDE_STATES, TRANSITIONS,
+    _digest, _list, _mapping, _safe_path, _utc, fail,
 )
+
+
+def _transition_contract(from_state: str, to_state: str) -> dict[str, Any]:
+    transition = f"{from_state} -> {to_state}"
+    for row in LIFECYCLE_CONTRACT["transitions"]:
+        if row["transition"] == transition:
+            return row
+    raise Invalid(f"lifecycle contract has no row for {transition}")
 
 def _validate_history(run: dict[str, Any]) -> None:
     history = _list(run.get("state_history"), "state_history")
@@ -45,6 +53,50 @@ def _validate_history(run: dict[str, Any]) -> None:
             fail(degradation.get("kind") not in {"kernel_degraded", "runtime_degraded"}, "degraded run requires a typed degradation kind")
             if degradation.get("kind") == "kernel_degraded":
                 fail(not degradation.get("fallback_skill"), "kernel_degraded requires the specialised fallback skill")
+
+
+def _validate_transition_evidence(
+    run: dict[str, Any], evidence: dict[str, dict[str, Any]],
+) -> None:
+    """Apply per-transition evidence and post-repair rules from the contract."""
+    history = run["state_history"]
+    for index in range(1, len(history)):
+        previous = _mapping(history[index - 1], f"state_history[{index - 1}]")
+        current = _mapping(history[index], f"state_history[{index}]")
+        from_state = previous["state"]
+        to_state = current["state"]
+        if from_state in SIDE_STATES or to_state in SIDE_STATES:
+            continue
+        row = _transition_contract(from_state, to_state)
+        linked = [evidence[evidence_id] for evidence_id in current["evidence_ids"]]
+        required_kinds = set(row["required_evidence_kinds"])
+        actual_kinds = {item.get("kind") for item in linked}
+        fail(
+            not required_kinds <= actual_kinds,
+            f"{row['transition']} requires evidence kinds {sorted(required_kinds)}",
+        )
+        freshness = row["freshness_rule"]
+        if freshness.get("mode") != "after_repair":
+            continue
+        repair_at = next(
+            (
+                _utc(item["at"], f"state_history[{repair_index}].at")
+                for repair_index, item in reversed(list(enumerate(history[:index])))
+                if item.get("state") == freshness.get("repair_state")
+            ),
+            None,
+        )
+        if repair_at is None:
+            continue
+        timestamp_field = freshness.get("evidence_timestamp_field")
+        for item in linked:
+            timestamp = item.get(timestamp_field)
+            if timestamp is None:
+                continue
+            fail(
+                _utc(timestamp, f"evidence {item['id']}.{timestamp_field}") < repair_at,
+                f"{row['transition']} evidence {item['id']} is stale after repair",
+            )
 
 
 def _validate_checkpoint(
@@ -106,6 +158,7 @@ def _validate_intent_design(run: dict[str, Any], artifacts: dict[str, dict[str, 
     _digest(intent.get("digest"), "intent.digest")
     matching = [item for item in artifacts.values() if item.get("path") == intent.get("artifact") or item.get("uri") == intent.get("artifact")]
     fail(not matching or matching[0].get("digest") != intent.get("digest"), "intent digest must bind a declared artifact")
+    intent_artifact_id = matching[0].get("id") if matching else None
 
     risk = run.get("risk_tier")
     design = _mapping(run.get("design"), "design")
@@ -115,6 +168,10 @@ def _validate_intent_design(run: dict[str, Any], artifacts: dict[str, dict[str, 
             fail(not design.get(field), f"design.{field} is required")
         bound = artifacts.get(design.get("artifact_id"))
         fail(not bound or bound.get("digest") != design.get("digest"), "design digest must bind its artifact")
+        fail(
+            design.get("artifact_id") != intent_artifact_id,
+            "design approval artifact must be the approved intent artifact",
+        )
         design_evidence = evidence.get(design.get("evidence"))
         fail(not design_evidence or design_evidence.get("kind") != "human" or design_evidence.get("status") != "pass" or design_evidence.get("gate") != "design-approval", "design approval must link matching passing human evidence")
     if risk in {"crucial", "terminal"}:
@@ -132,6 +189,3 @@ def _validate_intent_design(run: dict[str, Any], artifacts: dict[str, dict[str, 
             fail(not linked or linked.get("kind") != "human" or linked.get("status") != "pass" or linked.get("gate") != f"one-way-door:{door.get('id')}", f"one-way door {index} must link matching passing human evidence")
             if door.get("status") == "deferred":
                 fail(not door.get("approved_by") or not door.get("reason"), f"deferred one-way door {index} requires human approval and reason")
-
-
-

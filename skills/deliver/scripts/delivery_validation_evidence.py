@@ -11,6 +11,7 @@ from delivery_validation_common import (
     Invalid, _digest, _inside, _list, _mapping, _policy_validation_module,
     _safe_path, _utc, fail, _load_bound_json,
 )
+from delivery_validation_lifecycle import _validate_transition_evidence
 
 def _validate_evidence(
     run: dict[str, Any], profile: dict[str, Any], artifacts: dict[str, dict[str, Any]],
@@ -113,5 +114,52 @@ def _validate_evidence(
         for gate in gates:
             matches = [item for item in by_id.values() if item.get("gate") == gate and item.get("status") == "pass"]
             fail(not matches or any(item.get("kind") != kind for item in matches), f"profile gate {gate} requires passing {kind} evidence")
+    _validate_transition_evidence(run, by_id)
+    if run.get("status") == "closed":
+        _validate_observation_artifacts(
+            by_id, artifacts, artifact_root=artifact_root, verify_hashes=verify_hashes,
+        )
     return by_id
 
+
+def _validate_observation_artifacts(
+    evidence: dict[str, dict[str, Any]], artifacts: dict[str, dict[str, Any]],
+    *, artifact_root: Path | None, verify_hashes: bool,
+) -> None:
+    """Inspect content that is the source of a closed observation claim."""
+    if not verify_hashes:
+        return
+    fail(artifact_root is None, "observation evidence verification requires an artifact root")
+    for item in evidence.values():
+        if item.get("kind") != "observation":
+            continue
+        artifact = artifacts[item["artifact_id"]]
+        path = artifact.get("path")
+        fail(
+            artifact.get("media_type") != "application/json" or not path,
+            f"observation evidence artifact {item['artifact_id']} must be local JSON",
+        )
+        target = artifact_root / path
+        try:
+            raw = target.read_bytes()
+        except OSError as exc:
+            raise Invalid(
+                f"observation evidence artifact {item['artifact_id']} is unreadable"
+            ) from exc
+        fail(not raw, f"observation evidence artifact {item['artifact_id']} is empty")
+        try:
+            content = _load_bound_json(
+                raw, f"observation evidence artifact {item['artifact_id']}"
+            )
+        except Invalid as exc:
+            raise Invalid(
+                f"observation evidence artifact {item['artifact_id']} has invalid JSON"
+            ) from exc
+        if content.get("contract") == "deterministic-evidence-bundle":
+            continue
+        fail(
+            content.get("gate") != item.get("gate")
+            or content.get("measured_value") != item.get("measured_value"),
+            f"observation evidence artifact {item['artifact_id']} does not corroborate "
+            f"evidence {item['id']}",
+        )

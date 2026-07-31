@@ -9,7 +9,14 @@ from pathlib import Path
 from typing import Any
 
 from delivery_validation_common import (
-    AGENTIC_RISKS, NORMAL_STATES, _list, _mapping, _utc, fail,
+    AGENTIC_RISKS, LIFECYCLE_CONTRACT, NORMAL_STATES, _list, _mapping, _utc, fail,
+)
+
+
+CLOSE_GATE = next(
+    row["close_gate"]
+    for row in LIFECYCLE_CONTRACT["transitions"]
+    if row["transition"] == "observing -> closed"
 )
 
 def _validate_security(run: dict[str, Any], registry: dict[str, Any], profile: dict[str, Any], artifacts: dict[str, dict[str, Any]], evidence: dict[str, dict[str, Any]], *, required: bool, product_root: Path) -> None:
@@ -84,11 +91,11 @@ def _validate_gates_observation(run: dict[str, Any], evidence: dict[str, dict[st
             linked = evidence.get(gate.get("evidence"))
             fail(not linked or linked.get("kind") != "human" or linked.get("status") != "pass" or linked.get("gate") != f"human-{name}", f"human {name} approval must link matching passing human evidence")
     if run.get("status") in {"accepted", "awaiting_release", "observing", "closed"}:
-        fail(acceptance.get("status") != "approved", "accepted state requires human acceptance")
+        fail(acceptance.get("status") != CLOSE_GATE["acceptance"], "accepted state requires human acceptance")
         accepted_transition = next(item for item in run["state_history"] if item["state"] == "accepted")
         fail(acceptance.get("evidence") not in accepted_transition["evidence_ids"], "accepted transition must cite its human acceptance evidence")
     if run.get("status") in {"observing", "closed"}:
-        fail(release.get("status") != "approved", "observation requires separate human release authority")
+        fail(release.get("status") != CLOSE_GATE["release"], "observation requires separate human release authority")
         observing_transition = next(item for item in run["state_history"] if item["state"] == "observing")
         fail(release.get("evidence") not in observing_transition["evidence_ids"], "observing transition must cite its human release evidence")
     observation = run.get("observation")
@@ -97,7 +104,7 @@ def _validate_gates_observation(run: dict[str, Any], evidence: dict[str, dict[st
     if run.get("status") == "observing":
         fail(observation_status not in {"active", "pass"}, "observing state requires observation status active or pass")
     elif run.get("status") == "closed":
-        fail(observation_status != "pass", "closed state requires observation status pass")
+        fail(observation_status != CLOSE_GATE["observation"], "closed state requires observation status pass")
     elif run.get("status") in NORMAL_STATES:
         fail(observation_status not in {"planned", "not_applicable"}, "pre-release lifecycle states require planned or not_applicable observation")
     if observation_status == "not_applicable":
@@ -169,5 +176,4 @@ def _validate_high_stakes(run: dict[str, Any], registry: dict[str, Any], evidenc
             fail(any(not control.get(field) for field in ("domain", "reviewer", "qualification")), "qualified domain review requires domain, reviewer and qualification")
         elif name == "explicit_human_action_gate":
             fail(not control.get("action") or not control.get("approved_by"), "explicit human action gate requires action and approver")
-
 
