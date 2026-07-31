@@ -142,9 +142,9 @@ From the product checkout,
 reclaims the harness-owned skill links and nothing else. The bootstrap line and
 the Codex block remain until removed by hand.
 
-Before first use, run `provenant project activate [PATH]`. It trusts the Git or
-non-Git root in the existing registry. Activation does not bootstrap seats. Use
-`fabric_bootstrap`; low-level trust remains
+Before first use, run `provenant project activate [PATH]`. Git PATH must be its
+exact repository root or a non-Git directory; activation verifies trust, never
+bootstraps seats. Use `fabric_bootstrap`; trust remains
 `provenant fabric workspace trust`. If bootstrap runs first,
 `WORKSPACE_NOT_TRUSTED` provides recovery.
 
