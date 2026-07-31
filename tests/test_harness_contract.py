@@ -9,6 +9,7 @@ import yaml
 
 
 ROOT = Path(__file__).resolve().parents[1]
+SKILL_COUNT = len(list((ROOT / "skills").glob("*/SKILL.md")))
 WORKFLOWS = ROOT / "workflows"
 
 
@@ -368,15 +369,15 @@ def test_readme_headline_skill_count_matches_the_skills_on_disk(tmp_path):
     ("name", "mutate"),
     (
         # The historical defect, verbatim: an unmanaged count beside the noun.
-        ("the original 34-vs-33 wording", lambda text: text.replace("<!--skills-->32<!--/skills--> Agent Skills", "32 reusable Agent Skills")),
-        ("a plain miscount", lambda text: text.replace("<!--skills-->32<!--/skills--> Agent Skills", "30 Agent Skills")),
+        ("the original count wording", lambda text: text.replace(f"<!--skills-->{SKILL_COUNT}<!--/skills--> Agent Skills", f"{SKILL_COUNT - 1} reusable Agent Skills")),
+        ("a plain miscount", lambda text: text.replace(f"<!--skills-->{SKILL_COUNT}<!--/skills--> Agent Skills", f"{SKILL_COUNT - 2} Agent Skills")),
         # Whitespace must not smuggle a stale figure past the audit. Both of these render
         # in Markdown as the same false headline as the case above.
-        ("a double space before the noun", lambda text: text.replace("<!--skills-->32<!--/skills--> Agent Skills", "32  Agent Skills")),
-        ("a line wrap before the noun", lambda text: text.replace("<!--skills-->32<!--/skills--> Agent Skills", "32\nAgent Skills")),
+        ("a double space before the noun", lambda text: text.replace(f"<!--skills-->{SKILL_COUNT}<!--/skills--> Agent Skills", f"{SKILL_COUNT}  Agent Skills")),
+        ("a line wrap before the noun", lambda text: text.replace(f"<!--skills-->{SKILL_COUNT}<!--/skills--> Agent Skills", f"{SKILL_COUNT}\nAgent Skills")),
         # Silence must not pass: a gate that only compares stated counts would go green
         # on a README that states none, which is drift by deletion.
-        ("no count stated at all", lambda text: text.replace("<!--skills-->32<!--/skills--> Agent Skills", "Agent Skills").replace("<!--skills-->32<!--/skills-->-skill", "multi-skill")),
+        ("no count stated at all", lambda text: text.replace(f"<!--skills-->{SKILL_COUNT}<!--/skills--> Agent Skills", "Agent Skills").replace(f"<!--skills-->{SKILL_COUNT}<!--/skills-->-skill", "multi-skill")),
         ("a skill listed twice", lambda text: text.replace("[`session`](skills/session/SKILL.md), ", "[`session`](skills/session/SKILL.md), [`session`](skills/session/SKILL.md), ", 1)),
         ("a skill missing from the table", lambda text: text.replace("[`caveman`](skills/caveman/SKILL.md)", "")),
         ("a skill in the table that is not on disk", lambda text: text.replace("[`caveman`](skills/caveman/SKILL.md)", "[`caveman`](skills/caveman/SKILL.md), [`ghost`](skills/ghost/SKILL.md)")),
