@@ -1,13 +1,12 @@
+import re
 from pathlib import Path
-
-from scripts.count_skill_words import count_skill_words
 
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def words(path: Path):
-    return count_skill_words(path.read_text())
+    return len(re.findall(r"\b[\w'-]+\b", path.read_text()))
 
 
 def test_every_skill_entrypoint_stays_within_progressive_disclosure_budget():

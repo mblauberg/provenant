@@ -7,8 +7,6 @@ import sys
 import pytest
 import yaml
 
-from scripts.count_skill_words import count_skill_words
-
 
 ROOT = Path(__file__).resolve().parents[1]
 SKILL_COUNT = len(list((ROOT / "skills").glob("*/SKILL.md")))
@@ -550,7 +548,7 @@ def test_react_performance_skill_is_vendor_neutral_lean_and_vite_aware():
     root = ROOT / "skills" / "react-performance"
     skill = (root / "SKILL.md").read_text()
     assert frontmatter_name(root / "SKILL.md") == "react-performance"
-    assert count_skill_words(skill) <= 500
+    assert len(skill.split()) <= 500
     assert "Vite" in skill
     assert not (ROOT / "skills" / "vercel-react-best-practices").exists()
     assert not any((root / name).exists() for name in ("AGENTS.md", "README.md", "metadata.json"))
@@ -568,7 +566,7 @@ def test_natural_writing_replaces_humanise_text_with_a_lean_general_fallback():
         for path in (ROOT / "README.md", ROOT / "HARNESS.md", ROOT / "MAINTAINING.md")
     )
     assert frontmatter_name(root / "SKILL.md") == "natural-writing"
-    assert count_skill_words(skill) <= 500
+    assert len(skill.split()) <= 500
     assert not (ROOT / "skills" / "humanise-text").exists()
     assert not (ROOT / "skills" / "clean-writing").exists()
     assert "humanise-text" not in tracked_text
@@ -587,7 +585,7 @@ def test_retrospect_closes_the_quality_flywheel_without_log_bloat():
     path = ROOT / "skills" / "retrospect" / "SKILL.md"
     skill = path.read_text()
     assert frontmatter_name(path) == "retrospect"
-    assert count_skill_words(skill) <= 500
+    assert len(skill.split()) <= 500
     for term in ("Benchmark", "Diagnose", "Verify", "Monitor"):
         assert term in skill
     assert "one dated log per run" in skill
