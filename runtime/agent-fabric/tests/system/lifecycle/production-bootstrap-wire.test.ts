@@ -828,6 +828,7 @@ describe("production daemon bootstrap wiring", () => {
     expect(restarted.pid).not.toBe(abandoned.pid);
   });
 
+  // Restart waits for the production bootstrap election's 10s lease to expire.
   it("removes its socket when launcher custody is lost immediately after bind", async () => {
     const root = await mkdtemp(join(tmpdir(), "f-pre-discovery-custody-"));
     roots.push(root);
@@ -871,7 +872,7 @@ describe("production daemon bootstrap wiring", () => {
     const restarted = await startFabricDaemon(options);
     handles.push(restarted);
     expect(restarted.pid).not.toBe(daemonPid);
-  });
+  }, 20_000);
 
   it("keeps a released active daemon outside its launcher's process group", async () => {
     const root = await mkdtemp(join(tmpdir(), "f-release-custody-"));
