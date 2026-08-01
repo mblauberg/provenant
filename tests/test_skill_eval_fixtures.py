@@ -258,6 +258,56 @@ def test_current_portfolio_routing_fixture_accepts_a_digest_bound_completed_resu
     routing_validator.validate_current_fixture(root)
 
 
+def test_current_portfolio_completed_fixture_accepts_independent_partial_scores(tmp_path):
+    root, result_path = write_completed_current_fixture(tmp_path)
+    result = json.loads(result_path.read_text())
+    result["case_results"][0].update({
+        "status": "fail",
+        "primary_correct": False,
+        "companion_correct": True,
+    })
+    result["results"]["accounting"].update({"passed": 107, "failed": 1})
+    result["results"]["metrics"].update({
+        "primary_accuracy": {
+            "numerator": 107, "denominator": 108, "value": 107 / 108,
+            "threshold": 1.0, "passed": False,
+        },
+        "companion_fidelity": {
+            "numerator": 108, "denominator": 108, "value": 1.0,
+            "threshold": 0.9, "passed": True,
+        },
+        "critical_case_failures": 1,
+    })
+    result_path.write_text(json.dumps(result, indent=2) + "\n")
+
+    routing_validator.validate_current_fixture(root)
+
+
+def test_current_portfolio_completed_fixture_accepts_conserved_omitted_case(tmp_path):
+    root, result_path = write_completed_current_fixture(tmp_path)
+    result = json.loads(result_path.read_text())
+    result["case_results"][0].update({
+        "status": "omitted",
+        "primary_correct": False,
+        "companion_correct": False,
+    })
+    result["results"]["accounting"].update({"passed": 107, "omitted": 1})
+    result["results"]["metrics"].update({
+        "primary_accuracy": {
+            "numerator": 107, "denominator": 108, "value": 107 / 108,
+            "threshold": 1.0, "passed": False,
+        },
+        "companion_fidelity": {
+            "numerator": 107, "denominator": 108, "value": 107 / 108,
+            "threshold": 0.9, "passed": True,
+        },
+        "critical_case_failures": 1,
+    })
+    result_path.write_text(json.dumps(result, indent=2) + "\n")
+
+    routing_validator.validate_current_fixture(root)
+
+
 @pytest.mark.parametrize("mutation, message", [
     ("missing-result", "requires a result"),
     ("wrong-protocol", "protocol artifact digest does not match"),
@@ -273,11 +323,13 @@ def test_current_portfolio_routing_fixture_accepts_a_digest_bound_completed_resu
     ("summary-dependencies", "summary dependencies are invalid"),
     ("accounting", "case accounting is invalid"),
     ("metrics", "metrics are invalid"),
+    ("failed-all-correct", "case-result rows are invalid"),
     ("omitted-pass", "case-result rows are invalid"),
     ("attempt-case-state-drift", "terminal state does not match its attempt"),
     ("missing-lineage", "provider lineage is invalid"),
     ("undeclared-substitution", "substitution reason is required"),
     ("lineage-receipt-drift", "route receipt is invalid"),
+    ("duplicate-route-artifact", "route receipt identity is duplicated"),
     ("missing-route-receipt", "route receipt artifact digest does not match"),
     ("absent-route-receipt", "attempt evidence is invalid"),
     ("planned-lineage-echo", "current result keys are invalid"),
@@ -330,6 +382,8 @@ def test_current_portfolio_completed_fixture_rejects_unbound_or_mismatched_resul
             result["results"]["accounting"]["passed"] = 107
         elif mutation == "metrics":
             result["results"]["metrics"]["primary_accuracy"]["numerator"] = 107
+        elif mutation == "failed-all-correct":
+            result["case_results"][0]["status"] = "fail"
         elif mutation == "omitted-pass":
             result["case_results"][0]["status"] = "omitted"
         elif mutation == "attempt-case-state-drift":
@@ -349,6 +403,8 @@ def test_current_portfolio_completed_fixture_rejects_unbound_or_mismatched_resul
             result["attempts"][0]["disposition"] = "substituted"
         elif mutation == "missing-route-receipt":
             result["attempts"][0]["route_receipt"]["artifact"]["sha256"] = "sha256:" + "0" * 64
+        elif mutation == "duplicate-route-artifact":
+            result["attempts"][1]["route_receipt"]["artifact"] = result["attempts"][0]["route_receipt"]["artifact"]
         elif mutation == "absent-route-receipt":
             del result["attempts"][0]["route_receipt"]
         elif mutation == "planned-lineage-echo":
