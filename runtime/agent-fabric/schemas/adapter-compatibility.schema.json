@@ -33,6 +33,7 @@
         "command": {"type": "string"},
         "wrapper_entrypoint": {"type": "string", "minLength": 1},
         "executable": {"type": "string"},
+        "executable_override": {"type": "string", "pattern": "^/"},
         "cursor_install_root": {"type": "string"},
         "provider_install_root": {"type": "string"},
         "provider_identity": {"enum": ["apple-designated", "cursor-partial-signed-helpers", "owner-controlled-install-root"]}
