@@ -36,6 +36,12 @@ def _lenses(leg: Mapping[str, Any]) -> set[str]:
     return {value for value in values if isinstance(value, str) and value}
 
 
+def _provider_family(leg: Mapping[str, Any]) -> object:
+    """Use validated endpoint lineage when the caller has retained it."""
+    provider = leg.get("provider_family")
+    return provider if isinstance(provider, str) and provider else leg.get("family")
+
+
 def check_review_ladder(
     risk_tier: object,
     legs: Iterable[Mapping[str, Any]],
@@ -64,7 +70,7 @@ def check_review_ladder(
     if not passing_primary:
         errors.append("substantial+ review requires passing other-primary coverage")
     else:
-        family = passing_primary[0].get("family")
+        family = _provider_family(passing_primary[0])
         if family not in PRIMARY_FAMILIES:
             errors.append("other-primary review must use a primary family")
         if chair_family and family == chair_family:
@@ -72,7 +78,7 @@ def check_review_ladder(
 
     distinct = [leg for leg in checked if leg.get("role") == "distinct-family" and leg.get("status") == "pass"]
     for leg in distinct:
-        if leg.get("family") in PRIMARY_FAMILIES | {chair_family}:
+        if _provider_family(leg) in PRIMARY_FAMILIES | {chair_family}:
             errors.append("distinct-family review must use a non-primary family")
             break
 

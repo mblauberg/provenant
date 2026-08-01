@@ -39,12 +39,17 @@ def add_manifest_row(run, row):
 def review(review_id, scope, lens, family, tier="flagship", status="complete", substitution_for="", wave=1, reason=None):
     evidence_digest = "sha256:" + __import__("hashlib").sha256((review_id + ":evidence").encode()).hexdigest()
     route_digest = "sha256:" + __import__("hashlib").sha256((review_id + ":route").encode()).hexdigest()
+    terminal_digest = "sha256:" + __import__("hashlib").sha256((review_id + ":terminal").encode()).hexdigest()
     return {
         "id": review_id, "scope": scope, "lens": lens, "family": family,
         "tier": tier, "status": status, "substitution_for": substitution_for,
         "evidence": {"path": f"reviews/{review_id}.md", "digest": evidence_digest},
         "reason": reason if reason is not None else ("provider unavailable" if status != "complete" else ""),
         "verdict": "approve" if status == "complete" else "",
+        "terminal_result": {
+            "path": f"reviews/{review_id}.result.json",
+            "digest": terminal_digest,
+        } if status == "complete" else None,
         "wave": wave,
         "adapter": "claude" if family == "anthropic" else "codex",
         "adapter_gate": "direct-cli",
@@ -88,17 +93,39 @@ def bind_complete_reviews(run, plan):
         evidence = run / row["evidence"]["path"]
         evidence.write_text(row["id"] + ":evidence")
         row["evidence"]["digest"] = "sha256:" + __import__("hashlib").sha256(evidence.read_bytes()).hexdigest()
+        terminal = run / row["terminal_result"]["path"]
+        endpoint = "anthropic" if row["adapter"] == "claude" else "openai"
+        terminal.write_text(json.dumps({
+            "angle": row["lens"], "verdict": row["verdict"], "issues": [],
+            "crossFamily": {
+                "ran": row["scope"] == "primary", "tool": "",
+                "status": "ok", "modelFamily": row["family"],
+                "endpointProvider": endpoint, "crossFamily": row["scope"] == "primary",
+                "certificationEligible": row["scope"] == "primary",
+                "readOnlyGuarantee": "enforced", "outputPath": str(terminal),
+                "routeReceipt": row["route_receipt"]["path"], "notRunReason": "",
+            },
+            "path": row["evidence"]["path"],
+        }))
+        row["terminal_result"]["digest"] = "sha256:" + __import__("hashlib").sha256(terminal.read_bytes()).hexdigest()
         route = run / row["route_receipt"]["path"]
         route.write_text(json.dumps({
             "status": "ok", "adapter": row["adapter"], "resolved_model": row["model"],
-            "exit": 0, "output_path": str(evidence),
+            "exit": 0, "output_path": str(terminal),
             "adapter_gate": row["adapter_gate"],
             "catalog_model": row["catalog_model"], "model_family": row["family"],
             "provider_family": row["family"],
+            "endpoint_provider": endpoint,
+            "orchestrator_family": plan["chair_family"],
+            "read_only_guarantee": "enforced",
+            "tool": row["adapter"],
             "route_alias": row["tier"], "reviewer_id": row["reviewer_id"],
             "cross_family": row["scope"] == "primary",
             "certification_eligible": row["scope"] == "primary",
         }))
+        route_value = json.loads(route.read_text())
+        route_value["output_digest"] = "sha256:" + __import__("hashlib").sha256(terminal.read_bytes()).hexdigest()
+        route.write_text(json.dumps(route_value))
         row["route_receipt"]["digest"] = "sha256:" + __import__("hashlib").sha256(route.read_bytes()).hexdigest()
 
 
@@ -188,6 +215,156 @@ def test_complete_review_requires_terminal_receipt_and_verdict(tmp_path):
     assert any("explicit verdict" in error for error in errors)
 
 
+def test_nonempty_transcript_and_wrapper_verdict_do_not_replace_missing_worker_verdict(tmp_path):
+    plan = substantial_plan()
+    bind_complete_reviews(tmp_path, plan)
+    row = plan["reviews"][3]
+    route_path = tmp_path / row["route_receipt"]["path"]
+    route = json.loads(route_path.read_text())
+    provider_output = tmp_path / route["output_path"]
+    provider_output.write_text("provider stopped without a verdict or findings")
+    route_path.write_text(json.dumps(route))
+    row["route_receipt"]["digest"] = (
+        "sha256:" + __import__("hashlib").sha256(route_path.read_bytes()).hexdigest()
+    )
+    forged = tmp_path / "reviews/wrapper-forged.result.json"
+    forged.write_text(json.dumps({
+        "angle": row["lens"], "verdict": "approve", "issues": [],
+        "crossFamily": {
+            "ran": True, "tool": "codex", "status": "ok", "modelFamily": row["family"],
+            "endpointProvider": "anthropic", "crossFamily": True, "certificationEligible": True,
+            "readOnlyGuarantee": "enforced", "outputPath": str(provider_output),
+            "routeReceipt": row["route_receipt"]["path"], "notRunReason": "",
+        },
+        "path": row["evidence"]["path"],
+    }))
+    row["terminal_result"] = {
+        "path": str(forged.relative_to(tmp_path)),
+        "digest": "sha256:" + __import__("hashlib").sha256(forged.read_bytes()).hexdigest(),
+    }
+
+    errors = run_dir_finalize._validate_review_plan(plan, tmp_path)
+
+    assert any("does not bind route output" in error for error in errors)
+    assert any("certifying review leg" in error for error in errors)
+
+
+def test_same_provider_different_model_family_does_not_satisfy_other_primary(tmp_path):
+    plan = substantial_plan()
+    bind_complete_reviews(tmp_path, plan)
+    route_path = tmp_path / plan["reviews"][3]["route_receipt"]["path"]
+    route = json.loads(route_path.read_text())
+    route.update({
+        "provider_family": "openai",
+        "model_family": "anthropic",
+        "endpoint_provider": "openai",
+        "orchestrator_family": "openai",
+        "cross_family": True,
+        "certification_eligible": True,
+    })
+    route_path.write_text(json.dumps(route))
+    plan["reviews"][3]["route_receipt"]["digest"] = (
+        "sha256:" + __import__("hashlib").sha256(route_path.read_bytes()).hexdigest()
+    )
+
+    errors = run_dir_finalize._validate_review_plan(plan, tmp_path)
+
+    assert any("not certification eligible" in error for error in errors)
+    assert any("passing other-primary" in error for error in errors)
+
+
+def test_clean_distinct_provider_route_does_not_need_route_certification_flags(tmp_path):
+    plan = substantial_plan()
+    bind_complete_reviews(tmp_path, plan)
+    route_path = tmp_path / plan["reviews"][3]["route_receipt"]["path"]
+    route = json.loads(route_path.read_text())
+    route["cross_family"] = False
+    route["certification_eligible"] = False
+    route_path.write_text(json.dumps(route))
+    plan["reviews"][3]["route_receipt"]["digest"] = (
+        "sha256:" + __import__("hashlib").sha256(route_path.read_bytes()).hexdigest()
+    )
+
+    assert run_dir_finalize._validate_review_plan(plan, tmp_path) == []
+
+
+def test_inline_fabricated_terminal_result_is_not_a_retained_worker_result(tmp_path):
+    plan = substantial_plan()
+    bind_complete_reviews(tmp_path, plan)
+    plan["reviews"][3]["terminal_result"] = {
+        "verdict": "approve",
+        "fabricated_by": "wrapper",
+    }
+
+    errors = run_dir_finalize._validate_review_plan(plan, tmp_path)
+
+    assert any("terminal_result is invalid" in error for error in errors)
+
+
+def test_overwritten_provider_output_does_not_replace_dispatch_time_terminal_digest(tmp_path):
+    plan = substantial_plan()
+    bind_complete_reviews(tmp_path, plan)
+    row = plan["reviews"][3]
+    route_path = tmp_path / row["route_receipt"]["path"]
+    route = json.loads(route_path.read_text())
+    provider_output = tmp_path / route["output_path"]
+    provider_output.write_text(json.dumps({
+        "angle": row["lens"], "verdict": "approve", "issues": [],
+        "crossFamily": {
+            "ran": True, "tool": "codex", "status": "ok", "modelFamily": row["family"],
+            "endpointProvider": "openai", "crossFamily": True, "certificationEligible": True,
+            "readOnlyGuarantee": "enforced", "outputPath": str(provider_output),
+            "routeReceipt": row["route_receipt"]["path"], "notRunReason": "",
+        },
+        "path": row["evidence"]["path"],
+    }))
+    row["terminal_result"]["digest"] = "sha256:" + __import__("hashlib").sha256(provider_output.read_bytes()).hexdigest()
+    route_path.write_text(json.dumps(route))
+    row["route_receipt"]["digest"] = "sha256:" + __import__("hashlib").sha256(route_path.read_bytes()).hexdigest()
+
+    errors = run_dir_finalize._validate_review_plan(plan, tmp_path)
+
+    assert any("route output digest does not match dispatch receipt" in error for error in errors)
+    assert any("certifying review leg" in error for error in errors)
+
+
+def test_route_tool_and_adapter_mismatch_is_not_a_certifying_lineage(tmp_path):
+    plan = substantial_plan()
+    bind_complete_reviews(tmp_path, plan)
+    row = plan["reviews"][3]
+    route_path = tmp_path / row["route_receipt"]["path"]
+    route = json.loads(route_path.read_text())
+    route["tool"] = "codex"
+    route["adapter"] = "cursor"
+    route["endpoint_provider"] = "cursor"
+    route["provider_family"] = "xai"
+    route["model_family"] = "xai"
+    route["resolved_model"] = row["model"]
+    route_path.write_text(json.dumps(route))
+    row["route_receipt"]["digest"] = "sha256:" + __import__("hashlib").sha256(route_path.read_bytes()).hexdigest()
+
+    errors = run_dir_finalize._validate_review_plan(plan, tmp_path)
+
+    assert any("tool/adapter identity mismatch" in error for error in errors)
+    assert any("not a certifying review leg" in error for error in errors)
+
+
+def test_endpoint_provider_must_match_the_dispatch_adapter(tmp_path):
+    plan = substantial_plan()
+    bind_complete_reviews(tmp_path, plan)
+    route_path = tmp_path / plan["reviews"][3]["route_receipt"]["path"]
+    route = json.loads(route_path.read_text())
+    route["endpoint_provider"] = "openai"
+    route_path.write_text(json.dumps(route))
+    plan["reviews"][3]["route_receipt"]["digest"] = (
+        "sha256:" + __import__("hashlib").sha256(route_path.read_bytes()).hexdigest()
+    )
+
+    errors = run_dir_finalize._validate_review_plan(plan, tmp_path)
+
+    assert any("endpoint/provider identity" in error for error in errors)
+
+
 def test_substantial_review_topology_is_machine_checked():
     assert run_dir_finalize._validate_review_plan(substantial_plan()) == []
     plan = substantial_plan()
@@ -261,13 +438,26 @@ def test_review_topology_rejects_invalid_concurrency_ceiling():
 def test_review_topology_binds_account_default_route_and_review_evidence(tmp_path):
     evidence = tmp_path / "review.md"
     evidence.write_text("review output")
+    terminal = tmp_path / "terminal.json"
+    terminal.write_text(json.dumps({
+        "angle": "correctness", "verdict": "approve", "issues": [],
+        "crossFamily": {
+            "ran": False, "tool": "", "status": "not-applicable", "modelFamily": "openai",
+            "endpointProvider": "openai", "crossFamily": False, "certificationEligible": False,
+            "readOnlyGuarantee": "none", "outputPath": "", "routeReceipt": "", "notRunReason": "targeted-review",
+        },
+        "path": evidence.name,
+    }))
     route = tmp_path / "route.json"
     route.write_text(json.dumps({
-        "adapter": "codex", "adapter_gate": "direct-cli",
+        "tool": "codex", "adapter": "codex", "adapter_gate": "direct-cli",
         "resolved_model": "", "catalog_model": "gpt-5.6-sol",
         "model_family": "openai", "model_selection": "account-default",
-        "status": "ok", "exit": 0, "output_path": str(evidence),
+        "status": "ok", "exit": 0, "output_path": str(terminal),
         "provider_family": "openai",
+        "endpoint_provider": "openai", "orchestrator_family": "openai",
+        "output_digest": "sha256:" + __import__("hashlib").sha256(terminal.read_bytes()).hexdigest(),
+        "read_only_guarantee": "enforced",
         "certification_eligible": False,
         "route_alias": "flagship", "reviewer_id": "account-default",
     }))
@@ -275,6 +465,7 @@ def test_review_topology_binds_account_default_route_and_review_evidence(tmp_pat
     row.update({
         "model": "", "catalog_model": "gpt-5.6-sol",
         "evidence": {"path": evidence.name, "digest": "sha256:" + __import__("hashlib").sha256(evidence.read_bytes()).hexdigest()},
+        "terminal_result": {"path": terminal.name, "digest": "sha256:" + __import__("hashlib").sha256(terminal.read_bytes()).hexdigest()},
         "route_receipt": {"path": route.name, "digest": "sha256:" + __import__("hashlib").sha256(route.read_bytes()).hexdigest()},
     })
     plan = {

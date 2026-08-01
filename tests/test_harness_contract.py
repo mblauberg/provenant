@@ -210,6 +210,11 @@ def test_claude_workflows_use_router_and_safe_implement_loop():
     assert "do not recreate or replace it" in implementation
     assert "Review verdicts and dispatcher lineage" in implementation
     assert "certification_eligible" in implementation
+    assert "exact worker/provider REVIEW_SCHEMA object at the existing dispatcher output_path" in implementation
+    assert "Never inline, synthesise or derive terminal_result or its verdict" in implementation
+    assert "provider output at <your --out path> is the retained terminal result" in implementation
+    assert "dispatch-time output_digest" in implementation
+    assert "derive cross-family eligibility from that lineage and the chair family" in implementation
     assert "Machine gate FAILED" in implementation
     assert "state: 'failed'" in implementation
 

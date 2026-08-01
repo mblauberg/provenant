@@ -18,7 +18,7 @@ from _shared.review_ladder import (
     check_review_ladder,
 )
 from _shared.review_panel import PANEL_RECORD_KEYS, validate_panel_result
-from _shared.review_terminal import normalise_dispatch_review
+from _shared.review_terminal import REVIEW_RESULT_KEYS, normalise_dispatch_review
 
 
 TERMINAL = {"succeeded", "failed", "cancelled"}
@@ -103,12 +103,13 @@ def _validate_review_plan(raw: object, run_dir: Path | None = None) -> list[str]
         return errors + ["receipt review_plan.reviews must be a list"]
     keys = {
         "id", "scope", "lens", "family", "tier", "status",
-        "substitution_for", "evidence", "reason", "verdict", "wave",
+        "substitution_for", "evidence", "reason", "verdict", "terminal_result", "wave",
         "adapter", "model", "catalog_model", "route_receipt",
         "reviewer_id", "adapter_gate",
     }
     seen: set[str] = set()
     checked: list[dict[str, object]] = []
+    normalized_legs: dict[str, dict[str, object]] = {}
     for index, review in enumerate(reviews):
         if not isinstance(review, dict) or set(review) != keys:
             errors.append(f"receipt review_plan.reviews[{index}] must use the closed review record schema")
@@ -143,6 +144,39 @@ def _validate_review_plan(raw: object, run_dir: Path | None = None) -> list[str]
             not isinstance(review["verdict"], str) or not review["verdict"].strip()
         ):
             errors.append(f"receipt review_plan.reviews[{index}] requires an explicit verdict")
+        if review["status"] == "complete" and not isinstance(review["terminal_result"], dict):
+            errors.append(f"receipt review_plan.reviews[{index}] requires retained terminal_result")
+        terminal_result_ref = review["terminal_result"]
+        terminal_result_value: object = None
+        terminal_target: Path | None = None
+        if review["status"] == "complete":
+            if not isinstance(terminal_result_ref, dict) or set(terminal_result_ref) != {"path", "digest"}:
+                errors.append(f"receipt review_plan.reviews[{index}].terminal_result is invalid")
+            else:
+                terminal_path = Path(terminal_result_ref["path"]) if isinstance(terminal_result_ref["path"], str) else Path("..")
+                terminal_digest = terminal_result_ref["digest"]
+                if (
+                    terminal_path.is_absolute()
+                    or ".." in terminal_path.parts
+                    or not isinstance(terminal_digest, str)
+                    or not terminal_digest.startswith("sha256:")
+                ):
+                    errors.append(f"receipt review_plan.reviews[{index}].terminal_result is invalid")
+                elif run_dir is not None:
+                    terminal_target = run_dir / terminal_path
+                    if (
+                        not _inside(run_dir, terminal_target)
+                        or not terminal_target.is_file()
+                        or "sha256:" + hashlib.sha256(terminal_target.read_bytes()).hexdigest() != terminal_digest
+                    ):
+                        errors.append(f"receipt review_plan.reviews[{index}].terminal_result is missing or does not match")
+                    else:
+                        try:
+                            terminal_result_value = json.loads(terminal_target.read_text())
+                        except (OSError, json.JSONDecodeError):
+                            errors.append(f"receipt review_plan.reviews[{index}].terminal_result is invalid JSON")
+                        if not isinstance(terminal_result_value, dict) or set(terminal_result_value) != REVIEW_RESULT_KEYS:
+                            errors.append(f"receipt review_plan.reviews[{index}].terminal_result is invalid")
         evidence = review["evidence"]
         if not isinstance(evidence, dict) or set(evidence) != {"path", "digest"}:
             errors.append(f"receipt review_plan.reviews[{index}].evidence is invalid")
@@ -187,17 +221,23 @@ def _validate_review_plan(raw: object, run_dir: Path | None = None) -> list[str]
                             or route_value.get("resolved_model", route_value.get("model", "")) != review["model"]
                             or route_value.get("catalog_model", "") != review["catalog_model"]
                             or route_value.get("model_family") != review["family"]
+                            or not isinstance(route_value.get("provider_family"), str)
+                            or not route_value.get("provider_family", "").strip()
+                            or not isinstance(route_value.get("endpoint_provider"), str)
+                            or not route_value.get("endpoint_provider", "").strip()
+                            or not isinstance(route_value.get("output_digest"), str)
+                            or not route_value.get("output_digest", "").startswith("sha256:")
+                            or (
+                                isinstance(raw.get("chair_family"), str)
+                                and bool(raw.get("chair_family"))
+                                and route_value.get("orchestrator_family") != raw.get("chair_family")
+                            )
                         ):
                             errors.append(f"receipt review_plan.reviews[{index}].route_receipt identity does not match")
                         if isinstance(route_value, dict):
                             route_alias = route_value.get("route_alias", route_value.get("alias"))
                             if review["tier"] == "flagship" and route_alias != "flagship":
                                 errors.append(f"receipt review_plan.reviews[{index}].route_receipt does not prove flagship strength")
-                            if review["scope"] == "primary" and (
-                                route_value.get("cross_family") is not True
-                                or route_value.get("certification_eligible") is not True
-                            ):
-                                errors.append(f"receipt review_plan.reviews[{index}].route_receipt is not certification eligible")
                             transcript_target = run_dir / path if run_dir is not None else None
                             transcript_available = bool(
                                 transcript_target is not None
@@ -213,6 +253,32 @@ def _validate_review_plan(raw: object, run_dir: Path | None = None) -> list[str]
                             )
                             if output_target is not None and not output_target.is_absolute():
                                 output_target = run_dir / output_target
+                            if (
+                                terminal_target is not None
+                                and (
+                                    output_target is None
+                                    or output_target.resolve() != terminal_target.resolve()
+                                )
+                            ):
+                                terminal_result_value = None
+                                errors.append(
+                                    f"receipt review_plan.reviews[{index}].terminal_result does not bind route output"
+                                )
+                            if output_target is not None and output_target.is_file():
+                                output_digest = "sha256:" + hashlib.sha256(output_target.read_bytes()).hexdigest()
+                                if output_digest != route_value.get("output_digest"):
+                                    terminal_result_value = None
+                                    errors.append(
+                                        f"receipt review_plan.reviews[{index}].route output digest does not match dispatch receipt"
+                                    )
+                                elif (
+                                    isinstance(terminal_result_ref, dict)
+                                    and terminal_result_ref.get("digest") != output_digest
+                                ):
+                                    terminal_result_value = None
+                                    errors.append(
+                                        f"receipt review_plan.reviews[{index}].terminal_result digest does not match dispatch output"
+                                    )
                             dispatcher_output_available = bool(
                                 output_target is not None
                                 and _inside(run_dir, output_target)
@@ -221,13 +287,30 @@ def _validate_review_plan(raw: object, run_dir: Path | None = None) -> list[str]
                             )
                             leg = normalise_dispatch_review(
                                 route_value,
-                                review,
+                                terminal_result_value,
+                                review_verdict=review["verdict"],
+                                chair_family=raw.get("chair_family"),
                                 transcript_available=transcript_available,
                                 dispatcher_output_available=dispatcher_output_available,
                             )
+                            if isinstance(review["id"], str):
+                                normalized_legs[review["id"]] = leg
                             if leg["status"] != "pass":
                                 errors.append(
                                     f"receipt review_plan.reviews[{index}] is not a certifying review leg: {leg['reason']}"
+                                )
+                            other_primary_family = (
+                                "anthropic" if raw.get("chair_family") == "openai" else "openai"
+                            )
+                            if (
+                                review["scope"] == "primary"
+                                and review["family"] == other_primary_family
+                                and not review["substitution_for"]
+                                and not leg["certifying_vote"]
+                            ):
+                                errors.append(
+                                    f"receipt review_plan.reviews[{index}] route is not certification eligible: "
+                                    f"{leg['reason'] or 'provider-lineage'}"
                                 )
         if not isinstance(review["wave"], int) or isinstance(review["wave"], bool) or review["wave"] < 0:
             errors.append(f"receipt review_plan.reviews[{index}].wave must be a non-negative integer")
@@ -325,12 +408,34 @@ def _validate_review_plan(raw: object, run_dir: Path | None = None) -> list[str]
             role = "distinct-family"
         else:
             continue
+        normalized_leg = normalized_legs.get(review["id"]) if isinstance(review.get("id"), str) else None
+        leg_status = (
+            normalized_leg["status"]
+            if normalized_leg is not None
+            else "pass" if review["status"] == "complete" else review["status"]
+        )
+        if role == "other-primary" and normalized_leg is not None and not normalized_leg["certifying_vote"]:
+            leg_status = "failed"
         legs.append({
             "role": role,
             "family": review["family"],
-            "status": "pass" if review["status"] == "complete" else review["status"],
+            "provider_family": (
+                normalized_legs.get(review["id"], {}).get("provider_family", review["family"])
+                if isinstance(review.get("id"), str)
+                else review["family"]
+            ),
+            "endpoint_provider": (
+                normalized_legs.get(review["id"], {}).get("endpoint_provider", "")
+                if isinstance(review.get("id"), str)
+                else ""
+            ),
+            "status": leg_status,
             "lenses": [review["lens"]],
-            "reason": review["reason"],
+            "reason": (
+                normalized_leg["reason"]
+                if normalized_leg is not None
+                else review["reason"]
+            ),
             "substitution_for": review["substitution_for"],
         })
     errors.extend(check_review_ladder(risk, legs, chair_family=chair))
