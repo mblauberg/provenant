@@ -426,3 +426,38 @@ def test_changed_line_baseline_runs_in_a_scratch_tree(tmp_path):
         "routine",
     ) == 0
     assert not (source / "sentinel").exists()
+
+
+def test_right_reason_red_names_the_target_it_rejected(tmp_path, capsys):
+    """A verdict of "rejected=1" with no named target is undiagnosable.
+
+    The gate blocks the merge on this line, so a reader has to be able to tell
+    which target was rejected and on what classification. Without that, the only
+    way to find out is to rerun the whole gate by hand and bisect the targets.
+    """
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "tracked.py").write_text("base\n", encoding="utf-8")
+    (source / "tests").mkdir()
+    (source / "tests" / "existing.py").write_text("base test\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(source), "init", "--quiet"], check=True)
+    subprocess.run(["git", "-C", str(source), "add", "-A"], check=True)
+    subprocess.run(
+        [
+            "git", "-C", str(source),
+            "-c", "user.name=Gate Test",
+            "-c", "user.email=gate-test@example.invalid",
+            "commit", "--quiet", "-m", "base",
+        ],
+        check=True,
+    )
+
+    # The target existed at the base and cannot be imported, so its red is a
+    # typo rather than missing behaviour. That is the rejected case.
+    command = f'{sys.executable} -c "print(\\"ERROR during collection\\"); raise SystemExit(1)" {{test}}'
+    result = gate_right_reason_red(source, "HEAD", [command], ["tests/existing.py"], tmp_path / "scratch")
+
+    assert result == 1
+    output = capsys.readouterr().out
+    assert "tests/existing.py" in output
+    assert "REJECTED" in output
