@@ -4,6 +4,8 @@ from pathlib import Path
 import subprocess
 import sys
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "skills" / "orchestrate" / "scripts" / "worker_liveness.py"
@@ -19,7 +21,108 @@ def test_duration_parsers_cover_ps_formats():
     assert worker_liveness.parse_elapsed("2-01:02:03") == 176523
 
 
-def test_stall_rule_uses_cpu_and_log_age_together(monkeypatch, tmp_path):
+def test_terminal_report_requires_observed_exit_for_each_explicit_classification():
+    for classification in worker_liveness.TERMINAL_CLASSIFICATIONS:
+        report = worker_liveness.terminal_report(
+            classification,
+            pid=81,
+            process_live=False,
+            exit_observation=worker_liveness.WorkerExit(pid=81, exit_status=0),
+        )
+        assert report.classification == classification
+        assert report.exit_status == 0
+
+
+def test_terminal_report_rejects_unobserved_exit_as_nonterminal_progress():
+    with pytest.raises(worker_liveness.TerminalReportError, match="observed process exit"):
+        worker_liveness.terminal_report(
+            "complete",
+            pid=82,
+            process_live=False,
+            exit_observation=None,
+        )
+
+    with pytest.raises(worker_liveness.TerminalReportError, match="owned PID"):
+        worker_liveness.terminal_report(
+            "complete",
+            pid=82,
+            process_live=False,
+            exit_observation=worker_liveness.WorkerExit(pid=99, exit_status=0),
+        )
+
+
+def test_terminal_report_rejects_a_live_owned_pid_even_when_exit_was_claimed():
+    with pytest.raises(worker_liveness.LiveWriterError, match="terminal-report"):
+        worker_liveness.terminal_report(
+            "complete",
+            pid=83,
+            process_live=True,
+            exit_observation=worker_liveness.WorkerExit(pid=83, exit_status=0),
+        )
+
+
+def test_output_growth_is_liveness_even_when_cpu_is_low():
+    assert worker_liveness.liveness_signal(
+        process_live=True,
+        previous_output_size=100,
+        current_output_size=101,
+    ) == "progress"
+
+
+def test_no_output_growth_keeps_a_live_worker_waiting():
+    assert worker_liveness.liveness_signal(
+        process_live=True,
+        previous_output_size=100,
+        current_output_size=100,
+    ) == "live-no-growth"
+
+
+def test_elapsed_poll_budget_rearms_while_owned_pid_remains_live():
+    assert worker_liveness.rearm_poll_deadline(
+        now=60.0,
+        budget_seconds=20.0,
+        process_live=True,
+    ) == 80.0
+    assert worker_liveness.rearm_poll_deadline(
+        now=80.0,
+        budget_seconds=20.0,
+        process_live=True,
+    ) == 100.0
+
+
+def test_elapsed_poll_budget_does_not_rearm_after_observed_exit():
+    assert worker_liveness.rearm_poll_deadline(
+        now=60.0,
+        budget_seconds=20.0,
+        process_live=False,
+    ) is None
+
+
+def test_live_writer_fences_inspection_and_reuse():
+    for action in ("inspection", "reuse"):
+        with pytest.raises(worker_liveness.LiveWriterError, match=action):
+            worker_liveness.require_worker_quiescent(
+                pid=84,
+                process_live=True,
+                action=action,
+            )
+
+
+def test_live_writer_fences_worktree_inspection():
+    with pytest.raises(worker_liveness.LiveWriterError, match="inspection"):
+        worker_liveness.worktree_state(
+            "/repo/.worktrees/impl-421",
+            owned_pid=84,
+            live_pids={84},
+        )
+    with pytest.raises(worker_liveness.LiveWriterError, match="observed PID"):
+        worker_liveness.worktree_state(
+            "/repo/.worktrees/impl-421",
+            owned_pid=84,
+        )
+
+
+def test_cpu_and_log_age_do_not_override_output_growth(monkeypatch, tmp_path):
     monkeypatch.setattr(
         worker_liveness,
         "live_processes",
@@ -36,11 +139,15 @@ def test_stall_rule_uses_cpu_and_log_age_together(monkeypatch, tmp_path):
     log.write_text("{}\n")
     monkeypatch.setattr(worker_liveness, "log_metadata", lambda _path: ("2026-01-01T00:00:00+00:00", 3600.0))
 
-    [worker] = worker_liveness.collect(tmp_path)
+    [worker] = worker_liveness.collect(
+        tmp_path,
+        previous_output_sizes={41: 2},
+    )
 
-    assert worker.stalled is True
+    assert worker.stalled is False
+    assert worker.output_size == 3
     assert worker.cpu == "0:00.32"
-    assert worker.worktree == "dirty"
+    assert worker.worktree == "writer-live"
 
 
 def test_short_healthy_worker_is_not_stalled(monkeypatch, tmp_path):
@@ -59,7 +166,7 @@ def test_short_healthy_worker_is_not_stalled(monkeypatch, tmp_path):
     assert worker.session_log_mtime == "-"
 
 
-def test_missing_session_log_does_not_clear_cpu_stall(monkeypatch, tmp_path):
+def test_missing_output_snapshot_does_not_claim_a_stall(monkeypatch, tmp_path):
     monkeypatch.setattr(
         worker_liveness,
         "live_processes",
@@ -71,8 +178,62 @@ def test_missing_session_log_does_not_clear_cpu_stall(monkeypatch, tmp_path):
 
     [worker] = worker_liveness.collect(tmp_path)
 
-    assert worker.stalled is True
+    assert worker.stalled is False
     assert worker.session_log_mtime == "-"
+
+
+def test_known_unchanged_output_is_stalled_only_as_an_advisory(monkeypatch, tmp_path):
+    log = tmp_path / "rollout-1.jsonl"
+    log.write_text("{}\n")
+    monkeypatch.setattr(
+        worker_liveness,
+        "live_processes",
+        lambda: [worker_liveness.Process(44, 1, "01:00", "0:00.01", "codex exec task")],
+    )
+    monkeypatch.setattr(worker_liveness, "process_cwd", lambda _pid: str(tmp_path))
+    monkeypatch.setattr(worker_liveness, "worktree_state", lambda _cwd: "clean")
+    monkeypatch.setattr(
+        worker_liveness,
+        "session_logs",
+        lambda _root: {str(tmp_path): log},
+    )
+
+    [worker] = worker_liveness.collect(
+        tmp_path,
+        previous_output_sizes={44: log.stat().st_size},
+    )
+
+    assert worker.stalled is True
+
+
+def test_output_baselines_are_bound_to_the_owned_pid(monkeypatch, tmp_path):
+    log = tmp_path / "rollout-1.jsonl"
+    log.write_text("{}\n")
+    monkeypatch.setattr(
+        worker_liveness,
+        "live_processes",
+        lambda: [
+            worker_liveness.Process(45, 1, "01:00", "0:00.01", "codex exec task"),
+            worker_liveness.Process(46, 1, "01:00", "0:00.01", "codex exec task"),
+        ],
+    )
+    monkeypatch.setattr(worker_liveness, "process_cwd", lambda _pid: str(tmp_path))
+    monkeypatch.setattr(worker_liveness, "worktree_state", lambda _cwd: "dirty")
+    monkeypatch.setattr(
+        worker_liveness,
+        "session_logs",
+        lambda _root: {str(tmp_path): log},
+    )
+
+    workers = worker_liveness.collect(
+        tmp_path,
+        previous_output_sizes={45: 2, 46: 3},
+    )
+
+    assert [(worker.pid, worker.output_size, worker.stalled) for worker in workers] == [
+        (45, None, False),
+        (46, None, False),
+    ]
 
 
 def test_live_processes_collapses_codex_exec_wrapper_and_child(monkeypatch):
