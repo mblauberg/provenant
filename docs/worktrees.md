@@ -38,6 +38,8 @@ scripts/worktree create NAME --human-authorised --new-branch BRANCH \
 scripts/worktree create NAME --human-authorised --existing-branch BRANCH
 scripts/worktree list
 scripts/worktree check
+scripts/worktree verify-claim --repo <expected-linked-worktree> \
+  --claimed-worktree <claimed-worktree> --claimed-commit <full-sha>
 scripts/worktree remove NAME --human-authorised
 ```
 
@@ -46,8 +48,12 @@ the name and protected root, and refuses unsafe creation/removal. A create
 receipt emits `primary_root`, `worktree_root`, `common_git_dir`, `head_revision`
 and branch/detached state. It does not emit the supplied repo path as
 `repo_root`; record that path and the authority provenance separately when the
-run contract requires them. A removal receipt emits only `status`, `name` and
-`primary_root`.
+run contract requires them. At the chair acceptance boundary,
+`verify-claim` rejects a missing or non-resolving SHA, a different common Git
+directory, a mismatched worktree path, and any object other than the expected
+linked worktree's current `HEAD`. It emits `status: accepted` only after all
+of those checks pass; rejection exits non-zero and cannot be treated as
+acceptance. A removal receipt emits only `status`, `name` and `primary_root`.
 
 ## Ownership and cleanup
 

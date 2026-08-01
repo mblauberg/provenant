@@ -168,3 +168,188 @@ def test_remove_refuses_dirty_worktree_and_never_deletes_branch(tmp_path, capsys
         "remove", "clean", "--repo", str(repo), "--human-authorised",
     ]) == 0
     assert not target.exists()
+
+
+def test_verify_claim_rejects_missing_commit_sha(tmp_path, capsys):
+    repo = tmp_path / "project"
+    head = init_repo(repo)
+    assert worktree_policy.main([
+        "create", "implementation", "--repo", str(repo), "--detach", head,
+        "--human-authorised",
+    ]) == 0
+    capsys.readouterr()
+    worktree = repo / ".worktrees" / "implementation"
+
+    assert worktree_policy.main([
+        "verify-claim", "--repo", str(worktree),
+        "--claimed-worktree", str(worktree),
+    ]) == 2
+
+    receipt = json.loads(capsys.readouterr().out)
+    assert receipt["status"] == "rejected"
+    assert receipt["reason"] == "missing claimed commit SHA"
+
+
+def test_verify_claim_rejects_sha_from_wrong_worktree_context(tmp_path, capsys):
+    repo = tmp_path / "project"
+    head = init_repo(repo)
+    for name in ("expected", "other"):
+        assert worktree_policy.main([
+            "create", name, "--repo", str(repo), "--detach", head,
+            "--human-authorised",
+        ]) == 0
+        capsys.readouterr()
+    expected = repo / ".worktrees" / "expected"
+    other = repo / ".worktrees" / "other"
+    (other / "tracked.txt").write_text("other change\n")
+    subprocess.run(["git", "-C", str(other), "add", "tracked.txt"], check=True)
+    subprocess.run(["git", "-C", str(other), "commit", "-qm", "other change"], check=True)
+    other_head = subprocess.check_output(
+        ["git", "-C", str(other), "rev-parse", "HEAD"], text=True,
+    ).strip()
+
+    assert worktree_policy.main([
+        "verify-claim", "--repo", str(expected),
+        "--claimed-worktree", str(other), "--claimed-commit", other_head,
+    ]) == 2
+
+    receipt = json.loads(capsys.readouterr().out)
+    assert receipt["status"] == "rejected"
+    assert "worktree context" in receipt["reason"]
+
+
+def test_verify_claim_rejects_sha_from_wrong_repository(tmp_path, capsys):
+    repo = tmp_path / "project"
+    head = init_repo(repo)
+    assert worktree_policy.main([
+        "create", "implementation", "--repo", str(repo), "--detach", head,
+        "--human-authorised",
+    ]) == 0
+    capsys.readouterr()
+    expected = repo / ".worktrees" / "implementation"
+
+    foreign = tmp_path / "foreign"
+    foreign_head = init_repo(foreign)
+
+    assert worktree_policy.main([
+        "verify-claim", "--repo", str(expected),
+        "--claimed-worktree", str(foreign), "--claimed-commit", foreign_head,
+    ]) == 2
+
+    receipt = json.loads(capsys.readouterr().out)
+    assert receipt["status"] == "rejected"
+    assert "common Git directory" in receipt["reason"]
+
+
+def test_verify_claim_rejects_registered_worktree_outside_canonical_root(tmp_path, capsys):
+    repo = tmp_path / "project"
+    head = init_repo(repo)
+    outside = tmp_path / "outside-worktree"
+    subprocess.run(
+        ["git", "-C", str(repo), "worktree", "add", "--detach", str(outside), head],
+        check=True,
+    )
+
+    assert worktree_policy.main([
+        "verify-claim", "--repo", str(outside),
+        "--claimed-worktree", str(outside), "--claimed-commit", head,
+    ]) == 2
+
+    receipt = json.loads(capsys.readouterr().out)
+    assert receipt["status"] == "rejected"
+    assert "canonical .worktrees" in receipt["reason"]
+
+
+def test_verify_claim_rejects_symlinked_canonical_root(tmp_path, capsys):
+    repo = tmp_path / "project"
+    head = init_repo(repo)
+    real_shared = tmp_path / "real-worktrees"
+    real_shared.mkdir()
+    (repo / ".worktrees").symlink_to(real_shared, target_is_directory=True)
+    target = repo / ".worktrees" / "implementation"
+    subprocess.run(
+        ["git", "-C", str(repo), "worktree", "add", "--detach", str(target), head],
+        check=True,
+    )
+    resolved_target = target.resolve()
+
+    assert worktree_policy.main([
+        "verify-claim", "--repo", str(resolved_target),
+        "--claimed-worktree", str(resolved_target), "--claimed-commit", head,
+    ]) == 2
+
+    receipt = json.loads(capsys.readouterr().out)
+    assert receipt["status"] == "rejected"
+    assert "canonical .worktrees" in receipt["reason"]
+
+
+def test_verify_claim_accepts_head_sha_from_expected_linked_worktree(tmp_path, capsys):
+    repo = tmp_path / "project"
+    head = init_repo(repo)
+    assert worktree_policy.main([
+        "create", "implementation", "--repo", str(repo), "--detach", head,
+        "--human-authorised",
+    ]) == 0
+    capsys.readouterr()
+    worktree = repo / ".worktrees" / "implementation"
+    (worktree / "tracked.txt").write_text("implementation change\n")
+    subprocess.run(["git", "-C", str(worktree), "add", "tracked.txt"], check=True)
+    subprocess.run(["git", "-C", str(worktree), "commit", "-qm", "implementation change"], check=True)
+    claimed = subprocess.check_output(
+        ["git", "-C", str(worktree), "rev-parse", "HEAD"], text=True,
+    ).strip()
+
+    assert worktree_policy.main([
+        "verify-claim", "--repo", str(worktree),
+        "--claimed-worktree", str(worktree), "--claimed-commit", claimed,
+    ]) == 0
+
+    receipt = json.loads(capsys.readouterr().out)
+    assert receipt["status"] == "accepted"
+    assert receipt["claimed_commit"] == claimed
+    assert receipt["claimed_worktree"] == str(worktree)
+
+
+def test_verify_claim_rejects_claim_when_worktree_head_advances_during_check(
+    tmp_path, capsys, monkeypatch,
+):
+    repo = tmp_path / "project"
+    head = init_repo(repo)
+    assert worktree_policy.main([
+        "create", "implementation", "--repo", str(repo), "--detach", head,
+        "--human-authorised",
+    ]) == 0
+    capsys.readouterr()
+    worktree = repo / ".worktrees" / "implementation"
+    (worktree / "tracked.txt").write_text("first implementation change\n")
+    subprocess.run(["git", "-C", str(worktree), "add", "tracked.txt"], check=True)
+    subprocess.run(["git", "-C", str(worktree), "commit", "-qm", "first implementation change"], check=True)
+    claimed = subprocess.check_output(
+        ["git", "-C", str(worktree), "rev-parse", "HEAD"], text=True,
+    ).strip()
+    (worktree / "tracked.txt").write_text("second implementation change\n")
+
+    real_git = worktree_policy.git
+    advanced = False
+
+    def racing_git(repo_path, *args, **kwargs):
+        nonlocal advanced
+        result = real_git(repo_path, *args, **kwargs)
+        if not advanced and args == ("rev-parse", "--verify", f"{claimed}^{{commit}}"):
+            subprocess.run(["git", "-C", str(worktree), "add", "tracked.txt"], check=True)
+            subprocess.run(
+                ["git", "-C", str(worktree), "commit", "-qm", "second implementation change"],
+                check=True,
+            )
+            advanced = True
+        return result
+
+    monkeypatch.setattr(worktree_policy, "git", racing_git)
+    assert worktree_policy.main([
+        "verify-claim", "--repo", str(worktree),
+        "--claimed-worktree", str(worktree), "--claimed-commit", claimed,
+    ]) == 2
+
+    receipt = json.loads(capsys.readouterr().out)
+    assert receipt["status"] == "rejected"
+    assert "advanced" in receipt["reason"]

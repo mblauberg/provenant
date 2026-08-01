@@ -152,6 +152,9 @@ Four failure modes are specific to this lane:
   be assumed. Instruct the leg to leave the work uncommitted and end by printing
   `git status --short` and `git diff --stat`; the chair commits. Widening the sandbox to the
   repository root to work around this hands the worker every sibling worktree at once.
+- If a lane reports a commit claim, the chair must run `scripts/worktree verify-claim`
+  with the expected linked worktree and the claimed worktree/SHA; accept only its
+  `status: accepted` receipt. A missing or rejected claim is not a commit receipt.
 - **`-s read-only` blocks the worker's own scratch files.** A leg that must run code under
   that sandbox needs forms that write nothing, such as `python3 -c`.
 
