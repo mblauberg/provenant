@@ -16,6 +16,14 @@ from typing import Sequence
 SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 COMMIT_SHA = re.compile(r"^[0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?$")
 IGNORE_RULE = "/.worktrees/"
+ALLOWED_GENERATED_IGNORED_PREFIXES = (
+    ".agent-fabric/",
+    ".agent-run/",
+    ".pytest_cache/",
+    ".review-snapshots/",
+    ".venv/",
+    "node_modules/",
+)
 
 
 class PolicyError(RuntimeError):
@@ -79,6 +87,33 @@ def common_git_dir(root: Path) -> Path:
     return (root / path).resolve() if not path.is_absolute() else path.resolve()
 
 
+def ignored_path_is_generated(path: str) -> bool:
+    normalized = path.rstrip("/")
+    return (
+        any(
+            normalized == prefix.rstrip("/")
+            or f"/{prefix}" in f"/{normalized}/"
+            for prefix in ALLOWED_GENERATED_IGNORED_PREFIXES
+        )
+        or "/__pycache__/" in f"/{normalized}/"
+        or normalized.endswith((".pyc", ".pyo", ".pyd"))
+    )
+
+
+def worktree_residue(root: Path) -> list[str]:
+    status = git(
+        root, "status", "--porcelain=v1", "--untracked-files=all", "--ignored=matching",
+    )
+    residue: list[str] = []
+    for line in status.stdout.splitlines():
+        code = line[:2]
+        path = line[3:]
+        if code == "!!" and ignored_path_is_generated(path):
+            continue
+        residue.append(line)
+    return residue
+
+
 def verify_claim(
     expected_worktree: Path,
     claimed_worktree: Path,
@@ -137,9 +172,30 @@ def verify_claim(
     resolved_commit = resolved.stdout.strip()
     if resolved.returncode != 0 or not COMMIT_SHA.fullmatch(resolved_commit):
         return {"status": "rejected", "reason": "claimed commit does not resolve in expected common Git directory"}
+    residue_before = worktree_residue(expected_path)
+    if residue_before:
+        return {
+            "status": "rejected",
+            "reason": "worktree has implementation residue not captured by claimed commit: "
+            + "; ".join(residue_before),
+        }
+    residue_after = worktree_residue(expected_path)
+    if residue_after:
+        return {
+            "status": "rejected",
+            "reason": "worktree gained implementation residue during claim verification: "
+            + "; ".join(residue_after),
+        }
     head_after = git(expected_path, "rev-parse", "--verify", "HEAD", check=False).stdout.strip()
     if head_before.lower() != head_after.lower():
         return {"status": "rejected", "reason": "worktree HEAD advanced during claim verification"}
+    residue_final = worktree_residue(expected_path)
+    if residue_final:
+        return {
+            "status": "rejected",
+            "reason": "worktree gained implementation residue during claim verification: "
+            + "; ".join(residue_final),
+        }
     if head_after.lower() != resolved_commit.lower():
         return {"status": "rejected", "reason": "claimed commit does not match current worktree HEAD"}
     if resolved_commit.lower() != claimed_commit.lower():
@@ -152,6 +208,8 @@ def verify_claim(
         "claimed_commit": resolved_commit,
         "claimed_worktree": str(claimed_path),
         "common_git_dir": str(expected_common_path),
+        "acceptance_owner": "chair-orchestrator",
+        "acceptance_mode": "manual",
     }
 
 

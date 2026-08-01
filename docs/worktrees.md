@@ -49,11 +49,24 @@ receipt emits `primary_root`, `worktree_root`, `common_git_dir`, `head_revision`
 and branch/detached state. It does not emit the supplied repo path as
 `repo_root`; record that path and the authority provenance separately when the
 run contract requires them. At the chair acceptance boundary,
-`verify-claim` rejects a missing or non-resolving SHA, a different common Git
-directory, a mismatched worktree path, and any object other than the expected
-linked worktree's current `HEAD`. It emits `status: accepted` only after all
-of those checks pass; rejection exits non-zero and cannot be treated as
-acceptance. A removal receipt emits only `status`, `name` and `primary_root`.
+`verify-claim` is a manual acceptance gate owned by the chair orchestrator. The
+chair must invoke it for the claimed linked worktree and accept only its
+receipt. It rejects a missing or non-resolving SHA, a different common Git
+directory, a mismatched worktree path, any object other than the expected
+linked worktree's current `HEAD`, a HEAD change during verification, or any
+tracked, staged, untracked or conflicted residue. Ignored paths are rejected
+too unless they are one of the explicitly policy-excluded generated classes:
+`.agent-fabric/`, `node_modules/`, `.venv/`, `.pytest_cache/`,
+`.review-snapshots/`, `.agent-run/`, Python cache paths or Python bytecode. It emits
+`status: accepted` only after all of those checks pass, with
+`acceptance_owner: chair-orchestrator` and `acceptance_mode: manual`. Those
+fields state the contract owner and mode; the helper does not authenticate its
+caller. Before invoking the manual gate, the chair must quiesce the lane so no
+writer is active; this helper is a bounded verifier, not a writer lock,
+watcher, registry or daemon. The final residue scan is the verification point;
+a later worktree change needs a fresh claim. Rejection exits non-zero and
+cannot be treated as acceptance. A removal receipt emits only `status`, `name`
+and `primary_root`.
 
 ## Ownership and cleanup
 

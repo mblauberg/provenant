@@ -152,9 +152,15 @@ Four failure modes are specific to this lane:
   be assumed. Instruct the leg to leave the work uncommitted and end by printing
   `git status --short` and `git diff --stat`; the chair commits. Widening the sandbox to the
   repository root to work around this hands the worker every sibling worktree at once.
-- If a lane reports a commit claim, the chair must run `scripts/worktree verify-claim`
-  with the expected linked worktree and the claimed worktree/SHA; accept only its
-  `status: accepted` receipt. A missing or rejected claim is not a commit receipt.
+- If a lane reports a commit claim, the chair orchestrator owns this manual
+  acceptance gate and must run `scripts/worktree verify-claim` with the expected
+  linked worktree and the claimed worktree/SHA; accept only its `status: accepted`
+  receipt with `acceptance_owner: chair-orchestrator` and
+  `acceptance_mode: manual`. These fields declare the manual contract; the
+  helper does not authenticate the caller. The verifier also requires a clean implementation worktree, subject only to the
+  repository's explicit generated-dependency/cache exclusions. The chair must
+  quiesce the lane before invoking it; later mutations require a fresh claim.
+  A missing or rejected claim is not a commit receipt.
 - **`-s read-only` blocks the worker's own scratch files.** A leg that must run code under
   that sandbox needs forms that write nothing, such as `python3 -c`.
 
