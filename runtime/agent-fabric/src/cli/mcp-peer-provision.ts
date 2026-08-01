@@ -30,8 +30,13 @@ import {
   type SeatMetadata,
 } from "./seat-store.js";
 
+const ROSTER_CONVERGENCE_TIMEOUT_MS = 5_000;
 const ROSTER_CONVERGENCE_MAX_ATTEMPTS = 200;
 const ROSTER_CONVERGENCE_POLL_MS = 25;
+
+function monotonicNow(): number {
+  return performance.now();
+}
 
 function rosterConvergenceMaxAttempts(): number {
   const configured = process.env.NODE_ENV === "test"
@@ -443,6 +448,7 @@ export async function provisionMcpPeerSeats(
     );
   }
   const daemonHandle = await startMcpProvisionDaemon(paths);
+  const convergenceDeadline = monotonicNow() + ROSTER_CONVERGENCE_TIMEOUT_MS;
   const convergenceMaxAttempts = rosterConvergenceMaxAttempts();
   let convergenceAttempts = 0;
   try {
@@ -597,9 +603,11 @@ export async function provisionMcpPeerSeats(
       } catch (error: unknown) {
         if (
           (!rosterCasChanged(error) && !chairCredentialChanged(error)) ||
-          convergenceAttempts >= convergenceMaxAttempts
+          convergenceAttempts >= convergenceMaxAttempts ||
+          monotonicNow() >= convergenceDeadline
         ) throw error;
         await waitForRosterConvergence();
+        if (monotonicNow() >= convergenceDeadline) throw error;
       } finally {
         try {
           database?.close();
