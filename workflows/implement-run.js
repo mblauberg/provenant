@@ -560,6 +560,8 @@ let built = await agent(
     `patch file under ${runDir}/patches/, self-tagging its risk tier per the rules below.\n` +
     `Task: """${task}"""\nChosen plan: ${JSON.stringify(chosen)}\nConventions: ${JSON.stringify(conv)}\n` +
     `Repo root: ${boot.repoRoot}\n` +
+    'Before emitting a patch, name the governing skill for this change in the implementation narrative; ' +
+    'for every new or changed observable behaviour that skill must include `tdd` and a right-reason red. ' +
     ESCALATION_RULES +
     '\nKeep patches minimal and self-contained; one logical change per patch so the applier can land ' +
     'low-risk ones independently. Add a brief code comment for any unobvious decision.\n' +

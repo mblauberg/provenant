@@ -48,6 +48,15 @@ receipt.
 `awaiting_acceptance` is machine-ready, not complete. User acceptance and any
 production promotion remain separate gates.
 
+## Terminalisation
+
+When a run directory exists, terminalise it after acceptance, failure or
+cancellation with
+`${AGENTS_HOME:-$HOME/.agents}/skills/orchestrate/scripts/run_dir_finalize.py`.
+An outer orchestrator's `awaiting-user` transport remains active across that
+call and does not rename the canonical receipt state, so a still-open outer
+run is not a reason to skip terminalising the inner one.
+
 ## Post-merge continuity
 
 For a pull-request delivery, retain the complete ignored run directory until
