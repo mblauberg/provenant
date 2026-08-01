@@ -27,4 +27,7 @@ branch needs unavailable owner authority. Return the resolved register to
 Console, Herdr and GitHub are optional. Continue from canonical project
 artifacts and emit the skill-owned artifact kind in
 [portable-workflow.v1.json](portable-workflow.v1.json). That filesystem
-artifact records workflow evidence; it never approves the decision context.
+artifact proves only that a context object existed. Retain and identify the
+canonical context separately; this output is not itself workflow evidence or
+approval of the decision context. The runner validates the contract's declared
+context fields, including `accepted_artifact_identity`, before emission.

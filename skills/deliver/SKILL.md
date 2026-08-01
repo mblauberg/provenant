@@ -72,5 +72,6 @@ For audience-ready HTML, apply the
 Console, Herdr and GitHub are optional. Continue from canonical project
 artifacts and emit the skill-owned artifact kind in
 [portable-workflow.v1.json](portable-workflow.v1.json). That filesystem
-artifact records workflow evidence; it never grants acceptance or release
-authority.
+artifact proves only that a context object existed. Retain and identify the
+canonical context separately; this output is not itself workflow evidence,
+acceptance or release authority.

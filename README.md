@@ -87,7 +87,7 @@ provenant doctor
 
 # run the repository gates when changing Provenant
 provenant check   # harness policy gate
-npm run check     # fabric, console and Herdr gates
+npm run check     # TypeScript gates
 ```
 
 Each installer command registers the Fabric MCP server for the platform it
@@ -107,9 +107,9 @@ instruction conflicts include the bootstrap line to add.
 
 `provenant doctor` checks Fabric configuration and enabled adapters (identity
 and non-answer interfaces, not login or quota); Provenant never sets or persists
-provider API keys. `provenant check` runs the harness policy gate; the fabric,
-console, Herdr and review-portal gates run through `npm run check` and the CI
-workflow.
+provider API keys. `provenant check` runs the harness policy gate; `npm run
+check` covers TypeScript build, type, schema and tests. Evaluation, load, audit
+and Rust review-portal gates run in CI.
 
 <details>
 <summary>Filesystem layout, Codex config and uninstall</summary>
@@ -142,9 +142,9 @@ From the product checkout,
 reclaims the harness-owned skill links and nothing else. The bootstrap line and
 the Codex block remain until removed by hand.
 
-Before first use, run `provenant project activate [PATH]`. It trusts the Git or
-non-Git root in the existing registry. Activation does not bootstrap seats. Use
-`fabric_bootstrap`; low-level trust remains
+Before first use, run `provenant project activate [PATH]`. Git PATH must be its
+exact repository root or a non-Git directory; activation verifies trust, never
+bootstraps seats. Use `fabric_bootstrap`; trust remains
 `provenant fabric workspace trust`. If bootstrap runs first,
 `WORKSPACE_NOT_TRUSTED` provides recovery.
 

@@ -185,7 +185,8 @@ merge --auto` may be queued once those gates are met.
 `ci-status` is the single required check on branch protection. It is the
 aggregate job at the end of [`ci.yml`](../../.github/workflows/ci.yml): it
 runs on `if: always()`, succeeds only when every needed job (`detect-changes`,
-`harness`, `fabric`, `review-portal-supervisor`, `console`, `herdr`, `zizmor`)
+`harness`, `fabric`, `review-portal-supervisor`, `console`, `herdr`,
+`split-root`, `zizmor`)
 either succeeded or was skipped by the path filter, and fails closed on any
 failure or cancellation, including `detect-changes` itself. "CI is green"
 means exactly this one context; no other check is required.
@@ -217,11 +218,12 @@ when all of the following hold:
 - `dependabot/fetch-metadata` reports the update type as
   `version-update:semver-patch` (minor and major updates wait for maintainer
   review); and
-- the dependency list does not include `@anthropic-ai/claude-agent-sdk`.
+- the dependency list does not include `@anthropic-ai/claude-agent-sdk`,
+  `@anthropic-ai/claude-code` or `@openai/codex`.
 
-The SDK is excluded even at patch level (issue #195) because an adapter
+These adapter dependencies are excluded even at patch level because an adapter
 dependency update requires current runtime identity, handshake and capability
-evidence. A green SDK bump alone does not prove that enabled Claude activation
+evidence. A green dependency bump alone does not prove that enabled activation
 will remain conformant. The queued merge still lands only after `ci-status`
 reports green; that gate is the whole review pressure for these PRs.
 

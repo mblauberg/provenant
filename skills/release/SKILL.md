@@ -19,7 +19,7 @@ must bind this artifact, action, target, expiry and applicable constraints.
 
 Start from canonical
 [RELEASE.template.json](templates/RELEASE.template.json). The validator accepts
-only that typed receipt and fails closed on every other shape.
+schema-v2 core fields and semantic gates, but ignores unknown fields.
 
 ## Readiness
 
@@ -50,8 +50,8 @@ Run read-only gate before requesting promotion:
 ${AGENTS_HOME:-$HOME/.agents}/skills/release/scripts/validate_release.py --gate ready RELEASE.json
 ```
 
-The CLI binds artifact to the live delivery receipt. Unit-policy tests may call
-`validate(..., structural_only=True)` without a root; it cannot authorise
+The CLI binds artifact to the live delivery receipt. Unit tests may call
+`validate(..., structural_only=True)` without a root; that cannot authorise
 promotion.
 
 ## Promote and verify
@@ -80,6 +80,5 @@ Agent may prepare and verify; it may execute only within explicit authority.
 
 Console, Herdr and GitHub are optional. Use canonical project artifacts and
 emit the skill-owned artifact kind in
-[portable-workflow.v1.json](portable-workflow.v1.json). That filesystem
-artifact records workflow evidence; it cannot release or deploy and never
-substitutes for target-bound user authority.
+[portable-workflow.v1.json](portable-workflow.v1.json). It proves context only,
+not release evidence, authority or deployment. Keep canonical context separate.

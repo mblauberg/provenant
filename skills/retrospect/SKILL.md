@@ -55,7 +55,7 @@ Underpowered or confounded evidence is `inconclusive`.
 
 Route unclear intent to `scope`, deterministic defects to `implement`,
 stochastic behaviour to `evaluate`, skill evidence to `skill-craft`, and
-context/docs cleanup to `session` or `engineering-docs`.
+context cleanup to `session` or `engineering-docs`.
 
 ## Learning and authority
 
@@ -68,12 +68,13 @@ memory policy.
 This skill is proposal-first and read-only by default. Apply project/global
 harness changes only under explicit authority or an enclosing `implement` run;
 material cross-project changes return through user-approved scope. Finish with
-a compact table: finding, evidence, root cause, change, regression gate,
+a table: finding, evidence, root cause, change, regression gate,
 owner/destination, status (`promote`, `experiment`, `defer`, `reject`).
 
 ## Adapter-absent path
 
 Without optional Console, Herdr or GitHub, use canonical project artifacts and
 emit the skill-owned kind in
-[portable-workflow.v1.json](portable-workflow.v1.json). It records retrospective
-evidence; improvements still require normal authority.
+[portable-workflow.v1.json](portable-workflow.v1.json). It proves context
+existence only, not retrospective evidence. Keep context separate. Improvements
+require authority.

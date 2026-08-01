@@ -86,6 +86,6 @@ Load relevant [references](references/) only:
 
 ## Adapter-absent path
 
-Without Console, Herdr or GitHub, emit the skill-owned
-[portable kind](portable-workflow.v1.json). It
-grants no Fabric authority or second task owner.
+Without adapters, emit the skill-owned [portable kind](portable-workflow.v1.json).
+It proves context only, not evidence, route state or ownership. Keep context
+separate. Validate `accepted_artifact_identity`.

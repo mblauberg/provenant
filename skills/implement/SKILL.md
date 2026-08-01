@@ -76,5 +76,7 @@ reconciliation run.
 
 Without optional Console, Herdr or GitHub, use canonical project artifacts and
 emit the skill-owned kind in
-[portable-workflow.v1.json](portable-workflow.v1.json). It records evidence but
-grants no acceptance or promotion authority.
+[portable-workflow.v1.json](portable-workflow.v1.json). It proves only that a
+context object existed. Retain and identify the canonical context separately;
+this output is not itself implementation evidence, acceptance or promotion
+authority.
