@@ -167,6 +167,21 @@ describe("machine-local workspace trust", () => {
     await expect(runWorkspaceTrust(["trust", project], value.paths)).resolves.toMatchObject({ trusted: true });
   });
 
+  it("refuses a collection whose .claude entry is itself a cloned repository", async () => {
+    const value = await fixture();
+    const collection = join(value.root, "cloned-marker-collection");
+    await mkdir(collection, { mode: 0o700 });
+    await gitRepository(collection, "first-repo");
+    await gitRepository(collection, "second-repo");
+    // Anyone who can drop a repository beside the others could otherwise name
+    // it .claude and switch the collection guard off for every sibling.
+    await gitRepository(collection, ".claude");
+    const canonicalCollection = await realpath(collection);
+
+    await expect(looksLikeRepositoryCollection(canonicalCollection)).resolves.toBe(true);
+    await expect(runWorkspaceTrust(["trust", collection], value.paths)).rejects.toThrow(/collection/u);
+  });
+
   it("accepts a marker reached through a symlink into a child repository", async () => {
     const value = await fixture();
     const project = join(value.root, "symlinked-marker-project");
