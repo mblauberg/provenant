@@ -33,6 +33,13 @@ _ASSERTION_RE = re.compile(
     re.IGNORECASE,
 )
 
+_UNRESOLVED_MODULE_PATTERNS = (
+    re.compile(r"No module named ['\"]([^'\"]+)['\"]", re.IGNORECASE),
+    re.compile(r"Cannot find module ['\"]([^'\"]+)['\"]", re.IGNORECASE),
+    re.compile(r"Cannot find package ['\"]([^'\"]+)['\"]", re.IGNORECASE),
+    re.compile(r"Failed to resolve import ['\"]([^'\"]+)['\"]", re.IGNORECASE),
+)
+
 
 def _combine_failure_classes(classes: list[FailureClass]) -> FailureClass:
     if not classes:
@@ -90,6 +97,101 @@ def _structured_message_class(message: object, *, allow_assertion: bool = True) 
     if allow_assertion and (folded.lstrip().startswith("assert ") or _ASSERTION_RE.search(message)):
         classes.append(FailureClass.ASSERTION)
     return _combine_failure_classes(classes) if classes else FailureClass.UNKNOWN
+
+
+def _one_unresolved_module(values: list[str]) -> str | None:
+    modules = {
+        match.group(1).strip()
+        for value in values
+        for pattern in _UNRESOLVED_MODULE_PATTERNS
+        for match in pattern.finditer(value)
+        if match.group(1).strip()
+    }
+    if len(modules) != 1:
+        return None
+    return next(iter(modules), "")
+
+
+def _junit_import_values(report: Path) -> list[str]:
+    """Return module names from collection-shaped JUnit error records only."""
+
+    try:
+        root = ET.parse(report).getroot()
+    except (ET.ParseError, OSError):
+        return []
+
+    def tag(node: ET.Element) -> str:
+        return node.tag.rsplit("}", 1)[-1]
+
+    values: list[str] = []
+
+    def visit(node: ET.Element, suite_tests: str | None = None) -> None:
+        node_tag = tag(node)
+        current_suite_tests = (
+            node.attrib.get("tests", "1") if node_tag == "testsuite" else suite_tests
+        )
+        if node_tag in {"testsuite", "testcase"}:
+            is_testcase = node_tag in {"testcase"}
+            suite_has_no_tests = current_suite_tests == "0"
+            for record in node:
+                if tag(record) not in {"error"}:
+                    continue
+                detail_values = [
+                    value for value in record.attrib.values() if isinstance(value, str)
+                ]
+                text = "".join(record.itertext())
+                if text:
+                    detail_values.append(text)
+                detail = " ".join(detail_values).casefold()
+                native_collection_error = (
+                    record.attrib.get("message", "").casefold() == "collection failure"
+                    and (
+                        "importing test module" in detail
+                        or "error during collection" in detail
+                    )
+                )
+                if is_testcase and not suite_has_no_tests and not native_collection_error:
+                    continue
+                values.extend(detail_values)
+        for child in node:
+            visit(child, current_suite_tests)
+
+    visit(root)
+    return values
+
+
+def _vitest_import_values_from_report(report: Path) -> list[str]:
+    """Return module names from file-level Vitest errors, not assertions."""
+
+    try:
+        document = json.loads(report.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return []
+    if not isinstance(document, dict) or not isinstance(document.get("testResults"), list):
+        return []
+
+    values: list[str] = []
+
+    def collect(value: object) -> None:
+        if isinstance(value, str):
+            values.append(value)
+        elif isinstance(value, dict):
+            for child in value.values():
+                collect(child)
+
+    for result in document["testResults"]:
+        if not isinstance(result, dict):
+            continue
+        assertion_results = result.get("assertionResults")
+        if isinstance(assertion_results, list) and assertion_results:
+            continue
+        if "error" in result:
+            collect(result["error"])
+        for key in ("errorType", "errorMessage"):
+            collect(result.get(key))
+        if not result.get("assertionResults"):
+            collect(result.get("message"))
+    return values
 
 
 def _junit_failure_class(record: ET.Element, *, include_text: bool = False) -> FailureClass:
@@ -217,6 +319,8 @@ def parse_junit_report(report: Path) -> FailureClass:
 def _vitest_file_error_classes(result: dict[str, object]) -> list[FailureClass]:
     """Return file-level error evidence independently of assertion records."""
 
+    if result.get("status") != "failed":
+        return []
     error = result.get("error")
     error_type: object = result.get("errorType") or result.get("type")
     error_message: object = result.get("message")
@@ -362,8 +466,14 @@ def parse_vitest_report(report: Path) -> FailureClass:
     return FailureClass.COLLECTION if document["numTotalTests"] == 0 and document["numFailedTestSuites"] else FailureClass.UNKNOWN
 
 
-def classify_structured_report(runner: object, report: Path, returncode: int) -> FailureClass:
-    """Classify one known runner's report, failing closed on unusable evidence."""
+def classify_structured_report(
+    runner: object,
+    report: Path,
+    returncode: int,
+    *,
+    include_evidence: bool = False,
+) -> FailureClass | tuple[FailureClass, str | None]:
+    """Classify one known runner's report, optionally returning import evidence."""
 
     name = getattr(runner, "value", runner)
     if name == "pytest":
@@ -371,7 +481,33 @@ def classify_structured_report(runner: object, report: Path, returncode: int) ->
     elif name == "vitest":
         result = parse_vitest_report(report)
     else:
-        return FailureClass.UNKNOWN_RUNNER
+        return (
+            (FailureClass.UNKNOWN_RUNNER, None)
+            if include_evidence
+            else FailureClass.UNKNOWN_RUNNER
+        )
     if returncode != 0 and result is FailureClass.PASS:
-        return FailureClass.UNKNOWN
+        result = FailureClass.UNKNOWN
+    if not include_evidence:
+        return result
+    if result not in {FailureClass.IMPORT, FailureClass.COLLECTION}:
+        return result, None
+    values = (
+        _junit_import_values(report)
+        if name == "pytest"
+        else _vitest_import_values_from_report(report)
+    )
+    return result, _one_unresolved_module(values)
+
+
+def classify_structured_report_with_evidence(
+    runner: object, report: Path, returncode: int
+) -> tuple[FailureClass, str | None]:
+    """Return the parser result and its narrowly scoped import identity."""
+
+    result = classify_structured_report(
+        runner, report, returncode, include_evidence=True
+    )
+    if not isinstance(result, tuple):
+        raise AssertionError("structured evidence classification lost its tuple contract")
     return result
