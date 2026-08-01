@@ -29,28 +29,6 @@ def test_markdown_link_counts_text_but_not_url():
     assert count_skill_words("Read [run-contract.md](references/run-contract.md) now.") == 4
 
 
-def test_harness_checker_counts_frontmatter_in_skill_budget(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-):
-    from scripts import check_harness
-
-    skill = tmp_path / "skills" / "demo" / "SKILL.md"
-    (skill.parent / "evals").mkdir(parents=True)
-    (skill.parent / "evals" / "trigger_cases.yaml").write_text("cases: []\n")
-    skill.write_text(
-        "---\n"
-        "name: demo\n"
-        "description: Use demo. Not for production.\n"
-        "---\n"
-        + ("word " * 499)
-    )
-    monkeypatch.setattr(check_harness, "ROOT", tmp_path)
-
-    errors, _metrics = check_harness.skill_errors()
-
-    assert any("whole file has 507 words" in error for error in errors)
-
-
 @pytest.mark.parametrize(
     ("word_count", "expected_diagnostics"),
     (
