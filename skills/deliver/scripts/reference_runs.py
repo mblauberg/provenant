@@ -105,6 +105,7 @@ def make_reference_run(profile_name: str, root: Path = ROOT, *, high_stakes: boo
     return {
         "schema_version": 1,
         "contract": "delivery-run",
+        "execution_contract": "legacy-reference-v1",
         "run_id": f"REF-{profile_name.upper()}",
         "fabric_relationships": {
             "mode": "independent",

@@ -205,7 +205,8 @@ def test_claude_workflows_use_router_and_safe_implement_loop():
     assert "required: false" in implementation
     assert "otherPrimaryRan" in implementation
     assert "distinct-family availability never replaces other-primary" in implementation
-    assert "Copy the global deliver RUN.template.json" in implementation
+    assert "delivery_receipt.py init" in implementation
+    assert "do not edit the receipt JSON directly" in implementation
     assert "refusing the next dispatch" in implementation
     assert "do not recreate or replace it" in implementation
     assert "Review verdicts and dispatcher lineage" in implementation

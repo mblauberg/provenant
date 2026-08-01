@@ -85,6 +85,7 @@ def validate(
     evidence = _validate_evidence(
         run, profile, artifacts, required_kinds, allowed_source_paths,
         artifact_root=workspace_root or receipt_dir, verify_hashes=verify_hashes,
+        receipt_dir=receipt_dir, workspace_root=workspace_root,
     )
     authority_evidence = evidence.get(authority.get("evidence"))
     fail(not authority_evidence or authority_evidence.get("kind") != "human" or authority_evidence.get("status") != "pass" or authority_evidence.get("gate") != "authority-approval", "authority must link matching passing human evidence")

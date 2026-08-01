@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 import importlib.util
 import json
@@ -76,9 +76,12 @@ def _list(value: Any, field: str) -> list[Any]:
 def _utc(value: Any, field: str) -> datetime:
     fail(not isinstance(value, str) or not value.endswith("Z"), f"{field} must be a UTC timestamp")
     try:
-        return datetime.fromisoformat(value[:-1] + "+00:00")
+        parsed = datetime.fromisoformat(value[:-1] + "+00:00")
     except ValueError as exc:
         raise Invalid(f"{field} must be an ISO UTC timestamp") from exc
+    if parsed > datetime.now(timezone.utc) + timedelta(minutes=5):
+        raise Invalid(f"{field} exceeds the bounded future timestamp tolerance")
+    return parsed
 
 def _digest(value: Any, field: str) -> None:
     fail(not isinstance(value, str) or not DIGEST.fullmatch(value), f"{field} must be a sha256 digest")

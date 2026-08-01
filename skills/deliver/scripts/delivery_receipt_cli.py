@@ -1,0 +1,136 @@
+"""Command-line parser and dispatcher for the delivery receipt producer."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import subprocess
+from typing import Any
+
+
+def build_parser(api_module: Any) -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=api_module.__doc__)
+    commands = parser.add_subparsers(dest="command", required=True)
+    init = commands.add_parser("init")
+    init.add_argument("--run-dir", required=True)
+    init.add_argument("--run-id", required=True)
+    init.add_argument("--profile", required=True)
+    init.add_argument("--chair-family", required=True)
+    init.add_argument("--risk-assessment", required=True)
+    init.add_argument("--intent", required=True)
+    init.add_argument("--authority", required=True)
+    init.add_argument("--fabric-relationships")
+    init.add_argument("--risk-tier", choices=api_module.RISKS)
+    init.add_argument("--risk-override")
+    init.set_defaults(handler=api_module.command_init)
+
+    bind = commands.add_parser("bind")
+    bind.add_argument("--run-dir", required=True)
+    bind.add_argument("--section", choices=sorted(api_module.BIND_SECTIONS), required=True)
+    bind.add_argument("--from", dest="from_json", required=True)
+    bind.set_defaults(handler=api_module.command_bind)
+
+    artifact = commands.add_parser("artifact")
+    artifact_commands = artifact.add_subparsers(dest="artifact_command", required=True)
+    artifact_add = artifact_commands.add_parser("add")
+    artifact_add.add_argument("--run-dir", required=True)
+    artifact_add.add_argument("--id", dest="artifact_id", required=True)
+    artifact_add.add_argument("--path", required=True)
+    artifact_add.add_argument("--class", dest="artifact_class", choices=sorted(api_module.SAFE_CLASSES), required=True)
+    artifact_add.add_argument("--media-type", required=True)
+    artifact_add.add_argument("--artifact-type", required=True)
+    artifact_add.add_argument("--owner", required=True)
+    artifact_add.add_argument("--retention", required=True)
+    artifact_add.set_defaults(handler=api_module.command_artifact_add)
+
+    evidence = commands.add_parser("evidence")
+    evidence_commands = evidence.add_subparsers(dest="evidence_command", required=True)
+    evidence_run = evidence_commands.add_parser("run")
+    evidence_run.add_argument("--run-dir", required=True)
+    evidence_run.add_argument("--id", dest="evidence_id", required=True)
+    evidence_run.add_argument("--gate", required=True)
+    evidence_run.add_argument("--artifact-id", required=True)
+    evidence_run.add_argument("--source", dest="sources", action="append", required=True)
+    evidence_run.add_argument("command_args", nargs="+")
+    evidence_run.set_defaults(handler=api_module.command_evidence_run)
+    evidence_human = evidence_commands.add_parser("human")
+    evidence_human.add_argument("--run-dir", required=True)
+    evidence_human.add_argument("--id", dest="evidence_id", required=True)
+    evidence_human.add_argument("--gate", required=True)
+    evidence_human.add_argument("--artifact-id", required=True)
+    evidence_human.add_argument("--approver", required=True)
+    evidence_human.add_argument("--source", dest="sources", action="append", default=[])
+    evidence_human.set_defaults(handler=api_module.command_evidence_human)
+    observation = evidence_commands.add_parser("observation")
+    observation.add_argument("--run-dir", required=True)
+    observation.add_argument("--id", dest="evidence_id", required=True)
+    observation.add_argument("--gate", required=True)
+    observation.add_argument("--artifact-id", required=True)
+    observation.add_argument("--measured-value", type=float, required=True)
+    observation.add_argument("--source", dest="sources", action="append", required=True)
+    observation.set_defaults(handler=lambda args: api_module.lifecycle.command_evidence_observation(args, api_module._api()))
+    remove = evidence_commands.add_parser("remove")
+    remove.add_argument("--run-dir", required=True)
+    remove.add_argument("--id", dest="evidence_id", required=True)
+    remove.set_defaults(handler=lambda args: api_module.lifecycle.command_evidence_remove(args, api_module._api()))
+    rebuild = evidence_commands.add_parser("rebuild")
+    rebuild.add_argument("--run-dir", required=True)
+    rebuild.add_argument("--artifact-id", required=True)
+    rebuild.set_defaults(handler=api_module.command_evidence_rebuild)
+
+    review = commands.add_parser("review")
+    review_commands = review.add_subparsers(dest="review_command", required=True)
+    review_add = review_commands.add_parser("add")
+    review_add.add_argument("--run-dir", required=True)
+    review_add.add_argument("--id", dest="review_id", required=True)
+    review_add.add_argument("--role", choices=sorted(api_module.REVIEW_ROLES), required=True)
+    review_add.add_argument("--artifact")
+    review_add.add_argument("--route-receipt")
+    review_add.add_argument("--reviewer-id")
+    review_add.add_argument("--adapter", required=True)
+    review_add.add_argument("--provider-family", required=True)
+    review_add.add_argument("--model")
+    review_add.add_argument("--lens", dest="lenses", action="append", required=True)
+    review_add.add_argument("--status", choices=("pass", "failed", "unavailable", "skipped"), default="pass")
+    review_add.add_argument("--reason", default="")
+    review_add.set_defaults(handler=lambda args: api_module.lifecycle.command_review_add(args, api_module._api()))
+
+    checkpoint = commands.add_parser("checkpoint")
+    checkpoint_commands = checkpoint.add_subparsers(dest="checkpoint_command", required=True)
+    checkpoint_set = checkpoint_commands.add_parser("set")
+    checkpoint_set.add_argument("--run-dir", required=True)
+    checkpoint_set.add_argument("--current-slice", required=True)
+    checkpoint_set.add_argument("--next-action", required=True)
+    checkpoint_set.add_argument("--in-flight", action="append", default=[])
+    checkpoint_set.add_argument("--artifact", dest="artifacts", action="append", default=[])
+    checkpoint_set.set_defaults(handler=lambda args: api_module.lifecycle.command_checkpoint_set(args, api_module._api()))
+
+    transition = commands.add_parser("transition")
+    transition.add_argument("--run-dir", required=True)
+    transition.add_argument("--to", dest="target", required=True)
+    transition.add_argument("--evidence", dest="evidence_ids", action="append", default=[])
+    transition.add_argument("--reason", default="")
+    transition.add_argument("--recovery", default="")
+    transition.add_argument("--resume-state")
+    transition.add_argument("--degradation-kind", choices=("kernel_degraded", "runtime_degraded"))
+    transition.add_argument("--fallback-skill", default="")
+    transition.set_defaults(handler=lambda args: api_module.lifecycle.command_transition(args, api_module._api()))
+    show = commands.add_parser("show")
+    show.add_argument("--run-dir", required=True)
+    show.set_defaults(handler=lambda args: api_module.lifecycle.command_show(args, api_module._api()))
+    return parser
+
+
+def main(api_module: Any, argv: list[str] | None = None) -> int:
+    parser = build_parser(api_module)
+    try:
+        args = parser.parse_args(argv)
+        result = args.handler(args)
+    except (OSError, api_module.ReceiptError, subprocess.SubprocessError) as exc:
+        print(json.dumps({"ok": False, "error": str(exc)}), file=api_module.sys.stderr)
+        return 1
+    if "_raw_receipt" in result:
+        print(json.dumps(result["_raw_receipt"], indent=2))
+    else:
+        print(json.dumps({"ok": True, **result}))
+    return 0

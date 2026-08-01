@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 from datetime import datetime, timedelta
@@ -323,6 +324,9 @@ def materialise_evaluation_binding(
         _materialise_deterministic_evidence_bundle(
             run, evidence_bundle, workspace_root,
         )
+    if linked and linked.get("kind") == "deterministic":
+        _materialise_deterministic_result(run, linked, workspace_root)
+        linked["result"]["receipt_digest"] = digest
     return evaluation
 
 
@@ -335,21 +339,75 @@ def _write_delivery_artifact(
     artifact["digest"] = "sha256:" + hashlib.sha256(payload).hexdigest()
 
 
+def _materialise_deterministic_result(
+    run: dict[str, Any], item: dict[str, Any], workspace_root: Path,
+) -> None:
+    """Give synthetic deterministic rows the same bounded observation contract."""
+    started = item.setdefault("started_at", "2026-07-10T00:00:00Z")
+    finished = item.setdefault("finished_at", "2026-07-10T00:00:01Z")
+    result = item.setdefault("result", {})
+    result.setdefault("exit_code", 0)
+    empty_b64 = base64.b64encode(b"").decode("ascii")
+    git_identity = {"available": False, "reason": "reference fixture"}
+    source_digests = [
+        {
+            "path": path,
+            "digest": "sha256:" + hashlib.sha256((workspace_root / path).read_bytes()).hexdigest(),
+            "bytes": len((workspace_root / path).read_bytes()),
+        }
+        for path in item.get("source_paths", [])
+    ]
+    result.update({
+        "argv": result.get("argv", ["reference-check"]),
+        "cwd": str(workspace_root.resolve()),
+        "run_identity": {"run_id": run["run_id"], "receipt": "RUN.json"},
+        "source_digests": source_digests,
+        "source_digests_after": source_digests,
+        "git": {"before": git_identity, "after": git_identity},
+        "stdout": {"digest": "sha256:" + hashlib.sha256(b"").hexdigest(), "bytes": 0, "retained_bytes": 0, "truncated": False, "complete": True, "captured_b64": empty_b64, "retained_b64": empty_b64},
+        "stderr": {"digest": "sha256:" + hashlib.sha256(b"").hexdigest(), "bytes": 0, "retained_bytes": 0, "truncated": False, "complete": True, "captured_b64": empty_b64, "retained_b64": empty_b64},
+        "signal": None,
+        "timed_out": False,
+        "custody": {
+            "status": "posix-process-group-cleanup",
+            "cleanup": {"strategy": "posix-process-group-cleanup", "term_sent": False, "kill_sent": False, "grace_seconds": 0.1},
+            "unsupported": "Commands that daemonise or call setsid are unsupported.",
+        },
+        "started_at": started,
+        "finished_at": finished,
+    })
+
+
 def _materialise_deterministic_evidence_bundle(
     run: dict[str, Any], artifact: dict[str, Any], workspace_root: Path,
 ) -> None:
     """Write a non-self-referential receipt and bind its evidence rows."""
+    source_paths = {
+        path
+        for item in run["evidence"]
+        if item.get("kind") == "deterministic" and item.get("artifact_id") == artifact["id"]
+        for path in item.get("source_paths", [])
+    }
+    for path in source_paths:
+        target = workspace_root / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if not target.exists():
+            target.write_bytes(b"reference-input\n")
     checks = []
     for item in run["evidence"]:
         if item.get("kind") != "deterministic" or item.get("artifact_id") != artifact["id"]:
             continue
+        _materialise_deterministic_result(run, item, workspace_root)
+        result = item["result"]
         checks.append({
             "id": item["id"],
             "gate": item["gate"],
             "status": item["status"],
             "method": item["method"],
             "source_paths": item["source_paths"],
-            "exit_code": item["result"]["exit_code"],
+            "started_at": item["started_at"],
+            "finished_at": item["finished_at"],
+            "result": {key: value for key, value in item["result"].items() if key != "receipt_digest"},
         })
     payload = (json.dumps({
         "schema_version": 1,

@@ -511,7 +511,29 @@ def test_binder_materialises_the_post_merge_chain_without_advancing_acceptance(t
     del run["software_delivery"]
     for artifact_id in generated - {"merged-source"}:
         (tmp_path / "evidence" / f"{artifact_id}.json").unlink()
-    receipt = tmp_path / "RUN.json"
+    run_dir = tmp_path / ".agent-run" / run["run_id"]
+    run_dir.mkdir(parents=True)
+    MATERIALISE._materialise_deterministic_evidence_bundle(
+        run, next(item for item in run["artifacts"] if item["id"] == "evidence-bundle"), tmp_path,
+    )
+    canonical_receipt = f".agent-run/{run['run_id']}/RUN.json"
+    for item in run["evidence"]:
+        if item.get("kind") == "deterministic":
+            item["result"]["run_identity"]["receipt"] = canonical_receipt
+    bundle_path = tmp_path / "evidence.json"
+    bundle = json.loads(bundle_path.read_text())
+    by_id = {item["id"]: item for item in run["evidence"]}
+    for check in bundle["checks"]:
+        check["result"]["run_identity"]["receipt"] = canonical_receipt
+        check["result"] = {key: value for key, value in by_id[check["id"]]["result"].items() if key != "receipt_digest"}
+    bundle_path.write_text(json.dumps(bundle, sort_keys=True) + "\n")
+    evidence_bundle = next(item for item in run["artifacts"] if item["id"] == "evidence-bundle")
+    evidence_bundle["digest"] = "sha256:" + hashlib.sha256(bundle_path.read_bytes()).hexdigest()
+    for item in run["evidence"]:
+        if item.get("kind") == "deterministic" and item.get("artifact_id") == "evidence-bundle":
+            item["result"]["receipt_digest"] = evidence_bundle["digest"]
+    run["authority"]["evidence_digest"] = evidence_bundle["digest"]
+    receipt = run_dir / "RUN.json"
     receipt.write_text(json.dumps(run))
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
