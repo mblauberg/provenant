@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import { mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import type { Socket } from "node:net";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { Duplex } from "node:stream";
 
@@ -343,15 +343,34 @@ async function writeActiveGeneration(value: FabricPaths): Promise<void> {
 }
 
 describe("machine status and doctor", () => {
-  it("defaults status and doctor paths to process.cwd() when no root is configured", () => {
+  it("defaults status and doctor paths to ~/.agents when no root is configured", () => {
     vi.stubEnv("AGENTS_HOME", undefined);
     vi.stubEnv("AGENT_FABRIC_PRODUCT_ROOT", undefined);
     vi.stubEnv("AGENT_FABRIC_INSTANCE_ROOT", undefined);
 
     expect(resolveStatusPaths([])).toMatchObject({
-      productRoot: process.cwd(),
-      instanceRoot: process.cwd(),
+      productRoot: resolve(join(homedir(), ".agents")),
+      instanceRoot: resolve(join(homedir(), ".agents")),
     });
+  });
+
+  it("resolves both status and doctor roots from ~/.agents when invoked outside the install", () => {
+    const home = "/fixture/home";
+    vi.stubEnv("HOME", home);
+    vi.stubEnv("AGENTS_HOME", undefined);
+    vi.stubEnv("AGENT_FABRIC_PRODUCT_ROOT", undefined);
+    vi.stubEnv("AGENT_FABRIC_INSTANCE_ROOT", undefined);
+    const cwd = vi.spyOn(process, "cwd").mockReturnValue("/private/tmp");
+
+    const expectedRoot = resolve(join(home, ".agents"));
+    try {
+      expect(resolveStatusPaths([])).toMatchObject({
+        productRoot: expectedRoot,
+        instanceRoot: expectedRoot,
+      });
+    } finally {
+      cwd.mockRestore();
+    }
   });
 
   it("derives shipped policy from the product root and instance state from the instance root", () => {
