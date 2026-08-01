@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { chmod, lstat, mkdir, mkdtemp, readFile, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
@@ -39,6 +39,12 @@ afterEach(async () => {
 });
 
 describe("machine-local workspace trust", () => {
+  async function gitRepository(parent: string, name: string): Promise<string> {
+    const repository = join(parent, name);
+    await mkdir(join(repository, ".git"), { recursive: true, mode: 0o700 });
+    return repository;
+  }
+
   it("exports the exact live normalized entry with a deterministic sha256 binding", async () => {
     const value = await fixture();
     const now = new Date("2026-07-11T04:00:00.000Z");
@@ -115,6 +121,69 @@ describe("machine-local workspace trust", () => {
     });
     await expect(runWorkspaceTrust(["inspect", value.root], value.paths))
       .resolves.toMatchObject({ canonicalPath: await realpath(value.root), trusted: false });
+  });
+
+  it("trusts a Git repository root that contains submodule-like children", async () => {
+    const value = await fixture();
+    await mkdir(join(value.workspace, ".git"), { mode: 0o700 });
+    for (const name of ["first-submodule", "second-submodule"]) {
+      const child = join(value.workspace, name);
+      await mkdir(child, { mode: 0o700 });
+      await writeFile(join(child, ".git"), "gitdir: ../.git/modules/child\n");
+    }
+
+    await expect(runWorkspaceTrust(["trust", value.workspace], value.paths))
+      .resolves.toMatchObject({ trusted: true });
+  });
+
+  it("rejects a direct-child repository collection and names exact commands for its children", async () => {
+    const value = await fixture();
+    const collection = join(value.root, "projects");
+    await mkdir(collection, { mode: 0o700 });
+    const first = await gitRepository(collection, "first-repo");
+    const second = await gitRepository(collection, "second-repo");
+
+    await expect(runWorkspaceTrust(["trust", collection], value.paths)).rejects.toThrow(
+      new RegExp(`repository collection.*${first}.*${second}.*fabric workspace trust`, "u"),
+    );
+    await expect(runWorkspaceTrust(["list"], value.paths)).resolves.toMatchObject({ entries: [] });
+  });
+
+  it("trusts a non-Git directory beside repository neighbours", async () => {
+    const value = await fixture();
+    await gitRepository(value.root, "first-repo");
+    await gitRepository(value.root, "second-repo");
+    const project = join(value.root, "ordinary-project");
+    await mkdir(project, { mode: 0o700 });
+
+    await expect(runWorkspaceTrust(["trust", project], value.paths)).resolves.toMatchObject({ trusted: true });
+  });
+
+  it("refuses filesystem root before recording a grant", async () => {
+    const value = await fixture();
+
+    await expect(runWorkspaceTrust(["trust", "/"], value.paths)).rejects.toThrow(/filesystem root.*never be trusted/u);
+    await expect(runWorkspaceTrust(["list"], value.paths)).resolves.toMatchObject({ entries: [] });
+  });
+
+  it("refuses the real home directory before recording a grant", async () => {
+    const value = await fixture();
+    const home = await realpath(homedir());
+
+    await expect(runWorkspaceTrust(["trust", home], value.paths)).rejects.toThrow(/never be trusted.*home-wide/u);
+    await expect(runWorkspaceTrust(["list"], value.paths)).resolves.toMatchObject({ entries: [] });
+  });
+
+  it("reports ancestor broadening when an exact repository was trusted before its parent collection", async () => {
+    const value = await fixture();
+    const collection = join(value.root, "projects");
+    await mkdir(collection, { mode: 0o700 });
+    const first = await gitRepository(collection, "first-repo");
+    await gitRepository(collection, "second-repo");
+
+    await runWorkspaceTrust(["trust", first], value.paths);
+    await expect(runWorkspaceTrust(["trust", collection], value.paths))
+      .rejects.toThrow(new RegExp(`ancestor broadening over ${await realpath(first)}`, "u"));
   });
 
   it("treats workspace status as an inspect alias", async () => {
