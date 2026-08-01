@@ -598,6 +598,7 @@ exit 1
   it("reconciles a malformed first response through one immutable replay", async () => {
     const value = await fixture();
     daemon.bootstrapErrors = [new FabricRemoteError("DAEMON_PROTOCOL_INVALID", "malformed committed result")];
+    daemon.result = { ...daemon.result!, custodyMutated: false };
 
     const installed = await bootstrapMcpSeat({
       environment: { AGENT_FABRIC_SEAT: "codex" },

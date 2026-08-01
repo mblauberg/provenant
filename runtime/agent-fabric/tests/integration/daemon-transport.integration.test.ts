@@ -11,6 +11,10 @@ import {
   MCP_BOOTSTRAP_CREDENTIALS_FEATURE,
   MCP_BOOTSTRAP_RESULT_SHAPE_FEATURE,
 } from "@local/agent-fabric-protocol";
+import type {
+  BootstrapMcpSeatInput,
+  CurrentMcpSeatBindingInput,
+} from "../../src/core/contracts.ts";
 import { FabricDaemonClient } from "../../src/daemon/rpc-client.ts";
 import { FabricRemoteError, TimedNdjsonTransport } from "../../src/transport/ndjson-rpc.ts";
 import { daemonInitializeResult } from "../../src/transport/daemon-rpc-contract.ts";
@@ -78,6 +82,86 @@ class FixtureDaemonSocket extends Duplex {
     this.destroy();
     callback();
   }
+}
+
+const bootstrapInput: BootstrapMcpSeatInput = {
+  canonicalRoot: "/project-one",
+  trustRecordDigest: `sha256:${"b".repeat(64)}`,
+  seat: "codex",
+  expiresAt: "2099-01-01T00:00:00.000Z",
+};
+
+const currentBindingInput: CurrentMcpSeatBindingInput = {
+  canonicalRoot: "/project-one",
+  expectedPreviousGeneration: null,
+  generation: "a".repeat(64),
+  projectSessionId: "session-one",
+  expectedSessionRevision: 1,
+  expectedSessionGeneration: 1,
+  runId: "run-one",
+  expectedRunRevision: 1,
+  chairAgentId: "agent-chair",
+  expectedChairGeneration: 1,
+  chairLeaseId: "lease-one",
+  expiresAt: bootstrapInput.expiresAt,
+  bindings: [{
+    seat: "codex",
+    agentId: "agent-chair",
+    expectedPrincipalGeneration: 1,
+  }],
+};
+
+function completeCurrentBindingResult(): Record<string, unknown> {
+  return {
+    expectedPreviousGeneration: null,
+    generation: currentBindingInput.generation,
+    projectSessionId: currentBindingInput.projectSessionId,
+    sessionRevision: 1,
+    sessionGeneration: 1,
+    runId: currentBindingInput.runId,
+    runRevision: 1,
+    chairAgentId: currentBindingInput.chairAgentId,
+    chairGeneration: 1,
+    chairLeaseId: currentBindingInput.chairLeaseId,
+    expiresAt: currentBindingInput.expiresAt,
+    credentials: [{
+      seat: "codex",
+      agentId: "agent-chair",
+      expectedPrincipalGeneration: 1,
+      capability: "capability-one",
+    }],
+  };
+}
+
+function completeBootstrapResult(): Record<string, unknown> {
+  return {
+    ...completeCurrentBindingResult(),
+    projectId: "project-one",
+    canonicalRoot: bootstrapInput.canonicalRoot,
+    bootstrapRunDirectory: ".agent-run/bootstrap-one",
+    custodyMutated: true,
+    credentials: [{
+      seat: "codex",
+      agentId: "agent-chair",
+      expectedPrincipalGeneration: 1,
+      capability: "capability-one",
+      authorityId: "authority-one",
+    }],
+  };
+}
+
+async function connectFixtureClient(result: Record<string, unknown>): Promise<FabricDaemonClient> {
+  const socket = new FixtureDaemonSocket({
+    daemonVersion: "0.1.0",
+    capabilities: ["rpc", MCP_BOOTSTRAP_CREDENTIALS_FEATURE, MCP_BOOTSTRAP_RESULT_SHAPE_FEATURE],
+    legacyCredentialResult: result,
+  });
+  return await FabricDaemonClient.connect(
+    "/fixture/fabric.sock",
+    "afb_test",
+    [MCP_BOOTSTRAP_CREDENTIALS_FEATURE, MCP_BOOTSTRAP_RESULT_SHAPE_FEATURE],
+    { connect: () => socket as unknown as Socket },
+  );
 }
 
 describe("timed daemon NDJSON transport", () => {
@@ -194,6 +278,107 @@ describe("timed daemon NDJSON transport", () => {
       seat: "codex",
       expiresAt: "2099-01-01T00:00:00.000Z",
     })).rejects.toMatchObject({
+      code: "DAEMON_PROTOCOL_INVALID",
+    });
+    await client.close();
+  });
+
+  it("rejects a bootstrap result missing its inherited expiry before callers can publish metadata", async () => {
+    const result = completeBootstrapResult();
+    delete result.expiresAt;
+    const client = await connectFixtureClient(result);
+
+    await expect(client.bootstrapMcpSeat(bootstrapInput)).rejects.toMatchObject({
+      code: "DAEMON_PROTOCOL_INVALID",
+    });
+    await client.close();
+  });
+
+  it("accepts a complete current MCP seat binding result", async () => {
+    const client = await connectFixtureClient(completeCurrentBindingResult());
+
+    await expect(client.bindCurrentMcpSeats(currentBindingInput)).resolves.toMatchObject({
+      generation: currentBindingInput.generation,
+      projectSessionId: currentBindingInput.projectSessionId,
+      runId: currentBindingInput.runId,
+      chairLeaseId: currentBindingInput.chairLeaseId,
+    });
+    await client.close();
+  });
+
+  it("accepts a complete bootstrap result with the inherited binding fields", async () => {
+    const client = await connectFixtureClient(completeBootstrapResult());
+
+    await expect(client.bootstrapMcpSeat(bootstrapInput)).resolves.toMatchObject({
+      projectId: "project-one",
+      generation: currentBindingInput.generation,
+      credentials: [{ authorityId: "authority-one" }],
+    });
+    await client.close();
+  });
+
+  it.each(["generation", "projectSessionId", "runId", "chairLeaseId"])(
+    "rejects a bootstrap result missing its inherited %s field",
+    async (field) => {
+      const result = completeBootstrapResult();
+      delete result[field];
+      const client = await connectFixtureClient(result);
+
+      await expect(client.bootstrapMcpSeat(bootstrapInput)).rejects.toMatchObject({
+        code: "DAEMON_PROTOCOL_INVALID",
+      });
+      await client.close();
+    },
+  );
+
+  it.each([
+    ["generation", { generation: "not-a-full-generation-hash" }],
+    ["expectedPreviousGeneration", { expectedPreviousGeneration: "not-a-full-generation-hash" }],
+    ["projectSessionId", { projectSessionId: "" }],
+    ["sessionRevision", { sessionRevision: 0 }],
+    ["sessionGeneration", { sessionGeneration: 0 }],
+    ["runId", { runId: "" }],
+    ["runRevision", { runRevision: 0 }],
+    ["chairAgentId", { chairAgentId: "" }],
+    ["chairGeneration", { chairGeneration: 0 }],
+    ["chairLeaseId", { chairLeaseId: "" }],
+    ["expiresAt", { expiresAt: "not-a-timestamp" }],
+    ["expiresAt", { expiresAt: "2020-01-01T00:00:00.000Z" }],
+  ])("rejects a bootstrap result with an invalid inherited %s field", async (_field, override) => {
+    const client = await connectFixtureClient({ ...completeBootstrapResult(), ...override });
+
+    await expect(client.bootstrapMcpSeat(bootstrapInput)).rejects.toMatchObject({
+      code: "DAEMON_PROTOCOL_INVALID",
+    });
+    await client.close();
+  });
+
+  it("applies the shared inherited-result validation to current seat binding", async () => {
+    const result = completeCurrentBindingResult();
+    result.generation = "not-a-full-generation-hash";
+    const client = await connectFixtureClient(result);
+
+    await expect(client.bindCurrentMcpSeats(currentBindingInput)).rejects.toMatchObject({
+      code: "DAEMON_PROTOCOL_INVALID",
+    });
+    await client.close();
+  });
+
+  it.each([
+    ["seat", { seat: "" }],
+    ["agentId", { agentId: "" }],
+    ["principal generation", { expectedPrincipalGeneration: 0 }],
+    ["capability", { capability: "" }],
+    ["authorityId", { authorityId: "" }],
+  ])("rejects bootstrap results with malformed credential %s", async (_field, override) => {
+    const result = completeBootstrapResult();
+    result.credentials = [{
+      ...(result.credentials as Array<Record<string, unknown>>)[0],
+      ...override,
+    }];
+    const client = await connectFixtureClient(result);
+
+    await expect(client.bootstrapMcpSeat(bootstrapInput)).rejects.toMatchObject({
       code: "DAEMON_PROTOCOL_INVALID",
     });
     await client.close();
