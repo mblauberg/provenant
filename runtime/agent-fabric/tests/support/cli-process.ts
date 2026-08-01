@@ -1,8 +1,11 @@
 import { spawn } from "node:child_process";
+import { createRequire } from "node:module";
+import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const packageRoot = fileURLToPath(new URL("../../", import.meta.url));
 const sourceCli = fileURLToPath(new URL("../../src/cli/main.ts", import.meta.url));
+const tsxLoader = createRequire(import.meta.url).resolve("tsx");
 
 export type CliResult = {
   exitCode: number | null;
@@ -14,6 +17,8 @@ export type CliResult = {
 export async function runSourceCli(
   arguments_: string[],
   options: {
+    absoluteLoader?: string;
+    cwd?: string;
     environment?: Record<string, string | undefined>;
     detached?: boolean;
   } = {},
@@ -27,9 +32,12 @@ export async function runSourceCli(
     }
   }
 
+  const cwd = options.cwd ?? packageRoot;
+  const loader = options.absoluteLoader ?? (resolve(cwd) === packageRoot ? "tsx" : tsxLoader);
+
   return await new Promise<CliResult>((resolve, reject) => {
-    const child = spawn(process.execPath, ["--import", "tsx", sourceCli, ...arguments_], {
-      cwd: packageRoot,
+    const child = spawn(process.execPath, ["--import", loader, sourceCli, ...arguments_], {
+      cwd,
       env: environment,
       detached: options.detached ?? false,
       stdio: ["ignore", "pipe", "pipe"],
