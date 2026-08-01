@@ -112,50 +112,33 @@ def _direct_worker_leg(
     terminal_value: object,
     chair_family: object,
     risk: object,
+    worktree_receipt: object = None,
 ) -> tuple[str | None, dict[str, object] | None]:
     """Consume the common outcome join only for the direct-CLI producer."""
-    output_value = route_value.get("output_path")
-    output_target = Path(output_value) if isinstance(output_value, str) and output_value else None
-    if output_target is not None and not output_target.is_absolute():
-        output_target = run_dir / output_target
-    dispatcher_output_available = bool(
-        output_target is not None
-        and _inside(run_dir, output_target)
-        and output_target.is_file()
-        and output_target.stat().st_size > 0
-    )
-    terminal_path = (
-        Path(terminal_ref["path"])
-        if isinstance(terminal_ref, dict) and isinstance(terminal_ref.get("path"), str)
-        else None
-    )
-    terminal_target = run_dir / terminal_path if terminal_path is not None else None
-    transcript_available = bool(
-        terminal_target is not None
-        and _inside(run_dir, terminal_target)
-        and terminal_target.is_file()
-        and terminal_target.stat().st_size > 0
-    )
     outcome_reference: dict[str, object] = {
         "id": review["id"],
         "dispatch_receipt": route_ref,
         "terminal_artifact": terminal_ref,
-        "worktree_receipt": None,
+        "worktree_receipt": worktree_receipt,
     }
-    if route_value.get("terminal_artifact_path") or route_value.get("terminal_artifact_sha256"):
-        dispatch_terminal_ref, dispatch_error = _dispatch_terminal_reference(run_dir, route_value)
-        if dispatch_error:
-            return dispatch_error, None
-        assert dispatch_terminal_ref is not None
-        outcome_reference["dispatch_terminal_artifact"] = dispatch_terminal_ref
+    dispatch_terminal_ref, dispatch_error = _dispatch_terminal_reference(run_dir, route_value)
+    if dispatch_error:
+        return dispatch_error, None
+    assert dispatch_terminal_ref is not None
+    outcome_reference["dispatch_terminal_artifact"] = dispatch_terminal_ref
     outcome = accept_worker_outcome(run_dir, outcome_reference)
     if outcome.get("status") != "accepted":
         return str(outcome.get("reason", "invalid outcome")), None
-    if risk not in {"substantial", "crucial", "terminal"}:
-        return None, None
+    derived = outcome.get("derived_evidence")
+    if not isinstance(derived, dict):
+        return "worker outcome did not return derived evidence", None
+    semantic_result = derived.get("semantic_result")
+    human_answer = derived.get("human_answer")
+    dispatcher_output_available = isinstance(human_answer, dict)
+    transcript_available = isinstance(semantic_result, dict)
     return None, normalise_dispatch_review(
         route_value,
-        terminal_value,
+        semantic_result,
         review_verdict=review["verdict"],
         chair_family=chair_family,
         transcript_available=transcript_available,
@@ -224,7 +207,7 @@ def _validate_review_plan(raw: object, run_dir: Path | None = None) -> list[str]
         terminal_result_ref = review["terminal_result"]
         terminal_result_value: object = None
         terminal_path: Path | None = None
-        if review["status"] == "complete":
+        if review["status"] != "omitted":
             if not isinstance(terminal_result_ref, dict) or set(terminal_result_ref) != {"path", "digest"}:
                 errors.append(f"receipt review_plan.reviews[{index}].terminal_result is invalid")
             else:
@@ -250,15 +233,20 @@ def _validate_review_plan(raw: object, run_dir: Path | None = None) -> list[str]
                             terminal_result_value = json.loads(terminal_target.read_text())
                         except (OSError, json.JSONDecodeError):
                             errors.append(f"receipt review_plan.reviews[{index}].terminal_result is invalid JSON")
+        elif terminal_result_ref is not None:
+            errors.append(f"receipt review_plan.reviews[{index}].omitted leg must not have terminal_result")
         evidence = review["evidence"]
-        if not isinstance(evidence, dict) or set(evidence) != {"path", "digest"}:
+        if review["status"] == "omitted":
+            if evidence is not None:
+                errors.append(f"receipt review_plan.reviews[{index}].omitted leg must not have evidence")
+        elif not isinstance(evidence, dict) or set(evidence) != {"path", "digest"}:
             errors.append(f"receipt review_plan.reviews[{index}].evidence is invalid")
         else:
             path = Path(evidence["path"]) if isinstance(evidence["path"], str) else Path("..")
             digest = evidence["digest"]
             if path.is_absolute() or ".." in path.parts or not isinstance(digest, str) or not digest.startswith("sha256:"):
                 errors.append(f"receipt review_plan.reviews[{index}].evidence is invalid")
-            elif run_dir is not None and review["status"] == "complete":
+            elif run_dir is not None:
                 target = run_dir / path
                 if not _inside(run_dir, target) or not target.is_file() or "sha256:" + hashlib.sha256(target.read_bytes()).hexdigest() != digest:
                     errors.append(f"receipt review_plan.reviews[{index}].evidence is missing or does not match")
@@ -267,14 +255,17 @@ def _validate_review_plan(raw: object, run_dir: Path | None = None) -> list[str]
         ):
             errors.append(f"receipt review_plan.reviews[{index}].reason is required for an incomplete leg")
         route = review["route_receipt"]
-        if not isinstance(route, dict) or set(route) != {"path", "digest"}:
+        if review["status"] == "omitted":
+            if route is not None:
+                errors.append(f"receipt review_plan.reviews[{index}].omitted leg must not have route_receipt")
+        elif not isinstance(route, dict) or set(route) != {"path", "digest"}:
             errors.append(f"receipt review_plan.reviews[{index}].route_receipt is invalid")
         else:
             route_path = Path(route["path"]) if isinstance(route["path"], str) else Path("..")
             route_digest = route["digest"]
             if route_path.is_absolute() or ".." in route_path.parts or not isinstance(route_digest, str) or not route_digest.startswith("sha256:"):
                 errors.append(f"receipt review_plan.reviews[{index}].route_receipt is invalid")
-            elif run_dir is not None and review["status"] == "complete":
+            elif run_dir is not None:
                 target = run_dir / route_path
                 if not _inside(run_dir, target) or not target.is_file() or "sha256:" + hashlib.sha256(target.read_bytes()).hexdigest() != route_digest:
                     errors.append(f"receipt review_plan.reviews[{index}].route_receipt is missing or does not match")
@@ -287,12 +278,19 @@ def _validate_review_plan(raw: object, run_dir: Path | None = None) -> list[str]
                         if not isinstance(route_value, dict):
                             errors.append(f"receipt review_plan.reviews[{index}].route_receipt identity does not match")
                         elif (
-                            route_value.get("status") != "ok"
+                            not isinstance(route_value.get("status"), str)
+                            or not route_value.get("status")
                             or route_value.get("adapter") != review["adapter"]
                             or route_value.get("adapter_gate") != review["adapter_gate"]
                             or route_value.get("reviewer_id") != review["reviewer_id"]
-                            or route_value.get("resolved_model", route_value.get("model", "")) != review["model"]
-                            or route_value.get("catalog_model", "") != review["catalog_model"]
+                            or (
+                                review["model"]
+                                and route_value.get("resolved_model", route_value.get("model", "")) != review["model"]
+                            )
+                            or (
+                                review["catalog_model"]
+                                and route_value.get("catalog_model", "") != review["catalog_model"]
+                            )
                             or route_value.get("model_family") != review["family"]
                             or (
                                 risk in {"substantial", "crucial", "terminal"}
@@ -314,7 +312,7 @@ def _validate_review_plan(raw: object, run_dir: Path | None = None) -> list[str]
                             route_alias = route_value.get("route_alias", route_value.get("alias"))
                             if review["tier"] == "flagship" and route_alias != "flagship":
                                 errors.append(f"receipt review_plan.reviews[{index}].route_receipt does not prove flagship strength")
-                            if route_value.get("adapter_gate") == "direct-cli":
+                            if route_value.get("adapter_gate") in {"direct-cli", "fabric"}:
                                 outcome_error, leg = _direct_worker_leg(
                                     run_dir, review, route, route_value, terminal_result_ref,
                                     terminal_result_value, raw.get("chair_family"), risk,
@@ -325,7 +323,13 @@ def _validate_review_plan(raw: object, run_dir: Path | None = None) -> list[str]
                                     )
                                 elif leg is not None:
                                     normalized_legs[review["id"]] = leg
-                                    if leg["status"] != "pass":
+                                    expected_status = "pass" if review["status"] == "complete" else review["status"]
+                                    if leg["status"] != expected_status:
+                                        errors.append(
+                                            f"receipt review_plan.reviews[{index}] status is not derived from joined evidence: "
+                                            f"declared {review['status']}, observed {leg['status']}"
+                                        )
+                                    if review["status"] == "complete" and leg["status"] != "pass":
                                         errors.append(
                                             f"receipt review_plan.reviews[{index}] is not a certifying review leg: {leg['reason']}"
                                         )
@@ -340,6 +344,10 @@ def _validate_review_plan(raw: object, run_dir: Path | None = None) -> list[str]
                                             f"receipt review_plan.reviews[{index}] route is not certification eligible: "
                                             f"{leg['reason'] or 'provider-lineage'}"
                                         )
+                            else:
+                                errors.append(
+                                    f"receipt review_plan.reviews[{index}] adapter gate is not supported by the worker outcome join"
+                                )
         if not isinstance(review["wave"], int) or isinstance(review["wave"], bool) or review["wave"] < 0:
             errors.append(f"receipt review_plan.reviews[{index}].wave must be a non-negative integer")
         if all(isinstance(review[field], str) for field in (

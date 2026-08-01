@@ -96,15 +96,21 @@ claim, source, confidence, issues and validation. Certification needs a
 non-authoring reviewer plus verified evidence; best-effort routes only scout,
 they do not certify.
 
-A worker's terminal artifact is a closed `complete`, `question`, `failed` or
-`unavailable` object with its stable task and attempt identity. A direct-CLI
-dispatch keeps the human answer in `output_path` and, when requested, emits a
+A worker's terminal artifact is a closed `complete`, `question`, `failed`,
+`unavailable` or `blocked` object with its stable task and attempt identity. A
+direct-CLI dispatch keeps the human answer in `output_path` and emits a
 separate dispatcher-owned JSON terminal artifact in `terminal_artifact_path`;
-the receipt binds both digests. The chair independently joins that dispatcher
+the receipt binds both digests. Acceptance requires three distinct digest-bound
+paths: the human answer, dispatcher terminal, and semantic worker result. A
+complete semantic result must contain a worker verdict, and the chair accepts
+it only when that verdict agrees with the review terminal verdict. Every
+attempted incomplete leg still carries its route, dispatcher terminal and
+semantic result; a genuinely never-attempted leg is explicitly `omitted` and
+has those bindings absent. The chair independently joins that dispatcher
 terminal fact with the digest-bound worker terminal result and optional Git
 claim, then derives acceptance. It does not copy a verdict or completion claim
 into a second receipt. A question is terminal for the attempt but remains
-blocked for the task, and failed or unavailable outcomes are explicit
+blocked for the task, and failed, unavailable and blocked outcomes are explicit
 non-certifying results.
 
 ## Non-goals

@@ -543,7 +543,10 @@ def test_default_failure_retains_only_the_declared_output_tempfile():
         output = Path(record["output_path"])
         assert result.returncode != 0
         assert output.exists()
-        assert [path.resolve() for path in temp_root.iterdir()] == [output.resolve()]
+        assert sorted(path.resolve() for path in temp_root.iterdir()) == sorted(
+            [output.resolve(), Path(record["terminal_artifact_path"]).resolve()]
+        )
+        assert Path(record["terminal_artifact_path"]).is_file()
         output.unlink()
 
 
@@ -737,7 +740,7 @@ def test_unwritable_output_path_cannot_certify_success():
         )
         record = json.loads(result.stdout)
         assert result.returncode != 0
-        assert record["status"] == "output_write_error"
+        assert record["status"] == "terminal_artifact_write_error"
         assert record["certification_eligible"] is False
         assert record["output_path"] == ""
 

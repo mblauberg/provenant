@@ -20,7 +20,16 @@ def _digest(path: Path) -> str:
 
 def _reference(run: Path, *, terminal: dict, dispatch: dict | None = None):
     terminal_path = run / "worker.json"
+    if terminal.get("kind") == "complete" and "verdict" not in terminal:
+        terminal["verdict"] = "pass"
     terminal_path.write_text(json.dumps(terminal), encoding="utf-8")
+    answer_path = run / "answer.txt"
+    answer_path.write_text("human answer\n", encoding="utf-8")
+    dispatch_terminal_path = run / "dispatch-terminal.json"
+    dispatch_terminal_path.write_text(json.dumps({
+        "id": terminal["id"], "attempt_id": terminal["attempt_id"],
+        "kind": "complete", "summary": "dispatcher observed terminality",
+    }), encoding="utf-8")
     dispatch_path = run / "dispatch.json"
     dispatch_path.write_text(json.dumps(dispatch or {
         "id": terminal["id"],
@@ -28,13 +37,18 @@ def _reference(run: Path, *, terminal: dict, dispatch: dict | None = None):
         "status": "ok",
         "exit": 0,
         "terminal_observed": True,
-        "output_path": "worker.json",
-        "output_sha256": _digest(terminal_path),
+        "output_path": "answer.txt",
+        "output_sha256": _digest(answer_path),
+        "terminal_artifact_path": "dispatch-terminal.json",
+        "terminal_artifact_sha256": _digest(dispatch_terminal_path),
     }), encoding="utf-8")
     return {
         "id": terminal["id"],
         "dispatch_receipt": {"path": "dispatch.json", "digest": _digest(dispatch_path)},
         "terminal_artifact": {"path": "worker.json", "digest": _digest(terminal_path)},
+        "dispatch_terminal_artifact": {
+            "path": "dispatch-terminal.json", "digest": _digest(dispatch_terminal_path),
+        },
         "worktree_receipt": None,
     }
 
@@ -93,7 +107,7 @@ def test_separate_answer_and_terminal_artifact_are_verified_independently(tmp_pa
     terminal_path = tmp_path / "worker.json"
     terminal_path.write_text(json.dumps({
         "id": "review-1", "attempt_id": "attempt-1", "kind": "complete",
-        "summary": "terminal result",
+        "summary": "terminal result", "verdict": "pass",
     }), encoding="utf-8")
     dispatch_terminal_path = tmp_path / "dispatch-terminal.json"
     dispatch_terminal_path.write_text(json.dumps({

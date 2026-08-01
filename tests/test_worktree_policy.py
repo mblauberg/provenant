@@ -193,6 +193,59 @@ def test_verify_claim_requires_a_recorded_pre_dispatch_base(tmp_path, capsys):
     assert receipt == {"status": "rejected", "reason": "missing pre-dispatch base revision"}
 
 
+def test_verify_claim_rejects_primary_and_wrong_linked_worktrees(tmp_path, capsys):
+    repo = tmp_path / "project"
+    base = init_repo(repo)
+    first = repo / ".worktrees" / "first"
+    second = repo / ".worktrees" / "second"
+    first.parent.mkdir()
+    subprocess.run(["git", "-C", str(repo), "worktree", "add", "--detach", str(first), base], check=True)
+    subprocess.run(["git", "-C", str(repo), "worktree", "add", "--detach", str(second), base], check=True)
+
+    primary = worktree_policy.verify_claim(repo, repo, base, base_revision=base)
+    assert primary["status"] == "rejected"
+    assert "canonical" in primary["reason"] or "linked" in primary["reason"]
+
+    wrong_linked = worktree_policy.verify_claim(first, second, base, base_revision=base)
+    assert wrong_linked == {
+        "status": "rejected",
+        "reason": "claimed worktree context does not match expected worktree",
+    }
+    capsys.readouterr()
+
+
+def test_verify_claim_rejects_a_worktree_from_the_wrong_common_git_directory(tmp_path, capsys):
+    _repo, base, worktree = _implementation_worktree(tmp_path, capsys)
+    other = tmp_path / "other"
+    other_base = init_repo(other)
+    foreign = other / ".worktrees" / "foreign"
+    foreign.parent.mkdir()
+    subprocess.run(["git", "-C", str(other), "worktree", "add", "--detach", str(foreign), other_base], check=True)
+
+    result = worktree_policy.verify_claim(worktree, foreign, other_base, base_revision=base)
+
+    assert result == {
+        "status": "rejected",
+        "reason": "claimed worktree is from a different common Git directory",
+    }
+
+
+def test_verify_claim_rejects_a_non_descendant_head(tmp_path, capsys):
+    _repo, base, worktree = _implementation_worktree(tmp_path, capsys)
+    subprocess.run(["git", "-C", str(worktree), "checkout", "--orphan", "unrelated"], check=True, stdout=subprocess.DEVNULL)
+    (worktree / "unrelated.txt").write_text("unrelated\n")
+    subprocess.run(["git", "-C", str(worktree), "add", "unrelated.txt"], check=True)
+    subprocess.run(["git", "-C", str(worktree), "commit", "-qm", "unrelated"], check=True)
+    claimed = subprocess.check_output(["git", "-C", str(worktree), "rev-parse", "HEAD"], text=True).strip()
+
+    result = worktree_policy.verify_claim(worktree, worktree, claimed, base_revision=base)
+
+    assert result == {
+        "status": "rejected",
+        "reason": "claimed commit is not descended from pre-dispatch base",
+    }
+
+
 def test_verify_claim_rejects_unchanged_base_and_dirty_residue(tmp_path, capsys):
     _repo, base, worktree = _implementation_worktree(tmp_path, capsys)
     (worktree / "tracked.txt").write_text("uncommitted\n")

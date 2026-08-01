@@ -39,22 +39,23 @@ def add_manifest_row(run, row):
 def review(review_id, scope, lens, family, tier="flagship", status="complete", substitution_for="", wave=1, reason=None):
     evidence_digest = "sha256:" + __import__("hashlib").sha256((review_id + ":evidence").encode()).hexdigest()
     route_digest = "sha256:" + __import__("hashlib").sha256((review_id + ":route").encode()).hexdigest()
+    attempted = status != "omitted"
     return {
         "id": review_id, "scope": scope, "lens": lens, "family": family,
         "tier": tier, "status": status, "substitution_for": substitution_for,
-        "evidence": {"path": f"reviews/{review_id}.md", "digest": evidence_digest},
+        "evidence": {"path": f"reviews/{review_id}.md", "digest": evidence_digest} if attempted else None,
         "reason": reason if reason is not None else ("provider unavailable" if status != "complete" else ""),
         "verdict": "approve" if status == "complete" else "",
         "terminal_result": {
             "path": f"reviews/{review_id}.result.json",
             "digest": "sha256:" + __import__("hashlib").sha256((review_id + ":terminal").encode()).hexdigest(),
-        } if status == "complete" else None,
+        } if attempted else None,
         "wave": wave,
         "adapter": "claude" if family == "anthropic" else "codex",
         "adapter_gate": "direct-cli",
         "model": "opus" if status == "complete" else "",
         "catalog_model": "" if status == "complete" else "",
-        "route_receipt": {"path": f"reviews/{review_id}.route.json", "digest": route_digest},
+        "route_receipt": {"path": f"reviews/{review_id}.route.json", "digest": route_digest} if attempted else None,
         "reviewer_id": review_id,
     }
 
@@ -87,21 +88,36 @@ def bind_complete_reviews(run, plan):
     reviews_dir = run / "reviews"
     reviews_dir.mkdir()
     for row in plan["reviews"]:
-        if row["status"] != "complete":
+        if row["status"] == "omitted":
             continue
         evidence = run / row["evidence"]["path"]
         evidence.write_text(row["id"] + ":evidence")
         row["evidence"]["digest"] = "sha256:" + __import__("hashlib").sha256(evidence.read_bytes()).hexdigest()
         terminal = run / row["terminal_result"]["path"]
-        terminal.write_text(json.dumps({
-            "id": row["id"], "attempt_id": "attempt-" + row["id"], "kind": "complete",
-            "summary": row["id"] + ":complete", "verdict": row["verdict"],
-        }))
+        kind = row["status"]
+        semantic = {
+            "id": row["id"], "attempt_id": "attempt-" + row["id"], "kind": kind,
+        }
+        if kind == "complete":
+            semantic.update({"summary": row["id"] + ":complete", "verdict": row["verdict"]})
+        elif kind == "question":
+            semantic["question"] = "question from " + row["id"]
+        else:
+            semantic["reason"] = row["reason"] or (kind + " from " + row["id"])
+        terminal.write_text(json.dumps(semantic))
         row["terminal_result"]["digest"] = "sha256:" + __import__("hashlib").sha256(terminal.read_bytes()).hexdigest()
+        answer = run / f"reviews/{row['id']}.answer.txt"
+        answer.write_text(row["id"] + ":answer")
+        dispatch_terminal = run / f"reviews/{row['id']}.dispatch-terminal.json"
+        dispatch_terminal.write_text(json.dumps({
+            "id": row["id"], "attempt_id": "attempt-" + row["id"],
+            "kind": "complete", "summary": "dispatcher observed terminality",
+        }))
         route = run / row["route_receipt"]["path"]
         endpoint = "anthropic" if row["adapter"] == "claude" else "openai"
         route.write_text(json.dumps({
-            "status": "ok", "adapter": row["adapter"], "resolved_model": row["model"],
+            "status": "ok" if kind in {"complete", "question", "blocked"} else kind,
+            "adapter": row["adapter"], "resolved_model": row["model"],
             "adapter_gate": row["adapter_gate"],
             "catalog_model": row["catalog_model"], "model_family": row["family"],
             "provider_family": row["family"], "endpoint_provider": endpoint,
@@ -109,8 +125,11 @@ def bind_complete_reviews(run, plan):
             "read_only_guarantee": "enforced", "route_alias": row["tier"],
             "reviewer_id": row["reviewer_id"], "id": row["id"],
             "attempt_id": "attempt-" + row["id"], "terminal_observed": True,
-            "exit": 0, "output_path": row["terminal_result"]["path"],
-            "output_sha256": row["terminal_result"]["digest"],
+            "exit": 0 if kind in {"complete", "question", "blocked"} else 1,
+            "output_path": f"reviews/{row['id']}.answer.txt",
+            "output_sha256": "sha256:" + __import__("hashlib").sha256(answer.read_bytes()).hexdigest(),
+            "terminal_artifact_path": f"reviews/{row['id']}.dispatch-terminal.json",
+            "terminal_artifact_sha256": "sha256:" + __import__("hashlib").sha256(dispatch_terminal.read_bytes()).hexdigest(),
             "cross_family": row["scope"] == "primary",
             "certification_eligible": row["scope"] == "primary",
         }))
@@ -255,7 +274,8 @@ def test_review_topology_binds_account_default_route_and_review_evidence(tmp_pat
     route.write_text(json.dumps({
         "adapter": "codex", "adapter_gate": "direct-cli",
         "resolved_model": "", "catalog_model": "gpt-5.6-sol",
-        "model_family": "openai", "model_selection": "account-default",
+        "model_family": "openai", "provider_family": "openai", "endpoint_provider": "openai",
+        "orchestrator_family": "openai", "model_selection": "account-default",
         "status": "ok", "route_alias": "flagship", "reviewer_id": "account-default",
     }))
     row = review("account-default", "targeted", "correctness", "openai")
@@ -271,11 +291,20 @@ def test_review_topology_binds_account_default_route_and_review_evidence(tmp_pat
         "summary": "account default complete", "verdict": row["verdict"],
     }))
     row["terminal_result"]["digest"] = "sha256:" + __import__("hashlib").sha256(terminal.read_bytes()).hexdigest()
+    answer = tmp_path / "answer.txt"
+    answer.write_text("account-default answer")
+    dispatch_terminal = tmp_path / "dispatch-terminal.json"
+    dispatch_terminal.write_text(json.dumps({
+        "id": row["id"], "attempt_id": "attempt-" + row["id"],
+        "kind": "complete", "summary": "dispatcher observed terminality",
+    }))
     route_value = json.loads(route.read_text())
     route_value.update({
         "id": row["id"], "attempt_id": "attempt-" + row["id"], "terminal_observed": True,
-        "exit": 0, "output_path": row["terminal_result"]["path"],
-        "output_sha256": row["terminal_result"]["digest"],
+        "exit": 0, "output_path": "answer.txt",
+        "output_sha256": "sha256:" + __import__("hashlib").sha256(answer.read_bytes()).hexdigest(),
+        "terminal_artifact_path": "dispatch-terminal.json",
+        "terminal_artifact_sha256": "sha256:" + __import__("hashlib").sha256(dispatch_terminal.read_bytes()).hexdigest(),
     })
     route.write_text(json.dumps(route_value))
     row["route_receipt"]["digest"] = "sha256:" + __import__("hashlib").sha256(route.read_bytes()).hexdigest()
@@ -288,7 +317,7 @@ def test_review_topology_binds_account_default_route_and_review_evidence(tmp_pat
     route_value["status"] = "error"
     route.write_text(json.dumps(route_value))
     row["route_receipt"]["digest"] = "sha256:" + __import__("hashlib").sha256(route.read_bytes()).hexdigest()
-    assert any("identity does not match" in error for error in run_dir_finalize._validate_review_plan(plan, tmp_path))
+    assert any("status is not derived" in error for error in run_dir_finalize._validate_review_plan(plan, tmp_path))
     route_value["status"] = "ok"
     route_value["reviewer_id"] = "different-reviewer"
     route.write_text(json.dumps(route_value))
@@ -451,6 +480,26 @@ def test_review_route_receipt_binds_adapter_gate(tmp_path):
         "identity does not match" in error
         for error in run_dir_finalize._validate_review_plan(plan, tmp_path)
     )
+
+
+def test_fabric_attempted_leg_cannot_bypass_worker_outcome_join(tmp_path):
+    plan = substantial_plan()
+    bind_complete_reviews(tmp_path, plan)
+    row = plan["reviews"][0]
+    row["adapter_gate"] = "fabric"
+    route_path = tmp_path / row["route_receipt"]["path"]
+    route = json.loads(route_path.read_text())
+    route["adapter_gate"] = "fabric"
+    route["terminal_artifact_path"] = ""
+    route["terminal_artifact_sha256"] = ""
+    route_path.write_text(json.dumps(route))
+    row["route_receipt"]["digest"] = (
+        "sha256:" + __import__("hashlib").sha256(route_path.read_bytes()).hexdigest()
+    )
+
+    errors = run_dir_finalize._validate_review_plan(plan, tmp_path)
+
+    assert any("dispatcher terminal artifact reference is missing" in error for error in errors)
 
 
 def test_panel_records_are_closed_and_reference_existing_reviews():

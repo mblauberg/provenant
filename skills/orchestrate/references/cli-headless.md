@@ -89,13 +89,18 @@ or `oauth_safe_mode`.
 If any adapter cannot enforce the promised safety level, log the failure and fail over. Do not silently
 downgrade certification. For large prompts, prefer `--prompt-file`; enforced adapters use
 stdin/file-backed input where supported to avoid shell argument limits.
-Orchestrated direct-CLI runs pass `--out <run-dir>/<human-answer>` and
-`--terminal-artifact <run-dir>/<terminal-artifact>.json`, and list both in the
-manifest. The first is the human-readable provider answer. The second is the
+Orchestrated direct-CLI runs pass `--out <run-dir>/<human-answer>`,
+`--terminal-artifact <run-dir>/<terminal-artifact>.json`, and
+`--reviewer-id <stable-row-reviewer-id>`, and list all three in the manifest.
+The first is the human-readable provider answer. The second is the
 dispatcher-owned closed JSON terminal artifact whose digest is recorded in the
-dispatch receipt. Omitting `--out` creates one declared ephemeral answer for a
-one-shot caller to consume/remove; dispatcher-internal prompt/raw/diagnostic
-temporaries are cleaned on success and failure.
+dispatch receipt. The reviewer ID must be the stable ID in the consuming review
+row, not a free-text alias. Omitting `--terminal-artifact` uses the declared
+answer path with a `.terminal.json` suffix; the finalizer still requires the
+three answer/dispatcher/semantic paths to be distinct. Omitting `--out` creates
+one declared ephemeral answer for a one-shot caller to consume/remove;
+dispatcher-internal prompt/raw/diagnostic temporaries are cleaned on success
+and failure.
 
 `cf_dispatch.sh --doctor` prints PATH, resolved CLI locations, versions where cheap, pwd, git root,
 git short-status count, and advisory adapter switches. Use it before long runs or when a route fails
@@ -198,11 +203,12 @@ effort unsupported/mismatch/unresolved errors, `same_family_forbidden`, and
 `all_failed`. Consumers must tolerate a new fail-closed status as non-passing.
 
 The clean human answer lives in `output_path`; the dispatcher-owned JSON
-terminal artifact lives in `terminal_artifact_path`. `terminal_observed`,
-`output_sha256` and `terminal_artifact_sha256` are dispatcher-owned evidence,
-while stderr/stdout noise is diagnostic only. Do not parse one tool's footer
-with another tool's regex. Output files require scratch/report write
-permission; that is separate from permission to edit source or evidence files.
+terminal artifact lives in `terminal_artifact_path`; the semantic worker result
+is a third separately digested artifact. `terminal_observed`, `output_sha256`
+and `terminal_artifact_sha256` are dispatcher-owned evidence, while
+stderr/stdout noise is diagnostic only. Do not parse one tool's footer with
+another tool's regex. Output files require scratch/report write permission;
+that is separate from permission to edit source or evidence files.
 
 When a chain fully fails, preserve every attempt record in stderr or a trace file and record
 `CROSS-FAMILY-NOT-RUN: <reason>` in the run manifest. A final `all_failed` JSON line is not enough for

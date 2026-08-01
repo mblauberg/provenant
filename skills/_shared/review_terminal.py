@@ -40,7 +40,12 @@ def _family(result: Mapping[str, Any]) -> tuple[str, str]:
 
 
 def _terminal_verdict(terminal_result: object) -> tuple[str, str]:
-    if not isinstance(terminal_result, Mapping) or terminal_result.get("kind") != "complete":
+    if not isinstance(terminal_result, Mapping):
+        return "", "no-verdict"
+    kind = terminal_result.get("kind")
+    if kind in {"question", "blocked", "failed", "unavailable"}:
+        return "", f"worker-{kind}"
+    if kind != "complete":
         return "", "no-verdict"
     verdict = terminal_result.get("verdict")
     if not isinstance(verdict, str) or not verdict.strip():
@@ -103,6 +108,7 @@ def normalise_dispatch_review(
     output_path = dispatch_result.get("output_path")
     worker_verdict, worker_reason = _terminal_verdict(terminal_result)
     wrapper_verdict = review_verdict.strip() if isinstance(review_verdict, str) else ""
+    terminal_kind = terminal_result.get("kind") if isinstance(terminal_result, Mapping) else None
 
     reason = ""
     leg_status = "pass"
@@ -123,6 +129,9 @@ def normalise_dispatch_review(
     ):
         leg_status = "failed"
         reason = "missing-transcript"
+    elif terminal_kind in {"question", "blocked", "failed", "unavailable"}:
+        leg_status = terminal_kind
+        reason = f"worker outcome is {terminal_kind}"
     elif not worker_verdict:
         leg_status = "unavailable" if worker_reason == "execution-unavailable" else "failed"
         reason = worker_reason

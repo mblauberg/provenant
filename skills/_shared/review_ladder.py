@@ -22,6 +22,8 @@ REVIEW_PLAN_STATUSES = frozenset({
     REVIEW_PLAN_COMPLETE_STATUS,
     "failed",
     "unavailable",
+    "question",
+    "blocked",
     "omitted",
 })
 SKIPPED_STATUSES = REVIEW_PLAN_STATUSES - {REVIEW_PLAN_COMPLETE_STATUS}

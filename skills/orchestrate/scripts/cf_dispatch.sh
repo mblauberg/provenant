@@ -30,7 +30,7 @@ Options:
   --model MODEL                Optional model passed to adapter.
   --effort EFFORT              Optional effort passed to adapter.
   --out PATH                   Human-readable answer path; defaults to mktemp.
-  --terminal-artifact PATH     Dispatcher-owned JSON terminal artifact path.
+  --terminal-artifact PATH     Dispatcher-owned JSON terminal artifact path; defaults to PATH.terminal.json.
   --prompt TEXT                Prompt text.
   --prompt-file PATH           Read prompt from file.
   --doctor                     Print local dispatch diagnostics and exit.
@@ -131,6 +131,9 @@ make_tmp_dir() {
 if [ -z "$OUT" ]; then
   OUT="$(make_tmp)"
   OUT_CREATED=true
+fi
+if [ -z "$TERMINAL_ARTIFACT" ]; then
+  TERMINAL_ARTIFACT="${OUT}.terminal.json"
 fi
 PROMPT_TMP="$(make_tmp)"
 printf '%s' "$PROMPT" >"$PROMPT_TMP"
@@ -574,12 +577,15 @@ if [ -n "$CHAIN" ]; then
     echo "$rec" >&2
     if [ $rc -eq 0 ]; then echo "$rec"; exit 0; fi
   done
-  [ "$OUT_CREATED" = true ] && rm -f "$OUT"
   terminal_artifact_sha256=""
   if [ -n "$TERMINAL_ARTIFACT" ] && write_terminal_artifact "$TERMINAL_ARTIFACT" "all_failed" 1; then
     terminal_artifact_sha256="sha256:$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$TERMINAL_ARTIFACT")"
   fi
-  emit_record "chain" "" "" "all_failed" 1 "" "none" "" "" "" "" "" "" "" "" "" "" "" "" "" "" "" "" "" true "" "$TERMINAL_ARTIFACT" "$terminal_artifact_sha256"
+  chain_output_sha256=""
+  if [ -n "$OUT" ] && [ -f "$OUT" ]; then
+    chain_output_sha256="sha256:$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$OUT")"
+  fi
+  emit_record "chain" "" "" "all_failed" 1 "$OUT" "none" "" "" "" "" "" "" "" "" "" "" "" "" "" "" "" "" "" true "$chain_output_sha256" "$TERMINAL_ARTIFACT" "$terminal_artifact_sha256"
   exit 1
 else
   [ -z "$TOOL" ] && { echo "need --tool or --chain" >&2; exit 2; }
