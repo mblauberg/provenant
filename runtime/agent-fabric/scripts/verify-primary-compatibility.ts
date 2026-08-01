@@ -4,9 +4,10 @@ import { verifyAdapterCompatibility } from "../src/adapters/compatibility.js";
 import { verifyProviderExecutableIdentity } from "../src/adapters/provider-identity.js";
 import { probeProviderInterface } from "../src/adapters/provider-interface.js";
 import { FabricError } from "../src/errors.js";
+import { PRIMARY_ADAPTER_IDS } from "../src/adapters/primary-adapters.js";
 
 const root = resolve(import.meta.dirname, "../../..");
-const adapterIds = ["claude-agent-sdk", "codex-app-server"];
+const adapterIds = [...PRIMARY_ADAPTER_IDS];
 
 function argumentValue(arguments_: string[], name: string): string | undefined {
   const index = arguments_.indexOf(name);

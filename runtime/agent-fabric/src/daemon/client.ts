@@ -407,6 +407,13 @@ async function privateDaemonHandshake(
   try {
     client = await FabricDaemonClient.connect(discovery.receipt.socketPath, discovery.receipt.bootstrapCapability);
   } catch (error: unknown) {
+    if (error instanceof FabricRemoteError && ["DAEMON_PROTOCOL_MISMATCH", "DAEMON_PROTOCOL_UNSUPPORTED", "PROTOCOL_INCOMPATIBLE"].includes(error.code)) {
+      return {
+        status: "incompatible",
+        responsive: true,
+        message: `${error.message}; restart the incumbent through its owning Fabric lifecycle`,
+      };
+    }
     return {
       status: "unavailable",
       reason: error instanceof FabricRemoteError && error.code === "DAEMON_CONNECT_TIMEOUT" ? "timeout" : "unreachable",

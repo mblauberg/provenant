@@ -31,6 +31,15 @@ Promote the coordination-only agent fabric into a safely activated local model-e
 7. Herdr observation reads a durable monotonic event cursor and renders one-line summaries in a separate local observer pane. Message events include a terminal-safe 160-character body preview. It never types into an agent composer, receives mail or acknowledges delivery.
 8. Seat expiry warnings are automatic. Authority extension remains an explicit operator action: close the old run only after daemon-produced barrier evidence, provision a fresh immutable generation, atomically cut over the roster, reconnect every seat, and run health plus round-trip smokes. The global 31-day maximum remains non-configurable by projects.
 
+Executable resolution is revisioned at `2`: configured command names are
+resolved natively against the current `PATH`, and the resolved file must be a
+regular executable. A missing or unavailable enabled optional adapter is
+reported as degraded and omitted from daemon composition, status and doctor;
+an unavailable mandatory primary remains fatal. A directly selected optional
+adapter still fails closed when its executable is unavailable. This executable
+check is separate from activation: `direct-cli` does not turn disabled Pi into
+Fabric activation, while the Fabric gate continues to reject disabled Pi.
+
 ## Fresh coordination-run launch
 
 A trusted local Console starts the first current-schema coordination run through

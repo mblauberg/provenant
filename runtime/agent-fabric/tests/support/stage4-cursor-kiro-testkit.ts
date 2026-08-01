@@ -1,4 +1,4 @@
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { chmod, copyFile, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -30,6 +30,7 @@ export function requireStage4PublicFunction(name: string): PublicFunction {
 function compatibilityEntry(input: {
   adapterId: Stage4AdapterId;
   wrapperPath: string;
+  executablePath: string;
 }): Record<string, unknown> {
   const cursor = input.adapterId === "cursor-agent";
   const openCode = input.adapterId === "opencode-acp";
@@ -38,10 +39,10 @@ function compatibilityEntry(input: {
     delivery_stage: 4,
     implementation: {
       kind: "fixture-process",
-      executable: fixtureAdapter,
+      executable: input.executablePath,
       provider_identity: cursor ? "cursor-partial-signed-helpers" : openCode ? "owner-controlled-install-root" : "apple-designated",
-      ...(input.adapterId === "cursor-agent" ? { cursor_install_root: dirname(fixtureAdapter) } : {}),
-      ...(openCode ? { provider_install_root: dirname(fixtureAdapter) } : {}),
+      ...(input.adapterId === "cursor-agent" ? { cursor_install_root: dirname(input.executablePath) } : {}),
+      ...(openCode ? { provider_install_root: dirname(input.executablePath) } : {}),
       wrapper_entrypoint: input.wrapperPath,
     },
     contract: {
@@ -77,6 +78,9 @@ export async function createCursorKiroCompatibilityFixture(): Promise<{
   schemaPath: string;
 }> {
   const directory = await mkdtemp(join(tmpdir(), "agent-fabric-stage4-cursor-kiro-"));
+  const executablePath = join(directory, "stage4-fake-provider.ts");
+  await copyFile(fixtureAdapter, executablePath);
+  await chmod(executablePath, 0o700);
   const wrapperPath = join(directory, "fixture-wrapper.js");
   const wrapper = "export const fixtureWrapper = true;\n";
   await writeFile(wrapperPath, wrapper, { mode: 0o600 });
@@ -88,6 +92,7 @@ export async function createCursorKiroCompatibilityFixture(): Promise<{
       compatibilityEntry({
         adapterId,
         wrapperPath,
+        executablePath,
       }),
     ]),
   );
@@ -96,7 +101,7 @@ export async function createCursorKiroCompatibilityFixture(): Promise<{
     compatibilityPath,
     stringify({
       schema_version: 1,
-      activation_policy: { real_adapters_require_separate_gate: true, default_enabled: false },
+      activation_policy: { real_adapters_require_separate_gate: true, default_enabled: false, executable_resolution_version: 2 },
       adapters,
     }),
   );

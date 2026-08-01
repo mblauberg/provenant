@@ -1,6 +1,7 @@
 from pathlib import Path
 import json
 import os
+import shutil
 import subprocess
 import sys
 
@@ -16,13 +17,16 @@ def run_validator(tmp_path, executable, path):
 activation_policy:
   real_adapters_require_separate_gate: true
   default_enabled: false
+  executable_resolution_version: 2
 adapters:
-  example:
+  claude-agent-sdk:
     enabled: true
     delivery_stage: 3
     implementation:
       kind: native-cli
       executable: {json.dumps(executable)}
+      provider_identity: apple-designated
+      wrapper_entrypoint: fixture-wrapper.js
     contract:
       protocol: example
     runtime_range:
@@ -33,9 +37,11 @@ adapters:
     official_source_url: https://example.invalid/example
 """)
     environment = os.environ.copy()
-    environment["PATH"] = path + os.pathsep + "/opt/homebrew/opt/node@24/bin" + os.pathsep + os.environ.get("PATH", "")
+    environment["PATH"] = path + os.pathsep + os.environ.get("PATH", "")
+    node = shutil.which("node", path=environment["PATH"])
+    assert node is not None
     return subprocess.run(
-        ["/opt/homebrew/opt/node@24/bin/node", "--import", "tsx", str(VALIDATOR),
+        [node, "--import", "tsx", str(VALIDATOR),
          "--compatibility", str(compatibility), "--schema", str(SCHEMA)],
         cwd=ROOT,
         env=environment,
@@ -48,7 +54,7 @@ adapters:
 def test_install_time_check_rejects_enabled_adapter_with_unresolvable_executable(tmp_path):
     result = run_validator(tmp_path, "missing-example", str(tmp_path / "empty-bin"))
     assert result.returncode != 0
-    assert "adapter example is enabled but executable 'missing-example' is not resolvable on PATH" in result.stderr
+    assert "adapter claude-agent-sdk is enabled but executable 'missing-example' is not resolvable on PATH" in result.stderr
 
 
 def test_install_time_check_accepts_enabled_adapter_with_resolvable_executable(tmp_path):

@@ -11,6 +11,8 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
+import subprocess
 import sys
 from typing import Any
 
@@ -101,6 +103,9 @@ def load_adapter_compatibility(
         return None, "adapter_compatibility_unavailable"
     if not isinstance(data, dict) or data.get("schema_version") != 1:
         return None, "adapter_compatibility_invalid"
+    activation_policy = data.get("activation_policy")
+    if not isinstance(activation_policy, dict) or activation_policy.get("executable_resolution_version") != 2:
+        return None, "adapter_compatibility_invalid"
     adapters = data.get("adapters")
     entry = adapters.get(compatibility_id) if isinstance(adapters, dict) else None
     if not isinstance(entry, dict):
@@ -140,6 +145,85 @@ def load_active_adapters(path: Path) -> tuple[set[str], str]:
     ):
         return set(), "fabric_activation_invalid"
     return set(active), ""
+
+
+def _validated_agent_fabric_node() -> str | None:
+    configured = os.environ.get("AGENT_FABRIC_NODE")
+    candidate = Path(configured).expanduser() if configured else None
+    if candidate is not None and not candidate.is_absolute():
+        return None
+    if candidate is None:
+        resolved = shutil.which("node")
+        if resolved is None:
+            return None
+        candidate = Path(resolved)
+    if not candidate.is_file() or not os.access(candidate, os.X_OK):
+        return None
+    return str(candidate.resolve())
+
+
+def validate_adapter_executable(adapter: str, compatibility_path: Path) -> str:
+    """Validate the selected executable through the installed TypeScript seam.
+
+    This is deliberately separate from the Fabric activation gate: direct CLI
+    routing still does not activate a disabled adapter, but a selected enabled
+    adapter must have a usable executable. The TypeScript primary-adapter list
+    remains the sole owner of mandatory-primary semantics.
+    """
+    loader_script = PRODUCT_ROOT / "scripts" / "lib" / "agent-fabric-tsx-loader.sh"
+    validator = PRODUCT_ROOT / "runtime" / "agent-fabric" / "scripts" / "validate-adapter-executables.ts"
+    node_executable = _validated_agent_fabric_node()
+    if node_executable is None:
+        return "adapter_compatibility_unavailable"
+    environment = os.environ.copy()
+    environment["AGENT_FABRIC_NODE"] = node_executable
+    try:
+        loader = subprocess.run(
+            [
+                "sh", "-c",
+                '. "$1"; resolve_tsx_loader "$2" "$3"',
+                "resolve-tsx-loader",
+                str(loader_script),
+                str(PRODUCT_ROOT / "runtime" / "agent-fabric"),
+                str(PRODUCT_ROOT),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=environment,
+            timeout=10,
+        )
+        if loader.returncode != 0 or not loader.stdout.strip():
+            return "adapter_compatibility_unavailable"
+        completed = subprocess.run(
+            [
+                node_executable,
+                "--import", loader.stdout.strip(), "--conditions=source",
+                str(validator),
+                "--compatibility", str(compatibility_path),
+                "--schema", str(PRODUCT_ROOT / "runtime" / "agent-fabric" / "schemas" / "adapter-compatibility.schema.json"),
+                "--adapter", COMPATIBILITY_ADAPTER_IDS[adapter],
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=environment,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return "adapter_compatibility_unavailable"
+    if completed.returncode == 0:
+        return ""
+    try:
+        result = json.loads(completed.stderr.strip().splitlines()[-1])
+    except (json.JSONDecodeError, IndexError):
+        return "adapter_compatibility_unavailable"
+    code = result.get("code") if isinstance(result, dict) else None
+    if code == "ADAPTER_ARTIFACT_MISSING":
+        return "adapter_executable_unavailable"
+    if code == "ADAPTER_COMPATIBILITY_INVALID":
+        return "adapter_compatibility_invalid"
+    return "adapter_compatibility_unavailable"
 
 
 def check_adapter_compatibility(
@@ -483,6 +567,23 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
             "compatibility_adapter": compatibility["compatibility_adapter"],
             "adapter_enabled": compatibility["enabled"],
         }
+        # A Fabric-disabled adapter is rejected by the activation gate before
+        # point of use. Direct CLI selection has no such gate, so it must still
+        # prove that the selected optional executable is usable.
+        if args.adapter_gate != "fabric" or compatibility["enabled"]:
+            executable_status = validate_adapter_executable(
+                args.adapter, Path(args.adapter_compatibility)
+            )
+            if executable_status:
+                return emit_route(
+                    {
+                        **base,
+                        "status": executable_status,
+                        "endpoint_provider": endpoint,
+                        **compatibility_metadata,
+                    },
+                    2,
+                )
         if args.adapter_gate == "fabric":
             active_adapters, activation_status = load_active_adapters(Path(args.fabric_config))
             if activation_status:

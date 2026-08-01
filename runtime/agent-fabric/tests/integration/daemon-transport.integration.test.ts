@@ -49,7 +49,7 @@ class FixtureDaemonSocket extends Duplex {
     this.methods.push(request.method);
     const result = request.method === "initialize"
       ? {
-          protocolVersion: 1,
+          protocolVersion: 2,
           daemonVersion: this.#daemonVersion,
           capabilities: this.#capabilities,
           activeAdapters: [],
@@ -62,6 +62,7 @@ class FixtureDaemonSocket extends Duplex {
             maximumAdapterInFlight: 8,
             idleTimeoutMs: 300_000,
           },
+          executableResolutionVersion: 2,
         }
       : this.#legacyCredentialResult;
     this.push(`${JSON.stringify({ id: request.id, result })}\n`);
@@ -188,7 +189,7 @@ describe("timed daemon NDJSON transport", () => {
           socket.write(`${JSON.stringify({
             id: request.id,
             result: {
-              protocolVersion: 1,
+              protocolVersion: 2,
               daemonVersion: "0.1.0",
               capabilities: ["rpc"],
               activeAdapters: [],
@@ -201,6 +202,7 @@ describe("timed daemon NDJSON transport", () => {
                 maximumAdapterInFlight: 8,
                 idleTimeoutMs: 300_000,
               },
+              executableResolutionVersion: 2,
             },
           })}\n`);
           return;
@@ -234,7 +236,7 @@ describe("timed daemon NDJSON transport", () => {
       {
         capability: "afb_test",
         method: "initialize",
-        params: { protocolVersion: 1, client: { name: "agent-fabric", version: "0.1.0" }, capabilities: ["rpc"] },
+        params: { protocolVersion: 2, client: { name: "agent-fabric", version: "0.1.0" }, capabilities: ["rpc"] },
       },
       { capability: "afb_test", method: "first", params: { sequence: 1 } },
       { capability: "afb_test", method: "second", params: { sequence: 2 } },
@@ -253,7 +255,7 @@ describe("timed daemon NDJSON transport", () => {
           socket.write(`${JSON.stringify({
             id: request.id,
             result: {
-              protocolVersion: 1,
+              protocolVersion: 2,
               daemonVersion: "0.1.0",
               capabilities: ["rpc"],
               activeAdapters: [],
@@ -266,6 +268,7 @@ describe("timed daemon NDJSON transport", () => {
                 maximumAdapterInFlight: 8,
                 idleTimeoutMs: 300_000,
               },
+              executableResolutionVersion: 2,
             },
           })}\n`);
         } else {

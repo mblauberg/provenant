@@ -39,7 +39,7 @@ async function rawConnection(socketPath: string): Promise<{
   };
 }
 
-describe("daemon protocol v1 negotiation", () => {
+describe("daemon protocol negotiation", () => {
   it("fails closed before initialization and on unsupported versions, then binds capability", async () => {
     const fixture = await createDaemonFixture("run-protocol-v1");
     cleanup.push(fixture.cleanup);
@@ -56,21 +56,22 @@ describe("daemon protocol v1 negotiation", () => {
       id: "wrong-version",
       capability: fixture.daemon.bootstrapCapability,
       method: "initialize",
-      params: { protocolVersion: 2, client: { name: "test", version: "1" }, capabilities: ["rpc"] },
+      params: { protocolVersion: 1, client: { name: "test", version: "1" }, capabilities: ["rpc"] },
     })).resolves.toMatchObject({ error: { code: "DAEMON_PROTOCOL_UNSUPPORTED" } });
 
     await expect(raw.request({
       id: "initialize",
       capability: fixture.daemon.bootstrapCapability,
       method: "initialize",
-      params: { protocolVersion: 1, client: { name: "test", version: "1" }, capabilities: ["rpc"] },
+      params: { protocolVersion: 2, client: { name: "test", version: "1" }, capabilities: ["rpc"] },
     })).resolves.toMatchObject({
       result: {
-        protocolVersion: 1,
+        protocolVersion: 2,
         daemonVersion: "0.1.0",
         capabilities: ["rpc", MCP_BOOTSTRAP_CREDENTIALS_FEATURE],
         activeAdapters: [],
         limits: FABRIC_PROTOCOL_LIMITS,
+        executableResolutionVersion: 2,
       },
     });
 

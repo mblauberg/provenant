@@ -299,13 +299,24 @@ jobs:
           split_home="$split_parent/home"
           split_instance="$split_parent/instance"
           mkdir -p "$split_home/.codex" "$split_instance"
+          provider_bin="$split_home/.local/bin"
+          mkdir -p "$provider_bin"
+          for provider in claude codex agy cursor-agent kiro-cli opencode; do
+            printf '#!/bin/sh\nexit 0\n' > "$provider_bin/$provider"
+            chmod 700 "$provider_bin/$provider"
+          done
+          fabric_node="$(command -v node)"
+          fabric_python="$(command -v python3)"
+          printf '#!/bin/sh\nexec %s "$@"\n' "$fabric_python" > "$provider_bin/python3"
+          chmod 700 "$provider_bin/python3"
           export HOME="$split_home"
           export CODEX_HOME="$split_home/.codex"
           export PROVENANT_BIN_DIR="$split_home/.local/bin"
           export AGENT_FABRIC_PRODUCT_ROOT="$GITHUB_WORKSPACE"
           export AGENT_FABRIC_INSTANCE_ROOT="$split_instance"
+          export AGENT_FABRIC_NODE="$fabric_node"
           unset AGENTS_HOME
-          export PATH="$PROVENANT_BIN_DIR:$PATH"
+          export PATH="$provider_bin:/usr/bin:/bin"
           scripts/install-harness --platform codex
           test -f "$split_instance/AGENTS.md"
           test -f "$split_instance/config/model-routing.json"
