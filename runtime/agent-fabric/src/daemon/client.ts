@@ -8,7 +8,10 @@ import { MCP_BOOTSTRAP_CREDENTIALS_FEATURE } from "@local/agent-fabric-protocol"
 
 import type { FabricOpenOptions } from "../domain/types.js";
 import { resolveFabricRoots } from "../domain/fabric-roots.js";
-import { inspectFabricDatabase } from "../core/migrations.js";
+import {
+  inspectFabricDatabase,
+  type DatabaseInspectionHooks,
+} from "../core/migrations.js";
 import { FabricRemoteError } from "../transport/ndjson-rpc.js";
 import { attachOrStartDaemon, type DaemonHandshakeResult } from "./bootstrap-client.js";
 import { BootstrapElection, type BootstrapReadyReceipt } from "./bootstrap-election.js";
@@ -53,6 +56,8 @@ export type DaemonStartOptions = {
   githubHostedChecks?: OptionalGitHubHostedChecksConfiguration;
   trustedGitConfiguration?: TrustedGitConfiguration;
   herdr?: HerdrDaemonProcessConfiguration;
+  /** Parent-process test seam; never crosses into the daemon child. */
+  inspectionHooks?: DatabaseInspectionHooks;
   configuration?: {
     globalConfigPath: string;
     localConfigPath?: string;
@@ -519,7 +524,9 @@ async function spawnProductionDaemon(input: {
 }): Promise<ProductionSpawn> {
   const prepared = await prepareDaemonStart(input.options);
   const daemonInstanceGeneration = input.electionGeneration;
-  const child = await spawnDaemonChild(prepared, {
+  const childOptions = { ...prepared };
+  delete childOptions.inspectionHooks;
+  const child = await spawnDaemonChild(childOptions, {
     mode: "production-election",
     actionId: input.actionId,
     electionGeneration: input.electionGeneration,
@@ -680,7 +687,7 @@ export async function startFabricDaemon(options: DaemonStartOptions): Promise<Fa
         );
       },
       preBootstrap: async () => {
-        inspectFabricDatabase(normalized.databasePath);
+        inspectFabricDatabase(normalized.databasePath, normalized.inspectionHooks);
         await Promise.all([
           ensurePrivateDirectory(normalized.stateDirectory),
           ensurePrivateDirectory(normalized.runtimeDirectory),
