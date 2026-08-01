@@ -721,6 +721,14 @@ export async function reopenLifecycleFabric(
       directory: fixture.directory,
       clock: fixture.clock,
       providerJournalPath: fixture.providerJournalPath,
+      ...(fixture.providerSpawnBarrier === undefined
+        ? {}
+        : {
+            spawnBarrierPaths: {
+              entered: join(fixture.directory, "fake-provider-spawn-barrier-entered"),
+              release: join(fixture.directory, "fake-provider-spawn-barrier-release"),
+            },
+          }),
       ...(fixture.secondaryProviderJournalPath === undefined
         ? {}
         : { secondaryProviderJournalPath: fixture.secondaryProviderJournalPath }),

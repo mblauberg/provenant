@@ -331,7 +331,7 @@ describe("S1 REC: startup routing equivalence classes", () => {
   });
 
   it("REC-2 quarantines a generic row that crosses owner during lookup", async () => {
-    const fixture = await createLifecycleFixture();
+    const fixture = await createLifecycleFixture({ spawnBarrier: true });
     const closeOriginal = closeFixture(cleanup, fixture);
     const database = new Database(fixture.databasePath);
     const authorityId = database.prepare("SELECT authority_id FROM agents WHERE run_id=? AND agent_id='leader'").pluck().get(fixture.runId);
@@ -354,10 +354,7 @@ describe("S1 REC: startup routing equivalence classes", () => {
     // Write the journal directly (rather than via writeTerminalJournal) so the entry carries
     // scenario:"ambiguous-review-concurrent-divergent" -- the same scenario already declared on the
     // seeded row's payload above, which only reaches the adapter through the journal, not the
-    // dispatch payload, for a pre-seeded ambiguous row. The fake adapter's lookup_action handler
-    // special-cases this scenario: it delays its FIRST response by 100ms but records lookupCount=1
-    // in the shared journal synchronously beforehand, giving a deterministic, pollable signal that
-    // the request is in flight and the response is still pending.
+    // dispatch payload, for a pre-seeded ambiguous row.
     await writeFile(fixture.providerJournalPath, `${JSON.stringify({
       schemaVersion: 1,
       actions: {
@@ -379,18 +376,13 @@ describe("S1 REC: startup routing equivalence classes", () => {
     const reopened = await reopenLifecycleFabric(fixture);
     cleanup.push(async () => await reopened.close());
     const recovery = reopened.recoverStartupState();
-    // Deterministic barrier (no sleep): poll the journal for lookupCount>=1 so the owner corruption
-    // below lands inside the adapter round-trip -- after startup routing's initial "generic"
-    // snapshot classified this row, and before #reconcileProviderAction's post-lookup persist
-    // re-asserts ownership (the 100ms response delay above leaves ample margin either side).
-    await eventually(async () => {
-      const journal = await readFakeJournal(fixture.providerJournalPath);
-      const actions = journal.actions as Record<string, { lookupCount?: number }>;
-      expect(actions[ref.actionId]?.lookupCount).toBeGreaterThanOrEqual(1);
-    });
+    const providerBarrier = fixture.providerSpawnBarrier;
+    if (providerBarrier === undefined) throw new Error("provider lookup barrier is required");
+    await providerBarrier.waitUntilEntered();
     const crossed = new Database(fixture.databasePath);
     bindProviderAgentOwner(crossed, ref);
     crossed.close();
+    await providerBarrier.release();
     await expect(recovery).resolves.toMatchObject({ actionsReconciled: 0, actionsQuarantined: 1 });
     const observed = new Database(fixture.databasePath, { readonly: true });
     expect(observed.prepare("SELECT status,effect_count FROM provider_actions WHERE run_id=? AND action_id=?").get(fixture.runId, ref.actionId)).toEqual({ status: "quarantined", effect_count: 0 });
