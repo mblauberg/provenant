@@ -119,6 +119,76 @@ describe("shared project boundary resolver", () => {
     });
   });
 
+  it("reports multiple direct bare Git repositories as a repository collection", async () => {
+    const root = await fixture("bare-repository-collection");
+    const project = join(root, "projects");
+    const one = join(project, "one");
+    await execFileAsync("git", ["init", "--bare", "--quiet", one]);
+    await execFileAsync("git", ["init", "--bare", "--quiet", join(project, "two")]);
+    await rm(join(one, "description"));
+
+    await expect(resolveProjectBoundary(project)).resolves.toMatchObject({
+      requestedDirectory: await realpath(project),
+      selectedProjectRoot: await realpath(project),
+      gitProbe: "not-repository",
+      evidence: {
+        kind: "ambiguous",
+        reason: "repository-collection",
+        repositories: [await realpath(one), await realpath(join(project, "two"))],
+      },
+    });
+  });
+
+  it("refuses a standalone bare Git root instead of treating it as plain non-Git", async () => {
+    const root = await fixture("standalone-bare-repository");
+    const project = join(root, "bare");
+    await execFileAsync("git", ["init", "--bare", "--quiet", project]);
+
+    await expect(resolveProjectBoundary(project)).resolves.toMatchObject({
+      requestedDirectory: await realpath(project),
+      selectedProjectRoot: await realpath(project),
+      gitProbe: "repository",
+      evidence: { kind: "refused", reason: "bare-repository" },
+    });
+  });
+
+  it("keeps a normal HEAD/objects/refs folder out of bare-repository collection evidence", async () => {
+    const root = await fixture("bare-shape-false-positive");
+    const project = join(root, "projects");
+    const ordinary = join(project, "ordinary");
+    const bare = join(project, "bare");
+    await mkdir(join(ordinary, "objects"), { recursive: true });
+    await mkdir(join(ordinary, "refs"), { recursive: true });
+    await writeFile(join(ordinary, "HEAD"), "not a Git ref\n");
+    await execFileAsync("git", ["init", "--bare", "--quiet", bare]);
+
+    await expect(resolveProjectBoundary(project)).resolves.toMatchObject({
+      gitProbe: "not-repository",
+      evidence: {
+        kind: "ambiguous",
+        reason: "unmarked-non-git",
+        repositories: [await realpath(bare)],
+      },
+    });
+  });
+
+  it("treats mixed worktree and bare direct children as one repository collection", async () => {
+    const root = await fixture("mixed-repository-collection");
+    const project = join(root, "projects");
+    const worktree = join(project, "worktree");
+    const bare = join(project, "bare");
+    await mkdir(join(worktree, ".git"), { recursive: true });
+    await execFileAsync("git", ["init", "--bare", "--quiet", bare]);
+
+    await expect(resolveProjectBoundary(project)).resolves.toMatchObject({
+      evidence: {
+        kind: "ambiguous",
+        reason: "repository-collection",
+        repositories: expect.arrayContaining([await realpath(worktree), await realpath(bare)]),
+      },
+    });
+  });
+
   it("does not treat a cloned .provenant repository as a project marker", async () => {
     const root = await fixture("cloned-project-marker");
     const project = join(root, "projects");

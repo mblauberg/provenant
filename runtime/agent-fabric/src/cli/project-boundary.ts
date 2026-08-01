@@ -33,7 +33,7 @@ export type ProjectBoundaryEvidence =
   | Readonly<{
     kind: "refused";
     root: string;
-    reason: "filesystem-root" | "home" | "symbolic-link" | "linked-worktree" | "malformed-git-marker" | "unsafe-project-marker";
+    reason: "filesystem-root" | "home" | "symbolic-link" | "linked-worktree" | "malformed-git-marker" | "unsafe-project-marker" | "bare-repository";
     detail: string;
   }>;
 
@@ -152,14 +152,28 @@ export async function repositoryCollectionChildren(canonicalRoot: string): Promi
   const children = await readdir(canonicalRoot, { withFileTypes: true });
   const repositories = new Set<string>();
   for (const child of children) {
+    let canonicalChild: string;
     try {
-      const canonicalChild = await realpath(join(canonicalRoot, child.name));
-      if (!(await lstat(canonicalChild)).isDirectory()) continue;
-      const marker = await lstat(join(canonicalChild, ".git"));
-      if (marker.isDirectory() || marker.isFile()) repositories.add(canonicalChild);
+      canonicalChild = await realpath(join(canonicalRoot, child.name));
+    } catch (error: unknown) {
+      if (isMissingPathError(error)) continue;
+      throw error;
+    }
+    let childInfo: Awaited<ReturnType<typeof lstat>>;
+    try {
+      childInfo = await lstat(canonicalChild);
+    } catch (error: unknown) {
+      if (isMissingPathError(error)) continue;
+      throw error;
+    }
+    if (!childInfo.isDirectory()) continue;
+    let marker: Awaited<ReturnType<typeof lstat>> | undefined;
+    try {
+      marker = await lstat(join(canonicalChild, ".git"));
     } catch (error: unknown) {
       if (!isMissingPathError(error)) throw error;
     }
+    if (marker?.isDirectory() || marker?.isFile() || await isBareRepositoryRoot(canonicalChild)) repositories.add(canonicalChild);
   }
   return [...repositories];
 }
@@ -332,6 +346,8 @@ type GitRepositoryProbe = Readonly<{
   error: string | null;
 }>;
 
+type BareRepositoryProbe = "repository" | "not-repository" | "unavailable";
+
 function processErrorOutput(error: unknown): string {
   if (typeof error === "object" && error !== null && "stderr" in error && typeof error.stderr === "string") {
     const stderr = error.stderr.trim();
@@ -344,13 +360,74 @@ async function gitRepositoryProbe(path: string): Promise<GitRepositoryProbe> {
   try {
     const result = await execFileAsync("git", ["-C", path, "rev-parse", "--show-toplevel"], { encoding: "utf8" });
     const candidate = result.stdout.trim();
-    if (candidate.length === 0) return { root: null, status: "not-repository", error: null };
+    if (candidate.length === 0) {
+      return { root: null, status: "unavailable", error: "Git repository probe returned empty output" };
+    }
     return { root: await realpath(candidate), status: "repository", error: null };
   } catch (error: unknown) {
     const detail = processErrorOutput(error);
     if (/not a git repository/u.test(detail)) return { root: null, status: "not-repository", error: null };
+    if (/must be run in a work tree/u.test(detail)) {
+      const bareRepository = await bareRepositoryProbe(path);
+      if (bareRepository === "repository") return { root: await realpath(path), status: "repository", error: null };
+      if (bareRepository === "not-repository") return { root: null, status: "not-repository", error: null };
+    }
     return { root: null, status: "unavailable", error: detail };
   }
+}
+
+async function hasBareRepositoryShape(canonicalPath: string): Promise<boolean> {
+  // Keep this probe shallow and deliberately narrower than Git's permissive
+  // rev-parse shape: ordinary directories can contain HEAD, objects and refs.
+  // The fixed config set plus core.bare=true below is the boundary between
+  // that ordinary shape and a directly contained bare repository. Git's
+  // description file is optional and is therefore intentionally not required.
+  const requiredEntries: ReadonlyArray<readonly [string, "file" | "directory"]> = [
+    ["HEAD", "file"],
+    ["config", "file"],
+    ["objects", "directory"],
+    ["refs", "directory"],
+  ];
+  for (const [name, kind] of requiredEntries) {
+    try {
+      const entry = await lstat(join(canonicalPath, name));
+      if (entry.isSymbolicLink() || (kind === "file" ? !entry.isFile() : !entry.isDirectory())) return false;
+    } catch (error: unknown) {
+      if (isMissingPathError(error)) return false;
+      throw error;
+    }
+  }
+  return true;
+}
+
+async function bareRepositoryProbe(canonicalPath: string): Promise<BareRepositoryProbe> {
+  if (!await hasBareRepositoryShape(canonicalPath)) return "not-repository";
+  try {
+    const semantics = await execFileAsync("git", ["-C", canonicalPath, "rev-parse", "--is-bare-repository"], { encoding: "utf8" });
+    const semanticOutput = semantics.stdout.trim();
+    if (semanticOutput === "false") return "not-repository";
+    if (semanticOutput !== "true") return "unavailable";
+    const configuredBare = await execFileAsync("git", ["-C", canonicalPath, "config", "--local", "--get", "--type=bool", "core.bare"], { encoding: "utf8" });
+    const configuredOutput = configuredBare.stdout.trim();
+    if (configuredOutput === "true") return "repository";
+    if (configuredOutput === "false") return "not-repository";
+    return "unavailable";
+  } catch (error: unknown) {
+    const detail = processErrorOutput(error);
+    // The shallow filesystem shape is only a candidate signal. Once Git has
+    // been asked to adjudicate it, every failed or indeterminate semantic or
+    // configuration probe must remain unavailable. In particular, ENOENT
+    // here can mean the Git executable is absent, not that this is not a
+    // repository. Only Git's explicit not-a-repository result is negative.
+    if (/not a git repository/u.test(detail)) return "not-repository";
+    return "unavailable";
+  }
+}
+
+async function isBareRepositoryRoot(canonicalPath: string): Promise<boolean> {
+  const probe = await bareRepositoryProbe(canonicalPath);
+  if (probe === "unavailable") throw new Error(`bare Git repository probe unavailable for ${canonicalPath}`);
+  return probe === "repository";
 }
 
 async function canonicalDirectory(path: string): Promise<{ canonical: string; symbolicLink: boolean }> {
@@ -363,7 +440,22 @@ async function canonicalDirectory(path: string): Promise<{ canonical: string; sy
     symbolicLink ||= (await lstat(component)).isSymbolicLink();
   }
   const requestedInfo = await lstat(requested);
+  const requestedWasSymbolicLink = requestedInfo.isSymbolicLink();
   const canonical = await realpath(requested);
+  if (!requestedWasSymbolicLink) {
+    const requestedInfoAfterRealpath = await lstat(requested);
+    const infoAfterRealpath = await lstat(canonical);
+    if (
+      requestedInfoAfterRealpath.isSymbolicLink() ||
+      requestedInfoAfterRealpath.isDirectory() !== requestedInfo.isDirectory() ||
+      requestedInfoAfterRealpath.dev !== requestedInfo.dev ||
+      requestedInfoAfterRealpath.ino !== requestedInfo.ino ||
+      infoAfterRealpath.dev !== requestedInfo.dev ||
+      infoAfterRealpath.ino !== requestedInfo.ino
+    ) {
+      throw new Error("project path changed while resolving; retry boundary resolution");
+    }
+  }
   const info = await lstat(canonical);
   if (!info.isDirectory() || info.isSymbolicLink()) throw new Error(`project path is not a directory: ${canonical}`);
   return { canonical, symbolicLink: symbolicLink || requestedInfo.isSymbolicLink() };
@@ -471,6 +563,18 @@ export async function resolveProjectBoundary(
   }
 
   const gitProbe = await gitRepositoryProbe(requestedDirectory);
+  if (gitProbe.status === "repository" && gitProbe.root === requestedDirectory) {
+    // Bare repositories are valid Git stores, but they are not worktree roots
+    // and therefore are not automatic project boundaries. A bare store inside
+    // a plain parent is still a collection child and is handled above.
+    return refusedBoundary(
+      requestedDirectory,
+      requestedDirectory,
+      "bare-repository",
+      "a standalone bare Git repository is not an eligible automatic project boundary",
+      "repository",
+    );
+  }
   // A non-Git project marker is an exact-root signal. The caller may start in
   // a nested directory, but no parent marker is allowed to widen that request.
   const projectMarker = await projectMarkerAtRoot(requestedDirectory);

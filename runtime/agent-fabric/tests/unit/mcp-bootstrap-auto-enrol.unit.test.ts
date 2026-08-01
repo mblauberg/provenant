@@ -1,6 +1,8 @@
+import { execFile } from "node:child_process";
 import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { promisify } from "node:util";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { MCP_BOOTSTRAP_CREDENTIALS_FEATURE, MCP_BOOTSTRAP_RESULT_SHAPE_FEATURE } from "@local/agent-fabric-protocol";
@@ -29,6 +31,8 @@ const daemon = vi.hoisted((): {
   bootstrapRequests: [],
   requiredCapabilities: [],
 }));
+
+const execFileAsync = promisify(execFile);
 
 vi.mock("../../src/daemon/client.js", () => ({
   startFabricDaemon: vi.fn(async (_options: { configuration?: { projectConfigPath?: string } }) => {
@@ -285,6 +289,106 @@ describe("automatic exact-project enrolment", () => {
       canonicalRoot: project,
       executionProfile: "headless",
     })).resolves.toMatchObject({ canonicalRoot: project, entry: { boundaryKind: "non-git" } });
+  });
+
+  it("does not mutate trust when Git probing is unavailable for an unmarked root", async () => {
+    const value = await fixture();
+    const project = join(value.outer, "..", "missing-git-project");
+    await mkdir(project);
+    vi.stubEnv("PATH", value.outer);
+    try {
+      await expect(ensureAutomaticBootstrapTrust({
+        stateDirectory: value.paths.stateDirectory,
+        bootstrapAttemptId: "attempt-missing-git",
+        cwd: project,
+      })).rejects.toThrow(/Git repository probe was unavailable/iu);
+      await expect(readFile(join(value.paths.stateDirectory, "trusted-workspaces.json"))).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("does not mutate trust when Git returns an empty repository root", async () => {
+    const value = await fixture();
+    const project = join(value.outer, "..", "empty-git-probe-project");
+    await mkdir(project);
+    const shimDirectory = join(value.outer, "empty-git-probe-shim");
+    await mkdir(shimDirectory);
+    await writeFile(join(shimDirectory, "git"), "#!/bin/sh\nexit 0\n");
+    await chmod(join(shimDirectory, "git"), 0o700);
+    const previousPath = process.env.PATH;
+    process.env.PATH = shimDirectory;
+    try {
+      await expect(ensureAutomaticBootstrapTrust({
+        stateDirectory: value.paths.stateDirectory,
+        bootstrapAttemptId: "attempt-empty-git-probe",
+        cwd: project,
+      })).rejects.toThrow(/Git repository probe was unavailable/iu);
+      await expect(readFile(join(value.paths.stateDirectory, "trusted-workspaces.json"))).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      if (previousPath === undefined) delete process.env.PATH;
+      else process.env.PATH = previousPath;
+    }
+  });
+
+  it("does not mutate trust when a direct bare-repository semantic probe is unavailable", async () => {
+    const value = await fixture();
+    const collection = join(value.outer, "..", "bare-probe-failure-project");
+    const bare = join(collection, "bare");
+    await execFileAsync("git", ["init", "--bare", "--quiet", bare]);
+    const shimDirectory = join(value.outer, "bare-probe-git-shim");
+    await mkdir(shimDirectory);
+    await writeFile(join(shimDirectory, "git"), `#!/bin/sh
+case "$*" in
+  *"--show-toplevel"*) printf '%s\\n' 'fatal: not a git repository' >&2; exit 128 ;;
+  *"--is-bare-repository"*) printf '%s\\n' 'fatal: bare semantic probe unavailable' >&2; exit 1 ;;
+esac
+exit 1
+`);
+    await chmod(join(shimDirectory, "git"), 0o700);
+    const previousPath = process.env.PATH;
+    process.env.PATH = shimDirectory;
+    try {
+      await expect(ensureAutomaticBootstrapTrust({
+        stateDirectory: value.paths.stateDirectory,
+        bootstrapAttemptId: "attempt-bare-probe-failure",
+        cwd: collection,
+      })).rejects.toThrow(/bare Git repository probe unavailable/iu);
+      await expect(readFile(join(value.paths.stateDirectory, "trusted-workspaces.json"))).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      if (previousPath === undefined) delete process.env.PATH;
+      else process.env.PATH = previousPath;
+    }
+  });
+
+  it("does not mutate trust when a bare-repository semantic probe returns empty output", async () => {
+    const value = await fixture();
+    const collection = join(value.outer, "..", "empty-bare-probe-project");
+    const bare = join(collection, "bare");
+    await execFileAsync("git", ["init", "--bare", "--quiet", bare]);
+    const shimDirectory = join(value.outer, "empty-bare-probe-git-shim");
+    await mkdir(shimDirectory);
+    await writeFile(join(shimDirectory, "git"), `#!/bin/sh
+case "$*" in
+  *"--show-toplevel"*) printf '%s\\n' 'fatal: not a git repository' >&2; exit 128 ;;
+  *"--is-bare-repository"*) exit 0 ;;
+esac
+exit 1
+`);
+    await chmod(join(shimDirectory, "git"), 0o700);
+    const previousPath = process.env.PATH;
+    process.env.PATH = shimDirectory;
+    try {
+      await expect(ensureAutomaticBootstrapTrust({
+        stateDirectory: value.paths.stateDirectory,
+        bootstrapAttemptId: "attempt-empty-bare-probe",
+        cwd: collection,
+      })).rejects.toThrow(/bare Git repository probe unavailable/iu);
+      await expect(readFile(join(value.paths.stateDirectory, "trusted-workspaces.json"))).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      if (previousPath === undefined) delete process.env.PATH;
+      else process.env.PATH = previousPath;
+    }
   });
 
   it("keeps an existing explicit local-operator grant unchanged", async () => {
@@ -689,7 +793,7 @@ printf '%s\\n' ${value.inner}
       await writeFile(removed, "");
       await writeFile(releaseSecond, "");
 
-      await expect(pending).rejects.toThrow(/inspect and repair|boundary evidence/iu);
+      await expect(pending).rejects.toThrow(/inspect and repair|boundary evidence|Git repository probe was unavailable/iu);
       await expect(readFile(join(value.paths.stateDirectory, "trusted-workspaces.json"))).rejects.toMatchObject({ code: "ENOENT" });
     } finally {
       if (previousPath === undefined) delete process.env.PATH;

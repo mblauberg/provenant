@@ -401,6 +401,16 @@ async function automaticBoundaryRefusal(boundary: ProjectBoundary, cause?: unkno
       cause === undefined ? undefined : { cause },
     );
   }
+  if (boundary.gitProbe === "unavailable") {
+    const probeDetail = boundary.gitProbeError === null ? "the Git repository probe was unavailable" :
+      `the Git repository probe was unavailable (${boundary.gitProbeError})`;
+    return boundaryTrustError(
+      boundary,
+      `automatic bootstrap enrolment refused for ${shellQuote(root)}: ${probeDetail}; ` +
+      "non-Git admission requires a proven not-repository result. No automatic trust was added.",
+      cause === undefined ? undefined : { cause },
+    );
+  }
   if (evidence.kind === "refused" && (evidence.reason === "filesystem-root" || evidence.reason === "home")) {
     return boundaryTrustError(
       boundary,
@@ -437,10 +447,12 @@ function automaticBoundaryKind(boundary: ProjectBoundary): "git" | "project-mark
   if (boundary.evidence.kind === "git" && !boundary.evidence.linkedWorktree &&
     boundary.selectedProjectRoot === boundary.evidence.root) return "git";
   if (boundary.evidence.kind === "project-marker" &&
+    boundary.gitProbe === "not-repository" &&
     boundary.selectedProjectRoot === boundary.evidence.root &&
     boundary.selectedProjectRoot === boundary.requestedDirectory) return "project-marker";
   if (boundary.evidence.kind === "ambiguous" &&
     boundary.evidence.reason === "unmarked-non-git" &&
+    boundary.gitProbe === "not-repository" &&
     boundary.selectedProjectRoot === boundary.requestedDirectory &&
     boundary.evidence.root === boundary.requestedDirectory) return "non-git";
   return null;

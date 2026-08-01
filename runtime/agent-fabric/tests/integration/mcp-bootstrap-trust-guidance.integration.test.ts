@@ -102,6 +102,39 @@ describe("MCP bootstrap workspace-trust guidance", () => {
     expect(failure.message).not.toContain("workspace trust");
   });
 
+  it("withholds a trust command for a collection of bare repositories", async () => {
+    const temporaryRoot = await mkdtemp(join(tmpdir(), "fabric-bare-collection-bootstrap-"));
+    temporaryDirectories.push(temporaryRoot);
+    const collection = join(temporaryRoot, "projects");
+    const first = join(collection, "one");
+    const second = join(collection, "two");
+    await execFileAsync("git", ["init", "--bare", "--quiet", first]);
+    await execFileAsync("git", ["init", "--bare", "--quiet", second]);
+
+    const failure = await bootstrapFailure(await realpath(collection), temporaryRoot);
+
+    expect(failure).toMatchObject({
+      code: "WORKSPACE_NOT_TRUSTED",
+      message: expect.stringMatching(/repository collection.*one.*two.*inspect and repair/isu),
+    });
+    expect(failure.message).not.toContain("workspace trust");
+  });
+
+  it("refuses a standalone bare repository as an automatic project boundary", async () => {
+    const temporaryRoot = await mkdtemp(join(tmpdir(), "fabric-standalone-bare-bootstrap-"));
+    temporaryDirectories.push(temporaryRoot);
+    const bare = join(temporaryRoot, "bare");
+    await execFileAsync("git", ["init", "--bare", "--quiet", bare]);
+
+    const failure = await bootstrapFailure(await realpath(bare), temporaryRoot);
+
+    expect(failure).toMatchObject({
+      code: "WORKSPACE_NOT_TRUSTED",
+      message: expect.stringMatching(/standalone bare Git repository.*no automatic trust/isu),
+    });
+    expect(failure.message).not.toContain("workspace trust");
+  });
+
   it("refuses a symlinked plain non-Git root without widening trust", async () => {
     const temporaryRoot = await mkdtemp(join(tmpdir(), "fabric-symlinked-non-git-bootstrap-"));
     temporaryDirectories.push(temporaryRoot);

@@ -142,11 +142,13 @@ From the product checkout,
 reclaims the harness-owned skill links and nothing else. The bootstrap line and
 the Codex block remain until removed by hand.
 
-MCP bootstrap enrols only the exact nearest Git root or exact current non-Git
-directory. Other paths fail closed with `WORKSPACE_NOT_TRUSTED`; collections
-name children, malformed evidence gets repair guidance, and linked-worktree
-exceptions require explicit user decisions. Run `provenant fabric workspace
-trust PATH` for an explicit trust decision.
+MCP bootstrap enrols only the exact nearest Git root or an exact current
+directory whose Git probe proves `not-repository`. Other paths fail closed with
+`WORKSPACE_NOT_TRUSTED`; direct sibling collections, including valid bare Git
+repositories, name children, while a standalone bare Git root is refused.
+Malformed evidence gets repair guidance, linked-worktree exceptions require
+explicit user decisions, and unavailable Git never mutates automatic trust.
+Run `provenant fabric workspace trust PATH` for an explicit trust decision.
 
 </details>
 
