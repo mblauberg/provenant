@@ -247,7 +247,7 @@ async function nearestGitWorkspace(canonicalRoot: string): Promise<GitWorkspace 
 // children show that trusting this directory would grant sibling authority,
 // while recursively searching would misclassify an ordinary project that
 // happens to contain nested fixtures or vendored repositories.
-async function looksLikeRepositoryCollection(canonicalRoot: string): Promise<boolean> {
+export async function looksLikeRepositoryCollection(canonicalRoot: string): Promise<boolean> {
   const children = await readdir(canonicalRoot, { withFileTypes: true });
   let repositories = 0;
   for (const child of children) {
