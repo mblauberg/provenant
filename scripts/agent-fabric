@@ -23,7 +23,14 @@ node "$package_root/scripts/verify-npm-ci-attestation.mjs" "$agents_home"
 # attestation and before preflight can either autobuild or return its generic
 # exit 78. The freshness predicate is shared with protocol build and warm.
 workspace_freshness_library="$script_dir/lib/agent-fabric-workspace-freshness.sh"
-if [ -f "$agents_home/.git" ] && [ -f "$workspace_freshness_library" ]; then
+if [ -f "$agents_home/.git" ]; then
+  # Refuse rather than skip when the predicate is unavailable, matching
+  # agent-fabric-protocol-preflight. A missing library must not silently
+  # turn this refusal off: that is the case where the check matters most.
+  if [ ! -f "$workspace_freshness_library" ]; then
+    echo "AGENT_FABRIC_LAUNCH_INCOMPLETE: missing \"$workspace_freshness_library\"" >&2
+    exit 1
+  fi
   . "$workspace_freshness_library"
   if workspace_is_stale "$protocol_root" "$protocol_dist"; then
     echo "AGENT_FABRIC_LINKED_WORKTREE_DIST_STALE: local @local/agent-fabric-protocol dist is missing or stale against its build inputs" >&2
