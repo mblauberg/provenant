@@ -88,19 +88,21 @@ export function childEnvironment(
     const value = process.env[key];
     if (value !== undefined) environment[key] = value;
   }
-  const cutoverRaceFixture = process.env.AGENT_FABRIC_TEST_CUTOVER_RACE_FIXTURE_PATH;
-  const idleStopAttemptSocket = process.env.AGENT_FABRIC_TEST_IDLE_STOP_ATTEMPT_SOCKET_PATH;
-  const bootstrapSocketBarrier = process.env.AGENT_FABRIC_TEST_BOOTSTRAP_SOCKET_BARRIER_PATH;
-  if (process.env.NODE_ENV === "test" && (cutoverRaceFixture !== undefined || idleStopAttemptSocket !== undefined || bootstrapSocketBarrier !== undefined)) {
-    environment.NODE_ENV = "test";
-    if (cutoverRaceFixture !== undefined) {
-      environment.AGENT_FABRIC_TEST_CUTOVER_RACE_FIXTURE_PATH = cutoverRaceFixture;
-    }
-    if (idleStopAttemptSocket !== undefined) {
-      environment.AGENT_FABRIC_TEST_IDLE_STOP_ATTEMPT_SOCKET_PATH = idleStopAttemptSocket;
-    }
-    if (bootstrapSocketBarrier !== undefined) {
-      environment.AGENT_FABRIC_TEST_BOOTSTRAP_SOCKET_BARRIER_PATH = bootstrapSocketBarrier;
+  const testFixtureKeys = [
+    "AGENT_FABRIC_TEST_CUTOVER_RACE_FIXTURE_PATH",
+    "AGENT_FABRIC_TEST_IDLE_STOP_ATTEMPT_SOCKET_PATH",
+    "AGENT_FABRIC_TEST_BOOTSTRAP_SOCKET_BARRIER_PATH",
+    "AGENT_FABRIC_TEST_DATABASE_INSPECTION_ATTEMPTS",
+    "AGENT_FABRIC_TEST_DATABASE_INSPECTION_RACE_PATH",
+  ] as const;
+  if (process.env.NODE_ENV === "test") {
+    const testFixtures = testFixtureKeys.flatMap((key) => {
+      const value = process.env[key];
+      return value === undefined ? [] : [[key, value] as const];
+    });
+    if (testFixtures.length > 0) {
+      environment.NODE_ENV = "test";
+      for (const [key, value] of testFixtures) environment[key] = value;
     }
   }
   return environment;
