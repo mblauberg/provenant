@@ -427,10 +427,20 @@ def _materialise_base(source_root: Path, base: str, destination: Path, tests: li
 @contextmanager
 def _temporary_tree(source_root: Path, scratch_root: Path):
     scratch_root.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="gate-", dir=scratch_root) as directory:
-        destination = Path(directory)
+    destination = Path(tempfile.mkdtemp(prefix="gate-", dir=scratch_root))
+    try:
         _copy_tree(source_root, destination)
         yield destination
+    finally:
+        # The scratch tree is disposable and git can leave `.git` busy inside it
+        # once the base has been materialised. CI hit exactly that, and the
+        # OSError escaped before the gate had printed anything, so the run
+        # reported a crash with no verdict at all. Failing to delete a scratch
+        # copy says nothing about the change under test.
+        try:
+            shutil.rmtree(destination)
+        except OSError as error:
+            print(f"gate scratch tree left behind at {destination}: {error}")
 
 
 def _targets(commands: list[str] | dict[str, str], tests: list[str]) -> list[str | None]:
