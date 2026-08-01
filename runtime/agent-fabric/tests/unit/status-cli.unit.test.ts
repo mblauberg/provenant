@@ -783,6 +783,85 @@ describe("machine status and doctor", () => {
     ]);
   });
 
+  it("keeps a resolvable optional probe failure advisory while primaries stay clean", async () => {
+    const value = await paths();
+    const fixture = await createPortableActivatedPrimaryFixture();
+    cleanup.push(fixture.directory);
+    const compatibility = parse(await readFile(fixture.compatibilityPath, "utf8")) as {
+      adapters: Record<string, Record<string, any>>;
+    };
+    const primary = compatibility.adapters["claude-agent-sdk"]!;
+    compatibility.adapters.agy = {
+      ...primary,
+      enabled: true,
+      implementation: {
+        ...primary.implementation,
+        executable: fixture.artifactPaths[0],
+        wrapper_entrypoint: fixture.artifactPaths[1],
+      },
+    };
+    await writeFile(fixture.compatibilityPath, stringify(compatibility));
+    const config = parse(await readFile(fixture.configPath, "utf8")) as {
+      allowedAdapters: string[];
+      activeAdapters: string[];
+      adapters: Record<string, { command: string[] }>;
+    };
+    config.allowedAdapters.push("agy");
+    config.activeAdapters.push("agy");
+    config.adapters.agy = { command: [process.execPath, fixture.artifactPaths[1]!] };
+    await writeFile(fixture.configPath, stringify(config));
+
+    const result = await fabricDoctor([
+      "--agents-home", fixture.directory,
+      "--trusted-config", fixture.configPath,
+      "--compatibility", fixture.compatibilityPath,
+      "--compatibility-schema", fixture.schemaPath,
+    ], value, {
+      preflightProtocolBuild: async () => undefined,
+      verifyProvider: async ({ adapterId }) => {
+        if (adapterId === "agy") {
+          throw new FabricError(
+            "ADAPTER_INTERFACE_PROBE_INCOMPLETE",
+            "provider non-answer interface probe failed: agy",
+          );
+        }
+        throw new Error(`unexpected optional adapter probe: ${adapterId}`);
+      },
+    });
+
+    expect(result).toMatchObject({
+      healthy: true,
+      state: "idle",
+      code: "OPTIONAL_ADAPTERS_DEGRADED",
+      cause: {
+        checkId: "provider-conformance",
+        code: "OPTIONAL_ADAPTERS_DEGRADED",
+        recoverable: false,
+      },
+      providerIdentity: {
+        adapters: [
+          { adapterId: "claude-agent-sdk", state: "clean" },
+          { adapterId: "codex-app-server", state: "clean" },
+        ],
+      },
+    });
+    expect(result.optionalAdapters).toEqual([
+      {
+        adapterId: "agy",
+        executable: fixture.artifactPaths[0],
+        reasons: ["provider non-answer interface probe failed: agy"],
+      },
+    ]);
+    expect(result.checks).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: "provider-conformance",
+        status: "idle",
+        code: "OPTIONAL_ADAPTERS_DEGRADED",
+        detail: expect.stringContaining("agy=unavailable: provider non-answer interface probe failed: agy"),
+      }),
+    ]));
+  });
+
   it("uses cache-only pin evidence by default without invoking a producer or changing any state byte", async () => {
     const value = await paths();
     const fixture = await createPortableActivatedPrimaryFixture();
