@@ -63,6 +63,13 @@ def instance_root_for(home: Path) -> Path:
 
 
 def run(platform: str, home: Path, *arguments: str, **extra_env):
+    provider_bin = home / ".local" / "bin"
+    provider_bin.mkdir(parents=True, exist_ok=True)
+    for name in ("agy", "cursor-agent", "kiro-cli"):
+        executable = provider_bin / name
+        if not executable.exists():
+            executable.write_text("#!/bin/sh\nexit 0\n")
+            executable.chmod(0o700)
     env = os.environ.copy()
     env.update({"HOME": str(home)})
     # Keep the instance root deterministic in the scratch HOME. AGENTS_HOME now
