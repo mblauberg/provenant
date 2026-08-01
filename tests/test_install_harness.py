@@ -93,6 +93,44 @@ def run(platform: str, home: Path, *arguments: str, **extra_env):
     )
 
 
+def copy_product_fixture(tmp_path: Path) -> Path:
+    """Copy the installer inputs so product and instance can be the same tree."""
+    product = tmp_path / "product"
+    product.mkdir()
+    for name in ("AGENTS.md", "HARNESS.md", "package.json"):
+        shutil.copy2(ROOT / name, product / name)
+    for name in ("config", "scripts", "skills", "workflows"):
+        shutil.copytree(ROOT / name, product / name, symlinks=True)
+    (product / "config" / "installation.json").unlink()
+    return product
+
+
+def run_product(product: Path, platform: str, home: Path, *arguments: str):
+    env = os.environ.copy()
+    env.update(
+        {
+            "HOME": str(home),
+            "AGENT_FABRIC_INSTANCE_ROOT": str(product),
+            "PROVENANT_ALLOW_LINKED_WORKTREE_INSTALL": "1",
+            "PROVENANT_BIN_DIR": str(home / ".local/bin"),
+            "PATH": f"{home / '.local/bin'}{os.pathsep}{os.environ['PATH']}",
+        }
+    )
+    if platform == "claude":
+        env["CLAUDE_CONFIG_DIR"] = str(home / ".claude")
+    else:
+        env["CODEX_HOME"] = str(home / ".codex")
+    return subprocess.run(
+        [str(product / "scripts/install-harness"), "--platform", platform, *arguments],
+        cwd=product,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+
+
 def test_install_harness_requires_acknowledgement_for_a_linked_worktree(tmp_path):
     product = tmp_path / "product"
     scripts = product / "scripts"
@@ -278,6 +316,77 @@ def test_installs_codex_skills_and_global_instructions(tmp_path):
     second = run("codex", tmp_path, CODEX_HOME=str(config))
     assert second.returncode == 0, second.stderr
     assert codex_config.read_text() == configured
+
+
+def test_fused_install_converges_claude_then_codex_without_client_projections(tmp_path):
+    product = copy_product_fixture(tmp_path)
+    claude_home = tmp_path / "claude-home"
+    codex_home = tmp_path / "codex-home"
+
+    claude_first = run_product(product, "claude", claude_home)
+    assert claude_first.returncode == 0, claude_first.stderr
+    codex_first = run_product(product, "codex", codex_home)
+    assert codex_first.returncode == 0, codex_first.stderr
+    assert "instance mode=fused" in claude_first.stdout
+    assert "instance mode=fused" in codex_first.stdout
+    assert json.loads((product / "config/installation.json").read_text())["mode"] == "fused"
+
+    claude_config = claude_home / ".claude.json"
+    codex_config = codex_home / ".codex/config.toml"
+    claude_before = claude_config.read_bytes()
+    codex_before = codex_config.read_bytes()
+    authored = "# Authored fused instance doctrine\n"
+    (product / "AGENTS.md").write_text(authored)
+
+    claude_second = run_product(product, "claude", claude_home)
+    assert claude_second.returncode == 0, claude_second.stderr
+    codex_second = run_product(product, "codex", codex_home)
+    assert codex_second.returncode == 0, codex_second.stderr
+    assert "desired-state=existing seeded=0 existing=3" in claude_second.stdout
+    assert "desired-state=existing seeded=0 existing=3" in codex_second.stdout
+    assert (product / "AGENTS.md").read_text() == authored
+    assert claude_config.read_bytes() == claude_before
+    assert codex_config.read_bytes() == codex_before
+
+    claude_registration = json.loads(claude_config.read_text())["mcpServers"]["agent-fabric"]
+    codex_registration = tomllib.loads(codex_config.read_text())["mcp_servers"]["agent-fabric"]
+    assert claude_registration["command"] == str(claude_home / ".local/bin/provenant")
+    assert codex_registration["command"] == str(codex_home / ".local/bin/provenant")
+    assert claude_registration["env"] == {
+        "AGENT_FABRIC_CLIENT_LABEL": "claude",
+        "AGENT_FABRIC_SEAT": "claude",
+        "AGENT_FABRIC_STATE_DIRECTORY": str(claude_home / ".local/state/agent-harness/fabric"),
+    }
+    assert codex_registration["env"] == {
+        "AGENT_FABRIC_CLIENT_LABEL": "codex",
+        "AGENT_FABRIC_SEAT": "codex",
+        "AGENT_FABRIC_STATE_DIRECTORY": str(codex_home / ".local/state/agent-harness/fabric"),
+    }
+    assert "AGENT_FABRIC_PROJECT_PATH" not in json.dumps(
+        [claude_registration, codex_registration]
+    )
+    for instructions in (
+        claude_home / ".claude/CLAUDE.md",
+        codex_home / ".codex/AGENTS.md",
+    ):
+        content = instructions.read_text()
+        assert str(product / "AGENTS.md") in content
+        assert str(product / "HARNESS.md") in content
+
+    optional_paths = (
+        ".cursor/mcp.json",
+        ".gemini/config/mcp_config.json",
+        ".kiro/settings/mcp.json",
+        ".config/opencode/opencode.jsonc",
+    )
+    assert all(
+        not (home / path).exists()
+        for home in (claude_home, codex_home)
+        for path in optional_paths
+    )
+    assert not (product / "doctrine").exists()
+    assert not (claude_home / ".claude/agents").exists()
+    assert not (codex_home / ".codex/agents").exists()
 
 
 def test_codex_install_projects_instance_custom_skill_without_managed_ownership(
