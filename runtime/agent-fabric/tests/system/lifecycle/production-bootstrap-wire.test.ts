@@ -720,7 +720,7 @@ describe("production daemon bootstrap wiring", () => {
     }
   });
 
-  it("does not run cutover cleanup when concurrent inspection writes exhaust the retry bound", async () => {
+  it("does not run cutover cleanup when an injected source change exhausts the retry bound", async () => {
     vi.stubEnv("AGENT_FABRIC_TEST_DATABASE_INSPECTION_ATTEMPTS", "1");
     const root = await mkdtemp(join(tmpdir(), "fabric-production-inspection-race-"));
     roots.push(root);
@@ -752,10 +752,7 @@ describe("production daemon bootstrap wiring", () => {
     });
     await expect(lstat(stateDirectory)).resolves.toMatchObject({ mode: expect.any(Number) });
     await expect(lstat(runtimeDirectory)).resolves.toMatchObject({ mode: expect.any(Number) });
-    expect(await readdir(runtimeDirectory)).toEqual(expect.arrayContaining([
-      "daemon-election.attempts.jsonl",
-      "daemon-election.lease.json",
-    ]));
+    expect(await readdir(runtimeDirectory)).toEqual([]);
     expect((await readFile(databasePath)).byteLength).toBe(before.byteLength);
   });
 

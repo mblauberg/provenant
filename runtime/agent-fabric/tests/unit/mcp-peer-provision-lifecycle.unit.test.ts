@@ -39,6 +39,7 @@ const { provisionMcpPeerSeats } = await import("../../src/cli/mcp-peer-provision
 const roots: string[] = [];
 
 afterEach(async () => {
+  vi.unstubAllEnvs();
   mocks.bind.mockReset();
   mocks.connect.mockReset();
   mocks.release.mockReset();
