@@ -513,6 +513,15 @@ def gate_right_reason_red(
         ]
     for result in results:
         _print_output(result)
+    # Name every target and its verdict. The aggregate line below blocks the
+    # merge, and on its own it says only that something was rejected, leaving a
+    # reader to rerun the gate by hand and bisect the targets to find out which.
+    for target, result, reason in zip(targets, results, evidence, strict=True):
+        verdict = "REJECTED" if reason is None else reason.upper()
+        print(
+            f"TARGET {target or '(whole suite)'} status={verdict} "
+            f"classification={result.classification.value} returncode={result.returncode}"
+        )
     assertion_count = evidence.count("assertion")
     new_target_count = evidence.count("new-target")
     rejected_count = evidence.count(None)
