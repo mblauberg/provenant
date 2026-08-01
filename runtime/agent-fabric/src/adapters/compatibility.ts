@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { access } from "node:fs/promises";
 import { readFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, resolve } from "node:path";
 import { homedir } from "node:os";
@@ -26,6 +27,61 @@ export function resolveCompatibilityArtifact(compatibilityPath: string, value: s
 }
 
 const execFileAsync = promisify(execFile);
+
+type ExecutableLookup = (name: string, path: string) => Promise<string | undefined>;
+
+async function defaultExecutableLookup(name: string, path: string): Promise<string | undefined> {
+  try {
+    const { stdout } = await execFileAsync("which", [name], { env: { ...process.env, PATH: path } });
+    return stdout.trim() || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export async function resolveExecutableOnPath(
+  executable: string,
+  dependencies: { path?: string; lookup?: ExecutableLookup } = {},
+): Promise<string> {
+  if (isAbsolute(executable)) return executable;
+  const path = dependencies.path ?? process.env.PATH ?? "";
+  const resolved = await (dependencies.lookup ?? defaultExecutableLookup)(executable, path);
+  if (resolved === undefined) {
+    throw new FabricError(
+      "ADAPTER_ARTIFACT_MISSING",
+      `adapter executable '${executable}' is not resolvable on PATH`,
+    );
+  }
+  return resolved;
+}
+
+export async function resolveAdapterExecutable(input: {
+  executable: string;
+  executableOverride?: string;
+  compatibilityPath?: string;
+  path?: string;
+  lookup?: ExecutableLookup;
+}): Promise<string> {
+  if (input.executableOverride !== undefined) {
+    if (!isAbsolute(input.executableOverride)) {
+      throw new FabricError("ADAPTER_COMPATIBILITY_INVALID", "executable_override must be an absolute path");
+    }
+    return input.executableOverride;
+  }
+  const executable = input.compatibilityPath !== undefined && input.executable.startsWith("${USER_HOME}")
+    ? resolveCompatibilityArtifact(input.compatibilityPath, input.executable)
+    : input.executable;
+  return resolveExecutableOnPath(executable, input);
+}
+
+async function isExecutableFile(path: string): Promise<boolean> {
+  try {
+    await access(path, 1);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 export type WrapperProvenance = {
   adapterId: string;
@@ -213,19 +269,25 @@ export async function verifyAdapterCompatibility(input: {
         throw new FabricError("ADAPTER_COMPATIBILITY_INVALID", "enabled OpenCode adapter has no canonical install root");
       }
     }
+    const executable = adapter.implementation.executable;
+    const executableOverride = adapter.implementation.executable_override;
     if (input.requireEnabled) {
-      if (typeof adapter.implementation.executable !== "string") {
+      if (typeof executable !== "string") {
         throw new FabricError(
           "ADAPTER_COMPATIBILITY_INVALID",
           `enabled adapter has no provider executable: ${adapterId}`,
         );
       }
+      if (executableOverride !== undefined && typeof executableOverride !== "string") {
+        throw new FabricError("ADAPTER_COMPATIBILITY_INVALID", `adapter executable_override is invalid: ${adapterId}`);
+      }
     }
-    if (typeof adapter.implementation.executable === "string") {
-      resolvedExecutables[adapterId] = resolveCompatibilityArtifact(
-        input.compatibilityPath,
-        adapter.implementation.executable,
-      );
+    if (typeof executable === "string" && (adapter.enabled === true || input.requireEnabled)) {
+      resolvedExecutables[adapterId] = await resolveAdapterExecutable({
+        executable,
+        ...(typeof executableOverride === "string" ? { executableOverride } : {}),
+        compatibilityPath: input.compatibilityPath,
+      });
     }
     const wrapperEntrypoint = adapter.implementation.wrapper_entrypoint;
     if (typeof wrapperEntrypoint === "string") {
@@ -241,4 +303,35 @@ export async function verifyAdapterCompatibility(input: {
     wrapperProvenance,
     resolvedExecutables,
   };
+}
+
+export async function validateEnabledAdapterExecutables(input: {
+  compatibilityPath: string;
+}): Promise<void> {
+  const document: unknown = parse(await readFile(input.compatibilityPath, "utf8"));
+  if (!isRecord(document) || !isRecord(document.adapters)) {
+    throw new FabricError("ADAPTER_COMPATIBILITY_INVALID", "compatibility registry lacks adapters");
+  }
+  for (const [adapterId, value] of Object.entries(document.adapters)) {
+    if (!isRecord(value) || value.enabled !== true || !isRecord(value.implementation)) continue;
+    const executable = value.implementation.executable;
+    const executableOverride = value.implementation.executable_override;
+    if (typeof executable !== "string") {
+      throw new FabricError("ADAPTER_COMPATIBILITY_INVALID", `enabled adapter has no provider executable: ${adapterId}`);
+    }
+    if (executableOverride !== undefined && typeof executableOverride !== "string") {
+      throw new FabricError("ADAPTER_COMPATIBILITY_INVALID", `adapter executable_override is invalid: ${adapterId}`);
+    }
+    const candidate = await resolveAdapterExecutable({
+      executable,
+      ...(typeof executableOverride === "string" ? { executableOverride } : {}),
+      compatibilityPath: input.compatibilityPath,
+    }).catch(() => undefined);
+    if (candidate === undefined || !(await isExecutableFile(candidate))) {
+      throw new FabricError(
+        "ADAPTER_ARTIFACT_MISSING",
+        `adapter ${adapterId} is enabled but executable '${executable}' is not resolvable on PATH`,
+      );
+    }
+  }
 }
