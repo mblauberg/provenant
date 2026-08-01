@@ -459,9 +459,16 @@ def test_right_reason_red_names_the_target_it_rejected(tmp_path, capsys):
     result = gate_right_reason_red(source, "HEAD", [command], ["tests/existing.py"], tmp_path / "scratch")
 
     assert result == 1
-    output = capsys.readouterr().out
-    assert "tests/existing.py" in output
-    assert "REJECTED" in output
+    # Assert against the TARGET lines alone rather than the whole capture. The
+    # command above prints a collection marker on purpose, and pytest echoes the
+    # entire asserted value when an assertion fails. Asserting on `output` would
+    # therefore replay that marker into this file's own failure text, and
+    # `classify_failure` substring-matches, so running this file under the gate
+    # would classify it as a collection error on the strength of its own fixture.
+    target_lines = [line for line in capsys.readouterr().out.splitlines() if line.startswith("TARGET ")]
+    assert target_lines, "gate printed no per-target line"
+    assert "tests/existing.py" in target_lines[0]
+    assert "REJECTED" in target_lines[0]
 
 
 def test_right_reason_red_survives_a_scratch_tree_that_will_not_delete(tmp_path, capsys, monkeypatch):
