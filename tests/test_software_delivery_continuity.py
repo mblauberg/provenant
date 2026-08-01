@@ -511,6 +511,18 @@ def test_binder_materialises_the_post_merge_chain_without_advancing_acceptance(t
     del run["software_delivery"]
     for artifact_id in generated - {"merged-source"}:
         (tmp_path / "evidence" / f"{artifact_id}.json").unlink()
+    for item in run["evidence"]:
+        if item.get("kind") != "deterministic":
+            continue
+        for path in item.get("source_paths", []):
+            target = tmp_path / path
+            if target.is_file():
+                target.unlink()
+    evidence_bundle_path = tmp_path / next(
+        item["path"] for item in run["artifacts"] if item["id"] == "evidence-bundle"
+    )
+    if evidence_bundle_path.is_file():
+        evidence_bundle_path.unlink()
     run_dir = tmp_path / ".agent-run" / run["run_id"]
     run_dir.mkdir(parents=True)
     MATERIALISE._materialise_deterministic_evidence_bundle(

@@ -234,6 +234,7 @@ def command_evidence_run(args: Any, api: Any) -> dict[str, Any]:
         )
         status = "pass" if (
             exit_code == 0
+            and counts["failed"] == 0
             and observed.get("custody", {}).get("status") == "posix-process-group-cleanup"
             and not observed.get("timed_out")
             and complete_output
@@ -302,15 +303,15 @@ def command_reference(args: Any, api: Any) -> dict[str, Any]:
         run["state_history"].append({"state": "accepted", "at": "2026-07-10T00:09:00Z", "evidence_ids": ["acceptance-approval"]})
         run["human_gates"]["acceptance"] = {"status": "approved", "approver": "human-maintainer", "evidence": "acceptance-approval"}
         run["checkpoint"].update({"current_slice": "accepted", "next_action": "prepare release", "in_flight": []})
-    reference_materializer.materialise_reference_run(
-        run, workspace, api.PRODUCT_ROOT,
-        receipt_identity=f".agent-run/{run_id}/RUN.json",
-    )
     with api.run_lock(run_dir):
         if not run_dir.is_dir():
             raise api.ReceiptError("canonical run directory is unavailable")
         if receipt.exists() or receipt.is_symlink():
             raise api.ReceiptError(f"run-dir already contains a canonical receipt: {run_dir}")
+        reference_materializer.materialise_reference_run(
+            run, workspace, api.PRODUCT_ROOT,
+            receipt_identity=f".agent-run/{run_id}/RUN.json",
+        )
         api.create_json_exclusive(receipt, run)
     return {"path": str(receipt), "run_id": run_id, "profile": args.profile}
 

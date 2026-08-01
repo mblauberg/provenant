@@ -49,6 +49,115 @@ def load(path: Path, name: str):
     return module
 
 
+@pytest.mark.parametrize("malicious_path", ["/tmp/reference-escape.json", "../reference-escape.json"])
+def test_reference_materialisation_rejects_absolute_and_parent_artifact_paths(tmp_path, malicious_path):
+    reference = load(REFERENCE_RUNS_PATH, "reference_runs_materialisation_path")
+    materialiser = load(REFERENCE_EVALUATION_PATH, "reference_evaluation_materialisation_path")
+    run = reference.make_reference_run("research", ROOT)
+    run["artifacts"][0]["path"] = malicious_path
+    with pytest.raises(ValueError, match="workspace-relative"):
+        materialiser.materialise_reference_run(run, tmp_path, ROOT)
+    assert not (tmp_path.parent / "reference-escape.json").exists()
+
+
+def test_reference_materialisation_rejects_source_and_derived_report_path_escape(tmp_path):
+    reference = load(REFERENCE_RUNS_PATH, "reference_runs_materialisation_source")
+    materialiser = load(REFERENCE_EVALUATION_PATH, "reference_evaluation_materialisation_source")
+    run = reference.make_reference_run("research", ROOT)
+    deterministic = next(item for item in run["evidence"] if item["kind"] == "deterministic")
+    deterministic["source_paths"] = ["../reference-source-escape"]
+    with pytest.raises(ValueError, match="workspace-relative"):
+        materialiser.materialise_reference_run(run, tmp_path, ROOT)
+    assert not (tmp_path.parent / "reference-source-escape").exists()
+
+    run = reference.make_reference_run("research", ROOT)
+    deterministic = next(item for item in run["evidence"] if item["kind"] == "deterministic")
+    deterministic["result"]["gate_report"]["path"] = "../reference-report-escape"
+    with pytest.raises(ValueError, match="workspace-relative"):
+        materialiser.materialise_reference_run(run, tmp_path, ROOT)
+    assert not (tmp_path.parent / "reference-report-escape-gate-report.json").exists()
+
+
+def test_reference_materialisation_rejects_route_path_escape(tmp_path):
+    reference = load(REFERENCE_RUNS_PATH, "reference_runs_materialisation_route")
+    materialiser = load(REFERENCE_EVALUATION_PATH, "reference_evaluation_materialisation_route")
+    run = reference.make_reference_run("software", ROOT)
+    review = next(item for item in run["reviews"] if item["role"] == "other-primary")
+    linked = next(item for item in run["evidence"] if item["id"] == review["evidence_id"])
+    escaped = str(tmp_path.parent / "reference-route-escape.json")
+    linked["route_receipt"]["path"] = escaped
+    next(item for item in run["artifacts"] if item["id"] == "other-primary-route")["path"] = escaped
+    with pytest.raises(ValueError, match="workspace-relative"):
+        materialiser.materialise_reference_run(run, tmp_path, ROOT)
+    assert not (tmp_path.parent / "reference-route-escape.json").exists()
+
+
+@pytest.mark.parametrize("existing_kind", ["symlink", "hardlink"])
+def test_reference_materialisation_rejects_existing_symlink_or_hardlink_target(tmp_path, existing_kind):
+    reference = load(REFERENCE_RUNS_PATH, f"reference_runs_existing_{existing_kind}")
+    materialiser = load(REFERENCE_EVALUATION_PATH, f"reference_evaluation_existing_{existing_kind}")
+    run = reference.make_reference_run("research", ROOT)
+    run["artifacts"][0]["path"] = "existing-target"
+    outside = tmp_path.parent / f"reference-{existing_kind}-outside"
+    outside.write_text("preserve me\n")
+    target = tmp_path / "existing-target"
+    if existing_kind == "symlink":
+        target.symlink_to(outside)
+    else:
+        target.hardlink_to(outside)
+    with pytest.raises(ValueError, match="symlink|must not already exist"):
+        materialiser.materialise_reference_run(run, tmp_path, ROOT)
+    assert outside.read_text() == "preserve me\n"
+
+
+def test_reference_materialisation_rejects_aliasing_existing_external_artifacts(tmp_path):
+    reference = load(REFERENCE_RUNS_PATH, "reference_runs_materialisation_alias")
+    materialiser = load(REFERENCE_EVALUATION_PATH, "reference_evaluation_materialisation_alias")
+    run = reference.make_reference_run("research", ROOT)
+    external = tmp_path / "external.json"
+    external.write_text("external\n")
+    digest = "sha256:" + hashlib.sha256(external.read_bytes()).hexdigest()
+    for artifact_id in ("external-a", "external-b"):
+        artifact = copy.deepcopy(run["artifacts"][1])
+        artifact.update({"id": artifact_id, "path": "external.json", "digest": digest})
+        run["artifacts"].append(artifact)
+    with pytest.raises(ValueError, match="collides"):
+        materialiser.materialise_reference_run(run, tmp_path, ROOT)
+    assert not (tmp_path / "intent.md").exists()
+
+
+def test_reference_materialisation_rejects_duplicate_other_primary_routes(tmp_path):
+    reference = load(REFERENCE_RUNS_PATH, "reference_runs_materialisation_duplicate_route")
+    materialiser = load(REFERENCE_EVALUATION_PATH, "reference_evaluation_materialisation_duplicate_route")
+    run = reference.make_reference_run("software", ROOT)
+    review = next(item for item in run["reviews"] if item["role"] == "other-primary")
+    run["reviews"].append(copy.deepcopy(review))
+    with pytest.raises(ValueError, match="duplicate other-primary route path"):
+        materialiser.materialise_reference_run(run, tmp_path, ROOT)
+    assert not (tmp_path / "intent.md").exists()
+
+
+def test_reference_materialisation_rolls_back_files_after_a_late_failure(tmp_path, monkeypatch):
+    reference = load(REFERENCE_RUNS_PATH, "reference_runs_materialisation_rollback")
+    materialiser = load(REFERENCE_EVALUATION_PATH, "reference_evaluation_materialisation_rollback")
+    run = reference.make_reference_run("research", ROOT)
+
+    def fail_after_writes(*_args):
+        raise RuntimeError("late route failure")
+
+    monkeypatch.setattr(materialiser, "_materialise_reference_routes", fail_after_writes)
+    with pytest.raises(RuntimeError, match="late route failure"):
+        materialiser.materialise_reference_run(run, tmp_path, ROOT)
+    assert not any(path.is_file() for path in tmp_path.rglob("*"))
+
+
+def test_reference_runs_wrapper_preserves_high_stakes_reference_overlay():
+    reference = load(REFERENCE_RUNS_PATH, "reference_runs_high_stakes")
+    run = reference.make_reference_run("document", ROOT, high_stakes=True)
+    assert run["high_stakes"] is True
+    assert run["high_stakes_controls"]["explicit_human_action_gate"]["status"] == "pass"
+
+
 def terminalise_reference_evaluation(run, status="failed"):
     binding = run["assurance"]["evaluations"][0]
     evidence_id = f"evaluation-{status}-receipt"
@@ -790,6 +899,7 @@ def test_deterministic_evidence_artifact_must_be_a_matching_bundle(tmp_path):
     with pytest.raises(module.Invalid, match="valid bundle JSON"):
         module.validate(candidate, ROOT, workspace_root=workspace, verify_hashes=True)
 
+    workspace = tmp_path / "arbitrary-reset"
     candidate = fixture("software", workspace)
     artifact = next(item for item in candidate["artifacts"] if item["id"] == "evidence-bundle")
     target = workspace / artifact["path"]
@@ -1445,7 +1555,7 @@ def test_fresh_complete_plan_after_failed_evaluation_can_satisfy_acceptance(tmp_
     })
     retry = {
         "status": "complete",
-        "anchored_at": "2026-07-10T00:04:30Z",
+        "anchored_at": "2026-07-10T00:02:45Z",
         "evidence_id": next(
             item["id"] for item in candidate["evidence"]
             if item["kind"] == "judgement" and item["model_lineage"]["provider_family"] == "openai"
@@ -1456,18 +1566,13 @@ def test_fresh_complete_plan_after_failed_evaluation_can_satisfy_acceptance(tmp_
         "plan_digest": "sha256:" + "e" * 64,
     }
     candidate["assurance"]["evaluations"].append(retry)
+    next(
+        item for item in candidate["state_history"] if item["state"] == "executing"
+    )["at"] = "2026-07-10T00:02:30Z"
     candidate["state_history"][-2]["at"] = "2026-07-10T00:07:30Z"
     candidate["state_history"][-1]["at"] = "2026-07-10T00:08:00Z"
 
     materialiser.materialise_reference_run(candidate, workspace_root, ROOT)
-    materialiser.materialise_evaluation_binding(
-        candidate, workspace_root, ROOT, binding_index=0,
-        repetitions=2, sample_size=1,
-    )
-    materialiser.materialise_evaluation_binding(
-        candidate, workspace_root, ROOT, binding_index=1,
-        repetitions=3, sample_size=10, time_offset_minutes=2,
-    )
 
     first_execution = next(
         item["at"] for item in candidate["state_history"] if item["state"] == "executing"

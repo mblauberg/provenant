@@ -6,14 +6,18 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import sys
 
+SCRIPTS_DIR = Path(__file__).resolve().parent
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
 from delivery_receipt import PRODUCT_ROOT, build_reference_run
 
 ROOT = PRODUCT_ROOT
 
 
 def make_reference_run(profile_name: str, root: Path = ROOT, *, high_stakes: bool = False):
-    return build_reference_run(profile_name, root)
+    return build_reference_run(profile_name, root, high_stakes=high_stakes)
 
 
 def main(argv: list[str] | None = None) -> int:

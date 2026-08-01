@@ -302,14 +302,15 @@ def test_terminal_promotion_requires_release_gate_and_active_observation(tmp_pat
         receipt, "complete", workspace_root=tmp_path,
     )
 
-    delivery = write_accepted_document_delivery(tmp_path, status="observing")
+    observing_workspace = tmp_path / "observing"
+    delivery = write_accepted_document_delivery(observing_workspace, status="observing")
     bind_accepted_artifact(receipt, delivery)
-    assert MODULE.validate(receipt, "complete", workspace_root=tmp_path) == []
+    assert MODULE.validate(receipt, "complete", workspace_root=observing_workspace) == []
 
     delivery["observation"]["status"] = "planned"
-    (tmp_path / "RUN.json").write_text(json.dumps(delivery))
+    (observing_workspace / "RUN.json").write_text(json.dumps(delivery))
     assert "terminal promotion requires active or passing canonical observation" in MODULE.validate(
-        receipt, "complete", workspace_root=tmp_path,
+        receipt, "complete", workspace_root=observing_workspace,
     )
 
 

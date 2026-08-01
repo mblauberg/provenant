@@ -76,9 +76,9 @@ def build_scenario_receipt(case: dict[str, Any], fixture: dict[str, Any], root: 
     import delivery_receipt_reference as reference_fixtures
     return reference_fixtures.build_scenario_receipt(case, fixture, root)
 
-def build_reference_run(profile_name: str, root: Path = PRODUCT_ROOT) -> dict[str, Any]:
+def build_reference_run(profile_name: str, root: Path = PRODUCT_ROOT, *, high_stakes: bool = False) -> dict[str, Any]:
     import delivery_receipt_reference as reference_fixtures
-    return reference_fixtures.make_reference_run(profile_name, root)
+    return reference_fixtures.make_reference_run(profile_name, root, high_stakes=high_stakes)
 def utc_now() -> str:
     """Return the producer clock in an unambiguous UTC representation."""
     return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")

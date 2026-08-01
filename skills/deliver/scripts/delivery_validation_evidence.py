@@ -224,6 +224,7 @@ def _validate_execution_result(
         and not result["timed_out"]
         and custody["status"] == "posix-process-group-cleanup"
         and exit_code == 0
+        and counts["failed"] == 0
         and all(result[stream].get("complete") is True for stream in ("stdout", "stderr"))
     )
     fail((item.get("status") == "pass") != passing, f"deterministic evidence {evidence_id} status disagrees with its observed result")

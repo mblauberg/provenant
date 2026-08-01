@@ -130,6 +130,27 @@ def add_bundle(tmp_path: Path, run_dir: Path, artifact_id: str = "evidence-bundl
     assert result.returncode == 0, result.stderr
 
 
+def test_reference_does_not_materialise_when_canonical_receipt_already_exists(tmp_path):
+    external = tmp_path / "fabric.json"
+    external.write_text('{"fabric": true}\n')
+    run_dir = tmp_path / ".agent-run" / "EXISTING"
+    run_dir.mkdir(parents=True)
+    (run_dir / "RUN.json").write_text("{}\n")
+    result = subprocess.run(
+        [
+            sys.executable, str(PRODUCER), "reference",
+            "--run-dir", str(run_dir), "--run-id", "EXISTING",
+            "--profile", "analysis", "--artifact-path", "fabric.json",
+            "--artifact-sha256", hashlib.sha256(external.read_bytes()).hexdigest(),
+        ],
+        cwd=tmp_path, text=True, capture_output=True, check=False,
+    )
+    assert result.returncode == 1
+    assert "canonical receipt" in result.stderr
+    assert not (tmp_path / "intent.md").exists()
+    assert not (tmp_path / "evidence.json").exists()
+
+
 def test_init_creates_a_canonical_draft_receipt(tmp_path):
     (tmp_path / "intent.md").write_text("# Intent\n")
     assessment = {
@@ -293,6 +314,21 @@ def test_evidence_run_binds_gate_identity_counts_and_environment(tmp_path):
     assert evidence["result"]["environment"]["python"]["executable"]
 
 
+def test_evidence_run_marks_failed_gate_counts_as_failure_when_child_exits_zero(tmp_path):
+    run_dir = init_run(tmp_path)
+    add_bundle(tmp_path, run_dir)
+    result = run_producer(
+        tmp_path, "evidence", "run", "--run-dir", str(run_dir), "--id", "tests",
+        "--gate", "tests", "--scope", "full", "--collected", "1", "--passed", "0",
+        "--failed", "1", "--skipped", "0", "--expected-collected", "1",
+        "--artifact-id", "evidence-bundle", "--source", "intent.md",
+        "--", sys.executable, "-c", "pass",
+    )
+    assert result.returncode == 0, result.stderr
+    receipt = json.loads((run_dir / "RUN.json").read_text())
+    assert receipt["evidence"][0]["status"] == "fail"
+
+
 def test_evidence_run_requires_a_structured_gate_report(tmp_path):
     run_dir = init_run(tmp_path)
     add_bundle(tmp_path, run_dir)
@@ -338,6 +374,64 @@ def test_validator_rejects_a_source_symlink_that_escapes_the_workspace(tmp_path)
             receipt, row, row["source_paths"], receipt_dir=run_dir,
             workspace_root=tmp_path, verify_hashes=True,
         )
+
+
+def test_validator_rejects_a_gate_report_symlink_that_escapes_the_workspace(tmp_path):
+    run_dir = init_run(tmp_path)
+    add_bundle(tmp_path, run_dir)
+    result = run_producer(
+        tmp_path, "evidence", "run", "--run-dir", str(run_dir), "--id", "tests",
+        "--gate", "tests", "--artifact-id", "evidence-bundle", "--source", "intent.md",
+        "--", sys.executable, "-c", "pass",
+    )
+    assert result.returncode == 0, result.stderr
+    receipt = json.loads((run_dir / "RUN.json").read_text())
+    row = copy.deepcopy(receipt["evidence"][0])
+    artifact = next(item for item in receipt["artifacts"] if item["id"] == "evidence-bundle")
+    outside = tmp_path.parent / f"{tmp_path.name}-outside-report"
+    outside.write_text((tmp_path / row["result"]["gate_report"]["path"]).read_text())
+    link = tmp_path / "report-link"
+    link.symlink_to(outside)
+    report_ref = row["result"]["gate_report"]
+    row["source_paths"] = ["intent.md", "report-link"]
+    report_ref["path"] = "report-link"
+    intent_digest = next(
+        item for item in row["result"]["source_digests"] if item["path"] == "intent.md"
+    )
+    row["result"]["source_digests"] = [intent_digest, {
+        "path": "report-link", "digest": report_ref["digest"], "bytes": outside.stat().st_size,
+    }]
+    row["result"]["source_digests_after"] = copy.deepcopy(row["result"]["source_digests"])
+    row["_declared_artifact"] = artifact
+    sys.path.insert(0, str(ROOT / "skills" / "deliver" / "scripts"))
+    validator = load_module(
+        ROOT / "skills" / "deliver" / "scripts" / "delivery_validation_evidence.py",
+        "delivery_validation_gate_report_symlink_test",
+    )
+    with pytest.raises(validator.Invalid, match="outside workspace_root"):
+        validator._validate_execution_result(
+            receipt, row, row["source_paths"], receipt_dir=run_dir,
+            workspace_root=tmp_path, verify_hashes=True,
+        )
+
+
+def test_live_producer_rejects_an_unapproved_risk_override(tmp_path):
+    (tmp_path / "intent.md").write_text("# Intent\n")
+    high_assessment = assessment()
+    high_assessment["critical_surface"] = "financial"
+    override = {
+        "status": "pending", "approved_by": "", "evidence": "risk-approval",
+        "reason": "not approved",
+    }
+    result = run_producer(
+        tmp_path, "init", "--run-dir", ".agent-run/RISK-TEST", "--run-id", "RISK-TEST",
+        "--profile", "software", "--chair-family", "openai",
+        "--risk-tier", "routine", "--risk-assessment", json.dumps(high_assessment),
+        "--intent", "intent.md", "--authority", json.dumps(authority()),
+        "--risk-override", json.dumps(override),
+    )
+    assert result.returncode == 1
+    assert "approved human override" in result.stderr
 
 
 @pytest.mark.parametrize(
@@ -404,6 +498,35 @@ def test_validator_rejects_gate_identity_count_and_environment_drift(tmp_path):
                 receipt, candidate, candidate["source_paths"], receipt_dir=run_dir,
                 workspace_root=tmp_path, verify_hashes=True,
             )
+
+
+def test_validator_rejects_pass_status_when_observed_gate_counts_failed(tmp_path):
+    run_dir = init_run(tmp_path)
+    add_bundle(tmp_path, run_dir)
+    result = run_producer(
+        tmp_path, "evidence", "run", "--run-dir", str(run_dir), "--id", "tests",
+        "--gate", "tests", "--scope", "full", "--collected", "1", "--passed", "0",
+        "--failed", "1", "--skipped", "0", "--expected-collected", "1",
+        "--artifact-id", "evidence-bundle", "--source", "intent.md",
+        "--", sys.executable, "-c", "pass",
+    )
+    assert result.returncode == 0, result.stderr
+    receipt = json.loads((run_dir / "RUN.json").read_text())
+    row = copy.deepcopy(receipt["evidence"][0])
+    row["status"] = "pass"
+    row["_declared_artifact"] = next(
+        item for item in receipt["artifacts"] if item["id"] == "evidence-bundle"
+    )
+    sys.path.insert(0, str(ROOT / "skills" / "deliver" / "scripts"))
+    validator = load_module(
+        ROOT / "skills" / "deliver" / "scripts" / "delivery_validation_evidence.py",
+        "delivery_validation_failed_count_status_test",
+    )
+    with pytest.raises(validator.Invalid, match="status disagrees"):
+        validator._validate_execution_result(
+            receipt, row, row["source_paths"], receipt_dir=run_dir,
+            workspace_root=tmp_path, verify_hashes=True,
+        )
 
 
 def test_evidence_run_does_not_accept_a_supplied_exit_code(tmp_path):
