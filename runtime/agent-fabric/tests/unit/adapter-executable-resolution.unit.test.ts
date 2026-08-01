@@ -48,6 +48,18 @@ describe("adapter executable resolution", () => {
     }
   });
 
+  it("fails closed when a sanitised PATH cannot resolve the configured executable", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "fabric-sanitised-path-"));
+    try {
+      await expect(resolveExecutableOnPath("codex", { path: directory })).rejects.toMatchObject({
+        code: "ADAPTER_ARTIFACT_MISSING",
+        message: "adapter executable 'codex' is not resolvable on PATH",
+      });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("resolves every optional CLI by name from an alternate PATH", async () => {
     const directory = await mkdtemp(join(tmpdir(), "fabric-alternate-path-"));
     try {
