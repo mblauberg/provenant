@@ -3,7 +3,10 @@ import { createInterface } from "node:readline";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { MCP_BOOTSTRAP_CREDENTIALS_FEATURE } from "@local/agent-fabric-protocol";
+import {
+  MCP_BOOTSTRAP_CREDENTIALS_FEATURE,
+  MCP_BOOTSTRAP_RESULT_SHAPE_FEATURE,
+} from "@local/agent-fabric-protocol";
 import { FABRIC_PROTOCOL_LIMITS } from "../../src/transport/bounded-ndjson.ts";
 import { createDaemonFixture } from "../support/daemon-testkit.ts";
 
@@ -68,7 +71,7 @@ describe("daemon protocol v1 negotiation", () => {
       result: {
         protocolVersion: 1,
         daemonVersion: "0.1.0",
-        capabilities: ["rpc", MCP_BOOTSTRAP_CREDENTIALS_FEATURE],
+        capabilities: ["rpc", MCP_BOOTSTRAP_CREDENTIALS_FEATURE, MCP_BOOTSTRAP_RESULT_SHAPE_FEATURE],
         activeAdapters: [],
         limits: FABRIC_PROTOCOL_LIMITS,
       },

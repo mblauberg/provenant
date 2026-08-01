@@ -5,7 +5,9 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { MCP_BOOTSTRAP_CREDENTIALS_FEATURE } from "@local/agent-fabric-protocol";
+import {
+  MCP_BOOTSTRAP_RESULT_SHAPE_FEATURE,
+} from "@local/agent-fabric-protocol";
 
 vi.mock("node:net", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:net")>();
@@ -141,7 +143,7 @@ describe("production daemon bootstrap contract", () => {
       status: "rejected",
       error: {
         code: "BOOTSTRAP_INCOMPATIBLE_INCUMBENT",
-        message: expect.stringContaining(MCP_BOOTSTRAP_CREDENTIALS_FEATURE),
+        message: expect.stringContaining(MCP_BOOTSTRAP_RESULT_SHAPE_FEATURE),
       },
     });
   });

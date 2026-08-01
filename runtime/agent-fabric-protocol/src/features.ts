@@ -50,6 +50,7 @@ export const RESULT_SHAPE_FEATURES = [
   "run-lifecycle-facts.v1",
   ACTIVITY_NARRATIVE_GROUPING_FEATURE,
   "mcp-bootstrap-credentials.v2",
+  "mcp-bootstrap-result-shape.v1",
 ] as const;
 
 export const GATE_SYSTEM_SUPERSESSION_FEATURE = "gate-system-supersession.v1" as const;

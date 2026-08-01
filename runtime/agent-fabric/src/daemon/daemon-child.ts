@@ -91,7 +91,13 @@ export function childEnvironment(
   const cutoverRaceFixture = process.env.AGENT_FABRIC_TEST_CUTOVER_RACE_FIXTURE_PATH;
   const idleStopAttemptSocket = process.env.AGENT_FABRIC_TEST_IDLE_STOP_ATTEMPT_SOCKET_PATH;
   const bootstrapSocketBarrier = process.env.AGENT_FABRIC_TEST_BOOTSTRAP_SOCKET_BARRIER_PATH;
-  if (process.env.NODE_ENV === "test" && (cutoverRaceFixture !== undefined || idleStopAttemptSocket !== undefined || bootstrapSocketBarrier !== undefined)) {
+  const malformedBootstrapResultCount = process.env.AGENT_FABRIC_TEST_BOOTSTRAP_MALFORMED_RESULT_COUNT;
+  if (process.env.NODE_ENV === "test" && (
+    cutoverRaceFixture !== undefined ||
+    idleStopAttemptSocket !== undefined ||
+    bootstrapSocketBarrier !== undefined ||
+    malformedBootstrapResultCount !== undefined
+  )) {
     environment.NODE_ENV = "test";
     if (cutoverRaceFixture !== undefined) {
       environment.AGENT_FABRIC_TEST_CUTOVER_RACE_FIXTURE_PATH = cutoverRaceFixture;
@@ -101,6 +107,9 @@ export function childEnvironment(
     }
     if (bootstrapSocketBarrier !== undefined) {
       environment.AGENT_FABRIC_TEST_BOOTSTRAP_SOCKET_BARRIER_PATH = bootstrapSocketBarrier;
+    }
+    if (malformedBootstrapResultCount !== undefined) {
+      environment.AGENT_FABRIC_TEST_BOOTSTRAP_MALFORMED_RESULT_COUNT = malformedBootstrapResultCount;
     }
   }
   return environment;

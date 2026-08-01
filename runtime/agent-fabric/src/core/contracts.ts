@@ -54,6 +54,8 @@ export type BootstrapMcpSeatResult = Omit<CurrentMcpSeatBindingResult, "credenti
   projectId: string;
   canonicalRoot: string;
   bootstrapRunDirectory: string;
+  /** True when this call committed new custody rows or a new active generation. */
+  custodyMutated: boolean;
   credentials: Array<CurrentMcpSeatBinding & { capability: string; authorityId: string }>;
   droppedSeats?: Array<{
     seat: string;

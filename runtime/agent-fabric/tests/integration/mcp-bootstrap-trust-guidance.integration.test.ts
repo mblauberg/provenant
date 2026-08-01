@@ -1,12 +1,15 @@
+import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join, parse } from "node:path";
+import { promisify } from "node:util";
 
 import { afterEach, describe, expect, it } from "vitest";
 
 import { bootstrapMcpSeat } from "../../src/cli/mcp-bootstrap.ts";
 
 const temporaryDirectories: string[] = [];
+const execFileAsync = promisify(execFile);
 
 function paths(root: string) {
   return {
@@ -40,7 +43,7 @@ afterEach(async () => {
 });
 
 describe("MCP bootstrap workspace-trust guidance", () => {
-  it("recommends the repository root when bootstrap starts in a subdirectory", async () => {
+  it("auto-enrols the repository root when bootstrap starts in a subdirectory", async () => {
     const temporaryRoot = await mkdtemp(join(tmpdir(), "fabric-repository-bootstrap-"));
     temporaryDirectories.push(temporaryRoot);
     const root = await realpath(temporaryRoot);
@@ -56,8 +59,7 @@ describe("MCP bootstrap workspace-trust guidance", () => {
       cwd: project,
       paths: paths(root),
     })).rejects.toMatchObject({
-      code: "WORKSPACE_NOT_TRUSTED",
-      message: `Fabric bootstrap requires the exact current project root to be trusted; run '${join(root, "product", "scripts", "agent-fabric")}' workspace trust '${root}'; then retry fabric_bootstrap from '${root}'`,
+      code: "BOOTSTRAP_SPAWN_FAILED",
     });
   });
 
@@ -66,10 +68,14 @@ describe("MCP bootstrap workspace-trust guidance", () => {
     temporaryDirectories.push(temporaryRoot);
     const mainRepository = join(temporaryRoot, "main");
     const worktree = join(temporaryRoot, "linked");
-    const worktreeGitDirectory = join(mainRepository, ".git", "worktrees", "linked");
-    await mkdir(worktreeGitDirectory, { recursive: true });
-    await mkdir(worktree);
-    await writeFile(join(worktree, ".git"), `gitdir: ${worktreeGitDirectory}\n`);
+    await mkdir(mainRepository);
+    await execFileAsync("git", ["-C", mainRepository, "init", "--quiet"]);
+    await execFileAsync("git", ["-C", mainRepository, "config", "user.email", "fabric-tests@example.invalid"]);
+    await execFileAsync("git", ["-C", mainRepository, "config", "user.name", "Fabric Tests"]);
+    await writeFile(join(mainRepository, "README.md"), "linked worktree fixture\n");
+    await execFileAsync("git", ["-C", mainRepository, "add", "README.md"]);
+    await execFileAsync("git", ["-C", mainRepository, "commit", "--quiet", "-m", "fixture"]);
+    await execFileAsync("git", ["-C", mainRepository, "worktree", "add", "--detach", "--quiet", worktree]);
 
     const failure = await bootstrapFailure(await realpath(worktree), temporaryRoot);
 
@@ -91,9 +97,29 @@ describe("MCP bootstrap workspace-trust guidance", () => {
 
     expect(failure).toMatchObject({
       code: "WORKSPACE_NOT_TRUSTED",
-      message: expect.stringMatching(/parent collection.*several repositories.*policy.*specific project/iu),
+      message: expect.stringMatching(/repository collection.*one.*two.*project activate/isu),
     });
     expect(failure.message).not.toContain("workspace trust");
+  });
+
+  it("gives malformed collection children repair guidance without activation commands", async () => {
+    const temporaryRoot = await mkdtemp(join(tmpdir(), "fabric-malformed-collection-bootstrap-"));
+    temporaryDirectories.push(temporaryRoot);
+    const collection = join(temporaryRoot, "projects");
+    const valid = join(collection, "valid");
+    const malformed = join(collection, "malformed");
+    await mkdir(join(valid, ".git"), { recursive: true });
+    await mkdir(malformed, { recursive: true });
+    await writeFile(join(malformed, ".git"), "not a gitdir marker\n");
+
+    const failure = await bootstrapFailure(await realpath(collection), temporaryRoot);
+
+    expect(failure).toMatchObject({
+      code: "WORKSPACE_NOT_TRUSTED",
+      message: expect.stringContaining(`provenant project activate '${await realpath(valid)}'`),
+    });
+    expect(failure.message).toMatch(/inspect and repair.*malformed/isu);
+    expect(failure.message).not.toContain(`provenant project activate '${await realpath(malformed)}'`);
   });
 
   it("explains that home-wide trust is forbidden", async () => {
@@ -104,7 +130,7 @@ describe("MCP bootstrap workspace-trust guidance", () => {
 
     expect(failure).toMatchObject({
       code: "WORKSPACE_NOT_TRUSTED",
-      message: expect.stringMatching(/exact path can never be trusted.*home-wide trust.*forbidden by policy/iu),
+      message: expect.stringMatching(/exact path can never be trusted.*home-wide authority.*forbidden by policy/iu),
     });
     expect(failure.message).not.toContain("workspace trust");
   });
@@ -159,7 +185,7 @@ describe("MCP bootstrap workspace-trust guidance", () => {
 
     expect(failure).toMatchObject({
       code: "WORKSPACE_NOT_TRUSTED",
-      message: expect.stringMatching(/cannot safely determine.*trust boundary.*no trust command/iu),
+      message: expect.stringMatching(/inspect and repair.*boundary evidence/iu),
     });
     expect(failure.message).not.toContain("workspace trust");
   });
@@ -175,7 +201,7 @@ describe("MCP bootstrap workspace-trust guidance", () => {
 
     expect(failure).toMatchObject({
       code: "WORKSPACE_NOT_TRUSTED",
-      message: expect.stringMatching(/cannot safely determine.*trust boundary.*no trust command/iu),
+      message: expect.stringMatching(/inspect and repair.*boundary evidence/iu),
     });
     expect(failure.message).not.toContain("workspace trust");
   });

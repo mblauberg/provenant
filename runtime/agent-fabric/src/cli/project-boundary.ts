@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { lstatSync, readFileSync, realpathSync } from "node:fs";
 import { lstat, readFile, readdir, realpath } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -43,6 +44,22 @@ export type ProjectBoundary = Readonly<{
   gitProbeError: string | null;
   evidence: ProjectBoundaryEvidence;
 }>;
+
+/**
+ * Bind automatic trust to the exact boundary decision that admitted it. The
+ * resolver owns both the evidence and this canonical serialisation so callers
+ * cannot replace it with a broader or independently interpreted root claim.
+ */
+export function projectBoundaryEvidenceDigest(boundary: ProjectBoundary): `sha256:${string}` {
+  const normalized = JSON.stringify({
+    requestedDirectory: boundary.requestedDirectory,
+    selectedProjectRoot: boundary.selectedProjectRoot,
+    gitProbe: boundary.gitProbe,
+    gitProbeError: boundary.gitProbeError,
+    evidence: boundary.evidence,
+  });
+  return `sha256:${createHash("sha256").update(normalized).digest("hex")}`;
+}
 
 type ProjectBoundaryOptions = Readonly<{ selection?: "nearest" | "exact" }>;
 
@@ -98,13 +115,33 @@ export async function nearestGitWorkspace(canonicalRoot: string): Promise<GitWor
     }
     if (marker.isDirectory()) return { root: candidate, linkedWorktree: false };
     if (marker.isFile()) {
-      const match = /^gitdir:\s*(?<path>.+?)\s*$/u.exec(await readFile(join(candidate, ".git"), "utf8"));
+      const markerPath = join(candidate, ".git");
+      const markerBytes = await readFile(markerPath);
+      const match = /^gitdir:\s*(?<path>.+?)\s*$/u.exec(markerBytes.toString("utf8"));
       const gitDirectory = match?.groups?.path;
       if (gitDirectory === undefined) throw new Error("Git workspace marker is not a gitdir file");
       const canonicalGitDirectory = await realpath(resolve(candidate, gitDirectory));
+      const gitProbe = await gitRepositoryProbe(candidate);
+      const markerAfterProbe = await lstat(markerPath);
+      const markerBytesAfterProbe = await readFile(markerPath);
+      if (!markerAfterProbe.isFile() || markerAfterProbe.dev !== marker.dev || markerAfterProbe.ino !== marker.ino ||
+        !markerBytesAfterProbe.equals(markerBytes)) {
+        throw new Error("Git workspace marker changed while probing; retry boundary resolution");
+      }
+      if (gitProbe.status !== "repository" || gitProbe.root !== candidate) {
+        throw new Error(
+          `Git workspace marker at ${join(candidate, ".git")} does not resolve to the candidate root under Git`,
+        );
+      }
+      const linkedWorktree = pointsToLinkedWorktree(canonicalGitDirectory, candidate);
+      if (!linkedWorktree && !isCanonicalDescendant(candidate, canonicalGitDirectory)) {
+        throw new Error(
+          `Git workspace marker at ${join(candidate, ".git")} resolves to foreign Git metadata outside the candidate root`,
+        );
+      }
       return {
         root: candidate,
-        linkedWorktree: pointsToLinkedWorktree(canonicalGitDirectory, candidate),
+        linkedWorktree,
       };
     }
     throw new Error("Git workspace marker must be a directory or regular file");

@@ -1,6 +1,8 @@
+import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { promisify } from "node:util";
 
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -11,6 +13,7 @@ import {
 } from "../../src/cli/project-boundary.ts";
 
 const temporaryDirectories: string[] = [];
+const execFileAsync = promisify(execFile);
 
 async function fixture(prefix: string): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), `fabric-${prefix}-`));
@@ -129,5 +132,77 @@ describe("shared project boundary resolver", () => {
     await expect(resolveProjectBoundary(project)).resolves.toMatchObject({
       evidence: { kind: "refused", reason: "unsafe-project-marker" },
     });
+  });
+
+  it("rejects a Gitfile whose target is an arbitrary existing directory", async () => {
+    const root = await fixture("arbitrary-gitfile-target");
+    const project = join(root, "project");
+    const target = join(root, "ordinary-directory");
+    await mkdir(project, { recursive: true });
+    await mkdir(target, { recursive: true });
+    await writeFile(join(project, ".git"), `gitdir: ${target}\n`);
+
+    await expect(resolveProjectBoundary(project)).resolves.toMatchObject({
+      selectedProjectRoot: await realpath(project),
+      evidence: { kind: "refused", reason: "malformed-git-marker" },
+    });
+  });
+
+  it("rejects a Gitfile targeting a foreign Git repository", async () => {
+    const root = await fixture("foreign-gitfile-target");
+    const project = join(root, "project");
+    const foreign = join(root, "foreign");
+    await mkdir(project, { recursive: true });
+    await mkdir(foreign, { recursive: true });
+    await execFileAsync("git", ["-C", foreign, "init", "--quiet"]);
+    await writeFile(join(project, ".git"), `gitdir: ${join(foreign, ".git")}\n`);
+
+    await expect(resolveProjectBoundary(project)).resolves.toMatchObject({
+      selectedProjectRoot: await realpath(project),
+      evidence: { kind: "refused", reason: "malformed-git-marker" },
+    });
+  });
+
+  it("rejects a Gitfile whose valid target resolves outside the selected root", async () => {
+    const root = await fixture("out-of-root-gitfile-target");
+    const project = join(root, "project");
+    const foreign = join(root, "outside");
+    await mkdir(project, { recursive: true });
+    await mkdir(foreign, { recursive: true });
+    await execFileAsync("git", ["-C", foreign, "init", "--quiet"]);
+    await writeFile(join(project, ".git"), "gitdir: ../outside/.git\n");
+
+    await expect(resolveProjectBoundary(project)).resolves.toMatchObject({
+      selectedProjectRoot: await realpath(project),
+      evidence: { kind: "refused", reason: "malformed-git-marker" },
+    });
+  });
+
+  it("refuses a Gitfile whose marker is swapped during the Git probe", async () => {
+    const root = await fixture("gitfile-marker-swap");
+    const project = join(root, "project");
+    const target = join(project, "git-target");
+    const marker = join(project, ".git");
+    const replacement = join(root, "replacement-marker");
+    const shimDirectory = join(root, "bin");
+    await mkdir(project, { recursive: true });
+    await mkdir(join(target, ".git"), { recursive: true });
+    await mkdir(shimDirectory, { recursive: true });
+    await writeFile(marker, "gitdir: git-target/.git\n");
+    await writeFile(replacement, "not a gitdir marker\n");
+    const gitShim = join(shimDirectory, "git");
+    await writeFile(gitShim, "#!/bin/sh\nmv " + replacement + " " + marker + "\nprintf '%s\\n' " + project + "\n");
+    await import("node:fs/promises").then(async ({ chmod }) => await chmod(gitShim, 0o700));
+
+    const previousPath = process.env.PATH;
+    process.env.PATH = shimDirectory + ":" + (previousPath ?? "");
+    try {
+      await expect(resolveProjectBoundary(project)).resolves.toMatchObject({
+        evidence: { kind: "refused", reason: "malformed-git-marker" },
+      });
+    } finally {
+      if (previousPath === undefined) delete process.env.PATH;
+      else process.env.PATH = previousPath;
+    }
   });
 });
