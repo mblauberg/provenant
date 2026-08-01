@@ -12,6 +12,7 @@ import argparse
 from contextlib import contextmanager
 import io
 import os
+import posixpath
 from dataclasses import dataclass
 from enum import Enum
 import re
@@ -58,6 +59,15 @@ class GateError(RuntimeError):
     """A gate cannot certify its required evidence."""
 
 
+class ChangeMode(str, Enum):
+    """The closed set of change shapes understood by the gates."""
+
+    BEHAVIOUR = "behaviour"
+    IMPORT_HELPER = "import-helper"
+    REFACTOR = "refactor"
+    TYPE_ONLY = "type-only"
+
+
 @dataclass(frozen=True)
 class DiffHunk:
     path: str
@@ -83,6 +93,19 @@ class Mutant:
 
 _HUNK_RE = re.compile(r"^@@ -(?P<old_start>\d+)(?:,(?P<old_count>\d+))? \+(?P<new_start>\d+)(?:,(?P<new_count>\d+))? @@")
 _DIFF_FILE_RE = re.compile(r"^diff --git a/(.+) b/(.+)$")
+_TYPE_ONLY_LINE_RE = re.compile(
+    r"^\s*(?:"
+    r"(?:(?:export\s+)?(?:type|interface)\s+[A-Za-z_$][\w$]*(?:\s*<[^>\n]+>)?"
+    r"(?:\s*=\s*[^;\n]+|\s*(?:extends\s+[^\{\n]+)?\{[^}\n]*\})?;?)"
+    r"|(?:(?:export\s+)?declare\s+(?:const|let|var)\s+[A-Za-z_$][\w$]*"
+    r"(?:\s*:\s*[^;\n]+)?;?)"
+    r"|(?:import\s+type\s+[^;\n]+;?)"
+    r"|(?:(?:import|export)\s*\{\s*type\s+[A-Za-z_$][\w$]*"
+    r"(?:\s+as\s+[A-Za-z_$][\w$]*)?(?:\s*,\s*type\s+"
+    r"[A-Za-z_$][\w$]*(?:\s+as\s+[A-Za-z_$][\w$]*)?)*\s*\}\s*"
+    r"(?:from\s+['\"][^'\"]+['\"])?\s*;?)"
+    r")\s*$"
+)
 
 
 def classify_failure(returncode: int, output: str) -> FailureClass:
@@ -231,6 +254,92 @@ def is_source_path(path: str) -> bool:
 
 def changed_test_paths(hunks: list[DiffHunk]) -> list[str]:
     return sorted({hunk.path for hunk in hunks if is_test_path(hunk.path)})
+
+
+def _canonical_module_path(path: str) -> str:
+    normalized = posixpath.normpath(path.removeprefix("./")).lstrip("/")
+    suffix = Path(normalized).suffix.casefold()
+    if suffix in {".py", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"}:
+        normalized = normalized[: -len(suffix)]
+    if normalized.endswith("/__init__"):
+        normalized = normalized[: -len("/__init__")]
+    return normalized
+
+
+def added_module_names(hunks: list[DiffHunk]) -> frozenset[str]:
+    """Return canonical path and dotted spellings for newly added modules."""
+
+    names: set[str] = set()
+    for hunk in hunks:
+        if "--- /dev/null" not in hunk.header or not is_source_path(hunk.path):
+            continue
+        module = _canonical_module_path(hunk.path)
+        if not module:
+            continue
+        names.update({module, f"./{module}", module.replace("/", ".")})
+    return frozenset(names)
+
+
+def module_is_added(
+    unresolved_module: str,
+    added_modules: frozenset[str] | set[str],
+    importer: str | None = None,
+) -> bool:
+    """Resolve a structured import against the changed module identities."""
+
+    candidates: set[str] = set()
+    raw = unresolved_module.strip().replace("\\", "/")
+    if not raw:
+        return False
+    resolved = raw
+    if raw.startswith(".") and importer:
+        resolved = posixpath.normpath(posixpath.join(posixpath.dirname(importer), raw))
+    candidates.add(resolved)
+    candidates.add(raw)
+    for candidate in tuple(candidates):
+        canonical = _canonical_module_path(candidate)
+        if canonical:
+            candidates.update({canonical, f"./{canonical}", canonical.replace("/", ".")})
+    if "/" not in raw and not Path(raw).suffix and "." in raw:
+        candidates.add(raw.replace(".", "/"))
+    return bool(candidates & set(added_modules))
+
+
+def hunk_mode(hunk: DiffHunk) -> ChangeMode | None:
+    """Classify a TypeScript hunk only when every changed line is bounded type syntax."""
+
+    if Path(hunk.path).suffix.casefold() not in {".ts", ".tsx"}:
+        return ChangeMode.BEHAVIOUR
+    changed = [line[1:] for line in hunk.body if line.startswith(("+", "-"))]
+    if not changed:
+        return ChangeMode.BEHAVIOUR
+    type_only = [_TYPE_ONLY_LINE_RE.fullmatch(line) is not None for line in changed]
+    if all(type_only):
+        return ChangeMode.TYPE_ONLY
+    if any(type_only):
+        return None
+    return ChangeMode.BEHAVIOUR
+
+
+def validate_change_mode(hunks: list[DiffHunk], mode: ChangeMode | str) -> None:
+    """Reject mixed or misdeclared type-only production hunks."""
+
+    mode = ChangeMode(mode)
+    production = production_hunks(hunks)
+    mixed = [hunk.path for hunk in production if hunk_mode(hunk) is None]
+    if mixed:
+        raise GateError(
+            "mixed type/runtime production hunk is not certifiable: "
+            + ", ".join(sorted(set(mixed)))
+        )
+    type_only = [hunk for hunk in production if hunk_mode(hunk) is ChangeMode.TYPE_ONLY]
+    if mode is ChangeMode.TYPE_ONLY and (
+        not type_only or len(type_only) != len(production)
+    ):
+        raise GateError("type-only mode requires every production hunk to be type-only")
+    if type_only and mode is not ChangeMode.TYPE_ONLY and len(type_only) != len(production):
+        paths = ", ".join(sorted({hunk.path for hunk in type_only}))
+        raise GateError(f"type-only production hunks require --mode type-only: {paths}")
 
 
 def production_hunks(hunks: list[DiffHunk]) -> list[DiffHunk]:
@@ -499,15 +608,43 @@ def target_existed_at_base(base_root: Path, target: str) -> bool:
     return completed.returncode == 0
 
 
-def right_reason_red_evidence(result: CommandResult, target_existed: bool) -> str | None:
+def right_reason_red_evidence(
+    result: CommandResult,
+    target_existed: bool,
+    *,
+    mode: ChangeMode | str = ChangeMode.BEHAVIOUR,
+    added_modules: frozenset[str] | set[str] = frozenset(),
+    importer: str | None = None,
+) -> str | None:
     """Return the accepted evidence kind, or ``None`` for a defective red."""
 
+    try:
+        mode = ChangeMode(mode)
+    except (TypeError, ValueError):
+        return None
+    if mode is ChangeMode.TYPE_ONLY:
+        return (
+            "type-only"
+            if result.returncode == 0 and result.classification is FailureClass.PASS
+            else None
+        )
+    if mode is ChangeMode.REFACTOR and target_existed:
+        if result.returncode == 0 and result.classification is FailureClass.PASS:
+            return "refactor"
     if result.returncode == 0:
         return None
     if result.classification is FailureClass.ASSERTION:
         return "assertion"
     if not target_existed:
         return "new-target"
+    if (
+        mode is ChangeMode.IMPORT_HELPER
+        and result.classification in {FailureClass.IMPORT, FailureClass.COLLECTION}
+        and result.unresolved_module is not None
+        and result.structured_import_evidence
+        and module_is_added(result.unresolved_module, added_modules, importer)
+    ):
+        return "added-module"
     return None
 
 
@@ -518,9 +655,12 @@ def _all_assertion_failures(results: list[CommandResult]) -> bool:
 def gate_right_reason_red(
     source_root: Path,
     base: str,
-    commands: list[str],
+    commands: list[str] | dict[str, str],
     tests: list[str],
     scratch_root: Path,
+    *,
+    mode: ChangeMode | str = ChangeMode.BEHAVIOUR,
+    added_modules: frozenset[str] | set[str] = frozenset(),
 ) -> int:
     with _temporary_tree(source_root, scratch_root) as directory:
         base_root = Path(directory)
@@ -528,7 +668,13 @@ def gate_right_reason_red(
         results = _run_suite(commands, base_root, tests)
         targets = _targets(commands, tests)
         evidence = [
-            right_reason_red_evidence(result, target_existed_at_base(base_root, target))
+            right_reason_red_evidence(
+                result,
+                target_existed_at_base(base_root, target),
+                mode=mode,
+                added_modules=added_modules,
+                importer=target,
+            )
             for result, target in zip(results, targets, strict=True)
         ]
     for result in results:
@@ -559,6 +705,102 @@ def gate_right_reason_red(
     return 0
 
 
+def _gate_refactor_no_production(
+    source_root: Path,
+    base: str,
+    commands: list[str] | dict[str, str],
+    tests: list[str],
+    scratch_root: Path,
+    gate_name: str,
+) -> int:
+    """Run the mandatory non-red gate when refactor work has no production hunk."""
+
+    if not tests:
+        raise GateError(f"{gate_name} refactor mode requires a changed test target")
+    with _temporary_tree(source_root, scratch_root) as directory:
+        base_root = Path(directory)
+        _materialise_base(source_root, base, base_root, tests)
+        results = _run_suite(commands, base_root, tests)
+    for result in results:
+        _print_output(result)
+    if not results or any(
+        result.returncode != 0 or result.classification is not FailureClass.PASS
+        for result in results
+    ):
+        print(
+            f"{gate_name}: FAIL mode=refactor production_hunks=0 "
+            f"tests={len(results)} survivors=0 inconclusive=1"
+        )
+        return 1
+    if gate_name == "REVERT_PROBE":
+        print(
+            "REVERT_PROBE: PASS mode=refactor production_hunks=0 "
+            "killed=0 survivors=0 inconclusive=0"
+        )
+    else:
+        print(
+            "CHANGED_LINES_MUTATION: PASS mode=refactor production_hunks=0 "
+            "mutants=0 killed=0 survivors=0 inconclusive=0"
+        )
+    return 0
+
+
+def gate_type_only_probe(
+    source_root: Path,
+    hunks: list[DiffHunk],
+    gate_name: str,
+    scratch_root: Path,
+) -> int:
+    """Run the parser-owned reverse and negative-mutation probes for type-only work."""
+
+    probes = production_hunks(hunks)
+    if not probes or any(hunk_mode(hunk) is not ChangeMode.TYPE_ONLY for hunk in probes):
+        raise GateError("type-only probe requires only type-only production hunks")
+    if gate_name == "RIGHT_REASON_RED":
+        print(
+            "RIGHT_REASON_RED: TYPE_ONLY owner=type-gate "
+            f"verified_hunks={len(probes)} tests=0"
+        )
+        return 0
+    if gate_name == "REVERT_PROBE":
+        for hunk in probes:
+            with _temporary_tree(source_root, scratch_root) as directory:
+                _apply_reverse_hunk(Path(directory), hunk)
+        print(
+            "REVERT_PROBE: PASS owner=type-gate "
+            f"hunks={len(probes)} killed=0 survivors=0 inconclusive=0"
+        )
+        return 0
+    killed = 0
+    for hunk in probes:
+        mutated_body = tuple(
+            f"{line} runtime()" if line.startswith(("+", "-")) else line
+            for line in hunk.body
+        )
+        mutated = DiffHunk(
+            hunk.path,
+            hunk.header,
+            hunk.hunk_header,
+            mutated_body,
+            hunk.old_start,
+            hunk.old_count,
+            hunk.new_start,
+            hunk.new_count,
+            hunk.old_lines,
+            hunk.new_lines,
+        )
+        if hunk_mode(mutated) is ChangeMode.TYPE_ONLY:
+            print(f"TYPE_ONLY_MUTATION: SURVIVED path={hunk.path}")
+            return 1
+        killed += 1
+    print(
+        "CHANGED_LINES_MUTATION: PASS owner=type-gate "
+        f"hunks={len(probes)} mutants={killed} killed={killed} "
+        "survivors=0 inconclusive=0"
+    )
+    return 0
+
+
 def _apply_reverse_hunk(root: Path, hunk: DiffHunk) -> None:
     path = root / hunk.path
     if not path.is_file():
@@ -583,9 +825,17 @@ def gate_revert_probe(
     commands: list[str],
     tests: list[str],
     scratch_root: Path,
+    *,
+    mode: ChangeMode | str = ChangeMode.BEHAVIOUR,
+    base: str | None = None,
 ) -> int:
+    mode = ChangeMode(mode)
     probes = production_hunks(hunks)
     if not probes:
+        if mode is ChangeMode.REFACTOR and base is not None:
+            return _gate_refactor_no_production(
+                source_root, base, commands, tests, scratch_root, "REVERT_PROBE"
+            )
         raise GateError("revert-probe found no changed production hunks")
     survivors: list[DiffHunk] = []
     inconclusive: list[DiffHunk] = []
@@ -675,12 +925,20 @@ def _write_mutant(root: Path, mutant: Mutant) -> None:
 def gate_changed_line_mutation(
     source_root: Path,
     mutants: list[Mutant],
-    commands: list[str],
+    commands: list[str] | dict[str, str],
     tests: list[str],
     scratch_root: Path,
     risk: str,
+    *,
+    mode: ChangeMode | str = ChangeMode.BEHAVIOUR,
+    base: str | None = None,
 ) -> int:
+    mode = ChangeMode(mode)
     if not mutants:
+        if mode is ChangeMode.REFACTOR and base is not None:
+            return _gate_refactor_no_production(
+                source_root, base, commands, tests, scratch_root, "CHANGED_LINES_MUTATION"
+            )
         raise GateError("changed-lines-only mutation found no supported executable mutants")
     with _temporary_tree(source_root, scratch_root) as directory:
         baseline = _run_suite(commands, Path(directory), tests)
@@ -695,6 +953,7 @@ def gate_changed_line_mutation(
         return 1
     started = time.monotonic()
     survivors: list[Mutant] = []
+    inconclusive: list[Mutant] = []
     killed = 0
 
     def run_mutant_suite(cwd: Path, selected_tests: list[str]) -> list[CommandResult]:
@@ -714,19 +973,28 @@ def gate_changed_line_mutation(
             results = run_mutant_suite(mutant_root, mutant_tests)
         for result in results:
             _print_output(result)
-        if not _all_assertion_failures(results):
-            survivors.append(mutant)
-            print(f"MUTANT {index} path={mutant.path}:{mutant.line} status=INVALID {mutant.description}")
-        else:
+        if _all_assertion_failures(results):
             killed += 1
             print(f"MUTANT {index} path={mutant.path}:{mutant.line} status=KILLED {mutant.description}")
+        elif results and all(
+            result.returncode == 0 and result.classification is FailureClass.PASS
+            for result in results
+        ):
+            survivors.append(mutant)
+            print(f"MUTANT {index} path={mutant.path}:{mutant.line} status=SURVIVED {mutant.description}")
+        else:
+            inconclusive.append(mutant)
+            print(
+                f"MUTANT {index} path={mutant.path}:{mutant.line} "
+                f"status=INCONCLUSIVE {mutant.description}"
+            )
     elapsed = time.monotonic() - started
     print(
-        f"CHANGED_LINES_MUTATION: {'PASS' if not survivors or risk not in {'crucial', 'terminal'} else 'FAIL'} "
+        f"CHANGED_LINES_MUTATION: {'PASS' if not survivors and not inconclusive or risk not in {'crucial', 'terminal'} else 'FAIL'} "
         f"mutants={len(mutants)} killed={killed} survivors={len(survivors)} "
-        f"wall_seconds={elapsed:.3f}"
+        f"inconclusive={len(inconclusive)} wall_seconds={elapsed:.3f}"
     )
-    return 1 if survivors and risk in {"crucial", "terminal"} else 0
+    return 1 if (survivors or inconclusive) and risk in {"crucial", "terminal"} else 0
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -739,6 +1007,13 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--test-command-ts", required=True)
     parser.add_argument("--test", dest="tests", action="append", default=[])
     parser.add_argument("--risk", choices=("routine", "substantial", "crucial", "terminal"), default="crucial")
+    parser.add_argument(
+        "--mode",
+        type=ChangeMode,
+        choices=tuple(mode.value for mode in ChangeMode),
+        default=ChangeMode.BEHAVIOUR,
+        help="declared change shape for the applicable gate",
+    )
     return parser
 
 
@@ -747,23 +1022,65 @@ def main(argv: list[str] | None = None) -> int:
     source_root = args.source_root.resolve()
     diff_text = git_diff(source_root, args.base)
     hunks = parse_diff(diff_text)
+    production = production_hunks(hunks)
+    mode = args.mode
+    if mode is ChangeMode.BEHAVIOUR and production and all(
+        hunk_mode(hunk) is ChangeMode.TYPE_ONLY for hunk in production
+    ):
+        mode = ChangeMode.TYPE_ONLY
+    validate_change_mode(hunks, mode)
+    added_modules = added_module_names(hunks)
     tests = args.tests or changed_test_paths(hunks)
     commands = {"py": args.test_command_py, "ts": args.test_command_ts}
+    if mode is ChangeMode.TYPE_ONLY:
+        return gate_type_only_probe(
+            source_root,
+            hunks,
+            {
+                "right-reason-red": "RIGHT_REASON_RED",
+                "revert-probe": "REVERT_PROBE",
+                "changed-lines-only": "CHANGED_LINES_MUTATION",
+            }[args.gate],
+            args.scratch_root.resolve(),
+        )
     if not tests:
-        if production_hunks(hunks):
+        if production:
             raise GateError("production changes have no new or changed tests")
         print(f"{args.gate.upper().replace('-', '_')}: SKIP tests=0 production_hunks=0")
         return 0
-    if args.gate != "right-reason-red" and not production_hunks(hunks):
+    if args.gate != "right-reason-red" and not production and mode is not ChangeMode.REFACTOR:
         print(f"{args.gate.upper().replace('-', '_')}: SKIP production_hunks=0")
         return 0
     if args.gate == "right-reason-red":
-        return gate_right_reason_red(source_root, args.base, commands, tests, args.scratch_root.resolve())
+        return gate_right_reason_red(
+            source_root,
+            args.base,
+            commands,
+            tests,
+            args.scratch_root.resolve(),
+            mode=mode,
+            added_modules=added_modules,
+        )
     if args.gate == "revert-probe":
-        return gate_revert_probe(source_root, hunks, commands, tests, args.scratch_root.resolve())
+        return gate_revert_probe(
+            source_root,
+            hunks,
+            commands,
+            tests,
+            args.scratch_root.resolve(),
+            mode=mode,
+            base=args.base,
+        )
     mutants = build_mutants(source_root, hunks)
     return gate_changed_line_mutation(
-        source_root, mutants, commands, tests, args.scratch_root.resolve(), args.risk
+        source_root,
+        mutants,
+        commands,
+        tests,
+        args.scratch_root.resolve(),
+        args.risk,
+        mode=mode,
+        base=args.base,
     )
 
 

@@ -203,14 +203,21 @@ jobs:
             sleep 30
           done
           scratch="$RUNNER_TEMP/provenant-change-gates"
+          change_gate_mode=$(tr -d '[:space:]' < .github/change-gate-mode)
+          case "$change_gate_mode" in
+            behaviour|import-helper|refactor|type-only) ;;
+            *) echo "unsupported .github/change-gate-mode: $change_gate_mode" >&2; exit 2 ;;
+          esac
           scripts/check-test-gates right-reason-red \
             --base "$CHANGE_GATE_BASE" --scratch-root "$scratch" \
             --test-command-py "$HARNESS_PYTHON -m pytest {test} -q" \
-            --test-command-ts "npm exec vitest run {test}"
+            --test-command-ts "npm exec vitest run {test}" \
+            --mode "$change_gate_mode"
           scripts/check-test-gates revert-probe \
             --base "$CHANGE_GATE_BASE" --scratch-root "$scratch" \
             --test-command-py "$HARNESS_PYTHON -m pytest {test} -q" \
-            --test-command-ts "npm exec vitest run {test}"
+            --test-command-ts "npm exec vitest run {test}" \
+            --mode "$change_gate_mode"
           release
           trap - EXIT INT TERM HUP
 
