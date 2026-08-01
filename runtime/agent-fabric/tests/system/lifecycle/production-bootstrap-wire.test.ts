@@ -1,4 +1,4 @@
-import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { tmpdir } from "node:os";
@@ -729,6 +729,8 @@ describe("production daemon bootstrap wiring", () => {
     const stateDirectory = join(root, "state");
     const runtimeDirectory = join(root, "runtime");
     await mkdir(databaseDirectory, { mode: 0o700 });
+    await mkdir(stateDirectory, { mode: 0o700 });
+    await mkdir(runtimeDirectory, { mode: 0o700 });
     const seed = openFabricDatabase(databasePath);
     seed.prepare(`
       INSERT INTO daemon_runtime_epochs(
@@ -737,22 +739,14 @@ describe("production daemon bootstrap wiring", () => {
     `).run();
     seed.close();
     const before = await readFile(databasePath);
-    vi.stubEnv("AGENT_FABRIC_TEST_DATABASE_INSPECTION_RACE_PATH", databasePath);
-    console.error("DEBUG issue 603 env", process.env.NODE_ENV, process.env.AGENT_FABRIC_TEST_DATABASE_INSPECTION_ATTEMPTS, process.env.AGENT_FABRIC_TEST_DATABASE_INSPECTION_RACE_PATH, databasePath);
-    let failure: unknown;
-    try {
-      await startFabricDaemon({
-        databasePath,
-        stateDirectory,
-        runtimeDirectory,
-        socketPath: join(runtimeDirectory, "fabric.sock"),
-        workspaceRoots: [root],
-      });
-    } catch (error: unknown) {
-      failure = error;
-      console.error("DEBUG issue 603 bootstrap failure", error);
-    }
-    expect(failure).toMatchObject({
+    vi.stubEnv("AGENT_FABRIC_TEST_DATABASE_INSPECTION_RACE_PATH", await realpath(databasePath));
+    await expect(startFabricDaemon({
+      databasePath,
+      stateDirectory,
+      runtimeDirectory,
+      socketPath: join(runtimeDirectory, "fabric.sock"),
+      workspaceRoots: [root],
+    })).rejects.toMatchObject({
       code: "DATABASE_INSPECTION_UNSTABLE",
       preserved: false,
     });
