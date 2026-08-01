@@ -7,7 +7,11 @@ import { createInterface } from "node:readline";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { MCP_BOOTSTRAP_CREDENTIALS_FEATURE } from "@local/agent-fabric-protocol";
+import {
+  MCP_BOOTSTRAP_CREDENTIALS_FEATURE,
+  MCP_BOOTSTRAP_RESULT_SHAPE_FEATURE,
+} from "@local/agent-fabric-protocol";
+import { FabricDaemonClient } from "../../src/daemon/rpc-client.ts";
 import { FabricRemoteError, TimedNdjsonTransport } from "../../src/transport/ndjson-rpc.ts";
 import { daemonInitializeResult } from "../../src/transport/daemon-rpc-contract.ts";
 
@@ -81,6 +85,7 @@ describe("timed daemon NDJSON transport", () => {
     expect(daemonInitializeResult([]).capabilities).toEqual([
       "rpc",
       MCP_BOOTSTRAP_CREDENTIALS_FEATURE,
+      MCP_BOOTSTRAP_RESULT_SHAPE_FEATURE,
     ]);
   });
 
@@ -118,7 +123,7 @@ describe("timed daemon NDJSON transport", () => {
         capability: "afb_test",
         connectTimeoutMs: 200,
         requestTimeoutMs: 200,
-        requiredCapabilities: [MCP_BOOTSTRAP_CREDENTIALS_FEATURE],
+        requiredCapabilities: [MCP_BOOTSTRAP_CREDENTIALS_FEATURE, MCP_BOOTSTRAP_RESULT_SHAPE_FEATURE],
       }, {
         connect: () => socket as unknown as Socket,
       });
@@ -143,7 +148,7 @@ describe("timed daemon NDJSON transport", () => {
     ]) {
       const socket = new FixtureDaemonSocket({
         daemonVersion,
-        capabilities: ["rpc", MCP_BOOTSTRAP_CREDENTIALS_FEATURE],
+        capabilities: ["rpc", MCP_BOOTSTRAP_CREDENTIALS_FEATURE, MCP_BOOTSTRAP_RESULT_SHAPE_FEATURE],
         legacyCredentialResult,
       });
       const transport = await TimedNdjsonTransport.connect({
@@ -157,11 +162,41 @@ describe("timed daemon NDJSON transport", () => {
       });
       expect(transport.initializeResult).toMatchObject({
         daemonVersion,
-        capabilities: ["rpc", MCP_BOOTSTRAP_CREDENTIALS_FEATURE],
+        capabilities: ["rpc", MCP_BOOTSTRAP_CREDENTIALS_FEATURE, MCP_BOOTSTRAP_RESULT_SHAPE_FEATURE],
       });
       await transport.close();
       expect(socket.methods).toEqual(["initialize"]);
     }
+  });
+
+  it("classifies an invalid bootstrap result as a protocol ambiguity", async () => {
+    const socket = new FixtureDaemonSocket({
+      daemonVersion: "0.1.0",
+      capabilities: ["rpc", MCP_BOOTSTRAP_CREDENTIALS_FEATURE, MCP_BOOTSTRAP_RESULT_SHAPE_FEATURE],
+      legacyCredentialResult: {
+        projectId: "project-one",
+        canonicalRoot: "/project-one",
+        bootstrapRunDirectory: ".agent-run/bootstrap-one",
+        generation: "a".repeat(64),
+        credentials: [],
+      },
+    });
+    const client = await FabricDaemonClient.connect(
+      "/fixture/fabric.sock",
+      "afb_test",
+      [MCP_BOOTSTRAP_CREDENTIALS_FEATURE, MCP_BOOTSTRAP_RESULT_SHAPE_FEATURE],
+      { connect: () => socket as unknown as Socket },
+    );
+
+    await expect(client.bootstrapMcpSeat({
+      canonicalRoot: "/project-one",
+      trustRecordDigest: `sha256:${"b".repeat(64)}`,
+      seat: "codex",
+      expiresAt: "2099-01-01T00:00:00.000Z",
+    })).rejects.toMatchObject({
+      code: "DAEMON_PROTOCOL_INVALID",
+    });
+    await client.close();
   });
 
   it("bounds connection setup and destroys a socket that never connects", async () => {

@@ -67,6 +67,7 @@ async function fixture(): Promise<{ projectRoot: string; paths: FabricPaths }> {
     projectId: "project-one",
     canonicalRoot: projectRoot,
     bootstrapRunDirectory: ".agent-run/bootstrap-one",
+    custodyMutated: true,
     expectedPreviousGeneration: null,
     generation: GENERATION,
     projectSessionId: "session-one",
@@ -138,7 +139,7 @@ async function installRecordedGeneration(input: {
 }
 
 describe("legacy bootstrap provenance lifecycle action", () => {
-  it("emits only for first recording while both legacy replays remain custody-unmutated", async () => {
+  it("records the durable legacy marker once and keeps later replays unmutated", async () => {
     const value = await fixture();
     const first = await bootstrap(value);
     const seatRoot = join(value.paths.stateDirectory, "seats", projectKey(value.projectRoot));
@@ -147,13 +148,13 @@ describe("legacy bootstrap provenance lifecycle action", () => {
     delete legacy.originKind;
     await writeFile(metadataPath, `${JSON.stringify(legacy, null, 2)}\n`, { mode: 0o600 });
 
+    daemon.result = { ...daemon.result!, custodyMutated: false };
     const recorded = await bootstrap(value);
-    expect(recorded.receipt.mutated).toBe(false);
-    expect(recorded.receipt.actions.every(({ mutated }) => !mutated)).toBe(true);
+    expect(recorded.receipt.mutated).toBe(true);
     expect(recorded.receipt.actions.find(({ action }) => action === "legacy-bootstrap-provenance")).toEqual({
       action: "legacy-bootstrap-provenance",
       outcome: "recorded",
-      mutated: false,
+      mutated: true,
       generation: GENERATION,
     });
 

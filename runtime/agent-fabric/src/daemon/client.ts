@@ -4,7 +4,10 @@ import { chmod, open, readFile, rename, rm, rmdir } from "node:fs/promises";
 import { basename, dirname, join, normalize, resolve } from "node:path";
 
 import Database from "better-sqlite3";
-import { MCP_BOOTSTRAP_CREDENTIALS_FEATURE } from "@local/agent-fabric-protocol";
+import {
+  MCP_BOOTSTRAP_CREDENTIALS_FEATURE,
+  MCP_BOOTSTRAP_RESULT_SHAPE_FEATURE,
+} from "@local/agent-fabric-protocol";
 
 import type { FabricOpenOptions } from "../domain/types.js";
 import { resolveFabricRoots } from "../domain/fabric-roots.js";
@@ -546,7 +549,7 @@ async function spawnProductionDaemon(input: {
       bootstrapCapability: child.bootstrapCapability,
       lifecycleReceiptAuthorityId: prepared.lifecycleReceiptAuthorityId ?? null,
       protocolVersion: FABRIC_PROTOCOL_VERSION,
-      features: ["rpc", MCP_BOOTSTRAP_CREDENTIALS_FEATURE],
+      features: ["rpc", MCP_BOOTSTRAP_CREDENTIALS_FEATURE, MCP_BOOTSTRAP_RESULT_SHAPE_FEATURE],
     });
   })();
   const publishedIdentity = identity.then(
@@ -663,7 +666,7 @@ export async function startFabricDaemon(options: DaemonStartOptions): Promise<Fa
       actionId,
       socketPath: normalized.socketPath,
       requiredProtocolVersion: FABRIC_PROTOCOL_VERSION,
-      requiredFeatures: ["rpc", MCP_BOOTSTRAP_CREDENTIALS_FEATURE],
+      requiredFeatures: ["rpc", MCP_BOOTSTRAP_CREDENTIALS_FEATURE, MCP_BOOTSTRAP_RESULT_SHAPE_FEATURE],
       election,
       preflight: async () => {
         // This runs only when no compatible incumbent is attached: the
@@ -721,7 +724,7 @@ export async function startFabricDaemon(options: DaemonStartOptions): Promise<Fa
               daemonInstanceGeneration: provisional.daemonInstanceGeneration,
               socketPath: provisional.socketPath,
               protocolVersion: FABRIC_PROTOCOL_VERSION,
-              features: ["rpc", MCP_BOOTSTRAP_CREDENTIALS_FEATURE],
+              features: ["rpc", MCP_BOOTSTRAP_CREDENTIALS_FEATURE, MCP_BOOTSTRAP_RESULT_SHAPE_FEATURE],
               evidence: {
                 databaseOwned: true,
                 migrationsComplete: true,

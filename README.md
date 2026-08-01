@@ -142,11 +142,10 @@ From the product checkout,
 reclaims the harness-owned skill links and nothing else. The bootstrap line and
 the Codex block remain until removed by hand.
 
-Before first use, run `provenant project activate [PATH]`. Git PATH must be its
-exact repository root or a non-Git directory; activation verifies trust, never
-bootstraps seats. Use `fabric_bootstrap`; trust remains
-`provenant fabric workspace trust`. If bootstrap runs first,
-`WORKSPACE_NOT_TRUSTED` provides recovery.
+MCP bootstrap enrols only the exact nearest Git or marked non-Git root. Other
+paths fail closed with `WORKSPACE_NOT_TRUSTED`; collections name children,
+malformed evidence gets repair guidance, and linked-worktree exceptions require
+explicit user decisions. Run `provenant fabric workspace trust PATH` for trust.
 
 </details>
 

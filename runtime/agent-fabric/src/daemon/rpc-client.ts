@@ -393,6 +393,7 @@ export class FabricDaemonClient {
       typeof result.projectId !== "string" ||
       result.canonicalRoot !== input.canonicalRoot ||
       typeof result.bootstrapRunDirectory !== "string" ||
+      typeof result.custodyMutated !== "boolean" ||
       typeof result.generation !== "string" ||
       !Array.isArray(result.credentials) ||
       !result.credentials.every((credential) =>
@@ -416,7 +417,7 @@ export class FabricDaemonClient {
           )
         )
       ))
-    ) throw new Error("daemon returned an invalid MCP bootstrap result");
+    ) throw new FabricRemoteError("DAEMON_PROTOCOL_INVALID", "daemon returned an invalid MCP bootstrap result");
     return result as BootstrapMcpSeatResult;
   }
 

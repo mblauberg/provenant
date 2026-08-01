@@ -157,6 +157,7 @@ describe("zero-touch lifecycle action receipt", () => {
     expect(installed.receipt.actions.map(({ action: name }) => name)).toEqual([
       "workspace-trust",
       "daemon",
+      "custody",
       "seat-generation",
       "identity-smoke",
     ]);
@@ -166,6 +167,13 @@ describe("zero-touch lifecycle action receipt", () => {
       trustRecordDigest: expect.stringMatching(/^sha256:[0-9a-f]{64}$/u),
     });
     expect(action(installed.receipt, "daemon")).toMatchObject({ outcome: "started", mutated: true });
+    expect(action(installed.receipt, "custody")).toMatchObject({
+      outcome: "committed",
+      mutated: true,
+      projectId: expect.any(String),
+      runId: expect.any(String),
+      generation: installed.generation,
+    });
     expect(action(installed.receipt, "seat-generation")).toMatchObject({
       outcome: "installed",
       mutated: true,
@@ -185,6 +193,66 @@ describe("zero-touch lifecycle action receipt", () => {
     expect(smoke.agentId).toBe(installed.credentials.find(({ seat }) => seat === "codex")?.agentId);
     expect(JSON.stringify(installed.receipt)).not.toMatch(/afc_|afb_/u);
   });
+
+  it("reconciles a committed real-daemon bootstrap whose first result is malformed", async () => {
+    const value = await fixture();
+    const previous = process.env.AGENT_FABRIC_TEST_BOOTSTRAP_MALFORMED_RESULT_COUNT;
+    process.env.AGENT_FABRIC_TEST_BOOTSTRAP_MALFORMED_RESULT_COUNT = "1";
+    try {
+      const installed = await bootstrap(value);
+
+      expect(installed.receipt).toMatchObject({ healthy: true });
+      expect(action(installed.receipt, "custody")).toMatchObject({
+        outcome: "reconciled",
+        mutated: false,
+        generation: installed.generation,
+      });
+      expect(action(installed.receipt, "seat-generation")).toMatchObject({
+        outcome: "installed",
+        mutated: true,
+        generation: installed.generation,
+      });
+      expect(custodyCounts(value.paths.databasePath)).toMatchObject({
+        projects: 1,
+        runs: 1,
+        agents: 1,
+        mcp_seat_generations: 1,
+        activeGenerations: 1,
+      });
+    } finally {
+      if (previous === undefined) delete process.env.AGENT_FABRIC_TEST_BOOTSTRAP_MALFORMED_RESULT_COUNT;
+      else process.env.AGENT_FABRIC_TEST_BOOTSTRAP_MALFORMED_RESULT_COUNT = previous;
+    }
+  }, 30_000);
+
+  it("keeps two malformed real-daemon responses terminally conservative", async () => {
+    const value = await fixture();
+    const previous = process.env.AGENT_FABRIC_TEST_BOOTSTRAP_MALFORMED_RESULT_COUNT;
+    process.env.AGENT_FABRIC_TEST_BOOTSTRAP_MALFORMED_RESULT_COUNT = "2";
+    try {
+      const failure = await bootstrap(value).then(() => undefined, (error: unknown) => error as Error & {
+        code?: string;
+        receipt?: { actions: LifecycleAction[] };
+      });
+      if (failure === undefined) throw new Error("expected custody ambiguity failure");
+
+      expect(failure).toMatchObject({
+        code: "CUSTODY_AMBIGUOUS",
+        receipt: { failure: { phase: "custody-ambiguous" } },
+      });
+      expect(failure.receipt?.actions.some(({ action: name }) => name === "custody")).toBe(false);
+      expect(custodyCounts(value.paths.databasePath)).toMatchObject({
+        projects: 1,
+        runs: 1,
+        agents: 1,
+        mcp_seat_generations: 1,
+        activeGenerations: 1,
+      });
+    } finally {
+      if (previous === undefined) delete process.env.AGENT_FABRIC_TEST_BOOTSTRAP_MALFORMED_RESULT_COUNT;
+      else process.env.AGENT_FABRIC_TEST_BOOTSTRAP_MALFORMED_RESULT_COUNT = previous;
+    }
+  }, 30_000);
 
   it("reports a bounded smoke failure without discarding the receipt", async () => {
     const value = await fixture();
@@ -261,12 +329,13 @@ describe("zero-touch lifecycle action receipt", () => {
     const markerPath = join(seatRoot, "legacy-bootstrap.json");
     const markerBefore = await readFile(markerPath, "utf8");
     const markerMtimeBefore = (await lstat(markerPath)).mtimeMs;
-    expect(marked.receipt.mutated).toBe(false);
-    expect(marked.receipt.actions.every(({ mutated }) => !mutated)).toBe(true);
+    expect(marked.receipt.mutated).toBe(true);
+    expect(marked.receipt.actions.filter(({ action: name }) => name !== "legacy-bootstrap-provenance")
+      .every(({ mutated }) => !mutated)).toBe(true);
     expect(action(marked.receipt, "legacy-bootstrap-provenance")).toEqual({
       action: "legacy-bootstrap-provenance",
       outcome: "recorded",
-      mutated: false,
+      mutated: true,
       generation: first.generation,
     });
 

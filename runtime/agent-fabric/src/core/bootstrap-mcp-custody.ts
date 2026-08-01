@@ -306,6 +306,7 @@ export function bootstrapCurrentMcpSeat(custody: BootstrapMcpCustody, input: Boo
             projectId,
             canonicalRoot,
             bootstrapRunDirectory,
+            custodyMutated: false,
           };
         }
       }
@@ -470,6 +471,7 @@ export function bootstrapCurrentMcpSeat(custody: BootstrapMcpCustody, input: Boo
         projectId,
         canonicalRoot,
         bootstrapRunDirectory,
+        custodyMutated: true,
         ...(droppedSeats.length === 0 ? {} : { droppedSeats }),
       };
     }).immediate();

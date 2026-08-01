@@ -1,4 +1,7 @@
-import { MCP_BOOTSTRAP_CREDENTIALS_FEATURE } from "@local/agent-fabric-protocol";
+import {
+  MCP_BOOTSTRAP_CREDENTIALS_FEATURE,
+  MCP_BOOTSTRAP_RESULT_SHAPE_FEATURE,
+} from "@local/agent-fabric-protocol";
 
 import { isRecord } from "../domain/record.js";
 import { EXECUTABLE_RESOLUTION_VERSION } from "../domain/versions.js";
@@ -28,7 +31,7 @@ export function daemonInitializeResult(activeAdapters: string[]): DaemonInitiali
   return {
     protocolVersion: FABRIC_PROTOCOL_VERSION,
     daemonVersion: FABRIC_DAEMON_VERSION,
-    capabilities: ["rpc", MCP_BOOTSTRAP_CREDENTIALS_FEATURE],
+    capabilities: ["rpc", MCP_BOOTSTRAP_CREDENTIALS_FEATURE, MCP_BOOTSTRAP_RESULT_SHAPE_FEATURE],
     limits: FABRIC_PROTOCOL_LIMITS,
     activeAdapters: [...new Set(activeAdapters)].sort(),
     executableResolutionVersion: EXECUTABLE_RESOLUTION_VERSION,

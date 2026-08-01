@@ -5,6 +5,7 @@ import Database from "better-sqlite3";
 import {
   FABRIC_OPERATIONS,
   MCP_BOOTSTRAP_CREDENTIALS_FEATURE,
+  MCP_BOOTSTRAP_RESULT_SHAPE_FEATURE,
   NdjsonRpcTransport,
 } from "@local/agent-fabric-protocol";
 
@@ -19,7 +20,15 @@ import {
 } from "../core/migrations.js";
 import { defaultDaemonStartOptions } from "./default-daemon-options.js";
 import type { FabricPaths } from "./paths.js";
-import { resolveProjectBoundary, type ProjectBoundary } from "./project-boundary.js";
+import { projectBoundaryEvidenceDigest, resolveProjectBoundary, type ProjectBoundary } from "./project-boundary.js";
+import {
+  attachLifecycleReceipt,
+  currentLedgerGeneration,
+  lifecycleFailureReceipt,
+  type LifecycleAction,
+  type LifecycleActionReceipt,
+} from "../lifecycle/lifecycle-receipt.js";
+export type { LifecycleAction, LifecycleActionReceipt } from "../lifecycle/lifecycle-receipt.js";
 import { fabricCliCommand } from "../domain/fabric-roots.js";
 import {
   installSeatGeneration,
@@ -31,7 +40,9 @@ import {
   type SeatMetadata,
 } from "./seat-store.js";
 import {
+  ensureAutomaticBootstrapTrust,
   trustedWorkspaceIdentity,
+  workspaceTrustFailureContext,
 } from "./workspace-trust.js";
 
 /**
@@ -52,70 +63,6 @@ import {
  * bound is left to the daemon answering.
  */
 export const IDENTITY_SMOKE_DEADLINE_MS = 2_000;
-
-export type LifecycleAction =
-  | Readonly<{
-    action: "workspace-trust";
-    outcome: "resolved";
-    mutated: false;
-    trustRecordDigest: string;
-  }>
-  | Readonly<{
-    action: "daemon";
-    outcome: "attached" | "started";
-    mutated: boolean;
-    pid: number;
-    socketPath: string;
-  }>
-  | Readonly<{
-    action: "seat-generation";
-    outcome: "installed" | "replayed";
-    mutated: boolean;
-    generation: string;
-    previousGeneration: string | null;
-  }>
-  | Readonly<{
-    action: "legacy-bootstrap-provenance";
-    outcome: "recorded";
-    mutated: false;
-    generation: string;
-  }>
-  | Readonly<{
-    action: "identity-smoke";
-    outcome: "passed" | "failed";
-    mutated: false;
-    deadlineMs: number;
-    elapsedMs: number;
-    agentId: string | null;
-    mailboxWatermark: number | null;
-    code: string | null;
-  }>;
-
-/**
- * One concise machine-readable record of every automatic action this lifecycle
- * call took.
- *
- * `mutated` is the idempotency assertion surface, and it means exactly one
- * thing: no logical custody state changed. That is the daemon process
- * identity, the active seat generation and its installed roster, and the
- * database rows behind them. A converged repeat invocation reports `false`.
- *
- * It is deliberately not a claim that no bytes were written. A replay still
- * stages the roster through a private temporary tree and re-verifies the
- * installed files before discarding it, which touches directory metadata.
- * Callers reasoning about disk effects must observe the filesystem; callers
- * reasoning about whether a seat rotated or a daemon restarted read this.
- */
-export type LifecycleActionReceipt = Readonly<{
-  schemaVersion: 1;
-  kind: "agent-fabric-lifecycle-action";
-  canonicalRoot: string;
-  seat: "claude" | "codex";
-  generation: string;
-  mutated: boolean;
-  healthy: boolean;
-  actions: readonly LifecycleAction[];
-}>;
 
 /**
  * Material state displacement is one user decision, never an automatic action.
@@ -159,7 +106,7 @@ export type BootstrapMcpSeatIdentity = {
 
 export class McpBootstrapError extends Error {
   constructor(
-    readonly code: "WORKSPACE_NOT_TRUSTED" | "BOOTSTRAP_GENERATION_CHANGED",
+    readonly code: "WORKSPACE_NOT_TRUSTED" | "BOOTSTRAP_GENERATION_CHANGED" | "CUSTODY_AMBIGUOUS" | "POST_CUSTODY_BOUNDARY",
     message: string,
     options?: ErrorOptions,
   ) {
@@ -184,6 +131,58 @@ export class McpBootstrapSchemaCutoverGateError extends Error {
 
 function shellQuote(value: string): string {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function isAmbiguousBootstrapResponse(error: unknown): boolean {
+  if (typeof error !== "object" || error === null || !("code" in error) || typeof error.code !== "string") return false;
+  return ["DAEMON_DISCONNECTED", "DAEMON_REQUEST_TIMEOUT", "DAEMON_PROTOCOL_INVALID", "DAEMON_CONNECT_TIMEOUT"].includes(error.code);
+}
+
+function workspaceTrustAction(
+  trust: Awaited<ReturnType<typeof ensureAutomaticBootstrapTrust>>,
+): Extract<LifecycleAction, { action: "workspace-trust" }> {
+  const entry = trust.identity.entry;
+  return {
+    action: "workspace-trust",
+    outcome: trust.mutated ? "enrolled" : trust.alreadyTrusted
+      ? (entry.establishmentKind === "automatic-bootstrap" ? "already-trusted" : "resolved")
+      : "resolved",
+    mutated: trust.mutated,
+    alreadyTrusted: trust.alreadyTrusted,
+    trustRetained: true,
+    trustRecordDigest: trust.identity.trustRecordDigest,
+    establishmentKind: entry.establishmentKind ?? "local-operator",
+    boundaryKind: trust.boundaryKind,
+    boundaryEvidenceDigest: trust.boundaryEvidenceDigest,
+    requestAttemptId: trust.requestAttemptId,
+    bootstrapAttemptId: trust.bootstrapAttemptId,
+  };
+}
+
+function failedWorkspaceTrustAction(
+  boundary: ProjectBoundary,
+  requestAttemptId: string,
+  boundaryEvidenceDigest: `sha256:${string}` = projectBoundaryEvidenceDigest(boundary),
+): Extract<LifecycleAction, { action: "workspace-trust" }> {
+  return {
+    action: "workspace-trust",
+    outcome: "failed",
+    mutated: false,
+    alreadyTrusted: false,
+    trustRetained: false,
+    trustRecordDigest: null,
+    establishmentKind: null,
+    boundaryKind: boundary.evidence.kind === "git" || boundary.evidence.kind === "project-marker"
+      ? boundary.evidence.kind
+      : null,
+    boundaryEvidenceDigest,
+    requestAttemptId,
+    bootstrapAttemptId: null,
+  };
 }
 
 async function workspaceTrustRecoveryMessage(
@@ -368,7 +367,7 @@ export async function inspectBootstrapMcpSeat(input: {
       `${fabricCliCommand({ environment: input.environment })} mcp peer-provision --project ${shellQuote(input.cwd)} --seat ${seat} instead`,
     );
   }
-  const canonicalRoot = (await resolveProjectBoundary(input.cwd)).requestedDirectory;
+  const canonicalRoot = (await resolveProjectBoundary(input.cwd)).selectedProjectRoot;
   const database = new Database(input.paths.databasePath, { readonly: true, fileMustExist: true });
   try {
     const value = database.prepare(`
@@ -424,6 +423,7 @@ export async function bootstrapMcpSeat(input: {
   paths: FabricPaths;
   now?: Date;
   smokeDeadlineMs?: number;
+  testOnly?: { beforeRegistryRename?: () => Promise<void> };
 }): Promise<InstalledBootstrapMcpSeat> {
   const seat = parseMcpSeat(input.environment.AGENT_FABRIC_SEAT ?? "");
   if (seat !== "claude" && seat !== "codex") {
@@ -432,24 +432,49 @@ export async function bootstrapMcpSeat(input: {
       `${fabricCliCommand({ environment: input.environment })} mcp peer-provision --project ${shellQuote(input.cwd)} --seat ${seat} instead`,
     );
   }
-  const boundary = await resolveProjectBoundary(input.cwd);
-  const canonicalRoot = boundary.requestedDirectory;
-  let identity: Awaited<ReturnType<typeof trustedWorkspaceIdentity>>;
+  let canonicalRoot = input.cwd;
+  const bootstrapAttemptId = randomUUID();
+  let trust: Awaited<ReturnType<typeof ensureAutomaticBootstrapTrust>>;
   try {
-    identity = await trustedWorkspaceIdentity({
+    trust = await ensureAutomaticBootstrapTrust({
       stateDirectory: input.paths.stateDirectory,
-      canonicalRoot,
+      bootstrapAttemptId,
+      cwd: input.cwd,
+      ...(input.now === undefined ? {} : { now: input.now }),
+      ...(input.testOnly === undefined ? {} : { testOnly: input.testOnly }),
     });
   } catch (cause: unknown) {
-    const message = await workspaceTrustRecoveryMessage(boundary, input.environment).catch(
-      () => `Fabric bootstrap cannot safely determine the trust boundary for ${shellQuote(canonicalRoot)}, so no trust command is suggested. Inspect the workspace and retry from the exact repository root or current non-Git project directory`,
-    );
-    throw new McpBootstrapError(
+    const failedContext = workspaceTrustFailureContext(cause);
+    const failureBoundary = failedContext?.boundary;
+    if (failureBoundary !== undefined) canonicalRoot = failureBoundary.selectedProjectRoot;
+    const message = cause instanceof Error
+      ? cause.message
+      : failureBoundary === undefined
+        ? `Fabric bootstrap cannot safely determine the trust boundary for ${shellQuote(canonicalRoot)}, so no trust command is suggested. Inspect the workspace and retry from the exact repository root or current non-Git project directory`
+        : await workspaceTrustRecoveryMessage(failureBoundary, input.environment).catch(
+          () => `Fabric bootstrap cannot safely determine the trust boundary for ${shellQuote(canonicalRoot)}, so no trust command is suggested. Inspect the workspace and retry from the exact repository root or current non-Git project directory`,
+        );
+    const error = new McpBootstrapError(
       "WORKSPACE_NOT_TRUSTED",
       message,
       { cause },
     );
+    throw attachLifecycleReceipt(error, lifecycleFailureReceipt({
+      canonicalRoot,
+      seat,
+      generation: "",
+      actions: failureBoundary === undefined ? [] : [failedWorkspaceTrustAction(
+        failureBoundary,
+        bootstrapAttemptId,
+        failedContext?.boundaryEvidenceDigest,
+      )],
+      phase: "workspace-trust",
+      cause,
+    }));
   }
+  const identity = trust.identity;
+  canonicalRoot = identity.canonicalRoot;
+  const trustAction = workspaceTrustAction(trust);
   // Read before the daemon can rotate anything: comparing this pointer with the
   // generation the daemon replays is what distinguishes an installed roster
   // from a replayed one without inferring it from timing or file mtimes.
@@ -457,34 +482,116 @@ export async function bootstrapMcpSeat(input: {
     stateDirectory: input.paths.stateDirectory,
     projectPath: identity.canonicalRoot,
   }).catch(() => null);
+  const phaseLedger: LifecycleAction[] = [trustAction];
   let daemonHandle: Awaited<ReturnType<typeof startFabricDaemon>>;
   try {
     daemonHandle = await startFabricDaemon(
       defaultDaemonStartOptions(input.paths, {
         environment: input.environment,
-        projectRoot: boundary.selectedProjectRoot,
+        projectRoot: identity.canonicalRoot,
       }),
     );
   } catch (cause: unknown) {
-    if (!isSchemaCutoverRefusal(cause)) throw cause;
-    throw new McpBootstrapSchemaCutoverGateError(
-      schemaCutoverGate(input.paths.databasePath, cause, input.environment),
-      { cause },
-    );
+    const actions = [trustAction];
+    if (isSchemaCutoverRefusal(cause)) {
+      const error = new McpBootstrapSchemaCutoverGateError(
+        schemaCutoverGate(input.paths.databasePath, cause, input.environment),
+        { cause },
+      );
+      throw attachLifecycleReceipt(error, lifecycleFailureReceipt({
+        canonicalRoot,
+        seat,
+        generation: currentLedgerGeneration(actions, generationBefore?.generation ?? ""),
+        actions,
+        phase: "daemon-start",
+        cause,
+      }));
+    }
+    const error = cause instanceof Error ? cause : new Error(errorMessage(cause));
+    throw attachLifecycleReceipt(error, lifecycleFailureReceipt({
+      canonicalRoot,
+      seat,
+      generation: currentLedgerGeneration(actions, generationBefore?.generation ?? ""),
+      actions,
+      phase: "daemon-start",
+      cause,
+    }));
   }
+  phaseLedger.push({
+    action: "daemon",
+    outcome: daemonHandle.ownsProcess ? "started" : "attached",
+    mutated: daemonHandle.ownsProcess,
+    pid: daemonHandle.pid,
+    socketPath: daemonHandle.address.path,
+  });
   let daemon: Awaited<ReturnType<typeof connectFabricDaemon>> | undefined;
+  let fabricCustodyReferenced = false;
   try {
     daemon = await connectFabricDaemon({
       socketPath: daemonHandle.address.path,
       capability: daemonHandle.bootstrapCapability,
-      requiredCapabilities: [MCP_BOOTSTRAP_CREDENTIALS_FEATURE],
+      requiredCapabilities: [MCP_BOOTSTRAP_CREDENTIALS_FEATURE, MCP_BOOTSTRAP_RESULT_SHAPE_FEATURE],
     });
-    const result = await daemon.bootstrapMcpSeat({
+    const bootstrapRequest = Object.freeze({
       canonicalRoot: identity.canonicalRoot,
       trustRecordDigest: identity.trustRecordDigest,
       seat,
       expiresAt: new Date((input.now ?? new Date()).getTime() + 24 * 60 * 60 * 1_000).toISOString(),
     });
+    let reconciled = false;
+    let result: BootstrapMcpSeatResult;
+    try {
+      result = await daemon.bootstrapMcpSeat(bootstrapRequest);
+    } catch (cause: unknown) {
+      if (!isAmbiguousBootstrapResponse(cause)) throw cause;
+      await daemon.close().catch(() => undefined);
+      try {
+        daemon = await connectFabricDaemon({
+          socketPath: daemonHandle.address.path,
+          capability: daemonHandle.bootstrapCapability,
+          requiredCapabilities: [MCP_BOOTSTRAP_CREDENTIALS_FEATURE, MCP_BOOTSTRAP_RESULT_SHAPE_FEATURE],
+        });
+        result = await daemon.bootstrapMcpSeat(bootstrapRequest);
+        reconciled = true;
+      } catch (replayCause: unknown) {
+        throw new McpBootstrapError(
+          "CUSTODY_AMBIGUOUS",
+          "custody-ambiguous: Fabric could not observe either immutable bootstrap response; trust is retained and custody ownership is unknown",
+          { cause: replayCause },
+        );
+      }
+    }
+    fabricCustodyReferenced = true;
+    phaseLedger.push({
+      action: "custody",
+      outcome: reconciled ? "reconciled" : result.custodyMutated ? "committed" : "replayed",
+      mutated: reconciled ? false : result.custodyMutated,
+      projectId: result.projectId,
+      runId: result.runId,
+      generation: result.generation,
+    });
+    let postCustodyIdentity: Awaited<ReturnType<typeof trustedWorkspaceIdentity>>;
+    try {
+      postCustodyIdentity = await trustedWorkspaceIdentity({
+        stateDirectory: input.paths.stateDirectory,
+        canonicalRoot: identity.canonicalRoot,
+      });
+    } catch (cause: unknown) {
+      throw new McpBootstrapError(
+        "POST_CUSTODY_BOUNDARY",
+        "post-custody-boundary: the exact workspace trust binding changed after custody; custody is retained and no new credentials were published",
+        { cause },
+      );
+    }
+    if (
+      postCustodyIdentity.canonicalRoot !== identity.canonicalRoot ||
+      postCustodyIdentity.trustRecordDigest !== identity.trustRecordDigest
+    ) {
+      throw new McpBootstrapError(
+        "POST_CUSTODY_BOUNDARY",
+        "post-custody-boundary: the exact workspace trust binding changed after custody; custody is retained and no new credentials were published",
+      );
+    }
     const chairSeat = result.credentials.find(({ agentId }) => agentId === result.chairAgentId)?.seat;
     if (chairSeat === undefined) throw new Error("daemon bootstrap result did not bind the current chair");
     const seatProject = await resolveSeatProject({
@@ -572,6 +679,14 @@ export async function bootstrapMcpSeat(input: {
         throw generationChangedError(cause);
       }
     }
+    const replayed = generationBefore?.generation === result.generation;
+    phaseLedger.push({
+      action: "seat-generation",
+      outcome: replayed ? "replayed" : "installed",
+      mutated: !replayed,
+      generation: result.generation,
+      previousGeneration: result.expectedPreviousGeneration,
+    });
     const selected = installed.find((candidate) => candidate.seat === seat);
     const selectedCredential = result.credentials.find((candidate) => candidate.seat === seat)?.capability;
     if (selected === undefined || selectedCredential === undefined) throw new Error("bootstrap did not install the caller seat");
@@ -580,38 +695,15 @@ export async function bootstrapMcpSeat(input: {
       credential: selectedCredential,
       deadlineMs: input.smokeDeadlineMs ?? IDENTITY_SMOKE_DEADLINE_MS,
     });
-    const replayed = generationBefore?.generation === result.generation;
-    const actions: LifecycleAction[] = [
-      {
-        action: "workspace-trust",
-        outcome: "resolved",
-        mutated: false,
-        trustRecordDigest: identity.trustRecordDigest,
-      },
-      {
-        action: "daemon",
-        outcome: daemonHandle.ownsProcess ? "started" : "attached",
-        mutated: daemonHandle.ownsProcess,
-        pid: daemonHandle.pid,
-        socketPath: daemonHandle.address.path,
-      },
-      {
-        action: "seat-generation",
-        outcome: replayed ? "replayed" : "installed",
-        mutated: !replayed,
+    if (legacyBootstrapProvenanceRecorded) {
+      phaseLedger.push({
+        action: "legacy-bootstrap-provenance",
+        outcome: "recorded",
+        mutated: true,
         generation: result.generation,
-        previousGeneration: result.expectedPreviousGeneration,
-      },
-      ...(legacyBootstrapProvenanceRecorded
-        ? [{
-          action: "legacy-bootstrap-provenance" as const,
-          outcome: "recorded" as const,
-          mutated: false as const,
-          generation: result.generation,
-        }]
-        : []),
-      smoke,
-    ];
+      });
+    }
+    const actions: LifecycleAction[] = [...phaseLedger, smoke];
     return {
       ...result,
       credential: selectedCredential,
@@ -626,6 +718,21 @@ export async function bootstrapMcpSeat(input: {
         actions,
       },
     };
+  } catch (cause: unknown) {
+    const error = cause instanceof Error ? cause : new Error(errorMessage(cause));
+    const actions = [...phaseLedger];
+    throw attachLifecycleReceipt(error, lifecycleFailureReceipt({
+      canonicalRoot,
+      seat,
+      generation: currentLedgerGeneration(actions, generationBefore?.generation ?? ""),
+      actions,
+      phase: cause instanceof McpBootstrapError && cause.code === "CUSTODY_AMBIGUOUS"
+        ? "custody-ambiguous"
+        : cause instanceof McpBootstrapError && cause.code === "POST_CUSTODY_BOUNDARY"
+          ? "post-custody-boundary"
+        : fabricCustodyReferenced ? "post-custody" : "daemon-bootstrap",
+      cause,
+    }));
   } finally {
     try {
       await daemon?.close();

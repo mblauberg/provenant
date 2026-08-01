@@ -29,6 +29,8 @@ export const RUN_SCOPED_PROJECTION_FEATURE = "run-scoped-projection.v1" as const
 export const RUN_LIFECYCLE_FACTS_FEATURE = "run-lifecycle-facts.v1" as const;
 export const MCP_BOOTSTRAP_CREDENTIALS_FEATURE =
   "mcp-bootstrap-credentials.v2" as const;
+export const MCP_BOOTSTRAP_RESULT_SHAPE_FEATURE =
+  "mcp-bootstrap-result-shape.v1" as const;
 
 export class ProtocolResultShapeFeatureError extends TypeError {
   readonly code = "PROTOCOL_INCOMPATIBLE" as const;

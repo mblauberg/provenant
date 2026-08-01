@@ -261,6 +261,12 @@ chmodSync(runtimeDirectory, 0o700);
 const cutoverRaceFixture = process.env.NODE_ENV === "test"
   ? process.env.AGENT_FABRIC_TEST_CUTOVER_RACE_FIXTURE_PATH
   : undefined;
+let malformedBootstrapResultRemaining = process.env.NODE_ENV === "test"
+  ? Number(process.env.AGENT_FABRIC_TEST_BOOTSTRAP_MALFORMED_RESULT_COUNT ?? "0")
+  : 0;
+if (!Number.isSafeInteger(malformedBootstrapResultRemaining) || malformedBootstrapResultRemaining < 0) {
+  malformedBootstrapResultRemaining = 0;
+}
 if (cutoverRaceFixture !== undefined) {
   copyFileSync(cutoverRaceFixture, databasePath, fsConstants.COPYFILE_EXCL);
 }
@@ -446,10 +452,17 @@ const servePrivateControlConnection = (socket: Socket): void => {
         case "bootstrapMcpSeat": {
           const bootstrapInput = bootstrapMcpSeatInput(request.params, productRoot);
           const trustedInput = await withTrustedLocalSubject(bootstrapInput);
-          return fabric.bootstrapTrustedCurrentMcpSeat(bootstrapInput, {
+          const result = fabric.bootstrapTrustedCurrentMcpSeat(bootstrapInput, {
             canonicalRoot: trustedInput.canonicalRoot,
             trustRecordDigest: trustedInput.trustRecordDigest,
           });
+          if (malformedBootstrapResultRemaining > 0) {
+            malformedBootstrapResultRemaining -= 1;
+            const malformed = { ...result } as Record<string, unknown>;
+            delete malformed.custodyMutated;
+            return malformed;
+          }
+          return result;
         }
         case "provisionLocalOperator":
           return fabric.provisionLocalOperator(await withTrustedLocalSubject(

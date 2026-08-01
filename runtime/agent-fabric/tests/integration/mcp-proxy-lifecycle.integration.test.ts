@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { mkdtemp, mkdir, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm } from "node:fs/promises";
 import { createConnection, createServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -23,6 +23,7 @@ import {
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { describe, expect, it, vi } from "vitest";
 
 import { startFabricDaemon } from "../../src/index.ts";
@@ -635,6 +636,210 @@ describe("MCP proxy lifecycle", () => {
     } finally {
       await Promise.allSettled([client.close(), handle.close()]);
     }
+  });
+
+  it("relays a validated secret-free lifecycle receipt on bootstrap failure", async () => {
+    const handle = createUnprovisionedMcpServer({
+      bootstrap: async () => {
+        const error = Object.assign(new Error("workspace refusal"), {
+          code: "WORKSPACE_NOT_TRUSTED",
+          receipt: {
+            schemaVersion: 1,
+            kind: "agent-fabric-lifecycle-action",
+            canonicalRoot: "/tmp/project",
+            seat: "codex",
+            generation: "",
+            mutated: false,
+            healthy: false,
+            actions: [],
+            failure: { phase: "workspace-trust", message: "workspace refusal", code: "WORKSPACE_NOT_TRUSTED" },
+            capability: "afc_secret-must-not-cross-mcp",
+          },
+        });
+        throw error;
+      },
+    });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "receipt-failure", version: "0.1.0" });
+    try {
+      await Promise.all([handle.server.connect(serverTransport), client.connect(clientTransport)]);
+      const result = await callTool(client, "fabric_bootstrap", {});
+      expect(result).toEqual({
+        isError: true,
+        structured: {
+          code: "WORKSPACE_NOT_TRUSTED",
+          message: "workspace refusal",
+          receipt: {
+            schemaVersion: 1,
+            kind: "agent-fabric-lifecycle-action",
+            canonicalRoot: "/tmp/project",
+            seat: "codex",
+            generation: "",
+            mutated: false,
+            healthy: false,
+            actions: [],
+            failure: { phase: "workspace-trust", message: "workspace refusal", code: "WORKSPACE_NOT_TRUSTED" },
+          },
+        },
+        text: expect.stringContaining("workspace refusal"),
+      });
+      expect(result.text).not.toContain("afc_secret-must-not-cross-mcp");
+    } finally {
+      await Promise.allSettled([client.close(), handle.close()]);
+    }
+  });
+
+  it.each([
+    "daemon-start",
+    "post-custody",
+  ] as const)("relays a validated %s lifecycle failure receipt", async (phase) => {
+    const workspaceAction = {
+      action: "workspace-trust" as const,
+      outcome: "enrolled" as const,
+      mutated: true,
+      alreadyTrusted: false,
+      trustRetained: true,
+      trustRecordDigest: `sha256:${"a".repeat(64)}`,
+      establishmentKind: "automatic-bootstrap" as const,
+      boundaryKind: "git" as const,
+      boundaryEvidenceDigest: `sha256:${"b".repeat(64)}`,
+      requestAttemptId: "request-1",
+      bootstrapAttemptId: "grant-1",
+    };
+    const receipt = {
+      schemaVersion: 1 as const,
+      kind: "agent-fabric-lifecycle-action" as const,
+      canonicalRoot: "/tmp/project",
+      seat: "codex" as const,
+      generation: phase === "post-custody" ? "generation-1" : "",
+      mutated: true,
+      healthy: false,
+      actions: [
+        workspaceAction,
+        ...(phase === "daemon-start" ? [{
+          action: "daemon" as const,
+          outcome: "started" as const,
+          mutated: true,
+          pid: 42,
+          socketPath: "/tmp/fabric.sock",
+        }] : []),
+        ...(phase === "post-custody" ? [{
+          action: "custody" as const,
+          outcome: "committed" as const,
+          mutated: true,
+          projectId: "project-1",
+          runId: "run-1",
+          generation: "generation-1",
+        }] : []),
+      ],
+      failure: { phase, message: `${phase} failure`, code: "BOOTSTRAP_FAILED" },
+    };
+    const handle = createUnprovisionedMcpServer({
+      bootstrap: async () => {
+        throw Object.assign(new Error(`${phase} failure`), {
+          code: "BOOTSTRAP_FAILED",
+          receipt,
+        });
+      },
+    });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: `receipt-${phase}`, version: "0.1.0" });
+    try {
+      await Promise.all([handle.server.connect(serverTransport), client.connect(clientTransport)]);
+      const result = await callTool(client, "fabric_bootstrap", {});
+      expect(result).toMatchObject({
+        isError: true,
+        structured: { code: "BOOTSTRAP_FAILED", receipt: { failure: { phase } } },
+      });
+    } finally {
+      await Promise.allSettled([client.close(), handle.close()]);
+    }
+  });
+
+  it("attaches the latest successful bootstrap receipt when MCP configuration fails", async () => {
+    const receipt = {
+      schemaVersion: 1 as const,
+      kind: "agent-fabric-lifecycle-action" as const,
+      canonicalRoot: "/tmp/project",
+      seat: "codex" as const,
+      generation: "",
+      mutated: true,
+      healthy: true,
+      actions: [{
+        action: "workspace-trust" as const,
+        outcome: "enrolled" as const,
+        mutated: true,
+        alreadyTrusted: false,
+        trustRetained: true,
+        trustRecordDigest: `sha256:${"a".repeat(64)}`,
+        establishmentKind: "automatic-bootstrap" as const,
+        boundaryKind: "git" as const,
+        boundaryEvidenceDigest: `sha256:${"b".repeat(64)}`,
+        requestAttemptId: "request-1",
+        bootstrapAttemptId: "grant-1",
+      }],
+    };
+    const handle = createUnprovisionedMcpServer({
+      bootstrap: async () => ({
+        socketPath: join(tmpdir(), "fabric-receipt-configure-missing.sock"),
+        capability: `afc_${"a".repeat(43)}`,
+        lifecycleReceipt: receipt,
+      }),
+    });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "receipt-configure-failure", version: "0.1.0" });
+    try {
+      await Promise.all([handle.server.connect(serverTransport), client.connect(clientTransport)]);
+      const result = await callTool(client, "fabric_bootstrap", {});
+      expect(result).toMatchObject({
+        isError: true,
+        structured: { receipt: { canonicalRoot: "/tmp/project", actions: [{ action: "workspace-trust" }] } },
+      });
+    } finally {
+      await Promise.allSettled([client.close(), handle.close()]);
+    }
+  });
+
+  it("attaches the latest successful bootstrap receipt when tool-list notification fails", async () => {
+    const fixture = await createDaemonFixture("mcp-receipt-tool-list");
+    const receipt = {
+      schemaVersion: 1 as const,
+      kind: "agent-fabric-lifecycle-action" as const,
+      canonicalRoot: fixture.directory,
+      seat: "codex" as const,
+      generation: "",
+      mutated: false,
+      healthy: true,
+      actions: [],
+    };
+    const handle = createUnprovisionedMcpServer({
+      bootstrap: async () => ({
+        socketPath: fixture.socketPath,
+        capability: fixture.peerCapability,
+        lifecycleReceipt: receipt,
+      }),
+    });
+    const notification = vi.spyOn(Server.prototype, "sendToolListChanged")
+      .mockRejectedValueOnce(new Error("tool-list notification failed"));
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "receipt-tool-list-failure", version: "0.1.0" });
+    try {
+      await Promise.all([handle.server.connect(serverTransport), client.connect(clientTransport)]);
+      const result = await callTool(client, "fabric_bootstrap", {});
+      expect(result).toMatchObject({
+        isError: true,
+        structured: { receipt: { canonicalRoot: fixture.directory, healthy: true } },
+      });
+    } finally {
+      notification.mockRestore();
+      await Promise.allSettled([client.close(), handle.close(), fixture.cleanup()]);
+    }
+  });
+
+  it("keeps MCP receipt validation independent from CLI bootstrap orchestration", async () => {
+    const source = await readFile(new URL("../../src/mcp/server.ts", import.meta.url), "utf8");
+    expect(source).toContain("../lifecycle/lifecycle-receipt.js");
+    expect(source).not.toContain("../cli/mcp-bootstrap.js");
   });
 
   it("initializes with only exact-root bootstrap when the configured seat is not provisioned", async () => {

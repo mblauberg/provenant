@@ -429,12 +429,15 @@ narrowed authority and their own capability. Swapping Claude and Codex
 leadership requires typed handoff/takeover custody; it does not change the
 protocol or create a fallback chain.
 
-### First use in an exact trusted project
+### First use in an exact project
 
 An unprovisioned Claude or Codex global MCP exposes exactly one tool:
 `fabric_bootstrap`. Call it without arguments. The proxy derives its validated
-seat from `AGENT_FABRIC_SEAT` and the exact project root from its working
-directory. The daemon atomically creates one deterministic, narrow scoping run;
+seat from `AGENT_FABRIC_SEAT` and asks the shared boundary resolver for the
+exact project root. A first use automatically enrols only the nearest ordinary
+Git root or the current non-Git root with a valid
+`.provenant/agent-fabric.yaml` marker. The daemon atomically creates one
+deterministic, narrow scoping run;
 the same MCP connection then emits `tools/list_changed` and exposes the normal
 Fabric tools. A concurrent second primary joins that run as its peer and rotates
 the normal two-seat generation.
@@ -452,10 +455,11 @@ action it took, on both the CLI and the `fabric_bootstrap` tool result:
 
 | `action` | `outcome` | `mutated` |
 | --- | --- | --- |
-| `workspace-trust` | `resolved` | always `false`; resolution only reads the trust record |
+| `workspace-trust` | `enrolled`, `already-trusted`, `resolved` or `failed` | `true` only when automatic exact-root trust was added; explicit trust is never rewritten |
 | `daemon` | `started` or `attached` | `true` only when this call spawned the daemon |
+| `custody` | `committed`, `replayed` or `reconciled` | `true` only when Fabric committed custody rows or a new active custody generation; a replay reconciliation is `false` |
 | `seat-generation` | `installed` or `replayed` | `true` only when the active generation changed |
-| `legacy-bootstrap-provenance` | `recorded` | always `false`; emitted only when this call first records durable provenance for a legacy bootstrap generation |
+| `legacy-bootstrap-provenance` | `recorded` | `true` only when this call first records durable provenance for a legacy bootstrap generation |
 | `identity-smoke` | `passed` or `failed` | always `false`; `whoami` and `mailbox.read` only read |
 
 The receipt's top-level `mutated` is the idempotency surface, and it means one
@@ -523,6 +527,15 @@ For a zero-context bootstrap peer roundtrip:
 Bootstrap authority does not grant `task.claim`. For bootstrap-scoped work,
 the correlated response plus verified artifact digest is the completion
 evidence; do not widen authority or infer completion from pane text.
+
+Unmarked, ambiguous, linked-worktree, malformed, home and filesystem-root
+paths fail closed with `WORKSPACE_NOT_TRUSTED`. Collection refusals name valid
+child repositories and give exact child commands; malformed or linked children
+receive inspection and repair guidance only. Existing explicit workspace trust
+remains unchanged. A valid exact-root headless grant is retained after every
+downstream failure. A lost or ambiguous bootstrap response is replayed once;
+successful replay is `reconciled`, while two ambiguous responses report
+`custody-ambiguous` without claiming custody.
 
 Bootstrap seats are short-lived bearers over a bounded bootstrap authority
 that deliberately outlives them. When a bootstrap seat is expired or within

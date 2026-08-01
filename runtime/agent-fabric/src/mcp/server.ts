@@ -30,6 +30,11 @@ import {
   type ProtocolPrincipal,
   type ProtocolFeature,
 } from "@local/agent-fabric-protocol";
+import {
+  attachLifecycleReceipt,
+  validateLifecycleActionReceipt,
+  type LifecycleActionReceipt,
+} from "../lifecycle/lifecycle-receipt.js";
 
 export type FabricMcpServerOptions = {
   socketPath: string;
@@ -40,7 +45,7 @@ export type FabricMcpServerOptions = {
    * Machine-readable receipt for the automatic actions that produced this
    * activation. The proxy only relays it; it never interprets its contents.
    */
-  lifecycleReceipt?: Readonly<{ schemaVersion: 1; kind: string; mutated: boolean; healthy: boolean }>;
+  lifecycleReceipt?: LifecycleActionReceipt;
 };
 
 export type FabricMcpServerHandle = {
@@ -66,19 +71,28 @@ export function createUnprovisionedMcpServer(options?: {
     if (options === undefined || request.params.name !== "fabric_bootstrap") throw new Error(`unknown tool: ${request.params.name}`);
     const args = request.params.arguments ?? {};
     if (Object.keys(args).length !== 0) throw new TypeError("fabric_bootstrap accepts no arguments");
+    let latestLifecycleReceipt: LifecycleActionReceipt | undefined;
+    const bootstrap = async (): Promise<FabricMcpServerOptions> => {
+      const activated = await options.bootstrap();
+      if (activated.lifecycleReceipt === undefined) return activated;
+      const receipt = validateLifecycleActionReceipt(activated.lifecycleReceipt);
+      if (receipt === null) throw new Error("bootstrap returned an invalid lifecycle receipt");
+      latestLifecycleReceipt = receipt;
+      return { ...activated, lifecycleReceipt: receipt };
+    };
     try {
       let activated: FabricMcpServerOptions;
       try {
-        activated = await options.bootstrap();
+        activated = await bootstrap();
       } catch (error: unknown) {
         if (!isRecord(error) || error.code !== "BOOTSTRAP_GENERATION_CHANGED") throw error;
-        activated = await options.bootstrap();
+        activated = await bootstrap();
       }
       try {
         protocolClose = await configureFabricMcpServer(server, activated);
       } catch (error: unknown) {
         if (!(error instanceof ProtocolRemoteError) || error.code !== "AUTHENTICATION_FAILED") throw error;
-        activated = await options.bootstrap();
+        activated = await bootstrap();
         protocolClose = await configureFabricMcpServer(server, activated);
       }
       await server.sendToolListChanged();
@@ -86,12 +100,16 @@ export function createUnprovisionedMcpServer(options?: {
         content: [{ type: "text", text: "Agent Fabric bootstrap complete; normal Fabric tools are now active." }],
         structuredContent: {
           bootstrapped: true,
-          ...(activated.lifecycleReceipt === undefined ? {} : { receipt: activated.lifecycleReceipt }),
+          ...(latestLifecycleReceipt === undefined ? {} : { receipt: latestLifecycleReceipt }),
         },
       };
     } catch (error: unknown) {
-      const payload = errorPayload(error);
-      return { content: [{ type: "text", text: JSON.stringify(payload) }], isError: true };
+      const normalized = error instanceof Error ? error : new Error("Agent Fabric MCP bootstrap failed", { cause: error });
+      const withLatestReceipt = latestLifecycleReceipt === undefined
+        ? normalized
+        : attachLifecycleReceipt(normalized, latestLifecycleReceipt);
+      const payload = errorPayload(withLatestReceipt);
+      return { content: [{ type: "text", text: JSON.stringify(payload) }], structuredContent: payload, isError: true };
     }
   });
   server.setRequestHandler(ListResourcesRequestSchema, () => ({ resources: [] }));
@@ -114,7 +132,12 @@ const agentFeatures = Object.freeze([...new Set(
   ],
 )].sort()) as readonly ProtocolFeature[];
 
-type McpErrorPayload = { code: string; message: string; action?: string };
+type McpErrorPayload = {
+  code: string;
+  message: string;
+  action?: string;
+  receipt?: LifecycleActionReceipt;
+};
 
 class ReconnectRequiredError extends Error {
   readonly code = "RECONNECT_REQUIRED";
@@ -125,22 +148,25 @@ class ReconnectRequiredError extends Error {
 }
 
 export function errorPayload(error: unknown): McpErrorPayload {
-  if (error instanceof ProtocolRemoteError) return { code: error.code, message: error.message };
+  const receipt = isRecord(error) ? validateLifecycleActionReceipt(error.receipt) : null;
+  const withReceipt = (payload: Omit<McpErrorPayload, "receipt">): McpErrorPayload =>
+    receipt === null ? payload : { ...payload, receipt };
+  if (error instanceof ProtocolRemoteError) return withReceipt({ code: error.code, message: error.message });
   if (error instanceof ProtocolTransportError) {
-    return { code: error.code, message: "Agent Fabric protocol request failed" };
+    return withReceipt({ code: error.code, message: "Agent Fabric protocol request failed" });
   }
   if (error instanceof ProtocolResultShapeFeatureError) {
-    return { code: error.code, message: error.message };
+    return withReceipt({ code: error.code, message: error.message });
   }
-  if (error instanceof TypeError) return { code: "MCP_INPUT_INVALID", message: error.message };
+  if (error instanceof TypeError) return withReceipt({ code: "MCP_INPUT_INVALID", message: error.message });
   if (isRecord(error) && typeof error.code === "string" && typeof error.message === "string") {
-    return {
+    return withReceipt({
       code: error.code,
       message: error.message,
       ...(typeof error.action === "string" ? { action: error.action } : {}),
-    };
+    });
   }
-  return { code: "FABRIC_MCP_REQUEST_FAILED", message: "Agent Fabric MCP request failed" };
+  return withReceipt({ code: "FABRIC_MCP_REQUEST_FAILED", message: "Agent Fabric MCP request failed" });
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

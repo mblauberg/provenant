@@ -999,7 +999,7 @@ describe("production daemon bootstrap wiring", () => {
     ]);
     expect(discovery).toMatchObject({
       protocolVersion: 2,
-      features: ["rpc", "mcp-bootstrap-credentials.v2"],
+      features: ["rpc", "mcp-bootstrap-credentials.v2", "mcp-bootstrap-result-shape.v1"],
     });
     expect((await stat(join(runtimeDirectory, "fabric-v1.discovery.json"))).mode & 0o777).toBe(0o600);
     expect([

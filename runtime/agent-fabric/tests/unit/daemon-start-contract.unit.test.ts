@@ -5,6 +5,10 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import {
+  MCP_BOOTSTRAP_RESULT_SHAPE_FEATURE,
+} from "@local/agent-fabric-protocol";
+
 vi.mock("node:net", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:net")>();
   const { Duplex } = await import("node:stream");
@@ -139,7 +143,7 @@ describe("production daemon bootstrap contract", () => {
       status: "rejected",
       error: {
         code: "BOOTSTRAP_INCOMPATIBLE_INCUMBENT",
-        message: expect.stringContaining("daemon initialize response is incompatible"),
+        message: expect.stringContaining(MCP_BOOTSTRAP_RESULT_SHAPE_FEATURE),
       },
     });
   });
