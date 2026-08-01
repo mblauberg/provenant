@@ -1,4 +1,5 @@
-import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { statSync, utimesSync } from "node:fs";
+import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { tmpdir } from "node:os";
@@ -739,13 +740,21 @@ describe("production daemon bootstrap wiring", () => {
     `).run();
     seed.close();
     const before = await readFile(databasePath);
-    vi.stubEnv("AGENT_FABRIC_TEST_DATABASE_INSPECTION_RACE_PATH", await realpath(databasePath));
+    const inspectionHooks = {
+      beforeSourceRecheck(sourcePath: string): void {
+        const current = statSync(sourcePath);
+        const nextTimestamp = new Date(current.mtimeMs + 1_000);
+        // Explicitly reproduce the source identity race at the test seam.
+        utimesSync(sourcePath, nextTimestamp, nextTimestamp);
+      },
+    };
     await expect(startFabricDaemon({
       databasePath,
       stateDirectory,
       runtimeDirectory,
       socketPath: join(runtimeDirectory, "fabric.sock"),
       workspaceRoots: [root],
+      inspectionHooks,
     })).rejects.toMatchObject({
       code: "DATABASE_INSPECTION_UNSTABLE",
       preserved: false,

@@ -28,10 +28,9 @@ describe("daemon child environment", () => {
     expect(environment.AGENT_FABRIC_PRODUCT_ROOT).toBe("/fixture/product");
   });
 
-  it("forwards only the database inspection fixtures to a test child", () => {
+  it("forwards only the bounded test fixtures to a test child", () => {
     vi.stubEnv("NODE_ENV", "test");
     vi.stubEnv("AGENT_FABRIC_TEST_DATABASE_INSPECTION_ATTEMPTS", "1");
-    vi.stubEnv("AGENT_FABRIC_TEST_DATABASE_INSPECTION_RACE_PATH", "/fixture/state/fabric.sqlite3");
     vi.stubEnv("AGENT_FABRIC_TEST_ROSTER_CONVERGENCE_ATTEMPTS", "1");
     vi.stubEnv("AGENT_FABRIC_TEST_SECRET", "must-not-cross-daemon-boundary");
 
@@ -55,8 +54,8 @@ describe("daemon child environment", () => {
     expect(environment).toMatchObject({
       NODE_ENV: "test",
       AGENT_FABRIC_TEST_DATABASE_INSPECTION_ATTEMPTS: "1",
-      AGENT_FABRIC_TEST_DATABASE_INSPECTION_RACE_PATH: "/fixture/state/fabric.sqlite3",
     });
+    expect(environment).not.toHaveProperty("AGENT_FABRIC_TEST_DATABASE_INSPECTION_RACE_PATH");
     expect(environment).not.toHaveProperty("AGENT_FABRIC_TEST_ROSTER_CONVERGENCE_ATTEMPTS");
     expect(environment).not.toHaveProperty("AGENT_FABRIC_TEST_SECRET");
   });

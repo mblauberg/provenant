@@ -11,8 +11,6 @@ import {
   openSync,
   readFileSync,
   rmSync,
-  statSync,
-  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -306,6 +304,10 @@ export type StableSourceFile = Readonly<{
 
 export type StableSourceSet = ReadonlyMap<SqliteSourceSuffix, StableSourceFile>;
 
+export type DatabaseInspectionHooks = Readonly<{
+  beforeSourceRecheck?: (databasePath: string) => void;
+}>;
+
 function errno(error: unknown, code: string): boolean {
   return error instanceof Error && "code" in error && error.code === code;
 }
@@ -481,6 +483,7 @@ export function stableSourceSetSha256(sources: StableSourceSet): string {
 function createPrivateDatabaseClone(
   databasePath: string,
   presenceObserved = false,
+  hooks: DatabaseInspectionHooks = {},
 ): Readonly<{
   cloneDirectory: string;
   clonePath: string;
@@ -508,7 +511,7 @@ function createPrivateDatabaseClone(
         writeFileSync(`${clonePath}${suffix}`, sidecar.bytes, { flag: "wx", mode: 0o600 });
       }
     }
-    injectTestInspectionRace(databasePath);
+    hooks.beforeSourceRecheck?.(databasePath);
     assertSameSourceSet(sources, readStableSourceSet(databasePath, RECHECKED_SOURCE));
     return { cloneDirectory, clonePath, sources };
   } catch (error: unknown) {
@@ -527,18 +530,6 @@ function databaseInspectionAttempts(): number {
   return Number.isSafeInteger(configured) && configured > 0
     ? configured
     : DATABASE_INSPECTION_ATTEMPTS;
-}
-
-function injectTestInspectionRace(databasePath: string): void {
-  if (
-    process.env.NODE_ENV !== "test" ||
-    process.env.AGENT_FABRIC_TEST_DATABASE_INSPECTION_RACE_PATH !== databasePath
-  ) return;
-  const current = statSync(databasePath);
-  const nextTimestamp = new Date(current.mtimeMs + 1_000);
-  // Test-only metadata mutation makes the source recheck fail without a
-  // competing writer process or an elapsed-time race.
-  utimesSync(databasePath, nextTimestamp, nextTimestamp);
 }
 
 /**
@@ -865,7 +856,10 @@ export function inspectRetainedWork(databasePath: string): RetainedWorkCensus {
   return retryUnstableDatabaseInspection(() => inspectRetainedWorkOnce(databasePath));
 }
 
-function inspectFabricDatabaseOnce(databasePath: string): FabricDatabaseInspection {
+function inspectFabricDatabaseOnce(
+  databasePath: string,
+  hooks: DatabaseInspectionHooks,
+): FabricDatabaseInspection {
   let before;
   try {
     before = lstatSync(databasePath);
@@ -881,7 +875,7 @@ function inspectFabricDatabaseOnce(databasePath: string): FabricDatabaseInspecti
   let database: Database.Database | undefined;
   let clone: ReturnType<typeof createPrivateDatabaseClone> | undefined;
   try {
-    clone = createPrivateDatabaseClone(databasePath, true);
+    clone = createPrivateDatabaseClone(databasePath, true, hooks);
     // SQLite may recover/checkpoint its private WAL or journal and may create a
     // private SHM file. It has no writable relationship with the source path.
     database = new BetterSqlite3(clone.clonePath);
@@ -931,6 +925,9 @@ function inspectFabricDatabaseOnce(databasePath: string): FabricDatabaseInspecti
 }
 
 /** Read-only cutover gate used before any daemon/runtime mutation. */
-export function inspectFabricDatabase(databasePath: string): FabricDatabaseInspection {
-  return retryUnstableDatabaseInspection(() => inspectFabricDatabaseOnce(databasePath));
+export function inspectFabricDatabase(
+  databasePath: string,
+  hooks: DatabaseInspectionHooks = {},
+): FabricDatabaseInspection {
+  return retryUnstableDatabaseInspection(() => inspectFabricDatabaseOnce(databasePath, hooks));
 }

@@ -93,7 +93,6 @@ export function childEnvironment(
     "AGENT_FABRIC_TEST_IDLE_STOP_ATTEMPT_SOCKET_PATH",
     "AGENT_FABRIC_TEST_BOOTSTRAP_SOCKET_BARRIER_PATH",
     "AGENT_FABRIC_TEST_DATABASE_INSPECTION_ATTEMPTS",
-    "AGENT_FABRIC_TEST_DATABASE_INSPECTION_RACE_PATH",
   ] as const;
   if (process.env.NODE_ENV === "test") {
     const testFixtures = testFixtureKeys.flatMap((key) => {
