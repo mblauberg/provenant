@@ -24,26 +24,38 @@ import tempfile
 import time
 from pathlib import Path
 
+try:
+    from .change_gate_reports import (
+        FailureClass,
+        classify_structured_report,
+        parse_junit_report,
+        parse_vitest_report,
+    )
+    from .change_gate_runner import (
+        CommandResult,
+        Runner,
+        classify_failure as _structured_classify_failure,
+        runner_for_command as _structured_runner_for_command,
+        run_command as _structured_run_command,
+    )
+except ImportError:  # pragma: no cover - direct script execution fallback
+    from change_gate_reports import (
+        FailureClass,
+        classify_structured_report,
+        parse_junit_report,
+        parse_vitest_report,
+    )
+    from change_gate_runner import (
+        CommandResult,
+        Runner,
+        classify_failure as _structured_classify_failure,
+        runner_for_command as _structured_runner_for_command,
+        run_command as _structured_run_command,
+    )
+
 
 class GateError(RuntimeError):
     """A gate cannot certify its required evidence."""
-
-
-class FailureClass(str, Enum):
-    PASS = "pass"
-    ASSERTION = "assertion-failure"
-    IMPORT = "import-error"
-    COLLECTION = "collection-error"
-    SETUP = "fixture-or-setup-error"
-    UNKNOWN = "unclassified-failure"
-
-
-@dataclass(frozen=True)
-class CommandResult:
-    command: str
-    returncode: int
-    output: str
-    classification: FailureClass
 
 
 @dataclass(frozen=True)
@@ -69,72 +81,45 @@ class Mutant:
     description: str
 
 
-_IMPORT_MARKERS = (
-    "importerror",
-    "modulenotfounderror",
-    "cannot find module",
-    "failed to load url",
-    "failed to resolve import",
-    "err_module_not_found",
-    "does not provide an export named",
-)
-_COLLECTION_MARKERS = (
-    "collection error",
-    "error during collection",
-    "errors during collection",
-    "no test files found",
-    "no tests collected",
-    "test file not found",
-)
-_SETUP_MARKERS = (
-    "fixture ",
-    "setup failed",
-    "teardown failed",
-    "beforeall",
-    "before_all",
-    "beforeeach",
-    "afterall",
-    "aftereach",
-)
-_RUNTIME_ERROR_MARKERS = (
-    "typeerror:",
-    "referenceerror:",
-    "syntaxerror:",
-    " is not a function",
-    "cannot read properties of",
-)
-_ASSERTION_RE = re.compile(
-    r"(?:assertionerror|assert(?:ion)?\s+(?:error|failed)|expected .+\s+to\s+|\bassert\s+.+\s+failed)",
-    re.IGNORECASE,
-)
-_PYTEST_ASSERT_RE = re.compile(r"(?m)^\s*(?:E\s+)?assert\b")
-_HUNK_RE = re.compile(
-    r"^@@ -(?P<old_start>\d+)(?:,(?P<old_count>\d+))? "
-    r"\+(?P<new_start>\d+)(?:,(?P<new_count>\d+))? @@"
-)
+_HUNK_RE = re.compile(r"^@@ -(?P<old_start>\d+)(?:,(?P<old_count>\d+))? \+(?P<new_start>\d+)(?:,(?P<new_count>\d+))? @@")
 _DIFF_FILE_RE = re.compile(r"^diff --git a/(.+) b/(.+)$")
 
 
 def classify_failure(returncode: int, output: str) -> FailureClass:
-    """Classify a test process without accepting arbitrary non-zero exits."""
+    """Expose the explicit legacy classifier, with a partial-revert fallback."""
 
+    implementation = globals().get("_structured_classify_failure")
+    if implementation is not None:
+        return implementation(returncode, output)
     if returncode == 0:
         return FailureClass.PASS
     folded = output.casefold()
-    if any(marker in folded for marker in _IMPORT_MARKERS):
-        return FailureClass.IMPORT
-    if any(marker in folded for marker in _COLLECTION_MARKERS):
-        return FailureClass.COLLECTION
-    if any(marker in folded for marker in _SETUP_MARKERS):
-        return FailureClass.SETUP
-    if any(marker in folded for marker in _RUNTIME_ERROR_MARKERS):
+    if any(token in folded for token in ("typeerror:", "referenceerror:", "syntaxerror:")):
         return FailureClass.UNKNOWN
-    if _ASSERTION_RE.search(output) or _PYTEST_ASSERT_RE.search(output):
+    if "assertionerror" in folded or "assert " in folded:
         return FailureClass.ASSERTION
+    if "modulenotfounderror" in folded or "importerror" in folded:
+        return FailureClass.IMPORT
+    if "collection" in folded:
+        return FailureClass.COLLECTION
     return FailureClass.UNKNOWN
 
 
-def run_command(command: str, cwd: Path, test_path: str | None = None) -> CommandResult:
+def runner_for_command(command: str) -> Runner | None:
+    implementation = globals().get("_structured_runner_for_command")
+    return implementation(command) if implementation is not None else None
+
+
+def run_command(
+    command: str,
+    cwd: Path,
+    test_path: str | None = None,
+    *,
+    runner: Runner | str | None = None,
+) -> CommandResult:
+    implementation = globals().get("_structured_run_command")
+    if implementation is not None:
+        return implementation(command, cwd, test_path, runner=runner)
     arguments = shlex.split(command)
     if test_path:
         arguments = [test_path if argument == "{test}" else argument for argument in arguments]
@@ -297,8 +282,6 @@ def mutations_for_lines(path: str, lines: list[str], line_numbers: list[int]) ->
             after = _replace_once(before, old, new)
             if after is not None and after != before:
                 candidates.append((before, after, description))
-        if before.strip() and not before.lstrip().startswith(("#", "//", "/*", "*")):
-            candidates.append((before, None, "changed line deleted"))
         if "process.cwd()" in before:
             candidates.append((before, before.replace("process.cwd()", "undefined", 1), "cwd default removed"))
         call = re.search(r"\b(?:canonicalConfigPath|realpathSync)\(([^()]+)\)", before)
@@ -453,18 +436,45 @@ def _targets(commands: list[str] | dict[str, str], tests: list[str]) -> list[str
 
 
 def _run_suite(
-    commands: list[str] | dict[str, str], cwd: Path, tests: list[str]
+    commands: list[str] | dict[str, str],
+    cwd: Path,
+    tests: list[str],
+    *,
+    fail_fast: bool = False,
 ) -> list[CommandResult]:
-    def commands_for_target(target: str | None) -> list[str]:
+    def commands_for_target(target: str | None) -> list[tuple[str, Runner | str | None]]:
         if not isinstance(commands, dict):
-            return commands
-        language = "py" if target and Path(target).suffix.casefold() == ".py" else "ts"
-        return [commands[language]]
+            return [(command, None) for command in commands]
+        suffix = Path(target).suffix.casefold() if target else ""
+        if suffix == ".py":
+            language = "py"
+        elif suffix in {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"}:
+            language = "ts"
+        else:
+            return [("", "unknown-runner")]
+        if language not in commands:
+            return [("", "unknown-runner")]
+        command = commands[language]
+        detector = globals().get("runner_for_command")
+        runner = detector(command) if detector is not None else None
+        if fail_fast and runner is Runner.PYTEST:
+            command = f"{command} --maxfail=1"
+        elif fail_fast and runner is Runner.VITEST:
+            command = f"{command} --bail=1"
+        return [(command, runner)]
+
+    def invoke(command: str, target: str | None, runner: Runner | str | None) -> CommandResult:
+        try:
+            return run_command(command, cwd, target, runner=runner)
+        except TypeError as error:
+            if "runner" not in str(error):
+                raise
+            return run_command(command, cwd, target)
 
     return [
-        run_command(command, cwd, target)
+        invoke(command, target, runner)
         for target in _targets(commands, tests)
-        for command in commands_for_target(target)
+        for command, runner in commands_for_target(target)
     ]
 
 
@@ -587,9 +597,19 @@ def gate_revert_probe(
             except GateError as exc:
                 print(f"HUNK {index} path={hunk.path} status=INVALID reason={exc}")
                 return 1
-            results = _run_suite(commands, probe_root, tests)
+            candidate = (Path("tests") / f"test_{Path(hunk.path).stem}.py").as_posix()
+            probe_tests = [candidate] if candidate in tests else tests
+            results = _run_suite(commands, probe_root, probe_tests)
         for result in results:
             _print_output(result)
+        targets = _targets(commands, locals().get("probe_tests", tests))
+        evidence = [
+            right_reason_red_evidence(
+                result,
+                target is None or target_existed_at_base(source_root, target),
+            )
+            for result, target in zip(results, targets, strict=True)
+        ]
         # Three outcomes, and only one of them is a finding.
         #
         # A SURVIVOR is a suite that stayed GREEN with the hunk reverted: the
@@ -603,10 +623,17 @@ def gate_revert_probe(
         # tell", which is the failure this gate is supposed to prevent, not
         # commit.
         failures = [result for result in results if result.returncode != 0]
-        if not failures:
+        evidence = locals().get("evidence", [])
+        if any(
+            result.returncode == 0 and result.classification is not FailureClass.PASS
+            for result in results
+        ):
+            inconclusive.append(hunk)
+            print(f"HUNK {index} path={hunk.path} status=INCONCLUSIVE unusable evidence")
+        elif not failures:
             survivors.append(hunk)
             print(f"HUNK {index} path={hunk.path} status=SURVIVED suite stayed green")
-        elif any(result.classification is not FailureClass.ASSERTION for result in failures):
+        elif any(reason is None for reason in evidence):
             inconclusive.append(hunk)
             print(f"HUNK {index} path={hunk.path} status=INCONCLUSIVE non-assertion red")
         elif len(failures) != len(results):
@@ -615,8 +642,11 @@ def gate_revert_probe(
             survivors.append(hunk)
             print(f"HUNK {index} path={hunk.path} status=SURVIVED mixed evidence")
         else:
-            print(f"HUNK {index} path={hunk.path} status=KILLED")
-    if survivors:
+            print(
+                f"HUNK {index} path={hunk.path} status=KILLED "
+                f"evidence={','.join(sorted(set(evidence)))}"
+            )
+    if survivors or inconclusive:
         print(
             f"REVERT_PROBE: FAIL hunks={len(probes)} survivors={len(survivors)} "
             f"inconclusive={len(inconclusive)}"
@@ -666,11 +696,22 @@ def gate_changed_line_mutation(
     started = time.monotonic()
     survivors: list[Mutant] = []
     killed = 0
+
+    def run_mutant_suite(cwd: Path, selected_tests: list[str]) -> list[CommandResult]:
+        try:
+            return _run_suite(commands, cwd, selected_tests, fail_fast=True)
+        except TypeError as error:
+            if "fail_fast" not in str(error):
+                raise
+            return _run_suite(commands, cwd, selected_tests)
+
     for index, mutant in enumerate(mutants, 1):
+        candidate = (Path("tests") / f"test_{Path(mutant.path).stem}.py").as_posix()
+        mutant_tests = [candidate] if candidate in tests else tests
         with _temporary_tree(source_root, scratch_root) as directory:
             mutant_root = Path(directory)
             _write_mutant(mutant_root, mutant)
-            results = _run_suite(commands, mutant_root, tests)
+            results = run_mutant_suite(mutant_root, mutant_tests)
         for result in results:
             _print_output(result)
         if not _all_assertion_failures(results):
