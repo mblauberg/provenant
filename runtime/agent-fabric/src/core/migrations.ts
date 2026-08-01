@@ -530,7 +530,6 @@ function databaseInspectionAttempts(): number {
 }
 
 function injectTestInspectionRace(databasePath: string): void {
-  console.error("DEBUG migrations race hook", process.env.NODE_ENV, process.env.AGENT_FABRIC_TEST_DATABASE_INSPECTION_RACE_PATH, databasePath);
   if (
     process.env.NODE_ENV !== "test" ||
     process.env.AGENT_FABRIC_TEST_DATABASE_INSPECTION_RACE_PATH !== databasePath
