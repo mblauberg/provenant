@@ -169,6 +169,45 @@ describe("Stage 1 versioned JSON Schemas", () => {
     expect(unknown.keywords).toContain("additionalProperties");
   });
 
+  it("accepts the lockfile install attestation provider identity policy", async () => {
+    const schema = await readSchema("adapter-compatibility.schema.json");
+    const compatibility = await readYamlObject("adapter-compatibility.yaml");
+    const adapters = compatibility.adapters;
+    if (!isJsonObject(adapters)) throw new TypeError("adapter compatibility must contain an adapters object");
+    const claude = adapters["claude-agent-sdk"];
+    if (!isJsonObject(claude) || !isJsonObject(claude.implementation)) {
+      throw new TypeError("Claude implementation compatibility is invalid");
+    }
+
+    const lockfileAttested = {
+      ...compatibility,
+      adapters: {
+        ...adapters,
+        "claude-agent-sdk": {
+          ...claude,
+          implementation: {
+            ...claude.implementation,
+            provider_identity: "lockfile-install-attestation",
+          },
+        },
+      },
+    };
+    expect(validateWithSchema(schema, lockfileAttested).valid).toBe(true);
+    expect(validateWithSchema(schema, {
+      ...lockfileAttested,
+      adapters: {
+        ...lockfileAttested.adapters,
+        "claude-agent-sdk": {
+          ...lockfileAttested.adapters["claude-agent-sdk"],
+          implementation: {
+            ...claude.implementation,
+            provider_identity: "unrecognised-assurance",
+          },
+        },
+      },
+    }).valid).toBe(false);
+  });
+
   it("publishes only the exact current operation vocabulary and rejects coarse actions", async () => {
     const schema = await readProtocolSchema("authority-envelope.v2.schema.json");
     const properties = schema.properties;

@@ -10,7 +10,10 @@ import {
 import { verifyAdapterCompatibility, type AdapterExecutableFailure } from "../adapters/compatibility.js";
 import { isPrimaryAdapter } from "../adapters/primary-adapters.js";
 import { verifyProviderConformance } from "../adapters/provider-conformance.js";
-import { verifyProviderExecutableIdentity } from "../adapters/provider-identity.js";
+import {
+  providerIdentityAssuranceForPolicy,
+  verifyProviderExecutableIdentity,
+} from "../adapters/provider-identity.js";
 import { ADAPTER_INTERFACE_PROBE_INCOMPLETE, probeProviderInterface } from "../adapters/provider-interface.js";
 import { loadAdapterModelConstraints } from "../adapters/model-selection.js";
 import { loadFabricConfig } from "../config/index.js";
@@ -265,9 +268,11 @@ function primaryProviderState(observation: ProviderObservation): ProviderIdentit
     (failure.state === "drifted" ? drift : unknown).push(`${probe} probe ${failure.state === "drifted" ? "mismatch" : "unavailable"}: ${failure.detail}`);
   }
   if (observation.identity !== undefined) {
-    if (observation.requiredIdentity === "apple-designated" &&
-        observation.identity.assurance !== "full-vendor-identity") {
-      drift.push(`provider_identity apple-designated observed assurance ${observation.identity.assurance}`);
+    const expectedAssurance = providerIdentityAssuranceForPolicy(observation.requiredIdentity);
+    if (expectedAssurance !== undefined && observation.identity.assurance !== expectedAssurance) {
+      drift.push(
+        `provider_identity ${observation.requiredIdentity} observed assurance ${observation.identity.assurance}; expected ${expectedAssurance}`,
+      );
     }
   } else if (observation.identityError === undefined) unknown.push("identity probe did not complete");
   if (observation.providerInterface === undefined && observation.interfaceError === undefined) unknown.push("interface probe did not complete");
