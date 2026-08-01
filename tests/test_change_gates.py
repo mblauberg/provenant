@@ -1,9 +1,12 @@
+from contextlib import redirect_stdout
 from pathlib import Path
+import io
 import subprocess
 import sys
 
 import pytest
 
+from scripts import change_gates
 from scripts.change_gates import (
     DiffHunk,
     GateError,
@@ -426,3 +429,100 @@ def test_changed_line_baseline_runs_in_a_scratch_tree(tmp_path):
         "routine",
     ) == 0
     assert not (source / "sentinel").exists()
+
+
+def test_right_reason_red_names_the_target_it_rejected(tmp_path):
+    """A verdict of "rejected=1" with no named target is undiagnosable.
+
+    The gate blocks the merge on this line, so a reader has to be able to tell
+    which target was rejected and on what classification. Without that, the only
+    way to find out is to rerun the whole gate by hand and bisect the targets.
+    """
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "tracked.py").write_text("base\n", encoding="utf-8")
+    (source / "tests").mkdir()
+    (source / "tests" / "existing.py").write_text("base test\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(source), "init", "--quiet"], check=True)
+    subprocess.run(["git", "-C", str(source), "add", "-A"], check=True)
+    subprocess.run(
+        [
+            "git", "-C", str(source),
+            "-c", "user.name=Gate Test",
+            "-c", "user.email=gate-test@example.invalid",
+            "commit", "--quiet", "-m", "base",
+        ],
+        check=True,
+    )
+
+    # The target existed at the base and cannot be imported, so its red is a
+    # typo rather than missing behaviour. That is the rejected case.
+    # Split so this line does not itself read as a collection marker. pytest
+    # echoes the source of a failing test, `classify_failure` substring-matches
+    # the whole capture, and this file has to fail at the merge base by design.
+    # The same idiom is already used above for the import marker. See #622.
+    marker = "ERROR during " + "collection"
+    command = f'{sys.executable} -c "print(\\"{marker}\\"); raise SystemExit(1)" {{test}}'
+    capture = io.StringIO()
+    with redirect_stdout(capture):
+        result = gate_right_reason_red(source, "HEAD", [command], ["tests/existing.py"], tmp_path / "scratch")
+
+    assert result == 1
+    # Assert against the TARGET lines alone rather than the whole capture.
+    # `classify_failure` substring-matches the output, the command above emits a
+    # marker string on purpose, and pytest echoes the entire asserted value when
+    # an assertion fails. Asserting on the whole capture would replay that marker
+    # into this file's own failure text and misclassify it. See #622.
+    target_lines = [line for line in capture.getvalue().splitlines() if line.startswith("TARGET ")]
+    assert target_lines, "gate printed no per-target line"
+    assert "tests/existing.py" in target_lines[0]
+    assert "REJECTED" in target_lines[0]
+
+
+def test_right_reason_red_survives_a_scratch_tree_that_will_not_delete(tmp_path, monkeypatch):
+    """A scratch tree that will not delete must not destroy the verdict.
+
+    CI hit this for real: git left `.git` busy in the copied tree, cleanup raised
+    `OSError: [Errno 39] Directory not empty: '.git'`, and the exception escaped
+    the gate before it had printed anything. The run reported a crash with no
+    verdict at all, which is worse than either a pass or a fail because there is
+    nothing to act on and nothing to rerun against.
+    """
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "tests").mkdir()
+    (source / "tests" / "existing.py").write_text("base test\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(source), "init", "--quiet"], check=True)
+    subprocess.run(["git", "-C", str(source), "add", "-A"], check=True)
+    subprocess.run(
+        [
+            "git", "-C", str(source),
+            "-c", "user.name=Gate Test",
+            "-c", "user.email=gate-test@example.invalid",
+            "commit", "--quiet", "-m", "base",
+        ],
+        check=True,
+    )
+
+    # Only the scratch tree's own cleanup refuses. `_materialise_base` uses
+    # rmtree too and must keep working, so a blanket patch would test nothing.
+    real_rmtree = change_gates.shutil.rmtree
+
+    def refuse_to_remove_the_scratch_tree(path, *args, **kwargs):
+        if Path(path).name.startswith("gate-"):
+            raise OSError(39, "Directory not empty", ".git")
+        return real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(change_gates.shutil, "rmtree", refuse_to_remove_the_scratch_tree)
+
+    command = f'{sys.executable} -c "raise SystemExit(0)" {{test}}'
+    capture = io.StringIO()
+    with redirect_stdout(capture):
+        result = gate_right_reason_red(source, "HEAD", [command], ["tests/existing.py"], tmp_path / "scratch")
+
+    # The verdict itself is not the point here; reaching one at all is. Before
+    # the fix the OSError escaped and no verdict line was printed.
+    assert result in (0, 1)
+    output = capture.getvalue()
+    assert "RIGHT_REASON_RED:" in output
+    assert "left behind" in output
