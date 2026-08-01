@@ -395,9 +395,10 @@ instance state. The matching environment variables are
 absolute paths. Resolution order is the matching specific root flag, then
 `--agents-home` for both roots, then the matching split-root environment
 variable. `AGENTS_HOME` is a product-root fallback only; an unresolved instance
-root falls back to `~/.agents`. Direct `status` and `doctor` source invocation
-retains its legacy `process.cwd()` fallback when none of those controls is
-configured.
+root falls back to `~/.agents`, as does any other unresolved root.
+`process.cwd()` is used only as the implicit `status` project path when
+`--project` is omitted, and by project commands, never for product or instance
+root resolution.
 
 Do not start this command merely because a pane or PID is absent. Re-run
 `status` and `doctor`; on-demand bootstrap or the existing supervisor owns the

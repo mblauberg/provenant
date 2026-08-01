@@ -150,6 +150,39 @@ async function paths(): Promise<FabricPaths> {
   return { stateDirectory, runtimeDirectory, databasePath, socketPath: join(runtimeDirectory, "fabric-v1.sock") };
 }
 
+async function writeStatusRootFixture(root: string, catalogDate: string): Promise<void> {
+  const repositoryRoot = resolve(import.meta.dirname, "../../../..");
+  await mkdir(join(root, "config", "review-profiles"), { recursive: true });
+  await mkdir(join(root, "runtime", "agent-fabric", "schemas"), { recursive: true });
+  await Promise.all([
+    writeFile(join(root, "config", "agent-fabric.yaml"), `${JSON.stringify({
+      schemaVersion: 1,
+      allowedAdapters: [],
+      activeAdapters: [],
+      allowedProfiles: ["headless"],
+      adapters: {},
+      workspaceRoots: ["${AGENTS_HOME}"],
+      limits: { maximumConcurrentProviderTurns: 1 },
+    })}\n`),
+    writeFile(
+      join(root, "config", "adapter-compatibility.yaml"),
+      await readFile(join(repositoryRoot, "config", "adapter-compatibility.yaml"), "utf8"),
+    ),
+    writeFile(
+      join(root, "runtime", "agent-fabric", "schemas", "adapter-compatibility.schema.json"),
+      await readFile(join(repositoryRoot, "runtime", "agent-fabric", "schemas", "adapter-compatibility.schema.json"), "utf8"),
+    ),
+    writeFile(
+      join(root, "config", "review-profiles", "certifying-review-four-slot-v1.json"),
+      `${JSON.stringify({ schemaVersion: 1, profileId: "status-entrypoint-fixture", chairProfiles: [] })}\n`,
+    ),
+    writeFile(
+      join(root, "config", "model-routing.json"),
+      `${JSON.stringify({ schema_version: 1, catalog_date: catalogDate })}\n`,
+    ),
+  ]);
+}
+
 /** Copy the repository's certifying profile and routing catalogue into a fixture home. */
 async function writeReviewProfileFixture(directory: string): Promise<void> {
   const root = resolve(import.meta.dirname, "../../../..");
@@ -371,6 +404,47 @@ describe("machine status and doctor", () => {
     } finally {
       cwd.mockRestore();
     }
+  });
+
+  it("uses the fused default root at the CLI entrypoint while retaining project CWD selection", async () => {
+    const home = await mkdtemp(join(tmpdir(), "fabric-status-entrypoint-home-"));
+    const caller = await mkdtemp(join(tmpdir(), "fabric-status-entrypoint-caller-"));
+    cleanup.push(home, caller);
+    const fusedRoot = join(home, ".agents");
+    await Promise.all([
+      writeStatusRootFixture(fusedRoot, "2026-08-01"),
+      writeStatusRootFixture(caller, "1999-01-01"),
+    ]);
+    const expectedCaller = await realpath(caller);
+    const expectedFusedRoot = await realpath(fusedRoot);
+    const value = await paths();
+    const environment = {
+      HOME: home,
+      AGENTS_HOME: undefined,
+      AGENT_FABRIC_PRODUCT_ROOT: undefined,
+      AGENT_FABRIC_INSTANCE_ROOT: undefined,
+      AGENT_FABRIC_STATE_DIRECTORY: value.stateDirectory,
+      AGENT_FABRIC_RUNTIME_DIRECTORY: value.runtimeDirectory,
+      AGENT_FABRIC_DATABASE_PATH: value.databasePath,
+    };
+
+    const status = await runSourceCli(["status"], { cwd: caller, environment });
+    expect(status).toMatchObject({ exitCode: 0, signal: null, stderr: "" });
+    const statusOutput = JSON.parse(status.stdout) as {
+      project: { path: string };
+      trustedWorkspaceRoots: string[];
+    };
+    expect(statusOutput.project.path).toBe(expectedCaller);
+    expect(statusOutput.trustedWorkspaceRoots).toEqual([expectedFusedRoot]);
+    expect(statusOutput.trustedWorkspaceRoots).not.toContain(expectedCaller);
+
+    const doctor = await runSourceCli(["doctor"], { cwd: caller, environment });
+    expect(doctor).toMatchObject({ exitCode: 0, signal: null, stderr: "" });
+    const doctorOutput = JSON.parse(doctor.stdout) as {
+      staleness: { modelRouting: { date: string | null } };
+    };
+    expect(doctorOutput.staleness.modelRouting.date).toBe("2026-08-01");
+    expect(doctor.stdout).not.toContain("1999-01-01");
   });
 
   it("derives shipped policy from the product root and instance state from the instance root", () => {
