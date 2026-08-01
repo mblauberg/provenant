@@ -13,7 +13,7 @@ adapters:
     implementation:
       kind: npm-package
       package: "@anthropic-ai/claude-agent-sdk"
-      executable: "/opt/homebrew/bin/claude"
+      executable: "claude"
       provider_identity: apple-designated
       wrapper_entrypoint: "runtime/agent-fabric/src/adapters/providers/claude-agent-sdk.ts"
     contract:
@@ -34,7 +34,7 @@ adapters:
     delivery_stage: 3
     implementation:
       kind: native-cli
-      executable: "/opt/homebrew/bin/codex"
+      executable: "codex"
       provider_identity: apple-designated
       wrapper_entrypoint: "runtime/agent-fabric/src/adapters/providers/codex-app-server.ts"
     contract:
@@ -57,7 +57,7 @@ adapters:
     implementation:
       kind: native-cli
       command: herdr
-      executable: "/opt/homebrew/bin/herdr"
+      executable: "herdr"
     contract:
       protocol: herdr-local-api
     runtime_range:
@@ -76,7 +76,7 @@ adapters:
     implementation:
       kind: npm-cli
       package: "@earendil-works/pi-coding-agent"
-      executable: "/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/dist/cli.js"
+      executable: "@earendil-works/pi-coding-agent"
       wrapper_entrypoint: "runtime/agent-fabric/src/adapters/providers/optional/pi-rpc.ts"
     contract:
       protocol: pi-jsonl-rpc
@@ -184,7 +184,7 @@ adapters:
     implementation:
       kind: native-cli
       command: opencode
-      executable: "/opt/homebrew/bin/opencode"
+      executable: "opencode"
       provider_install_root: "/opt/homebrew/Cellar/opencode"
       provider_identity: owner-controlled-install-root
       wrapper_entrypoint: "runtime/agent-fabric/src/adapters/providers/optional/opencode-acp.ts"
