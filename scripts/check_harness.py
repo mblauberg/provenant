@@ -5,14 +5,19 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+import subprocess
 import sys
 
 import yaml
 
 try:
-    from scripts.count_skill_words import WORD_COUNT_HARD_LIMIT, word_count_diagnostics
+    from scripts.count_skill_words import (
+        WORD_COUNT_HARD_LIMIT,
+        word_count_delta_warnings,
+        word_count_diagnostics,
+    )
 except ModuleNotFoundError:  # Direct execution: python scripts/check_harness.py
-    from count_skill_words import WORD_COUNT_HARD_LIMIT, word_count_diagnostics
+    from count_skill_words import WORD_COUNT_HARD_LIMIT, word_count_delta_warnings, word_count_diagnostics
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -112,6 +117,28 @@ def skill_errors() -> tuple[list[str], dict[str, object]]:
     }
 
 
+def word_count_delta_diagnostics() -> tuple[str, ...]:
+    """Use merge-train deltas when the repository exposes usable Git history."""
+    try:
+        base = subprocess.run(
+            ["git", "-C", str(ROOT), "merge-base", "HEAD", "origin/main"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        head = subprocess.run(
+            ["git", "-C", str(ROOT), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        return ()
+    if not base or not head:
+        return ()
+    return word_count_delta_warnings(base, head)
+
+
 def openai_sidecar_errors() -> list[str]:
     errors: list[str] = []
     for path in sorted((ROOT / "skills").glob("*/agents/openai.yaml")):
@@ -163,7 +190,13 @@ def stale_name_errors() -> list[str]:
 
 def main() -> int:
     skill_failures, metrics = skill_errors()
+    delta_diagnostics = word_count_delta_diagnostics()
     errors = skill_failures + openai_sidecar_errors() + stale_name_errors()
+    for diagnostic in delta_diagnostics:
+        if diagnostic.startswith("error:"):
+            errors.append(diagnostic)
+        else:
+            metrics["warnings"].append(diagnostic)
     for warning in metrics["warnings"]:
         print(f"\033[33mWARN:\033[0m {warning}", file=sys.stderr)
     if errors:
