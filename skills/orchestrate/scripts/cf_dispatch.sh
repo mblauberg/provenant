@@ -236,6 +236,14 @@ adapter_command_for_tool() {
   esac
 }
 
+fixed_provider_family_for_tool() {
+  case "$1" in
+    claude) echo "anthropic";;
+    codex) echo "openai";;
+    *) echo "";;
+  esac
+}
+
 owner_failure_is_unavailable() {
   local diagnostic="$1"
   case "$diagnostic" in
@@ -362,8 +370,8 @@ run_one() {  # $1 tool $2 model $3 effort -> writes clean answer to OUT, echoes 
   : >"$diag"
   trap "rm -rf -- '$tmpdir'" EXIT
   trap "rm -rf -- '$tmpdir'; exit 143" INT TERM HUP
-  family=""
-  endpoint=""
+  family="$(fixed_provider_family_for_tool "$tool")"
+  endpoint="$(endpoint_provider "$tool")"
   identity=""
   effort_substitution=""
   substitution=""
@@ -391,6 +399,11 @@ run_one() {  # $1 tool $2 model $3 effort -> writes clean answer to OUT, echoes 
     guarantee="none"
     status="orchestrator_family_required"
     echo "$tool disabled: pass --orchestrator-family so cross-family status can be proven" >"$diag"
+    rc=1
+  elif [ -n "$family" ] && [ "$family" = "$ORCH_FAMILY" ]; then
+    guarantee="none"
+    status="same_family_forbidden"
+    echo "$tool disabled: same-family dispatch is forbidden" >"$diag"
     rc=1
   else
     if [ "$tool" = "codex" ]; then

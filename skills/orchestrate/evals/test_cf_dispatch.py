@@ -2,6 +2,7 @@
 """Behaviour tests for cf_dispatch.sh with stubbed CLIs."""
 import json
 import os
+import shlex
 import shutil
 import signal
 import stat
@@ -64,6 +65,44 @@ REQUIRED_GATE_ROWS = [
 def write_executable(path, body):
     path.write_text(textwrap.dedent(body), encoding="utf-8")
     path.chmod(path.stat().st_mode | stat.S_IXUSR)
+
+
+def provision_test_verified_owner(tmp, *, adapter_id, executable):
+    """Provision the owner seam without making PATH resolution authoritative."""
+    owner_root = tmp / "verified-owner"
+    owner_dir = owner_root / "scripts"
+    owner_dir.mkdir(parents=True)
+    calls = owner_root / "adapter-owner.calls"
+    write_executable(
+        owner_dir / "agent-fabric",
+        f"""\
+        #!/usr/bin/env bash
+        printf '%s\\n' "$*" >> {shlex.quote(str(calls))}
+        [ "$1" = "adapter" ] && [ "$2" = "executable" ] || exit 2
+        resolved_adapter=""
+        while [ "$#" -gt 0 ]; do
+          case "$1" in
+            --adapter) resolved_adapter="$2"; shift 2;;
+            *) shift;;
+          esac
+        done
+        [ "$resolved_adapter" = {shlex.quote(adapter_id)} ] || exit 3
+        printf '%s\\n' {shlex.quote(str(executable))}
+        """,
+    )
+    return owner_root, calls
+
+
+def env_with_test_verified_owner(tmp, bin_dir, *, adapter_id, executable):
+    owner_root, calls = provision_test_verified_owner(
+        tmp,
+        adapter_id=adapter_id,
+        executable=executable,
+    )
+    env = fabric_free_env()
+    env["PATH"] = f"{bin_dir}:{env['PATH']}"
+    env["AGENTS_HOME"] = str(owner_root)
+    return env, calls
 
 
 def fabric_free_env():
@@ -423,8 +462,12 @@ def test_claude_oauth_fallback_uses_verifier_system_prompt():
             """,
         )
         out = tmp / "out.txt"
-        env = fabric_free_env()
-        env["PATH"] = f"{bin_dir}:{env['PATH']}"
+        env, _ = env_with_test_verified_owner(
+            tmp,
+            bin_dir,
+            adapter_id="claude-agent-sdk",
+            executable=bin_dir / "claude",
+        )
         result = subprocess.run(
             [
                 str(SCRIPT),
@@ -582,8 +625,12 @@ def test_cursor_distinct_model_records_adapter_and_provider_family():
             f"#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" > {args_file}\necho OK\n",
         )
         out = tmp / "out.txt"
-        env = fabric_free_env()
-        env["PATH"] = f"{bin_dir}:{env['PATH']}"
+        env, _ = env_with_test_verified_owner(
+            tmp,
+            bin_dir,
+            adapter_id="cursor-agent",
+            executable=bin_dir / "cursor-agent",
+        )
         result = subprocess.run(
             [
                 str(SCRIPT),
@@ -611,8 +658,8 @@ def test_cursor_distinct_model_records_adapter_and_provider_family():
         assert record["endpoint_provider"] == "cursor"
         assert record["model_family"] == "xai"
         assert record["resolved_model"] == "cursor-grok-4.5-high"
-        assert record["certification_eligible"] is False
-        assert record["adapter_resolution"] == "degraded-command-v"
+        assert record["certification_eligible"] is True
+        assert record["adapter_resolution"] == "verified-owner"
         assert record["cross_family"] is True
         cursor_args = args_file.read_text(encoding="utf-8").splitlines()
         assert "--trust" in cursor_args
@@ -632,8 +679,12 @@ def test_explicit_output_path_preserves_adapter_failure_diagnostics():
             "#!/usr/bin/env bash\necho 'simulated adapter failure' >&2\nexit 9\n",
         )
         out = tmp / "review.txt"
-        env = fabric_free_env()
-        env["PATH"] = f"{bin_dir}:{env['PATH']}"
+        env, _ = env_with_test_verified_owner(
+            tmp,
+            bin_dir,
+            adapter_id="cursor-agent",
+            executable=bin_dir / "cursor-agent",
+        )
         result = subprocess.run(
             [
                 str(SCRIPT),
@@ -676,8 +727,12 @@ def test_unwritable_output_path_cannot_certify_success():
             echo OK
             """,
         )
-        env = fabric_free_env()
-        env["PATH"] = f"{bin_dir}:{env['PATH']}"
+        env, _ = env_with_test_verified_owner(
+            tmp,
+            bin_dir,
+            adapter_id="codex-app-server",
+            executable=bin_dir / "codex",
+        )
         result = subprocess.run(
             [str(SCRIPT), "--tool", "codex", "--orchestrator-family", "anthropic", "--out", str(tmp / "missing" / "out.txt"), "--prompt", "Review"],
             cwd=td,
@@ -711,8 +766,12 @@ def test_resolved_role_effort_reaches_codex_adapter_and_receipt():
             echo OK
             ''',
         )
-        env = fabric_free_env()
-        env["PATH"] = f"{bin_dir}:{env['PATH']}"
+        env, _ = env_with_test_verified_owner(
+            tmp,
+            bin_dir,
+            adapter_id="codex-app-server",
+            executable=bin_dir / "codex",
+        )
         result = subprocess.run(
             [
                 str(SCRIPT),
@@ -763,8 +822,12 @@ def test_codex_capability_discovery_failure_blocks_execution_with_receipt():
             exit 9
             ''',
         )
-        env = fabric_free_env()
-        env["PATH"] = f"{bin_dir}:{env['PATH']}"
+        env, _ = env_with_test_verified_owner(
+            tmp,
+            bin_dir,
+            adapter_id="codex-app-server",
+            executable=bin_dir / "codex",
+        )
         result = subprocess.run(
             [
                 str(SCRIPT),
@@ -810,8 +873,12 @@ def test_mixed_malformed_codex_capabilities_block_execution_with_receipt():
             exit 9
             ''',
         )
-        env = fabric_free_env()
-        env["PATH"] = f"{bin_dir}:{env['PATH']}"
+        env, _ = env_with_test_verified_owner(
+            tmp,
+            bin_dir,
+            adapter_id="codex-app-server",
+            executable=bin_dir / "codex",
+        )
         result = subprocess.run(
             [
                 str(SCRIPT),
@@ -855,8 +922,12 @@ def test_unrelated_codex_model_without_efforts_blocks_execution_with_receipt():
             exit 9
             ''',
         )
-        env = fabric_free_env()
-        env["PATH"] = f"{bin_dir}:{env['PATH']}"
+        env, _ = env_with_test_verified_owner(
+            tmp,
+            bin_dir,
+            adapter_id="codex-app-server",
+            executable=bin_dir / "codex",
+        )
         result = subprocess.run(
             [
                 str(SCRIPT),
@@ -900,8 +971,12 @@ def test_duplicate_codex_discovery_member_blocks_execution_with_receipt():
             exit 9
             ''',
         )
-        env = fabric_free_env()
-        env["PATH"] = f"{bin_dir}:{env['PATH']}"
+        env, _ = env_with_test_verified_owner(
+            tmp,
+            bin_dir,
+            adapter_id="codex-app-server",
+            executable=bin_dir / "codex",
+        )
         result = subprocess.run(
             [
                 str(SCRIPT),
@@ -945,8 +1020,12 @@ def test_codex_explicit_model_rejection_never_reports_it_as_resolved():
             exit 9
             ''',
         )
-        env = fabric_free_env()
-        env["PATH"] = f"{bin_dir}:{env['PATH']}"
+        env, _ = env_with_test_verified_owner(
+            tmp,
+            bin_dir,
+            adapter_id="codex-app-server",
+            executable=bin_dir / "codex",
+        )
         result = subprocess.run(
             [
                 str(SCRIPT),
@@ -984,8 +1063,12 @@ def test_interrupted_dispatch_cleans_internal_tempfiles():
         bin_dir.mkdir()
         temp_root.mkdir()
         write_executable(bin_dir / "codex", "#!/usr/bin/env bash\nsleep 10\n")
-        env = fabric_free_env()
-        env["PATH"] = f"{bin_dir}:{env['PATH']}"
+        env, _ = env_with_test_verified_owner(
+            tmp,
+            bin_dir,
+            adapter_id="codex-app-server",
+            executable=bin_dir / "codex",
+        )
         env["TMPDIR"] = str(temp_root)
         proc = subprocess.Popen(
             [str(SCRIPT), "--tool", "codex", "--orchestrator-family", "anthropic", "--out", str(tmp / "out.txt"), "--prompt", "Review"],
