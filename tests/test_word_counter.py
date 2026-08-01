@@ -25,8 +25,35 @@ def test_frontmatter_and_body_are_both_counted():
     assert count_skill_words(text) == 9
 
 
-def test_markdown_link_counts_text_but_not_url():
-    assert count_skill_words("Read [run-contract.md](references/run-contract.md) now.") == 4
+def test_markdown_link_is_not_reading_burden():
+    assert count_skill_words("Read [run-contract.md](references/run-contract.md) now.") == 2
+
+
+def test_markdown_link_preserves_natural_label_prose():
+    text = "See [the deployment guide](references/deploy.md) for details."
+    assert count_skill_words(text) == 6
+
+
+def test_bare_document_path_is_not_reading_burden():
+    assert count_skill_words("Read references/run-contract.md now.") == 2
+
+
+def test_reference_link_and_definition_are_not_reading_burden():
+    text = "Read [run-contract.md][contract] now.\n\n[contract]: references/run-contract.md"
+    assert count_skill_words(text) == 2
+
+
+def test_reference_link_preserves_natural_label_prose():
+    text = "See [the deployment guide][guide] for details.\n\n[guide]: references/deploy.md"
+    assert count_skill_words(text) == 6
+
+
+def test_bracketed_prose_is_not_treated_as_a_reference_definition():
+    assert count_skill_words("[note]: this is ordinary prose") == 5
+
+
+def test_path_filter_keeps_ordinary_slash_and_hyphen_prose():
+    assert count_skill_words("The phrase a/b and well-known prose remains.") == 8
 
 
 @pytest.mark.parametrize(
@@ -80,10 +107,14 @@ def _git_skill_history(tmp_path: Path, old_count: int, new_count: int) -> tuple[
 @pytest.mark.parametrize(
     ("old_count", "new_count", "expected_fragment"),
     (
-        (460, 460, None),
-        (460, 462, None),
-        (486, 494, "+8"),
-        (491, 492, "+1"),
+        (459, 468, None),
+        (459, 469, "+10"),
+        (465, 469, None),
+        (465, 470, "+5"),
+        (484, 488, None),
+        (484, 489, "+5"),
+        (489, 490, "+1"),
+        (499, 500, None),
         (499, 501, "error"),
     ),
 )

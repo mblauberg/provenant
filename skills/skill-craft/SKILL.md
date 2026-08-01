@@ -29,9 +29,10 @@ Both branches follow this without restating it in two voices:
 - **Three-mode invocation:** direct audit; direct authoring under authority;
   or composed, where audit is a companion to a primary lifecycle owner (for
   example `implement`) that stays the action-owner.
-- **Budgets:** soft ~500-word body per branch file; the standing
-  catalogue-description lever is governed in `MAINTAINING.md`; link it,
-  don't restate the number here.
+- **Budgets:** branch-file limits use the canonical whole-file counter,
+  including YAML frontmatter. `SKILL.md` is at or below 500 words and the audit
+  reference is at or below 600; the standing catalogue-description lever is
+  governed in `MAINTAINING.md`.
 - **Token model, three-tier:** always-loaded frontmatter, triggered branch
   body, and entrypoint references loaded at one hop. Reference documents may
   link to sibling references, but that depth is not recursively enforced by

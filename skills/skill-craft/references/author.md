@@ -45,9 +45,10 @@ capability language.
 
 ## Body contract
 
-Keep each branch file inside the soft body budget named in
-[../SKILL.md](../SKILL.md): behaviour-changing rules, workflow, gates and
-links. Avoid logs, generic advice, exhaustive flags and duplicated doctrine.
+Keep each branch file inside the soft budget named in [../SKILL.md](../SKILL.md),
+using the canonical whole-file counter including YAML frontmatter:
+behaviour-changing rules, workflow, gates and links. Avoid logs, generic advice,
+exhaustive flags and duplicated doctrine.
 Link another skill, or the other branch, by name instead of copying it.
 
 ## Verification

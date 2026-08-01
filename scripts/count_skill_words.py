@@ -8,20 +8,57 @@ from pathlib import Path
 
 
 WORD_COUNT_HARD_LIMIT = 500
+WORD_COUNT_WARNING_LOW_WATERMARK = 470
+WORD_COUNT_WARNING_HIGH_WATERMARK = 490
+WORD_COUNT_WARNING_LOW_DELTA = 10
+WORD_COUNT_WARNING_MIDDLE_DELTA = 5
+WORD_COUNT_WARNING_HIGH_DELTA = 1
 COUNTER_DESCRIPTION = (
-    "Unified counter (whole file including frontmatter; markdown link URLs excluded)"
+    "Unified counter (whole file including frontmatter; Markdown links, reference "
+    "definitions, and document path tokens excluded)"
 )
-_MARKDOWN_LINK_URL = re.compile(r"\]\([^)]*\)")
+WARNING_POLICY_DESCRIPTION = (
+    "delta warning boundaries: +10 below 470, +5 at 470-489, +1 at 490-499"
+)
+_DOCUMENT_EXTENSION = r"(?:md|rst|txt|py|rs|go|java|js|jsx|mjs|cjs|ts|tsx|vue|json|ya?ml|toml|xml|sql|sh|html|css|csv|pdf|docx)"
+_DOCUMENT_PATH_TOKEN = (
+    rf"(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+\.{_DOCUMENT_EXTENSION}"
+    rf"(?:#[A-Za-z0-9_./-]+)?"
+)
+_DOCUMENT_NAME_TOKEN = rf"[A-Za-z0-9_-]+\.{_DOCUMENT_EXTENSION}"
+_REFERENCE_DESTINATION = (
+    rf"(?:https?://|mailto:)[^\s<>()]+"
+    rf"|(?:\.\.?/|/)?{_DOCUMENT_PATH_TOKEN}"
+    rf"|{_DOCUMENT_NAME_TOKEN}"
+)
+_MARKDOWN_INLINE_LINK = re.compile(r"(?P<label>!?\[[^]\n]*\])\([^\)\n]*\)")
+_MARKDOWN_REFERENCE_LINK = re.compile(r"(?P<label>!?\[[^]\n]*\])\[[^]\n]*\]")
+_MARKDOWN_REFERENCE_DEFINITION = re.compile(
+    rf"(?m)^[ \t]{{0,3}}\[[^]\n]+\]:[ \t]*(?:{_REFERENCE_DESTINATION})"
+    rf"(?:[ \t]+(?:\"[^\n\"]*\"|'[^\n']*'|\([^\n)]*\)))?[ \t]*$"
+)
+_BARE_DOCUMENT_PATH = re.compile(
+    rf"(?<![A-Za-z0-9_./-]){_DOCUMENT_PATH_TOKEN}(?![A-Za-z0-9_.-])"
+)
+_BARE_DOCUMENT_NAME = re.compile(
+    rf"(?<![A-Za-z0-9_./-]){_DOCUMENT_NAME_TOKEN}(?![A-Za-z0-9_.-])"
+)
 _WORD = re.compile(r"\b[\w'-]+\b")
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
 
 def count_skill_words(text: str) -> int:
-    """Count the words users read, including frontmatter but excluding link URLs."""
-    # Count the whole file because frontmatter is user-visible skill content. Strip
-    # only markdown link destinations because they are navigation metadata, not
-    # reading burden; retain the link text itself.
-    readable_text = _MARKDOWN_LINK_URL.sub("]", text)
+    """Count readable words in the complete skill file, including frontmatter."""
+    # These are explicit Markdown/navigation tokens, not prose. Keep the removal
+    # syntax narrow so ordinary slash and hyphen prose remains visible to _WORD.
+    readable_text = _MARKDOWN_INLINE_LINK.sub(r"\g<label>", text)
+    readable_text = _MARKDOWN_REFERENCE_LINK.sub(r"\g<label>", readable_text)
+    for pattern in (
+        _MARKDOWN_REFERENCE_DEFINITION,
+        _BARE_DOCUMENT_PATH,
+        _BARE_DOCUMENT_NAME,
+    ):
+        readable_text = pattern.sub(" ", readable_text)
     return len(_WORD.findall(readable_text))
 
 
@@ -79,11 +116,17 @@ def word_count_delta_warnings(merge_base_sha: str, head_sha: str) -> tuple[str, 
                 f"limit {WORD_COUNT_HARD_LIMIT}, {over} over"
             )
             continue
-        threshold = 1 if new_count >= 490 else 5 if new_count >= 470 else 10
-        if delta >= threshold:
+        if new_count >= WORD_COUNT_WARNING_HIGH_WATERMARK:
+            threshold = WORD_COUNT_WARNING_HIGH_DELTA
+        elif new_count >= WORD_COUNT_WARNING_LOW_WATERMARK:
+            threshold = WORD_COUNT_WARNING_MIDDLE_DELTA
+        else:
+            threshold = WORD_COUNT_WARNING_LOW_DELTA
+        if new_count < WORD_COUNT_HARD_LIMIT and delta >= threshold:
             remaining = WORD_COUNT_HARD_LIMIT - new_count
             diagnostics.append(
                 f"warning: {path}: {old_count} -> {new_count} (+{delta}), "
-                f"limit {WORD_COUNT_HARD_LIMIT}, {remaining} remaining"
+                f"limit {WORD_COUNT_HARD_LIMIT}, {remaining} remaining; "
+                f"{WARNING_POLICY_DESCRIPTION}"
             )
     return tuple(diagnostics)

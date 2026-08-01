@@ -29,7 +29,9 @@ qualitative unless a versioned dataset defines a denominator.
 - frontmatter contains only `name` and `description` and is under 1024 chars;
 - name is kebab-case and the first 250 description characters carry the main
   trigger and exclusion;
-- body is roughly 500 words or less; stable depth belongs in references;
+- `SKILL.md` is at or below 500 words under the canonical whole-file counter,
+  including YAML frontmatter; the skill-craft audit reference has a separate
+  600-word ceiling under the same counter; stable depth belongs in references;
 - directives are concrete bright-line rules rather than repeated emphasis;
 - positive, negative and boundary fixtures cover adjacent skills;
 - paths and CLIs exist or are capability-gated; and

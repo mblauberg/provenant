@@ -389,8 +389,9 @@ Each run owns an artifact manifest with class, owner, retention and expiry:
 Session/context audit reports oversized entrypoints, stale state, duplicate
 canonical claims, orphaned scratch, expired logs and missing handoff promotion.
 It may delete only manifest-owned scratch under explicit cleanup authority.
-Skills above the body budget move stable detail to targeted references; core
-rules remain early in the entrypoint.
+Skills above the canonical whole-file entrypoint budget, including YAML
+frontmatter, move stable detail to targeted references; core rules remain early
+in the entrypoint.
 
 ## Evaluation strategy
 

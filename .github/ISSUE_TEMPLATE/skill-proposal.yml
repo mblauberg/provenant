@@ -141,7 +141,7 @@ body:
     attributes:
       label: Cost and safety
       options:
-        - label: SKILL.md will be roughly 500 words or less, with depth in narrowly named reference files loaded only when needed.
+        - label: SKILL.md will be at or below 500 words under the canonical whole-file counter, including YAML frontmatter, with depth in narrowly named reference files loaded only when needed.
           required: true
         - label: The description fits the catalogue budget (the canonical catalogue stays at or below 8,000 characters).
           required: true

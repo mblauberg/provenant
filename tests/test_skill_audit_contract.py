@@ -2,6 +2,8 @@ from pathlib import Path
 
 import yaml
 
+from scripts.count_skill_words import count_skill_words
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SKILL_CRAFT = ROOT / "skills" / "skill-craft"
@@ -19,10 +21,9 @@ def test_local_history_audit_is_local_first_and_export_gated():
     compact = " ".join(audit.split())
     lowered = compact.lower()
 
-    # SKILL.md is the shared branch selector (soft ~500-word body); the
-    # audit branch carries its own body under the same soft budget.
-    assert len(skill.split()) <= 500
-    assert len(audit.split()) <= 600
+    # Both branch-file budgets use the canonical whole-file counter.
+    assert count_skill_words(skill) <= 500
+    assert count_skill_words(audit) <= 600
     assert (
         "direct user request authorises read-only analysis of the named "
         "local histories" in lowered

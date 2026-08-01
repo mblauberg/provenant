@@ -12,6 +12,12 @@ import sys
 
 import yaml
 
+try:
+    from scripts.count_skill_words import count_skill_words
+except ModuleNotFoundError:  # Direct execution from the skill directory.
+    sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../../..")))
+    from scripts.count_skill_words import count_skill_words
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 SKILL_DIR = os.path.dirname(HERE)
 SKILL_MD = os.path.join(SKILL_DIR, "SKILL.md")
@@ -19,6 +25,9 @@ REF_DIR = os.path.join(SKILL_DIR, "references")
 SCRIPT_DIR = os.path.join(SKILL_DIR, "scripts")
 CASES = os.path.join(HERE, "contract_cases.yaml")
 TOPOLOGY_CASES = os.path.join(HERE, "topology_value_cases.yaml")
+# This separate router-role ceiling uses the canonical counter; it is not the
+# 500-word skill-entrypoint budget enforced by check_harness.py.
+ROUTER_ROLE_WORD_LIMIT = 1250
 MANIFEST = os.path.join(
     SKILL_DIR, "..", "..", "tests", "fixtures", "disclosure-migration.yaml"
 )
@@ -302,8 +311,8 @@ def main(argv=None):
     if not (PRIMARY_TRIGGER_TERMS & tokens(first_250)):
         fails.append("first 250 description chars lack primary trigger terms")
 
-    word_count = len(re.findall(r"\b[\w'-]+\b", text))
-    if word_count > 1250:
+    word_count = count_skill_words(text)
+    if word_count > ROUTER_ROLE_WORD_LIMIT:
         fails.append(f"SKILL.md too long for router role ({word_count} words)")
 
     for section in REQUIRED_SECTIONS:
