@@ -19,9 +19,39 @@ PRODUCER = ROOT / "skills" / "deliver" / "scripts" / "delivery_receipt.py"
 VALIDATOR = ROOT / "skills" / "deliver" / "scripts" / "validate_delivery.py"
 
 
+def with_gate_report(workspace: Path, command: list[str]) -> list[str]:
+    marker = command.index("--")
+    def option(name: str, default: str) -> str:
+        return command[command.index(name) + 1] if name in command else default
+    failed = any(token in {"sys.exit(7)", "signal.SIGTERM"} for token in command[marker:])
+    scope = option("--scope", "full")
+    counts = {
+        "collected": int(option("--collected", "1")),
+        "passed": int(option("--passed", "0" if failed else "1")),
+        "failed": int(option("--failed", "1" if failed else "0")),
+        "skipped": int(option("--skipped", "0")),
+        "expected_collected": int(option("--expected-collected", "1")),
+    }
+    if "--scope" not in command:
+        command[marker:marker] = ["--scope", scope]
+        marker = command.index("--")
+    report_path = workspace / "gate-report.json"
+    report_path.write_text(json.dumps({
+        "schema_version": 1, "contract": "delivery-gate-report",
+        "gate": option("--gate", "tests"), "argv": command[marker + 1:],
+        "scope": scope, "counts": counts,
+        "baseline": {"kind": "structured-runner", "expected_collected": counts["expected_collected"]},
+    }) + "\n")
+    command[marker:marker] = ["--gate-report", "gate-report.json"]
+    return command
+
+
 def run_producer(workspace: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    command = list(args)
+    if command[:2] == ["evidence", "run"]:
+        command = with_gate_report(workspace, command)
     return subprocess.run(
-        [sys.executable, str(PRODUCER), *args],
+        [sys.executable, str(PRODUCER), *command],
         cwd=workspace,
         text=True,
         capture_output=True,
@@ -239,6 +269,143 @@ def test_evidence_run_records_observed_success_failure_and_signal(tmp_path):
     ).hexdigest()
 
 
+def test_evidence_run_binds_gate_identity_counts_and_environment(tmp_path):
+    run_dir = init_run(tmp_path)
+    add_bundle(tmp_path, run_dir)
+    result = run_producer(
+        tmp_path, "evidence", "run", "--run-dir", str(run_dir), "--id", "tests",
+        "--gate", "tests", "--scope", "full", "--collected", "2", "--passed", "2",
+        "--failed", "0", "--skipped", "0", "--expected-collected", "2",
+        "--artifact-id", "evidence-bundle", "--source", "intent.md", "--",
+        sys.executable, "-c", "pass",
+    )
+    assert result.returncode == 0, result.stderr
+    receipt = json.loads((run_dir / "RUN.json").read_text())
+    evidence = receipt["evidence"][0]
+    assert evidence["result"]["gate_identity"] == {
+        "id": "tests", "argv": evidence["result"]["argv"], "scope": "full",
+    }
+    assert evidence["result"]["counts"] == {
+        "scope": "full", "collected": 2, "passed": 2, "failed": 0,
+        "skipped": 0, "expected_collected": 2,
+    }
+    assert evidence["result"]["environment"]["digest"].startswith("sha256:")
+    assert evidence["result"]["environment"]["python"]["executable"]
+
+
+def test_evidence_run_requires_a_structured_gate_report(tmp_path):
+    run_dir = init_run(tmp_path)
+    add_bundle(tmp_path, run_dir)
+    result = subprocess.run(
+        [sys.executable, str(PRODUCER), "evidence", "run", "--run-dir", str(run_dir),
+         "--id", "tests", "--gate", "tests", "--scope", "full", "--artifact-id",
+         "evidence-bundle", "--source", "intent.md", "--", sys.executable, "-c", "pass"],
+        cwd=tmp_path, text=True, capture_output=True, check=False,
+    )
+    assert result.returncode == 2
+    assert "--gate-report" in result.stderr
+
+
+def test_validator_rejects_a_source_symlink_that_escapes_the_workspace(tmp_path):
+    run_dir = init_run(tmp_path)
+    add_bundle(tmp_path, run_dir)
+    result = run_producer(
+        tmp_path, "evidence", "run", "--run-dir", str(run_dir), "--id", "tests",
+        "--gate", "tests", "--artifact-id", "evidence-bundle", "--source", "intent.md", "--",
+        sys.executable, "-c", "pass",
+    )
+    assert result.returncode == 0, result.stderr
+    receipt = json.loads((run_dir / "RUN.json").read_text())
+    row = copy.deepcopy(receipt["evidence"][0])
+    artifact = next(item for item in receipt["artifacts"] if item["id"] == "evidence-bundle")
+    outside = tmp_path.parent / f"{tmp_path.name}-outside-source"
+    outside.write_text("outside\n")
+    link = tmp_path / "source-link"
+    link.symlink_to(outside)
+    report_path = row["result"]["gate_report"]["path"]
+    row["source_paths"] = ["source-link", report_path]
+    source_record = next(item for item in row["result"]["source_digests"] if item["path"] == "intent.md")
+    source_record.update({"path": "source-link", "digest": "sha256:" + hashlib.sha256(outside.read_bytes()).hexdigest(), "bytes": outside.stat().st_size})
+    row["result"]["source_digests_after"] = copy.deepcopy(row["result"]["source_digests"])
+    row["_declared_artifact"] = artifact
+    sys.path.insert(0, str(ROOT / "skills" / "deliver" / "scripts"))
+    validator = load_module(
+        ROOT / "skills" / "deliver" / "scripts" / "delivery_validation_evidence.py",
+        "delivery_validation_source_symlink_test",
+    )
+    with pytest.raises(validator.Invalid, match="outside workspace_root"):
+        validator._validate_execution_result(
+            receipt, row, row["source_paths"], receipt_dir=run_dir,
+            workspace_root=tmp_path, verify_hashes=True,
+        )
+
+
+@pytest.mark.parametrize(
+    ("scope", "collected", "expected"),
+    [("full", 1, 2), ("scoped", 2, 2)],
+)
+def test_evidence_run_rejects_scope_count_mismatch(tmp_path, scope, collected, expected):
+    run_dir = init_run(tmp_path)
+    add_bundle(tmp_path, run_dir)
+    result = run_producer(
+        tmp_path, "evidence", "run", "--run-dir", str(run_dir), "--id", "tests",
+        "--gate", "tests", "--scope", scope, "--collected", str(collected),
+        "--passed", str(collected), "--failed", "0", "--skipped", "0",
+        "--expected-collected", str(expected), "--artifact-id", "evidence-bundle",
+        "--source", "intent.md", "--", sys.executable, "-c", "pass",
+    )
+    assert result.returncode == 1
+    assert "do not bind declared scope" in result.stderr
+
+
+def test_evidence_run_rejects_incomplete_counts(tmp_path):
+    run_dir = init_run(tmp_path)
+    add_bundle(tmp_path, run_dir)
+    result = run_producer(
+        tmp_path, "evidence", "run", "--run-dir", str(run_dir), "--id", "tests",
+        "--gate", "tests", "--scope", "full", "--collected", "2", "--passed", "1",
+        "--failed", "0", "--skipped", "0", "--expected-collected", "2",
+        "--artifact-id", "evidence-bundle", "--source", "intent.md", "--",
+        sys.executable, "-c", "pass",
+    )
+    assert result.returncode == 1
+    assert "counts must account for every collected result" in result.stderr
+
+
+def test_validator_rejects_gate_identity_count_and_environment_drift(tmp_path):
+    run_dir = init_run(tmp_path)
+    add_bundle(tmp_path, run_dir)
+    result = run_producer(
+        tmp_path, "evidence", "run", "--run-dir", str(run_dir), "--id", "tests",
+        "--gate", "tests", "--scope", "full", "--collected", "2", "--passed", "2",
+        "--failed", "0", "--skipped", "0", "--expected-collected", "2",
+        "--artifact-id", "evidence-bundle", "--source", "intent.md", "--",
+        sys.executable, "-c", "pass",
+    )
+    assert result.returncode == 0, result.stderr
+    receipt = json.loads((run_dir / "RUN.json").read_text())
+    row = receipt["evidence"][0]
+    artifact = next(item for item in receipt["artifacts"] if item["id"] == "evidence-bundle")
+    row["_declared_artifact"] = artifact
+    sys.path.insert(0, str(ROOT / "skills" / "deliver" / "scripts"))
+    validator = load_module(
+        ROOT / "skills" / "deliver" / "scripts" / "delivery_validation_evidence.py",
+        "delivery_validation_gate_binding_test",
+    )
+    for field, value, message in (
+        ("gate_identity", {"id": "wrong", "argv": row["result"]["argv"], "scope": "full"}, "gate identity"),
+        ("counts", {"scope": "scoped", "collected": 1, "passed": 1, "failed": 0, "skipped": 0, "expected_collected": 2}, "counts"),
+        ("environment", {"digest": "sha256:" + "0" * 64}, "environment"),
+    ):
+        candidate = copy.deepcopy(row)
+        candidate["result"][field] = value
+        with pytest.raises(validator.Invalid, match=message):
+            validator._validate_execution_result(
+                receipt, candidate, candidate["source_paths"], receipt_dir=run_dir,
+                workspace_root=tmp_path, verify_hashes=True,
+            )
+
+
 def test_evidence_run_does_not_accept_a_supplied_exit_code(tmp_path):
     run_dir = init_run(tmp_path)
     add_bundle(tmp_path, run_dir)
@@ -266,11 +433,13 @@ def test_evidence_bundle_publication_preserves_old_receipt_on_interruption(tmp_p
         return original_replace(source, destination)
 
     monkeypatch.setattr(module.os, "replace", interrupted)
-    args = module.build_parser().parse_args([
+    args = module.build_parser().parse_args(with_gate_report(tmp_path, [
         "evidence", "run", "--run-dir", str(run_dir), "--id", "tests",
-        "--gate", "tests", "--artifact-id", "evidence-bundle", "--source", "intent.md",
+        "--gate", "tests", "--scope", "full", "--collected", "1", "--passed", "1",
+        "--failed", "0", "--skipped", "0", "--expected-collected", "1",
+        "--artifact-id", "evidence-bundle", "--source", "intent.md",
         "--", sys.executable, "-c", "pass",
-    ])
+    ]))
     with pytest.raises(OSError, match="injected atomic interruption"):
         module.command_evidence_run(args)
     assert receipt_path.read_bytes() == before
@@ -294,11 +463,13 @@ def test_bundle_fsync_failure_does_not_leave_a_receipt_without_its_bundle(tmp_pa
         return original_fsync(path)
 
     monkeypatch.setattr(module, "fsync_directory", fail_receipt_directory)
-    args = module.build_parser().parse_args([
+    args = module.build_parser().parse_args(with_gate_report(tmp_path, [
         "evidence", "run", "--run-dir", str(run_dir), "--id", "tests",
-        "--gate", "tests", "--artifact-id", "evidence-bundle", "--source", "intent.md",
+        "--gate", "tests", "--scope", "full", "--collected", "1", "--passed", "1",
+        "--failed", "0", "--skipped", "0", "--expected-collected", "1",
+        "--artifact-id", "evidence-bundle", "--source", "intent.md",
         "--", sys.executable, "-c", "pass",
-    ])
+    ]))
     with pytest.raises(OSError, match="receipt directory fsync"):
         module.command_evidence_run(args)
     receipt = json.loads((run_dir / "RUN.json").read_text())
@@ -671,7 +842,7 @@ def test_independent_validator_rejects_forged_output_and_git_metadata(tmp_path):
     forged_output["_declared_artifact"] = artifact
     with pytest.raises(evidence_validator.Invalid, match="stdout"):
         evidence_validator._validate_execution_result(
-            receipt, forged_output, ["intent.md"], receipt_dir=None,
+            receipt, forged_output, forged_output["source_paths"], receipt_dir=None,
             workspace_root=None, verify_hashes=False,
         )
 
@@ -680,7 +851,7 @@ def test_independent_validator_rejects_forged_output_and_git_metadata(tmp_path):
     forged_git["_declared_artifact"] = artifact
     with pytest.raises(evidence_validator.Invalid, match="Git provenance|git"):
         evidence_validator._validate_execution_result(
-            receipt, forged_git, ["intent.md"], receipt_dir=None,
+            receipt, forged_git, forged_git["source_paths"], receipt_dir=None,
             workspace_root=None, verify_hashes=False,
         )
 
@@ -754,11 +925,13 @@ def test_timeout_result_is_validator_valid_failed_evidence(tmp_path, monkeypatch
             command, cwd=cwd, timeout_seconds=.05, max_log_bytes=128, error_type=ValueError,
         ),
     )
-    args = producer.build_parser().parse_args([
+    args = producer.build_parser().parse_args(with_gate_report(tmp_path, [
         "evidence", "run", "--run-dir", str(run_dir), "--id", "timed-out",
-        "--gate", "tests", "--artifact-id", "evidence-bundle", "--source", "intent.md", "--",
+        "--gate", "tests", "--scope", "full", "--collected", "1", "--passed", "0",
+        "--failed", "1", "--skipped", "0", "--expected-collected", "1",
+        "--artifact-id", "evidence-bundle", "--source", "intent.md", "--",
         sys.executable, "-c", "import time; time.sleep(1)",
-    ])
+    ]))
     assert producer.command_evidence_run(args)["status"] == "fail"
     receipt = json.loads((run_dir / "RUN.json").read_text())
     row = receipt["evidence"][0]
@@ -769,7 +942,7 @@ def test_timeout_result_is_validator_valid_failed_evidence(tmp_path, monkeypatch
     )
     row["_declared_artifact"] = artifact
     validator._validate_execution_result(
-        receipt, row, ["intent.md"], receipt_dir=run_dir,
+        receipt, row, row["source_paths"], receipt_dir=run_dir,
         workspace_root=tmp_path, verify_hashes=True,
     )
 

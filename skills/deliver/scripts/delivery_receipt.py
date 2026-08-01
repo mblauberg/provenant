@@ -69,20 +69,22 @@ SCAFFOLD_ENTRIES = {
     "intent.md", "authority-approval.json",
 }
 
-
 class ReceiptError(ValueError):
     """A producer operation was refused."""
 
+def build_scenario_receipt(case: dict[str, Any], fixture: dict[str, Any], root: Path = PRODUCT_ROOT) -> dict[str, Any]:
+    import delivery_receipt_reference as reference_fixtures
+    return reference_fixtures.build_scenario_receipt(case, fixture, root)
 
+def build_reference_run(profile_name: str, root: Path = PRODUCT_ROOT) -> dict[str, Any]:
+    import delivery_receipt_reference as reference_fixtures
+    return reference_fixtures.make_reference_run(profile_name, root)
 def utc_now() -> str:
     """Return the producer clock in an unambiguous UTC representation."""
     return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
 
-
 def digest_bytes(raw: bytes) -> str:
     return "sha256:" + hashlib.sha256(raw).hexdigest()
-
-
 def parse_utc(value: Any, field: str) -> datetime:
     if not isinstance(value, str) or not value.endswith("Z"):
         raise ReceiptError(f"{field} must be a UTC timestamp")
@@ -94,18 +96,14 @@ def parse_utc(value: Any, field: str) -> datetime:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
 
-
 def reject_future(value: Any, field: str) -> None:
     if parse_utc(value, field) > datetime.now(timezone.utc) + timedelta(minutes=5):
         raise ReceiptError(f"{field} exceeds the future timestamp tolerance")
-
 
 def require_identifier(value: str, field: str) -> str:
     if not isinstance(value, str) or not IDENTIFIER.fullmatch(value):
         raise ReceiptError(f"{field} must be a bounded stable identifier")
     return value
-
-
 def _json_object(value: str | None, field: str) -> dict[str, Any]:
     if value is None:
         raise ReceiptError(f"{field} is required")
@@ -125,8 +123,6 @@ def _json_object(value: str | None, field: str) -> dict[str, Any]:
     if not isinstance(parsed, dict):
         raise ReceiptError(f"{field} must be a JSON object")
     return parsed
-
-
 def _safe_path(workspace: Path, value: str, field: str) -> tuple[Path, str]:
     if not isinstance(value, str) or not value:
         raise ReceiptError(f"{field} must be safe and workspace-relative")
@@ -140,15 +136,12 @@ def _safe_path(workspace: Path, value: str, field: str) -> tuple[Path, str]:
         raise ReceiptError(f"{field} escapes the workspace") from exc
     return target, relative.as_posix().rstrip("/") or "."
 
-
 def safe_workspace_path(workspace: Path, value: str, field: str) -> tuple[Path, str]:
     return _safe_path(workspace.resolve(), value, field)
-
 
 def _scoped_path(workspace: Path, scope: str, field: str) -> Path:
     target, _ = safe_workspace_path(workspace, scope, field)
     return target
-
 
 def ensure_scope(run: dict[str, Any], workspace: Path, target: Path, field: str) -> None:
     authority = run.get("authority")
@@ -160,14 +153,11 @@ def ensure_scope(run: dict[str, Any], workspace: Path, target: Path, field: str)
     if not any(resolved == root or resolved.is_relative_to(root) for root in roots):
         raise ReceiptError(f"{field.removeprefix('allowed_')} leaves authority.{field}")
 
-
 def ensure_allowed_artifact_target(run: dict[str, Any], workspace: Path, target: Path) -> None:
     ensure_scope(run, workspace, target, "allowed_artifact_paths")
 
-
 def ensure_allowed_source_target(run: dict[str, Any], workspace: Path, target: Path) -> None:
     ensure_scope(run, workspace, target, "allowed_source_paths")
-
 
 def _lexical_absolute(value: str | Path) -> Path:
     candidate = Path(value)
@@ -175,11 +165,9 @@ def _lexical_absolute(value: str | Path) -> Path:
         candidate = Path.cwd() / candidate
     return Path(os.path.abspath(os.fspath(candidate)))
 
-
 def _reject_symlink(path: Path, field: str) -> None:
     if path.is_symlink():
         raise ReceiptError(f"{field} must not be a symlink: {path}")
-
 
 def resolve_receipt(
     value: str | Path,
@@ -221,16 +209,13 @@ def resolve_receipt(
         raise ReceiptError("run-dir does not contain RUN.json")
     return expected_run, expected_receipt, workspace
 
-
 def resolve_run_dir(value: str | Path, *, run_id: str | None = None) -> tuple[Path, Path]:
     run_dir, _receipt, workspace = resolve_receipt(value, run_id=run_id, allow_missing=True)
     return run_dir, workspace
 
-
 def _receipt_path(value: str | Path) -> tuple[Path, Path]:
     run_dir, receipt, _workspace = resolve_receipt(value)
     return run_dir, receipt
-
 
 def fsync_directory(path: Path) -> None:
     descriptor = os.open(path, os.O_RDONLY)
@@ -238,7 +223,6 @@ def fsync_directory(path: Path) -> None:
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
-
 
 @contextmanager
 def run_lock(
@@ -280,7 +264,6 @@ def run_lock(
             yield
         finally:
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-
 
 def _written_shape(value: Any) -> None:
     if not isinstance(value, dict):
@@ -340,7 +323,6 @@ def _written_shape(value: Any) -> None:
             identifiers.append(require_identifier(identifier, f"RUN.json {key}[{index}].id"))
         if len(identifiers) != len(set(identifiers)):
             raise ReceiptError(f"RUN.json {key} contains duplicate ids")
-
 
 def _checkpoint_compatibility_shape(value: Any) -> None:
     compatibility.validate_checkpoint(value, ReceiptError, _written_shape)
@@ -546,6 +528,20 @@ def ensure_immutable_risk(run: dict[str, Any], workspace: Path) -> None:
         if not isinstance(override, dict):
             raise ReceiptError(f"risk tier below derived {derived} requires an approved human override")
         _check_override(override, derived)
+        evidence = next(
+            (item for item in run.get("evidence", [])
+             if isinstance(item, dict) and item.get("id") == override.get("evidence")),
+            None,
+        )
+        if not isinstance(evidence, dict) or evidence.get("status") != "pass" or evidence.get("gate") != "risk-override":
+            raise ReceiptError("risk override evidence is not a passing risk-override row")
+        artifact = find_artifact(run, evidence.get("artifact_id", ""))
+        target, _ = safe_workspace_path(workspace, artifact.get("path", ""), "risk override artifact")
+        ensure_allowed_artifact_target(run, workspace, target)
+        if not target.is_file() or artifact.get("digest") != digest_bytes(target.read_bytes()):
+            raise ReceiptError("risk override artifact digest does not match its live bytes")
+        if evidence.get("artifact_digest") != artifact.get("digest"):
+            raise ReceiptError("risk override evidence digest does not match its artifact")
 
 
 def ensure_mutable(run: dict[str, Any]) -> None:
@@ -972,6 +968,9 @@ import delivery_receipt_commands as _evidence_commands
 def command_evidence_run(args: argparse.Namespace) -> dict[str, Any]:
     return _evidence_commands.command_evidence_run(args, _module_api())
 
+
+def command_reference(args: argparse.Namespace) -> dict[str, Any]:
+    return _evidence_commands.command_reference(args, _module_api())
 
 def command_evidence_human(args: argparse.Namespace) -> dict[str, Any]:
     return _evidence_commands.command_evidence_human(args, _module_api())

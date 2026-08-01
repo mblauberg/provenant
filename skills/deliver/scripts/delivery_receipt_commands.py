@@ -3,10 +3,17 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
+import os
+import platform
 import re
 import shlex
 import subprocess
+import sys
+
+import delivery_receipt_reference as reference_fixtures
+import reference_evaluation as reference_materializer
 from pathlib import Path
 from typing import Any
 
@@ -26,16 +33,22 @@ def _source_records(
 
 
 def _git_record(workspace: Path) -> dict[str, Any]:
+    git_environment = os.environ.copy()
+    for name in (
+        "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_COMMON_DIR",
+    ):
+        git_environment.pop(name, None)
     try:
         root = subprocess.check_output(
             ["git", "-C", str(workspace), "rev-parse", "--show-toplevel"],
-            text=True, stderr=subprocess.DEVNULL,
+            text=True, stderr=subprocess.DEVNULL, env=git_environment,
         ).strip()
         head = subprocess.check_output(
             ["git", "-C", str(workspace), "rev-parse", "HEAD"],
-            text=True, stderr=subprocess.DEVNULL,
+            text=True, stderr=subprocess.DEVNULL, env=git_environment,
         ).strip()
-        if Path(root).resolve() != workspace.resolve() or not re.fullmatch(r"[0-9a-f]{40}", head):
+        if Path(root).resolve() != workspace.resolve() or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", head):
             return {"available": False, "reason": "workspace is not a committed Git root"}
         return {"available": True, "root": str(workspace.resolve()), "head": head}
     except (OSError, subprocess.CalledProcessError):
@@ -49,6 +62,27 @@ def _git_required(run: dict[str, Any], workspace: Path) -> bool:
     )
 
 
+def _environment_provenance() -> dict[str, Any]:
+    """Capture non-secret runtime identity needed to interpret a gate result."""
+    identity = {
+        "platform": {
+            "system": platform.system(),
+            "release": platform.release(),
+            "machine": platform.machine(),
+        },
+        "python": {
+            "executable": str(Path(sys.executable).resolve()),
+            "version": platform.python_version(),
+        },
+        "variables": {
+            name: os.environ.get(name, "")
+            for name in ("PATH", "VIRTUAL_ENV", "CONDA_PREFIX", "PYTHONHOME", "NODE_PATH")
+        },
+    }
+    canonical = json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
+    return {**identity, "digest": "sha256:" + hashlib.sha256(canonical).hexdigest()}
+
+
 def _require_git_record(
     record: dict[str, Any], *, required: bool, error_type: type[ValueError] = ValueError,
 ) -> None:
@@ -58,7 +92,7 @@ def _require_git_record(
         if (
             not isinstance(record.get("root"), str)
             or not record["root"]
-            or not re.fullmatch(r"[0-9a-f]{40}", record.get("head", ""))
+            or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", record.get("head", ""))
         ):
             raise error_type("execution Git provenance is invalid")
     elif required:
@@ -80,14 +114,71 @@ def _next_bundle_version(api: Any, run: dict[str, Any], artifact_id: str) -> str
         version += 1
 
 
+def _gate_report(
+    api: Any, workspace: Path, args: Any, command: list[str],
+) -> tuple[str, str, dict[str, Any]]:
+    target, relative = api.safe_workspace_path(workspace, args.gate_report, "gate report")
+    try:
+        raw = target.read_bytes()
+        report = json.loads(raw)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise api.ReceiptError(f"gate report is unreadable: {exc}") from exc
+    if not isinstance(report, dict) or set(report) != {
+        "schema_version", "contract", "gate", "argv", "scope", "counts", "baseline",
+    }:
+        raise api.ReceiptError("gate report contract is incomplete")
+    if (
+        report["schema_version"] != 1
+        or report["contract"] != "delivery-gate-report"
+        or report["gate"] != args.gate
+        or report["argv"] != command
+        or report["scope"] != args.scope
+    ):
+        raise api.ReceiptError("gate report does not bind the exact gate identity")
+    counts = report["counts"]
+    if not isinstance(counts, dict) or set(counts) != {
+        "collected", "passed", "failed", "skipped", "expected_collected",
+    }:
+        raise api.ReceiptError("gate report counts are incomplete")
+    if any(
+        isinstance(counts[field], bool) or not isinstance(counts[field], int) or counts[field] < 0
+        for field in ("collected", "passed", "failed", "skipped", "expected_collected")
+    ):
+        raise api.ReceiptError("gate report counts are non-negative integers")
+    if counts["passed"] + counts["failed"] + counts["skipped"] != counts["collected"]:
+        raise api.ReceiptError("gate report counts must account for every collected result")
+    baseline = report["baseline"]
+    if not isinstance(baseline, dict) or set(baseline) != {"kind", "expected_collected"}:
+        raise api.ReceiptError("gate report baseline is incomplete")
+    if baseline["kind"] != "structured-runner" or baseline["expected_collected"] != counts["expected_collected"]:
+        raise api.ReceiptError("gate report baseline does not bind the structured runner population")
+    if counts["expected_collected"] == 0 or (
+        args.scope == "full" and counts["collected"] < counts["expected_collected"]
+    ) or (
+        args.scope == "scoped" and counts["collected"] >= counts["expected_collected"]
+    ):
+        raise api.ReceiptError("gate report counts do not bind declared scope")
+    supplied = {
+        field: getattr(args, field, None)
+        for field in ("collected", "passed", "failed", "skipped", "expected_collected")
+    }
+    if any(value is not None and value != counts[field] for field, value in supplied.items()):
+        raise api.ReceiptError("caller-supplied gate counts disagree with the structured runner report")
+    return relative, api.digest_bytes(raw), counts
+
+
 def command_evidence_run(args: Any, api: Any) -> dict[str, Any]:
     command = list(args.command_args)
     if command and command[0] == "--":
         command = command[1:]
     if not command:
         raise api.ReceiptError("evidence run requires a command after --")
+    if args.scope not in {"scoped", "full"}:
+        raise api.ReceiptError("evidence gate scope must be scoped or full")
     run_dir, receipt = api._receipt_path(args.run_dir)
     workspace = run_dir.parent.parent.resolve()
+    report_relative, report_digest, report_counts = _gate_report(api, workspace, args, command)
+    counts = {"scope": args.scope, **report_counts}
     with api.run_lock(run_dir):
         run = api.load_run(run_dir)
         api.ensure_immutable_risk(run, workspace)
@@ -95,7 +186,7 @@ def command_evidence_run(args: Any, api: Any) -> dict[str, Any]:
         api.ensure_new_evidence_id(run, args.evidence_id)
         artifact, original_bundle = api._bundle_artifact(run, args.artifact_id, workspace)
         sources = []
-        for source in dict.fromkeys(args.sources):
+        for source in dict.fromkeys([*args.sources, report_relative]):
             _target, relative = api.safe_workspace_path(workspace, source, "evidence source")
             sources.append(relative)
         source_records = _source_records(api, sources, workspace, run)
@@ -124,6 +215,17 @@ def command_evidence_run(args: Any, api: Any) -> dict[str, Any]:
             "git": {"before": git_before, "after": git_after},
             "started_at": started,
             "finished_at": finished,
+            "gate_identity": {"id": args.gate, "argv": command, "scope": counts["scope"]},
+            "counts": counts,
+            "gate_report": {
+                "path": report_relative,
+                "digest": report_digest,
+                "baseline": {
+                    "kind": "structured-runner",
+                    "expected_collected": counts["expected_collected"],
+                },
+            },
+            "environment": _environment_provenance(),
         })
         exit_code = observed.get("exit_code")
         complete_output = all(
@@ -171,6 +273,46 @@ def command_evidence_run(args: Any, api: Any) -> dict[str, Any]:
         run["updated_at"] = finished
         api._publish_bundle_and_receipt(receipt, run, target, bundle_raw)
     return {"evidence_id": args.evidence_id, "status": row["status"], "exit_code": exit_code, "artifact_id": bundle_artifact_id, "receipt_digest": bundle_digest}
+
+
+def command_reference(args: Any, api: Any) -> dict[str, Any]:
+    run_id = api.require_identifier(args.run_id, "run-id")
+    if args.profile not in json.loads(api.PROFILE_PATH.read_text()).get("profiles", {}):
+        raise api.ReceiptError(f"unknown delivery profile: {args.profile}")
+    if not re.fullmatch(r"[0-9a-f]{64}", args.artifact_sha256):
+        raise api.ReceiptError("reference artifact SHA-256 is invalid")
+    run_dir, receipt, workspace = api.resolve_receipt(args.run_dir, run_id=run_id, allow_missing=True)
+    target, relative = api.safe_workspace_path(workspace, args.artifact_path, "reference artifact")
+    if not target.is_file() or api.digest_bytes(target.read_bytes()) != f"sha256:{args.artifact_sha256}":
+        raise api.ReceiptError("reference artifact does not match its declared digest")
+    run = reference_fixtures.make_reference_run(args.profile, api.PRODUCT_ROOT)
+    run["run_id"] = run_id
+    if isinstance(run.get("fabric_relationships"), dict):
+        run["fabric_relationships"]["delivery_run_id"] = run_id
+    run["artifacts"].append({
+        "id": "fabric-coordination-receipt", "path": relative,
+        "media_type": "application/json", "artifact_type": "evidence",
+        "digest": f"sha256:{args.artifact_sha256}", "class": "evidence",
+        "owner": "chair", "retention": "risk-policy",
+    })
+    if args.accepted:
+        if args.profile != "agent-product":
+            raise api.ReceiptError("only an agent-product reference can be accepted")
+        run["status"] = "accepted"
+        run["state_history"].append({"state": "accepted", "at": "2026-07-10T00:09:00Z", "evidence_ids": ["acceptance-approval"]})
+        run["human_gates"]["acceptance"] = {"status": "approved", "approver": "human-maintainer", "evidence": "acceptance-approval"}
+        run["checkpoint"].update({"current_slice": "accepted", "next_action": "prepare release", "in_flight": []})
+    reference_materializer.materialise_reference_run(
+        run, workspace, api.PRODUCT_ROOT,
+        receipt_identity=f".agent-run/{run_id}/RUN.json",
+    )
+    with api.run_lock(run_dir):
+        if not run_dir.is_dir():
+            raise api.ReceiptError("canonical run directory is unavailable")
+        if receipt.exists() or receipt.is_symlink():
+            raise api.ReceiptError(f"run-dir already contains a canonical receipt: {run_dir}")
+        api.create_json_exclusive(receipt, run)
+    return {"path": str(receipt), "run_id": run_id, "profile": args.profile}
 
 
 def command_evidence_human(args: Any, api: Any) -> dict[str, Any]:

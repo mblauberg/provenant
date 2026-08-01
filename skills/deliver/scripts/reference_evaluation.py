@@ -6,6 +6,9 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
+import re
+import subprocess
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -287,6 +290,7 @@ def materialise_evaluation_binding(
     run: dict[str, Any], workspace_root: Path, root: Path = ROOT, *,
     binding_index: int = 0, repetitions: int = 3, sample_size: int = 10,
     time_offset_minutes: int = 0, skills_root: Path = SKILLS_ROOT,
+    receipt_identity: str = "RUN.json",
 ) -> dict[str, Any]:
     """Materialise one non-planned assurance binding and return its receipt."""
     binding = run["assurance"]["evaluations"][binding_index]
@@ -322,10 +326,12 @@ def materialise_evaluation_binding(
     evidence_bundle = by_id.get("evidence-bundle")
     if evidence_bundle:
         _materialise_deterministic_evidence_bundle(
-            run, evidence_bundle, workspace_root,
+            run, evidence_bundle, workspace_root, receipt_identity=receipt_identity,
         )
     if linked and linked.get("kind") == "deterministic":
-        _materialise_deterministic_result(run, linked, workspace_root)
+        _materialise_deterministic_result(
+            run, linked, workspace_root, receipt_identity=receipt_identity,
+        )
         linked["result"]["receipt_digest"] = digest
     return evaluation
 
@@ -339,8 +345,33 @@ def _write_delivery_artifact(
     artifact["digest"] = "sha256:" + hashlib.sha256(payload).hexdigest()
 
 
+def _git_identity(workspace_root: Path) -> dict[str, Any]:
+    """Materialise the real Git identity when the reference runs in a Git root."""
+    git_environment = os.environ.copy()
+    for name in (
+        "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_COMMON_DIR",
+    ):
+        git_environment.pop(name, None)
+    try:
+        root = subprocess.check_output(
+            ["git", "-C", str(workspace_root), "rev-parse", "--show-toplevel"],
+            text=True, stderr=subprocess.DEVNULL, env=git_environment,
+        ).strip()
+        head = subprocess.check_output(
+            ["git", "-C", str(workspace_root), "rev-parse", "HEAD"],
+            text=True, stderr=subprocess.DEVNULL, env=git_environment,
+        ).strip()
+    except (OSError, subprocess.CalledProcessError):
+        return {"available": False, "reason": "reference fixture"}
+    if Path(root).resolve() != workspace_root.resolve() or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", head):
+        return {"available": False, "reason": "reference fixture"}
+    return {"available": True, "root": str(workspace_root.resolve()), "head": head}
+
+
 def _materialise_deterministic_result(
-    run: dict[str, Any], item: dict[str, Any], workspace_root: Path,
+    run: dict[str, Any], item: dict[str, Any], workspace_root: Path, *,
+    receipt_identity: str = "RUN.json",
 ) -> None:
     """Give synthetic deterministic rows the same bounded observation contract."""
     started = item.setdefault("started_at", "2026-07-10T00:00:00Z")
@@ -348,7 +379,32 @@ def _materialise_deterministic_result(
     result = item.setdefault("result", {})
     result.setdefault("exit_code", 0)
     empty_b64 = base64.b64encode(b"").decode("ascii")
-    git_identity = {"available": False, "reason": "reference fixture"}
+    git_identity = _git_identity(workspace_root)
+    argv = result.setdefault("argv", ["reference-check"])
+    report_path = f"evidence/{item['id']}-gate-report.json"
+    if report_path not in item.setdefault("source_paths", []):
+        item["source_paths"].append(report_path)
+    report = {
+        "schema_version": 1,
+        "contract": "delivery-gate-report",
+        "gate": item["gate"],
+        "argv": argv,
+        "scope": "full",
+        "counts": {"collected": 1, "passed": 1, "failed": 0, "skipped": 0, "expected_collected": 1},
+        "baseline": {"kind": "structured-runner", "expected_collected": 1},
+    }
+    report_raw = (json.dumps(report, sort_keys=True) + "\n").encode()
+    report_target = workspace_root / report_path
+    report_target.parent.mkdir(parents=True, exist_ok=True)
+    report_target.write_bytes(report_raw)
+    environment_identity = {
+        "platform": {"system": "reference", "release": "reference", "machine": "reference"},
+        "python": {"executable": "reference", "version": "reference"},
+        "variables": {name: "reference" for name in ("PATH", "VIRTUAL_ENV", "CONDA_PREFIX", "PYTHONHOME", "NODE_PATH")},
+    }
+    environment_identity["digest"] = "sha256:" + hashlib.sha256(
+        json.dumps(environment_identity, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
     source_digests = [
         {
             "path": path,
@@ -358,9 +414,20 @@ def _materialise_deterministic_result(
         for path in item.get("source_paths", [])
     ]
     result.update({
-        "argv": result.get("argv", ["reference-check"]),
+        "argv": argv,
+        "gate_identity": {"id": item["gate"], "argv": argv, "scope": "full"},
+        "counts": {"scope": "full", "collected": 1, "passed": 1, "failed": 0, "skipped": 0, "expected_collected": 1},
+        "gate_report": {
+            "path": report_path,
+            "digest": "sha256:" + hashlib.sha256(report_raw).hexdigest(),
+            "baseline": {"kind": "structured-runner", "expected_collected": 1},
+        },
+        "environment": environment_identity,
         "cwd": str(workspace_root.resolve()),
-        "run_identity": {"run_id": run["run_id"], "receipt": "RUN.json"},
+        "run_identity": {
+            "run_id": run["run_id"],
+            "receipt": receipt_identity,
+        },
         "source_digests": source_digests,
         "source_digests_after": source_digests,
         "git": {"before": git_identity, "after": git_identity},
@@ -379,9 +446,15 @@ def _materialise_deterministic_result(
 
 
 def _materialise_deterministic_evidence_bundle(
-    run: dict[str, Any], artifact: dict[str, Any], workspace_root: Path,
+    run: dict[str, Any], artifact: dict[str, Any], workspace_root: Path, *,
+    receipt_identity: str = "RUN.json",
 ) -> None:
     """Write a non-self-referential receipt and bind its evidence rows."""
+    for item in run["evidence"]:
+        if item.get("kind") == "deterministic" and item.get("artifact_id") == artifact["id"]:
+            report_path = f"evidence/{item['id']}-gate-report.json"
+            if report_path not in item.setdefault("source_paths", []):
+                item["source_paths"].append(report_path)
     source_paths = {
         path
         for item in run["evidence"]
@@ -397,7 +470,9 @@ def _materialise_deterministic_evidence_bundle(
     for item in run["evidence"]:
         if item.get("kind") != "deterministic" or item.get("artifact_id") != artifact["id"]:
             continue
-        _materialise_deterministic_result(run, item, workspace_root)
+        _materialise_deterministic_result(
+            run, item, workspace_root, receipt_identity=receipt_identity,
+        )
         result = item["result"]
         checks.append({
             "id": item["id"],
@@ -426,10 +501,32 @@ def _materialise_deterministic_evidence_bundle(
         run["authority"]["evidence_digest"] = artifact["digest"]
 
 
+def _materialise_reference_routes(run: dict[str, Any], workspace_root: Path) -> None:
+    reviews = [item for item in run.get("reviews", []) if item.get("role") == "other-primary"]
+    evidence_by_id = {item.get("id"): item for item in run.get("evidence", [])}
+    artifacts_by_id = {item.get("id"): item for item in run.get("artifacts", [])}
+    for review in reviews:
+        linked = evidence_by_id.get(review.get("evidence_id"))
+        route_artifact = next(
+            (item for item in artifacts_by_id.values() if item.get("path") == linked.get("route_receipt", {}).get("path")),
+            None,
+        ) if isinstance(linked, dict) else None
+        if not isinstance(linked, dict) or not isinstance(route_artifact, dict):
+            continue
+        route = {
+            "status": "ok", "cross_family": True, "certification_eligible": True,
+            "adapter": review["adapter"], "reviewer_id": review.get("reviewer_id", "reference-anthropic"),
+            "model_family": review["provider_family"], "resolved_model": review["model"],
+        }
+        payload = (json.dumps(route, sort_keys=True) + "\n").encode()
+        _write_delivery_artifact(route_artifact, workspace_root, payload)
+        linked["route_receipt"]["digest"] = route_artifact["digest"]
+
+
 def materialise_reference_run(
     run: dict[str, Any], workspace_root: Path, root: Path = ROOT, *,
     evaluation_repetitions: int = 3, evaluation_sample_size: int = 10,
-    skills_root: Path = SKILLS_ROOT,
+    skills_root: Path = SKILLS_ROOT, receipt_identity: str = "RUN.json",
 ) -> dict[str, Any]:
     """Write every local reference artifact and replace placeholders with live digests."""
     workspace_root.mkdir(parents=True, exist_ok=True)
@@ -447,9 +544,11 @@ def materialise_reference_run(
         materialise_evaluation_binding(
             run, workspace_root, root, binding_index=index,
             repetitions=evaluation_repetitions, sample_size=evaluation_sample_size,
-            skills_root=skills_root,
+            skills_root=skills_root, receipt_identity=receipt_identity,
         )
     _materialise_deterministic_evidence_bundle(
         run, by_id["evidence-bundle"], workspace_root,
+        receipt_identity=receipt_identity,
     )
+    _materialise_reference_routes(run, workspace_root)
     return run

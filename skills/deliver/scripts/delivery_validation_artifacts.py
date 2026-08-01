@@ -32,6 +32,13 @@ def _validate_artifacts(
         if path_present:
             clean_path = _safe_path(path, f"artifact {artifact_id}.path")
             fail(not any(_inside(clean_path, scope) for scope in allowed_artifact_paths), f"artifact {artifact_id} is outside authority.allowed_artifact_paths")
+            if workspace_root is not None:
+                target = (workspace_root / clean_path).resolve()
+                roots = [(workspace_root / scope).resolve() for scope in allowed_artifact_paths]
+                fail(
+                    not any(target == root or target.is_relative_to(root) for root in roots),
+                    f"artifact {artifact_id} resolves outside authority.allowed_artifact_paths",
+                )
         fail(not item.get("media_type"), f"artifact {artifact_id} requires media_type")
         fail(item.get("class") not in SAFE_CLASSES, f"artifact {artifact_id} has invalid class")
         artifact_type = item.get("artifact_type")
@@ -61,4 +68,3 @@ def _validate_artifacts(
     fail(not by_id, "at least one artifact is required")
     fail(not any(item.get("class") == "canonical" for item in by_id.values()), "profile requires a canonical outcome artifact")
     return by_id
-

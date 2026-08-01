@@ -1025,7 +1025,10 @@ def test_security_checks_are_exact_policy_selected_deterministic_evidence():
     candidate["security"]["changed_surfaces"] = ["generated-artifact"]
     candidate["security"]["artifact_surfaces"] = [{"artifact_id": "intent", "surfaces": ["generated-artifact"]}]
     candidate["security"]["checks"] = [{"id": "provenance", "surface": "generated-artifact", "status": "pass", "evidence_id": "security-provenance"}]
-    candidate["evidence"].append({"id": "security-provenance", "kind": "deterministic", "gate": "provenance", "status": "pass", "method": "probe", "artifact_id": "evidence-bundle", "source_paths": ["input"], "result": {"exit_code": 0, "receipt_digest": "sha256:" + "b" * 64}})
+    source_evidence = next(item for item in candidate["evidence"] if item["kind"] == "deterministic")
+    provenance_result = copy.deepcopy(source_evidence["result"])
+    provenance_result["gate_identity"] = {"id": "provenance", "argv": provenance_result["argv"], "scope": "full"}
+    candidate["evidence"].append({"id": "security-provenance", "kind": "deterministic", "gate": "provenance", "status": "pass", "method": "probe", "artifact_id": "evidence-bundle", "source_paths": source_evidence["source_paths"], "started_at": provenance_result["started_at"], "finished_at": provenance_result["finished_at"], "result": provenance_result})
     with pytest.raises(module.Invalid, match="derived surfaces"):
         module.validate(candidate, ROOT)
 

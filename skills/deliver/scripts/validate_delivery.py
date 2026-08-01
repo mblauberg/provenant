@@ -22,7 +22,7 @@ from delivery_validation_common import (
     _load_bound_json, _mapping, _policy_validation_module, _retrospect_validator,
     _safe_path, _software_delivery_validator, _utc, fail,
 )
-from delivery_validation_evidence import _validate_evidence
+from delivery_validation_evidence import _validate_evidence, _validate_live_risk_override
 from delivery_validation_lifecycle import _validate_checkpoint, _validate_history, _validate_intent_design
 from delivery_validation_measures import _validate_measures_assurance
 from delivery_validation_reviews import _validate_reviews
@@ -87,6 +87,7 @@ def validate(
         artifact_root=workspace_root or receipt_dir, verify_hashes=verify_hashes,
         receipt_dir=receipt_dir, workspace_root=workspace_root,
     )
+    _validate_live_risk_override(run, artifacts, evidence, workspace_root, root)
     authority_evidence = evidence.get(authority.get("evidence"))
     fail(not authority_evidence or authority_evidence.get("kind") != "human" or authority_evidence.get("status") != "pass" or authority_evidence.get("gate") != "authority-approval", "authority must link matching passing human evidence")
     approval_artifact = artifacts.get(authority_evidence.get("artifact_id")) if authority_evidence else None
@@ -119,7 +120,10 @@ def validate(
         }
         first_review = next(item for item in run["state_history"] if item["state"] == "reviewing")
         fail(not deterministic_ids <= set(first_review["evidence_ids"]), "reviewing transition lacks deterministic gate evidence")
-    _validate_reviews(run, evidence, required=acceptance_reached)
+    _validate_reviews(
+        run, evidence, required=acceptance_reached,
+        workspace_root=workspace_root, artifacts=artifacts, verify_hashes=verify_hashes,
+    )
     _software_delivery_validator().validate_if_software(
         run, artifacts, workspace_root or receipt_dir, verify_hashes, Invalid,
     )

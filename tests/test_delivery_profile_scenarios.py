@@ -87,5 +87,14 @@ def test_evaluator_does_not_import_the_production_reference_generator():
     source = SCRIPT.read_text()
     assert "reference_runs" not in source
     assert "make_reference_run" not in source
+    assert "delivery_receipt" in source
+    assert "_compile_receipt" not in source
     assert "verify_hashes=True" in source
     assert "materialise_reference_run" in source
+    assert "legacy-reference-v1" not in (ROOT / "skills" / "deliver" / "scripts" / "delivery_receipt_reference.py").read_text()
+
+
+def test_fabric_delivery_fixture_delegates_run_writes_to_the_producer():
+    source = (ROOT / "runtime" / "agent-fabric" / "tests" / "support" / "delivery-run-fixture.ts").read_text()
+    assert "delivery_receipt.py" in source
+    assert "writeFile(runReceiptPath" not in source

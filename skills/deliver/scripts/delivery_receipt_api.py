@@ -9,6 +9,7 @@ def build(api: Any) -> dict[str, Any]:
     return {
         "ReceiptError": api.ReceiptError,
         "PROFILE_PATH": api.PROFILE_PATH,
+        "PRODUCT_ROOT": api.PRODUCT_ROOT,
         "CHAIR_FAMILIES": api.CHAIR_FAMILIES,
         "TRANSITIONS": api._transitions(),
         "SIDE_STATES": api._side_states(),
@@ -26,6 +27,7 @@ def build(api: Any) -> dict[str, Any]:
         "utc_now": api.utc_now,
         "run_lock": api.run_lock,
         "receipt_path": api._receipt_path,
+        "resolve_receipt": api.resolve_receipt,
         "resolve_run_dir": api.resolve_run_dir,
         "load_run": api.load_run,
         "ensure_immutable_risk": api.ensure_immutable_risk,
