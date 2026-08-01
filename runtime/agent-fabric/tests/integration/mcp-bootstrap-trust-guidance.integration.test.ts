@@ -116,7 +116,6 @@ describe("MCP bootstrap workspace-trust guidance", () => {
     const project = join(home, "project");
     await mkdir(join(home, ".git"), { recursive: true });
     await mkdir(project);
-    await writeFile(join(home, "AGENTS.md"), "# home marker must not widen trust\n");
     const previousHome = process.env.HOME;
     process.env.HOME = home;
     try {

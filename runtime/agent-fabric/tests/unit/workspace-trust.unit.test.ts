@@ -228,6 +228,25 @@ describe("machine-local workspace trust", () => {
     await expect(runWorkspaceTrust(["list"], value.paths)).resolves.toMatchObject({ entries: [] });
   });
 
+  it("refuses a marked resolved home directory before recording a grant", async () => {
+    const value = await fixture();
+    const home = join(value.root, "home");
+    await mkdir(join(home, ".git"), { recursive: true, mode: 0o700 });
+    await writeFile(join(home, "AGENTS.md"), "# home marker must not widen trust\n");
+    const previousHome = process.env.HOME;
+    process.env.HOME = home;
+    try {
+      expect(await realpath(homedir())).toBe(await realpath(home));
+      await expect(runWorkspaceTrust(["trust", home], value.paths)).rejects.toThrow(
+        /never be trusted.*home-wide/u,
+      );
+      await expect(runWorkspaceTrust(["list"], value.paths)).resolves.toMatchObject({ entries: [] });
+    } finally {
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+    }
+  });
+
   it("reports ancestor broadening when an exact repository was trusted before its parent collection", async () => {
     const value = await fixture();
     const collection = join(value.root, "projects");
