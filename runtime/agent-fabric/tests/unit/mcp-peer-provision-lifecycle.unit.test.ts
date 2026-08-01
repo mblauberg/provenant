@@ -454,6 +454,19 @@ describe("MCP peer provision daemon lifecycle", () => {
     expect(mocks.release).toHaveBeenCalledOnce();
   });
 
+  it("stops roster convergence after the injected attempt bound", async () => {
+    const value = await fixture();
+    vi.stubEnv("AGENT_FABRIC_TEST_ROSTER_CONVERGENCE_ATTEMPTS", "1");
+    mocks.connect.mockRejectedValue(new Error("inactive MCP seat generation"));
+
+    await expect(provisionMcpPeerSeats([
+      "--project", value.project, "--seat", "agy",
+    ], value.paths)).rejects.toThrow("inactive MCP seat generation");
+
+    expect(mocks.connect).toHaveBeenCalledOnce();
+    expect(mocks.release).toHaveBeenCalledOnce();
+  });
+
   it("rejects a registration capability that does not match live custody", async () => {
     const value = await registeredPeerFixture();
     const close = vi.fn();

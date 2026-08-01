@@ -4,7 +4,7 @@ import { chmod, lstat, mkdtemp, readFile, readdir, rm, stat, writeFile } from "n
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { openFabricDatabase } from "../../src/persistence/sqlite.ts";
 import {
@@ -55,6 +55,7 @@ async function preservationSnapshot(directory: string): Promise<unknown> {
 }
 
 afterEach(async () => {
+  vi.unstubAllEnvs();
   await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })));
 });
 
@@ -215,6 +216,7 @@ describe("SQLite connection hardening", () => {
   });
 
   it("surfaces bounded inspection instability without cutover preservation semantics", async () => {
+    vi.stubEnv("AGENT_FABRIC_TEST_DATABASE_INSPECTION_ATTEMPTS", "1");
     const directory = await mkdtemp(join(tmpdir(), "agent-fabric-inspection-unstable-"));
     directories.push(directory);
     const path = join(directory, "fabric.sqlite3");
@@ -230,9 +232,9 @@ describe("SQLite connection hardening", () => {
       code: "DATABASE_INSPECTION_UNSTABLE",
       preserved: false,
     }));
-    // Pins the bound: this writer perturbs the source on every attempt, so it
-    // can never converge and must stop after exactly the configured attempts.
-    expect(inspections).toBe(5);
+    // Pins the injected bound: this writer perturbs the source on every
+    // attempt, so it can never converge and must stop immediately.
+    expect(inspections).toBe(1);
   });
 
   it("classifies a file SQLite rejects as a database as incompatible so archive-and-fresh can repair it", async () => {
