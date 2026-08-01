@@ -28,7 +28,9 @@ reconciliation run.
    `../deliver/templates/RUN.template.json`, set profile `software`, and follow
    [run-contract.md](references/run-contract.md). Routine minor work may proceed
    without `RUN.json` unless the user or project policy requests one.
-2. Keep an adaptive plan. Use `tdd` for observable change, `refactor`
+2. Keep an adaptive plan. Name the governing skill in the worker contract
+   before changing code. Invoke `tdd` for every new or changed observable
+   behaviour, and use `refactor`
    for behaviour-preserving structure and `diagnose` for unknown causes.
    Migrations may need behaviour tests and equivalence evidence. Use
    `orchestrate` when decomposition helps; adapt topology inside authority.
@@ -51,11 +53,8 @@ reconciliation run.
    .agent-run/<id>/RUN.json --workspace-root "$PWD" --verify-hashes`.
    Hand off only after this machine gate.
 8. User final acceptance is mandatory; promotion needs separate `release`
-   authority. When a run directory exists, after acceptance, failure or
-   cancellation, terminalise with
-   `${AGENTS_HOME:-$HOME/.agents}/skills/orchestrate/scripts/run_dir_finalize.py`;
-   an outer orchestrator's `awaiting-user` transport remains active and does
-   not rename the canonical receipt state.
+   authority. Terminalise any run directory as
+   [run-contract.md](references/run-contract.md) sets out.
 
 ## Authority and completion
 
@@ -73,8 +72,6 @@ reconciliation run.
 ## Adapter-absent path
 
 Without optional Console, Herdr or GitHub, use canonical project artifacts and
-emit the skill-owned kind in
-[portable-workflow.v1.json](portable-workflow.v1.json). It proves only that a
-context object existed. Retain and identify the canonical context separately;
-this output is not itself implementation evidence, acceptance or promotion
-authority.
+emit the skill-owned [portable kind](portable-workflow.v1.json). It proves only
+that a context object existed, never implementation evidence, acceptance or
+promotion authority. Retain and identify the canonical context separately.

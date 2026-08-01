@@ -20,7 +20,7 @@ surface; receipts declare that independence and enforce family separation, they 
 ## Lifecycle and user gates
 
 `session → scope → user spec/one-way-door gate → deliver profile → implement/domain execution
-[tdd | diagnose] → deterministic verification → evaluate when needed → independent review +
+[name governing skill; invoke tdd for observable change | diagnose] → deterministic verification → evaluate when needed → independent review +
 bounded repair → user acceptance → release authority → release + observe → retrospect`; on
 failure diagnose or implement and route evidence back to scope. `deliver` owns the neutral
 delivery-run receipt, `implement` is the software front door, `session` owns context hygiene,

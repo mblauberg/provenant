@@ -94,9 +94,10 @@ def test_subagent_dispatch_contract_requires_task_class_bound_route_and_receipt(
     codex = (
         ROOT / "skills" / "orchestrate" / "references" / "codex-subagents.md"
     ).read_text()
-    for field in ("task class", "tier", "model", "effort", "route receipt"):
+    for field in ("task class", "tier", "model", "effort", "route receipt", "governing skill"):
         assert field in contract.lower()
     assert "task class" in skill.lower()
+    assert "governing skill" in contract.lower()
     # HARNESS keeps the full routing invariant (route by task class, bind identity +
     # effort + receipt, runtime governs); the Codex subscription-native
     # effort-binding detail lives in the orchestrate reference below (D2 routing
@@ -109,6 +110,7 @@ def test_subagent_dispatch_contract_requires_task_class_bound_route_and_receipt(
         "For subscription-native Codex workers, omit the literal transport `model` "
         "and bind the resolved `effort`."
     ) in codex
+    assert "governing-skill" in codex
 
 
 def test_ambient_files_meet_the_static_disclosure_gates():
