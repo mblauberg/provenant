@@ -16,6 +16,31 @@ from typing import Iterable
 
 # Canonical advisory rule. This label never triggers process control.
 STALL_WINDOW_SECONDS = 60.0
+TERMINAL_CLASSIFICATIONS = frozenset(
+    {"blocked", "question", "unavailable", "failed", "complete"}
+)
+
+
+class TerminalReportError(ValueError):
+    """A terminal report is missing required worker-exit evidence."""
+
+
+class LiveWriterError(RuntimeError):
+    """An operation would race an owned worker that is still writing."""
+
+
+@dataclass(frozen=True)
+class WorkerExit:
+    pid: int
+    exit_status: int
+
+
+@dataclass(frozen=True)
+class TerminalReport:
+    classification: str
+    pid: int
+    observed_exit: bool
+    exit_status: int
 
 
 @dataclass(frozen=True)
@@ -38,8 +63,66 @@ class Worker:
     session_log: str
     session_log_mtime: str
     session_log_age_seconds: float | None
+    output_size: int | None
     worktree: str
     stalled: bool
+
+
+def require_worker_quiescent(*, pid: int, process_live: bool, action: str) -> None:
+    """Fence worktree actions while the owned worker PID remains live."""
+    if process_live:
+        raise LiveWriterError(
+            f"cannot {action} while owned worker PID {pid} remains live"
+        )
+
+
+def terminal_report(
+    classification: str,
+    *,
+    pid: int,
+    process_live: bool,
+    exit_observation: WorkerExit | None,
+) -> TerminalReport:
+    """Build a terminal report only after the owned process has exited."""
+    if classification not in TERMINAL_CLASSIFICATIONS:
+        raise TerminalReportError(f"unknown terminal classification: {classification}")
+    require_worker_quiescent(pid=pid, process_live=process_live, action="terminal-report")
+    if exit_observation is None or exit_observation.pid != pid:
+        raise TerminalReportError(
+            "terminal report requires observed process exit for the owned PID"
+        )
+    return TerminalReport(
+        classification, pid, observed_exit=True, exit_status=exit_observation.exit_status
+    )
+
+
+def output_grew(previous_output_size: int, current_output_size: int) -> bool:
+    """Return the positive liveness signal for an owned worker."""
+    return current_output_size > previous_output_size
+
+
+def liveness_signal(
+    *,
+    process_live: bool,
+    previous_output_size: int,
+    current_output_size: int,
+) -> str:
+    if not process_live:
+        return "exited"
+    return (
+        "progress"
+        if output_grew(previous_output_size, current_output_size)
+        else "live-no-growth"
+    )
+
+
+def rearm_poll_deadline(
+    *, now: float, budget_seconds: float, process_live: bool
+) -> float | None:
+    """Re-arm a bounded wait while the owned PID remains live."""
+    if budget_seconds <= 0:
+        raise ValueError("poll budget must be positive")
+    return now + budget_seconds if process_live else None
 
 
 def parse_duration(value: str) -> float:
@@ -176,7 +259,22 @@ def session_logs(root: Path) -> dict[str, Path]:
     return result
 
 
-def worktree_state(cwd: str) -> str:
+def worktree_state(
+    cwd: str,
+    *,
+    owned_pid: int | None = None,
+    live_pids: set[int] | None = None,
+) -> str:
+    if owned_pid is not None:
+        if live_pids is None:
+            raise LiveWriterError(
+                "cannot inspection without an observed PID set"
+            )
+        require_worker_quiescent(
+            pid=owned_pid,
+            process_live=owned_pid in live_pids,
+            action="inspection",
+        )
     if cwd == "?":
         return "unknown"
     result = subprocess.run(
@@ -217,41 +315,72 @@ def log_metadata(path: Path | None) -> tuple[str, float | None]:
     return datetime.fromtimestamp(mtime, timezone.utc).isoformat(), age
 
 
-def collect(sessions_root: Path, repo_scope: Path | None = None) -> list[Worker]:
+def output_size(path: Path | None) -> int | None:
+    if path is None:
+        return None
+    try:
+        return path.stat().st_size
+    except OSError:
+        return None
+
+
+def collect(
+    sessions_root: Path,
+    repo_scope: Path | None = None,
+    previous_output_sizes: dict[int, int] | None = None,
+) -> list[Worker]:
     logs = session_logs(sessions_root)
     scope_id = repository_id(repo_scope) if repo_scope is not None else None
     if repo_scope is not None and scope_id is None:
         raise RuntimeError(f"not a git repository: {repo_scope}")
-    workers: list[Worker] = []
-    for process in live_processes():
-        pid, elapsed, cpu = process.pid, process.elapsed, process.cpu
+    processes = list(live_processes())
+    located_processes: list[tuple[Process, str]] = []
+    for process in processes:
         cwd = worker_cwd(process)
-        if scope_id is not None and repository_id(cwd) != scope_id:
-            continue
+        if scope_id is None or repository_id(cwd) == scope_id:
+            located_processes.append((process, cwd))
+    cwd_counts: dict[str, int] = {}
+    for _process, cwd in located_processes:
+        cwd_counts[cwd] = cwd_counts.get(cwd, 0) + 1
+    workers: list[Worker] = []
+    for process, cwd in located_processes:
+        pid, elapsed, cpu = process.pid, process.elapsed, process.cpu
         elapsed_seconds = parse_elapsed(elapsed)
         cpu_seconds = parse_duration(cpu)
         log = logs.get(cwd)
         log_mtime, log_age = log_metadata(log)
+        output_is_ambiguous = cwd_counts[cwd] > 1
+        current_output_size = None if output_is_ambiguous else output_size(log)
+        previous_output_size = (
+            previous_output_sizes.get(pid) if previous_output_sizes is not None else None
+        )
         stalled = (
             elapsed_seconds >= STALL_WINDOW_SECONDS
-            and cpu_seconds < elapsed_seconds / STALL_WINDOW_SECONDS
-            and (log_age is None or log_age >= STALL_WINDOW_SECONDS)
+            and previous_output_size is not None
+            and current_output_size is not None
+            and not output_grew(previous_output_size, current_output_size)
         )
         workers.append(Worker(
             pid, elapsed, elapsed_seconds, cpu, cpu_seconds, cwd,
             str(log) if log else "-", log_mtime, log_age,
-            worktree_state(cwd), stalled,
+            current_output_size,
+            "writer-live", stalled,
         ))
     return workers
 
 
 def render(workers: list[Worker]) -> str:
-    columns = ("PID", "ELAPSED", "CPU", "SESSION LOG MTIME", "WORKTREE", "STATUS", "CWD")
+    columns = (
+        "PID", "ELAPSED", "CPU", "OUTPUT SIZE", "SESSION LOG MTIME",
+        "WORKTREE", "STATUS", "CWD",
+    )
     rows = [columns]
     for worker in workers:
         rows.append((
-            str(worker.pid), worker.elapsed, worker.cpu, worker.session_log_mtime,
-            worker.worktree, "STALLED?" if worker.stalled else "active", worker.cwd,
+            str(worker.pid), worker.elapsed, worker.cpu,
+            str(worker.output_size) if worker.output_size is not None else "-",
+            worker.session_log_mtime, worker.worktree,
+            "STALLED?" if worker.stalled else "active", worker.cwd,
         ))
     widths = [max(len(row[index]) for row in rows) for index in range(len(columns))]
     return "\n".join(

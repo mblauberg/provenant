@@ -113,6 +113,27 @@ def test_subagent_dispatch_contract_requires_task_class_bound_route_and_receipt(
     assert "governing-skill" in codex
 
 
+def test_worker_terminal_contract_requires_exit_growth_and_live_writer_fence():
+    contract = (
+        ROOT / "skills" / "orchestrate" / "references" / "orchestration-contract.md"
+    ).read_text()
+    liveness = (
+        ROOT / "skills" / "orchestrate" / "references" / "worker-liveness.md"
+    ).read_text()
+    skill = (ROOT / "skills" / "orchestrate" / "SKILL.md").read_text()
+
+    for classification in ("blocked", "question", "unavailable", "failed", "complete"):
+        assert f"`{classification}`" in contract
+    assert "observed process exit" in contract
+    assert "exit receipt from the existing wait/provider boundary" in contract
+    assert "run-owned worker PID" in contract
+    assert "live PID fences terminal reporting, filesystem inspection and worktree" in contract
+    assert "Output growth is the positive liveness signal" in liveness
+    assert "re-arm the same bounded wait while the\nowned PID remains live" in liveness
+    assert "watcher, scheduler, event bus or generic supervisor" in liveness
+    assert "output growth proves progress" in skill.lower()
+
+
 def test_ambient_files_meet_the_static_disclosure_gates():
     # AC-S1 hard gates (D1/D4/D10/D12): the whole constitution lives in the two
     # ambient files within fixed line caps, carries no date, no repo-relative

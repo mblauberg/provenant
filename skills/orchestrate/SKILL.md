@@ -25,9 +25,9 @@ Decompose -> waves -> reduce -> gate.
   `FABRIC-ROUNDTRIP-UNAVAILABLE` and collect an artifact.
 - Record worker cwd; never assume repository.
 - **Workers write full output to files**; return a digest/path.
-- **Liveness: size proves nothing.** Compare CPU and session-log mtime; see
-  `worker-liveness.md`. A detached task is not dead: check the PID before
-  reusing a worktree.
+- **Liveness: output growth proves progress.** No growth keeps a live worker in
+  the waiting/escalation path; see `worker-liveness.md`. A detached task is not
+  dead: observed PID exit fences terminal reporting, inspection and reuse.
 - **Cross-family follows the HARNESS risk ladder.** Targeted lenses plus other
   primary; distinct family when available; record terminal skips.
 - **Objective checks outrank opinions. You own the final call.**
