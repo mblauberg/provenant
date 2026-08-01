@@ -57,9 +57,9 @@ npm run test:load
 
 `scripts/install-agent-fabric-dependencies` runs the root locked install and
 records `runtime/agent-fabric/.npm-ci-attestation`. Launchers and adapter
-admission fail closed when the product commit, lockfile, package integrity
-values or installed execution tree no longer match that receipt; rerun the
-helper to restore the attested install.
+admission fail closed when the lockfile, package integrity values or installed
+execution tree no longer match that receipt; rerun the helper to restore the
+attested install.
 
 Normal tests use temporary databases and fake provider boundaries. They do not
 log into providers, register MCP servers or prove the Console's human

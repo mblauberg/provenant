@@ -88,15 +88,14 @@ describe("npm install attestation", () => {
     expect(verifyResult.stdout).toBe("");
   });
 
-  it("writes the required formatted fields and verifies the unchanged install", async () => {
+  it("writes only dependency attestation fields and verifies the unchanged install", async () => {
     const root = await createFixture();
     const path = await writeNpmInstallAttestation(root);
     const serialized = await readFile(path, "utf8");
 
-    expect(serialized).toContain('\n  "productCommit":');
+    expect(serialized).not.toContain("productCommit");
     expect(serialized.endsWith("\n")).toBe(true);
     expect(await readAttestation(root)).toMatchObject({
-      productCommit: expect.stringMatching(/^[a-f0-9]{40}$/u),
       lockfileSha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
       packageSriValues: { "node_modules/tsx": "sha512-fixture" },
       installedTreeSha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
@@ -104,7 +103,7 @@ describe("npm install attestation", () => {
     await expect(checkNpmInstallAttestation(root)).resolves.toBeUndefined();
   });
 
-  it("reports a product commit change", async () => {
+  it("accepts a changed Git HEAD when dependency inputs are unchanged", async () => {
     const root = await createFixture();
     await writeNpmInstallAttestation(root);
     await execFileAsync(
@@ -113,7 +112,35 @@ describe("npm install attestation", () => {
       { cwd: root },
     );
 
-    await expect(checkNpmInstallAttestation(root)).resolves.toMatchObject({ reason: "product-commit" });
+    await expect(checkNpmInstallAttestation(root)).resolves.toBeUndefined();
+  });
+
+  it("validates an extracted product without Git metadata", async () => {
+    const root = await createFixture();
+    await writeNpmInstallAttestation(root);
+    await rm(join(root, ".git"), { recursive: true, force: true });
+
+    await expect(checkNpmInstallAttestation(root)).resolves.toBeUndefined();
+  });
+
+  it("accepts a legacy product commit field without using it", async () => {
+    const root = await createFixture();
+    const path = await writeNpmInstallAttestation(root);
+    const attestation = await readAttestation(root);
+    attestation.productCommit = "legacy-provenance-that-must-not-gate";
+    await writeFile(path, `${JSON.stringify(attestation, null, 2)}\n`);
+
+    await expect(checkNpmInstallAttestation(root)).resolves.toBeUndefined();
+  });
+
+  it("rejects a malformed attestation shape", async () => {
+    const root = await createFixture();
+    const path = await writeNpmInstallAttestation(root);
+    const attestation = await readAttestation(root);
+    attestation.packageSriValues = [];
+    await writeFile(path, `${JSON.stringify(attestation, null, 2)}\n`);
+
+    await expect(checkNpmInstallAttestation(root)).resolves.toMatchObject({ reason: "invalid" });
   });
 
   it("reports lockfile byte drift", async () => {

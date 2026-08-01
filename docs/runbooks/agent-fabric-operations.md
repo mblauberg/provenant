@@ -44,9 +44,9 @@ python3 skills/deliver/scripts/validate_delivery.py \
 ```
 
 The dependency helper runs the root `npm ci` and records the npm-install
-attestation used by the bare-Node launch gates. If the product commit,
-lockfile, package integrity values or installed execution tree changes, rerun
-the helper before launching Fabric.
+attestation used by the bare-Node launch gates. If the lockfile, package
+integrity values or installed execution tree changes, rerun the helper before
+launching Fabric.
 
 Then verify the selected compatibility entries. The adapter registry records
 activation policy, stable launch paths, runtime requirements and provider

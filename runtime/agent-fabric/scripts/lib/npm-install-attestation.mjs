@@ -1,10 +1,6 @@
-import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { lstat, opendir, readFile, readlink, rename, writeFile } from "node:fs/promises";
 import { join, relative, sep } from "node:path";
-import { promisify } from "node:util";
-
-const execFileAsync = promisify(execFile);
 
 export const NPM_INSTALL_ATTESTATION_ERROR = "NPM_INSTALL_ATTESTATION_MISMATCH";
 export const NPM_INSTALL_ATTESTATION_RELATIVE_PATH = join("runtime", "agent-fabric", ".npm-ci-attestation");
@@ -72,15 +68,9 @@ export async function installedTreeSha256(nodeModulesPath) {
   return digest.digest("hex");
 }
 
-async function productCommit(productRoot) {
-  const result = await execFileAsync("git", ["-C", productRoot, "rev-parse", "HEAD"], { encoding: "utf8" });
-  return result.stdout.trim();
-}
-
 export async function createNpmInstallAttestation(productRoot) {
   const lockfilePath = join(productRoot, "package-lock.json");
   return {
-    productCommit: await productCommit(productRoot),
     lockfileSha256: await sha256File(lockfilePath),
     packageSriValues: await readPackageSriValues(lockfilePath),
     installedTreeSha256: await installedTreeSha256(join(productRoot, "node_modules")),
@@ -99,7 +89,6 @@ export async function writeNpmInstallAttestation(productRoot) {
 function parseAttestation(value) {
   if (
     !isRecord(value) ||
-    typeof value.productCommit !== "string" ||
     typeof value.lockfileSha256 !== "string" ||
     !isRecord(value.packageSriValues) ||
     typeof value.installedTreeSha256 !== "string" ||
@@ -120,22 +109,6 @@ export async function checkNpmInstallAttestation(productRoot) {
     const reason = isRecord(error) && error.code === "ENOENT" ? "missing" : "invalid";
     const detail = reason === "missing" ? "npm install attestation is missing" : "npm install attestation is invalid";
     return { reason, message: `${detail}; rerun: ${recovery}`, cause: error };
-  }
-  let commit;
-  try {
-    commit = await productCommit(productRoot);
-  } catch (error) {
-    return {
-      reason: "product-commit",
-      message: `product commit cannot be verified against npm install attestation; rerun: ${recovery}`,
-      cause: error,
-    };
-  }
-  if (attestation.productCommit !== commit) {
-    return {
-      reason: "product-commit",
-      message: `product commit changed after npm ci; rerun: ${recovery}`,
-    };
   }
   const lockfilePath = join(productRoot, "package-lock.json");
   let lockfileDigest;

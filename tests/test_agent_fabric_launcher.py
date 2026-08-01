@@ -814,10 +814,9 @@ def test_linked_worktree_stale_dist_keeps_the_exact_refusal(
         check=False,
     )
 
-    assert result.returncode == 1
+    assert result.returncode == 78
     assert result.stdout == ""
-    assert "NPM_INSTALL_ATTESTATION_MISMATCH" in result.stderr
-    assert "product commit cannot be verified" in result.stderr
+    assert result.stderr == _stale_refusal(root)
     assert not npm_marker.exists(), "a linked worktree must never autobuild"
     assert not marker.exists()
 
