@@ -196,16 +196,8 @@ export function resolveStatusPaths(arguments_: string[]): { productRoot: string;
   const agentsHomeFlag = option(arguments_, "--agents-home");
   const productRootFlag = option(arguments_, "--product-root");
   const instanceRootFlag = option(arguments_, "--instance-root");
-  const hasConfiguredRoot = [
-    agentsHomeFlag,
-    productRootFlag,
-    instanceRootFlag,
-    process.env.AGENTS_HOME,
-    process.env.AGENT_FABRIC_PRODUCT_ROOT,
-    process.env.AGENT_FABRIC_INSTANCE_ROOT,
-  ].some((value) => value !== undefined && value.length > 0);
   const rootOptions = {
-    agentsHomeFlag: agentsHomeFlag,
+    agentsHomeFlag,
     productRootFlag,
     instanceRootFlag,
   };
