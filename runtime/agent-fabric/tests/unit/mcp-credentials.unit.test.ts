@@ -19,6 +19,13 @@ const GENERATION_MIGRATED = "d".repeat(64);
 const GENERATION_WINDOW = "e".repeat(64);
 const GENERATION_RECOVERY = "f".repeat(64);
 
+// The sentinel this file and the rest of the fabric suite use to mean "this
+// seat is not the thing under test, so it must never expire". A near-future
+// date here is a time bomb: these two fixtures pinned 2026-08-01, that date
+// arrived, and the suite went red with a capability-crossing failure that had
+// nothing to do with capability crossing.
+const NEVER_EXPIRES = "2099-01-01T00:00:00.000Z";
+
 afterEach(async () => {
   await Promise.all(cleanup.splice(0).map((path) => rm(path, { recursive: true, force: true })));
 });
@@ -117,7 +124,7 @@ describe("MCP capability loading", () => {
       agentId: "codex",
       role: "chair",
       credentialPath,
-      expiresAt: "2026-08-01T00:00:00.000Z",
+      expiresAt: NEVER_EXPIRES,
     })}\n`, { mode: 0o600 });
     const otherCredentialPath = join(otherSeatDirectory, "codex.cap");
     const otherCapability = `afc_${"f".repeat(43)}`;
@@ -133,7 +140,7 @@ describe("MCP capability loading", () => {
       agentId: "codex",
       role: "chair",
       credentialPath: otherCredentialPath,
-      expiresAt: "2026-08-01T00:00:00.000Z",
+      expiresAt: NEVER_EXPIRES,
     })}\n`, { mode: 0o600 });
     const environment = {
       AGENT_FABRIC_SEAT: "codex",
