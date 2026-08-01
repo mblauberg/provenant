@@ -291,6 +291,19 @@ describe("automatic exact-project enrolment", () => {
     })).resolves.toMatchObject({ canonicalRoot: project, entry: { boundaryKind: "non-git" } });
   });
 
+  it("does not auto-enrol an unmarked parent with one direct repository child", async () => {
+    const value = await fixture();
+    const collection = join(value.outer, "..", "single-child-collection");
+    await mkdir(join(collection, "repository", ".git"), { recursive: true });
+
+    await expect(ensureAutomaticBootstrapTrust({
+      stateDirectory: value.paths.stateDirectory,
+      bootstrapAttemptId: "attempt-single-child-collection",
+      cwd: collection,
+    })).rejects.toThrow(/repository collection/iu);
+    await expect(readFile(join(value.paths.stateDirectory, "trusted-workspaces.json"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it("does not mutate trust when Git probing is unavailable for an unmarked root", async () => {
     const value = await fixture();
     const project = join(value.outer, "..", "missing-git-project");

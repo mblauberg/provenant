@@ -336,7 +336,7 @@ async function hasWorkspaceMarker(canonicalRoot: string): Promise<boolean> {
 // marker at this exact root is an explicit project signal, even when the
 // project deliberately composes several repositories.
 export async function looksLikeRepositoryCollection(canonicalRoot: string): Promise<boolean> {
-  if ((await repositoryCollectionChildren(canonicalRoot)).length <= 1) return false;
+  if ((await repositoryCollectionChildren(canonicalRoot)).length === 0) return false;
   return !await hasWorkspaceMarker(canonicalRoot);
 }
 
@@ -347,6 +347,14 @@ type GitRepositoryProbe = Readonly<{
 }>;
 
 type BareRepositoryProbe = "repository" | "not-repository" | "unavailable";
+
+type PathComponentSnapshot = Readonly<{
+  path: string;
+  device: number;
+  inode: number;
+  directory: boolean;
+  symbolicLink: boolean;
+}>;
 
 function processErrorOutput(error: unknown): string {
   if (typeof error === "object" && error !== null && "stderr" in error && typeof error.stderr === "string") {
@@ -434,31 +442,39 @@ async function canonicalDirectory(path: string): Promise<{ canonical: string; sy
   const requested = resolve(path);
   const filesystemRoot = parse(requested).root;
   let component = filesystemRoot;
-  let symbolicLink = false;
+  const components = [filesystemRoot];
   for (const name of requested.slice(filesystemRoot.length).split(sep).filter((part) => part.length > 0)) {
     component = join(component, name);
-    symbolicLink ||= (await lstat(component)).isSymbolicLink();
+    components.push(component);
   }
-  const requestedInfo = await lstat(requested);
-  const requestedWasSymbolicLink = requestedInfo.isSymbolicLink();
+  const snapshots: PathComponentSnapshot[] = [];
+  for (const componentPath of components) {
+    const info = await lstat(componentPath);
+    snapshots.push({
+      path: componentPath,
+      device: info.dev,
+      inode: info.ino,
+      directory: info.isDirectory(),
+      symbolicLink: info.isSymbolicLink(),
+    });
+  }
+  const requestedSnapshot = snapshots.at(-1);
+  if (requestedSnapshot === undefined) throw new Error("project path has no filesystem components");
   const canonical = await realpath(requested);
-  if (!requestedWasSymbolicLink) {
-    const requestedInfoAfterRealpath = await lstat(requested);
-    const infoAfterRealpath = await lstat(canonical);
+  for (const snapshot of snapshots) {
+    const after = await lstat(snapshot.path);
     if (
-      requestedInfoAfterRealpath.isSymbolicLink() ||
-      requestedInfoAfterRealpath.isDirectory() !== requestedInfo.isDirectory() ||
-      requestedInfoAfterRealpath.dev !== requestedInfo.dev ||
-      requestedInfoAfterRealpath.ino !== requestedInfo.ino ||
-      infoAfterRealpath.dev !== requestedInfo.dev ||
-      infoAfterRealpath.ino !== requestedInfo.ino
+      after.dev !== snapshot.device ||
+      after.ino !== snapshot.inode ||
+      after.isDirectory() !== snapshot.directory ||
+      after.isSymbolicLink() !== snapshot.symbolicLink
     ) {
       throw new Error("project path changed while resolving; retry boundary resolution");
     }
   }
   const info = await lstat(canonical);
   if (!info.isDirectory() || info.isSymbolicLink()) throw new Error(`project path is not a directory: ${canonical}`);
-  return { canonical, symbolicLink: symbolicLink || requestedInfo.isSymbolicLink() };
+  return { canonical, symbolicLink: snapshots.some((snapshot) => snapshot.symbolicLink) || requestedSnapshot.symbolicLink };
 }
 
 function refusedBoundary(
@@ -599,7 +615,7 @@ export async function resolveProjectBoundary(
   }
 
   const repositories = await repositoryCollectionChildren(requestedDirectory);
-  const ambiguous = repositories.length > 1;
+  const ambiguous = repositories.length > 0;
   return {
     requestedDirectory,
     selectedProjectRoot: requestedDirectory,

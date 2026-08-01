@@ -119,6 +119,25 @@ describe("shared project boundary resolver", () => {
     });
   });
 
+  it("reports one direct ordinary Git repository as a repository collection", async () => {
+    const root = await fixture("single-repository-collection");
+    const project = join(root, "projects");
+    const repository = join(project, "one");
+    await mkdir(join(repository, ".git"), { recursive: true });
+
+    await expect(looksLikeRepositoryCollection(await realpath(project))).resolves.toBe(true);
+    await expect(resolveProjectBoundary(project)).resolves.toMatchObject({
+      requestedDirectory: await realpath(project),
+      selectedProjectRoot: await realpath(project),
+      gitProbe: "not-repository",
+      evidence: {
+        kind: "ambiguous",
+        reason: "repository-collection",
+        repositories: [await realpath(repository)],
+      },
+    });
+  });
+
   it("reports multiple direct bare Git repositories as a repository collection", async () => {
     const root = await fixture("bare-repository-collection");
     const project = join(root, "projects");
@@ -143,12 +162,47 @@ describe("shared project boundary resolver", () => {
     const root = await fixture("standalone-bare-repository");
     const project = join(root, "bare");
     await execFileAsync("git", ["init", "--bare", "--quiet", project]);
+    await rm(join(project, "description"));
 
     await expect(resolveProjectBoundary(project)).resolves.toMatchObject({
       requestedDirectory: await realpath(project),
       selectedProjectRoot: await realpath(project),
       gitProbe: "repository",
       evidence: { kind: "refused", reason: "bare-repository" },
+    });
+  });
+
+  it("reports one direct bare Git repository without description as a repository collection", async () => {
+    const root = await fixture("single-bare-repository-collection");
+    const project = join(root, "projects");
+    const bare = join(project, "bare");
+    await execFileAsync("git", ["init", "--bare", "--quiet", bare]);
+    await rm(join(bare, "description"));
+
+    await expect(looksLikeRepositoryCollection(await realpath(project))).resolves.toBe(true);
+    await expect(resolveProjectBoundary(project)).resolves.toMatchObject({
+      requestedDirectory: await realpath(project),
+      selectedProjectRoot: await realpath(project),
+      gitProbe: "not-repository",
+      evidence: {
+        kind: "ambiguous",
+        reason: "repository-collection",
+        repositories: [await realpath(bare)],
+      },
+    });
+  });
+
+  it("lets an exact project marker override a direct repository child", async () => {
+    const root = await fixture("marked-single-repository-collection");
+    const project = join(root, "projects");
+    await mkdir(join(project, "one", ".git"), { recursive: true });
+    await mkdir(join(project, ".provenant"), { recursive: true });
+    await writeFile(join(project, ".provenant", "agent-fabric.yaml"), "schemaVersion: 1\n");
+
+    await expect(resolveProjectBoundary(project)).resolves.toMatchObject({
+      selectedProjectRoot: await realpath(project),
+      gitProbe: "not-repository",
+      evidence: { kind: "project-marker", root: await realpath(project) },
     });
   });
 
@@ -166,7 +220,7 @@ describe("shared project boundary resolver", () => {
       gitProbe: "not-repository",
       evidence: {
         kind: "ambiguous",
-        reason: "unmarked-non-git",
+        reason: "repository-collection",
         repositories: [await realpath(bare)],
       },
     });

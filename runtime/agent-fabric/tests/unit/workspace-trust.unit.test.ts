@@ -198,7 +198,20 @@ describe("machine-local workspace trust", () => {
     await expect(runWorkspaceTrust(["list"], value.paths)).resolves.toMatchObject({ entries: [] });
   });
 
-  it("treats two symlink aliases to one repository as one collection child", async () => {
+  it("rejects a parent with exactly one direct repository child", async () => {
+    const value = await fixture();
+    const collection = join(value.root, "single-repository-collection");
+    await mkdir(collection, { mode: 0o700 });
+    const repository = await gitRepository(collection, "only-repo");
+
+    await expect(looksLikeRepositoryCollection(await realpath(collection))).resolves.toBe(true);
+    await expect(runWorkspaceTrust(["trust", collection], value.paths)).rejects.toThrow(
+      new RegExp(`repository collection.*${repository}.*fabric workspace trust`, "u"),
+    );
+    await expect(runWorkspaceTrust(["list"], value.paths)).resolves.toMatchObject({ entries: [] });
+  });
+
+  it("treats two symlink aliases to one repository as one collection child and refuses the parent", async () => {
     const value = await fixture();
     const collection = join(value.root, "alias-only-collection");
     const repositories = join(value.root, "repositories");
@@ -209,11 +222,11 @@ describe("machine-local workspace trust", () => {
     await symlink(repository, join(collection, "second-alias"));
 
     const canonicalCollection = await realpath(collection);
-    await expect(looksLikeRepositoryCollection(canonicalCollection)).resolves.toBe(false);
-    await expect(runWorkspaceTrust(["trust", collection], value.paths)).resolves.toMatchObject({ trusted: true });
+    await expect(looksLikeRepositoryCollection(canonicalCollection)).resolves.toBe(true);
+    await expect(runWorkspaceTrust(["trust", collection], value.paths)).rejects.toThrow(/repository collection/u);
   });
 
-  it("treats a real repository child and its symlink alias as one collection child", async () => {
+  it("treats a real repository child and its symlink alias as one collection child and refuses the parent", async () => {
     const value = await fixture();
     const collection = join(value.root, "real-and-alias-collection");
     await mkdir(collection, { mode: 0o700 });
@@ -221,8 +234,8 @@ describe("machine-local workspace trust", () => {
     await symlink(repository, join(collection, "shared-alias"));
 
     const canonicalCollection = await realpath(collection);
-    await expect(looksLikeRepositoryCollection(canonicalCollection)).resolves.toBe(false);
-    await expect(runWorkspaceTrust(["trust", collection], value.paths)).resolves.toMatchObject({ trusted: true });
+    await expect(looksLikeRepositoryCollection(canonicalCollection)).resolves.toBe(true);
+    await expect(runWorkspaceTrust(["trust", collection], value.paths)).rejects.toThrow(/repository collection/u);
   });
 
   it("shell-quotes every canonical repository path in collection trust commands", async () => {
@@ -263,7 +276,8 @@ describe("machine-local workspace trust", () => {
     await mkdir(project, { mode: 0o700 });
     await gitRepository(project, "first-repo");
     await gitRepository(project, "second-repo");
-    await writeFile(join(project, "AGENTS.md"), "# composed project\n");
+    await mkdir(join(project, ".provenant"), { mode: 0o700 });
+    await writeFile(join(project, ".provenant", "agent-fabric.yaml"), "schemaVersion: 1\n");
     const canonicalProject = await realpath(project);
 
     await expect(nearestGitWorkspace(canonicalProject)).resolves.toBeNull();
@@ -367,13 +381,34 @@ describe("machine-local workspace trust", () => {
     await expect(looksLikeRepositoryCollection(await realpath(project))).resolves.toBe(false);
   });
 
-  it("trusts a non-Git directory with one direct-child repository and no marker", async () => {
+  it("rejects a non-Git directory with one direct-child repository and no marker", async () => {
     const value = await fixture();
     const project = join(value.root, "ordinary-project");
     await mkdir(project, { mode: 0o700 });
     await gitRepository(project, "repository");
 
-    await expect(runWorkspaceTrust(["trust", project], value.paths)).resolves.toMatchObject({ trusted: true });
+    await expect(runWorkspaceTrust(["trust", project], value.paths)).rejects.toThrow(/repository collection/u);
+    await expect(runWorkspaceTrust(["list"], value.paths)).resolves.toMatchObject({ entries: [] });
+  });
+
+  it("rejects explicit trust when a root-level Git semantic probe is unavailable", async () => {
+    const value = await fixture();
+    const bare = join(value.root, "unavailable-bare");
+    await execFileAsync("git", ["init", "--bare", "--quiet", bare]);
+    const shimDirectory = join(value.root, "unavailable-git-shim");
+    await mkdir(shimDirectory, { mode: 0o700 });
+    const shim = join(shimDirectory, "git");
+    await writeFile(shim, "#!/bin/sh\ncase \"$*\" in *--show-toplevel*) printf '%s\\n' 'fatal: this operation must be run in a work tree' >&2; exit 128;; *--is-bare-repository*) printf '%s\\n' 'fatal: bare semantic probe unavailable' >&2; exit 1;; esac\nexit 1\n");
+    await chmod(shim, 0o700);
+    const previousPath = process.env.PATH;
+    process.env.PATH = shimDirectory;
+    try {
+      await expect(runWorkspaceTrust(["trust", bare], value.paths)).rejects.toThrow(/Git repository probe unavailable|repository collection/iu);
+      await expect(runWorkspaceTrust(["list"], value.paths)).resolves.toMatchObject({ entries: [] });
+    } finally {
+      if (previousPath === undefined) delete process.env.PATH;
+      else process.env.PATH = previousPath;
+    }
   });
 
   it("refuses filesystem root before recording a grant", async () => {

@@ -59,4 +59,28 @@ describe("requested project path replacement boundary", () => {
     })).rejects.toThrow(/changed while resolving|symbolic-link/iu);
     await expect(readFile(join(stateDirectory, "trusted-workspaces.json"))).rejects.toMatchObject({ code: "ENOENT" });
   });
+
+  it("refuses automatic enrolment when an ancestor becomes a symlink during realpath", async () => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), "fabric-boundary-ancestor-race-")));
+    temporaryDirectories.push(root);
+    const parent = join(root, "parent");
+    const originalParent = join(root, "parent-original");
+    const project = join(parent, "project");
+    const stateDirectory = join(root, "state");
+    await mkdir(project, { recursive: true });
+    await mkdir(stateDirectory, { mode: 0o700 });
+
+    race.requestedPath = project;
+    race.swap = async () => {
+      await rename(parent, originalParent);
+      await symlink(originalParent, parent);
+    };
+
+    await expect(ensureAutomaticBootstrapTrust({
+      stateDirectory,
+      bootstrapAttemptId: "attempt-ancestor-path-swap",
+      cwd: project,
+    })).rejects.toThrow(/changed while resolving|symbolic-link/iu);
+    await expect(readFile(join(stateDirectory, "trusted-workspaces.json"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
 });

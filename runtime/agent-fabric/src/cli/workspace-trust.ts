@@ -345,6 +345,7 @@ async function collectionBoundarySatisfied(canonicalRoot: string): Promise<boole
   try {
     const boundary = await resolveProjectBoundary(canonicalRoot, { selection: "exact" });
     if (boundary.evidence.kind === "refused") return false;
+    if (boundary.gitProbe === "unavailable" && boundary.evidence.kind !== "project-marker") return false;
     if (boundary.evidence.kind !== "ambiguous" || boundary.evidence.reason !== "repository-collection") return true;
     return !await looksLikeRepositoryCollection(canonicalRoot);
   } catch (error: unknown) {
