@@ -69,6 +69,13 @@ class Mutant:
     description: str
 
 
+_INSTALL_ARTIFACTS = ("node_modules", ".venv")
+_NPM_INSTALL_ATTESTATION = Path("runtime/agent-fabric/.npm-ci-attestation")
+_NPM_INSTALL_ATTESTATION_LIBRARY = Path(
+    "runtime/agent-fabric/scripts/lib/npm-install-attestation.mjs"
+)
+
+
 _IMPORT_MARKERS = (
     "importerror",
     "modulenotfounderror",
@@ -353,7 +360,7 @@ def _copy_tree(source_root: Path, destination: Path) -> None:
 
 
 def _materialise_base(source_root: Path, base: str, destination: Path, tests: list[str]) -> None:
-    for child in destination.iterdir():
+    for child in list(destination.iterdir()):
         if child.is_symlink() or child.is_file():
             child.unlink()
         elif child.is_dir():
@@ -417,11 +424,66 @@ def _materialise_base(source_root: Path, base: str, destination: Path, tests: li
             raise GateError(f"changed test is unavailable in the source tree: {relative}")
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, target)
-    for name in ("node_modules", ".venv"):
+
+
+def _provision_install_artifacts(source_root: Path, destination: Path) -> None:
+    for name in _INSTALL_ARTIFACTS:
         source = source_root / name
         target = destination / name
-        if source.exists() and not target.exists():
-            target.symlink_to(source, target_is_directory=source.is_dir())
+        if not source.exists():
+            continue
+        if target.is_symlink() or target.is_file():
+            target.unlink()
+        elif target.is_dir():
+            shutil.rmtree(target)
+        target.symlink_to(source, target_is_directory=source.is_dir())
+
+    source_attestation = source_root / _NPM_INSTALL_ATTESTATION
+    if source_attestation.is_file():
+        target_attestation = destination / _NPM_INSTALL_ATTESTATION
+        _ensure_no_symlink_components(destination, target_attestation)
+        target_attestation.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source_attestation, target_attestation)
+
+
+def _ensure_no_symlink_components(root: Path, path: Path) -> None:
+    try:
+        relative = path.relative_to(root)
+    except ValueError as exc:
+        raise GateError(f"provisioned path escapes scratch tree: {path}") from exc
+    current = root
+    for component in relative.parts:
+        current /= component
+        if current.is_symlink():
+            raise GateError(f"provisioned path contains a symlink: {current}")
+
+
+@contextmanager
+def _current_npm_attestation_library(
+    source_root: Path, destination: Path
+):
+    # The materialised base must keep its production code for the changed-test
+    # run. Its protocol preflight nevertheless needs the current attestation
+    # contract to read the current install record. Overlay only the helper for
+    # that preflight, then restore the base file before tests execute.
+    source = source_root / _NPM_INSTALL_ATTESTATION_LIBRARY
+    target = destination / _NPM_INSTALL_ATTESTATION_LIBRARY
+    _ensure_no_symlink_components(destination, target)
+    if not source.is_file() or not target.is_file():
+        yield
+        return
+
+    original = target.read_bytes()
+    original_stat = target.stat()
+    shutil.copy2(source, target)
+    try:
+        yield
+    finally:
+        target.write_bytes(original)
+        os.utime(
+            target,
+            ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns),
+        )
 
 
 @contextmanager
@@ -493,9 +555,16 @@ def _provision_protocol_build(
 
 
 def _run_suite(
-    commands: list[str] | dict[str, str], cwd: Path, tests: list[str]
+    commands: list[str] | dict[str, str],
+    cwd: Path,
+    tests: list[str],
+    protocol_build_source_root: Path | None = None,
 ) -> list[CommandResult]:
-    _provision_protocol_build(commands, cwd, tests)
+    if protocol_build_source_root is None or not _uses_ts_command(commands, tests):
+        _provision_protocol_build(commands, cwd, tests)
+    else:
+        with _current_npm_attestation_library(protocol_build_source_root, cwd):
+            _provision_protocol_build(commands, cwd, tests)
 
     def commands_for_target(target: str | None) -> list[str]:
         if not isinstance(commands, dict):
@@ -557,7 +626,13 @@ def gate_right_reason_red(
     with _temporary_tree(source_root, scratch_root) as directory:
         base_root = Path(directory)
         _materialise_base(source_root, base, base_root, tests)
-        results = _run_suite(commands, base_root, tests)
+        _provision_install_artifacts(source_root, base_root)
+        results = _run_suite(
+            commands,
+            base_root,
+            tests,
+            protocol_build_source_root=source_root,
+        )
         targets = _targets(commands, tests)
         evidence = [
             right_reason_red_evidence(result, target_existed_at_base(base_root, target))

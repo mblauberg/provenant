@@ -93,10 +93,9 @@ describe("npm install attestation", () => {
     const path = await writeNpmInstallAttestation(root);
     const serialized = await readFile(path, "utf8");
 
-    expect(serialized).toContain('\n  "productCommit":');
+    expect(serialized).not.toContain('\n  "productCommit":');
     expect(serialized.endsWith("\n")).toBe(true);
     expect(await readAttestation(root)).toMatchObject({
-      productCommit: expect.stringMatching(/^[a-f0-9]{40}$/u),
       lockfileSha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
       packageSriValues: { "node_modules/tsx": "sha512-fixture" },
       installedTreeSha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
@@ -104,16 +103,19 @@ describe("npm install attestation", () => {
     await expect(checkNpmInstallAttestation(root)).resolves.toBeUndefined();
   });
 
-  it("reports a product commit change", async () => {
+  it("ignores a product commit change when the install content is unchanged", async () => {
     const root = await createFixture();
-    await writeNpmInstallAttestation(root);
+    const path = await writeNpmInstallAttestation(root);
+    const attestation = await readAttestation(root);
+    attestation.productCommit = "legacy-provenance-only";
+    await writeFile(path, `${JSON.stringify(attestation, null, 2)}\n`);
     await execFileAsync(
       "git",
       ["-c", "user.name=Attestation Test", "-c", "user.email=test@example.invalid", "commit", "--allow-empty", "-qm", "next"],
       { cwd: root },
     );
 
-    await expect(checkNpmInstallAttestation(root)).resolves.toMatchObject({ reason: "product-commit" });
+    await expect(checkNpmInstallAttestation(root)).resolves.toBeUndefined();
   });
 
   it("reports lockfile byte drift", async () => {

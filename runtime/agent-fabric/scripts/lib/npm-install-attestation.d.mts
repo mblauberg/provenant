@@ -3,14 +3,13 @@ export declare const NPM_INSTALL_ATTESTATION_RELATIVE_PATH: string;
 export declare const NPM_INSTALL_RECOVERY_COMMAND: "scripts/install-agent-fabric-dependencies";
 
 export type NpmInstallAttestation = {
-  productCommit: string;
   lockfileSha256: string;
   packageSriValues: Record<string, string>;
   installedTreeSha256: string;
 };
 
 export type NpmInstallAttestationMismatch = {
-  reason: "missing" | "invalid" | "product-commit" | "lockfile" | "package-sri" | "installed-tree";
+  reason: "missing" | "invalid" | "lockfile" | "package-sri" | "installed-tree";
   message: string;
   cause?: unknown;
 };

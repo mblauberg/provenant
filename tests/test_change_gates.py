@@ -135,11 +135,16 @@ def test_ts_right_reason_red_provisions_protocol_build_in_materialised_tree(tmp_
     source = tmp_path / "source"
     source.mkdir()
     (source / "scripts").mkdir()
+    verifier = source / "runtime" / "agent-fabric" / "scripts" / "lib" / "npm-install-attestation.mjs"
+    verifier.parent.mkdir(parents=True)
+    verifier.write_text("base verifier\n", encoding="utf-8")
     build = source / "scripts" / "agent-fabric-protocol-build"
     build.write_text(
         "#!/bin/sh\n"
         "set -eu\n"
         "printf '%s\\n' \"$AGENTS_HOME\" > \"$AGENTS_HOME/protocol-build-agents-home\"\n"
+        "cat \"$AGENTS_HOME/runtime/agent-fabric/scripts/lib/npm-install-attestation.mjs\" "
+        "> \"$AGENTS_HOME/protocol-verifier-content\"\n"
         ": > \"$AGENTS_HOME/protocol-ready\"\n",
         encoding="utf-8",
     )
@@ -152,6 +157,10 @@ def test_ts_right_reason_red_provisions_protocol_build_in_materialised_tree(tmp_
         "    print('AGENT_FABRIC_PROTOCOL_BUILD_STALE: local @local/agent-fabric-protocol dist is missing')\n"
         "    raise SystemExit(1)\n"
         "assert Path('protocol-build-agents-home').read_text().strip() == str(Path.cwd())\n"
+        "if Path('protocol-verifier-content').read_text() != 'current verifier\\n':\n"
+        "    print('AGENT_FABRIC_PROTOCOL_BUILD_STALE: current attestation verifier was not used')\n"
+        "    raise SystemExit(1)\n"
+        "assert Path('runtime/agent-fabric/scripts/lib/npm-install-attestation.mjs').read_text() == 'base verifier\\n'\n"
         "raise AssertionError('expected right-reason red after protocol build')\n",
         encoding="utf-8",
     )
@@ -175,6 +184,7 @@ def test_ts_right_reason_red_provisions_protocol_build_in_materialised_tree(tmp_
         ],
         check=True,
     )
+    verifier.write_text("current verifier\n", encoding="utf-8")
     target.write_text("current test\n", encoding="utf-8")
 
     result = gate_right_reason_red(
@@ -192,6 +202,129 @@ def test_ts_right_reason_red_provisions_protocol_build_in_materialised_tree(tmp_
     assert result == 0, f"expected TS gate to accept the assertion red, got {result}:\n{output}"
     assert "classification=assertion-failure" in output
     assert "AGENT_FABRIC_PROTOCOL_BUILD_STALE" not in output
+
+
+def test_ts_right_reason_red_reprovisions_untracked_install_artifacts(tmp_path, capsys):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "scripts").mkdir()
+    (source / "runtime" / "agent-fabric").mkdir(parents=True)
+    (source / "node_modules").mkdir()
+    (source / "node_modules" / "installed-marker").write_text("installed\n", encoding="utf-8")
+    (source / ".gitignore").write_text("node_modules/\n", encoding="utf-8")
+    (source / "runtime" / "agent-fabric" / ".gitignore").write_text(
+        ".npm-ci-attestation\n", encoding="utf-8"
+    )
+    (source / "runtime" / "agent-fabric" / ".npm-ci-attestation").write_text(
+        "attested\n", encoding="utf-8"
+    )
+    build = source / "scripts" / "agent-fabric-protocol-build"
+    build.write_text(
+        "#!/bin/sh\n"
+        "set -eu\n"
+        "if test -L \"$AGENTS_HOME/node_modules\" && "
+        "test -f \"$AGENTS_HOME/node_modules/installed-marker\" && "
+        "test -f \"$AGENTS_HOME/runtime/agent-fabric/.npm-ci-attestation\"; then\n"
+        "    : > \"$AGENTS_HOME/install-artifacts-provisioned\"\n"
+        "fi\n",
+        encoding="utf-8",
+    )
+    build.chmod(0o755)
+    (source / "tests").mkdir()
+    (source / "tests" / "provisioning.test.ts").write_text("base test\n", encoding="utf-8")
+    (source / "tests" / "provisioning_gate.py").write_text(
+        "from pathlib import Path\n"
+        "if not Path('install-artifacts-provisioned').is_file():\n"
+        "    print('AGENT_FABRIC_PROTOCOL_BUILD_STALE: install artifacts were not provisioned')\n"
+        "    raise SystemExit(1)\n"
+        "raise AssertionError('expected right-reason red after install provisioning')\n",
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "-C", str(source), "init", "--quiet"], check=True)
+    subprocess.run(["git", "-C", str(source), "add", "-A"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(source),
+            "-c",
+            "user.name=Gate Test",
+            "-c",
+            "user.email=gate-test@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "base",
+        ],
+        check=True,
+    )
+    (source / "tests" / "provisioning.test.ts").write_text("current test\n", encoding="utf-8")
+
+    result = gate_right_reason_red(
+        source,
+        "HEAD",
+        {
+            "py": f'{sys.executable} -c "raise SystemExit(1)" {{test}}',
+            "ts": f'{sys.executable} tests/provisioning_gate.py {{test}}',
+        },
+        ["tests/provisioning.test.ts"],
+        tmp_path / "scratch",
+    )
+    output = capsys.readouterr().out
+
+    assert result == 0, f"expected install artifacts to be provisioned, got {result}:\n{output}"
+    assert "classification=assertion-failure" in output
+    assert "AGENT_FABRIC_PROTOCOL_BUILD_STALE" not in output
+
+
+def test_materialised_install_provisioning_rejects_symlinked_attestation_parents(tmp_path):
+    source = tmp_path / "source"
+    source_attestation = source / "runtime" / "agent-fabric" / ".npm-ci-attestation"
+    source_attestation.parent.mkdir(parents=True)
+    source_attestation.write_text("attested\n", encoding="utf-8")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+
+    source_attestation.unlink()
+    (source / "runtime" / "agent-fabric").rmdir()
+    (source / "runtime" / "agent-fabric").symlink_to(outside, target_is_directory=True)
+    (source / "tests").mkdir()
+    (source / "tests" / "symlink.test.ts").write_text("base test\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(source), "init", "--quiet"], check=True)
+    subprocess.run(["git", "-C", str(source), "add", "-A"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(source),
+            "-c",
+            "user.name=Gate Test",
+            "-c",
+            "user.email=gate-test@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "base",
+        ],
+        check=True,
+    )
+    (source / "runtime" / "agent-fabric").unlink()
+    (source / "runtime" / "agent-fabric").mkdir()
+    source_attestation.write_text("attested\n", encoding="utf-8")
+    (source / "tests" / "symlink.test.ts").write_text("current test\n", encoding="utf-8")
+
+    with pytest.raises(GateError, match="contains a symlink"):
+        gate_right_reason_red(
+            source,
+            "HEAD",
+            {
+                "py": f'{sys.executable} -c "raise SystemExit(1)" {{test}}',
+                "ts": f'{sys.executable} -c "raise SystemExit(1)" {{test}}',
+            },
+            ["tests/symlink.test.ts"],
+            tmp_path / "scratch",
+        )
+    assert not (outside / "agent-fabric" / ".npm-ci-attestation").exists()
 
 
 def test_revert_probe_fails_when_a_reverted_hunk_survives(tmp_path):
