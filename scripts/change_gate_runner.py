@@ -39,6 +39,40 @@ class CommandResult:
 DIRECT_PROCESS_TIMEOUT = 30.0
 PIPE_DRAIN_TIMEOUT = 5.0
 
+_PYTEST_IMPORT_PLUGIN = """import json
+import os
+from pathlib import Path
+
+
+_SCHEMA = "provenant.pytest-import-evidence.v1"
+_modules = set()
+
+
+def pytest_exception_interact(node, call, report):
+    del node
+    if report.when != "collect":
+        return
+    cause = call.excinfo.value.__cause__
+    if not isinstance(cause, ImportError) or not isinstance(cause.name, str):
+        return
+    if cause.name.strip() == cause.name and cause.name:
+        _modules.add(cause.name)
+
+
+def pytest_sessionfinish(session, exitstatus):
+    del session, exitstatus
+    sidecar = os.environ.get("PROVENANT_PYTEST_IMPORT_SIDECAR")
+    if sidecar is None:
+        return
+    try:
+        Path(sidecar).write_text(
+            json.dumps({"schema": _SCHEMA, "modules": sorted(_modules)}),
+            encoding="utf-8",
+        )
+    except OSError:
+        return
+"""
+
 
 _IMPORT_MARKERS = (
     "importerror",
@@ -180,13 +214,25 @@ def _drain_output(process: subprocess.Popen[str]) -> tuple[str, bool]:
 def _run_structured(
     arguments: list[str], cwd: Path, rendered: str, runner: Runner, report_path: Path
 ) -> CommandResult:
+    sidecar_path = report_path.with_name("pytest-import.json")
+    environment = os.environ.copy()
+    if runner is Runner.PYTEST:
+        plugin_path = report_path.with_name("_provenant_pytest_import_sidecar.py")
+        plugin_path.write_text(_PYTEST_IMPORT_PLUGIN, encoding="utf-8")
+        pythonpath = environment.get("PYTHONPATH")
+        environment["PYTHONPATH"] = os.pathsep.join(
+            part for part in (str(plugin_path.parent), pythonpath) if part
+        )
+        environment["PROVENANT_PYTEST_IMPORT_SIDECAR"] = str(sidecar_path)
+        arguments.extend(["-p", plugin_path.stem])
+        rendered = shlex.join(arguments)
     process = subprocess.Popen(
         arguments,
         cwd=cwd,
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
-        env=os.environ.copy(),
+        env=environment,
         start_new_session=True,
     )
     direct_timed_out = False
@@ -218,7 +264,10 @@ def _run_structured(
     if returncode is None:
         returncode = -signal.SIGKILL
     classification, unresolved_module = classify_structured_report_with_evidence(
-        runner, report_path, returncode
+        runner,
+        report_path,
+        returncode,
+        pytest_sidecar=sidecar_path if runner is Runner.PYTEST else None,
     )
     if direct_timed_out or not group_closed or not pipes_drained:
         classification = FailureClass.UNKNOWN

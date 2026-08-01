@@ -40,6 +40,8 @@ _UNRESOLVED_MODULE_PATTERNS = (
     re.compile(r"Failed to resolve import ['\"]([^'\"]+)['\"]", re.IGNORECASE),
 )
 
+_PYTEST_IMPORT_SIDECAR_SCHEMA = "provenant.pytest-import-evidence.v1"
+
 
 def _combine_failure_classes(classes: list[FailureClass]) -> FailureClass:
     if not classes:
@@ -99,7 +101,9 @@ def _structured_message_class(message: object, *, allow_assertion: bool = True) 
     return _combine_failure_classes(classes) if classes else FailureClass.UNKNOWN
 
 
-def _one_unresolved_module(values: list[str]) -> str | None:
+def _one_unresolved_module(
+    values: list[str], identities: list[str] | tuple[str, ...] = ()
+) -> str | None:
     modules = {
         match.group(1).strip()
         for value in values
@@ -107,6 +111,7 @@ def _one_unresolved_module(values: list[str]) -> str | None:
         for match in pattern.finditer(value)
         if match.group(1).strip()
     }
+    modules.update(identities)
     if len(modules) != 1:
         return None
     return next(iter(modules), "")
@@ -158,6 +163,41 @@ def _junit_import_values(report: Path) -> list[str]:
 
     visit(root)
     return values
+
+
+def _pytest_import_sidecar_values(report: Path, sidecar: Path | None) -> list[str]:
+    """Return only runner-owned collection identities from a contained sidecar."""
+
+    if sidecar is None:
+        return []
+    try:
+        report_path = report.resolve()
+        sidecar_path = sidecar.resolve()
+    except OSError:
+        return []
+    if sidecar_path.parent != report_path.parent or not sidecar_path.is_file():
+        return []
+    try:
+        document = json.loads(sidecar_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return []
+    if (
+        not isinstance(document, dict)
+        or set(document) != {"schema", "modules"}
+        or document.get("schema") != _PYTEST_IMPORT_SIDECAR_SCHEMA
+        or not isinstance(document.get("modules"), list)
+    ):
+        return []
+    modules = document["modules"]
+    if any(
+        not isinstance(module, str)
+        or not module.strip()
+        or module != module.strip()
+        or not all(part.isidentifier() for part in module.split("."))
+        for module in modules
+    ):
+        return []
+    return modules
 
 
 def _vitest_import_values_from_report(report: Path) -> list[str]:
@@ -472,6 +512,7 @@ def classify_structured_report(
     returncode: int,
     *,
     include_evidence: bool = False,
+    pytest_sidecar: Path | None = None,
 ) -> FailureClass | tuple[FailureClass, str | None]:
     """Classify one known runner's report, optionally returning import evidence."""
 
@@ -497,16 +538,27 @@ def classify_structured_report(
         if name == "pytest"
         else _vitest_import_values_from_report(report)
     )
-    return result, _one_unresolved_module(values)
+    sidecar_values = (
+        _pytest_import_sidecar_values(report, pytest_sidecar) if name == "pytest" else []
+    )
+    return result, _one_unresolved_module(values, sidecar_values)
 
 
 def classify_structured_report_with_evidence(
-    runner: object, report: Path, returncode: int
+    runner: object,
+    report: Path,
+    returncode: int,
+    *,
+    pytest_sidecar: Path | None = None,
 ) -> tuple[FailureClass, str | None]:
     """Return the parser result and its narrowly scoped import identity."""
 
     result = classify_structured_report(
-        runner, report, returncode, include_evidence=True
+        runner,
+        report,
+        returncode,
+        include_evidence=True,
+        pytest_sidecar=pytest_sidecar,
     )
     if not isinstance(result, tuple):
         raise AssertionError("structured evidence classification lost its tuple contract")
