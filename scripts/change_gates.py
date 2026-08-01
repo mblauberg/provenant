@@ -452,9 +452,51 @@ def _targets(commands: list[str] | dict[str, str], tests: list[str]) -> list[str
     return tests
 
 
+def _uses_ts_command(commands: list[str] | dict[str, str], tests: list[str]) -> bool:
+    if not isinstance(commands, dict):
+        return False
+    return any(
+        target is None or Path(target).suffix.casefold() != ".py"
+        for target in _targets(commands, tests)
+    )
+
+
+def _provision_protocol_build(
+    commands: list[str] | dict[str, str], cwd: Path, tests: list[str]
+) -> None:
+    if not _uses_ts_command(commands, tests):
+        return
+    build_script = cwd / "scripts" / "agent-fabric-protocol-build"
+    if not build_script.is_file():
+        raise GateError(f"materialised TS tree is missing {build_script}")
+    environment = os.environ.copy()
+    environment["AGENTS_HOME"] = str(cwd)
+    try:
+        completed = subprocess.run(
+            [str(build_script)],
+            cwd=cwd,
+            env=environment,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            check=False,
+        )
+    except OSError as exc:
+        raise GateError(f"unable to run protocol build in materialised tree: {exc}") from exc
+    if completed.returncode != 0:
+        detail = (completed.stdout or "").strip()
+        suffix = f": {detail}" if detail else ""
+        raise GateError(
+            f"protocol build failed in materialised TS tree "
+            f"(returncode={completed.returncode}){suffix}"
+        )
+
+
 def _run_suite(
     commands: list[str] | dict[str, str], cwd: Path, tests: list[str]
 ) -> list[CommandResult]:
+    _provision_protocol_build(commands, cwd, tests)
+
     def commands_for_target(target: str | None) -> list[str]:
         if not isinstance(commands, dict):
             return commands

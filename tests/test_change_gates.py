@@ -131,6 +131,69 @@ def test_right_reason_red_accepts_collection_error_for_target_new_at_base(tmp_pa
     assert result == 0
 
 
+def test_ts_right_reason_red_provisions_protocol_build_in_materialised_tree(tmp_path, capsys):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "scripts").mkdir()
+    build = source / "scripts" / "agent-fabric-protocol-build"
+    build.write_text(
+        "#!/bin/sh\n"
+        "set -eu\n"
+        "printf '%s\\n' \"$AGENTS_HOME\" > \"$AGENTS_HOME/protocol-build-agents-home\"\n"
+        ": > \"$AGENTS_HOME/protocol-ready\"\n",
+        encoding="utf-8",
+    )
+    build.chmod(0o755)
+    (source / "tests").mkdir()
+    (source / "tests" / "ts_gate.py").write_text(
+        "from pathlib import Path\n"
+        "import sys\n"
+        "if not Path('protocol-ready').is_file():\n"
+        "    print('AGENT_FABRIC_PROTOCOL_BUILD_STALE: local @local/agent-fabric-protocol dist is missing')\n"
+        "    raise SystemExit(1)\n"
+        "assert Path('protocol-build-agents-home').read_text().strip() == str(Path.cwd())\n"
+        "raise AssertionError('expected right-reason red after protocol build')\n",
+        encoding="utf-8",
+    )
+    target = source / "tests" / "protocol.test.ts"
+    target.write_text("base test\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(source), "init", "--quiet"], check=True)
+    subprocess.run(["git", "-C", str(source), "add", "-A"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(source),
+            "-c",
+            "user.name=Gate Test",
+            "-c",
+            "user.email=gate-test@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "base",
+        ],
+        check=True,
+    )
+    target.write_text("current test\n", encoding="utf-8")
+
+    result = gate_right_reason_red(
+        source,
+        "HEAD",
+        {
+            "py": f'{sys.executable} -c "raise SystemExit(1)" {{test}}',
+            "ts": f'{sys.executable} tests/ts_gate.py {{test}}',
+        },
+        ["tests/protocol.test.ts"],
+        tmp_path / "scratch",
+    )
+    output = capsys.readouterr().out
+
+    assert result == 0, f"expected TS gate to accept the assertion red, got {result}:\n{output}"
+    assert "classification=assertion-failure" in output
+    assert "AGENT_FABRIC_PROTOCOL_BUILD_STALE" not in output
+
+
 def test_revert_probe_fails_when_a_reverted_hunk_survives(tmp_path):
     source = tmp_path / "source"
     source.mkdir()
