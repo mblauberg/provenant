@@ -12,7 +12,6 @@ import {
   AUTHORITY_ACTION_VOCABULARY,
   connectFabricDaemon,
   openFabric,
-  startFabricDaemon,
 } from "../../src/index.ts";
 import type {
   AuthorityInput,
@@ -27,19 +26,15 @@ import { createCurrentSessionRun } from "./current-session-testkit.ts";
 import { TEST_AUTHORITY_V2_FIELDS } from "./authority-v2-testkit.ts";
 import { ManualClock } from "./manual-clock.ts";
 import { callTool, spawnMcpProxy, type McpProxy } from "./mcp-testkit.ts";
-import { terminateTrackedTestProcess, trackTestProcess, untrackTestProcess } from "./test-process-registry.ts";
+import { createRetainedAgentClient } from "./retained-agent-client-testkit.ts";
+import {
+  restartTrackedRetainedDaemon,
+  startTrackedRetainedDaemon,
+  stopTrackedRetainedDaemon,
+  type RetainedDaemonStarted,
+} from "./retained-daemon-testkit.ts";
 
 const fakeProvider = fileURLToPath(new URL("./lifecycle-fake-provider.ts", import.meta.url));
-type OwnedDaemon = Awaited<ReturnType<typeof startFabricDaemon>>;
-
-async function stopOwnedDaemon(daemon: OwnedDaemon): Promise<void> {
-  try {
-    await daemon.stop();
-    untrackTestProcess(daemon.pid);
-  } finally {
-    await terminateTrackedTestProcess(daemon.pid);
-  }
-}
 
 export type LifecycleCheckpoint = {
   relativePath: string;
@@ -197,7 +192,7 @@ export async function createLifecycleFixture(
     fault?: (label: string) => void;
     secondaryAdapter?: boolean;
     retainedAgents?: boolean;
-    retainedDaemonStarted?: (input: { pid: number; directory: string; release: () => void }) => Promise<void> | void;
+    retainedDaemonStarted?: RetainedDaemonStarted;
   } = {},
 ): Promise<LifecycleFixture> {
   const directory = await mkdtemp(join(tmpdir(), "agent-fabric-lifecycle-"));
@@ -404,63 +399,6 @@ async function callMcpResult(
   return outcome.structured;
 }
 
-function retainedAgentClient(input: {
-  chair: {
-    dispatchProviderAction(
-      value: Parameters<FabricClient["dispatchProviderAction"]>[0],
-    ): Promise<ProviderActionResult>;
-  };
-  adapterId: "fake-lifecycle" | "fake-lifecycle-secondary";
-  agentId: "leader" | "child";
-}): FabricClient {
-  let sequence = 0;
-  const retainedCall = async (operation: string, operationInput: Record<string, unknown>): Promise<unknown> => {
-    sequence += 1;
-    const taskId = operation === "createTask"
-      ? `${input.agentId}-task`
-      : typeof operationInput.taskId === "string"
-      ? operationInput.taskId
-      : operation === "receiveMessages"
-        ? `${input.agentId}-task`
-        : undefined;
-    const actionIdentity = operation === "requestLifecycle" && typeof operationInput.commandId === "string"
-      ? `lifecycle:${operationInput.commandId}`
-      : String(sequence);
-    const action = await input.chair.dispatchProviderAction({
-      certifyingReview: null,
-      adapterId: input.adapterId,
-      actionId: `retained-test:${input.agentId}:${actionIdentity}`,
-      operation: "send_turn",
-      payload: {
-        agentId: input.agentId,
-        providerSessionGeneration: 1,
-        ...(taskId === undefined ? {} : { taskId }),
-        scenario: "retained-test-action",
-        retainedAction: { operation, input: operationInput },
-      },
-      commandId: `retained-test:${input.agentId}:${actionIdentity}:dispatch`,
-    });
-    if (
-      action.status !== "terminal" ||
-      typeof action.result !== "object" || action.result === null ||
-      !("retainedActionResult" in action.result)
-    ) throw new Error(`retained ${input.agentId} ${operation} did not return a terminal result`);
-    return (action.result as { retainedActionResult: unknown }).retainedActionResult;
-  };
-  return {
-    acquireWriteLease: async (value: Record<string, unknown>) => await retainedCall(
-      "acquireWriteLease",
-      { taskId: `${input.agentId}-task`, ...value },
-    ),
-    attachAgent: async (value: Record<string, unknown>) => await retainedCall("attachAgent", value),
-    claimTask: async (value: Record<string, unknown>) => await retainedCall("claimTask", value),
-    createTask: async (value: Record<string, unknown>) => await retainedCall("createTask", value),
-    delegateAuthority: async (value: Record<string, unknown>) => await retainedCall("delegateAuthority", value),
-    receiveMessages: async (value: Record<string, unknown>) => await retainedCall("receiveMessages", value),
-    requestLifecycle: async (value: Record<string, unknown>) => await retainedCall("requestLifecycle", value),
-  } as unknown as FabricClient;
-}
-
 async function createRetainedLifecycleFixture(input: {
   directory: string;
   runDirectory: string;
@@ -480,7 +418,7 @@ async function createRetainedLifecycleFixture(input: {
     spawnUnresolved?: boolean;
     spawnLookupMissing?: boolean;
     fault?: (label: string) => void;
-    retainedDaemonStarted?: (input: { pid: number; directory: string; release: () => void }) => Promise<void> | void;
+    retainedDaemonStarted?: RetainedDaemonStarted;
   };
 }): Promise<LifecycleFixture> {
   const providerSpawnBarrier = input.providerSpawnBarrier;
@@ -532,9 +470,8 @@ async function createRetainedLifecycleFixture(input: {
     },
   };
   const daemon = input.options.fault === undefined
-    ? await startFabricDaemon(daemonOptions)
+    ? await startTrackedRetainedDaemon(daemonOptions, `retained lifecycle daemon ${input.directory}`)
     : undefined;
-  if (daemon !== undefined) trackTestProcess(daemon.pid, `retained lifecycle daemon ${input.directory}`);
   if (input.options.fault !== undefined) {
     await Promise.all([
       mkdir(stateDirectory, { recursive: true, mode: 0o700 }),
@@ -581,7 +518,7 @@ async function createRetainedLifecycleFixture(input: {
     if (closed) return;
     closed = true;
     await Promise.allSettled([chairProxy?.close() ?? Promise.resolve(), remoteChair?.close() ?? Promise.resolve()]);
-    await (daemon === undefined ? inProcessFabric?.close() ?? Promise.resolve() : stopOwnedDaemon(daemon));
+    await (daemon === undefined ? inProcessFabric?.close() ?? Promise.resolve() : stopTrackedRetainedDaemon(daemon));
     if (protocolServer !== undefined) {
       await new Promise<void>((resolve) => protocolServer?.close(() => resolve()));
     }
@@ -591,7 +528,7 @@ async function createRetainedLifecycleFixture(input: {
       await input.options.retainedDaemonStarted?.({
         pid: daemon.pid,
         directory: input.directory,
-        release: () => daemon.release(),
+        releaseDaemonHandle: () => daemon.release(),
       });
     }
     const rootAuthority = {
@@ -652,7 +589,7 @@ async function createRetainedLifecycleFixture(input: {
     if (leaderAttached.bridgeState !== "active") {
       throw new Error("retained Stage 3 leader attach failed");
     }
-    const leader = retainedAgentClient({
+    const leader = createRetainedAgentClient({
       chair: retainedChair,
       adapterId: "fake-lifecycle",
       agentId: "leader",
@@ -672,7 +609,7 @@ async function createRetainedLifecycleFixture(input: {
     if (childAttached.bridgeState !== "active") {
       throw new Error("retained Stage 3 child attach did not activate its bridge");
     }
-    const child = retainedAgentClient({
+    const child = createRetainedAgentClient({
       chair: retainedChair,
       adapterId: "fake-lifecycle-secondary",
       agentId: "child",
@@ -750,30 +687,12 @@ async function createRetainedLifecycleFixture(input: {
       childTask: childTask as { taskId: string; revision: number },
       ...(daemon === undefined ? {} : {
         restartRetainedDaemon: async (): Promise<{ fabric: Fabric; chair: FabricClient }> => {
-          const restartedDaemon = await startFabricDaemon(daemonOptions);
-          trackTestProcess(restartedDaemon.pid, `retained lifecycle restart daemon ${input.directory}`);
-          let restartedChair: Awaited<ReturnType<typeof connectFabricDaemon>>;
-          try {
-            restartedChair = await connectFabricDaemon({
-              socketPath,
-              capability: run.chairCapability,
-            });
-          } catch (error: unknown) {
-            await stopOwnedDaemon(restartedDaemon);
-            throw error;
-          }
-          let restartClosed = false;
-          return {
-            chair: restartedChair as unknown as FabricClient,
-            fabric: {
-              close: async () => {
-                if (restartClosed) return;
-                restartClosed = true;
-                await restartedChair.close();
-                await stopOwnedDaemon(restartedDaemon);
-              },
-            } as unknown as Fabric,
-          };
+          return await restartTrackedRetainedDaemon({
+            options: daemonOptions,
+            socketPath,
+            capability: run.chairCapability,
+            label: `retained lifecycle restart daemon ${input.directory}`,
+          });
         },
       }),
     };
@@ -840,7 +759,7 @@ export async function createRetainedLifecycleCallbackFixture(): Promise<Retained
   const socketPath = join(runtimeDirectory, "f.sock");
   await mkdir(join(directory, "src", "retained-child"), { recursive: true });
   await mkdir(join(runDirectory, "checkpoints"), { recursive: true });
-  const daemon = await startFabricDaemon({
+  const daemon = await startTrackedRetainedDaemon({
     databasePath,
     stateDirectory,
     runtimeDirectory,
@@ -852,8 +771,7 @@ export async function createRetainedLifecycleCallbackFixture(): Promise<Retained
         environment: { LIFECYCLE_FAKE_JOURNAL: providerJournalPath },
       },
     },
-  });
-  trackTestProcess(daemon.pid, `retained lifecycle callback daemon ${directory}`);
+  }, `retained lifecycle callback daemon ${directory}`);
   let bootstrap: Awaited<ReturnType<typeof connectFabricDaemon>> | undefined;
   let chair: Awaited<ReturnType<typeof connectFabricDaemon>> | undefined;
   let chairProxy: Awaited<ReturnType<typeof spawnMcpProxy>> | undefined;
@@ -867,7 +785,7 @@ export async function createRetainedLifecycleCallbackFixture(): Promise<Retained
       bootstrap?.close() ?? Promise.resolve(),
     ]);
     try {
-      await stopOwnedDaemon(daemon);
+      await stopTrackedRetainedDaemon(daemon);
     } finally {
       await rm(directory, { recursive: true, force: true });
     }

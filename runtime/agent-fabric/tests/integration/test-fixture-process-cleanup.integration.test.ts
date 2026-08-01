@@ -112,12 +112,17 @@ describe.sequential("agent-fabric test fixture cleanup", () => {
           runtimeDirectory: string;
           stateDirectory: string;
           socketPath: string;
+          daemonHandleReleased: boolean;
         };
         daemonPid = handoff.daemonPid;
         daemonDirectory = handoff.directory;
         daemonRuntimeDirectory = handoff.runtimeDirectory;
         daemonStateDirectory = handoff.stateDirectory;
         daemonSocketPath = handoff.socketPath;
+        expect(
+          handoff.daemonHandleReleased,
+          "the inner worker must release daemon-handle custody before registry custody is assessed",
+        ).toBe(true);
         expect(Number.isInteger(daemonPid)).toBe(true);
         expect(daemonPid).toBeGreaterThan(0);
         expect(existsSync(daemonSocketPath)).toBe(true);

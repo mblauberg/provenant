@@ -11,7 +11,10 @@ let fixture: Awaited<ReturnType<typeof createLifecycleFixture>> | undefined;
 try {
   fixture = await createLifecycleFixture({
     retainedAgents: true,
-    retainedDaemonStarted: async ({ pid, directory, release }) => {
+    retainedDaemonStarted: async ({ pid, directory, releaseDaemonHandle }) => {
+      // Deliberately release only the daemon handle. This drops the worker's
+      // child/pipe custody so the test proves the registry owns the exact PID.
+      releaseDaemonHandle();
       const runtimeDirectory = join(directory, "runtime");
       const handoff = {
         daemonPid: pid,
@@ -19,11 +22,11 @@ try {
         runtimeDirectory,
         stateDirectory: join(directory, "state"),
         socketPath: join(runtimeDirectory, "fabric.sock"),
+        daemonHandleReleased: true,
       };
       const temporaryHandoffPath = `${handoffPath}.tmp-${process.pid}`;
       writeFileSync(temporaryHandoffPath, `${JSON.stringify(handoff)}\n`);
       renameSync(temporaryHandoffPath, handoffPath);
-      release();
     },
   });
   await new Promise<void>(() => undefined);
