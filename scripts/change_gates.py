@@ -91,6 +91,14 @@ class Mutant:
     description: str
 
 
+_TYPESCRIPT_TARGET_SUFFIXES = {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"}
+_NPM_INSTALL_RECOVERY_COMMAND = "scripts/install-agent-fabric-dependencies"
+_NPM_ATTESTATION_WRITER = Path(
+    "runtime/agent-fabric/scripts/write-npm-ci-attestation.mjs"
+)
+_PROTOCOL_BUILD_SCRIPT = Path("scripts/agent-fabric-protocol-build")
+
+
 _HUNK_RE = re.compile(r"^@@ -(?P<old_start>\d+)(?:,(?P<old_count>\d+))? \+(?P<new_start>\d+)(?:,(?P<new_count>\d+))? @@")
 _DIFF_FILE_RE = re.compile(r"^diff --git a/(.+) b/(.+)$")
 _TYPE_ONLY_LINE_RE = re.compile(
@@ -544,6 +552,108 @@ def _targets(commands: list[str] | dict[str, str], tests: list[str]) -> list[str
     return tests
 
 
+def _uses_typescript_target(commands: list[str] | dict[str, str], tests: list[str]) -> bool:
+    if not isinstance(commands, dict):
+        return False
+    return any(
+        target is not None
+        and Path(target).suffix.casefold() in _TYPESCRIPT_TARGET_SUFFIXES
+        for target in _targets(commands, tests)
+    )
+
+
+def _ensure_scratch_path_is_contained(root: Path, path: Path) -> None:
+    try:
+        relative = path.relative_to(root)
+    except ValueError as exc:
+        raise GateError(
+            f"CHANGE_GATES_TS_PREREQUISITE: path escapes the materialised scratch tree: {path}"
+        ) from exc
+    current = root
+    for component in relative.parts:
+        current /= component
+        if current.is_symlink():
+            raise GateError(
+                f"CHANGE_GATES_TS_PREREQUISITE: path contains a symlink: {current}"
+            )
+
+
+def _run_scratch_preparation_command(
+    command: list[str],
+    cwd: Path,
+    *,
+    environment: dict[str, str] | None,
+    error_prefix: str,
+    operation: str,
+) -> None:
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=cwd,
+            env=environment,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            check=False,
+        )
+    except OSError as exc:
+        raise GateError(f"{error_prefix}: unable to {operation}: {exc}") from exc
+    if completed.returncode == 0:
+        return
+    detail = (completed.stdout or "").strip()
+    suffix = f": {detail}" if detail else ""
+    raise GateError(
+        f"{error_prefix}: {operation} failed (returncode={completed.returncode}){suffix}"
+    )
+
+
+def _prepare_typescript_scratch(
+    source_root: Path,
+    scratch_root: Path,
+    commands: list[str] | dict[str, str],
+    tests: list[str],
+) -> None:
+    if not _uses_typescript_target(commands, tests):
+        return
+    if not (source_root / "node_modules").is_dir():
+        raise GateError(
+            "CHANGE_GATES_TS_PREREQUISITE: source node_modules is missing; "
+            f"rerun: {_NPM_INSTALL_RECOVERY_COMMAND}"
+        )
+
+    writer = scratch_root / _NPM_ATTESTATION_WRITER
+    _ensure_scratch_path_is_contained(scratch_root, writer)
+    if not writer.is_file():
+        raise GateError(
+            "CHANGE_GATES_TS_PREREQUISITE: materialised base attestation writer is missing: "
+            f"{writer}"
+        )
+    _run_scratch_preparation_command(
+        ["node", str(writer), str(scratch_root)],
+        scratch_root,
+        environment=None,
+        error_prefix="CHANGE_GATES_TS_PREREQUISITE",
+        operation="npm install attestation refresh",
+    )
+
+    build = scratch_root / _PROTOCOL_BUILD_SCRIPT
+    _ensure_scratch_path_is_contained(scratch_root, build)
+    if not build.is_file():
+        raise GateError(
+            "CHANGE_GATES_TS_BUILD: materialised base protocol build is missing: "
+            f"{build}"
+        )
+    environment = os.environ.copy()
+    environment["AGENTS_HOME"] = str(scratch_root)
+    _run_scratch_preparation_command(
+        [str(build)],
+        scratch_root,
+        environment=environment,
+        error_prefix="CHANGE_GATES_TS_BUILD",
+        operation="agent-fabric protocol build",
+    )
+
+
 def _run_suite(
     commands: list[str] | dict[str, str],
     cwd: Path,
@@ -665,6 +775,7 @@ def gate_right_reason_red(
     with _temporary_tree(source_root, scratch_root) as directory:
         base_root = Path(directory)
         _materialise_base(source_root, base, base_root, tests)
+        _prepare_typescript_scratch(source_root, base_root, commands, tests)
         results = _run_suite(commands, base_root, tests)
         targets = _targets(commands, tests)
         evidence = [
@@ -720,6 +831,7 @@ def _gate_refactor_no_production(
     with _temporary_tree(source_root, scratch_root) as directory:
         base_root = Path(directory)
         _materialise_base(source_root, base, base_root, tests)
+        _prepare_typescript_scratch(source_root, base_root, commands, tests)
         results = _run_suite(commands, base_root, tests)
     for result in results:
         _print_output(result)
