@@ -89,8 +89,11 @@ or `oauth_safe_mode`.
 If any adapter cannot enforce the promised safety level, log the failure and fail over. Do not silently
 downgrade certification. For large prompts, prefer `--prompt-file`; enforced adapters use
 stdin/file-backed input where supported to avoid shell argument limits.
-Orchestrated runs always pass `--out <run-dir>/<classified-artifact>` and list it
-in the manifest. Omitting `--out` creates one declared ephemeral output for a
+Orchestrated direct-CLI runs pass `--out <run-dir>/<human-answer>` and
+`--terminal-artifact <run-dir>/<terminal-artifact>.json`, and list both in the
+manifest. The first is the human-readable provider answer. The second is the
+dispatcher-owned closed JSON terminal artifact whose digest is recorded in the
+dispatch receipt. Omitting `--out` creates one declared ephemeral answer for a
 one-shot caller to consume/remove; dispatcher-internal prompt/raw/diagnostic
 temporaries are cleaned on success and failure.
 
@@ -158,6 +161,9 @@ Four failure modes are specific to this lane:
 Verify the tree, not the transcript: a run can report success having produced nothing. After
 every implementation leg, check `git -C <worktree> log --oneline <base>..HEAD`, `git diff
 --stat` and `git status --short`, and confirm the diff touches only permitted paths.
+For a claimed commit, the chair must also run `scripts/worktree verify-claim` with the
+recorded pre-dispatch base revision and accept only its clean, base-descended receipt;
+missing or rejected Git evidence is not an implementation outcome.
 
 A worker has no conversation context, so the brief carries everything: absolute path and
 branch, what has already been verified so it is not redone, ordered parts, out-of-scope
@@ -181,7 +187,7 @@ Each CLI emits different wrappers: banners, JSONL, token footers, ANSI, stats, o
 dispatcher should produce:
 
 ```
-{"tool":"...","adapter":"...","model":"...","resolved_model":"...","catalog_model":"...","model_selection":"...","requested_effort":"...","effort":"...","effort_source":"...","effort_capability_source":"...","effort_substitution":"...","substitution":"...","status":"...","exit":0,"output_path":"...","read_only_guarantee":"enforced|oauth_safe_mode|best_effort|prompt_only|none","orchestrator_family":"...","provider_family":"...","model_family":"...","endpoint_provider":"...","identity_source":"...","cross_family":true,"certification_eligible":true}
+{"id":"...","attempt_id":"...","tool":"...","adapter":"...","model":"...","resolved_model":"...","catalog_model":"...","model_selection":"...","requested_effort":"...","effort":"...","effort_source":"...","effort_capability_source":"...","effort_substitution":"...","substitution":"...","status":"...","exit":0,"terminal_observed":true,"output_path":"...","output_sha256":"sha256:...","read_only_guarantee":"enforced|oauth_safe_mode|best_effort|prompt_only|none","orchestrator_family":"...","provider_family":"...","model_family":"...","endpoint_provider":"...","identity_source":"...","cross_family":true,"certification_eligible":true}
 ```
 
 `status` is the resolver/dispatcher vocabulary, not a hand-maintained subset:
@@ -191,9 +197,12 @@ model/alias/adapter errors, capability discovery/trust/staleness errors,
 effort unsupported/mismatch/unresolved errors, `same_family_forbidden`, and
 `all_failed`. Consumers must tolerate a new fail-closed status as non-passing.
 
-The clean answer lives in `output_path`; stderr/stdout noise is diagnostic only. Do not parse one tool's
-footer with another tool's regex. Output files require scratch/report write permission; that is separate
-from permission to edit source or evidence files.
+The clean human answer lives in `output_path`; the dispatcher-owned JSON
+terminal artifact lives in `terminal_artifact_path`. `terminal_observed`,
+`output_sha256` and `terminal_artifact_sha256` are dispatcher-owned evidence,
+while stderr/stdout noise is diagnostic only. Do not parse one tool's footer
+with another tool's regex. Output files require scratch/report write
+permission; that is separate from permission to edit source or evidence files.
 
 When a chain fully fails, preserve every attempt record in stderr or a trace file and record
 `CROSS-FAMILY-NOT-RUN: <reason>` in the run manifest. A final `all_failed` JSON line is not enough for

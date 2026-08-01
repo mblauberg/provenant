@@ -297,9 +297,11 @@ function crossFamilyPrompt(boot, claim, idx) {
     '  Before using cursor in the chain, run cursor-agent --list-models and export CF_DISPATCH_CURSOR_MODEL to a current model from a family distinct from Claude and OpenAI. The dispatcher fails closed if it cannot prove the provider family.',
     `  Use the --chain form so it fails over automatically:`,
     `    ${SKILL_SCRIPTS}/cf_dispatch.sh --orchestrator-family claude --chain "${chain}" \\`,
-    `      --prompt-file <abs path to ${claim.id}.prompt.txt> --out <abs path to crossfamily/${claim.id}.out.txt>`,
+    `      --prompt-file <abs path to ${claim.id}.prompt.txt> --out <abs path to crossfamily/${claim.id}.out.txt> ` +
+    `--terminal-artifact <abs path to crossfamily/${claim.id}.terminal.json> ` +
+    `--task-id ${claim.id} --attempt-id cross-verify-${claim.id} --receipt <abs path to crossfamily/${claim.id}.route.json>`,
     '  (codex runs `exec -s read-only` enforced; cursor runs `--mode plan`. Never use claude as the cross-family tool — same family. agy is advisory-only and disabled unless CF_DISPATCH_ENABLE_AGY=1; do not enable it here.)',
-    '  The dispatcher prints a JSON record (adapter, provider_family, status, exit, output_path, read_only_guarantee, cross_family). Capture it.',
+    '  The dispatcher prints a JSON record (adapter, provider_family, status, exit, output_path, output_sha256, terminal_artifact_path, terminal_artifact_sha256, read_only_guarantee, cross_family). Capture it. output_path is the human-readable answer; terminal_artifact_path is the dispatcher-owned JSON terminal artifact. Keep them separate.',
     '',
     'STEP 3 — normalise:',
     '  - If the record has cross_family=true and read_only_guarantee in {enforced, oauth_safe_mode} and status=ok: read the CLI answer from output_path and map it to a verdict + anchors (verbatim quotes + source + locator). Set crossFamily=true and readOnlyGuarantee accordingly. Set verifier to the tool that answered.',

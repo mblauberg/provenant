@@ -44,6 +44,11 @@ def review(review_id, scope, lens, family, tier="flagship", status="complete", s
         "tier": tier, "status": status, "substitution_for": substitution_for,
         "evidence": {"path": f"reviews/{review_id}.md", "digest": evidence_digest},
         "reason": reason if reason is not None else ("provider unavailable" if status != "complete" else ""),
+        "verdict": "approve" if status == "complete" else "",
+        "terminal_result": {
+            "path": f"reviews/{review_id}.result.json",
+            "digest": "sha256:" + __import__("hashlib").sha256((review_id + ":terminal").encode()).hexdigest(),
+        } if status == "complete" else None,
         "wave": wave,
         "adapter": "claude" if family == "anthropic" else "codex",
         "adapter_gate": "direct-cli",
@@ -87,12 +92,25 @@ def bind_complete_reviews(run, plan):
         evidence = run / row["evidence"]["path"]
         evidence.write_text(row["id"] + ":evidence")
         row["evidence"]["digest"] = "sha256:" + __import__("hashlib").sha256(evidence.read_bytes()).hexdigest()
+        terminal = run / row["terminal_result"]["path"]
+        terminal.write_text(json.dumps({
+            "id": row["id"], "attempt_id": "attempt-" + row["id"], "kind": "complete",
+            "summary": row["id"] + ":complete", "verdict": row["verdict"],
+        }))
+        row["terminal_result"]["digest"] = "sha256:" + __import__("hashlib").sha256(terminal.read_bytes()).hexdigest()
         route = run / row["route_receipt"]["path"]
+        endpoint = "anthropic" if row["adapter"] == "claude" else "openai"
         route.write_text(json.dumps({
             "status": "ok", "adapter": row["adapter"], "resolved_model": row["model"],
             "adapter_gate": row["adapter_gate"],
             "catalog_model": row["catalog_model"], "model_family": row["family"],
-            "route_alias": row["tier"], "reviewer_id": row["reviewer_id"],
+            "provider_family": row["family"], "endpoint_provider": endpoint,
+            "orchestrator_family": plan["chair_family"] or row["family"],
+            "read_only_guarantee": "enforced", "route_alias": row["tier"],
+            "reviewer_id": row["reviewer_id"], "id": row["id"],
+            "attempt_id": "attempt-" + row["id"], "terminal_observed": True,
+            "exit": 0, "output_path": row["terminal_result"]["path"],
+            "output_sha256": row["terminal_result"]["digest"],
             "cross_family": row["scope"] == "primary",
             "certification_eligible": row["scope"] == "primary",
         }))
@@ -246,6 +264,21 @@ def test_review_topology_binds_account_default_route_and_review_evidence(tmp_pat
         "evidence": {"path": evidence.name, "digest": "sha256:" + __import__("hashlib").sha256(evidence.read_bytes()).hexdigest()},
         "route_receipt": {"path": route.name, "digest": "sha256:" + __import__("hashlib").sha256(route.read_bytes()).hexdigest()},
     })
+    terminal = tmp_path / row["terminal_result"]["path"]
+    terminal.parent.mkdir(parents=True, exist_ok=True)
+    terminal.write_text(json.dumps({
+        "id": row["id"], "attempt_id": "attempt-" + row["id"], "kind": "complete",
+        "summary": "account default complete", "verdict": row["verdict"],
+    }))
+    row["terminal_result"]["digest"] = "sha256:" + __import__("hashlib").sha256(terminal.read_bytes()).hexdigest()
+    route_value = json.loads(route.read_text())
+    route_value.update({
+        "id": row["id"], "attempt_id": "attempt-" + row["id"], "terminal_observed": True,
+        "exit": 0, "output_path": row["terminal_result"]["path"],
+        "output_sha256": row["terminal_result"]["digest"],
+    })
+    route.write_text(json.dumps(route_value))
+    row["route_receipt"]["digest"] = "sha256:" + __import__("hashlib").sha256(route.read_bytes()).hexdigest()
     plan = {
         "risk_tier": "routine", "chair_family": "", "concurrency_ceiling": 1,
         "panels": [], "reviews": [row],

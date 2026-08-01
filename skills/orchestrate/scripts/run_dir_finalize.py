@@ -18,6 +18,8 @@ from _shared.review_ladder import (
     check_review_ladder,
 )
 from _shared.review_panel import PANEL_RECORD_KEYS, validate_panel_result
+from _shared.review_terminal import normalise_dispatch_review
+from _shared.worker_outcome import accept_worker_outcome
 
 
 TERMINAL = {"succeeded", "failed", "cancelled"}
@@ -85,6 +87,59 @@ def _table(text: str, required: list[str]) -> list[dict[str, str]]:
     raise ValueError("required table header not found: " + ", ".join(required))
 
 
+def _direct_worker_leg(
+    run_dir: Path,
+    review: dict[str, object],
+    route_ref: dict[str, object],
+    route_value: dict[str, object],
+    terminal_ref: object,
+    terminal_value: object,
+    chair_family: object,
+    risk: object,
+) -> tuple[str | None, dict[str, object] | None]:
+    """Consume the common outcome join only for the direct-CLI producer."""
+    output_value = route_value.get("output_path")
+    output_target = Path(output_value) if isinstance(output_value, str) and output_value else None
+    if output_target is not None and not output_target.is_absolute():
+        output_target = run_dir / output_target
+    dispatcher_output_available = bool(
+        output_target is not None
+        and _inside(run_dir, output_target)
+        and output_target.is_file()
+        and output_target.stat().st_size > 0
+    )
+    terminal_path = (
+        Path(terminal_ref["path"])
+        if isinstance(terminal_ref, dict) and isinstance(terminal_ref.get("path"), str)
+        else None
+    )
+    terminal_target = run_dir / terminal_path if terminal_path is not None else None
+    transcript_available = bool(
+        terminal_target is not None
+        and _inside(run_dir, terminal_target)
+        and terminal_target.is_file()
+        and terminal_target.stat().st_size > 0
+    )
+    outcome = accept_worker_outcome(run_dir, {
+        "id": review["id"],
+        "dispatch_receipt": route_ref,
+        "terminal_artifact": terminal_ref,
+        "worktree_receipt": None,
+    })
+    if outcome.get("status") != "accepted":
+        return str(outcome.get("reason", "invalid outcome")), None
+    if risk not in {"substantial", "crucial", "terminal"}:
+        return None, None
+    return None, normalise_dispatch_review(
+        route_value,
+        terminal_value,
+        review_verdict=review["verdict"],
+        chair_family=chair_family,
+        transcript_available=transcript_available,
+        dispatcher_output_available=dispatcher_output_available,
+    )
+
+
 def _validate_review_plan(raw: object, run_dir: Path | None = None) -> list[str]:
     errors: list[str] = []
     if not isinstance(raw, dict) or set(raw) != {
@@ -102,12 +157,13 @@ def _validate_review_plan(raw: object, run_dir: Path | None = None) -> list[str]
         return errors + ["receipt review_plan.reviews must be a list"]
     keys = {
         "id", "scope", "lens", "family", "tier", "status",
-        "substitution_for", "evidence", "reason", "wave",
+        "substitution_for", "evidence", "reason", "verdict", "terminal_result", "wave",
         "adapter", "model", "catalog_model", "route_receipt",
         "reviewer_id", "adapter_gate",
     }
     seen: set[str] = set()
     checked: list[dict[str, object]] = []
+    normalized_legs: dict[str, dict[str, object]] = {}
     for index, review in enumerate(reviews):
         if not isinstance(review, dict) or set(review) != keys:
             errors.append(f"receipt review_plan.reviews[{index}] must use the closed review record schema")
@@ -138,6 +194,39 @@ def _validate_review_plan(raw: object, run_dir: Path | None = None) -> list[str]
             isinstance(review[field], str) and review[field] for field in ("model", "catalog_model")
         ):
             errors.append(f"receipt review_plan.reviews[{index}] requires resolved or catalog model identity")
+        if review["status"] == "complete" and (
+            not isinstance(review["verdict"], str) or not review["verdict"].strip()
+        ):
+            errors.append(f"receipt review_plan.reviews[{index}] requires an explicit verdict")
+        terminal_result_ref = review["terminal_result"]
+        terminal_result_value: object = None
+        terminal_path: Path | None = None
+        if review["status"] == "complete":
+            if not isinstance(terminal_result_ref, dict) or set(terminal_result_ref) != {"path", "digest"}:
+                errors.append(f"receipt review_plan.reviews[{index}].terminal_result is invalid")
+            else:
+                terminal_path = Path(terminal_result_ref["path"]) if isinstance(terminal_result_ref["path"], str) else Path("..")
+                terminal_digest = terminal_result_ref["digest"]
+                if (
+                    terminal_path.is_absolute()
+                    or ".." in terminal_path.parts
+                    or not isinstance(terminal_digest, str)
+                    or not terminal_digest.startswith("sha256:")
+                ):
+                    errors.append(f"receipt review_plan.reviews[{index}].terminal_result is invalid")
+                elif run_dir is not None:
+                    terminal_target = run_dir / terminal_path
+                    if (
+                        not _inside(run_dir, terminal_target)
+                        or not terminal_target.is_file()
+                        or "sha256:" + hashlib.sha256(terminal_target.read_bytes()).hexdigest() != terminal_digest
+                    ):
+                        errors.append(f"receipt review_plan.reviews[{index}].terminal_result is missing or does not match")
+                    else:
+                        try:
+                            terminal_result_value = json.loads(terminal_target.read_text())
+                        except (OSError, json.JSONDecodeError):
+                            errors.append(f"receipt review_plan.reviews[{index}].terminal_result is invalid JSON")
         evidence = review["evidence"]
         if not isinstance(evidence, dict) or set(evidence) != {"path", "digest"}:
             errors.append(f"receipt review_plan.reviews[{index}].evidence is invalid")
@@ -182,17 +271,52 @@ def _validate_review_plan(raw: object, run_dir: Path | None = None) -> list[str]
                             or route_value.get("resolved_model", route_value.get("model", "")) != review["model"]
                             or route_value.get("catalog_model", "") != review["catalog_model"]
                             or route_value.get("model_family") != review["family"]
+                            or (
+                                risk in {"substantial", "crucial", "terminal"}
+                                and (
+                                    not isinstance(route_value.get("provider_family"), str)
+                                    or not route_value.get("provider_family", "").strip()
+                                    or not isinstance(route_value.get("endpoint_provider"), str)
+                                    or not route_value.get("endpoint_provider", "").strip()
+                                )
+                            )
+                            or (
+                                isinstance(raw.get("chair_family"), str)
+                                and bool(raw.get("chair_family"))
+                                and route_value.get("orchestrator_family") != raw.get("chair_family")
+                            )
                         ):
                             errors.append(f"receipt review_plan.reviews[{index}].route_receipt identity does not match")
                         if isinstance(route_value, dict):
                             route_alias = route_value.get("route_alias", route_value.get("alias"))
                             if review["tier"] == "flagship" and route_alias != "flagship":
                                 errors.append(f"receipt review_plan.reviews[{index}].route_receipt does not prove flagship strength")
-                            if review["scope"] == "primary" and (
-                                route_value.get("cross_family") is not True
-                                or route_value.get("certification_eligible") is not True
-                            ):
-                                errors.append(f"receipt review_plan.reviews[{index}].route_receipt is not certification eligible")
+                            if route_value.get("adapter_gate") == "direct-cli":
+                                outcome_error, leg = _direct_worker_leg(
+                                    run_dir, review, route, route_value, terminal_result_ref,
+                                    terminal_result_value, raw.get("chair_family"), risk,
+                                )
+                                if outcome_error:
+                                    errors.append(
+                                        f"receipt review_plan.reviews[{index}] worker outcome rejected: {outcome_error}"
+                                    )
+                                elif leg is not None:
+                                    normalized_legs[review["id"]] = leg
+                                    if leg["status"] != "pass":
+                                        errors.append(
+                                            f"receipt review_plan.reviews[{index}] is not a certifying review leg: {leg['reason']}"
+                                        )
+                                    other_primary_family = "anthropic" if raw.get("chair_family") == "openai" else "openai"
+                                    if (
+                                        review["scope"] == "primary"
+                                        and review["family"] == other_primary_family
+                                        and not review["substitution_for"]
+                                        and not leg["certifying_vote"]
+                                    ):
+                                        errors.append(
+                                            f"receipt review_plan.reviews[{index}] route is not certification eligible: "
+                                            f"{leg['reason'] or 'provider-lineage'}"
+                                        )
         if not isinstance(review["wave"], int) or isinstance(review["wave"], bool) or review["wave"] < 0:
             errors.append(f"receipt review_plan.reviews[{index}].wave must be a non-negative integer")
         if all(isinstance(review[field], str) for field in (
@@ -292,9 +416,17 @@ def _validate_review_plan(raw: object, run_dir: Path | None = None) -> list[str]
         legs.append({
             "role": role,
             "family": review["family"],
-            "status": "pass" if review["status"] == "complete" else review["status"],
+            "status": (
+                normalized_legs[review["id"]]["status"]
+                if review["id"] in normalized_legs
+                else "pass" if review["status"] == "complete" else review["status"]
+            ),
             "lenses": [review["lens"]],
-            "reason": review["reason"],
+            "reason": (
+                normalized_legs[review["id"]]["reason"]
+                if review["id"] in normalized_legs
+                else review["reason"]
+            ),
             "substitution_for": review["substitution_for"],
         })
     errors.extend(check_review_ladder(risk, legs, chair_family=chair))

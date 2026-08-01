@@ -320,8 +320,10 @@ function crossFamilyDispatchHint(runDir, gitCwd, kind = 'primary') {
     ' Write your prompt to a file, then run:\n' +
     '  ~/.agents/skills/orchestrate/scripts/cf_dispatch.sh ' +
     '--orchestrator-family anthropic --tool codex --alias flagship --role other-primary --prompt-file <your-prompt-file> ' +
-    `--out ${runDir}/crossfamily/<name>.txt > ${runDir}/crossfamily/<name>.route.json\n` +
-    'The dispatcher prints a normalised JSON record (model_family, endpoint_provider, cross_family, certification_eligible, read_only_guarantee, ' +
+    `--out ${runDir}/crossfamily/<name>.txt --terminal-artifact ${runDir}/crossfamily/<name>.terminal.json ` +
+    `--task-id <review-id> --attempt-id <attempt-id> ` +
+    `--receipt ${runDir}/crossfamily/<name>.route.json > /dev/null\n` +
+    'The dispatcher prints a normalised JSON record (model_family, endpoint_provider, cross_family, certification_eligible, output_sha256, terminal_artifact_sha256, read_only_guarantee, ' +
     'status) — preserve that exact route JSON and return its path as routeReceipt. Certified only when cross_family=true and read_only_guarantee ' +
     'is enforced or oauth_safe_mode. On failure, set ran=false and record OTHER-PRIMARY-NOT-RUN: <reason>. ' +
     'Apply the host data policy before dispatch.'

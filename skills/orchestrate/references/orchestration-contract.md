@@ -96,12 +96,13 @@ claim, source, confidence, issues and validation. Certification needs a
 non-authoring reviewer plus verified evidence; best-effort routes only scout,
 they do not certify.
 
-A worker's final act before idling is its report: the digest plus artifact
-path through its return channel or a direct message to the chair, or an
-explicit failure report. Going idle without one is a contract breach, not a
-neutral state. A chair observing idle-without-report verifies the deliverable
-directly from the filesystem, then queries the worker once; completion is
-judged from the verified artifact, never inferred from silence.
+A worker's terminal artifact is a closed `complete`, `question`, `failed` or
+`unavailable` object with its stable task and attempt identity. A direct-CLI
+dispatch receipt supplies the observed terminal fact, exit status and output
+digest. The chair joins those digest-bound references and derives acceptance;
+it does not copy a verdict or completion claim into a second receipt. A
+question is terminal for the attempt but remains blocked for the task, and
+failed or unavailable outcomes are explicit non-certifying results.
 
 ## Non-goals
 

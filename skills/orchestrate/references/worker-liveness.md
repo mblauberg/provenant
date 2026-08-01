@@ -15,38 +15,26 @@ PID, elapsed wall time, accumulated CPU time, the newest matching
 cwd. The `STALLED?` label is advisory. It never signals, kills, restarts, or
 supervises a process.
 
-The helper's `STALL_WINDOW_SECONDS` is the single source of truth for the
-stall rule: once a worker has run for at least that window, it is stalled only
-when accumulated CPU is below one CPU-second per window of elapsed time and
-the matching session log has also been unchanged for at least that window.
-If no matching session log exists, that absence cannot clear a stall already
-indicated by elapsed time and CPU. At the start of a run, a 0-byte output file
-is ambiguous. After a minute it is suspicious, but output size alone is not a
-liveness test.
+The helper's `STALL_WINDOW_SECONDS` is the single advisory threshold. A live
+worker with no observed output growth remains live and waiting; an unchanged
+snapshot may prompt escalation, but it never proves failure or grants permission
+to stop or reuse the worktree. CPU, session-log mtime, elapsed time and a
+0-byte first snapshot are supporting observations only. Terminality comes from
+the execution owner that waited for the worker and recorded its exit.
 
 Detached harness-task state is not process state. Before reusing a worktree,
 confirm the worker PID is gone. Otherwise the detached task and a fresh worker
 can become two writers in the same worktree, as happened when detached tasks
 continued running for hours.
 
-## Waiting from inside a sub-agent
+## Native launcher ownership
 
-A sub-agent that ends its turn is finished. Its result returns to the caller at
-that moment, and no later notification reopens it. A background wait therefore
-only works for a chair sitting in the main loop; from a sub-agent it silently
-discards the run.
+The native launcher that starts a provider owns the wait, retry and process
+lifecycle. A dispatching sub-agent returns only the launcher's observed
+terminal result; it must not invent a second lifecycle around that process.
 
-This is the single most common dispatcher failure. It has now occurred nine or
-more times across `codex`, `agy` and `cursor-agent` lanes, always the same way:
-the worker is launched detached, a background watcher is armed, the turn ends
-with "I will wait for the notification", and the caller receives a progress
-report instead of a result while the worker keeps running unattended.
-
-So a dispatching sub-agent blocks in the **foreground** and never arms a
-background watcher for its own worker. Prefer the cheapest form that fits.
-
-**First choice: run the worker in the foreground.** No detaching, no PID, no
-polling. The shell blocks on process exit and the harness holds the turn open:
+**Preferred path: let the native launcher wait for exit.** The provider command
+owns its process and the caller records the result it returns:
 
 ```bash
 codex exec -s <sandbox> -C <ABSOLUTE_DIR> -m <model> - < brief.txt > out.txt 2>&1
@@ -55,32 +43,11 @@ codex exec -s <sandbox> -C <ABSOLUTE_DIR> -m <model> - < brief.txt > out.txt 2>&
 Give it the largest timeout the tool accepts. This is the whole procedure when
 the run fits inside one timeout window.
 
-**Second choice, for runs that can exceed that window: detach, then block on a
-FIFO.** Still event-driven and still zero-poll, and it carries the exit status:
-
-```bash
-mkfifo done.fifo
-nohup bash -c '<worker command> > out.txt 2>&1; echo EXIT=$? > done.fifo' >/dev/null 2>&1 &
-```
-
-then, as a separate foreground call, `cat done.fifo`. It blocks on the write and
-returns the worker's exit code. If the tool timeout fires first, reissue `cat`
-unchanged; the FIFO is still there and still unwritten.
-
-**Last resort**, where a FIFO is awkward, a foreground condition loop:
-
-```bash
-while kill -0 <PID> 2>/dev/null; do sleep 20; done; echo WORKER-EXITED
-```
-
-Harnesses that block a bare foreground `sleep` still permit this form, because
-the guard targets `sleep N; <command>` poll chains rather than a loop blocking
-on a condition. It polls, so prefer either option above it.
-
-Whichever form is used, reissue on timeout and do not substitute short sleeps,
-liveness probes or status checks between reissues: each is a turn the worker
-could have finished in, and the temptation to then stop and await a notification
-is exactly the failure above.
+If the provider turn exceeds a launcher timeout, use the existing native
+launcher wait/retry contract and retain the attempt as non-terminal until the
+execution owner observes exit. Do not replace that contract with another
+process owner, and do not infer completion from an idle turn or unchanged
+output.
 
 ## A dispatcher must actually dispatch
 
