@@ -273,6 +273,16 @@ function workspaceMarkerKind(name: string): "file" | "directory" | null {
   return null;
 }
 
+async function isRepositoryRoot(canonicalPath: string): Promise<boolean> {
+  try {
+    const marker = await lstat(join(canonicalPath, ".git"));
+    return marker.isDirectory() || marker.isFile();
+  } catch (error: unknown) {
+    if (isMissingPathError(error)) return false;
+    throw error;
+  }
+}
+
 async function hasWorkspaceMarker(canonicalRoot: string): Promise<boolean> {
   const children = await readdir(canonicalRoot, { withFileTypes: true });
   for (const child of children) {
@@ -281,7 +291,13 @@ async function hasWorkspaceMarker(canonicalRoot: string): Promise<boolean> {
     try {
       // Resolve before inspecting so a project marker symlinked into a child
       // repository is treated the same as a marker stored at this root.
-      const marker = await lstat(await realpath(join(canonicalRoot, child.name)));
+      const resolved = await realpath(join(canonicalRoot, child.name));
+      const marker = await lstat(resolved);
+      // A directory marker that is itself a repository root is a sibling
+      // clone, not a project signal. Anyone able to place a repository here
+      // could otherwise name it `.claude` and turn the collection guard off
+      // for every other repository beside it.
+      if (kind === "directory" && await isRepositoryRoot(resolved)) continue;
       if ((kind === "file" && marker.isFile()) || (kind === "directory" && marker.isDirectory())) return true;
     } catch (error: unknown) {
       if (!isMissingPathError(error)) throw error;
