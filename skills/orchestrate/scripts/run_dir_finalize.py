@@ -18,6 +18,7 @@ from _shared.review_ladder import (
     check_review_ladder,
 )
 from _shared.review_panel import PANEL_RECORD_KEYS, validate_panel_result
+from _shared.review_terminal import normalise_dispatch_review
 
 
 TERMINAL = {"succeeded", "failed", "cancelled"}
@@ -102,7 +103,7 @@ def _validate_review_plan(raw: object, run_dir: Path | None = None) -> list[str]
         return errors + ["receipt review_plan.reviews must be a list"]
     keys = {
         "id", "scope", "lens", "family", "tier", "status",
-        "substitution_for", "evidence", "reason", "wave",
+        "substitution_for", "evidence", "reason", "verdict", "wave",
         "adapter", "model", "catalog_model", "route_receipt",
         "reviewer_id", "adapter_gate",
     }
@@ -138,6 +139,10 @@ def _validate_review_plan(raw: object, run_dir: Path | None = None) -> list[str]
             isinstance(review[field], str) and review[field] for field in ("model", "catalog_model")
         ):
             errors.append(f"receipt review_plan.reviews[{index}] requires resolved or catalog model identity")
+        if review["status"] == "complete" and (
+            not isinstance(review["verdict"], str) or not review["verdict"].strip()
+        ):
+            errors.append(f"receipt review_plan.reviews[{index}] requires an explicit verdict")
         evidence = review["evidence"]
         if not isinstance(evidence, dict) or set(evidence) != {"path", "digest"}:
             errors.append(f"receipt review_plan.reviews[{index}].evidence is invalid")
@@ -193,11 +198,42 @@ def _validate_review_plan(raw: object, run_dir: Path | None = None) -> list[str]
                                 or route_value.get("certification_eligible") is not True
                             ):
                                 errors.append(f"receipt review_plan.reviews[{index}].route_receipt is not certification eligible")
+                            transcript_target = run_dir / path if run_dir is not None else None
+                            transcript_available = bool(
+                                transcript_target is not None
+                                and _inside(run_dir, transcript_target)
+                                and transcript_target.is_file()
+                                and transcript_target.stat().st_size > 0
+                            )
+                            output_value = route_value.get("output_path")
+                            output_target = (
+                                Path(output_value)
+                                if isinstance(output_value, str) and output_value
+                                else None
+                            )
+                            if output_target is not None and not output_target.is_absolute():
+                                output_target = run_dir / output_target
+                            dispatcher_output_available = bool(
+                                output_target is not None
+                                and _inside(run_dir, output_target)
+                                and output_target.is_file()
+                                and output_target.stat().st_size > 0
+                            )
+                            leg = normalise_dispatch_review(
+                                route_value,
+                                review,
+                                transcript_available=transcript_available,
+                                dispatcher_output_available=dispatcher_output_available,
+                            )
+                            if leg["status"] != "pass":
+                                errors.append(
+                                    f"receipt review_plan.reviews[{index}] is not a certifying review leg: {leg['reason']}"
+                                )
         if not isinstance(review["wave"], int) or isinstance(review["wave"], bool) or review["wave"] < 0:
             errors.append(f"receipt review_plan.reviews[{index}].wave must be a non-negative integer")
         if all(isinstance(review[field], str) for field in (
             "id", "scope", "lens", "family", "tier", "status", "substitution_for",
-            "reason", "adapter", "model", "catalog_model",
+            "reason", "verdict", "adapter", "model", "catalog_model",
             "reviewer_id", "adapter_gate",
         )) and isinstance(review["wave"], int) and not isinstance(review["wave"], bool):
             checked.append(review)

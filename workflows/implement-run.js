@@ -767,7 +767,9 @@ const apply = await agent(
     `graduation/archive/cleanup actions and retained recovery artifacts. Never remove unknown or pre-existing files. ` +
     `Update ${runDir}/RUN_RECEIPT.json task/owner, artifact retention and owned/handed-off pane fields; leave its ` +
     `status=active while this change awaits human acceptance. Record unresolved blockers and every reviewer lane ` +
-    `including failures. The preserved cross-family dispatch record supplies ` +
+    `including failures. Every complete review_plan row must preserve its explicit verdict and the ` +
+    `dispatcher route receipt's observed exit and output_path; missing verdict, transcript, provider ` +
+    `availability or nonzero exit is an explicit non-certifying leg. The preserved cross-family dispatch record supplies ` +
     `adapter/model_family, output_path, dispatch_status, cross_family, certification_eligible and read_only_guarantee; ` +
     `role=targeted for fresh targeted lenses, role=other-primary only for a certified ` +
     `OpenAI-family reviewer with its exact route_receipt path, output sha256 and reviewed_revision, and role=distinct-family for advisory distinct-family attempts including failed/unavailable ` +

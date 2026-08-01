@@ -44,6 +44,7 @@ def review(review_id, scope, lens, family, tier="flagship", status="complete", s
         "tier": tier, "status": status, "substitution_for": substitution_for,
         "evidence": {"path": f"reviews/{review_id}.md", "digest": evidence_digest},
         "reason": reason if reason is not None else ("provider unavailable" if status != "complete" else ""),
+        "verdict": "approve" if status == "complete" else "",
         "wave": wave,
         "adapter": "claude" if family == "anthropic" else "codex",
         "adapter_gate": "direct-cli",
@@ -90,8 +91,10 @@ def bind_complete_reviews(run, plan):
         route = run / row["route_receipt"]["path"]
         route.write_text(json.dumps({
             "status": "ok", "adapter": row["adapter"], "resolved_model": row["model"],
+            "exit": 0, "output_path": str(evidence),
             "adapter_gate": row["adapter_gate"],
             "catalog_model": row["catalog_model"], "model_family": row["family"],
+            "provider_family": row["family"],
             "route_alias": row["tier"], "reviewer_id": row["reviewer_id"],
             "cross_family": row["scope"] == "primary",
             "certification_eligible": row["scope"] == "primary",
@@ -158,6 +161,31 @@ def test_real_run_complete_primary_still_requires_route_receipt(tmp_path):
     errors = run_dir_finalize._validate_review_plan(plan, tmp_path)
 
     assert any("route_receipt is missing or does not match" in error for error in errors)
+
+
+def test_complete_review_requires_terminal_receipt_and_verdict(tmp_path):
+    plan = substantial_plan()
+    bind_complete_reviews(tmp_path, plan)
+    route_path = tmp_path / plan["reviews"][0]["route_receipt"]["path"]
+    route = json.loads(route_path.read_text())
+    del route["exit"]
+    route_path.write_text(json.dumps(route))
+    plan["reviews"][0]["route_receipt"]["digest"] = (
+        "sha256:" + __import__("hashlib").sha256(route_path.read_bytes()).hexdigest()
+    )
+
+    errors = run_dir_finalize._validate_review_plan(plan, tmp_path)
+
+    assert any("terminal-unavailable" in error for error in errors)
+
+    plan = substantial_plan()
+    second_run = tmp_path / "second"
+    second_run.mkdir()
+    bind_complete_reviews(second_run, plan)
+    plan["reviews"][0]["verdict"] = ""
+    errors = run_dir_finalize._validate_review_plan(plan, second_run)
+
+    assert any("explicit verdict" in error for error in errors)
 
 
 def test_substantial_review_topology_is_machine_checked():
@@ -238,7 +266,10 @@ def test_review_topology_binds_account_default_route_and_review_evidence(tmp_pat
         "adapter": "codex", "adapter_gate": "direct-cli",
         "resolved_model": "", "catalog_model": "gpt-5.6-sol",
         "model_family": "openai", "model_selection": "account-default",
-        "status": "ok", "route_alias": "flagship", "reviewer_id": "account-default",
+        "status": "ok", "exit": 0, "output_path": str(evidence),
+        "provider_family": "openai",
+        "certification_eligible": False,
+        "route_alias": "flagship", "reviewer_id": "account-default",
     }))
     row = review("account-default", "targeted", "correctness", "openai")
     row.update({
