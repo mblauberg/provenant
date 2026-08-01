@@ -102,6 +102,41 @@ describe("MCP bootstrap workspace-trust guidance", () => {
     expect(failure.message).not.toContain("workspace trust");
   });
 
+  it("refuses a symlinked plain non-Git root without widening trust", async () => {
+    const temporaryRoot = await mkdtemp(join(tmpdir(), "fabric-symlinked-non-git-bootstrap-"));
+    temporaryDirectories.push(temporaryRoot);
+    const target = join(temporaryRoot, "target");
+    const linked = join(temporaryRoot, "linked");
+    await mkdir(target);
+    await symlink(target, linked);
+
+    const failure = await bootstrapFailure(linked, temporaryRoot);
+
+    expect(failure).toMatchObject({
+      code: "WORKSPACE_NOT_TRUSTED",
+      message: expect.stringMatching(/symbolic-link|symlink/iu),
+    });
+    expect(failure.message).not.toContain("workspace trust");
+  });
+
+  it("refuses a plain non-Git root reached through a symlinked ancestor", async () => {
+    const temporaryRoot = await mkdtemp(join(tmpdir(), "fabric-symlinked-ancestor-bootstrap-"));
+    temporaryDirectories.push(temporaryRoot);
+    const targetParent = join(temporaryRoot, "target-parent");
+    const linkedParent = join(temporaryRoot, "linked-parent");
+    const project = join(targetParent, "project");
+    await mkdir(project, { recursive: true });
+    await symlink(targetParent, linkedParent);
+
+    const failure = await bootstrapFailure(join(linkedParent, "project"), temporaryRoot);
+
+    expect(failure).toMatchObject({
+      code: "WORKSPACE_NOT_TRUSTED",
+      message: expect.stringMatching(/symbolic-link|symlink/iu),
+    });
+    expect(failure.message).not.toContain("workspace trust");
+  });
+
   it("gives malformed collection children repair guidance without activation commands", async () => {
     const temporaryRoot = await mkdtemp(join(tmpdir(), "fabric-malformed-collection-bootstrap-"));
     temporaryDirectories.push(temporaryRoot);
@@ -142,10 +177,12 @@ describe("MCP bootstrap workspace-trust guidance", () => {
     const project = join(home, "project");
     await mkdir(join(home, ".git"), { recursive: true });
     await mkdir(project);
+    const canonicalHome = await realpath(home);
+    const canonicalProject = await realpath(project);
     const previousHome = process.env.HOME;
-    process.env.HOME = home;
+    process.env.HOME = canonicalHome;
     try {
-      const failure = await bootstrapFailure(project, temporaryRoot);
+      const failure = await bootstrapFailure(canonicalProject, temporaryRoot);
 
       expect(failure).toMatchObject({
         code: "WORKSPACE_NOT_TRUSTED",

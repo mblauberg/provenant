@@ -115,32 +115,13 @@ describe("zero-state MCP bootstrap", () => {
     })).rejects.toMatchObject({ code: "BOOTSTRAP_SPAWN_FAILED" });
   });
 
-  it("emits exact project activation guidance for a spaced home and exact root", async () => {
-    const temporaryRoot = await mkdtemp(join(tmpdir(), "fabric-spaced-bootstrap-"));
-    roots.push(temporaryRoot);
-    const project = join(temporaryRoot, "project root");
-    await mkdir(project);
-    await expect(bootstrapMcpSeat({
-      environment: { AGENT_FABRIC_SEAT: "codex" },
-      cwd: project,
-      paths: {
-        stateDirectory: join(temporaryRoot, "state"),
-        runtimeDirectory: join(temporaryRoot, "runtime"),
-        databasePath: join(temporaryRoot, "state", "fabric-v1.sqlite3"),
-        socketPath: join(temporaryRoot, "runtime", "fabric-v1.sock"),
-      },
-    })).rejects.toMatchObject({
-      code: "WORKSPACE_NOT_TRUSTED",
-      message: expect.stringContaining(`provenant project activate '${await realpath(project)}'`),
-    });
-  });
-
   it("emits a machine-readable lifecycle receipt on CLI workspace refusal", async () => {
     const temporaryRoot = await mkdtemp(join(tmpdir(), "fabric-cli-receipt-bootstrap-"));
     roots.push(temporaryRoot);
-    const project = join(temporaryRoot, "project");
+    const project = join(temporaryRoot, "projects");
     const stateDirectory = join(temporaryRoot, "state");
-    await mkdir(project);
+    await mkdir(join(project, "one", ".git"), { recursive: true });
+    await mkdir(join(project, "two", ".git"), { recursive: true });
     let failure: { stdout?: string; stderr?: string; code?: number } | undefined;
     try {
       await execFileAsync(process.execPath, ["--import", tsxLoader, cliMain, "bootstrap", "--seat", "codex"], {
@@ -168,6 +149,8 @@ describe("zero-state MCP bootstrap", () => {
         })],
       },
     });
+    expect(failure?.stderr).toMatch(/repository collection/iu);
+    await expect(access(stateDirectory)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("creates one deterministic scoping run and converges a second primary into its peer seat", async () => {

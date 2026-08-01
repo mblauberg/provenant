@@ -7,7 +7,7 @@ export type LifecycleAction =
     trustRetained: boolean;
     trustRecordDigest: string | null;
     establishmentKind: "automatic-bootstrap" | "local-operator" | null;
-    boundaryKind: "git" | "project-marker" | null;
+    boundaryKind: "git" | "project-marker" | "non-git" | null;
     boundaryEvidenceDigest: string | null;
     requestAttemptId: string;
     bootstrapAttemptId: string | null;
@@ -104,7 +104,7 @@ function validatedLifecycleAction(value: unknown): LifecycleAction | null {
       mutated === null || alreadyTrusted === null || trustRetained === null ||
       trustRecordDigest === undefined ||
       ![null, "automatic-bootstrap", "local-operator"].includes(establishmentKind as string | null) ||
-      ![null, "git", "project-marker"].includes(boundaryKind as string | null) ||
+      ![null, "git", "project-marker", "non-git"].includes(boundaryKind as string | null) ||
       boundaryEvidenceDigest === undefined || requestAttemptId === null || bootstrapAttemptId === undefined
     ) return null;
     return {
@@ -115,7 +115,7 @@ function validatedLifecycleAction(value: unknown): LifecycleAction | null {
       trustRetained,
       trustRecordDigest,
       establishmentKind: establishmentKind as "automatic-bootstrap" | "local-operator" | null,
-      boundaryKind: boundaryKind as "git" | "project-marker" | null,
+      boundaryKind: boundaryKind as "git" | "project-marker" | "non-git" | null,
       boundaryEvidenceDigest,
       requestAttemptId,
       bootstrapAttemptId,

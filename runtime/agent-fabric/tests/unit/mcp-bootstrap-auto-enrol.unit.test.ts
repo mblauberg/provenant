@@ -218,32 +218,73 @@ describe("automatic exact-project enrolment", () => {
     });
   });
 
-  it("refuses an unmarked non-Git root without mutating the trust registry", async () => {
+  it("keeps marker-bearing composed non-Git roots eligible for automatic enrolment", async () => {
+    const value = await fixture();
+    const projectPath = join(value.outer, "..", "marked-composed-project");
+    await mkdir(join(projectPath, ".provenant"), { recursive: true });
+    await mkdir(join(projectPath, "one", ".git"), { recursive: true });
+    await mkdir(join(projectPath, "two", ".git"), { recursive: true });
+    const project = await realpath(projectPath);
+    await writeFile(join(project, ".provenant", "agent-fabric.yaml"), "schemaVersion: 1\n");
+    daemon.result = { ...daemon.result!, canonicalRoot: project };
+
+    const installed = await bootstrapMcpSeat({
+      environment: { AGENT_FABRIC_SEAT: "codex" },
+      cwd: project,
+      paths: value.paths,
+      smokeDeadlineMs: 1,
+    });
+
+    expect(installed.canonicalRoot).toBe(project);
+    await expect(readFile(join(value.paths.stateDirectory, "trusted-workspaces.json"), "utf8").then(JSON.parse)).resolves.toMatchObject({
+      entries: [expect.objectContaining({
+        canonicalPath: project,
+        establishmentKind: "automatic-bootstrap",
+        boundaryKind: "project-marker",
+      })],
+    });
+  });
+
+  it("enrols a plain unmarked non-Git root exactly and continues bootstrap", async () => {
     const value = await fixture();
     const projectPath = join(value.outer, "..", "unmarked-project");
     await mkdir(projectPath);
     const project = await realpath(projectPath);
     daemon.result = { ...daemon.result!, canonicalRoot: project };
 
-    await expect(bootstrapMcpSeat({
+    const installed = await bootstrapMcpSeat({
       environment: { AGENT_FABRIC_SEAT: "codex" },
       cwd: project,
       paths: value.paths,
       smokeDeadlineMs: 1,
-    })).rejects.toMatchObject({
-      code: "WORKSPACE_NOT_TRUSTED",
-      message: expect.stringContaining(`provenant project activate '${project}'`),
-      receipt: {
-        actions: [expect.objectContaining({
-          action: "workspace-trust",
-          outcome: "failed",
-          boundaryEvidenceDigest: expect.stringMatching(/^sha256:[0-9a-f]{64}$/u),
-          requestAttemptId: expect.any(String),
-          bootstrapAttemptId: null,
-        })],
-      },
     });
-    await expect(readFile(join(value.paths.stateDirectory, "trusted-workspaces.json"))).rejects.toMatchObject({ code: "ENOENT" });
+
+    expect(installed.canonicalRoot).toBe(project);
+    expect(installed.receipt).toMatchObject({
+      canonicalRoot: project,
+      actions: expect.arrayContaining([expect.objectContaining({
+        action: "workspace-trust",
+        outcome: "enrolled",
+        mutated: true,
+        alreadyTrusted: false,
+        establishmentKind: "automatic-bootstrap",
+        boundaryKind: "non-git",
+        bootstrapAttemptId: expect.any(String),
+      })]),
+    });
+    await expect(readFile(join(value.paths.stateDirectory, "trusted-workspaces.json"), "utf8").then(JSON.parse)).resolves.toMatchObject({
+      entries: [expect.objectContaining({
+        canonicalPath: project,
+        establishmentKind: "automatic-bootstrap",
+        boundaryKind: "non-git",
+        boundaryEvidenceDigest: expect.stringMatching(/^sha256:[0-9a-f]{64}$/u),
+      })],
+    });
+    await expect(trustedWorkspaceIdentity({
+      stateDirectory: value.paths.stateDirectory,
+      canonicalRoot: project,
+      executionProfile: "headless",
+    })).resolves.toMatchObject({ canonicalRoot: project, entry: { boundaryKind: "non-git" } });
   });
 
   it("keeps an existing explicit local-operator grant unchanged", async () => {
@@ -578,6 +619,8 @@ describe("automatic exact-project enrolment", () => {
     const value = await fixture();
     const project = join(value.outer, "..", "causal-boundary-project");
     await mkdir(project);
+    await mkdir(join(project, "first", ".git"), { recursive: true });
+    await mkdir(join(project, "second", ".git"), { recursive: true });
     const boundary = await resolveProjectBoundary(project);
     const causalDigest = projectBoundaryEvidenceDigest(boundary);
     const failure = await bootstrapMcpSeat({

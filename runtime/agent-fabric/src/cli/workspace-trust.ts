@@ -33,7 +33,7 @@ export type WorkspaceTrustEntry = {
   allowedProfiles: string[];
   /** Present only on a grant made by the first-use bootstrap saga. */
   establishmentKind?: "automatic-bootstrap";
-  boundaryKind?: "git" | "project-marker";
+  boundaryKind?: "git" | "project-marker" | "non-git";
   boundaryEvidenceDigest?: `sha256:${string}`;
   bootstrapAttemptId?: string;
 };
@@ -46,7 +46,7 @@ export type AutomaticBootstrapTrustResult = Readonly<{
   requestAttemptId: string;
   /** The persisted automatic grant attempt, or null for an explicit grant. */
   bootstrapAttemptId: string | null;
-  boundaryKind: "git" | "project-marker" | null;
+  boundaryKind: "git" | "project-marker" | "non-git" | null;
   boundaryEvidenceDigest: `sha256:${string}` | null;
 }>;
 
@@ -139,7 +139,7 @@ function validateRegistry(value: unknown): WorkspaceTrustRegistry {
     const bootstrapAttemptId = record.bootstrapAttemptId;
     if (hasAutomaticProvenance) {
       if (
-        (boundaryKind !== "git" && boundaryKind !== "project-marker") ||
+        (boundaryKind !== "git" && boundaryKind !== "project-marker" && boundaryKind !== "non-git") ||
         typeof boundaryEvidenceDigest !== "string" || !/^sha256:[0-9a-f]{64}$/u.test(boundaryEvidenceDigest) ||
         typeof bootstrapAttemptId !== "string" || bootstrapAttemptId.length === 0 ||
         JSON.stringify(candidate.allowedProfiles) !== JSON.stringify(["headless"])
@@ -159,7 +159,7 @@ function validateRegistry(value: unknown): WorkspaceTrustRegistry {
       allowedProfiles: [...new Set(candidate.allowedProfiles as string[])].sort(),
       ...(hasAutomaticProvenance ? {
         establishmentKind: "automatic-bootstrap" as const,
-        boundaryKind: boundaryKind as "git" | "project-marker",
+        boundaryKind: boundaryKind as "git" | "project-marker" | "non-git",
         boundaryEvidenceDigest: boundaryEvidenceDigest as `sha256:${string}`,
         bootstrapAttemptId: bootstrapAttemptId as string,
       } : {}),
@@ -433,12 +433,16 @@ async function automaticBoundaryRefusal(boundary: ProjectBoundary, cause?: unkno
   );
 }
 
-function automaticBoundaryKind(boundary: ProjectBoundary): "git" | "project-marker" | null {
+function automaticBoundaryKind(boundary: ProjectBoundary): "git" | "project-marker" | "non-git" | null {
   if (boundary.evidence.kind === "git" && !boundary.evidence.linkedWorktree &&
     boundary.selectedProjectRoot === boundary.evidence.root) return "git";
   if (boundary.evidence.kind === "project-marker" &&
     boundary.selectedProjectRoot === boundary.evidence.root &&
     boundary.selectedProjectRoot === boundary.requestedDirectory) return "project-marker";
+  if (boundary.evidence.kind === "ambiguous" &&
+    boundary.evidence.reason === "unmarked-non-git" &&
+    boundary.selectedProjectRoot === boundary.requestedDirectory &&
+    boundary.evidence.root === boundary.requestedDirectory) return "non-git";
   return null;
 }
 

@@ -33,7 +33,7 @@ export type ProjectBoundaryEvidence =
   | Readonly<{
     kind: "refused";
     root: string;
-    reason: "filesystem-root" | "home" | "linked-worktree" | "malformed-git-marker" | "unsafe-project-marker";
+    reason: "filesystem-root" | "home" | "symbolic-link" | "linked-worktree" | "malformed-git-marker" | "unsafe-project-marker";
     detail: string;
   }>;
 
@@ -353,11 +353,20 @@ async function gitRepositoryProbe(path: string): Promise<GitRepositoryProbe> {
   }
 }
 
-async function canonicalDirectory(path: string): Promise<string> {
-  const canonical = await realpath(resolve(path));
+async function canonicalDirectory(path: string): Promise<{ canonical: string; symbolicLink: boolean }> {
+  const requested = resolve(path);
+  const filesystemRoot = parse(requested).root;
+  let component = filesystemRoot;
+  let symbolicLink = false;
+  for (const name of requested.slice(filesystemRoot.length).split(sep).filter((part) => part.length > 0)) {
+    component = join(component, name);
+    symbolicLink ||= (await lstat(component)).isSymbolicLink();
+  }
+  const requestedInfo = await lstat(requested);
+  const canonical = await realpath(requested);
   const info = await lstat(canonical);
   if (!info.isDirectory() || info.isSymbolicLink()) throw new Error(`project path is not a directory: ${canonical}`);
-  return canonical;
+  return { canonical, symbolicLink: symbolicLink || requestedInfo.isSymbolicLink() };
 }
 
 function refusedBoundary(
@@ -381,7 +390,8 @@ export async function resolveProjectBoundary(
   path = process.cwd(),
   options: ProjectBoundaryOptions = {},
 ): Promise<ProjectBoundary> {
-  const requestedDirectory = await canonicalDirectory(path);
+  const requestedPath = await canonicalDirectory(path);
+  const requestedDirectory = requestedPath.canonical;
   const filesystemRoot = parse(requestedDirectory).root;
   const home = await realpath(homedir());
   if (requestedDirectory === filesystemRoot) {
@@ -398,6 +408,14 @@ export async function resolveProjectBoundary(
       requestedDirectory,
       "home",
       "this exact path can never be trusted because home-wide authority is forbidden by policy",
+    );
+  }
+  if (requestedPath.symbolicLink) {
+    return refusedBoundary(
+      requestedDirectory,
+      requestedDirectory,
+      "symbolic-link",
+      "the requested project path is a symbolic link and its identity cannot be trusted",
     );
   }
 

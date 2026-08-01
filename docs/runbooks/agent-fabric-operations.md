@@ -435,9 +435,9 @@ An unprovisioned Claude or Codex global MCP exposes exactly one tool:
 `fabric_bootstrap`. Call it without arguments. The proxy derives its validated
 seat from `AGENT_FABRIC_SEAT` and asks the shared boundary resolver for the
 exact project root. A first use automatically enrols only the nearest ordinary
-Git root or the current non-Git root with a valid
-`.provenant/agent-fabric.yaml` marker. The daemon atomically creates one
-deterministic, narrow scoping run;
+Git root or the exact current non-Git root. A valid
+`.provenant/agent-fabric.yaml` marker also permits a composed non-Git root. The
+daemon atomically creates one deterministic, narrow scoping run;
 the same MCP connection then emits `tools/list_changed` and exposes the normal
 Fabric tools. A concurrent second primary joins that run as its peer and rotates
 the normal two-seat generation.
@@ -528,12 +528,13 @@ Bootstrap authority does not grant `task.claim`. For bootstrap-scoped work,
 the correlated response plus verified artifact digest is the completion
 evidence; do not widen authority or infer completion from pane text.
 
-Unmarked, ambiguous, linked-worktree, malformed, home and filesystem-root
-paths fail closed with `WORKSPACE_NOT_TRUSTED`. Collection refusals name valid
-child repositories and give exact child commands; malformed or linked children
-receive inspection and repair guidance only. Existing explicit workspace trust
-remains unchanged. A valid exact-root headless grant is retained after every
-downstream failure. A lost or ambiguous bootstrap response is replayed once;
+Ambiguous collection, linked-worktree, malformed, symbolic-link, home and
+filesystem-root paths fail closed with `WORKSPACE_NOT_TRUSTED`. Collection
+refusals name valid child repositories and give exact child commands; malformed
+or linked children receive inspection and repair guidance only. Existing
+explicit workspace trust remains unchanged. A valid exact-root headless grant is
+retained after every downstream failure. A lost or ambiguous bootstrap response is
+replayed once;
 successful replay is `reconciled`, while two ambiguous responses report
 `custody-ambiguous` without claiming custody.
 
