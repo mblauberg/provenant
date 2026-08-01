@@ -45,6 +45,9 @@ DISPATCH_SCHEMA = {
     "reviewer_id",
     "risk_tier",
     "policy_override",
+    "adapter_resolution",
+    "adapter_executable",
+    "adapter_resolution_reason",
     "certification_eligible",
     "cross_family",
 }
@@ -90,6 +93,9 @@ def run_dispatch_with_stub(
         # PATH precedence keeps the checkout's stubs first.
         env = fabric_free_env()
         env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
+        # Keep the owner-unavailable branch deterministic; the verified-owner
+        # branch has its own test with an explicit owner stub.
+        env["AGENTS_HOME"] = str(tmp / "unavailable-owner")
         command = [
                 str(SCRIPT),
                 "--tool",
@@ -153,7 +159,103 @@ def test_claude_other_primary_uses_opus_without_implicit_fable_route():
     assert record["fallback_model"] == ""
     assert record["identity_source"] == "dated-catalog"
     assert record["substitution"] == ""
+    assert record["adapter_resolution"] == "degraded-command-v"
+    assert "DEGRADED" in record["adapter_resolution_reason"]
     assert output.strip() == "OPUS OK"
+
+
+def test_direct_cli_executes_the_verified_adapter_path_once():
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        bad_path = bin_dir / "claude"
+        write_executable(
+            bad_path,
+            "#!/usr/bin/env bash\necho BAD-PATH >&2\nexit 9\n",
+        )
+        verified_path = tmp / "verified-claude"
+        write_executable(
+            verified_path,
+            "#!/usr/bin/env bash\ncat >/dev/null\necho VERIFIED-PATH\n",
+        )
+        owner_dir = tmp / "owner" / "scripts"
+        owner_dir.mkdir(parents=True)
+        owner_calls = tmp / "owner-calls"
+        write_executable(
+            owner_dir / "agent-fabric",
+            f"#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >> {owner_calls}\necho {verified_path}\n",
+        )
+        out = tmp / "out.txt"
+        env = fabric_free_env()
+        env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
+        env["AGENTS_HOME"] = str(tmp / "owner")
+        result = subprocess.run(
+            [
+                str(SCRIPT),
+                "--tool", "claude",
+                "--orchestrator-family", "codex",
+                "--out", str(out),
+                "--prompt", "Reply exactly VERIFIED-PATH",
+            ],
+            cwd=str(tmp),
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        record = json.loads(result.stdout)
+        assert result.returncode == 0, result.stderr
+        assert out.read_text(encoding="utf-8").strip() == "VERIFIED-PATH"
+        assert record["adapter_resolution"] == "verified-owner"
+        assert record["adapter_executable"] == str(verified_path)
+        assert owner_calls.read_text(encoding="utf-8").splitlines() == [
+            f"adapter executable --adapter claude-agent-sdk --product-root {PRODUCT_ROOT} --instance-root {PRODUCT_ROOT}",
+        ]
+
+
+def test_direct_cli_refuses_a_tampered_path_when_owner_rejects_it():
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        tampered_marker = tmp / "tampered-ran"
+        write_executable(
+            bin_dir / "claude",
+            f"#!/usr/bin/env bash\necho ran > {tampered_marker}\nexit 0\n",
+        )
+        owner_dir = tmp / "owner" / "scripts"
+        owner_dir.mkdir(parents=True)
+        owner_calls = tmp / "owner-calls"
+        write_executable(
+            owner_dir / "agent-fabric",
+            f"#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >> {owner_calls}\necho 'ADAPTER_IDENTITY_MISMATCH: provider signing identity is invalid' >&2\nexit 1\n",
+        )
+        out = tmp / "out.txt"
+        env = fabric_free_env()
+        env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
+        env["AGENTS_HOME"] = str(tmp / "owner")
+        result = subprocess.run(
+            [
+                str(SCRIPT),
+                "--tool", "claude",
+                "--orchestrator-family", "codex",
+                "--out", str(out),
+                "--prompt", "Reply exactly OK",
+            ],
+            cwd=str(tmp),
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        record = json.loads(result.stdout)
+        assert result.returncode != 0
+        assert record["status"] == "adapter_resolution_failed"
+        assert record["adapter_resolution"] == "rejected"
+        assert "ADAPTER_IDENTITY_MISMATCH" in out.read_text(encoding="utf-8")
+        assert not tampered_marker.exists()
+        assert owner_calls.read_text(encoding="utf-8").count("adapter executable") == 1
 
 
 def test_claude_crucial_synthesis_dispatches_explicit_fable_override():
@@ -509,7 +611,8 @@ def test_cursor_distinct_model_records_adapter_and_provider_family():
         assert record["endpoint_provider"] == "cursor"
         assert record["model_family"] == "xai"
         assert record["resolved_model"] == "cursor-grok-4.5-high"
-        assert record["certification_eligible"] is True
+        assert record["certification_eligible"] is False
+        assert record["adapter_resolution"] == "degraded-command-v"
         assert record["cross_family"] is True
         cursor_args = args_file.read_text(encoding="utf-8").splitlines()
         assert "--trust" in cursor_args
