@@ -14,6 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from _shared.worker_outcome import accept_worker_outcome
+from orchestrate.scripts import run_dir_finalize
 
 
 HERE = Path(__file__).resolve().parent
@@ -249,6 +250,7 @@ def test_documented_workflow_separates_answer_from_terminal_artifact_and_joins_e
         write_executable(bin_dir / "claude", stub)
         answer = tmp / "crossfamily" / "review.out.txt"
         terminal = tmp / "crossfamily" / "review.terminal.json"
+        worker_terminal = tmp / "crossfamily" / "review.worker.json"
         receipt_path = tmp / "crossfamily" / "review.route.json"
         answer.parent.mkdir()
         env = fabric_free_env()
@@ -266,12 +268,27 @@ def test_documented_workflow_separates_answer_from_terminal_artifact_and_joins_e
         record = json.loads(result.stdout)
         persisted = json.loads(receipt_path.read_text(encoding="utf-8"))
         terminal_value = json.loads(terminal.read_text(encoding="utf-8"))
+        worker_terminal.write_text(json.dumps({
+            "id": "review-1", "attempt_id": "attempt-1", "kind": "complete",
+            "summary": "normalised worker result", "verdict": "pass",
+        }), encoding="utf-8")
         accepted = accept_worker_outcome(tmp, {
             "id": "review-1",
             "dispatch_receipt": {"path": "crossfamily/review.route.json", "digest": _digest(receipt_path)},
-            "terminal_artifact": {"path": "crossfamily/review.terminal.json", "digest": _digest(terminal)},
+            "terminal_artifact": {"path": "crossfamily/review.worker.json", "digest": _digest(worker_terminal)},
+            "dispatch_terminal_artifact": {"path": "crossfamily/review.terminal.json", "digest": _digest(terminal)},
             "worktree_receipt": None,
         })
+        finalizer_error, finalizer_leg = run_dir_finalize._direct_worker_leg(
+            tmp,
+            {"id": "review-1", "verdict": "pass"},
+            {"path": "crossfamily/review.route.json", "digest": _digest(receipt_path)},
+            record,
+            {"path": "crossfamily/review.worker.json", "digest": _digest(worker_terminal)},
+            json.loads(worker_terminal.read_text(encoding="utf-8")),
+            "openai",
+            "substantial",
+        )
 
         assert result.returncode == 0, result.stderr
         assert answer.read_text(encoding="utf-8") == "Human answer\n"
@@ -286,6 +303,40 @@ def test_documented_workflow_separates_answer_from_terminal_artifact_and_joins_e
         assert record["terminal_artifact_sha256"] == _digest(terminal)
         assert accepted["status"] == "accepted"
         assert accepted["certifying"] is True
+        assert finalizer_error is None
+        assert finalizer_leg["status"] == "pass"
+
+
+def test_receipt_write_failure_is_explicitly_non_successful():
+    stub = """\
+        #!/usr/bin/env bash
+        cat >/dev/null
+        printf 'OK\n'
+    """
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        write_executable(bin_dir / "claude", stub)
+        out = tmp / "answer.txt"
+        receipt = tmp / "missing" / "dispatch.json"
+        env = fabric_free_env()
+        env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
+        result = subprocess.run(
+            [
+                str(SCRIPT), "--tool", "claude", "--orchestrator-family", "codex",
+                "--task-id", "task-1", "--attempt-id", "attempt-1", "--receipt", str(receipt),
+                "--out", str(out), "--prompt", "Reply exactly OK",
+            ],
+            cwd=str(tmp), env=env, text=True, capture_output=True,
+        )
+
+        record = json.loads(result.stdout)
+        assert result.returncode != 0
+        assert record["status"] == "receipt_write_error"
+        assert record["terminal_observed"] is False
+        assert record["certification_eligible"] is False
+        assert "cannot write dispatcher receipt" in result.stderr
 
 
 def _digest(path: Path) -> str:

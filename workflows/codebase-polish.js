@@ -422,7 +422,7 @@ const reviewStage = (cand, _orig, _i) => parallel([
         `  --task-id ${cand.id} --attempt-id review-${cand.id} \\`,
         `  --receipt ${runDir}/crossfamily/${cand.id}.json > /dev/null`,
         'Fail-over order is codex -> cursor -> agy (agy advisory/best-effort only).',
-        `The human cross-family answer is in ${runDir}/crossfamily/${cand.id}.out.txt; the dispatcher-owned JSON terminal artifact is in ${runDir}/crossfamily/${cand.id}.terminal.json; the normalised dispatcher record (read provider_family, cross_family, output_sha256, terminal_artifact_sha256 and read_only_guarantee from it) is in ${runDir}/crossfamily/${cand.id}.json. Keep all three distinct.`,
+        `The human cross-family answer is in ${runDir}/crossfamily/${cand.id}.out.txt; the dispatcher-owned JSON terminal artifact is in ${runDir}/crossfamily/${cand.id}.terminal.json; the normalised dispatcher record (read provider_family, cross_family, output_sha256, terminal_artifact_sha256 and read_only_guarantee from it) is in ${runDir}/crossfamily/${cand.id}.json. Keep all three distinct, and write the normalised worker result separately for terminal_result binding.`,
         'Set recordPath to the .json path. If every tool fails (chain status all_failed) or disclosure was withheld, set crossFamilyRan=false and record CROSS-FAMILY-NOT-RUN: <reason> in the manifest. Never silently downgrade.',
         WORKER_CONTRACT,
         'Return the structured cross-family record.',

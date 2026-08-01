@@ -325,7 +325,7 @@ function crossFamilyDispatchHint(runDir, gitCwd, kind = 'primary') {
     `--receipt ${runDir}/crossfamily/<name>.route.json > /dev/null\n` +
     'The dispatcher prints a normalised JSON record (model_family, endpoint_provider, cross_family, certification_eligible, output_sha256, terminal_artifact_sha256, read_only_guarantee, ' +
     'status) — preserve that exact route JSON and return its path as routeReceipt. Certified only when cross_family=true and read_only_guarantee ' +
-    'is enforced or oauth_safe_mode. On failure, set ran=false and record OTHER-PRIMARY-NOT-RUN: <reason>. ' +
+    'is enforced or oauth_safe_mode. Keep the normalised worker result as a separate terminal_result artifact; the dispatcher terminal JSON is not its semantic verdict. On failure, set ran=false and record OTHER-PRIMARY-NOT-RUN: <reason>. ' +
     'Apply the host data policy before dispatch.'
   )
   return (

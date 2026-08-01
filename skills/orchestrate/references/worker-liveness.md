@@ -85,5 +85,3 @@ the transcript exists and is non-trivial before accepting the result.
 
 The rule is provider-agnostic: it applies to `codex exec`, `agy`,
 `cursor-agent`, `kiro` and any other external CLI a sub-agent shells out to.
-The chair is the only party that may legitimately wait in the background,
-because the chair is still there to be woken.

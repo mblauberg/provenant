@@ -187,7 +187,7 @@ Each CLI emits different wrappers: banners, JSONL, token footers, ANSI, stats, o
 dispatcher should produce:
 
 ```
-{"id":"...","attempt_id":"...","tool":"...","adapter":"...","model":"...","resolved_model":"...","catalog_model":"...","model_selection":"...","requested_effort":"...","effort":"...","effort_source":"...","effort_capability_source":"...","effort_substitution":"...","substitution":"...","status":"...","exit":0,"terminal_observed":true,"output_path":"...","output_sha256":"sha256:...","read_only_guarantee":"enforced|oauth_safe_mode|best_effort|prompt_only|none","orchestrator_family":"...","provider_family":"...","model_family":"...","endpoint_provider":"...","identity_source":"...","cross_family":true,"certification_eligible":true}
+{"id":"...","attempt_id":"...","tool":"...","adapter":"...","model":"...","resolved_model":"...","catalog_model":"...","model_selection":"...","requested_effort":"...","effort":"...","effort_source":"...","effort_capability_source":"...","effort_substitution":"...","substitution":"...","status":"...","exit":0,"terminal_observed":true,"output_path":"...","output_sha256":"sha256:...","terminal_artifact_path":"...","terminal_artifact_sha256":"sha256:...","read_only_guarantee":"enforced|oauth_safe_mode|best_effort|prompt_only|none","orchestrator_family":"...","provider_family":"...","model_family":"...","endpoint_provider":"...","identity_source":"...","cross_family":true,"certification_eligible":true}
 ```
 
 `status` is the resolver/dispatcher vocabulary, not a hand-maintained subset:

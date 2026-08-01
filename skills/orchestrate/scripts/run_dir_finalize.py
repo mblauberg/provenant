@@ -87,6 +87,22 @@ def _table(text: str, required: list[str]) -> list[dict[str, str]]:
     raise ValueError("required table header not found: " + ", ".join(required))
 
 
+def _dispatch_terminal_reference(run_dir: Path, route_value: dict[str, object]) -> tuple[dict[str, str] | None, str | None]:
+    path_value = route_value.get("terminal_artifact_path")
+    digest = route_value.get("terminal_artifact_sha256")
+    if not isinstance(path_value, str) or not path_value or not isinstance(digest, str):
+        return None, "dispatcher terminal artifact reference is missing"
+    path = Path(path_value)
+    target = path if path.is_absolute() else run_dir / path
+    if not _inside(run_dir, target):
+        return None, "dispatcher terminal artifact escapes the run directory"
+    try:
+        relative = target.resolve().relative_to(run_dir.resolve()).as_posix()
+    except ValueError:
+        return None, "dispatcher terminal artifact escapes the run directory"
+    return {"path": relative, "digest": digest}, None
+
+
 def _direct_worker_leg(
     run_dir: Path,
     review: dict[str, object],
@@ -120,12 +136,19 @@ def _direct_worker_leg(
         and terminal_target.is_file()
         and terminal_target.stat().st_size > 0
     )
-    outcome = accept_worker_outcome(run_dir, {
+    outcome_reference: dict[str, object] = {
         "id": review["id"],
         "dispatch_receipt": route_ref,
         "terminal_artifact": terminal_ref,
         "worktree_receipt": None,
-    })
+    }
+    if route_value.get("terminal_artifact_path") or route_value.get("terminal_artifact_sha256"):
+        dispatch_terminal_ref, dispatch_error = _dispatch_terminal_reference(run_dir, route_value)
+        if dispatch_error:
+            return dispatch_error, None
+        assert dispatch_terminal_ref is not None
+        outcome_reference["dispatch_terminal_artifact"] = dispatch_terminal_ref
+    outcome = accept_worker_outcome(run_dir, outcome_reference)
     if outcome.get("status") != "accepted":
         return str(outcome.get("reason", "invalid outcome")), None
     if risk not in {"substantial", "crucial", "terminal"}:

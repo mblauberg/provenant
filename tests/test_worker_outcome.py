@@ -95,18 +95,26 @@ def test_separate_answer_and_terminal_artifact_are_verified_independently(tmp_pa
         "id": "review-1", "attempt_id": "attempt-1", "kind": "complete",
         "summary": "terminal result",
     }), encoding="utf-8")
+    dispatch_terminal_path = tmp_path / "dispatch-terminal.json"
+    dispatch_terminal_path.write_text(json.dumps({
+        "id": "review-1", "attempt_id": "attempt-1", "kind": "complete",
+        "summary": "dispatcher observed terminality",
+    }), encoding="utf-8")
     dispatch_path = tmp_path / "dispatch.json"
     dispatch_path.write_text(json.dumps({
         "id": "review-1", "attempt_id": "attempt-1", "status": "ok", "exit": 0,
         "terminal_observed": True, "output_path": str(answer_path),
         "output_sha256": _digest(answer_path),
-        "terminal_artifact_path": str(terminal_path),
-        "terminal_artifact_sha256": _digest(terminal_path),
+        "terminal_artifact_path": str(dispatch_terminal_path),
+        "terminal_artifact_sha256": _digest(dispatch_terminal_path),
     }), encoding="utf-8")
     reference = {
         "id": "review-1",
         "dispatch_receipt": {"path": "dispatch.json", "digest": _digest(dispatch_path)},
         "terminal_artifact": {"path": "worker.json", "digest": _digest(terminal_path)},
+        "dispatch_terminal_artifact": {
+            "path": "dispatch-terminal.json", "digest": _digest(dispatch_terminal_path),
+        },
         "worktree_receipt": None,
     }
 

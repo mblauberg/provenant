@@ -230,6 +230,9 @@ emit_record() {
   if [ -n "$DISPATCH_RECEIPT" ]; then
     if ! printf '%s' "$record" >"$DISPATCH_RECEIPT"; then
       echo "cannot write dispatcher receipt: $DISPATCH_RECEIPT" >&2
+      record="$(printf '%s' "$record" | python3 -c 'import json,sys; value=json.load(sys.stdin); value.update(status="receipt_write_error", exit=1, terminal_observed=False, read_only_guarantee="none", certification_eligible=False); print(json.dumps(value, separators=(",", ":")))')"
+      printf '%s' "$record"
+      return 1
     fi
   fi
   printf '%s' "$record"
@@ -553,7 +556,9 @@ run_one() {  # $1 tool $2 model $3 effort -> writes answer and optional terminal
       guarantee="none"
     fi
   fi
-  emit_record "$tool" "$model" "$effort" "$status" "$rc" "$opath" "$guarantee" "$family" "$endpoint" "$identity" "$effort_substitution" "$requested_effort" "$effort_source" "$effort_capability_source" "$substitution" "$requested_model" "$fallback_model" "$catalog_model" "$model_selection" "$route_risk_tier" "$policy_override" true "$output_sha256" "$TERMINAL_ARTIFACT" "$terminal_artifact_sha256"
+  if ! emit_record "$tool" "$model" "$effort" "$status" "$rc" "$opath" "$guarantee" "$family" "$endpoint" "$identity" "$effort_substitution" "$requested_effort" "$effort_source" "$effort_capability_source" "$substitution" "$requested_model" "$fallback_model" "$catalog_model" "$model_selection" "$route_risk_tier" "$policy_override" true "$output_sha256" "$TERMINAL_ARTIFACT" "$terminal_artifact_sha256"; then
+    return 1
+  fi
   [ "$status" = "ok" ]
 }
 

@@ -98,11 +98,14 @@ they do not certify.
 
 A worker's terminal artifact is a closed `complete`, `question`, `failed` or
 `unavailable` object with its stable task and attempt identity. A direct-CLI
-dispatch receipt supplies the observed terminal fact, exit status and output
-digest. The chair joins those digest-bound references and derives acceptance;
-it does not copy a verdict or completion claim into a second receipt. A
-question is terminal for the attempt but remains blocked for the task, and
-failed or unavailable outcomes are explicit non-certifying results.
+dispatch keeps the human answer in `output_path` and, when requested, emits a
+separate dispatcher-owned JSON terminal artifact in `terminal_artifact_path`;
+the receipt binds both digests. The chair independently joins that dispatcher
+terminal fact with the digest-bound worker terminal result and optional Git
+claim, then derives acceptance. It does not copy a verdict or completion claim
+into a second receipt. A question is terminal for the attempt but remains
+blocked for the task, and failed or unavailable outcomes are explicit
+non-certifying results.
 
 ## Non-goals
 

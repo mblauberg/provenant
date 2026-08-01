@@ -305,6 +305,7 @@ function crossFamilyPrompt(boot, claim, idx) {
     '',
     'STEP 3 — normalise:',
     '  - If the record has cross_family=true and read_only_guarantee in {enforced, oauth_safe_mode} and status=ok: read the CLI answer from output_path and map it to a verdict + anchors (verbatim quotes + source + locator). Set crossFamily=true and readOnlyGuarantee accordingly. Set verifier to the tool that answered.',
+    '  - Keep that normalised worker result as a separate closed terminal JSON artifact with the same task/attempt identity. The dispatcher-owned terminal JSON proves launcher terminality; it is not a substitute for the worker result or its semantic verdict.',
     '  - If the whole chain failed (status all_failed / auth_or_quota_error / error on every tool), or no tool could run (no git repo for codex and cursor unavailable): set verdict="unable", crossFamily=false, verifier="CROSS-FAMILY-NOT-RUN", readOnlyGuarantee="none", and put the failure summary in notRunReason. Append a "CROSS-FAMILY-NOT-RUN: <reason>" line to <run-dir>/MANIFEST.md (or traces/README.md). Do NOT silently downgrade or substitute a Claude answer.',
     '',
     `Write the raw dispatcher record(s) + your normalisation to <run-dir>/crossfamily/${claim.id}.norm.md, then return ONLY the verdict object (claimId="${claim.id}").`,

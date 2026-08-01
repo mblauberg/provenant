@@ -12,7 +12,9 @@ from typing import Any
 _DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 _COMMIT = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$")
 _REFERENCE_KEYS = {"path", "digest"}
-_OUTCOME_KEYS = {"id", "dispatch_receipt", "terminal_artifact", "worktree_receipt"}
+_OUTCOME_KEYS = {
+    "id", "dispatch_receipt", "terminal_artifact", "dispatch_terminal_artifact", "worktree_receipt",
+}
 _DISPATCH_KEYS = {
     "id", "attempt_id", "status", "exit", "terminal_observed", "output_path", "output_sha256",
 }
@@ -178,7 +180,10 @@ def _validate_worktree(root: Path, value: object) -> str | None:
 def accept_worker_outcome(run_dir: Path, outcome: object) -> dict[str, object]:
     """Return a derived acceptance decision for one digest-bound attempt."""
     root = run_dir.expanduser().resolve()
-    if not isinstance(outcome, dict) or set(outcome) != _OUTCOME_KEYS:
+    if not isinstance(outcome, dict) or set(outcome) not in (
+        _OUTCOME_KEYS,
+        _OUTCOME_KEYS - {"dispatch_terminal_artifact"},
+    ):
         return _failure("worker outcome uses an invalid closed schema")
     outcome_id = outcome.get("id")
     if not isinstance(outcome_id, str) or not outcome_id.strip():
@@ -214,11 +219,25 @@ def accept_worker_outcome(run_dir: Path, outcome: object) -> dict[str, object]:
         return _failure(error)
     terminal_path_value = dispatch.get("terminal_artifact_path")
     terminal_digest = outcome["terminal_artifact"]["digest"]
-    if terminal_path_value is not None or dispatch.get("terminal_artifact_sha256") is not None:
-        if not _path_matches(root, terminal_path_value, terminal_path):
-            return _failure("dispatch receipt terminal_artifact_path does not match terminal artifact")
-        if dispatch.get("terminal_artifact_sha256") != terminal_digest:
-            return _failure("dispatch receipt terminal artifact digest does not match terminal artifact")
+    if terminal_path_value or dispatch.get("terminal_artifact_sha256"):
+        dispatch_terminal_ref = outcome.get("dispatch_terminal_artifact")
+        dispatch_terminal_path, error = _reference(
+            root, dispatch_terminal_ref, "dispatch_terminal_artifact"
+        )
+        if error:
+            return _failure(error)
+        assert dispatch_terminal_path is not None
+        if not _path_matches(root, terminal_path_value, dispatch_terminal_path):
+            return _failure("dispatch receipt terminal_artifact_path does not match dispatch terminal artifact")
+        if dispatch.get("terminal_artifact_sha256") != dispatch_terminal_ref["digest"]:
+            return _failure("dispatch receipt terminal artifact digest does not match dispatch terminal artifact")
+        dispatch_terminal, error = _json_file(dispatch_terminal_path, "dispatch_terminal_artifact")
+        if error:
+            return _failure(error)
+        assert dispatch_terminal is not None
+        error = _validate_terminal(root, dispatch_terminal, outcome_id=outcome_id, attempt_id=attempt_id)
+        if error:
+            return _failure(f"dispatch terminal artifact: {error}")
     else:
         if not _path_matches(root, dispatch.get("output_path"), terminal_path):
             return _failure("dispatch receipt output_path does not match terminal artifact")
