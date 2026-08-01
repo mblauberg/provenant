@@ -123,6 +123,19 @@ describe("machine-local workspace trust", () => {
       .resolves.toMatchObject({ canonicalPath: await realpath(value.root), trusted: false });
   });
 
+  it("trusts a Git repository root that contains submodule-like children", async () => {
+    const value = await fixture();
+    await mkdir(join(value.workspace, ".git"), { mode: 0o700 });
+    for (const name of ["first-submodule", "second-submodule"]) {
+      const child = join(value.workspace, name);
+      await mkdir(child, { mode: 0o700 });
+      await writeFile(join(child, ".git"), "gitdir: ../.git/modules/child\n");
+    }
+
+    await expect(runWorkspaceTrust(["trust", value.workspace], value.paths))
+      .resolves.toMatchObject({ trusted: true });
+  });
+
   it("rejects a direct-child repository collection and names exact commands for its children", async () => {
     const value = await fixture();
     const collection = join(value.root, "projects");

@@ -186,7 +186,7 @@ function shellQuote(value: string): string {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
 
-type GitWorkspace = Readonly<{ root: string; linkedWorktree: boolean }>;
+export type GitWorkspace = Readonly<{ root: string; linkedWorktree: boolean }>;
 
 function isMissingPathError(error: unknown): boolean {
   return typeof error === "object" && error !== null && "code" in error &&
@@ -212,7 +212,7 @@ function pointsToLinkedWorktree(gitDirectory: string, workspaceRoot: string): bo
   }
 }
 
-async function nearestGitWorkspace(canonicalRoot: string): Promise<GitWorkspace | null> {
+export async function nearestGitWorkspace(canonicalRoot: string): Promise<GitWorkspace | null> {
   let candidate = canonicalRoot;
   for (;;) {
     const filesystemRoot = candidate === parse(candidate).root;
@@ -243,24 +243,27 @@ async function nearestGitWorkspace(canonicalRoot: string): Promise<GitWorkspace 
   }
 }
 
+export async function repositoryCollectionChildren(canonicalRoot: string): Promise<string[]> {
+  const children = await readdir(canonicalRoot, { withFileTypes: true });
+  const repositories: string[] = [];
+  for (const child of children) {
+    if (!child.isDirectory()) continue;
+    try {
+      const marker = await lstat(join(canonicalRoot, child.name, ".git"));
+      if (marker.isDirectory() || marker.isFile()) repositories.push(join(canonicalRoot, child.name));
+    } catch (error: unknown) {
+      if (!isMissingPathError(error)) throw error;
+    }
+  }
+  return repositories;
+}
+
 // The collection heuristic is intentionally shallow: direct repository
 // children show that trusting this directory would grant sibling authority,
 // while recursively searching would misclassify an ordinary project that
 // happens to contain nested fixtures or vendored repositories.
 export async function looksLikeRepositoryCollection(canonicalRoot: string): Promise<boolean> {
-  const children = await readdir(canonicalRoot, { withFileTypes: true });
-  let repositories = 0;
-  for (const child of children) {
-    if (!child.isDirectory()) continue;
-    try {
-      const marker = await lstat(join(canonicalRoot, child.name, ".git"));
-      if (marker.isDirectory() || marker.isFile()) repositories += 1;
-      if (repositories > 1) return true;
-    } catch (error: unknown) {
-      if (!isMissingPathError(error)) throw error;
-    }
-  }
-  return false;
+  return (await repositoryCollectionChildren(canonicalRoot)).length > 1;
 }
 
 async function workspaceTrustRecoveryMessage(
