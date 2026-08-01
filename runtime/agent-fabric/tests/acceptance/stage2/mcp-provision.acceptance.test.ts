@@ -18,7 +18,7 @@ const roots: string[] = [];
 const daemons: FabricDaemonHandle[] = [];
 const daemonPids = new Set<number>();
 
-function withFixtureRoots(environment: NodeJS.ProcessEnv, fixtureRoot: string): NodeJS.ProcessEnv {
+function withFixtureRoots(environment: Record<string, string>, fixtureRoot: string): Record<string, string> {
   return {
     ...environment,
     AGENT_FABRIC_PRODUCT_ROOT: fixtureRoot,
@@ -161,7 +161,6 @@ async function fixture(options: { broaderRoot?: boolean; daemonIdle?: boolean } 
 
   return {
     environment: withFixtureRoots({
-      ...process.env,
       AGENTS_HOME: agentsHome,
       AGENT_FABRIC_STATE_DIRECTORY: stateDirectory,
       AGENT_FABRIC_RUNTIME_DIRECTORY: runtimeDirectory,
