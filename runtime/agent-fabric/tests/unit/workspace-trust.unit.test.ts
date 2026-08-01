@@ -1,21 +1,23 @@
+import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { chmod, lstat, mkdir, mkdtemp, readFile, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
+import { promisify } from "node:util";
 
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
   looksLikeRepositoryCollection,
   nearestGitWorkspace,
-} from "../../src/cli/mcp-bootstrap.ts";
-import {
   runWorkspaceTrust,
   trustedWorkspaceIdentity,
   trustedWorkspaceRoots,
+  WorkspaceTrustError,
 } from "../../src/cli/workspace-trust.ts";
 
 const temporaryDirectories: string[] = [];
+const execFileAsync = promisify(execFile);
 
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), "fabric-workspace-trust-"));
@@ -91,6 +93,49 @@ describe("machine-local workspace trust", () => {
     })).rejects.toThrow(/profile/u);
   });
 
+  it("rejects a trusted root after it becomes an unmarked collection and reuses its digest after marking it", async () => {
+    const value = await fixture();
+    await runWorkspaceTrust(["trust", value.workspace], value.paths);
+    const canonicalPath = await realpath(value.workspace);
+    const original = await trustedWorkspaceIdentity({
+      stateDirectory: value.paths.stateDirectory,
+      canonicalRoot: value.workspace,
+    });
+    const registryPath = join(value.paths.stateDirectory, "trusted-workspaces.json");
+    const before = await readFile(registryPath, "utf8");
+
+    await gitRepository(value.workspace, "first-repo");
+    await gitRepository(value.workspace, "second-repo");
+
+    await expect(runWorkspaceTrust(["trust", value.workspace], value.paths))
+      .rejects.toThrow(/repository collection/u);
+
+    await expect(trustedWorkspaceIdentity({
+      stateDirectory: value.paths.stateDirectory,
+      canonicalRoot: value.workspace,
+    })).rejects.toSatisfy((error: unknown) =>
+      error instanceof WorkspaceTrustError &&
+      error.code === "WORKSPACE_NOT_TRUSTED" &&
+      error.message.includes("repository collection"));
+    await expect(trustedWorkspaceRoots({ stateDirectory: value.paths.stateDirectory }))
+      .resolves.toEqual([]);
+    await expect(runWorkspaceTrust(["inspect", value.workspace], value.paths))
+      .resolves.toMatchObject({ canonicalPath, trusted: false });
+
+    await writeFile(join(value.workspace, "AGENTS.md"), "# composed project\n");
+
+    await expect(trustedWorkspaceIdentity({
+      stateDirectory: value.paths.stateDirectory,
+      canonicalRoot: value.workspace,
+    })).resolves.toMatchObject({
+      canonicalRoot: canonicalPath,
+      trustRecordDigest: original.trustRecordDigest,
+    });
+    await expect(trustedWorkspaceRoots({ stateDirectory: value.paths.stateDirectory }))
+      .resolves.toEqual([canonicalPath]);
+    await expect(readFile(registryPath, "utf8")).resolves.toBe(before);
+  });
+
   it("atomically records exact roots and filters them by profile and expiry", async () => {
     const value = await fixture();
     const now = new Date("2026-07-11T04:00:00.000Z");
@@ -153,6 +198,65 @@ describe("machine-local workspace trust", () => {
     await expect(runWorkspaceTrust(["list"], value.paths)).resolves.toMatchObject({ entries: [] });
   });
 
+  it("treats two symlink aliases to one repository as one collection child", async () => {
+    const value = await fixture();
+    const collection = join(value.root, "alias-only-collection");
+    const repositories = join(value.root, "repositories");
+    await mkdir(collection, { mode: 0o700 });
+    await mkdir(repositories, { mode: 0o700 });
+    const repository = await gitRepository(repositories, "shared-repo");
+    await symlink(repository, join(collection, "first-alias"));
+    await symlink(repository, join(collection, "second-alias"));
+
+    const canonicalCollection = await realpath(collection);
+    await expect(looksLikeRepositoryCollection(canonicalCollection)).resolves.toBe(false);
+    await expect(runWorkspaceTrust(["trust", collection], value.paths)).resolves.toMatchObject({ trusted: true });
+  });
+
+  it("treats a real repository child and its symlink alias as one collection child", async () => {
+    const value = await fixture();
+    const collection = join(value.root, "real-and-alias-collection");
+    await mkdir(collection, { mode: 0o700 });
+    const repository = await gitRepository(collection, "shared-repo");
+    await symlink(repository, join(collection, "shared-alias"));
+
+    const canonicalCollection = await realpath(collection);
+    await expect(looksLikeRepositoryCollection(canonicalCollection)).resolves.toBe(false);
+    await expect(runWorkspaceTrust(["trust", collection], value.paths)).resolves.toMatchObject({ trusted: true });
+  });
+
+  it("shell-quotes every canonical repository path in collection trust commands", async () => {
+    const value = await fixture();
+    const collection = join(value.root, "projects with spaces");
+    await mkdir(collection, { mode: 0o700 });
+    const names = [
+      "repo with spaces",
+      "repo'with'quotes",
+      "repo;echo shell-metacharacter",
+      "repo$(echo injected) `backtick`",
+    ];
+    const repositories: string[] = [];
+    for (const name of names) repositories.push(await gitRepository(collection, name));
+
+    const result = await runWorkspaceTrust(["trust", collection], value.paths).catch((error: unknown) => error);
+    expect(result).toBeInstanceOf(Error);
+    const message = (result as Error).message;
+    const shellQuote = (path: string) => `'${path.replaceAll("'", `\'"\'"\'`)}'`;
+    const canonicalRepositories = await Promise.all(repositories.map(async (repository) => await realpath(repository)));
+    const commandsStart = message.indexOf("Run ");
+    expect(commandsStart).toBeGreaterThanOrEqual(0);
+    const commands = message.slice(commandsStart + "Run ".length);
+
+    for (const repository of canonicalRepositories) {
+      expect(commands).toContain(`provenant fabric workspace trust ${shellQuote(repository)}`);
+    }
+    const shell = await execFileAsync("sh", [
+      "-c",
+      `provenant() { test "$1" = fabric && test "$2" = workspace && test "$3" = trust || exit 91; printf '%s\\n' "$4"; }\n${commands}`,
+    ]);
+    expect(shell.stdout.trim().split("\n").sort()).toEqual([...canonicalRepositories].sort());
+  });
+
   it("trusts a marker-bearing multi-repository project and keeps it outside Git discovery", async () => {
     const value = await fixture();
     const project = join(value.root, "composed-project");
@@ -176,6 +280,50 @@ describe("machine-local workspace trust", () => {
     // Anyone who can drop a repository beside the others could otherwise name
     // it .claude and switch the collection guard off for every sibling.
     await gitRepository(collection, ".claude");
+    const canonicalCollection = await realpath(collection);
+
+    await expect(looksLikeRepositoryCollection(canonicalCollection)).resolves.toBe(true);
+    await expect(runWorkspaceTrust(["trust", collection], value.paths)).rejects.toThrow(/collection/u);
+  });
+
+  it("refuses a collection whose .claude marker resolves to the candidate root", async () => {
+    const value = await fixture();
+    const collection = join(value.root, "root-marker-collection");
+    await mkdir(collection, { mode: 0o700 });
+    await gitRepository(collection, "first-repo");
+    await gitRepository(collection, "second-repo");
+    await symlink(".", join(collection, ".claude"));
+    const canonicalCollection = await realpath(collection);
+
+    await expect(looksLikeRepositoryCollection(canonicalCollection)).resolves.toBe(true);
+    await expect(runWorkspaceTrust(["trust", collection], value.paths)).rejects.toThrow(/collection/u);
+  });
+
+  it("refuses a collection whose .claude marker resolves outside the candidate root", async () => {
+    const value = await fixture();
+    const collection = join(value.root, "outside-marker-collection");
+    const outsideMarker = join(value.root, "outside-marker");
+    await mkdir(collection, { mode: 0o700 });
+    await mkdir(outsideMarker, { mode: 0o700 });
+    await gitRepository(collection, "first-repo");
+    await gitRepository(collection, "second-repo");
+    await symlink(outsideMarker, join(collection, ".claude"));
+    const canonicalCollection = await realpath(collection);
+
+    await expect(looksLikeRepositoryCollection(canonicalCollection)).resolves.toBe(true);
+    await expect(runWorkspaceTrust(["trust", collection], value.paths)).rejects.toThrow(/collection/u);
+  });
+
+  it("refuses a collection whose repository children are reached through directory symlinks", async () => {
+    const value = await fixture();
+    const collection = join(value.root, "symlinked-repository-collection");
+    const repositories = join(value.root, "repositories");
+    await mkdir(collection, { mode: 0o700 });
+    await mkdir(repositories, { mode: 0o700 });
+    const first = await gitRepository(repositories, "first-repo");
+    const second = await gitRepository(repositories, "second-repo");
+    await symlink(first, join(collection, "first-repo"));
+    await symlink(second, join(collection, "second-repo"));
     const canonicalCollection = await realpath(collection);
 
     await expect(looksLikeRepositoryCollection(canonicalCollection)).resolves.toBe(true);

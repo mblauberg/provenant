@@ -286,6 +286,11 @@ describe("F-033 Agent Fabric module boundaries", () => {
     }
   });
 
+  it("keeps workspace trust independent from the bootstrap module", () => {
+    const workspaceTrust = readFileSync(resolve(sourceRoot, "cli/workspace-trust.ts"), "utf8");
+    expect(workspaceTrust).not.toMatch(/from\s+["']\.\/mcp-bootstrap\.js["']/u);
+  });
+
   it("rejects edges outside the committed domain-to-domain edge set", () => {
     const graph = inspectGraph();
     const golden = maybeRegenerateGolden(graph, readGolden());
