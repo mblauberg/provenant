@@ -4,34 +4,28 @@ from pathlib import Path
 import pytest
 
 
-try:
-    from scripts import count_skill_words as word_counter
-    from scripts.count_skill_words import count_skill_words, word_count_diagnostics, word_count_delta_warnings
-except (ImportError, AttributeError):
-    count_skill_words = None
-    word_count_diagnostics = None
-    word_count_delta_warnings = None
-    word_counter = None
+from scripts import count_skill_words as word_counter
+from scripts.count_skill_words import (
+    count_skill_words,
+    word_count_delta_warnings,
+    word_count_diagnostics,
+)
 
 
 def test_frontmatter_only_is_counted():
-    assert callable(count_skill_words), "missing function: count_skill_words"
     assert count_skill_words("---\nname: demo\ndescription: Use demo\n---\n") == 5
 
 
 def test_body_only_is_counted():
-    assert callable(count_skill_words), "missing function: count_skill_words"
     assert count_skill_words("Use the tool carefully.") == 4
 
 
 def test_frontmatter_and_body_are_both_counted():
-    assert callable(count_skill_words), "missing function: count_skill_words"
     text = "---\nname: demo\ndescription: Use demo\n---\nUse the tool carefully."
     assert count_skill_words(text) == 9
 
 
 def test_markdown_link_counts_text_but_not_url():
-    assert callable(count_skill_words), "missing function: count_skill_words"
     assert count_skill_words("Read [run-contract.md](references/run-contract.md) now.") == 4
 
 
@@ -45,7 +39,6 @@ def test_markdown_link_counts_text_but_not_url():
     ),
 )
 def test_word_count_thresholds(tmp_path: Path, word_count: int, expected_diagnostics: tuple[str, ...]):
-    assert callable(word_count_diagnostics), "missing function: word_count_diagnostics"
     path = tmp_path / "SKILL.md"
     path.write_text("word " * word_count)
 
@@ -56,7 +49,6 @@ def test_word_count_thresholds(tmp_path: Path, word_count: int, expected_diagnos
 
 
 def test_delta_warns_increases_at_risk(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    assert callable(word_count_delta_warnings), "missing function: word_count_delta_warnings"
     repository, base_sha, head_sha = _git_skill_history(tmp_path, 491, 495)
     monkeypatch.setattr(word_counter, "REPOSITORY_ROOT", repository)
 
