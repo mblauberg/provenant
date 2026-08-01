@@ -157,7 +157,7 @@ describe("machine-local workspace trust", () => {
     const value = await fixture();
     const home = await realpath(homedir());
 
-    await expect(runWorkspaceTrust(["trust", home], value.paths)).rejects.toThrow(/home-wide.*never be trusted/u);
+    await expect(runWorkspaceTrust(["trust", home], value.paths)).rejects.toThrow(/never be trusted.*home-wide/u);
     await expect(runWorkspaceTrust(["list"], value.paths)).resolves.toMatchObject({ entries: [] });
   });
 
