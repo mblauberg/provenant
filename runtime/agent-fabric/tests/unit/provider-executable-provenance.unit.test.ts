@@ -52,6 +52,7 @@ vi.mock("node:child_process", async (importOriginal) => {
 
 import {
   SYSTEM_PORT,
+  deriveProviderInstallRoot,
   verifyProviderExecutableIdentity,
   type ProviderIdentityPort,
 } from "../../src/adapters/provider-identity.ts";
@@ -222,6 +223,43 @@ describe("provider executable identity", () => {
       sha256: "a".repeat(64),
       signing: [],
     });
+  });
+
+  it("derives an OpenCode root for a non-Homebrew executable layout", async () => {
+    const executable = "/srv/provider-store/opencode/1.17.18/bin/opencode";
+    expect(deriveProviderInstallRoot(executable)).toBe("/srv/provider-store/opencode");
+
+    await expect(verifyProviderExecutableIdentity({
+      adapterId: "opencode-acp",
+      executable,
+    }, port())).resolves.toMatchObject({
+      assurance: "owner-controlled-install-root",
+      canonicalPath: executable,
+    });
+  });
+
+  it("bounds a PATH-installed OpenCode executable to its containing directory", async () => {
+    const executable = "/srv/alternate-bin/opencode";
+    expect(deriveProviderInstallRoot(executable)).toBe("/srv/alternate-bin");
+
+    await expect(verifyProviderExecutableIdentity({
+      adapterId: "opencode-acp",
+      executable,
+    }, port())).resolves.toMatchObject({ assurance: "owner-controlled-install-root" });
+  });
+
+  it("rejects an alternate-PATH OpenCode executable in an unsafe derived root", async () => {
+    await expect(verifyProviderExecutableIdentity({
+      adapterId: "opencode-acp",
+      executable: "/srv/alternate-bin/opencode",
+    }, port({
+      inspectDirectory: vi.fn(async (path: string) => ({
+        canonicalPath: path,
+        directory: true,
+        ownerUid: 501,
+        mode: 0o777,
+      })),
+    }))).rejects.toMatchObject({ code: "ADAPTER_PATH_UNSAFE" });
   });
 
   it("rejects OpenCode outside its canonical install root", async () => {

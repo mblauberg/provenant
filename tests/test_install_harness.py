@@ -65,11 +65,14 @@ def instance_root_for(home: Path) -> Path:
 def run(platform: str, home: Path, *arguments: str, **extra_env):
     provider_bin = home / ".local" / "bin"
     provider_bin.mkdir(parents=True, exist_ok=True)
-    for name in ("agy", "cursor-agent", "kiro-cli"):
+    for name in ("claude", "codex", "agy", "cursor-agent", "kiro-cli", "opencode"):
         executable = provider_bin / name
         if not executable.exists():
             executable.write_text("#!/bin/sh\nexit 0\n")
             executable.chmod(0o700)
+    python_shim = provider_bin / "python3"
+    python_shim.write_text(f"#!/bin/sh\nexec {sys.executable} \"$@\"\n")
+    python_shim.chmod(0o700)
     env = os.environ.copy()
     env.update({"HOME": str(home)})
     # Keep the instance root deterministic in the scratch HOME. AGENTS_HOME now
@@ -78,6 +81,7 @@ def run(platform: str, home: Path, *arguments: str, **extra_env):
     env["AGENT_FABRIC_INSTANCE_ROOT"] = str(instance_root_for(home))
     env["PROVENANT_ALLOW_LINKED_WORKTREE_INSTALL"] = "1"
     env.update(extra_env)
+    env["PATH"] = f"{provider_bin}{os.pathsep}{env.get('PATH', os.environ.get('PATH', ''))}"
     return subprocess.run(
         [str(SCRIPT), "--platform", platform, *arguments],
         cwd=ROOT,
@@ -229,6 +233,21 @@ def test_installs_claude_skills_and_global_instructions_idempotently(tmp_path):
     assert second.returncode == 0, second.stderr
     assert f"instructions existing={instructions}" in second.stdout
 
+
+def test_install_harness_uses_absolute_node_with_a_sanitized_provider_path(tmp_path):
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is required for the install harness")
+
+    result = run(
+        "codex",
+        tmp_path,
+        PROVENANT_BIN_DIR=str(tmp_path / "bin"),
+        PATH=f"{tmp_path / '.local' / 'bin'}:/usr/bin:/bin",
+        AGENT_FABRIC_NODE=node,
+    )
+
+    assert result.returncode == 0, result.stderr
 
 def test_installs_codex_skills_and_global_instructions(tmp_path):
     config = tmp_path / "codex-home"

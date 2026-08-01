@@ -1,9 +1,12 @@
 import { MCP_BOOTSTRAP_CREDENTIALS_FEATURE } from "@local/agent-fabric-protocol";
 
 import { isRecord } from "../domain/record.js";
+import { EXECUTABLE_RESOLUTION_VERSION } from "../domain/versions.js";
 import { FABRIC_PROTOCOL_LIMITS, type FabricProtocolLimits } from "./bounded-ndjson.js";
 
-export const FABRIC_PROTOCOL_VERSION = 1 as const;
+export { EXECUTABLE_RESOLUTION_VERSION } from "../domain/versions.js";
+
+export const FABRIC_PROTOCOL_VERSION = 2 as const;
 export const FABRIC_DAEMON_VERSION = "0.1.0";
 
 export type DaemonInitializeParams = {
@@ -18,6 +21,7 @@ export type DaemonInitializeResult = {
   capabilities: string[];
   limits: FabricProtocolLimits;
   activeAdapters: string[];
+  executableResolutionVersion: typeof EXECUTABLE_RESOLUTION_VERSION;
 };
 
 export function daemonInitializeResult(activeAdapters: string[]): DaemonInitializeResult {
@@ -27,6 +31,7 @@ export function daemonInitializeResult(activeAdapters: string[]): DaemonInitiali
     capabilities: ["rpc", MCP_BOOTSTRAP_CREDENTIALS_FEATURE],
     limits: FABRIC_PROTOCOL_LIMITS,
     activeAdapters: [...new Set(activeAdapters)].sort(),
+    executableResolutionVersion: EXECUTABLE_RESOLUTION_VERSION,
   };
 }
 
@@ -92,7 +97,7 @@ export function isDaemonInitializeResult(value: unknown): value is DaemonInitial
   const limits = isRecord(value) ? value.limits : undefined;
   if (
     !isRecord(value) ||
-    Object.keys(value).some((key) => !["protocolVersion", "daemonVersion", "capabilities", "limits", "activeAdapters"].includes(key)) ||
+    Object.keys(value).some((key) => !["protocolVersion", "daemonVersion", "capabilities", "limits", "activeAdapters", "executableResolutionVersion"].includes(key)) ||
     value.protocolVersion !== FABRIC_PROTOCOL_VERSION ||
     typeof value.daemonVersion !== "string" ||
     !Array.isArray(value.capabilities) ||
@@ -102,6 +107,7 @@ export function isDaemonInitializeResult(value: unknown): value is DaemonInitial
     !value.activeAdapters.every((adapter) => typeof adapter === "string") ||
     new Set(value.activeAdapters).size !== value.activeAdapters.length ||
     !isRecord(limits)
+    || value.executableResolutionVersion !== EXECUTABLE_RESOLUTION_VERSION
   ) return false;
   if (Object.keys(limits).some((key) => !Object.hasOwn(FABRIC_PROTOCOL_LIMITS, key))) return false;
   return Object.entries(FABRIC_PROTOCOL_LIMITS).every(([key, maximum]) => {

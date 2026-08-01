@@ -5,6 +5,7 @@ schema_version: 1
 activation_policy:
   real_adapters_require_separate_gate: true
   default_enabled: false
+  executable_resolution_version: 2
 
 adapters:
   claude-agent-sdk:
@@ -108,7 +109,7 @@ adapters:
     implementation:
       kind: native-cli
       command: agy
-      executable: "${USER_HOME}/.local/bin/agy"
+      executable: "agy"
       provider_identity: apple-designated
       wrapper_entrypoint: "runtime/agent-fabric/src/adapters/providers/optional/agy.ts"
     contract:
@@ -130,7 +131,7 @@ adapters:
     implementation:
       kind: bundled-cli
       command: cursor-agent
-      executable: "${USER_HOME}/.local/bin/cursor-agent"
+      executable: "cursor-agent"
       cursor_install_root: "${USER_HOME}/.local/share/cursor-agent"
       provider_identity: cursor-partial-signed-helpers
       wrapper_entrypoint: "runtime/agent-fabric/src/adapters/providers/optional/cursor-agent.ts"
@@ -155,7 +156,7 @@ adapters:
     implementation:
       kind: native-cli
       command: kiro-cli
-      executable: "${USER_HOME}/.local/bin/kiro-cli"
+      executable: "kiro-cli"
       provider_identity: apple-designated
       wrapper_entrypoint: "runtime/agent-fabric/src/adapters/providers/optional/kiro-acp.ts"
     contract:
@@ -185,7 +186,6 @@ adapters:
       kind: native-cli
       command: opencode
       executable: "opencode"
-      provider_install_root: "/opt/homebrew/Cellar/opencode"
       provider_identity: owner-controlled-install-root
       wrapper_entrypoint: "runtime/agent-fabric/src/adapters/providers/optional/opencode-acp.ts"
     contract:

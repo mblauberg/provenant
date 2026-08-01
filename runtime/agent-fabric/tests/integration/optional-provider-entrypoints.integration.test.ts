@@ -154,8 +154,6 @@ describe("optional provider executable wrappers", () => {
         join(directory, "adapter.sqlite3"),
         "--provider-executable",
         providerExecutable,
-        "--provider-install-root",
-        directory,
       ],
       environment: {},
       responseTimeoutMs: 2_000,

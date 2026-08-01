@@ -108,14 +108,14 @@ describe("Stage 1 versioned JSON Schemas", () => {
     }
     expect(adapters.agy).toMatchObject({
       implementation: {
-        executable: "${USER_HOME}/.local/bin/agy",
+        executable: "agy",
       },
       contract: { protocol: "agy-cli" },
       model_family_constraints: { allowed: ["google", "anthropic"] },
     });
     expect(adapters["cursor-agent"]).toMatchObject({
       implementation: {
-        executable: "${USER_HOME}/.local/bin/cursor-agent",
+        executable: "cursor-agent",
         cursor_install_root: "${USER_HOME}/.local/share/cursor-agent",
       },
       contract: { protocol: "cursor-agent-stream-json-cli" },
@@ -125,8 +125,7 @@ describe("Stage 1 versioned JSON Schemas", () => {
     });
     expect(adapters["opencode-acp"]).toMatchObject({
       implementation: {
-        executable: "/opt/homebrew/bin/opencode",
-        provider_install_root: "/opt/homebrew/Cellar/opencode",
+        executable: "opencode",
         provider_identity: "owner-controlled-install-root",
       },
       contract: { protocol: "agent-client-protocol" },
@@ -136,7 +135,7 @@ describe("Stage 1 versioned JSON Schemas", () => {
       },
     });
     expect(adapters["kiro-acp"]).toMatchObject({
-      implementation: { executable: "${USER_HOME}/.local/bin/kiro-cli" },
+      implementation: { executable: "kiro-cli" },
       contract: { protocol: "agent-client-protocol" },
       model_family_constraints: { allowed: ["open-weight"] },
     });

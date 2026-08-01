@@ -1064,6 +1064,7 @@ def test_non_git_fallback_routes_via_product_root_model_route():
             HERE.parent / "scripts",
             product / "skills" / "orchestrate" / "scripts",
         )
+        (product / "package.json").write_text('{"type":"module"}\n', encoding="utf-8")
         shutil.copytree(PRODUCT_ROOT / "config", product / "config")
         (product / "scripts").mkdir()
         for name in (
@@ -1072,6 +1073,19 @@ def test_non_git_fallback_routes_via_product_root_model_route():
             "model_route_preferences.py",
         ):
             shutil.copy2(PRODUCT_ROOT / "scripts" / name, product / "scripts" / name)
+        for relative_path in (
+            "runtime/agent-fabric/src/adapters/primary-adapters.ts",
+            "runtime/agent-fabric/src/domain/versions.ts",
+            "runtime/agent-fabric/src/adapters/compatibility.ts",
+            "runtime/agent-fabric/src/errors.ts",
+            "runtime/agent-fabric/scripts/validate-adapter-executables.ts",
+            "runtime/agent-fabric/schemas/adapter-compatibility.schema.json",
+            "scripts/lib/agent-fabric-tsx-loader.sh",
+        ):
+            destination = product / relative_path
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(PRODUCT_ROOT / relative_path, destination)
+        os.symlink(PRODUCT_ROOT / "node_modules", product / "node_modules", target_is_directory=True)
         bin_dir = tmp / "bin"
         bin_dir.mkdir()
         write_executable(
@@ -1085,6 +1099,9 @@ def test_non_git_fallback_routes_via_product_root_model_route():
         write_executable(bin_dir / "python3", f'#!/bin/sh\nexec {sys.executable} "$@"\n')
         env = fabric_free_env()
         env["PATH"] = f"{bin_dir}:/usr/bin:/bin"
+        node = shutil.which("node")
+        assert node is not None
+        env["AGENT_FABRIC_NODE"] = node
         # cf_dispatch.sh appends $HOME/.local/bin and $HOME/bin to PATH;
         # point HOME at the sandbox so an installed provenant cannot leak in.
         env["HOME"] = str(tmp)

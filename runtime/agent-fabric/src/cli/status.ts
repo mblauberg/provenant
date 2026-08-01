@@ -7,7 +7,8 @@ import {
   assertRequiredResultShapeFeatures,
 } from "@local/agent-fabric-protocol";
 
-import { verifyAdapterCompatibility } from "../adapters/compatibility.js";
+import { verifyAdapterCompatibility, type AdapterExecutableFailure } from "../adapters/compatibility.js";
+import { isPrimaryAdapter } from "../adapters/primary-adapters.js";
 import { verifyProviderConformance } from "../adapters/provider-conformance.js";
 import { verifyProviderExecutableIdentity } from "../adapters/provider-identity.js";
 import { ADAPTER_INTERFACE_PROBE_INCOMPLETE, probeProviderInterface } from "../adapters/provider-interface.js";
@@ -32,7 +33,6 @@ import { BootstrapElection, FLOCK_ELECTION_LOCK_PORT } from "../daemon/bootstrap
 import { connectFabricDaemon } from "../daemon/client.js";
 import { privateDiscoveryPaths, readPrivateDiscovery } from "../daemon/private-discovery.js";
 import { preflightProtocolBuild } from "../daemon/protocol-build-preflight.js";
-import { readDiscoveryReceipt } from "./mcp-provision.js";
 import {
   mcpBootstrapRenewalCommand,
   mcpRosterRenewalCommand,
@@ -45,6 +45,15 @@ import { hasPairedInstanceRoot } from "./instance-root-pairing.js";
 import { MCP_SEATS, resolveSeatPaths, type SeatMetadata } from "./seat-store.js";
 import { projectConfigPathAtExactRoot, resolveProjectBoundary } from "./project-boundary.js";
 import { trustedWorkspaceRoots } from "./workspace-trust.js";
+import {
+  daemonState,
+  errorCode,
+  errorDetail,
+  mergeOptionalAdapterFailures,
+  optionalAdapterFailureDetail,
+  verifyConfiguredTsxLoaders,
+  type StatusDependencies,
+} from "./status-support.js";
 
 type Check = {
   id: string;
@@ -137,7 +146,6 @@ const RECOVERABLE_CODES: ReadonlySet<string> = new Set([
   "DATABASE_INSPECTION_UNSTABLE",
 ]);
 
-const PRIMARY_ADAPTER_IDS = ["claude-agent-sdk", "codex-app-server"] as const;
 const PROVIDER_PROBE_TIMEOUT_MS = 16_000;
 const STALENESS_THRESHOLD_DAYS = 30;
 const PROFILE_PIN_REPAIR_COMMAND = "npm run profile:pin";
@@ -156,16 +164,6 @@ function option(arguments_: string[], name: string): string | undefined {
   const value = index === -1 ? undefined : arguments_[index + 1];
   if (index !== -1 && (value === undefined || value.startsWith("--"))) throw new Error(`${name} requires a value`);
   return value;
-}
-
-function errorDetail(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
-function errorCode(error: unknown, fallback: string): string {
-  return error instanceof Error && "code" in error && typeof error.code === "string"
-    ? error.code
-    : fallback;
 }
 
 function checkCode(id: string, outcome: "OK" | "FAILED"): string {
@@ -352,19 +350,6 @@ async function reviewProfilePins(
   return { ...report, catalogueDeployment };
 }
 
-async function daemonState(paths: FabricPaths): Promise<{ reachable: boolean; pid: number | null; socketPath: string; protocolVersion: 1; activeAdapters: string[] }> {
-  try {
-    const discovery = await readDiscoveryReceipt(paths);
-    process.kill(discovery.pid, 0);
-    const client = await connectFabricDaemon({ socketPath: discovery.socketPath, capability: discovery.bootstrapCapability });
-    const activeAdapters = client.initializeResult.activeAdapters;
-    await client.close();
-    return { reachable: true, pid: discovery.pid, socketPath: discovery.socketPath, protocolVersion: 1, activeAdapters };
-  } catch {
-    return { reachable: false, pid: null, socketPath: paths.socketPath, protocolVersion: 1, activeAdapters: [] };
-  }
-}
-
 function shellQuote(value: string): string {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
@@ -470,7 +455,11 @@ async function seatStatus(
   }
 }
 
-export async function fabricStatus(arguments_: string[], paths: FabricPaths): Promise<Record<string, unknown>> {
+export async function fabricStatus(
+  arguments_: string[],
+  paths: FabricPaths,
+  dependencies: StatusDependencies = {},
+): Promise<Record<string, unknown>> {
   const selected = resolveStatusPaths(arguments_);
   const project = resolve(option(arguments_, "--project") ?? process.cwd());
   const boundary = await resolveProjectBoundary(project);
@@ -487,13 +476,21 @@ export async function fabricStatus(arguments_: string[], paths: FabricPaths): Pr
     agentsHome: selected.productRoot,
   });
   const roots = [...new Set([...config.workspaceRoots, ...await trustedWorkspaceRoots({ stateDirectory: paths.stateDirectory, executionProfile: config.executionProfile ?? "headless" })])].sort();
-  const daemon = await daemonState(paths);
+  const daemon = await daemonState(paths, dependencies);
+  const compatibility = await verifyAdapterCompatibility({
+    compatibilityPath: selected.compatibility,
+    schemaPath: selected.compatibilitySchema,
+    adapterIds: config.adapterIds,
+    requireEnabled: true,
+    allowUnavailableOptional: true,
+  });
   return {
     schemaVersion: 1,
     daemon,
     executionProfile: config.executionProfile ?? "headless",
     configuredAdapters: config.adapterIds,
     activeAdapters: daemon.activeAdapters,
+    optionalAdapters: compatibility.unavailableOptionalAdapters,
     trustedWorkspaceRoots: roots,
     project: { path: project, seats: await seatStatus(paths, project, selected.productRoot) },
   };
@@ -705,14 +702,14 @@ async function doctorDaemonState(
       }
     } catch (error: unknown) {
       const errorCodeValue = errorCode(error, "DAEMON_HANDSHAKE_FAILED");
-      const code = errorCodeValue === "PROTOCOL_INCOMPATIBLE"
-        ? errorCodeValue
+      const code = ["PROTOCOL_INCOMPATIBLE", "DAEMON_PROTOCOL_MISMATCH", "DAEMON_PROTOCOL_UNSUPPORTED"].includes(errorCodeValue)
+        ? "DAEMON_PROTOCOL_INCOMPATIBLE"
         : "DAEMON_HANDSHAKE_FAILED";
       return {
         status: "failed",
         code,
-        detail: code === "PROTOCOL_INCOMPATIBLE"
-          ? `${errorDetail(error)}; stop the incumbent through its owning Fabric lifecycle, then retry provenant doctor`
+        detail: code === "DAEMON_PROTOCOL_INCOMPATIBLE"
+          ? `${errorDetail(error)}; restart the incumbent through its owning Fabric lifecycle, then retry provenant doctor`
           : errorDetail(error),
         pid: discovery.receipt.pid,
         socketPath: discovery.receipt.socketPath,
@@ -755,6 +752,7 @@ export async function fabricDoctor(
   let adapterIds: string[] = [];
   let adapterCommands: string[][] = [];
   let compatibilityVerification: Awaited<ReturnType<typeof verifyAdapterCompatibility>> | undefined;
+  const optionalAdapterFailures: AdapterExecutableFailure[] = [];
   const providerObservations: ProviderObservation[] = [];
   const checks: Check[] = [];
   checks.push(await check("protocol-build", async () => {
@@ -785,37 +783,31 @@ export async function fabricDoctor(
     adapterCommands = adapterIds.map((adapterId) => config.adapterCommands[adapterId] ?? []);
   }));
   checks.push(await check("wrapper-loader", async () => {
-    const loaderParts = [...new Set(adapterCommands.flat().filter((part) => part.includes("node_modules/tsx/dist/loader.mjs")))];
-    for (const part of loaderParts) {
-      const loaderPath = part.startsWith("${AGENTS_HOME}/") ? join(selected.productRoot, part.slice("${AGENTS_HOME}/".length)) : part;
-      try {
-        await lstat(loaderPath);
-      } catch {
-        throw new Error(
-          `tsx loader is missing: ${loaderPath}. Adapter wrappers execute tracked TypeScript source through tsx; ` +
-          `rerun ${join(selected.productRoot, "scripts", "install-agent-fabric-dependencies")}.`,
-        );
-      }
-    }
-    return loaderParts.length === 0 ? "no tsx wrapper commands configured" : "tsx loader present";
+    return await verifyConfiguredTsxLoaders(adapterCommands, selected.productRoot);
   }));
   checks.push(await check("adapter-compatibility", async () => {
-    compatibilityVerification = await verifyAdapterCompatibility({ compatibilityPath: selected.compatibility, schemaPath: selected.compatibilitySchema, adapterIds, requireEnabled: true });
+    compatibilityVerification = await verifyAdapterCompatibility({ compatibilityPath: selected.compatibility, schemaPath: selected.compatibilitySchema, adapterIds, requireEnabled: true, allowUnavailableOptional: true });
+    optionalAdapterFailures.push(...compatibilityVerification.unavailableOptionalAdapters);
     return compatibilityVerification.wrapperProvenance
       .map((item) => `${item.adapterId}=${item.repositoryCommit}:${item.wrapperPath}`)
       .join(" ");
   }));
   checks.push(await check("provider-conformance", async () => {
-    const verification = compatibilityVerification ?? await verifyAdapterCompatibility({ compatibilityPath: selected.compatibility, schemaPath: selected.compatibilitySchema, adapterIds, requireEnabled: true });
+    const verification = compatibilityVerification ?? await verifyAdapterCompatibility({ compatibilityPath: selected.compatibility, schemaPath: selected.compatibilitySchema, adapterIds, requireEnabled: true, allowUnavailableOptional: true });
     const observations = [];
     for (const adapterId of adapterIds) {
       const executable = verification.resolvedExecutables[adapterId];
-      if (executable === undefined) throw new Error(`provider executable is missing: ${adapterId}`);
-      const policy = await loadAdapterModelConstraints({
-        compatibilityPath: selected.compatibility,
-        schemaPath: selected.compatibilitySchema,
-        adapterId,
-      });
+      if (executable === undefined) {
+        if (isPrimaryAdapter(adapterId)) throw new Error(`provider executable is missing: ${adapterId}`);
+        optionalAdapterFailures.push({ adapterId, executable: "<missing>", reasons: [`provider executable is missing: ${adapterId}`] });
+        continue;
+      }
+      try {
+        const policy = await loadAdapterModelConstraints({
+          compatibilityPath: selected.compatibility,
+          schemaPath: selected.compatibilitySchema,
+          adapterId,
+        });
       if (policy.providerIdentity === undefined) continue;
       const input = {
         adapterId,
@@ -823,7 +815,7 @@ export async function fabricDoctor(
         ...(policy.cursorInstallRoot === undefined ? {} : { cursorInstallRoot: policy.cursorInstallRoot }),
         ...(policy.providerInstallRoot === undefined ? {} : { providerInstallRoot: policy.providerInstallRoot }),
       };
-      if (PRIMARY_ADAPTER_IDS.some((primaryId) => primaryId === adapterId)) {
+      if (isPrimaryAdapter(adapterId)) {
         const timeoutMs = dependencies.providerProbeTimeoutMs ?? PROVIDER_PROBE_TIMEOUT_MS;
         const [identity, providerInterface] = await Promise.allSettled([
           bounded(Promise.resolve().then(async () => await (dependencies.verifyProviderIdentity ?? verifyProviderExecutableIdentity)(input)), timeoutMs, `${adapterId} provider identity probe`),
@@ -844,9 +836,25 @@ export async function fabricDoctor(
       }
       const observation = await (dependencies.verifyProvider ?? verifyProviderConformance)(input);
       observations.push(`${adapterId}=${observation.interface.version}:${observation.identity.sha256}:${observation.identity.assurance}`);
+      } catch (error: unknown) {
+        if (isPrimaryAdapter(adapterId)) throw error;
+        optionalAdapterFailures.push({ adapterId, executable, reasons: [errorDetail(error)] });
+      }
     }
     return observations.join(" ");
   }));
+  const mergedOptionalAdapterFailures = mergeOptionalAdapterFailures(optionalAdapterFailures);
+  if (mergedOptionalAdapterFailures.length > 0) {
+    const providerCheck = checks.find((item) => item.id === "provider-conformance");
+    if (providerCheck !== undefined && providerCheck.status === "pass") {
+      providerCheck.status = "idle";
+      providerCheck.code = "OPTIONAL_ADAPTERS_DEGRADED";
+      providerCheck.detail = [
+        providerCheck.detail,
+        optionalAdapterFailureDetail(mergedOptionalAdapterFailures),
+      ].filter((item) => item.length > 0).join(" ");
+    }
+  }
   const metadata = await readDoctorMetadata(selected.modelRouting);
   const providerIdentity = providerObservations.map((observation) =>
     primaryProviderState(observation));
@@ -954,7 +962,7 @@ export async function fabricDoctor(
     schemaVersion: 1,
     healthy,
     state,
-    code: failed?.code ?? daemon.code,
+    code: failed?.code ?? (mergedOptionalAdapterFailures.length > 0 ? "OPTIONAL_ADAPTERS_DEGRADED" : daemon.code),
     // Why the state holds, not merely which state it is: the exact check whose
     // precondition decided it, and whether this lifecycle may repair it.
     // `satisfied` reports that check's own precondition and is independent of
@@ -975,6 +983,7 @@ export async function fabricDoctor(
       pid: daemon.pid,
       socketPath: daemon.socketPath,
     },
+    optionalAdapters: mergedOptionalAdapterFailures,
     providerIdentity: { adapters: providerIdentity },
     reviewProfilePins: { repairCommand: PROFILE_PIN_REPAIR_COMMAND, ...pinReport },
     staleness: {

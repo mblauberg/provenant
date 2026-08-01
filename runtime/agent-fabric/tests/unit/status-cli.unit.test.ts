@@ -9,6 +9,7 @@ import { Duplex } from "node:stream";
 import Database from "better-sqlite3";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { MCP_BOOTSTRAP_CREDENTIALS_FEATURE } from "@local/agent-fabric-protocol";
+import { parse, stringify } from "yaml";
 
 import {
   fabricDoctor as realFabricDoctor,
@@ -62,11 +63,12 @@ class DoctorFixtureDaemonSocket extends Duplex {
       this.push(`${JSON.stringify({
         id: request.id,
         result: {
-          protocolVersion: 1,
+          protocolVersion: 2,
           daemonVersion: "pre-0636854",
           capabilities: this.capabilities,
           limits: FABRIC_PROTOCOL_LIMITS,
           activeAdapters: [],
+          executableResolutionVersion: 2,
         },
       })}\n`);
       callback();
@@ -288,7 +290,7 @@ async function writeStoppedGeneration(
     electionGeneration: 1,
     daemonInstanceGeneration: 1,
     socketPath: value.socketPath,
-    protocolVersion: 1,
+    protocolVersion: 2,
     features: ["rpc"],
     readyAt: 2,
     evidence: { databaseOwned: true, migrationsComplete: true, recoveryComplete: true, socketBound: true },
@@ -335,7 +337,7 @@ async function writeActiveGeneration(value: FabricPaths): Promise<void> {
     electionGeneration: 1,
     daemonInstanceGeneration: 1,
     socketPath: value.socketPath,
-    protocolVersion: 1,
+    protocolVersion: 2,
     features: ["rpc"],
     readyAt: 2,
     evidence: { databaseOwned: true, migrationsComplete: true, recoveryComplete: true, socketBound: true },
@@ -414,7 +416,7 @@ describe("machine status and doctor", () => {
     const status = await fabricStatus(["--agents-home", agentsHome, "--project", agentsHome], value);
     expect(status).toMatchObject({
       schemaVersion: 1,
-      daemon: { reachable: false, protocolVersion: 1 },
+      daemon: { reachable: false, protocolVersion: 2 },
       configuredAdapters: ["claude-agent-sdk", "codex-app-server", "agy", "cursor-agent", "opencode-acp", "kiro-acp"],
       activeAdapters: [],
       project: { path: agentsHome },
@@ -733,6 +735,52 @@ describe("machine status and doctor", () => {
       status: "pass",
       detail: "no certifying profile pins in the comparison set",
     });
+  });
+
+  it("reports one deterministic optional degradation record with all observed reasons", async () => {
+    const value = await paths();
+    const fixture = await createPortableActivatedPrimaryFixture();
+    cleanup.push(fixture.directory);
+    const compatibility = parse(await readFile(fixture.compatibilityPath, "utf8")) as {
+      adapters: Record<string, Record<string, any>>;
+    };
+    const primary = compatibility.adapters["claude-agent-sdk"]!;
+    compatibility.adapters.agy = {
+      ...primary,
+      implementation: {
+        ...primary.implementation,
+        executable: "missing-agy",
+        wrapper_entrypoint: fixture.artifactPaths[1],
+      },
+    };
+    await writeFile(fixture.compatibilityPath, stringify(compatibility));
+    const config = parse(await readFile(fixture.configPath, "utf8")) as {
+      allowedAdapters: string[];
+      activeAdapters: string[];
+      adapters: Record<string, { command: string[] }>;
+    };
+    config.allowedAdapters.push("agy");
+    config.activeAdapters.push("agy");
+    config.adapters.agy = { command: [process.execPath, fixture.artifactPaths[1]!] };
+    await writeFile(fixture.configPath, stringify(config));
+
+    const result = await fabricDoctor([
+      "--agents-home", fixture.directory,
+      "--trusted-config", fixture.configPath,
+      "--compatibility", fixture.compatibilityPath,
+      "--compatibility-schema", fixture.schemaPath,
+    ], value, { preflightProtocolBuild: async () => undefined });
+
+    expect(result.optionalAdapters).toEqual([
+      {
+        adapterId: "agy",
+        executable: "missing-agy",
+        reasons: expect.arrayContaining([
+          expect.stringContaining("missing-agy"),
+          expect.stringContaining("provider executable is missing: agy"),
+        ]),
+      },
+    ]);
   });
 
   it("uses cache-only pin evidence by default without invoking a producer or changing any state byte", async () => {
@@ -1788,13 +1836,13 @@ printf '%s\\n' '{"schema_version":1,"source":"claude subscription canary","obser
     expect(result).toMatchObject({
       healthy: false,
       state: "blocked",
-      code: "PROTOCOL_INCOMPATIBLE",
+      code: "DAEMON_PROTOCOL_INCOMPATIBLE",
       daemon: { status: "failed", pid: process.pid, socketPath: value.socketPath },
       checks: expect.arrayContaining([
         expect.objectContaining({
           id: "daemon-socket",
           status: "fail",
-          code: "PROTOCOL_INCOMPATIBLE",
+          code: "DAEMON_PROTOCOL_INCOMPATIBLE",
           detail: expect.stringContaining("mcp-bootstrap-credentials.v2"),
         }),
       ]),
@@ -1803,6 +1851,41 @@ printf '%s\\n' '{"schema_version":1,"source":"claude subscription canary","obser
       detail.includes("mcp-bootstrap-credentials.v2"))?.detail).toContain("retry provenant doctor");
     expect(socket?.methods).toEqual(["initialize"]);
     expect(socket?.destroyed).toBe(true);
+  });
+
+  it("reports a responsive daemon missing the bootstrap capability as incompatible in status", async () => {
+    const value = await paths();
+    await writeActiveGeneration(value);
+    const agentsHome = resolve(import.meta.dirname, "../../../..");
+
+    const result = await fabricStatus(
+      ["--agents-home", agentsHome, "--project", agentsHome],
+      value,
+      {
+        connectDaemon: async ({ requiredCapabilities }) => {
+          if (requiredCapabilities?.includes(MCP_BOOTSTRAP_CREDENTIALS_FEATURE) !== true) {
+            return {
+              initializeResult: {
+                activeAdapters: [],
+              },
+              close: async () => undefined,
+            } as never;
+          }
+          throw Object.assign(new Error("protocol is missing required result-shape features: mcp-bootstrap-credentials.v2"), {
+            code: "PROTOCOL_INCOMPATIBLE",
+          });
+        },
+      },
+    );
+
+    expect(result).toMatchObject({
+      daemon: {
+        reachable: true,
+        status: "incompatible",
+        code: "DAEMON_PROTOCOL_INCOMPATIBLE",
+        remedy: expect.stringContaining("restart the daemon"),
+      },
+    });
   });
 
   it("reports a dropped contract probe as a handshake failure, not protocol incompatibility", async () => {
@@ -1841,7 +1924,7 @@ printf '%s\\n' '{"schema_version":1,"source":"claude subscription canary","obser
       code: "DAEMON_HANDSHAKE_FAILED",
       daemon: { status: "failed" },
     });
-    expect(result.code).not.toBe("PROTOCOL_INCOMPATIBLE");
+    expect(result.code).not.toBe("DAEMON_PROTOCOL_INCOMPATIBLE");
     expect(socket?.methods).toEqual(["initialize", "eventsAfter"]);
   });
 
@@ -2000,7 +2083,7 @@ printf '%s\\n' '{"schema_version":1,"source":"claude subscription canary","obser
       electionGeneration: 2,
       daemonInstanceGeneration: 2,
       socketPath: value.socketPath,
-      protocolVersion: 1,
+      protocolVersion: 2,
       features: ["rpc"],
       readyAt: 3,
       evidence: { databaseOwned: true, migrationsComplete: true, recoveryComplete: true, socketBound: true },
@@ -2328,6 +2411,59 @@ printf '%s\\n' '{"schema_version":1,"source":"claude subscription canary","obser
     expect(result.wrapperIntercepted).toEqual([]);
     expect((result.checks as Array<{ id: string }>).map(({ id }) => id)).toContain("protocol-build");
   });
+
+  it.each(["wrong-package", "symlink-target"] as const)(
+    "rejects a %s TypeScript loader during doctor admission",
+    async (kind) => {
+      const value = await paths();
+      const fixture = await createPortableActivatedPrimaryFixture();
+      cleanup.push(fixture.directory);
+      const nodeModules = join(fixture.directory, "node_modules");
+      const loaderPath = join(nodeModules, "tsx", "dist", "loader.mjs");
+      await mkdir(nodeModules, { recursive: true });
+      if (kind === "wrong-package") {
+        const packageDirectory = join(nodeModules, "wrong-package");
+        await mkdir(join(packageDirectory, "dist"), { recursive: true });
+        await writeFile(join(packageDirectory, "package.json"), JSON.stringify({ name: "wrong-package" }));
+        await writeFile(join(packageDirectory, "dist", "loader.mjs"), "export {};");
+        const config = parse(await readFile(fixture.configPath, "utf8")) as {
+          adapters: Record<string, { command: string[] }>;
+        };
+        for (const adapter of Object.values(config.adapters)) {
+          adapter.command = [process.execPath, "--import", join(nodeModules, "wrong-package", "dist", "loader.mjs"), fixture.artifactPaths[1]!];
+        }
+        await writeFile(fixture.configPath, stringify(config));
+      } else {
+        const outside = join(dirname(fixture.directory), "tsx-outside");
+        await mkdir(join(outside, "dist"), { recursive: true });
+        await writeFile(join(outside, "package.json"), JSON.stringify({ name: "tsx" }));
+        await writeFile(join(outside, "dist", "loader.mjs"), "export {};");
+        await symlink(outside, join(nodeModules, "tsx"));
+        const config = parse(await readFile(fixture.configPath, "utf8")) as {
+          adapters: Record<string, { command: string[] }>;
+        };
+        for (const adapter of Object.values(config.adapters)) {
+          adapter.command = [process.execPath, "--import", loaderPath, fixture.artifactPaths[1]!];
+        }
+        await writeFile(fixture.configPath, stringify(config));
+      }
+
+      const result = await fabricDoctor([
+        "--agents-home", fixture.directory,
+        "--trusted-config", fixture.configPath,
+        "--compatibility", fixture.compatibilityPath,
+        "--compatibility-schema", fixture.schemaPath,
+      ], value, { preflightProtocolBuild: async () => undefined });
+
+      expect(result.checks).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          id: "wrapper-loader",
+          status: "fail",
+          detail: expect.stringContaining("tsx loader"),
+        }),
+      ]));
+    },
+  );
 
   it("keeps database preflight failure unhealthy while the daemon is idle", async () => {
     const value = await paths();

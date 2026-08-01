@@ -46,9 +46,6 @@ export async function loadAdapterModelConstraints(input: {
   const providerExecutable = typeof implementation.executable === "string"
     ? await resolveAdapterExecutable({
       executable: implementation.executable,
-      ...(typeof implementation.executable_override === "string"
-        ? { executableOverride: implementation.executable_override }
-        : {}),
       compatibilityPath: input.compatibilityPath,
     })
     : undefined;

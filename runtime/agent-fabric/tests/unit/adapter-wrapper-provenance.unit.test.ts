@@ -39,7 +39,7 @@ async function writeCompatibility(
     fixture.compatibilityPath,
     stringify({
       schema_version: 1,
-      activation_policy: { real_adapters_require_separate_gate: true, default_enabled: false },
+      activation_policy: { real_adapters_require_separate_gate: true, default_enabled: false, executable_resolution_version: 2 },
       adapters: {
         fixture: {
           enabled: true,
@@ -69,7 +69,7 @@ async function createProvenanceFixture(): Promise<ProvenanceFixture> {
   const executablePath = join(directory, "provider");
   await Promise.all([
     writeFile(wrapperPath, 'export const execute = () => "safe";\n'),
-    writeFile(executablePath, "provider executable\n"),
+    writeFile(executablePath, "provider executable\n", { mode: 0o700 }),
   ]);
   await writeWrapperPackageScaffold(directory);
   const repositoryCommit = await commitFixtureRepository(directory);

@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { lstat, readFile, realpath, stat } from "node:fs/promises";
-import { dirname, isAbsolute, join, relative } from "node:path";
+import { basename, dirname, isAbsolute, join, relative } from "node:path";
 import { promisify } from "node:util";
 
 import { FabricError } from "../errors.js";
@@ -132,6 +132,20 @@ function assertSigning(actual: { teamId: string; identifier: string }, expected:
   }
 }
 
+/**
+ * Find the provider's package root from its already-resolved executable. A
+ * configured root remains authoritative when supplied; this fallback keeps
+ * the owner-controlled-root check portable across package managers and PATH
+ * layouts without introducing another fixed path.
+ */
+export function deriveProviderInstallRoot(executablePath: string): string {
+  const executableName = basename(executablePath);
+  for (let current = dirname(executablePath); current !== dirname(current); current = dirname(current)) {
+    if (basename(current) === executableName) return current;
+  }
+  return dirname(executablePath);
+}
+
 async function verifiedSigningIdentity(port: ProviderIdentityPort, path: string): Promise<{ teamId: string; identifier: string }> {
   try {
     await port.verifySignature(path);
@@ -169,8 +183,9 @@ export async function verifyProviderExecutableIdentity(input: {
       signing: [{ path: executable.canonicalPath, ...signing }],
     };
   }
-  if (input.adapterId === "opencode-acp" && input.providerInstallRoot !== undefined) {
-    const rootObservation = await port.inspectDirectory(input.providerInstallRoot);
+  if (input.adapterId === "opencode-acp") {
+    const installRoot = input.providerInstallRoot ?? deriveProviderInstallRoot(executable.canonicalPath);
+    const rootObservation = await port.inspectDirectory(installRoot);
     const root = rootObservation.canonicalPath;
     const contained = relative(root, executable.canonicalPath);
     if (contained.length === 0 || contained.startsWith("..") || isAbsolute(contained)) {

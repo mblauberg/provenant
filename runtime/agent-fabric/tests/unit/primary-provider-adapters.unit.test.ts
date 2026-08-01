@@ -2631,7 +2631,7 @@ describe("trusted primary adapter configuration", () => {
       },
     });
     expect(compatibility).toMatchObject({
-      activation_policy: { default_enabled: false, real_adapters_require_separate_gate: true },
+      activation_policy: { default_enabled: false, real_adapters_require_separate_gate: true, executable_resolution_version: 2 },
       adapters: {
         "claude-agent-sdk": {
           enabled: true,
