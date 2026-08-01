@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import { loadFabricConfig } from "../../src/config/index.ts";
+import { projectConfigPathAtExactRoot } from "../../src/cli/project-boundary.ts";
 
 async function writeJson(path: string, value: unknown): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
@@ -73,6 +74,25 @@ describe("runtime configuration schema validation", () => {
     await expect(loadFabricConfig({ globalPath, projectPath })).rejects.toMatchObject({
       code: "CONFIG_UNTRUSTED_FIELD",
       field: "/limits/maximumConcurrentProviderTurns",
+    });
+  });
+
+  it("loads the exact .provenant marker through the existing narrowing-only project layer", async () => {
+    const root = await mkdtemp(join(tmpdir(), "fabric-runtime-provenant-config-"));
+    const projectRoot = join(root, "project");
+    const globalPath = join(root, "global.yaml");
+    const markerPath = join(projectRoot, ".provenant", "agent-fabric.yaml");
+    await writeJson(globalPath, validGlobal(projectRoot));
+    await writeJson(markerPath, {
+      schemaVersion: 1,
+      limits: { maximumConcurrentProviderTurns: 2, listener: "0.0.0.0" },
+    });
+
+    const projectPath = projectConfigPathAtExactRoot(projectRoot);
+    if (projectPath === undefined) throw new Error("expected the exact .provenant marker to be discovered");
+    await expect(loadFabricConfig({ globalPath, projectPath })).rejects.toMatchObject({
+      code: "CONFIG_UNTRUSTED_FIELD",
+      field: "/limits/listener",
     });
   });
 

@@ -1,17 +1,11 @@
-import { execFile } from "node:child_process";
-import { lstat, realpath } from "node:fs/promises";
-import { resolve } from "node:path";
-import { promisify } from "node:util";
-
 import { readActiveSeatGeneration } from "./seat-store.js";
 import type { FabricPaths } from "./paths.js";
+import { resolveProjectBoundary } from "./project-boundary.js";
 import {
   runWorkspaceTrust,
   trustedWorkspaceIdentity,
   trustedWorkspaceRoots,
 } from "./workspace-trust.js";
-
-const execFileAsync = promisify(execFile);
 
 export type ProjectRoots = {
   requestedPath: string;
@@ -40,55 +34,18 @@ function errorDetail(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-async function canonicalDirectory(path: string): Promise<string> {
-  const canonical = await realpath(resolve(path));
-  const info = await lstat(canonical);
-  if (!info.isDirectory() || info.isSymbolicLink()) {
-    throw new Error(`project path is not a directory: ${canonical}`);
-  }
-  return canonical;
-}
-
-type GitRepositoryProbe = {
-  root: string | null;
-  status: ProjectRoots["gitProbe"];
-  error: string | null;
-};
-
-function processErrorOutput(error: unknown): string {
-  if (typeof error === "object" && error !== null && "stderr" in error && typeof error.stderr === "string") {
-    const stderr = error.stderr.trim();
-    if (stderr.length > 0) return stderr;
-  }
-  return errorDetail(error);
-}
-
-async function gitRepositoryRoot(path: string): Promise<GitRepositoryProbe> {
-  try {
-    const result = await execFileAsync("git", ["-C", path, "rev-parse", "--show-toplevel"], {
-      encoding: "utf8",
-    });
-    const candidate = result.stdout.trim();
-    if (candidate.length === 0) return { root: null, status: "not-repository", error: null };
-    return { root: await canonicalDirectory(candidate), status: "repository", error: null };
-  } catch (error: unknown) {
-    const detail = processErrorOutput(error);
-    if (/not a git repository/u.test(detail)) {
-      return { root: null, status: "not-repository", error: null };
-    }
-    return { root: null, status: "unavailable", error: detail };
-  }
-}
-
 export async function resolveProjectRoots(path = process.cwd()): Promise<ProjectRoots> {
-  const requestedPath = await canonicalDirectory(path);
-  const probe = await gitRepositoryRoot(requestedPath);
+  const boundary = await resolveProjectBoundary(path, { selection: "exact" });
+  const gitRoot = boundary.evidence.kind === "git" ? boundary.evidence.root : null;
+  const projectRoot = boundary.evidence.kind === "project-marker"
+    ? boundary.evidence.root
+    : gitRoot ?? boundary.requestedDirectory;
   return {
-    requestedPath,
-    canonicalRepositoryRoot: probe.root ?? requestedPath,
-    isGitRepository: probe.root !== null,
-    gitProbe: probe.status,
-    gitProbeError: probe.error,
+    requestedPath: boundary.requestedDirectory,
+    canonicalRepositoryRoot: projectRoot,
+    isGitRepository: gitRoot !== null,
+    gitProbe: boundary.gitProbe,
+    gitProbeError: boundary.gitProbeError,
   };
 }
 

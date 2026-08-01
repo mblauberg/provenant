@@ -43,6 +43,7 @@ import type { FabricPaths } from "./paths.js";
 import { fabricCliCommand, resolveFabricRoots } from "../domain/fabric-roots.js";
 import { hasPairedInstanceRoot } from "./instance-root-pairing.js";
 import { MCP_SEATS, resolveSeatPaths, type SeatMetadata } from "./seat-store.js";
+import { projectConfigPathAtExactRoot, resolveProjectBoundary } from "./project-boundary.js";
 import { trustedWorkspaceRoots } from "./workspace-trust.js";
 
 type Check = {
@@ -471,16 +472,21 @@ async function seatStatus(
 
 export async function fabricStatus(arguments_: string[], paths: FabricPaths): Promise<Record<string, unknown>> {
   const selected = resolveStatusPaths(arguments_);
+  const project = resolve(option(arguments_, "--project") ?? process.cwd());
+  const boundary = await resolveProjectBoundary(project);
+  const projectConfigPath = boundary.evidence.kind === "refused"
+    ? undefined
+    : projectConfigPathAtExactRoot(boundary.selectedProjectRoot);
   // ${AGENTS_HOME} expands against the product root (#528); the layering is the
   // same composition daemon startup performs, so a widening instance file is
   // refused here exactly as the daemon would refuse it.
   const config = await loadFabricConfig({
     globalPath: selected.config,
     ...(selected.localConfig === undefined ? {} : { localPath: selected.localConfig }),
+    ...(projectConfigPath === undefined ? {} : { projectPath: projectConfigPath }),
     agentsHome: selected.productRoot,
   });
   const roots = [...new Set([...config.workspaceRoots, ...await trustedWorkspaceRoots({ stateDirectory: paths.stateDirectory, executionProfile: config.executionProfile ?? "headless" })])].sort();
-  const project = resolve(option(arguments_, "--project") ?? process.cwd());
   const daemon = await daemonState(paths);
   return {
     schemaVersion: 1,
@@ -740,6 +746,11 @@ export async function fabricDoctor(
   dependencies: DoctorDependencies = {},
 ): Promise<Record<string, unknown>> {
   const selected = resolveStatusPaths(arguments_);
+  const project = resolve(option(arguments_, "--project") ?? process.cwd());
+  const boundary = await resolveProjectBoundary(project);
+  const projectConfigPath = boundary.evidence.kind === "refused"
+    ? undefined
+    : projectConfigPathAtExactRoot(boundary.selectedProjectRoot);
   const consumeProviderQuota = arguments_.includes("--consume-provider-quota");
   let adapterIds: string[] = [];
   let adapterCommands: string[][] = [];
@@ -767,6 +778,7 @@ export async function fabricDoctor(
     const config = await loadFabricConfig({
       globalPath: selected.config,
       ...(selected.localConfig === undefined ? {} : { localPath: selected.localConfig }),
+      ...(projectConfigPath === undefined ? {} : { projectPath: projectConfigPath }),
       agentsHome: selected.productRoot,
     });
     adapterIds = config.adapterIds;
