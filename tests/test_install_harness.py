@@ -94,26 +94,77 @@ def run(platform: str, home: Path, *arguments: str, **extra_env):
 
 
 def copy_product_fixture(tmp_path: Path) -> Path:
-    """Copy the installer inputs so product and instance can be the same tree."""
+    """Make a small, provisioned product checkout for the fused install."""
     product = tmp_path / "product"
     product.mkdir()
-    for name in ("AGENTS.md", "HARNESS.md", "package.json"):
+    for name in ("AGENTS.md", "HARNESS.md", "package.json", "package-lock.json"):
         shutil.copy2(ROOT / name, product / name)
     for name in ("config", "scripts", "skills", "workflows"):
         shutil.copytree(ROOT / name, product / name, symlinks=True)
+    shutil.copytree(
+        ROOT / "runtime" / "agent-fabric",
+        product / "runtime" / "agent-fabric",
+        symlinks=True,
+        ignore=shutil.ignore_patterns("node_modules", ".npm-ci-attestation*"),
+    )
+    (product / "node_modules").symlink_to(ROOT / "node_modules", target_is_directory=True)
     (product / "config" / "installation.json").unlink()
+
+    subprocess.run(["git", "init", "-q"], cwd=product, check=True)
+    for command in (
+        ["git", "config", "user.name", "fused-install-test"],
+        ["git", "config", "user.email", "fused-install-test@example.invalid"],
+        ["git", "add", "."],
+        ["git", "commit", "-qm", "provisioned product fixture"],
+    ):
+        subprocess.run(command, cwd=product, check=True)
+
+    node = shutil.which("node")
+    assert node is not None, "node is required for a provisioned product fixture"
+    subprocess.run(
+        [
+            node,
+            str(product / "runtime/agent-fabric/scripts/write-npm-ci-attestation.mjs"),
+            str(product),
+        ],
+        cwd=product,
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
     return product
 
 
 def run_product(product: Path, platform: str, home: Path, *arguments: str):
-    env = os.environ.copy()
+    provider_bin = home / ".local/bin"
+    provider_bin.mkdir(parents=True, exist_ok=True)
+    for name in ("claude", "codex", "agy", "cursor-agent", "kiro-cli", "opencode"):
+        executable = provider_bin / name
+        executable.write_text("#!/bin/sh\nexit 0\n")
+        executable.chmod(0o700)
+
+    node = shutil.which("node")
+    assert node is not None, "node is required for the install harness"
+    env = {
+        "HOME": str(home),
+        "PATH": os.pathsep.join(
+            (
+                str(provider_bin),
+                str(Path(sys.executable).parent),
+                str(Path(node).parent),
+                "/opt/homebrew/bin",
+                os.defpath,
+            )
+        ),
+        "LANG": "C",
+        "LC_ALL": "C",
+    }
     env.update(
         {
-            "HOME": str(home),
             "AGENT_FABRIC_INSTANCE_ROOT": str(product),
             "PROVENANT_ALLOW_LINKED_WORKTREE_INSTALL": "1",
             "PROVENANT_BIN_DIR": str(home / ".local/bin"),
-            "PATH": f"{home / '.local/bin'}{os.pathsep}{os.environ['PATH']}",
         }
     )
     if platform == "claude":
