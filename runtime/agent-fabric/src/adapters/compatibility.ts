@@ -11,6 +11,7 @@ import { parse } from "yaml";
 import { FabricError } from "../errors.js";
 import { EXECUTABLE_RESOLUTION_VERSION } from "../domain/versions.js";
 import { isPrimaryAdapter, PRIMARY_ADAPTER_IDS } from "./primary-adapters.js";
+import type { ProviderIdentityPolicy } from "./provider-identity.js";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -121,7 +122,7 @@ export function mergeAdapterExecutableFailures(
     }));
 }
 
-const PROVIDER_IDENTITY_POLICY: Readonly<Record<string, string>> = {
+const PROVIDER_IDENTITY_POLICY: Readonly<Record<string, ProviderIdentityPolicy>> = {
   "claude-agent-sdk": "apple-designated",
   "codex-app-server": "apple-designated",
   agy: "apple-designated",
