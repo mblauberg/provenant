@@ -94,7 +94,13 @@ _COLLECTION_MARKERS = (
     "test file not found",
 )
 _SETUP_MARKERS = (
-    "fixture ",
+    # Quoted deliberately.  pytest dumps local variables on an assertion
+    # failure, so a test that merely uses a fixture prints something like
+    # `capsys = <_pytest.capture.CaptureFixture object ...>`, and a bare
+    # "fixture " matches the tail of "CaptureFixture".  That misread every
+    # genuine assertion red in a fixture-using test as a setup error.  The
+    # real pytest setup failure is `fixture 'name' not found`.
+    "fixture '",
     "setup failed",
     "teardown failed",
     "beforeall",
@@ -554,6 +560,30 @@ def _provision_protocol_build(
         )
 
 
+def _refresh_materialised_npm_attestation(cwd: Path) -> None:
+    writer = cwd / "runtime" / "agent-fabric" / "scripts" / "write-npm-ci-attestation.mjs"
+    if not writer.is_file():
+        return
+    try:
+        completed = subprocess.run(
+            ["node", str(writer), str(cwd)],
+            cwd=cwd,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            check=False,
+        )
+    except OSError as exc:
+        raise GateError(f"unable to refresh npm install attestation in materialised tree: {exc}") from exc
+    if completed.returncode != 0:
+        detail = (completed.stdout or "").strip()
+        suffix = f": {detail}" if detail else ""
+        raise GateError(
+            f"npm install attestation refresh failed in materialised tree "
+            f"(returncode={completed.returncode}){suffix}"
+        )
+
+
 def _run_suite(
     commands: list[str] | dict[str, str],
     cwd: Path,
@@ -561,9 +591,12 @@ def _run_suite(
     protocol_build_source_root: Path | None = None,
 ) -> list[CommandResult]:
     if protocol_build_source_root is None or not _uses_ts_command(commands, tests):
+        if _uses_ts_command(commands, tests):
+            _refresh_materialised_npm_attestation(cwd)
         _provision_protocol_build(commands, cwd, tests)
     else:
         with _current_npm_attestation_library(protocol_build_source_root, cwd):
+            _refresh_materialised_npm_attestation(cwd)
             _provision_protocol_build(commands, cwd, tests)
 
     def commands_for_target(target: str | None) -> list[str]:
@@ -704,7 +737,15 @@ def gate_revert_probe(
             except GateError as exc:
                 print(f"HUNK {index} path={hunk.path} status=INVALID reason={exc}")
                 return 1
-            results = _run_suite(commands, probe_root, tests)
+            try:
+                results = _run_suite(commands, probe_root, tests)
+            except GateError as exc:
+                # Reverting one hunk can leave a deliberately incomplete
+                # implementation that cannot reach the test process. That
+                # is inconclusive evidence, not a surviving hunk.
+                inconclusive.append(hunk)
+                print(f"HUNK {index} path={hunk.path} status=INCONCLUSIVE non-assertion red: {exc}")
+                continue
         for result in results:
             _print_output(result)
         # Three outcomes, and only one of them is a finding.

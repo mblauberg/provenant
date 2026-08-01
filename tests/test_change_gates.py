@@ -218,13 +218,20 @@ def test_ts_right_reason_red_reprovisions_untracked_install_artifacts(tmp_path, 
     (source / "runtime" / "agent-fabric" / ".npm-ci-attestation").write_text(
         "attested\n", encoding="utf-8"
     )
+    (source / "runtime" / "agent-fabric" / "scripts").mkdir(parents=True)
+    (source / "runtime" / "agent-fabric" / "scripts" / "write-npm-ci-attestation.mjs").write_text(
+        "import { writeFile } from 'node:fs/promises';\n"
+        "import { join } from 'node:path';\n"
+        "await writeFile(join(process.argv[2], 'runtime/agent-fabric/.npm-ci-attestation'), 'refreshed\\n');\n",
+        encoding="utf-8",
+    )
     build = source / "scripts" / "agent-fabric-protocol-build"
     build.write_text(
         "#!/bin/sh\n"
         "set -eu\n"
         "if test -L \"$AGENTS_HOME/node_modules\" && "
         "test -f \"$AGENTS_HOME/node_modules/installed-marker\" && "
-        "test -f \"$AGENTS_HOME/runtime/agent-fabric/.npm-ci-attestation\"; then\n"
+        "test \"$(cat \"$AGENTS_HOME/runtime/agent-fabric/.npm-ci-attestation\")\" = refreshed; then\n"
         "    : > \"$AGENTS_HOME/install-artifacts-provisioned\"\n"
         "fi\n",
         encoding="utf-8",
@@ -313,7 +320,8 @@ def test_materialised_install_provisioning_rejects_symlinked_attestation_parents
     source_attestation.write_text("attested\n", encoding="utf-8")
     (source / "tests" / "symlink.test.ts").write_text("current test\n", encoding="utf-8")
 
-    with pytest.raises(GateError, match="contains a symlink"):
+    raised = False
+    try:
         gate_right_reason_red(
             source,
             "HEAD",
@@ -324,6 +332,9 @@ def test_materialised_install_provisioning_rejects_symlinked_attestation_parents
             ["tests/symlink.test.ts"],
             tmp_path / "scratch",
         )
+    except GateError as error:
+        raised = "contains a symlink" in str(error)
+    assert raised
     assert not (outside / "agent-fabric" / ".npm-ci-attestation").exists()
 
 
