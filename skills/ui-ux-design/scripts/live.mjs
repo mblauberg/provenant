@@ -62,8 +62,19 @@ The agent should then:
 
   // 2. Start server (or reuse existing)
   const serverInfo = ensureServerRunning();
-  if (!serverInfo) {
-    console.log(JSON.stringify({ ok: false, error: 'server_start_failed' }));
+  if (!serverInfo || serverInfo.failure) {
+    const failure = serverInfo?.failure;
+    const reason = failure?.status === 'timeout'
+      ? 'server_start_timeout'
+      : failure?.status === 'refused'
+        ? 'server_start_refused'
+        : null;
+    console.log(JSON.stringify({
+      ok: false,
+      error: 'server_start_failed',
+      ...(failure ? { diagnostic: failure } : {}),
+      ...(reason ? { reason } : {}),
+    }));
     process.exit(1);
   }
 
@@ -206,16 +217,27 @@ function globToRegex(pattern) {
 // ---------------------------------------------------------------------------
 
 function runScript(name, args) {
+  return runScriptResult(name, args).stdout;
+}
+
+function runScriptResult(name, args) {
   const scriptPath = path.join(__dirname, name);
   try {
-    return execFileSync(process.execPath, [scriptPath, ...args], {
-      encoding: 'utf-8',
-      cwd: process.cwd(),
-      timeout: 15_000,
-    });
+    return {
+      stdout: execFileSync(process.execPath, [scriptPath, ...args], {
+        encoding: 'utf-8',
+        cwd: process.cwd(),
+        timeout: 15_000,
+      }),
+      stderr: '',
+    };
   } catch (err) {
-    // execFileSync throws on non-zero exit; return stdout if any
-    return err.stdout || err.message || '';
+    return {
+      // execFileSync throws on non-zero exit; return stdout and stderr so the
+      // live-server launcher can retain its structured startup diagnosis.
+      stdout: err.stdout || err.message || '',
+      stderr: err.stderr || '',
+    };
   }
 }
 
@@ -239,8 +261,12 @@ function ensureServerRunning() {
   } catch { /* no PID file */ }
 
   // Start a new server
-  const out = runScript('live-server.mjs', ['--background']);
-  return safeParse(out);
+  const result = runScriptResult('live-server.mjs', ['--background']);
+  const info = safeParse(result.stdout);
+  if (info) return info;
+  const failure = safeParse(result.stderr);
+  if (failure) return { failure };
+  return null;
 }
 
 // ---------------------------------------------------------------------------

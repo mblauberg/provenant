@@ -33,6 +33,11 @@ import {
   resolveDesignSidecarPath,
   writeLiveServerInfo,
 } from './impeccable-paths.mjs';
+import {
+  classifyStartupOutcome,
+  LIVE_SERVER_STARTUP_TIMEOUT_MS,
+  observeStartup,
+} from './live-server-startup.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // PRODUCT.md / DESIGN.md live wherever load-context.mjs resolves. The generated
@@ -952,19 +957,45 @@ if (args.includes('stop')) {
 // simple (no shell backgrounding or chained commands).
 if (args.includes('--background')) {
   const childArgs = args.filter(a => a !== '--background');
+  const startedAt = Date.now();
+  const previousInfo = readLiveServerInfo(process.cwd())?.info || null;
   const child = spawn(process.execPath, [fileURLToPath(import.meta.url), ...childArgs], {
     detached: true,
     stdio: 'ignore',
     cwd: process.cwd(),
   });
+  let childExit = null;
+  child.once('exit', (code, signal) => {
+    childExit = { code, signal };
+  });
+  child.once('error', (error) => {
+    childExit = { code: null, signal: null, error: { code: error.code, message: error.message } };
+  });
   child.unref();
 
   // Poll for the PID file (the child writes it once the HTTP server is listening).
-  const deadline = Date.now() + 10_000;
+  const deadline = startedAt + LIVE_SERVER_STARTUP_TIMEOUT_MS;
   while (Date.now() < deadline) {
+    if (childExit) {
+      const outcome = classifyStartupOutcome({
+        exit: childExit,
+        observation: observeStartup({
+          startedAt,
+          observedAt: Date.now(),
+        }),
+      });
+      console.error(JSON.stringify({
+        ...outcome,
+        message: 'Live server refused to start; check bind or startup errors.',
+      }));
+      process.exit(1);
+    }
     try {
       const { info } = readLiveServerInfo(process.cwd()) || {};
-      if (info.pid !== process.pid) {
+      const replacedPreviousRecord = !previousInfo
+        || info.pid !== previousInfo.pid
+        || info.token !== previousInfo.token;
+      if (info.pid !== process.pid && replacedPreviousRecord) {
         // Output JSON so the agent can read port + token from stdout.
         console.log(JSON.stringify(info));
         process.exit(0);
@@ -972,7 +1003,16 @@ if (args.includes('--background')) {
     } catch { /* not ready yet */ }
     await new Promise(r => setTimeout(r, 200));
   }
-  console.error('Timed out waiting for live server to start.');
+  const outcome = classifyStartupOutcome({
+    observation: observeStartup({
+      startedAt,
+      observedAt: Date.now(),
+    }),
+  });
+  console.error(JSON.stringify({
+    ...outcome,
+    message: 'Timed out waiting for live server to start.',
+  }));
   process.exit(1);
 }
 
