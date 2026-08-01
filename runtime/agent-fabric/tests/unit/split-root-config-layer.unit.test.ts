@@ -245,16 +245,21 @@ describe("split-layout startup path binding", () => {
   it("binds the global layer, compatibility and the token to the product root", async () => {
     const split = await makeSplit("binding");
     await writeYamlishJson(split.localPath, { schemaVersion: 1 });
+    const projectRoot = join(split.root, "project");
+    const projectConfigPath = join(projectRoot, ".provenant", "agent-fabric.yaml");
+    await writeYamlishJson(projectConfigPath, { schemaVersion: 1, limits: { maximumConcurrentProviderTurns: 4 } });
 
     const options = defaultDaemonStartOptions(paths, {
       productRootFlag: split.productRoot,
       instanceRootFlag: split.instanceRoot,
+      projectRoot,
       environment: {},
     });
 
     expect(options.configuration).toEqual({
       globalConfigPath: split.globalPath,
       localConfigPath: split.localPath,
+      projectConfigPath,
       compatibilityPath: join(split.productRoot, "config", "adapter-compatibility.yaml"),
       compatibilitySchemaPath: join(
         split.productRoot,

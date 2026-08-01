@@ -62,6 +62,21 @@ describe("project activation front doors", () => {
     expect(result.message).toContain("Trusted project root");
   });
 
+  it("activates a nested non-Git directory exactly without inheriting a parent marker", async () => {
+    const value = await fixture();
+    const requested = join(value.project, "src");
+    await mkdir(requested, { recursive: true, mode: 0o700 });
+    await mkdir(join(value.project, ".provenant"), { mode: 0o700 });
+    await writeFile(join(value.project, ".provenant", "agent-fabric.yaml"), "schemaVersion: 1\n");
+
+    await expect(runProjectActivate(requested, value.paths)).resolves.toMatchObject({
+      requestedPath: await realpath(requested),
+      canonicalRepositoryRoot: await realpath(requested),
+      trustedRoot: await realpath(requested),
+      isGitRepository: false,
+    });
+  });
+
   it("reports an already trusted exact root as a clean no-op", async () => {
     const value = await fixture();
     const first = await runProjectActivate(value.project, value.paths);

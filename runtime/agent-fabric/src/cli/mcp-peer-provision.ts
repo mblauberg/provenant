@@ -433,7 +433,7 @@ export async function provisionMcpPeerSeats(
       productRoot,
     );
   }
-  const daemonHandle = await startMcpProvisionDaemon(paths);
+  const daemonHandle = await startMcpProvisionDaemon(paths, process.env, request.project);
   const convergenceDeadline = Date.now() + ROSTER_CONVERGENCE_TIMEOUT_MS;
   try {
     while (true) {

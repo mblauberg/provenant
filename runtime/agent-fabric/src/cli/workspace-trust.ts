@@ -1,11 +1,22 @@
 import { createHash, randomBytes } from "node:crypto";
 import Database from "better-sqlite3";
 import { constants } from "node:fs";
-import { chmod, lstat, open, readFile, readdir, realpath, rename, rm } from "node:fs/promises";
+import { chmod, lstat, open, realpath, rename, rm } from "node:fs/promises";
 import { homedir } from "node:os";
-import { basename, dirname, isAbsolute, join, parse, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, parse, resolve, sep } from "node:path";
 
 import { ensureFabricPaths, type FabricPaths } from "./paths.js";
+import {
+  looksLikeRepositoryCollection,
+  repositoryCollectionChildren,
+  resolveProjectBoundary,
+} from "./project-boundary.js";
+
+export {
+  looksLikeRepositoryCollection,
+  nearestGitWorkspace,
+  repositoryCollectionChildren,
+} from "./project-boundary.js";
 
 const PROFILE_PATTERN = /^[a-z][a-z0-9-]{0,63}$/u;
 const DEFAULT_PROFILES = ["headless", "observed", "interactive", "paired-visible", "paired-observed"];
@@ -33,146 +44,6 @@ export class WorkspaceTrustError extends Error {
     super(message, options);
     this.name = "WorkspaceTrustError";
   }
-}
-
-type GitWorkspace = Readonly<{ root: string; linkedWorktree: boolean }>;
-
-function isMissingPathError(error: unknown): boolean {
-  return typeof error === "object" && error !== null && "code" in error &&
-    (error.code === "ENOENT" || error.code === "ENOTDIR");
-}
-
-function hasErrorCode(error: unknown, code: string): boolean {
-  return typeof error === "object" && error !== null && "code" in error && error.code === code;
-}
-
-// Gitfiles also identify submodules, so the file alone does not prove a linked
-// worktree. Only its canonical gitdir under another repository's
-// `.git/worktrees/` boundary activates the user-only exception guidance.
-function pointsToLinkedWorktree(gitDirectory: string, workspaceRoot: string): boolean {
-  let candidate = gitDirectory;
-  for (;;) {
-    const parent = dirname(candidate);
-    if (basename(parent) === "worktrees" && basename(dirname(parent)) === ".git") {
-      return dirname(dirname(parent)) !== workspaceRoot;
-    }
-    if (parent === candidate) return false;
-    candidate = parent;
-  }
-}
-
-export async function nearestGitWorkspace(canonicalRoot: string): Promise<GitWorkspace | null> {
-  let candidate = canonicalRoot;
-  for (;;) {
-    const filesystemRoot = candidate === parse(candidate).root;
-    let marker: Awaited<ReturnType<typeof lstat>>;
-    try {
-      marker = await lstat(join(candidate, ".git"));
-    } catch (error: unknown) {
-      // macOS may report EINVAL rather than ENOENT for `/.git` in a sandbox.
-      // It is a missing root marker only at this terminal probe; the same
-      // error anywhere else leaves the boundary indeterminate and fail-closed.
-      if (!isMissingPathError(error) && !(filesystemRoot && hasErrorCode(error, "EINVAL"))) throw error;
-      if (filesystemRoot) return null;
-      candidate = dirname(candidate);
-      continue;
-    }
-    if (marker.isDirectory()) return { root: candidate, linkedWorktree: false };
-    if (marker.isFile()) {
-      const match = /^gitdir:\s*(?<path>.+?)\s*$/u.exec(await readFile(join(candidate, ".git"), "utf8"));
-      const gitDirectory = match?.groups?.path;
-      if (gitDirectory === undefined) throw new Error("Git workspace marker is not a gitdir file");
-      const canonicalGitDirectory = await realpath(resolve(candidate, gitDirectory));
-      return {
-        root: candidate,
-        linkedWorktree: pointsToLinkedWorktree(canonicalGitDirectory, candidate),
-      };
-    }
-    throw new Error("Git workspace marker must be a directory or regular file");
-  }
-}
-
-export async function repositoryCollectionChildren(canonicalRoot: string): Promise<string[]> {
-  const children = await readdir(canonicalRoot, { withFileTypes: true });
-  const repositories = new Set<string>();
-  for (const child of children) {
-    try {
-      const canonicalChild = await realpath(join(canonicalRoot, child.name));
-      if (!(await lstat(canonicalChild)).isDirectory()) continue;
-      const marker = await lstat(join(canonicalChild, ".git"));
-      if (marker.isDirectory() || marker.isFile()) repositories.add(canonicalChild);
-    } catch (error: unknown) {
-      if (!isMissingPathError(error)) throw error;
-    }
-  }
-  return [...repositories];
-}
-
-const WORKSPACE_FILE_MARKERS = new Set([
-  "AGENTS.md",
-  "CLAUDE.md",
-  "package.json",
-  "pyproject.toml",
-  "Cargo.toml",
-  "go.mod",
-]);
-
-function workspaceMarkerKind(name: string): "file" | "directory" | null {
-  if (name === ".claude") return "directory";
-  if (WORKSPACE_FILE_MARKERS.has(name) || name.endsWith(".code-workspace")) return "file";
-  return null;
-}
-
-function isCanonicalDescendant(canonicalRoot: string, canonicalPath: string): boolean {
-  const relativePath = relative(canonicalRoot, canonicalPath);
-  return relativePath === "" || (relativePath !== ".." &&
-    !relativePath.startsWith(`..${sep}`) && !isAbsolute(relativePath));
-}
-
-async function isRepositoryRoot(canonicalPath: string): Promise<boolean> {
-  try {
-    const marker = await lstat(join(canonicalPath, ".git"));
-    return marker.isDirectory() || marker.isFile();
-  } catch (error: unknown) {
-    if (isMissingPathError(error)) return false;
-    throw error;
-  }
-}
-
-async function hasWorkspaceMarker(canonicalRoot: string): Promise<boolean> {
-  const children = await readdir(canonicalRoot, { withFileTypes: true });
-  for (const child of children) {
-    const kind = workspaceMarkerKind(child.name);
-    if (kind === null) continue;
-    try {
-      // Resolve before inspecting so a project marker symlinked into a child
-      // repository is treated the same as a marker stored at this root.
-      const resolved = await realpath(join(canonicalRoot, child.name));
-      if (resolved === canonicalRoot && child.isSymbolicLink()) continue;
-      if (!isCanonicalDescendant(canonicalRoot, resolved)) continue;
-      const marker = await lstat(resolved);
-      // A directory marker that is itself a repository root is a sibling
-      // clone, not a project signal. Anyone able to place a repository here
-      // could otherwise name it `.claude` and turn the collection guard off
-      // for every other repository beside it.
-      if (kind === "directory" && await isRepositoryRoot(resolved)) continue;
-      if ((kind === "file" && marker.isFile()) || (kind === "directory" && marker.isDirectory())) return true;
-    } catch (error: unknown) {
-      if (!isMissingPathError(error)) throw error;
-    }
-  }
-  return false;
-}
-
-// The collection heuristic is intentionally shallow: direct repository
-// children show that trusting this directory would grant sibling authority,
-// while recursively searching would misclassify an ordinary project that
-// happens to contain nested fixtures or vendored repositories. A conventional
-// marker at this exact root is an explicit project signal, even when the
-// project deliberately composes several repositories.
-export async function looksLikeRepositoryCollection(canonicalRoot: string): Promise<boolean> {
-  if ((await repositoryCollectionChildren(canonicalRoot)).length <= 1) return false;
-  return !await hasWorkspaceMarker(canonicalRoot);
 }
 
 type WorkspaceTrustRegistry = { schemaVersion: 1; entries: WorkspaceTrustEntry[] };
@@ -379,8 +250,10 @@ function trustRecordDigest(entry: WorkspaceTrustEntry): `sha256:${string}` {
 
 async function collectionBoundarySatisfied(canonicalRoot: string): Promise<boolean> {
   try {
-    const workspace = await nearestGitWorkspace(canonicalRoot);
-    return workspace !== null || !await looksLikeRepositoryCollection(canonicalRoot);
+    const boundary = await resolveProjectBoundary(canonicalRoot, { selection: "exact" });
+    if (boundary.evidence.kind === "refused") return false;
+    if (boundary.evidence.kind !== "ambiguous" || boundary.evidence.reason !== "repository-collection") return true;
+    return !await looksLikeRepositoryCollection(canonicalRoot);
   } catch (error: unknown) {
     if (errorCode(error) === "ENOENT") return false;
     throw error;
