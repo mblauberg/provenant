@@ -36,18 +36,51 @@ scripts/worktree create NAME --human-authorised --detach REV
 scripts/worktree create NAME --human-authorised --new-branch BRANCH \
   --branch-authorised --start-point REV
 scripts/worktree create NAME --human-authorised --existing-branch BRANCH
+scripts/worktree provision NAME --human-authorised --from-step protocol-build
 scripts/worktree list
 scripts/worktree check
 scripts/worktree remove NAME --human-authorised
 ```
 
 The helper resolves the primary checkout through Git's common directory, checks
-the name and protected root, and refuses unsafe creation/removal. A create
-receipt emits `primary_root`, `worktree_root`, `common_git_dir`, `head_revision`
-and branch/detached state. It does not emit the supplied repo path as
-`repo_root`; record that path and the authority provenance separately when the
-run contract requires them. A removal receipt emits only `status`, `name` and
-`primary_root`.
+the name and protected root, and refuses unsafe creation/removal. After an
+authorised create it runs the repository's existing
+`scripts/install-agent-fabric-dependencies` and
+`scripts/agent-fabric-protocol-build` commands in order. A successful create
+receipt has `status: ready`, includes `primary_root`, `worktree_root`,
+`common_git_dir`, `head_revision`, branch/detached state and
+`provisioned_steps`. If either command fails, the receipt has `status: failed`,
+the exact `failed_step`, command, exit code and bounded non-secret diagnostic
+summaries; the
+worktree is left in place for inspection and no later step runs. It does not
+pass the caller's ambient environment to those commands: only the narrow
+execution, temporary-directory, CI, registry and proxy variables are copied,
+with `AGENTS_HOME` bound to the target. It does not
+emit the supplied repo path as `repo_root`; record that path and the authority
+provenance separately when the run contract requires them. A removal receipt
+emits only `status`, `name` and `primary_root`.
+
+To retry a failed bootstrap, use `provision` on the registered target with
+explicit human authorisation. It requires a clean worktree and defaults to
+rerunning dependency installation followed by the protocol build; pass
+`--from-step protocol-build` when the failed receipt proves installation
+already succeeded and the worktree still has its install attestation. It
+returns the same ready or failed-step receipt, distinguishing executed and
+assumed steps, and never reuses an occupied create target. Provisioning holds
+the target's exclusive worktree lock for its clean check and both commands.
+Create, provision and remove also take a non-blocking name-specific admission
+reservation under Git's common directory at
+`worktree-admission/NAME.lock`. Same-name requests exclude each other, while
+different names may overlap. It is acquired before target admission and
+registration checks, and create holds it through `git worktree add` and the
+initial provisioning handoff; provision and remove acquire it in the same
+order before their target lock.
+
+Every expected create, provision or remove policy or Git failure emits a
+typed `status: failed` receipt with `operation`, known-or-null root metadata,
+`failed_step`, command and exit-code fields, and bounded redacted `stdout` and
+`stderr`. Policy failures have no child command or exit code. A successful
+remove receipt contains only `status`, `name` and `primary_root`.
 
 ## Ownership and cleanup
 
