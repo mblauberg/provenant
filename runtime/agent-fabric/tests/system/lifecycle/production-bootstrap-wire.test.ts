@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import Database from "better-sqlite3";
 import type { Sha256Digest } from "@local/agent-fabric-protocol";
 
@@ -215,6 +215,7 @@ async function startBusyWalWriter(
 }
 
 afterEach(async () => {
+  vi.unstubAllEnvs();
   await Promise.allSettled(handles.splice(0).reverse().map(async (handle) => handle.stop()));
   await Promise.allSettled(roots.splice(0).map(async (root) => rm(root, { recursive: true, force: true })));
 });
@@ -720,6 +721,7 @@ describe("production daemon bootstrap wiring", () => {
   });
 
   it("does not run cutover cleanup when concurrent inspection writes exhaust the retry bound", async () => {
+    vi.stubEnv("AGENT_FABRIC_TEST_DATABASE_INSPECTION_ATTEMPTS", "1");
     const root = await mkdtemp(join(tmpdir(), "fabric-production-inspection-race-"));
     roots.push(root);
     const databaseDirectory = join(root, "database");
@@ -735,31 +737,32 @@ describe("production daemon bootstrap wiring", () => {
     `).run();
     seed.close();
     const before = await readFile(databasePath);
-    const writer = await startBusyWalWriter(databasePath, stateDirectory);
+    vi.stubEnv("AGENT_FABRIC_TEST_DATABASE_INSPECTION_RACE_PATH", databasePath);
+    console.error("DEBUG issue 603 env", process.env.NODE_ENV, process.env.AGENT_FABRIC_TEST_DATABASE_INSPECTION_ATTEMPTS, process.env.AGENT_FABRIC_TEST_DATABASE_INSPECTION_RACE_PATH, databasePath);
+    let failure: unknown;
     try {
-      await expect(startFabricDaemon({
+      await startFabricDaemon({
         databasePath,
         stateDirectory,
         runtimeDirectory,
         socketPath: join(runtimeDirectory, "fabric.sock"),
         workspaceRoots: [root],
-      })).rejects.toMatchObject({
-        code: "DATABASE_INSPECTION_UNSTABLE",
-        preserved: false,
       });
-      await expect(lstat(stateDirectory)).resolves.toMatchObject({ mode: expect.any(Number) });
-      await expect(lstat(runtimeDirectory)).resolves.toMatchObject({ mode: expect.any(Number) });
-      expect(await readdir(runtimeDirectory)).toEqual(expect.arrayContaining([
-        "daemon-election.attempts.jsonl",
-        "daemon-election.lease.json",
-      ]));
-      expect((await readFile(databasePath)).byteLength).toBe(before.byteLength);
-    } finally {
-      if (writer.exitCode === null && writer.signalCode === null) {
-        writer.kill("SIGTERM");
-        await new Promise<void>((resolvePromise) => writer.once("exit", () => resolvePromise()));
-      }
+    } catch (error: unknown) {
+      failure = error;
+      console.error("DEBUG issue 603 bootstrap failure", error);
     }
+    expect(failure).toMatchObject({
+      code: "DATABASE_INSPECTION_UNSTABLE",
+      preserved: false,
+    });
+    await expect(lstat(stateDirectory)).resolves.toMatchObject({ mode: expect.any(Number) });
+    await expect(lstat(runtimeDirectory)).resolves.toMatchObject({ mode: expect.any(Number) });
+    expect(await readdir(runtimeDirectory)).toEqual(expect.arrayContaining([
+      "daemon-election.attempts.jsonl",
+      "daemon-election.lease.json",
+    ]));
+    expect((await readFile(databasePath)).byteLength).toBe(before.byteLength);
   });
 
   it("releases a bootstrap owner's local process handles without stopping the daemon", async () => {

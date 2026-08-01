@@ -11,6 +11,8 @@ import {
   openSync,
   readFileSync,
   rmSync,
+  statSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -506,6 +508,7 @@ function createPrivateDatabaseClone(
         writeFileSync(`${clonePath}${suffix}`, sidecar.bytes, { flag: "wx", mode: 0o600 });
       }
     }
+    injectTestInspectionRace(databasePath);
     assertSameSourceSet(sources, readStableSourceSet(databasePath, RECHECKED_SOURCE));
     return { cloneDirectory, clonePath, sources };
   } catch (error: unknown) {
@@ -516,6 +519,28 @@ function createPrivateDatabaseClone(
 
 const DATABASE_INSPECTION_ATTEMPTS = 5;
 const DATABASE_INSPECTION_BACKOFF_MS = [10, 20, 40, 80] as const;
+
+function databaseInspectionAttempts(): number {
+  const configured = process.env.NODE_ENV === "test"
+    ? Number.parseInt(process.env.AGENT_FABRIC_TEST_DATABASE_INSPECTION_ATTEMPTS ?? "", 10)
+    : Number.NaN;
+  return Number.isSafeInteger(configured) && configured > 0
+    ? configured
+    : DATABASE_INSPECTION_ATTEMPTS;
+}
+
+function injectTestInspectionRace(databasePath: string): void {
+  console.error("DEBUG migrations race hook", process.env.NODE_ENV, process.env.AGENT_FABRIC_TEST_DATABASE_INSPECTION_RACE_PATH, databasePath);
+  if (
+    process.env.NODE_ENV !== "test" ||
+    process.env.AGENT_FABRIC_TEST_DATABASE_INSPECTION_RACE_PATH !== databasePath
+  ) return;
+  const current = statSync(databasePath);
+  const nextTimestamp = new Date(current.mtimeMs + 1_000);
+  // Test-only metadata mutation makes the source recheck fail without a
+  // competing writer process or an elapsed-time race.
+  utimesSync(databasePath, nextTimestamp, nextTimestamp);
+}
 
 /**
  * Blocks the calling thread for the given delay.
@@ -537,14 +562,15 @@ function sleepSync(milliseconds: number): void {
  * what actually lets a busy-but-healthy database converge.
  */
 function retryUnstableDatabaseInspection<T>(operation: () => T): T {
-  for (let attempt = 1; attempt <= DATABASE_INSPECTION_ATTEMPTS; attempt += 1) {
+  const attempts = databaseInspectionAttempts();
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
     try {
       return operation();
     } catch (error: unknown) {
       if (
         !(error instanceof SchemaBaselineError) ||
         error.code !== "DATABASE_INSPECTION_UNSTABLE" ||
-        attempt === DATABASE_INSPECTION_ATTEMPTS
+        attempt === attempts
       ) throw error;
       const backoff = DATABASE_INSPECTION_BACKOFF_MS[attempt - 1];
       if (backoff !== undefined) sleepSync(backoff);
