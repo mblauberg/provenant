@@ -123,6 +123,54 @@ def test_legacy_nonzero_exit_is_returned_without_check_true_raising(tmp_path):
     assert result.returncode == 3
 
 
+def test_legacy_pytest_assertion_with_fixture_repr_is_assertion(tmp_path):
+    test_file = tmp_path / "test_fixture_assertion.py"
+    test_file.write_text(
+        "def test_fixture_assertion(capsys):\n"
+        "    assert False\n",
+        encoding="utf-8",
+    )
+
+    result = run_command("pytest {test} -q", tmp_path, str(test_file))
+
+    assert "CaptureFixture" in result.output
+    assert result.classification is FailureClass.ASSERTION
+
+
+def test_legacy_pytest_missing_fixture_is_setup(tmp_path):
+    test_file = tmp_path / "test_missing_fixture.py"
+    test_file.write_text(
+        "def test_missing_fixture(missing_fixture):\n"
+        "    assert missing_fixture\n",
+        encoding="utf-8",
+    )
+
+    result = run_command("pytest {test} -q", tmp_path, str(test_file))
+
+    assert "fixture 'missing_fixture' not found" in result.output
+    assert result.classification is FailureClass.SETUP
+
+
+def test_legacy_pytest_fixture_setup_failure_is_setup(tmp_path):
+    test_file = tmp_path / "test_fixture_setup.py"
+    test_file.write_text(
+        "import pytest\n"
+        "\n"
+        "@pytest.fixture\n"
+        "def broken_fixture():\n"
+        "    raise RuntimeError('boom')\n"
+        "\n"
+        "def test_fixture_setup(broken_fixture):\n"
+        "    assert broken_fixture\n",
+        encoding="utf-8",
+    )
+
+    result = run_command("pytest {test} -q", tmp_path, str(test_file))
+
+    assert "ERROR at setup of test_fixture_setup" in result.output
+    assert result.classification is FailureClass.SETUP
+
+
 def test_run_command_replaces_only_the_test_placeholder(tmp_path):
     target = sys.executable
     code = f"import sys; assert sys.argv[1] == {target!r}"

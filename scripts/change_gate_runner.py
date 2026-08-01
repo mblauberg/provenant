@@ -92,7 +92,8 @@ _COLLECTION_MARKERS = (
     "test file not found",
 )
 _SETUP_MARKERS = (
-    "fixture ",
+    "fixture '",
+    "error at setup of ",
     "setup failed",
     "teardown failed",
     "beforeall",
