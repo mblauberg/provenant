@@ -186,7 +186,7 @@ function shellQuote(value: string): string {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
 
-export type GitWorkspace = Readonly<{ root: string; linkedWorktree: boolean }>;
+type GitWorkspace = Readonly<{ root: string; linkedWorktree: boolean }>;
 
 function isMissingPathError(error: unknown): boolean {
   return typeof error === "object" && error !== null && "code" in error &&
