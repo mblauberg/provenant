@@ -22,6 +22,14 @@ const compatibilitySchemaSource = fileURLToPath(new URL("../../../schemas/adapte
 const roots: string[] = [];
 const daemonPids = new Set<number>();
 
+function withFixtureRoots(environment: NodeJS.ProcessEnv, fixtureRoot: string): NodeJS.ProcessEnv {
+  return {
+    ...environment,
+    AGENT_FABRIC_PRODUCT_ROOT: fixtureRoot,
+    AGENT_FABRIC_INSTANCE_ROOT: fixtureRoot,
+  };
+}
+
 afterEach(async () => {
   await Promise.allSettled([...daemonPids].map(async (pid) => {
     await terminateTrackedTestProcess(pid);
@@ -74,12 +82,12 @@ async function fixture(): Promise<Fixture> {
     stateDirectory,
     runtimeDirectory,
     databasePath: join(stateDirectory, "fabric-v1.sqlite3"),
-    environment: {
+    environment: withFixtureRoots({
       ...process.env,
       AGENTS_HOME: agentsHome,
       AGENT_FABRIC_STATE_DIRECTORY: stateDirectory,
       AGENT_FABRIC_RUNTIME_DIRECTORY: runtimeDirectory,
-    },
+    }, agentsHome),
   };
 }
 

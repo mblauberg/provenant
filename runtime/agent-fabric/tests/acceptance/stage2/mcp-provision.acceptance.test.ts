@@ -17,6 +17,14 @@ import { terminateTrackedTestProcess, trackTestProcess } from "../../support/tes
 const roots: string[] = [];
 const daemons: FabricDaemonHandle[] = [];
 const daemonPids = new Set<number>();
+
+function withFixtureRoots(environment: NodeJS.ProcessEnv, fixtureRoot: string): NodeJS.ProcessEnv {
+  return {
+    ...environment,
+    AGENT_FABRIC_PRODUCT_ROOT: fixtureRoot,
+    AGENT_FABRIC_INSTANCE_ROOT: fixtureRoot,
+  };
+}
 const compatibilitySource = fileURLToPath(new URL("../../../../../config/adapter-compatibility.yaml", import.meta.url));
 const compatibilitySchemaSource = fileURLToPath(new URL("../../../schemas/adapter-compatibility.schema.json", import.meta.url));
 
@@ -152,11 +160,12 @@ async function fixture(options: { broaderRoot?: boolean; daemonIdle?: boolean } 
   }
 
   return {
-    environment: {
+    environment: withFixtureRoots({
+      ...process.env,
       AGENTS_HOME: agentsHome,
       AGENT_FABRIC_STATE_DIRECTORY: stateDirectory,
       AGENT_FABRIC_RUNTIME_DIRECTORY: runtimeDirectory,
-    },
+    }, agentsHome),
     projectPath,
     stateDirectory,
     databasePath,
