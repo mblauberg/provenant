@@ -1,11 +1,12 @@
 import { createHash, randomBytes } from "node:crypto";
 import Database from "better-sqlite3";
 import { constants } from "node:fs";
-import { chmod, lstat, open, realpath, rename, rm } from "node:fs/promises";
+import { chmod, lstat, open, readdir, realpath, rename, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, parse, resolve, sep } from "node:path";
 
 import { ensureFabricPaths, type FabricPaths } from "./paths.js";
+import { looksLikeRepositoryCollection } from "./mcp-bootstrap.js";
 
 const PROFILE_PATTERN = /^[a-z][a-z0-9-]{0,63}$/u;
 const DEFAULT_PROFILES = ["headless", "observed", "interactive", "paired-visible", "paired-observed"];
@@ -158,7 +159,16 @@ async function canonicalWorkspace(path: string): Promise<{ canonicalPath: string
   const canonicalInfo = await lstat(canonical);
   if (!canonicalInfo.isDirectory() || canonicalInfo.isSymbolicLink()) throw new Error("trusted workspace identity is unsafe");
   const home = await realpath(homedir());
-  if (canonical === parse(canonical).root || canonical === home) throw new Error("workspace trust refuses filesystem-root or home-wide authority");
+  if (canonical === parse(canonical).root) {
+    throw new Error(
+      `workspace trust refuses ${canonical}: the filesystem root can never be trusted because root-wide authority is forbidden by policy. Run provenant fabric workspace trust /path/to/exact-repository instead`,
+    );
+  }
+  if (canonical === home) {
+    throw new Error(
+      `workspace trust refuses ${canonical}: this exact path can never be trusted because home-wide authority is forbidden by policy. Run provenant fabric workspace trust /path/to/exact-repository instead`,
+    );
+  }
   return { canonicalPath: canonical, device: canonicalInfo.dev, inode: canonicalInfo.ino };
 }
 
@@ -224,6 +234,21 @@ function option(arguments_: string[], name: string): string | undefined {
   const value = index === -1 ? undefined : arguments_[index + 1];
   if (index !== -1 && (value === undefined || value.startsWith("--"))) throw new Error(`${name} requires a value`);
   return value;
+}
+
+async function repositoryCollectionChildren(canonicalRoot: string): Promise<string[]> {
+  const children = await readdir(canonicalRoot, { withFileTypes: true });
+  const repositories: string[] = [];
+  for (const child of children) {
+    if (!child.isDirectory()) continue;
+    try {
+      const marker = await lstat(join(canonicalRoot, child.name, ".git"));
+      if (marker.isDirectory() || marker.isFile()) repositories.push(join(canonicalRoot, child.name));
+    } catch (error: unknown) {
+      if (errorCode(error) !== "ENOENT") throw error;
+    }
+  }
+  return repositories;
 }
 
 export async function trustedWorkspaceRoots(input: {
@@ -356,6 +381,13 @@ export async function runWorkspaceTrust(
     if (currentEntry === undefined || !currentEntryIdentityMatches) {
       const broadened = current.entries.find((item) => item.canonicalPath.startsWith(`${canonicalPath}${sep}`));
       if (broadened !== undefined) throw new Error(`workspace trust refuses ancestor broadening over ${broadened.canonicalPath}`);
+    }
+    if (await looksLikeRepositoryCollection(canonicalPath)) {
+      const repositories = await repositoryCollectionChildren(canonicalPath);
+      const commands = repositories.map((repository) => `provenant fabric workspace trust ${repository}`).join("; ");
+      throw new Error(
+        `workspace trust refuses ${canonicalPath} because it is a repository collection; trust an exact repository root instead: ${repositories.join(", ")}. Run ${commands}`,
+      );
     }
     const allowedProfiles = requestedProfiles ?? currentEntry?.allowedProfiles ?? DEFAULT_PROFILES;
     const currentExpiryIsLive = currentEntry?.expiresAt !== undefined &&
