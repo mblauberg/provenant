@@ -1,4 +1,4 @@
-import { access, chmod, mkdir, mkdtemp, readFile, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { access, chmod, lstat, mkdir, mkdtemp, readFile, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -7,7 +7,7 @@ import { execFile } from "node:child_process";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { runProjectActivate, runProjectStatus, resolveProjectRoots } from "../../src/cli/project.ts";
-import { runWorkspaceTrust } from "../../src/cli/workspace-trust.ts";
+import { runWorkspaceTrust, trustedWorkspaceIdentity } from "../../src/cli/workspace-trust.ts";
 import { projectKey } from "../../src/cli/seat-store.ts";
 import { parseCliJson, runSourceCli } from "../support/cli-process.ts";
 
@@ -172,6 +172,56 @@ describe("project activation front doors", () => {
       trusted: false,
       trustedRoot: null,
       missingDependencies: expect.arrayContaining(["workspace trust"]),
+    });
+  });
+
+  it("reports a trusted root that becomes an unmarked repository collection as untrusted status", async () => {
+    const value = await fixture();
+    await runProjectActivate(value.project, value.paths);
+    await mkdir(join(value.project, "first-repo", ".git"), { recursive: true, mode: 0o700 });
+    await mkdir(join(value.project, "second-repo", ".git"), { recursive: true, mode: 0o700 });
+
+    await expect(runProjectStatus(value.project, value.paths)).resolves.toMatchObject({
+      status: "untrusted",
+      trusted: false,
+      trustedRoot: null,
+      fabricReady: false,
+      missingDependencies: expect.arrayContaining(["workspace trust"]),
+    });
+  });
+
+  it("keeps a seeded legacy trust record aligned with project custody digest", async () => {
+    const value = await fixture();
+    const now = new Date("2026-07-11T04:00:00.000Z");
+    const canonicalPath = await realpath(value.project);
+    const identity = await lstat(canonicalPath);
+    const registryPath = join(value.paths.stateDirectory, "trusted-workspaces.json");
+    await writeFile(registryPath, `${JSON.stringify({
+      schemaVersion: 1,
+      entries: [{
+        canonicalPath,
+        approvedAt: now.toISOString(),
+        approvedBy: "local-operator",
+        device: identity.dev,
+        inode: identity.ino,
+        allowedProfiles: ["headless"],
+      }],
+    }, null, 2)}\n`);
+    await chmod(registryPath, 0o600);
+    const direct = await runProjectStatus(value.project, value.paths);
+    const identityResult = await trustedWorkspaceIdentity({
+      stateDirectory: value.paths.stateDirectory,
+      canonicalRoot: value.project,
+    });
+
+    expect(direct).toMatchObject({
+      status: "trusted",
+      trusted: true,
+      trustedRoot: canonicalPath,
+      trustRecordDigest: identityResult.trustRecordDigest,
+      fabricReady: false,
+      fabricReadiness: "bootstrap a Fabric seat after activation",
+      missingDependencies: ["active Fabric seat"],
     });
   });
 

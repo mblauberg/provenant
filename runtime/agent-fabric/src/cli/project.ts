@@ -93,6 +93,9 @@ export async function resolveProjectRoots(path = process.cwd()): Promise<Project
 }
 
 function isTrustStatusError(error: unknown): boolean {
+  if (typeof error === "object" && error !== null && "code" in error && error.code === "WORKSPACE_NOT_TRUSTED") {
+    return true;
+  }
   const message = errorDetail(error);
   return [
     "workspace root is not trusted",

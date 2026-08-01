@@ -1,16 +1,11 @@
 import { createHash, randomBytes } from "node:crypto";
 import Database from "better-sqlite3";
 import { constants } from "node:fs";
-import { chmod, lstat, open, realpath, rename, rm } from "node:fs/promises";
+import { chmod, lstat, open, readFile, readdir, realpath, rename, rm } from "node:fs/promises";
 import { homedir } from "node:os";
-import { basename, dirname, isAbsolute, join, parse, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, parse, relative, resolve, sep } from "node:path";
 
 import { ensureFabricPaths, type FabricPaths } from "./paths.js";
-import {
-  looksLikeRepositoryCollection,
-  nearestGitWorkspace,
-  repositoryCollectionChildren,
-} from "./mcp-bootstrap.js";
 
 const PROFILE_PATTERN = /^[a-z][a-z0-9-]{0,63}$/u;
 const DEFAULT_PROFILES = ["headless", "observed", "interactive", "paired-visible", "paired-observed"];
@@ -30,6 +25,155 @@ export type TrustedWorkspaceIdentity = {
   trustRecordDigest: `sha256:${string}`;
   entry: WorkspaceTrustEntry;
 };
+
+export class WorkspaceTrustError extends Error {
+  readonly code = "WORKSPACE_NOT_TRUSTED" as const;
+
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "WorkspaceTrustError";
+  }
+}
+
+type GitWorkspace = Readonly<{ root: string; linkedWorktree: boolean }>;
+
+function isMissingPathError(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "code" in error &&
+    (error.code === "ENOENT" || error.code === "ENOTDIR");
+}
+
+function hasErrorCode(error: unknown, code: string): boolean {
+  return typeof error === "object" && error !== null && "code" in error && error.code === code;
+}
+
+// Gitfiles also identify submodules, so the file alone does not prove a linked
+// worktree. Only its canonical gitdir under another repository's
+// `.git/worktrees/` boundary activates the user-only exception guidance.
+function pointsToLinkedWorktree(gitDirectory: string, workspaceRoot: string): boolean {
+  let candidate = gitDirectory;
+  for (;;) {
+    const parent = dirname(candidate);
+    if (basename(parent) === "worktrees" && basename(dirname(parent)) === ".git") {
+      return dirname(dirname(parent)) !== workspaceRoot;
+    }
+    if (parent === candidate) return false;
+    candidate = parent;
+  }
+}
+
+export async function nearestGitWorkspace(canonicalRoot: string): Promise<GitWorkspace | null> {
+  let candidate = canonicalRoot;
+  for (;;) {
+    const filesystemRoot = candidate === parse(candidate).root;
+    let marker: Awaited<ReturnType<typeof lstat>>;
+    try {
+      marker = await lstat(join(candidate, ".git"));
+    } catch (error: unknown) {
+      // macOS may report EINVAL rather than ENOENT for `/.git` in a sandbox.
+      // It is a missing root marker only at this terminal probe; the same
+      // error anywhere else leaves the boundary indeterminate and fail-closed.
+      if (!isMissingPathError(error) && !(filesystemRoot && hasErrorCode(error, "EINVAL"))) throw error;
+      if (filesystemRoot) return null;
+      candidate = dirname(candidate);
+      continue;
+    }
+    if (marker.isDirectory()) return { root: candidate, linkedWorktree: false };
+    if (marker.isFile()) {
+      const match = /^gitdir:\s*(?<path>.+?)\s*$/u.exec(await readFile(join(candidate, ".git"), "utf8"));
+      const gitDirectory = match?.groups?.path;
+      if (gitDirectory === undefined) throw new Error("Git workspace marker is not a gitdir file");
+      const canonicalGitDirectory = await realpath(resolve(candidate, gitDirectory));
+      return {
+        root: candidate,
+        linkedWorktree: pointsToLinkedWorktree(canonicalGitDirectory, candidate),
+      };
+    }
+    throw new Error("Git workspace marker must be a directory or regular file");
+  }
+}
+
+export async function repositoryCollectionChildren(canonicalRoot: string): Promise<string[]> {
+  const children = await readdir(canonicalRoot, { withFileTypes: true });
+  const repositories = new Set<string>();
+  for (const child of children) {
+    try {
+      const canonicalChild = await realpath(join(canonicalRoot, child.name));
+      if (!(await lstat(canonicalChild)).isDirectory()) continue;
+      const marker = await lstat(join(canonicalChild, ".git"));
+      if (marker.isDirectory() || marker.isFile()) repositories.add(canonicalChild);
+    } catch (error: unknown) {
+      if (!isMissingPathError(error)) throw error;
+    }
+  }
+  return [...repositories];
+}
+
+const WORKSPACE_FILE_MARKERS = new Set([
+  "AGENTS.md",
+  "CLAUDE.md",
+  "package.json",
+  "pyproject.toml",
+  "Cargo.toml",
+  "go.mod",
+]);
+
+function workspaceMarkerKind(name: string): "file" | "directory" | null {
+  if (name === ".claude") return "directory";
+  if (WORKSPACE_FILE_MARKERS.has(name) || name.endsWith(".code-workspace")) return "file";
+  return null;
+}
+
+function isCanonicalDescendant(canonicalRoot: string, canonicalPath: string): boolean {
+  const relativePath = relative(canonicalRoot, canonicalPath);
+  return relativePath === "" || (relativePath !== ".." &&
+    !relativePath.startsWith(`..${sep}`) && !isAbsolute(relativePath));
+}
+
+async function isRepositoryRoot(canonicalPath: string): Promise<boolean> {
+  try {
+    const marker = await lstat(join(canonicalPath, ".git"));
+    return marker.isDirectory() || marker.isFile();
+  } catch (error: unknown) {
+    if (isMissingPathError(error)) return false;
+    throw error;
+  }
+}
+
+async function hasWorkspaceMarker(canonicalRoot: string): Promise<boolean> {
+  const children = await readdir(canonicalRoot, { withFileTypes: true });
+  for (const child of children) {
+    const kind = workspaceMarkerKind(child.name);
+    if (kind === null) continue;
+    try {
+      // Resolve before inspecting so a project marker symlinked into a child
+      // repository is treated the same as a marker stored at this root.
+      const resolved = await realpath(join(canonicalRoot, child.name));
+      if (resolved === canonicalRoot && child.isSymbolicLink()) continue;
+      if (!isCanonicalDescendant(canonicalRoot, resolved)) continue;
+      const marker = await lstat(resolved);
+      // A directory marker that is itself a repository root is a sibling
+      // clone, not a project signal. Anyone able to place a repository here
+      // could otherwise name it `.claude` and turn the collection guard off
+      // for every other repository beside it.
+      if (kind === "directory" && await isRepositoryRoot(resolved)) continue;
+      if ((kind === "file" && marker.isFile()) || (kind === "directory" && marker.isDirectory())) return true;
+    } catch (error: unknown) {
+      if (!isMissingPathError(error)) throw error;
+    }
+  }
+  return false;
+}
+
+// The collection heuristic is intentionally shallow: direct repository
+// children show that trusting this directory would grant sibling authority,
+// while recursively searching would misclassify an ordinary project that
+// happens to contain nested fixtures or vendored repositories. A conventional
+// marker at this exact root is an explicit project signal, even when the
+// project deliberately composes several repositories.
+export async function looksLikeRepositoryCollection(canonicalRoot: string): Promise<boolean> {
+  if ((await repositoryCollectionChildren(canonicalRoot)).length <= 1) return false;
+  return !await hasWorkspaceMarker(canonicalRoot);
+}
 
 type WorkspaceTrustRegistry = { schemaVersion: 1; entries: WorkspaceTrustEntry[] };
 let mutationQueue: Promise<void> = Promise.resolve();
@@ -233,6 +377,25 @@ function trustRecordDigest(entry: WorkspaceTrustEntry): `sha256:${string}` {
   return `sha256:${createHash("sha256").update(normalized).digest("hex")}`;
 }
 
+async function collectionBoundarySatisfied(canonicalRoot: string): Promise<boolean> {
+  try {
+    const workspace = await nearestGitWorkspace(canonicalRoot);
+    return workspace !== null || !await looksLikeRepositoryCollection(canonicalRoot);
+  } catch (error: unknown) {
+    if (errorCode(error) === "ENOENT") return false;
+    throw error;
+  }
+}
+
+function collectionBoundaryError(canonicalRoot: string, repositories: string[]): WorkspaceTrustError {
+  const shellQuote = (value: string) => `'${value.replaceAll("'", `\'"\'"\'`)}'`;
+  const quotedRepositories = repositories.map(shellQuote);
+  const commands = repositories.map((repository) => `provenant fabric workspace trust ${shellQuote(repository)}`).join("; ");
+  return new WorkspaceTrustError(
+    `workspace trust refuses ${shellQuote(canonicalRoot)} because it is a repository collection; trust an exact repository root instead: ${quotedRepositories.join(", ")}. Run ${commands}`,
+  );
+}
+
 function option(arguments_: string[], name: string): string | undefined {
   const index = arguments_.indexOf(name);
   const value = index === -1 ? undefined : arguments_[index + 1];
@@ -250,7 +413,8 @@ export async function trustedWorkspaceRoots(input: {
   const candidates = registry.entries
     .filter((entry) => input.executionProfile === undefined || entry.allowedProfiles.includes(input.executionProfile))
     .filter((entry) => entry.expiresAt === undefined || timestamp(entry.expiresAt, "workspace expiry") > now);
-  const matches = await Promise.all(candidates.map(identityMatches));
+  const matches = await Promise.all(candidates.map(async (entry) =>
+    await identityMatches(entry) && await collectionBoundarySatisfied(entry.canonicalPath)));
   return candidates.filter((_entry, index) => matches[index] === true).map((entry) => entry.canonicalPath);
 }
 
@@ -271,6 +435,9 @@ export async function trustedWorkspaceIdentity(input: {
     throw new Error("workspace trust record does not allow the requested profile");
   }
   if (!await identityMatches(entry)) throw new Error("workspace trust record no longer matches the live root identity");
+  if (!await collectionBoundarySatisfied(identity.canonicalPath)) {
+    throw collectionBoundaryError(identity.canonicalPath, await repositoryCollectionChildren(identity.canonicalPath));
+  }
   return {
     canonicalRoot: entry.canonicalPath,
     trustRecordDigest: trustRecordDigest(entry),
@@ -291,6 +458,7 @@ export async function runWorkspaceTrust(
     // A record whose root has been removed or replaced is dead, but rendering it
     // exactly like a live one made `list` say trusted where `inspect` said false.
     const states = await Promise.all(registry.entries.map(identityState));
+    const boundaries = await Promise.all(registry.entries.map((entry) => collectionBoundarySatisfied(entry.canonicalPath)));
     return {
       schemaVersion: 1,
       registryPath,
@@ -298,7 +466,7 @@ export async function runWorkspaceTrust(
         ...entry,
         identity: states[index],
         expired: entry.expiresAt !== undefined && timestamp(entry.expiresAt, "workspace expiry") <= now.getTime(),
-        trusted: states[index] !== "mismatch" &&
+        trusted: boundaries[index] && states[index] !== "mismatch" &&
           (entry.expiresAt === undefined || timestamp(entry.expiresAt, "workspace expiry") > now.getTime()),
       })),
     };
@@ -334,7 +502,8 @@ export async function runWorkspaceTrust(
   const existing = registry.entries.find((entry) => entry.canonicalPath === canonicalPath);
   if (action === "inspect") {
     const expired = existing?.expiresAt !== undefined && timestamp(existing.expiresAt, "workspace expiry") <= now.getTime();
-    const trusted = existing !== undefined && !expired && await identityMatches(existing);
+    const trusted = existing !== undefined && !expired && await identityMatches(existing) &&
+      await collectionBoundarySatisfied(canonicalPath);
     return { schemaVersion: 1, canonicalPath, trusted, expired, entry: existing ?? null };
   }
   if (action !== "trust") throw new Error("workspace command must be trust, inspect, status, list or revoke");
@@ -357,28 +526,14 @@ export async function runWorkspaceTrust(
     const currentEntryIsLive = currentEntry !== undefined &&
       (currentEntry.expiresAt === undefined || timestamp(currentEntry.expiresAt, "workspace expiry") > now.getTime()) &&
       currentEntryIdentityMatches;
-    // A drifted record is honoured, but re-trusting it is the moment to write the
-    // live device back, so the stale number does not persist forever.
-    if (currentEntryIsLive && currentEntryState === "match" && profileValue === undefined && expiresAt === undefined) {
-      return {
-        schemaVersion: 1,
-        trusted: true,
-        alreadyTrusted: true,
-        entry: { ...currentEntry, allowedProfiles: [...currentEntry.allowedProfiles] },
-      };
-    }
     if (currentEntry === undefined || !currentEntryIdentityMatches) {
       const broadened = current.entries.find((item) => item.canonicalPath.startsWith(`${canonicalPath}${sep}`));
       if (broadened !== undefined) throw new Error(`workspace trust refuses ancestor broadening over ${broadened.canonicalPath}`);
     }
-    const workspace = await nearestGitWorkspace(canonicalPath);
-    if (workspace === null && await looksLikeRepositoryCollection(canonicalPath)) {
-      const repositories = await repositoryCollectionChildren(canonicalPath);
-      const commands = repositories.map((repository) => `provenant fabric workspace trust ${repository}`).join("; ");
-      throw new Error(
-        `workspace trust refuses ${canonicalPath} because it is a repository collection; trust an exact repository root instead: ${repositories.join(", ")}. Run ${commands}`,
-      );
-    }
+    // A drifted record is honoured, but re-trusting it is the moment to write the
+    // live device back, so the stale number does not persist forever.
+    const alreadyTrusted = currentEntryIsLive && currentEntryState === "match" &&
+      profileValue === undefined && expiresAt === undefined;
     const allowedProfiles = requestedProfiles ?? currentEntry?.allowedProfiles ?? DEFAULT_PROFILES;
     const currentExpiryIsLive = currentEntry?.expiresAt !== undefined &&
       timestamp(currentEntry.expiresAt, "workspace expiry") > now.getTime();
@@ -395,6 +550,17 @@ export async function runWorkspaceTrust(
       ...(effectiveExpiry === undefined ? {} : { expiresAt: effectiveExpiry }),
       allowedProfiles: [...new Set(allowedProfiles)].sort(),
     };
+    if (!await collectionBoundarySatisfied(canonicalPath)) {
+      throw collectionBoundaryError(canonicalPath, await repositoryCollectionChildren(canonicalPath));
+    }
+    if (alreadyTrusted && currentEntry !== undefined) {
+      return {
+        schemaVersion: 1,
+        trusted: true,
+        alreadyTrusted: true,
+        entry: { ...currentEntry, allowedProfiles: [...currentEntry.allowedProfiles] },
+      };
+    }
     await writeRegistry(registryPath, {
       schemaVersion: 1,
       entries: [...current.entries.filter((item) => item.canonicalPath !== canonicalPath), entry],
