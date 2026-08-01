@@ -27,8 +27,19 @@ import { createCurrentSessionRun } from "./current-session-testkit.ts";
 import { TEST_AUTHORITY_V2_FIELDS } from "./authority-v2-testkit.ts";
 import { ManualClock } from "./manual-clock.ts";
 import { callTool, spawnMcpProxy, type McpProxy } from "./mcp-testkit.ts";
+import { terminateTrackedTestProcess, trackTestProcess, untrackTestProcess } from "./test-process-registry.ts";
 
 const fakeProvider = fileURLToPath(new URL("./lifecycle-fake-provider.ts", import.meta.url));
+type OwnedDaemon = Awaited<ReturnType<typeof startFabricDaemon>>;
+
+async function stopOwnedDaemon(daemon: OwnedDaemon): Promise<void> {
+  try {
+    await daemon.stop();
+    untrackTestProcess(daemon.pid);
+  } finally {
+    await terminateTrackedTestProcess(daemon.pid);
+  }
+}
 
 export type LifecycleCheckpoint = {
   relativePath: string;
@@ -186,6 +197,7 @@ export async function createLifecycleFixture(
     fault?: (label: string) => void;
     secondaryAdapter?: boolean;
     retainedAgents?: boolean;
+    retainedDaemonStarted?: (input: { pid: number; directory: string; release: () => void }) => Promise<void> | void;
   } = {},
 ): Promise<LifecycleFixture> {
   const directory = await mkdtemp(join(tmpdir(), "agent-fabric-lifecycle-"));
@@ -468,6 +480,7 @@ async function createRetainedLifecycleFixture(input: {
     spawnUnresolved?: boolean;
     spawnLookupMissing?: boolean;
     fault?: (label: string) => void;
+    retainedDaemonStarted?: (input: { pid: number; directory: string; release: () => void }) => Promise<void> | void;
   };
 }): Promise<LifecycleFixture> {
   const providerSpawnBarrier = input.providerSpawnBarrier;
@@ -521,6 +534,7 @@ async function createRetainedLifecycleFixture(input: {
   const daemon = input.options.fault === undefined
     ? await startFabricDaemon(daemonOptions)
     : undefined;
+  if (daemon !== undefined) trackTestProcess(daemon.pid, `retained lifecycle daemon ${input.directory}`);
   if (input.options.fault !== undefined) {
     await Promise.all([
       mkdir(stateDirectory, { recursive: true, mode: 0o700 }),
@@ -567,12 +581,19 @@ async function createRetainedLifecycleFixture(input: {
     if (closed) return;
     closed = true;
     await Promise.allSettled([chairProxy?.close() ?? Promise.resolve(), remoteChair?.close() ?? Promise.resolve()]);
-    await (daemon?.stop() ?? inProcessFabric?.close() ?? Promise.resolve());
+    await (daemon === undefined ? inProcessFabric?.close() ?? Promise.resolve() : stopOwnedDaemon(daemon));
     if (protocolServer !== undefined) {
       await new Promise<void>((resolve) => protocolServer?.close(() => resolve()));
     }
   };
   try {
+    if (daemon !== undefined) {
+      await input.options.retainedDaemonStarted?.({
+        pid: daemon.pid,
+        directory: input.directory,
+        release: () => daemon.release(),
+      });
+    }
     const rootAuthority = {
       ...TEST_AUTHORITY_V2_FIELDS,
       workspaceRoots: ["."],
@@ -730,10 +751,17 @@ async function createRetainedLifecycleFixture(input: {
       ...(daemon === undefined ? {} : {
         restartRetainedDaemon: async (): Promise<{ fabric: Fabric; chair: FabricClient }> => {
           const restartedDaemon = await startFabricDaemon(daemonOptions);
-          const restartedChair = await connectFabricDaemon({
-            socketPath,
-            capability: run.chairCapability,
-          });
+          trackTestProcess(restartedDaemon.pid, `retained lifecycle restart daemon ${input.directory}`);
+          let restartedChair: Awaited<ReturnType<typeof connectFabricDaemon>>;
+          try {
+            restartedChair = await connectFabricDaemon({
+              socketPath,
+              capability: run.chairCapability,
+            });
+          } catch (error: unknown) {
+            await stopOwnedDaemon(restartedDaemon);
+            throw error;
+          }
           let restartClosed = false;
           return {
             chair: restartedChair as unknown as FabricClient,
@@ -742,7 +770,7 @@ async function createRetainedLifecycleFixture(input: {
                 if (restartClosed) return;
                 restartClosed = true;
                 await restartedChair.close();
-                await restartedDaemon.stop();
+                await stopOwnedDaemon(restartedDaemon);
               },
             } as unknown as Fabric,
           };
@@ -750,7 +778,11 @@ async function createRetainedLifecycleFixture(input: {
       }),
     };
   } catch (error: unknown) {
-    await close();
+    try {
+      await close();
+    } finally {
+      await rm(input.directory, { recursive: true, force: true });
+    }
     throw error;
   }
 }
@@ -821,6 +853,7 @@ export async function createRetainedLifecycleCallbackFixture(): Promise<Retained
       },
     },
   });
+  trackTestProcess(daemon.pid, `retained lifecycle callback daemon ${directory}`);
   let bootstrap: Awaited<ReturnType<typeof connectFabricDaemon>> | undefined;
   let chair: Awaited<ReturnType<typeof connectFabricDaemon>> | undefined;
   let chairProxy: Awaited<ReturnType<typeof spawnMcpProxy>> | undefined;
@@ -833,8 +866,11 @@ export async function createRetainedLifecycleCallbackFixture(): Promise<Retained
       chair?.close() ?? Promise.resolve(),
       bootstrap?.close() ?? Promise.resolve(),
     ]);
-    await daemon.stop();
-    await rm(directory, { recursive: true, force: true });
+    try {
+      await stopOwnedDaemon(daemon);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   };
   try {
     bootstrap = await connectFabricDaemon({ socketPath, capability: daemon.bootstrapCapability });
