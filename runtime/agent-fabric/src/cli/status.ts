@@ -204,7 +204,7 @@ export function resolveStatusPaths(arguments_: string[]): { productRoot: string;
     process.env.AGENT_FABRIC_INSTANCE_ROOT,
   ].some((value) => value !== undefined && value.length > 0);
   const rootOptions = {
-    agentsHomeFlag: agentsHomeFlag ?? (hasConfiguredRoot ? undefined : process.cwd()),
+    agentsHomeFlag: agentsHomeFlag,
     productRootFlag,
     instanceRootFlag,
   };
