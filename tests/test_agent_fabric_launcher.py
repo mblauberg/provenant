@@ -293,6 +293,15 @@ def _stale_refusal(agents_home: Path) -> str:
     )
 
 
+def _linked_worktree_stale_refusal(agents_home: Path) -> str:
+    return (
+        "AGENT_FABRIC_LINKED_WORKTREE_DIST_STALE: local "
+        "@local/agent-fabric-protocol dist is missing or stale against its build inputs\n"
+        f'repair: AGENTS_HOME="{agents_home}" '
+        f'"{agents_home / "scripts/agent-fabric-protocol-build"}"\n'
+    )
+
+
 def _mark_install_root(root: Path) -> None:
     if not (root / ".git").exists():
         _commit_fixture(root)
@@ -816,8 +825,7 @@ def test_linked_worktree_stale_dist_keeps_the_exact_refusal(
 
     assert result.returncode == 1
     assert result.stdout == ""
-    assert "NPM_INSTALL_ATTESTATION_MISMATCH" in result.stderr
-    assert "product commit cannot be verified" in result.stderr
+    assert result.stderr == _linked_worktree_stale_refusal(root)
     assert not npm_marker.exists(), "a linked worktree must never autobuild"
     assert not marker.exists()
 

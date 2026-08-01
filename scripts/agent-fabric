@@ -13,8 +13,24 @@ script_dir=$(CDPATH= cd -- "$(dirname -- "$script_path")" && pwd)
 agents_home=${AGENTS_HOME:-"$(dirname -- "$script_dir")"}
 case "$agents_home" in /*) ;; *) echo "AGENTS_HOME must be absolute" >&2; exit 2 ;; esac
 package_root="$agents_home/runtime/agent-fabric"
+protocol_root="$agents_home/runtime/agent-fabric-protocol"
+protocol_dist="$protocol_root/dist/index.js"
 
 node "$package_root/scripts/verify-npm-ci-attestation.mjs" "$agents_home"
+
+# A linked worktree cannot use the protocol preflight's install-root
+# autobuild. Refuse its stale protocol dist here, after the content-only npm
+# attestation and before preflight can either autobuild or return its generic
+# exit 78. The freshness predicate is shared with protocol build and warm.
+workspace_freshness_library="$script_dir/lib/agent-fabric-workspace-freshness.sh"
+if [ -f "$agents_home/.git" ] && [ -f "$workspace_freshness_library" ]; then
+  . "$workspace_freshness_library"
+  if workspace_is_stale "$protocol_root" "$protocol_dist"; then
+    echo "AGENT_FABRIC_LINKED_WORKTREE_DIST_STALE: local @local/agent-fabric-protocol dist is missing or stale against its build inputs" >&2
+    echo "repair: AGENTS_HOME=\"$agents_home\" \"$agents_home/scripts/agent-fabric-protocol-build\"" >&2
+    exit 1
+  fi
+fi
 
 unset AGENT_FABRIC_PROTOCOL_BUILD_VERDICT AGENT_FABRIC_PROTOCOL_BUILD_REPAIR
 if [ "${1:-}" = doctor ]; then
