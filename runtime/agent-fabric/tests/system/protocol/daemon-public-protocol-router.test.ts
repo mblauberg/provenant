@@ -27,6 +27,7 @@ afterEach(async () => {
 async function startRouter(options: {
   maximumFirstFrameBytes?: number;
   idleTimeoutMs?: number;
+  allowHalfOpen?: boolean;
 } = {}) {
   const root = await mkdtemp(join(tmpdir(), "fabric-daemon-router-"));
   roots.push(root);
@@ -36,20 +37,24 @@ async function startRouter(options: {
     routed.resolve(protocol);
     socket.destroy();
   });
-  const server = createServer((socket) => routeDaemonConnection(socket, {
-    maximumFirstFrameBytes: options.maximumFirstFrameBytes ?? 1_024,
-    idleTimeoutMs: options.idleTimeoutMs ?? 1_000,
-    onRoute,
-  }));
+  const accepted = Promise.withResolvers<Socket>();
+  const server = createServer((serving) => {
+    accepted.resolve(serving);
+    routeDaemonConnection(serving, {
+      maximumFirstFrameBytes: options.maximumFirstFrameBytes ?? 1_024,
+      idleTimeoutMs: options.idleTimeoutMs ?? 1_000,
+      onRoute,
+    });
+  });
   servers.push(server);
   await new Promise<void>((resolve, reject) => server.listen(socketPath, resolve).once("error", reject));
-  const socket = createConnection(socketPath);
+  const socket = createConnection({ path: socketPath, allowHalfOpen: options.allowHalfOpen ?? false });
   sockets.push(socket);
   await new Promise<void>((resolve, reject) => {
     socket.once("connect", resolve);
     socket.once("error", reject);
   });
-  return { socket, onRoute, routed: routed.promise };
+  return { socket, onRoute, routed: routed.promise, accepted: accepted.promise };
 }
 
 async function nextResponse(socket: Socket): Promise<Record<string, unknown>> {
@@ -85,6 +90,31 @@ describe("daemon first-frame routing bounds", () => {
       error: { code: "NDJSON_FRAME_TOO_LARGE" },
     });
     expect(onRoute).not.toHaveBeenCalled();
+  });
+
+  it("releases the descriptor of a rejected connection whose peer never closes", async () => {
+    // A peer that holds its write side open after receiving the rejection is
+    // the condition the live daemon met: it accumulated orphaned descriptors
+    // until it hit its own connection ceiling.
+    const { socket, accepted } = await startRouter({ allowHalfOpen: true });
+    const serving = await accepted;
+    const response = nextResponse(socket);
+    socket.write('{"operation":"initialize","method":"ping"}\n');
+
+    await expect(response).resolves.toMatchObject({
+      id: "connection",
+      error: { code: "DAEMON_PROTOCOL_AMBIGUOUS" },
+    });
+
+    // end() would only half-close, leaving the serving socket waiting for a FIN
+    // that never arrives and holding its descriptor for the daemon's lifetime.
+    const released = serving.destroyed
+      ? Promise.resolve(true)
+      : new Promise<true>((resolve) => serving.once("close", () => resolve(true)));
+    const timedOut = new Promise<false>((resolve) => setTimeout(() => resolve(false), 500));
+
+    await expect(Promise.race([released, timedOut])).resolves.toBe(true);
+    expect(serving.destroyed).toBe(true);
   });
 
   it("closes a connection that stays idle before its first frame", async () => {

@@ -67,10 +67,12 @@ export function routeDaemonConnection(
       maximumFrameBytes: Math.max(maximumFirstFrameBytes, 4_096),
       maximumPendingWrites: 1,
     });
+    // Rejected peers may keep their write side open or leave unread inbound
+    // data behind. A graceful end can then retain the daemon descriptor.
     void writer.write({
       id: "connection",
       error: { name: "DaemonProtocolError", code, message },
-    }).catch(() => undefined).finally(() => socket.end());
+    }).catch(() => undefined).finally(() => socket.destroy());
   };
 
   const route = (protocol: DaemonConnectionProtocol): void => {
