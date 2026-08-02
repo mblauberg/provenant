@@ -259,7 +259,7 @@ def test_direct_cli_executes_the_verified_adapter_path_once():
         ]
 
 
-def test_legacy_owner_plain_path_fallback_is_advisory_and_not_certifying():
+def test_legacy_owner_structured_fallback_is_advisory_and_not_certifying():
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
         bin_dir = tmp / "bin"
@@ -272,9 +272,9 @@ def test_legacy_owner_plain_path_fallback_is_advisory_and_not_certifying():
         write_executable(owner_dir / "agent-fabric", f'''#!/usr/bin/env bash
         printf '%s\n' "$*" >> {owner_calls}
         case " $* " in
-          *" --json "*) echo 'unknown option --json' >&2; exit 2;;
+          *" --json "*) echo 'adapter executable received unknown option: --json' >&2; exit 2;;
         esac
-        printf '%s\n' {json.dumps(str(executable))}
+        printf '%s\n' '{{"executable":{json.dumps(str(executable))},"provider_assurance":"full-vendor-identity","certifying_answer_bearing_leg":true}}'
         ''')
         out = tmp / "out.txt"
         env = fabric_free_env()
@@ -294,6 +294,45 @@ def test_legacy_owner_plain_path_fallback_is_advisory_and_not_certifying():
         assert len(owner_calls.read_text(encoding="utf-8").splitlines()) == 2
         assert "--json" in owner_calls.read_text(encoding="utf-8").splitlines()[0]
         assert "--json" not in owner_calls.read_text(encoding="utf-8").splitlines()[1]
+
+
+def test_owner_json_retry_requires_the_actual_unsupported_option_diagnostic():
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        ran_marker = tmp / "adapter-ran"
+        executable = tmp / "legacy-claude"
+        write_executable(
+            executable,
+            f"#!/usr/bin/env bash\necho ran > {ran_marker}\necho SHOULD-NOT-RUN\n",
+        )
+        owner_dir = tmp / "owner" / "scripts"
+        owner_dir.mkdir(parents=True)
+        owner_calls = tmp / "owner-calls"
+        write_executable(owner_dir / "agent-fabric", f'''#!/usr/bin/env bash
+        printf '%s\n' "$*" >> {owner_calls}
+        case " $* " in
+          *" --json "*) echo 'unknown adapter --json' >&2; exit 2;;
+          *) printf '%s\n' {json.dumps(str(executable))};;
+        esac
+        ''')
+        out = tmp / "out.txt"
+        env = fabric_free_env()
+        env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
+        env["AGENTS_HOME"] = str(tmp / "owner")
+        result = subprocess.run([
+            str(SCRIPT), "--tool", "claude", "--orchestrator-family", "codex",
+            "--out", str(out), "--prompt", "Review",
+        ], cwd=td, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+        record = json.loads(result.stdout)
+        assert result.returncode != 0
+        assert record["status"] == "adapter_resolution_failed"
+        assert record["adapter_resolution"] == "rejected"
+        assert "unknown adapter --json" in out.read_text(encoding="utf-8")
+        assert not ran_marker.exists()
+        assert len(owner_calls.read_text(encoding="utf-8").splitlines()) == 1
 
 
 def test_direct_cli_refuses_a_tampered_path_when_owner_rejects_it():
