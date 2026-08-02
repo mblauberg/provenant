@@ -296,6 +296,142 @@ describe("zero-state MCP bootstrap", () => {
     }
   });
 
+  it("upgrades a persisted pre-task bootstrap authority without changing its active seat generation", async () => {
+    const temporaryRoot = await mkdtemp(join(tmpdir(), "fabric-zero-state-authority-upgrade-"));
+    roots.push(temporaryRoot);
+    const root = await realpath(temporaryRoot);
+    const databasePath = join(root, "fabric.sqlite3");
+    const request = {
+      canonicalRoot: root,
+      trustRecordDigest: `sha256:${"7".repeat(64)}`,
+      seat: "codex" as const,
+      expiresAt: "2026-07-19T00:00:00.000Z",
+    };
+    const fabric = new Fabric({ databasePath, workspaceRoots: [root], clock: () => Date.parse("2026-07-18T00:00:00.000Z") });
+
+    try {
+      fabric.bootstrapCurrentMcpSeat(request);
+      const original = fabric.bootstrapCurrentMcpSeat({ ...request, seat: "claude" });
+      const originalCredential = original.credentials.find(({ seat }) => seat === "codex")?.capability;
+      if (originalCredential === undefined) throw new Error("bootstrap credential is missing");
+
+      let expectedUpgradedActions: string[] | undefined;
+      const database = new Database(databasePath);
+      try {
+        for (const credential of original.credentials) {
+          const authorityRow = database.prepare(
+            "SELECT authority_json FROM authorities WHERE authority_id=? AND run_id=?",
+          ).get(credential.authorityId, original.runId) as { authority_json: string } | undefined;
+          if (authorityRow === undefined) throw new Error(`bootstrap authority for ${credential.seat} is missing`);
+          const authority = JSON.parse(authorityRow.authority_json) as { actions: string[] } & Record<string, unknown>;
+          const legacyAuthority = {
+            ...authority,
+            actions: authority.actions.filter((action) =>
+              action !== FABRIC_OPERATIONS.taskRequest && action !== FABRIC_OPERATIONS.taskCompleteWithReply,
+            ),
+          };
+          expectedUpgradedActions = [
+            ...legacyAuthority.actions,
+            FABRIC_OPERATIONS.taskRequest,
+            FABRIC_OPERATIONS.taskCompleteWithReply,
+          ].sort();
+          const legacyAuthorityJson = canonicalFixtureJson(legacyAuthority);
+          const legacyAuthorityHash = createHash("sha256").update(legacyAuthorityJson).digest("hex");
+          database.prepare(
+            "UPDATE authorities SET authority_json=?,authority_hash=? WHERE authority_id=? AND run_id=?",
+          ).run(legacyAuthorityJson, legacyAuthorityHash, credential.authorityId, original.runId);
+        }
+      } finally {
+        database.close();
+      }
+
+      const upgraded = fabric.bootstrapCurrentMcpSeat(request);
+      expect(upgraded.generation).toBe(original.generation);
+      expect(upgraded.credentials.map(({ seat }) => seat).sort()).toEqual(["claude", "codex"]);
+      expect(upgraded.credentials.find(({ seat }) => seat === "codex")?.capability).toBe(originalCredential);
+      expect(upgraded.custodyMutated).toBe(true);
+      if (expectedUpgradedActions === undefined) throw new Error("legacy bootstrap action fixture is missing");
+      for (const credential of original.credentials) {
+        const verified = fabric.verifyProtocolCredential(credential.capability);
+        expect(verified.grantedOperations).toEqual(expectedUpgradedActions);
+        expect(verified.grantedOperations).not.toContain(FABRIC_OPERATIONS.claimTask);
+      }
+      await expect(fabric.connect(originalCredential).claimTask({
+        taskId: "upgrade-must-not-claim",
+        expectedRevision: 1,
+        commandId: "upgrade:claim-denied",
+      })).rejects.toThrow(expect.objectContaining({ code: "CAPABILITY_FORBIDDEN" }));
+
+      const replay = fabric.bootstrapCurrentMcpSeat(request);
+      expect(replay.generation).toBe(original.generation);
+      expect(replay.credentials.find(({ seat }) => seat === "codex")?.capability).toBe(originalCredential);
+      expect(replay.custodyMutated).toBe(false);
+    } finally {
+      await fabric.close();
+    }
+  });
+
+  it("fails closed without partial mutation when the canonical bootstrap authority is customised", async () => {
+    const temporaryRoot = await mkdtemp(join(tmpdir(), "fabric-zero-state-authority-upgrade-refuse-"));
+    roots.push(temporaryRoot);
+    const root = await realpath(temporaryRoot);
+    const databasePath = join(root, "fabric.sqlite3");
+    const request = {
+      canonicalRoot: root,
+      trustRecordDigest: `sha256:${"8".repeat(64)}`,
+      seat: "codex" as const,
+      expiresAt: "2026-07-19T00:00:00.000Z",
+    };
+    const fabric = new Fabric({ databasePath, workspaceRoots: [root], clock: () => Date.parse("2026-07-18T00:00:00.000Z") });
+
+    try {
+      const original = fabric.bootstrapCurrentMcpSeat(request);
+      const database = new Database(databasePath);
+      try {
+        const authority = database.prepare(
+          "SELECT authority_id,authority_json FROM authorities WHERE run_id=? AND parent_authority_id IS NULL",
+        ).get(original.runId) as { authority_id: string; authority_json: string } | undefined;
+        if (authority === undefined) throw new Error("bootstrap authority is missing");
+        const custom = JSON.parse(authority.authority_json) as { actions: string[] } & Record<string, unknown>;
+        custom.actions = [...custom.actions, FABRIC_OPERATIONS.claimTask].sort();
+        const customJson = canonicalFixtureJson(custom);
+        const customHash = createHash("sha256").update(customJson).digest("hex");
+        database.prepare("UPDATE authorities SET authority_json=?,authority_hash=? WHERE authority_id=? AND run_id=?")
+          .run(customJson, customHash, authority.authority_id, original.runId);
+      } finally {
+        database.close();
+      }
+
+      const before = new Database(databasePath, { readonly: true });
+      let authorityRows: unknown;
+      let activeGeneration: unknown;
+      try {
+        authorityRows = before.prepare(
+          "SELECT authority_id,parent_authority_id,authority_json,authority_hash FROM authorities WHERE run_id=? ORDER BY authority_id",
+        ).all(original.runId);
+        activeGeneration = before.prepare("SELECT generation FROM mcp_active_seat_generations WHERE project_id=?")
+          .get(`project:local:${createHash("sha256").update(canonicalFixtureJson({ canonicalRoot: root })).digest("hex")}`);
+      } finally {
+        before.close();
+      }
+
+      expect(() => fabric.bootstrapCurrentMcpSeat(request)).toThrow(expect.objectContaining({ code: "AUTHORITY_WIDENING" }));
+
+      const after = new Database(databasePath, { readonly: true });
+      try {
+        expect(after.prepare(
+          "SELECT authority_id,parent_authority_id,authority_json,authority_hash FROM authorities WHERE run_id=? ORDER BY authority_id",
+        ).all(original.runId)).toEqual(authorityRows);
+        expect(after.prepare("SELECT generation FROM mcp_active_seat_generations WHERE project_id=?")
+          .get(`project:local:${createHash("sha256").update(canonicalFixtureJson({ canonicalRoot: root })).digest("hex")}`)).toEqual(activeGeneration);
+      } finally {
+        after.close();
+      }
+    } finally {
+      await fabric.close();
+    }
+  });
+
   it("renews an expiring bootstrap roster in place and revokes its predecessor", async () => {
     const temporaryRoot = await mkdtemp(join(tmpdir(), "fabric-zero-state-renewal-"));
     roots.push(temporaryRoot);
