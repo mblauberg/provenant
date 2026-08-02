@@ -1,4 +1,5 @@
 from contextlib import redirect_stdout
+import dataclasses
 import os
 from pathlib import Path
 import io
@@ -843,6 +844,13 @@ def _printed(result):
 
 
 def _command_result(*, timed_out):
+    # Assert the timing fields before constructing. A result type without them
+    # raises TypeError from __init__, and a bare TypeError is unusable evidence
+    # for the change gates.
+    fields = {field.name for field in dataclasses.fields(CommandResult)}
+    assert {"elapsed_seconds", "timed_out"} <= fields, (
+        "CommandResult does not carry the run's timing, so the COMMAND line cannot report it"
+    )
     return CommandResult(
         command="pytest tests/test_slow.py",
         returncode=1,
@@ -917,7 +925,9 @@ def test_print_output_reports_the_cap_under_direct_script_import():
     # child traceback replayed into this assertion reads as the child's error
     # class rather than as this file's assertion. Rerun the program above to see
     # the traceback. Same idiom as the collection marker earlier in this file.
-    assert completed.returncode == 0, (
+    returncode = completed.returncode
+
+    assert returncode == 0, (
         "the direct-script import path could not report a target killed at the cap"
     )
     assert "timed_out=yes" in completed.stdout, completed.stdout

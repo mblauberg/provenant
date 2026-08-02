@@ -376,6 +376,20 @@ def test_runner_detection_is_bound_to_the_configured_command(command, expected):
     assert runner_for_command(command) is expected
 
 
+def _timing(result):
+    """The result's timing fields, asserted rather than read straight off.
+
+    A result that never carried them raises `AttributeError`, and a bare
+    attribute error is unusable evidence for the change gates. Assert the miss.
+    """
+    for field in ("elapsed_seconds", "timed_out"):
+        assert hasattr(result, field), (
+            f"CommandResult does not carry {field}; the structured runner is not measuring "
+            "how long a target ran or whether it was killed at the cap"
+        )
+    return result.elapsed_seconds, result.timed_out
+
+
 def test_structured_runner_records_how_long_the_target_ran(tmp_path):
     """A gate line that says only "non-zero" cannot separate slow from hung.
 
@@ -389,12 +403,14 @@ def test_structured_runner_records_how_long_the_target_ran(tmp_path):
         runner=Runner.PYTEST,
     )
 
-    assert result.timed_out is False
-    assert result.elapsed_seconds >= 0.4, (
+    elapsed_seconds, timed_out = _timing(result)
+
+    assert timed_out is False
+    assert elapsed_seconds >= 0.4, (
         "structured runner reported "
-        f"elapsed_seconds={result.elapsed_seconds} for a target that slept 0.4s"
+        f"elapsed_seconds={elapsed_seconds} for a target that slept 0.4s"
     )
-    assert result.elapsed_seconds < 60
+    assert elapsed_seconds < 60
 
 
 def test_structured_runner_flags_a_target_killed_at_the_cap(tmp_path, monkeypatch):
@@ -412,9 +428,11 @@ def test_structured_runner_flags_a_target_killed_at_the_cap(tmp_path, monkeypatc
         runner=Runner.PYTEST,
     )
 
-    assert result.timed_out is True, "a target killed at the cap did not carry timed_out"
+    elapsed_seconds, timed_out = _timing(result)
+
+    assert timed_out is True, "a target killed at the cap did not carry timed_out"
     assert result.classification is FailureClass.UNKNOWN
-    assert result.elapsed_seconds >= 0.1
+    assert elapsed_seconds >= 0.1
 
 
 # The slowest legitimate target observed at its own merge base:
