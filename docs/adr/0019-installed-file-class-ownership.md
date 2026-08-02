@@ -26,7 +26,7 @@ notice. The file looks fine; it just names a directory that does not exist
 there.
 
 The material already sits on both sides of the line. `AGENTS.md` carries global
-product doctrine (`AGENTS.md:1-31`) and is the symlink target of
+product doctrine (`AGENTS.md:1-28`) and is the symlink target of
 `~/.claude/CLAUDE.md` and `~/.codex/AGENTS.md`, so it is simultaneously
 product-authored and the natural home for one user's personal doctrine.
 `config/risk-policy.json`, `config/review-profiles/`,
@@ -40,12 +40,12 @@ Two mechanisms already exist and neither had to be invented here. The
 installation receipt written by `scripts/managed_installation_manifest.py`
 records absolute target roots, per-entry source paths and content digests
 beside the installed directory; it is machine-local by construction. And
-`loadFabricConfig` (`runtime/agent-fabric/src/config/index.ts:180-213,224-285`)
-already merges a global and a local trusted layer under a typed narrowing-only
+`loadFabricConfig` (`runtime/agent-fabric/src/config/index.ts:304-367`),
+through `mergeTrustedConfig` (`:215-252`), already merges a global and a local trusted layer under a typed narrowing-only
 rule: allow-lists intersect, workspace roots must stay contained, limits take
 the minimum, and a widening attempt raises `CONFIG_WIDENING_FORBIDDEN`. What
 was missing is that normal daemon startup only ever supplied a global path
-(`runtime/agent-fabric/src/cli/default-daemon-options.ts:7-26`), so the local
+(`runtime/agent-fabric/src/cli/default-daemon-options.ts`), so the local
 layer was reachable from `--local-config` on `daemon-run` and nowhere else.
 
 ## Decision
