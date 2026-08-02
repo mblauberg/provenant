@@ -7,10 +7,7 @@ from enum import Enum
 import os
 import re
 import shlex
-import signal
-import subprocess
 import tempfile
-import time
 from pathlib import Path
 
 try:
@@ -18,7 +15,9 @@ try:
         FailureClass,
         classify_structured_report_with_evidence,
     )
+    from .bounded_process import run_bounded
 except ImportError:  # pragma: no cover - direct script execution fallback
+    from bounded_process import run_bounded
     from change_gate_reports import FailureClass, classify_structured_report_with_evidence
 
 
@@ -48,7 +47,6 @@ class CommandResult:
 # merge base on a Linux runner, so the cap is set well clear of the slowest known
 # target rather than just above it. A hang is unbounded and is still caught.
 DIRECT_PROCESS_TIMEOUT = 1800.0
-PIPE_DRAIN_TIMEOUT = 5.0
 
 _PYTEST_IMPORT_PLUGIN = """import json
 import os
@@ -167,57 +165,17 @@ def runner_for_command(command: str) -> Runner | None:
     return None
 
 
-def _terminate_process_group(process_id: int) -> bool:
-    """Close descendants inherited by a gate-owned structured command."""
-
-    try:
-        os.killpg(process_id, signal.SIGTERM)
-    except ProcessLookupError:
-        return True
-    except OSError:
-        return False
-    try:
-        os.killpg(process_id, signal.SIGKILL)
-    except ProcessLookupError:
-        return True
-    except OSError:
-        return False
-    return True
-
-
-def _text_output(value: object) -> str:
-    if isinstance(value, bytes):
-        return value.decode(errors="replace")
-    return value if isinstance(value, str) else ""
-
-
-def _run_legacy(arguments: list[str], cwd: Path, rendered: str) -> CommandResult:
-    """Keep the current-main subprocess.run path for unstructured commands."""
-
-    completed = subprocess.run(
-        arguments,
-        cwd=cwd,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        env=os.environ.copy(),
-        check=False,
-    )
-    output = completed.stdout or ""
-    return CommandResult(
-        command=rendered,
-        returncode=completed.returncode,
-        output=output,
-        classification=classify_failure(completed.returncode, output),
-    )
-
-
-def _run_structured(
-    arguments: list[str], cwd: Path, rendered: str, runner: Runner, report_path: Path
+def _run_captured(
+    arguments: list[str],
+    cwd: Path,
+    rendered: str,
+    runner: Runner | None = None,
+    report_path: Path | None = None,
 ) -> CommandResult:
-    sidecar_path = report_path.with_name("pytest-import.json")
+    sidecar_path = report_path.with_name("pytest-import.json") if report_path else None
     environment = os.environ.copy()
     if runner is Runner.PYTEST:
+        assert report_path is not None
         plugin_path = report_path.with_name("_provenant_pytest_import_sidecar.py")
         plugin_path.write_text(_PYTEST_IMPORT_PLUGIN, encoding="utf-8")
         pythonpath = environment.get("PYTHONPATH")
@@ -227,55 +185,31 @@ def _run_structured(
         environment["PROVENANT_PYTEST_IMPORT_SIDECAR"] = str(sidecar_path)
         arguments.extend(["-p", plugin_path.stem])
         rendered = shlex.join(arguments)
-    with tempfile.TemporaryFile(mode="w+b") as output_file:
-        process = subprocess.Popen(
-            arguments,
-            cwd=cwd,
-            text=True,
-            stdout=output_file,
-            stderr=subprocess.STDOUT,
-            env=environment,
-            start_new_session=True,
+    result = run_bounded(
+        arguments,
+        cwd=cwd,
+        timeout_seconds=DIRECT_PROCESS_TIMEOUT,
+        env=environment,
+    )
+    if runner is None:
+        classification = classify_failure(result.returncode, result.output)
+        return CommandResult(
+            command=rendered,
+            returncode=result.returncode,
+            output=result.output,
+            classification=classification,
+            elapsed_seconds=result.elapsed_seconds,
+            timed_out=result.timed_out,
         )
-        started = time.monotonic()
-        direct_timed_out = False
-        group_closed: bool
-        output = ""
-        output_read = False
-        try:
-            try:
-                process.wait(timeout=DIRECT_PROCESS_TIMEOUT)
-            except subprocess.TimeoutExpired:
-                direct_timed_out = True
-                group_closed = _terminate_process_group(process.pid)
-                try:
-                    process.wait(timeout=PIPE_DRAIN_TIMEOUT)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait(timeout=PIPE_DRAIN_TIMEOUT)
-            else:
-                group_closed = _terminate_process_group(process.pid)
-            output_file.flush()
-            output_file.seek(0)
-            output = _text_output(output_file.read())
-            output_read = True
-        finally:
-            if process.poll() is None:
-                group_closed = _terminate_process_group(process.pid) and group_closed
-                process.kill()
-                process.wait(timeout=PIPE_DRAIN_TIMEOUT)
 
-    elapsed_seconds = time.monotonic() - started
-    returncode = process.returncode
-    if returncode is None:
-        returncode = -signal.SIGKILL
+    assert report_path is not None
     classification, unresolved_module = classify_structured_report_with_evidence(
         runner,
         report_path,
-        returncode,
+        result.returncode,
         pytest_sidecar=sidecar_path if runner is Runner.PYTEST else None,
     )
-    if direct_timed_out or not group_closed or not output_read:
+    if result.timed_out:
         classification = FailureClass.UNKNOWN
         unresolved_module = None
     structured_import_evidence = (
@@ -284,13 +218,13 @@ def _run_structured(
     )
     return CommandResult(
         command=rendered,
-        returncode=returncode,
-        output=output,
+        returncode=result.returncode,
+        output=result.output,
         classification=classification,
         unresolved_module=unresolved_module,
         structured_import_evidence=structured_import_evidence,
-        elapsed_seconds=elapsed_seconds,
-        timed_out=direct_timed_out,
+        elapsed_seconds=result.elapsed_seconds,
+        timed_out=result.timed_out,
     )
 
 
@@ -314,7 +248,7 @@ def run_command(
 
     rendered = shlex.join(arguments)
     if resolved_runner is None:
-        return _run_legacy(arguments, cwd, rendered)
+        return _run_captured(arguments, cwd, rendered)
 
     with tempfile.TemporaryDirectory(prefix="report-", dir=cwd) as report_directory:
         report_path = Path(report_directory) / (
@@ -328,4 +262,4 @@ def run_command(
         elif resolved_runner is Runner.VITEST:
             arguments.extend(["--reporter=json", f"--outputFile={report_path}"])
         rendered = shlex.join(arguments)
-        return _run_structured(arguments, cwd, rendered, resolved_runner, report_path)
+        return _run_captured(arguments, cwd, rendered, resolved_runner, report_path)

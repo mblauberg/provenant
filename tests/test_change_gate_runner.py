@@ -2,8 +2,6 @@ import os
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 import shlex
-import signal
-import subprocess
 import sys
 import time
 
@@ -11,12 +9,12 @@ import pytest
 
 from _change_gate_helpers import PYTEST_COMMAND
 from scripts import change_gate_runner
+from scripts.bounded_process import BoundedProcessResult
 from scripts.change_gate_runner import (
     FailureClass,
     Runner,
     runner_for_command,
     run_command,
-    _terminate_process_group,
 )
 
 
@@ -72,43 +70,26 @@ def test_command_result_is_frozen():
         assert False, "CommandResult accepted mutation"
 
 
-def test_structured_runner_uses_file_output_and_private_process_group(tmp_path, monkeypatch):
+def test_structured_runner_uses_the_bounded_process_helper(tmp_path, monkeypatch):
     observed = {}
 
-    class Process:
-        pid = 1234
-        returncode = 0
-        stdout = None
+    def bounded(command, *, cwd, timeout_seconds, env=None, output_limit_bytes=1_048_576):
+        observed.update(
+            command=command,
+            cwd=cwd,
+            timeout_seconds=timeout_seconds,
+            env=env,
+            output_limit_bytes=output_limit_bytes,
+        )
+        return BoundedProcessResult(1, "captured output", 15, False, False, 0.1)
 
-        def wait(self, timeout):
-            del timeout
+    monkeypatch.setattr(change_gate_runner, "run_bounded", bounded)
+    run_command("pytest tests/example.py", tmp_path, runner=Runner.PYTEST)
 
-        def poll(self):
-            return self.returncode
-
-        def communicate(self, timeout):
-            del timeout
-            return "", None
-
-    def start(arguments, **kwargs):
-        del arguments
-        observed.update(kwargs)
-        return Process()
-
-    monkeypatch.setattr(change_gate_runner.subprocess, "Popen", start)
-    monkeypatch.setattr(change_gate_runner, "_terminate_process_group", lambda _: True)
-
-    change_gate_runner._run_structured(
-        ["pytest", "tests/example.py"],
-        tmp_path,
-        "pytest tests/example.py",
-        Runner.PYTEST,
-        tmp_path / "missing.xml",
-    )
-
-    assert observed["text"] is True
-    assert observed["start_new_session"] is True
-    assert observed["stdout"] is not subprocess.PIPE
+    assert observed["cwd"] == tmp_path
+    assert observed["timeout_seconds"] == change_gate_runner.DIRECT_PROCESS_TIMEOUT
+    assert sum(argument.startswith("--junitxml=") for argument in observed["command"]) == 1
+    assert observed["env"]["PROVENANT_PYTEST_IMPORT_SIDECAR"].endswith("pytest-import.json")
 
 
 def test_legacy_success_is_classified_as_pass(tmp_path):
@@ -301,63 +282,25 @@ def test_structured_runner_bounds_a_direct_process_that_does_not_exit(tmp_path, 
     assert result.classification is FailureClass.UNKNOWN
 
 
-@pytest.mark.parametrize(
-    ("side_effect", "expected"),
-    [
-        (ProcessLookupError(), True),
-        (OSError(), False),
-    ],
-)
-def test_terminate_process_group_reports_term_signal_failures(monkeypatch, side_effect, expected):
-    def killpg(process_id, signal_number):
-        del process_id, signal_number
-        raise side_effect
+def test_unstructured_runner_uses_the_bounded_process_helper(tmp_path, monkeypatch):
+    observed = {}
 
-    monkeypatch.setattr(change_gate_runner.os, "killpg", killpg)
+    def bounded(command, *, cwd, timeout_seconds, env=None, output_limit_bytes=1_048_576):
+        observed.update(
+            command=command,
+            cwd=cwd,
+            timeout_seconds=timeout_seconds,
+            env=env,
+            output_limit_bytes=output_limit_bytes,
+        )
+        return BoundedProcessResult(0, "42\n", 3, False, False, 0.1)
 
-    assert _terminate_process_group(1234) is expected
-
-
-@pytest.mark.parametrize(
-    ("side_effect", "expected"),
-    [
-        (ProcessLookupError(), True),
-        (OSError(), False),
-    ],
-)
-def test_terminate_process_group_reports_kill_signal_failures(monkeypatch, side_effect, expected):
-    calls = 0
-
-    def killpg(process_id, signal_number):
-        nonlocal calls
-        del process_id, signal_number
-        calls += 1
-        if calls == 2:
-            raise side_effect
-
-    monkeypatch.setattr(change_gate_runner.os, "killpg", killpg)
-
-    assert _terminate_process_group(1234) is expected
-
-
-def test_terminate_process_group_reports_success(monkeypatch):
-    monkeypatch.setattr(change_gate_runner.os, "killpg", lambda *_: None)
-
-    assert _terminate_process_group(1234) is True
-
-
-def test_legacy_runner_keeps_the_subprocess_run_path(tmp_path, monkeypatch):
-    called = False
-
-    def fail_if_structured(*args, **kwargs):
-        nonlocal called
-        called = True
-        raise AssertionError("legacy command used structured custody")
-
-    monkeypatch.setattr(change_gate_runner, "_run_structured", fail_if_structured)
+    monkeypatch.setattr(change_gate_runner, "run_bounded", bounded)
     result = run_command(f"{sys.executable} -c 'print(42)'", tmp_path)
 
-    assert called is False
+    assert observed["command"] == [sys.executable, "-c", "print(42)"]
+    assert observed["cwd"] == tmp_path
+    assert observed["timeout_seconds"] == change_gate_runner.DIRECT_PROCESS_TIMEOUT
     assert result.returncode == 0
     assert result.output.strip() == "42"
 
