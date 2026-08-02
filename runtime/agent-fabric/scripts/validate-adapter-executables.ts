@@ -60,11 +60,6 @@ try {
   process.stdout.write(`${JSON.stringify({
     status: "pass",
     ...result,
-    executable_available: declarationOnly
-      ? false
-      : (adapter === undefined
-        ? Object.keys(result.resolvedExecutables).length > 0
-        : result.resolvedExecutables[adapter] !== undefined),
     ...(declarationOnly ? { resolvedExecutables: {} } : {}),
   })}\n`);
 } catch (error: unknown) {

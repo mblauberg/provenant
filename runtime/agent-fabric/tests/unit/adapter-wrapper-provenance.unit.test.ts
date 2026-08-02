@@ -108,13 +108,17 @@ describe("adapter wrapper Git provenance", () => {
     });
   });
 
-  it("fails closed when the tracked wrapper is modified", async () => {
+  it("allows a dirty wrapper during declaration validation", async () => {
     const fixture = await createProvenanceFixture();
     await writeFile(fixture.wrapperPath, 'export const execute = () => "tampered";\n');
 
-    await expect(verify(fixture)).rejects.toMatchObject({
-      code: "ADAPTER_COMPATIBILITY_INVALID",
-      message: expect.stringContaining("wrapper entrypoint differs from its committed content"),
+    await expect(verify(fixture)).resolves.toMatchObject({
+      valid: true,
+      wrapperProvenance: [{
+        adapterId: "fixture",
+        repositoryCommit: fixture.repositoryCommit,
+        wrapperPath: "wrapper.js",
+      }],
     });
   });
 

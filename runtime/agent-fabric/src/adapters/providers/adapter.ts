@@ -599,8 +599,6 @@ export function createProviderAdapter(options: {
       let value: Record<string, unknown>;
       switch (operation) {
         case "spawn":
-          // Route resolution records executable availability only. Dispatch
-          // validates it at this boundary before starting adapter work.
           value = responseRecord(await options.boundary.spawn(payload), operation);
           break;
         case "attach":

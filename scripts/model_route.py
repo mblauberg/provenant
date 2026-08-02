@@ -162,18 +162,18 @@ def _validated_agent_fabric_node() -> str | None:
     return str(candidate.resolve())
 
 
-def validate_adapter_executable(adapter: str, compatibility_path: Path) -> tuple[str, bool]:
+def validate_adapter_executable(adapter: str, compatibility_path: Path) -> str:
     """Validate the selected adapter declaration through the TypeScript seam.
 
-    Route resolution records executable availability without requiring the
-    provider binary. Dispatch remains responsible for validating the executable
-    before starting the adapter process.
+    Route resolution validates the declaration without requiring the provider
+    binary. Dispatch remains responsible for validating the executable before
+    starting the adapter process.
     """
     loader_script = PRODUCT_ROOT / "scripts" / "lib" / "agent-fabric-tsx-loader.sh"
     validator = PRODUCT_ROOT / "runtime" / "agent-fabric" / "scripts" / "validate-adapter-executables.ts"
     node_executable = _validated_agent_fabric_node()
     if node_executable is None:
-        return "adapter_compatibility_unavailable", False
+        return "adapter_compatibility_unavailable"
     environment = os.environ.copy()
     environment["AGENT_FABRIC_NODE"] = node_executable
     try:
@@ -193,7 +193,7 @@ def validate_adapter_executable(adapter: str, compatibility_path: Path) -> tuple
             timeout=10,
         )
         if loader.returncode != 0 or not loader.stdout.strip():
-            return "adapter_compatibility_unavailable", False
+            return "adapter_compatibility_unavailable"
         completed = subprocess.run(
             [
                 node_executable,
@@ -211,26 +211,23 @@ def validate_adapter_executable(adapter: str, compatibility_path: Path) -> tuple
             timeout=30,
         )
     except (OSError, subprocess.SubprocessError):
-        return "adapter_compatibility_unavailable", False
+        return "adapter_compatibility_unavailable"
     if completed.returncode == 0:
         try:
-            result = json.loads(completed.stdout.strip().splitlines()[-1])
+            json.loads(completed.stdout.strip().splitlines()[-1])
         except (json.JSONDecodeError, IndexError):
-            return "adapter_compatibility_unavailable", False
-        executable_available = (
-            isinstance(result, dict) and result.get("executable_available") is True
-        )
-        return "", executable_available
+            return "adapter_compatibility_unavailable"
+        return ""
     try:
         result = json.loads(completed.stderr.strip().splitlines()[-1])
     except (json.JSONDecodeError, IndexError):
-        return "adapter_compatibility_unavailable", False
+        return "adapter_compatibility_unavailable"
     code = result.get("code") if isinstance(result, dict) else None
     if code == "ADAPTER_ARTIFACT_MISSING":
-        return "adapter_executable_unavailable", False
+        return "adapter_executable_unavailable"
     if code == "ADAPTER_COMPATIBILITY_INVALID":
-        return "adapter_compatibility_invalid", False
-    return "adapter_compatibility_unavailable", False
+        return "adapter_compatibility_invalid"
+    return "adapter_compatibility_unavailable"
 
 
 def check_adapter_compatibility(
@@ -573,7 +570,6 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
         compatibility_metadata = {
             "compatibility_adapter": compatibility["compatibility_adapter"],
             "adapter_enabled": compatibility["enabled"],
-            "executable_available": False,
         }
         if args.adapter_gate == "fabric":
             active_adapters, activation_status = load_active_adapters(Path(args.fabric_config))
@@ -590,12 +586,11 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
             compatibility_metadata["adapter_active"] = (
                 compatibility["compatibility_adapter"] in active_adapters
             )
-        # Availability is recorded during planning but enforced at dispatch.
+        # Executable availability is enforced at dispatch, not route resolution.
         if args.adapter_gate != "fabric" or compatibility["enabled"]:
-            executable_status, executable_available = validate_adapter_executable(
+            executable_status = validate_adapter_executable(
                 args.adapter, Path(args.adapter_compatibility)
             )
-            compatibility_metadata["executable_available"] = executable_available
             if executable_status:
                 return emit_route(
                     {

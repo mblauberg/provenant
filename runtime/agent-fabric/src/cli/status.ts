@@ -480,6 +480,7 @@ export async function fabricStatus(
     adapterIds: config.adapterIds,
     requireEnabled: true,
     allowUnavailableOptional: true,
+    resolveExecutables: false,
   });
   return {
     schemaVersion: 1,
