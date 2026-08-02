@@ -2,6 +2,7 @@
 """Behaviour tests for cf_dispatch.sh with stubbed CLIs."""
 import json
 import os
+import re
 import shlex
 import shutil
 import signal
@@ -66,6 +67,23 @@ DISPATCH_SCHEMA = {
     "certification_eligible",
     "cross_family",
 }
+
+
+def test_every_local_has_an_explicit_default_for_bash52_nounset():
+    bare = []
+    declaration = re.compile(r"^\s*local(?:\s+-[A-Za-z]+)*\s+(.+?)\s*$")
+
+    for lineno, line in enumerate(SCRIPT.read_text(encoding="utf-8").splitlines(), 1):
+        match = declaration.match(line)
+        if not match:
+            continue
+        for word in shlex.split(match.group(1), posix=True):
+            if not word.startswith("-") and "=" not in word:
+                bare.append(f"{lineno}: {word}")
+
+    assert not bare, "bare local declarations are unsafe under bash 5.2 set -u: " + ", ".join(bare)
+
+
 REQUIRED_GATE_ROWS = [
     "P0/P1 findings triaged or explicitly deferred",
     "status=ok, cross_family=true, and read_only_guarantee=enforced/oauth_safe_mode",
