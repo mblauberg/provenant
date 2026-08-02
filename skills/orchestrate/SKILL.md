@@ -13,7 +13,7 @@ Decompose -> waves -> reduce -> gate.
 
 - **Use parallel fan-out only after the decomposition/value gate passes.**
 - Preflight dependencies/shared errors.
-- Before running gates in a linked worktree, run the owning repository's declared lockfile bootstrap and build commands, record the exact commands and results, and classify a failure as environmental only after that. See the [worktree provisioning rule](../../docs/worktrees.md#L58-L61).
+- Before running gates in a linked worktree, run the owning repository's declared lockfile bootstrap and build commands, record the exact commands and results, and classify a failure as environmental only after that. See [worktree provisioning](../../docs/worktrees.md).
 - **No concurrent shared-state writes.** Partition authorised writers into
   repository `.worktrees/<task-agent>`; otherwise use a serial applier.
 - Parallel lanes stop ready-to-merge. The chair merges serially, refreshes the
