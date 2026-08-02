@@ -775,38 +775,6 @@ def right_reason_red_evidence(
     return None
 
 
-FLAKE_WAIVER_LEDGER = ".github/change-gate-flake-waivers.txt"
-_FLAKE_WAIVER_ENTRY = re.compile(r"(?P<target>\S+)\s+(?P<issue>#\d+)")
-
-
-def read_flake_waivers(source_root: Path) -> dict[str, str]:
-    """Map each waived target to the issue that owns its de-flaking fix.
-
-    A de-flaking fix cannot be red at the merge base: the bug is intermittent, so
-    the base run comes back ``classification=pass`` and the gate rejects it. The
-    ledger names the few targets where that rejection is waived. A missing ledger
-    simply means no waivers. An entry with no issue is an error rather than an
-    ignored line, because an unowned waiver is a permanent exemption.
-    """
-
-    ledger = source_root / FLAKE_WAIVER_LEDGER
-    if not ledger.is_file():
-        return {}
-    waivers: dict[str, str] = {}
-    for number, line in enumerate(ledger.read_text(encoding="utf-8").splitlines(), start=1):
-        entry = line.strip()
-        if not entry or entry.startswith("#"):
-            continue
-        match = _FLAKE_WAIVER_ENTRY.fullmatch(entry)
-        if match is None:
-            raise GateError(
-                f"{FLAKE_WAIVER_LEDGER}:{number}: a waiver needs a target and its owning "
-                f"issue, as in 'tests/flaky.py #639': {entry}"
-            )
-        waivers[match.group("target")] = match.group("issue")
-    return waivers
-
-
 def _all_assertion_failures(results: list[CommandResult]) -> bool:
     return bool(results) and all(result.classification is FailureClass.ASSERTION for result in results)
 
@@ -821,9 +789,6 @@ def gate_right_reason_red(
     mode: ChangeMode | str = ChangeMode.BEHAVIOUR,
     added_modules: frozenset[str] | set[str] = frozenset(),
 ) -> int:
-    # Read before the suite runs, so a malformed ledger fails the gate rather
-    # than being discovered after several minutes of base runs.
-    waivers = read_flake_waivers(source_root)
     with _temporary_tree(source_root, scratch_root) as directory:
         base_root = Path(directory)
         _materialise_base(source_root, base, base_root, tests)
@@ -845,6 +810,31 @@ def gate_right_reason_red(
     # Name every target and its verdict. The aggregate line below blocks the
     # merge, and on its own it says only that something was rejected, leaving a
     # reader to rerun the gate by hand and bisect the targets to find out which.
+    # The waiver ledger, read here rather than in a helper so that reverting this
+    # block leaves the gate consistent. A de-flaking fix cannot be red at the
+    # merge base: the bug is intermittent, so the base run comes back green and
+    # the gate rejects it on classification=pass, which makes the fix for a flake
+    # permanently unlandable. Each entry names one target and the issue that owns
+    # its fix. A missing ledger means no waivers; an entry with no issue is an
+    # error rather than an ignored line, because an unowned waiver never has to
+    # be removed.
+    waivers: dict[str, str] = {}
+    ledger = source_root / ".github/change-gate-flake-waivers.txt"
+    if ledger.is_file():
+        lines = ledger.read_text(encoding="utf-8").splitlines()
+        for number, line in enumerate(lines, start=1):
+            entry = line.strip()
+            if not entry or entry.startswith("#"):
+                continue
+            waiver = re.fullmatch(r"(?P<target>\S+)\s+(?P<issue>#\d+)", entry)
+            if waiver is None:
+                raise GateError(
+                    f"change-gate-flake-waivers.txt:{number}: a waiver needs a target and "
+                    f"its owning issue, as in 'tests/flaky.py #639': {entry}"
+                )
+            waivers[waiver.group("target")] = waiver.group("issue")
+    assertion_count = evidence.count("assertion")
+    new_target_count = evidence.count("new-target")
     waived_count = 0
     rejected_count = 0
     for target, result, reason in zip(targets, results, evidence, strict=True):
@@ -867,8 +857,6 @@ def gate_right_reason_red(
             f"TARGET {target or '(whole suite)'} status={verdict} "
             f"classification={result.classification.value} returncode={result.returncode}"
         )
-    assertion_count = evidence.count("assertion")
-    new_target_count = evidence.count("new-target")
     if rejected_count:
         print(
             "RIGHT_REASON_RED: FAIL "
