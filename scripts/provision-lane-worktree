@@ -1,0 +1,17 @@
+#!/bin/sh
+set -eu
+
+# A fresh worktree has source but no build. Without this, the daemon dies at
+# startup on a missing protocol export and every daemon-dependent test fails,
+# which reads as a catastrophic regression in code the lane never touched.
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+product_root=$(dirname -- "$script_dir")
+
+echo "provisioning $product_root"
+
+"$script_dir/install-agent-fabric-dependencies"
+AGENTS_HOME="$product_root" "$script_dir/agent-fabric-protocol-build"
+uv sync --project "$product_root" --locked --only-group test
+
+echo "provisioned; run tests with $product_root/.venv/bin/python -m pytest"
