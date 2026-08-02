@@ -233,6 +233,10 @@ import {
   LifecycleReceiptRecoveryError,
   LifecycleReceiptRecoveryService,
 } from "../lifecycle/receipt-recovery.js";
+import {
+  DAEMON_SHUTDOWN_FABRIC_CLOSE_TIMEOUT,
+  waitWithShutdownDeadline,
+} from "../daemon/recoverable-serving-socket.js";
 
 export { FabricClient } from "./client.js";
 
@@ -259,6 +263,7 @@ export type FabricRuntimeOpenOptions = FabricOpenOptions & {
 };
 
 type Row = Record<string, unknown>;
+const FABRIC_CLOSE_DRAIN_TIMEOUT_MS = 30_000;
 type TaskCreateInput = {
   taskId: string;
   authorityId: string;
@@ -1502,23 +1507,42 @@ export class Fabric {
     this.#closing = true;
     this.#providerActionState.clearScheduledPump();
     this.#providerActionState.abandonDeferred();
-    while (
-      this.#service.size > 0 ||
-      this.#providerActionState.size > 0 ||
-      this.#continuation.size > 0
-    ) {
-      await Promise.allSettled([
-        ...this.#service.pending(),
-        ...this.#providerActionState.pending(),
-        ...this.#continuation.pending(),
-      ]);
-      this.#providerActionState.abandonDeferred();
+    let drainFailure: unknown;
+    try {
+      await waitWithShutdownDeadline(
+        (async () => {
+          while (
+            this.#service.size > 0 ||
+            this.#providerActionState.size > 0 ||
+            this.#continuation.size > 0
+          ) {
+            await Promise.allSettled([
+              ...this.#service.pending(),
+              ...this.#providerActionState.pending(),
+              ...this.#continuation.pending(),
+            ]);
+            this.#providerActionState.abandonDeferred();
+          }
+        })(),
+        FABRIC_CLOSE_DRAIN_TIMEOUT_MS,
+        DAEMON_SHUTDOWN_FABRIC_CLOSE_TIMEOUT,
+        `fabric operations did not close within ${String(FABRIC_CLOSE_DRAIN_TIMEOUT_MS)}ms`,
+      );
+    } catch (error: unknown) {
+      drainFailure = error;
     }
-    await this.#adapterSupervisor.close();
-    if (this.#database.open) {
-      this.#database.pragma("wal_checkpoint(TRUNCATE)");
-      this.#database.close();
+    try {
+      await this.#adapterSupervisor.close();
+    } finally {
+      if (this.#database.open) {
+        try {
+          this.#database.pragma("wal_checkpoint(TRUNCATE)");
+        } finally {
+          if (this.#database.open) this.#database.close();
+        }
+      }
     }
+    if (drainFailure !== undefined) throw drainFailure;
   }
 
   async #requestAdapter(adapterId: string, method: string, params: Record<string, unknown>): Promise<unknown> {

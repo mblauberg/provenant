@@ -32,7 +32,6 @@ export async function waitWithShutdownDeadline(
       pending,
       new Promise<never>((_resolve, reject) => {
         timer = setTimeout(() => reject(new DaemonShutdownTimeoutError(code, message)), timeoutMs);
-        timer.unref();
       }),
     ]);
   } finally {

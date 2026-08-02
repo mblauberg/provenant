@@ -50,7 +50,10 @@ import { BootstrapElection, FLOCK_ELECTION_LOCK_PORT, type ElectionLockHandle } 
 import { GuardedIdleStopController, type IdleStopResult, type QuiesceToken } from "../lifecycle/global-liveness.js";
 import { IdleShutdownScheduler } from "./idle-shutdown-scheduler.js";
 import { ResultDeadlineScheduler } from "./result-deadline-scheduler.js";
-import { finalizeDaemonShutdown } from "./shutdown-finalizer.js";
+import {
+  closeFabricWithLifecycleReceiptAuthority,
+  finalizeDaemonShutdown,
+} from "./shutdown-finalizer.js";
 import { acquireDaemonLocks, releaseDaemonLocks, writeDaemonLockReceipt } from "./client.js";
 import {
   markPrivateDiscoveryTerminal,
@@ -69,10 +72,8 @@ import type { TrustedGitConfiguration } from "../operator/trusted-git-registry.j
 import { inspectFabricDatabase } from "../core/migrations.js";
 import {
   closeRecoverableUnixListener,
-  DAEMON_SHUTDOWN_FABRIC_CLOSE_TIMEOUT,
   openRecoverableUnixListener,
   RecoverableServingAdmissionFence,
-  waitWithShutdownDeadline,
 } from "./recoverable-serving-socket.js";
 
 class DaemonProtocolError extends Error {
@@ -766,22 +767,21 @@ const finishProcess = async (input: {
   return await finalizeDaemonShutdown({
     requestedState: input.state,
     requestedExitCode: input.exitCode,
-    closeFabric: async () => {
-      try {
-        await waitWithShutdownDeadline(
-          fabric.close(),
-          30_000,
-          DAEMON_SHUTDOWN_FABRIC_CLOSE_TIMEOUT,
-          "fabric operations did not close within 30000ms",
-        );
-      } catch (error: unknown) {
-        const failure = daemonFailureEvidence(error);
-        process.stderr.write(`${failure.code}: ${failure.message}\n`);
-        throw error;
-      }
-      lifecycleReceiptAuthority?.close();
-      lifecycleReceiptAuthority = undefined;
-    },
+    closeFabric: async () => await closeFabricWithLifecycleReceiptAuthority({
+      closeFabric: async () => {
+        try {
+          await fabric.close();
+        } catch (error: unknown) {
+          const failure = daemonFailureEvidence(error);
+          process.stderr.write(`${failure.code}: ${failure.message}\n`);
+          throw error;
+        }
+      },
+      closeAuthority: () => {
+        lifecycleReceiptAuthority?.close();
+        lifecycleReceiptAuthority = undefined;
+      },
+    }),
     removeSocket: async () => { rmSync(socketPath, { force: true }); },
     releaseLocks: async () => await releaseDaemonLocks(daemonLocks),
     markTerminal: async ({ state, exitCode }) => {

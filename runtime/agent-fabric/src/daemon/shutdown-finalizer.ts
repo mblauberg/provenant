@@ -5,6 +5,17 @@ export type ShutdownFailure = Readonly<{
   cause: unknown;
 }>;
 
+export async function closeFabricWithLifecycleReceiptAuthority(input: Readonly<{
+  closeFabric(): Promise<void>;
+  closeAuthority(): void;
+}>): Promise<void> {
+  try {
+    await input.closeFabric();
+  } finally {
+    input.closeAuthority();
+  }
+}
+
 export async function finalizeDaemonShutdown(input: Readonly<{
   requestedState: ShutdownTerminalState;
   requestedExitCode: number;
