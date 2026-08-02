@@ -55,10 +55,12 @@ test 3; WCAG 1.4.1). Four semantic roles, each pinned to an existing field:
 | Degraded | `health` degraded, session `visibility_degraded` | `~` | amber | `~` glyph + `DEGRADED` word |
 | Stale/absent | freshness `stale`/`unavailable`/`conflict` | `?` | dim/grey | freshness word (`STALE`, `UNAVAILABLE`) suffix |
 
-The `URGENCY_MARKER` map and freshness labels already exist in
-`row-presentation.ts`; this slice reuses them and adds no new severity source.
-No fact is conveyed by colour with no textual/glyph twin. In `--no-colour` the
-glyph gutter and freshness words carry the full signal unchanged.
+The `FABRIC_URGENCY_MARKERS` map (in `theme.ts`, read through
+`urgencyMarkerFor`) and the freshness labels already exist; this slice reuses
+them and adds no new severity source.
+No fact is conveyed by colour with no textual/glyph twin. Colour is not emitted
+today, so the glyph gutter and freshness words already carry the full signal;
+when colour lands it must stay a redundant layer.
 
 ### Density rules
 
@@ -133,8 +135,8 @@ fields, stable under focus/scroll and stacked reflow. Nothing else.
   `nextMilestone`).
 - Keep coordination runs and delivery workstreams visually distinct using the
   existing `runIdentityCompactLabel`; never flatten or auto-select.
-- Glyph gutter + freshness words as the non-colour signal; colour as redundant
-  layer; `--no-colour` parity.
+- Glyph gutter + freshness words as the non-colour signal; colour remains
+  unimplemented and, when added, must be a redundant layer only.
 - Focus/scroll stability across `SIGWINCH` and 80x24 ↔ stacked reflow: preserve
   selected stable ID, focus owner, per-band scroll anchor, follow-tail; clamp on
   shrink without dispatch (per `operator-interaction.md` resize clause).
@@ -156,7 +158,8 @@ including staged connection diagnosis.
 ### Files touched (console-only)
 
 - `row-presentation.ts` — assemble the roster band from existing run summaries/
-  `RunIdentity`; reuse `URGENCY_MARKER`, freshness labels, `runIdentityCompactLabel`.
+  `RunIdentity`; reuse `urgencyMarkerFor` (`theme.ts`), freshness labels,
+  `runIdentityCompactLabel`.
 - `presenter-model.ts` / `presenter.ts` — extend the Deck presentation with the
   roster band; no new state owner.
 - `index.ts` — render three stacked bands + strip; glyph gutter; wide/compact/
@@ -172,8 +175,8 @@ including staged connection diagnosis.
    health/attention identifiable at 80x24; safety/critical outrank FYIs;
    duplicates grouped; freshness visible; no inferred percentage.
 2. Coordination runs and workstreams render as distinct labelled rows.
-3. Every non-colour twin present; `--no-colour` snapshot conveys identical
-   severity and freshness.
+3. Every non-colour twin present; the rendered snapshot conveys severity and
+   freshness with no colour emitted.
 4. Resize/SIGWINCH preserves selection, focus, per-band scroll, follow-tail; no
    submit/repeat/discard; 30x6 usable, below → inert with Detach live.
 5. All eight canonical views still reachable and unchanged; no projection field
