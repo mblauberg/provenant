@@ -136,6 +136,8 @@ def _direct_worker_leg(
     human_answer = derived.get("human_answer")
     dispatcher_output_available = isinstance(human_answer, dict)
     transcript_available = isinstance(semantic_result, dict)
+    if review.get("status") == "complete" and outcome.get("certifying") is not True:
+        return str(outcome.get("reason", "worker outcome is not certifying")), None
     return None, normalise_dispatch_review(
         route_value,
         semantic_result,

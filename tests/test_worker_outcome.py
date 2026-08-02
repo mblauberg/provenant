@@ -66,7 +66,36 @@ def test_accept_worker_outcome_joins_observed_complete_artifact(tmp_path):
 
     assert result["status"] == "accepted"
     assert result["kind"] == "complete"
+    assert result["certifying"] is True
     assert result["verdict"] == "pass"
+
+
+def test_successful_route_with_failed_dispatcher_terminal_is_rejected(tmp_path):
+    reference = _reference(tmp_path, terminal={
+        "id": "review-1",
+        "attempt_id": "attempt-1",
+        "kind": "complete",
+        "summary": "review completed",
+        "verdict": "pass",
+    })
+    dispatch_terminal_path = tmp_path / "dispatch-terminal.json"
+    dispatch_terminal_path.write_text(json.dumps({
+        "id": "review-1",
+        "attempt_id": "attempt-1",
+        "kind": "failed",
+        "reason": "dispatcher failed",
+    }), encoding="utf-8")
+    dispatch = json.loads((tmp_path / "dispatch.json").read_text(encoding="utf-8"))
+    dispatch["terminal_artifact_sha256"] = _digest(dispatch_terminal_path)
+    dispatch_path = tmp_path / "dispatch.json"
+    dispatch_path.write_text(json.dumps(dispatch), encoding="utf-8")
+    reference["dispatch_receipt"]["digest"] = _digest(dispatch_path)
+    reference["dispatch_terminal_artifact"]["digest"] = _digest(dispatch_terminal_path)
+
+    result = worker_outcome.accept_worker_outcome(tmp_path, reference)
+
+    assert result["status"] == "rejected"
+    assert "dispatcher terminal" in result["reason"]
 
 
 def test_live_or_unobserved_dispatch_cannot_certify_terminal_artifact(tmp_path):
@@ -201,8 +230,15 @@ def test_nonzero_dispatch_exit_is_explicit_and_never_certifying(tmp_path):
     dispatch = json.loads(dispatch_path.read_text())
     dispatch["status"] = "error"
     dispatch["exit"] = 9
+    dispatch_terminal_path = tmp_path / "dispatch-terminal.json"
+    dispatch_terminal_path.write_text(json.dumps({
+        "id": "review-1", "attempt_id": "attempt-1", "kind": "failed",
+        "reason": "dispatcher failed",
+    }), encoding="utf-8")
+    dispatch["terminal_artifact_sha256"] = _digest(dispatch_terminal_path)
     dispatch_path.write_text(json.dumps(dispatch))
     reference["dispatch_receipt"]["digest"] = _digest(dispatch_path)
+    reference["dispatch_terminal_artifact"]["digest"] = _digest(dispatch_terminal_path)
 
     result = worker_outcome.accept_worker_outcome(tmp_path, reference)
 

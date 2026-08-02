@@ -273,6 +273,12 @@ def accept_worker_outcome(
     error = _validate_terminal(root, dispatch_terminal, outcome_id=outcome_id, attempt_id=attempt_id)
     if error:
         return _failure(f"dispatch terminal artifact: {error}")
+    dispatch_kind = dispatch_terminal["kind"]
+    dispatch_succeeded = dispatch.get("status") == "ok" and exit_value == 0
+    if dispatch_kind == "complete" and not dispatch_succeeded:
+        return _failure("dispatcher terminal complete contradicts dispatch receipt status/exit")
+    if dispatch_kind == "failed" and dispatch_succeeded:
+        return _failure("dispatcher terminal failed contradicts dispatch receipt status/exit")
     paths = {
         "human answer": answer_path,
         "dispatcher terminal": dispatch_terminal_path,
@@ -301,7 +307,7 @@ def accept_worker_outcome(
         "id": outcome_id,
         "attempt_id": attempt_id,
         "kind": kind,
-        "certifying": kind == "complete" and exit_value == 0,
+        "certifying": kind == "complete" and dispatch_kind == "complete" and dispatch_succeeded,
     }
     result["derived_evidence"] = {
         "human_answer": {

@@ -198,20 +198,19 @@ def test_claude_workflows_use_router_and_safe_implement_loop():
     assert "substantial: 4" in implementation
     assert "crucial: 5" in implementation
     assert "terminal: 5" in implementation
-    assert "state: 'awaiting-human'" in implementation
+    assert "awaiting-host-apply" in implementation
     assert "git checkout" not in implementation
     assert "git restore" not in implementation
     assert "git reset" not in implementation
     assert "required: false" in implementation
     assert "otherPrimaryRan" in implementation
-    assert "distinct-family availability never replaces other-primary" in implementation
+    assert "never replaces the other-primary gate" in implementation
     assert "Copy the global deliver RUN.template.json" in implementation
     assert "refusing the next dispatch" in implementation
-    assert "do not recreate or replace it" in implementation
-    assert "Review verdicts and dispatcher lineage" in implementation
     assert "certification_eligible" in implementation
-    assert "Machine gate FAILED" in implementation
-    assert "state: 'failed'" in implementation
+    assert "apply:serial" not in implementation
+    assert "git apply" not in implementation
+    assert "implementationCandidate" not in implementation
 
 
 def test_implement_skill_uses_canonical_delivery_completion_states():

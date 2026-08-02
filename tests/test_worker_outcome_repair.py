@@ -166,41 +166,43 @@ def test_non_ok_complete_worker_outcome_is_never_certifying(tmp_path):
 
     result = accept_worker_outcome(tmp_path, reference)
 
-    assert result["status"] == "accepted"
-    assert result["certifying"] is False
+    assert result["status"] == "rejected"
+    assert "dispatcher terminal complete contradicts" in result["reason"]
 
 
-def test_workflow_defers_implementation_claims_to_host_verification():
+def test_workflow_emits_reviewed_patches_for_host_application_only():
     workflow = Path(__file__).parents[1] / "workflows" / "implement-run.js"
     text = workflow.read_text(encoding="utf-8")
 
     assert "acceptance:implementation-claim" not in text
-    assert "awaiting-host-verification" in text
+    assert "awaiting-host-apply" in text
     assert "machineGatePassed: false" in text
-    assert "implementationCandidate" in text
-    assert "outcomeReferencePath" not in text
+    for forbidden in (
+        "apply:serial",
+        "git apply",
+        "autoApplyAllowed",
+        "implementationCandidate",
+        "outerChairCanonicalWorktree",
+        "outerChairBaseRevision",
+        "hostClaimContextAvailable",
+    ):
+        assert forbidden not in text
 
 
-def test_workflow_requires_outer_chair_base_and_worktree_for_auto_apply():
+def test_workflow_fails_closed_before_host_apply_on_failed_checks_or_blockers():
     workflow = Path(__file__).parents[1] / "workflows" / "implement-run.js"
     text = workflow.read_text(encoding="utf-8")
 
-    assert "outerChairCanonicalWorktree" in text
-    assert "outerChairBaseRevision" in text
-    assert "hostClaimContextAvailable" in text
-    assert "autoApplyAllowed =" in text
-    assert "hostClaimContextAvailable &&" in text
+    failure_guard = "if (!checksPass || blocking > 0)"
+    guard_at = text.index(failure_guard)
+    host_apply_at = text.index("phase('Host apply')")
 
-
-def test_missing_outer_chair_context_stays_patch_only_before_model_apply_claim():
-    workflow = Path(__file__).parents[1] / "workflows" / "implement-run.js"
-    text = workflow.read_text(encoding="utf-8")
-
-    no_context = text.index("if (!hostClaimContextAvailable)")
-    applied = text.index("if (appliedN > 0)")
-    assert no_context < applied
-    assert "state: 'patch-only'" in text[no_context:applied]
-    assert "refusing to treat the serial applier output as execution proof" in text[no_context:applied]
+    assert guard_at < host_apply_at
+    failure_tail = text[guard_at:host_apply_at]
+    assert "await failRun(" in failure_tail
+    assert "state: 'failed'" in failure_tail
+    assert "machineGatePassed: false" in failure_tail
+    assert text.index("state: 'awaiting-host-apply'", host_apply_at) > host_apply_at
 
 
 def test_claimed_implementation_cannot_use_an_unused_verifier(tmp_path):
@@ -251,14 +253,12 @@ def test_never_attempted_omitted_leg_remains_explicit_without_route_or_terminal(
     assert run_dir_finalize._validate_review_plan(plan) == []
 
 
-def test_implement_workflow_returns_a_candidate_only_at_the_apply_boundary():
+def test_implement_workflow_has_no_model_source_application_boundary():
     workflow = Path(__file__).parents[1] / "workflows" / "implement-run.js"
     text = workflow.read_text(encoding="utf-8")
 
-    assert "base_revision" in text
-    assert "accept_claim.py" in text
-    assert "implementationCandidate" in text
-    assert "awaiting-host-verification" in text
+    assert "patches/" in text
+    assert "awaiting-host-apply" in text
     assert "machineGatePassed: false" in text
     assert "acceptance:implementation-claim" not in text
     assert "reviewerId" in text
@@ -316,7 +316,6 @@ def test_claim_acceptance_helper_executes_verifier_and_binds_receipt(tmp_path, m
         claimed_commit="b" * 40,
         base_revision="a" * 40,
         run_dir=run,
-        outcome_reference=None,
     )
 
     assert accept_claim.accept(args) == 0
@@ -347,7 +346,7 @@ def test_claim_acceptance_rejects_nonzero_installed_verifier_even_if_stdout_clai
     args = SimpleNamespace(
         canonical_worktree=canonical, claimed_worktree=None,
         claimed_commit="b" * 40, base_revision="a" * 40,
-        run_dir=run, outcome_reference=None,
+        run_dir=run,
     )
 
     assert accept_claim.accept(args) == 1
@@ -356,38 +355,13 @@ def test_claim_acceptance_rejects_nonzero_installed_verifier_even_if_stdout_clai
     assert "verifier failed" in result["reason"]
 
 
-def test_optional_worker_join_never_certifies_a_question(tmp_path, monkeypatch, capsys):
-    run = tmp_path / "run"
-    run.mkdir()
-    canonical = tmp_path / "canonical"
-    canonical.mkdir()
-    reference = write_attempt(run, kind="question")
-    reference.pop("worktree_receipt")
-    outcome_path = run / "review.outcome.json"
-    outcome_path.write_text(json.dumps(reference), encoding="utf-8")
-    expected_common = Path("/installed/common.git")
-    monkeypatch.setattr(accept_claim.worktree_policy, "common_git_dir", lambda _path: expected_common)
+def test_claim_acceptance_cli_has_no_worker_outcome_option():
+    parser = accept_claim.parser()
 
-    def fake_run(command, **kwargs):
-        return __import__("subprocess").CompletedProcess(
-            command, 0, stdout=json.dumps({
-                "status": "accepted", "base_revision": "a" * 40,
-                "head_revision": "b" * 40, "claimed_commit": "b" * 40, "clean": True,
-                "claimed_worktree": str(canonical), "common_git_dir": str(expected_common),
-            }), stderr="",
-        )
-
-    monkeypatch.setattr(accept_claim.subprocess, "run", fake_run)
-    args = SimpleNamespace(
-        canonical_worktree=canonical, claimed_worktree=None,
-        claimed_commit="b" * 40, base_revision="a" * 40,
-        run_dir=run, outcome_reference=outcome_path,
+    assert not any(
+        "--outcome-reference" in action.option_strings
+        for action in parser._actions
     )
-
-    assert accept_claim.accept(args) == 1
-    result = json.loads(capsys.readouterr().out)
-    assert result["status"] == "rejected"
-    assert "question" in result["reason"]
 
 
 def _claim_fixture(tmp_path):
@@ -419,7 +393,12 @@ def test_valid_new_clean_exact_linked_worktree_succeeds_only_through_direct_help
     args = SimpleNamespace(
         canonical_worktree=worktree, claimed_worktree=None,
         claimed_commit=claimed, base_revision=base,
-        run_dir=run, outcome_reference=None,
+        run_dir=run,
+    )
+
+    (run / "unrelated-worker-outcome.json").write_text(
+        json.dumps({"id": "unrelated", "attempt_id": "attempt-unrelated", "kind": "complete"}),
+        encoding="utf-8",
     )
 
     assert accept_claim.accept(args) == 0

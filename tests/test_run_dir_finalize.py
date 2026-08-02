@@ -174,6 +174,34 @@ def test_real_run_allows_recorded_targeted_omission(tmp_path):
     assert run_dir_finalize._validate_review_plan(plan, tmp_path) == []
 
 
+def test_failed_dispatcher_terminal_cannot_finalise_a_complete_review(tmp_path):
+    plan = substantial_plan()
+    bind_complete_reviews(tmp_path, plan)
+    row = plan["reviews"][0]
+    dispatch_terminal = tmp_path / row["route_receipt"]["path"].replace(
+        ".route.json", ".dispatch-terminal.json"
+    )
+    dispatch_terminal.write_text(json.dumps({
+        "id": row["id"],
+        "attempt_id": "attempt-" + row["id"],
+        "kind": "failed",
+        "reason": "dispatcher failed",
+    }))
+    route = tmp_path / row["route_receipt"]["path"]
+    route_value = json.loads(route.read_text())
+    route_value["terminal_artifact_sha256"] = "sha256:" + __import__("hashlib").sha256(
+        dispatch_terminal.read_bytes()
+    ).hexdigest()
+    route.write_text(json.dumps(route_value))
+    row["route_receipt"]["digest"] = "sha256:" + __import__("hashlib").sha256(
+        route.read_bytes()
+    ).hexdigest()
+
+    errors = run_dir_finalize._validate_review_plan(plan, tmp_path)
+
+    assert any("worker outcome rejected" in error for error in errors)
+
+
 def test_real_run_allows_recorded_crucial_second_family_omission(tmp_path):
     plan = substantial_plan("crucial")
     plan["reviews"].append(
@@ -317,7 +345,7 @@ def test_review_topology_binds_account_default_route_and_review_evidence(tmp_pat
     route_value["status"] = "error"
     route.write_text(json.dumps(route_value))
     row["route_receipt"]["digest"] = "sha256:" + __import__("hashlib").sha256(route.read_bytes()).hexdigest()
-    assert any("status is not derived" in error for error in run_dir_finalize._validate_review_plan(plan, tmp_path))
+    assert any("worker outcome rejected" in error for error in run_dir_finalize._validate_review_plan(plan, tmp_path))
     route_value["status"] = "ok"
     route_value["reviewer_id"] = "different-reviewer"
     route.write_text(json.dumps(route_value))

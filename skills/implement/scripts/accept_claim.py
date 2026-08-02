@@ -57,22 +57,6 @@ def existing_directory(value: Path, label: str) -> Path:
     return resolved
 
 
-def contained_existing_file(run_dir: Path, value: Path, label: str) -> Path:
-    candidate = value if value.is_absolute() else run_dir / value
-    if candidate.is_symlink():
-        raise ValueError(f"{label} must not be a symlink")
-    try:
-        resolved = candidate.resolve(strict=True)
-        resolved.relative_to(run_dir)
-    except (OSError, RuntimeError, ValueError) as exc:
-        raise ValueError(f"{label} must be an existing file contained by run-dir") from exc
-    if not resolved.is_file():
-        raise ValueError(f"{label} must be an existing file contained by run-dir")
-    if resolved.stat().st_nlink != 1:
-        raise ValueError(f"{label} must not be hardlinked")
-    return resolved
-
-
 def _valid_commit(value: object, label: str) -> str:
     if not isinstance(value, str) or not COMMIT_SHA.fullmatch(value):
         raise ValueError(f"{label} must be a full Git object ID")
@@ -134,27 +118,6 @@ def verify_claim(args: argparse.Namespace, canonical: Path, claimed: Path) -> di
     return receipt
 
 
-def _worker_join(run_dir: Path, outcome_path: Path, worktree_ref: dict[str, str]) -> dict[str, object]:
-    """Use the worker join only when an explicit worker artifact is supplied."""
-    from skills._shared.worker_outcome import accept_worker_outcome
-
-    try:
-        outcome = json.loads(outcome_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        return {"status": "rejected", "reason": f"worker outcome is unreadable: {exc}"}
-    if not isinstance(outcome, dict) or "worktree_receipt" in outcome:
-        return {"status": "rejected", "reason": "worker outcome must be an unbound object"}
-    outcome["worktree_receipt"] = worktree_ref
-    joined = accept_worker_outcome(run_dir, outcome, require_worktree_receipt=True)
-    if joined.get("status") != "accepted" or joined.get("certifying") is not True:
-        return {
-            "status": "rejected",
-            "reason": str(joined.get("reason", "worker outcome is not certifying")),
-            "worker_outcome": joined,
-        }
-    return {"status": "accepted", "worker_outcome": joined}
-
-
 def accept(args: argparse.Namespace) -> int:
     run_dir: Path | None = None
     result: dict[str, object]
@@ -163,18 +126,12 @@ def accept(args: argparse.Namespace) -> int:
         canonical = existing_directory(Path(args.canonical_worktree), "canonical worktree")
         claimed_value = getattr(args, "claimed_worktree", None)
         claimed = canonical if claimed_value is None else existing_directory(Path(claimed_value), "claimed worktree")
-        outcome_value = getattr(args, "outcome_reference", None)
-        outcome_path = None if outcome_value is None else contained_existing_file(
-            run_dir, Path(outcome_value), "outcome reference",
-        )
         claim_receipt = verify_claim(args, canonical, claimed)
         receipt_path = fixed_output_path(run_dir, RECEIPT_NAME)
         write_json(receipt_path, claim_receipt)
         worktree_ref = {"path": RECEIPT_NAME, "digest": digest(receipt_path)}
         if claim_receipt.get("status") != "accepted":
             result = {"status": "rejected", "reason": claim_receipt.get("reason", "claim rejected")}
-        elif outcome_path is not None:
-            result = _worker_join(run_dir, outcome_path, worktree_ref)
         else:
             result = {
                 "status": "accepted",
@@ -219,7 +176,6 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--claimed-commit", required=True)
     result.add_argument("--base-revision", required=True)
     result.add_argument("--run-dir", type=Path, required=True)
-    result.add_argument("--outcome-reference", type=Path)
     return result
 
 
