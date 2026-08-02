@@ -3,7 +3,9 @@ import type { Server, Socket } from "node:net";
 
 import {
   DAEMON_SHUTDOWN_CLOSE_TIMEOUT,
+  DAEMON_SHUTDOWN_CLOSE_TIMEOUT_MS,
   DAEMON_SHUTDOWN_DRAIN_TIMEOUT,
+  DAEMON_SHUTDOWN_DRAIN_TIMEOUT_MS,
   waitWithShutdownDeadline,
 } from "../lifecycle/shutdown-deadline.js";
 
@@ -61,11 +63,13 @@ export async function closeRecoverableUnixListener(options: {
   server: Server;
   sockets: Iterable<Socket>;
   waitForInFlight(): Promise<void>;
-  closeTimeoutMs: number;
-  drainTimeoutMs: number;
+  closeTimeoutMs?: number;
+  drainTimeoutMs?: number;
   admissionFence?: RecoverableServingAdmissionFence;
 }): Promise<void> {
   options.admissionFence?.close();
+  const drainTimeoutMs = options.drainTimeoutMs ?? DAEMON_SHUTDOWN_DRAIN_TIMEOUT_MS;
+  const closeTimeoutMs = options.closeTimeoutMs ?? DAEMON_SHUTDOWN_CLOSE_TIMEOUT_MS;
   let drainFailed = false;
   let drainError: unknown;
   let teardownFailed = false;
@@ -73,9 +77,9 @@ export async function closeRecoverableUnixListener(options: {
   try {
     await waitWithShutdownDeadline(
       options.waitForInFlight(),
-      options.drainTimeoutMs,
+      drainTimeoutMs,
       DAEMON_SHUTDOWN_DRAIN_TIMEOUT,
-      `in-flight operations did not drain within ${String(options.drainTimeoutMs)}ms`,
+      `in-flight operations did not drain within ${String(drainTimeoutMs)}ms`,
     );
   } catch (error: unknown) {
     drainFailed = true;
@@ -87,13 +91,27 @@ export async function closeRecoverableUnixListener(options: {
           else reject(error);
         }))
       : Promise.resolve();
-    for (const socket of options.sockets) socket.destroy();
+    const socketsClosed = Promise.all([...options.sockets].map(async (socket) => {
+      if (socket.destroyed) return;
+      await new Promise<void>((resolve) => {
+        let settled = false;
+        const finish = (): void => {
+          if (settled) return;
+          settled = true;
+          socket.destroy();
+          resolve();
+        };
+        socket.once("close", finish);
+        socket.once("error", finish);
+        socket.end(finish);
+      });
+    })).then(() => undefined);
     try {
       await waitWithShutdownDeadline(
-        closed,
-        options.closeTimeoutMs,
+        Promise.all([closed, socketsClosed]).then(() => undefined),
+        closeTimeoutMs,
         DAEMON_SHUTDOWN_CLOSE_TIMEOUT,
-        `serving socket did not close within ${String(options.closeTimeoutMs)}ms`,
+        `serving socket did not close within ${String(closeTimeoutMs)}ms`,
       );
     } catch (error: unknown) {
       teardownFailed = true;

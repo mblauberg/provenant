@@ -2,6 +2,11 @@ export const DAEMON_SHUTDOWN_DRAIN_TIMEOUT = "DAEMON_SHUTDOWN_DRAIN_TIMEOUT";
 export const DAEMON_SHUTDOWN_CLOSE_TIMEOUT = "DAEMON_SHUTDOWN_CLOSE_TIMEOUT";
 export const DAEMON_SHUTDOWN_FABRIC_CLOSE_TIMEOUT = "DAEMON_SHUTDOWN_FABRIC_CLOSE_TIMEOUT";
 
+// A local daemon gets a short grace period for useful work, then bounded cleanup.
+export const DAEMON_SHUTDOWN_DRAIN_TIMEOUT_MS = 5_000;
+export const DAEMON_SHUTDOWN_CLOSE_TIMEOUT_MS = 2_000;
+export const DAEMON_SHUTDOWN_FABRIC_CLOSE_TIMEOUT_MS = 5_000;
+
 class DaemonShutdownTimeoutError extends Error {
   readonly code: DaemonShutdownTimeoutCode;
 

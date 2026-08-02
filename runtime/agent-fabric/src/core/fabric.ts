@@ -235,6 +235,7 @@ import {
 } from "../lifecycle/receipt-recovery.js";
 import {
   DAEMON_SHUTDOWN_FABRIC_CLOSE_TIMEOUT,
+  DAEMON_SHUTDOWN_FABRIC_CLOSE_TIMEOUT_MS,
   waitWithShutdownDeadline,
 } from "../lifecycle/shutdown-deadline.js";
 
@@ -263,7 +264,6 @@ export type FabricRuntimeOpenOptions = FabricOpenOptions & {
 };
 
 type Row = Record<string, unknown>;
-const FABRIC_CLOSE_DRAIN_TIMEOUT_MS = 30_000;
 type TaskCreateInput = {
   taskId: string;
   authorityId: string;
@@ -1524,9 +1524,9 @@ export class Fabric {
             this.#providerActionState.abandonDeferred();
           }
         })(),
-        FABRIC_CLOSE_DRAIN_TIMEOUT_MS,
+        DAEMON_SHUTDOWN_FABRIC_CLOSE_TIMEOUT_MS,
         DAEMON_SHUTDOWN_FABRIC_CLOSE_TIMEOUT,
-        `fabric operations did not close within ${String(FABRIC_CLOSE_DRAIN_TIMEOUT_MS)}ms`,
+        `fabric operations did not close within ${String(DAEMON_SHUTDOWN_FABRIC_CLOSE_TIMEOUT_MS)}ms`,
       );
     } catch (error: unknown) {
       drainFailure = error;

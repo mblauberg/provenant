@@ -2,16 +2,18 @@ import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises
 import { randomBytes } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { setImmediate as realSetImmediate } from "node:timers";
 
 import Database from "better-sqlite3";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { openFabric } from "../../../src/index.ts";
 import { openLocalLifecycleReceiptAuthority } from "../../../src/lifecycle/local-receipt-authority.ts";
+import { DAEMON_SHUTDOWN_FABRIC_CLOSE_TIMEOUT_MS } from "../../../src/lifecycle/shutdown-deadline.ts";
 import * as shutdownFinalizer from "../../../src/daemon/shutdown-finalizer.ts";
 import { createCurrentSessionRun } from "../../support/current-session-testkit.ts";
 import { DAEMON_ROOT_AUTHORITY } from "../../support/daemon-testkit.ts";
-import { waitForFile } from "../../shared/deadline-wait.ts";
+import { waitForFile, waitForProcessExit } from "../../shared/deadline-wait.ts";
 
 const roots: string[] = [];
 
@@ -101,22 +103,27 @@ describe("shutdown deadline behaviour", () => {
         () => ({ kind: "resolved" as const }),
         (error: unknown) => ({ kind: "rejected" as const, error }),
       );
-      const testDeadline = new Promise<{ kind: "unfinished" }>((resolve) => {
-        setTimeout(() => resolve({ kind: "unfinished" }), 31_000);
-      });
-      await vi.advanceTimersByTimeAsync(31_000);
+      let closingSettled = false;
+      void closingOutcome.then(() => { closingSettled = true; });
+      for (let attempt = 0; !closingSettled && attempt < 4; attempt += 1) {
+        await vi.advanceTimersByTimeAsync(DAEMON_SHUTDOWN_FABRIC_CLOSE_TIMEOUT_MS + 1_000);
+        await new Promise<void>((resolve) => realSetImmediate(resolve));
+      }
 
-      const outcome = await Promise.race([
-        closingOutcome,
-        testDeadline,
-      ]);
+      const outcome = await closingOutcome;
       expect(outcome).toMatchObject({
         kind: "rejected",
         error: { code: "DAEMON_SHUTDOWN_FABRIC_CLOSE_TIMEOUT" },
       });
-      const spawnedAdapterPid = adapterPid;
-      expect(spawnedAdapterPid).toBeDefined();
-      expect(() => process.kill(spawnedAdapterPid as number, 0)).toThrow();
+      expect(adapterPid).toBeDefined();
+      await waitForProcessExit(adapterPid as number, {
+        timeoutMs: 2_000,
+        clock: {
+          now: () => performance.now(),
+          sleep: async () => await new Promise<void>((resolve) => realSetImmediate(resolve)),
+        },
+      });
+      console.log("shutdown-debug: adapter exit marker");
       await expect(chair.getMailboxState()).rejects.toThrow();
     } finally {
       vi.useRealTimers();
