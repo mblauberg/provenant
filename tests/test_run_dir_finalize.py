@@ -46,6 +46,14 @@ def review(review_id, scope, lens, family, tier="flagship", status="complete", s
         "evidence": {"path": f"reviews/{review_id}.md", "digest": evidence_digest} if attempted else None,
         "reason": reason if reason is not None else ("provider unavailable" if status != "complete" else ""),
         "verdict": "approve" if status == "complete" else "",
+        "wrapper_verdict": {
+            "verdict": "approve" if status == "complete" else "",
+            "model": "opus" if status == "complete" else "",
+            "family": family,
+            "endpoint": "anthropic" if family == "anthropic" else "openai",
+            "route_receipt": f"reviews/{review_id}.route.json",
+            "terminal_result": f"reviews/{review_id}.result.json",
+        } if attempted else None,
         "terminal_result": {
             "path": f"reviews/{review_id}.result.json",
             "digest": "sha256:" + __import__("hashlib").sha256((review_id + ":terminal").encode()).hexdigest(),

@@ -22,6 +22,19 @@ def terminal_result(verdict="approve", **overrides):
     return result
 
 
+def wrapper_verdict(verdict="approve", **overrides):
+    result = {
+        "verdict": verdict,
+        "model": "gpt-reviewer",
+        "family": "openai",
+        "endpoint": "openai",
+        "route_receipt": "reviews/luna.route.json",
+        "terminal_result": "reviews/luna.result.json",
+    }
+    result.update(overrides)
+    return result
+
+
 def test_worker_block_verdict_cannot_certify():
     leg = normalise_dispatch_review(
         dispatch_result(), terminal_result(verdict="block"), review_verdict="block",
@@ -79,3 +92,41 @@ def test_unobserved_exit_is_not_a_review_terminal():
 
     assert leg["status"] == "unavailable"
     assert leg["reason"] == "terminal-unavailable"
+
+
+def test_verdict_disagreement_rejection():
+    leg = normalise_dispatch_review(
+        dispatch_result(),
+        terminal_result(verdict="approve"),
+        review_verdict=wrapper_verdict(verdict="block"),
+        chair_family="anthropic",
+        transcript_available=True,
+        dispatcher_output_available=True,
+    )
+
+    assert leg["status"] == "failed"
+    assert leg["reason"] == "verdict-mismatch"
+    assert leg["certifying_vote"] is False
+
+
+def test_agent_lineage_not_trusted():
+    agent_result = terminal_result(
+        model="anthropic-agent",
+        family="anthropic",
+        endpoint="anthropic",
+        route_receipt="agent-supplied.route.json",
+        terminal_result="agent-supplied.result.json",
+    )
+    leg = normalise_dispatch_review(
+        dispatch_result(),
+        agent_result,
+        wrapper_verdict=wrapper_verdict(),
+        chair_family="anthropic",
+        transcript_available=True,
+        dispatcher_output_available=True,
+    )
+
+    assert leg["family"] == "openai"
+    assert leg["provider_family"] == "openai"
+    assert leg["endpoint_provider"] == "openai"
+    assert leg["orchestrator_family"] == "anthropic"

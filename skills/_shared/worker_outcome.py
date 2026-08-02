@@ -30,10 +30,21 @@ _DISPATCH_KEYS = {
 _TERMINAL_KEYS = {"id", "attempt_id", "kind", "summary", "question", "reason", "verdict", "artifact_refs"}
 _KINDS = {"complete", "question", "failed", "unavailable", "blocked"}
 _REVIEW_VERDICTS = {"approve", "approve-with-nits", "block", "pass"}
+_WRAPPER_VERDICT_KEYS = {
+    "verdict", "model", "family", "endpoint", "route_receipt", "terminal_result",
+}
 
 
 def _failure(reason: str) -> dict[str, object]:
     return {"status": "rejected", "reason": reason}
+
+
+def _valid_wrapper_verdict(value: object) -> bool:
+    return (
+        isinstance(value, dict)
+        and set(value) == _WRAPPER_VERDICT_KEYS
+        and all(isinstance(value.get(field), str) for field in _WRAPPER_VERDICT_KEYS)
+    )
 
 
 def _digest_bytes(data: bytes) -> str:
@@ -143,11 +154,6 @@ def _verify_answer_snapshot(
     return path, data, identity, None
 
 
-def _verify_answer(root: Path, dispatch: dict[str, Any]) -> tuple[Path | None, bytes | None, str | None]:
-    path, data, _identity_value, error = _verify_answer_snapshot(root, dispatch)
-    return path, data, error
-
-
 def _validate_terminal(
     root: Path,
     terminal: dict[str, Any],
@@ -243,9 +249,12 @@ def accept_worker_outcome(
     outcome: object,
     *,
     require_worktree_receipt: bool = False,
+    wrapper_verdict: object = None,
 ) -> dict[str, object]:
     """Return a derived acceptance decision for one digest-bound attempt."""
     root = run_dir.expanduser().absolute()
+    if wrapper_verdict is not None and not _valid_wrapper_verdict(wrapper_verdict):
+        return _failure("worker outcome uses an invalid closed schema")
     if not isinstance(outcome, dict):
         return _failure("worker outcome uses an invalid closed schema")
     if "dispatch_terminal_artifact" not in outcome:
@@ -383,6 +392,8 @@ def accept_worker_outcome(
         "dispatch_terminal": dispatch_terminal,
         "semantic_result": terminal,
     }
+    if wrapper_verdict is not None:
+        result["derived_evidence"]["wrapper_verdict"] = wrapper_verdict
     for field in ("summary", "question", "reason", "verdict", "artifact_refs"):
         if field in terminal:
             result[field] = terminal[field]

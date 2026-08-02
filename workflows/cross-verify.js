@@ -114,7 +114,7 @@ const DECOMPOSE_SCHEMA = {
 const VERDICT_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['claimId', 'reviewerId', 'verifier', 'verdict', 'anchors', 'crossFamily', 'readOnlyGuarantee'],
+  required: ['claimId', 'reviewerId', 'verifier', 'verdict', 'anchors'],
   properties: {
     claimId: { type: 'string' },
     reviewerId: { type: 'string', description: 'Stable verifier row identity; it must match the dispatcher --reviewer-id.' },
@@ -135,8 +135,6 @@ const VERDICT_SCHEMA = {
         },
       },
     },
-    crossFamily: { type: 'boolean', description: 'true only when produced by a different model family with an enforced/oauth_safe_mode read-only guarantee.' },
-    readOnlyGuarantee: { type: 'string', enum: ['enforced', 'oauth_safe_mode', 'best_effort', 'none', 'unknown'], description: 'Mirrors cf_dispatch.sh read_only_guarantee for cross-family; "enforced" for the Claude skeptic.' },
     notRunReason: { type: 'string', description: 'If verdict=unable due to cross-family failure, the CROSS-FAMILY-NOT-RUN reason from the dispatcher record.' },
     reasoning: { type: 'string', description: 'One or two lines on how the anchors settle the claim.' },
   },
@@ -258,14 +256,12 @@ function claudeSkepticPrompt(boot, claim) {
     '',
     'Find the actual evidence. Quote it VERBATIM with its source path/citekey/route/test and a locator (line range/section/page).',
     'Decide a verdict: supported | unsupported | partial | unable. Default to unsupported/unable if you cannot anchor support to an exact quote — never assert support without an anchor.',
-    'Set crossFamily=false and readOnlyGuarantee="enforced" (you are same-family).',
     `Write your working notes to <run-dir>/findings/${claim.id}.claude.md, then return ONLY the verdict object (claimId="${claim.id}", reviewerId="cross-verify-${claim.id}-claude", verifier="claude-skeptic").`,
   ].join('\n')
 }
 
 // Cross-family worker — first-class parallel worker. Shells out to cf_dispatch.sh.
-// Attacks a DIFFERENT angle from the Claude skeptic (independent evidence hunt) and
-// returns the dispatcher's normalised guarantees verbatim.
+// Attacks a DIFFERENT angle from the Claude skeptic (independent evidence hunt).
 function crossFamilyPrompt(boot, claim, idx) {
   const runDir = boot.runDir
   // Per-item variation by INDEX (no RNG): even claims lead with codex, odd lead with
@@ -288,7 +284,7 @@ function crossFamilyPrompt(boot, claim, idx) {
     '',
     'STEP 0 — DATA POLICY GATE (do this BEFORE writing any prompt file or dispatching). External-family CLIs disclose the prompt + any attached files to that provider. Per the cli-headless data-policy doctrine in the orchestrate skill, confirm the host project data policy permits sending THIS claim text and its cited evidence to an external provider:',
     '  - Apply the current project data policy. Redact secrets, credentials, personal data and any content not authorised for the selected provider.',
-    '  - If disclosure is NOT permitted for this content: do NOT dispatch. Set verdict="unable", crossFamily=false, verifier="CROSS-FAMILY-NOT-RUN", readOnlyGuarantee="none", notRunReason="data-policy-block", and append a "CROSS-FAMILY-NOT-RUN: data-policy-block" line to <run-dir>/MANIFEST.md. Return that verdict and stop.',
+    '  - If disclosure is NOT permitted for this content: do NOT dispatch. Set verdict="unable", verifier="CROSS-FAMILY-NOT-RUN", notRunReason="data-policy-block", and append a "CROSS-FAMILY-NOT-RUN: data-policy-block" line to <run-dir>/MANIFEST.md. Return that semantic result and stop. The workflow owns dispatcher lineage fields.',
     '  Record the policy acknowledgement (permitted/blocked + what, if anything, you redacted) in your norm file so it is auditable.',
     '',
     'STEP 1 — write a self-contained prompt file for the cross-family CLI:',
@@ -303,15 +299,38 @@ function crossFamilyPrompt(boot, claim, idx) {
     `--terminal-artifact <abs path to crossfamily/${claim.id}.terminal.json> ` +
     `--task-id ${claim.id} --attempt-id cross-verify-${claim.id} --reviewer-id cross-verify-${claim.id}-external --receipt <abs path to crossfamily/${claim.id}.route.json>`,
     '  (codex runs `exec -s read-only` enforced; cursor runs `--mode plan`. Never use claude as the cross-family tool — same family. agy is advisory-only and disabled unless CF_DISPATCH_ENABLE_AGY=1; do not enable it here.)',
-    '  The dispatcher prints a JSON record (adapter, provider_family, status, exit, output_path, output_sha256, terminal_artifact_path, terminal_artifact_sha256, read_only_guarantee, cross_family). Capture it. output_path is the human-readable answer; terminal_artifact_path is the dispatcher-owned JSON terminal artifact. Keep them separate.',
+    `  The dispatcher prints a JSON record (adapter, provider_family, status, exit, output_path, output_sha256, terminal_artifact_path, terminal_artifact_sha256, read_only_guarantee, cross_family). Capture it at <run-dir>/crossfamily/${claim.id}.route.json. output_path is the human-readable answer; terminal_artifact_path is the dispatcher-owned JSON terminal artifact. Keep them separate. Write the normalised semantic worker result to <run-dir>/crossfamily/${claim.id}.result.json.`,
     '',
     'STEP 3 — normalise:',
-    '  - If the record has cross_family=true and read_only_guarantee in {enforced, oauth_safe_mode} and status=ok: read the CLI answer from output_path and map it to a verdict + anchors (verbatim quotes + source + locator). Set crossFamily=true and readOnlyGuarantee accordingly. Set verifier to the tool that answered.',
-    '  - Keep that normalised worker result as a separate closed terminal JSON artifact with the same task/attempt identity. The dispatcher-owned terminal JSON proves launcher terminality; it is not a substitute for the worker result or its semantic verdict.',
-    `  - If the whole chain failed (status all_failed / auth_or_quota_error / error on every tool), or no tool could run (no git repo for codex and cursor unavailable): set reviewerId="cross-verify-${claim.id}-external", verdict="unable", crossFamily=false, verifier="CROSS-FAMILY-NOT-RUN", readOnlyGuarantee="none", and put the failure summary in notRunReason. Append a "CROSS-FAMILY-NOT-RUN: <reason>" line to <run-dir>/MANIFEST.md (or traces/README.md). Do NOT silently downgrade or substitute a Claude answer.`,
+    '  - If the record has cross_family=true and read_only_guarantee in {enforced, oauth_safe_mode} and status=ok: read the CLI answer from output_path and map it to a verdict + anchors (verbatim quotes + source + locator). Set verifier to the tool that answered.',
+    '  - Keep that normalised worker result as a separate closed terminal JSON artifact with the same task/attempt identity. The dispatcher-owned terminal JSON proves launcher terminality; it is not a substitute for the worker result or its semantic verdict. Do not copy model, family, endpoint, route receipt or terminal result fields into the worker verdict object: the workflow owns the wrapper record.',
+    `  - If the whole chain failed (status all_failed / auth_or_quota_error / error on every tool), or no tool could run (no git repo for codex and cursor unavailable): set reviewerId="cross-verify-${claim.id}-external", verdict="unable", verifier="CROSS-FAMILY-NOT-RUN", and put the failure summary in notRunReason. Append a "CROSS-FAMILY-NOT-RUN: <reason>" line to <run-dir>/MANIFEST.md (or traces/README.md). Do NOT silently downgrade or substitute a Claude answer.`,
     '',
     `Write the raw dispatcher record(s) + your normalisation to <run-dir>/crossfamily/${claim.id}.norm.md, then return ONLY the verdict object (claimId="${claim.id}", reviewerId="cross-verify-${claim.id}-external").`,
   ].join('\n')
+}
+
+function workflowCrossFamilyResult(boot, claim, workerResult) {
+  const wrapperVerdict = {
+    // The workflow knows the stable receipt locations. The selected model,
+    // provider family and endpoint remain unknown until the host reads the
+    // dispatcher receipt, so they are not taken from the worker response.
+    verdict: 'pass',
+    model: '',
+    family: '',
+    endpoint: '',
+    route_receipt: `${boot.runDir}/crossfamily/${claim.id}.route.json`,
+    terminal_result: `${boot.runDir}/crossfamily/${claim.id}.result.json`,
+  }
+  return {
+    ...workerResult,
+    workerVerdict: workerResult.verdict,
+    wrapperVerdict,
+    verifier: 'dispatcher-record-required',
+    crossFamily: false,
+    readOnlyGuarantee: 'dispatcher-record-required',
+    notRunReason: 'dispatcher-record-required',
+  }
 }
 
 function synthesisPrompt(boot, decomposed, verdictRows) {
@@ -424,12 +443,15 @@ if (boot && boot.runDir && boot.targetAvailable === false) {
         schema: VERDICT_SCHEMA,
         model: models.criticalReviewer,
       }),
-      () => agent(crossFamilyPrompt(boot, claim, idx), {
-        label: `cross-verify:cf:${claim.id}`,
-        phase: 'Cross-verify',
-        schema: VERDICT_SCHEMA,
-        model: models.scout,
-      }),
+      async () => {
+        const workerResult = await agent(crossFamilyPrompt(boot, claim, idx), {
+          label: `cross-verify:cf:${claim.id}`,
+          phase: 'Cross-verify',
+          schema: VERDICT_SCHEMA,
+          model: models.scout,
+        })
+        return workerResult ? workflowCrossFamilyResult(boot, claim, workerResult) : workerResult
+      },
     ]),
   )
 

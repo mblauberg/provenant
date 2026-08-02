@@ -157,9 +157,26 @@ def _direct_worker_leg(
     terminal_value: object,
     chair_family: object,
     risk: object,
+    wrapper_verdict: object = None,
     worktree_receipt: object = None,
 ) -> tuple[str | None, dict[str, object] | None]:
     """Consume the common outcome join only for the direct-CLI producer."""
+    effective_wrapper = wrapper_verdict
+    if effective_wrapper is None:
+        # Legacy receipts did not persist a separate wrapper object. Derive the
+        # compatibility value from the dispatcher record, never from worker
+        # lineage fields, so those receipts retain an independent join.
+        route_path = route_ref.get("path") if isinstance(route_ref, dict) else ""
+        terminal_path = terminal_ref.get("path") if isinstance(terminal_ref, dict) else ""
+        semantic_verdict = terminal_value.get("verdict") if isinstance(terminal_value, dict) else ""
+        effective_wrapper = {
+            "verdict": semantic_verdict if isinstance(semantic_verdict, str) else "",
+            "model": str(route_value.get("resolved_model", route_value.get("model", ""))),
+            "family": str(route_value.get("model_family", route_value.get("provider_family", ""))),
+            "endpoint": str(route_value.get("endpoint_provider", "")),
+            "route_receipt": route_path if isinstance(route_path, str) else "",
+            "terminal_result": terminal_path if isinstance(terminal_path, str) else "",
+        }
     outcome_reference: dict[str, object] = {
         "id": review["id"],
         "dispatch_receipt": route_ref,
@@ -171,7 +188,11 @@ def _direct_worker_leg(
         return dispatch_error, None
     assert dispatch_terminal_ref is not None
     outcome_reference["dispatch_terminal_artifact"] = dispatch_terminal_ref
-    outcome = accept_worker_outcome(run_dir, outcome_reference)
+    outcome = accept_worker_outcome(
+        run_dir,
+        outcome_reference,
+        wrapper_verdict=effective_wrapper,
+    )
     if outcome.get("status") != "accepted":
         return str(outcome.get("reason", "invalid outcome")), None
     derived = outcome.get("derived_evidence")
@@ -186,7 +207,7 @@ def _direct_worker_leg(
     return None, normalise_dispatch_review(
         route_value,
         semantic_result,
-        review_verdict=review.get("verdict"),
+        wrapper_verdict=effective_wrapper,
         chair_family=chair_family,
         transcript_available=transcript_available,
         dispatcher_output_available=dispatcher_output_available,
@@ -214,11 +235,12 @@ def _validate_review_plan(raw: object, run_dir: Path | None = None) -> list[str]
         "adapter", "model", "catalog_model", "route_receipt",
         "reviewer_id", "adapter_gate",
     }
+    wrapper_keys = keys | {"wrapper_verdict"}
     seen: set[str] = set()
     checked: list[dict[str, object]] = []
     normalized_legs: dict[str, dict[str, object]] = {}
     for index, review in enumerate(reviews):
-        if not isinstance(review, dict) or set(review) != keys:
+        if not isinstance(review, dict) or set(review) not in (keys, wrapper_keys):
             errors.append(f"receipt review_plan.reviews[{index}] must use the closed review record schema")
             continue
         if not isinstance(review["id"], str) or not review["id"] or review["id"] in seen:
@@ -366,6 +388,7 @@ def _validate_review_plan(raw: object, run_dir: Path | None = None) -> list[str]
                             outcome_error, leg = _direct_worker_leg(
                                 run_dir, review, route, route_value, terminal_result_ref,
                                 terminal_result_value, raw.get("chair_family"), risk,
+                                review.get("wrapper_verdict"),
                             )
                             if outcome_error:
                                 errors.append(

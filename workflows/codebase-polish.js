@@ -141,19 +141,46 @@ const REVIEW_SCHEMA = {
 const CF_REVIEW_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['id', 'reviewerId', 'crossFamilyRan', 'tool', 'crossFamily', 'readOnlyGuarantee', 'verdict', 'angle', 'recordPath', 'notRunReason'],
+  required: ['id', 'reviewerId', 'verdict', 'angle'],
   properties: {
     id: { type: 'string' },
     reviewerId: { type: 'string', description: 'Stable candidate-row identity; it must equal the dispatcher --reviewer-id.' },
-    crossFamilyRan: { type: 'boolean' },
-    tool: { type: ['string', 'null'], description: 'codex|cursor|agy or null' },
-    crossFamily: { type: 'boolean', description: 'From dispatcher JSON: cross_family' },
-    readOnlyGuarantee: { type: ['string', 'null'], description: 'enforced|oauth_safe_mode|best_effort|none' },
     verdict: { type: 'string', enum: ['agree-apply', 'agree-reject', 'disagree', 'advisory', 'not-run'] },
     angle: { type: 'string', description: 'Different angle the cross-family worker attacked' },
-    recordPath: { type: ['string', 'null'], description: 'crossfamily/<id>.json path' },
-    notRunReason: { type: ['string', 'null'], description: 'CROSS-FAMILY-NOT-RUN reason when crossFamilyRan=false' },
   },
+}
+
+function workflowCrossFamilyWrapper(cand) {
+  const routeReceipt = `${runDir}/crossfamily/${cand.id}.json`
+  const terminalResult = `${runDir}/crossfamily/${cand.id}.result.json`
+  return {
+    // The workflow knows that the dispatch was requested and can name its
+    // stable artifacts. It cannot know the selected failover model, family or
+    // endpoint until the route receipt is read by the host finalizer.
+    verdict: 'pass',
+    model: '',
+    family: '',
+    endpoint: '',
+    route_receipt: routeReceipt,
+    terminal_result: terminalResult,
+  }
+}
+
+function workflowCrossFamilyRecord(cand, workerResult) {
+  const wrapperVerdict = workflowCrossFamilyWrapper(cand)
+  return {
+    ...workerResult,
+    // Keep the semantic worker verdict, but replace self-reported dispatcher
+    // fields with the workflow-owned wrapper facts.
+    wrapperVerdict,
+    workerVerdict: workerResult.verdict,
+    crossFamilyRan: false,
+    tool: null,
+    crossFamily: false,
+    readOnlyGuarantee: 'dispatcher-record-required',
+    recordPath: wrapperVerdict.route_receipt,
+    notRunReason: 'dispatcher-record-required',
+  }
 }
 
 // Phase 3: adjudicated decision per candidate.
@@ -424,8 +451,8 @@ const reviewStage = (cand, _orig, _i) => parallel([
         `  --task-id ${cand.id} --attempt-id review-${cand.id} --reviewer-id review-${cand.id} \\`,
         `  --receipt ${runDir}/crossfamily/${cand.id}.json > /dev/null`,
         'Fail-over order is codex -> cursor -> agy (agy advisory/best-effort only).',
-        `The human cross-family answer is in ${runDir}/crossfamily/${cand.id}.out.txt; the dispatcher-owned JSON terminal artifact is in ${runDir}/crossfamily/${cand.id}.terminal.json; the normalised dispatcher record (read provider_family, cross_family, output_sha256, terminal_artifact_sha256 and read_only_guarantee from it) is in ${runDir}/crossfamily/${cand.id}.json. Keep all three distinct, and write the normalised worker result separately for terminal_result binding.`,
-        `Return reviewerId="review-${cand.id}" so the consuming candidate row and dispatcher route share one stable identity. Set recordPath to the .json path. If every tool fails (chain status all_failed) or disclosure was withheld, set crossFamilyRan=false and record CROSS-FAMILY-NOT-RUN: <reason> in the manifest. Never silently downgrade.`,
+        `The human cross-family answer is in ${runDir}/crossfamily/${cand.id}.out.txt; the dispatcher-owned JSON terminal artifact is in ${runDir}/crossfamily/${cand.id}.terminal.json; the dispatcher record is in ${runDir}/crossfamily/${cand.id}.json. Keep all three distinct, and write the normalised worker result separately to ${runDir}/crossfamily/${cand.id}.result.json for terminal_result binding. Do not copy model, family, endpoint, route receipt or terminal result fields into the worker record: the workflow owns the wrapper record and the host finalizer reads the dispatcher record.`,
+        `Return reviewerId="review-${cand.id}" so the consuming candidate row and dispatcher route share one stable identity. If every tool fails (chain status all_failed) or disclosure was withheld, record CROSS-FAMILY-NOT-RUN: <reason> in the manifest. Never silently downgrade. The workflow owns dispatcher lineage fields and recordPath.`,
         WORKER_CONTRACT,
         'Return the structured cross-family record.',
       ].join('\n'),
@@ -439,7 +466,17 @@ for (let w = 0; w < candidates.length; w += REVIEW_WAVE) {
   const wave = candidates.slice(w, w + REVIEW_WAVE)
   log(`Review wave ${Math.floor(w / REVIEW_WAVE) + 1}: candidates ${w + 1}-${w + wave.length} of ${candidates.length}.`)
   const waveResults = await pipeline(wave, reviewStage)
-  for (const wr of waveResults) reviewed.push(wr)
+  for (let localIndex = 0; localIndex < waveResults.length; localIndex += 1) {
+    const wr = waveResults[localIndex]
+    if (!wr) continue
+    const [claudeReview, crossFamilyReview] = wr
+    reviewed.push([
+      claudeReview,
+      crossFamilyReview
+        ? workflowCrossFamilyRecord(candidates[w + localIndex], crossFamilyReview)
+        : crossFamilyReview,
+    ])
+  }
 }
 
 // Pair each candidate with its [claudeReview, cfReview] (drop dead items).
@@ -469,7 +506,9 @@ const adjudication = await agent(
           patchPath: p.claudeReview.patchPath, checks: p.claudeReview.objectiveChecks,
         },
         crossFamily: p.cfReview && {
-          ran: p.cfReview.crossFamilyRan, tool: p.cfReview.tool, verdict: p.cfReview.verdict,
+          workerVerdict: p.cfReview.workerVerdict,
+          wrapperVerdict: p.cfReview.wrapperVerdict,
+          ran: p.cfReview.crossFamilyRan, tool: p.cfReview.tool,
           crossFamily: p.cfReview.crossFamily, guarantee: p.cfReview.readOnlyGuarantee,
           notRun: p.cfReview.notRunReason,
         },

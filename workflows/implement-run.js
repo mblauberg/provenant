@@ -168,7 +168,7 @@ const IMPLEMENT_SCHEMA = {
 const REVIEW_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['angle', 'reviewerId', 'verdict', 'issues', 'crossFamily', 'path'],
+  required: ['angle', 'reviewerId', 'verdict', 'issues', 'path'],
   properties: {
     angle: { type: 'string', description: 'correctness | regression | scope | cross-family' },
     reviewerId: { type: 'string', description: 'Stable review-row identity; dispatched commands must pass this exact value as --reviewer-id.' },
@@ -184,25 +184,6 @@ const REVIEW_SCHEMA = {
           patchPath: { type: 'string' },
           detail: { type: 'string' },
         },
-      },
-    },
-    crossFamily: {
-      type: 'object',
-      additionalProperties: false,
-      required: ['ran', 'tool', 'status', 'modelFamily', 'endpointProvider', 'crossFamily', 'certificationEligible', 'readOnlyGuarantee', 'outputPath', 'routeReceipt', 'terminalResult', 'notRunReason'],
-      properties: {
-        ran: { type: 'boolean' },
-        tool: { type: 'string', description: 'codex | cursor | agy | "" if Claude reviewer' },
-        status: { type: 'string', description: 'Normalised dispatcher status; not-applicable for native Claude' },
-        modelFamily: { type: 'string', description: 'Actual model lineage from the dispatcher' },
-        endpointProvider: { type: 'string' },
-        crossFamily: { type: 'boolean' },
-        certificationEligible: { type: 'boolean' },
-        readOnlyGuarantee: { type: 'string', description: 'cf_dispatch.sh value: enforced | oauth_safe_mode | best_effort | prompt_only | none (none only for a Claude reviewer)' },
-        outputPath: { type: 'string' },
-        routeReceipt: { type: 'string', description: 'Exact cf_dispatch JSON receipt path; empty for native review' },
-        terminalResult: { type: 'string', description: 'Digest-bound semantic worker result JSON path; empty for native review' },
-        notRunReason: { type: 'string', description: 'CROSS-FAMILY-NOT-RUN reason if ran=false; else ""' },
       },
     },
     path: { type: 'string' },
@@ -273,22 +254,26 @@ const ESCALATION_RULES =
 // (non-git) dirs, so the dispatch runs with cwd inside a git repo; cf_dispatch.sh has NO
 // --skip-git-repo-check flag. The "codex cursor" --chain lets the dispatcher own failover in one call
 // (codex enforced -> cursor enforced), so cursor is attempted deterministically, not on agent whim.
-function crossFamilyDispatchHint(runDir, gitCwd, kind = 'primary', reviewerId = '<reviewer-id>') {
+function crossFamilyDispatchHint(runDir, gitCwd, kind = 'primary', reviewerId = '<reviewer-id>', evidenceStem = reviewerId) {
   const cwdClause = gitCwd
     ? `Run the dispatcher with your shell cwd set to the git repo at ${gitCwd} (codex refuses non-git trees).`
     : 'No git repo was found at bootstrap. Set the shell cwd inside a nested git repo before the Codex dispatch; if none exists, record OTHER-PRIMARY-NOT-RUN.'
+  const outputPath = `${runDir}/crossfamily/${evidenceStem}.out.txt`
+  const dispatcherTerminalPath = `${runDir}/crossfamily/${evidenceStem}.terminal.json`
+  const routeReceipt = `${runDir}/crossfamily/${evidenceStem}.route.json`
+  const workerTerminalPath = `${runDir}/crossfamily/${evidenceStem}.result.json`
   if (kind === 'primary') return (
     'Dispatch the load-bearing OpenAI other-primary worker. ' +
     cwdClause +
     ' Write your prompt to a file, then run:\n' +
     '  ~/.agents/skills/orchestrate/scripts/cf_dispatch.sh ' +
     '--orchestrator-family anthropic --tool codex --alias flagship --role other-primary --prompt-file <your-prompt-file> ' +
-    `--evidence-root ${runDir} --out ${runDir}/crossfamily/<name>.txt --terminal-artifact ${runDir}/crossfamily/<name>.terminal.json ` +
+    `--evidence-root ${runDir} --out ${outputPath} --terminal-artifact ${dispatcherTerminalPath} ` +
     `--task-id <review-id> --attempt-id <attempt-id> --reviewer-id ${reviewerId} ` +
-    `--receipt ${runDir}/crossfamily/<name>.route.json > /dev/null\n` +
+    `--receipt ${routeReceipt} > /dev/null\n` +
     'The dispatcher prints a normalised JSON record (model_family, endpoint_provider, cross_family, certification_eligible, output_sha256, terminal_artifact_sha256, read_only_guarantee, ' +
     'status) — preserve that exact route JSON and return its path as routeReceipt. Certified only when cross_family=true and read_only_guarantee ' +
-    'is enforced or oauth_safe_mode. Keep the normalised worker result as a separate terminal_result JSON artifact and return its path as terminalResult; the dispatcher terminal JSON is not its semantic verdict. On failure, set ran=false and record OTHER-PRIMARY-NOT-RUN: <reason>. ' +
+    `is enforced or oauth_safe_mode. Keep the normalised worker result as a separate terminal_result JSON artifact at ${workerTerminalPath}; the dispatcher terminal JSON is not its semantic verdict. On failure, record OTHER-PRIMARY-NOT-RUN: <reason>. ` +
     'Apply the host data policy before dispatch.'
   )
   return (
@@ -299,6 +284,59 @@ function crossFamilyDispatchHint(runDir, gitCwd, kind = 'primary', reviewerId = 
     'DISTINCT-FAMILY-NOT-RUN: <reason> and never replaces the other-primary gate; distinct-family availability never replaces other-primary coverage. Distinct-family ' +
     'findings are advisory until a primary-family reviewer corroborates their evidence.'
   )
+}
+
+function workflowWrapperVerdict(runDir, reviewId, reviewAngle) {
+  const dispatched = Boolean(reviewAngle.cf)
+  const family = !dispatched
+    ? 'anthropic'
+    : reviewAngle.cf === 'primary' ? 'openai' : ''
+  const endpoint = !dispatched
+    ? 'anthropic'
+    : reviewAngle.cf === 'primary' ? 'openai' : ''
+  // The workflow knows its requested route and stable artifact paths. A nested
+  // failover may change the concrete model, so model is deliberately unknown
+  // here until the host reads the route receipt.
+  return {
+    verdict: reviewAngle.required ? 'approve' : 'approve-with-nits',
+    model: dispatched ? '' : reviewAngle.model,
+    family,
+    endpoint,
+    route_receipt: dispatched ? `${runDir}/crossfamily/${reviewId}.route.json` : '',
+    terminal_result: dispatched ? `${runDir}/crossfamily/${reviewId}.result.json` : '',
+  }
+}
+
+function workflowReviewRecord(runDir, reviewId, reviewAngle, result) {
+  const wrapper = workflowWrapperVerdict(runDir, reviewId, reviewAngle)
+  const dispatched = Boolean(reviewAngle.cf)
+  const crossFamily = {
+    ran: false,
+    tool: dispatched && reviewAngle.cf === 'primary' ? 'codex' : '',
+    status: dispatched ? 'dispatcher-record-required' : 'not-applicable',
+    modelFamily: wrapper.family,
+    endpointProvider: wrapper.endpoint,
+    crossFamily: false,
+    certificationEligible: false,
+    readOnlyGuarantee: dispatched ? 'dispatcher-record-required' : 'none',
+    outputPath: dispatched ? `${runDir}/crossfamily/${reviewId}.out.txt` : '',
+    routeReceipt: wrapper.route_receipt,
+    terminalResult: wrapper.terminal_result,
+    notRunReason: dispatched ? 'dispatcher-record-required' : 'targeted-review',
+  }
+  return result
+    ? { ...result, wrapperVerdict: wrapper, crossFamily }
+    : {
+        angle: reviewAngle.angle,
+        reviewerId: reviewId,
+        verdict: reviewAngle.required ? 'block' : 'approve-with-nits',
+        issues: reviewAngle.required
+          ? [{ severity: 'P1', patchPath: '', detail: 'required review lane failed or returned no result' }]
+          : [],
+        wrapperVerdict: wrapper,
+        crossFamily,
+        path: '',
+      }
 }
 
 // ---------------------------------------------------------------------------
@@ -582,48 +620,46 @@ for (let cycle = 0; cycle <= maxRepairCycles; cycle += 1) {
   phase('Review')
   await checkpoint(`review-${cycle}-dispatch`, 'reconcile reviewer results', REVIEW_ANGLES.map((r) => `review:${cycle}:${r.angle}`), [])
   const rawReviews = await parallel(
-    REVIEW_ANGLES.map((rv) => () =>
-      agent(
+    REVIEW_ANGLES.map((rv) => () => {
+      const reviewId = `review-${cycle}-${rv.angle}`
+      return agent(
         `Load ${'${AGENTS_HOME:-$HOME/.agents}'}/skills/code-review/SKILL.md and its required references. ` +
           `Review cycle ${cycle}, angle "${rv.angle}": ${rv.lens}. Read-only; the diff is entrypoint, not boundary.\n` +
           `Task: """${task}"""\nAcceptance criteria: ${JSON.stringify(acceptanceCriteria)}\n` +
           `Patches: ${patchDigest}\nConventions: ${JSON.stringify(conv)}\n` +
           ESCALATION_RULES +
-          '\nFor a native Claude review, set crossFamily to ran=false, tool="", status="not-applicable", ' +
-          'modelFamily="anthropic", endpointProvider="anthropic", crossFamily=false, certificationEligible=false, readOnlyGuarantee="none", ' +
-          'outputPath="", routeReceipt="", terminalResult="", notRunReason="targeted-review". For a dispatched review, copy every normalised field ' +
-          'from the dispatcher record; do not infer or relabel lineage.\n' +
-          `\nWrite full review to ${runDir}/findings/review-${cycle}-${rv.angle}.md and return the structured verdict. Return reviewerId="review-${cycle}-${rv.angle}" and use that exact stable ID for any dispatcher route.` +
-          (rv.cf ? '\n' + crossFamilyDispatchHint(runDir, gitCwd, rv.cf, `review-${cycle}-${rv.angle}`) : ''),
+          '\nFor a native Claude review, report only the worker review result. For a dispatched review, return the worker verdict and review evidence only. ' +
+          'Do not copy dispatcher model, family, endpoint, route receipt, terminal result or certification fields into the worker result; the workflow constructs the wrapper record from its dispatch contract and leaves unknown fields explicit.\n' +
+          `\nWrite full review to ${runDir}/findings/review-${cycle}-${rv.angle}.md and return the structured verdict. Return reviewerId="${reviewId}" and use that exact stable ID for any dispatcher route.` +
+          (rv.cf ? '\n' + crossFamilyDispatchHint(runDir, gitCwd, rv.cf, reviewId, reviewId) : ''),
         { label: `review:${cycle}:${rv.angle}`, phase: 'Review', schema: REVIEW_SCHEMA, model: rv.model },
-      ),
-    ),
+      )
+    }),
   )
-  reviews = rawReviews.map((result, index) =>
-    result || {
-      angle: REVIEW_ANGLES[index].angle,
-      reviewerId: `review-${cycle}-${REVIEW_ANGLES[index].angle}`,
-      verdict: REVIEW_ANGLES[index].required ? 'block' : 'approve-with-nits',
-      issues: REVIEW_ANGLES[index].required
-        ? [{ severity: 'P1', patchPath: '', detail: 'required review lane failed or returned no result' }]
-        : [],
-      crossFamily: { ran: false, tool: '', status: 'unavailable', modelFamily: '', endpointProvider: '', crossFamily: false, certificationEligible: false, readOnlyGuarantee: 'none', outputPath: '', routeReceipt: '', terminalResult: '', notRunReason: REVIEW_ANGLES[index].required ? 'review-lane-failed' : 'distinct-family-review-unavailable' },
-      path: '',
-    },
-  )
+  reviews = rawReviews.map((result, index) => workflowReviewRecord(
+    runDir,
+    `review-${cycle}-${REVIEW_ANGLES[index].angle}`,
+    REVIEW_ANGLES[index],
+    result,
+  ))
   const distinctFamilyReview = reviews.find((r) => r.angle === 'distinct-family')
   if (distinctFamilyReview && distinctFamilyReview.crossFamily && distinctFamilyReview.crossFamily.ran && distinctFamilyReview.issues.length > 0) {
     const corroborated = await agent(
       'Corroborate the distinct-family review against the actual patches, repository context and acceptance criteria. ' +
       'Treat it as a lead, not authority. Return block only for a reproducible, task-relevant defect supported by ' +
-        'primary evidence; otherwise approve or approve-with-nits. This is a native Claude corroboration: set ' +
-        'crossFamily to ran=false, tool="", status="not-applicable", modelFamily="anthropic", ' +
-        'endpointProvider="anthropic", crossFamily=false, certificationEligible=false, readOnlyGuarantee="none", outputPath="", routeReceipt="", terminalResult="", ' +
-        'notRunReason="native-corroboration" and reviewerId="review-${cycle}-distinct-family-corroboration".\n' +
+      'primary evidence; otherwise approve or approve-with-nits. This is a native Claude corroboration. ' +
+        'Return reviewerId="review-${cycle}-distinct-family-corroboration".\n' +
         `Distinct-family review: ${JSON.stringify(distinctFamilyReview)}\nPatches: ${patchDigest}\nTask: ${task}`,
       { label: `review:${cycle}:distinct-family-corroboration`, phase: 'Review', schema: REVIEW_SCHEMA, model: models.criticalReviewer },
     )
-    if (corroborated) reviews.push(corroborated)
+    if (corroborated) {
+      reviews.push(workflowReviewRecord(
+        runDir,
+        `review-${cycle}-distinct-family-corroboration`,
+        { angle: 'distinct-family-corroboration', model: models.criticalReviewer, required: false, cf: '' },
+        corroborated,
+      ))
+    }
   }
   blocking = reviews.filter((r, index) =>
     (index >= REVIEW_ANGLES.length || REVIEW_ANGLES[index].required) && r.verdict === 'block'

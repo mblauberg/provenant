@@ -20,6 +20,9 @@ _UNAVAILABLE_STATUSES = frozenset({
     "unavailable",
 })
 _REVIEW_VERDICTS = frozenset({"approve", "approve-with-nits", "block", "pass"})
+_WRAPPER_VERDICT_KEYS = frozenset({
+    "verdict", "model", "family", "endpoint", "route_receipt", "terminal_result",
+})
 _ENDPOINT_PROVIDERS = {
     "claude": "anthropic",
     "codex": "openai",
@@ -58,6 +61,17 @@ def _terminal_verdict(terminal_result: object) -> tuple[str, str]:
     return verdict, ""
 
 
+def _wrapper_verdict(value: object) -> str:
+    """Read the workflow-owned verdict without trusting worker lineage fields."""
+    if isinstance(value, Mapping):
+        if set(value) != _WRAPPER_VERDICT_KEYS:
+            return ""
+        if not all(isinstance(value.get(field), str) for field in _WRAPPER_VERDICT_KEYS):
+            return ""
+        value = value.get("verdict")
+    return value.strip() if isinstance(value, str) else ""
+
+
 def _lineage(result: Mapping[str, Any], chair_family: object) -> tuple[str, str, str, str, bool, str]:
     family, provider_family = _family(result)
     adapter = result.get("adapter", result.get("tool"))
@@ -89,7 +103,8 @@ def normalise_dispatch_review(
     dispatch_result: Mapping[str, Any],
     terminal_result: object,
     *,
-    review_verdict: object,
+    review_verdict: object = None,
+    wrapper_verdict: object = None,
     chair_family: object,
     transcript_available: bool,
     dispatcher_output_available: bool,
@@ -107,7 +122,9 @@ def normalise_dispatch_review(
     status = dispatch_result.get("status")
     output_path = dispatch_result.get("output_path")
     worker_verdict, worker_reason = _terminal_verdict(terminal_result)
-    wrapper_verdict = review_verdict.strip() if isinstance(review_verdict, str) else ""
+    wrapper_value = _wrapper_verdict(
+        wrapper_verdict if wrapper_verdict is not None else review_verdict
+    )
     terminal_kind = terminal_result.get("kind") if isinstance(terminal_result, Mapping) else None
 
     reason = ""
@@ -135,10 +152,10 @@ def normalise_dispatch_review(
     elif not worker_verdict:
         leg_status = "unavailable" if worker_reason == "execution-unavailable" else "failed"
         reason = worker_reason
-    elif wrapper_verdict not in _REVIEW_VERDICTS:
+    elif wrapper_value not in _REVIEW_VERDICTS:
         leg_status = "failed"
         reason = "wrapper-verdict-unavailable"
-    elif worker_verdict != wrapper_verdict:
+    elif worker_verdict != wrapper_value:
         leg_status = "failed"
         reason = "verdict-mismatch"
     elif worker_verdict == "block":
