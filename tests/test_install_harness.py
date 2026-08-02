@@ -207,9 +207,27 @@ def test_install_harness_uses_product_interpreter_when_path_python_is_old(tmp_pa
     old_python_bin = tmp_path / "python39-bin"
     old_python_bin.mkdir()
     old_python = old_python_bin / "python3"
-    if not Path("/usr/bin/python3").exists():
-        pytest.skip("stock /usr/bin/python3 is not available")
-    old_python.symlink_to("/usr/bin/python3")
+    old_python_marker = tmp_path / "old-python-invoked"
+    old_python.write_text(
+        "#!/bin/sh\n"
+        "if [ \"$1\" = \"--version\" ]; then\n"
+        "  echo 'Python 3.9.0'\n"
+        "  exit 0\n"
+        "fi\n"
+        f"touch '{old_python_marker}'\n"
+        "echo 'simulated Python 3.9 invoked' >&2\n"
+        "exit 97\n"
+    )
+    old_python.chmod(0o755)
+
+    version = subprocess.run(
+        [str(old_python), "--version"],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    assert version.stdout.strip() == "Python 3.9.0"
 
     result = run_product(
         product,
@@ -220,6 +238,7 @@ def test_install_harness_uses_product_interpreter_when_path_python_is_old(tmp_pa
 
     assert result.returncode == 0, result.stderr
     assert "ModuleNotFoundError: No module named 'tomllib'" not in result.stderr
+    assert not old_python_marker.exists()
 
 
 def test_install_harness_requires_acknowledgement_for_a_linked_worktree(tmp_path):
