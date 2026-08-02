@@ -360,8 +360,10 @@ release, evidence window, containment, diagnosis and resulting regression case.
 Introduce a versioned installation manifest containing skill name, source
 digest, installed target, ownership and rename/supersession history. Installer
 operations support `plan`, `install`, `reconcile` and `uninstall-managed`.
-Unmanaged existing paths are never claimed or overwritten. Broken managed
-links and safe managed renames are repaired with receipts. The target-bound
+Different unmanaged existing paths are never claimed or overwritten. An
+unmanaged file with bytes identical to the product source may be adopted as a
+managed link. Broken managed links and safe managed renames are repaired with
+receipts. The target-bound
 manifest hashes full skill-tree bytes and executable modes; link mutations roll
 back if its atomic commit fails. Conflicts stop for user resolution.
 

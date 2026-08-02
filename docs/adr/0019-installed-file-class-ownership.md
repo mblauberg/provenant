@@ -56,13 +56,13 @@ and is never committed anywhere.
 
 | Class | Owner |
 |---|---|
-| runtime, scripts, schemas, skills (managed), workflows, HARNESS.md | product-shipped projection |
+| runtime, scripts, schemas, skills (managed), workflows, agents (managed), HARNESS.md | product-shipped projection |
 | risk-policy, review-profiles, delivery-profiles, adapter-compatibility | product-shipped projection |
 | instance `agent-fabric.yaml` local layer | instance-owned (narrowing-only) |
 | AGENTS.md, model-preferences.json, model-routing.json | seeded once, then instance-owned |
 | third-party skill sources (`custom-skills/`) | instance-owned, committed |
 | desired state (product version, mode) | instance-owned, committed |
-| installation receipts, generated `skills/` projection, client links | machine-local, ignored |
+| installation receipts, generated `skills/` and `agents/` projections, client links | machine-local, ignored |
 
 The table above is the approved decision and does not change. Two further
 artifacts are members of classes it already names, recorded here so the
