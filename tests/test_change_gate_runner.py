@@ -9,6 +9,7 @@ import time
 
 import pytest
 
+from _change_gate_helpers import PYTEST_COMMAND
 from scripts import change_gate_runner
 from scripts.change_gate_runner import (
     FailureClass,
@@ -131,7 +132,7 @@ def test_legacy_pytest_assertion_with_fixture_repr_is_assertion(tmp_path):
         encoding="utf-8",
     )
 
-    result = run_command("pytest {test} -q", tmp_path, str(test_file))
+    result = run_command(PYTEST_COMMAND, tmp_path, str(test_file))
 
     assert "CaptureFixture" in result.output
     assert result.classification is FailureClass.ASSERTION
@@ -145,7 +146,7 @@ def test_legacy_pytest_missing_fixture_is_setup(tmp_path):
         encoding="utf-8",
     )
 
-    result = run_command("pytest {test} -q", tmp_path, str(test_file))
+    result = run_command(PYTEST_COMMAND, tmp_path, str(test_file))
 
     assert "fixture 'missing_fixture' not found" in result.output
     assert result.classification is FailureClass.SETUP
@@ -165,7 +166,7 @@ def test_legacy_pytest_fixture_setup_failure_is_setup(tmp_path):
         encoding="utf-8",
     )
 
-    result = run_command("pytest {test} -q", tmp_path, str(test_file))
+    result = run_command(PYTEST_COMMAND, tmp_path, str(test_file))
 
     assert "ERROR at setup of test_fixture_setup" in result.output
     assert result.classification is FailureClass.SETUP
@@ -190,7 +191,7 @@ def test_run_command_uses_pytest_report_not_process_output(tmp_path):
     )
 
     result = _run_with_runner(
-        "pytest {test} -q",
+        PYTEST_COMMAND,
         tmp_path,
         str(test_file),
         runner=_runner("PYTEST"),
@@ -218,7 +219,7 @@ def test_structured_runner_pass_output_is_text(tmp_path):
     test_file = tmp_path / "test_pass.py"
     test_file.write_text("def test_pass():\n    assert True\n", encoding="utf-8")
 
-    result = run_command("pytest {test} -q", tmp_path, str(test_file), runner=Runner.PYTEST)
+    result = run_command(PYTEST_COMMAND, tmp_path, str(test_file), runner=Runner.PYTEST)
 
     assert result.classification is FailureClass.PASS
     assert isinstance(result.output, str)

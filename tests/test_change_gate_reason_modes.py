@@ -4,6 +4,7 @@ from pathlib import Path
 import subprocess
 import sys
 
+from _change_gate_helpers import PYTEST_COMMAND
 from scripts import change_gates
 from scripts.change_gate_reports import FailureClass, classify_structured_report
 from scripts.change_gate_runner import CommandResult, Runner, run_command
@@ -268,7 +269,7 @@ def test_structured_runner_does_not_promote_test_body_module_error(tmp_path):
         encoding="utf-8",
     )
 
-    result = run_command(f"{sys.executable} -m pytest {{test}} -q", tmp_path, str(test_file), runner=Runner.PYTEST)
+    result = run_command(PYTEST_COMMAND, tmp_path, str(test_file), runner=Runner.PYTEST)
 
     assert result.classification is FailureClass.IMPORT
     assert result.unresolved_module is None
@@ -282,7 +283,7 @@ def test_structured_runner_preserves_one_real_collection_module(tmp_path):
         encoding="utf-8",
     )
 
-    result = run_command(f"{sys.executable} -m pytest {{test}} -q", tmp_path, str(test_file), runner=Runner.PYTEST)
+    result = run_command(PYTEST_COMMAND, tmp_path, str(test_file), runner=Runner.PYTEST)
 
     assert result.classification is FailureClass.IMPORT
     assert result.unresolved_module == "new_helper"
@@ -519,7 +520,7 @@ def test_pure_type_only_change_is_owned_by_type_gate(tmp_path, capsys):
         [
             "right-reason-red", "--base", "HEAD", "--source-root", str(source),
             "--scratch-root", str(tmp_path / "scratch"),
-            "--test-command-py", "python3 -m pytest {test} -q",
+            "--test-command-py", PYTEST_COMMAND,
             "--test-command-ts", "npm exec vitest run {test}",
         ]
     )
@@ -533,7 +534,7 @@ def test_pure_type_only_change_is_owned_by_type_gate(tmp_path, capsys):
         [
             "revert-probe", "--base", "HEAD", "--source-root", str(source),
             "--scratch-root", str(tmp_path / "revert-scratch"),
-            "--test-command-py", "python3 -m pytest {test} -q",
+            "--test-command-py", PYTEST_COMMAND,
             "--test-command-ts", "npm exec vitest run {test}",
         ]
     )
@@ -546,7 +547,7 @@ def test_pure_type_only_change_is_owned_by_type_gate(tmp_path, capsys):
         [
             "changed-lines-only", "--base", "HEAD", "--source-root", str(source),
             "--scratch-root", str(tmp_path / "mutation-scratch"),
-            "--test-command-py", "python3 -m pytest {test} -q",
+            "--test-command-py", PYTEST_COMMAND,
             "--test-command-ts", "npm exec vitest run {test}",
         ]
     )
