@@ -19,6 +19,7 @@ for component_root in "$PRODUCT_ROOT" "$SCRIPTS_ROOT" "$SKILLS_ROOT" "$DOCS_ROOT
     exit 3
   }
 done
+# shellcheck source=scripts/lib/harness-python.sh
 source "$SCRIPTS_ROOT/lib/harness-python.sh"
 
 cd "$PRODUCT_ROOT"

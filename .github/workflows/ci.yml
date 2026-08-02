@@ -227,6 +227,8 @@ jobs:
     name: Agent fabric TypeScript, tests and audit
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      HARNESS_PYTHON: ${{ github.workspace }}/.venv/bin/python
     permissions:
       contents: read
     needs: detect-changes
@@ -240,6 +242,14 @@ jobs:
         run: test ! -e runtime/agent-fabric-protocol/dist
       - name: Set up Node.js workspace
         uses: ./.github/actions/setup-node-workspace
+      - name: Set up uv and Python
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - name: Install locked harness test dependencies
+        run: uv sync --locked --only-group test
       - name: Build workspace in dependency order
         run: npm run build
       - name: Assert deterministic adapter build artifacts

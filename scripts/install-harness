@@ -9,6 +9,7 @@ while [[ -L "$script_path" ]]; do
     *) script_path=$(dirname "$script_path")/$link ;;
   esac
 done
+# shellcheck disable=SC1007
 PRODUCT_ROOT="$(CDPATH= cd -- "$(dirname "$script_path")/.." && pwd)"
 if [[ -f "$PRODUCT_ROOT/.git" && "${PROVENANT_ALLOW_LINKED_WORKTREE_INSTALL:-}" != 1 ]]; then
   echo "install-harness refuses a linked worktree product root: $PRODUCT_ROOT" >&2
@@ -78,6 +79,7 @@ case "$instance_root" in
   *) echo "Agent Fabric instance root must be absolute" >&2; exit 3 ;;
 esac
 
+# shellcheck source=scripts/lib/harness-python.sh
 source "$PRODUCT_ROOT/scripts/lib/harness-python.sh"
 
 # Validate the complete skill namespace before publishing the command, product

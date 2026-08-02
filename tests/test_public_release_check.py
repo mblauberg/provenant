@@ -40,6 +40,8 @@ def test_shell_surface_gate_rejects_python_dispatch_and_python_scripts(
     python_script.chmod(0o755)
     shell_script = tmp_path / "scripts/unsafe.sh"
     shell_script.write_text("#!/bin/sh\npython3 unsafe.py\n")
+    bash_script = tmp_path / "scripts/unsafe.bash"
+    bash_script.write_text("#!/usr/bin/env bash\npython3 unsafe.py\n")
     workflow = tmp_path / ".github/workflows/unsafe.yml"
     workflow.parent.mkdir(parents=True)
     workflow.write_text("jobs:\n  check:\n    steps:\n      - run: python unsafe.py\n")
@@ -48,6 +50,7 @@ def test_shell_surface_gate_rejects_python_dispatch_and_python_scripts(
         [
             "scripts/unsafe.py",
             "scripts/unsafe.sh",
+            "scripts/unsafe.bash",
             ".github/workflows/unsafe.yml",
         ],
         tmp_path,
@@ -56,6 +59,7 @@ def test_shell_surface_gate_rejects_python_dispatch_and_python_scripts(
     assert "forbidden Python shebang: scripts/unsafe.py" in errors
     assert "forbidden executable Python script: scripts/unsafe.py" in errors
     assert "bare Python command in shell surface: scripts/unsafe.sh" in errors
+    assert "bare Python command in shell surface: scripts/unsafe.bash" in errors
     assert "bare Python command in shell surface: .github/workflows/unsafe.yml" in errors
 
 

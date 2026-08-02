@@ -672,8 +672,10 @@ def test_duplicate_on_key_boolean_alias_fails_the_exact_key_guard() -> None:
 
 def test_ci_runs_complete_harness_and_fabric_gates() -> None:
     document = _workflow()
-    harness_steps = _steps(_job(document, "harness"))
-    fabric_steps = _steps(_job(document, "fabric"))
+    harness_job = _job(document, "harness")
+    fabric_job = _job(document, "fabric")
+    harness_steps = _steps(harness_job)
+    fabric_steps = _steps(fabric_job)
 
     # The toolchain contract (Node 24, pinned npm before a locked install)
     # moved into the shared composite action; assert it once there, then
@@ -722,6 +724,15 @@ def test_ci_runs_complete_harness_and_fabric_gates() -> None:
     assert build_types_index < generated_check_index < build_index < status_index < harness_index
 
     fabric_commands = "\n".join(str(step.get("run", "")) for step in fabric_steps)
+    assert fabric_job.get("env") == {"HARNESS_PYTHON": "${{ github.workspace }}/.venv/bin/python"}
+    fabric_setup = next(
+        step for step in fabric_steps if str(step.get("uses", "")).startswith("astral-sh/setup-uv@")
+    )
+    assert fabric_setup.get("with", {}).get("python-version") == "3.12"
+    fabric_run_commands = [str(step.get("run", "")).strip() for step in fabric_steps if "run" in step]
+    fabric_sync_index = fabric_run_commands.index("uv sync --locked --only-group test")
+    fabric_build_index = fabric_run_commands.index("npm run build")
+    assert fabric_sync_index < fabric_build_index
     for required in (
         "npm run build",
         "npm run test --workspace=@local/agent-fabric-protocol",

@@ -70,6 +70,7 @@ SECRET_PATTERNS = {
 }
 PERSONAL_EMAIL = re.compile(r"@(?:gmail|outlook|hotmail|icloud|yahoo)\.[A-Za-z.]+$", re.I)
 BARE_PYTHON_COMMAND = re.compile(r"(?<![A-Za-z0-9_./-])python(?:3)?(?![A-Za-z0-9_.-])")
+SHELL_SUFFIXES = {"", ".sh", ".bash", ".zsh", ".ksh", ".csh", ".fish"}
 HOME_PATH_BYTES = re.compile(HOME_PATH.pattern.encode("ascii"))
 SECRET_BYTE_PATTERNS = {
     label: re.compile(pattern.pattern.encode("ascii"))
@@ -2004,7 +2005,7 @@ def _is_shell_surface(relative: str, text: str) -> bool:
     first_line = text.splitlines()[0] if text else ""
     if first_line.startswith("#!") and re.search(r"\bpython(?:3)?\b", first_line):
         return False
-    return Path(relative).suffix in {"", ".sh"}
+    return Path(relative).suffix in SHELL_SUFFIXES
 
 
 def scan_paths(paths: list[str], root: Path = ROOT) -> list[str]:
