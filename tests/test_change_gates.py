@@ -1,3 +1,4 @@
+import ast
 from contextlib import redirect_stdout
 import os
 from pathlib import Path
@@ -8,7 +9,7 @@ import sys
 import pytest
 
 from _change_gate_helpers import PYTEST_COMMAND
-from scripts import change_gates
+from scripts import change_gate_runner, change_gates
 from scripts.change_gates import (
     DiffHunk,
     GateError,
@@ -59,6 +60,26 @@ def _missing_failure_class():
     value = getattr(FailureClass, "MISSING", None)
     assert value is not None, "structured failure classes are absent at the merge base"
     return value
+
+
+def test_change_gates_uses_the_single_change_gate_runner():
+    assert change_gates.run_command is change_gate_runner.run_command
+
+
+def test_local_subprocess_run_calls_all_state_finite_timeouts():
+    tree = ast.parse(Path(change_gates.__file__).read_text(encoding="utf-8"))
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "subprocess"
+        and node.func.attr == "run"
+    ]
+
+    assert calls
+    assert all(any(keyword.arg == "timeout" for keyword in call.keywords) for call in calls)
 
 
 def test_right_reason_red_rejects_collection_errors_as_assertion_reds():
@@ -275,7 +296,7 @@ def test_changed_lines_mutation_fails_for_a_surviving_crucial_mutant(tmp_path):
     ) == 1
 
 
-def test_custom_commands_keep_legacy_process_semantics_for_known_file_suffixes(tmp_path):
+def test_custom_commands_use_shared_process_semantics_for_known_file_suffixes(tmp_path):
     commands = {
         "py": f'{sys.executable} -c "import sys; sys.exit(0)" {{test}}',
         "ts": f'{sys.executable} -c "import sys; sys.exit(0)" {{test}}',

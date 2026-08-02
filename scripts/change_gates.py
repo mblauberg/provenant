@@ -16,7 +16,6 @@ import posixpath
 from dataclasses import dataclass
 from enum import Enum
 import re
-import shlex
 import shutil
 import subprocess
 import sys
@@ -36,9 +35,9 @@ try:
         DIRECT_PROCESS_TIMEOUT,
         CommandResult,
         Runner,
-        classify_failure as _structured_classify_failure,
-        runner_for_command as _structured_runner_for_command,
-        run_command as _structured_run_command,
+        classify_failure,
+        runner_for_command,
+        run_command,
     )
 except ImportError:  # pragma: no cover - direct script execution fallback
     from change_gate_reports import (
@@ -51,9 +50,9 @@ except ImportError:  # pragma: no cover - direct script execution fallback
         DIRECT_PROCESS_TIMEOUT,
         CommandResult,
         Runner,
-        classify_failure as _structured_classify_failure,
-        runner_for_command as _structured_runner_for_command,
-        run_command as _structured_run_command,
+        classify_failure,
+        runner_for_command,
+        run_command,
     )
 
 
@@ -99,6 +98,8 @@ _NPM_ATTESTATION_WRITER = Path(
     "runtime/agent-fabric/scripts/write-npm-ci-attestation.mjs"
 )
 _PROTOCOL_BUILD_SCRIPT = Path("scripts/agent-fabric-protocol-build")
+_GIT_COMMAND_TIMEOUT_SECONDS = 60.0
+_SCRATCH_PREPARATION_TIMEOUT_SECONDS = 300.0
 
 
 _HUNK_RE = re.compile(r"^@@ -(?P<old_start>\d+)(?:,(?P<old_count>\d+))? \+(?P<new_start>\d+)(?:,(?P<new_count>\d+))? @@")
@@ -116,63 +117,6 @@ _TYPE_ONLY_LINE_RE = re.compile(
     r"(?:from\s+['\"][^'\"]+['\"])?\s*;?)"
     r")\s*$"
 )
-
-
-def classify_failure(returncode: int, output: str) -> FailureClass:
-    """Expose the explicit legacy classifier, with a partial-revert fallback."""
-
-    implementation = globals().get("_structured_classify_failure")
-    if implementation is not None:
-        return implementation(returncode, output)
-    if returncode == 0:
-        return FailureClass.PASS
-    folded = output.casefold()
-    if any(token in folded for token in ("typeerror:", "referenceerror:", "syntaxerror:")):
-        return FailureClass.UNKNOWN
-    if "assertionerror" in folded or "assert " in folded:
-        return FailureClass.ASSERTION
-    if "modulenotfounderror" in folded or "importerror" in folded:
-        return FailureClass.IMPORT
-    if "collection" in folded:
-        return FailureClass.COLLECTION
-    return FailureClass.UNKNOWN
-
-
-def runner_for_command(command: str) -> Runner | None:
-    implementation = globals().get("_structured_runner_for_command")
-    return implementation(command) if implementation is not None else None
-
-
-def run_command(
-    command: str,
-    cwd: Path,
-    test_path: str | None = None,
-    *,
-    runner: Runner | str | None = None,
-) -> CommandResult:
-    implementation = globals().get("_structured_run_command")
-    if implementation is not None:
-        return implementation(command, cwd, test_path, runner=runner)
-    arguments = shlex.split(command)
-    if test_path:
-        arguments = [test_path if argument == "{test}" else argument for argument in arguments]
-    rendered = shlex.join(arguments)
-    completed = subprocess.run(
-        arguments,
-        cwd=cwd,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        env=os.environ.copy(),
-        check=False,
-    )
-    output = completed.stdout or ""
-    return CommandResult(
-        command=rendered,
-        returncode=completed.returncode,
-        output=output,
-        classification=classify_failure(completed.returncode, output),
-    )
 
 
 def parse_diff(diff_text: str) -> list[DiffHunk]:
@@ -236,6 +180,7 @@ def git_diff(source_root: Path, base: str) -> str:
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         check=False,
+        timeout=_GIT_COMMAND_TIMEOUT_SECONDS,
     )
     if completed.returncode != 0:
         raise GateError(f"unable to compute diff against {base}: {completed.stderr.strip()}")
@@ -465,6 +410,7 @@ def _materialise_base(source_root: Path, base: str, destination: Path, tests: li
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         check=False,
+        timeout=_GIT_COMMAND_TIMEOUT_SECONDS,
     )
     if archive.returncode != 0:
         raise GateError(f"unable to materialise merge base {base}: {archive.stderr.decode().strip()}")
@@ -496,6 +442,7 @@ def _materialise_base(source_root: Path, base: str, destination: Path, tests: li
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             check=False,
+            timeout=_GIT_COMMAND_TIMEOUT_SECONDS,
         )
         if completed.returncode != 0:
             detail = completed.stderr.strip() or completed.stdout.strip()
@@ -506,6 +453,7 @@ def _materialise_base(source_root: Path, base: str, destination: Path, tests: li
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         check=False,
+        timeout=_GIT_COMMAND_TIMEOUT_SECONDS,
     )
     if update_ref.returncode != 0:
         detail = update_ref.stderr.strip() or update_ref.stdout.strip()
@@ -604,8 +552,9 @@ def _run_scratch_preparation_command(
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             check=False,
+            timeout=_SCRATCH_PREPARATION_TIMEOUT_SECONDS,
         )
-    except OSError as exc:
+    except (OSError, subprocess.TimeoutExpired) as exc:
         raise GateError(f"{error_prefix}: unable to {operation}: {exc}") from exc
     if completed.returncode == 0:
         return
@@ -692,16 +641,8 @@ def _run_suite(
             command = f"{command} --bail=1"
         return [(command, runner)]
 
-    def invoke(command: str, target: str | None, runner: Runner | str | None) -> CommandResult:
-        try:
-            return run_command(command, cwd, target, runner=runner)
-        except TypeError as error:
-            if "runner" not in str(error):
-                raise
-            return run_command(command, cwd, target)
-
     return [
-        invoke(command, target, runner)
+        run_command(command, cwd, target, runner=runner)
         for target in _targets(commands, tests)
         for command, runner in commands_for_target(target)
     ]
@@ -731,6 +672,7 @@ def target_existed_at_base(base_root: Path, target: str) -> bool:
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         check=False,
+        timeout=_GIT_COMMAND_TIMEOUT_SECONDS,
     )
     return completed.returncode == 0
 
@@ -1096,14 +1038,6 @@ def gate_changed_line_mutation(
     inconclusive: list[Mutant] = []
     killed = 0
 
-    def run_mutant_suite(cwd: Path, selected_tests: list[str]) -> list[CommandResult]:
-        try:
-            return _run_suite(commands, cwd, selected_tests, fail_fast=True)
-        except TypeError as error:
-            if "fail_fast" not in str(error):
-                raise
-            return _run_suite(commands, cwd, selected_tests)
-
     for index, mutant in enumerate(mutants, 1):
         candidate = (Path("tests") / f"test_{Path(mutant.path).stem}.py").as_posix()
         mutant_tests = [candidate] if candidate in tests else tests
@@ -1113,7 +1047,7 @@ def gate_changed_line_mutation(
             _prepare_typescript_scratch(
                 source_root, mutant_root, commands, mutant_tests, [mutant.path]
             )
-            results = run_mutant_suite(mutant_root, mutant_tests)
+            results = _run_suite(commands, mutant_root, mutant_tests, fail_fast=True)
         for result in results:
             _print_output(result)
         if _all_assertion_failures(results):
