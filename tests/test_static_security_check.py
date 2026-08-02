@@ -140,6 +140,9 @@ def test_pipe_wait_rule_finds_one_bad_fixture_and_accepts_bounded_drains(tmp_pat
         "    selector = selectors.DefaultSelector()\n"
         "    selector.register(process.stdout, selectors.EVENT_READ)\n"
         "    selector.register(process.stderr, selectors.EVENT_READ)\n"
+        "    while selector.get_map():\n"
+        "        for key, _ in selector.select(timeout=1):\n"
+        "            key.fileobj.read()\n"
         "    process.wait(timeout=1)\n",
         encoding="utf-8",
     )
@@ -175,6 +178,68 @@ def test_pipe_wait_rule_finds_one_bad_fixture_and_accepts_bounded_drains(tmp_pat
     assert len(findings) == 1
     assert findings[0]["path"].endswith("bad.py")
     assert findings[0]["line"] == 4
+
+
+def test_pipe_wait_rule_conservatively_covers_bindings_and_branches(tmp_path):
+    module = load_module()
+    fixtures = {
+        "registration_only.py": (
+            "import selectors, subprocess\n"
+            "def bad():\n"
+            "    process = subprocess.Popen(['tool'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)\n"
+            "    selector = selectors.DefaultSelector()\n"
+            "    selector.register(process.stdout, selectors.EVENT_READ)\n"
+            "    selector.register(process.stderr, selectors.EVENT_READ)\n"
+            "    process.wait()\n"
+        ),
+        "conditional_drain.py": (
+            "import subprocess\n"
+            "def bad(flag):\n"
+            "    process = subprocess.Popen(['tool'], stdout=subprocess.PIPE)\n"
+            "    if flag:\n"
+            "        process.stdout.read()\n"
+            "    process.wait()\n"
+        ),
+        "conditional_rebind.py": (
+            "import subprocess\n"
+            "def bad(flag, output):\n"
+            "    if flag:\n"
+            "        process = subprocess.Popen(['tool'], stdout=subprocess.PIPE)\n"
+            "    else:\n"
+            "        process = subprocess.Popen(['tool'], stdout=output)\n"
+            "    process.wait()\n"
+        ),
+        "context_manager.py": (
+            "import subprocess\n"
+            "def bad():\n"
+            "    with subprocess.Popen(['tool'], stdout=subprocess.PIPE) as process:\n"
+            "        process.wait()\n"
+        ),
+        "named_expression.py": (
+            "import subprocess\n"
+            "def bad():\n"
+            "    (process := subprocess.Popen(['tool'], stdout=subprocess.PIPE))\n"
+            "    process.wait()\n"
+        ),
+        "unrecognised_start.py": (
+            "import subprocess\n"
+            "def bad(worker):\n"
+            "    process = subprocess.Popen(['tool'], stdout=subprocess.PIPE)\n"
+            "    worker(process.stdout).start()\n"
+            "    process.wait()\n"
+        ),
+    }
+    for name, source in fixtures.items():
+        (tmp_path / name).write_text(source, encoding="utf-8")
+
+    findings = [
+        finding
+        for finding in module.scan(tmp_path)
+        if finding["rule"] == "subprocess-pipe-wait-before-drain"
+    ]
+
+    assert len(findings) == len(fixtures)
+    assert {Path(finding["path"]).name for finding in findings} == set(fixtures)
 
 
 def test_pipe_wait_rule_is_clean_across_all_four_real_execution_sites():

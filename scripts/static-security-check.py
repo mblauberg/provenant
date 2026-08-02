@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import copy
 import json
 import os
 from pathlib import Path
@@ -101,6 +102,62 @@ class _PipeWaitVisitor(ast.NodeVisitor):
         self.processes: dict[str, dict[str, object]] = {}
         self.readers: dict[str, set[tuple[str, str]]] = {}
 
+    def _fork(self) -> _PipeWaitVisitor:
+        visitor = _PipeWaitVisitor(self.aliases, self.path, self.findings)
+        visitor.processes = copy.deepcopy(self.processes)
+        visitor.readers = copy.deepcopy(self.readers)
+        return visitor
+
+    def _visit_branch(self, body: list[ast.stmt]) -> _PipeWaitVisitor:
+        visitor = self._fork()
+        for statement in body:
+            visitor.visit(statement)
+        return visitor
+
+    def _merge_branches(self, branches: list[_PipeWaitVisitor]) -> None:
+        alias_names = set.intersection(*(set(branch.aliases) for branch in branches))
+        self.aliases = {
+            name: branches[0].aliases[name]
+            for name in alias_names
+            if all(branch.aliases[name] == branches[0].aliases[name] for branch in branches)
+        }
+
+        merged_processes: dict[str, dict[str, object]] = {}
+        process_names = set().union(*(branch.processes for branch in branches))
+        for binding in process_names:
+            states = [
+                branch.processes[binding]
+                for branch in branches
+                if binding in branch.processes
+            ]
+            pipes = set().union(*(state["pipes"] for state in states))
+            drained = set.intersection(*(set(state["drained"]) for state in states))
+            selector_names = set().union(*(state["selectors"] for state in states))
+            selectors = {
+                selector: set.intersection(
+                    *(set(state["selectors"].get(selector, set())) for state in states)
+                )
+                for selector in selector_names
+            }
+            merged_processes[binding] = {
+                "pipes": pipes,
+                "drained": drained,
+                "selectors": selectors,
+                "reported": any(bool(state["reported"]) for state in states),
+            }
+        self.processes = merged_processes
+
+        reader_names = set().union(*(branch.readers for branch in branches))
+        self.readers = {
+            name: streams
+            for name in reader_names
+            if (
+                streams := set.intersection(
+                    *(set(branch.readers.get(name, set())) for branch in branches)
+                )
+            )
+        }
+
     def _stream_refs(self, node: ast.AST) -> set[tuple[str, str]]:
         refs: set[tuple[str, str]] = set()
         for item in ast.walk(node):
@@ -118,6 +175,52 @@ class _PipeWaitVisitor(ast.NodeVisitor):
                 drained = state["drained"]
                 assert isinstance(drained, set)
                 drained.add(stream)
+
+    def _drain_selector(self, selector: str) -> None:
+        for binding, state in self.processes.items():
+            pipes = state["pipes"]
+            selectors = state["selectors"]
+            assert isinstance(pipes, set) and isinstance(selectors, dict)
+            if pipes and pipes <= selectors.get(selector, set()):
+                self._drain({(binding, stream) for stream in pipes})
+
+    @staticmethod
+    def _selector_drain_loops(node: ast.While) -> set[str]:
+        selectors = {
+            dotted(call.func.value)
+            for call in ast.walk(node.test)
+            if isinstance(call, ast.Call)
+            and isinstance(call.func, ast.Attribute)
+            and call.func.attr == "get_map"
+        }
+        drained: set[str] = set()
+        for selector in selectors:
+            has_named_drain = any(
+                isinstance(call, ast.Call)
+                and dotted(call.func) == "_drain"
+                and bool(call.args)
+                and dotted(call.args[0]) == selector
+                for statement in node.body
+                for call in ast.walk(statement)
+            )
+            has_select = any(
+                isinstance(call, ast.Call)
+                and isinstance(call.func, ast.Attribute)
+                and call.func.attr == "select"
+                and dotted(call.func.value) == selector
+                for statement in node.body
+                for call in ast.walk(statement)
+            )
+            has_read = any(
+                isinstance(call, ast.Call)
+                and isinstance(call.func, ast.Attribute)
+                and call.func.attr in {"read", "read1", "readline", "readlines"}
+                for statement in node.body
+                for call in ast.walk(statement)
+            )
+            if has_named_drain or (has_select and has_read):
+                drained.add(selector)
+        return drained
 
     def _thread_streams(self, node: ast.AST) -> set[tuple[str, str]]:
         if not isinstance(node, ast.Call):
@@ -181,6 +284,10 @@ class _PipeWaitVisitor(ast.NodeVisitor):
         if node.value is not None:
             self.visit(node.value)
 
+    def visit_NamedExpr(self, node: ast.NamedExpr) -> None:  # noqa: N802
+        self._record_assignment([node.target], node.value)
+        self.visit(node.value)
+
     def visit_AugAssign(self, node: ast.AugAssign) -> None:  # noqa: N802
         binding = _binding_name(node.target)
         self.processes.pop(binding, None)
@@ -189,9 +296,44 @@ class _PipeWaitVisitor(ast.NodeVisitor):
 
     def visit_For(self, node: ast.For) -> None:  # noqa: N802
         self._drain(self._stream_refs(node.iter))
-        self.generic_visit(node)
+        self.visit(node.iter)
+        before = self._fork()
+        body = self._visit_branch(node.body)
+        self._merge_branches([before, body])
+        if node.orelse:
+            before_else = self._fork()
+            after_else = self._visit_branch(node.orelse)
+            self._merge_branches([before_else, after_else])
 
     visit_AsyncFor = visit_For
+
+    def visit_If(self, node: ast.If) -> None:  # noqa: N802
+        self.visit(node.test)
+        body = self._visit_branch(node.body)
+        otherwise = self._visit_branch(node.orelse)
+        self._merge_branches([body, otherwise])
+
+    def visit_While(self, node: ast.While) -> None:  # noqa: N802
+        for selector in self._selector_drain_loops(node):
+            self._drain_selector(selector)
+        self.visit(node.test)
+        before = self._fork()
+        body = self._visit_branch(node.body)
+        self._merge_branches([before, body])
+        if node.orelse:
+            before_else = self._fork()
+            after_else = self._visit_branch(node.orelse)
+            self._merge_branches([before_else, after_else])
+
+    def visit_With(self, node: ast.With) -> None:  # noqa: N802
+        for item in node.items:
+            if item.optional_vars is not None:
+                self._record_assignment([item.optional_vars], item.context_expr)
+            self.visit(item.context_expr)
+        for statement in node.body:
+            self.visit(statement)
+
+    visit_AsyncWith = visit_With
 
     def visit_Call(self, node: ast.Call) -> None:  # noqa: N802
         name = dotted(node.func)
@@ -221,16 +363,11 @@ class _PipeWaitVisitor(ast.NodeVisitor):
                 assert isinstance(selectors, dict)
                 registered = selectors.setdefault(selector, set())
                 registered.add(stream)
-                pipes = state["pipes"]
-                assert isinstance(pipes, set)
-                if pipes <= registered:
-                    self._drain({(binding, item) for item in pipes})
 
         if isinstance(node.func, ast.Attribute) and node.func.attr == "start":
             streams = self.readers.get(dotted(node.func.value), set())
             if isinstance(node.func.value, ast.Call):
                 streams = streams | self._thread_streams(node.func.value)
-            streams = streams | self._stream_refs(node)
             self._drain(streams)
 
         for binding, state in self.processes.items():
