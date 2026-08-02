@@ -1162,6 +1162,12 @@ def test_default_failure_retains_only_the_declared_output_tempfile():
         output = Path(record["output_path"])
         assert result.returncode != 0
         assert output.exists()
+        # Only the dispatcher's own tempfiles are its responsibility. The tsx
+        # loader caches into a tsx-<uid> directory under TMPDIR, which is not a
+        # cf_dispatch leak. That directory appears on CI and not on a developer
+        # machine because fabric_free_env leaves PATH alone: where provenant is
+        # installed, routing takes the `command -v provenant` branch above and
+        # never loads tsx at all.
         assert sorted(
             path.resolve()
             for path in temp_root.iterdir()
