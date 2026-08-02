@@ -73,6 +73,16 @@ def test_shell_surface_gate_exempts_the_interpreter_resolver(tmp_path: Path):
     assert not any("harness-python.sh" in error for error in errors)
 
 
+def test_python_gate_boundary_leaves_scripts_provenant_outside_scope(tmp_path: Path):
+    seed_required(tmp_path)
+    entrypoint = tmp_path / "scripts/provenant"
+    entrypoint.parent.mkdir(parents=True)
+    entrypoint.write_text("#!/usr/bin/env python3\nprint('entrypoint')\n")
+    entrypoint.chmod(0o755)
+
+    assert scan_paths([*release_check.REQUIRED, "scripts/provenant"], tmp_path) == []
+
+
 def git_at(root: Path, *args: str) -> str:
     result = subprocess.run(
         ["git", *args],

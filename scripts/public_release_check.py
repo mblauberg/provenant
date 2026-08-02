@@ -1992,6 +1992,10 @@ def tracked_files() -> list[str]:
 
 
 def _is_script_python(relative: str) -> bool:
+    # The ruling deliberately limits the Python shebang/+x gate to
+    # scripts/**/*.py. The executable Python entrypoint scripts/provenant is
+    # therefore outside both halves of this check; widening this boundary
+    # would change the gate's scope rather than repair it.
     return relative.startswith("scripts/") and relative.endswith(".py")
 
 
