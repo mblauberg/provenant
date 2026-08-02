@@ -269,7 +269,7 @@ The first variant has no `display: none` (visible by default). All others do. If
 
 One edit, all variants; the browser's MutationObserver picks everything up in one pass.
 
-For `styleMode: "scoped"`, author every `:scope` rule with a descendant combinator. The `@scope` boundary is the **variant wrapper `<div data-impeccable-variant="N">`**, not the element you're designing. A bare `:scope { background: cream; }` styles the wrapper, not the inner replacement, so the cream lands on a `display: contents` shell while the actual element keeps page defaults. Always step in: `:scope > .card`, `:scope > section`, `:scope .hero-title`, etc. The fake test agent's CSS in `tests/live-e2e/agent.mjs` is a faithful template; every scoped rule starts `:scope > ...`.
+For `styleMode: "scoped"`, author every `:scope` rule with a descendant combinator. The `@scope` boundary is the **variant wrapper `<div data-impeccable-variant="N">`**, not the element you're designing. A bare `:scope { background: cream; }` styles the wrapper, not the inner replacement, so the cream lands on a `display: contents` shell while the actual element keeps page defaults. Always step in: `:scope > .card`, `:scope > section`, `:scope .hero-title`, etc. Every scoped rule must start `:scope > ...`.
 
 **JSX / TSX target files.** Wrap `<style>` content in a template literal so the CSS `{` / `}` aren't parsed as JSX expressions, and use `className=` / `style={{…}}` on every variant element. Keep `data-impeccable-*` attributes as-is; they're plain strings:
 
@@ -598,10 +598,6 @@ const __impeccableLiveDev =
 - **SvelteKit**: edit `svelte.config.js`, appending to `kit.csp.directives['script-src']` and `kit.csp.directives['connect-src']`.
 - **Nuxt + nuxt-security**: edit `nuxt.config.*`, appending to `security.headers.contentSecurityPolicy['script-src']` and `['connect-src']`.
 
-Reference outputs:
-- `tests/framework-fixtures/nextjs-turborepo/expected-after-patch.ts` (Next.js)
-- `tests/framework-fixtures/sveltekit-csp/expected-after-patch.js` (SvelteKit)
-
 Idempotency: if `__impeccableLiveDev` already exists in the file, the patch is already applied; skip asking and just mark `cspChecked: true`.
 
 #### append-string
@@ -623,10 +619,6 @@ Then in the CSP value string:
 Per-framework specifics:
 - **Next.js inline `headers()`**: edit `next.config.*`, splicing the variable into the CSP value.
 - **Nuxt `routeRules`**: edit `nuxt.config.*`, splicing into the CSP in `routeRules['/**'].headers['Content-Security-Policy']`.
-
-Reference outputs:
-- `tests/framework-fixtures/nextjs-inline-csp/expected-after-patch.js` (Next.js)
-- `tests/framework-fixtures/nuxt-csp/expected-after-patch.ts` (Nuxt)
 
 ### Troubleshooting
 
