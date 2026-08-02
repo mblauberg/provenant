@@ -318,7 +318,13 @@ describe("provider non-answer interface conformance", () => {
           `process.once("SIGTERM", () => { require("node:fs").writeFileSync(${JSON.stringify(terminationMarker)}, "term"); setTimeout(() => process.exit(23), 120); });`,
           "setInterval(() => undefined, 1_000);",
         ].join("\n")],
-        timeoutMs: 200,
+        // 2_000 like every other probe in this file, not 200. The child only
+        // installs its SIGTERM handler once Node has finished starting, which
+        // takes past 200ms whenever the suite runs its files in parallel. A
+        // shorter deadline signals the child before the handler exists, so it
+        // dies to the default action, never writes the marker, and the test
+        // reads a startup race as a custody failure.
+        timeoutMs: 2_000,
       });
       await waitForFile(terminationMarker);
       await expect(probe).rejects.toThrow("provider interface probe timed out");
