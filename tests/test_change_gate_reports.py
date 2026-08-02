@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 import subprocess
+import sys
 import pytest
 
 from scripts.change_gate_reports import (
@@ -210,7 +211,7 @@ def test_pytest_reports_classify_setup_collection_and_import(source, expected, t
     report = tmp_path / "pytest.xml"
     test_file.write_text(source, encoding="utf-8")
     subprocess.run(
-        ["pytest", str(test_file), "--junitxml", str(report), "-q"],
+        [sys.executable, "-m", "pytest", str(test_file), "--junitxml", str(report), "-q"],
         cwd=tmp_path,
         check=False,
         stdout=subprocess.PIPE,
@@ -686,7 +687,7 @@ def test_pytest_runtime_exception_message_does_not_become_assertion(tmp_path):
         encoding="utf-8",
     )
     subprocess.run(
-        ["pytest", str(test_file), "--junitxml", str(report), "-q"],
+        [sys.executable, "-m", "pytest", str(test_file), "--junitxml", str(report), "-q"],
         cwd=tmp_path,
         check=False,
         stdout=subprocess.PIPE,
