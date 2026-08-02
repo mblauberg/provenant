@@ -27,6 +27,7 @@ export async function connectRawSocket(socketPath: string): Promise<Socket> {
 }
 
 afterEach(async () => {
+  vi.useRealTimers();
   await Promise.all(servers.splice(0).map(async (server) => {
     if (!server.listening) return;
     await new Promise<void>((resolve) => server.close(() => resolve()));
@@ -183,6 +184,7 @@ describe("global idle stop races", () => {
   });
 
   it("does not finish a Unix listener drain while an in-flight operation remains tracked", async () => {
+    vi.useFakeTimers();
     const root = await mkdtemp(join(tmpdir(), "fabric-late-frame-drain-"));
     directories.push(root);
     const socketPath = join(root, "fabric.sock");
@@ -229,17 +231,19 @@ describe("global idle stop races", () => {
       drainTimeoutMs: 500,
     });
 
-    const finishedBeforeCommand = await Promise.race([
+    const finishedBeforeCommand = Promise.race([
       closing.then(() => true),
       new Promise<false>((resolve) => setTimeout(() => resolve(false), 25)),
     ]);
-    expect(finishedBeforeCommand).toBe(false);
+    await vi.advanceTimersByTimeAsync(25);
+    await expect(finishedBeforeCommand).resolves.toBe(false);
     finishCommand();
     await closing;
     client.destroy();
   });
 
   it("fails with typed evidence when real in-flight work misses the shutdown drain deadline", async () => {
+    vi.useFakeTimers();
     const activeSockets = new Set<Socket>();
     const operationStarted = Promise.withResolvers<void>();
     const operationFinished = Promise.withResolvers<void>();
@@ -263,7 +267,7 @@ describe("global idle stop races", () => {
       client.write("held operation\n");
       await operationStarted.promise;
 
-      const outcome = await Promise.race([
+      const outcome = Promise.race([
         closeRecoverableUnixListener({
           server,
           sockets: activeSockets,
@@ -275,8 +279,9 @@ describe("global idle stop races", () => {
         }).catch((error: unknown) => error),
         new Promise<{ code: string }>((resolve) => setTimeout(() => resolve({ code: "TEST_TIMEOUT" }), 100)),
       ]);
+      await vi.advanceTimersByTimeAsync(100);
 
-      expect(outcome).toMatchObject({
+      await expect(outcome).resolves.toMatchObject({
         code: "DAEMON_SHUTDOWN_DRAIN_TIMEOUT",
         message: "in-flight operations did not drain within 10ms",
       });
@@ -287,6 +292,7 @@ describe("global idle stop races", () => {
   });
 
   it("fails with distinct typed evidence when an open socket misses the shutdown close deadline", async () => {
+    vi.useFakeTimers();
     const server = createServer();
     servers.push(server);
     const root = await mkdtemp(join(tmpdir(), "fabric-real-close-timeout-"));
@@ -295,7 +301,7 @@ describe("global idle stop races", () => {
     await openRecoverableUnixListener(server, socketPath);
     const client = await connectRawSocket(socketPath);
     try {
-      const outcome = await Promise.race([
+      const outcome = Promise.race([
         closeRecoverableUnixListener({
           server,
           sockets: [],
@@ -305,8 +311,9 @@ describe("global idle stop races", () => {
         }).catch((error: unknown) => error),
         new Promise<{ code: string }>((resolve) => setTimeout(() => resolve({ code: "TEST_TIMEOUT" }), 100)),
       ]);
+      await vi.advanceTimersByTimeAsync(100);
 
-      expect(outcome).toMatchObject({
+      await expect(outcome).resolves.toMatchObject({
         code: "DAEMON_SHUTDOWN_CLOSE_TIMEOUT",
         message: "serving socket did not close within 10ms",
       });
