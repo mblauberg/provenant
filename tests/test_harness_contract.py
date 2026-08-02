@@ -116,9 +116,11 @@ def test_subagent_dispatch_contract_requires_task_class_bound_route_and_receipt(
 def test_ambient_files_meet_the_static_disclosure_gates():
     # AC-S1 hard gates (D1/D4/D10/D12): the whole constitution lives in the two
     # ambient files within fixed line caps, carries no date, no repo-relative
-    # docs/config/scripts path and no skills/<x>/references path, and states its
-    # skill-resolution root exactly once via the D12 resolver line. Nothing else
+    # docs/config/scripts path and no skills/<x>/references path. Nothing else
     # in the suite enforces the line caps, so this is the binding machine gate.
+    # D12 amendment: the resolver line lives in HARNESS.md alone. Both harnesses
+    # discover skills through their own symlinked skills directory, so restating
+    # the root in AGENTS.md bought nothing and cost the always-loaded budget.
     import re
 
     agents = (ROOT / "AGENTS.md").read_text()
@@ -132,9 +134,13 @@ def test_ambient_files_meet_the_static_disclosure_gates():
     for name, text in (("AGENTS.md", agents), ("HARNESS.md", harness)):
         assert not forbidden_path.search(text), f"{name} has a forbidden repo-relative/references path (D4/D3)"
         assert not date.search(text), f"{name} carries a date (D10)"
-        # The D12 resolver names the skills root; it is the sole location-bearing line.
-        assert "$HOME/.agents/skills/<name>/" in text
-        assert "~/.codex/skills/" in text
+    # The D12 resolver names the skills root; it is the sole location-bearing
+    # line, and HARNESS.md is now its only home.
+    assert "$HOME/.agents/skills/<name>/" in harness
+    assert "~/.codex/skills/" in harness
+    assert "$HOME/.agents/skills/<name>/" not in agents, (
+        "AGENTS.md must not restate the D12 resolver root"
+    )
 
 
 def test_constitution_is_a_compact_core_with_progressive_disclosure():
