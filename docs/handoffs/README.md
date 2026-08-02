@@ -2,7 +2,9 @@
 
 ## Active
 
-_None._ No live session or run currently needs a continuity handoff.
+[Provenant stable-baseline chair handoff](HANDOFF-2026-08-01-provenant-baseline-chair.md)
+is active while the fused baseline, Agent Fabric recovery and repository-split
+acceptance work continue.
 
 [GitHub Issues](https://github.com/mblauberg/provenant/issues) own the current
 owner, dependencies and user gates; Project Status owns workflow state. Read
