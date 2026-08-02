@@ -961,6 +961,7 @@ def gate_revert_probe(
                 return 1
             candidate = (Path("tests") / f"test_{Path(hunk.path).stem}.py").as_posix()
             probe_tests = [candidate] if candidate in tests else tests
+            _prepare_typescript_scratch(source_root, probe_root, commands, probe_tests)
             results = _run_suite(commands, probe_root, probe_tests)
         for result in results:
             _print_output(result)
@@ -1053,7 +1054,9 @@ def gate_changed_line_mutation(
             )
         raise GateError("changed-lines-only mutation found no supported executable mutants")
     with _temporary_tree(source_root, scratch_root) as directory:
-        baseline = _run_suite(commands, Path(directory), tests)
+        baseline_root = Path(directory)
+        _prepare_typescript_scratch(source_root, baseline_root, commands, tests)
+        baseline = _run_suite(commands, baseline_root, tests)
     for result in baseline:
         _print_output(result)
     invalid_baseline = [result for result in baseline if result.classification is not FailureClass.PASS]
@@ -1082,6 +1085,7 @@ def gate_changed_line_mutation(
         with _temporary_tree(source_root, scratch_root) as directory:
             mutant_root = Path(directory)
             _write_mutant(mutant_root, mutant)
+            _prepare_typescript_scratch(source_root, mutant_root, commands, mutant_tests)
             results = run_mutant_suite(mutant_root, mutant_tests)
         for result in results:
             _print_output(result)
