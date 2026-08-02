@@ -69,19 +69,64 @@ DISPATCH_SCHEMA = {
 }
 
 
-def test_every_local_has_an_explicit_default_for_bash52_nounset():
-    bare = []
-    declaration = re.compile(r"^\s*local(?:\s+-[A-Za-z]+)*\s+(.+?)\s*$")
+DECLARATORS = {"local", "declare", "typeset"}
+STATEMENT_OPENERS = {"then", "do", "else", "{", "&&", "||"}
+DECLARATOR_WORD = re.compile(r"\b(?:local|declare|typeset)\b")
 
-    for lineno, line in enumerate(SCRIPT.read_text(encoding="utf-8").splitlines(), 1):
-        match = declaration.match(line)
-        if not match:
+
+def logical_lines(text):
+    """Yield (first line number, line) with backslash continuations joined."""
+    pending, start = "", 0
+    for lineno, line in enumerate(text.splitlines(), 1):
+        start = start or lineno
+        if len(line) - len(line.rstrip("\\")) == 1:
+            pending += line[:-1]
             continue
-        for word in shlex.split(match.group(1), posix=True):
-            if not word.startswith("-") and "=" not in word:
-                bare.append(f"{lineno}: {word}")
+        yield start, pending + line
+        pending, start = "", 0
+    if pending:
+        yield start, pending
 
-    assert not bare, "bare local declarations are unsafe under bash 5.2 set -u: " + ", ".join(bare)
+
+def bare_declarations(text):
+    """Names declared with no initialiser, which bash 5.2 leaves unset under set -u.
+
+    Tokenised rather than matched line-anchored, so it also catches `declare`,
+    `typeset`, and a declarator part-way through a line such as a `case` arm.
+    The word `local` in prose is ignored because only command position counts.
+    """
+    bare = []
+    for lineno, line in logical_lines(text):
+        try:
+            tokens = shlex.split(line, comments=True, posix=True)
+        except ValueError as exc:
+            if DECLARATOR_WORD.search(line):
+                bare.append(f"{lineno}: unparseable declaration ({exc})")
+            continue
+        command_position = True
+        declaring = False
+        for token in tokens:
+            word = token.rstrip(";")
+            ends_statement = word != token
+            if declaring:
+                if word and not word.startswith("-") and "=" not in word:
+                    bare.append(f"{lineno}: {word}")
+            elif command_position and word in DECLARATORS:
+                declaring = True
+            if ends_statement:
+                declaring = False
+            command_position = (
+                ends_statement or word in STATEMENT_OPENERS or word.endswith(")")
+            )
+    return bare
+
+
+def test_no_bare_declaration_survives_bash52_nounset():
+    bare = bare_declarations(SCRIPT.read_text(encoding="utf-8"))
+    assert not bare, (
+        "bash 3.2 initialises a bare-declared local to empty but bash 5.2 leaves it "
+        "unset, so reading one aborts the function under set -u: " + ", ".join(bare)
+    )
 
 
 REQUIRED_GATE_ROWS = [
