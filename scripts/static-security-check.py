@@ -85,6 +85,193 @@ def _bind(target: ast.AST, value: ast.AST | None, aliases: dict[str, str]) -> No
             aliases.pop(name, None)
 
 
+def _binding_name(target: ast.AST) -> str:
+    return dotted(target) if isinstance(target, (ast.Name, ast.Attribute)) else ""
+
+
+class _PipeWaitVisitor(ast.NodeVisitor):
+    """Find a local Popen pipe wait with no preceding local drain."""
+
+    def __init__(
+        self, aliases: dict[str, str], path: Path, findings: list[dict[str, object]]
+    ) -> None:
+        self.aliases = dict(aliases)
+        self.path = path
+        self.findings = findings
+        self.processes: dict[str, dict[str, object]] = {}
+        self.readers: dict[str, set[tuple[str, str]]] = {}
+
+    def _stream_refs(self, node: ast.AST) -> set[tuple[str, str]]:
+        refs: set[tuple[str, str]] = set()
+        for item in ast.walk(node):
+            if not isinstance(item, ast.Attribute) or item.attr not in {"stdout", "stderr"}:
+                continue
+            owner = dotted(item.value)
+            if owner in self.processes:
+                refs.add((owner, item.attr))
+        return refs
+
+    def _drain(self, refs: set[tuple[str, str]]) -> None:
+        for binding, stream in refs:
+            state = self.processes.get(binding)
+            if state is not None:
+                drained = state["drained"]
+                assert isinstance(drained, set)
+                drained.add(stream)
+
+    def _thread_streams(self, node: ast.AST) -> set[tuple[str, str]]:
+        if not isinstance(node, ast.Call):
+            return set()
+        if canonical_name(node.func, self.aliases) != "threading.Thread":
+            return set()
+        return self._stream_refs(node)
+
+    def _record_process(self, target: ast.AST, value: ast.AST | None) -> bool:
+        binding = _binding_name(target)
+        if not binding or not isinstance(value, ast.Call):
+            return False
+        if canonical_name(value.func, self.aliases) != "subprocess.Popen":
+            return False
+        pipes = {
+            keyword.arg
+            for keyword in value.keywords
+            if keyword.arg in {"stdout", "stderr"}
+            and canonical_name(keyword.value, self.aliases) == "subprocess.PIPE"
+        }
+        if not pipes:
+            return False
+        self.processes[binding] = {
+            "pipes": pipes,
+            "drained": set(),
+            "selectors": {},
+            "reported": False,
+        }
+        return True
+
+    def _record_assignment(self, targets: list[ast.AST], value: ast.AST | None) -> None:
+        thread_streams = self._thread_streams(value) if value is not None else set()
+        for target in targets:
+            binding = _binding_name(target)
+            if self._record_process(target, value):
+                continue
+            if binding:
+                self.processes.pop(binding, None)
+                if thread_streams:
+                    self.readers[binding] = thread_streams
+                else:
+                    self.readers.pop(binding, None)
+            _bind(target, value, self.aliases)
+
+    def visit_Import(self, node: ast.Import) -> None:  # noqa: N802
+        for item in node.names:
+            bound = item.asname or item.name.split(".")[0]
+            self.aliases[bound] = item.name if item.asname else item.name.split(".")[0]
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:  # noqa: N802
+        if node.module:
+            for item in node.names:
+                self.aliases[item.asname or item.name] = f"{node.module}.{item.name}"
+
+    def visit_Assign(self, node: ast.Assign) -> None:  # noqa: N802
+        self._record_assignment(list(node.targets), node.value)
+        self.visit(node.value)
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:  # noqa: N802
+        self._record_assignment([node.target], node.value)
+        if node.value is not None:
+            self.visit(node.value)
+
+    def visit_AugAssign(self, node: ast.AugAssign) -> None:  # noqa: N802
+        binding = _binding_name(node.target)
+        self.processes.pop(binding, None)
+        self.readers.pop(binding, None)
+        self.visit(node.value)
+
+    def visit_For(self, node: ast.For) -> None:  # noqa: N802
+        self._drain(self._stream_refs(node.iter))
+        self.generic_visit(node)
+
+    visit_AsyncFor = visit_For
+
+    def visit_Call(self, node: ast.Call) -> None:  # noqa: N802
+        name = dotted(node.func)
+        for binding, state in self.processes.items():
+            if name == f"{binding}.communicate" and any(
+                keyword.arg == "timeout" for keyword in node.keywords
+            ):
+                pipes = state["pipes"]
+                assert isinstance(pipes, set)
+                self._drain({(binding, stream) for stream in pipes})
+            elif name in {
+                f"{binding}.stdout.read",
+                f"{binding}.stdout.readline",
+                f"{binding}.stdout.readlines",
+                f"{binding}.stderr.read",
+                f"{binding}.stderr.readline",
+                f"{binding}.stderr.readlines",
+            }:
+                parts = name.split(".")
+                self._drain({(binding, parts[-2])})
+
+        if isinstance(node.func, ast.Attribute) and node.func.attr == "register" and node.args:
+            selector = dotted(node.func.value)
+            for binding, stream in self._stream_refs(node.args[0]):
+                state = self.processes[binding]
+                selectors = state["selectors"]
+                assert isinstance(selectors, dict)
+                registered = selectors.setdefault(selector, set())
+                registered.add(stream)
+                pipes = state["pipes"]
+                assert isinstance(pipes, set)
+                if pipes <= registered:
+                    self._drain({(binding, item) for item in pipes})
+
+        if isinstance(node.func, ast.Attribute) and node.func.attr == "start":
+            streams = self.readers.get(dotted(node.func.value), set())
+            if isinstance(node.func.value, ast.Call):
+                streams = streams | self._thread_streams(node.func.value)
+            streams = streams | self._stream_refs(node)
+            self._drain(streams)
+
+        for binding, state in self.processes.items():
+            if name != f"{binding}.wait" or state["reported"]:
+                continue
+            pipes = state["pipes"]
+            drained = state["drained"]
+            assert isinstance(pipes, set) and isinstance(drained, set)
+            if not pipes <= drained:
+                self.findings.append({
+                    "path": str(self.path),
+                    "line": node.lineno,
+                    "rule": "subprocess-pipe-wait-before-drain",
+                    "detail": f"{binding}.wait",
+                })
+                state["reported"] = True
+        self.generic_visit(node)
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:  # noqa: N802
+        return
+
+    visit_AsyncFunctionDef = visit_FunctionDef
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:  # noqa: N802
+        return
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:  # noqa: N802
+        return
+
+
+def _check_pipe_wait(
+    node: ast.FunctionDef | ast.AsyncFunctionDef,
+    aliases: dict[str, str],
+    path: Path,
+    findings: list[dict[str, object]],
+) -> None:
+    visitor = _PipeWaitVisitor(aliases, path, findings)
+    for statement in node.body:
+        visitor.visit(statement)
+
+
 def _pattern_bindings(pattern: ast.pattern) -> set[str]:
     names: set[str] = set()
     for node in ast.walk(pattern):
@@ -125,6 +312,7 @@ def _scan_body(body: list[ast.stmt], aliases: dict[str, str], path: Path, findin
                 local.pop(node.args.vararg.arg, None)
             if node.args.kwarg:
                 local.pop(node.args.kwarg.arg, None)
+            _check_pipe_wait(node, local, path, findings)
             _scan_body(node.body, local, path, findings)
         elif isinstance(node, ast.ClassDef):
             for value in [*node.decorator_list, *node.bases, *node.keywords]:

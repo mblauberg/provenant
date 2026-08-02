@@ -107,3 +107,90 @@ def test_match_pattern_bindings_do_not_shadow_imports_after_match(tmp_path):
 
 def test_repository_python_surface_passes_static_security_check():
     assert load_module().scan(ROOT) == []
+
+
+def test_pipe_wait_rule_finds_one_bad_fixture_and_accepts_bounded_drains(tmp_path):
+    module = load_module()
+    (tmp_path / "bad.py").write_text(
+        "import subprocess as sp\n"
+        "def bad():\n"
+        "    process = sp.Popen(['tool'], stdout=sp.PIPE, stderr=sp.PIPE)\n"
+        "    process.wait(timeout=1)\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "regular_file.py").write_text(
+        "import subprocess\n"
+        "def safe(output):\n"
+        "    process = subprocess.Popen(['tool'], stdout=output)\n"
+        "    process.wait(timeout=1)\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "communicate.py").write_text(
+        "import subprocess\n"
+        "def safe():\n"
+        "    process = subprocess.Popen(['tool'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)\n"
+        "    process.communicate(timeout=1)\n"
+        "    process.wait(timeout=1)\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "selector.py").write_text(
+        "import selectors, subprocess\n"
+        "def safe():\n"
+        "    process = subprocess.Popen(['tool'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)\n"
+        "    selector = selectors.DefaultSelector()\n"
+        "    selector.register(process.stdout, selectors.EVENT_READ)\n"
+        "    selector.register(process.stderr, selectors.EVENT_READ)\n"
+        "    process.wait(timeout=1)\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "read_and_iteration.py").write_text(
+        "import subprocess\n"
+        "def read_safe():\n"
+        "    process = subprocess.Popen(['tool'], stdout=subprocess.PIPE)\n"
+        "    process.stdout.read()\n"
+        "    process.wait(timeout=1)\n"
+        "def iteration_safe():\n"
+        "    process = subprocess.Popen(['tool'], stdout=subprocess.PIPE)\n"
+        "    for line in process.stdout:\n"
+        "        consume(line)\n"
+        "    process.wait(timeout=1)\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "concurrent_reader.py").write_text(
+        "import subprocess, threading\n"
+        "def safe(drain):\n"
+        "    process = subprocess.Popen(['tool'], stdout=subprocess.PIPE)\n"
+        "    reader = threading.Thread(target=drain, args=(process.stdout,))\n"
+        "    reader.start()\n"
+        "    process.wait(timeout=1)\n",
+        encoding="utf-8",
+    )
+
+    findings = [
+        finding
+        for finding in module.scan(tmp_path)
+        if finding["rule"] == "subprocess-pipe-wait-before-drain"
+    ]
+
+    assert len(findings) == 1
+    assert findings[0]["path"].endswith("bad.py")
+    assert findings[0]["line"] == 4
+
+
+def test_pipe_wait_rule_is_clean_across_all_four_real_execution_sites():
+    module = load_module()
+    sites = (
+        ROOT / "scripts" / "public_release_check.py",
+        ROOT / "skills" / "deliver" / "scripts" / "delivery_receipt_process.py",
+        ROOT / "scripts" / "change_gate_runner.py",
+        ROOT / "skills" / "orchestrate" / "evals" / "test_cf_dispatch.py",
+    )
+
+    findings = [
+        finding
+        for site in sites
+        for finding in module.scan_file(site)
+        if finding["rule"] == "subprocess-pipe-wait-before-drain"
+    ]
+
+    assert findings == []
