@@ -189,7 +189,7 @@ const REVIEW_SCHEMA = {
     crossFamily: {
       type: 'object',
       additionalProperties: false,
-      required: ['ran', 'tool', 'status', 'modelFamily', 'endpointProvider', 'crossFamily', 'certificationEligible', 'readOnlyGuarantee', 'outputPath', 'routeReceipt', 'notRunReason'],
+      required: ['ran', 'tool', 'status', 'modelFamily', 'endpointProvider', 'crossFamily', 'certificationEligible', 'readOnlyGuarantee', 'outputPath', 'routeReceipt', 'terminalResult', 'notRunReason'],
       properties: {
         ran: { type: 'boolean' },
         tool: { type: 'string', description: 'codex | cursor | agy | "" if Claude reviewer' },
@@ -201,10 +201,24 @@ const REVIEW_SCHEMA = {
         readOnlyGuarantee: { type: 'string', description: 'cf_dispatch.sh value: enforced | oauth_safe_mode | best_effort | prompt_only | none (none only for a Claude reviewer)' },
         outputPath: { type: 'string' },
         routeReceipt: { type: 'string', description: 'Exact cf_dispatch JSON receipt path; empty for native review' },
+        terminalResult: { type: 'string', description: 'Digest-bound semantic worker result JSON path; empty for native review' },
         notRunReason: { type: 'string', description: 'CROSS-FAMILY-NOT-RUN reason if ran=false; else ""' },
       },
     },
     path: { type: 'string' },
+  },
+}
+
+const CERTIFICATION_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['certifying', 'reviewerId', 'routeReceipt', 'terminalResult', 'reason'],
+  properties: {
+    certifying: { type: 'boolean' },
+    reviewerId: { type: 'string' },
+    routeReceipt: { type: 'string' },
+    terminalResult: { type: 'string' },
+    reason: { type: 'string' },
   },
 }
 
@@ -287,7 +301,7 @@ function crossFamilyDispatchHint(runDir, gitCwd, kind = 'primary', reviewerId = 
     `--receipt ${runDir}/crossfamily/<name>.route.json > /dev/null\n` +
     'The dispatcher prints a normalised JSON record (model_family, endpoint_provider, cross_family, certification_eligible, output_sha256, terminal_artifact_sha256, read_only_guarantee, ' +
     'status) — preserve that exact route JSON and return its path as routeReceipt. Certified only when cross_family=true and read_only_guarantee ' +
-    'is enforced or oauth_safe_mode. Keep the normalised worker result as a separate terminal_result artifact; the dispatcher terminal JSON is not its semantic verdict. On failure, set ran=false and record OTHER-PRIMARY-NOT-RUN: <reason>. ' +
+    'is enforced or oauth_safe_mode. Keep the normalised worker result as a separate terminal_result JSON artifact and return its path as terminalResult; the dispatcher terminal JSON is not its semantic verdict. On failure, set ran=false and record OTHER-PRIMARY-NOT-RUN: <reason>. ' +
     'Apply the host data policy before dispatch.'
   )
   return (
@@ -577,7 +591,7 @@ for (let cycle = 0; cycle <= maxRepairCycles; cycle += 1) {
           ESCALATION_RULES +
           '\nFor a native Claude review, set crossFamily to ran=false, tool="", status="not-applicable", ' +
           'modelFamily="anthropic", endpointProvider="anthropic", crossFamily=false, certificationEligible=false, readOnlyGuarantee="none", ' +
-          'outputPath="", routeReceipt="", notRunReason="targeted-review". For a dispatched review, copy every normalised field ' +
+          'outputPath="", routeReceipt="", terminalResult="", notRunReason="targeted-review". For a dispatched review, copy every normalised field ' +
           'from the dispatcher record; do not infer or relabel lineage.\n' +
           `\nWrite full review to ${runDir}/findings/review-${cycle}-${rv.angle}.md and return the structured verdict. Return reviewerId="review-${cycle}-${rv.angle}" and use that exact stable ID for any dispatcher route.` +
           (rv.cf ? '\n' + crossFamilyDispatchHint(runDir, gitCwd, rv.cf, `review-${cycle}-${rv.angle}`) : ''),
@@ -593,7 +607,7 @@ for (let cycle = 0; cycle <= maxRepairCycles; cycle += 1) {
       issues: REVIEW_ANGLES[index].required
         ? [{ severity: 'P1', patchPath: '', detail: 'required review lane failed or returned no result' }]
         : [],
-      crossFamily: { ran: false, tool: '', status: 'unavailable', modelFamily: '', endpointProvider: '', crossFamily: false, certificationEligible: false, readOnlyGuarantee: 'none', outputPath: '', routeReceipt: '', notRunReason: REVIEW_ANGLES[index].required ? 'review-lane-failed' : 'distinct-family-review-unavailable' },
+      crossFamily: { ran: false, tool: '', status: 'unavailable', modelFamily: '', endpointProvider: '', crossFamily: false, certificationEligible: false, readOnlyGuarantee: 'none', outputPath: '', routeReceipt: '', terminalResult: '', notRunReason: REVIEW_ANGLES[index].required ? 'review-lane-failed' : 'distinct-family-review-unavailable' },
       path: '',
     },
   )
@@ -604,7 +618,7 @@ for (let cycle = 0; cycle <= maxRepairCycles; cycle += 1) {
       'Treat it as a lead, not authority. Return block only for a reproducible, task-relevant defect supported by ' +
         'primary evidence; otherwise approve or approve-with-nits. This is a native Claude corroboration: set ' +
         'crossFamily to ran=false, tool="", status="not-applicable", modelFamily="anthropic", ' +
-        'endpointProvider="anthropic", crossFamily=false, certificationEligible=false, readOnlyGuarantee="none", outputPath="", routeReceipt="", ' +
+        'endpointProvider="anthropic", crossFamily=false, certificationEligible=false, readOnlyGuarantee="none", outputPath="", routeReceipt="", terminalResult="", ' +
         'notRunReason="native-corroboration" and reviewerId="review-${cycle}-distinct-family-corroboration".\n' +
         `Distinct-family review: ${JSON.stringify(distinctFamilyReview)}\nPatches: ${patchDigest}\nTask: ${task}`,
       { label: `review:${cycle}:distinct-family-corroboration`, phase: 'Review', schema: REVIEW_SCHEMA, model: models.criticalReviewer },
@@ -614,7 +628,36 @@ for (let cycle = 0; cycle <= maxRepairCycles; cycle += 1) {
   blocking = reviews.filter((r, index) =>
     (index >= REVIEW_ANGLES.length || REVIEW_ANGLES[index].required) && r.verdict === 'block'
   ).length
-  otherPrimaryRan = reviews.some((r) => r.angle === 'other-primary' && r.crossFamily && r.crossFamily.ran && r.crossFamily.status === 'ok' && r.crossFamily.crossFamily && r.crossFamily.certificationEligible && ['enforced', 'oauth_safe_mode'].includes(r.crossFamily.readOnlyGuarantee))
+  const candidate = reviews.find((r) => r.angle === 'other-primary')
+  let otherPrimaryCertification = null
+  if (candidate) {
+    otherPrimaryCertification = await agent(
+      'Run the existing deterministic worker-outcome receipt join for the candidate below. Do not certify from ' +
+        'the reviewer booleans (ran, status, crossFamily, certificationEligible or readOnlyGuarantee). Read the ' +
+        'route receipt and semantic terminal-result JSON from disk and invoke the existing ' +
+        '`run_dir_finalize._direct_worker_leg` / `accept_worker_outcome` validation. If either path is empty, ' +
+        'missing, aliased, digest-mismatched, or the joined leg is not certifying, return certifying=false. ' +
+        'Return routeReceipt and terminalResult exactly as supplied by the candidate only after attempting the ' +
+        'deterministic join; return the command-backed result only.\n' +
+        `Run directory: ${runDir}\nCandidate: ${JSON.stringify(candidate)}\nChair family: anthropic\n` +
+        'The command must use the actual files under the run directory, not reconstructed reviewer claims. ' +
+        'Return the structured certification result only.',
+      { label: `review:${cycle}:other-primary-certification`, phase: 'Review', schema: CERTIFICATION_SCHEMA, model: models.scout },
+    )
+  }
+  otherPrimaryRan = !!(
+    candidate &&
+    candidate.crossFamily &&
+    typeof candidate.crossFamily.routeReceipt === 'string' &&
+    candidate.crossFamily.routeReceipt &&
+    typeof candidate.crossFamily.terminalResult === 'string' &&
+    candidate.crossFamily.terminalResult &&
+    otherPrimaryCertification &&
+    otherPrimaryCertification.certifying === true &&
+    otherPrimaryCertification.reviewerId === candidate.reviewerId &&
+    otherPrimaryCertification.routeReceipt === candidate.crossFamily.routeReceipt &&
+    otherPrimaryCertification.terminalResult === candidate.crossFamily.terminalResult
+  )
   distinctFamilyRan = reviews.some((r) => r.angle === 'distinct-family' && r.crossFamily && r.crossFamily.ran && r.crossFamily.status === 'ok')
   log(`Review cycle ${cycle}: ${reviews.length} verdicts, ${blocking} blocking; other-primary ${otherPrimaryRan ? 'ran' : 'NOT run'}; distinct-family ${distinctFamilyRan ? 'ran' : 'not available'}.`)
   await checkpoint(`review-${cycle}-complete`, 'run objective verification', [], reviews.map((r) => r.path).filter(Boolean))

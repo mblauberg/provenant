@@ -9,6 +9,7 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+PUBLISH_HELPER="$SCRIPT_DIR/cf_dispatch_publish.py"
 
 usage() {
   cat <<'EOF'
@@ -186,7 +187,7 @@ emit_record() {
   local requested_effort="${12:-}" effort_source="${13:-}" effort_capability_source="${14:-}" cross cert
   local substitution="${15:-}" requested_model="${16:-$model}" fallback_model="${17:-}"
   local catalog_model="${18:-}" model_selection="${19:-}"
-  local risk_tier="${20:-$RISK_TIER}" policy_override="${21:-}" terminal_observed="${22:-false}" output_sha256="${23:-}" terminal_artifact_path="${24:-}" terminal_artifact_sha256="${25:-}" record
+  local risk_tier="${20:-$RISK_TIER}" policy_override="${21:-}" terminal_observed="${22:-false}" output_sha256="${23:-}" terminal_artifact_path="${24:-}" terminal_artifact_sha256="${25:-}" record receipt_tmp record_digest
   model="$(resolve_model "$tool" "$model")"
   [ -n "$endpoint" ] || endpoint="$(endpoint_provider "$tool")"
   [ -n "$identity" ] || identity="unresolved"
@@ -230,19 +231,37 @@ emit_record() {
     "$(printf '%s' "$policy_override" | json_escape)" \
     "$cross" \
     "$cert" )"
-  if [ -n "$DISPATCH_RECEIPT" ]; then
-    if ! printf '%s' "$record" >"$DISPATCH_RECEIPT"; then
+  if [ -n "$DISPATCH_RECEIPT" ] && [ "$status" != "evidence_paths_not_distinct" ]; then
+    receipt_tmp="$(make_tmp)" || receipt_tmp=""
+    if [ -z "$receipt_tmp" ] || ! printf '%s' "$record" >"$receipt_tmp" || ! python3 "$PUBLISH_HELPER" publish "$DISPATCH_RECEIPT" "$receipt_tmp"; then
+      [ -n "$receipt_tmp" ] && rm -f "$receipt_tmp"
       echo "cannot write dispatcher receipt: $DISPATCH_RECEIPT" >&2
       record="$(printf '%s' "$record" | python3 -c 'import json,sys; value=json.load(sys.stdin); value.update(status="receipt_write_error", exit=1, terminal_observed=False, read_only_guarantee="none", certification_eligible=False); print(json.dumps(value, separators=(",", ":")))')"
       printf '%s' "$record"
       return 1
     fi
+    rm -f "$receipt_tmp"
+    record_digest="$(printf '%s' "$record" | python3 -c 'import hashlib,sys; print("sha256:" + hashlib.sha256(sys.stdin.buffer.read()).hexdigest())')"
+  fi
+  if [ -n "$output_sha256" ] && [ -n "$terminal_artifact_sha256" ] && ! evidence_paths_valid "$output_sha256" "$terminal_artifact_sha256" "$record_digest"; then
+    EVIDENCE_PATHS_DISTINCT=false
+    record="$(printf '%s' "$record" | python3 -c 'import json,sys; value=json.load(sys.stdin); value.update(status="evidence_publication_invalid", exit=2, terminal_observed=False, read_only_guarantee="none", certification_eligible=False); print(json.dumps(value, separators=(",", ":")))')"
+    if [ -n "$DISPATCH_RECEIPT" ] && evidence_paths_distinct; then
+      receipt_tmp="$(make_tmp)" || receipt_tmp=""
+      if [ -n "$receipt_tmp" ] && printf '%s' "$record" >"$receipt_tmp" && python3 "$PUBLISH_HELPER" publish "$DISPATCH_RECEIPT" "$receipt_tmp"; then
+        rm -f "$receipt_tmp"
+      else
+        [ -n "$receipt_tmp" ] && rm -f "$receipt_tmp"
+      fi
+    fi
+    printf '%s' "$record"
+    return 1
   fi
   printf '%s' "$record"
 }
 
 write_terminal_artifact() {
-  local path="$1" status="$2" rc="$3" payload outcome_id
+  local path="$1" status="$2" rc="$3" payload outcome_id temporary
   [ -n "$path" ] || return 0
   outcome_id="${TASK_ID:-$REVIEWER_ID}"
   if [ "$status" = "ok" ] && [ "$rc" -eq 0 ]; then
@@ -272,49 +291,36 @@ print(json.dumps({
 PY
 )"
   fi
-  printf '%s' "$payload" >"$path"
+  temporary="$(make_tmp)" || return 1
+  if ! printf '%s' "$payload" >"$temporary" || ! python3 "$PUBLISH_HELPER" publish "$path" "$temporary"; then
+    rm -f "$temporary"
+    return 1
+  fi
+  rm -f "$temporary"
 }
 
 ORCH_FAMILY="$(normalise_family "$ORCH_FAMILY")"
 EVIDENCE_PATHS_DISTINCT=true
 
 evidence_paths_distinct() {
-  python3 - "$OUT" "$TERMINAL_ARTIFACT" <<'PY'
-from pathlib import Path
-import stat
-import sys
+  local -a paths
+  paths=("$OUT" "$TERMINAL_ARTIFACT")
+  [ -n "$DISPATCH_RECEIPT" ] && paths+=("$DISPATCH_RECEIPT")
+  python3 "$PUBLISH_HELPER" identity "${paths[@]}"
+}
 
-answer = Path(sys.argv[1])
-terminal = Path(sys.argv[2])
-try:
-    if answer.resolve(strict=False) == terminal.resolve(strict=False):
-        raise ValueError("answer and dispatcher terminal paths resolve to the same file")
-    identities = []
-    for label, path in (("answer", answer), ("dispatcher terminal", terminal)):
-        try:
-            if stat.S_ISLNK(path.lstat().st_mode):
-                raise ValueError(f"{label} path is a symlink")
-            info = path.stat()
-        except FileNotFoundError:
-            continue
-        identities.append((info.st_dev, info.st_ino))
-        if info.st_nlink != 1:
-            raise ValueError(f"{label} path is hardlinked")
-    if len(identities) == 2 and len(set(identities)) != len(identities):
-        raise ValueError("answer and dispatcher terminal paths are hardlink aliases")
-except (OSError, RuntimeError) as error:
-    print(f"cannot verify answer and dispatcher terminal path identity: {error}", file=sys.stderr)
-    raise SystemExit(2)
-except ValueError as error:
-    print(str(error), file=sys.stderr)
-    raise SystemExit(1)
-PY
+evidence_paths_valid() {
+  local output_digest="$1" terminal_digest="$2" receipt_digest="${3:-}"
+  local -a entries
+  entries=("$OUT" "$output_digest" "$TERMINAL_ARTIFACT" "$terminal_digest")
+  [ -n "$DISPATCH_RECEIPT" ] && entries+=("$DISPATCH_RECEIPT" "$receipt_digest")
+  python3 "$PUBLISH_HELPER" verify "${entries[@]}"
 }
 
 emit_evidence_path_rejection() {
   local record
   EVIDENCE_PATHS_DISTINCT=false
-  echo "answer and dispatcher terminal evidence paths must be distinct files; path, symlink, and hardlink aliases are rejected" >&2
+  echo "answer, dispatcher terminal, and receipt evidence paths must be distinct files; path, symlink, and hardlink aliases are rejected" >&2
   record="$(emit_record "${TOOL:-chain}" "" "" "evidence_paths_not_distinct" 2 "" "none" "" "" "" "" "" "" "" "" "" "" "" "" "$RISK_TIER" "evidence-path-alias" false "" "$TERMINAL_ARTIFACT" "")"
   printf '%s\n' "$record"
 }
@@ -569,7 +575,7 @@ run_one() {  # $1 tool $2 model $3 effort -> writes answer and optional terminal
   [ "$status" = "tool_not_found" ] && guarantee="none"
 
   if [ "$status" = "ok" ]; then
-    if cp "$clean" "$OUT"; then
+    if python3 "$PUBLISH_HELPER" publish "$OUT" "$clean"; then
       opath="$OUT"
     else
       status="output_write_error"
@@ -578,7 +584,7 @@ run_one() {  # $1 tool $2 model $3 effort -> writes answer and optional terminal
       opath=""
     fi
   else
-    if cp "$combined" "$OUT"; then
+    if python3 "$PUBLISH_HELPER" publish "$OUT" "$combined"; then
       opath="$OUT"
     else
       status="output_write_error"
@@ -589,12 +595,21 @@ run_one() {  # $1 tool $2 model $3 effort -> writes answer and optional terminal
   fi
   output_sha256=""
   if [ -n "$opath" ] && [ -f "$opath" ]; then
-    output_sha256="sha256:$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$opath")"
+    if ! output_sha256="$(python3 "$PUBLISH_HELPER" digest "$opath")"; then
+      status="output_validation_error"
+      rc=1
+      guarantee="none"
+      opath=""
+    fi
   fi
   terminal_artifact_sha256=""
   if [ -n "$TERMINAL_ARTIFACT" ]; then
     if write_terminal_artifact "$TERMINAL_ARTIFACT" "$status" "$rc"; then
-      terminal_artifact_sha256="sha256:$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$TERMINAL_ARTIFACT")"
+      if ! terminal_artifact_sha256="$(python3 "$PUBLISH_HELPER" digest "$TERMINAL_ARTIFACT")"; then
+        status="terminal_artifact_validation_error"
+        rc=1
+        guarantee="none"
+      fi
     else
       status="terminal_artifact_write_error"
       rc=1
@@ -633,11 +648,11 @@ if [ -n "$CHAIN" ]; then
   done
   terminal_artifact_sha256=""
   if [ -n "$TERMINAL_ARTIFACT" ] && write_terminal_artifact "$TERMINAL_ARTIFACT" "all_failed" 1; then
-    terminal_artifact_sha256="sha256:$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$TERMINAL_ARTIFACT")"
+    terminal_artifact_sha256="$(python3 "$PUBLISH_HELPER" digest "$TERMINAL_ARTIFACT")" || terminal_artifact_sha256=""
   fi
   chain_output_sha256=""
   if [ -n "$OUT" ] && [ -f "$OUT" ]; then
-    chain_output_sha256="sha256:$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$OUT")"
+    chain_output_sha256="$(python3 "$PUBLISH_HELPER" digest "$OUT")" || chain_output_sha256=""
   fi
   emit_record "chain" "" "" "all_failed" 1 "$OUT" "none" "" "" "" "" "" "" "" "" "" "" "" "" "" "" "" "" "" true "$chain_output_sha256" "$TERMINAL_ARTIFACT" "$terminal_artifact_sha256"
   exit 1

@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
+import stat
 from typing import Any
 
 
@@ -31,39 +33,92 @@ def _digest_bytes(data: bytes) -> str:
     return "sha256:" + hashlib.sha256(data).hexdigest()
 
 
-def _reference(root: Path, value: object, label: str) -> tuple[Path | None, bytes | None, str | None]:
+def _after_file_read(_path: Path, _label: str) -> None:
+    """Narrow test seam for exercising the post-read identity check."""
+
+
+def _read_file(path: Path, label: str) -> tuple[bytes | None, tuple[int, int] | None, str | None]:
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError as exc:
+        return None, None, f"{label} is unreadable: {exc}"
+    try:
+        before = os.fstat(fd)
+        if not stat.S_ISREG(before.st_mode):
+            return None, None, f"{label} is not a regular file"
+        if before.st_nlink != 1:
+            return None, None, f"{label} is hardlinked"
+        chunks: list[bytes] = []
+        while True:
+            chunk = os.read(fd, 1024 * 1024)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        after = os.fstat(fd)
+        identity = (before.st_dev, before.st_ino)
+        if identity != (after.st_dev, after.st_ino) or before.st_nlink != after.st_nlink:
+            return None, None, f"{label} changed while it was read"
+        data = b"".join(chunks)
+        _after_file_read(path, label)
+        try:
+            current = os.stat(path, follow_symlinks=False)
+        except OSError as exc:
+            return None, None, f"{label} changed after it was read: {exc}"
+        if stat.S_ISLNK(current.st_mode):
+            return None, None, f"{label} became a symlink"
+        if not stat.S_ISREG(current.st_mode):
+            return None, None, f"{label} is not a regular file after it was read"
+        if current.st_nlink != 1:
+            return None, None, f"{label} became hardlinked"
+        if (current.st_dev, current.st_ino) != identity:
+            return None, None, f"{label} inode changed after it was read"
+        return data, identity, None
+    finally:
+        os.close(fd)
+
+
+def _reference_snapshot(
+    root: Path,
+    value: object,
+    label: str,
+    *,
+    check_digest: bool = True,
+    allow_absolute: bool = False,
+) -> tuple[Path | None, bytes | None, tuple[int, int] | None, str | None]:
     if not isinstance(value, dict) or set(value) != _REFERENCE_KEYS:
-        return None, None, f"{label} must contain only path and digest"
+        return None, None, None, f"{label} must contain only path and digest"
     path_value = value.get("path")
     digest = value.get("digest")
     path = Path(path_value) if isinstance(path_value, str) else Path("..")
     if (
         not isinstance(path_value, str)
-        or path.is_absolute()
+        or (path.is_absolute() and not allow_absolute)
         or ".." in path.parts
         or not isinstance(digest, str)
         or not _DIGEST.fullmatch(digest)
     ):
-        return None, None, f"{label} is invalid"
-    target = root / path
+        return None, None, None, f"{label} is invalid"
+    target = path if path.is_absolute() else root / path
     try:
-        resolved = target.resolve(strict=True)
+        resolved = target.resolve(strict=False)
         resolved.relative_to(root.resolve())
     except (ValueError, RuntimeError):
-        return None, None, f"{label} escapes the run directory"
+        return None, None, None, f"{label} escapes the run directory"
     except OSError:
-        return None, None, f"{label} is missing"
-    if target.is_symlink() or not resolved.is_file():
-        return None, None, f"{label} is missing or symlinked"
-    try:
-        if resolved.stat().st_nlink != 1:
-            return None, None, f"{label} is hardlinked"
-        data = resolved.read_bytes()
-    except OSError:
-        return None, None, f"{label} is unreadable"
-    if _digest_bytes(data) != digest:
-        return None, None, f"{label} digest does not match"
-    return resolved, data, None
+        return None, None, None, f"{label} is missing"
+    data, identity, error = _read_file(target, label)
+    if error:
+        return None, None, None, error
+    assert data is not None and identity is not None
+    if check_digest and _digest_bytes(data) != digest:
+        return None, None, None, f"{label} digest does not match"
+    return resolved, data, identity, None
+
+
+def _reference(root: Path, value: object, label: str) -> tuple[Path | None, bytes | None, str | None]:
+    path, data, _identity_value, error = _reference_snapshot(root, value, label)
+    return path, data, error
 
 
 def _json_bytes(data: bytes, label: str) -> tuple[dict[str, Any] | None, str | None]:
@@ -85,36 +140,43 @@ def _path_matches(root: Path, output_path: object, artifact: Path) -> bool:
     return (root / candidate).resolve() == artifact.resolve() and ".." not in candidate.parts
 
 
-def _verify_answer(root: Path, dispatch: dict[str, Any]) -> tuple[Path | None, bytes | None, str | None]:
+def _verify_answer_snapshot(
+    root: Path,
+    dispatch: dict[str, Any],
+) -> tuple[Path | None, bytes | None, tuple[int, int] | None, str | None]:
     """Verify the human answer independently from the terminal JSON artifact."""
     output_path = dispatch.get("output_path")
     output_digest = dispatch.get("output_sha256")
     if not isinstance(output_path, str) or not output_path:
-        return None, None, "human answer path is unavailable"
+        return None, None, None, "human answer path is unavailable"
     if not isinstance(output_digest, str) or not _DIGEST.fullmatch(output_digest):
-        return None, None, "human answer digest is unavailable"
+        return None, None, None, "human answer digest is unavailable"
     candidate = Path(output_path)
     target = candidate if candidate.is_absolute() else root / candidate
     try:
-        resolved = target.resolve(strict=True)
-        resolved.relative_to(root.resolve())
-    except (ValueError, RuntimeError):
-        return None, None, "human answer path escapes the run directory"
-    except OSError:
-        return None, None, "human answer is missing"
-    if target.is_symlink() or not resolved.is_file():
-        return None, None, "human answer is missing or symlinked"
-    try:
-        if resolved.stat().st_nlink != 1:
-            return None, None, "human answer is hardlinked"
-        data = resolved.read_bytes()
-    except OSError:
-        return None, None, "human answer is unreadable"
+        target.resolve(strict=False).relative_to(root.resolve())
+    except (OSError, RuntimeError, ValueError):
+        return None, None, None, "human answer path escapes the run directory"
+    path, data, identity, error = _reference_snapshot(
+        root,
+        {"path": str(target), "digest": output_digest},
+        "human answer",
+        check_digest=False,
+        allow_absolute=True,
+    )
+    if error:
+        return None, None, None, error
+    assert path is not None and data is not None and identity is not None
     if not data:
-        return None, None, "human answer is empty"
+        return None, None, None, "human answer is empty"
     if _digest_bytes(data) != output_digest:
-        return None, None, "human answer digest does not match"
-    return resolved, data, None
+        return None, None, None, "human answer digest does not match"
+    return path, data, identity, None
+
+
+def _verify_answer(root: Path, dispatch: dict[str, Any]) -> tuple[Path | None, bytes | None, str | None]:
+    path, data, _identity_value, error = _verify_answer_snapshot(root, dispatch)
+    return path, data, error
 
 
 def _validate_terminal(
@@ -225,10 +287,14 @@ def accept_worker_outcome(
     if not isinstance(outcome_id, str) or not outcome_id.strip():
         return _failure("worker outcome id is required")
 
-    dispatch_path, dispatch_bytes, error = _reference(root, outcome.get("dispatch_receipt"), "dispatch_receipt")
+    dispatch_path, dispatch_bytes, dispatch_identity, error = _reference_snapshot(
+        root, outcome.get("dispatch_receipt"), "dispatch_receipt"
+    )
     if error:
         return _failure(error)
-    terminal_path, terminal_bytes, error = _reference(root, outcome.get("terminal_artifact"), "terminal_artifact")
+    terminal_path, terminal_bytes, terminal_identity, error = _reference_snapshot(
+        root, outcome.get("terminal_artifact"), "terminal_artifact"
+    )
     if error:
         return _failure(error)
     assert dispatch_path is not None and dispatch_bytes is not None
@@ -251,12 +317,12 @@ def accept_worker_outcome(
     exit_value = dispatch.get("exit")
     if not isinstance(exit_value, int) or isinstance(exit_value, bool):
         return _failure("dispatch receipt exit status is unavailable")
-    answer_path, answer_bytes, error = _verify_answer(root, dispatch)
+    answer_path, answer_bytes, answer_identity, error = _verify_answer_snapshot(root, dispatch)
     if error:
         return _failure(error)
     assert answer_path is not None and answer_bytes is not None
     dispatch_terminal_ref = outcome["dispatch_terminal_artifact"]
-    dispatch_terminal_path, dispatch_terminal_bytes, error = _reference(
+    dispatch_terminal_path, dispatch_terminal_bytes, dispatch_terminal_identity, error = _reference_snapshot(
         root, dispatch_terminal_ref, "dispatch_terminal_artifact"
     )
     if error:
@@ -280,21 +346,52 @@ def accept_worker_outcome(
     if dispatch_kind == "failed" and dispatch_succeeded:
         return _failure("dispatcher terminal failed contradicts dispatch receipt status/exit")
     paths = {
+        "dispatch receipt": dispatch_path,
         "human answer": answer_path,
         "dispatcher terminal": dispatch_terminal_path,
         "semantic result": terminal_path,
     }
     try:
-        identities = {(item.stat().st_dev, item.stat().st_ino) for item in paths.values()}
+        identities = {
+            identity
+            for identity in (
+                dispatch_identity,
+                answer_identity,
+                dispatch_terminal_identity,
+                terminal_identity,
+            )
+            if identity is not None
+        }
     except OSError:
         return _failure("worker evidence file identity is unavailable")
     if len(paths) != len(identities):
-        return _failure("human answer, dispatcher terminal and semantic result must use distinct paths and inodes")
+        return _failure("dispatch receipt, human answer, dispatcher terminal and semantic result must use distinct paths and inodes")
     error = _validate_terminal(
         root, terminal, outcome_id=outcome_id, attempt_id=attempt_id, require_verdict=True
     )
     if error:
         return _failure(error)
+
+    snapshots = (
+        ("dispatch receipt", outcome["dispatch_receipt"], dispatch_identity, False),
+        (
+            "human answer",
+            {"path": dispatch["output_path"], "digest": dispatch["output_sha256"]},
+            answer_identity,
+            True,
+        ),
+        ("dispatcher terminal", dispatch_terminal_ref, dispatch_terminal_identity, False),
+        ("semantic result", outcome["terminal_artifact"], terminal_identity, False),
+    )
+    for label, reference, expected_identity, allow_absolute in snapshots:
+        assert expected_identity is not None
+        _current_path, _current_bytes, current_identity, error = _reference_snapshot(
+            root, reference, label, allow_absolute=allow_absolute
+        )
+        if error:
+            return _failure(f"{label} changed during certification: {error}")
+        if current_identity != expected_identity:
+            return _failure(f"{label} inode changed during certification")
     if require_worktree_receipt and outcome.get("worktree_receipt") is None:
         return _failure("claimed implementation outcome requires worktree_receipt")
     error = _validate_worktree(root, outcome.get("worktree_receipt"))

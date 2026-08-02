@@ -342,6 +342,91 @@ def test_cli_rejects_answer_and_dispatcher_terminal_aliases_before_certification
         assert record["terminal_observed"] is False
 
 
+@pytest.mark.parametrize("receipt_alias", ("answer", "terminal"))
+def test_cli_rejects_dispatch_receipt_aliases_before_certification(receipt_alias):
+    stub = """
+        #!/usr/bin/env bash
+        cat >/dev/null
+        printf 'Human answer\\n'
+    """
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        answer = tmp / "answer.txt"
+        terminal = tmp / "dispatcher.terminal.json"
+        receipt = answer if receipt_alias == "answer" else terminal
+
+        result, record, _ = run_dispatch_with_stub(
+            stub,
+            extra_args=[
+                "--terminal-artifact", str(terminal),
+                "--receipt", str(receipt),
+            ],
+            output_path=answer,
+        )
+
+        assert result.returncode != 0
+        assert record["status"] == "evidence_paths_not_distinct"
+        assert record["certification_eligible"] is False
+        assert record["terminal_observed"] is False
+
+
+@pytest.mark.parametrize("target_name", ("answer.txt", "dispatcher.terminal.json", "dispatch.json"))
+@pytest.mark.parametrize("race_kind", ("rename", "hardlink"))
+def test_publication_race_over_answer_terminal_or_receipt_fails_closed(target_name, race_kind):
+    stub = """
+        #!/usr/bin/env bash
+        cat >/dev/null
+        printf 'Human answer\\n'
+    """
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        write_executable(bin_dir / "claude", stub)
+        answer = tmp / "answer.txt"
+        terminal = tmp / "dispatcher.terminal.json"
+        receipt = tmp / "dispatch.json"
+        barrier = tmp / "barrier"
+        target = {answer.name: answer, terminal.name: terminal, receipt.name: receipt}[target_name]
+        env = fabric_free_env()
+        env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
+        env["CF_DISPATCH_TEST_BARRIER_DIR"] = str(barrier)
+        env["CF_DISPATCH_TEST_BARRIER_MATCH"] = str(target)
+        command = [
+            str(SCRIPT), "--tool", "claude", "--orchestrator-family", "codex",
+            "--task-id", "race-1", "--attempt-id", "race-attempt",
+            "--receipt", str(receipt), "--out", str(answer),
+            "--terminal-artifact", str(terminal), "--prompt", "Reply exactly OK",
+        ]
+        process = subprocess.Popen(
+            command, cwd=str(tmp), env=env, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        deadline = time.monotonic() + 10
+        ready = []
+        while time.monotonic() < deadline:
+            ready = list(barrier.glob("*.publish.ready"))
+            if ready:
+                break
+            time.sleep(0.01)
+        assert ready, "publication barrier was not reached"
+        payload = target.read_bytes()
+        if race_kind == "rename":
+            moved = target.with_name(target.name + ".moved")
+            target.rename(moved)
+            target.write_bytes(payload)
+        else:
+            alias = target.with_name(target.name + ".alias")
+            alias.hardlink_to(target)
+        release = ready[0].with_name(ready[0].name.replace(".ready", ".release"))
+        release.write_text("release", encoding="utf-8")
+        stdout, stderr = process.communicate(timeout=10)
+        record = json.loads(stdout)
+
+        assert process.returncode != 0, stderr
+        assert record["certification_eligible"] is False
+
+
 def test_receipt_write_failure_is_explicitly_non_successful():
     stub = """\
         #!/usr/bin/env bash
