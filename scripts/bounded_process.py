@@ -16,6 +16,7 @@ import subprocess
 import tempfile
 import time
 from pathlib import Path
+from typing import BinaryIO
 
 
 _TRUNCATION_MARKER = b"\n...[output truncated]...\n"
@@ -37,23 +38,33 @@ class BoundedProcessResult:
         return -self.returncode if self.returncode < 0 else None
 
 
-def _bounded_output(raw: bytes, limit: int) -> tuple[str, bool]:
+def _read_bounded_output(output_file: BinaryIO, limit: int) -> tuple[str, int, bool]:
+    output_file.seek(0, os.SEEK_END)
+    output_bytes = output_file.tell()
     limit = max(0, limit)
-    if len(raw) <= limit:
-        retained = raw
+    if output_bytes <= limit:
+        output_file.seek(0)
+        retained = output_file.read(output_bytes)
         truncated = False
     elif limit <= len(_TRUNCATION_MARKER):
         head = limit // 2
         tail = limit - head
-        retained = raw[:head] + (raw[-tail:] if tail else b"")
+        output_file.seek(0)
+        retained = output_file.read(head)
+        if tail:
+            output_file.seek(-tail, os.SEEK_END)
+            retained += output_file.read(tail)
         truncated = True
     else:
         available = limit - len(_TRUNCATION_MARKER)
         head = available // 2
         tail = available - head
-        retained = raw[:head] + _TRUNCATION_MARKER + raw[-tail:]
+        output_file.seek(0)
+        retained = output_file.read(head) + _TRUNCATION_MARKER
+        output_file.seek(-tail, os.SEEK_END)
+        retained += output_file.read(tail)
         truncated = True
-    return retained.decode("utf-8", errors="replace"), truncated
+    return retained.decode("utf-8", errors="replace"), output_bytes, truncated
 
 
 def _signal_group(process_id: int, sig: signal.Signals) -> bool:
@@ -127,16 +138,16 @@ def run_bounded(
                 timed_out = True
         finally:
             _stop_process_group(process)
-        output_file.seek(0)
-        raw = output_file.read()
+        output, output_bytes, truncated = _read_bounded_output(
+            output_file, output_limit_bytes
+        )
 
-    output, truncated = _bounded_output(raw, output_limit_bytes)
     if process.returncode is None:  # pragma: no cover - wait contract guard
         raise RuntimeError("bounded process was not reaped")
     return BoundedProcessResult(
         returncode=process.returncode,
         output=output,
-        output_bytes=len(raw),
+        output_bytes=output_bytes,
         output_truncated=truncated,
         timed_out=timed_out,
         elapsed_seconds=time.monotonic() - started,

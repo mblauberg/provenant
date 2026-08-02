@@ -1,3 +1,4 @@
+import io
 import os
 import signal
 import sys
@@ -5,6 +6,7 @@ import time
 
 import pytest
 
+from scripts import bounded_process
 from scripts.bounded_process import run_bounded
 
 
@@ -67,15 +69,21 @@ def test_timeout_returns_partial_output_and_a_negative_status(tmp_path):
 
 def test_timeout_kills_same_group_grandchild_holding_output_descriptor(tmp_path):
     grandchild_pid_path = tmp_path / "grandchild.pid"
+    grandchild_ready_path = tmp_path / "grandchild.ready"
     grandchild_code = (
-        "import signal, time; "
+        "from pathlib import Path; import signal, time; "
         "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+        f"Path({str(grandchild_ready_path)!r}).write_text('ready'); "
         "time.sleep(60)"
     )
     parent_code = (
         "import subprocess, sys, time; from pathlib import Path; "
         f"child = subprocess.Popen([sys.executable, '-c', {grandchild_code!r}]); "
         f"Path({str(grandchild_pid_path)!r}).write_text(str(child.pid)); "
+        f"ready = Path({str(grandchild_ready_path)!r}); "
+        "deadline = time.monotonic() + 2; "
+        "exec(\"while not ready.is_file() and time.monotonic() < deadline:\\n    time.sleep(0.005)\"); "
+        "assert ready.is_file(); "
         "print('GRANDCHILD-SPAWNED', flush=True); time.sleep(60)"
     )
 
@@ -155,3 +163,19 @@ def test_output_limit_retains_head_and_tail(tmp_path):
     assert len(result.output.encode()) <= 128
     assert result.output.startswith("HEAD-")
     assert result.output.endswith("-TAIL")
+
+
+def test_output_limit_does_not_read_the_whole_spool_into_memory():
+    class GuardedSpool(io.BytesIO):
+        def read(self, size=-1):
+            assert 0 <= size <= 64
+            return super().read(size)
+
+    output, output_bytes, truncated = bounded_process._read_bounded_output(
+        GuardedSpool(b"HEAD" + b"x" * 4096 + b"TAIL"), 64
+    )
+
+    assert output_bytes == 4104
+    assert truncated is True
+    assert output.startswith("HEAD")
+    assert output.endswith("TAIL")
