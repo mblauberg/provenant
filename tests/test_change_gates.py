@@ -1,4 +1,5 @@
 from contextlib import redirect_stdout
+import dataclasses
 import os
 from pathlib import Path
 import io
@@ -816,3 +817,262 @@ def test_right_reason_red_and_revert_probe_close_structured_runner_children(tmp_
         == 0
     )
     assert not list(revert_scratch.glob("gate-*"))
+
+
+def _cap_seconds():
+    """The cap as `change_gates` sees it, asserted rather than imported.
+
+    `_print_output` reads the cap off this module. If the import is gone the
+    reporting path raises `NameError` on the first target killed at the cap, and
+    a bare NameError is unusable evidence; assert the miss instead.
+    """
+    cap = getattr(change_gates, "DIRECT_PROCESS_TIMEOUT", None)
+    assert cap is not None, (
+        "change_gates does not carry DIRECT_PROCESS_TIMEOUT, so it cannot report the cap a "
+        "killed target hit"
+    )
+    return cap
+
+
+def _printed(result):
+    capture = io.StringIO()
+    with redirect_stdout(capture):
+        change_gates._print_output(result)
+    lines = [line for line in capture.getvalue().splitlines() if line.startswith("COMMAND ")]
+    assert lines, "gate printed no COMMAND line"
+    return lines[0]
+
+
+def _command_result(*, timed_out):
+    # Assert the timing fields before constructing. A result type without them
+    # raises TypeError from __init__, and a bare TypeError is unusable evidence
+    # for the change gates.
+    fields = {field.name for field in dataclasses.fields(CommandResult)}
+    assert {"elapsed_seconds", "timed_out"} <= fields, (
+        "CommandResult does not carry the run's timing, so the COMMAND line cannot report it"
+    )
+    return CommandResult(
+        command="pytest tests/test_slow.py",
+        returncode=1,
+        output="",
+        classification=FailureClass.UNKNOWN,
+        elapsed_seconds=1801.3 if timed_out else 12.5,
+        timed_out=timed_out,
+    )
+
+
+def test_print_output_reports_how_long_the_target_ran():
+    """The COMMAND line has to carry the run's duration.
+
+    A classification and a return code alone say nothing about whether a target
+    was slow, and reading the duration out of CI meant rerunning it.
+    """
+    line = _printed(_command_result(timed_out=False))
+
+    assert "elapsed=12.5s" in line, line
+
+
+def test_print_output_marks_a_target_killed_at_the_cap():
+    """A cap kill must be named on the line, together with the cap it hit.
+
+    A target killed at the cap and a target that failed on its own merits both
+    surface as an unclassified non-zero return. Without the flag and the cap
+    value, telling them apart meant raising the cap and rerunning CI.
+    """
+    cap = _cap_seconds()
+    killed = _printed(_command_result(timed_out=True))
+    survived = _printed(_command_result(timed_out=False))
+
+    assert "timed_out=yes" in killed, killed
+    assert f"cap={cap:.0f}s" in killed, killed
+    assert "timed_out" not in survived, survived
+    assert "cap=" not in survived, survived
+
+
+def test_print_output_reports_the_cap_under_direct_script_import():
+    """The gate also runs as a plain script, and that path needs the cap too.
+
+    `scripts/check-test-gates` imports these modules without a package, so the
+    fallback import branch is the one that runs in production. If the cap is
+    missing from it, the first target killed at the cap raises NameError inside
+    the gate's own reporting instead of reporting the kill.
+    """
+    program = (
+        "import sys\n"
+        f"sys.path.insert(0, {str(ROOT / 'scripts')!r})\n"
+        "import change_gates\n"
+        "assert change_gates.__package__ in (None, ''), 'not the direct-script import path'\n"
+        "result = change_gates.CommandResult(\n"
+        "    command='pytest tests/test_slow.py',\n"
+        "    returncode=-15,\n"
+        "    output='',\n"
+        "    classification=change_gates.FailureClass.UNKNOWN,\n"
+        "    elapsed_seconds=1801.3,\n"
+        "    timed_out=True,\n"
+        ")\n"
+        "change_gates._print_output(result)\n"
+    )
+
+    completed = subprocess.run(
+        [sys.executable, "-c", program],
+        capture_output=True,
+        text=True,
+        cwd=ROOT,
+    )
+
+    # Assert on the child's exit status alone and keep its traceback out of the
+    # message. `classify_failure` substring-matches the failure text, and a
+    # child traceback replayed into this assertion reads as the child's error
+    # class rather than as this file's assertion. Rerun the program above to see
+    # the traceback. Same idiom as the collection marker earlier in this file.
+    returncode = completed.returncode
+
+    assert returncode == 0, (
+        "the direct-script import path could not report a target killed at the cap"
+    )
+    assert "timed_out=yes" in completed.stdout, completed.stdout
+    assert f"cap={_cap_seconds():.0f}s" in completed.stdout, completed.stdout
+
+
+def _waiver_source(tmp_path, ledger=None):
+    """A committed source tree with one test target and an optional ledger."""
+
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "tests").mkdir()
+    (source / "tests" / "flaky.py").write_text("base test\n", encoding="utf-8")
+    if ledger is not None:
+        (source / ".github").mkdir()
+        (source / ".github" / "change-gate-flake-waivers.txt").write_text(
+            ledger, encoding="utf-8"
+        )
+    subprocess.run(["git", "-C", str(source), "init", "--quiet"], check=True)
+    subprocess.run(["git", "-C", str(source), "add", "-A"], check=True)
+    subprocess.run(
+        [
+            "git", "-C", str(source),
+            "-c", "user.name=Gate Test",
+            "-c", "user.email=gate-test@example.invalid",
+            "commit", "--quiet", "-m", "base",
+        ],
+        check=True,
+    )
+    return source
+
+
+def _target_lines(capture):
+    lines = [line for line in capture.getvalue().splitlines() if line.startswith("TARGET ")]
+    assert lines, "gate printed no per-target line"
+    return lines
+
+
+def test_a_waived_target_that_was_green_at_the_base_does_not_fail_the_gate(tmp_path):
+    """A de-flaking fix has no red base state to show, and must still land.
+
+    The gate rejects a target that passed at the merge base, because a test that
+    was already green proves nothing. A flake's base state is intermittent rather
+    than red, so every de-flaking fix is rejected on classification=pass and the
+    flake stays forever. The ledger names the targets where that verdict is
+    waived, each with the issue that owns the measurement behind it.
+    """
+    source = _waiver_source(tmp_path, "# owned flake\ntests/flaky.py #639\n")
+
+    command = f'{sys.executable} -c "raise SystemExit(0)" {{test}}'
+    capture = io.StringIO()
+    with redirect_stdout(capture):
+        result = gate_right_reason_red(
+            source, "HEAD", [command], ["tests/flaky.py"], tmp_path / "scratch"
+        )
+
+    assert result == 0, "a ledgered flaky target still failed the gate for passing at the base"
+    assert _target_lines(capture)[0] == (
+        "TARGET tests/flaky.py status=WAIVED classification=pass issue=#639"
+    )
+    assert "waived=1" in capture.getvalue()
+
+
+def test_a_target_absent_from_the_ledger_is_still_rejected_for_passing(tmp_path):
+    """The waiver is per target. An unlisted green target is still no evidence."""
+    source = _waiver_source(tmp_path, "tests/other.py #639\n")
+
+    command = f'{sys.executable} -c "raise SystemExit(0)" {{test}}'
+    capture = io.StringIO()
+    with redirect_stdout(capture):
+        result = gate_right_reason_red(
+            source, "HEAD", [command], ["tests/flaky.py"], tmp_path / "scratch"
+        )
+
+    assert result == 1
+    assert "REJECTED" in _target_lines(capture)[0]
+    assert "WAIVED" not in capture.getvalue()
+
+
+def test_a_waiver_does_not_excuse_any_other_failure_class(tmp_path):
+    """A waived target buys exactly one verdict, and a broken test is not it.
+
+    If a waiver softened a red as well as a green, the ledger would become a way
+    to land a test that cannot even be collected, which is the defect the gate
+    exists to catch.
+    """
+    source = _waiver_source(tmp_path, "tests/flaky.py #639\n")
+
+    # Split so this line does not itself read as a collection marker. pytest
+    # echoes the source of a failing test, `classify_failure` substring-matches
+    # the whole capture, and this file has to fail at the merge base by design.
+    # The same idiom is already used above. See #622.
+    marker = "ERROR during " + "collection"
+    command = f'{sys.executable} -c "print(\\"{marker}\\"); raise SystemExit(1)" {{test}}'
+    capture = io.StringIO()
+    with redirect_stdout(capture):
+        result = gate_right_reason_red(
+            source, "HEAD", [command], ["tests/flaky.py"], tmp_path / "scratch"
+        )
+
+    assert result == 1
+    target_lines = _target_lines(capture)
+    assert "REJECTED" in target_lines[0]
+    assert "WAIVED" not in target_lines[0]
+
+
+def test_the_revert_probe_gate_does_not_read_the_waiver_ledger(tmp_path):
+    """A waiver must not blunt the other gate. A survivor is still a survivor.
+
+    revert-probe asks a different question: with the production hunk reverted,
+    did the tests stay green? A ledger entry has nothing to say about that, and
+    if it silenced the answer an unconstrained change would land unnoticed.
+    """
+    source = _waiver_source(tmp_path, "tests/flaky.py #639\n")
+    (source / "production.py").write_text("new\n", encoding="utf-8")
+
+    command = f'{sys.executable} -c "raise SystemExit(0)" {{test}}'
+
+    assert gate_revert_probe(
+        source, [_hunk()], [command], ["tests/flaky.py"], tmp_path / "scratch"
+    ) == 1
+
+
+def test_a_waiver_without_its_owning_issue_fails_closed(tmp_path):
+    """An unowned waiver is how a permanent exemption gets in.
+
+    A line the parser cannot read is an error rather than a comment: ignoring it
+    turns a typo into a waiver that silently never applies, and a deliberate
+    entry with no issue into one that nobody ever has to remove.
+    """
+    source = _waiver_source(tmp_path, "tests/flaky.py\n")
+
+    command = f'{sys.executable} -c "raise SystemExit(0)" {{test}}'
+    # Assert on the message rather than with `pytest.raises`, so that a revision
+    # which does not fail closed reports a plain assertion here instead of a
+    # bare "DID NOT RAISE" that the change gates cannot classify.
+    try:
+        gate_right_reason_red(
+            source, "HEAD", [command], ["tests/flaky.py"], tmp_path / "scratch"
+        )
+    except GateError as exc:
+        reported = str(exc)
+    else:
+        reported = ""
+
+    assert "change-gate-flake-waivers.txt:1" in reported, (
+        "the gate accepted a waiver with no owning issue"
+    )

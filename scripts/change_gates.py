@@ -33,6 +33,7 @@ try:
         parse_vitest_report,
     )
     from .change_gate_runner import (
+        DIRECT_PROCESS_TIMEOUT,
         CommandResult,
         Runner,
         classify_failure as _structured_classify_failure,
@@ -47,6 +48,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
         parse_vitest_report,
     )
     from change_gate_runner import (
+        DIRECT_PROCESS_TIMEOUT,
         CommandResult,
         Runner,
         classify_failure as _structured_classify_failure,
@@ -706,9 +708,16 @@ def _run_suite(
 
 
 def _print_output(result: CommandResult) -> None:
+    # Elapsed time and an explicit timed_out flag, because a target killed at the
+    # cap and a target that failed on its own merits both surface as an
+    # unclassified non-zero return. Without these two numbers the only way to
+    # tell them apart was to raise the cap and rerun CI.
+    timing = f"elapsed={result.elapsed_seconds:.1f}s"
+    if result.timed_out:
+        timing += f" timed_out=yes cap={DIRECT_PROCESS_TIMEOUT:.0f}s"
     print(
-        f"COMMAND classification={result.classification.value} returncode={result.returncode}: "
-        f"{result.command}"
+        f"COMMAND classification={result.classification.value} returncode={result.returncode} "
+        f"{timing}: {result.command}"
     )
     if result.output:
         print(result.output.rstrip())
@@ -801,25 +810,64 @@ def gate_right_reason_red(
     # Name every target and its verdict. The aggregate line below blocks the
     # merge, and on its own it says only that something was rejected, leaving a
     # reader to rerun the gate by hand and bisect the targets to find out which.
+    # The waiver ledger, read here rather than in a helper so that reverting this
+    # block leaves the gate consistent. A de-flaking fix cannot be red at the
+    # merge base: the bug is intermittent, so the base run comes back green and
+    # the gate rejects it on classification=pass, which makes the fix for a flake
+    # permanently unlandable. Each entry names one target and the issue that owns
+    # its fix. A missing ledger means no waivers; an entry with no issue is an
+    # error rather than an ignored line, because an unowned waiver never has to
+    # be removed.
+    waivers: dict[str, str] = {}
+    ledger = source_root / ".github/change-gate-flake-waivers.txt"
+    if ledger.is_file():
+        lines = ledger.read_text(encoding="utf-8").splitlines()
+        for number, line in enumerate(lines, start=1):
+            entry = line.strip()
+            if not entry or entry.startswith("#"):
+                continue
+            waiver = re.fullmatch(r"(?P<target>\S+)\s+(?P<issue>#\d+)", entry)
+            if waiver is None:
+                raise GateError(
+                    f"change-gate-flake-waivers.txt:{number}: a waiver needs a target and "
+                    f"its owning issue, as in 'tests/flaky.py #639': {entry}"
+                )
+            waivers[waiver.group("target")] = waiver.group("issue")
+    assertion_count = evidence.count("assertion")
+    new_target_count = evidence.count("new-target")
+    waived_count = 0
+    rejected_count = 0
     for target, result, reason in zip(targets, results, evidence, strict=True):
+        # A waiver softens the one verdict a de-flaking fix cannot avoid, and
+        # nothing else: the target ran green at the base and is on the ledger.
+        issue = waivers.get(target) if target else None
+        if (
+            reason is None
+            and issue is not None
+            and result.returncode == 0
+            and result.classification is FailureClass.PASS
+        ):
+            waived_count += 1
+            print(f"TARGET {target} status=WAIVED classification=pass issue={issue}")
+            continue
+        if reason is None:
+            rejected_count += 1
         verdict = "REJECTED" if reason is None else reason.upper()
         print(
             f"TARGET {target or '(whole suite)'} status={verdict} "
             f"classification={result.classification.value} returncode={result.returncode}"
         )
-    assertion_count = evidence.count("assertion")
-    new_target_count = evidence.count("new-target")
-    rejected_count = evidence.count(None)
     if rejected_count:
         print(
             "RIGHT_REASON_RED: FAIL "
             f"tests={len(results)} assertion={assertion_count} "
-            f"new-target={new_target_count} rejected={rejected_count}"
+            f"new-target={new_target_count} waived={waived_count} rejected={rejected_count}"
         )
         return 1
     print(
         "RIGHT_REASON_RED: PASS "
-        f"tests={len(results)} assertion={assertion_count} new-target={new_target_count}"
+        f"tests={len(results)} assertion={assertion_count} "
+        f"new-target={new_target_count} waived={waived_count}"
     )
     return 0
 

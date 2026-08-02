@@ -10,6 +10,7 @@ import shlex
 import signal
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 
 try:
@@ -34,9 +35,19 @@ class CommandResult:
     classification: FailureClass
     unresolved_module: str | None = None
     structured_import_evidence: bool = False
+    elapsed_seconds: float = 0.0
+    timed_out: bool = False
 
 
-DIRECT_PROCESS_TIMEOUT = 30.0
+# A cap on a target run, so a genuine hang cannot stall the gate forever. It has
+# to clear the slowest legitimate target rather than the average one: at 30s a
+# hang and a merely slow suite were indistinguishable, and any change touching
+# skills/orchestrate/evals/test_cf_dispatch.py was permanently unlandable because
+# the reverted run was killed part way and came back as an unclassified SIGTERM
+# rather than an assertion. That file takes 76s on macOS but over 300s at its own
+# merge base on a Linux runner, so the cap is set well clear of the slowest known
+# target rather than just above it. A hang is unbounded and is still caught.
+DIRECT_PROCESS_TIMEOUT = 1800.0
 PIPE_DRAIN_TIMEOUT = 5.0
 
 _PYTEST_IMPORT_PLUGIN = """import json
@@ -201,17 +212,6 @@ def _run_legacy(arguments: list[str], cwd: Path, rendered: str) -> CommandResult
     )
 
 
-def _drain_output(process: subprocess.Popen[str]) -> tuple[str, bool]:
-    try:
-        output, _ = process.communicate(timeout=PIPE_DRAIN_TIMEOUT)
-        return output or "", True
-    except subprocess.TimeoutExpired as exc:
-        partial = _text_output(exc.output)
-        if process.stdout is not None:
-            process.stdout.close()
-        return partial, False
-
-
 def _run_structured(
     arguments: list[str], cwd: Path, rendered: str, runner: Runner, report_path: Path
 ) -> CommandResult:
@@ -227,40 +227,45 @@ def _run_structured(
         environment["PROVENANT_PYTEST_IMPORT_SIDECAR"] = str(sidecar_path)
         arguments.extend(["-p", plugin_path.stem])
         rendered = shlex.join(arguments)
-    process = subprocess.Popen(
-        arguments,
-        cwd=cwd,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        env=environment,
-        start_new_session=True,
-    )
-    direct_timed_out = False
-    group_closed: bool
-    output = ""
-    try:
+    with tempfile.TemporaryFile(mode="w+b") as output_file:
+        process = subprocess.Popen(
+            arguments,
+            cwd=cwd,
+            text=True,
+            stdout=output_file,
+            stderr=subprocess.STDOUT,
+            env=environment,
+            start_new_session=True,
+        )
+        started = time.monotonic()
+        direct_timed_out = False
+        group_closed: bool
+        output = ""
+        output_read = False
         try:
-            process.wait(timeout=DIRECT_PROCESS_TIMEOUT)
-        except subprocess.TimeoutExpired:
-            direct_timed_out = True
-            group_closed = _terminate_process_group(process.pid)
             try:
-                process.wait(timeout=PIPE_DRAIN_TIMEOUT)
+                process.wait(timeout=DIRECT_PROCESS_TIMEOUT)
             except subprocess.TimeoutExpired:
+                direct_timed_out = True
+                group_closed = _terminate_process_group(process.pid)
+                try:
+                    process.wait(timeout=PIPE_DRAIN_TIMEOUT)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=PIPE_DRAIN_TIMEOUT)
+            else:
+                group_closed = _terminate_process_group(process.pid)
+            output_file.flush()
+            output_file.seek(0)
+            output = _text_output(output_file.read())
+            output_read = True
+        finally:
+            if process.poll() is None:
+                group_closed = _terminate_process_group(process.pid) and group_closed
                 process.kill()
                 process.wait(timeout=PIPE_DRAIN_TIMEOUT)
-        else:
-            group_closed = _terminate_process_group(process.pid)
-        output, pipes_drained = _drain_output(process)
-    finally:
-        if process.poll() is None:
-            group_closed = _terminate_process_group(process.pid) and group_closed
-            process.kill()
-            process.wait(timeout=PIPE_DRAIN_TIMEOUT)
-        if process.stdout is not None and not process.stdout.closed:
-            process.stdout.close()
 
+    elapsed_seconds = time.monotonic() - started
     returncode = process.returncode
     if returncode is None:
         returncode = -signal.SIGKILL
@@ -270,7 +275,7 @@ def _run_structured(
         returncode,
         pytest_sidecar=sidecar_path if runner is Runner.PYTEST else None,
     )
-    if direct_timed_out or not group_closed or not pipes_drained:
+    if direct_timed_out or not group_closed or not output_read:
         classification = FailureClass.UNKNOWN
         unresolved_module = None
     structured_import_evidence = (
@@ -284,6 +289,8 @@ def _run_structured(
         classification=classification,
         unresolved_module=unresolved_module,
         structured_import_evidence=structured_import_evidence,
+        elapsed_seconds=elapsed_seconds,
+        timed_out=direct_timed_out,
     )
 
 

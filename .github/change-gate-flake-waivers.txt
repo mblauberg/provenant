@@ -1,0 +1,24 @@
+# Targets whose right-reason-red rejection on classification=pass is waived,
+# one target path per line, then the issue that owns the fix.
+#
+# The gate requires a changed test to be red at the merge base for a genuine
+# assertion, because a test that was already green proves nothing about the
+# behaviour the change claims to add.  A de-flaking fix can never satisfy that.
+# The bug it repairs is intermittent by definition, so the base run is red only
+# on some runs and the gate sees classification=pass.  Without this file the fix
+# for a flake is permanently unlandable and the flake stays.
+#
+# A waiver softens exactly one verdict: the classification=pass rejection, for
+# the one target named.  Every other failure class is still rejected, and the
+# revert-probe gate does not read this file at all.  So an entry can absorb a
+# green test and nothing else, which is the same discipline as the intermittent
+# ledger in split-root-known-flaky.txt.
+#
+# Every entry carries its owning issue, and the issue carries the measurement
+# that proves the flake was real and that the fix removed it.  An entry with no
+# issue is a parse error rather than a comment, because an unowned waiver is how
+# a permanent exemption gets in.  Delete the entry in the pull request that
+# closes its issue.
+#
+#   #639  3/30 failures under CPU contention, 0/40 idle, 0/60 after the fix.
+runtime/agent-fabric/tests/unit/provider-interface-conformance.unit.test.ts #639

@@ -16,7 +16,6 @@ from scripts.change_gate_runner import (
     Runner,
     runner_for_command,
     run_command,
-    _drain_output,
     _terminate_process_group,
 )
 
@@ -73,7 +72,7 @@ def test_command_result_is_frozen():
         assert False, "CommandResult accepted mutation"
 
 
-def test_structured_runner_uses_text_pipes_and_private_process_group(tmp_path, monkeypatch):
+def test_structured_runner_uses_file_output_and_private_process_group(tmp_path, monkeypatch):
     observed = {}
 
     class Process:
@@ -109,6 +108,7 @@ def test_structured_runner_uses_text_pipes_and_private_process_group(tmp_path, m
 
     assert observed["text"] is True
     assert observed["start_new_session"] is True
+    assert observed["stdout"] is not subprocess.PIPE
 
 
 def test_legacy_success_is_classified_as_pass(tmp_path):
@@ -225,6 +225,22 @@ def test_structured_runner_pass_output_is_text(tmp_path):
     assert isinstance(result.output, str)
 
 
+def test_run_structured_does_not_deadlock_on_large_output(tmp_path, monkeypatch):
+    monkeypatch.setattr(change_gate_runner, "DIRECT_PROCESS_TIMEOUT", 0.1)
+    code = "import sys; sys.stdout.write('x' * 131072 + '\\nFINAL-LINE\\n')"
+
+    result = run_command(
+        f"{sys.executable} -c {shlex.quote(code)}",
+        tmp_path,
+        runner=Runner.PYTEST,
+    )
+
+    assert result.returncode == 0
+    assert result.timed_out is False
+    assert len(result.output) > 64 * 1024
+    assert result.output.endswith("FINAL-LINE\n")
+
+
 def test_structured_runner_closes_descendants_that_hold_output_pipes(tmp_path):
     child_pid = tmp_path / "child.pid"
     child_code = (
@@ -330,36 +346,6 @@ def test_terminate_process_group_reports_success(monkeypatch):
     assert _terminate_process_group(1234) is True
 
 
-def test_drain_output_reports_a_successful_pipe_drain():
-    class Process:
-        stdout = None
-
-        def communicate(self, timeout):
-            assert timeout == change_gate_runner.PIPE_DRAIN_TIMEOUT
-            return "output", None
-
-    assert _drain_output(Process()) == ("output", True)
-
-
-def test_drain_output_reports_a_timed_out_pipe_drain():
-    class Stdout:
-        closed = False
-
-        def close(self):
-            self.closed = True
-
-    class Process:
-        stdout = Stdout()
-
-        def communicate(self, timeout):
-            del timeout
-            raise subprocess.TimeoutExpired("command", 1, output=b"partial")
-
-    process = Process()
-    assert _drain_output(process) == ("partial", False)
-    assert process.stdout.closed is True
-
-
 def test_legacy_runner_keeps_the_subprocess_run_path(tmp_path, monkeypatch):
     called = False
 
@@ -388,3 +374,97 @@ def test_legacy_runner_keeps_the_subprocess_run_path(tmp_path, monkeypatch):
 )
 def test_runner_detection_is_bound_to_the_configured_command(command, expected):
     assert runner_for_command(command) is expected
+
+
+def _timing(result):
+    """The result's timing fields, asserted rather than read straight off.
+
+    A result that never carried them raises `AttributeError`, and a bare
+    attribute error is unusable evidence for the change gates. Assert the miss.
+    """
+    for field in ("elapsed_seconds", "timed_out"):
+        assert hasattr(result, field), (
+            f"CommandResult does not carry {field}; the structured runner is not measuring "
+            "how long a target ran or whether it was killed at the cap"
+        )
+    return result.elapsed_seconds, result.timed_out
+
+
+def test_structured_runner_records_how_long_the_target_ran(tmp_path):
+    """A gate line that says only "non-zero" cannot separate slow from hung.
+
+    The runner therefore has to measure the run, not just report its exit. This
+    pins the measurement to real wall-clock time so an unpopulated default of
+    0.0 cannot pass for a timing.
+    """
+    result = run_command(
+        f"{sys.executable} -c {shlex.quote('import time; time.sleep(0.4)')}",
+        tmp_path,
+        runner=Runner.PYTEST,
+    )
+
+    elapsed_seconds, timed_out = _timing(result)
+
+    assert timed_out is False
+    assert elapsed_seconds >= 0.4, (
+        "structured runner reported "
+        f"elapsed_seconds={elapsed_seconds} for a target that slept 0.4s"
+    )
+    assert elapsed_seconds < 60
+
+
+def test_structured_runner_flags_a_target_killed_at_the_cap(tmp_path, monkeypatch):
+    """A target killed at the cap must say so on the result.
+
+    Without the flag, a cap kill and a target that failed on its own merits are
+    both an unclassified non-zero return, and telling them apart meant raising
+    the cap and rerunning CI.
+    """
+    monkeypatch.setattr(change_gate_runner, "DIRECT_PROCESS_TIMEOUT", 0.1)
+
+    result = run_command(
+        f"{sys.executable} -c {shlex.quote('import time; time.sleep(60)')}",
+        tmp_path,
+        runner=Runner.PYTEST,
+    )
+
+    elapsed_seconds, timed_out = _timing(result)
+
+    assert timed_out is True, "a target killed at the cap did not carry timed_out"
+    assert result.classification is FailureClass.UNKNOWN
+    assert elapsed_seconds >= 0.1
+
+
+# The slowest legitimate target observed at its own merge base:
+# skills/orchestrate/evals/test_cf_dispatch.py takes 76s on macOS but over 300s
+# on a Linux CI runner.
+SLOWEST_KNOWN_TARGET_SECONDS = 300.0
+
+
+def test_direct_process_timeout_clears_the_slowest_known_target():
+    """The cap bounds hangs; it must not bound slow-but-honest targets.
+
+    At 30s the cap sat below the slowest real target, so any change touching
+    that target was permanently unlandable: the reverted run was killed part way
+    and came back as an unclassified SIGTERM rather than an assertion.
+    """
+    assert change_gate_runner.DIRECT_PROCESS_TIMEOUT >= 4 * SLOWEST_KNOWN_TARGET_SECONDS, (
+        "DIRECT_PROCESS_TIMEOUT="
+        f"{change_gate_runner.DIRECT_PROCESS_TIMEOUT}s does not comfortably clear the slowest "
+        f"known target ({SLOWEST_KNOWN_TARGET_SECONDS}s for "
+        "skills/orchestrate/evals/test_cf_dispatch.py on a Linux runner); a cap at or below "
+        "that turns a slow target into an unclassified SIGTERM and makes the change unlandable"
+    )
+
+
+def test_structured_runner_keeps_no_pipe_draining_helper():
+    """Output custody is a temp file, so no pipe drainer may survive.
+
+    `_run_structured` hands the child a `tempfile.TemporaryFile` rather than a
+    pipe, which is what stops a target that outruns the pipe buffer from
+    deadlocking. A resurrected `_drain_output` would mean the pipe path is back.
+    """
+    assert not hasattr(change_gate_runner, "_drain_output"), (
+        "change_gate_runner still defines _drain_output; the structured runner captures output "
+        "through a temp file and must not carry a pipe-draining path"
+    )
