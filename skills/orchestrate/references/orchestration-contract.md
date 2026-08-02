@@ -96,12 +96,22 @@ claim, source, confidence, issues and validation. Certification needs a
 non-authoring reviewer plus verified evidence; best-effort routes only scout,
 they do not certify.
 
-A worker's final act before idling is its report: the digest plus artifact
-path through its return channel or a direct message to the chair, or an
-explicit failure report. Going idle without one is a contract breach, not a
-neutral state. A chair observing idle-without-report verifies the deliverable
-directly from the filesystem, then queries the worker once; completion is
-judged from the verified artifact, never inferred from silence.
+A worker's terminal artifact is a closed `complete`, `question`, `failed`,
+`unavailable` or `blocked` object with its stable task and attempt identity. A
+direct-CLI dispatch keeps the human answer in `output_path` and emits a
+separate dispatcher-owned JSON terminal artifact in `terminal_artifact_path`;
+the receipt binds both digests. Acceptance requires three distinct digest-bound
+paths: the human answer, dispatcher terminal, and semantic worker result. A
+complete semantic result must contain a worker verdict, and the chair accepts
+it only when that verdict agrees with the review terminal verdict. Every
+attempted incomplete leg still carries its route, dispatcher terminal and
+semantic result; a genuinely never-attempted leg is explicitly `omitted` and
+has those bindings absent. The chair independently joins that dispatcher
+terminal fact with the digest-bound worker terminal result and optional Git
+claim, then derives acceptance. It does not copy a verdict or completion claim
+into a second receipt. A question is terminal for the attempt but remains
+blocked for the task, and failed, unavailable and blocked outcomes are explicit
+non-certifying results.
 
 ## Non-goals
 

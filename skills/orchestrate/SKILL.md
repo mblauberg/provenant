@@ -24,10 +24,10 @@ Decompose -> waves -> reduce -> gate.
   Pane injection is fire-and-forget steering. Without callback, record
   `FABRIC-ROUNDTRIP-UNAVAILABLE` and collect an artifact.
 - Record worker cwd; never assume repository.
-- **Workers write full output to files**; return a digest/path.
-- **Liveness: size proves nothing.** Compare CPU and session-log mtime; see
-  `worker-liveness.md`. A detached task is not dead: check the PID before
-  reusing a worktree.
+- **Workers write full output to files**; return digest/path. Direct CLI owns terminal,
+  exit and digest; callers do not reconstruct them.
+- **Liveness is advisory**; see `worker-liveness.md`. Verify PID before worktree
+  reuse.
 - **Cross-family follows the HARNESS risk ladder.** Targeted lenses plus other
   primary; distinct family when available; record terminal skips.
 - **Objective checks outrank opinions. You own the final call.**

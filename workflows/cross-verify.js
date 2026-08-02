@@ -114,9 +114,10 @@ const DECOMPOSE_SCHEMA = {
 const VERDICT_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['claimId', 'verifier', 'verdict', 'anchors', 'crossFamily', 'readOnlyGuarantee'],
+  required: ['claimId', 'reviewerId', 'verifier', 'verdict', 'anchors', 'crossFamily', 'readOnlyGuarantee'],
   properties: {
     claimId: { type: 'string' },
+    reviewerId: { type: 'string', description: 'Stable verifier row identity; it must match the dispatcher --reviewer-id.' },
     verifier: { type: 'string', description: 'e.g. claude-skeptic, codex, cursor, CROSS-FAMILY-NOT-RUN.' },
     verdict: { type: 'string', enum: ['supported', 'unsupported', 'partial', 'unable'], description: 'Default to unsupported/unable on uncertainty; never assert support without an anchor.' },
     confidence: { type: 'number', minimum: 0, maximum: 1 },
@@ -258,7 +259,7 @@ function claudeSkepticPrompt(boot, claim) {
     'Find the actual evidence. Quote it VERBATIM with its source path/citekey/route/test and a locator (line range/section/page).',
     'Decide a verdict: supported | unsupported | partial | unable. Default to unsupported/unable if you cannot anchor support to an exact quote — never assert support without an anchor.',
     'Set crossFamily=false and readOnlyGuarantee="enforced" (you are same-family).',
-    `Write your working notes to <run-dir>/findings/${claim.id}.claude.md, then return ONLY the verdict object (claimId="${claim.id}", verifier="claude-skeptic").`,
+    `Write your working notes to <run-dir>/findings/${claim.id}.claude.md, then return ONLY the verdict object (claimId="${claim.id}", reviewerId="cross-verify-${claim.id}-claude", verifier="claude-skeptic").`,
   ].join('\n')
 }
 
@@ -266,6 +267,7 @@ function claudeSkepticPrompt(boot, claim) {
 // Attacks a DIFFERENT angle from the Claude skeptic (independent evidence hunt) and
 // returns the dispatcher's normalised guarantees verbatim.
 function crossFamilyPrompt(boot, claim, idx) {
+  const runDir = boot.runDir
   // Per-item variation by INDEX (no RNG): even claims lead with codex, odd lead with
   // cursor, so the two cross-family tools spread across the claim set deterministically.
   const lead = idx % 2 === 0 ? 'codex' : 'cursor'
@@ -297,15 +299,18 @@ function crossFamilyPrompt(boot, claim, idx) {
     '  Before using cursor in the chain, run cursor-agent --list-models and export CF_DISPATCH_CURSOR_MODEL to a current model from a family distinct from Claude and OpenAI. The dispatcher fails closed if it cannot prove the provider family.',
     `  Use the --chain form so it fails over automatically:`,
     `    ${SKILL_SCRIPTS}/cf_dispatch.sh --orchestrator-family claude --chain "${chain}" \\`,
-    `      --prompt-file <abs path to ${claim.id}.prompt.txt> --out <abs path to crossfamily/${claim.id}.out.txt>`,
+    `      --evidence-root ${runDir} --prompt-file <abs path to ${claim.id}.prompt.txt> --out <abs path to crossfamily/${claim.id}.out.txt> ` +
+    `--terminal-artifact <abs path to crossfamily/${claim.id}.terminal.json> ` +
+    `--task-id ${claim.id} --attempt-id cross-verify-${claim.id} --reviewer-id cross-verify-${claim.id}-external --receipt <abs path to crossfamily/${claim.id}.route.json>`,
     '  (codex runs `exec -s read-only` enforced; cursor runs `--mode plan`. Never use claude as the cross-family tool — same family. agy is advisory-only and disabled unless CF_DISPATCH_ENABLE_AGY=1; do not enable it here.)',
-    '  The dispatcher prints a JSON record (adapter, provider_family, status, exit, output_path, read_only_guarantee, cross_family). Capture it.',
+    '  The dispatcher prints a JSON record (adapter, provider_family, status, exit, output_path, output_sha256, terminal_artifact_path, terminal_artifact_sha256, read_only_guarantee, cross_family). Capture it. output_path is the human-readable answer; terminal_artifact_path is the dispatcher-owned JSON terminal artifact. Keep them separate.',
     '',
     'STEP 3 — normalise:',
     '  - If the record has cross_family=true and read_only_guarantee in {enforced, oauth_safe_mode} and status=ok: read the CLI answer from output_path and map it to a verdict + anchors (verbatim quotes + source + locator). Set crossFamily=true and readOnlyGuarantee accordingly. Set verifier to the tool that answered.',
-    '  - If the whole chain failed (status all_failed / auth_or_quota_error / error on every tool), or no tool could run (no git repo for codex and cursor unavailable): set verdict="unable", crossFamily=false, verifier="CROSS-FAMILY-NOT-RUN", readOnlyGuarantee="none", and put the failure summary in notRunReason. Append a "CROSS-FAMILY-NOT-RUN: <reason>" line to <run-dir>/MANIFEST.md (or traces/README.md). Do NOT silently downgrade or substitute a Claude answer.',
+    '  - Keep that normalised worker result as a separate closed terminal JSON artifact with the same task/attempt identity. The dispatcher-owned terminal JSON proves launcher terminality; it is not a substitute for the worker result or its semantic verdict.',
+    `  - If the whole chain failed (status all_failed / auth_or_quota_error / error on every tool), or no tool could run (no git repo for codex and cursor unavailable): set reviewerId="cross-verify-${claim.id}-external", verdict="unable", crossFamily=false, verifier="CROSS-FAMILY-NOT-RUN", readOnlyGuarantee="none", and put the failure summary in notRunReason. Append a "CROSS-FAMILY-NOT-RUN: <reason>" line to <run-dir>/MANIFEST.md (or traces/README.md). Do NOT silently downgrade or substitute a Claude answer.`,
     '',
-    `Write the raw dispatcher record(s) + your normalisation to <run-dir>/crossfamily/${claim.id}.norm.md, then return ONLY the verdict object (claimId="${claim.id}").`,
+    `Write the raw dispatcher record(s) + your normalisation to <run-dir>/crossfamily/${claim.id}.norm.md, then return ONLY the verdict object (claimId="${claim.id}", reviewerId="cross-verify-${claim.id}-external").`,
   ].join('\n')
 }
 

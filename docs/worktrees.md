@@ -38,6 +38,9 @@ scripts/worktree create NAME --human-authorised --new-branch BRANCH \
 scripts/worktree create NAME --human-authorised --existing-branch BRANCH
 scripts/worktree list
 scripts/worktree check
+scripts/worktree verify-claim --repo <expected-linked-worktree> \
+  --claimed-worktree <claimed-worktree> --claimed-commit <full-sha> \
+  --base-revision <pre-dispatch-full-sha>
 scripts/worktree remove NAME --human-authorised
 ```
 
@@ -47,7 +50,13 @@ receipt emits `primary_root`, `worktree_root`, `common_git_dir`, `head_revision`
 and branch/detached state. It does not emit the supplied repo path as
 `repo_root`; record that path and the authority provenance separately when the
 run contract requires them. A removal receipt emits only `status`, `name` and
-`primary_root`.
+`primary_root`. At the chair acceptance boundary, `verify-claim` requires the
+recorded pre-dispatch `base_revision`, a new full `head_revision` descended from
+that base, the exact linked worktree and common Git directory, and a clean
+residue scan that is stable across verification. It emits `status: accepted`
+only with `clean: true`; generated dependency/cache paths are the only documented
+ignored exclusions. The helper is a bounded verifier, not a lock, watcher,
+daemon or worktree owner. Later mutation needs a fresh claim.
 
 ## Ownership and cleanup
 

@@ -14,7 +14,16 @@ from typing import Sequence
 
 
 SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+COMMIT_SHA = re.compile(r"^[0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?$")
 IGNORE_RULE = "/.worktrees/"
+ALLOWED_GENERATED_IGNORED_PREFIXES = (
+    ".agent-fabric/",
+    ".agent-run/",
+    ".pytest_cache/",
+    ".review-snapshots/",
+    ".venv/",
+    "node_modules/",
+)
 
 
 class PolicyError(RuntimeError):
@@ -76,6 +85,156 @@ def common_git_dir(root: Path) -> Path:
     value = git(root, "rev-parse", "--git-common-dir").stdout.strip()
     path = Path(value)
     return (root / path).resolve() if not path.is_absolute() else path.resolve()
+
+
+def ignored_path_is_generated(path: str) -> bool:
+    normalized = path.rstrip("/")
+    return (
+        any(
+            normalized == prefix.rstrip("/")
+            or f"/{prefix}" in f"/{normalized}/"
+            for prefix in ALLOWED_GENERATED_IGNORED_PREFIXES
+        )
+        or "/__pycache__/" in f"/{normalized}/"
+        or normalized.endswith((".pyc", ".pyo", ".pyd"))
+    )
+
+
+def worktree_residue(root: Path) -> list[str]:
+    status = git(
+        root, "status", "--porcelain=v1", "--untracked-files=all", "--ignored=matching",
+    )
+    residue: list[str] = []
+    for line in status.stdout.splitlines():
+        code = line[:2]
+        path = line[3:]
+        if code == "!!" and ignored_path_is_generated(path):
+            continue
+        residue.append(line)
+    return residue
+
+
+def verify_claim(
+    expected_worktree: Path,
+    claimed_worktree: Path,
+    claimed_commit: str | None,
+    expected_common: Path | None = None,
+    *,
+    base_revision: str | None = None,
+) -> dict[str, object]:
+    """Verify one chair-bound, base-descended clean linked-worktree claim."""
+    if not claimed_commit:
+        return {"status": "rejected", "reason": "missing claimed commit SHA"}
+    if not COMMIT_SHA.fullmatch(claimed_commit):
+        return {"status": "rejected", "reason": "claimed commit SHA must be a full Git object ID"}
+    if not base_revision:
+        return {"status": "rejected", "reason": "missing pre-dispatch base revision"}
+    if not COMMIT_SHA.fullmatch(base_revision):
+        return {"status": "rejected", "reason": "base revision must be a full Git object ID"}
+
+    expected_path = expected_worktree.expanduser().resolve()
+    claimed_path = claimed_worktree.expanduser().resolve()
+    if expected_worktree.is_symlink() or claimed_worktree.is_symlink():
+        return {"status": "rejected", "reason": "worktree context must not be a symlink"}
+
+    expected_common_path = common_git_dir(expected_path)
+    if expected_common is not None and expected_common.expanduser().resolve() != expected_common_path:
+        return {"status": "rejected", "reason": "expected common Git directory does not match worktree"}
+    claimed_common_path = common_git_dir(claimed_path)
+    if claimed_common_path != expected_common_path:
+        return {"status": "rejected", "reason": "claimed worktree is from a different common Git directory"}
+
+    project_root = primary_root(expected_path)
+    canonical_shared = project_root / ".worktrees"
+    if (
+        canonical_shared.is_symlink()
+        or not canonical_shared.is_dir()
+        or expected_path.parent != canonical_shared
+        or not SAFE_NAME.fullmatch(expected_path.name)
+    ):
+        return {"status": "rejected", "reason": "expected worktree is outside canonical .worktrees"}
+
+    records = worktree_records(expected_path)
+    expected_record = next(
+        (
+            item for item in records
+            if item.get("worktree") and Path(str(item["worktree"])).resolve() == expected_path
+        ),
+        None,
+    )
+    primary_path = Path(str(records[0]["worktree"])).resolve() if records and records[0].get("worktree") else None
+    if expected_record is None or expected_path == primary_path:
+        return {"status": "rejected", "reason": "expected worktree is not a registered linked worktree"}
+    if claimed_path != expected_path:
+        return {"status": "rejected", "reason": "claimed worktree context does not match expected worktree"}
+
+    head_before = git(expected_path, "rev-parse", "--verify", "HEAD", check=False).stdout.strip()
+    if not COMMIT_SHA.fullmatch(head_before):
+        return {"status": "rejected", "reason": "expected worktree HEAD cannot be resolved"}
+    resolved = git(
+        expected_path, "rev-parse", "--verify", f"{claimed_commit}^{{commit}}", check=False,
+    )
+    resolved_commit = resolved.stdout.strip()
+    if resolved.returncode != 0 or not COMMIT_SHA.fullmatch(resolved_commit):
+        return {"status": "rejected", "reason": "claimed commit does not resolve in expected common Git directory"}
+    base = git(
+        expected_path, "rev-parse", "--verify", f"{base_revision}^{{commit}}", check=False,
+    )
+    resolved_base = base.stdout.strip()
+    if base.returncode != 0 or not COMMIT_SHA.fullmatch(resolved_base):
+        return {"status": "rejected", "reason": "base revision does not resolve in expected common Git directory"}
+    if resolved_base.lower() != base_revision.lower():
+        return {"status": "rejected", "reason": "base revision must be an exact object ID"}
+    if resolved_commit.lower() == resolved_base.lower():
+        return {"status": "rejected", "reason": "claimed commit is unchanged from pre-dispatch base"}
+    ancestry = git(
+        expected_path, "merge-base", "--is-ancestor", resolved_base, resolved_commit, check=False,
+    )
+    if ancestry.returncode != 0:
+        return {"status": "rejected", "reason": "claimed commit is not descended from pre-dispatch base"}
+
+    residue_before = worktree_residue(expected_path)
+    if residue_before:
+        return {
+            "status": "rejected",
+            "reason": "worktree has implementation residue not captured by claimed commit: "
+            + "; ".join(residue_before),
+        }
+    residue_after = worktree_residue(expected_path)
+    if residue_after:
+        return {
+            "status": "rejected",
+            "reason": "worktree gained implementation residue during claim verification: "
+            + "; ".join(residue_after),
+        }
+    head_after = git(expected_path, "rev-parse", "--verify", "HEAD", check=False).stdout.strip()
+    if head_before.lower() != head_after.lower():
+        return {"status": "rejected", "reason": "worktree HEAD advanced during claim verification"}
+    residue_final = worktree_residue(expected_path)
+    if residue_final:
+        return {
+            "status": "rejected",
+            "reason": "worktree gained implementation residue during claim verification: "
+            + "; ".join(residue_final),
+        }
+    if head_after.lower() != resolved_commit.lower():
+        return {"status": "rejected", "reason": "claimed commit does not match current worktree HEAD"}
+    if resolved_commit.lower() != claimed_commit.lower():
+        return {"status": "rejected", "reason": "claimed commit SHA is not an exact object ID"}
+    if str(expected_record.get("HEAD", "")).lower() != resolved_commit.lower():
+        return {"status": "rejected", "reason": "claimed commit does not match claimed worktree context"}
+
+    return {
+        "status": "accepted",
+        "base_revision": resolved_base,
+        "head_revision": resolved_commit,
+        "clean": True,
+        "claimed_commit": resolved_commit,
+        "claimed_worktree": str(claimed_path),
+        "common_git_dir": str(expected_common_path),
+        "acceptance_owner": "chair-orchestrator",
+        "acceptance_mode": "manual",
+    }
 
 
 def ensure_shared_root(root: Path) -> Path:
@@ -202,6 +361,19 @@ def check_worktrees(args: argparse.Namespace) -> dict[str, object]:
     }
 
 
+def verify_claim_command(args: argparse.Namespace) -> dict[str, object]:
+    try:
+        return verify_claim(
+            args.repo,
+            args.claimed_worktree,
+            args.claimed_commit,
+            args.expected_common,
+            base_revision=args.base_revision,
+        )
+    except PolicyError as exc:
+        return {"status": "rejected", "reason": str(exc)}
+
+
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description=__doc__)
     sub = result.add_subparsers(dest="command", required=True)
@@ -226,6 +398,17 @@ def parser() -> argparse.ArgumentParser:
     check_parser.add_argument("--repo", type=Path, default=Path.cwd())
     check_parser.set_defaults(handler=check_worktrees)
 
+    verify_parser = sub.add_parser(
+        "verify-claim",
+        help="verify a claimed commit and linked worktree at the chair acceptance boundary",
+    )
+    verify_parser.add_argument("--repo", type=Path, required=True, help="chair-expected linked worktree")
+    verify_parser.add_argument("--claimed-worktree", type=Path, required=True)
+    verify_parser.add_argument("--claimed-commit")
+    verify_parser.add_argument("--base-revision")
+    verify_parser.add_argument("--expected-common", type=Path)
+    verify_parser.set_defaults(handler=verify_claim_command)
+
     remove_parser = sub.add_parser("remove")
     remove_parser.add_argument("name")
     remove_parser.add_argument("--repo", type=Path, default=Path.cwd())
@@ -242,7 +425,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"worktree policy: {exc}", file=sys.stderr)
         return 2
     print(json.dumps(receipt, indent=2, sort_keys=True))
-    return 2 if receipt.get("status") == "fail" else 0
+    return 2 if receipt.get("status") in {"fail", "rejected"} else 0
 
 
 if __name__ == "__main__":
