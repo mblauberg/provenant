@@ -237,11 +237,6 @@ def run_dispatch_with_stub(
                     entry for entry in env["PATH"].split(os.pathsep)
                     if entry != provenant_dir
                 )
-        # Ensure node is available for adapter compatibility validation.
-        # fabric_free_env() strips AGENT_FABRIC_* variables, so we restore it here.
-        node = shutil.which("node")
-        if node is not None:
-            env["AGENT_FABRIC_NODE"] = node
         command = [
                 str(SCRIPT),
                 "--tool",
