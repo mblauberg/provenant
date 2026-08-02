@@ -357,6 +357,17 @@ what the older product understands. This generalises: any future class the
 product takes ownership of moves the floor for supported rollback, and the
 floor is not tracked by any automated check.
 
+### Addendum — 2026-08-03
+
+The layering paragraph above names `provenant status`. No such command exists
+and none was ever accepted: `scripts/provenant` delegates `route`, `worktree`,
+`check`, `fabric`, `doctor` and `project` only, and anything else exits 2, which
+matches the command set ADR 0013 accepted. The diagnostic meant is
+`provenant fabric status` (`runtime/agent-fabric/src/cli/main.ts`), which is how
+every other document writes it. `provenant doctor` and
+`agent-fabric adapter executable` are named correctly, and the layering claim
+itself is unchanged.
+
 ## Rejected
 
 - **A merge for every file class**, so that an instance edit and a product
