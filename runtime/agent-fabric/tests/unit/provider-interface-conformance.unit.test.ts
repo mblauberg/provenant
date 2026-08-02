@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
 import { probeProviderInterface, runProbe } from "../../src/adapters/provider-interface.ts";
-import { eventually, waitForFile, waitUntil } from "../shared/deadline-wait.ts";
+import { waitForFile, waitUntil } from "../shared/deadline-wait.ts";
 
 async function writeExecutable(directory: string, name: string, source: string): Promise<string> {
   const executable = join(directory, name);
@@ -50,31 +50,18 @@ async function waitForFileContents(path: string, expected: string, timeoutMs = 5
   }, timeoutMs, `File ${path} contents`);
 }
 
-/*
- * The shim signals its owned group with process.kill(-pid), which kills the shim
- * itself, so it cannot outlive the group to observe its members being reaped.
- * The probe therefore resolves once the group is *signalled*, while a doomed
- * helper still has to be scheduled to release its listening socket. Connecting to
- * that socket needs no CPU from the helper — the kernel queues the connection
- * into the listen backlog — so a single-shot check races the helper's death and
- * loses under load. Wait for the teardown to be observed instead of sampling it
- * once. On timeout `eventually` rethrows the assertion below, not a deadline
- * error, so a helper that genuinely survives still fails with that message.
- */
-async function expectUnixSocketClosed(path: string, timeoutMs = 5_000): Promise<void> {
-  await eventually(async () => {
-    await new Promise<void>((resolve, reject) => {
-      const socket = createConnection(path);
-      socket.once("connect", () => {
-        socket.destroy();
-        reject(new Error(`identity-bearing helper socket remained live: ${path}`));
-      });
-      socket.once("error", (error: NodeJS.ErrnoException) => {
-        if (error.code === "ENOENT" || error.code === "ECONNREFUSED") resolve();
-        else reject(error);
-      });
+async function expectUnixSocketClosed(path: string): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const socket = createConnection(path);
+    socket.once("connect", () => {
+      socket.destroy();
+      reject(new Error(`identity-bearing helper socket remained live: ${path}`));
     });
-  }, timeoutMs, `Unix socket ${path} closure`);
+    socket.once("error", (error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT" || error.code === "ECONNREFUSED") resolve();
+      else reject(error);
+    });
+  });
 }
 
 async function expectIncompleteBefore(
