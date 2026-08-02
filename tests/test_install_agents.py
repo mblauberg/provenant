@@ -265,17 +265,104 @@ def test_identical_unmanaged_definitions_are_adoptable_in_plan_check_and_install
     assert set(manifest["managed"]) == AGENT_NAMES
 
 
-def test_agent_check_reports_foreign_markdown_entries(tmp_path):
+def test_agent_check_warns_about_foreign_markdown_entries(tmp_path):
     target = tmp_path / "agents"
     assert run(target).returncode == 0
-    (target / "evil.md").write_text("# foreign definition\n")
-    (target / "pw.md").symlink_to("/etc/passwd")
+    (target / "my-notes.md").write_text("# my notes\n")
+    (target / "my-notes-link.md").symlink_to(target / "my-notes.md")
 
     result = run_manager("check", target, summary=True)
 
+    assert result.returncode == 0, result.stderr
+    assert "warning:" in result.stderr
+    assert "my-notes.md=foreign" in result.stderr
+    assert "my-notes-link.md=foreign" in result.stderr
+
+
+def test_byte_identical_replacement_of_a_managed_link_is_adopted(tmp_path):
+    target = tmp_path / "agents"
+    assert run_manager("install", target).returncode == 0
+    destination = target / "codex-analyst.md"
+    destination.unlink()
+    shutil.copy2(ROOT / "agents" / destination.name, destination)
+
+    plan = run_manager("plan", target)
+    assert plan.returncode == 0, plan.stderr
+    assert next(
+        item["state"]
+        for item in json.loads(plan.stdout)["items"]
+        if item["name"] == destination.name
+    ) == "adoptable"
+
+    check = run_manager("check", target)
+    assert check.returncode == 0, check.stderr
+    assert next(
+        item["state"]
+        for item in json.loads(check.stdout)["items"]
+        if item["name"] == destination.name
+    ) == "adoptable"
+
+    install = run_manager("install", target)
+    assert install.returncode == 0, install.stderr
+    assert destination.is_symlink()
+    assert destination.resolve() == (ROOT / "agents" / destination.name).resolve()
+
+
+def test_nonidentical_replacement_of_a_managed_link_has_a_remedy(tmp_path):
+    target = tmp_path / "agents"
+    assert run_manager("install", target).returncode == 0
+    destination = target / "codex-analyst.md"
+    destination.unlink()
+    destination.write_text("# changed definition\n")
+
+    result = run_manager("plan", target)
+
     assert result.returncode == 3
-    assert "evil.md" in result.stderr
-    assert "pw.md" in result.stderr
+    assert "codex-analyst.md:" in result.stderr
+    assert "manually restore the managed link" in result.stderr
+    assert str(destination) in result.stderr
+
+
+def test_canonical_source_symlinks_without_a_manifest_are_adopted(tmp_path):
+    target = tmp_path / "agents"
+    target.mkdir()
+    for name in AGENT_NAMES:
+        (target / name).symlink_to(ROOT / "agents" / name)
+
+    plan = run_manager("plan", target)
+    assert plan.returncode == 0, plan.stderr
+    assert {
+        item["state"] for item in json.loads(plan.stdout)["items"]
+    } == {"adoptable"}
+
+    check = run_manager("check", target)
+    assert check.returncode == 0, check.stderr
+    assert {
+        item["state"] for item in json.loads(check.stdout)["items"]
+    } == {"adoptable"}
+
+    install = run_manager("install", target)
+    assert install.returncode == 0, install.stderr
+    manifest = json.loads((target.parent / MANIFEST_NAME).read_text())
+    assert set(manifest["managed"]) == AGENT_NAMES
+
+
+def test_agent_plan_discloses_retired_manifest_entries(tmp_path):
+    source = tmp_path / "source"
+    shutil.copytree(ROOT / "agents", source)
+    target = tmp_path / "agents"
+    assert run_manager("install", target, source=source).returncode == 0
+    retired_name = "agy-reviewer.md"
+    (source / retired_name).unlink()
+
+    result = run_manager("plan", target, source=source)
+
+    assert result.returncode == 0, result.stderr
+    states = {
+        item["name"]: item["state"]
+        for item in json.loads(result.stdout)["items"]
+    }
+    assert states[retired_name] == "retired"
 
 
 def test_agent_actions_share_the_canonical_directory_link_exemption(tmp_path):
