@@ -2035,6 +2035,7 @@ def test_non_git_fallback_routes_via_product_root_model_route():
             "runtime/agent-fabric/src/domain/versions.ts",
             "runtime/agent-fabric/src/adapters/compatibility.ts",
             "runtime/agent-fabric/src/errors.ts",
+            "runtime/agent-fabric/src/adapters/providers/claude-agent-sdk.ts",
             "runtime/agent-fabric/scripts/validate-adapter-executables.ts",
             "runtime/agent-fabric/schemas/adapter-compatibility.schema.json",
             "scripts/lib/agent-fabric-tsx-loader.sh",
@@ -2042,7 +2043,16 @@ def test_non_git_fallback_routes_via_product_root_model_route():
             destination = product / relative_path
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(PRODUCT_ROOT / relative_path, destination)
-        os.symlink(PRODUCT_ROOT / "node_modules", product / "node_modules", target_is_directory=True)
+        node_modules_source = next(
+            (
+                candidate / "node_modules"
+                for candidate in (PRODUCT_ROOT, *PRODUCT_ROOT.parents)
+                if (candidate / "node_modules/tsx/dist/loader.mjs").is_file()
+            ),
+            None,
+        )
+        assert node_modules_source is not None
+        os.symlink(node_modules_source, product / "node_modules", target_is_directory=True)
         bin_dir = tmp / "bin"
         bin_dir.mkdir()
         write_executable(
