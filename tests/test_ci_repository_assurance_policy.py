@@ -84,14 +84,15 @@ FILTERED_JOBS = {
 FILTER_HELPER_KEYS = frozenset({"ci-contract", "node-workspace"})
 # PR #168 repair cycle 2: fabric tests execute exactly these repo files
 # outside runtime/agent-fabric — the model-routing acceptance suite runs
-# scripts/model-route (a bash wrapper that execs scripts/model_route.py,
-# where the logic lives) and the delivery-run fixture runs
-# skills/deliver/scripts/*.py — so those paths must retrigger the fabric
-# job. Repair cycle 3 added scripts/model_route.py: the wrapper was already
-# listed but the module it execs was not, so a PR changing only the Python
-# module skipped the fabric job that runs it. This allowlist is exact by
-# design: adding an executed dependency means adding it here deliberately,
-# and nothing else in docs/ or skills/ may path-trigger a non-harness job.
+# scripts/model-route (a bash wrapper that sources and invokes
+# scripts/lib/model-route-python.sh, then execs scripts/model_route.py, where
+# the routing logic lives) and the delivery-run fixture runs
+# skills/deliver/scripts/*.py — so those paths must retrigger the fabric job.
+# Repair cycle 3 added scripts/model_route.py: the wrapper was already listed
+# but the module it execs was not, so a PR changing only the Python module
+# skipped the fabric job that runs it. This allowlist is exact by design:
+# adding an executed dependency means adding it here deliberately, and nothing
+# else in docs/ or skills/ may path-trigger a non-harness job.
 # PR #446 added scripts/model_route_catalog.py, which model_route.py loads and
 # executes at import: a change to it alone reaches the fabric suite at runtime,
 # so it must retrigger the job that runs it for the same reason cycle 3 added
@@ -100,6 +101,7 @@ FILTER_HELPER_KEYS = frozenset({"ci-contract", "node-workspace"})
 FABRIC_EXECUTED_DEPENDENCIES = frozenset(
     {
         "scripts/model-route",
+        "scripts/lib/model-route-python.sh",
         "scripts/model_route.py",
         "scripts/model_route_catalog.py",
         "scripts/model_route_preferences.py",
@@ -423,6 +425,7 @@ def test_ci_gates_build_jobs_behind_path_filters_and_one_aggregate_check() -> No
     # deleted, and any new entry must be added to the allowlist deliberately.
     assert FABRIC_EXECUTED_DEPENDENCIES == {
         "scripts/model-route",
+        "scripts/lib/model-route-python.sh",
         "scripts/model_route.py",
         "scripts/model_route_catalog.py",
         "scripts/model_route_preferences.py",
@@ -561,6 +564,15 @@ def test_model_route_preferences_change_selects_the_fabric_job() -> None:
     selected = _jobs_for_changed_paths(
         document,
         ["scripts/model_route_preferences.py"],
+    )
+    assert "fabric" in selected
+
+
+def test_model_route_python_helper_change_selects_the_fabric_job() -> None:
+    document = _workflow()
+    selected = _jobs_for_changed_paths(
+        document,
+        ["scripts/lib/model-route-python.sh"],
     )
     assert "fabric" in selected
 

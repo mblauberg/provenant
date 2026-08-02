@@ -106,14 +106,17 @@ jobs:
               - 'config/**'
               - 'runtime/agent-fabric/**'
               # Executed by fabric tests: the model-routing acceptance suite
-              # runs scripts/model-route, a bash wrapper that execs
+              # runs scripts/model-route, a bash wrapper that sources and
+              # invokes scripts/lib/model-route-python.sh, then execs
               # scripts/model_route.py where the routing logic lives, and the
-              # delivery-run fixture runs skills/deliver/scripts/*.py. Both the
-              # wrapper, the Python module it execs, and the catalogue and
-              # preference modules that module loads must all retrigger fabric.
+              # delivery-run fixture runs skills/deliver/scripts/*.py. The
+              # wrapper, its interpreter helper, the Python module it execs,
+              # and the catalogue and preference modules that module loads must
+              # all retrigger fabric.
               # Exact executed dependencies only — the policy test rejects
               # broader docs/skills globs.
               - 'scripts/model-route'
+              - 'scripts/lib/model-route-python.sh'
               - 'scripts/model_route.py'
               - 'scripts/model_route_catalog.py'
               - 'scripts/model_route_preferences.py'
