@@ -12,7 +12,9 @@ import { afterEach, describe, expect, it } from "vitest";
 import { runWorkspaceTrust } from "../../../src/cli/workspace-trust.ts";
 import type { FabricPaths } from "../../../src/cli/paths.ts";
 import { projectKey, readLegacyBootstrapSeatGeneration } from "../../../src/cli/seat-store.ts";
-import { callTool } from "../../support/mcp-testkit.ts";
+import { connectFabricDaemon, FABRIC_OPERATIONS } from "../../../src/index.ts";
+import type { AuthorityInput } from "../../../src/domain/types.ts";
+import { callTool, spawnMcpProxy, type McpProxy } from "../../support/mcp-testkit.ts";
 import { terminateTrackedTestProcess, trackTestProcess } from "../../support/test-process-registry.ts";
 
 const roots: string[] = [];
@@ -404,6 +406,218 @@ describe("fresh Agent Fabric launch bootstrap", () => {
       expect(resource.contents).toHaveLength(1);
     } finally {
       await Promise.allSettled(clients.map(async (client) => client.close()));
+    }
+  });
+
+  it("completes a bootstrap-scoped task request with a correlated artifact-bound reply", async () => {
+    const { projectRoot, paths, agentsHome } = await fixture();
+    const chair = await openMcpClient("codex", projectRoot, paths, agentsHome, "bootstrap-chair");
+    let chairDaemon: Awaited<ReturnType<typeof connectFabricDaemon>> | undefined;
+    let requester: McpProxy | undefined;
+    let worker: McpProxy | undefined;
+    try {
+      const bootstrapped = await callTool(chair, "fabric_bootstrap", {});
+      if (bootstrapped.isError) throw new Error(bootstrapped.text);
+      const discovery = JSON.parse(await readFile(join(paths.runtimeDirectory, "fabric-v1.discovery.json"), "utf8")) as { pid: number };
+      trackTestProcess(discovery.pid, "paired-completion-bootstrap-daemon");
+      daemonPids.add(discovery.pid);
+
+      const identityResult = await callTool(chair, "fabric_whoami", {});
+      expect(identityResult.isError).toBe(false);
+      const identity = identityResult.structured as {
+        authorityId: string;
+        generation: string;
+        runId: string;
+      };
+      const chairCapability = (await readFile(join(
+        paths.stateDirectory,
+        "seats",
+        projectKey(projectRoot),
+        "generations",
+        identity.generation,
+        "codex.cap",
+      ), "utf8")).trim();
+      chairDaemon = await connectFabricDaemon({ socketPath: paths.socketPath, capability: chairCapability });
+
+      const authorityDatabase = new Database(paths.databasePath, { readonly: true });
+      let rootAuthority: AuthorityInput;
+      let projectSessionId: string;
+      try {
+        const authorityRow = authorityDatabase.prepare(
+          "SELECT authority_json FROM authorities WHERE authority_id=?",
+        ).get(identity.authorityId) as { authority_json: string } | undefined;
+        if (authorityRow === undefined) throw new Error("bootstrap authority was not persisted");
+        rootAuthority = JSON.parse(authorityRow.authority_json) as AuthorityInput;
+        const runRow = authorityDatabase.prepare(
+          "SELECT project_session_id FROM runs WHERE run_id=?",
+        ).get(identity.runId) as { project_session_id: string } | undefined;
+        if (runRow === undefined) throw new Error("bootstrap run identity was not persisted");
+        projectSessionId = runRow.project_session_id;
+      } finally {
+        authorityDatabase.close();
+      }
+
+      const deriveProxy = async (
+        agentId: string,
+        providerSessionRef: string,
+        actions: AuthorityInput["actions"],
+      ): Promise<McpProxy> => {
+        if (chairDaemon === undefined) throw new Error("bootstrap chair daemon is unavailable");
+        const authority = await chairDaemon.delegateAuthority({
+          parentAuthorityId: identity.authorityId,
+          commandId: `bootstrap-paired:${agentId}:authority`,
+          authority: { ...rootAuthority, actions },
+        });
+        const registration = await chairDaemon.registerAgent({
+          agentId,
+          authorityId: authority.authorityId,
+          providerSessionRef,
+        });
+        return spawnMcpProxy({
+          socketPath: paths.socketPath,
+          capability: registration.capability,
+          label: agentId,
+        });
+      };
+
+      requester = await deriveProxy(
+        "bootstrap-requester",
+        "provider-bootstrap-requester",
+        [FABRIC_OPERATIONS.taskRequest],
+      );
+      worker = await deriveProxy(
+        "bootstrap-worker",
+        "provider-bootstrap-worker",
+        [FABRIC_OPERATIONS.taskCompleteWithReply],
+      );
+      const chairToolNames = (await chair.listTools()).tools.map(({ name }) => name);
+      expect(chairToolNames).toContain("fabric_task_request");
+      expect(chairToolNames).toContain("fabric_task_complete_with_reply");
+      expect(chairToolNames).not.toContain("fabric_task_claim");
+      expect((await requester.client.listTools()).tools.map(({ name }) => name)).toContain("fabric_task_request");
+      expect((await requester.client.listTools()).tools.map(({ name }) => name)).not.toContain("fabric_task_claim");
+      expect((await worker.client.listTools()).tools.map(({ name }) => name)).toContain("fabric_task_complete_with_reply");
+      expect((await worker.client.listTools()).tools.map(({ name }) => name)).not.toContain("fabric_task_claim");
+      expect((await chair.listTools()).tools.map(({ name }) => name)).not.toContain("fabric_task_claim");
+
+      const taskId = "bootstrap-paired-task";
+      const requestMessageId = "bootstrap-paired-request";
+      const callbackId = "bootstrap-paired-callback";
+      const artifactPath = `${rootAuthority.artifactPaths[0]}/paired-reply.md`;
+      const artifactDigest = `sha256:${"b".repeat(64)}`;
+      const request = {
+        commandId: "bootstrap-paired:request",
+        projectSessionId,
+        coordinationRunId: identity.runId,
+        task: {
+          taskId,
+          taskRevision: 1,
+          objective: "Return the paired completion evidence.",
+          baseRevision: "baseline-integration-6b85f653",
+          expectedArtifactPaths: [artifactPath],
+        },
+        request: {
+          requestRevision: 1,
+          messageId: requestMessageId,
+          conversationId: "bootstrap-paired-conversation",
+          targetAgentId: "bootstrap-worker",
+          targetProviderSessionRef: "provider-bootstrap-worker",
+          requiresAck: true,
+          dedupeKey: "bootstrap-paired:request",
+          responseDeadline: "2099-01-01T00:00:00.000Z",
+          callbackId,
+          callbackGeneration: 1,
+          dependentBarrierId: "bootstrap-paired-barrier",
+        },
+      };
+      const requested = await callTool(requester.client, "fabric_task_request", request);
+      expect(requested.isError).toBe(false);
+      expect(requested.structured).toMatchObject({
+        taskRevision: 1,
+        requestRevision: 1,
+        callbackId,
+        callbackGeneration: 1,
+      });
+      const requestReplay = await callTool(requester.client, "fabric_task_request", request);
+      expect(requestReplay.isError).toBe(false);
+      expect(requestReplay.structured).toEqual(requested.structured);
+
+      const completion = {
+        commandId: "bootstrap-paired:complete",
+        taskId,
+        expectedTaskRevision: 1,
+        ownerLeaseId: `task-owner:${identity.runId}:${taskId}:1`,
+        ownerLeaseGeneration: 1,
+        requestMessageId,
+        expectedRequestRevision: 1,
+        callbackId,
+        callbackGeneration: 1,
+        reply: {
+          messageId: "bootstrap-paired-reply",
+          conversationId: "bootstrap-paired-conversation",
+          replyToMessageId: requestMessageId,
+          body: "Paired completion evidence is ready.",
+          artifactRefs: [{ path: artifactPath, digest: artifactDigest }],
+        },
+        terminalResult: {
+          status: "complete" as const,
+          summary: "Paired completion succeeded.",
+          completedAt: "2099-01-01T00:00:00.000Z",
+        },
+      };
+      const uncorrelated = await callTool(worker.client, "fabric_task_complete_with_reply", {
+        ...completion,
+        commandId: "bootstrap-paired:uncorrelated",
+        requestMessageId: "bootstrap-paired-missing-request",
+        reply: { ...completion.reply, replyToMessageId: "bootstrap-paired-missing-request" },
+      });
+      expect(uncorrelated.isError).toBe(true);
+      expect(uncorrelated.structured).toMatchObject({ code: "NOT_FOUND" });
+
+      const completed = await callTool(worker.client, "fabric_task_complete_with_reply", completion);
+      expect(completed.isError).toBe(false);
+      expect(completed.structured).toMatchObject({
+        taskRevision: 2,
+        replyRevision: 1,
+        resultDelivery: {
+          state: "pending",
+          projectSessionId,
+          taskId,
+          requestMessageId,
+          replyMessageId: "bootstrap-paired-reply",
+          targetAgentId: "bootstrap-requester",
+          targetProviderSessionRef: "provider-bootstrap-requester",
+          callbackId,
+          callbackGeneration: 1,
+          payloadDigest: expect.stringMatching(/^sha256:[0-9a-f]{64}$/u),
+        },
+      });
+      const completionReplay = await callTool(worker.client, "fabric_task_complete_with_reply", completion);
+      expect(completionReplay.isError).toBe(false);
+      expect(completionReplay.structured).toEqual(completed.structured);
+
+      const evidenceDatabase = new Database(paths.databasePath, { readonly: true });
+      try {
+        expect(evidenceDatabase.prepare(
+          "SELECT relative_path, sha256 FROM artifacts WHERE run_id=? AND task_id=?",
+        ).get(identity.runId, taskId)).toEqual({ relative_path: artifactPath, sha256: artifactDigest });
+        const storedResult = evidenceDatabase.prepare(
+          "SELECT artifacts_json FROM task_results WHERE run_id=? AND task_id=?",
+        ).get(identity.runId, taskId) as { artifacts_json: string } | undefined;
+        expect(storedResult).toBeDefined();
+        expect(JSON.parse(storedResult?.artifacts_json ?? "null")).toEqual([
+          { path: artifactPath, digest: artifactDigest },
+        ]);
+      } finally {
+        evidenceDatabase.close();
+      }
+    } finally {
+      await Promise.allSettled([
+        requester?.close() ?? Promise.resolve(),
+        worker?.close() ?? Promise.resolve(),
+        chairDaemon?.close() ?? Promise.resolve(),
+        chair.close(),
+      ]);
     }
   });
 });

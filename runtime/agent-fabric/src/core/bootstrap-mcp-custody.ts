@@ -150,6 +150,8 @@ export function bootstrapCurrentMcpSeat(custody: BootstrapMcpCustody, input: Boo
             FABRIC_OPERATIONS.acknowledgeDelivery,
             FABRIC_OPERATIONS.getMailboxState,
             FABRIC_OPERATIONS.createTask,
+            FABRIC_OPERATIONS.taskRequest,
+            FABRIC_OPERATIONS.taskCompleteWithReply,
             FABRIC_OPERATIONS.getTask,
             FABRIC_OPERATIONS.createTeam,
             FABRIC_OPERATIONS.getTeam,
