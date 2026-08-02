@@ -73,7 +73,7 @@ def test_command_result_is_frozen():
         assert False, "CommandResult accepted mutation"
 
 
-def test_structured_runner_uses_text_pipes_and_private_process_group(tmp_path, monkeypatch):
+def test_structured_runner_uses_file_output_and_private_process_group(tmp_path, monkeypatch):
     observed = {}
 
     class Process:
@@ -109,6 +109,7 @@ def test_structured_runner_uses_text_pipes_and_private_process_group(tmp_path, m
 
     assert observed["text"] is True
     assert observed["start_new_session"] is True
+    assert observed["stdout"] is not subprocess.PIPE
 
 
 def test_legacy_success_is_classified_as_pass(tmp_path):

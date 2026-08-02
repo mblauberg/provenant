@@ -238,40 +238,45 @@ def _run_structured(
         environment["PROVENANT_PYTEST_IMPORT_SIDECAR"] = str(sidecar_path)
         arguments.extend(["-p", plugin_path.stem])
         rendered = shlex.join(arguments)
-    process = subprocess.Popen(
-        arguments,
-        cwd=cwd,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        env=environment,
-        start_new_session=True,
-    )
-    started = time.monotonic()
-    direct_timed_out = False
-    group_closed: bool
-    output = ""
-    try:
+    with tempfile.TemporaryFile(mode="w+b") as output_file:
+        process = subprocess.Popen(
+            arguments,
+            cwd=cwd,
+            text=True,
+            stdout=output_file,
+            stderr=subprocess.STDOUT,
+            env=environment,
+            start_new_session=True,
+        )
+        started = time.monotonic()
+        direct_timed_out = False
+        group_closed: bool
+        output = ""
+        output_read = False
         try:
-            process.wait(timeout=DIRECT_PROCESS_TIMEOUT)
-        except subprocess.TimeoutExpired:
-            direct_timed_out = True
-            group_closed = _terminate_process_group(process.pid)
             try:
-                process.wait(timeout=PIPE_DRAIN_TIMEOUT)
+                process.wait(timeout=DIRECT_PROCESS_TIMEOUT)
             except subprocess.TimeoutExpired:
+                direct_timed_out = True
+                group_closed = _terminate_process_group(process.pid)
+                try:
+                    process.wait(timeout=PIPE_DRAIN_TIMEOUT)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=PIPE_DRAIN_TIMEOUT)
+            else:
+                group_closed = _terminate_process_group(process.pid)
+            output_file.flush()
+            output_file.seek(0)
+            output = _text_output(output_file.read())
+            output_read = True
+        finally:
+            if process.poll() is None:
+                group_closed = _terminate_process_group(process.pid) and group_closed
                 process.kill()
                 process.wait(timeout=PIPE_DRAIN_TIMEOUT)
-        else:
-            group_closed = _terminate_process_group(process.pid)
-        output, pipes_drained = _drain_output(process)
-    finally:
-        if process.poll() is None:
-            group_closed = _terminate_process_group(process.pid) and group_closed
-            process.kill()
-            process.wait(timeout=PIPE_DRAIN_TIMEOUT)
-        if process.stdout is not None and not process.stdout.closed:
-            process.stdout.close()
+            if process.stdout is not None and not process.stdout.closed:
+                process.stdout.close()
 
     elapsed_seconds = time.monotonic() - started
     returncode = process.returncode
@@ -283,7 +288,7 @@ def _run_structured(
         returncode,
         pytest_sidecar=sidecar_path if runner is Runner.PYTEST else None,
     )
-    if direct_timed_out or not group_closed or not pipes_drained:
+    if direct_timed_out or not group_closed or not output_read:
         classification = FailureClass.UNKNOWN
         unresolved_module = None
     structured_import_evidence = (
