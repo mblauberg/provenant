@@ -105,6 +105,8 @@ jobs:
               - *node-workspace
               - 'config/**'
               - 'runtime/agent-fabric/**'
+              # Locked Python test tooling for this job's own gate.
+              - 'uv.lock'
               # Executed by fabric tests: the model-routing acceptance suite
               # runs scripts/model-route, a bash wrapper that execs
               # scripts/model_route.py where the routing logic lives, and the
@@ -126,6 +128,8 @@ jobs:
               - '.github/split-root-known-flaky.txt'
               - 'config/**'
               - 'runtime/agent-fabric/**'
+              # Locked Python test tooling for this job's own gate.
+              - 'uv.lock'
               - 'scripts/**'
               - 'tests/**'
             console:
