@@ -884,7 +884,7 @@ describe("machine status and doctor", () => {
       adapters: Record<string, Record<string, any>>;
     };
     const primary = compatibility.adapters["claude-agent-sdk"]!;
-    compatibility.adapters.agy = {
+    compatibility.adapters["kiro-acp"] = {
       ...primary,
       enabled: true,
       implementation: {
@@ -899,9 +899,9 @@ describe("machine status and doctor", () => {
       activeAdapters: string[];
       adapters: Record<string, { command: string[] }>;
     };
-    config.allowedAdapters.push("agy");
-    config.activeAdapters.push("agy");
-    config.adapters.agy = { command: [process.execPath, fixture.artifactPaths[1]!] };
+    config.allowedAdapters.push("kiro-acp");
+    config.activeAdapters.push("kiro-acp");
+    config.adapters["kiro-acp"] = { command: [process.execPath, fixture.artifactPaths[1]!] };
     await writeFile(fixture.configPath, stringify(config));
 
     const result = await fabricDoctor([
@@ -912,10 +912,10 @@ describe("machine status and doctor", () => {
     ], value, {
       preflightProtocolBuild: async () => undefined,
       verifyProvider: async ({ adapterId }) => {
-        if (adapterId === "agy") {
+        if (adapterId === "kiro-acp") {
           throw new FabricError(
             "ADAPTER_INTERFACE_PROBE_INCOMPLETE",
-            "provider non-answer interface probe failed: agy",
+            "provider non-answer interface probe failed: kiro-acp",
           );
         }
         throw new Error(`unexpected optional adapter probe: ${adapterId}`);
@@ -940,9 +940,9 @@ describe("machine status and doctor", () => {
     });
     expect(result.optionalAdapters).toEqual([
       {
-        adapterId: "agy",
+        adapterId: "kiro-acp",
         executable: fixture.artifactPaths[0],
-        reasons: ["provider non-answer interface probe failed: agy"],
+        reasons: ["provider non-answer interface probe failed: kiro-acp"],
       },
     ]);
     expect(result.checks).toEqual(expect.arrayContaining([
@@ -950,7 +950,7 @@ describe("machine status and doctor", () => {
         id: "provider-conformance",
         status: "idle",
         code: "OPTIONAL_ADAPTERS_DEGRADED",
-        detail: expect.stringContaining("agy=unavailable: provider non-answer interface probe failed: agy"),
+        detail: expect.stringContaining("kiro-acp=unavailable: provider non-answer interface probe failed: kiro-acp"),
       }),
     ]));
   });
