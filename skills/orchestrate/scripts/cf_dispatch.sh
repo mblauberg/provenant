@@ -76,7 +76,7 @@ while [ $# -gt 0 ]; do
 done
 
 append_cli_paths() {
-  local dir home_dir
+  local dir="" home_dir=""
   home_dir="${HOME:-}"
   for dir in /opt/homebrew/bin /usr/local/bin ${home_dir:+"$home_dir/.local/bin"} ${home_dir:+"$home_dir/bin"}; do
     [ -d "$dir" ] || continue
@@ -90,7 +90,7 @@ append_cli_paths() {
 append_cli_paths
 
 show_doctor() {
-  local tool cmd
+  local tool="" cmd=""
   printf 'cf_dispatch doctor\n'
   printf 'pwd=%s\n' "$(pwd)"
   printf 'PATH=%s\n' "$PATH"
@@ -130,7 +130,7 @@ make_tmp() {
   mktemp "$root/cf-dispatch.XXXXXX"
 }
 make_tmp_path() {
-  local path
+  local path=""
   path="$(make_tmp)" || return 1
   rm -f -- "$path"
   printf '%s\n' "$path"
@@ -197,10 +197,10 @@ endpoint_provider() {
 emit_record() {
   local tool="$1" model="$2" effort="$3" status="$4" rc="$5" path="$6" guarantee="$7"
   local family="${8:-}" endpoint="${9:-}" identity="${10:-}" effort_substitution="${11:-}"
-  local requested_effort="${12:-}" effort_source="${13:-}" effort_capability_source="${14:-}" cross cert
+  local requested_effort="${12:-}" effort_source="${13:-}" effort_capability_source="${14:-}" cross="" cert=""
   local substitution="${15:-}" requested_model="${16:-$model}" fallback_model="${17:-}"
   local catalog_model="${18:-}" model_selection="${19:-}"
-  local risk_tier="${20:-$RISK_TIER}" policy_override="${21:-}" terminal_observed="${22:-false}" output_sha256="${23:-}" terminal_artifact_path="${24:-}" terminal_artifact_sha256="${25:-}" record receipt_tmp record_digest
+  local risk_tier="${20:-$RISK_TIER}" policy_override="${21:-}" terminal_observed="${22:-false}" output_sha256="${23:-}" terminal_artifact_path="${24:-}" terminal_artifact_sha256="${25:-}" record="" receipt_tmp="" record_digest=""
   local adapter_resolution="${26:-}" adapter_executable="${27:-}" adapter_resolution_reason="${28:-}"
   local provider_assurance="${29:-}" certifying_answer_bearing_leg="${30:-false}"
   model="$(resolve_model "$tool" "$model")"
@@ -272,7 +272,7 @@ emit_record() {
 }
 
 write_terminal_artifact() {
-  local path="$1" status="$2" rc="$3" payload outcome_id temporary
+  local path="$1" status="$2" rc="$3" payload="" outcome_id="" temporary=""
   [ -n "$path" ] || return 0
   outcome_id="${TASK_ID:-$REVIEWER_ID}"
   if [ "$status" = "ok" ] && [ "$rc" -eq 0 ]; then
@@ -314,7 +314,7 @@ ORCH_FAMILY="$(normalise_family "$ORCH_FAMILY")"
 EVIDENCE_PATHS_DISTINCT=true
 
 evidence_paths_distinct() {
-  local -a paths
+  local -a paths=()
   paths=("$OUT" "$TERMINAL_ARTIFACT")
   [ -n "$DISPATCH_RECEIPT" ] && paths+=("$DISPATCH_RECEIPT")
   "$DISPATCH_PYTHON" "$PUBLISH_HELPER" --root "$EVIDENCE_ROOT" identity "${paths[@]}"
@@ -322,14 +322,14 @@ evidence_paths_distinct() {
 
 evidence_paths_valid() {
   local output_digest="$1" terminal_digest="$2" receipt_digest="${3:-}"
-  local -a entries
+  local -a entries=()
   entries=("$OUT" "$output_digest" "$TERMINAL_ARTIFACT" "$terminal_digest")
   [ -n "$DISPATCH_RECEIPT" ] && entries+=("$DISPATCH_RECEIPT" "$receipt_digest")
   "$DISPATCH_PYTHON" "$PUBLISH_HELPER" --root "$EVIDENCE_ROOT" verify "${entries[@]}"
 }
 
 emit_evidence_path_rejection() {
-  local record
+  local record=""
   EVIDENCE_PATHS_DISTINCT=false
   echo "answer, dispatcher terminal, and receipt evidence paths must be distinct files; path, symlink, and hardlink aliases are rejected" >&2
   record="$(emit_record "${TOOL:-chain}" "" "" "evidence_paths_not_distinct" 2 "" "none" "" "" "" "" "" "" "" "" "" "" "" "" "$RISK_TIER" "evidence-path-alias" false "" "$TERMINAL_ARTIFACT" "")"
@@ -368,7 +368,8 @@ owner_failure_is_unavailable() {
 }
 
 resolve_adapter_executable() {
-  local tool="$1" diag="$2" adapter_id="$3" command_name owner_root owner owner_output owner_rc
+  local tool="$1" diag="$2" adapter_id="$3"
+  local command_name="" owner_root="" owner="" owner_output="" owner_rc=0
   adapter_resolution=""
   adapter_executable=""
   adapter_resolution_reason=""
@@ -392,7 +393,7 @@ resolve_adapter_executable() {
         --json; } 2>"$diag")"
       owner_rc=$?
       if [ "$owner_rc" -eq 0 ]; then
-        local owner_executable owner_assurance owner_certifying
+        local owner_executable="" owner_assurance="" owner_certifying=""
         owner_executable="$(printf '%s' "$owner_output" | "$DISPATCH_PYTHON" -c 'import json,sys
 raw=sys.stdin.read()
 try:
@@ -467,7 +468,7 @@ resolve_routing() {
   # Returns JSON. If neither method is available, returns status="model_routing_unavailable".
   local tool="$1" alias="$2" role="$3" lead_family="$4" diag_file="$5"
   local model="$6" effort="$7" risk_tier="$8" capabilities_file="$9"
-  local -a cmd route_args
+  local -a cmd=() route_args=()
 
   route_args=(--adapter "$tool" --alias "$alias" --role "$role" --lead-family "$lead_family" --require-distinct --adapter-gate direct-cli)
   [ -n "$model" ] && route_args+=(--model "$model")
@@ -484,7 +485,7 @@ resolve_routing() {
 
   # Fall back to scripts/model_route.py from product root
   # Locate product root via git if possible, else try relative to this script
-  local product_root
+  local product_root=""
   if product_root="$(cd "$SCRIPT_DIR" && git rev-parse --show-toplevel 2>/dev/null)"; then
     if [ -f "$product_root/scripts/model_route.py" ]; then
       cmd=("$DISPATCH_PYTHON" "$product_root/scripts/model_route.py" "resolve" "${route_args[@]}")
@@ -507,7 +508,13 @@ resolve_routing() {
 }
 
 run_one() {  # $1 tool $2 model $3 effort -> writes answer and optional terminal artifact, echoes JSON, returns 0/1
-  local tool="$1" model="$2" effort="$3" tmpdir raw diag combined clean rc status opath guarantee family endpoint identity effort_substitution substitution requested_model requested_effort effort_source effort_capability_source route_json route_rc route_fields capabilities_file fallback_model primary_model catalog_model model_selection policy_override route_risk_tier output_sha256 terminal_artifact_sha256 compatibility_adapter adapter_resolution_failed adapter_resolution adapter_executable adapter_resolution_reason provider_assurance certifying_answer_bearing_leg terminal_observed
+  local tool="$1" model="$2" effort="$3"
+  local tmpdir="" raw="" diag="" combined="" clean="" rc=0 status="" opath="" guarantee="" family="" endpoint="" identity=""
+  local effort_substitution="" substitution="" requested_model="" requested_effort="" effort_source="" effort_capability_source=""
+  local route_json="" route_rc=0 route_fields="" capabilities_file="" fallback_model="" primary_model="" catalog_model="" model_selection=""
+  local policy_override="" route_risk_tier="" output_sha256="" terminal_artifact_sha256="" compatibility_adapter=""
+  local adapter_resolution_failed=0 adapter_resolution="" adapter_executable="" adapter_resolution_reason=""
+  local provider_assurance="" certifying_answer_bearing_leg=false terminal_observed=false
   model="$(resolve_model "$tool" "$model")"
   tmpdir="$(make_tmp_dir)"
   raw="$tmpdir/raw"
@@ -609,7 +616,7 @@ run_one() {  # $1 tool $2 model $3 effort -> writes answer and optional terminal
           case "$tool" in
         claude)
           guarantee="enforced"
-          local claude_verifier_system_prompt
+          local claude_verifier_system_prompt=""
           claude_verifier_system_prompt="You are a non-interactive cross-family verifier. You may use only Read, Grep, and Glob to inspect the requested workspace. Do not mutate files, use shell commands, call Task/tool/function abstractions, or launch subagents. Answer only the requested final verification text from the supplied prompt."
           if ! [ -x "$adapter_executable" ]; then
             status="tool_not_found"
