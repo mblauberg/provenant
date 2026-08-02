@@ -816,3 +816,102 @@ def test_right_reason_red_and_revert_probe_close_structured_runner_children(tmp_
         == 0
     )
     assert not list(revert_scratch.glob("gate-*"))
+
+
+def _cap_seconds():
+    """The cap as `change_gates` sees it, asserted rather than imported.
+
+    `_print_output` reads the cap off this module. If the import is gone the
+    reporting path raises `NameError` on the first target killed at the cap, and
+    a bare NameError is unusable evidence; assert the miss instead.
+    """
+    cap = getattr(change_gates, "DIRECT_PROCESS_TIMEOUT", None)
+    assert cap is not None, (
+        "change_gates does not carry DIRECT_PROCESS_TIMEOUT, so it cannot report the cap a "
+        "killed target hit"
+    )
+    return cap
+
+
+def _printed(result):
+    capture = io.StringIO()
+    with redirect_stdout(capture):
+        change_gates._print_output(result)
+    lines = [line for line in capture.getvalue().splitlines() if line.startswith("COMMAND ")]
+    assert lines, "gate printed no COMMAND line"
+    return lines[0]
+
+
+def _command_result(*, timed_out):
+    return CommandResult(
+        command="pytest tests/test_slow.py",
+        returncode=1,
+        output="",
+        classification=FailureClass.UNKNOWN,
+        elapsed_seconds=1801.3 if timed_out else 12.5,
+        timed_out=timed_out,
+    )
+
+
+def test_print_output_reports_how_long_the_target_ran():
+    """The COMMAND line has to carry the run's duration.
+
+    A classification and a return code alone say nothing about whether a target
+    was slow, and reading the duration out of CI meant rerunning it.
+    """
+    line = _printed(_command_result(timed_out=False))
+
+    assert "elapsed=12.5s" in line, line
+
+
+def test_print_output_marks_a_target_killed_at_the_cap():
+    """A cap kill must be named on the line, together with the cap it hit.
+
+    A target killed at the cap and a target that failed on its own merits both
+    surface as an unclassified non-zero return. Without the flag and the cap
+    value, telling them apart meant raising the cap and rerunning CI.
+    """
+    cap = _cap_seconds()
+    killed = _printed(_command_result(timed_out=True))
+    survived = _printed(_command_result(timed_out=False))
+
+    assert "timed_out=yes" in killed, killed
+    assert f"cap={cap:.0f}s" in killed, killed
+    assert "timed_out" not in survived, survived
+    assert "cap=" not in survived, survived
+
+
+def test_print_output_reports_the_cap_under_direct_script_import():
+    """The gate also runs as a plain script, and that path needs the cap too.
+
+    `scripts/check-test-gates` imports these modules without a package, so the
+    fallback import branch is the one that runs in production. If the cap is
+    missing from it, the first target killed at the cap raises NameError inside
+    the gate's own reporting instead of reporting the kill.
+    """
+    program = (
+        "import sys\n"
+        f"sys.path.insert(0, {str(ROOT / 'scripts')!r})\n"
+        "import change_gates\n"
+        "assert change_gates.__package__ in (None, ''), 'not the direct-script import path'\n"
+        "result = change_gates.CommandResult(\n"
+        "    command='pytest tests/test_slow.py',\n"
+        "    returncode=-15,\n"
+        "    output='',\n"
+        "    classification=change_gates.FailureClass.UNKNOWN,\n"
+        "    elapsed_seconds=1801.3,\n"
+        "    timed_out=True,\n"
+        ")\n"
+        "change_gates._print_output(result)\n"
+    )
+
+    completed = subprocess.run(
+        [sys.executable, "-c", program],
+        capture_output=True,
+        text=True,
+        cwd=ROOT,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "timed_out=yes" in completed.stdout, completed.stdout
+    assert f"cap={_cap_seconds():.0f}s" in completed.stdout, completed.stdout
