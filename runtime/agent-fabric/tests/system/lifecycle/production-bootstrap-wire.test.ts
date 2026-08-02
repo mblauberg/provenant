@@ -1,3 +1,4 @@
+import { statSync, utimesSync } from "node:fs";
 import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
@@ -6,7 +7,7 @@ import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import Database from "better-sqlite3";
 import type { Sha256Digest } from "@local/agent-fabric-protocol";
 
@@ -215,6 +216,7 @@ async function startBusyWalWriter(
 }
 
 afterEach(async () => {
+  vi.unstubAllEnvs();
   await Promise.allSettled(handles.splice(0).reverse().map(async (handle) => handle.stop()));
   await Promise.allSettled(roots.splice(0).map(async (root) => rm(root, { recursive: true, force: true })));
 });
@@ -719,7 +721,8 @@ describe("production daemon bootstrap wiring", () => {
     }
   });
 
-  it("does not run cutover cleanup when concurrent inspection writes exhaust the retry bound", async () => {
+  it("does not run cutover cleanup when an injected source change exhausts the retry bound", async () => {
+    vi.stubEnv("AGENT_FABRIC_TEST_DATABASE_INSPECTION_ATTEMPTS", "1");
     const root = await mkdtemp(join(tmpdir(), "fabric-production-inspection-race-"));
     roots.push(root);
     const databaseDirectory = join(root, "database");
@@ -727,6 +730,8 @@ describe("production daemon bootstrap wiring", () => {
     const stateDirectory = join(root, "state");
     const runtimeDirectory = join(root, "runtime");
     await mkdir(databaseDirectory, { mode: 0o700 });
+    await mkdir(stateDirectory, { mode: 0o700 });
+    await mkdir(runtimeDirectory, { mode: 0o700 });
     const seed = openFabricDatabase(databasePath);
     seed.prepare(`
       INSERT INTO daemon_runtime_epochs(
@@ -735,31 +740,29 @@ describe("production daemon bootstrap wiring", () => {
     `).run();
     seed.close();
     const before = await readFile(databasePath);
-    const writer = await startBusyWalWriter(databasePath, stateDirectory);
-    try {
-      await expect(startFabricDaemon({
-        databasePath,
-        stateDirectory,
-        runtimeDirectory,
-        socketPath: join(runtimeDirectory, "fabric.sock"),
-        workspaceRoots: [root],
-      })).rejects.toMatchObject({
-        code: "DATABASE_INSPECTION_UNSTABLE",
-        preserved: false,
-      });
-      await expect(lstat(stateDirectory)).resolves.toMatchObject({ mode: expect.any(Number) });
-      await expect(lstat(runtimeDirectory)).resolves.toMatchObject({ mode: expect.any(Number) });
-      expect(await readdir(runtimeDirectory)).toEqual(expect.arrayContaining([
-        "daemon-election.attempts.jsonl",
-        "daemon-election.lease.json",
-      ]));
-      expect((await readFile(databasePath)).byteLength).toBe(before.byteLength);
-    } finally {
-      if (writer.exitCode === null && writer.signalCode === null) {
-        writer.kill("SIGTERM");
-        await new Promise<void>((resolvePromise) => writer.once("exit", () => resolvePromise()));
-      }
-    }
+    const inspectionHooks = {
+      beforeSourceRecheck(sourcePath: string): void {
+        const current = statSync(sourcePath);
+        const nextTimestamp = new Date(current.mtimeMs + 1_000);
+        // Explicitly reproduce the source identity race at the test seam.
+        utimesSync(sourcePath, nextTimestamp, nextTimestamp);
+      },
+    };
+    await expect(startFabricDaemon({
+      databasePath,
+      stateDirectory,
+      runtimeDirectory,
+      socketPath: join(runtimeDirectory, "fabric.sock"),
+      workspaceRoots: [root],
+      inspectionHooks,
+    })).rejects.toMatchObject({
+      code: "DATABASE_INSPECTION_UNSTABLE",
+      preserved: false,
+    });
+    await expect(lstat(stateDirectory)).resolves.toMatchObject({ mode: expect.any(Number) });
+    await expect(lstat(runtimeDirectory)).resolves.toMatchObject({ mode: expect.any(Number) });
+    expect(await readdir(runtimeDirectory)).toEqual([]);
+    expect((await readFile(databasePath)).byteLength).toBe(before.byteLength);
   });
 
   it("releases a bootstrap owner's local process handles without stopping the daemon", async () => {
@@ -825,6 +828,7 @@ describe("production daemon bootstrap wiring", () => {
     expect(restarted.pid).not.toBe(abandoned.pid);
   });
 
+  // Restart waits for the production bootstrap election's 10s lease to expire.
   it("removes its socket when launcher custody is lost immediately after bind", async () => {
     const root = await mkdtemp(join(tmpdir(), "f-pre-discovery-custody-"));
     roots.push(root);
@@ -868,7 +872,7 @@ describe("production daemon bootstrap wiring", () => {
     const restarted = await startFabricDaemon(options);
     handles.push(restarted);
     expect(restarted.pid).not.toBe(daemonPid);
-  });
+  }, 20_000);
 
   it("keeps a released active daemon outside its launcher's process group", async () => {
     const root = await mkdtemp(join(tmpdir(), "f-release-custody-"));
@@ -994,8 +998,8 @@ describe("production daemon bootstrap wiring", () => {
       "protocolVersion", "schemaVersion", "socketPath",
     ]);
     expect(discovery).toMatchObject({
-      protocolVersion: 1,
-      features: ["rpc", "mcp-bootstrap-credentials.v2"],
+      protocolVersion: 2,
+      features: ["rpc", "mcp-bootstrap-credentials.v2", "mcp-bootstrap-result-shape.v1"],
     });
     expect((await stat(join(runtimeDirectory, "fabric-v1.discovery.json"))).mode & 0o777).toBe(0o600);
     expect([

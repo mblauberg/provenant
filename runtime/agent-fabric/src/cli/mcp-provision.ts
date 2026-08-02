@@ -11,6 +11,7 @@ import {
 } from "../daemon/private-discovery.js";
 import type { FabricPaths } from "./paths.js";
 import { defaultDaemonStartOptions } from "./default-daemon-options.js";
+import { resolveProjectBoundary } from "./project-boundary.js";
 import {
   isSchemaCutoverRefusal,
   McpBootstrapSchemaCutoverGateError,
@@ -83,9 +84,16 @@ export type ProvisionedSeatRosterInput = {
 export async function startMcpProvisionDaemon(
   paths: FabricPaths,
   environment: NodeJS.ProcessEnv = process.env,
+  projectRoot?: string,
 ): Promise<Awaited<ReturnType<typeof startFabricDaemon>>> {
   try {
-    return await startFabricDaemon(defaultDaemonStartOptions(paths, { environment }));
+    const selectedProjectRoot = projectRoot === undefined
+      ? undefined
+      : (await resolveProjectBoundary(projectRoot)).selectedProjectRoot;
+    return await startFabricDaemon(defaultDaemonStartOptions(paths, {
+      environment,
+      ...(selectedProjectRoot === undefined ? {} : { projectRoot: selectedProjectRoot }),
+    }));
   } catch (cause: unknown) {
     if (!isSchemaCutoverRefusal(cause)) throw cause;
     throw new McpBootstrapSchemaCutoverGateError(
@@ -251,7 +259,7 @@ export async function provisionMcpSeats(arguments_: string[], paths: FabricPaths
     bindings,
     expiresAt,
   };
-  const daemonHandle = await startMcpProvisionDaemon(paths);
+  const daemonHandle = await startMcpProvisionDaemon(paths, process.env, input.project);
   try {
     return await bindProvisionedSeatRoster(input, paths);
   } finally {

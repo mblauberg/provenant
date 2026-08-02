@@ -85,6 +85,25 @@ esac
   --custom-source "$instance_root/custom-skills" \
   --target "$platform_home/skills" >/dev/null
 
+# Validate enabled provider executables before any installation mutation.
+# Command names resolve on PATH, and executable permissions are checked before
+# any installation mutation. Primary adapters are mandatory; enabled optional
+# adapters are reported as degraded by the validator.
+source "$PRODUCT_ROOT/scripts/lib/agent-fabric-tsx-loader.sh"
+node_executable=$(resolve_agent_fabric_node) || {
+  echo "unable to resolve a validated Agent Fabric Node executable" >&2
+  exit 3
+}
+export AGENT_FABRIC_NODE="$node_executable"
+tsx_loader=$(resolve_tsx_loader "$PRODUCT_ROOT/runtime/agent-fabric" "$PRODUCT_ROOT") || {
+  echo "unable to resolve the trusted tsx loader" >&2
+  exit 3
+}
+"$node_executable" --import "$tsx_loader" "$PRODUCT_ROOT/runtime/agent-fabric/scripts/validate-adapter-executables.ts" \
+  --compatibility "$PRODUCT_ROOT/config/adapter-compatibility.yaml" \
+  --schema "$PRODUCT_ROOT/runtime/agent-fabric/schemas/adapter-compatibility.schema.json" \
+  --mandatory-primary
+
 # Refuse a command collision before any installation mutation. Publication
 # revalidates this state and uses atomic no-replace or exchange primitives.
 legacy_provenant_target="$instance_root/scripts/provenant"

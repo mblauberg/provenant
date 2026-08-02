@@ -53,6 +53,10 @@ REQUIRED_GATES = {
     "Final claims have source/test/file anchors",
     "Context hygiene classified: durable outputs retained; owned ephemeral payload archived/removed",
 }
+CERTIFYING_PROVIDER_ASSURANCE = frozenset({
+    "full-vendor-identity",
+    "lockfile-install-attestation",
+})
 
 
 def _inside(root: Path, candidate: Path) -> bool:
@@ -353,6 +357,11 @@ def _validate_review_plan(raw: object, run_dir: Path | None = None) -> list[str]
                         route_alias = route_value.get("route_alias", route_value.get("alias"))
                         if review["tier"] == "flagship" and route_alias != "flagship":
                             errors.append(f"receipt review_plan.reviews[{index}].route_receipt does not prove flagship strength")
+                        if review["scope"] == "primary" and (
+                            route_value.get("cross_family") is not True
+                            or route_value.get("provider_assurance") not in CERTIFYING_PROVIDER_ASSURANCE
+                        ):
+                            errors.append(f"receipt review_plan.reviews[{index}].route_receipt is not certification eligible")
                         if route_value.get("adapter_gate") in {"direct-cli", "fabric"}:
                             outcome_error, leg = _direct_worker_leg(
                                 run_dir, review, route, route_value, terminal_result_ref,

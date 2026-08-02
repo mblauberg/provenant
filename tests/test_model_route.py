@@ -37,6 +37,19 @@ def resolve(*args, adapter_gate="direct-cli"):
     return result, json.loads(result.stdout) if result.stdout else None
 
 
+def usable_pi_compatibility(tmp_path):
+    compatibility = tmp_path / "adapter-compatibility.yaml"
+    compatibility.write_text(
+        (ROOT / "config" / "adapter-compatibility.yaml")
+        .read_text()
+        .replace(
+            'executable: "@earendil-works/pi-coding-agent"',
+            'executable: "sh"',
+        )
+    )
+    return compatibility
+
+
 def capability_snapshot(models, source="codex debug models"):
     return {
         "schema_version": 1,
@@ -2711,6 +2724,20 @@ def test_split_root_defaults_use_instance_routing_and_product_compatibility(tmp_
     product_root = tmp_path / "product"
     instance_root = tmp_path / "instance"
     shutil.copytree(ROOT / "scripts", product_root / "scripts")
+    shutil.copy2(ROOT / "package.json", product_root / "package.json")
+    for relative_path in (
+        "runtime/agent-fabric/scripts/validate-adapter-executables.ts",
+        "runtime/agent-fabric/src/adapters/compatibility.ts",
+        "runtime/agent-fabric/src/adapters/primary-adapters.ts",
+        "runtime/agent-fabric/src/domain/record.ts",
+        "runtime/agent-fabric/src/domain/versions.ts",
+        "runtime/agent-fabric/src/errors.ts",
+        "runtime/agent-fabric/schemas/adapter-compatibility.schema.json",
+    ):
+        destination = product_root / relative_path
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(ROOT / relative_path, destination)
+    (product_root / "node_modules").symlink_to(ROOT / "node_modules", target_is_directory=True)
     (product_root / "config").mkdir()
     shutil.copy2(
         ROOT / "config/adapter-compatibility.yaml",
@@ -2800,10 +2827,12 @@ def test_kiro_accepts_only_open_weight_models():
     assert forbidden_route["status"] == "adapter_family_forbidden"
 
 
-def test_pi_without_model_patterns_fails_closed_for_provider_families():
+def test_pi_without_model_patterns_fails_closed_for_provider_families(tmp_path):
+    compatibility = usable_pi_compatibility(tmp_path)
     for model in ("gpt-5.6-sol", "claude-opus-4.5", "gemini-3.1-pro"):
         result, route = resolve(
-            "--adapter", "pi", "--model", model, "--alias", "scout", "--role", "worker"
+            "--adapter", "pi", "--model", model, "--alias", "scout", "--role", "worker",
+            "--adapter-compatibility", str(compatibility),
         )
         assert result.returncode == 1
         assert route["status"] == "adapter_family_forbidden"
@@ -2867,6 +2896,47 @@ def test_primary_adapters_honour_fabric_activation_gate(tmp_path):
         assert fabric_route["adapter_enabled"] is True
         assert direct.returncode == 0
         assert direct_route["status"] == "ok"
+
+
+def test_disabled_pi_direct_route_remains_separate_from_fabric_activation_gate(tmp_path):
+    compatibility = usable_pi_compatibility(tmp_path)
+    direct, direct_route = resolve(
+        "--adapter", "pi", "--model", "qwen3-32b", "--alias", "scout", "--role", "worker",
+        "--adapter-compatibility", str(compatibility),
+        adapter_gate="direct-cli",
+    )
+    fabric, fabric_route = resolve(
+        "--adapter", "pi", "--model", "qwen3-32b", "--alias", "scout", "--role", "worker",
+        "--adapter-compatibility", str(compatibility),
+        adapter_gate="fabric",
+    )
+
+    assert direct.returncode == 0
+    assert direct_route["status"] == "ok"
+    assert direct_route["adapter_enabled"] is False
+    assert fabric.returncode == 1
+    assert fabric_route["status"] == "adapter_disabled"
+
+
+def test_explicitly_selected_disabled_pi_requires_a_usable_executable(tmp_path):
+    compatibility = tmp_path / "adapter-compatibility.yaml"
+    compatibility.write_text(
+        (ROOT / "config" / "adapter-compatibility.yaml")
+        .read_text()
+        .replace(
+            'executable: "@earendil-works/pi-coding-agent"',
+            'executable: "missing-pi"',
+        )
+    )
+
+    result, route = resolve(
+        "--adapter", "pi", "--model", "qwen3-32b", "--alias", "scout", "--role", "worker",
+        "--adapter-compatibility", str(compatibility),
+        adapter_gate="direct-cli",
+    )
+
+    assert result.returncode == 2
+    assert route["status"] == "adapter_executable_unavailable"
 
 
 def test_fabric_gate_rejects_catalogue_adapter_without_compatibility_contract():

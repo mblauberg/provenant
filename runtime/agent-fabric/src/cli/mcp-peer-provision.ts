@@ -31,7 +31,21 @@ import {
 } from "./seat-store.js";
 
 const ROSTER_CONVERGENCE_TIMEOUT_MS = 5_000;
+const ROSTER_CONVERGENCE_MAX_ATTEMPTS = 200;
 const ROSTER_CONVERGENCE_POLL_MS = 25;
+
+function monotonicNow(): number {
+  return performance.now();
+}
+
+function rosterConvergenceMaxAttempts(): number {
+  const configured = process.env.NODE_ENV === "test"
+    ? Number.parseInt(process.env.AGENT_FABRIC_TEST_ROSTER_CONVERGENCE_ATTEMPTS ?? "", 10)
+    : Number.NaN;
+  return Number.isSafeInteger(configured) && configured > 0
+    ? configured
+    : ROSTER_CONVERGENCE_MAX_ATTEMPTS;
+}
 
 type InstalledSeat = {
   metadata: SeatMetadata;
@@ -433,10 +447,13 @@ export async function provisionMcpPeerSeats(
       productRoot,
     );
   }
-  const daemonHandle = await startMcpProvisionDaemon(paths);
-  const convergenceDeadline = Date.now() + ROSTER_CONVERGENCE_TIMEOUT_MS;
+  const daemonHandle = await startMcpProvisionDaemon(paths, process.env, request.project);
+  const convergenceDeadline = monotonicNow() + ROSTER_CONVERGENCE_TIMEOUT_MS;
+  const convergenceMaxAttempts = rosterConvergenceMaxAttempts();
+  let convergenceAttempts = 0;
   try {
     while (true) {
+      convergenceAttempts += 1;
       let client: Awaited<ReturnType<typeof connectFabricDaemon>> | undefined;
       let database: Database.Database | undefined;
       try {
@@ -586,9 +603,11 @@ export async function provisionMcpPeerSeats(
       } catch (error: unknown) {
         if (
           (!rosterCasChanged(error) && !chairCredentialChanged(error)) ||
-          Date.now() >= convergenceDeadline
+          convergenceAttempts >= convergenceMaxAttempts ||
+          monotonicNow() >= convergenceDeadline
         ) throw error;
         await waitForRosterConvergence();
+        if (monotonicNow() >= convergenceDeadline) throw error;
       } finally {
         try {
           database?.close();

@@ -17,14 +17,15 @@ explicit user approval. If intent is unsettled, use `scope`.
 Select base profile from `config/delivery-profiles.json`: `software`,
 `research`, `analysis`, `document` or `agent-product`. Add high-stakes
 overlay when source authority, privacy or qualified review matters. Projects
-may strengthen a profile, never weaken kernel gates silently. Use explicit
-independent `not_applicable` form for fabric_relationships rather than
+may strengthen a profile, never weaken kernel gates silently. Use independent
+`not_applicable` form for fabric_relationships rather than
 inventing.
 
 ## Lifecycle
 
-1. Create `.agent-run/<id>/RUN.json` from `templates/RUN.template.json` and
-   bind intent, design and authority by digest. When coordinated, bind
+1. Create `.agent-run/<id>/RUN.json` with
+   `scripts/delivery_receipt.py init`; the template is a read-only contract
+   fixture. Bind intent, design and authority by digest. When coordinated, bind
    `fabric_relationships` to project session, coordination run and workstream
    IDs per [the receipt contract](references/contract.md).
 2. Record each state transition. No state may jump an approval, evidence,

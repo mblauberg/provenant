@@ -669,7 +669,7 @@ input.on("line", (line) => {
           },
         };
         saveJournal(journal);
-        if (lookupCount === 1) setTimeout(() => respond(request.id, candidate), 100);
+        if (lookupCount === 1) afterSpawnBarrier(() => respond(request.id, candidate));
         else respond(request.id, candidate);
         return;
       }

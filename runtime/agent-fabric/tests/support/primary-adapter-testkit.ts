@@ -86,6 +86,7 @@ export async function createPrimaryCompatibilityFixture(): Promise<{
       activation_policy: {
         real_adapters_require_separate_gate: true,
         default_enabled: false,
+        executable_resolution_version: 2,
       },
       adapters,
     }),

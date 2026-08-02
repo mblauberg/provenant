@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "requirement": "F-033",
-  "allowed_edge_count": 133,
+  "allowed_edge_count": 135,
   "allowed_edges": [
     {
       "from": "adapters",
@@ -142,6 +142,10 @@
     {
       "from": "cli",
       "to": "exports"
+    },
+    {
+      "from": "cli",
+      "to": "lifecycle"
     },
     {
       "from": "cli",
@@ -350,6 +354,10 @@
     {
       "from": "mcp",
       "to": "domain"
+    },
+    {
+      "from": "mcp",
+      "to": "lifecycle"
     },
     {
       "from": "operator",

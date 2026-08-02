@@ -287,14 +287,14 @@ describe("Stage 1 chair receipt link", () => {
         },
       });
       const exported = await fabric.connect(run.chairCapability).exportReceipt({ commandId: "receipt-link:mismatch-export" });
-      const runReceiptPath = await writeDeliveryRunFixture({
+      await expect(writeDeliveryRunFixture({
         runDirectory,
         runId: "run-declared",
         artifactPath: `.agent-run/run-directory/${exported.relativePath}`,
         artifactSha256: exported.sha256,
+      })).rejects.toMatchObject({
+        stderr: expect.stringContaining("run-dir name must match run-id"),
       });
-
-      await expect(verifyFabricReceiptLink({ runReceiptPath })).rejects.toMatchObject({ code: "RECEIPT_LINK_INVALID" });
     } finally {
       await fabric.close();
       await rm(root, { recursive: true, force: true });

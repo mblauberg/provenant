@@ -1,15 +1,24 @@
 import { Duplex } from "node:stream";
 import { mkdtemp, rm } from "node:fs/promises";
-import { createServer, type Socket } from "node:net";
+import { connect, createServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { MCP_BOOTSTRAP_CREDENTIALS_FEATURE } from "@local/agent-fabric-protocol";
+import {
+  MCP_BOOTSTRAP_CREDENTIALS_FEATURE,
+  MCP_BOOTSTRAP_RESULT_SHAPE_FEATURE,
+} from "@local/agent-fabric-protocol";
+import type {
+  BootstrapMcpSeatInput,
+  CurrentMcpSeatBindingInput,
+} from "../../src/core/contracts.ts";
+import { FabricDaemonClient } from "../../src/daemon/rpc-client.ts";
 import { FabricRemoteError, TimedNdjsonTransport } from "../../src/transport/ndjson-rpc.ts";
 import { daemonInitializeResult } from "../../src/transport/daemon-rpc-contract.ts";
+import { createDaemonFixture } from "../support/daemon-testkit.ts";
 
 const cleanup: Array<() => Promise<void>> = [];
 
@@ -49,7 +58,7 @@ class FixtureDaemonSocket extends Duplex {
     this.methods.push(request.method);
     const result = request.method === "initialize"
       ? {
-          protocolVersion: 1,
+          protocolVersion: 2,
           daemonVersion: this.#daemonVersion,
           capabilities: this.#capabilities,
           activeAdapters: [],
@@ -62,6 +71,7 @@ class FixtureDaemonSocket extends Duplex {
             maximumAdapterInFlight: 8,
             idleTimeoutMs: 300_000,
           },
+          executableResolutionVersion: 2,
         }
       : this.#legacyCredentialResult;
     this.push(`${JSON.stringify({ id: request.id, result })}\n`);
@@ -75,11 +85,162 @@ class FixtureDaemonSocket extends Duplex {
   }
 }
 
+const daemonConnectionLimitFrame = {
+  id: "connection",
+  error: {
+    name: "DaemonProtocolError",
+    code: "DAEMON_CONNECTION_LIMIT",
+    message: "daemon accepts at most 32 connections",
+  },
+} as const;
+
+class ConnectionLimitDaemonSocket extends Duplex {
+  #pendingCalls = 0;
+
+  constructor() {
+    super();
+    queueMicrotask(() => this.emit("connect"));
+  }
+
+  override _read(): void {}
+
+  override _write(chunk: Buffer, _encoding: BufferEncoding, callback: (error?: Error | null) => void): void {
+    const request = JSON.parse(chunk.toString("utf8")) as { id: string; method: string };
+    if (request.method === "initialize") {
+      this.push(`${JSON.stringify({ id: request.id, result: daemonInitializeResult([]) })}\n`);
+    } else if (++this.#pendingCalls === 2) {
+      this.push(`${JSON.stringify(daemonConnectionLimitFrame)}\n`);
+    }
+    callback();
+  }
+
+  override _final(callback: (error?: Error | null) => void): void {
+    this.push(null);
+    this.destroy();
+    callback();
+  }
+}
+
+class DelayedWriteDaemonSocket extends Duplex {
+  #heldWrite: ((error?: Error | null) => void) | undefined;
+
+  constructor() {
+    super();
+    queueMicrotask(() => this.emit("connect"));
+  }
+
+  override _read(): void {}
+
+  override _write(chunk: Buffer, _encoding: BufferEncoding, callback: (error?: Error | null) => void): void {
+    const request = JSON.parse(chunk.toString("utf8")) as { id: string; method: string };
+    if (request.method === "initialize") {
+      this.push(`${JSON.stringify({ id: request.id, result: daemonInitializeResult([]) })}\n`);
+      callback();
+      return;
+    }
+    this.#heldWrite = callback;
+    this.push(`${JSON.stringify(daemonConnectionLimitFrame)}\n`);
+  }
+
+  releaseWrite(): void {
+    const callback = this.#heldWrite;
+    this.#heldWrite = undefined;
+    callback?.();
+  }
+
+  override _final(callback: (error?: Error | null) => void): void {
+    this.push(null);
+    this.destroy();
+    callback();
+  }
+}
+
+const bootstrapInput: BootstrapMcpSeatInput = {
+  canonicalRoot: "/project-one",
+  trustRecordDigest: `sha256:${"b".repeat(64)}`,
+  seat: "codex",
+  expiresAt: "2099-01-01T00:00:00.000Z",
+};
+
+const currentBindingInput: CurrentMcpSeatBindingInput = {
+  canonicalRoot: "/project-one",
+  expectedPreviousGeneration: null,
+  generation: "a".repeat(64),
+  projectSessionId: "session-one",
+  expectedSessionRevision: 1,
+  expectedSessionGeneration: 1,
+  runId: "run-one",
+  expectedRunRevision: 1,
+  chairAgentId: "agent-chair",
+  expectedChairGeneration: 1,
+  chairLeaseId: "lease-one",
+  expiresAt: bootstrapInput.expiresAt,
+  bindings: [{
+    seat: "codex",
+    agentId: "agent-chair",
+    expectedPrincipalGeneration: 1,
+  }],
+};
+
+function completeCurrentBindingResult(): Record<string, unknown> {
+  return {
+    expectedPreviousGeneration: null,
+    generation: currentBindingInput.generation,
+    projectSessionId: currentBindingInput.projectSessionId,
+    sessionRevision: 1,
+    sessionGeneration: 1,
+    runId: currentBindingInput.runId,
+    runRevision: 1,
+    chairAgentId: currentBindingInput.chairAgentId,
+    chairGeneration: 1,
+    chairLeaseId: currentBindingInput.chairLeaseId,
+    expiresAt: currentBindingInput.expiresAt,
+    credentials: [{
+      seat: "codex",
+      agentId: "agent-chair",
+      expectedPrincipalGeneration: 1,
+      capability: "capability-one",
+    }],
+  };
+}
+
+function completeBootstrapResult(): Record<string, unknown> {
+  return {
+    ...completeCurrentBindingResult(),
+    projectId: "project-one",
+    canonicalRoot: bootstrapInput.canonicalRoot,
+    bootstrapRunDirectory: ".agent-run/bootstrap-one",
+    custodyMutated: true,
+    credentials: [{
+      seat: "codex",
+      agentId: "agent-chair",
+      expectedPrincipalGeneration: 1,
+      capability: "capability-one",
+      authorityId: "authority-one",
+    }],
+  };
+}
+
+async function connectFixtureClient(result: Record<string, unknown>): Promise<FabricDaemonClient> {
+  const socket = new FixtureDaemonSocket({
+    daemonVersion: "0.1.0",
+    capabilities: ["rpc", MCP_BOOTSTRAP_CREDENTIALS_FEATURE, MCP_BOOTSTRAP_RESULT_SHAPE_FEATURE],
+    legacyCredentialResult: result,
+  });
+  return await FabricDaemonClient.connect(
+    "/fixture/fabric.sock",
+    "afb_test",
+    [MCP_BOOTSTRAP_CREDENTIALS_FEATURE, MCP_BOOTSTRAP_RESULT_SHAPE_FEATURE],
+    { connect: () => socket as unknown as Socket },
+  );
+}
+
 describe("timed daemon NDJSON transport", () => {
   it("advertises the current MCP bootstrap credential result shape", () => {
     expect(daemonInitializeResult([]).capabilities).toEqual([
       "rpc",
       MCP_BOOTSTRAP_CREDENTIALS_FEATURE,
+      MCP_BOOTSTRAP_RESULT_SHAPE_FEATURE,
     ]);
   });
 
@@ -117,7 +278,7 @@ describe("timed daemon NDJSON transport", () => {
         capability: "afb_test",
         connectTimeoutMs: 200,
         requestTimeoutMs: 200,
-        requiredCapabilities: [MCP_BOOTSTRAP_CREDENTIALS_FEATURE],
+        requiredCapabilities: [MCP_BOOTSTRAP_CREDENTIALS_FEATURE, MCP_BOOTSTRAP_RESULT_SHAPE_FEATURE],
       }, {
         connect: () => socket as unknown as Socket,
       });
@@ -142,7 +303,7 @@ describe("timed daemon NDJSON transport", () => {
     ]) {
       const socket = new FixtureDaemonSocket({
         daemonVersion,
-        capabilities: ["rpc", MCP_BOOTSTRAP_CREDENTIALS_FEATURE],
+        capabilities: ["rpc", MCP_BOOTSTRAP_CREDENTIALS_FEATURE, MCP_BOOTSTRAP_RESULT_SHAPE_FEATURE],
         legacyCredentialResult,
       });
       const transport = await TimedNdjsonTransport.connect({
@@ -156,11 +317,142 @@ describe("timed daemon NDJSON transport", () => {
       });
       expect(transport.initializeResult).toMatchObject({
         daemonVersion,
-        capabilities: ["rpc", MCP_BOOTSTRAP_CREDENTIALS_FEATURE],
+        capabilities: ["rpc", MCP_BOOTSTRAP_CREDENTIALS_FEATURE, MCP_BOOTSTRAP_RESULT_SHAPE_FEATURE],
       });
       await transport.close();
       expect(socket.methods).toEqual(["initialize"]);
     }
+  });
+
+  it("classifies an invalid bootstrap result as a protocol ambiguity", async () => {
+    const socket = new FixtureDaemonSocket({
+      daemonVersion: "0.1.0",
+      capabilities: ["rpc", MCP_BOOTSTRAP_CREDENTIALS_FEATURE, MCP_BOOTSTRAP_RESULT_SHAPE_FEATURE],
+      legacyCredentialResult: {
+        projectId: "project-one",
+        canonicalRoot: "/project-one",
+        bootstrapRunDirectory: ".agent-run/bootstrap-one",
+        generation: "a".repeat(64),
+        credentials: [],
+      },
+    });
+    const client = await FabricDaemonClient.connect(
+      "/fixture/fabric.sock",
+      "afb_test",
+      [MCP_BOOTSTRAP_CREDENTIALS_FEATURE, MCP_BOOTSTRAP_RESULT_SHAPE_FEATURE],
+      { connect: () => socket as unknown as Socket },
+    );
+
+    await expect(client.bootstrapMcpSeat({
+      canonicalRoot: "/project-one",
+      trustRecordDigest: `sha256:${"b".repeat(64)}`,
+      seat: "codex",
+      expiresAt: "2099-01-01T00:00:00.000Z",
+    })).rejects.toMatchObject({
+      code: "DAEMON_PROTOCOL_INVALID",
+    });
+    await client.close();
+  });
+
+  it("rejects a bootstrap result missing its inherited expiry before callers can publish metadata", async () => {
+    const result = completeBootstrapResult();
+    delete result.expiresAt;
+    const client = await connectFixtureClient(result);
+
+    await expect(client.bootstrapMcpSeat(bootstrapInput)).rejects.toMatchObject({
+      code: "DAEMON_PROTOCOL_INVALID",
+    });
+    await client.close();
+  });
+
+  it("accepts a complete current MCP seat binding result", async () => {
+    const client = await connectFixtureClient(completeCurrentBindingResult());
+
+    await expect(client.bindCurrentMcpSeats(currentBindingInput)).resolves.toMatchObject({
+      generation: currentBindingInput.generation,
+      projectSessionId: currentBindingInput.projectSessionId,
+      runId: currentBindingInput.runId,
+      chairLeaseId: currentBindingInput.chairLeaseId,
+    });
+    await client.close();
+  });
+
+  it("accepts a complete bootstrap result with the inherited binding fields", async () => {
+    const client = await connectFixtureClient(completeBootstrapResult());
+
+    await expect(client.bootstrapMcpSeat(bootstrapInput)).resolves.toMatchObject({
+      projectId: "project-one",
+      generation: currentBindingInput.generation,
+      credentials: [{ authorityId: "authority-one" }],
+    });
+    await client.close();
+  });
+
+  it.each(["generation", "projectSessionId", "runId", "chairLeaseId"])(
+    "rejects a bootstrap result missing its inherited %s field",
+    async (field) => {
+      const result = completeBootstrapResult();
+      delete result[field];
+      const client = await connectFixtureClient(result);
+
+      await expect(client.bootstrapMcpSeat(bootstrapInput)).rejects.toMatchObject({
+        code: "DAEMON_PROTOCOL_INVALID",
+      });
+      await client.close();
+    },
+  );
+
+  it.each([
+    ["generation", { generation: "not-a-full-generation-hash" }],
+    ["expectedPreviousGeneration", { expectedPreviousGeneration: "not-a-full-generation-hash" }],
+    ["projectSessionId", { projectSessionId: "" }],
+    ["sessionRevision", { sessionRevision: 0 }],
+    ["sessionGeneration", { sessionGeneration: 0 }],
+    ["runId", { runId: "" }],
+    ["runRevision", { runRevision: 0 }],
+    ["chairAgentId", { chairAgentId: "" }],
+    ["chairGeneration", { chairGeneration: 0 }],
+    ["chairLeaseId", { chairLeaseId: "" }],
+    ["expiresAt", { expiresAt: "not-a-timestamp" }],
+    ["expiresAt", { expiresAt: "2020-01-01T00:00:00.000Z" }],
+  ])("rejects a bootstrap result with an invalid inherited %s field", async (_field, override) => {
+    const client = await connectFixtureClient({ ...completeBootstrapResult(), ...override });
+
+    await expect(client.bootstrapMcpSeat(bootstrapInput)).rejects.toMatchObject({
+      code: "DAEMON_PROTOCOL_INVALID",
+    });
+    await client.close();
+  });
+
+  it("applies the shared inherited-result validation to current seat binding", async () => {
+    const result = completeCurrentBindingResult();
+    result.generation = "not-a-full-generation-hash";
+    const client = await connectFixtureClient(result);
+
+    await expect(client.bindCurrentMcpSeats(currentBindingInput)).rejects.toMatchObject({
+      code: "DAEMON_PROTOCOL_INVALID",
+    });
+    await client.close();
+  });
+
+  it.each([
+    ["seat", { seat: "" }],
+    ["agentId", { agentId: "" }],
+    ["principal generation", { expectedPrincipalGeneration: 0 }],
+    ["capability", { capability: "" }],
+    ["authorityId", { authorityId: "" }],
+  ])("rejects bootstrap results with malformed credential %s", async (_field, override) => {
+    const result = completeBootstrapResult();
+    result.credentials = [{
+      ...(result.credentials as Array<Record<string, unknown>>)[0],
+      ...override,
+    }];
+    const client = await connectFixtureClient(result);
+
+    await expect(client.bootstrapMcpSeat(bootstrapInput)).rejects.toMatchObject({
+      code: "DAEMON_PROTOCOL_INVALID",
+    });
+    await client.close();
   });
 
   it("bounds connection setup and destroys a socket that never connects", async () => {
@@ -188,7 +480,7 @@ describe("timed daemon NDJSON transport", () => {
           socket.write(`${JSON.stringify({
             id: request.id,
             result: {
-              protocolVersion: 1,
+              protocolVersion: 2,
               daemonVersion: "0.1.0",
               capabilities: ["rpc"],
               activeAdapters: [],
@@ -201,6 +493,7 @@ describe("timed daemon NDJSON transport", () => {
                 maximumAdapterInFlight: 8,
                 idleTimeoutMs: 300_000,
               },
+              executableResolutionVersion: 2,
             },
           })}\n`);
           return;
@@ -234,11 +527,163 @@ describe("timed daemon NDJSON transport", () => {
       {
         capability: "afb_test",
         method: "initialize",
-        params: { protocolVersion: 1, client: { name: "agent-fabric", version: "0.1.0" }, capabilities: ["rpc"] },
+        params: { protocolVersion: 2, client: { name: "agent-fabric", version: "0.1.0" }, capabilities: ["rpc"] },
       },
       { capability: "afb_test", method: "first", params: { sequence: 1 } },
       { capability: "afb_test", method: "second", params: { sequence: 2 } },
     ]);
+  });
+
+  it("fans out a connection-level error to every pending call without waiting for request timeout", async () => {
+    const socket = new ConnectionLimitDaemonSocket();
+    const transport = await TimedNdjsonTransport.connect({
+      socketPath: "/fixture/fabric.sock",
+      capability: "afb_test",
+      connectTimeoutMs: 200,
+      requestTimeoutMs: 500,
+    }, {
+      connect: () => socket as unknown as Socket,
+    });
+    cleanup.unshift(() => transport.close());
+    const startedAt = performance.now();
+    const results = await Promise.all([
+      transport.call("first", {}).catch((error: unknown) => error),
+      transport.call("second", {}).catch((error: unknown) => error),
+    ]);
+
+    expect(performance.now() - startedAt).toBeLessThan(250);
+    expect(results).toEqual([
+      expect.objectContaining({ code: daemonConnectionLimitFrame.error.code }),
+      expect.objectContaining({ code: daemonConnectionLimitFrame.error.code }),
+    ]);
+    expect(results[0]).toBeInstanceOf(FabricRemoteError);
+    expect(results[1]).toBeInstanceOf(FabricRemoteError);
+    expect(transport.closed).toBe(true);
+    await transport.close();
+  });
+
+  it("rejects promptly without an unhandled error when a connection error precedes a delayed write callback", async () => {
+    const socket = new DelayedWriteDaemonSocket();
+    const transport = await TimedNdjsonTransport.connect({
+      socketPath: "/fixture/fabric.sock",
+      capability: "afb_test",
+      connectTimeoutMs: 200,
+      requestTimeoutMs: 5_000,
+    }, {
+      connect: () => socket as unknown as Socket,
+    });
+    cleanup.unshift(() => transport.close());
+
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => { unhandled.push(reason); };
+    process.on("unhandledRejection", onUnhandled);
+    const request = transport.call("hold", {});
+    const timedOut = Symbol("timed out");
+    try {
+      const outcome = await Promise.race([
+        request.then(
+          () => ({ kind: "resolved" as const }),
+          (error: unknown) => ({ kind: "rejected" as const, error }),
+        ),
+        new Promise<typeof timedOut>((resolve) => setTimeout(() => resolve(timedOut), 100)),
+      ]);
+      expect(outcome).not.toBe(timedOut);
+      expect(outcome).toMatchObject({
+        kind: "rejected",
+        error: expect.objectContaining({ code: daemonConnectionLimitFrame.error.code }),
+      });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(unhandled).toEqual([]);
+    } finally {
+      socket.releaseWrite();
+      await request.catch(() => undefined);
+      process.off("unhandledRejection", onUnhandled);
+    }
+  });
+
+  it("rejects all pending calls from the real daemon connection-limit frame", async () => {
+    const fixture = await createDaemonFixture("run-connection-limit-transport");
+    cleanup.push(fixture.cleanup);
+    const held = await Promise.all(Array.from({ length: 29 }, () => {
+      const socket = connect(fixture.socketPath);
+      cleanup.unshift(async () => { socket.destroy(); });
+      return new Promise<Socket>((resolve, reject) => {
+        socket.once("connect", () => resolve(socket));
+        socket.once("error", reject);
+      });
+    }));
+    expect(held).toHaveLength(29);
+
+    const overflow = connect(fixture.socketPath);
+    cleanup.unshift(async () => { overflow.destroy(); });
+    const overflowFrame = await new Promise<Record<string, unknown>>((resolve, reject) => {
+      const lines = createInterface({ input: overflow, crlfDelay: Infinity });
+      overflow.once("error", reject);
+      lines.once("line", (line) => resolve(JSON.parse(line) as Record<string, unknown>));
+    });
+    expect(overflowFrame).toMatchObject({
+      id: "connection",
+      error: { code: "DAEMON_CONNECTION_LIMIT" },
+    });
+    const connectStartedAt = performance.now();
+    await expect(TimedNdjsonTransport.connect({
+      socketPath: fixture.socketPath,
+      capability: fixture.daemon.bootstrapCapability,
+      connectTimeoutMs: 200,
+      requestTimeoutMs: 5_000,
+    })).rejects.toMatchObject({ code: "DAEMON_CONNECTION_LIMIT" });
+    expect(performance.now() - connectStartedAt).toBeLessThan(1_000);
+
+    const overflowDirectory = await mkdtemp(join(tmpdir(), "fabric-transport-connection-frame-"));
+    const overflowSocketPath = join(overflowDirectory, "fabric.sock");
+    const pendingRequestIds: string[] = [];
+    const server = createServer((socket) => {
+      const lines = createInterface({ input: socket, crlfDelay: Infinity });
+      lines.on("line", (line) => {
+        const request = JSON.parse(line) as { id: string; method: string };
+        if (request.method === "initialize") {
+          socket.write(`${JSON.stringify({ id: request.id, result: daemonInitializeResult([]) })}\n`);
+          return;
+        }
+        pendingRequestIds.push(request.id);
+        if (pendingRequestIds.length !== 2) return;
+        socket.write(`${JSON.stringify(overflowFrame)}\n`);
+        socket.end();
+      });
+    });
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(overflowSocketPath, resolve);
+    });
+    cleanup.push(async () => {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await rm(overflowDirectory, { recursive: true, force: true });
+    });
+
+    const transport = await TimedNdjsonTransport.connect({
+      socketPath: overflowSocketPath,
+      capability: "afb_test",
+      connectTimeoutMs: 200,
+      requestTimeoutMs: 5_000,
+    });
+    cleanup.unshift(() => transport.close());
+    const startedAt = performance.now();
+    const pending = [
+      transport.call("first", {}).catch((error: unknown) => error),
+      transport.call("second", {}).catch((error: unknown) => error),
+    ];
+    const results = await Promise.all(pending);
+
+    expect(performance.now() - startedAt).toBeLessThan(1_000);
+    expect(results).toEqual([
+      expect.objectContaining({ code: "DAEMON_CONNECTION_LIMIT" }),
+      expect.objectContaining({ code: "DAEMON_CONNECTION_LIMIT" }),
+    ]);
+    expect(results[0]).toBeInstanceOf(FabricRemoteError);
+    expect(results[1]).toBeInstanceOf(FabricRemoteError);
+    expect(transport.closed).toBe(true);
+    expect(pendingRequestIds).toHaveLength(2);
+    await transport.close();
   });
 
   it("rejects a thirty-third pending client call without writing it", async () => {
@@ -253,7 +698,7 @@ describe("timed daemon NDJSON transport", () => {
           socket.write(`${JSON.stringify({
             id: request.id,
             result: {
-              protocolVersion: 1,
+              protocolVersion: 2,
               daemonVersion: "0.1.0",
               capabilities: ["rpc"],
               activeAdapters: [],
@@ -266,6 +711,7 @@ describe("timed daemon NDJSON transport", () => {
                 maximumAdapterInFlight: 8,
                 idleTimeoutMs: 300_000,
               },
+              executableResolutionVersion: 2,
             },
           })}\n`);
         } else {

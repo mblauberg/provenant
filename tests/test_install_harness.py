@@ -63,6 +63,16 @@ def instance_root_for(home: Path) -> Path:
 
 
 def run(platform: str, home: Path, *arguments: str, **extra_env):
+    provider_bin = home / ".local" / "bin"
+    provider_bin.mkdir(parents=True, exist_ok=True)
+    for name in ("claude", "codex", "agy", "cursor-agent", "kiro-cli", "opencode"):
+        executable = provider_bin / name
+        if not executable.exists():
+            executable.write_text("#!/bin/sh\nexit 0\n")
+            executable.chmod(0o700)
+    python_shim = provider_bin / "python3"
+    python_shim.write_text(f"#!/bin/sh\nexec {sys.executable} \"$@\"\n")
+    python_shim.chmod(0o700)
     env = os.environ.copy()
     env.update({"HOME": str(home)})
     # Keep the instance root deterministic in the scratch HOME. AGENTS_HOME now
@@ -71,9 +81,99 @@ def run(platform: str, home: Path, *arguments: str, **extra_env):
     env["AGENT_FABRIC_INSTANCE_ROOT"] = str(instance_root_for(home))
     env["PROVENANT_ALLOW_LINKED_WORKTREE_INSTALL"] = "1"
     env.update(extra_env)
+    env["PATH"] = f"{provider_bin}{os.pathsep}{env.get('PATH', os.environ.get('PATH', ''))}"
     return subprocess.run(
         [str(SCRIPT), "--platform", platform, *arguments],
         cwd=ROOT,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+
+
+def copy_product_fixture(tmp_path: Path) -> Path:
+    """Make a small, provisioned product checkout for the fused install."""
+    product = tmp_path / "product"
+    product.mkdir()
+    for name in ("AGENTS.md", "HARNESS.md", "package.json", "package-lock.json"):
+        shutil.copy2(ROOT / name, product / name)
+    for name in ("config", "scripts", "skills", "workflows"):
+        shutil.copytree(ROOT / name, product / name, symlinks=True)
+    shutil.copytree(
+        ROOT / "runtime" / "agent-fabric",
+        product / "runtime" / "agent-fabric",
+        symlinks=True,
+        ignore=shutil.ignore_patterns("node_modules", ".npm-ci-attestation*"),
+    )
+    (product / "node_modules").symlink_to(ROOT / "node_modules", target_is_directory=True)
+    (product / "config" / "installation.json").unlink()
+
+    subprocess.run(["git", "init", "-q"], cwd=product, check=True)
+    for command in (
+        ["git", "config", "user.name", "fused-install-test"],
+        ["git", "config", "user.email", "fused-install-test@example.invalid"],
+        ["git", "add", "."],
+        ["git", "commit", "-qm", "provisioned product fixture"],
+    ):
+        subprocess.run(command, cwd=product, check=True)
+
+    node = shutil.which("node")
+    assert node is not None, "node is required for a provisioned product fixture"
+    subprocess.run(
+        [
+            node,
+            str(product / "runtime/agent-fabric/scripts/write-npm-ci-attestation.mjs"),
+            str(product),
+        ],
+        cwd=product,
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    return product
+
+
+def run_product(product: Path, platform: str, home: Path, *arguments: str):
+    provider_bin = home / ".local/bin"
+    provider_bin.mkdir(parents=True, exist_ok=True)
+    for name in ("claude", "codex", "agy", "cursor-agent", "kiro-cli", "opencode"):
+        executable = provider_bin / name
+        executable.write_text("#!/bin/sh\nexit 0\n")
+        executable.chmod(0o700)
+
+    node = shutil.which("node")
+    assert node is not None, "node is required for the install harness"
+    env = {
+        "HOME": str(home),
+        "PATH": os.pathsep.join(
+            (
+                str(provider_bin),
+                str(Path(sys.executable).parent),
+                str(Path(node).parent),
+                "/opt/homebrew/bin",
+                os.defpath,
+            )
+        ),
+        "LANG": "C",
+        "LC_ALL": "C",
+    }
+    env.update(
+        {
+            "AGENT_FABRIC_INSTANCE_ROOT": str(product),
+            "PROVENANT_ALLOW_LINKED_WORKTREE_INSTALL": "1",
+            "PROVENANT_BIN_DIR": str(home / ".local/bin"),
+        }
+    )
+    if platform == "claude":
+        env["CLAUDE_CONFIG_DIR"] = str(home / ".claude")
+    else:
+        env["CODEX_HOME"] = str(home / ".codex")
+    return subprocess.run(
+        [str(product / "scripts/install-harness"), "--platform", platform, *arguments],
+        cwd=product,
         env=env,
         text=True,
         stdout=subprocess.PIPE,
@@ -223,6 +323,21 @@ def test_installs_claude_skills_and_global_instructions_idempotently(tmp_path):
     assert f"instructions existing={instructions}" in second.stdout
 
 
+def test_install_harness_uses_absolute_node_with_a_sanitized_provider_path(tmp_path):
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is required for the install harness")
+
+    result = run(
+        "codex",
+        tmp_path,
+        PROVENANT_BIN_DIR=str(tmp_path / "bin"),
+        PATH=f"{tmp_path / '.local' / 'bin'}:/usr/bin:/bin",
+        AGENT_FABRIC_NODE=node,
+    )
+
+    assert result.returncode == 0, result.stderr
+
 def test_installs_codex_skills_and_global_instructions(tmp_path):
     config = tmp_path / "codex-home"
     config.mkdir()
@@ -252,6 +367,77 @@ def test_installs_codex_skills_and_global_instructions(tmp_path):
     second = run("codex", tmp_path, CODEX_HOME=str(config))
     assert second.returncode == 0, second.stderr
     assert codex_config.read_text() == configured
+
+
+def test_fused_install_converges_claude_then_codex_without_client_projections(tmp_path):
+    product = copy_product_fixture(tmp_path)
+    claude_home = tmp_path / "claude-home"
+    codex_home = tmp_path / "codex-home"
+
+    claude_first = run_product(product, "claude", claude_home)
+    assert claude_first.returncode == 0, claude_first.stderr
+    codex_first = run_product(product, "codex", codex_home)
+    assert codex_first.returncode == 0, codex_first.stderr
+    assert "instance mode=fused" in claude_first.stdout
+    assert "instance mode=fused" in codex_first.stdout
+    assert json.loads((product / "config/installation.json").read_text())["mode"] == "fused"
+
+    claude_config = claude_home / ".claude.json"
+    codex_config = codex_home / ".codex/config.toml"
+    claude_before = claude_config.read_bytes()
+    codex_before = codex_config.read_bytes()
+    authored = "# Authored fused instance doctrine\n"
+    (product / "AGENTS.md").write_text(authored)
+
+    claude_second = run_product(product, "claude", claude_home)
+    assert claude_second.returncode == 0, claude_second.stderr
+    codex_second = run_product(product, "codex", codex_home)
+    assert codex_second.returncode == 0, codex_second.stderr
+    assert "desired-state=existing seeded=0 existing=3" in claude_second.stdout
+    assert "desired-state=existing seeded=0 existing=3" in codex_second.stdout
+    assert (product / "AGENTS.md").read_text() == authored
+    assert claude_config.read_bytes() == claude_before
+    assert codex_config.read_bytes() == codex_before
+
+    claude_registration = json.loads(claude_config.read_text())["mcpServers"]["agent-fabric"]
+    codex_registration = tomllib.loads(codex_config.read_text())["mcp_servers"]["agent-fabric"]
+    assert claude_registration["command"] == str(claude_home / ".local/bin/provenant")
+    assert codex_registration["command"] == str(codex_home / ".local/bin/provenant")
+    assert claude_registration["env"] == {
+        "AGENT_FABRIC_CLIENT_LABEL": "claude",
+        "AGENT_FABRIC_SEAT": "claude",
+        "AGENT_FABRIC_STATE_DIRECTORY": str(claude_home / ".local/state/agent-harness/fabric"),
+    }
+    assert codex_registration["env"] == {
+        "AGENT_FABRIC_CLIENT_LABEL": "codex",
+        "AGENT_FABRIC_SEAT": "codex",
+        "AGENT_FABRIC_STATE_DIRECTORY": str(codex_home / ".local/state/agent-harness/fabric"),
+    }
+    assert "AGENT_FABRIC_PROJECT_PATH" not in json.dumps(
+        [claude_registration, codex_registration]
+    )
+    for instructions in (
+        claude_home / ".claude/CLAUDE.md",
+        codex_home / ".codex/AGENTS.md",
+    ):
+        content = instructions.read_text()
+        assert str(product / "AGENTS.md") in content
+        assert str(product / "HARNESS.md") in content
+
+    optional_paths = (
+        ".cursor/mcp.json",
+        ".gemini/config/mcp_config.json",
+        ".kiro/settings/mcp.json",
+        ".config/opencode/opencode.jsonc",
+    )
+    assert all(
+        not (home / path).exists()
+        for home in (claude_home, codex_home)
+        for path in optional_paths
+    )
+    assert not (product / "doctrine").exists()
+    assert not (claude_home / ".claude/agents").exists()
+    assert not (codex_home / ".codex/agents").exists()
 
 
 def test_codex_install_projects_instance_custom_skill_without_managed_ownership(

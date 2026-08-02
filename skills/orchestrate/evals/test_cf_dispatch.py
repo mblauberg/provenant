@@ -2,6 +2,7 @@
 """Behaviour tests for cf_dispatch.sh with stubbed CLIs."""
 import json
 import os
+import shlex
 import shutil
 import signal
 import stat
@@ -52,12 +53,16 @@ DISPATCH_SCHEMA = {
     "model_family",
     "resolved_model",
     "identity_source",
+    "provider_assurance",
     "catalog_model",
     "model_selection",
     "route_alias",
     "reviewer_id",
     "risk_tier",
     "policy_override",
+    "adapter_resolution",
+    "adapter_executable",
+    "adapter_resolution_reason",
     "certification_eligible",
     "cross_family",
 }
@@ -74,6 +79,49 @@ REQUIRED_GATE_ROWS = [
 def write_executable(path, body):
     path.write_text(textwrap.dedent(body), encoding="utf-8")
     path.chmod(path.stat().st_mode | stat.S_IXUSR)
+
+
+def provision_test_verified_owner(tmp, *, adapter_id, executable):
+    """Provision the owner seam without making PATH resolution authoritative."""
+    owner_root = tmp / "verified-owner"
+    owner_dir = owner_root / "scripts"
+    owner_dir.mkdir(parents=True)
+    calls = owner_root / "adapter-owner.calls"
+    assurance = {
+        "cursor-agent": "partial-signed-helpers",
+        "opencode-acp": "owner-controlled-install-root",
+    }.get(adapter_id, "full-vendor-identity")
+    certifying = assurance in {"full-vendor-identity", "lockfile-install-attestation"}
+    write_executable(
+        owner_dir / "agent-fabric",
+        f"""\
+        #!/usr/bin/env bash
+        printf '%s\\n' "$*" >> {shlex.quote(str(calls))}
+        [ "$1" = "adapter" ] && [ "$2" = "executable" ] || exit 2
+        resolved_adapter=""
+        while [ "$#" -gt 0 ]; do
+          case "$1" in
+            --adapter) resolved_adapter="$2"; shift 2;;
+            *) shift;;
+          esac
+        done
+        [ "$resolved_adapter" = {shlex.quote(adapter_id)} ] || exit 3
+        printf '%s\\n' '{{"executable":{json.dumps(str(executable))},"provider_assurance":{json.dumps(assurance)},"certifying_answer_bearing_leg":{str(certifying).lower()}}}'
+        """,
+    )
+    return owner_root, calls
+
+
+def env_with_test_verified_owner(tmp, bin_dir, *, adapter_id, executable):
+    owner_root, calls = provision_test_verified_owner(
+        tmp,
+        adapter_id=adapter_id,
+        executable=executable,
+    )
+    env = fabric_free_env()
+    env["PATH"] = f"{bin_dir}:{env['PATH']}"
+    env["AGENTS_HOME"] = str(owner_root)
+    return env, calls
 
 
 def fabric_free_env():
@@ -102,8 +150,12 @@ def run_dispatch_with_stub(
             write_executable(bin_dir / "provenant", provenant_stub)
         out = Path(output_path) if output_path is not None else tmp / "out.txt"
         # PATH precedence keeps the checkout's stubs first.
-        env = fabric_free_env()
-        env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
+        env, _ = env_with_test_verified_owner(
+            tmp, bin_dir, adapter_id="claude-agent-sdk", executable=bin_dir / "claude"
+        )
+        # Keep the owner-unavailable branch deterministic; the verified-owner
+        # branch has its own test with an explicit owner stub.
+        env["AGENTS_HOME"] = str(tmp / "unavailable-owner")
         command = [
                 str(SCRIPT),
                 "--tool",
@@ -172,7 +224,107 @@ def test_claude_other_primary_uses_opus_without_implicit_fable_route():
     assert record["fallback_model"] == ""
     assert record["identity_source"] == "dated-catalog"
     assert record["substitution"] == ""
+    assert record["adapter_resolution"] == "degraded-command-v"
+    assert "DEGRADED" in record["adapter_resolution_reason"]
     assert output.strip() == "OPUS OK"
+
+
+def test_direct_cli_executes_the_verified_adapter_path_once():
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        bad_path = bin_dir / "claude"
+        write_executable(
+            bad_path,
+            "#!/usr/bin/env bash\necho BAD-PATH >&2\nexit 9\n",
+        )
+        verified_path = tmp / "verified-claude"
+        write_executable(
+            verified_path,
+            "#!/usr/bin/env bash\ncat >/dev/null\necho VERIFIED-PATH\n",
+        )
+        owner_dir = tmp / "owner" / "scripts"
+        owner_dir.mkdir(parents=True)
+        owner_calls = tmp / "owner-calls"
+        write_executable(
+            owner_dir / "agent-fabric",
+            f"#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >> {owner_calls}\necho {verified_path}\n",
+        )
+        out = tmp / "out.txt"
+        env, _ = env_with_test_verified_owner(
+            tmp, bin_dir, adapter_id="claude-agent-sdk", executable=bin_dir / "claude"
+        )
+        env["AGENTS_HOME"] = str(tmp / "owner")
+        result = subprocess.run(
+            [
+                str(SCRIPT),
+                "--tool", "claude",
+                "--orchestrator-family", "codex",
+                "--out", str(out),
+                "--prompt", "Reply exactly VERIFIED-PATH",
+                "--evidence-root", str(tmp),
+            ],
+            cwd=str(tmp),
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        record = json.loads(result.stdout)
+        assert result.returncode == 0, result.stderr
+        assert out.read_text(encoding="utf-8").strip() == "VERIFIED-PATH"
+        assert record["adapter_resolution"] == "verified-owner"
+        assert record["adapter_executable"] == str(verified_path)
+        assert owner_calls.read_text(encoding="utf-8").splitlines() == [
+            f"adapter executable --adapter claude-agent-sdk --product-root {PRODUCT_ROOT} --instance-root {PRODUCT_ROOT} --json",
+        ]
+
+
+def test_direct_cli_refuses_a_tampered_path_when_owner_rejects_it():
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        tampered_marker = tmp / "tampered-ran"
+        write_executable(
+            bin_dir / "claude",
+            f"#!/usr/bin/env bash\necho ran > {tampered_marker}\nexit 0\n",
+        )
+        owner_dir = tmp / "owner" / "scripts"
+        owner_dir.mkdir(parents=True)
+        owner_calls = tmp / "owner-calls"
+        write_executable(
+            owner_dir / "agent-fabric",
+            f"#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >> {owner_calls}\necho 'ADAPTER_IDENTITY_MISMATCH: provider signing identity is invalid' >&2\nexit 1\n",
+        )
+        out = tmp / "out.txt"
+        env, _ = env_with_test_verified_owner(
+            tmp, bin_dir, adapter_id="claude-agent-sdk", executable=bin_dir / "claude"
+        )
+        env["AGENTS_HOME"] = str(tmp / "owner")
+        result = subprocess.run(
+            [
+                str(SCRIPT),
+                "--tool", "claude",
+                "--orchestrator-family", "codex",
+                "--out", str(out),
+                "--prompt", "Reply exactly OK",
+                "--evidence-root", str(tmp),
+            ],
+            cwd=str(tmp),
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        record = json.loads(result.stdout)
+        assert result.returncode != 0
+        assert record["status"] == "adapter_resolution_failed"
+        assert record["adapter_resolution"] == "rejected"
+        assert "ADAPTER_IDENTITY_MISMATCH" in out.read_text(encoding="utf-8")
+        assert not tampered_marker.exists()
+        assert owner_calls.read_text(encoding="utf-8").count("adapter executable") == 1
 
 
 def test_claude_crucial_synthesis_dispatches_explicit_fable_override():
@@ -225,8 +377,9 @@ def test_dispatch_receipt_owns_terminal_fact_and_output_digest():
         write_executable(bin_dir / "claude", stub)
         out = tmp / "out.txt"
         receipt_path = tmp / "dispatch.json"
-        env = fabric_free_env()
-        env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
+        env, _ = env_with_test_verified_owner(
+            tmp, bin_dir, adapter_id="claude-agent-sdk", executable=bin_dir / "claude"
+        )
         result = subprocess.run(
             [
                 str(SCRIPT), "--tool", "claude", "--orchestrator-family", "codex",
@@ -263,8 +416,9 @@ def test_documented_workflow_separates_answer_from_terminal_artifact_and_joins_e
         worker_terminal = tmp / "crossfamily" / "review.worker.json"
         receipt_path = tmp / "crossfamily" / "review.route.json"
         answer.parent.mkdir()
-        env = fabric_free_env()
-        env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
+        env, _ = env_with_test_verified_owner(
+            tmp, bin_dir, adapter_id="claude-agent-sdk", executable=bin_dir / "claude"
+        )
         result = subprocess.run(
             [
                 str(SCRIPT), "--tool", "claude", "--orchestrator-family", "codex",
@@ -396,8 +550,9 @@ def test_publication_race_over_answer_terminal_or_receipt_fails_closed(target_na
         receipt = tmp / "dispatch.json"
         barrier = tmp / "barrier"
         target = {answer.name: answer, terminal.name: terminal, receipt.name: receipt}[target_name]
-        env = fabric_free_env()
-        env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
+        env, _ = env_with_test_verified_owner(
+            tmp, bin_dir, adapter_id="claude-agent-sdk", executable=bin_dir / "claude"
+        )
         env["CF_DISPATCH_TEST_BARRIER_DIR"] = str(barrier)
         env["CF_DISPATCH_TEST_BARRIER_MATCH"] = str(target)
         command = [
@@ -608,8 +763,9 @@ def test_dispatch_accepts_explicit_root_with_receipt_and_default_output_in_diffe
         bin_dir = tmp / "bin"
         bin_dir.mkdir()
         write_executable(bin_dir / "claude", "#!/usr/bin/env bash\ncat >/dev/null\necho OK\n")
-        env = fabric_free_env()
-        env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
+        env, _ = env_with_test_verified_owner(
+            tmp, bin_dir, adapter_id="claude-agent-sdk", executable=bin_dir / "claude"
+        )
         env["TMPDIR"] = str(temp_root)
 
         result = subprocess.run(
@@ -643,8 +799,9 @@ def test_chain_failed_then_success_preserves_attempt_evidence_and_summary():
             "fi\n"
             "echo 'second provider succeeded'\n",
         )
-        env = fabric_free_env()
-        env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
+        env, _ = env_with_test_verified_owner(
+            tmp, bin_dir, adapter_id="claude-agent-sdk", executable=bin_dir / "claude"
+        )
         answer = tmp / "review.txt"
         terminal = tmp / "review.terminal.json"
         receipt = tmp / "review.route.json"
@@ -848,8 +1005,12 @@ def test_claude_oauth_fallback_uses_verifier_system_prompt():
             """,
         )
         out = tmp / "out.txt"
-        env = fabric_free_env()
-        env["PATH"] = f"{bin_dir}:{env['PATH']}"
+        env, _ = env_with_test_verified_owner(
+            tmp,
+            bin_dir,
+            adapter_id="claude-agent-sdk",
+            executable=bin_dir / "claude",
+        )
         result = subprocess.run(
             [
                 str(SCRIPT),
@@ -1045,8 +1206,12 @@ def test_cursor_distinct_model_records_adapter_and_provider_family():
             f"#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" > {args_file}\necho OK\n",
         )
         out = tmp / "out.txt"
-        env = fabric_free_env()
-        env["PATH"] = f"{bin_dir}:{env['PATH']}"
+        env, _ = env_with_test_verified_owner(
+            tmp,
+            bin_dir,
+            adapter_id="cursor-agent",
+            executable=bin_dir / "cursor-agent",
+        )
         result = subprocess.run(
             [
                 str(SCRIPT),
@@ -1076,7 +1241,9 @@ def test_cursor_distinct_model_records_adapter_and_provider_family():
         assert record["endpoint_provider"] == "cursor"
         assert record["model_family"] == "xai"
         assert record["resolved_model"] == "cursor-grok-4.5-high"
-        assert record["certification_eligible"] is True
+        assert record["provider_assurance"] == "partial-signed-helpers"
+        assert record["certification_eligible"] is False
+        assert record["adapter_resolution"] == "verified-owner"
         assert record["cross_family"] is True
         cursor_args = args_file.read_text(encoding="utf-8").splitlines()
         assert "--trust" in cursor_args
@@ -1084,6 +1251,60 @@ def test_cursor_distinct_model_records_adapter_and_provider_family():
         assert "enabled" in cursor_args
         assert "--mode" in cursor_args
         assert cursor_args[cursor_args.index("--mode") + 1] == "ask"
+
+
+def test_full_vendor_owner_attestation_can_certify_a_direct_route():
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        executable = bin_dir / "claude"
+        write_executable(executable, "#!/usr/bin/env bash\necho OK\n")
+        owner_root = tmp / "owner"
+        owner_dir = owner_root / "scripts"
+        owner_dir.mkdir(parents=True)
+        write_executable(owner_dir / "agent-fabric", f'''#!/usr/bin/env bash
+        printf '%s\\n' '{{"executable":{json.dumps(str(executable))},"provider_assurance":"full-vendor-identity","certifying_answer_bearing_leg":true}}'
+        ''')
+        out = tmp / "out.txt"
+        env = fabric_free_env()
+        env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
+        env["AGENTS_HOME"] = str(owner_root)
+        result = subprocess.run([
+            str(SCRIPT), "--tool", "claude", "--orchestrator-family", "codex",
+            "--out", str(out), "--prompt", "Review", "--evidence-root", str(tmp),
+        ], cwd=td, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        record = json.loads(result.stdout)
+        assert result.returncode == 0, result.stderr
+        assert record["provider_assurance"] == "full-vendor-identity"
+        assert record["certification_eligible"] is True
+
+
+def test_direct_cli_does_not_trust_inconsistent_owner_certification_boolean():
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        executable = bin_dir / "cursor-agent"
+        write_executable(executable, "#!/usr/bin/env bash\ncat >/dev/null\necho OK\n")
+        owner_dir = (tmp / "owner" / "scripts")
+        owner_dir.mkdir(parents=True)
+        write_executable(owner_dir / "agent-fabric", f'''#!/usr/bin/env bash
+        printf '%s\n' '{{"executable":{json.dumps(str(executable))},"provider_assurance":"partial-signed-helpers","certifying_answer_bearing_leg":true}}'
+        ''')
+        out = tmp / "out.txt"
+        env = fabric_free_env()
+        env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
+        env["AGENTS_HOME"] = str(tmp / "owner")
+        result = subprocess.run([
+            str(SCRIPT), "--tool", "cursor", "--model", "cursor-grok-4.5-high",
+            "--orchestrator-family", "openai", "--out", str(out), "--prompt", "Review",
+            "--evidence-root", str(tmp),
+        ], cwd=td, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        record = json.loads(result.stdout)
+        assert result.returncode == 0, result.stderr
+        assert record["provider_assurance"] == "partial-signed-helpers"
+        assert record["certification_eligible"] is False
 
 
 def test_explicit_output_path_preserves_adapter_failure_diagnostics():
@@ -1096,8 +1317,12 @@ def test_explicit_output_path_preserves_adapter_failure_diagnostics():
             "#!/usr/bin/env bash\necho 'simulated adapter failure' >&2\nexit 9\n",
         )
         out = tmp / "review.txt"
-        env = fabric_free_env()
-        env["PATH"] = f"{bin_dir}:{env['PATH']}"
+        env, _ = env_with_test_verified_owner(
+            tmp,
+            bin_dir,
+            adapter_id="cursor-agent",
+            executable=bin_dir / "cursor-agent",
+        )
         result = subprocess.run(
             [
                 str(SCRIPT),
@@ -1142,8 +1367,12 @@ def test_unwritable_output_path_cannot_certify_success():
             echo OK
             """,
         )
-        env = fabric_free_env()
-        env["PATH"] = f"{bin_dir}:{env['PATH']}"
+        env, _ = env_with_test_verified_owner(
+            tmp,
+            bin_dir,
+            adapter_id="codex-app-server",
+            executable=bin_dir / "codex",
+        )
         result = subprocess.run(
             [str(SCRIPT), "--tool", "codex", "--orchestrator-family", "anthropic", "--out", str(tmp / "missing" / "out.txt"), "--prompt", "Review", "--evidence-root", str(tmp)],
             cwd=td,
@@ -1177,8 +1406,12 @@ def test_resolved_role_effort_reaches_codex_adapter_and_receipt():
             echo OK
             ''',
         )
-        env = fabric_free_env()
-        env["PATH"] = f"{bin_dir}:{env['PATH']}"
+        env, _ = env_with_test_verified_owner(
+            tmp,
+            bin_dir,
+            adapter_id="codex-app-server",
+            executable=bin_dir / "codex",
+        )
         result = subprocess.run(
             [
                 str(SCRIPT),
@@ -1231,8 +1464,12 @@ def test_codex_capability_discovery_failure_blocks_execution_with_receipt():
             exit 9
             ''',
         )
-        env = fabric_free_env()
-        env["PATH"] = f"{bin_dir}:{env['PATH']}"
+        env, _ = env_with_test_verified_owner(
+            tmp,
+            bin_dir,
+            adapter_id="codex-app-server",
+            executable=bin_dir / "codex",
+        )
         result = subprocess.run(
             [
                 str(SCRIPT),
@@ -1280,8 +1517,12 @@ def test_mixed_malformed_codex_capabilities_block_execution_with_receipt():
             exit 9
             ''',
         )
-        env = fabric_free_env()
-        env["PATH"] = f"{bin_dir}:{env['PATH']}"
+        env, _ = env_with_test_verified_owner(
+            tmp,
+            bin_dir,
+            adapter_id="codex-app-server",
+            executable=bin_dir / "codex",
+        )
         result = subprocess.run(
             [
                 str(SCRIPT),
@@ -1327,8 +1568,12 @@ def test_unrelated_codex_model_without_efforts_blocks_execution_with_receipt():
             exit 9
             ''',
         )
-        env = fabric_free_env()
-        env["PATH"] = f"{bin_dir}:{env['PATH']}"
+        env, _ = env_with_test_verified_owner(
+            tmp,
+            bin_dir,
+            adapter_id="codex-app-server",
+            executable=bin_dir / "codex",
+        )
         result = subprocess.run(
             [
                 str(SCRIPT),
@@ -1374,8 +1619,12 @@ def test_duplicate_codex_discovery_member_blocks_execution_with_receipt():
             exit 9
             ''',
         )
-        env = fabric_free_env()
-        env["PATH"] = f"{bin_dir}:{env['PATH']}"
+        env, _ = env_with_test_verified_owner(
+            tmp,
+            bin_dir,
+            adapter_id="codex-app-server",
+            executable=bin_dir / "codex",
+        )
         result = subprocess.run(
             [
                 str(SCRIPT),
@@ -1421,8 +1670,12 @@ def test_codex_explicit_model_rejection_never_reports_it_as_resolved():
             exit 9
             ''',
         )
-        env = fabric_free_env()
-        env["PATH"] = f"{bin_dir}:{env['PATH']}"
+        env, _ = env_with_test_verified_owner(
+            tmp,
+            bin_dir,
+            adapter_id="codex-app-server",
+            executable=bin_dir / "codex",
+        )
         result = subprocess.run(
             [
                 str(SCRIPT),
@@ -1462,8 +1715,12 @@ def test_interrupted_dispatch_cleans_internal_tempfiles():
         bin_dir.mkdir()
         temp_root.mkdir()
         write_executable(bin_dir / "codex", "#!/usr/bin/env bash\nsleep 10\n")
-        env = fabric_free_env()
-        env["PATH"] = f"{bin_dir}:{env['PATH']}"
+        env, _ = env_with_test_verified_owner(
+            tmp,
+            bin_dir,
+            adapter_id="codex-app-server",
+            executable=bin_dir / "codex",
+        )
         env["TMPDIR"] = str(temp_root)
         proc = subprocess.Popen(
             [str(SCRIPT), "--tool", "codex", "--orchestrator-family", "anthropic", "--out", str(tmp / "out.txt"), "--prompt", "Review", "--evidence-root", str(tmp)],
@@ -1658,6 +1915,7 @@ def test_non_git_fallback_routes_via_product_root_model_route():
             PRODUCT_ROOT / "skills" / "_shared" / "no_follow.py",
             product / "skills" / "_shared" / "no_follow.py",
         )
+        (product / "package.json").write_text('{"type":"module"}\n', encoding="utf-8")
         shutil.copytree(PRODUCT_ROOT / "config", product / "config")
         (product / "scripts").mkdir()
         for name in (
@@ -1666,6 +1924,19 @@ def test_non_git_fallback_routes_via_product_root_model_route():
             "model_route_preferences.py",
         ):
             shutil.copy2(PRODUCT_ROOT / "scripts" / name, product / "scripts" / name)
+        for relative_path in (
+            "runtime/agent-fabric/src/adapters/primary-adapters.ts",
+            "runtime/agent-fabric/src/domain/versions.ts",
+            "runtime/agent-fabric/src/adapters/compatibility.ts",
+            "runtime/agent-fabric/src/errors.ts",
+            "runtime/agent-fabric/scripts/validate-adapter-executables.ts",
+            "runtime/agent-fabric/schemas/adapter-compatibility.schema.json",
+            "scripts/lib/agent-fabric-tsx-loader.sh",
+        ):
+            destination = product / relative_path
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(PRODUCT_ROOT / relative_path, destination)
+        os.symlink(PRODUCT_ROOT / "node_modules", product / "node_modules", target_is_directory=True)
         bin_dir = tmp / "bin"
         bin_dir.mkdir()
         write_executable(
@@ -1679,6 +1950,9 @@ def test_non_git_fallback_routes_via_product_root_model_route():
         write_executable(bin_dir / "python3", f'#!/bin/sh\nexec {sys.executable} "$@"\n')
         env = fabric_free_env()
         env["PATH"] = f"{bin_dir}:/usr/bin:/bin"
+        node = shutil.which("node")
+        assert node is not None
+        env["AGENT_FABRIC_NODE"] = node
         # cf_dispatch.sh appends $HOME/.local/bin and $HOME/bin to PATH;
         # point HOME at the sandbox so an installed provenant cannot leak in.
         env["HOME"] = str(tmp)

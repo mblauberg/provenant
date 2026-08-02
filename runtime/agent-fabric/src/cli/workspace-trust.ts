@@ -1,16 +1,24 @@
 import { createHash, randomBytes } from "node:crypto";
 import Database from "better-sqlite3";
 import { constants } from "node:fs";
-import { chmod, lstat, open, realpath, rename, rm } from "node:fs/promises";
+import { chmod, lstat, mkdir, open, realpath, rename, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, parse, resolve, sep } from "node:path";
 
 import { ensureFabricPaths, type FabricPaths } from "./paths.js";
 import {
   looksLikeRepositoryCollection,
+  projectBoundaryEvidenceDigest,
+  repositoryCollectionChildren,
+  resolveProjectBoundary,
+  type ProjectBoundary,
+} from "./project-boundary.js";
+
+export {
+  looksLikeRepositoryCollection,
   nearestGitWorkspace,
   repositoryCollectionChildren,
-} from "./mcp-bootstrap.js";
+} from "./project-boundary.js";
 
 const PROFILE_PATTERN = /^[a-z][a-z0-9-]{0,63}$/u;
 const DEFAULT_PROFILES = ["headless", "observed", "interactive", "paired-visible", "paired-observed"];
@@ -23,13 +31,63 @@ export type WorkspaceTrustEntry = {
   inode: number;
   expiresAt?: string;
   allowedProfiles: string[];
+  /** Present only on a grant made by the first-use bootstrap saga. */
+  establishmentKind?: "automatic-bootstrap";
+  boundaryKind?: "git" | "project-marker" | "non-git";
+  boundaryEvidenceDigest?: `sha256:${string}`;
+  bootstrapAttemptId?: string;
 };
+
+export type AutomaticBootstrapTrustResult = Readonly<{
+  identity: TrustedWorkspaceIdentity;
+  mutated: boolean;
+  alreadyTrusted: boolean;
+  /** The attempt that made or observed this request. */
+  requestAttemptId: string;
+  /** The persisted automatic grant attempt, or null for an explicit grant. */
+  bootstrapAttemptId: string | null;
+  boundaryKind: "git" | "project-marker" | "non-git" | null;
+  boundaryEvidenceDigest: `sha256:${string}` | null;
+}>;
 
 export type TrustedWorkspaceIdentity = {
   canonicalRoot: string;
   trustRecordDigest: `sha256:${string}`;
   entry: WorkspaceTrustEntry;
 };
+
+export class WorkspaceTrustError extends Error {
+  readonly code = "WORKSPACE_NOT_TRUSTED" as const;
+
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "WorkspaceTrustError";
+  }
+}
+
+export type WorkspaceTrustFailureContext = Readonly<{
+  boundary: ProjectBoundary;
+  boundaryEvidenceDigest: `sha256:${string}`;
+}>;
+
+const workspaceTrustFailureContexts = new WeakMap<WorkspaceTrustError, WorkspaceTrustFailureContext>();
+
+function boundaryTrustError(
+  boundary: ProjectBoundary,
+  message: string,
+  options?: ErrorOptions,
+): WorkspaceTrustError {
+  const error = new WorkspaceTrustError(message, options);
+  workspaceTrustFailureContexts.set(error, {
+    boundary,
+    boundaryEvidenceDigest: projectBoundaryEvidenceDigest(boundary),
+  });
+  return error;
+}
+
+export function workspaceTrustFailureContext(error: unknown): WorkspaceTrustFailureContext | undefined {
+  return error instanceof WorkspaceTrustError ? workspaceTrustFailureContexts.get(error) : undefined;
+}
 
 type WorkspaceTrustRegistry = { schemaVersion: 1; entries: WorkspaceTrustEntry[] };
 let mutationQueue: Promise<void> = Promise.resolve();
@@ -38,6 +96,14 @@ function errorCode(error: unknown): string | undefined {
   return typeof error === "object" && error !== null && "code" in error && typeof error.code === "string"
     ? error.code
     : undefined;
+}
+
+function errorDetail(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", `\\'"'"'`)}'`;
 }
 
 function timestamp(value: string, field: string): number {
@@ -62,6 +128,25 @@ function validateRegistry(value: unknown): WorkspaceTrustRegistry {
       candidate.allowedProfiles.some((profile: unknown) => typeof profile !== "string" || !PROFILE_PATTERN.test(profile)) ||
       ("expiresAt" in candidate && candidate.expiresAt !== undefined && typeof candidate.expiresAt !== "string")
     ) throw new Error("workspace trust entry is invalid");
+    const record = candidate as Record<string, unknown>;
+    const establishmentKind = record.establishmentKind;
+    const hasAutomaticProvenance = establishmentKind !== undefined;
+    if (hasAutomaticProvenance && establishmentKind !== "automatic-bootstrap") {
+      throw new Error("workspace trust entry establishment kind is invalid");
+    }
+    const boundaryKind = record.boundaryKind;
+    const boundaryEvidenceDigest = record.boundaryEvidenceDigest;
+    const bootstrapAttemptId = record.bootstrapAttemptId;
+    if (hasAutomaticProvenance) {
+      if (
+        (boundaryKind !== "git" && boundaryKind !== "project-marker" && boundaryKind !== "non-git") ||
+        typeof boundaryEvidenceDigest !== "string" || !/^sha256:[0-9a-f]{64}$/u.test(boundaryEvidenceDigest) ||
+        typeof bootstrapAttemptId !== "string" || bootstrapAttemptId.length === 0 ||
+        JSON.stringify(candidate.allowedProfiles) !== JSON.stringify(["headless"])
+      ) throw new Error("automatic workspace trust provenance is invalid");
+    } else if ("boundaryKind" in record || "boundaryEvidenceDigest" in record || "bootstrapAttemptId" in record) {
+      throw new Error("workspace trust provenance is incomplete");
+    }
     timestamp(candidate.approvedAt, "workspace approval");
     if (typeof candidate.expiresAt === "string") timestamp(candidate.expiresAt, "workspace expiry");
     return {
@@ -72,6 +157,12 @@ function validateRegistry(value: unknown): WorkspaceTrustRegistry {
       inode: candidate.inode,
       ...(typeof candidate.expiresAt === "string" ? { expiresAt: candidate.expiresAt } : {}),
       allowedProfiles: [...new Set(candidate.allowedProfiles as string[])].sort(),
+      ...(hasAutomaticProvenance ? {
+        establishmentKind: "automatic-bootstrap" as const,
+        boundaryKind: boundaryKind as "git" | "project-marker" | "non-git",
+        boundaryEvidenceDigest: boundaryEvidenceDigest as `sha256:${string}`,
+        bootstrapAttemptId: bootstrapAttemptId as string,
+      } : {}),
     };
   });
   if (new Set(entries.map((entry) => entry.canonicalPath)).size !== entries.length) throw new Error("workspace trust entries must be unique");
@@ -96,7 +187,15 @@ async function readRegistry(path: string): Promise<WorkspaceTrustRegistry> {
   }
 }
 
-async function writeRegistry(path: string, registry: WorkspaceTrustRegistry): Promise<void> {
+type AutomaticBootstrapTrustTestOnly = Readonly<{
+  beforeRegistryRename?: () => Promise<void>;
+}>;
+
+async function writeRegistry(
+  path: string,
+  registry: WorkspaceTrustRegistry,
+  testOnly?: AutomaticBootstrapTrustTestOnly,
+): Promise<void> {
   try {
     const existing = await lstat(path);
     if (!existing.isFile() || existing.isSymbolicLink() || (existing.mode & 0o077) !== 0) {
@@ -114,6 +213,9 @@ async function writeRegistry(path: string, registry: WorkspaceTrustRegistry): Pr
     await handle.close();
   }
   try {
+    if (process.env.NODE_ENV === "test") {
+      await testOnly?.beforeRegistryRename?.();
+    }
     await rename(temporary, path);
     // The temporary inode was created privately, so rename is the visibility
     // commit point. These follow-up operations improve durability or repair
@@ -229,8 +331,361 @@ function trustRecordDigest(entry: WorkspaceTrustEntry): `sha256:${string}` {
     device: entry.device,
     ...(entry.expiresAt === undefined ? {} : { expiresAt: entry.expiresAt }),
     inode: entry.inode,
+    ...(entry.establishmentKind === undefined ? {} : {
+      establishmentKind: entry.establishmentKind,
+      boundaryKind: entry.boundaryKind,
+      boundaryEvidenceDigest: entry.boundaryEvidenceDigest,
+      bootstrapAttemptId: entry.bootstrapAttemptId,
+    }),
   });
   return `sha256:${createHash("sha256").update(normalized).digest("hex")}`;
+}
+
+async function collectionBoundarySatisfied(canonicalRoot: string): Promise<boolean> {
+  try {
+    const boundary = await resolveProjectBoundary(canonicalRoot, { selection: "exact" });
+    if (boundary.evidence.kind === "refused") return false;
+    if (boundary.gitProbe === "unavailable" && boundary.evidence.kind !== "project-marker") return false;
+    if (boundary.evidence.kind !== "ambiguous" || boundary.evidence.reason !== "repository-collection") return true;
+    return !await looksLikeRepositoryCollection(canonicalRoot);
+  } catch (error: unknown) {
+    if (errorCode(error) === "ENOENT") return false;
+    throw error;
+  }
+}
+
+function collectionBoundaryError(canonicalRoot: string, repositories: string[]): WorkspaceTrustError {
+  const shellQuote = (value: string) => `'${value.replaceAll("'", `\'"\'"\'`)}'`;
+  const quotedRepositories = repositories.map(shellQuote);
+  const commands = repositories.map((repository) => `provenant fabric workspace trust ${shellQuote(repository)}`).join("; ");
+  return new WorkspaceTrustError(
+    `workspace trust refuses ${shellQuote(canonicalRoot)} because it is a repository collection; trust an exact repository root instead: ${quotedRepositories.join(", ")}. Run ${commands}`,
+  );
+}
+
+async function collectionChildGuidance(root: string): Promise<{ activations: string[]; repairs: string[] }> {
+  const children = await repositoryCollectionChildren(root);
+  const activations: string[] = [];
+  const repairs: string[] = [];
+  for (const child of children) {
+    try {
+      const boundary = await resolveProjectBoundary(child, { selection: "exact" });
+      const actionable = automaticBoundaryKind(boundary) !== null &&
+        boundary.selectedProjectRoot === child;
+      if (actionable) {
+        activations.push(`provenant project activate ${shellQuote(child)}`);
+      } else {
+        repairs.push(`Inspect and repair ${shellQuote(child)}: linked or invalid boundary evidence`);
+      }
+    } catch (cause: unknown) {
+      repairs.push(`Inspect and repair ${shellQuote(child)}: ${errorDetail(cause)}`);
+    }
+  }
+  return { activations, repairs };
+}
+
+async function automaticBoundaryRefusal(boundary: ProjectBoundary, cause?: unknown): Promise<WorkspaceTrustError> {
+  const evidence = boundary.evidence;
+  const root = boundary.selectedProjectRoot;
+  if (evidence.kind === "ambiguous" && evidence.reason === "repository-collection") {
+    const guidance = await collectionChildGuidance(root);
+    const childSummary = evidence.repositories.map((repository) => shellQuote(repository)).join(", ");
+    const activationText = guidance.activations.length > 0
+      ? ` Run ${guidance.activations.join("; ")}.`
+      : "";
+    const repairText = guidance.repairs.length > 0
+      ? ` ${guidance.repairs.join(". ")}.`
+      : "";
+    return boundaryTrustError(
+      boundary,
+      `automatic bootstrap enrolment refused for ${shellQuote(root)}: the selected directory is a repository collection. Choose one specific valid child repository: ${childSummary}.${activationText}${repairText} No automatic trust was added.`,
+      cause === undefined ? undefined : { cause },
+    );
+  }
+  if (boundary.gitProbe === "unavailable") {
+    const probeDetail = boundary.gitProbeError === null ? "the Git repository probe was unavailable" :
+      `the Git repository probe was unavailable (${boundary.gitProbeError})`;
+    return boundaryTrustError(
+      boundary,
+      `automatic bootstrap enrolment refused for ${shellQuote(root)}: ${probeDetail}; ` +
+      "non-Git admission requires a proven not-repository result. No automatic trust was added.",
+      cause === undefined ? undefined : { cause },
+    );
+  }
+  if (evidence.kind === "refused" && (evidence.reason === "filesystem-root" || evidence.reason === "home")) {
+    return boundaryTrustError(
+      boundary,
+      `automatic bootstrap enrolment refused for ${shellQuote(root)}: ${evidence.detail}. Choose a specific child repository or exact non-Git project directory and retry; no automatic trust was added.`,
+      cause === undefined ? undefined : { cause },
+    );
+  }
+  if (evidence.kind === "refused") {
+    return boundaryTrustError(
+      boundary,
+      `automatic bootstrap enrolment refused for ${shellQuote(root)}: ${evidence.detail}. Inspect and repair the boundary evidence, then retry from the exact repository root or exact marked non-Git project directory; no automatic trust was added.`,
+      cause === undefined ? undefined : { cause },
+    );
+  }
+  if (evidence.kind === "git" && evidence.linkedWorktree) {
+    return boundaryTrustError(
+      boundary,
+      `automatic bootstrap enrolment refused for ${shellQuote(root)}: the selected directory is a linked worktree; a worktree-path trust exception is a user-only decision. Inspect the worktree and make an explicit exact-root decision; no automatic trust was added.`,
+      cause === undefined ? undefined : { cause },
+    );
+  }
+  const detail = evidence.kind === "ambiguous"
+    ? "the selected directory is an unmarked non-Git directory"
+    : "the boundary evidence is not eligible for automatic bootstrap enrolment";
+  const causeDetail = cause === undefined ? "" : ` (${errorDetail(cause)})`;
+  return boundaryTrustError(
+    boundary,
+    `automatic bootstrap enrolment refused for ${shellQuote(root)}: ${detail}${causeDetail}. Run provenant project activate ${shellQuote(root)} for an explicit exact-root decision; no automatic trust was added.`,
+    cause === undefined ? undefined : { cause },
+  );
+}
+
+function automaticBoundaryKind(boundary: ProjectBoundary): "git" | "project-marker" | "non-git" | null {
+  if (boundary.evidence.kind === "git" && !boundary.evidence.linkedWorktree &&
+    boundary.selectedProjectRoot === boundary.evidence.root) return "git";
+  if (boundary.evidence.kind === "project-marker" &&
+    boundary.gitProbe === "not-repository" &&
+    boundary.selectedProjectRoot === boundary.evidence.root &&
+    boundary.selectedProjectRoot === boundary.requestedDirectory) return "project-marker";
+  if (boundary.evidence.kind === "ambiguous" &&
+    boundary.evidence.reason === "unmarked-non-git" &&
+    boundary.gitProbe === "not-repository" &&
+    boundary.selectedProjectRoot === boundary.requestedDirectory &&
+    boundary.evidence.root === boundary.requestedDirectory) return "non-git";
+  return null;
+}
+
+function automaticBoundaryMatchesEntry(
+  boundary: ProjectBoundary,
+  entry: WorkspaceTrustEntry,
+): boolean {
+  return entry.establishmentKind === "automatic-bootstrap" &&
+    entry.boundaryKind !== undefined &&
+    entry.boundaryEvidenceDigest !== undefined &&
+    boundary.selectedProjectRoot === entry.canonicalPath &&
+    automaticBoundaryKind(boundary) === entry.boundaryKind &&
+    projectBoundaryEvidenceDigest(boundary) === entry.boundaryEvidenceDigest;
+}
+
+async function validateAutomaticEntryBoundary(entry: WorkspaceTrustEntry): Promise<void> {
+  if (
+    entry.establishmentKind !== "automatic-bootstrap" ||
+    entry.boundaryKind === undefined ||
+    entry.boundaryEvidenceDigest === undefined ||
+    entry.bootstrapAttemptId === undefined ||
+    JSON.stringify(entry.allowedProfiles) !== JSON.stringify(["headless"])
+  ) {
+    throw new WorkspaceTrustError(
+      `automatic workspace trust at ${shellQuote(entry.canonicalPath)} has incomplete provenance; ` +
+      "inspect and repair the trust record before retrying",
+    );
+  }
+  let boundary: ProjectBoundary;
+  try {
+    boundary = await resolveProjectBoundary(entry.canonicalPath, { selection: "exact" });
+  } catch (cause: unknown) {
+    throw new WorkspaceTrustError(
+      `automatic workspace trust at ${shellQuote(entry.canonicalPath)} could not revalidate its live boundary: ${errorDetail(cause)}; ` +
+      "inspect and repair the boundary evidence before retrying",
+      { cause },
+    );
+  }
+  if (!automaticBoundaryMatchesEntry(boundary, entry)) {
+    throw new WorkspaceTrustError(
+      `automatic workspace trust at ${shellQuote(entry.canonicalPath)} no longer matches the live boundary evidence; ` +
+      "inspect and repair the boundary evidence before retrying",
+    );
+  }
+}
+
+async function automaticEntryIsLive(entry: WorkspaceTrustEntry): Promise<boolean> {
+  if (await identityState(entry) === "mismatch") return false;
+  if (entry.establishmentKind === "automatic-bootstrap") {
+    try {
+      await validateAutomaticEntryBoundary(entry);
+    } catch {
+      return false;
+    }
+  }
+  return await collectionBoundarySatisfied(entry.canonicalPath);
+}
+
+function automaticTrustIdentity(entry: WorkspaceTrustEntry): TrustedWorkspaceIdentity {
+  return {
+    canonicalRoot: entry.canonicalPath,
+    trustRecordDigest: trustRecordDigest(entry),
+    entry: { ...entry, allowedProfiles: [...entry.allowedProfiles] },
+  };
+}
+
+/**
+ * Establish exact-root trust as part of first-use bootstrap. This is the only
+ * automatic writer: it reuses the existing registry lock and writer and never
+ * changes an existing grant, including one created by an explicit operator.
+ */
+export async function ensureAutomaticBootstrapTrust(input: {
+  stateDirectory: string;
+  bootstrapAttemptId: string;
+  cwd: string;
+  now?: Date;
+  testOnly?: AutomaticBootstrapTrustTestOnly;
+}): Promise<AutomaticBootstrapTrustResult> {
+  const boundary = await resolveProjectBoundary(input.cwd);
+  return ensureAutomaticBootstrapTrustAtBoundary({
+    stateDirectory: input.stateDirectory,
+    boundary,
+    requestAttemptId: input.bootstrapAttemptId,
+    ...(input.now === undefined ? {} : { now: input.now }),
+    ...(input.testOnly === undefined ? {} : { testOnly: input.testOnly }),
+  });
+}
+
+async function ensureAutomaticBootstrapTrustAtBoundary(input: {
+  stateDirectory: string;
+  boundary: ProjectBoundary;
+  requestAttemptId: string;
+  now?: Date;
+  testOnly?: AutomaticBootstrapTrustTestOnly;
+}): Promise<AutomaticBootstrapTrustResult> {
+  const initialBoundaryKind = automaticBoundaryKind(input.boundary);
+  const initialSelectedIdentity = await canonicalWorkspace(input.boundary.selectedProjectRoot).catch(async (cause: unknown) => {
+    throw await automaticBoundaryRefusal(input.boundary, cause);
+  });
+  const initialBoundaryEvidenceDigest = projectBoundaryEvidenceDigest(input.boundary);
+  const now = input.now ?? new Date();
+  const registryPath = join(input.stateDirectory, "trusted-workspaces.json");
+  if (initialBoundaryKind === null) {
+    const stateDirectoryExists = await lstat(input.stateDirectory).then((value) => value.isDirectory() && !value.isSymbolicLink()).catch((cause: unknown) => {
+      if (errorCode(cause) === "ENOENT") return false;
+      throw cause;
+    });
+    if (!stateDirectoryExists) throw await automaticBoundaryRefusal(input.boundary);
+    const existing = await readRegistry(registryPath);
+    if (!existing.entries.some((entry) => entry.canonicalPath === initialSelectedIdentity.canonicalPath)) {
+      throw await automaticBoundaryRefusal(input.boundary);
+    }
+  }
+  await mkdir(input.stateDirectory, { recursive: true, mode: 0o700 });
+
+  return await withRegistryMutationLock(input.stateDirectory, async () => {
+    const current = await readRegistry(registryPath);
+    // The first resolution is only a preflight. The registry lock must cover a
+    // fresh boundary decision, identity lookup and the grant write so removing
+    // or replacing `.git` while this request waits cannot leave stale evidence
+    // behind as an automatic grant.
+    const liveBoundary = await resolveProjectBoundary(input.boundary.requestedDirectory);
+    const liveBoundaryKind = automaticBoundaryKind(liveBoundary);
+    const liveBoundaryEvidenceDigest = projectBoundaryEvidenceDigest(liveBoundary);
+    const liveSelectedIdentity = await canonicalWorkspace(liveBoundary.selectedProjectRoot).catch(async (cause: unknown) => {
+      throw await automaticBoundaryRefusal(liveBoundary, cause);
+    });
+    let persistedBoundary: ProjectBoundary;
+    try {
+      // Automatic entries are keyed by the exact selected root. Persist the
+      // exact-root snapshot so later liveness checks hash the same boundary
+      // shape even when admission began from a nested CWD.
+      persistedBoundary = await resolveProjectBoundary(liveSelectedIdentity.canonicalPath, { selection: "exact" });
+    } catch (cause: unknown) {
+      throw await automaticBoundaryRefusal(liveBoundary, cause);
+    }
+    const persistedBoundaryKind = automaticBoundaryKind(persistedBoundary);
+    const persistedBoundaryEvidenceDigest = projectBoundaryEvidenceDigest(persistedBoundary);
+    if (
+      liveBoundary.selectedProjectRoot !== input.boundary.selectedProjectRoot ||
+      liveBoundaryKind !== initialBoundaryKind ||
+      liveBoundaryEvidenceDigest !== initialBoundaryEvidenceDigest ||
+      persistedBoundary.selectedProjectRoot !== liveSelectedIdentity.canonicalPath ||
+      persistedBoundaryKind !== liveBoundaryKind
+    ) {
+      throw await automaticBoundaryRefusal(liveBoundary, "the boundary changed while the registry lock was being acquired");
+    }
+    const currentEntry = current.entries.find((entry) => entry.canonicalPath === liveSelectedIdentity.canonicalPath);
+    if (currentEntry !== undefined) {
+      const state = await identityState(currentEntry);
+      if (state === "mismatch") {
+        throw boundaryTrustError(liveBoundary,
+          `automatic bootstrap enrolment refused for ${shellQuote(liveSelectedIdentity.canonicalPath)}: ` +
+          "the existing trust record no longer matches the live directory identity. " +
+          "Inspect and repair the trust record before retrying; no automatic trust was added.",
+        );
+      }
+      if (currentEntry.expiresAt !== undefined && timestamp(currentEntry.expiresAt, "workspace expiry") <= now.getTime()) {
+        throw boundaryTrustError(liveBoundary,
+          `automatic bootstrap enrolment refused for ${shellQuote(liveSelectedIdentity.canonicalPath)}: ` +
+          "the existing trust record is expired. " +
+          `Run provenant project activate ${shellQuote(liveSelectedIdentity.canonicalPath)} for an explicit exact-root decision; no automatic trust was added.`,
+        );
+      }
+      if (currentEntry.establishmentKind === "automatic-bootstrap" && !currentEntry.allowedProfiles.includes("headless")) {
+        throw boundaryTrustError(liveBoundary,
+          `automatic bootstrap enrolment refused for ${shellQuote(liveSelectedIdentity.canonicalPath)}: ` +
+          "the existing trust record does not allow the headless profile. " +
+          "Inspect and repair the trust record before retrying; no automatic trust was added.",
+        );
+      }
+      if (currentEntry.establishmentKind === "automatic-bootstrap" && !automaticBoundaryMatchesEntry(persistedBoundary, currentEntry)) {
+        throw boundaryTrustError(liveBoundary,
+          `automatic bootstrap enrolment refused for ${shellQuote(liveSelectedIdentity.canonicalPath)}: ` +
+          "the existing automatic trust record has different or stale boundary evidence. " +
+          "Inspect and repair the trust record and live boundary before retrying; no automatic trust was added.",
+        );
+      }
+      if (liveBoundary.evidence.kind === "ambiguous" && liveBoundary.evidence.reason === "repository-collection") {
+        throw await automaticBoundaryRefusal(liveBoundary);
+      }
+      return {
+        identity: automaticTrustIdentity(currentEntry),
+        mutated: false,
+        alreadyTrusted: true,
+        requestAttemptId: input.requestAttemptId,
+        bootstrapAttemptId: currentEntry.establishmentKind === "automatic-bootstrap"
+          ? currentEntry.bootstrapAttemptId ?? null
+          : null,
+        boundaryKind: currentEntry.boundaryKind ?? liveBoundaryKind,
+        boundaryEvidenceDigest: currentEntry.boundaryEvidenceDigest ??
+          (currentEntry.establishmentKind === "automatic-bootstrap" ? persistedBoundaryEvidenceDigest : null),
+      };
+    }
+
+    if (liveBoundaryKind === null) throw await automaticBoundaryRefusal(liveBoundary);
+    const broadened = current.entries.find((entry) => entry.canonicalPath.startsWith(`${liveSelectedIdentity.canonicalPath}${sep}`));
+    if (broadened !== undefined) {
+      throw boundaryTrustError(liveBoundary,
+        `automatic bootstrap enrolment refused for ${shellQuote(liveSelectedIdentity.canonicalPath)}: ` +
+        `it would broaden trust over the existing exact root ${shellQuote(broadened.canonicalPath)}. ` +
+        "Choose the exact root deliberately; no automatic trust was added.",
+      );
+    }
+    if (liveBoundary.evidence.kind === "ambiguous" && liveBoundary.evidence.reason === "repository-collection") {
+      throw await automaticBoundaryRefusal(liveBoundary);
+    }
+    const entry: WorkspaceTrustEntry = {
+      canonicalPath: liveSelectedIdentity.canonicalPath,
+      approvedAt: now.toISOString(),
+      approvedBy: "local-operator",
+      device: liveSelectedIdentity.device,
+      inode: liveSelectedIdentity.inode,
+      allowedProfiles: ["headless"],
+      establishmentKind: "automatic-bootstrap",
+      boundaryKind: liveBoundaryKind,
+      boundaryEvidenceDigest: persistedBoundaryEvidenceDigest,
+      bootstrapAttemptId: input.requestAttemptId,
+    };
+    await writeRegistry(registryPath, { schemaVersion: 1, entries: [...current.entries, entry] }, input.testOnly);
+    return {
+      identity: automaticTrustIdentity(entry),
+      mutated: true,
+      alreadyTrusted: false,
+      requestAttemptId: input.requestAttemptId,
+      bootstrapAttemptId: input.requestAttemptId,
+      boundaryKind: liveBoundaryKind,
+      boundaryEvidenceDigest: persistedBoundaryEvidenceDigest,
+    };
+  });
 }
 
 function option(arguments_: string[], name: string): string | undefined {
@@ -250,7 +705,7 @@ export async function trustedWorkspaceRoots(input: {
   const candidates = registry.entries
     .filter((entry) => input.executionProfile === undefined || entry.allowedProfiles.includes(input.executionProfile))
     .filter((entry) => entry.expiresAt === undefined || timestamp(entry.expiresAt, "workspace expiry") > now);
-  const matches = await Promise.all(candidates.map(identityMatches));
+  const matches = await Promise.all(candidates.map(async (entry) => await automaticEntryIsLive(entry)));
   return candidates.filter((_entry, index) => matches[index] === true).map((entry) => entry.canonicalPath);
 }
 
@@ -271,6 +726,10 @@ export async function trustedWorkspaceIdentity(input: {
     throw new Error("workspace trust record does not allow the requested profile");
   }
   if (!await identityMatches(entry)) throw new Error("workspace trust record no longer matches the live root identity");
+  if (entry.establishmentKind === "automatic-bootstrap") await validateAutomaticEntryBoundary(entry);
+  if (!await collectionBoundarySatisfied(identity.canonicalPath)) {
+    throw collectionBoundaryError(identity.canonicalPath, await repositoryCollectionChildren(identity.canonicalPath));
+  }
   return {
     canonicalRoot: entry.canonicalPath,
     trustRecordDigest: trustRecordDigest(entry),
@@ -291,6 +750,7 @@ export async function runWorkspaceTrust(
     // A record whose root has been removed or replaced is dead, but rendering it
     // exactly like a live one made `list` say trusted where `inspect` said false.
     const states = await Promise.all(registry.entries.map(identityState));
+    const liveEntries = await Promise.all(registry.entries.map(automaticEntryIsLive));
     return {
       schemaVersion: 1,
       registryPath,
@@ -298,7 +758,7 @@ export async function runWorkspaceTrust(
         ...entry,
         identity: states[index],
         expired: entry.expiresAt !== undefined && timestamp(entry.expiresAt, "workspace expiry") <= now.getTime(),
-        trusted: states[index] !== "mismatch" &&
+        trusted: liveEntries[index] && states[index] !== "mismatch" &&
           (entry.expiresAt === undefined || timestamp(entry.expiresAt, "workspace expiry") > now.getTime()),
       })),
     };
@@ -334,7 +794,7 @@ export async function runWorkspaceTrust(
   const existing = registry.entries.find((entry) => entry.canonicalPath === canonicalPath);
   if (action === "inspect") {
     const expired = existing?.expiresAt !== undefined && timestamp(existing.expiresAt, "workspace expiry") <= now.getTime();
-    const trusted = existing !== undefined && !expired && await identityMatches(existing);
+    const trusted = existing !== undefined && !expired && await automaticEntryIsLive(existing);
     return { schemaVersion: 1, canonicalPath, trusted, expired, entry: existing ?? null };
   }
   if (action !== "trust") throw new Error("workspace command must be trust, inspect, status, list or revoke");
@@ -357,28 +817,14 @@ export async function runWorkspaceTrust(
     const currentEntryIsLive = currentEntry !== undefined &&
       (currentEntry.expiresAt === undefined || timestamp(currentEntry.expiresAt, "workspace expiry") > now.getTime()) &&
       currentEntryIdentityMatches;
-    // A drifted record is honoured, but re-trusting it is the moment to write the
-    // live device back, so the stale number does not persist forever.
-    if (currentEntryIsLive && currentEntryState === "match" && profileValue === undefined && expiresAt === undefined) {
-      return {
-        schemaVersion: 1,
-        trusted: true,
-        alreadyTrusted: true,
-        entry: { ...currentEntry, allowedProfiles: [...currentEntry.allowedProfiles] },
-      };
-    }
     if (currentEntry === undefined || !currentEntryIdentityMatches) {
       const broadened = current.entries.find((item) => item.canonicalPath.startsWith(`${canonicalPath}${sep}`));
       if (broadened !== undefined) throw new Error(`workspace trust refuses ancestor broadening over ${broadened.canonicalPath}`);
     }
-    const workspace = await nearestGitWorkspace(canonicalPath);
-    if (workspace === null && await looksLikeRepositoryCollection(canonicalPath)) {
-      const repositories = await repositoryCollectionChildren(canonicalPath);
-      const commands = repositories.map((repository) => `provenant fabric workspace trust ${repository}`).join("; ");
-      throw new Error(
-        `workspace trust refuses ${canonicalPath} because it is a repository collection; trust an exact repository root instead: ${repositories.join(", ")}. Run ${commands}`,
-      );
-    }
+    // A drifted record is honoured, but re-trusting it is the moment to write the
+    // live device back, so the stale number does not persist forever.
+    const alreadyTrusted = currentEntryIsLive && currentEntryState === "match" &&
+      profileValue === undefined && expiresAt === undefined;
     const allowedProfiles = requestedProfiles ?? currentEntry?.allowedProfiles ?? DEFAULT_PROFILES;
     const currentExpiryIsLive = currentEntry?.expiresAt !== undefined &&
       timestamp(currentEntry.expiresAt, "workspace expiry") > now.getTime();
@@ -395,6 +841,17 @@ export async function runWorkspaceTrust(
       ...(effectiveExpiry === undefined ? {} : { expiresAt: effectiveExpiry }),
       allowedProfiles: [...new Set(allowedProfiles)].sort(),
     };
+    if (!await collectionBoundarySatisfied(canonicalPath)) {
+      throw collectionBoundaryError(canonicalPath, await repositoryCollectionChildren(canonicalPath));
+    }
+    if (alreadyTrusted && currentEntry !== undefined) {
+      return {
+        schemaVersion: 1,
+        trusted: true,
+        alreadyTrusted: true,
+        entry: { ...currentEntry, allowedProfiles: [...currentEntry.allowedProfiles] },
+      };
+    }
     await writeRegistry(registryPath, {
       schemaVersion: 1,
       entries: [...current.entries.filter((item) => item.canonicalPath !== canonicalPath), entry],

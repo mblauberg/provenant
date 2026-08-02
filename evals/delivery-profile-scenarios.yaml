@@ -74,7 +74,7 @@ cases:
     profile: software
     case_type: negative
     expected: fail
-    expected_error: deterministic evidence artifact evidence-bundle check tests does not match its evidence row
+    expected_error: deterministic evidence tests gate identity is invalid
     high_stakes: false
     risk_tier: substantial
     repetitions: 1

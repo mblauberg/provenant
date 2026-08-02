@@ -1,13 +1,11 @@
 import { randomUUID } from "node:crypto";
-import { lstat, readFile, readdir, realpath } from "node:fs/promises";
 import { createConnection } from "node:net";
-import { homedir } from "node:os";
-import { basename, dirname, join, parse, resolve } from "node:path";
 
 import Database from "better-sqlite3";
 import {
   FABRIC_OPERATIONS,
   MCP_BOOTSTRAP_CREDENTIALS_FEATURE,
+  MCP_BOOTSTRAP_RESULT_SHAPE_FEATURE,
   NdjsonRpcTransport,
 } from "@local/agent-fabric-protocol";
 
@@ -22,6 +20,15 @@ import {
 } from "../core/migrations.js";
 import { defaultDaemonStartOptions } from "./default-daemon-options.js";
 import type { FabricPaths } from "./paths.js";
+import { projectBoundaryEvidenceDigest, resolveProjectBoundary, type ProjectBoundary } from "./project-boundary.js";
+import {
+  attachLifecycleReceipt,
+  currentLedgerGeneration,
+  lifecycleFailureReceipt,
+  type LifecycleAction,
+  type LifecycleActionReceipt,
+} from "../lifecycle/lifecycle-receipt.js";
+export type { LifecycleAction, LifecycleActionReceipt } from "../lifecycle/lifecycle-receipt.js";
 import { fabricCliCommand } from "../domain/fabric-roots.js";
 import {
   installSeatGeneration,
@@ -32,7 +39,11 @@ import {
   SeatGenerationChangedError,
   type SeatMetadata,
 } from "./seat-store.js";
-import { trustedWorkspaceIdentity } from "./workspace-trust.js";
+import {
+  ensureAutomaticBootstrapTrust,
+  trustedWorkspaceIdentity,
+  workspaceTrustFailureContext,
+} from "./workspace-trust.js";
 
 /**
  * Whole-smoke wall-clock budget covering connect, `whoami` and `mailbox.read`.
@@ -52,70 +63,6 @@ import { trustedWorkspaceIdentity } from "./workspace-trust.js";
  * bound is left to the daemon answering.
  */
 export const IDENTITY_SMOKE_DEADLINE_MS = 2_000;
-
-export type LifecycleAction =
-  | Readonly<{
-    action: "workspace-trust";
-    outcome: "resolved";
-    mutated: false;
-    trustRecordDigest: string;
-  }>
-  | Readonly<{
-    action: "daemon";
-    outcome: "attached" | "started";
-    mutated: boolean;
-    pid: number;
-    socketPath: string;
-  }>
-  | Readonly<{
-    action: "seat-generation";
-    outcome: "installed" | "replayed";
-    mutated: boolean;
-    generation: string;
-    previousGeneration: string | null;
-  }>
-  | Readonly<{
-    action: "legacy-bootstrap-provenance";
-    outcome: "recorded";
-    mutated: false;
-    generation: string;
-  }>
-  | Readonly<{
-    action: "identity-smoke";
-    outcome: "passed" | "failed";
-    mutated: false;
-    deadlineMs: number;
-    elapsedMs: number;
-    agentId: string | null;
-    mailboxWatermark: number | null;
-    code: string | null;
-  }>;
-
-/**
- * One concise machine-readable record of every automatic action this lifecycle
- * call took.
- *
- * `mutated` is the idempotency assertion surface, and it means exactly one
- * thing: no logical custody state changed. That is the daemon process
- * identity, the active seat generation and its installed roster, and the
- * database rows behind them. A converged repeat invocation reports `false`.
- *
- * It is deliberately not a claim that no bytes were written. A replay still
- * stages the roster through a private temporary tree and re-verifies the
- * installed files before discarding it, which touches directory metadata.
- * Callers reasoning about disk effects must observe the filesystem; callers
- * reasoning about whether a seat rotated or a daemon restarted read this.
- */
-export type LifecycleActionReceipt = Readonly<{
-  schemaVersion: 1;
-  kind: "agent-fabric-lifecycle-action";
-  canonicalRoot: string;
-  seat: "claude" | "codex";
-  generation: string;
-  mutated: boolean;
-  healthy: boolean;
-  actions: readonly LifecycleAction[];
-}>;
 
 /**
  * Material state displacement is one user decision, never an automatic action.
@@ -159,7 +106,7 @@ export type BootstrapMcpSeatIdentity = {
 
 export class McpBootstrapError extends Error {
   constructor(
-    readonly code: "WORKSPACE_NOT_TRUSTED" | "BOOTSTRAP_GENERATION_CHANGED",
+    readonly code: "WORKSPACE_NOT_TRUSTED" | "BOOTSTRAP_GENERATION_CHANGED" | "CUSTODY_AMBIGUOUS" | "POST_CUSTODY_BOUNDARY",
     message: string,
     options?: ErrorOptions,
   ) {
@@ -186,114 +133,82 @@ function shellQuote(value: string): string {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
 
-type GitWorkspace = Readonly<{ root: string; linkedWorktree: boolean }>;
-
-function isMissingPathError(error: unknown): boolean {
-  return typeof error === "object" && error !== null && "code" in error &&
-    (error.code === "ENOENT" || error.code === "ENOTDIR");
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
-function hasErrorCode(error: unknown, code: string): boolean {
-  return typeof error === "object" && error !== null && "code" in error && error.code === code;
+function isAmbiguousBootstrapResponse(error: unknown): boolean {
+  if (typeof error !== "object" || error === null || !("code" in error) || typeof error.code !== "string") return false;
+  return ["DAEMON_DISCONNECTED", "DAEMON_REQUEST_TIMEOUT", "DAEMON_PROTOCOL_INVALID", "DAEMON_CONNECT_TIMEOUT"].includes(error.code);
 }
 
-// Gitfiles also identify submodules, so the file alone does not prove a linked
-// worktree. Only its canonical gitdir under another repository's
-// `.git/worktrees/` boundary activates the user-only exception guidance.
-function pointsToLinkedWorktree(gitDirectory: string, workspaceRoot: string): boolean {
-  let candidate = gitDirectory;
-  for (;;) {
-    const parent = dirname(candidate);
-    if (basename(parent) === "worktrees" && basename(dirname(parent)) === ".git") {
-      return dirname(dirname(parent)) !== workspaceRoot;
-    }
-    if (parent === candidate) return false;
-    candidate = parent;
-  }
+function workspaceTrustAction(
+  trust: Awaited<ReturnType<typeof ensureAutomaticBootstrapTrust>>,
+): Extract<LifecycleAction, { action: "workspace-trust" }> {
+  const entry = trust.identity.entry;
+  return {
+    action: "workspace-trust",
+    outcome: trust.mutated ? "enrolled" : trust.alreadyTrusted
+      ? (entry.establishmentKind === "automatic-bootstrap" ? "already-trusted" : "resolved")
+      : "resolved",
+    mutated: trust.mutated,
+    alreadyTrusted: trust.alreadyTrusted,
+    trustRetained: true,
+    trustRecordDigest: trust.identity.trustRecordDigest,
+    establishmentKind: entry.establishmentKind ?? "local-operator",
+    boundaryKind: trust.boundaryKind,
+    boundaryEvidenceDigest: trust.boundaryEvidenceDigest,
+    requestAttemptId: trust.requestAttemptId,
+    bootstrapAttemptId: trust.bootstrapAttemptId,
+  };
 }
 
-export async function nearestGitWorkspace(canonicalRoot: string): Promise<GitWorkspace | null> {
-  let candidate = canonicalRoot;
-  for (;;) {
-    const filesystemRoot = candidate === parse(candidate).root;
-    let marker: Awaited<ReturnType<typeof lstat>>;
-    try {
-      marker = await lstat(join(candidate, ".git"));
-    } catch (error: unknown) {
-      // macOS may report EINVAL rather than ENOENT for `/.git` in a sandbox.
-      // It is a missing root marker only at this terminal probe; the same
-      // error anywhere else leaves the boundary indeterminate and fail-closed.
-      if (!isMissingPathError(error) && !(filesystemRoot && hasErrorCode(error, "EINVAL"))) throw error;
-      if (filesystemRoot) return null;
-      candidate = dirname(candidate);
-      continue;
-    }
-    if (marker.isDirectory()) return { root: candidate, linkedWorktree: false };
-    if (marker.isFile()) {
-      const match = /^gitdir:\s*(?<path>.+?)\s*$/u.exec(await readFile(join(candidate, ".git"), "utf8"));
-      const gitDirectory = match?.groups?.path;
-      if (gitDirectory === undefined) throw new Error("Git workspace marker is not a gitdir file");
-      const canonicalGitDirectory = await realpath(resolve(candidate, gitDirectory));
-      return {
-        root: candidate,
-        linkedWorktree: pointsToLinkedWorktree(canonicalGitDirectory, candidate),
-      };
-    }
-    throw new Error("Git workspace marker must be a directory or regular file");
-  }
-}
-
-export async function repositoryCollectionChildren(canonicalRoot: string): Promise<string[]> {
-  const children = await readdir(canonicalRoot, { withFileTypes: true });
-  const repositories: string[] = [];
-  for (const child of children) {
-    if (!child.isDirectory()) continue;
-    try {
-      const marker = await lstat(join(canonicalRoot, child.name, ".git"));
-      if (marker.isDirectory() || marker.isFile()) repositories.push(join(canonicalRoot, child.name));
-    } catch (error: unknown) {
-      if (!isMissingPathError(error)) throw error;
-    }
-  }
-  return repositories;
-}
-
-// The collection heuristic is intentionally shallow: direct repository
-// children show that trusting this directory would grant sibling authority,
-// while recursively searching would misclassify an ordinary project that
-// happens to contain nested fixtures or vendored repositories.
-export async function looksLikeRepositoryCollection(canonicalRoot: string): Promise<boolean> {
-  return (await repositoryCollectionChildren(canonicalRoot)).length > 1;
+function failedWorkspaceTrustAction(
+  boundary: ProjectBoundary,
+  requestAttemptId: string,
+  boundaryEvidenceDigest: `sha256:${string}` = projectBoundaryEvidenceDigest(boundary),
+): Extract<LifecycleAction, { action: "workspace-trust" }> {
+  return {
+    action: "workspace-trust",
+    outcome: "failed",
+    mutated: false,
+    alreadyTrusted: false,
+    trustRetained: false,
+    trustRecordDigest: null,
+    establishmentKind: null,
+    boundaryKind: boundary.evidence.kind === "git" || boundary.evidence.kind === "project-marker"
+      ? boundary.evidence.kind
+      : null,
+    boundaryEvidenceDigest,
+    requestAttemptId,
+    bootstrapAttemptId: null,
+  };
 }
 
 async function workspaceTrustRecoveryMessage(
-  canonicalRoot: string,
+  boundary: ProjectBoundary,
   environment: NodeJS.ProcessEnv = process.env,
 ): Promise<string> {
-  const home = await realpath(homedir());
-  if (canonicalRoot === parse(canonicalRoot).root) {
-    return `Fabric bootstrap cannot proceed from ${shellQuote(canonicalRoot)}: the filesystem root can never be trusted because root-wide authority is forbidden by policy. Choose the exact repository root or current non-Git project directory instead`;
+  const evidence = boundary.evidence;
+  if (evidence.kind === "refused" && evidence.reason === "filesystem-root") {
+    return `Fabric bootstrap cannot proceed from ${shellQuote(evidence.root)}: the filesystem root can never be trusted because root-wide authority is forbidden by policy. Choose the exact repository root or current non-Git project directory instead`;
   }
-  if (canonicalRoot === home) {
-    return `Fabric bootstrap cannot proceed from ${shellQuote(canonicalRoot)}: this exact path can never be trusted because home-wide trust is forbidden by policy. Choose the exact repository root or current non-Git project directory instead`;
+  if (evidence.kind === "refused" && evidence.reason === "home") {
+    return `Fabric bootstrap cannot proceed from ${shellQuote(evidence.root)}: this exact path can never be trusted because home-wide trust is forbidden by policy. Choose the exact repository root or current non-Git project directory instead`;
   }
-  const workspace = await nearestGitWorkspace(canonicalRoot);
-  if (workspace !== null && workspace.root === parse(workspace.root).root) {
-    return `Fabric bootstrap cannot proceed from ${shellQuote(workspace.root)}: the filesystem root can never be trusted because root-wide authority is forbidden by policy. Choose the exact repository root or current non-Git project directory instead`;
+  if (evidence.kind === "git" && evidence.linkedWorktree) {
+    return `Fabric bootstrap cannot proceed from ${shellQuote(evidence.root)} because it is a linked worktree; granting a worktree-path trust exception is a user-only decision, and the agent must not run a trust command unprompted`;
   }
-  if (workspace?.root === home) {
-    return `Fabric bootstrap cannot proceed from ${shellQuote(workspace.root)}: this exact path can never be trusted because home-wide trust is forbidden by policy. Choose the exact repository root or current non-Git project directory instead`;
+  if (evidence.kind === "ambiguous" && evidence.reason === "repository-collection") {
+    return `Fabric bootstrap cannot proceed from ${shellQuote(evidence.root)} because it looks like a parent collection of several repositories; policy forbids trusting a parent or collection directory. Run fabric_bootstrap again from inside the specific project it actually needs`;
   }
-  if (workspace?.linkedWorktree === true) {
-    return `Fabric bootstrap cannot proceed from ${shellQuote(workspace.root)} because it is a linked worktree; granting a worktree-path trust exception is a user-only decision, and the agent must not run a trust command unprompted`;
+  if ((evidence.kind === "git" || evidence.kind === "project-marker") && evidence.root !== boundary.requestedDirectory) {
+    return `Fabric bootstrap requires the exact current project root to be trusted; run ${fabricCliCommand({ environment })} workspace trust ${shellQuote(evidence.root)}; then retry fabric_bootstrap from ${shellQuote(evidence.root)}`;
   }
-  if (workspace === null && await looksLikeRepositoryCollection(canonicalRoot)) {
-    return `Fabric bootstrap cannot proceed from ${shellQuote(canonicalRoot)} because it looks like a parent collection of several repositories; policy forbids trusting a parent or collection directory. Run fabric_bootstrap again from inside the specific project it actually needs`;
+  if (evidence.kind === "refused") {
+    return `Fabric bootstrap cannot safely determine the trust boundary for ${shellQuote(boundary.requestedDirectory)}: ${evidence.detail}. No trust command can be suggested. Inspect the workspace and retry from the exact repository root or current non-Git project directory`;
   }
-  if (workspace !== null && workspace.root !== canonicalRoot) {
-    return `Fabric bootstrap requires the exact current project root to be trusted; run ${fabricCliCommand({ environment })} workspace trust ${shellQuote(workspace.root)}; then retry fabric_bootstrap from ${shellQuote(workspace.root)}`;
-  }
-  return `Fabric bootstrap requires the exact current project root to be trusted; run ${fabricCliCommand({ environment })} workspace trust ${shellQuote(workspace?.root ?? canonicalRoot)}; then retry fabric_bootstrap`;
+  return `Fabric bootstrap requires the exact current project root to be trusted; run ${fabricCliCommand({ environment })} workspace trust ${shellQuote(boundary.requestedDirectory)}; then retry fabric_bootstrap`;
 }
 
 export function isSchemaCutoverRefusal(error: unknown): boolean {
@@ -452,7 +367,7 @@ export async function inspectBootstrapMcpSeat(input: {
       `${fabricCliCommand({ environment: input.environment })} mcp peer-provision --project ${shellQuote(input.cwd)} --seat ${seat} instead`,
     );
   }
-  const canonicalRoot = await realpath(input.cwd);
+  const canonicalRoot = (await resolveProjectBoundary(input.cwd)).selectedProjectRoot;
   const database = new Database(input.paths.databasePath, { readonly: true, fileMustExist: true });
   try {
     const value = database.prepare(`
@@ -508,6 +423,7 @@ export async function bootstrapMcpSeat(input: {
   paths: FabricPaths;
   now?: Date;
   smokeDeadlineMs?: number;
+  testOnly?: { beforeRegistryRename?: () => Promise<void> };
 }): Promise<InstalledBootstrapMcpSeat> {
   const seat = parseMcpSeat(input.environment.AGENT_FABRIC_SEAT ?? "");
   if (seat !== "claude" && seat !== "codex") {
@@ -516,23 +432,49 @@ export async function bootstrapMcpSeat(input: {
       `${fabricCliCommand({ environment: input.environment })} mcp peer-provision --project ${shellQuote(input.cwd)} --seat ${seat} instead`,
     );
   }
-  const canonicalRoot = await realpath(input.cwd);
-  let identity: Awaited<ReturnType<typeof trustedWorkspaceIdentity>>;
+  let canonicalRoot = input.cwd;
+  const bootstrapAttemptId = randomUUID();
+  let trust: Awaited<ReturnType<typeof ensureAutomaticBootstrapTrust>>;
   try {
-    identity = await trustedWorkspaceIdentity({
+    trust = await ensureAutomaticBootstrapTrust({
       stateDirectory: input.paths.stateDirectory,
-      canonicalRoot,
+      bootstrapAttemptId,
+      cwd: input.cwd,
+      ...(input.now === undefined ? {} : { now: input.now }),
+      ...(input.testOnly === undefined ? {} : { testOnly: input.testOnly }),
     });
   } catch (cause: unknown) {
-    const message = await workspaceTrustRecoveryMessage(canonicalRoot, input.environment).catch(
-      () => `Fabric bootstrap cannot safely determine the trust boundary for ${shellQuote(canonicalRoot)}, so no trust command is suggested. Inspect the workspace and retry from the exact repository root or current non-Git project directory`,
-    );
-    throw new McpBootstrapError(
+    const failedContext = workspaceTrustFailureContext(cause);
+    const failureBoundary = failedContext?.boundary;
+    if (failureBoundary !== undefined) canonicalRoot = failureBoundary.selectedProjectRoot;
+    const message = cause instanceof Error
+      ? cause.message
+      : failureBoundary === undefined
+        ? `Fabric bootstrap cannot safely determine the trust boundary for ${shellQuote(canonicalRoot)}, so no trust command is suggested. Inspect the workspace and retry from the exact repository root or current non-Git project directory`
+        : await workspaceTrustRecoveryMessage(failureBoundary, input.environment).catch(
+          () => `Fabric bootstrap cannot safely determine the trust boundary for ${shellQuote(canonicalRoot)}, so no trust command is suggested. Inspect the workspace and retry from the exact repository root or current non-Git project directory`,
+        );
+    const error = new McpBootstrapError(
       "WORKSPACE_NOT_TRUSTED",
       message,
       { cause },
     );
+    throw attachLifecycleReceipt(error, lifecycleFailureReceipt({
+      canonicalRoot,
+      seat,
+      generation: "",
+      actions: failureBoundary === undefined ? [] : [failedWorkspaceTrustAction(
+        failureBoundary,
+        bootstrapAttemptId,
+        failedContext?.boundaryEvidenceDigest,
+      )],
+      phase: "workspace-trust",
+      cause,
+    }));
   }
+  const identity = trust.identity;
+  canonicalRoot = identity.canonicalRoot;
+  const trustAction = workspaceTrustAction(trust);
   // Read before the daemon can rotate anything: comparing this pointer with the
   // generation the daemon replays is what distinguishes an installed roster
   // from a replayed one without inferring it from timing or file mtimes.
@@ -540,31 +482,116 @@ export async function bootstrapMcpSeat(input: {
     stateDirectory: input.paths.stateDirectory,
     projectPath: identity.canonicalRoot,
   }).catch(() => null);
+  const phaseLedger: LifecycleAction[] = [trustAction];
   let daemonHandle: Awaited<ReturnType<typeof startFabricDaemon>>;
   try {
     daemonHandle = await startFabricDaemon(
-      defaultDaemonStartOptions(input.paths, { environment: input.environment }),
+      defaultDaemonStartOptions(input.paths, {
+        environment: input.environment,
+        projectRoot: identity.canonicalRoot,
+      }),
     );
   } catch (cause: unknown) {
-    if (!isSchemaCutoverRefusal(cause)) throw cause;
-    throw new McpBootstrapSchemaCutoverGateError(
-      schemaCutoverGate(input.paths.databasePath, cause, input.environment),
-      { cause },
-    );
+    const actions = [trustAction];
+    if (isSchemaCutoverRefusal(cause)) {
+      const error = new McpBootstrapSchemaCutoverGateError(
+        schemaCutoverGate(input.paths.databasePath, cause, input.environment),
+        { cause },
+      );
+      throw attachLifecycleReceipt(error, lifecycleFailureReceipt({
+        canonicalRoot,
+        seat,
+        generation: currentLedgerGeneration(actions, generationBefore?.generation ?? ""),
+        actions,
+        phase: "daemon-start",
+        cause,
+      }));
+    }
+    const error = cause instanceof Error ? cause : new Error(errorMessage(cause));
+    throw attachLifecycleReceipt(error, lifecycleFailureReceipt({
+      canonicalRoot,
+      seat,
+      generation: currentLedgerGeneration(actions, generationBefore?.generation ?? ""),
+      actions,
+      phase: "daemon-start",
+      cause,
+    }));
   }
+  phaseLedger.push({
+    action: "daemon",
+    outcome: daemonHandle.ownsProcess ? "started" : "attached",
+    mutated: daemonHandle.ownsProcess,
+    pid: daemonHandle.pid,
+    socketPath: daemonHandle.address.path,
+  });
   let daemon: Awaited<ReturnType<typeof connectFabricDaemon>> | undefined;
+  let fabricCustodyReferenced = false;
   try {
     daemon = await connectFabricDaemon({
       socketPath: daemonHandle.address.path,
       capability: daemonHandle.bootstrapCapability,
-      requiredCapabilities: [MCP_BOOTSTRAP_CREDENTIALS_FEATURE],
+      requiredCapabilities: [MCP_BOOTSTRAP_CREDENTIALS_FEATURE, MCP_BOOTSTRAP_RESULT_SHAPE_FEATURE],
     });
-    const result = await daemon.bootstrapMcpSeat({
+    const bootstrapRequest = Object.freeze({
       canonicalRoot: identity.canonicalRoot,
       trustRecordDigest: identity.trustRecordDigest,
       seat,
       expiresAt: new Date((input.now ?? new Date()).getTime() + 24 * 60 * 60 * 1_000).toISOString(),
     });
+    let reconciled = false;
+    let result: BootstrapMcpSeatResult;
+    try {
+      result = await daemon.bootstrapMcpSeat(bootstrapRequest);
+    } catch (cause: unknown) {
+      if (!isAmbiguousBootstrapResponse(cause)) throw cause;
+      await daemon.close().catch(() => undefined);
+      try {
+        daemon = await connectFabricDaemon({
+          socketPath: daemonHandle.address.path,
+          capability: daemonHandle.bootstrapCapability,
+          requiredCapabilities: [MCP_BOOTSTRAP_CREDENTIALS_FEATURE, MCP_BOOTSTRAP_RESULT_SHAPE_FEATURE],
+        });
+        result = await daemon.bootstrapMcpSeat(bootstrapRequest);
+        reconciled = true;
+      } catch (replayCause: unknown) {
+        throw new McpBootstrapError(
+          "CUSTODY_AMBIGUOUS",
+          "custody-ambiguous: Fabric could not observe either immutable bootstrap response; trust is retained and custody ownership is unknown",
+          { cause: replayCause },
+        );
+      }
+    }
+    fabricCustodyReferenced = true;
+    phaseLedger.push({
+      action: "custody",
+      outcome: reconciled ? "reconciled" : result.custodyMutated ? "committed" : "replayed",
+      mutated: reconciled ? false : result.custodyMutated,
+      projectId: result.projectId,
+      runId: result.runId,
+      generation: result.generation,
+    });
+    let postCustodyIdentity: Awaited<ReturnType<typeof trustedWorkspaceIdentity>>;
+    try {
+      postCustodyIdentity = await trustedWorkspaceIdentity({
+        stateDirectory: input.paths.stateDirectory,
+        canonicalRoot: identity.canonicalRoot,
+      });
+    } catch (cause: unknown) {
+      throw new McpBootstrapError(
+        "POST_CUSTODY_BOUNDARY",
+        "post-custody-boundary: the exact workspace trust binding changed after custody; custody is retained and no new credentials were published",
+        { cause },
+      );
+    }
+    if (
+      postCustodyIdentity.canonicalRoot !== identity.canonicalRoot ||
+      postCustodyIdentity.trustRecordDigest !== identity.trustRecordDigest
+    ) {
+      throw new McpBootstrapError(
+        "POST_CUSTODY_BOUNDARY",
+        "post-custody-boundary: the exact workspace trust binding changed after custody; custody is retained and no new credentials were published",
+      );
+    }
     const chairSeat = result.credentials.find(({ agentId }) => agentId === result.chairAgentId)?.seat;
     if (chairSeat === undefined) throw new Error("daemon bootstrap result did not bind the current chair");
     const seatProject = await resolveSeatProject({
@@ -652,6 +679,14 @@ export async function bootstrapMcpSeat(input: {
         throw generationChangedError(cause);
       }
     }
+    const replayed = generationBefore?.generation === result.generation;
+    phaseLedger.push({
+      action: "seat-generation",
+      outcome: replayed ? "replayed" : "installed",
+      mutated: !replayed,
+      generation: result.generation,
+      previousGeneration: result.expectedPreviousGeneration,
+    });
     const selected = installed.find((candidate) => candidate.seat === seat);
     const selectedCredential = result.credentials.find((candidate) => candidate.seat === seat)?.capability;
     if (selected === undefined || selectedCredential === undefined) throw new Error("bootstrap did not install the caller seat");
@@ -660,38 +695,15 @@ export async function bootstrapMcpSeat(input: {
       credential: selectedCredential,
       deadlineMs: input.smokeDeadlineMs ?? IDENTITY_SMOKE_DEADLINE_MS,
     });
-    const replayed = generationBefore?.generation === result.generation;
-    const actions: LifecycleAction[] = [
-      {
-        action: "workspace-trust",
-        outcome: "resolved",
-        mutated: false,
-        trustRecordDigest: identity.trustRecordDigest,
-      },
-      {
-        action: "daemon",
-        outcome: daemonHandle.ownsProcess ? "started" : "attached",
-        mutated: daemonHandle.ownsProcess,
-        pid: daemonHandle.pid,
-        socketPath: daemonHandle.address.path,
-      },
-      {
-        action: "seat-generation",
-        outcome: replayed ? "replayed" : "installed",
-        mutated: !replayed,
+    if (legacyBootstrapProvenanceRecorded) {
+      phaseLedger.push({
+        action: "legacy-bootstrap-provenance",
+        outcome: "recorded",
+        mutated: true,
         generation: result.generation,
-        previousGeneration: result.expectedPreviousGeneration,
-      },
-      ...(legacyBootstrapProvenanceRecorded
-        ? [{
-          action: "legacy-bootstrap-provenance" as const,
-          outcome: "recorded" as const,
-          mutated: false as const,
-          generation: result.generation,
-        }]
-        : []),
-      smoke,
-    ];
+      });
+    }
+    const actions: LifecycleAction[] = [...phaseLedger, smoke];
     return {
       ...result,
       credential: selectedCredential,
@@ -706,6 +718,21 @@ export async function bootstrapMcpSeat(input: {
         actions,
       },
     };
+  } catch (cause: unknown) {
+    const error = cause instanceof Error ? cause : new Error(errorMessage(cause));
+    const actions = [...phaseLedger];
+    throw attachLifecycleReceipt(error, lifecycleFailureReceipt({
+      canonicalRoot,
+      seat,
+      generation: currentLedgerGeneration(actions, generationBefore?.generation ?? ""),
+      actions,
+      phase: cause instanceof McpBootstrapError && cause.code === "CUSTODY_AMBIGUOUS"
+        ? "custody-ambiguous"
+        : cause instanceof McpBootstrapError && cause.code === "POST_CUSTODY_BOUNDARY"
+          ? "post-custody-boundary"
+        : fabricCustodyReferenced ? "post-custody" : "daemon-bootstrap",
+      cause,
+    }));
   } finally {
     try {
       await daemon?.close();

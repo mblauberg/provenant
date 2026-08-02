@@ -4,6 +4,7 @@ import { isAbsolute } from "node:path";
 import { AdapterProcessTransport } from "./process.js";
 import { verifySpawnWrapperProvenance } from "./compatibility.js";
 import { verifyNpmInstallAttestation } from "./npm-install-attestation-verifier.js";
+import type { ProviderIdentityAssurance } from "./provider-identity.js";
 import { DEFAULT_PROVIDER_TURN_TIMEOUT_MS, providerTurnResponseTimeoutMs } from "./provider-deadlines.js";
 import {
   chairActionKey,
@@ -36,6 +37,7 @@ export type AdapterProcessDefinition = {
   modelPolicy?: AdapterModelPolicy;
   wrapperProvenance?: { repositoryCommit: string; wrapperPath: string };
   npmInstallProductRoot?: string;
+  providerAssurance?: ProviderIdentityAssurance;
 };
 
 export type AdapterSupervisorOptions = {

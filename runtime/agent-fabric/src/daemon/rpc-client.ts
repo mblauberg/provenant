@@ -136,6 +136,81 @@ function isPositiveInteger(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
 }
 
+const MCP_SEAT_GENERATION_PATTERN = /^[0-9a-f]{64}$/u;
+
+function nonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0;
+}
+
+function validMcpSeatExpiry(value: unknown): value is string {
+  if (!nonEmptyString(value)) return false;
+  const expiresAt = Date.parse(value);
+  return Number.isFinite(expiresAt) &&
+    expiresAt > Date.now() &&
+    new Date(expiresAt).toISOString() === value;
+}
+
+function isCurrentMcpSeatBindingResult(
+  value: unknown,
+  requireAuthorityId: boolean,
+): value is CurrentMcpSeatBindingResult {
+  if (
+    !isRecord(value) ||
+    !Object.hasOwn(value, "expectedPreviousGeneration") ||
+    (value.expectedPreviousGeneration !== null &&
+      (typeof value.expectedPreviousGeneration !== "string" ||
+        !MCP_SEAT_GENERATION_PATTERN.test(value.expectedPreviousGeneration))) ||
+    typeof value.generation !== "string" ||
+    !MCP_SEAT_GENERATION_PATTERN.test(value.generation) ||
+    !nonEmptyString(value.projectSessionId) ||
+    !isPositiveInteger(value.sessionRevision) ||
+    !isPositiveInteger(value.sessionGeneration) ||
+    !nonEmptyString(value.runId) ||
+    !isPositiveInteger(value.runRevision) ||
+    !nonEmptyString(value.chairAgentId) ||
+    !isPositiveInteger(value.chairGeneration) ||
+    !nonEmptyString(value.chairLeaseId) ||
+    !validMcpSeatExpiry(value.expiresAt) ||
+    !Array.isArray(value.credentials) ||
+    value.credentials.length === 0 ||
+    !value.credentials.every((credential) =>
+      isRecord(credential) &&
+      nonEmptyString(credential.seat) &&
+      nonEmptyString(credential.agentId) &&
+      isPositiveInteger(credential.expectedPrincipalGeneration) &&
+      nonEmptyString(credential.capability) &&
+      (!requireAuthorityId || nonEmptyString(credential.authorityId))
+    )
+  ) return false;
+  return true;
+}
+
+function isBootstrapMcpSeatResult(
+  value: Record<string, unknown>,
+  canonicalRoot: string,
+): value is BootstrapMcpSeatResult {
+  const record = value;
+  if (!isCurrentMcpSeatBindingResult(value, true)) return false;
+  if (
+    !Object.hasOwn(record, "projectId") ||
+    !nonEmptyString(record.projectId) ||
+    record.canonicalRoot !== canonicalRoot ||
+    !nonEmptyString(record.bootstrapRunDirectory) ||
+    typeof record.custodyMutated !== "boolean"
+  ) return false;
+  if (record.droppedSeats === undefined) return true;
+  return Array.isArray(record.droppedSeats) && record.droppedSeats.every((seat) =>
+    isRecord(seat) &&
+    nonEmptyString(seat.seat) &&
+    nonEmptyString(seat.agentId) &&
+    (
+      seat.reason === "AGENT_NOT_LIVE" ||
+      seat.reason === "STALE_PRINCIPAL_GENERATION" ||
+      seat.reason === "AUTHORITY_EXPIRES_BEFORE_RENEWAL"
+    )
+  );
+}
+
 function localOperatorProvisioningResult(value: unknown): LocalOperatorProvisioningResult {
   if (!isRecord(value)) throw new Error("daemon returned an invalid local operator provisioning result");
   const fields = [
@@ -357,67 +432,18 @@ export class FabricDaemonClient {
 
   async bindCurrentMcpSeats(input: CurrentMcpSeatBindingInput): Promise<CurrentMcpSeatBindingResult> {
     const result = await this.#call("bindCurrentMcpSeats", input);
-    if (
-      !isRecord(result) ||
-      (result.expectedPreviousGeneration !== null &&
-        (typeof result.expectedPreviousGeneration !== "string" || !/^[0-9a-f]{64}$/u.test(result.expectedPreviousGeneration))) ||
-      typeof result.generation !== "string" ||
-      !/^[0-9a-f]{64}$/u.test(result.generation) ||
-      typeof result.projectSessionId !== "string" ||
-      !isPositiveInteger(result.sessionRevision) ||
-      !isPositiveInteger(result.sessionGeneration) ||
-      typeof result.runId !== "string" ||
-      !isPositiveInteger(result.runRevision) ||
-      typeof result.chairAgentId !== "string" ||
-      !isPositiveInteger(result.chairGeneration) ||
-      typeof result.chairLeaseId !== "string" ||
-      typeof result.expiresAt !== "string" ||
-      !Array.isArray(result.credentials) ||
-      !result.credentials.every((credential) =>
-        isRecord(credential) &&
-        typeof credential.seat === "string" &&
-        typeof credential.agentId === "string" &&
-        isPositiveInteger(credential.expectedPrincipalGeneration) &&
-        typeof credential.capability === "string"
-      )
-    ) {
-      throw new Error("daemon returned an invalid current MCP seat binding result");
+    if (!isCurrentMcpSeatBindingResult(result, false)) {
+      throw new FabricRemoteError("DAEMON_PROTOCOL_INVALID", "daemon returned an invalid current MCP seat binding result");
     }
-    return result as CurrentMcpSeatBindingResult;
+    return result;
   }
 
   async bootstrapMcpSeat(input: BootstrapMcpSeatInput): Promise<BootstrapMcpSeatResult> {
     const result = await this.#call("bootstrapMcpSeat", input);
-    if (
-      !isRecord(result) ||
-      typeof result.projectId !== "string" ||
-      result.canonicalRoot !== input.canonicalRoot ||
-      typeof result.bootstrapRunDirectory !== "string" ||
-      typeof result.generation !== "string" ||
-      !Array.isArray(result.credentials) ||
-      !result.credentials.every((credential) =>
-        isRecord(credential) &&
-        typeof credential.seat === "string" &&
-        typeof credential.agentId === "string" &&
-        typeof credential.authorityId === "string" &&
-        isPositiveInteger(credential.expectedPrincipalGeneration) &&
-        typeof credential.capability === "string"
-      ) ||
-      (result.droppedSeats !== undefined && (
-        !Array.isArray(result.droppedSeats) ||
-        !result.droppedSeats.every((seat) =>
-          isRecord(seat) &&
-          typeof seat.seat === "string" &&
-          typeof seat.agentId === "string" &&
-          (
-            seat.reason === "AGENT_NOT_LIVE" ||
-            seat.reason === "STALE_PRINCIPAL_GENERATION" ||
-            seat.reason === "AUTHORITY_EXPIRES_BEFORE_RENEWAL"
-          )
-        )
-      ))
-    ) throw new Error("daemon returned an invalid MCP bootstrap result");
-    return result as BootstrapMcpSeatResult;
+    if (!isRecord(result) || !isBootstrapMcpSeatResult(result, input.canonicalRoot)) {
+      throw new FabricRemoteError("DAEMON_PROTOCOL_INVALID", "daemon returned an invalid MCP bootstrap result");
+    }
+    return result;
   }
 
   async provisionLocalOperator(

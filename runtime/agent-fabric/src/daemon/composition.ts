@@ -1,11 +1,19 @@
 import type { FabricOpenOptions } from "../domain/types.js";
 import { isAbsolute, resolve } from "node:path";
-import { verifyAdapterCompatibility, wrapperCommandEntrypointIndex } from "../adapters/compatibility.js";
+import {
+  mergeAdapterExecutableFailures,
+  verifyAdapterCompatibility,
+  wrapperCommandEntrypointIndex,
+  type AdapterExecutableFailure,
+} from "../adapters/compatibility.js";
 import { loadAdapterModelConstraints } from "../adapters/model-selection.js";
 import { loadFabricConfig } from "../config/index.js";
 import { trustedWorkspaceRoots } from "../cli/workspace-trust.js";
 import { verifyProviderConformance } from "../adapters/provider-conformance.js";
+import { isProviderIdentityAssurance } from "../adapters/provider-identity.js";
 import { verifyNpmInstallAttestation } from "../adapters/npm-install-attestation-verifier.js";
+import { isPrimaryAdapter } from "../adapters/primary-adapters.js";
+import { admitTsxLoader } from "../adapters/tsx-loader.js";
 
 type AdapterMap = NonNullable<FabricOpenOptions["adapters"]>;
 
@@ -65,6 +73,10 @@ export function parseDaemonAdapters(serialized: string | undefined): AdapterMap 
     if (npmInstallProductRoot !== undefined && typeof npmInstallProductRoot !== "string") {
       throw new TypeError(`daemon adapter npm install product root is invalid for ${adapterId}`);
     }
+    const providerAssurance = candidate.providerAssurance;
+    if (providerAssurance !== undefined && (typeof providerAssurance !== "string" || !isProviderIdentityAssurance(providerAssurance))) {
+      throw new TypeError(`daemon adapter provider assurance is invalid for ${adapterId}`);
+    }
     adapters[adapterId] = {
       command: candidate.command,
       environment: candidate.environment as Record<string, string>,
@@ -73,6 +85,7 @@ export function parseDaemonAdapters(serialized: string | undefined): AdapterMap 
         wrapperProvenance: wrapperProvenance as NonNullable<AdapterMap[string]["wrapperProvenance"]>,
       }),
       ...(npmInstallProductRoot === undefined ? {} : { npmInstallProductRoot }),
+      ...(providerAssurance === undefined ? {} : { providerAssurance }),
     };
   }
   return adapters;
@@ -89,7 +102,7 @@ export async function composeDaemonConfiguration(options: {
   stateDirectory?: string;
   verifyProvider?: typeof verifyProviderConformance;
   verifyNpmInstall?: typeof verifyNpmInstallAttestation;
-}): Promise<{ adapters: AdapterMap; executionProfile: string; maximumConcurrentProviderTurns: number; workspaceRoots: string[] }> {
+}): Promise<{ adapters: AdapterMap; executionProfile: string; maximumConcurrentProviderTurns: number; workspaceRoots: string[]; unavailableOptionalAdapters: AdapterExecutableFailure[] }> {
   const trustedConfigOptions = {
     globalPath: options.globalConfigPath,
     agentsHome: options.agentsHome,
@@ -116,80 +129,97 @@ export async function composeDaemonConfiguration(options: {
       eligibleLocalTrustedRoots.every((root, index) => root === allLocalTrustedRoots[index])
     ? candidateConfig
     : await loadFabricConfig({ ...configOptions, additionalWorkspaceRoots: eligibleLocalTrustedRoots });
-  const verification = await verifyAdapterCompatibility({ compatibilityPath: options.compatibilityPath, schemaPath: options.compatibilitySchemaPath, adapterIds: config.adapterIds, requireEnabled: true });
+  const verification = await verifyAdapterCompatibility({
+    compatibilityPath: options.compatibilityPath,
+    schemaPath: options.compatibilitySchemaPath,
+    adapterIds: config.adapterIds,
+    requireEnabled: true,
+    allowUnavailableOptional: true,
+  });
   if (config.adapterIds.length > 0) {
     await (options.verifyNpmInstall ?? verifyNpmInstallAttestation)(options.agentsHome);
   }
   const provenanceByAdapter = new Map(verification.wrapperProvenance.map((item) => [item.adapterId, item]));
-  const adapters = Object.fromEntries(await Promise.all(config.adapterIds.map(async (adapterId) => {
-    const command = config.adapterCommands[adapterId];
-    if (command === undefined || command.length === 0) throw new TypeError(`activated adapter ${adapterId} has no trusted command`);
-    const policy = await loadAdapterModelConstraints({
-      compatibilityPath: options.compatibilityPath,
-      schemaPath: options.compatibilitySchemaPath,
-      adapterId,
-      requireEnabled: true,
-    });
-    if (policy.providerExecutable === undefined || policy.providerIdentity === undefined) {
-      throw new TypeError(`${adapterId} compatibility entry has no mandatory provider identity`);
-    }
-    await (options.verifyProvider ?? verifyProviderConformance)({
-      adapterId,
-      executable: policy.providerExecutable,
-      ...(policy.cursorInstallRoot === undefined ? {} : { cursorInstallRoot: policy.cursorInstallRoot }),
-      ...(policy.providerInstallRoot === undefined ? {} : { providerInstallRoot: policy.providerInstallRoot }),
-    });
-    let resolvedCommand = command.map((part) => expandTrustedCommandPart(part, options.agentsHome, options.stateDirectory));
-    if (policy.wrapperEntrypoint === undefined) throw new TypeError(`${adapterId} compatibility entry has no configured fabric wrapper`);
-    const provenance = provenanceByAdapter.get(adapterId);
-    if (provenance === undefined) throw new TypeError(`${adapterId} activation has no verified wrapper provenance`);
-    const wrapperIndex = wrapperCommandEntrypointIndex(resolvedCommand);
-    if (wrapperIndex === -1) throw new TypeError(`${adapterId} trusted command has no wrapper entrypoint`);
-    resolvedCommand[wrapperIndex] = policy.wrapperEntrypoint;
-    if (policy.wrapperEntrypoint.endsWith(".ts")) {
-      const loaderIndex = resolvedCommand.indexOf("--import");
-      const loader = loaderIndex === -1 ? undefined : resolvedCommand[loaderIndex + 1];
-      if (loader === undefined || !loader.endsWith("/tsx/dist/loader.mjs") || !resolvedCommand.includes("--conditions=source")) {
-        throw new TypeError(
-          `${adapterId} TypeScript wrapper requires the tsx loader and --conditions=source so first-party code executes from tracked source`,
-        );
+  const unavailableOptionalAdapters = [...verification.unavailableOptionalAdapters];
+  const unavailable = new Set(unavailableOptionalAdapters.map((item) => item.adapterId));
+  const entries = await Promise.all(config.adapterIds.filter((adapterId) => !unavailable.has(adapterId)).map(async (adapterId) => {
+    try {
+      const command = config.adapterCommands[adapterId];
+      if (command === undefined || command.length === 0) throw new TypeError(`activated adapter ${adapterId} has no trusted command`);
+      const policy = await loadAdapterModelConstraints({
+        compatibilityPath: options.compatibilityPath,
+        schemaPath: options.compatibilitySchemaPath,
+        adapterId,
+        requireEnabled: true,
+      });
+      if (policy.providerExecutable === undefined || policy.providerIdentity === undefined) {
+        throw new TypeError(`${adapterId} compatibility entry has no mandatory provider identity`);
       }
-    }
-    if (policy.providerExecutable !== undefined) {
+      const providerVerification = await (options.verifyProvider ?? verifyProviderConformance)({
+        adapterId,
+        executable: policy.providerExecutable,
+        ...(policy.cursorInstallRoot === undefined ? {} : { cursorInstallRoot: policy.cursorInstallRoot }),
+        ...(policy.providerInstallRoot === undefined ? {} : { providerInstallRoot: policy.providerInstallRoot }),
+      });
+      const providerAssurance = providerVerification.identity?.assurance;
+      let resolvedCommand = command.map((part) => expandTrustedCommandPart(part, options.agentsHome, options.stateDirectory));
+      if (policy.wrapperEntrypoint === undefined) throw new TypeError(`${adapterId} compatibility entry has no configured fabric wrapper`);
+      const provenance = provenanceByAdapter.get(adapterId);
+      if (provenance === undefined) throw new TypeError(`${adapterId} activation has no verified wrapper provenance`);
+      const wrapperIndex = wrapperCommandEntrypointIndex(resolvedCommand);
+      if (wrapperIndex === -1) throw new TypeError(`${adapterId} trusted command has no wrapper entrypoint`);
+      resolvedCommand[wrapperIndex] = policy.wrapperEntrypoint;
+      if (policy.wrapperEntrypoint.endsWith(".ts")) {
+        const loaderIndex = resolvedCommand.indexOf("--import");
+        const loader = loaderIndex === -1 ? undefined : resolvedCommand[loaderIndex + 1];
+        if (loader === undefined || !resolvedCommand.includes("--conditions=source")) {
+          throw new TypeError(
+            `${adapterId} TypeScript wrapper requires the tsx loader and --conditions=source so first-party code executes from tracked source`,
+          );
+        }
+        await admitTsxLoader({ loaderPath: loader, productRoot: options.agentsHome });
+      }
       if (!isAbsolute(policy.providerExecutable)) throw new TypeError(`${adapterId} provider executable must be absolute`);
       resolvedCommand = replaceUniqueOption(resolvedCommand, "--provider-executable", policy.providerExecutable);
-      if (policy.providerIdentity !== undefined) {
-        resolvedCommand = replaceUniqueOption(resolvedCommand, "--provider-identity-policy", policy.providerIdentity);
-      }
+      resolvedCommand = replaceUniqueOption(resolvedCommand, "--provider-identity-policy", policy.providerIdentity);
       if (policy.cursorInstallRoot !== undefined) {
         resolvedCommand = replaceUniqueOption(resolvedCommand, "--provider-install-root", policy.cursorInstallRoot);
       }
       if (policy.providerInstallRoot !== undefined) {
         resolvedCommand = replaceUniqueOption(resolvedCommand, "--provider-install-root", policy.providerInstallRoot);
       }
-    } else if (adapterId !== "claude-agent-sdk") {
-      throw new TypeError(`${adapterId} compatibility entry has no configured provider executable`);
+      return [adapterId, {
+        command: resolvedCommand,
+        environment: {},
+        modelPolicy: {
+          allowedFamilies: policy.allowed,
+          allowedModelPatterns: policy.patterns,
+          requiresExplicitModel: policy.requiresExplicitModel,
+        },
+        wrapperProvenance: {
+          repositoryCommit: provenance.repositoryCommit,
+          wrapperPath: provenance.wrapperPath,
+        },
+        npmInstallProductRoot: options.agentsHome,
+        ...(providerAssurance === undefined ? {} : { providerAssurance }),
+      }] as const;
+    } catch (error: unknown) {
+      if (isPrimaryAdapter(adapterId)) throw error;
+      unavailableOptionalAdapters.push({
+        adapterId,
+        executable: "<resolved>",
+        reasons: [error instanceof Error ? error.message : String(error)],
+      });
+      return undefined;
     }
-    return [adapterId, {
-      command: resolvedCommand,
-      environment: {},
-      modelPolicy: {
-        allowedFamilies: policy.allowed,
-        allowedModelPatterns: policy.patterns,
-        requiresExplicitModel: policy.requiresExplicitModel,
-      },
-      wrapperProvenance: {
-        repositoryCommit: provenance.repositoryCommit,
-        wrapperPath: provenance.wrapperPath,
-      },
-      npmInstallProductRoot: options.agentsHome,
-    }] as const;
-  })));
+  }));
+  const adapters = Object.fromEntries(entries.filter((entry): entry is Exclude<typeof entry, undefined> => entry !== undefined));
   return {
     adapters,
     executionProfile: config.executionProfile ?? "headless",
     maximumConcurrentProviderTurns: config.limits.maximumConcurrentProviderTurns,
     workspaceRoots: config.workspaceRoots,
+    unavailableOptionalAdapters: mergeAdapterExecutableFailures(unavailableOptionalAdapters),
   };
 }
 

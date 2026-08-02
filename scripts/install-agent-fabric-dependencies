@@ -4,6 +4,5 @@ set -eu
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 product_root=$(dirname -- "$script_dir")
 
-git -C "$product_root" rev-parse --verify HEAD >/dev/null
 npm ci --prefix "$product_root" --no-audit --no-fund
 node "$product_root/runtime/agent-fabric/scripts/write-npm-ci-attestation.mjs" "$product_root"

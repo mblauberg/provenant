@@ -4,10 +4,13 @@ import { join } from "node:path";
 import type { DaemonStartOptions } from "../daemon/client.js";
 import { resolveFabricRoots, type FabricRootResolutionOptions } from "../domain/fabric-roots.js";
 import { hasPairedInstanceRoot, type RootPairingDependencies } from "./instance-root-pairing.js";
+import { projectConfigPathAtExactRoot } from "./project-boundary.js";
 
 export type SplitConfiguration = NonNullable<DaemonStartOptions["configuration"]>;
 
-export type SplitConfigurationOptions = FabricRootResolutionOptions & RootPairingDependencies;
+export type SplitConfigurationOptions = FabricRootResolutionOptions & RootPairingDependencies & Readonly<{
+  projectRoot?: string;
+}>;
 
 /**
  * Bind every configuration path to the root that owns its file class.
@@ -33,12 +36,16 @@ export function resolveSplitConfiguration(
   const { productRoot, instanceRoot } = resolveFabricRoots(options);
   const globalConfigPath = join(productRoot, "config", "agent-fabric.yaml");
   const localConfigPath = join(instanceRoot, "config", "agent-fabric.yaml");
+  const projectConfigPath = options.projectRoot === undefined
+    ? undefined
+    : projectConfigPathAtExactRoot(options.projectRoot);
   const offerLocal = hasPairedInstanceRoot({ productRoot, instanceRoot }, options)
     && localConfigPath !== globalConfigPath
     && exists(localConfigPath);
   return {
     globalConfigPath,
     ...(offerLocal ? { localConfigPath } : {}),
+    ...(projectConfigPath === undefined ? {} : { projectConfigPath }),
     compatibilityPath: join(productRoot, "config", "adapter-compatibility.yaml"),
     compatibilitySchemaPath: join(
       productRoot,

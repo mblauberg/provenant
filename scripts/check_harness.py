@@ -5,9 +5,19 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+import subprocess
 import sys
 
 import yaml
+
+try:
+    from scripts.count_skill_words import (
+        WORD_COUNT_HARD_LIMIT,
+        word_count_delta_warnings,
+        word_count_diagnostics,
+    )
+except ModuleNotFoundError:  # Direct execution: python scripts/check_harness.py
+    from count_skill_words import WORD_COUNT_HARD_LIMIT, word_count_delta_warnings, word_count_diagnostics
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -17,7 +27,7 @@ SKILL_NAME = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 CATALOGUE_TARGET_CHARS = 7_600
 CATALOGUE_HARD_LIMIT_CHARS = 8_000
 DESCRIPTION_LIMIT_CHARS = 1_024
-SKILL_ENTRYPOINT_WORD_LIMIT = 500
+SKILL_ENTRYPOINT_WORD_LIMIT = WORD_COUNT_HARD_LIMIT
 RETIRED_NAMES = {
     "au-legal-writing-style",
     "clear-engineering-writing",
@@ -32,8 +42,9 @@ RETIRED_NAMES = {
 }
 
 
-def skill_errors() -> tuple[list[str], dict[str, int]]:
+def skill_errors() -> tuple[list[str], dict[str, object]]:
     errors: list[str] = []
+    warnings: list[str] = []
     link_pattern = re.compile(r"\[[^]]+\]\(([^)]+)\)")
     descriptions: dict[str, str] = {}
     for skill in sorted((ROOT / "skills").glob("*/SKILL.md")):
@@ -69,12 +80,12 @@ def skill_errors() -> tuple[list[str], dict[str, int]]:
             boundary = description[:250].lower()
             if not any(marker in boundary for marker in ("not for", "not a ", "only when")):
                 errors.append(f"{skill.relative_to(ROOT)}: first 250 description characters need an explicit exclusion")
-        body = text[match.end():]
-        word_count = len(re.findall(r"\b[\w'-]+\b", body))
-        if word_count > SKILL_ENTRYPOINT_WORD_LIMIT:
-            errors.append(
-                f"{skill.relative_to(ROOT)}: body has {word_count} words; limit is {SKILL_ENTRYPOINT_WORD_LIMIT}"
-            )
+        for diagnostic in word_count_diagnostics(skill):
+            relative = diagnostic.replace(f"{skill}:", f"{skill.relative_to(ROOT)}:", 1)
+            if diagnostic.startswith("warning:"):
+                warnings.append(relative)
+            else:
+                errors.append(relative)
         fixture = skill.parent / "evals" / "trigger_cases.yaml"
         if not fixture.is_file():
             errors.append(f"{skill.relative_to(ROOT)}: missing evals/trigger_cases.yaml")
@@ -102,7 +113,30 @@ def skill_errors() -> tuple[list[str], dict[str, int]]:
         "description_chars": sum(map(len, descriptions.values())),
         "catalogue_chars": len(catalogue),
         "catalogue_bytes": len(catalogue.encode()),
+        "warnings": warnings,
     }
+
+
+def word_count_delta_diagnostics() -> tuple[str, ...]:
+    """Use merge-train deltas when the repository exposes usable Git history."""
+    try:
+        base = subprocess.run(
+            ["git", "-C", str(ROOT), "merge-base", "HEAD", "origin/main"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        head = subprocess.run(
+            ["git", "-C", str(ROOT), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        return ()
+    if not base or not head:
+        return ()
+    return word_count_delta_warnings(base, head)
 
 
 def openai_sidecar_errors() -> list[str]:
@@ -156,10 +190,18 @@ def stale_name_errors() -> list[str]:
 
 def main() -> int:
     skill_failures, metrics = skill_errors()
+    delta_diagnostics = word_count_delta_diagnostics()
     errors = skill_failures + openai_sidecar_errors() + stale_name_errors()
+    for diagnostic in delta_diagnostics:
+        if diagnostic.startswith("error:"):
+            errors.append(diagnostic)
+        else:
+            metrics["warnings"].append(diagnostic)
+    for warning in metrics["warnings"]:
+        print(f"\033[33mWARN:\033[0m {warning}", file=sys.stderr)
     if errors:
         for error in errors:
-            print(f"FAIL: {error}", file=sys.stderr)
+            print(f"\033[31mFAIL:\033[0m {error}", file=sys.stderr)
         return 1
     target_state = "within target" if metrics["catalogue_chars"] <= CATALOGUE_TARGET_CHARS else "above target"
     print(

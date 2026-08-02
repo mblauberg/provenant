@@ -296,7 +296,7 @@ function crossFamilyDispatchHint(runDir, gitCwd, kind = 'primary', reviewerId = 
     'Gemini through Agy is also valid. Discover and pin the exact model, keep the route read-only or ' +
     'best-effort, and capture adapter, model_family, status and output. Do not substitute Claude or ' +
     'OpenAI and do not wait or retry on quota/API failure. Any skipped leg is ' +
-    'DISTINCT-FAMILY-NOT-RUN: <reason> and never replaces the other-primary gate. Distinct-family ' +
+    'DISTINCT-FAMILY-NOT-RUN: <reason> and never replaces the other-primary gate; distinct-family availability never replaces other-primary coverage. Distinct-family ' +
     'findings are advisory until a primary-family reviewer corroborates their evidence.'
   )
 }
@@ -346,20 +346,26 @@ const runIdClause = runId
 const boot = await agent(
   'Bootstrap a dynamic-workflow run.\n' +
     `1. Resolve the WORKSPACE ROOT (the dir that holds .work/, or the outermost project dir if none) and ` +
-    `build an ABSOLUTE run-dir path <workspace-root>/.work/wf/implement/<runId> so the run dir never lands ` +
+    `build an ABSOLUTE run-dir path <workspace-root>/.agent-run/<runId> so the run dir never lands ` +
     `under a nested subproject. ${runIdClause}\n` +
     '   Then run: ~/.agents/skills/orchestrate/scripts/run_dir_init.sh <abs run-dir>\n' +
     '   and ALSO run: mkdir -p <abs run-dir>/patches   (the patch-emitting builder writes there; ' +
     'run_dir_init.sh scaffolds findings/ crossfamily/ traces/ but NOT patches/).\n' +
     '   If run_dir_init.sh is unavailable or fails, return no runDir and stop; do not create an incomplete fallback.\n' +
-    `   Copy the global deliver RUN.template.json to <abs run-dir>/RUN.json immediately. Set contract=delivery-run, ` +
-    `schema_version=1, profile=software, risk_tier=${receiptRisk}, status=executing, approved intent/design/authority evidence. ` +
+    `   Call skills/deliver/scripts/delivery_receipt.py init with <abs run-dir>, --run-id, --profile software, ` +
+    `--chair-family, the complete --risk-assessment, --intent and --authority JSON. Init creates a draft receipt; ` +
+    `do not copy the template; do not edit the receipt JSON directly. Use the producer's artifact add and evidence human ` +
+    `commands for authority and intent/design approvals, bind the approved design, then use transition commands ` +
+    `draft -> scoped -> approved -> executing and checkpoint set. Validate only after those producer commands. ` +
+    `The resulting contract=delivery-run, schema_version=1 receipt has profile=software and risk_tier=${receiptRisk}. ` +
     `Fill every risk_assessment factor from config/risk-policy.json conservatively; never lower the supplied tier. ` +
-    `Fill authority from this human-requested task only: bounded source/artifact paths (when the run dir is inside repoRoot, ` +
-    `artifact_write_paths must include that exact repo-relative run-dir subtree), expiry, prohibited paths/actions, ` +
-    `external_disclosure, secrets, deployment=false, irreversible_actions=false and explicit ignored_path_exemptions. Do not invent broader authority. ` +
-    `Capture git HEAD as implementation.base_revision and return it as baseRevision for advisory run metadata only; ` +
-    `never use a model-authored base, path, command, exit status or digest as execution proof. ` +
+    `Fill authority from this human-requested task only: bounded allowed_source_paths and allowed_artifact_paths ` +
+    `(when the run dir is inside repoRoot, include that exact repo-relative run-dir subtree), with artifact_write_paths ` +
+    `covering that exact repo-relative run-dir subtree, expiry, denied_paths and prohibited paths/actions, ` +
+    `disclosure/external_disclosure, secrets_access/secrets, deployment=false, irreversible_actions=false, ` +
+    `and explicit ignored_path_exemptions. Do not invent broader authority. ` +
+    `Capture git HEAD before mutation as implementation.base_revision and return it as baseRevision; fill implementation.repo_root. ` +
+    `Never use a model-authored base, path, command, exit status or digest as execution proof. ` +
     `Require a clean source baseline: if tracked or untracked source changes already exist, fail preflight instead of hiding them in preexisting_paths. ` +
     `Bind the named human approval to matching human evidence and the canonical spec digest. ` +
     `Run deliver/scripts/validate_delivery.py <RUN.json> --workspace-root <repo-root>; return riskPreflightPassed=true only on exit 0, and return the receipt risk as effectiveRisk. ` +
@@ -426,8 +432,10 @@ async function checkpoint(currentSlice, nextAction, inFlight, artifactPaths) {
 }
 async function failRun(reason) {
   const result = await agent(
-    `Close the failed workflow run at ${runDir} without touching source. Update RUN.json checkpoint to ` +
-      `current_slice=failed, next_action=human inspect failure receipt, in_flight=[], and add the reason to ` +
+    `Close the failed workflow run at ${runDir} without touching source. Use the receipt producer checkpoint and ` +
+      `transition --to blocked --reason <reason> --recovery <next action>, then checkpoint set with current_slice=failed, ` +
+      `next_action=human inspect failure receipt and in_flight=[]; do not edit RUN.json directly. The canonical lifecycle ` +
+      `has no failed state, so do not invent one. Add the reason to ` +
       `unresolved_blockers. Classify every run artifact in MANIFEST.md with stable IDs/status/retention. Update ` +
       `RUN_RECEIPT.json task/owner and clear or hand off owned panes, then run run_dir_finalize.py --status failed ` +
       `--reason ${JSON.stringify(reason)}. Re-open both receipts and return path, generation and verified=true only ` +

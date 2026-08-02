@@ -39,6 +39,7 @@ const { provisionMcpPeerSeats } = await import("../../src/cli/mcp-peer-provision
 const roots: string[] = [];
 
 afterEach(async () => {
+  vi.unstubAllEnvs();
   mocks.bind.mockReset();
   mocks.connect.mockReset();
   mocks.release.mockReset();
@@ -452,6 +453,39 @@ describe("MCP peer provision daemon lifecycle", () => {
       "--project", value.project, "--seat", "agy",
     ], value.paths)).rejects.toThrow("chair connection refused");
     expect(mocks.release).toHaveBeenCalledOnce();
+  });
+
+  it("stops roster convergence after the injected attempt bound", async () => {
+    const value = await fixture();
+    vi.stubEnv("AGENT_FABRIC_TEST_ROSTER_CONVERGENCE_ATTEMPTS", "1");
+    mocks.connect.mockRejectedValue(new Error("inactive MCP seat generation"));
+
+    await expect(provisionMcpPeerSeats([
+      "--project", value.project, "--seat", "agy",
+    ], value.paths)).rejects.toThrow("inactive MCP seat generation");
+
+    expect(mocks.connect).toHaveBeenCalledOnce();
+    expect(mocks.release).toHaveBeenCalledOnce();
+  });
+
+  it("stops roster convergence after the elapsed deadline while attempts remain", async () => {
+    const value = await fixture();
+    vi.stubEnv("AGENT_FABRIC_TEST_ROSTER_CONVERGENCE_ATTEMPTS", "2");
+    const monotonicNow = vi.spyOn(performance, "now")
+      .mockReturnValueOnce(0)
+      .mockReturnValue(5_001);
+    mocks.connect.mockRejectedValue(new Error("inactive MCP seat generation"));
+
+    try {
+      await expect(provisionMcpPeerSeats([
+        "--project", value.project, "--seat", "agy",
+      ], value.paths)).rejects.toThrow("inactive MCP seat generation");
+
+      expect(mocks.connect).toHaveBeenCalledOnce();
+      expect(mocks.release).toHaveBeenCalledOnce();
+    } finally {
+      monotonicNow.mockRestore();
+    }
   });
 
   it("rejects a registration capability that does not match live custody", async () => {

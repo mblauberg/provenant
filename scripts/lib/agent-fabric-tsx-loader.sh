@@ -58,6 +58,23 @@ resolve_tsx_loader_boundary() {
   esac
 }
 
+# Resolve and validate the one Node executable used by loader identity checks
+# and TypeScript verification. An absolute override is required to work with a
+# sanitised PATH; otherwise the ordinary PATH lookup remains the fallback.
+resolve_agent_fabric_node() {
+  _aftsx_node=${AGENT_FABRIC_NODE:-}
+  if [ -n "$_aftsx_node" ]; then
+    case "$_aftsx_node" in
+      /*) ;;
+      *) return 1 ;;
+    esac
+  else
+    _aftsx_node=$(command -v node 2>/dev/null) || return 1
+  fi
+  [ -f "$_aftsx_node" ] && [ -x "$_aftsx_node" ] || return 1
+  printf '%s\n' "$_aftsx_node"
+}
+
 # Validate one candidate and print the path that would actually be executed.
 #
 # The boundary governs *where a package may be declared*, not where its bytes
@@ -80,7 +97,8 @@ resolve_tsx_loader_boundary() {
 # It deliberately does not pin a version: no declared expectation exists to pin
 # against, and inventing one here would fail every legitimate upgrade.
 _aftsx_validate() {
-  node -e '
+  _aftsx_node=$(resolve_agent_fabric_node) || return 1
+  "$_aftsx_node" -e '
 const { realpathSync } = require("node:fs");
 const { dirname } = require("node:path");
 try {

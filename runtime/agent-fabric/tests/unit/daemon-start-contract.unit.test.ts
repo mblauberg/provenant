@@ -5,12 +5,15 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { MCP_BOOTSTRAP_CREDENTIALS_FEATURE } from "@local/agent-fabric-protocol";
+import {
+  MCP_BOOTSTRAP_RESULT_SHAPE_FEATURE,
+} from "@local/agent-fabric-protocol";
 
 vi.mock("node:net", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:net")>();
   const { Duplex } = await import("node:stream");
-  const { FABRIC_PROTOCOL_LIMITS } = await import("../../src/transport/bounded-ndjson.ts");
+    const { FABRIC_PROTOCOL_LIMITS } = await import("../../src/transport/bounded-ndjson.ts");
+    const { EXECUTABLE_RESOLUTION_VERSION } = await import("../../src/transport/daemon-rpc-contract.ts");
 
   class LegacyPrivateDaemonSocket extends Duplex {
     constructor() {
@@ -31,11 +34,12 @@ vi.mock("node:net", async (importOriginal) => {
         this.push(`${JSON.stringify({
           id: request.id,
           result: {
-            protocolVersion: 1,
+            protocolVersion: 2,
             daemonVersion: "legacy-private-daemon",
             capabilities: ["rpc"],
             limits: FABRIC_PROTOCOL_LIMITS,
             activeAdapters: [],
+            executableResolutionVersion: EXECUTABLE_RESOLUTION_VERSION,
           },
         })}\n`);
       }
@@ -114,7 +118,7 @@ describe("production daemon bootstrap contract", () => {
         electionGeneration: 1,
         daemonInstanceGeneration: 1,
         socketPath,
-        protocolVersion: 1,
+        protocolVersion: 2,
         features: ["rpc"],
         readyAt: 2,
         evidence: {
@@ -141,7 +145,7 @@ describe("production daemon bootstrap contract", () => {
       status: "rejected",
       error: {
         code: "BOOTSTRAP_INCOMPATIBLE_INCUMBENT",
-        message: expect.stringContaining(MCP_BOOTSTRAP_CREDENTIALS_FEATURE),
+        message: expect.stringContaining(MCP_BOOTSTRAP_RESULT_SHAPE_FEATURE),
       },
     });
   });

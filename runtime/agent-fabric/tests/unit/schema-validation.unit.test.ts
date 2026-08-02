@@ -108,14 +108,14 @@ describe("Stage 1 versioned JSON Schemas", () => {
     }
     expect(adapters.agy).toMatchObject({
       implementation: {
-        executable: "${USER_HOME}/.local/bin/agy",
+        executable: "agy",
       },
       contract: { protocol: "agy-cli" },
       model_family_constraints: { allowed: ["google", "anthropic"] },
     });
     expect(adapters["cursor-agent"]).toMatchObject({
       implementation: {
-        executable: "${USER_HOME}/.local/bin/cursor-agent",
+        executable: "cursor-agent",
         cursor_install_root: "${USER_HOME}/.local/share/cursor-agent",
       },
       contract: { protocol: "cursor-agent-stream-json-cli" },
@@ -125,8 +125,7 @@ describe("Stage 1 versioned JSON Schemas", () => {
     });
     expect(adapters["opencode-acp"]).toMatchObject({
       implementation: {
-        executable: "/opt/homebrew/bin/opencode",
-        provider_install_root: "/opt/homebrew/Cellar/opencode",
+        executable: "opencode",
         provider_identity: "owner-controlled-install-root",
       },
       contract: { protocol: "agent-client-protocol" },
@@ -136,7 +135,7 @@ describe("Stage 1 versioned JSON Schemas", () => {
       },
     });
     expect(adapters["kiro-acp"]).toMatchObject({
-      implementation: { executable: "${USER_HOME}/.local/bin/kiro-cli" },
+      implementation: { executable: "kiro-cli" },
       contract: { protocol: "agent-client-protocol" },
       model_family_constraints: { allowed: ["open-weight"] },
     });
@@ -168,6 +167,45 @@ describe("Stage 1 versioned JSON Schemas", () => {
     });
     expect(unknown.valid).toBe(false);
     expect(unknown.keywords).toContain("additionalProperties");
+  });
+
+  it("accepts the lockfile install attestation provider identity policy", async () => {
+    const schema = await readSchema("adapter-compatibility.schema.json");
+    const compatibility = await readYamlObject("adapter-compatibility.yaml");
+    const adapters = compatibility.adapters;
+    if (!isJsonObject(adapters)) throw new TypeError("adapter compatibility must contain an adapters object");
+    const claude = adapters["claude-agent-sdk"];
+    if (!isJsonObject(claude) || !isJsonObject(claude.implementation)) {
+      throw new TypeError("Claude implementation compatibility is invalid");
+    }
+
+    const lockfileAttested = {
+      ...compatibility,
+      adapters: {
+        ...adapters,
+        "claude-agent-sdk": {
+          ...claude,
+          implementation: {
+            ...claude.implementation,
+            provider_identity: "lockfile-install-attestation",
+          },
+        },
+      },
+    };
+    expect(validateWithSchema(schema, lockfileAttested).valid).toBe(true);
+    expect(validateWithSchema(schema, {
+      ...lockfileAttested,
+      adapters: {
+        ...lockfileAttested.adapters,
+        "claude-agent-sdk": {
+          ...lockfileAttested.adapters["claude-agent-sdk"],
+          implementation: {
+            ...claude.implementation,
+            provider_identity: "unrecognised-assurance",
+          },
+        },
+      },
+    }).valid).toBe(false);
   });
 
   it("publishes only the exact current operation vocabulary and rejects coarse actions", async () => {

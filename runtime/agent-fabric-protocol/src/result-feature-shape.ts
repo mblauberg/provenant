@@ -1,6 +1,7 @@
 import {
   ACTIVITY_NARRATIVE_GROUPING_FEATURE,
   GATE_SYSTEM_SUPERSESSION_FEATURE,
+  PROVIDER_ASSURANCE_RESULT_SHAPE_FEATURE,
 } from "./features.js";
 import type { ScopedGate } from "./gates.js";
 import { FABRIC_OPERATIONS } from "./operations.js";
@@ -29,6 +30,8 @@ export const RUN_SCOPED_PROJECTION_FEATURE = "run-scoped-projection.v1" as const
 export const RUN_LIFECYCLE_FACTS_FEATURE = "run-lifecycle-facts.v1" as const;
 export const MCP_BOOTSTRAP_CREDENTIALS_FEATURE =
   "mcp-bootstrap-credentials.v2" as const;
+export const MCP_BOOTSTRAP_RESULT_SHAPE_FEATURE =
+  "mcp-bootstrap-result-shape.v1" as const;
 
 export class ProtocolResultShapeFeatureError extends TypeError {
   readonly code = "PROTOCOL_INCOMPATIBLE" as const;
@@ -384,6 +387,45 @@ function assertUniformFeaturePresence(
   }
 }
 
+function providerAssuranceValuePresence(value: unknown): readonly boolean[] {
+  if (Array.isArray(value)) return value.flatMap(providerAssuranceValuePresence);
+  if (typeof value !== "object" || value === null) return [];
+  const record = value as Readonly<Record<string, unknown>>;
+  const own = Object.prototype.hasOwnProperty.call(record, "providerAssurance")
+    ? [record.providerAssurance !== undefined]
+    : [];
+  return [...own, ...Object.values(record).flatMap(providerAssuranceValuePresence)];
+}
+
+function providerAssurancePresence(
+  operation: ProtocolOperation,
+  result: OperationResultMap[ProtocolOperation],
+): readonly boolean[] {
+  const hasField = (value: unknown): boolean => (
+    typeof value === "object" && value !== null &&
+    Object.prototype.hasOwnProperty.call(value, "providerAssurance")
+  );
+  if (operation === FABRIC_OPERATIONS.reviewEvidenceRead) {
+    const record = result as Record<string, unknown>;
+    if (Object.prototype.hasOwnProperty.call(record, "code")) return [];
+    return [hasField(record.record), hasField(record.currency)];
+  }
+  if (operation === FABRIC_OPERATIONS.reviewEvidenceList) {
+    const entries = (result as Record<string, unknown>).entries;
+    if (!Array.isArray(entries)) return [];
+    return entries.flatMap((entry) => {
+      const value = entry as Record<string, unknown>;
+      return [hasField(value.record), hasField(value.currency)];
+    });
+  }
+  if (operation === FABRIC_OPERATIONS.reviewCompletionRead) {
+    const slots = (result as Record<string, unknown>).slots;
+    if (!Array.isArray(slots)) return [];
+    return slots.map(hasField);
+  }
+  return providerAssuranceValuePresence(result);
+}
+
 function gateResult(
   operation: ProtocolOperation,
   result: OperationResultMap[ProtocolOperation],
@@ -462,6 +504,11 @@ export function assertOperationResultFeatureShape<Operation extends ProtocolOper
     operation,
     features.includes(RUN_LIFECYCLE_FACTS_FEATURE),
     runLifecycleFactsPresence(operation, result as OperationResultMap[ProtocolOperation]),
+  );
+  assertUniformFeaturePresence(
+    operation,
+    features.includes(PROVIDER_ASSURANCE_RESULT_SHAPE_FEATURE),
+    providerAssurancePresence(operation, result as OperationResultMap[ProtocolOperation]),
   );
   return result;
 }

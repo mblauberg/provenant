@@ -56,7 +56,7 @@ export async function runOpenCodeAcpAdapter(
 ): Promise<void> {
   const journal = new SqliteAdapterActionJournal(journalPathFromArguments("opencode-acp", arguments_));
   const providerExecutable = requiredArgument(arguments_, "--provider-executable");
-  const providerInstallRoot = requiredArgument(arguments_, "--provider-install-root");
+  const providerInstallRoot = argument(arguments_, "--provider-install-root");
   const requestTimeoutMs = positiveIntegerArgument(arguments_, "--request-timeout-ms");
   const closeTimeoutMs = positiveIntegerArgument(arguments_, "--close-timeout-ms");
   const maximumLineBytes = positiveIntegerArgument(arguments_, "--maximum-line-bytes");
@@ -67,7 +67,7 @@ export async function runOpenCodeAcpAdapter(
     verifyExecutable: async () => await (dependencies.verifyProvider ?? verifyProviderConformance)({
       adapterId: "opencode-acp",
       executable: providerExecutable,
-      providerInstallRoot,
+      ...(providerInstallRoot === undefined ? {} : { providerInstallRoot }),
     }),
     clientFactory({ model, effort, cwd }) {
       return new KiroAcpStdioClient({

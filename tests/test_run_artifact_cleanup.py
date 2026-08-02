@@ -30,10 +30,26 @@ def make_run(tmp_path):
     receipt = reference.make_reference_run("research", ROOT)
     receipt["run_id"] = "CLEAN-1"
     receipt["fabric_relationships"]["delivery_run_id"] = "CLEAN-1"
+    for item in receipt["evidence"]:
+        if item.get("kind") == "deterministic":
+            item["result"]["run_identity"]["run_id"] = "CLEAN-1"
     receipt["authority"]["allowed_artifact_paths"] = ["run"]
     receipt["intent"]["artifact"] = "run/intent.md"
-    receipt["artifacts"][0]["path"] = "run/intent.md"
-    receipt["artifacts"][1]["path"] = "run/evidence.json"
+    for artifact in receipt["artifacts"]:
+        if artifact["id"] == "intent":
+            artifact["path"] = "run/intent.md"
+        elif artifact["id"] == "evidence-bundle":
+            artifact["path"] = "run/evidence.json"
+        elif artifact["id"] == "other-primary-route":
+            artifact["path"] = "run/other-primary.route.json"
+    for evidence in receipt["evidence"]:
+        route = evidence.get("route_receipt")
+        if isinstance(route, dict):
+            route["path"] = "run/other-primary.route.json"
+        evidence["source_paths"] = [
+            "run/other-primary.route.json" if path == "other-primary.route.json" else path
+            for path in evidence.get("source_paths", [])
+        ]
     receipt["status"] = "closed"
     receipt["checkpoint"].update({"current_slice": "closed", "next_action": "authorised cleanup", "in_flight": []})
     receipt["human_gates"]["acceptance"] = {"status": "approved", "approver": "human", "evidence": "acceptance-approval"}

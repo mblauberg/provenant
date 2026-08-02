@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
-import { readFile } from "node:fs/promises";
-import { basename, dirname, isAbsolute, resolve } from "node:path";
+import { constants } from "node:fs";
+import { access, readFile, stat } from "node:fs/promises";
+import { basename, delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { promisify } from "node:util";
 
@@ -8,6 +9,9 @@ import { Ajv2020 } from "ajv/dist/2020.js";
 import { parse } from "yaml";
 
 import { FabricError } from "../errors.js";
+import { EXECUTABLE_RESOLUTION_VERSION } from "../domain/versions.js";
+import { isPrimaryAdapter, PRIMARY_ADAPTER_IDS } from "./primary-adapters.js";
+import type { ProviderIdentityPolicy } from "./provider-identity.js";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -27,13 +31,98 @@ export function resolveCompatibilityArtifact(compatibilityPath: string, value: s
 
 const execFileAsync = promisify(execFile);
 
+type ExecutableLookup = (name: string, path: string) => Promise<string | undefined>;
+
+async function defaultExecutableLookup(name: string, path: string): Promise<string | undefined> {
+  const pathEntries = path.split(delimiter);
+  const extensions = process.platform === "win32" && !name.includes(".")
+    ? (process.env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD").split(";")
+    : [""];
+  for (const entry of pathEntries) {
+    const directory = entry.length === 0 ? "." : entry;
+    for (const extension of extensions) {
+      const candidate = isAbsolute(name) ? name : join(directory, `${name}${extension}`);
+      if (await isExecutableFile(candidate)) return resolve(candidate);
+    }
+  }
+  return undefined;
+}
+
+export async function resolveExecutableOnPath(
+  executable: string,
+  dependencies: { path?: string; lookup?: ExecutableLookup } = {},
+): Promise<string> {
+  if (isAbsolute(executable)) return executable;
+  const path = dependencies.path ?? process.env.PATH ?? "";
+  const resolved = await (dependencies.lookup ?? defaultExecutableLookup)(executable, path);
+  if (resolved === undefined) {
+    throw new FabricError(
+      "ADAPTER_ARTIFACT_MISSING",
+      `adapter executable '${executable}' is not resolvable on PATH`,
+    );
+  }
+  return resolved;
+}
+
+export async function resolveAdapterExecutable(input: {
+  executable: string;
+  compatibilityPath?: string;
+  path?: string;
+  lookup?: ExecutableLookup;
+}): Promise<string> {
+  const executable = input.compatibilityPath !== undefined && input.executable.startsWith("${USER_HOME}")
+    ? resolveCompatibilityArtifact(input.compatibilityPath, input.executable)
+    : input.executable;
+  return resolveExecutableOnPath(executable, input);
+}
+
+export async function isExecutableFile(path: string): Promise<boolean> {
+  try {
+    const info = await stat(path);
+    if (!info.isFile()) return false;
+    await access(path, constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export type WrapperProvenance = {
   adapterId: string;
   repositoryCommit: string;
   wrapperPath: string;
 };
 
-const PROVIDER_IDENTITY_POLICY: Readonly<Record<string, string>> = {
+export type AdapterExecutableFailure = {
+  adapterId: string;
+  executable: string;
+  reasons: string[];
+};
+
+function executableFailure(adapterId: string, executable: string, reason: string): AdapterExecutableFailure {
+  return { adapterId, executable, reasons: [reason] };
+}
+
+export function mergeAdapterExecutableFailures(
+  ...groups: readonly (readonly AdapterExecutableFailure[])[]
+): AdapterExecutableFailure[] {
+  const merged = new Map<string, { executables: Set<string>; reasons: Set<string> }>();
+  for (const failure of groups.flat()) {
+    const current = merged.get(failure.adapterId) ?? { executables: new Set<string>(), reasons: new Set<string>() };
+    current.executables.add(failure.executable);
+    for (const reason of failure.reasons) current.reasons.add(reason);
+    merged.set(failure.adapterId, current);
+  }
+  return [...merged.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([adapterId, value]) => ({
+      adapterId,
+      executable: [...value.executables].filter((executable) => executable !== "<missing>").sort()[0] ?? "<missing>",
+      reasons: [...value.reasons].sort(),
+    }));
+}
+
+const PROVIDER_IDENTITY_POLICY: Readonly<Record<string, ProviderIdentityPolicy>> = {
   "claude-agent-sdk": "apple-designated",
   "codex-app-server": "apple-designated",
   agy: "apple-designated",
@@ -160,11 +249,13 @@ export async function verifyAdapterCompatibility(input: {
   schemaPath: string;
   adapterIds: string[];
   requireEnabled: boolean;
+  allowUnavailableOptional?: boolean;
 }): Promise<{
   valid: true;
   adapterIds: string[];
   wrapperProvenance: WrapperProvenance[];
   resolvedExecutables: Record<string, string>;
+  unavailableOptionalAdapters: AdapterExecutableFailure[];
 }> {
   const document: unknown = parse(await readFile(input.compatibilityPath, "utf8"));
   const schema: unknown = JSON.parse(await readFile(input.schemaPath, "utf8"));
@@ -181,6 +272,7 @@ export async function verifyAdapterCompatibility(input: {
 
   const wrapperProvenance: WrapperProvenance[] = [];
   const resolvedExecutables: Record<string, string> = {};
+  const unavailableOptionalAdapters: AdapterExecutableFailure[] = [];
   for (const adapterId of input.adapterIds) {
     const adapter = document.adapters[adapterId];
     if (!isRecord(adapter)) {
@@ -209,24 +301,44 @@ export async function verifyAdapterCompatibility(input: {
       if (adapterId === "cursor-agent" && typeof adapter.implementation.cursor_install_root !== "string") {
         throw new FabricError("ADAPTER_COMPATIBILITY_INVALID", "enabled Cursor adapter has no canonical install root");
       }
-      if (adapterId === "opencode-acp" && typeof adapter.implementation.provider_install_root !== "string") {
-        throw new FabricError("ADAPTER_COMPATIBILITY_INVALID", "enabled OpenCode adapter has no canonical install root");
-      }
     }
+    const executable = adapter.implementation.executable;
     if (input.requireEnabled) {
-      if (typeof adapter.implementation.executable !== "string") {
+      if (typeof executable !== "string") {
+        if (input.allowUnavailableOptional === true && !isPrimaryAdapter(adapterId)) {
+          unavailableOptionalAdapters.push(executableFailure(
+            adapterId,
+            "<missing>",
+            `enabled adapter has no provider executable: ${adapterId}`,
+          ));
+          continue;
+        }
         throw new FabricError(
           "ADAPTER_COMPATIBILITY_INVALID",
           `enabled adapter has no provider executable: ${adapterId}`,
         );
       }
     }
-    if (typeof adapter.implementation.executable === "string") {
-      resolvedExecutables[adapterId] = resolveCompatibilityArtifact(
-        input.compatibilityPath,
-        adapter.implementation.executable,
-      );
+    if (typeof executable === "string" && (adapter.enabled === true || input.requireEnabled)) {
+      try {
+        const candidate = await resolveAdapterExecutable({ executable, compatibilityPath: input.compatibilityPath });
+        if (!(await isExecutableFile(candidate))) {
+          throw new FabricError("ADAPTER_ARTIFACT_MISSING", `adapter executable '${executable}' is not executable: ${adapterId}`);
+        }
+        resolvedExecutables[adapterId] = candidate;
+      } catch (error: unknown) {
+        if (input.allowUnavailableOptional === true && !isPrimaryAdapter(adapterId) && error instanceof FabricError && error.code === "ADAPTER_ARTIFACT_MISSING") {
+          unavailableOptionalAdapters.push(executableFailure(
+            adapterId,
+            typeof executable === "string" ? executable : "<missing>",
+            error.message,
+          ));
+        } else {
+          throw error;
+        }
+      }
     }
+    if (unavailableOptionalAdapters.some((failure) => failure.adapterId === adapterId)) continue;
     const wrapperEntrypoint = adapter.implementation.wrapper_entrypoint;
     if (typeof wrapperEntrypoint === "string") {
       wrapperProvenance.push(await deriveWrapperProvenance({
@@ -240,5 +352,86 @@ export async function verifyAdapterCompatibility(input: {
     adapterIds: [...input.adapterIds],
     wrapperProvenance,
     resolvedExecutables,
+    unavailableOptionalAdapters,
   };
+}
+
+export async function validateEnabledAdapterExecutables(input: {
+  compatibilityPath: string;
+  schemaPath?: string;
+  activeAdapterIds?: readonly string[];
+  adapterIds?: readonly string[];
+  mandatoryPrimary?: boolean;
+}): Promise<{
+  valid: true;
+  executableResolutionVersion: typeof EXECUTABLE_RESOLUTION_VERSION;
+  resolvedExecutables: Record<string, string>;
+  unavailableOptionalAdapters: AdapterExecutableFailure[];
+}> {
+  const document: unknown = parse(await readFile(input.compatibilityPath, "utf8"));
+  if (input.schemaPath !== undefined) {
+    const schema: unknown = JSON.parse(await readFile(input.schemaPath, "utf8"));
+    if (!isRecord(schema)) throw new FabricError("ADAPTER_COMPATIBILITY_INVALID", "compatibility schema is not an object");
+    const ajv = new Ajv2020({ allErrors: true, strict: true });
+    if (!ajv.validate(schema, document)) {
+      throw new FabricError("ADAPTER_COMPATIBILITY_INVALID", `compatibility registry does not match published schema: ${ajv.errorsText(ajv.errors)}`);
+    }
+  }
+  if (!isRecord(document) || !isRecord(document.adapters)) {
+    throw new FabricError("ADAPTER_COMPATIBILITY_INVALID", "compatibility registry lacks adapters");
+  }
+  const explicitSelection = input.adapterIds !== undefined;
+  const selected = new Set(input.adapterIds ?? Object.keys(document.adapters));
+  if (input.mandatoryPrimary === true) {
+    for (const adapterId of PRIMARY_ADAPTER_IDS) selected.add(adapterId);
+  }
+  const resolvedExecutables: Record<string, string> = {};
+  const failures: AdapterExecutableFailure[] = [];
+  for (const adapterId of selected) {
+    if (document.adapters[adapterId] === undefined) {
+      failures.push(executableFailure(adapterId, "<missing>", `adapter compatibility entry is missing: ${adapterId}`));
+    }
+  }
+  for (const [adapterId, value] of Object.entries(document.adapters)) {
+    if (!selected.has(adapterId) || !isRecord(value)) continue;
+    const primaryMandatory = input.mandatoryPrimary === true && isPrimaryAdapter(adapterId);
+    const selectedDisabledOptional = explicitSelection && value.enabled !== true && !primaryMandatory;
+    if (value.enabled !== true && !selectedDisabledOptional && !primaryMandatory) continue;
+    if (primaryMandatory && value.enabled !== true) {
+      failures.push(executableFailure(adapterId, "<disabled>", `mandatory primary adapter is disabled: ${adapterId}`));
+      continue;
+    }
+    if (!isRecord(value.implementation)) {
+      failures.push(executableFailure(adapterId, "<missing>", `selected adapter has no provider executable: ${adapterId}`));
+      continue;
+    }
+    const executable = value.implementation.executable;
+    if (typeof executable !== "string") {
+      failures.push(executableFailure(adapterId, "<missing>", `selected adapter has no provider executable: ${adapterId}`));
+      continue;
+    }
+    let candidate: string;
+    try {
+      candidate = await resolveAdapterExecutable({ executable, compatibilityPath: input.compatibilityPath });
+    } catch (error: unknown) {
+      if (!(error instanceof FabricError) || error.code !== "ADAPTER_ARTIFACT_MISSING") throw error;
+      failures.push(executableFailure(
+        adapterId,
+        executable,
+        `adapter ${adapterId} is enabled but executable '${executable}' is not resolvable on PATH`,
+      ));
+      continue;
+    }
+    if (candidate === undefined || !(await isExecutableFile(candidate))) {
+      failures.push(executableFailure(adapterId, executable, `adapter ${adapterId} is enabled but executable '${executable}' is not resolvable on PATH`));
+      continue;
+    }
+    resolvedExecutables[adapterId] = candidate;
+  }
+  const mandatoryIds = new Set(input.activeAdapterIds ?? PRIMARY_ADAPTER_IDS);
+  const primaryFailures = failures.filter((failure) => mandatoryIds.has(failure.adapterId) || (input.mandatoryPrimary === true && isPrimaryAdapter(failure.adapterId)));
+  if (primaryFailures.length > 0) {
+    throw new FabricError("ADAPTER_ARTIFACT_MISSING", ["enabled adapter executable validation failed:", ...failures.flatMap((failure) => failure.reasons.map((reason) => `- ${reason}`))].join("\n"));
+  }
+  return { valid: true, executableResolutionVersion: EXECUTABLE_RESOLUTION_VERSION, resolvedExecutables, unavailableOptionalAdapters: mergeAdapterExecutableFailures(failures) };
 }

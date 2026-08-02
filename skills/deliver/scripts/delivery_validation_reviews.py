@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+from pathlib import Path
 from typing import Any
 
 from delivery_validation_common import (
@@ -9,11 +12,56 @@ from delivery_validation_common import (
     Invalid,
     _list,
     _mapping,
+    _safe_path,
     check_review_ladder,
     fail,
 )
 
-def _validate_reviews(run: dict[str, Any], evidence: dict[str, dict[str, Any]], *, required: bool) -> None:
+def _validate_route_receipt(
+    run: dict[str, Any], item: dict[str, Any], linked: dict[str, Any], *,
+    workspace_root: Path | None, artifacts: dict[str, dict[str, Any]] | None,
+    verify_hashes: bool,
+) -> None:
+    fail(item.get("provider_family") == run.get("chair_family"), "other-primary review must use a distinct primary family")
+    route_ref = _mapping(linked.get("route_receipt"), "review route receipt")
+    fail(not isinstance(route_ref.get("path"), str) or not route_ref["path"], "other-primary review route receipt path is invalid")
+    fail(not isinstance(route_ref.get("digest"), str), "other-primary review route receipt digest is invalid")
+    route_path = _safe_path(route_ref["path"], "other-primary route receipt.path")
+    fail(route_path not in linked.get("source_paths", []), "other-primary route receipt is not bound to review evidence")
+    if artifacts is not None:
+        fail(
+            not any(
+                artifact.get("path") == route_path
+                and artifact.get("digest") == route_ref["digest"]
+                for artifact in artifacts.values()
+            ),
+            "other-primary route receipt is not bound to a declared artifact",
+        )
+    if workspace_root is None or not verify_hashes:
+        return
+    target = (workspace_root / route_path).resolve()
+    try:
+        target.relative_to(workspace_root.resolve())
+    except ValueError as exc:
+        raise Invalid("other-primary route receipt resolves outside workspace_root") from exc
+    try:
+        raw = target.read_bytes()
+        route = json.loads(raw)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise Invalid("other-primary route receipt is unreadable") from exc
+    fail("sha256:" + hashlib.sha256(raw).hexdigest() != route_ref["digest"], "other-primary route receipt digest does not match live bytes")
+    route = _mapping(route, "other-primary route receipt")
+    fail(route.get("status") != "ok", "other-primary route receipt is not closed successfully")
+    fail(route.get("cross_family") is not True or route.get("certification_eligible") is not True, "other-primary review requires a closed cross-family route receipt")
+    fail(route.get("adapter") != item.get("adapter") or route.get("reviewer_id") != item.get("reviewer_id") or route.get("model_family") != item.get("provider_family") or route.get("resolved_model", route.get("model")) != item.get("model"), "other-primary route receipt identity does not match review lineage")
+
+
+def _validate_reviews(
+    run: dict[str, Any], evidence: dict[str, dict[str, Any]], *, required: bool,
+    workspace_root: Path | None = None,
+    artifacts: dict[str, dict[str, Any]] | None = None,
+    verify_hashes: bool = False,
+) -> None:
     reviews = []
     for index, raw in enumerate(_list(run.get("reviews"), "reviews")):
         item = _mapping(raw, f"reviews[{index}]")
@@ -34,6 +82,11 @@ def _validate_reviews(run: dict[str, Any], evidence: dict[str, dict[str, Any]], 
                 or lineage.get("model") != item.get("model"),
                 f"review {index} lineage does not match its evidence",
             )
+            if item.get("role") == "other-primary":
+                _validate_route_receipt(
+                    run, item, linked, workspace_root=workspace_root,
+                    artifacts=artifacts, verify_hashes=verify_hashes,
+                )
         else:
             fail(not item.get("reason"), f"non-passing review {index} requires reason")
         reviews.append(item)
@@ -58,5 +111,3 @@ def _validate_reviews(run: dict[str, Any], evidence: dict[str, dict[str, Any]], 
     ladder_errors = check_review_ladder(run.get("risk_tier"), legs, chair_family=chair_family)
     if ladder_errors:
         raise Invalid(ladder_errors[0])
-
-

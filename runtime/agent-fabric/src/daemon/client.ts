@@ -4,11 +4,17 @@ import { chmod, open, readFile, rename, rm, rmdir } from "node:fs/promises";
 import { basename, dirname, join, normalize, resolve } from "node:path";
 
 import Database from "better-sqlite3";
-import { MCP_BOOTSTRAP_CREDENTIALS_FEATURE } from "@local/agent-fabric-protocol";
+import {
+  MCP_BOOTSTRAP_CREDENTIALS_FEATURE,
+  MCP_BOOTSTRAP_RESULT_SHAPE_FEATURE,
+} from "@local/agent-fabric-protocol";
 
 import type { FabricOpenOptions } from "../domain/types.js";
 import { resolveFabricRoots } from "../domain/fabric-roots.js";
-import { inspectFabricDatabase } from "../core/migrations.js";
+import {
+  inspectFabricDatabase,
+  type DatabaseInspectionHooks,
+} from "../core/migrations.js";
 import { FabricRemoteError } from "../transport/ndjson-rpc.js";
 import { attachOrStartDaemon, type DaemonHandshakeResult } from "./bootstrap-client.js";
 import { BootstrapElection, type BootstrapReadyReceipt } from "./bootstrap-election.js";
@@ -53,6 +59,8 @@ export type DaemonStartOptions = {
   githubHostedChecks?: OptionalGitHubHostedChecksConfiguration;
   trustedGitConfiguration?: TrustedGitConfiguration;
   herdr?: HerdrDaemonProcessConfiguration;
+  /** Parent-process test seam; never crosses into the daemon child. */
+  inspectionHooks?: DatabaseInspectionHooks;
   configuration?: {
     globalConfigPath: string;
     localConfigPath?: string;
@@ -407,6 +415,13 @@ async function privateDaemonHandshake(
   try {
     client = await FabricDaemonClient.connect(discovery.receipt.socketPath, discovery.receipt.bootstrapCapability);
   } catch (error: unknown) {
+    if (error instanceof FabricRemoteError && ["DAEMON_PROTOCOL_MISMATCH", "DAEMON_PROTOCOL_UNSUPPORTED", "PROTOCOL_INCOMPATIBLE"].includes(error.code)) {
+      return {
+        status: "incompatible",
+        responsive: true,
+        message: `${error.message}; restart the incumbent through its owning Fabric lifecycle`,
+      };
+    }
     return {
       status: "unavailable",
       reason: error instanceof FabricRemoteError && error.code === "DAEMON_CONNECT_TIMEOUT" ? "timeout" : "unreachable",
@@ -512,7 +527,9 @@ async function spawnProductionDaemon(input: {
 }): Promise<ProductionSpawn> {
   const prepared = await prepareDaemonStart(input.options);
   const daemonInstanceGeneration = input.electionGeneration;
-  const child = await spawnDaemonChild(prepared, {
+  const childOptions = { ...prepared };
+  delete childOptions.inspectionHooks;
+  const child = await spawnDaemonChild(childOptions, {
     mode: "production-election",
     actionId: input.actionId,
     electionGeneration: input.electionGeneration,
@@ -532,7 +549,7 @@ async function spawnProductionDaemon(input: {
       bootstrapCapability: child.bootstrapCapability,
       lifecycleReceiptAuthorityId: prepared.lifecycleReceiptAuthorityId ?? null,
       protocolVersion: FABRIC_PROTOCOL_VERSION,
-      features: ["rpc", MCP_BOOTSTRAP_CREDENTIALS_FEATURE],
+      features: ["rpc", MCP_BOOTSTRAP_CREDENTIALS_FEATURE, MCP_BOOTSTRAP_RESULT_SHAPE_FEATURE],
     });
   })();
   const publishedIdentity = identity.then(
@@ -649,7 +666,7 @@ export async function startFabricDaemon(options: DaemonStartOptions): Promise<Fa
       actionId,
       socketPath: normalized.socketPath,
       requiredProtocolVersion: FABRIC_PROTOCOL_VERSION,
-      requiredFeatures: ["rpc", MCP_BOOTSTRAP_CREDENTIALS_FEATURE],
+      requiredFeatures: ["rpc", MCP_BOOTSTRAP_CREDENTIALS_FEATURE, MCP_BOOTSTRAP_RESULT_SHAPE_FEATURE],
       election,
       preflight: async () => {
         // This runs only when no compatible incumbent is attached: the
@@ -673,7 +690,7 @@ export async function startFabricDaemon(options: DaemonStartOptions): Promise<Fa
         );
       },
       preBootstrap: async () => {
-        inspectFabricDatabase(normalized.databasePath);
+        inspectFabricDatabase(normalized.databasePath, normalized.inspectionHooks);
         await Promise.all([
           ensurePrivateDirectory(normalized.stateDirectory),
           ensurePrivateDirectory(normalized.runtimeDirectory),
@@ -707,7 +724,7 @@ export async function startFabricDaemon(options: DaemonStartOptions): Promise<Fa
               daemonInstanceGeneration: provisional.daemonInstanceGeneration,
               socketPath: provisional.socketPath,
               protocolVersion: FABRIC_PROTOCOL_VERSION,
-              features: ["rpc", MCP_BOOTSTRAP_CREDENTIALS_FEATURE],
+              features: ["rpc", MCP_BOOTSTRAP_CREDENTIALS_FEATURE, MCP_BOOTSTRAP_RESULT_SHAPE_FEATURE],
               evidence: {
                 databaseOwned: true,
                 migrationsComplete: true,

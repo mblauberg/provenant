@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
-import { access, mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -94,11 +94,12 @@ describe("zero-state MCP bootstrap", () => {
     }
   });
 
-  it("rejects an untrusted exact root before daemon discovery", async () => {
+  it("auto-enrols a valid exact repository root before daemon discovery", async () => {
     const temporaryRoot = await mkdtemp(join(tmpdir(), "fabric-untrusted-bootstrap-"));
     roots.push(temporaryRoot);
     const root = await realpath(temporaryRoot);
     const stateDirectory = join(root, "state");
+    await mkdir(join(root, ".git"));
     await expect(bootstrapMcpSeat({
       environment: {
         AGENT_FABRIC_SEAT: "codex",
@@ -111,46 +112,45 @@ describe("zero-state MCP bootstrap", () => {
         databasePath: join(stateDirectory, "fabric-v1.sqlite3"),
         socketPath: join(root, "runtime", "fabric-v1.sock"),
       },
-    })).rejects.toMatchObject({
-      code: "WORKSPACE_NOT_TRUSTED",
-      message: `Fabric bootstrap requires the exact current project root to be trusted; run '${join(root, "product", "scripts", "agent-fabric")}' workspace trust '${root}'; then retry fabric_bootstrap`,
-    });
+    })).rejects.toMatchObject({ code: "BOOTSTRAP_SPAWN_FAILED" });
   });
 
-  it("emits an executable recovery command for a spaced home and exact root", async () => {
-    const temporaryRoot = await mkdtemp(join(tmpdir(), "fabric-spaced-bootstrap-"));
+  it("emits a machine-readable lifecycle receipt on CLI workspace refusal", async () => {
+    const temporaryRoot = await mkdtemp(join(tmpdir(), "fabric-cli-receipt-bootstrap-"));
     roots.push(temporaryRoot);
-    const home = join(temporaryRoot, "operator home");
-    const project = join(temporaryRoot, "project root");
-    const launcher = join(home, ".agents", "scripts", "agent-fabric");
-    await mkdir(join(home, ".agents", "scripts"), { recursive: true });
-    await mkdir(project);
-    await writeFile(launcher, "#!/bin/sh\nprintf '%s' \"$3\"\n", { mode: 0o700 });
-    let message = "";
+    const project = join(temporaryRoot, "projects");
+    const stateDirectory = join(temporaryRoot, "state");
+    await mkdir(join(project, "one", ".git"), { recursive: true });
+    await mkdir(join(project, "two", ".git"), { recursive: true });
+    let failure: { stdout?: string; stderr?: string; code?: number } | undefined;
     try {
-      await bootstrapMcpSeat({
-        environment: {
-          AGENT_FABRIC_SEAT: "codex",
-          AGENT_FABRIC_PRODUCT_ROOT: join(home, ".agents"),
-        },
+      await execFileAsync(process.execPath, ["--import", tsxLoader, cliMain, "bootstrap", "--seat", "codex"], {
         cwd: project,
-        paths: {
-          stateDirectory: join(temporaryRoot, "state"),
-          runtimeDirectory: join(temporaryRoot, "runtime"),
-          databasePath: join(temporaryRoot, "state", "fabric-v1.sqlite3"),
-          socketPath: join(temporaryRoot, "runtime", "fabric-v1.sock"),
+        env: {
+          ...process.env,
+          AGENT_FABRIC_STATE_DIRECTORY: stateDirectory,
+          AGENT_FABRIC_PRODUCT_ROOT: join(temporaryRoot, "product"),
+          AGENT_FABRIC_SEAT: "codex",
         },
       });
     } catch (error: unknown) {
-      if (error instanceof Error) message = error.message;
+      failure = error as { stdout?: string; stderr?: string; code?: number };
     }
-    const recovery = /; run (?<command>.+); then retry fabric_bootstrap$/u.exec(message)?.groups?.command;
-    expect(recovery).toBeDefined();
-
-    const result = await execFileAsync("/bin/sh", ["-c", recovery!], {
-      env: { ...process.env, HOME: home },
+    expect(failure?.code).toBe(1);
+    const output = JSON.parse(failure?.stdout ?? "{}") as Record<string, unknown>;
+    expect(output).toMatchObject({
+      error: { code: "WORKSPACE_NOT_TRUSTED" },
+      receipt: {
+        healthy: false,
+        failure: { phase: "workspace-trust" },
+        actions: [expect.objectContaining({
+          action: "workspace-trust",
+          boundaryEvidenceDigest: expect.stringMatching(/^sha256:[0-9a-f]{64}$/u),
+        })],
+      },
     });
-    expect(result.stdout).toBe(await realpath(project));
+    expect(failure?.stderr).toMatch(/repository collection/iu);
+    await expect(access(stateDirectory)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("creates one deterministic scoping run and converges a second primary into its peer seat", async () => {
@@ -172,7 +172,7 @@ describe("zero-state MCP bootstrap", () => {
     const replay = fabric.bootstrapCurrentMcpSeat({ ...base, seat: "codex" });
     const second = fabric.bootstrapCurrentMcpSeat({ ...base, seat: "claude" });
 
-    expect(replay).toEqual(first);
+    expect(replay).toEqual({ ...first, custodyMutated: false });
     expect(first.credentials).toHaveLength(1);
     expect(first.credentials[0]?.authorityId).toMatch(/^bootstrap-authority:[a-f0-9]{64}:codex$/u);
     expect(second.credentials.map(({ seat }) => seat).sort()).toEqual(["claude", "codex"]);
@@ -290,7 +290,7 @@ describe("zero-state MCP bootstrap", () => {
         database.close();
       }
 
-      expect(fabric.bootstrapCurrentMcpSeat(request)).toEqual(first);
+      expect(fabric.bootstrapCurrentMcpSeat(request)).toEqual({ ...first, custodyMutated: false });
     } finally {
       await fabric.close();
     }

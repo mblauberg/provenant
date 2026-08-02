@@ -9261,6 +9261,9 @@
                                 "type": "null"
                               }
                             ]
+                          },
+                          "providerAssurance": {
+                            "$ref": "#/$defs/generated_10"
                           }
                         }
                       },
@@ -9355,6 +9358,9 @@
                               "coverageSummaryDigest": {
                                 "type": "string",
                                 "pattern": "^sha256:[a-f0-9]{64}$"
+                              },
+                              "providerAssurance": {
+                                "$ref": "#/$defs/generated_10"
                               }
                             }
                           },
@@ -9424,6 +9430,9 @@
                               "coverageSummaryDigest": {
                                 "type": "string",
                                 "pattern": "^sha256:[a-f0-9]{64}$"
+                              },
+                              "providerAssurance": {
+                                "$ref": "#/$defs/generated_10"
                               }
                             }
                           },
@@ -9496,6 +9505,9 @@
                               },
                               "coverageSummaryDigest": {
                                 "const": null
+                              },
+                              "providerAssurance": {
+                                "$ref": "#/$defs/generated_10"
                               }
                             }
                           },
@@ -9563,6 +9575,9 @@
                               },
                               "coverageSummaryDigest": {
                                 "const": null
+                              },
+                              "providerAssurance": {
+                                "$ref": "#/$defs/generated_10"
                               }
                             }
                           },
@@ -9630,6 +9645,9 @@
                               },
                               "coverageSummaryDigest": {
                                 "const": null
+                              },
+                              "providerAssurance": {
+                                "$ref": "#/$defs/generated_10"
                               }
                             }
                           },
@@ -9697,6 +9715,9 @@
                               },
                               "coverageSummaryDigest": {
                                 "const": null
+                              },
+                              "providerAssurance": {
+                                "$ref": "#/$defs/generated_10"
                               }
                             }
                           }
@@ -10087,11 +10108,20 @@
                 "minimum": 1
               }
             }
+          },
+          "generated_10": {
+            "type": "string",
+            "enum": [
+              "full-vendor-identity",
+              "partial-signed-helpers",
+              "owner-controlled-install-root",
+              "lockfile-install-attestation"
+            ]
           }
         }
       },
       "inputCodecDigest": "sha256:7f37498fd0633a6a8a6a0c79dbf402279c8819a0241c4c342a8f6bc867ad4d74",
-      "outputCodecDigest": "sha256:f736c71d4cdbffc7510555cae222d7dc2d347fa4d4bca5c7be60e16dc2ade2fc"
+      "outputCodecDigest": "sha256:314ed5b0626e98be6c85c542095811698fa240f3002512c74e9c72744c0ab26f"
     },
     {
       "operation": "fabric.v1.provider-action.read",
@@ -10662,6 +10692,9 @@
                                 "type": "null"
                               }
                             ]
+                          },
+                          "providerAssurance": {
+                            "$ref": "#/$defs/generated_10"
                           }
                         }
                       },
@@ -10756,6 +10789,9 @@
                               "coverageSummaryDigest": {
                                 "type": "string",
                                 "pattern": "^sha256:[a-f0-9]{64}$"
+                              },
+                              "providerAssurance": {
+                                "$ref": "#/$defs/generated_10"
                               }
                             }
                           },
@@ -10825,6 +10861,9 @@
                               "coverageSummaryDigest": {
                                 "type": "string",
                                 "pattern": "^sha256:[a-f0-9]{64}$"
+                              },
+                              "providerAssurance": {
+                                "$ref": "#/$defs/generated_10"
                               }
                             }
                           },
@@ -10897,6 +10936,9 @@
                               },
                               "coverageSummaryDigest": {
                                 "const": null
+                              },
+                              "providerAssurance": {
+                                "$ref": "#/$defs/generated_10"
                               }
                             }
                           },
@@ -10964,6 +11006,9 @@
                               },
                               "coverageSummaryDigest": {
                                 "const": null
+                              },
+                              "providerAssurance": {
+                                "$ref": "#/$defs/generated_10"
                               }
                             }
                           },
@@ -11031,6 +11076,9 @@
                               },
                               "coverageSummaryDigest": {
                                 "const": null
+                              },
+                              "providerAssurance": {
+                                "$ref": "#/$defs/generated_10"
                               }
                             }
                           },
@@ -11098,6 +11146,9 @@
                               },
                               "coverageSummaryDigest": {
                                 "const": null
+                              },
+                              "providerAssurance": {
+                                "$ref": "#/$defs/generated_10"
                               }
                             }
                           }
@@ -11488,11 +11539,20 @@
                 "minimum": 1
               }
             }
+          },
+          "generated_10": {
+            "type": "string",
+            "enum": [
+              "full-vendor-identity",
+              "partial-signed-helpers",
+              "owner-controlled-install-root",
+              "lockfile-install-attestation"
+            ]
           }
         }
       },
       "inputCodecDigest": "sha256:acaf2439712c4dcb0ce2c1f1ffc1ec8aa49d5cf1fff5434120d3a61e56b92627",
-      "outputCodecDigest": "sha256:f736c71d4cdbffc7510555cae222d7dc2d347fa4d4bca5c7be60e16dc2ade2fc"
+      "outputCodecDigest": "sha256:314ed5b0626e98be6c85c542095811698fa240f3002512c74e9c72744c0ab26f"
     },
     {
       "operation": "fabric.v1.provider-action.reconcile",
@@ -12067,6 +12127,9 @@
                                 "type": "null"
                               }
                             ]
+                          },
+                          "providerAssurance": {
+                            "$ref": "#/$defs/generated_10"
                           }
                         }
                       },
@@ -12161,6 +12224,9 @@
                               "coverageSummaryDigest": {
                                 "type": "string",
                                 "pattern": "^sha256:[a-f0-9]{64}$"
+                              },
+                              "providerAssurance": {
+                                "$ref": "#/$defs/generated_10"
                               }
                             }
                           },
@@ -12230,6 +12296,9 @@
                               "coverageSummaryDigest": {
                                 "type": "string",
                                 "pattern": "^sha256:[a-f0-9]{64}$"
+                              },
+                              "providerAssurance": {
+                                "$ref": "#/$defs/generated_10"
                               }
                             }
                           },
@@ -12302,6 +12371,9 @@
                               },
                               "coverageSummaryDigest": {
                                 "const": null
+                              },
+                              "providerAssurance": {
+                                "$ref": "#/$defs/generated_10"
                               }
                             }
                           },
@@ -12369,6 +12441,9 @@
                               },
                               "coverageSummaryDigest": {
                                 "const": null
+                              },
+                              "providerAssurance": {
+                                "$ref": "#/$defs/generated_10"
                               }
                             }
                           },
@@ -12436,6 +12511,9 @@
                               },
                               "coverageSummaryDigest": {
                                 "const": null
+                              },
+                              "providerAssurance": {
+                                "$ref": "#/$defs/generated_10"
                               }
                             }
                           },
@@ -12503,6 +12581,9 @@
                               },
                               "coverageSummaryDigest": {
                                 "const": null
+                              },
+                              "providerAssurance": {
+                                "$ref": "#/$defs/generated_10"
                               }
                             }
                           }
@@ -12893,11 +12974,20 @@
                 "minimum": 1
               }
             }
+          },
+          "generated_10": {
+            "type": "string",
+            "enum": [
+              "full-vendor-identity",
+              "partial-signed-helpers",
+              "owner-controlled-install-root",
+              "lockfile-install-attestation"
+            ]
           }
         }
       },
       "inputCodecDigest": "sha256:28ee48268d11ba40ced5a25a1d8273f6fb1be4cec62b084b9381449a01c16037",
-      "outputCodecDigest": "sha256:f736c71d4cdbffc7510555cae222d7dc2d347fa4d4bca5c7be60e16dc2ade2fc"
+      "outputCodecDigest": "sha256:314ed5b0626e98be6c85c542095811698fa240f3002512c74e9c72744c0ab26f"
     },
     {
       "operation": "fabric.v1.provider-context-pressure.read",
@@ -20223,6 +20313,15 @@
                       "minItems": 0,
                       "maxItems": 20,
                       "uniqueItems": true
+                    },
+                    "providerAssurance": {
+                      "type": "string",
+                      "enum": [
+                        "full-vendor-identity",
+                        "partial-signed-helpers",
+                        "owner-controlled-install-root",
+                        "lockfile-install-attestation"
+                      ]
                     }
                   },
                   "x-reviewSlotCorrelated": true
@@ -20579,6 +20678,12 @@
                   "type": "null"
                 }
               },
+              "providerAssurance": {
+                "enum": [
+                  "full-vendor-identity",
+                  "lockfile-install-attestation"
+                ]
+              },
               "currentCertificationBasis": {
                 "not": {
                   "type": "null"
@@ -20642,7 +20747,7 @@
         }
       },
       "inputCodecDigest": "sha256:665fe0ba3fd5598d8ca4dcdf8b81c771a4818b88d54d90e19e7e854de0446bb7",
-      "outputCodecDigest": "sha256:4b3d652dbd8ba92d057cbfea52a8b4e7adf21f1e534c5caf65a0c938ca42aaed"
+      "outputCodecDigest": "sha256:922137b2e88e25a1a9d48e826dcd9edfdce8aa40fe57ba856c309438e0b22a80"
     },
     {
       "operation": "fabric.v1.review-evidence-annotation.current.read",
@@ -21569,6 +21674,9 @@
                         "mutationReceiptDigest": {
                           "type": "string",
                           "pattern": "^sha256:[a-f0-9]{64}$"
+                        },
+                        "providerAssurance": {
+                          "$ref": "#/$defs/generated_9"
                         }
                       },
                       "x-reviewEvidenceCorrelated": true
@@ -21665,6 +21773,9 @@
                           "minItems": 0,
                           "maxItems": 32,
                           "uniqueItems": true
+                        },
+                        "providerAssurance": {
+                          "$ref": "#/$defs/generated_9"
                         }
                       },
                       "x-reviewEvidenceCurrencyCorrelated": true
@@ -22049,11 +22160,20 @@
                 "minimum": 1
               }
             }
+          },
+          "generated_9": {
+            "type": "string",
+            "enum": [
+              "full-vendor-identity",
+              "partial-signed-helpers",
+              "owner-controlled-install-root",
+              "lockfile-install-attestation"
+            ]
           }
         }
       },
       "inputCodecDigest": "sha256:a023e90e3b5dd6df9405ec9c67ab6c80aec02b932398145a23e2da60754365b4",
-      "outputCodecDigest": "sha256:4e64fa619969c6b6b0adfaf3142810934e650eccc130ba707d321767f17bc82b"
+      "outputCodecDigest": "sha256:e80cfd3ce6d9ce9c1ddcb40cb77d6b404aa3a124976dc34e84f911de727a60f4"
     },
     {
       "operation": "fabric.v1.review-evidence.read",
@@ -22514,6 +22634,9 @@
                   "mutationReceiptDigest": {
                     "type": "string",
                     "pattern": "^sha256:[a-f0-9]{64}$"
+                  },
+                  "providerAssurance": {
+                    "$ref": "#/$defs/generated_8"
                   }
                 },
                 "x-reviewEvidenceCorrelated": true
@@ -22610,6 +22733,9 @@
                     "minItems": 0,
                     "maxItems": 32,
                     "uniqueItems": true
+                  },
+                  "providerAssurance": {
+                    "$ref": "#/$defs/generated_8"
                   }
                 },
                 "x-reviewEvidenceCurrencyCorrelated": true
@@ -22972,11 +23098,20 @@
                 "minimum": 1
               }
             }
+          },
+          "generated_8": {
+            "type": "string",
+            "enum": [
+              "full-vendor-identity",
+              "partial-signed-helpers",
+              "owner-controlled-install-root",
+              "lockfile-install-attestation"
+            ]
           }
         }
       },
       "inputCodecDigest": "sha256:025640b921e0d7496ebfceea9e165c2947efd38375791542cda96206088acb0b",
-      "outputCodecDigest": "sha256:2ae30b1a15dc4088833be2617afe89b6e85228667dbcaef08e82a3df9c0721ec"
+      "outputCodecDigest": "sha256:a2dae7c676c560fbd40431849d43e82ba6a58f5371e5e3a2386d0dc7ebc36516"
     },
     {
       "operation": "fabric.v1.review-finding-page.read",

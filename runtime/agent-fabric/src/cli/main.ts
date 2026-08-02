@@ -229,8 +229,17 @@ async function main(arguments_: string[]): Promise<void> {
     return;
   }
   if (arguments_[0] === "adapter" && arguments_[1] === "executable") {
-    const { resolveAdapterExecutableCli } = await import("./adapter-executable.js");
-    process.stdout.write(`${await resolveAdapterExecutableCli(arguments_.slice(2))}\n`);
+    const { resolveAdapterExecutableAttestationCli, resolveAdapterExecutableCli } = await import("./adapter-executable.js");
+    if (arguments_.includes("--json")) {
+      const result = await resolveAdapterExecutableAttestationCli(arguments_.slice(2));
+      process.stdout.write(`${JSON.stringify({
+        executable: result.executable,
+        provider_assurance: result.providerAssurance,
+        certifying_answer_bearing_leg: result.certifyingAnswerBearingLeg,
+      })}\n`);
+    } else {
+      process.stdout.write(`${await resolveAdapterExecutableCli(arguments_.slice(2))}\n`);
+    }
     return;
   }
   if (arguments_[0] === "adapter" && arguments_[1] === "invocation") {
@@ -406,9 +415,27 @@ try {
   // A schema cutover gate is a user decision, not a failure report: emit the
   // machine-readable gate on stdout so the agent can relay counts and
   // consequences without displacing anything.
-  const { McpBootstrapSchemaCutoverGateError } = await import("./mcp-bootstrap.js");
+  const [{ McpBootstrapSchemaCutoverGateError }, { validateLifecycleActionReceipt }] = await Promise.all([
+    import("./mcp-bootstrap.js"),
+    import("../lifecycle/lifecycle-receipt.js"),
+  ]);
+  const lifecycleReceipt = typeof error === "object" && error !== null && "receipt" in error
+    ? validateLifecycleActionReceipt(error.receipt)
+    : null;
   if (error instanceof McpBootstrapSchemaCutoverGateError) {
-    process.stdout.write(`${JSON.stringify(error.gate, null, 2)}\n`);
+    process.stdout.write(`${JSON.stringify(
+      lifecycleReceipt === null ? error.gate : { error: { code: error.code, message: error.message }, gate: error.gate, receipt: lifecycleReceipt },
+      null,
+      2,
+    )}\n`);
+  } else if (lifecycleReceipt !== null) {
+    const code = typeof error === "object" && error !== null && "code" in error && typeof error.code === "string"
+      ? error.code
+      : "FABRIC_CLI_REQUEST_FAILED";
+    process.stdout.write(`${JSON.stringify({
+      error: { code, message: error instanceof Error ? error.message : String(error) },
+      receipt: lifecycleReceipt,
+    }, null, 2)}\n`);
   }
   process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
   process.exitCode = 1;

@@ -54,204 +54,17 @@ def load_evaluation_materializer(skills_root: Path = SKILLS_ROOT):
     return module
 
 
-def _evidence(
-    evidence_id: str, kind: str, gate: str, *, family: str | None = None,
-) -> dict[str, Any]:
-    item: dict[str, Any] = {
-        "id": evidence_id,
-        "kind": kind,
-        "gate": gate,
-        "status": "pass",
-        "method": f"held-out-{gate}",
-        "artifact_id": "evidence-bundle",
-        "source_paths": [] if kind == "human" else ["inputs"],
-    }
-    if kind == "deterministic":
-        item["result"] = {"exit_code": 0, "receipt_digest": DIGEST_B}
-    if kind == "judgement":
-        item["model_lineage"] = {
-            "adapter": "native-subagent" if family == "openai" else "claude-code",
-            "provider_family": family,
-            "model": "held-out-model",
-        }
-    return item
 
 
-def _compile_receipt(
-    case: dict[str, Any], fixture: dict[str, Any], product_root: Path = PRODUCT_ROOT,
-) -> dict[str, Any]:
-    """Compile static held-out fixture data without reading production profiles."""
-    profile = case["profile"]
-    risk = case["risk_tier"]
-    stochastic = case.get("stochastic", fixture["stochastic"])
-    deterministic = list(fixture["deterministic_gates"])
-    judgements = list(fixture["judgement_gates"])
-    evidence = [_evidence(gate, "deterministic", gate) for gate in deterministic]
-    judgement_ids: dict[str, list[str]] = {"openai": [], "anthropic": []}
-    for gate in judgements:
-        for family in ("openai", "anthropic"):
-            evidence_id = f"{gate}-{family}"
-            evidence.append(_evidence(evidence_id, "judgement", gate, family=family))
-            judgement_ids[family].append(evidence_id)
 
-    for gate in fixture["security_checks"]:
-        if not any(item["gate"] == gate and item["kind"] == "deterministic" for item in evidence):
-            evidence.append(_evidence(f"security-{gate}", "deterministic", gate))
-    evidence.extend([
-        _evidence("authority-approval", "human", "authority-approval"),
-        _evidence("intent-approval", "human", "intent-approval"),
-        _evidence("design-approval", "human", "design-approval"),
-    ])
-
-    if profile == "agent-product":
-        evidence.append(_evidence("agentic-risk-tool-misuse", "deterministic", "agentic-risk:tool-misuse"))
-
-    high_stakes_controls = None
-    if case["high_stakes"]:
-        evidence.extend([
-            _evidence("high-source-authority", "human", "high-stakes:source-authority"),
-            _evidence("high-privacy", "deterministic", "high-stakes:privacy"),
-            _evidence("high-domain-review", "human", "high-stakes:qualified-domain-review"),
-            _evidence("high-action", "human", "high-stakes:explicit-human-action"),
-        ])
-        high_stakes_controls = {
-            "source_authority": {"status": "pass", "evidence_id": "high-source-authority", "authority": "named-source-owner"},
-            "privacy": {"status": "pass", "evidence_id": "high-privacy", "privacy_boundary": "synthetic local fixtures"},
-            "qualified_domain_review": {
-                "status": "pass", "evidence_id": "high-domain-review", "domain": "held-out-domain",
-                "reviewer": "named-reviewer", "qualification": "domain-credential",
-            },
-            "explicit_human_action_gate": {
-                "status": "pass", "evidence_id": "high-action",
-                "action": "approve-held-out-use", "approved_by": "human-owner",
-            },
-        }
-
-    security_evidence = {item["gate"]: item["id"] for item in evidence if item["kind"] == "deterministic"}
-    security_checks = [
-        {"id": gate, "surface": surface, "status": "pass", "evidence_id": security_evidence[gate]}
-        for surface in fixture["security_surfaces"]
-        for gate in fixture["security_checks"]
-        if (surface, gate) in {
-            ("source", "secrets-scan"), ("source", "sast"),
-            ("generated-artifact", "provenance"),
-            ("destructive-boundary", "destructive-boundary-tests"),
-            ("iac-container-config", "policy-scan"),
-            ("agent-tools", "permission-check"), ("agent-tools", "tool-boundary-tests"),
-            ("agent-tools", "prompt-injection-tests"),
-        }
-    ]
-    review_evidence = [*deterministic, *judgement_ids["openai"], *judgement_ids["anthropic"]]
-    states = ("draft", "scoped", "approved", "executing", "verifying", "reviewing", "awaiting_acceptance")
-    first_judgement = judgement_ids["openai"][0]
-    policy_path = product_root / "config" / "security-evidence.json"
-    receipt: dict[str, Any] = {
-        "schema_version": 1,
-        "contract": "delivery-run",
-        "run_id": f"HELD-{case['id'].upper()}",
-        "profile": profile,
-        "status": "awaiting_acceptance",
-        "risk_tier": risk,
-        "chair_family": "openai",
-        "risk_assessment": {
-            "blast_radius": "multi-module", "reversibility": "moderate",
-            "data_sensitivity": "internal", "migration": "none", "oracle_quality": "mixed",
-            "external_effects": "none", "critical_surface": "none",
-        },
-        "risk_override": {"status": "not-required", "approved_by": "", "evidence": "", "reason": ""},
-        "high_stakes": case["high_stakes"],
-        "intent": {
-            "artifact": "outcome.bin", "digest": DIGEST_A, "decision_owner": "human-owner",
-            "approval": {"status": "approved", "approver": "human-owner", "evidence": "intent-approval"},
-        },
-        "authority": {
-            "schema_version": 2,
-            "approved_by": "human-owner", "evidence": "authority-approval",
-            "evidence_digest": DIGEST_B, "workspace_roots": ["."],
-            "expires_at": "2027-07-10T00:00:00Z", "allowed_source_paths": ["inputs"],
-            "allowed_artifact_paths": ["."],
-            "allowed_fabric_operations": [], "denied_paths": [],
-            "denied_fabric_operations": [],
-            "prohibited_actions": ["external-release", "deployment", "irreversible-action"],
-            "disclosure": "local-only", "secrets_access": "none", "secret_refs": [],
-            "deployment": False, "deployment_targets": [],
-            "irreversible_actions": False, "irreversible_action_ids": [],
-            "network": {"tool_egress": "none", "allowed_hosts": []},
-            "budget": {}, "delegations": [],
-        },
-        "artifacts": [
-            {"id": "outcome", "path": "outcome.bin", "media_type": "application/octet-stream", "artifact_type": fixture["artifact_type"], "digest": DIGEST_A, "class": "canonical", "owner": "human-owner", "retention": "project-policy"},
-            {"id": "evidence-bundle", "path": "evidence.json", "media_type": "application/json", "artifact_type": "evidence", "digest": DIGEST_B, "class": "evidence", "owner": "delivery-chair", "retention": "risk-policy"},
-            *([{"id": "evaluation-receipt", "path": "evaluation/EVALUATION.json", "media_type": "application/json", "artifact_type": "evidence", "digest": DIGEST_B, "class": "evidence", "owner": "evaluation-chair", "retention": "risk-policy"}] if stochastic else []),
-        ],
-        "design": {
-            "status": "approved", "artifact_id": "outcome", "digest": DIGEST_A,
-            "approver": "human-owner", "evidence": "design-approval",
-            "alternatives": ["do-nothing"], "failure_analysis": "held-out failure analysis",
-            "containment": "discard the fixture", "one_way_doors": [],
-        },
-        "state_history": [
-            {
-                "state": state, "at": f"2026-07-10T00:{index:02d}:00Z",
-                "evidence_ids": review_evidence if state == "awaiting_acceptance" else deterministic if state in {"verifying", "reviewing"} else [],
-            }
-            for index, state in enumerate(states)
-        ],
-        "evidence": evidence,
-        "measures": {
-            "outcome": [{"id": fixture["outcome_measure"], "status": "pass", "value": 1, "target": "pass", "aggregation": "held-out-case", "evidence_kind": "deterministic", "evidence_id": deterministic[0]}],
-            "trajectory": [{"id": fixture["trajectory_measure"], "status": "pass", "value": 1, "target": "pass", "aggregation": "held-out-case", "evidence_kind": "deterministic", "evidence_id": deterministic[0]}],
-        },
-        "assurance": {
-            "stochastic_required": stochastic,
-            "reason": "held-out stochastic behaviour gate" if stochastic else "deterministic profile with independent review",
-            "evaluations": ([{
-                "status": "complete", "anchored_at": "2026-07-10T00:02:30Z",
-                "evidence_id": first_judgement,
-                "evaluation_artifact_id": "evaluation-receipt",
-                "evaluation_id": "EVAL-REFERENCE",
-                "evaluation_digest": DIGEST_B,
-                "plan_digest": DIGEST_B,
-            }] if stochastic else []),
-        },
-        "reviews": [
-            {"role": "targeted", "provider_family": "openai", "adapter": "native-subagent", "model": "held-out-model", "independent_of_authorship": True, "lenses": ["correctness", "tests"], "status": "pass", "evidence_id": judgement_ids["openai"][0], "reason": ""},
-            {"role": "other-primary", "provider_family": "anthropic", "adapter": "claude-code", "model": "held-out-model", "independent_of_authorship": True, "lenses": ["spec-alignment"], "status": "pass", "evidence_id": judgement_ids["anthropic"][0], "reason": ""},
-            {"role": "distinct-family", "provider_family": "google", "adapter": "gemini", "model": "", "independent_of_authorship": True, "lenses": ["blind-spots"], "status": "unavailable", "evidence_id": "", "reason": "held-out case has no optional provider"},
-        ],
-        "security": {
-            "status": "pass" if fixture["security_surfaces"] else "not_applicable",
-            "reason": "" if fixture["security_surfaces"] else "held-out fixture has no changed technical surface",
-            "policy_sha256": "sha256:" + hashlib.sha256(policy_path.read_bytes()).hexdigest(),
-            "changed_surfaces": fixture["security_surfaces"],
-            "artifact_surfaces": ([{"artifact_id": "outcome", "surfaces": fixture["security_surfaces"]}] if fixture["security_surfaces"] else []),
-            "checks": security_checks,
-            "agentic_risks": ([
-                {"id": item, "status": "pass", "evidence_id": "agentic-risk-tool-misuse"}
-                if item == "tool-misuse" else {"id": item, "status": "not_applicable", "reason": "not exercised by this held-out fixture"}
-                for item in AGENTIC_RISKS
-            ] if profile == "agent-product" else []),
-        },
-        "high_stakes_controls": high_stakes_controls,
-        "human_gates": {
-            "acceptance": {"status": "pending", "approver": "", "evidence": ""},
-            "release": {"status": "pending", "approver": "", "evidence": ""},
-        },
-        "observation": {
-            "status": "planned", "window": {"kind": "event-count", "minimum": 1},
-            "signals": [fixture["observation_signal"]],
-            "thresholds": {fixture["observation_signal"]: {"direction": "gte", "limit": 1}},
-            "owner": "human-owner", "containment": "withdraw the artifact",
-            "privacy": "aggregate-redacted", "close_condition": "threshold passes",
-            "started_at": "", "ended_at": "", "observed_events": 0, "evidence_ids": [],
-        },
-        "incident": None, "retrospective": None, "repair_cycles": 0,
-        "escaped_defect": False, "human_corrections": [],
-        "checkpoint": {"generation": 0, "current_slice": "awaiting-acceptance", "next_action": "human acceptance", "in_flight": [], "artifact_paths": ["RUN.json"]},
-        "degradation": None,
-    }
-    return receipt
-
+def load_receipt_producer(skills_root: Path = SKILLS_ROOT):
+    path = skills_root / "deliver" / "scripts" / "delivery_receipt.py"
+    spec = importlib.util.spec_from_file_location("scenario_delivery_receipt_producer", path)
+    if not spec or not spec.loader:
+        raise ValueError("delivery receipt producer is unavailable")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 def _pointer_parent(document: Any, pointer: str) -> tuple[Any, str]:
     if not isinstance(pointer, str) or not pointer.startswith("/"):
@@ -351,13 +164,14 @@ def validate(
     fixtures, cases = _validate_dataset(data)
     kernel = load_kernel(skills_root)
     materializer = load_evaluation_materializer(skills_root)
+    producer = load_receipt_producer(skills_root)
     matched = 0
     attempted = 0
     for case in cases:
         fixture = copy.deepcopy(fixtures[case["profile"]])
         fixture.update(copy.deepcopy(case.get("fixture_overrides", {})))
         for repetition in range(case["repetitions"]):
-            receipt = _compile_receipt(case, fixture, product_root)
+            receipt = producer.build_scenario_receipt(case, fixture, product_root)
             error = ""
             with tempfile.TemporaryDirectory(prefix="delivery-scenario-") as temporary:
                 workspace_root = Path(temporary)

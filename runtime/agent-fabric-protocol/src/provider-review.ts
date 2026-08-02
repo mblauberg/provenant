@@ -14,6 +14,11 @@ import {
   type CodecOutput,
 } from "./codec.js";
 import { PROVIDER_ACTION_REF_V1_CODEC } from "./launch.js";
+import {
+  PROVIDER_IDENTITY_ASSURANCE_V1_CODEC,
+  supportsCertifyingAnswerBearingLeg,
+  type ProviderIdentityAssurance,
+} from "./provider-assurance.js";
 import { LOCAL_PROVIDER_ROUTE_V1_CODEC } from "./route-lineage.js";
 
 const positive = integer({ minimum: 1 });
@@ -559,8 +564,11 @@ const terminalReviewCommon = {
   currentCertificationBasis: nullable(REVIEW_CERTIFICATION_BASIS_V1_CODEC),
   certifying: boolean,
 };
+const terminalReviewCodec = (required: Parameters<typeof objectCodec>[0]) => objectCodec(required, {
+  providerAssurance: PROVIDER_IDENTITY_ASSURANCE_V1_CODEC,
+});
 const terminalReviewProjectionBaseCodec = unionOf([
-  objectCodec({
+  terminalReviewCodec({
     kind: literal("safe-answer"),
     ...terminalReviewCommon,
     providerAnswerDigest: sha256,
@@ -573,7 +581,7 @@ const terminalReviewProjectionBaseCodec = unionOf([
     readCoverageDigest: sha256,
     coverageSummaryDigest: sha256,
   }),
-  objectCodec({
+  terminalReviewCodec({
     kind: literal("unusable-answer"),
     ...terminalReviewCommon,
     providerAnswerDigest: sha256,
@@ -586,7 +594,7 @@ const terminalReviewProjectionBaseCodec = unionOf([
     readCoverageDigest: sha256,
     coverageSummaryDigest: sha256,
   }),
-  objectCodec({
+  terminalReviewCodec({
     kind: literal("provider-terminal-failure"),
     ...terminalReviewCommon,
     providerAnswerDigest: literal(null),
@@ -599,7 +607,7 @@ const terminalReviewProjectionBaseCodec = unionOf([
     readCoverageDigest: literal(null),
     coverageSummaryDigest: literal(null),
   }),
-  objectCodec({
+  terminalReviewCodec({
     kind: literal("terminal-no-effect"),
     ...terminalReviewCommon,
     providerAnswerDigest: literal(null),
@@ -612,7 +620,7 @@ const terminalReviewProjectionBaseCodec = unionOf([
     readCoverageDigest: literal(null),
     coverageSummaryDigest: literal(null),
   }),
-  objectCodec({
+  terminalReviewCodec({
     kind: literal("integrity-terminal"),
     ...terminalReviewCommon,
     providerAnswerDigest: literal(null),
@@ -625,7 +633,7 @@ const terminalReviewProjectionBaseCodec = unionOf([
     readCoverageDigest: literal(null),
     coverageSummaryDigest: literal(null),
   }),
-  objectCodec({
+  terminalReviewCodec({
     kind: literal("retired-unknown"),
     ...terminalReviewCommon,
     providerAnswerDigest: literal(null),
@@ -644,6 +652,9 @@ const terminalReviewProjectionCodec = parserBacked(
   (value, path) => {
     const record = value as Readonly<Record<string, unknown>>;
     if (record.certifying === true) {
+      if (!supportsCertifyingAnswerBearingLeg(record.providerAssurance as ProviderIdentityAssurance)) {
+        throw new TypeError(`${path}.certifying requires a certifying provider assurance`);
+      }
       const basis = record.currentCertificationBasis as Readonly<Record<string, unknown>> | null;
       if (record.kind !== "safe-answer" || basis === null || basis.kind === "post-cut") {
         throw new TypeError(`${path}.certifying requires a safe answer with a current certifying basis`);
@@ -695,6 +706,9 @@ export const PROVIDER_ACTION_TERMINAL_PROJECTION_V1_CODEC = parserBacked(
       const action = record.actionRef as Readonly<Record<string, unknown>>;
       const route = record.route as Readonly<Record<string, unknown>>;
       if (action.adapterId !== route.adapterId) throw new TypeError(`${path}.actionRef.adapterId must equal route.adapterId`);
+      if (terminal !== null && terminal.providerAssurance !== route.providerAssurance) {
+        throw new TypeError(`${path}.terminalReview.providerAssurance must equal route.providerAssurance`);
+      }
     }
     if (evidenceKind && mutation !== null) {
       if (!present) throw new TypeError(`${path}.evidenceMutationReceipt requires a present route`);
@@ -783,6 +797,8 @@ const reviewEvidenceRecordBaseCodec = objectCodec({
   reviewerFamilyRelation,
   certificationBasisAtTerminal: REVIEW_CERTIFICATION_BASIS_V1_CODEC,
   mutationReceiptDigest: sha256,
+}, {
+  providerAssurance: PROVIDER_IDENTITY_ASSURANCE_V1_CODEC,
 });
 export const REVIEW_EVIDENCE_RECORD_V1_CODEC = parserBacked(
   defineCodec(
@@ -831,6 +847,8 @@ const reviewEvidenceCurrencyBaseCodec = objectCodec({
   currentCertificationBasis: nullable(REVIEW_CERTIFICATION_BASIS_V1_CODEC),
   certifying: boolean,
   blockerCodes: arrayOf(reviewCurrencyBlocker, { maximum: 32, unique: true }),
+}, {
+  providerAssurance: PROVIDER_IDENTITY_ASSURANCE_V1_CODEC,
 });
 const reviewCurrencyBlockerOrder = [
   ...TOP_REVIEW_BLOCKERS,
@@ -856,6 +874,9 @@ export const REVIEW_EVIDENCE_CURRENCY_V1_CODEC = parserBacked(
     const blockers = record.blockerCodes as readonly unknown[];
     requireEnumOrder(blockers, reviewCurrencyBlockerOrder, `${path}.blockerCodes`);
     if (record.certifying === true) {
+      if (!supportsCertifyingAnswerBearingLeg(record.providerAssurance as ProviderIdentityAssurance)) {
+        throw new TypeError(`${path}.certifying requires a certifying provider assurance`);
+      }
       const basis = record.currentCertificationBasis as Readonly<Record<string, unknown>> | null;
       const current = ["target", "source", "chair", "profile"].every((field) => record[field] === "current");
       if (!current || basis === null || basis.kind === "post-cut" || blockers.length !== 0) {
@@ -906,6 +927,8 @@ export const REVIEW_EVIDENCE_READ_V1_CODEC = parserBacked(
       const currentBasis = currency.currentCertificationBasis as Readonly<Record<string, unknown>>;
       const expectedRelation = evidence.slot === "native" ? "same-family-exempt" : "distinct-family-proved";
       if (
+        currency.providerAssurance !== evidence.providerAssurance ||
+        !supportsCertifyingAnswerBearingLeg(currency.providerAssurance as ProviderIdentityAssurance) ||
         evidence.terminalKind !== "safe-answer" || evidence.answerSafety !== "safe" ||
         !["CLEAN", "FINDINGS"].includes(String(evidence.verdict)) || evidence.reviewResultDigest === null ||
         evidence.routeObservationDigest === null || evidence.actualRouteIdentityDigest === null ||
@@ -1038,6 +1061,8 @@ const reviewSlotBaseCodec = objectCodec({
   certifying: boolean,
   openFindingSet: FINDING_SET_REF_V1_CODEC,
   blockers: arrayOf(enumeration(SLOT_REVIEW_BLOCKERS), { maximum: SLOT_REVIEW_BLOCKERS.length, unique: true }),
+}, {
+  providerAssurance: PROVIDER_IDENTITY_ASSURANCE_V1_CODEC,
 });
 export const REVIEW_SLOT_V1_CODEC = parserBacked(
   defineCodec(
@@ -1067,6 +1092,9 @@ export const REVIEW_SLOT_V1_CODEC = parserBacked(
       throw new TypeError(`${path}.provider failure fields must exist exactly for provider-terminal-failure`);
     }
     if (record.certifying === true) {
+      if (!supportsCertifyingAnswerBearingLeg(record.providerAssurance as ProviderIdentityAssurance)) {
+        throw new TypeError(`${path}.certifying requires a certifying provider assurance`);
+      }
       const basis = record.currentCertificationBasis as Readonly<Record<string, unknown>> | null;
       if (terminalKind !== "safe-answer" || basis === null || basis.kind === "post-cut") {
         throw new TypeError(`${path}.certifying requires a safe answer with a current certifying basis`);
@@ -1170,6 +1198,7 @@ const completeSlotCommonSchema = {
     routeObservationDigest: nonnullSchema,
     actualRouteIdentityDigest: nonnullSchema,
     readCoverageDigest: nonnullSchema,
+    providerAssurance: { enum: ["full-vendor-identity", "lockfile-install-attestation"] },
     currentCertificationBasis: nonnullSchema,
     certifying: { const: true },
     openFindingSet: {
@@ -1237,6 +1266,7 @@ function isCompleteReview(record: Readonly<Record<string, unknown>>): boolean {
         slot.actionRef !== null && slot.evidenceId !== null && slot.resultDigest !== null &&
         slot.routeReceiptDigest !== null && slot.routeObservationDigest !== null && slot.actualRouteIdentityDigest !== null &&
         slot.readCoverageDigest !== null && slot.currentCertificationBasis !== null && slot.certifying === true &&
+        supportsCertifyingAnswerBearingLeg(slot.providerAssurance as ProviderIdentityAssurance) &&
         slot.reviewerFamilyRelation === (index === 0 ? "same-family-exempt" : "distinct-family-proved") &&
         open.findingCount === 0 && (open.pageDigests as readonly unknown[]).length === 0 &&
         (slot.blockers as readonly unknown[]).length === 0;

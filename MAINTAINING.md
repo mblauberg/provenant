@@ -56,8 +56,9 @@ Documentation claims sit in three tiers, and the third is deliberate:
 5. Put trigger terms and the nearest exclusion in the first 250 description
    characters. Keep the complete canonical catalogue at or below 8,000
    characters, targeting 7,600 for wrapper and version headroom.
-6. Keep `SKILL.md` roughly 500 words or less. Move depth into narrowly named
-   references loaded only when needed and deterministic behaviour into scripts.
+6. Keep `SKILL.md` at or below 500 words under the canonical whole-file counter,
+   including YAML frontmatter. Move depth into narrowly named references loaded
+   only when needed and deterministic behaviour into scripts.
 7. Add positive, negative and boundary fixtures with exact primary and companion
    routes, plus contract tests for machine-enforceable invariants. Trigger
    fixtures and contract tests remain mandatory for every skill change.

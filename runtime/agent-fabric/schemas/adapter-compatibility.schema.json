@@ -9,10 +9,11 @@
     "activation_policy": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["real_adapters_require_separate_gate", "default_enabled"],
+      "required": ["real_adapters_require_separate_gate", "default_enabled", "executable_resolution_version"],
       "properties": {
         "real_adapters_require_separate_gate": {"const": true},
-        "default_enabled": {"const": false}
+        "default_enabled": {"const": false},
+        "executable_resolution_version": {"const": 2}
       }
     },
     "adapters": {
@@ -35,7 +36,7 @@
         "executable": {"type": "string"},
         "cursor_install_root": {"type": "string"},
         "provider_install_root": {"type": "string"},
-        "provider_identity": {"enum": ["apple-designated", "cursor-partial-signed-helpers", "owner-controlled-install-root"]}
+        "provider_identity": {"enum": ["apple-designated", "cursor-partial-signed-helpers", "owner-controlled-install-root", "lockfile-install-attestation"]}
       }
     },
     "contract": {
@@ -96,7 +97,7 @@
                 "type": "object",
                 "properties": {
                   "wrapper_entrypoint": {"type": "string", "minLength": 1},
-                  "provider_identity": {"enum": ["apple-designated", "cursor-partial-signed-helpers", "owner-controlled-install-root"]}
+                  "provider_identity": {"enum": ["apple-designated", "cursor-partial-signed-helpers", "owner-controlled-install-root", "lockfile-install-attestation"]}
                 },
                 "required": ["wrapper_entrypoint", "provider_identity"]
               }
@@ -119,26 +120,6 @@
                 "type": "object",
                 "properties": {"cursor_install_root": {"type": "string"}},
                 "required": ["cursor_install_root"]
-              }
-            }
-          }
-        },
-        {
-          "if": {
-            "properties": {
-              "implementation": {
-                "type": "object",
-                "properties": {"provider_identity": {"const": "owner-controlled-install-root"}},
-                "required": ["provider_identity"]
-              }
-            }
-          },
-          "then": {
-            "properties": {
-              "implementation": {
-                "type": "object",
-                "properties": {"provider_install_root": {"type": "string"}},
-                "required": ["provider_install_root"]
               }
             }
           }

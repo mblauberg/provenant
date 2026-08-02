@@ -18,6 +18,5 @@
 #         it is unreliable, not because it is less real.  Removal is still
 #         enforced: when #563 lands, the six strict entries all go green and
 #         break the gate, and this entry is deleted in that same pull request.
-does not run cutover cleanup when concurrent inspection writes exhaust the retry bound #603
 closes attached sockets and exits without waiting for clients to disconnect first #603
 renews credentials on the same explicit run and rejects a one-seat binding #563

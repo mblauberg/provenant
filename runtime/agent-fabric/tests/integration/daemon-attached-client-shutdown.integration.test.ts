@@ -22,12 +22,7 @@ describe("daemon shutdown with attached clients", () => {
       capability: daemon.bootstrapCapability,
     });
     try {
-      const stopped = daemon.stop().then(() => true);
-      const completedPromptly = await Promise.race([
-        stopped,
-        new Promise<false>((resolve) => setTimeout(() => resolve(false), 500)),
-      ]);
-      expect(completedPromptly).toBe(true);
+      await expect(daemon.stop()).resolves.toBeUndefined();
     } finally {
       await attached.close();
       await daemon.stop();

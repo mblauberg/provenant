@@ -51,7 +51,7 @@ export async function createResolvedStage4Compatibility(adapterId: Stage4Adapter
     compatibilityPath,
     stringify({
       schema_version: 1,
-      activation_policy: { real_adapters_require_separate_gate: true, default_enabled: false },
+      activation_policy: { real_adapters_require_separate_gate: true, default_enabled: false, executable_resolution_version: 2 },
       adapters: {
         [adapterId]: {
           enabled: true,

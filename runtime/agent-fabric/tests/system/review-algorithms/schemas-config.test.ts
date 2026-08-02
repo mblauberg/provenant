@@ -216,6 +216,7 @@ describe("Agent Fabric review schemas and checked-in catalogues", () => {
     const reclassified = reduceTerminalEvidenceEffect({ terminal: safe, priorHeadGeneration: 0, priorEvidenceId: null,
       priorOpenFindingSetDigest: digest("open"), priorRepairRequiredSetDigest: digest("repair"), reportedResolvedFindingDigests: [],
       certifyingInputsCurrent: true, mandatoryReadsSatisfied: false, actualRouteProvedEqual: true,
+      providerAssurance: "full-vendor-identity",
       findingWindowMode: "normal", reviewVerdict: "CLEAN", parsedFindingDigests: [] });
     expect(validateTerminal(reclassified.effectiveTerminal), JSON.stringify(validateTerminal.errors)).toBe(true);
     expect(digestTerminalResult(reclassified.effectiveTerminal).terminalResultDigest).toBe(reclassified.terminalResultDigest);

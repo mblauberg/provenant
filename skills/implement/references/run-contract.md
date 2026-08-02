@@ -1,9 +1,10 @@
 # Software delivery contract
 
 `implement` executes the `software` profile inside the single canonical
-`delivery-run` receipt. Create `.agent-run/<id>/RUN.json` from
-`skills/deliver/templates/RUN.template.json`, set `profile: software`, then use
-the delivery validator. There is no separate implementation receipt format.
+`delivery-run` receipt. Create `.agent-run/<id>/RUN.json` through
+`skills/deliver/scripts/delivery_receipt.py init`, set `profile: software`,
+then use the delivery validator. The template remains a read-only contract
+fixture. There is no separate implementation receipt format.
 
 The approved scope supplies acceptance criteria, risk and authority. Record
 software artifacts with profile types (`source`, `migration`, `configuration`

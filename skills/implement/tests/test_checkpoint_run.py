@@ -13,12 +13,20 @@ SPEC.loader.exec_module(checkpoint_run)
 
 
 def make_run(tmp_path):
-    path = tmp_path / "RUN.json"
-    path.write_text(json.dumps({"schema_version": 1, "contract": "delivery-run", "checkpoint": {"generation": 0, "artifact_paths": ["RUN.json"]}}))
+    path = tmp_path / ".agent-run" / "CHECKPOINT"
+    path.mkdir(parents=True)
+    path = path / "RUN.json"
+    path.write_text(json.dumps({
+        "schema_version": 1,
+        "contract": "delivery-run",
+        "authority": {"allowed_artifact_paths": ["."]},
+        "checkpoint": {"generation": 0, "current_slice": "draft", "next_action": "continue", "in_flight": [], "artifact_paths": ["RUN.json"]},
+    }))
     return path
 
 
-def test_checkpoint_updates_atomically_and_verifies(tmp_path):
+def test_checkpoint_updates_atomically_and_verifies(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
     run = make_run(tmp_path)
     artifact = tmp_path / "review.md"
     artifact.write_text("review")
@@ -29,7 +37,8 @@ def test_checkpoint_updates_atomically_and_verifies(tmp_path):
     assert data["checkpoint"]["artifact_paths"] == ["RUN.json", "review.md"]
 
 
-def test_checkpoint_rejects_missing_or_escaping_artifacts(tmp_path):
+def test_checkpoint_rejects_missing_or_escaping_artifacts(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
     run = make_run(tmp_path)
     for artifact in ("missing.md", "../outside.md"):
         try:
@@ -38,3 +47,18 @@ def test_checkpoint_rejects_missing_or_escaping_artifacts(tmp_path):
             pass
         else:
             raise AssertionError("unsafe artifact path accepted")
+
+
+def test_checkpoint_rejects_in_workspace_artifacts_outside_authority_scope(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    run = make_run(tmp_path)
+    receipt = json.loads(run.read_text())
+    receipt["authority"]["allowed_artifact_paths"] = ["allowed"]
+    run.write_text(json.dumps(receipt))
+    (tmp_path / "other.md").write_text("outside authority")
+    try:
+        checkpoint_run.update(run, "review", "verify", [], ["other.md"])
+    except ValueError as exc:
+        assert "authority.allowed_artifact_paths" in str(exc)
+    else:
+        raise AssertionError("artifact outside authority scope accepted")

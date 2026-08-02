@@ -1,4 +1,4 @@
-import { access, chmod, mkdir, mkdtemp, readFile, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { access, chmod, lstat, mkdir, mkdtemp, readFile, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -7,7 +7,7 @@ import { execFile } from "node:child_process";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { runProjectActivate, runProjectStatus, resolveProjectRoots } from "../../src/cli/project.ts";
-import { runWorkspaceTrust } from "../../src/cli/workspace-trust.ts";
+import { runWorkspaceTrust, trustedWorkspaceIdentity } from "../../src/cli/workspace-trust.ts";
 import { projectKey } from "../../src/cli/seat-store.ts";
 import { parseCliJson, runSourceCli } from "../support/cli-process.ts";
 
@@ -60,6 +60,21 @@ describe("project activation front doors", () => {
       missingDependencies: ["active Fabric seat"],
     });
     expect(result.message).toContain("Trusted project root");
+  });
+
+  it("activates a nested non-Git directory exactly without inheriting a parent marker", async () => {
+    const value = await fixture();
+    const requested = join(value.project, "src");
+    await mkdir(requested, { recursive: true, mode: 0o700 });
+    await mkdir(join(value.project, ".provenant"), { mode: 0o700 });
+    await writeFile(join(value.project, ".provenant", "agent-fabric.yaml"), "schemaVersion: 1\n");
+
+    await expect(runProjectActivate(requested, value.paths)).resolves.toMatchObject({
+      requestedPath: await realpath(requested),
+      canonicalRepositoryRoot: await realpath(requested),
+      trustedRoot: await realpath(requested),
+      isGitRepository: false,
+    });
   });
 
   it("reports an already trusted exact root as a clean no-op", async () => {
@@ -175,6 +190,56 @@ describe("project activation front doors", () => {
     });
   });
 
+  it("reports a trusted root that becomes an unmarked repository collection as untrusted status", async () => {
+    const value = await fixture();
+    await runProjectActivate(value.project, value.paths);
+    await mkdir(join(value.project, "first-repo", ".git"), { recursive: true, mode: 0o700 });
+    await mkdir(join(value.project, "second-repo", ".git"), { recursive: true, mode: 0o700 });
+
+    await expect(runProjectStatus(value.project, value.paths)).resolves.toMatchObject({
+      status: "untrusted",
+      trusted: false,
+      trustedRoot: null,
+      fabricReady: false,
+      missingDependencies: expect.arrayContaining(["workspace trust"]),
+    });
+  });
+
+  it("keeps a seeded legacy trust record aligned with project custody digest", async () => {
+    const value = await fixture();
+    const now = new Date("2026-07-11T04:00:00.000Z");
+    const canonicalPath = await realpath(value.project);
+    const identity = await lstat(canonicalPath);
+    const registryPath = join(value.paths.stateDirectory, "trusted-workspaces.json");
+    await writeFile(registryPath, `${JSON.stringify({
+      schemaVersion: 1,
+      entries: [{
+        canonicalPath,
+        approvedAt: now.toISOString(),
+        approvedBy: "local-operator",
+        device: identity.dev,
+        inode: identity.ino,
+        allowedProfiles: ["headless"],
+      }],
+    }, null, 2)}\n`);
+    await chmod(registryPath, 0o600);
+    const direct = await runProjectStatus(value.project, value.paths);
+    const identityResult = await trustedWorkspaceIdentity({
+      stateDirectory: value.paths.stateDirectory,
+      canonicalRoot: value.project,
+    });
+
+    expect(direct).toMatchObject({
+      status: "trusted",
+      trusted: true,
+      trustedRoot: canonicalPath,
+      trustRecordDigest: identityResult.trustRecordDigest,
+      fabricReady: false,
+      fabricReadiness: "bootstrap a Fabric seat after activation",
+      missingDependencies: ["active Fabric seat"],
+    });
+  });
+
   it.each([
     "workspace trust record is expired",
     "workspace trust record does not allow the requested profile",
@@ -235,7 +300,7 @@ describe("project activation front doors", () => {
     }
   });
 
-  it("passes the canonical requested path to the trust writer", async () => {
+  it("does not pass an explicitly symlinked project path to the trust writer", async () => {
     const value = await fixture();
     const linked = join(value.root, "linked-project");
     await symlink(value.project, linked);
@@ -246,11 +311,8 @@ describe("project activation front doors", () => {
         received.push(arguments_[1] ?? "");
         return await runWorkspaceTrust(arguments_, paths, now);
       },
-    })).resolves.toMatchObject({
-      action: "trusted",
-      requestedPath: await realpath(value.project),
-    });
-    expect(received).toEqual([await realpath(value.project)]);
+    })).rejects.toThrow(/symbolic link/u);
+    expect(received).toEqual([]);
   });
 
   it("revokes a trust record if the trust owner reports a different canonical path", async () => {
@@ -396,16 +458,13 @@ describe("project activation front doors", () => {
     await expect(access(runtimeDirectory), "D5: refused symlink-root activation must not create the Fabric runtime directory").rejects.toThrow();
   });
 
-  it("canonicalizes a symbolic-link project path before activation", async () => {
+  it("refuses an explicitly symlinked project path through both public project APIs", async () => {
     const value = await fixture();
     const linked = join(value.root, "linked-project");
     await symlink(value.project, linked);
 
-    await expect(runProjectActivate(linked, value.paths)).resolves.toMatchObject({
-      action: "trusted",
-      requestedPath: await realpath(value.project),
-      trustedRoot: await realpath(value.project),
-    });
+    await expect(resolveProjectRoots(linked)).rejects.toThrow(/symbolic link/u);
+    await expect(runProjectActivate(linked, value.paths)).rejects.toThrow(/symbolic link/u);
   });
 
   it("canonicalizes a lexical project-path alias before activation", async () => {

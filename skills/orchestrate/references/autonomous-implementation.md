@@ -16,7 +16,7 @@ substantial+ work and lets routine minor work proceed without one (see
 `implement/SKILL.md`); an unattended queue has no user in the loop to
 notice a missing receipt, so this mode cannot rely on that per-issue
 discretion. It always directs `implement` to create the canonical
-`delivery-run` (`deliver/templates/RUN.template.json`) for **every** queued
+`delivery-run` using `deliver/scripts/delivery_receipt.py init` for **every** queued
 issue, including routine minor ones, and only ever reads/reports the one
 receipt `implement` produces — it never creates, assumes, or forks a second
 one.
@@ -47,7 +47,7 @@ one.
 2. **RUN** `implement` for that issue verbatim: its entry gate, adaptive
    plan, `tdd`/`refactor`/`diagnose` legs, `code-review`, and `evaluate`
    where required — and its loop step 1, directed to create the canonical
-   `delivery-run` `RUN.json` for this issue regardless of size. This mode
+   `delivery-run` `RUN.json` with the receipt producer for this issue regardless of size. This mode
    adds no parallel review path of its own — it delegates the entire
    verified-implementation loop, including receipt creation; it never
    pre-supposes a receipt is already sitting there.
@@ -57,8 +57,8 @@ one.
    and CI gates pass on the exact head. Where no such policy exists, do not
    merge. Never promote, and do not carry
    that issue's `RUN.json` past the state `implement` leaves it in. **Never
-   fork a new receipt** — the canonical `delivery-run` from
-   `deliver/templates/RUN.template.json`, created by `implement` at this
+   fork a new receipt** — the canonical `delivery-run` created by
+   `implement` through `delivery_receipt.py init` at this
    mode's direction for this specific issue, is the only receipt; this mode
    reads and reports it, it never replaces it and never keeps a shadow
    receipt of its own.
