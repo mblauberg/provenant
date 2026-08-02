@@ -1,10 +1,7 @@
 # Provenant: global agent instructions (all harnesses)
 
 Depth lives in the adjacent harness constitution; read it before orchestration,
-routing, delegation, memory or pane decisions. Skills live at
-`$HOME/.agents/skills/<name>/` (Codex reads the installed `~/.codex/skills/`
-mirror); a named skill (e.g. the `implement` skill) means read its `SKILL.md`,
-which discloses its own references. Skill names are binding, not advisory.
+routing, delegation, memory or pane decisions.
 
 - **Objective:** quality per user attention-hour. Verify, delegate and curate.
 - **Sub-agents:** use them; vary model and effort per the harness constitution.
