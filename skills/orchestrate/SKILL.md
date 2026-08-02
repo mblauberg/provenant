@@ -43,8 +43,8 @@ interfaces and dependencies; non-overlapping writes; independently checkable
 return contracts; and expected information gain **greater than** coordination,
 shared-state and tool-density cost.
 
-If the gate fails, keep serial ownership; coupled or shared-error work stays
-serial. Choose the smallest passing topology.
+If the gate fails, keep serial ownership with the chair or one specialist;
+coupled or shared-error work stays serial. Choose the smallest passing topology.
 
 ## Adaptive Loop
 
