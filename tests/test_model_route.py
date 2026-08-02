@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 import importlib.util
 import os
 from pathlib import Path
+import shlex
 import shutil
 import subprocess
 import sys
@@ -86,10 +87,9 @@ def test_model_route_wrapper_does_not_walk_outside_the_product_root(tmp_path):
         python_path.write_text(f"#!/bin/sh\nprintf escaped > {marker}\nexit 97\n")
         python_path.chmod(0o700)
 
-    path_python = tmp_path / "path-bin" / "python3"
-    path_python.parent.mkdir()
-    path_python.symlink_to(ROOT / ".venv" / "bin" / "python")
+    path_python = path_python_from_venv(tmp_path)
     cwd = tmp_path / "cwd"
+    cwd.mkdir(exist_ok=True)
     env = {
         **os.environ,
         "AGENT_FABRIC_PRODUCT_ROOT": str(product_root),
@@ -172,6 +172,150 @@ def write_codex_capability_snapshot(tmp_path, *, observed_at=None, models=None):
     snapshot = tmp_path / "codex-capabilities.json"
     snapshot.write_text(json.dumps(value))
     return snapshot
+
+
+def minimal_product_root(tmp_path):
+    product_root = tmp_path / "product"
+    shutil.copytree(ROOT / "scripts", product_root / "scripts")
+    shutil.copytree(ROOT / "config", product_root / "config")
+    return product_root
+
+
+def provisioned_python():
+    python_path = ROOT / ".venv" / "bin" / "python"
+    assert python_path.is_file(), f"provisioned test interpreter is missing: {python_path}"
+    assert os.access(python_path, os.X_OK), f"provisioned test interpreter is not executable: {python_path}"
+    return python_path
+
+
+def bare_python(tmp_path):
+    python_root = tmp_path / "bare-python"
+    subprocess.run([sys.executable, "-m", "venv", str(python_root)], check=True)
+    python_path = python_root / "bin" / "python"
+    assert python_path.is_file()
+    return python_path
+
+
+def path_python_from_venv(tmp_path):
+    path_python = tmp_path / "path-bin" / "python3"
+    path_python.parent.mkdir()
+    path_python.write_text(f"#!/bin/sh\nexec {shlex.quote(str(provisioned_python()))} \"$@\"\n")
+    path_python.chmod(0o700)
+    return path_python
+
+
+@pytest.mark.parametrize("rung", ("harness", "product-venv", "path-python", "uv"))
+def test_model_route_wrapper_resolves_relative_capabilities_file_on_every_rung(tmp_path, rung):
+    product_root = minimal_product_root(tmp_path)
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    clean_home = tmp_path / "home"
+    clean_home.mkdir()
+    capabilities_file = write_codex_capability_snapshot(cwd)
+    env = {
+        **os.environ,
+        "AGENT_FABRIC_PRODUCT_ROOT": str(product_root),
+        "HOME": str(clean_home),
+        "PYTHONNOUSERSITE": "1",
+    }
+    env.pop("HARNESS_PYTHON", None)
+
+    if rung == "harness":
+        env["HARNESS_PYTHON"] = str(provisioned_python())
+    elif rung == "product-venv":
+        product_venv = product_root / ".venv"
+        product_venv.symlink_to(ROOT / ".venv", target_is_directory=True)
+        product_python = product_venv / "bin" / "python"
+        assert product_python.is_file()
+    elif rung == "path-python":
+        path_python = path_python_from_venv(tmp_path)
+        env["PATH"] = f"{path_python.parent}:{os.environ['PATH']}"
+    else:
+        env["UV_PYTHON"] = str(bare_python(tmp_path))
+        env["UV_NO_CACHE"] = "1"
+        env["UV_NO_SYNC"] = "1"
+        env["UV_PROJECT_ENVIRONMENT"] = str(ROOT / ".venv")
+        fake_python3 = tmp_path / "uv-bin" / "python3"
+        fake_python3.parent.mkdir()
+        fake_python3.write_text("#!/bin/sh\nexit 97\n")
+        fake_python3.chmod(0o700)
+        env["PATH"] = f"{fake_python3.parent}:{os.environ['PATH']}"
+
+    result = subprocess.run(
+        [
+            str(SCRIPT),
+            "resolve",
+            "--adapter", "copilot",
+            "--alias", "scout",
+            "--role", "worker",
+            "--model", "gpt-5.6-luna",
+            "--adapter-gate", "direct-cli",
+            "--capabilities-file", capabilities_file.name,
+        ],
+        cwd=cwd,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+
+    assert result.returncode == 1, result.stderr
+    receipt = json.loads(result.stdout)
+    # The Codex snapshot is deliberately supplied to the direct copilot route:
+    # this status proves the relative file was found and parsed. A missing file
+    # would instead produce capability_discovery_failed.
+    assert receipt["status"] == "capability_snapshot_untrusted"
+    assert "Traceback" not in result.stderr
+
+
+def test_model_route_wrapper_uv_uses_helper_project_for_minimal_product_root(tmp_path):
+    product_root = minimal_product_root(tmp_path)
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    clean_home = tmp_path / "home"
+    clean_home.mkdir()
+    fake_python3 = tmp_path / "uv-bin" / "python3"
+    fake_python3.parent.mkdir()
+    fake_python3.write_text("#!/bin/sh\nexit 97\n")
+    fake_python3.chmod(0o700)
+    env_bare_python = bare_python(tmp_path)
+    env = {
+        **os.environ,
+        "AGENT_FABRIC_PRODUCT_ROOT": str(product_root),
+        "HOME": str(clean_home),
+        "PATH": f"{fake_python3.parent}:{os.environ['PATH']}",
+        "PYTHONNOUSERSITE": "1",
+        "UV_NO_CACHE": "1",
+        "UV_NO_SYNC": "1",
+        "UV_PYTHON": str(env_bare_python),
+        "UV_PROJECT_ENVIRONMENT": str(ROOT / ".venv"),
+    }
+    env.pop("HARNESS_PYTHON", None)
+
+    result = subprocess.run(
+        [
+            str(SCRIPT),
+            "resolve",
+            "--adapter", "copilot",
+            "--alias", "scout",
+            "--role", "worker",
+            "--model", "gpt-5.6-luna",
+            "--adapter-gate", "direct-cli",
+        ],
+        cwd=cwd,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    receipt = json.loads(result.stdout)
+    assert receipt["schema_version"] == 1
+    assert receipt["status"] == "ok"
+    assert "Traceback" not in result.stderr
 
 
 def load_router():

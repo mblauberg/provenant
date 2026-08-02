@@ -1,18 +1,12 @@
 #!/usr/bin/env bash
 
-# Shared interpreter ladder for the operator and Fabric router callers.
-# Keep this order aligned with scripts/check-harness:
-# HARNESS_PYTHON, the product .venv, PyYAML-capable python3, then uv.
-
-model_route_product_root() {
-  local helper_root
-  helper_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-  printf '%s\n' "${AGENT_FABRIC_PRODUCT_ROOT:-$helper_root}"
-}
+# Interpreter ladder for model-route's Python dependency.
+# scripts/check-harness keeps its own ladder because it probes pytest and yaml.
 
 exec_model_route_python() {
-  local product_root
-  product_root="$(model_route_product_root)"
+  local helper_root product_root python3_path
+  helper_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+  product_root="${AGENT_FABRIC_PRODUCT_ROOT:-$helper_root}"
   [[ "$product_root" == /* ]] || {
     echo "model-route: product root must be absolute: $product_root" >&2
     return 3
@@ -29,11 +23,9 @@ exec_model_route_python() {
     exec "$python3_path" "$@"
   fi
   if command -v uv >/dev/null 2>&1; then
-    cd "$product_root"
-    exec uv run --frozen --only-group test python "$@"
+    exec uv run --project "$helper_root" --frozen --only-group test python "$@"
   fi
 
   echo "model-route: no Python with PyYAML found; install uv or set HARNESS_PYTHON" >&2
   return 3
 }
-
