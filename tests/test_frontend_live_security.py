@@ -257,10 +257,10 @@ class LiveServer:
         except (HTTPError, URLError, ConnectionError):
             pass
         try:
-            self.process.communicate(timeout=3)
+            self.process.wait(timeout=3)
         except subprocess.TimeoutExpired:
             self.process.terminate()
-            self.process.communicate(timeout=3)
+            self.process.wait(timeout=3)
 
     def __exit__(self, _exc_type, _exc, _tb):
         self.close()
