@@ -39,6 +39,7 @@ def run_configure(tmp_path: Path, *arguments: str) -> subprocess.CompletedProces
     shim = stable_shim(tmp_path)
     return subprocess.run(
         [
+            sys.executable,
             str(SCRIPT),
             "--agents-home", str(ROOT),
             "--state-directory", str(tmp_path / "state"),
@@ -65,7 +66,12 @@ def run_configure_with_closed_stdout(
     read_descriptor, write_descriptor = os.pipe()
     os.close(read_descriptor)
     process = subprocess.Popen(
-        [str(SCRIPT), *all_client_arguments(tmp_path, paths), *arguments],
+        [
+            sys.executable,
+            str(SCRIPT),
+            *all_client_arguments(tmp_path, paths),
+            *arguments,
+        ],
         cwd=ROOT,
         stdout=write_descriptor,
         stderr=subprocess.PIPE,
