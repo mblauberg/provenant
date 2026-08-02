@@ -9,7 +9,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { openFabric } from "../../../src/index.ts";
 import { openLocalLifecycleReceiptAuthority } from "../../../src/lifecycle/local-receipt-authority.ts";
-import { DAEMON_SHUTDOWN_FABRIC_CLOSE_TIMEOUT_MS } from "../../../src/lifecycle/shutdown-deadline.ts";
+import {
+  DAEMON_SHUTDOWN_FABRIC_CLOSE_TIMEOUT,
+  DAEMON_SHUTDOWN_FABRIC_CLOSE_TIMEOUT_MS,
+  waitWithShutdownDeadline,
+} from "../../../src/lifecycle/shutdown-deadline.ts";
 import * as shutdownFinalizer from "../../../src/daemon/shutdown-finalizer.ts";
 import { createCurrentSessionRun } from "../../support/current-session-testkit.ts";
 import { DAEMON_ROOT_AUTHORITY } from "../../support/daemon-testkit.ts";
@@ -36,6 +40,35 @@ async function provisionLifecycleReceiptAuthority(stateDirectory: string): Promi
 }
 
 describe("shutdown deadline behaviour", () => {
+  it("consumes a pending rejection after the shutdown deadline wins", async () => {
+    vi.useFakeTimers();
+    const unhandledRejection = vi.fn();
+    process.on("unhandledRejection", unhandledRejection);
+    try {
+      const pending = Promise.withResolvers<void>();
+      const pendingCatch = vi.spyOn(pending.promise, "catch");
+      const waiting = waitWithShutdownDeadline(
+        pending.promise,
+        10,
+        DAEMON_SHUTDOWN_FABRIC_CLOSE_TIMEOUT,
+        "fabric close timed out",
+      ).then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+
+      expect(pendingCatch).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(10);
+      await expect(waiting).resolves.toMatchObject({ code: DAEMON_SHUTDOWN_FABRIC_CLOSE_TIMEOUT });
+      pending.reject(new Error("late cleanup failure"));
+      await vi.runAllTicks();
+      expect(unhandledRejection).not.toHaveBeenCalled();
+    } finally {
+      process.off("unhandledRejection", unhandledRejection);
+      vi.useRealTimers();
+    }
+  });
+
   it("tears down a wedged adapter child and closes the database after a drain timeout", async () => {
     const root = await mkdtemp(join(tmpdir(), "fabric-shutdown-deadline-"));
     roots.push(root);

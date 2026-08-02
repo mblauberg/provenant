@@ -29,6 +29,7 @@ export async function waitWithShutdownDeadline(
   message: string,
 ): Promise<void> {
   let timer: NodeJS.Timeout | undefined;
+  void pending.catch(() => undefined);
   try {
     await Promise.race([
       pending,
