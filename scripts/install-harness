@@ -84,6 +84,13 @@ esac
   --source "$PRODUCT_ROOT/skills" \
   --custom-source "$instance_root/custom-skills" \
   --target "$platform_home/skills" >/dev/null
+if [[ "$PLATFORM" == "claude" ]]; then
+  "$PRODUCT_ROOT/scripts/manage_installation.py" plan \
+    --surface agents \
+    --source "$PRODUCT_ROOT/agents" \
+    --target "$platform_home/agents" \
+    --summary >/dev/null
+fi
 
 # Validate enabled provider executables before any installation mutation.
 # Command names resolve on PATH, and executable permissions are checked before
@@ -170,6 +177,7 @@ mkdir -p "$platform_home"
   --custom-source "$instance_root/custom-skills"
 if [[ "$PLATFORM" == "claude" ]]; then
   "$PRODUCT_ROOT/scripts/install-workflows" --target "$platform_home/workflows"
+  "$PRODUCT_ROOT/scripts/install-agents" --target "$platform_home/agents"
 fi
 if [[ "$PLATFORM" == "codex" ]]; then
   "$PRODUCT_ROOT/scripts/configure-codex-skill-overrides.py" \

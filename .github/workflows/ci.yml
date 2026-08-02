@@ -82,6 +82,7 @@ jobs:
               - 'runtime/**'
               - 'scripts/**'
               - 'skills/**'
+              - 'agents/**'
               - 'tests/**'
               - 'workflows/**'
               - '.gitignore'
