@@ -147,7 +147,10 @@ jobs:
   harness:
     name: Harness policy and Python tests
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # The suite is ~5 minutes and the two change gates each rerun one target
+    # against the merge base, so the ceiling has to cover the suite plus two
+    # slow-target runs rather than the suite alone.
+    timeout-minutes: 30
     permissions:
       contents: read
     needs: detect-changes

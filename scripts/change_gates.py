@@ -33,6 +33,7 @@ try:
         parse_vitest_report,
     )
     from .change_gate_runner import (
+        DIRECT_PROCESS_TIMEOUT,
         CommandResult,
         Runner,
         classify_failure as _structured_classify_failure,
@@ -47,6 +48,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
         parse_vitest_report,
     )
     from change_gate_runner import (
+        DIRECT_PROCESS_TIMEOUT,
         CommandResult,
         Runner,
         classify_failure as _structured_classify_failure,
@@ -706,9 +708,16 @@ def _run_suite(
 
 
 def _print_output(result: CommandResult) -> None:
+    # Elapsed time and an explicit timed_out flag, because a target killed at the
+    # cap and a target that failed on its own merits both surface as an
+    # unclassified non-zero return. Without these two numbers the only way to
+    # tell them apart was to raise the cap and rerun CI.
+    timing = f"elapsed={result.elapsed_seconds:.1f}s"
+    if result.timed_out:
+        timing += f" timed_out=yes cap={DIRECT_PROCESS_TIMEOUT:.0f}s"
     print(
-        f"COMMAND classification={result.classification.value} returncode={result.returncode}: "
-        f"{result.command}"
+        f"COMMAND classification={result.classification.value} returncode={result.returncode} "
+        f"{timing}: {result.command}"
     )
     if result.output:
         print(result.output.rstrip())

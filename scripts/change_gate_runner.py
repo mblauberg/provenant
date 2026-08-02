@@ -10,6 +10,7 @@ import shlex
 import signal
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 
 try:
@@ -34,15 +35,19 @@ class CommandResult:
     classification: FailureClass
     unresolved_module: str | None = None
     structured_import_evidence: bool = False
+    elapsed_seconds: float = 0.0
+    timed_out: bool = False
 
 
 # A cap on a target run, so a genuine hang cannot stall the gate forever. It has
 # to clear the slowest legitimate target rather than the average one: at 30s a
 # hang and a merely slow suite were indistinguishable, and any change touching
-# skills/orchestrate/evals/test_cf_dispatch.py (66 tests, over a minute) was
-# permanently unlandable because the reverted run was killed at 30s and came
-# back as an unclassified SIGTERM rather than an assertion.
-DIRECT_PROCESS_TIMEOUT = 300.0
+# skills/orchestrate/evals/test_cf_dispatch.py was permanently unlandable because
+# the reverted run was killed part way and came back as an unclassified SIGTERM
+# rather than an assertion. That file takes 76s on macOS but over 300s at its own
+# merge base on a Linux runner, so the cap is set well clear of the slowest known
+# target rather than just above it. A hang is unbounded and is still caught.
+DIRECT_PROCESS_TIMEOUT = 900.0
 PIPE_DRAIN_TIMEOUT = 5.0
 
 _PYTEST_IMPORT_PLUGIN = """import json
@@ -242,6 +247,7 @@ def _run_structured(
         env=environment,
         start_new_session=True,
     )
+    started = time.monotonic()
     direct_timed_out = False
     group_closed: bool
     output = ""
@@ -267,6 +273,7 @@ def _run_structured(
         if process.stdout is not None and not process.stdout.closed:
             process.stdout.close()
 
+    elapsed_seconds = time.monotonic() - started
     returncode = process.returncode
     if returncode is None:
         returncode = -signal.SIGKILL
@@ -290,6 +297,8 @@ def _run_structured(
         classification=classification,
         unresolved_module=unresolved_module,
         structured_import_evidence=structured_import_evidence,
+        elapsed_seconds=elapsed_seconds,
+        timed_out=direct_timed_out,
     )
 
 
