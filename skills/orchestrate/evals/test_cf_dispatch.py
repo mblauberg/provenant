@@ -22,6 +22,7 @@ from orchestrate.scripts import run_dir_finalize
 HERE = Path(__file__).resolve().parent
 PRODUCT_ROOT = HERE.parents[2]
 SCRIPT = HERE.parent / "scripts" / "cf_dispatch.sh"
+PUBLISH_HELPER = HERE.parent / "scripts" / "cf_dispatch_publish.py"
 RUN_DIR_SCRIPT = HERE.parent / "scripts" / "run_dir_init.sh"
 DISPATCH_SCHEMA = {
     "id",
@@ -425,6 +426,191 @@ def test_publication_race_over_answer_terminal_or_receipt_fails_closed(target_na
 
         assert process.returncode != 0, stderr
         assert record["certification_eligible"] is False
+
+
+@pytest.mark.parametrize("race_kind", ("rename", "symlink"))
+def test_publication_parent_directory_swap_fails_closed(race_kind):
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        evidence = tmp / "evidence"
+        evidence.mkdir()
+        source = tmp / "source.txt"
+        source.write_text("immutable evidence\n", encoding="utf-8")
+        target = evidence / "answer.txt"
+        barrier = tmp / "barrier"
+        env = fabric_free_env()
+        env["CF_DISPATCH_TEST_BARRIER_DIR"] = str(barrier)
+        env["CF_DISPATCH_TEST_BARRIER_MATCH"] = str(target)
+        process = subprocess.Popen(
+            [
+                sys.executable, str(PUBLISH_HELPER), "--root", str(tmp),
+                "publish", str(target), str(source),
+            ],
+            cwd=str(tmp), env=env, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        deadline = time.monotonic() + 10
+        ready = []
+        while time.monotonic() < deadline:
+            ready = list(barrier.glob("*.publish.ready"))
+            if ready:
+                break
+            time.sleep(0.01)
+        assert ready, "publication barrier was not reached"
+        moved = tmp / "evidence.moved"
+        evidence.rename(moved)
+        if race_kind == "symlink":
+            evidence.symlink_to(tmp, target_is_directory=True)
+        else:
+            evidence.mkdir()
+        release = ready[0].with_name(ready[0].name.replace(".ready", ".release"))
+        release.write_text("release", encoding="utf-8")
+        _stdout, stderr = process.communicate(timeout=10)
+
+        assert process.returncode != 0, stderr
+
+
+def test_publisher_refuses_to_replace_existing_evidence():
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        target = tmp / "answer.txt"
+        source = tmp / "source.txt"
+        target.write_text("original\n", encoding="utf-8")
+        source.write_text("replacement\n", encoding="utf-8")
+
+        result = subprocess.run(
+            [
+                sys.executable, str(PUBLISH_HELPER), "--root", str(tmp),
+                "publish", str(target), str(source),
+            ],
+            cwd=str(tmp), text=True, capture_output=True,
+        )
+
+        assert result.returncode != 0
+        assert target.read_text(encoding="utf-8") == "original\n"
+
+
+def test_publisher_rejects_symlinked_parent_below_the_bound_run_root():
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        run_dir = tmp / "run"
+        run_dir.mkdir()
+        outside = tmp / "outside"
+        outside.mkdir()
+        (run_dir / "answers").symlink_to(outside, target_is_directory=True)
+        source = run_dir / "source.txt"
+        source.write_text("immutable evidence\n", encoding="utf-8")
+        target = run_dir / "answers" / "answer.txt"
+
+        result = subprocess.run(
+            [
+                sys.executable, str(PUBLISH_HELPER), "--root", str(run_dir),
+                "publish", str(target), str(source),
+            ],
+            cwd=str(run_dir), text=True, capture_output=True,
+        )
+
+        assert result.returncode != 0
+        assert not (outside / "answer.txt").exists()
+
+
+@pytest.mark.parametrize("command", ("identity", "digest"))
+def test_publisher_rejects_fifo_without_blocking(command):
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        fifo = tmp / "evidence.fifo"
+        os.mkfifo(fifo)
+        arguments = [
+            sys.executable, str(PUBLISH_HELPER), "--root", str(tmp), command, str(fifo),
+        ]
+        if command == "identity":
+            arguments.append(str(tmp / "other.txt"))
+
+        result = subprocess.run(
+            arguments,
+            cwd=str(tmp), text=True, capture_output=True, timeout=2,
+        )
+
+        assert result.returncode != 0
+        assert "not a regular file" in result.stderr
+
+
+def test_publisher_accepts_an_unresolved_symlink_alias_for_the_run_root():
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        real_run_dir = tmp / "private" / "run"
+        real_run_dir.mkdir(parents=True)
+        alias_run_dir = tmp / "var"
+        alias_run_dir.symlink_to(real_run_dir, target_is_directory=True)
+        evidence = real_run_dir / "answer.txt"
+        evidence.write_text("immutable evidence\n", encoding="utf-8")
+        alias_evidence = alias_run_dir / evidence.name
+
+        result = subprocess.run(
+            [
+                sys.executable, str(PUBLISH_HELPER), "--root", str(alias_run_dir),
+                "digest", str(alias_evidence),
+            ],
+            cwd=str(tmp), text=True, capture_output=True,
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.startswith("sha256:")
+
+
+def test_chain_failed_then_success_preserves_attempt_evidence_and_summary():
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        counter = tmp / "counter"
+        write_executable(
+            bin_dir / "claude",
+            "#!/usr/bin/env bash\n"
+            f"count=0\n[ -f '{counter}' ] && count=$(cat '{counter}')\n"
+            f"count=$((count + 1))\nprintf '%s' \"$count\" > '{counter}'\n"
+            "cat >/dev/null\n"
+            "if [ \"$count\" -eq 1 ]; then\n"
+            "  echo 'first provider failed' >&2\n"
+            "  exit 9\n"
+            "fi\n"
+            "echo 'second provider succeeded'\n",
+        )
+        env = fabric_free_env()
+        env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
+        answer = tmp / "review.txt"
+        terminal = tmp / "review.terminal.json"
+        receipt = tmp / "review.route.json"
+        result = subprocess.run(
+            [
+                str(SCRIPT), "--chain", "claude claude",
+                "--orchestrator-family", "codex", "--task-id", "chain-1",
+                "--receipt", str(receipt), "--out", str(answer),
+                "--terminal-artifact", str(terminal), "--prompt", "Review",
+            ],
+            cwd=str(tmp), env=env, text=True, capture_output=True,
+        )
+
+        record = json.loads(result.stdout)
+        assert result.returncode == 0, result.stderr
+        assert receipt.is_file()
+        assert json.loads(receipt.read_text(encoding="utf-8")) == record
+        attempts = record["chain"]["attempts"]
+        assert len(attempts) == 2
+        assert attempts[0]["status"] != "ok"
+        assert attempts[1]["status"] == "ok"
+        assert len({item["output_path"] for item in attempts}) == 2
+        assert len({item["terminal_artifact_path"] for item in attempts}) == 2
+        assert len({item["receipt_path"] for item in attempts}) == 2
+        for item in attempts:
+            assert Path(item["output_path"]).is_file()
+            assert Path(item["terminal_artifact_path"]).is_file()
+            assert Path(item["receipt_path"]).is_file()
+        selected = record["chain"]["selected_success"]
+        assert selected["attempt_id"] == attempts[1]["attempt_id"]
+        assert selected["receipt_path"] == attempts[1]["receipt_path"]
+        assert not answer.exists()
+        assert not terminal.exists()
 
 
 def test_receipt_write_failure_is_explicitly_non_successful():
@@ -1338,6 +1524,11 @@ def test_non_git_fallback_routes_via_product_root_model_route():
         shutil.copytree(
             HERE.parent / "scripts",
             product / "skills" / "orchestrate" / "scripts",
+        )
+        (product / "skills" / "_shared").mkdir(parents=True)
+        shutil.copy2(
+            PRODUCT_ROOT / "skills" / "_shared" / "no_follow.py",
+            product / "skills" / "_shared" / "no_follow.py",
         )
         shutil.copytree(PRODUCT_ROOT / "config", product / "config")
         (product / "scripts").mkdir()

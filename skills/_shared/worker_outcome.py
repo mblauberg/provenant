@@ -3,12 +3,19 @@
 from __future__ import annotations
 
 import hashlib
+import errno
 import json
-import os
 from pathlib import Path
 import re
-import stat
 from typing import Any
+
+try:
+    from .no_follow import NoFollowError, bound_path, lexical_path, read_file, relative_path
+except ImportError:  # Direct spec loading used by the standalone worker tests.
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).parent))
+    from no_follow import NoFollowError, bound_path, lexical_path, read_file, relative_path
 
 
 _DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -37,47 +44,6 @@ def _after_file_read(_path: Path, _label: str) -> None:
     """Narrow test seam for exercising the post-read identity check."""
 
 
-def _read_file(path: Path, label: str) -> tuple[bytes | None, tuple[int, int] | None, str | None]:
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
-    try:
-        fd = os.open(path, flags)
-    except OSError as exc:
-        return None, None, f"{label} is unreadable: {exc}"
-    try:
-        before = os.fstat(fd)
-        if not stat.S_ISREG(before.st_mode):
-            return None, None, f"{label} is not a regular file"
-        if before.st_nlink != 1:
-            return None, None, f"{label} is hardlinked"
-        chunks: list[bytes] = []
-        while True:
-            chunk = os.read(fd, 1024 * 1024)
-            if not chunk:
-                break
-            chunks.append(chunk)
-        after = os.fstat(fd)
-        identity = (before.st_dev, before.st_ino)
-        if identity != (after.st_dev, after.st_ino) or before.st_nlink != after.st_nlink:
-            return None, None, f"{label} changed while it was read"
-        data = b"".join(chunks)
-        _after_file_read(path, label)
-        try:
-            current = os.stat(path, follow_symlinks=False)
-        except OSError as exc:
-            return None, None, f"{label} changed after it was read: {exc}"
-        if stat.S_ISLNK(current.st_mode):
-            return None, None, f"{label} became a symlink"
-        if not stat.S_ISREG(current.st_mode):
-            return None, None, f"{label} is not a regular file after it was read"
-        if current.st_nlink != 1:
-            return None, None, f"{label} became hardlinked"
-        if (current.st_dev, current.st_ino) != identity:
-            return None, None, f"{label} inode changed after it was read"
-        return data, identity, None
-    finally:
-        os.close(fd)
-
-
 def _reference_snapshot(
     root: Path,
     value: object,
@@ -99,21 +65,26 @@ def _reference_snapshot(
         or not _DIGEST.fullmatch(digest)
     ):
         return None, None, None, f"{label} is invalid"
-    target = path if path.is_absolute() else root / path
     try:
-        resolved = target.resolve(strict=False)
-        resolved.relative_to(root.resolve())
-    except (ValueError, RuntimeError):
-        return None, None, None, f"{label} escapes the run directory"
-    except OSError:
-        return None, None, None, f"{label} is missing"
-    data, identity, error = _read_file(target, label)
-    if error:
-        return None, None, None, error
-    assert data is not None and identity is not None
+        relative = relative_path(root, path, allow_absolute=allow_absolute)
+        target = bound_path(root, relative)
+        data, identity, _logical = read_file(
+            relative,
+            label,
+            root=root,
+            allow_absolute=False,
+            after_read=_after_file_read,
+        )
+    except (NoFollowError, OSError, RuntimeError, ValueError) as exc:
+        message = str(exc)
+        if getattr(exc, "errno", None) == errno.ELOOP:
+            message = f"{label} is a symlink"
+        if isinstance(exc, FileNotFoundError):
+            message = f"{label} is missing"
+        return None, None, None, message
     if check_digest and _digest_bytes(data) != digest:
         return None, None, None, f"{label} digest does not match"
-    return resolved, data, identity, None
+    return target, data, identity, None
 
 
 def _reference(root: Path, value: object, label: str) -> tuple[Path | None, bytes | None, str | None]:
@@ -134,10 +105,10 @@ def _json_bytes(data: bytes, label: str) -> tuple[dict[str, Any] | None, str | N
 def _path_matches(root: Path, output_path: object, artifact: Path) -> bool:
     if not isinstance(output_path, str) or not output_path:
         return False
-    candidate = Path(output_path)
-    if candidate.is_absolute():
-        return candidate.resolve() == artifact.resolve()
-    return (root / candidate).resolve() == artifact.resolve() and ".." not in candidate.parts
+    try:
+        return lexical_path(bound_path(root, output_path, allow_absolute=True)) == lexical_path(artifact)
+    except (NoFollowError, OSError, RuntimeError, ValueError):
+        return False
 
 
 def _verify_answer_snapshot(
@@ -151,18 +122,16 @@ def _verify_answer_snapshot(
         return None, None, None, "human answer path is unavailable"
     if not isinstance(output_digest, str) or not _DIGEST.fullmatch(output_digest):
         return None, None, None, "human answer digest is unavailable"
-    candidate = Path(output_path)
-    target = candidate if candidate.is_absolute() else root / candidate
     try:
-        target.resolve(strict=False).relative_to(root.resolve())
-    except (OSError, RuntimeError, ValueError):
+        relative = relative_path(root, output_path, allow_absolute=True)
+    except (NoFollowError, OSError, RuntimeError, ValueError):
         return None, None, None, "human answer path escapes the run directory"
     path, data, identity, error = _reference_snapshot(
         root,
-        {"path": str(target), "digest": output_digest},
+        {"path": relative.as_posix(), "digest": output_digest},
         "human answer",
         check_digest=False,
-        allow_absolute=True,
+        allow_absolute=False,
     )
     if error:
         return None, None, None, error
@@ -276,7 +245,7 @@ def accept_worker_outcome(
     require_worktree_receipt: bool = False,
 ) -> dict[str, object]:
     """Return a derived acceptance decision for one digest-bound attempt."""
-    root = run_dir.expanduser().resolve()
+    root = run_dir.expanduser().absolute()
     if not isinstance(outcome, dict):
         return _failure("worker outcome uses an invalid closed schema")
     if "dispatch_terminal_artifact" not in outcome:
@@ -408,7 +377,7 @@ def accept_worker_outcome(
     }
     result["derived_evidence"] = {
         "human_answer": {
-            "path": answer_path.resolve().relative_to(root).as_posix(),
+            "path": answer_path.absolute().relative_to(root.absolute()).as_posix(),
             "digest": dispatch["output_sha256"],
         },
         "dispatch_terminal": dispatch_terminal,

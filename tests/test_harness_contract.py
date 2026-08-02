@@ -199,12 +199,12 @@ def test_claude_workflows_use_router_and_safe_implement_loop():
     assert "crucial: 5" in implementation
     assert "terminal: 5" in implementation
     assert "state: 'executing'" in implementation
-    assert "handoff: 'awaiting-host-application'" in implementation
+    assert "handoff: 'awaiting-host-certification/application'" in implementation
     assert "git checkout" not in implementation
     assert "git restore" not in implementation
     assert "git reset" not in implementation
     assert "required: false" in implementation
-    assert "otherPrimaryRan" in implementation
+    assert "otherPrimaryReviewAttempted" in implementation
     assert "never replaces the other-primary gate" in implementation
     assert "Copy the global deliver RUN.template.json" in implementation
     assert "refusing the next dispatch" in implementation

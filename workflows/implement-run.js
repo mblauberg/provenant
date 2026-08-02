@@ -209,19 +209,6 @@ const REVIEW_SCHEMA = {
   },
 }
 
-const CERTIFICATION_SCHEMA = {
-  type: 'object',
-  additionalProperties: false,
-  required: ['certifying', 'reviewerId', 'routeReceipt', 'terminalResult', 'reason'],
-  properties: {
-    certifying: { type: 'boolean' },
-    reviewerId: { type: 'string' },
-    routeReceipt: { type: 'string' },
-    terminalResult: { type: 'string' },
-    reason: { type: 'string' },
-  },
-}
-
 // Verify: objective-check outcome on the narrowest lane.
 const VERIFY_SCHEMA = {
   type: 'object',
@@ -571,8 +558,13 @@ const REVIEW_ANGLES = [
 let reviews = []
 let verify = null
 let blocking = 0
-let otherPrimaryRan = false
-let distinctFamilyRan = false
+let otherPrimaryReviewAttempted = false
+let distinctFamilyReviewAttempted = false
+let otherPrimaryReview = {
+  status: 'not-attempted',
+  reviewerId: '',
+  candidatePaths: { outputPath: '', routeReceipt: '', terminalResult: '' },
+}
 let checksPass = false
 let repairCycles = 0
 let patchDigest = ''
@@ -629,37 +621,21 @@ for (let cycle = 0; cycle <= maxRepairCycles; cycle += 1) {
     (index >= REVIEW_ANGLES.length || REVIEW_ANGLES[index].required) && r.verdict === 'block'
   ).length
   const candidate = reviews.find((r) => r.angle === 'other-primary')
-  let otherPrimaryCertification = null
+  otherPrimaryReviewAttempted = Boolean(candidate)
   if (candidate) {
-    otherPrimaryCertification = await agent(
-      'Run the existing deterministic worker-outcome receipt join for the candidate below. Do not certify from ' +
-        'the reviewer booleans (ran, status, crossFamily, certificationEligible or readOnlyGuarantee). Read the ' +
-        'route receipt and semantic terminal-result JSON from disk and invoke the existing ' +
-        '`run_dir_finalize._direct_worker_leg` / `accept_worker_outcome` validation. If either path is empty, ' +
-        'missing, aliased, digest-mismatched, or the joined leg is not certifying, return certifying=false. ' +
-        'Return routeReceipt and terminalResult exactly as supplied by the candidate only after attempting the ' +
-        'deterministic join; return the command-backed result only.\n' +
-        `Run directory: ${runDir}\nCandidate: ${JSON.stringify(candidate)}\nChair family: anthropic\n` +
-        'The command must use the actual files under the run directory, not reconstructed reviewer claims. ' +
-        'Return the structured certification result only.',
-      { label: `review:${cycle}:other-primary-certification`, phase: 'Review', schema: CERTIFICATION_SCHEMA, model: models.scout },
-    )
+    const candidateCrossFamily = candidate.crossFamily || {}
+    otherPrimaryReview = {
+      status: 'attempted-awaiting-host-certification',
+      reviewerId: typeof candidate.reviewerId === 'string' ? candidate.reviewerId : '',
+      candidatePaths: {
+        outputPath: typeof candidateCrossFamily.outputPath === 'string' ? candidateCrossFamily.outputPath : '',
+        routeReceipt: typeof candidateCrossFamily.routeReceipt === 'string' ? candidateCrossFamily.routeReceipt : '',
+        terminalResult: typeof candidateCrossFamily.terminalResult === 'string' ? candidateCrossFamily.terminalResult : '',
+      },
+    }
   }
-  otherPrimaryRan = !!(
-    candidate &&
-    candidate.crossFamily &&
-    typeof candidate.crossFamily.routeReceipt === 'string' &&
-    candidate.crossFamily.routeReceipt &&
-    typeof candidate.crossFamily.terminalResult === 'string' &&
-    candidate.crossFamily.terminalResult &&
-    otherPrimaryCertification &&
-    otherPrimaryCertification.certifying === true &&
-    otherPrimaryCertification.reviewerId === candidate.reviewerId &&
-    otherPrimaryCertification.routeReceipt === candidate.crossFamily.routeReceipt &&
-    otherPrimaryCertification.terminalResult === candidate.crossFamily.terminalResult
-  )
-  distinctFamilyRan = reviews.some((r) => r.angle === 'distinct-family' && r.crossFamily && r.crossFamily.ran && r.crossFamily.status === 'ok')
-  log(`Review cycle ${cycle}: ${reviews.length} verdicts, ${blocking} blocking; other-primary ${otherPrimaryRan ? 'ran' : 'NOT run'}; distinct-family ${distinctFamilyRan ? 'ran' : 'not available'}.`)
+  distinctFamilyReviewAttempted = reviews.some((r) => r.angle === 'distinct-family')
+  log(`Review cycle ${cycle}: ${reviews.length} verdicts, ${blocking} blocking; other-primary ${otherPrimaryReviewAttempted ? 'attempted' : 'NOT attempted'}; distinct-family ${distinctFamilyReviewAttempted ? 'attempted' : 'not available'}.`)
   await checkpoint(`review-${cycle}-complete`, 'run objective verification', [], reviews.map((r) => r.path).filter(Boolean))
 
   phase('Verify')
@@ -677,7 +653,7 @@ for (let cycle = 0; cycle <= maxRepairCycles; cycle += 1) {
   checksPass = !!(verify && verify.passed)
   await checkpoint(
     `verify-${cycle}-complete`,
-    checksPass && blocking === 0 && otherPrimaryRan ? 'prepare host apply' : 'repair blocking findings',
+    checksPass && blocking === 0 ? 'prepare host certification and application' : 'repair blocking findings',
     [],
     [verify && verify.path].filter(Boolean),
   )
@@ -733,11 +709,10 @@ if (!councilChallenge || !councilChallenge.anonymized || !councilChallenge.rando
 
 log(`Final machine checks: ${checksPass ? 'PASS' : 'FAIL/UNKNOWN'}; blocking reviews: ${blocking}; repair cycles: ${repairCycles}.`)
 
-if (!checksPass || blocking > 0 || !otherPrimaryRan) {
+if (!checksPass || blocking > 0) {
   const failureReasons = []
   if (!checksPass) failureReasons.push('objective verification failed')
   if (blocking > 0) failureReasons.push('blocking review findings remain')
-  if (!otherPrimaryRan) failureReasons.push('required certified other-primary coverage did not run')
   const failureReason = failureReasons.join('; ')
   log(`Machine work failed closed: ${failureReason}; host application is not permitted.`)
   await failRun(failureReason)
@@ -750,8 +725,9 @@ if (!checksPass || blocking > 0 || !otherPrimaryRan) {
     patchesEmitted: built.patches.length,
     checksPass,
     blockingReviews: blocking,
-    otherPrimaryReviewRan: otherPrimaryRan,
-    distinctFamilyReviewRan: distinctFamilyRan,
+    otherPrimaryReviewAttempted,
+    otherPrimaryReview,
+    distinctFamilyReviewAttempted,
     repairCycles,
     state: 'failed',
     patches: built.patches,
@@ -787,14 +763,15 @@ return {
   patchesEmitted: built.patches.length,
   checksPass,
   blockingReviews: blocking,
-  otherPrimaryReviewRan: otherPrimaryRan,
-  distinctFamilyReviewRan: distinctFamilyRan,
+  otherPrimaryReviewAttempted,
+  otherPrimaryReview,
+  distinctFamilyReviewAttempted,
   repairCycles,
   state: 'executing',
   transport: {
-    handoff: 'awaiting-host-application',
+    handoff: 'awaiting-host-certification/application',
     kind: 'host-application',
-    nextAction: 'ordinary host chair applies and verifies reviewed patches',
+    nextAction: 'host finalizer certifies candidate evidence, then ordinary host chair applies and verifies reviewed patches',
   },
   patches: built.patches,
   manifest: `${runDir}/MANIFEST.md`,

@@ -124,18 +124,33 @@ make_tmp() {
   [ -d "$root" ] || { echo "temporary directory does not exist: $root" >&2; return 1; }
   mktemp "$root/cf-dispatch.XXXXXX"
 }
+make_tmp_path() {
+  local path
+  path="$(make_tmp)" || return 1
+  rm -f -- "$path"
+  printf '%s\n' "$path"
+}
 make_tmp_dir() {
   local root="${TMPDIR:-/tmp}"
   [ -d "$root" ] || { echo "temporary directory does not exist: $root" >&2; return 1; }
   mktemp -d "$root/cf-dispatch-run.XXXXXX"
 }
 if [ -z "$OUT" ]; then
-  OUT="$(make_tmp)"
+  OUT="$(make_tmp_path)"
   OUT_CREATED=true
 fi
 if [ -z "$TERMINAL_ARTIFACT" ]; then
   TERMINAL_ARTIFACT="${OUT}.terminal.json"
 fi
+EVIDENCE_ROOT="$(python3 - "$OUT" "$TERMINAL_ARTIFACT" "$DISPATCH_RECEIPT" <<'PY'
+import os
+from pathlib import Path
+import sys
+
+parents = [str(Path(value).absolute().parent) for value in sys.argv[1:] if value]
+print(os.path.commonpath(parents))
+PY
+)"
 PROMPT_TMP="$(make_tmp)"
 printf '%s' "$PROMPT" >"$PROMPT_TMP"
 trap 'rm -f "$PROMPT_TMP"' EXIT
@@ -233,7 +248,7 @@ emit_record() {
     "$cert" )"
   if [ -n "$DISPATCH_RECEIPT" ] && [ "$status" != "evidence_paths_not_distinct" ]; then
     receipt_tmp="$(make_tmp)" || receipt_tmp=""
-    if [ -z "$receipt_tmp" ] || ! printf '%s' "$record" >"$receipt_tmp" || ! python3 "$PUBLISH_HELPER" publish "$DISPATCH_RECEIPT" "$receipt_tmp"; then
+    if [ -z "$receipt_tmp" ] || ! printf '%s' "$record" >"$receipt_tmp" || ! python3 "$PUBLISH_HELPER" --root "$EVIDENCE_ROOT" publish "$DISPATCH_RECEIPT" "$receipt_tmp"; then
       [ -n "$receipt_tmp" ] && rm -f "$receipt_tmp"
       echo "cannot write dispatcher receipt: $DISPATCH_RECEIPT" >&2
       record="$(printf '%s' "$record" | python3 -c 'import json,sys; value=json.load(sys.stdin); value.update(status="receipt_write_error", exit=1, terminal_observed=False, read_only_guarantee="none", certification_eligible=False); print(json.dumps(value, separators=(",", ":")))')"
@@ -246,14 +261,6 @@ emit_record() {
   if [ -n "$output_sha256" ] && [ -n "$terminal_artifact_sha256" ] && ! evidence_paths_valid "$output_sha256" "$terminal_artifact_sha256" "$record_digest"; then
     EVIDENCE_PATHS_DISTINCT=false
     record="$(printf '%s' "$record" | python3 -c 'import json,sys; value=json.load(sys.stdin); value.update(status="evidence_publication_invalid", exit=2, terminal_observed=False, read_only_guarantee="none", certification_eligible=False); print(json.dumps(value, separators=(",", ":")))')"
-    if [ -n "$DISPATCH_RECEIPT" ] && evidence_paths_distinct; then
-      receipt_tmp="$(make_tmp)" || receipt_tmp=""
-      if [ -n "$receipt_tmp" ] && printf '%s' "$record" >"$receipt_tmp" && python3 "$PUBLISH_HELPER" publish "$DISPATCH_RECEIPT" "$receipt_tmp"; then
-        rm -f "$receipt_tmp"
-      else
-        [ -n "$receipt_tmp" ] && rm -f "$receipt_tmp"
-      fi
-    fi
     printf '%s' "$record"
     return 1
   fi
@@ -292,7 +299,7 @@ PY
 )"
   fi
   temporary="$(make_tmp)" || return 1
-  if ! printf '%s' "$payload" >"$temporary" || ! python3 "$PUBLISH_HELPER" publish "$path" "$temporary"; then
+  if ! printf '%s' "$payload" >"$temporary" || ! python3 "$PUBLISH_HELPER" --root "$EVIDENCE_ROOT" publish "$path" "$temporary"; then
     rm -f "$temporary"
     return 1
   fi
@@ -306,7 +313,7 @@ evidence_paths_distinct() {
   local -a paths
   paths=("$OUT" "$TERMINAL_ARTIFACT")
   [ -n "$DISPATCH_RECEIPT" ] && paths+=("$DISPATCH_RECEIPT")
-  python3 "$PUBLISH_HELPER" identity "${paths[@]}"
+  python3 "$PUBLISH_HELPER" --root "$EVIDENCE_ROOT" identity "${paths[@]}"
 }
 
 evidence_paths_valid() {
@@ -314,7 +321,7 @@ evidence_paths_valid() {
   local -a entries
   entries=("$OUT" "$output_digest" "$TERMINAL_ARTIFACT" "$terminal_digest")
   [ -n "$DISPATCH_RECEIPT" ] && entries+=("$DISPATCH_RECEIPT" "$receipt_digest")
-  python3 "$PUBLISH_HELPER" verify "${entries[@]}"
+  python3 "$PUBLISH_HELPER" --root "$EVIDENCE_ROOT" verify "${entries[@]}"
 }
 
 emit_evidence_path_rejection() {
@@ -575,7 +582,7 @@ run_one() {  # $1 tool $2 model $3 effort -> writes answer and optional terminal
   [ "$status" = "tool_not_found" ] && guarantee="none"
 
   if [ "$status" = "ok" ]; then
-    if python3 "$PUBLISH_HELPER" publish "$OUT" "$clean"; then
+    if python3 "$PUBLISH_HELPER" --root "$EVIDENCE_ROOT" publish "$OUT" "$clean"; then
       opath="$OUT"
     else
       status="output_write_error"
@@ -584,7 +591,7 @@ run_one() {  # $1 tool $2 model $3 effort -> writes answer and optional terminal
       opath=""
     fi
   else
-    if python3 "$PUBLISH_HELPER" publish "$OUT" "$combined"; then
+    if python3 "$PUBLISH_HELPER" --root "$EVIDENCE_ROOT" publish "$OUT" "$combined"; then
       opath="$OUT"
     else
       status="output_write_error"
@@ -595,7 +602,7 @@ run_one() {  # $1 tool $2 model $3 effort -> writes answer and optional terminal
   fi
   output_sha256=""
   if [ -n "$opath" ] && [ -f "$opath" ]; then
-    if ! output_sha256="$(python3 "$PUBLISH_HELPER" digest "$opath")"; then
+    if ! output_sha256="$(python3 "$PUBLISH_HELPER" --root "$EVIDENCE_ROOT" digest "$opath")"; then
       status="output_validation_error"
       rc=1
       guarantee="none"
@@ -605,7 +612,7 @@ run_one() {  # $1 tool $2 model $3 effort -> writes answer and optional terminal
   terminal_artifact_sha256=""
   if [ -n "$TERMINAL_ARTIFACT" ]; then
     if write_terminal_artifact "$TERMINAL_ARTIFACT" "$status" "$rc"; then
-      if ! terminal_artifact_sha256="$(python3 "$PUBLISH_HELPER" digest "$TERMINAL_ARTIFACT")"; then
+      if ! terminal_artifact_sha256="$(python3 "$PUBLISH_HELPER" --root "$EVIDENCE_ROOT" digest "$TERMINAL_ARTIFACT")"; then
         status="terminal_artifact_validation_error"
         rc=1
         guarantee="none"
@@ -635,26 +642,62 @@ if ! evidence_paths_distinct; then
 fi
 
 if [ -n "$CHAIN" ]; then
+  chain_base_out="$OUT"
+  chain_base_terminal="$TERMINAL_ARTIFACT"
+  chain_base_receipt="$DISPATCH_RECEIPT"
+  chain_summary_path="${chain_base_receipt:-${chain_base_out}.chain.json}"
+  chain_attempts_tmp="$(make_tmp)" || exit 1
+  : >"$chain_attempts_tmp"
+  chain_attempt_index=0
+  chain_attempt_base="${ATTEMPT_ID:-attempt-1}"
   for spec in $CHAIN; do
+    chain_attempt_index=$((chain_attempt_index + 1))
     t="${spec%%:*}"
     rest="${spec#*:}"
     m="${rest%%:*}"
     e="${rest#*:}"
     [ "$rest" = "$spec" ] && { m=""; e=""; }
     [ "$e" = "$m" ] && e=""
+    OUT="${chain_base_out}.attempt-${chain_attempt_index}"
+    TERMINAL_ARTIFACT="${chain_base_terminal}.attempt-${chain_attempt_index}"
+    if [ -n "$chain_base_receipt" ]; then
+      DISPATCH_RECEIPT="${chain_base_receipt}.attempt-${chain_attempt_index}"
+    else
+      DISPATCH_RECEIPT="${chain_base_out}.route.attempt-${chain_attempt_index}.json"
+    fi
+    ATTEMPT_ID="${chain_attempt_base}.attempt-${chain_attempt_index}"
     rec="$(run_one "$t" "$m" "$e")"; rc=$?
     echo "$rec" >&2
-    if [ $rc -eq 0 ]; then echo "$rec"; exit 0; fi
+    printf '{"record":%s,"receipt_path":"%s"}\n' \
+      "$rec" "$(printf '%s' "$DISPATCH_RECEIPT" | json_escape)" >>"$chain_attempts_tmp"
+    if [ $rc -eq 0 ]; then
+      chain_record_tmp="$(make_tmp)" || exit 1
+      if ! python3 "$SCRIPT_DIR/cf_dispatch_chain.py" "$chain_attempts_tmp" "$rec" "$chain_summary_path" >"$chain_record_tmp"; then
+        rm -f "$chain_record_tmp" "$chain_attempts_tmp"
+        exit 1
+      fi
+      if ! python3 "$PUBLISH_HELPER" --root "$EVIDENCE_ROOT" publish "$chain_summary_path" "$chain_record_tmp"; then
+        echo "cannot write immutable chain summary: $chain_summary_path" >&2
+        rm -f "$chain_record_tmp" "$chain_attempts_tmp"
+        exit 1
+      fi
+      cat "$chain_record_tmp"
+      rm -f "$chain_record_tmp" "$chain_attempts_tmp"
+      exit 0
+    fi
   done
-  terminal_artifact_sha256=""
-  if [ -n "$TERMINAL_ARTIFACT" ] && write_terminal_artifact "$TERMINAL_ARTIFACT" "all_failed" 1; then
-    terminal_artifact_sha256="$(python3 "$PUBLISH_HELPER" digest "$TERMINAL_ARTIFACT")" || terminal_artifact_sha256=""
+  chain_record_tmp="$(make_tmp)" || exit 1
+  if ! python3 "$SCRIPT_DIR/cf_dispatch_chain.py" "$chain_attempts_tmp" "" "$chain_summary_path" >"$chain_record_tmp"; then
+    rm -f "$chain_record_tmp" "$chain_attempts_tmp"
+    exit 1
   fi
-  chain_output_sha256=""
-  if [ -n "$OUT" ] && [ -f "$OUT" ]; then
-    chain_output_sha256="$(python3 "$PUBLISH_HELPER" digest "$OUT")" || chain_output_sha256=""
+  if ! python3 "$PUBLISH_HELPER" --root "$EVIDENCE_ROOT" publish "$chain_summary_path" "$chain_record_tmp"; then
+    echo "cannot write immutable chain summary: $chain_summary_path" >&2
+    rm -f "$chain_record_tmp" "$chain_attempts_tmp"
+    exit 1
   fi
-  emit_record "chain" "" "" "all_failed" 1 "$OUT" "none" "" "" "" "" "" "" "" "" "" "" "" "" "" "" "" "" "" true "$chain_output_sha256" "$TERMINAL_ARTIFACT" "$terminal_artifact_sha256"
+  cat "$chain_record_tmp"
+  rm -f "$chain_record_tmp" "$chain_attempts_tmp"
   exit 1
 else
   [ -z "$TOOL" ] && { echo "need --tool or --chain" >&2; exit 2; }

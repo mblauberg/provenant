@@ -17,15 +17,26 @@ def digest(path: Path) -> str:
     return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def write_attempt(run: Path, *, kind="complete", verdict="pass", status="ok", exit_code=0):
-    answer = run / "answer.txt"
+def write_attempt(
+    run: Path,
+    *,
+    kind="complete",
+    verdict="pass",
+    status="ok",
+    exit_code=0,
+    directory: str | None = None,
+):
+    evidence = run / directory if directory else run
+    evidence.mkdir(parents=True, exist_ok=True)
+    prefix = f"{directory}/" if directory else ""
+    answer = evidence / "answer.txt"
     answer.write_text("human answer\n", encoding="utf-8")
-    dispatch_terminal = run / "dispatcher.terminal.json"
+    dispatch_terminal = evidence / "dispatcher.terminal.json"
     dispatch_terminal.write_text(json.dumps({
         "id": "review-1", "attempt_id": "attempt-1", "kind": "complete",
         "summary": "dispatcher observed terminality",
     }), encoding="utf-8")
-    semantic = run / "worker.semantic.json"
+    semantic = evidence / "worker.semantic.json"
     semantic_value = {
         "id": "review-1", "attempt_id": "attempt-1", "kind": kind,
     }
@@ -36,21 +47,21 @@ def write_attempt(run: Path, *, kind="complete", verdict="pass", status="ok", ex
     else:
         semantic_value["reason"] = "provider did not return a review"
     semantic.write_text(json.dumps(semantic_value), encoding="utf-8")
-    dispatch = run / "dispatch.json"
+    dispatch = evidence / "dispatch.json"
     dispatch.write_text(json.dumps({
         "id": "review-1", "attempt_id": "attempt-1", "status": status,
         "exit": exit_code, "terminal_observed": True,
-        "output_path": "answer.txt", "output_sha256": digest(answer),
-        "terminal_artifact_path": "dispatcher.terminal.json",
+        "output_path": f"{prefix}answer.txt", "output_sha256": digest(answer),
+        "terminal_artifact_path": f"{prefix}dispatcher.terminal.json",
         "terminal_artifact_sha256": digest(dispatch_terminal),
     }), encoding="utf-8")
     return {
         "id": "review-1",
-        "dispatch_receipt": {"path": "dispatch.json", "digest": digest(dispatch)},
+        "dispatch_receipt": {"path": f"{prefix}dispatch.json", "digest": digest(dispatch)},
         "dispatch_terminal_artifact": {
-            "path": "dispatcher.terminal.json", "digest": digest(dispatch_terminal),
+            "path": f"{prefix}dispatcher.terminal.json", "digest": digest(dispatch_terminal),
         },
-        "terminal_artifact": {"path": "worker.semantic.json", "digest": digest(semantic)},
+        "terminal_artifact": {"path": f"{prefix}worker.semantic.json", "digest": digest(semantic)},
         "worktree_receipt": None,
     }
 
@@ -214,39 +225,65 @@ def test_barrier_controlled_evidence_race_rejects_certification(
     )
 
 
-def test_fabricated_schema_valid_review_row_cannot_supply_other_primary_certification():
-    workflow = Path(__file__).parents[1] / "workflows" / "implement-run.js"
-    text = workflow.read_text(encoding="utf-8")
+@pytest.mark.parametrize(
+    "artifact",
+    ("answer.txt", "dispatcher.terminal.json", "dispatch.json", "worker.semantic.json"),
+)
+@pytest.mark.parametrize("race_kind", ("rename", "symlink"))
+def test_parent_directory_swap_during_host_acceptance_fails_closed(
+    tmp_path, monkeypatch, artifact, race_kind,
+):
+    reference = write_attempt(tmp_path, directory="evidence")
+    target = tmp_path / "evidence" / artifact
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    raced = False
+
+    def swap_parent(path, _label):
+        nonlocal raced
+        if raced or path != target:
+            return
+        raced = True
+        moved = tmp_path / "evidence.moved"
+        path.parent.rename(moved)
+        if race_kind == "symlink":
+            path.parent.symlink_to(outside, target_is_directory=True)
+        else:
+            path.parent.mkdir()
+
+    monkeypatch.setattr(worker_outcome, "_after_file_read", swap_parent)
+
+    result = accept_worker_outcome(tmp_path, reference)
+
+    assert raced is True
+    assert result["status"] == "rejected"
+    assert any(
+        word in result["reason"]
+        for word in ("symlink", "changed", "missing", "unreadable", "inode", "Not a directory")
+    )
+
+
+def test_host_acceptance_ignores_fabricated_workflow_certification_claim(tmp_path):
     fabricated = {
-        "angle": "other-primary",
-        "reviewerId": "review-0-other-primary",
-        "verdict": "approve",
-        "issues": [],
-        "crossFamily": {
-            "ran": True,
-            "tool": "codex",
-            "status": "ok",
-            "modelFamily": "openai",
-            "endpointProvider": "openai",
-            "crossFamily": True,
-            "certificationEligible": True,
-            "readOnlyGuarantee": "enforced",
-            "outputPath": "answer.txt",
-            "routeReceipt": "",
-            "terminalResult": "",
-            "notRunReason": "",
-        },
-        "path": "review.md",
+        "crossFamily": {"ran": True, "crossFamily": True, "certificationEligible": True},
+        "routeReceipt": "",
+        "terminalResult": "",
     }
 
-    assert fabricated["crossFamily"]["certificationEligible"] is True
-    assert fabricated["crossFamily"]["routeReceipt"] == ""
-    assert "otherPrimaryCertification" in text
-    gate_start = text.index("otherPrimaryRan = !!")
-    gate = text[gate_start:text.index("distinctFamilyRan =", gate_start)]
-    assert "crossFamily.certificationEligible" not in gate
-    assert "candidate.crossFamily.routeReceipt" in gate
-    assert "candidate.crossFamily.terminalResult" in gate
+    error, leg = run_dir_finalize._direct_worker_leg(
+        tmp_path,
+        {"id": "review-1", "status": "complete", "verdict": "pass"},
+        {"path": "missing-route.json", "digest": "sha256:" + "0" * 64},
+        fabricated,
+        {"path": "missing-worker.json", "digest": "sha256:" + "0" * 64},
+        None,
+        "openai",
+        "substantial",
+    )
+
+    assert leg is None
+    assert error
+    assert "missing" in error or "unreadable" in error or "digest" in error or "reference" in error
 
 
 def test_workflow_emits_reviewed_patches_for_host_application_only():
@@ -255,7 +292,7 @@ def test_workflow_emits_reviewed_patches_for_host_application_only():
 
     assert "acceptance:implementation-claim" not in text
     assert "state: 'executing'" in text
-    assert "awaiting-host-application" in text
+    assert "awaiting-host-certification/application" in text
     assert "machineGatePassed: false" in text
     for forbidden in (
         "apply:serial",
@@ -265,6 +302,8 @@ def test_workflow_emits_reviewed_patches_for_host_application_only():
         "outerChairCanonicalWorktree",
         "outerChairBaseRevision",
         "hostClaimContextAvailable",
+        "CERTIFICATION_SCHEMA",
+        "other-primary-certification",
     ):
         assert forbidden not in text
 
@@ -273,7 +312,7 @@ def test_workflow_fails_closed_before_host_apply_on_failed_checks_or_blockers():
     workflow = Path(__file__).parents[1] / "workflows" / "implement-run.js"
     text = workflow.read_text(encoding="utf-8")
 
-    failure_guard = "if (!checksPass || blocking > 0 || !otherPrimaryRan)"
+    failure_guard = "if (!checksPass || blocking > 0)"
     guard_at = text.index(failure_guard)
     host_apply_at = text.index("phase('Host apply')")
 
@@ -285,18 +324,17 @@ def test_workflow_fails_closed_before_host_apply_on_failed_checks_or_blockers():
     assert text.index("state: 'executing'", host_apply_at) > host_apply_at
 
 
-def test_workflow_fails_closed_when_certified_other_primary_coverage_is_missing():
+def test_workflow_hands_off_review_paths_for_host_certification():
     workflow = Path(__file__).parents[1] / "workflows" / "implement-run.js"
     text = workflow.read_text(encoding="utf-8")
 
-    failure_guard = "if (!checksPass || blocking > 0 || !otherPrimaryRan)"
-    guard_at = text.index(failure_guard)
-    host_apply_at = text.index("phase('Host apply')")
+    handoff_at = text.index("// --- Phase 6: host apply handoff")
+    handoff = text[handoff_at:]
 
-    assert guard_at < host_apply_at
-    failure_tail = text[guard_at:host_apply_at]
-    assert "required certified other-primary coverage did not run" in failure_tail
-    assert "state: 'failed'" in failure_tail
+    assert "awaiting-host-certification/application" in handoff
+    assert "state: 'executing'" in handoff
+    assert "machineGatePassed: false" in handoff
+    assert "otherPrimaryRan" not in handoff
 
 
 def test_workflow_host_application_wait_is_transport_metadata_not_delivery_state():
@@ -307,7 +345,7 @@ def test_workflow_host_application_wait_is_transport_metadata_not_delivery_state
 
     assert "state: 'executing'" in handoff
     assert "transport:" in handoff
-    assert "handoff: 'awaiting-host-application'" in handoff
+    assert "handoff: 'awaiting-host-certification/application'" in handoff
     assert "state: 'awaiting-host-apply'" not in handoff
 
 
@@ -365,7 +403,7 @@ def test_implement_workflow_has_no_model_source_application_boundary():
 
     assert "patches/" in text
     assert "state: 'executing'" in text
-    assert "awaiting-host-application" in text
+    assert "awaiting-host-certification/application" in text
     assert "machineGatePassed: false" in text
     assert "acceptance:implementation-claim" not in text
     assert "reviewerId" in text

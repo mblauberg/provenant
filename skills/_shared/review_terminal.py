@@ -141,6 +141,9 @@ def normalise_dispatch_review(
     elif worker_verdict != wrapper_verdict:
         leg_status = "failed"
         reason = "verdict-mismatch"
+    elif worker_verdict == "block":
+        leg_status = "failed"
+        reason = "worker verdict is block"
     elif lineage_reason == "provider-unavailable":
         leg_status = "unavailable"
         reason = lineage_reason
