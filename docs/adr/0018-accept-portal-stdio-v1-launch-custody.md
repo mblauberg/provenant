@@ -24,17 +24,18 @@ TypeScript.
 None of that exists. `AFCHAL1`, `AFREGV1`, `AFACKV1`, `supervise-v1` and
 `SCM_RIGHTS` appear in no `.rs` and no `.ts` file in the repository. The crate
 never forks and never execs: it has no `fork`, `execve` or `Command::new` call
-site. There is no daemon-side caller at all — outside its own crate, the
-supervisor is named only by `runtime/README.md` and
-`runtime/agent-fabric/README.md`.
+site. There is no daemon-side caller at all. Outside its own crate the
+supervisor is named only by documentation (`runtime/README.md`,
+`runtime/agent-fabric/README.md`, `MAINTAINING.md` and several
+specifications), by the repository-structure tests and by CI; none of them
+invokes it.
 
-`review_portal_process_custody`
-(`runtime/agent-fabric/migrations/0001-current-baseline.sql:9200`) is the
-schema the handshake was to write, down to
-`control_fd_number INTEGER NOT NULL CHECK (control_fd_number = 3)` at line
-9220. It has no production writer; its only other mention in the tree is an
+`review_portal_process_custody` was the schema the handshake was to write,
+down to `control_fd_number INTEGER NOT NULL CHECK (control_fd_number = 3)`.
+It had no production writer, and its only other mention in the tree was an
 inventory list in
-`runtime/agent-fabric/tests/integration/migration-runner.integration.test.ts:105`.
+`runtime/agent-fabric/tests/integration/migration-runner.integration.test.ts`.
+It has since been dropped from the regenerated baseline (see Consequences).
 
 So the question issue #489 raised is not "which of two implementations wins".
 It is whether the cheap layer that exists is the layer this harness should
@@ -110,12 +111,10 @@ What is lost is the guarantee that no provider instruction executes before
 durable custody exists. That guarantee was never delivered, so nothing regresses
 today; what changes is that the specifications stop implying otherwise.
 
-`review_portal_process_custody` is therefore write-dead by decision rather than
-by oversight. It is scheduled for removal alongside the other write-dead table
-tracked in [issue
-#381](https://github.com/mblauberg/provenant/issues/381), whenever the baseline
-is next regenerated. It is not removed here: dropping it requires regenerating
-`0001-current-baseline.sql` and its recorded digest, which is a separate change.
+`review_portal_process_custody` was therefore write-dead by decision rather
+than by oversight. It was dropped when the baseline was regenerated for [issue
+#381](https://github.com/mblauberg/provenant/issues/381) (commit `93c3496c`),
+together with the other write-dead tables; nothing in the tree names it now.
 
 The affected specification paragraphs are corrected rather than deleted
 wholesale, under [ADR

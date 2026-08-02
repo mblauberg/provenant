@@ -79,7 +79,7 @@ one.
 | Scope source | pre-scoped accepted/ready issues only; never scopes | self-scopes open-ended missions |
 | Duration | one bounded pass over the current queue snapshot | persistent, survives sessions/crashes, until user `STATUS: STOP` |
 | User gate | per issue: user PR-review/merge by default, or the repository's agent-merge policy where one exists | user-out-of-loop during the loop; reaches users only at hard/one-way-door gates |
-| State | uses `implement`/`deliver` receipts only, no durable lab state | `GOAL.md`/`STATE.md`/ADR/queue durable cross-session state |
+| State | uses `implement`/`deliver` receipts only, no durable lab state | `GOAL.md`/`STATE.md`/`QUEUE.md`/`HANDOFF.md` durable cross-session state; decision records delegated to `implement`/`deliver` |
 | Authority | lower — never proceeds past the per-issue merge gate its repository's policy sets | higher — authorised to keep driving without per-item user sign-off |
 
 Trigger this mode only on an explicit **bounded, pre-scoped issue queue**

@@ -134,12 +134,15 @@ def test_ambient_files_meet_the_static_disclosure_gates():
     for name, text in (("AGENTS.md", agents), ("HARNESS.md", harness)):
         assert not forbidden_path.search(text), f"{name} has a forbidden repo-relative/references path (D4/D3)"
         assert not date.search(text), f"{name} carries a date (D10)"
-    # The D12 resolver names the skills root; it is the sole location-bearing
-    # line, and HARNESS.md is now its only home.
-    assert "$HOME/.agents/skills/<name>/" in harness
+    # The D12 resolver names the installed skills roots; it is the sole
+    # location-bearing line, and HARNESS.md is now its only home. Skills ship in
+    # the product checkout, not in the thin instance root, so the resolver must
+    # not name `~/.agents/skills/`.
+    assert "~/.claude/skills/" in harness
     assert "~/.codex/skills/" in harness
-    assert "$HOME/.agents/skills/<name>/" not in agents, (
-        "AGENTS.md must not restate the D12 resolver root"
+    assert ".agents/skills/" not in harness
+    assert "~/.claude/skills/" not in agents and "~/.codex/skills/" not in agents, (
+        "AGENTS.md must not restate the D12 resolver roots"
     )
 
 

@@ -191,7 +191,7 @@ These are operational safety bounds, not throughput targets. Load evidence may s
 - Full runtime and harness gates pass from a clean install-compatible state.
 - CI-policy tests prove immutable Actions and complete fabric coverage.
 - All resource, protocol, trust, database, retention, receipt and status acceptance tests pass.
-- The existing five adapter smokes and five-seat MCP health/round-trip remain green after hardening.
+- The adapter smokes for every enabled entry in `config/adapter-compatibility.yaml` and the five-seat MCP health/round-trip remain green after hardening.
 - the activation contract rollback to coordination-only remains possible.
 - Targeted OpenAI lenses and an independent Anthropic other-primary review are clean at P0–P2; available distinct-family pressure is recorded when used.
 - Canonical delivery receipt validates at `awaiting_acceptance`.

@@ -17,7 +17,7 @@ The current pre-release tree includes:
   orchestrators with one session chair, the scope-to-retrospect lifecycle, the
   user gates, and the rule that no two agents write the same source surface at
   once.
-- 32 Agent Skills under `skills/`, covering delivery (`scope`, `deliver`,
+- 33 Agent Skills under `skills/`, covering delivery (`scope`, `deliver`,
   `implement`, `tdd`, `refactor`, `diagnose`, `code-review`, `evaluate`,
   `release`, `retrospect`, `session`, `work-map`), orchestration, writing,
   design and diagrams, web engineering, and harness development.
@@ -117,7 +117,7 @@ The current pre-release tree includes:
   `.agent-run/<mission-id>/`), made `natural-writing` the single-owner writing
   hub the domain writing skills link to, and added an autonomous
   ready-issue-implementation mode to `orchestrate` that stops at the user PR
-  gate. The catalogue is now 32 skills; managed renames are recorded in
+  gate. The catalogue is now 33 skills; managed renames are recorded in
   `config/skill-renames.json`.
 - Completed the progressive-disclosure refactor tracked by #335: compact
   ambient instructions, repository-managed Claude workflows, enforced

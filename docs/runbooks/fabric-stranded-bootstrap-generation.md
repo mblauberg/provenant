@@ -1,9 +1,11 @@
 # Runbook: stranded bootstrap seat generation
 
 Applies when `provenant fabric bootstrap --seat <seat>` fails with
-`BOOTSTRAP_GENERATION_CHANGED` and the message
-`Fabric bootstrap seat generation changed during local cutover`, and keeps
-failing on every retry rather than succeeding once the contention clears.
+`BOOTSTRAP_GENERATION_CHANGED` and a message beginning
+`Fabric bootstrap could not complete the local seat cutover for project ...`
+that reports a recorded on-disk generation differing from the daemon-computed
+generation, and keeps failing on every retry rather than succeeding once the
+contention clears.
 
 ## What has actually gone wrong
 
