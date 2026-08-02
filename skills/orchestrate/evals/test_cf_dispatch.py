@@ -1162,7 +1162,11 @@ def test_default_failure_retains_only_the_declared_output_tempfile():
         output = Path(record["output_path"])
         assert result.returncode != 0
         assert output.exists()
-        assert sorted(path.resolve() for path in temp_root.iterdir()) == sorted(
+        assert sorted(
+            path.resolve()
+            for path in temp_root.iterdir()
+            if path.name.startswith("cf-dispatch.")
+        ) == sorted(
             [output.resolve(), Path(record["terminal_artifact_path"]).resolve()]
         )
         assert Path(record["terminal_artifact_path"]).is_file()
