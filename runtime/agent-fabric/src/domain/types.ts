@@ -2,16 +2,11 @@ import type {
   AuthorityEnvelopeV2,
   DisclosurePolicy,
   DisclosureTarget,
+  ProviderIdentityAssurance,
 } from "@local/agent-fabric-protocol";
 
-export type ProviderIdentityAssurance =
-  | "full-vendor-identity"
-  | "partial-signed-helpers"
-  | "owner-controlled-install-root"
-  | "lockfile-install-attestation";
-
 export type AuthorityInput = AuthorityEnvelopeV2;
-export type { DisclosurePolicy, DisclosureTarget };
+export type { DisclosurePolicy, DisclosureTarget, ProviderIdentityAssurance };
 
 export type Clock = () => number | Date;
 
