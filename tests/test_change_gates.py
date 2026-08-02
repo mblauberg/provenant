@@ -932,3 +932,178 @@ def test_print_output_reports_the_cap_under_direct_script_import():
     )
     assert "timed_out=yes" in completed.stdout, completed.stdout
     assert f"cap={_cap_seconds():.0f}s" in completed.stdout, completed.stdout
+
+
+def _flake_waiver_reader():
+    """The ledger reader, asserted rather than imported at module scope.
+
+    A revision without it raises `AttributeError` on the attribute lookup, and a
+    bare attribute error is unusable evidence for the change gates. Assert the
+    miss so the failure is a plain assertion. Same idiom as `classify_failure`.
+    """
+    implementation = getattr(change_gates, "read_flake_waivers", None)
+    assert implementation is not None, (
+        "the change gate reads no flake waiver ledger, so a de-flaking fix cannot land: "
+        "its target is green at the merge base by definition"
+    )
+    return implementation
+
+
+def _waiver_source(tmp_path, ledger=None):
+    """A committed source tree with one test target and an optional ledger."""
+
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "tests").mkdir()
+    (source / "tests" / "flaky.py").write_text("base test\n", encoding="utf-8")
+    if ledger is not None:
+        (source / ".github").mkdir()
+        (source / ".github" / "change-gate-flake-waivers.txt").write_text(
+            ledger, encoding="utf-8"
+        )
+    subprocess.run(["git", "-C", str(source), "init", "--quiet"], check=True)
+    subprocess.run(["git", "-C", str(source), "add", "-A"], check=True)
+    subprocess.run(
+        [
+            "git", "-C", str(source),
+            "-c", "user.name=Gate Test",
+            "-c", "user.email=gate-test@example.invalid",
+            "commit", "--quiet", "-m", "base",
+        ],
+        check=True,
+    )
+    return source
+
+
+def _target_lines(capture):
+    lines = [line for line in capture.getvalue().splitlines() if line.startswith("TARGET ")]
+    assert lines, "gate printed no per-target line"
+    return lines
+
+
+def test_a_waived_target_that_was_green_at_the_base_does_not_fail_the_gate(tmp_path):
+    """A de-flaking fix has no red base state to show, and must still land.
+
+    The gate rejects a target that passed at the merge base, because a test that
+    was already green proves nothing. A flake's base state is intermittent, not
+    red, so every de-flaking fix is rejected on classification=pass and the flake
+    stays forever. The ledger names the targets where that verdict is waived.
+    """
+    _flake_waiver_reader()
+    source = _waiver_source(
+        tmp_path,
+        "# owned flake\ntests/flaky.py #639\n",
+    )
+
+    command = f'{sys.executable} -c "raise SystemExit(0)" {{test}}'
+    capture = io.StringIO()
+    with redirect_stdout(capture):
+        result = gate_right_reason_red(
+            source, "HEAD", [command], ["tests/flaky.py"], tmp_path / "scratch"
+        )
+
+    assert result == 0
+    assert _target_lines(capture)[0] == (
+        "TARGET tests/flaky.py status=WAIVED classification=pass issue=#639"
+    )
+    assert "waived=1" in capture.getvalue()
+
+
+def test_a_target_absent_from_the_ledger_is_still_rejected_for_passing(tmp_path):
+    """The waiver is per target. An unlisted green target is still no evidence."""
+    _flake_waiver_reader()
+    source = _waiver_source(tmp_path, "tests/other.py #639\n")
+
+    command = f'{sys.executable} -c "raise SystemExit(0)" {{test}}'
+    capture = io.StringIO()
+    with redirect_stdout(capture):
+        result = gate_right_reason_red(
+            source, "HEAD", [command], ["tests/flaky.py"], tmp_path / "scratch"
+        )
+
+    assert result == 1
+    assert "REJECTED" in _target_lines(capture)[0]
+    assert "WAIVED" not in capture.getvalue()
+
+
+def test_a_waiver_does_not_excuse_any_other_failure_class(tmp_path):
+    """A waived target buys exactly one verdict, and a broken test is not it.
+
+    If a waiver softened a red as well as a green, the ledger would become a way
+    to land a test that cannot even be collected, which is the defect the gate
+    exists to catch.
+    """
+    _flake_waiver_reader()
+    source = _waiver_source(tmp_path, "tests/flaky.py #639\n")
+
+    # Split so this line does not itself read as a collection marker. pytest
+    # echoes the source of a failing test, `classify_failure` substring-matches
+    # the whole capture, and this file has to fail at the merge base by design.
+    # The same idiom is already used above. See #622.
+    marker = "ERROR during " + "collection"
+    command = f'{sys.executable} -c "print(\\"{marker}\\"); raise SystemExit(1)" {{test}}'
+    capture = io.StringIO()
+    with redirect_stdout(capture):
+        result = gate_right_reason_red(
+            source, "HEAD", [command], ["tests/flaky.py"], tmp_path / "scratch"
+        )
+
+    assert result == 1
+    target_lines = _target_lines(capture)
+    assert "REJECTED" in target_lines[0]
+    assert "WAIVED" not in target_lines[0]
+
+
+def test_the_revert_probe_gate_does_not_read_the_waiver_ledger(tmp_path):
+    """A waiver must not blunt the other gate. A survivor is still a survivor.
+
+    revert-probe asks a different question: with the hunk reverted, did the tests
+    stay green? A ledger entry has nothing to say about that, and if it silenced
+    the answer an unconstrained production change would land unnoticed.
+    """
+    _flake_waiver_reader()
+    source = _waiver_source(tmp_path, "tests/flaky.py #639\n")
+    (source / "production.py").write_text("new\n", encoding="utf-8")
+
+    command = f'{sys.executable} -c "raise SystemExit(0)" {{test}}'
+
+    assert gate_revert_probe(
+        source, [_hunk()], [command], ["tests/flaky.py"], tmp_path / "scratch"
+    ) == 1
+
+
+def test_a_waiver_without_its_owning_issue_fails_closed(tmp_path):
+    """An unowned waiver is how a permanent exemption gets in.
+
+    A line the parser cannot read is an error rather than a comment: silently
+    ignoring it turns a typo into a waiver that never applies, or a deliberate
+    entry with no issue into one nobody ever has to remove.
+    """
+    read_flake_waivers = _flake_waiver_reader()
+    source = _waiver_source(tmp_path, "tests/flaky.py\n")
+
+    with pytest.raises(GateError) as error:
+        read_flake_waivers(source)
+    assert "change-gate-flake-waivers.txt:1" in str(error.value)
+
+    command = f'{sys.executable} -c "raise SystemExit(0)" {{test}}'
+    with pytest.raises(GateError):
+        gate_right_reason_red(
+            source, "HEAD", [command], ["tests/flaky.py"], tmp_path / "scratch"
+        )
+
+
+def test_a_missing_ledger_simply_means_no_waivers(tmp_path):
+    read_flake_waivers = _flake_waiver_reader()
+    source = _waiver_source(tmp_path)
+
+    assert read_flake_waivers(source) == {}
+
+
+def test_the_repository_ledger_parses_and_owns_every_entry():
+    read_flake_waivers = _flake_waiver_reader()
+
+    waivers = read_flake_waivers(ROOT)
+
+    assert waivers, "the repository ledger has no entries to check"
+    assert all(issue.startswith("#") and issue[1:].isdigit() for issue in waivers.values())

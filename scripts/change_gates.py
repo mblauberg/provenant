@@ -775,6 +775,38 @@ def right_reason_red_evidence(
     return None
 
 
+FLAKE_WAIVER_LEDGER = ".github/change-gate-flake-waivers.txt"
+_FLAKE_WAIVER_ENTRY = re.compile(r"(?P<target>\S+)\s+(?P<issue>#\d+)")
+
+
+def read_flake_waivers(source_root: Path) -> dict[str, str]:
+    """Map each waived target to the issue that owns its de-flaking fix.
+
+    A de-flaking fix cannot be red at the merge base: the bug is intermittent, so
+    the base run comes back ``classification=pass`` and the gate rejects it. The
+    ledger names the few targets where that rejection is waived. A missing ledger
+    simply means no waivers. An entry with no issue is an error rather than an
+    ignored line, because an unowned waiver is a permanent exemption.
+    """
+
+    ledger = source_root / FLAKE_WAIVER_LEDGER
+    if not ledger.is_file():
+        return {}
+    waivers: dict[str, str] = {}
+    for number, line in enumerate(ledger.read_text(encoding="utf-8").splitlines(), start=1):
+        entry = line.strip()
+        if not entry or entry.startswith("#"):
+            continue
+        match = _FLAKE_WAIVER_ENTRY.fullmatch(entry)
+        if match is None:
+            raise GateError(
+                f"{FLAKE_WAIVER_LEDGER}:{number}: a waiver needs a target and its owning "
+                f"issue, as in 'tests/flaky.py #639': {entry}"
+            )
+        waivers[match.group("target")] = match.group("issue")
+    return waivers
+
+
 def _all_assertion_failures(results: list[CommandResult]) -> bool:
     return bool(results) and all(result.classification is FailureClass.ASSERTION for result in results)
 
@@ -789,6 +821,9 @@ def gate_right_reason_red(
     mode: ChangeMode | str = ChangeMode.BEHAVIOUR,
     added_modules: frozenset[str] | set[str] = frozenset(),
 ) -> int:
+    # Read before the suite runs, so a malformed ledger fails the gate rather
+    # than being discovered after several minutes of base runs.
+    waivers = read_flake_waivers(source_root)
     with _temporary_tree(source_root, scratch_root) as directory:
         base_root = Path(directory)
         _materialise_base(source_root, base, base_root, tests)
@@ -810,7 +845,23 @@ def gate_right_reason_red(
     # Name every target and its verdict. The aggregate line below blocks the
     # merge, and on its own it says only that something was rejected, leaving a
     # reader to rerun the gate by hand and bisect the targets to find out which.
+    waived_count = 0
+    rejected_count = 0
     for target, result, reason in zip(targets, results, evidence, strict=True):
+        # A waiver softens the one verdict a de-flaking fix cannot avoid, and
+        # nothing else: the target ran green at the base and is on the ledger.
+        issue = waivers.get(target) if target else None
+        if (
+            reason is None
+            and issue is not None
+            and result.returncode == 0
+            and result.classification is FailureClass.PASS
+        ):
+            waived_count += 1
+            print(f"TARGET {target} status=WAIVED classification=pass issue={issue}")
+            continue
+        if reason is None:
+            rejected_count += 1
         verdict = "REJECTED" if reason is None else reason.upper()
         print(
             f"TARGET {target or '(whole suite)'} status={verdict} "
@@ -818,17 +869,17 @@ def gate_right_reason_red(
         )
     assertion_count = evidence.count("assertion")
     new_target_count = evidence.count("new-target")
-    rejected_count = evidence.count(None)
     if rejected_count:
         print(
             "RIGHT_REASON_RED: FAIL "
             f"tests={len(results)} assertion={assertion_count} "
-            f"new-target={new_target_count} rejected={rejected_count}"
+            f"new-target={new_target_count} waived={waived_count} rejected={rejected_count}"
         )
         return 1
     print(
         "RIGHT_REASON_RED: PASS "
-        f"tests={len(results)} assertion={assertion_count} new-target={new_target_count}"
+        f"tests={len(results)} assertion={assertion_count} "
+        f"new-target={new_target_count} waived={waived_count}"
     )
     return 0
 
