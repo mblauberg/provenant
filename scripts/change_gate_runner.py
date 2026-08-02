@@ -212,17 +212,6 @@ def _run_legacy(arguments: list[str], cwd: Path, rendered: str) -> CommandResult
     )
 
 
-def _drain_output(process: subprocess.Popen[str]) -> tuple[str, bool]:
-    try:
-        output, _ = process.communicate(timeout=PIPE_DRAIN_TIMEOUT)
-        return output or "", True
-    except subprocess.TimeoutExpired as exc:
-        partial = _text_output(exc.output)
-        if process.stdout is not None:
-            process.stdout.close()
-        return partial, False
-
-
 def _run_structured(
     arguments: list[str], cwd: Path, rendered: str, runner: Runner, report_path: Path
 ) -> CommandResult:
@@ -275,8 +264,6 @@ def _run_structured(
                 group_closed = _terminate_process_group(process.pid) and group_closed
                 process.kill()
                 process.wait(timeout=PIPE_DRAIN_TIMEOUT)
-            if process.stdout is not None and not process.stdout.closed:
-                process.stdout.close()
 
     elapsed_seconds = time.monotonic() - started
     returncode = process.returncode

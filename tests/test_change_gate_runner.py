@@ -16,7 +16,6 @@ from scripts.change_gate_runner import (
     Runner,
     runner_for_command,
     run_command,
-    _drain_output,
     _terminate_process_group,
 )
 
@@ -345,36 +344,6 @@ def test_terminate_process_group_reports_success(monkeypatch):
     monkeypatch.setattr(change_gate_runner.os, "killpg", lambda *_: None)
 
     assert _terminate_process_group(1234) is True
-
-
-def test_drain_output_reports_a_successful_pipe_drain():
-    class Process:
-        stdout = None
-
-        def communicate(self, timeout):
-            assert timeout == change_gate_runner.PIPE_DRAIN_TIMEOUT
-            return "output", None
-
-    assert _drain_output(Process()) == ("output", True)
-
-
-def test_drain_output_reports_a_timed_out_pipe_drain():
-    class Stdout:
-        closed = False
-
-        def close(self):
-            self.closed = True
-
-    class Process:
-        stdout = Stdout()
-
-        def communicate(self, timeout):
-            del timeout
-            raise subprocess.TimeoutExpired("command", 1, output=b"partial")
-
-    process = Process()
-    assert _drain_output(process) == ("partial", False)
-    assert process.stdout.closed is True
 
 
 def test_legacy_runner_keeps_the_subprocess_run_path(tmp_path, monkeypatch):
