@@ -139,6 +139,31 @@ describe("adapter wrapper Git provenance", () => {
     }
   });
 
+  it.each([
+    ["safe.directory refusal", 128, "fatal: detected dubious ownership in repository at '/fixture'"],
+    ["unrelated Git failure", 1, "fatal: wrapper repository probe failed"],
+  ])("fails closed for a %s", async (_label, exitCode, stderr) => {
+    const fixture = await createProvenanceFixture();
+    const fakeGitPath = await mkdtemp(join(tmpdir(), "agent-fabric-failing-git-"));
+    temporaryDirectories.push(fakeGitPath);
+    await writeFile(
+      join(fakeGitPath, "git"),
+      `#!/bin/sh\nprintf '%s\\n' ${JSON.stringify(stderr)} >&2\nexit ${String(exitCode)}\n`,
+      { mode: 0o700 },
+    );
+    const originalPath = process.env.PATH;
+    process.env.PATH = fakeGitPath;
+    try {
+      await expect(verify(fixture)).rejects.toMatchObject({
+        code: "ADAPTER_COMPATIBILITY_INVALID",
+        cause: { code: exitCode, stderr: expect.stringContaining(stderr) },
+      });
+    } finally {
+      if (originalPath === undefined) delete process.env.PATH;
+      else process.env.PATH = originalPath;
+    }
+  });
+
   it("fails closed when the configured wrapper is not tracked", async () => {
     const fixture = await createProvenanceFixture();
     const untrackedWrapper = join(fixture.directory, "untracked-wrapper.js");

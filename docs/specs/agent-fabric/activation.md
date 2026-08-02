@@ -34,7 +34,7 @@ Promote the coordination-only agent fabric into a safely activated local model-e
 Executable resolution is revisioned at `2`: configured command names are
 resolved natively against the current `PATH`, and the resolved file must be a
 regular executable. A missing or unavailable enabled optional adapter is
-reported as degraded and omitted from daemon composition, status and doctor;
+reported as degraded in status and doctor and omitted from daemon composition;
 an unavailable mandatory primary remains fatal. A directly selected optional
 adapter still fails closed when its executable is unavailable. This executable
 check is separate from activation: `direct-cli` does not turn disabled Pi into
