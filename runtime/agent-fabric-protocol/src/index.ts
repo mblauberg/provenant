@@ -20,6 +20,7 @@ export * from "./operation-codecs.js";
 export * from "./primitives.js";
 export * from "./project-session.js";
 export * from "./provider-review.js";
+export * from "./provider-assurance.js";
 export * from "./provider-action.js";
 export * from "./lifecycle.js";
 export * from "./projection.js";

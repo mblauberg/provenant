@@ -94,6 +94,7 @@ def bind_complete_reviews(run, plan):
             "catalog_model": row["catalog_model"], "model_family": row["family"],
             "route_alias": row["tier"], "reviewer_id": row["reviewer_id"],
             "cross_family": row["scope"] == "primary",
+            "provider_assurance": "full-vendor-identity" if row["scope"] == "primary" else "partial-signed-helpers",
             "certification_eligible": row["scope"] == "primary",
         }))
         row["route_receipt"]["digest"] = "sha256:" + __import__("hashlib").sha256(route.read_bytes()).hexdigest()
@@ -158,6 +159,21 @@ def test_real_run_complete_primary_still_requires_route_receipt(tmp_path):
     errors = run_dir_finalize._validate_review_plan(plan, tmp_path)
 
     assert any("route_receipt is missing or does not match" in error for error in errors)
+
+
+def test_primary_advisory_assurance_route_cannot_finalize_as_certifying(tmp_path):
+    plan = substantial_plan()
+    bind_complete_reviews(tmp_path, plan)
+    primary = plan["reviews"][-1]
+    route_path = tmp_path / primary["route_receipt"]["path"]
+    route = json.loads(route_path.read_text())
+    route.update({"provider_assurance": "partial-signed-helpers", "certification_eligible": True})
+    route_path.write_text(json.dumps(route))
+    primary["route_receipt"]["digest"] = "sha256:" + __import__("hashlib").sha256(route_path.read_bytes()).hexdigest()
+
+    errors = run_dir_finalize._validate_review_plan(plan, tmp_path)
+
+    assert any("not certification eligible" in error for error in errors)
 
 
 def test_substantial_review_topology_is_machine_checked():

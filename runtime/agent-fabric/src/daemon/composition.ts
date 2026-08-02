@@ -10,6 +10,7 @@ import { loadAdapterModelConstraints } from "../adapters/model-selection.js";
 import { loadFabricConfig } from "../config/index.js";
 import { trustedWorkspaceRoots } from "../cli/workspace-trust.js";
 import { verifyProviderConformance } from "../adapters/provider-conformance.js";
+import { isProviderIdentityAssurance } from "../adapters/provider-identity.js";
 import { verifyNpmInstallAttestation } from "../adapters/npm-install-attestation-verifier.js";
 import { isPrimaryAdapter } from "../adapters/primary-adapters.js";
 import { admitTsxLoader } from "../adapters/tsx-loader.js";
@@ -72,6 +73,10 @@ export function parseDaemonAdapters(serialized: string | undefined): AdapterMap 
     if (npmInstallProductRoot !== undefined && typeof npmInstallProductRoot !== "string") {
       throw new TypeError(`daemon adapter npm install product root is invalid for ${adapterId}`);
     }
+    const providerAssurance = candidate.providerAssurance;
+    if (providerAssurance !== undefined && (typeof providerAssurance !== "string" || !isProviderIdentityAssurance(providerAssurance))) {
+      throw new TypeError(`daemon adapter provider assurance is invalid for ${adapterId}`);
+    }
     adapters[adapterId] = {
       command: candidate.command,
       environment: candidate.environment as Record<string, string>,
@@ -80,6 +85,7 @@ export function parseDaemonAdapters(serialized: string | undefined): AdapterMap 
         wrapperProvenance: wrapperProvenance as NonNullable<AdapterMap[string]["wrapperProvenance"]>,
       }),
       ...(npmInstallProductRoot === undefined ? {} : { npmInstallProductRoot }),
+      ...(providerAssurance === undefined ? {} : { providerAssurance }),
     };
   }
   return adapters;
@@ -149,12 +155,13 @@ export async function composeDaemonConfiguration(options: {
       if (policy.providerExecutable === undefined || policy.providerIdentity === undefined) {
         throw new TypeError(`${adapterId} compatibility entry has no mandatory provider identity`);
       }
-      await (options.verifyProvider ?? verifyProviderConformance)({
+      const providerVerification = await (options.verifyProvider ?? verifyProviderConformance)({
         adapterId,
         executable: policy.providerExecutable,
         ...(policy.cursorInstallRoot === undefined ? {} : { cursorInstallRoot: policy.cursorInstallRoot }),
         ...(policy.providerInstallRoot === undefined ? {} : { providerInstallRoot: policy.providerInstallRoot }),
       });
+      const providerAssurance = providerVerification.identity?.assurance;
       let resolvedCommand = command.map((part) => expandTrustedCommandPart(part, options.agentsHome, options.stateDirectory));
       if (policy.wrapperEntrypoint === undefined) throw new TypeError(`${adapterId} compatibility entry has no configured fabric wrapper`);
       const provenance = provenanceByAdapter.get(adapterId);
@@ -194,6 +201,7 @@ export async function composeDaemonConfiguration(options: {
           wrapperPath: provenance.wrapperPath,
         },
         npmInstallProductRoot: options.agentsHome,
+        ...(providerAssurance === undefined ? {} : { providerAssurance }),
       }] as const;
     } catch (error: unknown) {
       if (isPrimaryAdapter(adapterId)) throw error;

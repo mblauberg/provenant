@@ -870,6 +870,15 @@
             "minItems": 0,
             "maxItems": 20,
             "uniqueItems": true
+          },
+          "providerAssurance": {
+            "type": "string",
+            "enum": [
+              "full-vendor-identity",
+              "partial-signed-helpers",
+              "owner-controlled-install-root",
+              "lockfile-install-attestation"
+            ]
           }
         },
         "x-reviewSlotCorrelated": true
@@ -1016,6 +1025,12 @@
                           "type": "null"
                         }
                       },
+                      "providerAssurance": {
+                        "enum": [
+                          "full-vendor-identity",
+                          "lockfile-install-attestation"
+                        ]
+                      },
                       "currentCertificationBasis": {
                         "not": {
                           "type": "null"
@@ -1114,6 +1129,12 @@
                         "not": {
                           "type": "null"
                         }
+                      },
+                      "providerAssurance": {
+                        "enum": [
+                          "full-vendor-identity",
+                          "lockfile-install-attestation"
+                        ]
                       },
                       "currentCertificationBasis": {
                         "not": {
@@ -1214,6 +1235,12 @@
                           "type": "null"
                         }
                       },
+                      "providerAssurance": {
+                        "enum": [
+                          "full-vendor-identity",
+                          "lockfile-install-attestation"
+                        ]
+                      },
                       "currentCertificationBasis": {
                         "not": {
                           "type": "null"
@@ -1312,6 +1339,12 @@
                         "not": {
                           "type": "null"
                         }
+                      },
+                      "providerAssurance": {
+                        "enum": [
+                          "full-vendor-identity",
+                          "lockfile-install-attestation"
+                        ]
                       },
                       "currentCertificationBasis": {
                         "not": {
@@ -1497,6 +1530,12 @@
                           "type": "null"
                         }
                       },
+                      "providerAssurance": {
+                        "enum": [
+                          "full-vendor-identity",
+                          "lockfile-install-attestation"
+                        ]
+                      },
                       "currentCertificationBasis": {
                         "not": {
                           "type": "null"
@@ -1595,6 +1634,12 @@
                         "not": {
                           "type": "null"
                         }
+                      },
+                      "providerAssurance": {
+                        "enum": [
+                          "full-vendor-identity",
+                          "lockfile-install-attestation"
+                        ]
                       },
                       "currentCertificationBasis": {
                         "not": {
@@ -1695,6 +1740,12 @@
                           "type": "null"
                         }
                       },
+                      "providerAssurance": {
+                        "enum": [
+                          "full-vendor-identity",
+                          "lockfile-install-attestation"
+                        ]
+                      },
                       "currentCertificationBasis": {
                         "not": {
                           "type": "null"
@@ -1793,6 +1844,12 @@
                         "not": {
                           "type": "null"
                         }
+                      },
+                      "providerAssurance": {
+                        "enum": [
+                          "full-vendor-identity",
+                          "lockfile-install-attestation"
+                        ]
                       },
                       "currentCertificationBasis": {
                         "not": {

@@ -229,8 +229,17 @@ async function main(arguments_: string[]): Promise<void> {
     return;
   }
   if (arguments_[0] === "adapter" && arguments_[1] === "executable") {
-    const { resolveAdapterExecutableCli } = await import("./adapter-executable.js");
-    process.stdout.write(`${await resolveAdapterExecutableCli(arguments_.slice(2))}\n`);
+    const { resolveAdapterExecutableAttestationCli, resolveAdapterExecutableCli } = await import("./adapter-executable.js");
+    if (arguments_.includes("--json")) {
+      const result = await resolveAdapterExecutableAttestationCli(arguments_.slice(2));
+      process.stdout.write(`${JSON.stringify({
+        executable: result.executable,
+        provider_assurance: result.providerAssurance,
+        certifying_answer_bearing_leg: result.certifyingAnswerBearingLeg,
+      })}\n`);
+    } else {
+      process.stdout.write(`${await resolveAdapterExecutableCli(arguments_.slice(2))}\n`);
+    }
     return;
   }
   if (arguments_[0] === "adapter" && arguments_[1] === "invocation") {

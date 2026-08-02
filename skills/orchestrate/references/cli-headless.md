@@ -181,7 +181,7 @@ Each CLI emits different wrappers: banners, JSONL, token footers, ANSI, stats, o
 dispatcher should produce:
 
 ```
-{"tool":"...","adapter":"...","model":"...","resolved_model":"...","catalog_model":"...","model_selection":"...","requested_effort":"...","effort":"...","effort_source":"...","effort_capability_source":"...","effort_substitution":"...","substitution":"...","status":"...","exit":0,"output_path":"...","read_only_guarantee":"enforced|oauth_safe_mode|best_effort|prompt_only|none","orchestrator_family":"...","provider_family":"...","model_family":"...","endpoint_provider":"...","identity_source":"...","cross_family":true,"certification_eligible":true}
+{"tool":"...","adapter":"...","model":"...","resolved_model":"...","catalog_model":"...","model_selection":"...","requested_effort":"...","effort":"...","effort_source":"...","effort_capability_source":"...","effort_substitution":"...","substitution":"...","status":"...","exit":0,"output_path":"...","read_only_guarantee":"enforced|oauth_safe_mode|best_effort|prompt_only|none","orchestrator_family":"...","provider_family":"...","model_family":"...","endpoint_provider":"...","identity_source":"...","provider_assurance":"full-vendor-identity|partial-signed-helpers|owner-controlled-install-root|lockfile-install-attestation|","cross_family":true,"certification_eligible":true}
 ```
 
 `status` is the resolver/dispatcher vocabulary, not a hand-maintained subset:

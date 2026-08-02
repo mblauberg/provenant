@@ -17,6 +17,7 @@ import {
   type CodecOutput,
 } from "./codec.js";
 import { PROVIDER_ACTION_REF_V1_CODEC } from "./launch.js";
+import { PROVIDER_IDENTITY_ASSURANCE_V1_CODEC } from "./provider-assurance.js";
 import { OPERATION_REGISTRY } from "./operations.js";
 
 const positive = integer({ minimum: 1 });
@@ -475,6 +476,8 @@ export const LOCAL_PROVIDER_ROUTE_V1_CODEC = objectCodec({
   profileDigest: nullable(sha256),
   slotHeadGeneration: nullable(nonnegative),
   attemptGeneration: nullable(positive),
+}, {
+  providerAssurance: PROVIDER_IDENTITY_ASSURANCE_V1_CODEC,
 });
 const providerRouteBaseCodec = objectCodec({
   actionRef: PROVIDER_ACTION_REF_V1_CODEC,

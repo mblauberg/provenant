@@ -178,6 +178,12 @@ export class TimedNdjsonTransport {
       this.#socket.destroy();
       return;
     }
+    if (response.id === "connection" && "error" in response) {
+      this.#terminalError = new FabricRemoteError(response.error.code, response.error.message);
+      this.#disconnect();
+      this.#socket.destroy();
+      return;
+    }
     const pending = this.#pending.get(response.id);
     if (pending === undefined) return;
     this.#pending.delete(response.id);
@@ -217,17 +223,14 @@ export class TimedNdjsonTransport {
       }, this.#requestTimeoutMs);
       this.#pending.set(id, { resolve, reject, timeout });
     });
-    try {
-      await this.#writer.write({ id, capability: this.#capability, method, params });
-    } catch (error: unknown) {
+    void this.#writer.write({ id, capability: this.#capability, method, params }).catch((error: unknown) => {
       const pending = this.#pending.get(id);
-      if (pending !== undefined) {
-        this.#pending.delete(id);
-        clearTimeout(pending.timeout);
-        pending.reject(error instanceof Error ? error : new Error(String(error)));
-      }
-    }
-    return result;
+      if (pending === undefined) return;
+      this.#pending.delete(id);
+      clearTimeout(pending.timeout);
+      pending.reject(error instanceof Error ? error : new Error(String(error)));
+    });
+    return await result;
   }
 
   async close(): Promise<void> {

@@ -403,6 +403,15 @@
               "type": "null"
             }
           ]
+        },
+        "providerAssurance": {
+          "type": "string",
+          "enum": [
+            "full-vendor-identity",
+            "partial-signed-helpers",
+            "owner-controlled-install-root",
+            "lockfile-install-attestation"
+          ]
         }
       }
     },

@@ -3,6 +3,10 @@ import {
   sha256Digest,
   type Sha256Digest,
 } from "../canonical/index.js";
+import {
+  supportsCertifyingAnswerBearingLeg,
+  type ProviderIdentityAssurance,
+} from "../../adapters/provider-identity.js";
 
 export interface ProviderActionRef {
   adapterId: string;
@@ -370,6 +374,7 @@ export function reduceTerminalEvidenceEffect(input: Readonly<{
   certifyingInputsCurrent: boolean;
   mandatoryReadsSatisfied: boolean;
   actualRouteProvedEqual: boolean;
+  providerAssurance: ProviderIdentityAssurance;
   findingWindowMode: "normal" | "resolution-only";
   reviewVerdict: "CLEAN" | "FINDINGS" | null;
   parsedFindingDigests: readonly Sha256Digest[];
@@ -401,7 +406,8 @@ export function reduceTerminalEvidenceEffect(input: Readonly<{
   input.parsedFindingDigests.forEach((value) => assertDigest(value, "parsed finding digest"));
   const insufficientClean = safeAnswer && input.reviewVerdict === "CLEAN" && !input.mandatoryReadsSatisfied;
   const eligibleForResolution = safeAnswer && !insufficientClean
-    && input.certifyingInputsCurrent && input.mandatoryReadsSatisfied && input.actualRouteProvedEqual;
+    && input.certifyingInputsCurrent && input.mandatoryReadsSatisfied && input.actualRouteProvedEqual
+    && supportsCertifyingAnswerBearingLeg(input.providerAssurance);
   const accepted = eligibleForResolution
     ? [...input.reportedResolvedFindingDigests]
     : [];
