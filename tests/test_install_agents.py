@@ -3,6 +3,7 @@ import hashlib
 import json
 import shutil
 import subprocess
+import sys
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -26,6 +27,36 @@ AGENT_DIGESTS = {
 def run(target: Path):
     return subprocess.run(
         [str(SCRIPT), "--target", str(target)],
+        cwd=ROOT,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+
+
+def run_manager(
+    action: str,
+    target: Path,
+    *,
+    source: Path = ROOT / "agents",
+    summary: bool = False,
+):
+    command = [
+        sys.executable,
+        str(MANAGER),
+        action,
+        "--surface",
+        "agents",
+        "--source",
+        str(source),
+        "--target",
+        str(target),
+    ]
+    if summary:
+        command.append("--summary")
+    return subprocess.run(
+        command,
         cwd=ROOT,
         text=True,
         stdout=subprocess.PIPE,
@@ -88,11 +119,11 @@ def test_agent_installer_preserves_an_unmanaged_definition(tmp_path):
     assert result.returncode == 3
     assert unmanaged.read_bytes() == original
     assert not unmanaged.is_symlink()
-    assert "codex-analyst.md=unmanaged" in result.stderr
-    manifest = json.loads((target.parent / MANIFEST_NAME).read_text())
-    assert "codex-analyst.md" not in manifest["managed"]
+    assert "codex-analyst.md" in result.stderr
+    assert "manually move or remove" in result.stderr
+    assert not (target.parent / MANIFEST_NAME).exists()
     assert all(
-        (target / name).is_symlink()
+        not (target / name).is_symlink()
         for name in AGENT_NAMES - {"codex-analyst.md"}
     )
 
@@ -206,3 +237,213 @@ def test_agent_installer_preserves_a_directory_link_to_canonical_sources(tmp_pat
     assert "agents existing=directory-link" in result.stdout
     assert not (tmp_path / "claude" / MANIFEST_NAME).exists()
     assert not (fixture_root / MANIFEST_NAME).exists()
+
+
+def test_identical_unmanaged_definitions_are_adoptable_in_plan_check_and_install(tmp_path):
+    target = tmp_path / "agents"
+    target.mkdir()
+    for name in AGENT_NAMES:
+        shutil.copy2(ROOT / "agents" / name, target / name)
+
+    plan = run_manager("plan", target)
+    assert plan.returncode == 0, plan.stderr
+    assert {
+        item["state"] for item in json.loads(plan.stdout)["items"]
+    } == {"adoptable"}
+
+    check = run_manager("check", target)
+    assert check.returncode == 0, check.stderr
+    assert {
+        item["state"] for item in json.loads(check.stdout)["items"]
+    } == {"adoptable"}
+
+    install = run_manager("install", target, summary=True)
+    assert install.returncode == 0, install.stderr
+    assert "agents linked=3 existing=0" in install.stdout
+    assert all((target / name).is_symlink() for name in AGENT_NAMES)
+    manifest = json.loads((target.parent / MANIFEST_NAME).read_text())
+    assert set(manifest["managed"]) == AGENT_NAMES
+
+
+def test_agent_check_warns_about_foreign_markdown_entries(tmp_path):
+    target = tmp_path / "agents"
+    assert run(target).returncode == 0
+    (target / "my-notes.md").write_text("# my notes\n")
+    (target / "my-notes-link.md").symlink_to(target / "my-notes.md")
+
+    result = run_manager("check", target, summary=True)
+
+    assert result.returncode == 0, result.stderr
+    assert "warning:" in result.stderr
+    assert "my-notes.md=foreign" in result.stderr
+    assert "my-notes-link.md=foreign" in result.stderr
+
+
+def test_byte_identical_replacement_of_a_managed_link_is_adopted(tmp_path):
+    target = tmp_path / "agents"
+    assert run_manager("install", target).returncode == 0
+    destination = target / "codex-analyst.md"
+    destination.unlink()
+    shutil.copy2(ROOT / "agents" / destination.name, destination)
+
+    plan = run_manager("plan", target)
+    assert plan.returncode == 0, plan.stderr
+    assert next(
+        item["state"]
+        for item in json.loads(plan.stdout)["items"]
+        if item["name"] == destination.name
+    ) == "adoptable"
+
+    check = run_manager("check", target)
+    assert check.returncode == 0, check.stderr
+    assert next(
+        item["state"]
+        for item in json.loads(check.stdout)["items"]
+        if item["name"] == destination.name
+    ) == "adoptable"
+
+    install = run_manager("install", target)
+    assert install.returncode == 0, install.stderr
+    assert destination.is_symlink()
+    assert destination.resolve() == (ROOT / "agents" / destination.name).resolve()
+
+
+def test_nonidentical_replacement_of_a_managed_link_has_a_remedy(tmp_path):
+    target = tmp_path / "agents"
+    assert run_manager("install", target).returncode == 0
+    destination = target / "codex-analyst.md"
+    destination.unlink()
+    destination.write_text("# changed definition\n")
+
+    result = run_manager("plan", target)
+
+    assert result.returncode == 3
+    assert "codex-analyst.md:" in result.stderr
+    assert "manually restore the managed link" in result.stderr
+    assert str(destination) in result.stderr
+
+
+def test_canonical_source_symlinks_without_a_manifest_are_adopted(tmp_path):
+    target = tmp_path / "agents"
+    target.mkdir()
+    for name in AGENT_NAMES:
+        (target / name).symlink_to(ROOT / "agents" / name)
+
+    plan = run_manager("plan", target)
+    assert plan.returncode == 0, plan.stderr
+    assert {
+        item["state"] for item in json.loads(plan.stdout)["items"]
+    } == {"adoptable"}
+
+    check = run_manager("check", target)
+    assert check.returncode == 0, check.stderr
+    assert {
+        item["state"] for item in json.loads(check.stdout)["items"]
+    } == {"adoptable"}
+
+    install = run_manager("install", target)
+    assert install.returncode == 0, install.stderr
+    manifest = json.loads((target.parent / MANIFEST_NAME).read_text())
+    assert set(manifest["managed"]) == AGENT_NAMES
+
+
+def test_agent_plan_discloses_retired_manifest_entries(tmp_path):
+    source = tmp_path / "source"
+    shutil.copytree(ROOT / "agents", source)
+    target = tmp_path / "agents"
+    assert run_manager("install", target, source=source).returncode == 0
+    retired_name = "agy-reviewer.md"
+    (source / retired_name).unlink()
+
+    result = run_manager("plan", target, source=source)
+
+    assert result.returncode == 0, result.stderr
+    states = {
+        item["name"]: item["state"]
+        for item in json.loads(result.stdout)["items"]
+    }
+    assert states[retired_name] == "retired"
+
+
+def test_agent_actions_share_the_canonical_directory_link_exemption(tmp_path):
+    target = tmp_path / "claude" / "agents"
+    target.parent.mkdir()
+    target.symlink_to(ROOT / "agents", target_is_directory=True)
+
+    for action in ("plan", "check", "install"):
+        result = run_manager(action, target, summary=True)
+        assert result.returncode == 0, (action, result.stderr)
+
+    assert target.is_symlink()
+    assert not (target.parent / MANIFEST_NAME).exists()
+
+
+def test_agent_install_and_check_emit_managed_json_without_summary(tmp_path):
+    target = tmp_path / "agents"
+
+    install = run_manager("install", target)
+    assert install.returncode == 0, install.stderr
+    assert set(json.loads(install.stdout)) == {
+        "schema_version",
+        "action",
+        "items",
+        "changed",
+    }
+
+    check = run_manager("check", target)
+    assert check.returncode == 0, check.stderr
+    assert set(json.loads(check.stdout)) == {
+        "schema_version",
+        "action",
+        "items",
+        "changed",
+    }
+
+
+def test_agent_reconcile_and_uninstall_managed_remove_agent_links(tmp_path):
+    target = tmp_path / "agents"
+    assert run_manager("install", target).returncode == 0
+
+    reconciled = run_manager("reconcile", target)
+    assert reconciled.returncode == 0, reconciled.stderr
+    reconcile_report = json.loads(reconciled.stdout)
+    assert reconcile_report["action"] == "reconcile"
+    assert reconcile_report["changed"] == []
+
+    uninstalled = run_manager("uninstall-managed", target)
+    assert uninstalled.returncode == 0, uninstalled.stderr
+    uninstall_report = json.loads(uninstalled.stdout)
+    assert uninstall_report["action"] == "uninstall-managed"
+    assert set(uninstall_report["changed"]) == AGENT_NAMES
+    assert not any(target.glob("*.md"))
+    assert json.loads((target.parent / MANIFEST_NAME).read_text())["managed"] == {}
+
+
+def test_agent_retirements_do_not_count_as_new_links(tmp_path):
+    source = tmp_path / "source"
+    shutil.copytree(ROOT / "agents", source)
+    target = tmp_path / "agents"
+    assert run_manager("install", target, source=source).returncode == 0
+    (source / "agy-reviewer.md").unlink()
+    (source / "codex-analyst.md").unlink()
+
+    result = run_manager("install", target, source=source, summary=True)
+
+    assert result.returncode == 0, result.stderr
+    assert "agents linked=0 existing=1" in result.stdout
+
+
+def test_agent_install_accepts_an_empty_source_and_retires_all_definitions(tmp_path):
+    source = tmp_path / "source"
+    shutil.copytree(ROOT / "agents", source)
+    target = tmp_path / "agents"
+    assert run_manager("install", target, source=source).returncode == 0
+    for path in source.glob("*.md"):
+        path.unlink()
+
+    result = run_manager("install", target, source=source, summary=True)
+
+    assert result.returncode == 0, result.stderr
+    assert "agents linked=0 existing=0" in result.stdout
+    assert not any(target.glob("*.md"))
+    assert json.loads((target.parent / MANIFEST_NAME).read_text())["managed"] == {}

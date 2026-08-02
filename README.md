@@ -133,8 +133,9 @@ that file is preserved.
 
 From the product checkout,
 `scripts/manage_installation.py uninstall-managed --target <skills-dir>`
-reclaims the harness-owned skill links and nothing else. The bootstrap line and
-the Codex block remain until removed by hand.
+reclaims the harness-owned skill links and nothing else. Use the same action
+with `--surface agents --source agents --target <agents-dir>` for agent links.
+The bootstrap line and the Codex block remain until removed by hand.
 
 MCP bootstrap enrols only the exact nearest Git root or an exact current
 directory whose Git probe proves `not-repository`. Other paths fail closed with
