@@ -59,6 +59,7 @@ vi.mock("node:net", async (importOriginal) => {
 });
 
 import { startFabricDaemon } from "../../src/daemon/client.ts";
+import { currentRuntimeBuildIdentity } from "../../src/daemon/runtime-build-identity.ts";
 
 const roots: string[] = [];
 
@@ -77,6 +78,7 @@ describe("production daemon bootstrap contract", () => {
     const actionId = "legacy-private-daemon";
     const bootstrapCapability = `afb_${"a".repeat(43)}`;
     const bootstrapCapabilityHash = createHash("sha256").update(bootstrapCapability).digest("hex");
+    const runtimeBuildIdentity = await currentRuntimeBuildIdentity();
     await Promise.all([
       mkdir(stateDirectory, { mode: 0o700 }),
       mkdir(runtimeDirectory, { mode: 0o700 }),
@@ -88,6 +90,7 @@ describe("production daemon bootstrap contract", () => {
         pid: process.pid,
         bootstrapCapability,
         lifecycleReceiptAuthorityId: null,
+        runtimeBuildIdentity,
       })}\n`, { mode: 0o600 }),
       writeFile(join(runtimeDirectory, "fabric-v1.discovery-owner.json"), `${JSON.stringify({
         schemaVersion: 1,

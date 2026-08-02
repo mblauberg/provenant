@@ -125,6 +125,17 @@ describe("attachOrStartDaemon", () => {
   it("returns a typed stale-build gate without marking or spawning the live incumbent", async () => {
     const root = await mkdtemp(join(tmpdir(), "fabric-bootstrap-stale-build-"));
     cleanup.push(root);
+    const socketPath = join(root, "runtime", "fabric.sock");
+    const staleBuildEvidence = {
+      kind: "daemon-stale-build" as const,
+      expectedRuntimeBuildIdentity: currentBuildIdentity,
+      currentRuntimeBuildIdentity: null,
+      pid: 8123,
+      socketPath,
+      electionGeneration: 2,
+      daemonInstanceGeneration: 6,
+      gate: "reconciliation-required" as const,
+    };
     const spawn = vi.fn();
     const handshake = vi.fn().mockResolvedValue({
       status: "unavailable",
@@ -132,17 +143,18 @@ describe("attachOrStartDaemon", () => {
       message: "daemon build identity is missing",
       reconciliationRequired: true,
       code: "DAEMON_STALE_BUILD",
+      staleBuildEvidence,
     } as never);
 
     await expect(attachOrStartDaemon({
       actionId: "bootstrap_stale_build_01",
-      socketPath: join(root, "runtime", "fabric.sock"),
+      socketPath,
       requiredProtocolVersion: 1,
       requiredFeatures: ["project-sessions.v1"],
       election: new BootstrapElection({ runtimeDirectory: join(root, "runtime") }),
       handshake,
       spawn,
-    })).rejects.toMatchObject({ code: "DAEMON_STALE_BUILD" });
+    })).rejects.toMatchObject({ code: "DAEMON_STALE_BUILD", staleBuildEvidence });
 
     expect(handshake).toHaveBeenCalledTimes(2);
     expect(spawn).not.toHaveBeenCalled();
@@ -210,11 +222,21 @@ describe("attachOrStartDaemon", () => {
     expect(spawn).not.toHaveBeenCalled();
   });
 
-  it("rechecks a stale incumbent under election before deciding whether a spawn is safe", async () => {
+  it("rechecks a live stale incumbent under election before deciding whether a spawn is safe", async () => {
     const root = await mkdtemp(join(tmpdir(), "fabric-bootstrap-stale-recheck-"));
     cleanup.push(root);
     const socketPath = join(root, "runtime", "fabric.sock");
     const client = { id: "rechecked-current-daemon" };
+    const staleBuildEvidence = {
+      kind: "daemon-stale-build" as const,
+      expectedRuntimeBuildIdentity: currentBuildIdentity,
+      currentRuntimeBuildIdentity: null,
+      pid: 9123,
+      socketPath,
+      electionGeneration: 3,
+      daemonInstanceGeneration: 8,
+      gate: "reconciliation-required" as const,
+    };
     const handshake = vi.fn()
       .mockResolvedValueOnce({
         status: "unavailable" as const,
@@ -222,6 +244,7 @@ describe("attachOrStartDaemon", () => {
         message: "legacy build",
         reconciliationRequired: true,
         code: "DAEMON_STALE_BUILD",
+        staleBuildEvidence,
       })
       .mockResolvedValueOnce({
         status: "compatible" as const,

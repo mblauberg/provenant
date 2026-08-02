@@ -7,7 +7,7 @@ import { dirname, join, resolve } from "node:path";
 import { Duplex } from "node:stream";
 
 import Database from "better-sqlite3";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { MCP_BOOTSTRAP_CREDENTIALS_FEATURE } from "@local/agent-fabric-protocol";
 import { parse, stringify } from "yaml";
 
@@ -19,6 +19,7 @@ import {
 import type { FabricPaths } from "../../src/cli/paths.ts";
 import { probeProviderInterface as realProbeProviderInterface } from "../../src/adapters/provider-interface.ts";
 import { FLOCK_ELECTION_LOCK_PORT } from "../../src/daemon/bootstrap-election.ts";
+import { currentRuntimeBuildIdentity } from "../../src/daemon/runtime-build-identity.ts";
 import { FabricDaemonClient } from "../../src/daemon/rpc-client.ts";
 import { FabricError } from "../../src/errors.ts";
 import { loadFabricConfig } from "../../src/config/index.ts";
@@ -27,7 +28,6 @@ import { PIN_OBSERVATION_CACHE_FILE } from "../../src/review/profile/pin-observe
 import { digestCanonical } from "../../src/review/canonical/index.ts";
 import { deployReviewProfileCatalogue } from "../../scripts/deploy-review-profile-catalogue.ts";
 import { FABRIC_PROTOCOL_LIMITS } from "../../src/transport/bounded-ndjson.ts";
-import { RUNTIME_BUILD_IDENTITY } from "../../src/daemon/runtime-build-identity.generated.ts";
 import { createPortableActivatedPrimaryFixture } from "../support/primary-adapter-testkit.ts";
 import { runSourceCli } from "../support/cli-process.ts";
 import { installSeatGeneration, projectKey } from "../../src/cli/seat-store.ts";
@@ -35,6 +35,10 @@ import { parseMcpPeerProvisionArguments } from "../../src/cli/mcp-peer-provision
 import { shellCommandArguments } from "../support/shell-command-arguments.ts";
 
 const cleanup: string[] = [];
+let currentBuildIdentity!: string;
+beforeAll(async () => {
+  currentBuildIdentity = await currentRuntimeBuildIdentity();
+});
 afterEach(async () => {
   vi.unstubAllEnvs();
   await Promise.all(cleanup.splice(0).map((path) => rm(path, { recursive: true, force: true })));
@@ -333,7 +337,7 @@ async function writeStoppedGeneration(
 
 async function writeActiveGeneration(
   value: FabricPaths,
-  runtimeBuildIdentity = RUNTIME_BUILD_IDENTITY,
+  runtimeBuildIdentity = currentBuildIdentity,
 ): Promise<void> {
   const actionId = "active-doctor-action";
   const bootstrapCapability = `afb_${"A".repeat(43)}`;
@@ -377,7 +381,6 @@ async function writeActiveGeneration(
     socketPath: value.socketPath,
     protocolVersion: 2,
     features: ["rpc"],
-    runtimeBuildIdentity,
     readyAt: 2,
     evidence: { databaseOwned: true, migrationsComplete: true, recoveryComplete: true, socketBound: true },
   })}\n`, { mode: 0o600 });
@@ -2079,14 +2082,14 @@ printf '%s\\n' '{"schema_version":1,"source":"claude subscription canary","obser
     ];
 
     const status = await fabricStatus([...arguments_, "--project", fixture.directory], value, {
-      runtimeBuildIdentity: RUNTIME_BUILD_IDENTITY,
+      runtimeBuildIdentity: currentBuildIdentity,
       inspectDaemonSocket: async () => ({
         isSocket: () => true,
         uid: process.getuid?.() ?? 0,
       }),
     });
     const doctor = await fabricDoctor(arguments_, value, {
-      runtimeBuildIdentity: RUNTIME_BUILD_IDENTITY,
+      runtimeBuildIdentity: currentBuildIdentity,
       inspectDaemonSocket: async () => ({
         isSocket: () => true,
         uid: process.getuid?.() ?? 0,

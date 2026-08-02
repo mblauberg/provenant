@@ -33,7 +33,7 @@ import { BootstrapElection, FLOCK_ELECTION_LOCK_PORT } from "../daemon/bootstrap
 import { connectFabricDaemon } from "../daemon/client.js";
 import { privateDiscoveryPaths, readPrivateDiscovery } from "../daemon/private-discovery.js";
 import { preflightProtocolBuild } from "../daemon/protocol-build-preflight.js";
-import { RUNTIME_BUILD_IDENTITY } from "../daemon/runtime-build-identity.generated.js";
+import { currentRuntimeBuildIdentity } from "../daemon/runtime-build-identity.js";
 import {
   mcpBootstrapRenewalCommand,
   mcpRosterRenewalCommand,
@@ -679,7 +679,7 @@ async function doctorDaemonState(
         socketPath: discovery.receipt.socketPath,
       };
     }
-    const expectedRuntimeBuildIdentity = dependencies.runtimeBuildIdentity ?? RUNTIME_BUILD_IDENTITY;
+    const expectedRuntimeBuildIdentity = dependencies.runtimeBuildIdentity ?? await currentRuntimeBuildIdentity();
     if (discovery.receipt.runtimeBuildIdentity !== expectedRuntimeBuildIdentity) {
       return {
         status: "stale",

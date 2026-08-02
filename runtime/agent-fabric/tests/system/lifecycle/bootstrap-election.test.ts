@@ -17,6 +17,32 @@ afterEach(async () => {
 });
 
 describe("bootstrap election receipts", () => {
+  it("keeps strict schema-v1 ready receipts free of discovery-only build identity", async () => {
+    const root = await mkdtemp(join(tmpdir(), "fabric-bootstrap-ready-compatibility-"));
+    cleanup.push(root);
+    const runtimeDirectory = join(root, "runtime");
+    const election = new BootstrapElection({ runtimeDirectory });
+
+    await election.withExclusiveLock("bootstrap_compatibility_01", async (held) => {
+      const generation = await held.beginGeneration();
+      await generation.publishReady({
+        daemonInstanceGeneration: 1,
+        socketPath: join(runtimeDirectory, "fabric.sock"),
+        protocolVersion: 1,
+        features: ["rpc"],
+        evidence: { databaseOwned: true, migrationsComplete: true, recoveryComplete: true, socketBound: true },
+      });
+      await generation.confirmReady();
+    });
+
+    const ready = JSON.parse(await readFile(election.paths.readyPath, "utf8")) as Record<string, unknown>;
+    expect(Object.keys(ready).sort()).toEqual([
+      "actionId", "daemonInstanceGeneration", "electionGeneration", "evidence", "features",
+      "protocolVersion", "readyAt", "schemaVersion", "socketPath",
+    ]);
+    expect(ready).not.toHaveProperty("runtimeBuildIdentity");
+  });
+
   it("publishes one generation through private non-SQLite runtime artifacts", async () => {
     const root = await mkdtemp(join(tmpdir(), "fabric-bootstrap-election-"));
     cleanup.push(root);

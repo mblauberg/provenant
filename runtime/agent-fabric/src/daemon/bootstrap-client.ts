@@ -5,6 +5,7 @@ import type {
   BootstrapReadyReceipt,
   BootstrapReadyEvidence,
 } from "./bootstrap-election.js";
+import type { DaemonStaleBuildEvidence } from "../lifecycle/lifecycle-receipt.js";
 
 export type DaemonHandshakeResult<Client> =
   | {
@@ -22,6 +23,7 @@ export type DaemonHandshakeResult<Client> =
       code?: string;
       terminalEvidence?: DaemonTerminalEvidence;
       reconciliationRequired?: boolean;
+      staleBuildEvidence?: DaemonStaleBuildEvidence;
     }
   | { status: "incompatible"; responsive: true; message: string };
 
@@ -36,11 +38,13 @@ export type DaemonTerminalEvidence = {
 export class BootstrapClientError extends Error {
   readonly code: string;
   readonly preserved: boolean;
+  readonly staleBuildEvidence?: DaemonStaleBuildEvidence;
 
-  constructor(code: string, message: string, options?: ErrorOptions) {
+  constructor(code: string, message: string, options?: ErrorOptions & { staleBuildEvidence?: DaemonStaleBuildEvidence }) {
     super(message, options);
     this.name = "BootstrapClientError";
     this.code = code;
+    if (options?.staleBuildEvidence !== undefined) this.staleBuildEvidence = options.staleBuildEvidence;
     this.preserved = code !== "DATABASE_INSPECTION_UNSTABLE" && (
       code === "SCHEMA_CUTOVER_REQUIRED" || (
         typeof options?.cause === "object" &&
@@ -67,7 +71,6 @@ export type BootstrapSpawnReady = {
   socketPath: string;
   protocolVersion: number;
   features: readonly string[];
-  runtimeBuildIdentity?: string;
   evidence: BootstrapReadyEvidence;
 };
 
@@ -149,15 +152,6 @@ function validateReadyReceipt(
   if (receipt.protocolVersion !== options.requiredProtocolVersion) {
     throw new BootstrapClientError("BOOTSTRAP_PROTOCOL_MISMATCH", "ready receipt protocol version is incompatible");
   }
-  if (
-    options.requiredRuntimeBuildIdentity !== undefined &&
-    receipt.runtimeBuildIdentity !== options.requiredRuntimeBuildIdentity
-  ) {
-    throw new BootstrapClientError(
-      "DAEMON_STALE_BUILD",
-      "bootstrap ready runtime build identity does not match the current client build",
-    );
-  }
   const available = new Set(receipt.features);
   const missing = options.requiredFeatures.filter((feature) => !available.has(feature));
   if (missing.length > 0) {
@@ -185,15 +179,6 @@ function validateSpawnReady<Client>(ready: BootstrapSpawnReady, options: AttachO
   if (ready.protocolVersion !== options.requiredProtocolVersion) {
     throw new BootstrapClientError("BOOTSTRAP_PROTOCOL_MISMATCH", "spawn ready protocol version is incompatible");
   }
-  if (
-    options.requiredRuntimeBuildIdentity !== undefined &&
-    ready.runtimeBuildIdentity !== options.requiredRuntimeBuildIdentity
-  ) {
-    throw new BootstrapClientError(
-      "DAEMON_STALE_BUILD",
-      "spawn ready runtime build identity does not match the current client build",
-    );
-  }
   const available = new Set(ready.features);
   const missing = options.requiredFeatures.filter((feature) => !available.has(feature));
   if (missing.length > 0) {
@@ -208,9 +193,11 @@ function validateStartedHandshake<Client>(
   started: boolean,
 ): AttachedDaemon<Client> {
   if (result.status !== "compatible") {
+    const staleBuildEvidence = result.status === "unavailable" ? result.staleBuildEvidence : undefined;
     throw new BootstrapClientError(
       result.status === "incompatible" ? "BOOTSTRAP_INCOMPATIBLE_INCUMBENT" : "BOOTSTRAP_HANDSHAKE_FAILED",
       result.message,
+      staleBuildEvidence === undefined ? undefined : { staleBuildEvidence },
     );
   }
   const attached = compatibleDaemon(result, options, receipt.electionGeneration, started);
@@ -232,7 +219,11 @@ async function recordKnownFailure(
 ): Promise<never> {
   const message = error instanceof Error ? error.message : String(error);
   await generation.recordTerminal({ status, code, message, phase });
-  throw new BootstrapClientError(code, message, { cause: error });
+  const options: ErrorOptions & { staleBuildEvidence?: DaemonStaleBuildEvidence } = { cause: error };
+  if (error instanceof BootstrapClientError && error.staleBuildEvidence !== undefined) {
+    options.staleBuildEvidence = error.staleBuildEvidence;
+  }
+  throw new BootstrapClientError(code, message, options);
 }
 
 function typedFailureCode(error: unknown): string | undefined {
@@ -275,7 +266,11 @@ export async function attachOrStartDaemon<Client>(options: AttachOrStartOptions<
       throw new BootstrapClientError("BOOTSTRAP_INCOMPATIBLE_INCUMBENT", recheck.message);
     }
     if (recheck.reconciliationRequired === true) {
-      throw new BootstrapClientError(recheck.code ?? "BOOTSTRAP_RECONCILIATION_REQUIRED", recheck.message);
+      throw new BootstrapClientError(
+        recheck.code ?? "BOOTSTRAP_RECONCILIATION_REQUIRED",
+        recheck.message,
+        recheck.staleBuildEvidence === undefined ? undefined : { staleBuildEvidence: recheck.staleBuildEvidence },
+      );
     }
     await preBootstrap();
 

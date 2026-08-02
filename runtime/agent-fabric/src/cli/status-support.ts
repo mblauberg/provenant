@@ -12,7 +12,7 @@ import { connectFabricDaemon } from "../daemon/client.js";
 import { readDiscoveryReceipt } from "./mcp-provision.js";
 import type { FabricPaths } from "./paths.js";
 import { FABRIC_PROTOCOL_VERSION } from "../daemon/protocol.js";
-import { RUNTIME_BUILD_IDENTITY } from "../daemon/runtime-build-identity.generated.js";
+import { currentRuntimeBuildIdentity } from "../daemon/runtime-build-identity.js";
 
 export type FabricDaemonStatus = {
   reachable: boolean;
@@ -66,7 +66,7 @@ export async function daemonState(
       activeAdapters: [],
     };
   }
-  const expectedRuntimeBuildIdentity = dependencies.runtimeBuildIdentity ?? RUNTIME_BUILD_IDENTITY;
+  const expectedRuntimeBuildIdentity = dependencies.runtimeBuildIdentity ?? await currentRuntimeBuildIdentity();
   if (discovery.runtimeBuildIdentity !== expectedRuntimeBuildIdentity) {
     try {
       const info = await (dependencies.inspectDaemonSocket ?? lstat)(discovery.socketPath);

@@ -16,7 +16,7 @@ import {
   type DatabaseInspectionHooks,
 } from "../core/migrations.js";
 import { FabricRemoteError } from "../transport/ndjson-rpc.js";
-import { attachOrStartDaemon, type DaemonHandshakeResult } from "./bootstrap-client.js";
+import { attachOrStartDaemon, type AttachOrStartOptions, type DaemonHandshakeResult } from "./bootstrap-client.js";
 import { BootstrapElection, type BootstrapReadyReceipt } from "./bootstrap-election.js";
 import {
   holdDaemonChildBeforeDiscovery,
@@ -42,7 +42,8 @@ import type { HerdrDaemonProcessConfiguration } from "./herdr-composition.js";
 import type { OptionalGitHubHostedChecksConfiguration } from "../operator/github-hosted-checks.js";
 import type { TrustedGitConfiguration } from "../operator/trusted-git-registry.js";
 import { verifyReviewProfileCatalogueDigest } from "../review/profile/catalogue-digest.js";
-import { RUNTIME_BUILD_IDENTITY } from "./runtime-build-identity.generated.js";
+import { currentRuntimeBuildIdentity } from "./runtime-build-identity.js";
+import type { DaemonStaleBuildEvidence } from "../lifecycle/lifecycle-receipt.js";
 
 export { FabricRemoteError } from "../transport/ndjson-rpc.js";
 export { connectFabricDaemon, FabricDaemonClient } from "./rpc-client.js";
@@ -370,6 +371,19 @@ async function privateDaemonHandshake(
   expectedLifecycleReceiptAuthorityId: string | undefined,
   expectedRuntimeBuildIdentity: string,
 ): Promise<DaemonHandshakeResult<PrivateDaemonAttachment>> {
+  const staleBuildEvidence = (
+    currentRuntimeBuildIdentity: string | null,
+    owner: PrivateDiscoveryOwner,
+  ): DaemonStaleBuildEvidence => ({
+    kind: "daemon-stale-build",
+    expectedRuntimeBuildIdentity,
+    currentRuntimeBuildIdentity,
+    pid: owner.pid,
+    socketPath: owner.socketPath,
+    electionGeneration: owner.electionGeneration,
+    daemonInstanceGeneration: owner.daemonInstanceGeneration,
+    gate: "reconciliation-required",
+  });
   const discovery = await readPrivateDiscovery(paths, socketPath);
   if (discovery.status === "absent") {
     if (socketEntryExists(socketPath)) {
@@ -423,6 +437,7 @@ async function privateDaemonHandshake(
         : "daemon runtime build identity does not match the current client build; operator reconciliation is required",
       reconciliationRequired: true,
       code: "DAEMON_STALE_BUILD",
+      staleBuildEvidence: staleBuildEvidence(discovery.receipt.runtimeBuildIdentity ?? null, discovery.owner),
     };
   }
 
@@ -490,17 +505,6 @@ async function privateDaemonHandshake(
         reconciliationRequired: true,
       };
     }
-    if (outcome.receipt.runtimeBuildIdentity !== expectedRuntimeBuildIdentity) {
-      return {
-        status: "unavailable",
-        reason: "stale",
-        message: outcome.receipt.runtimeBuildIdentity === undefined
-          ? "daemon ready receipt has no runtime build identity; operator reconciliation is required"
-          : "daemon ready receipt runtime build identity does not match the current client build; operator reconciliation is required",
-        reconciliationRequired: true,
-        code: "DAEMON_STALE_BUILD",
-      };
-    }
     if (!readyMatchesOwner(outcome.receipt, discovery.owner)) {
       throw new FabricRemoteError(
         "DAEMON_DISCOVERY_GENERATION_MISMATCH",
@@ -552,6 +556,10 @@ async function spawnProductionDaemon(input: {
   paths: PrivateDiscoveryPaths;
   election: BootstrapElection;
 }): Promise<ProductionSpawn> {
+  const runtimeBuildIdentity = input.options.runtimeBuildIdentity;
+  if (runtimeBuildIdentity === undefined) {
+    throw new FabricRemoteError("DAEMON_BUILD_IDENTITY_UNAVAILABLE", "daemon build identity was not captured before spawn");
+  }
   const prepared = await prepareDaemonStart(input.options);
   const daemonInstanceGeneration = input.electionGeneration;
   const childOptions = { ...prepared };
@@ -577,7 +585,7 @@ async function spawnProductionDaemon(input: {
       lifecycleReceiptAuthorityId: prepared.lifecycleReceiptAuthorityId ?? null,
       protocolVersion: FABRIC_PROTOCOL_VERSION,
       features: ["rpc", MCP_BOOTSTRAP_CREDENTIALS_FEATURE, MCP_BOOTSTRAP_RESULT_SHAPE_FEATURE],
-      runtimeBuildIdentity: input.options.runtimeBuildIdentity ?? RUNTIME_BUILD_IDENTITY,
+      runtimeBuildIdentity,
     });
   })();
   const publishedIdentity = identity.then(
@@ -670,6 +678,7 @@ function attachedHandle(
 export async function startFabricDaemon(options: DaemonStartOptions): Promise<FabricDaemonHandle> {
   const normalized = normalizedStartOptions(options);
   normalized.databasePath = safeDatabasePath(normalized.databasePath);
+  let runtimeBuildIdentity = normalized.runtimeBuildIdentity;
   const stateDirectoryWasAbsent = !existsSync(normalized.stateDirectory);
   const runtimeDirectoryWasAbsent = !existsSync(normalized.runtimeDirectory);
   const paths = privateDiscoveryPaths(normalized.runtimeDirectory);
@@ -688,85 +697,94 @@ export async function startFabricDaemon(options: DaemonStartOptions): Promise<Fa
   let bootstrapDirectoriesPrepared = false;
   let provisional: PrivateDiscoveryIdentity | undefined;
   let spawned: ProductionSpawn | undefined;
+  const capturedRuntimeBuildIdentity = (): string => {
+    if (runtimeBuildIdentity === undefined) {
+      throw new FabricRemoteError("DAEMON_BUILD_IDENTITY_UNAVAILABLE", "daemon build identity could not be captured");
+    }
+    return runtimeBuildIdentity;
+  };
+  const attachOptions: AttachOrStartOptions<PrivateDaemonAttachment> = {
+    actionId,
+    socketPath: normalized.socketPath,
+    requiredProtocolVersion: FABRIC_PROTOCOL_VERSION,
+    requiredFeatures: ["rpc", MCP_BOOTSTRAP_CREDENTIALS_FEATURE, MCP_BOOTSTRAP_RESULT_SHAPE_FEATURE],
+    ...(runtimeBuildIdentity === undefined ? {} : { requiredRuntimeBuildIdentity: runtimeBuildIdentity }),
+    election,
+    preflight: async () => {
+      // The current build must be proved before an incumbent is accepted.
+      await preflightFabricDaemonStart(normalized);
+      normalized.runtimeBuildIdentity ??= await currentRuntimeBuildIdentity();
+      runtimeBuildIdentity = normalized.runtimeBuildIdentity;
+      attachOptions.requiredRuntimeBuildIdentity = capturedRuntimeBuildIdentity();
+    },
+    handshake: async () => {
+      if (!bootstrapDirectoriesPrepared && !existsSync(normalized.runtimeDirectory)) {
+        return {
+          status: "unavailable" as const,
+          reason: "absent" as const,
+          message: "private daemon discovery is absent",
+        };
+      }
+      return await privateDaemonHandshake(
+        paths,
+        election,
+        normalized.socketPath,
+        provisional,
+        normalized.lifecycleReceiptAuthorityId,
+        capturedRuntimeBuildIdentity(),
+      );
+    },
+    preBootstrap: async () => {
+      inspectFabricDatabase(normalized.databasePath, normalized.inspectionHooks);
+      await Promise.all([
+        ensurePrivateDirectory(normalized.stateDirectory),
+        ensurePrivateDirectory(normalized.runtimeDirectory),
+      ]);
+      bootstrapDirectoriesPrepared = true;
+    },
+    reconcile: async (unavailable) => {
+      if (!await reconcileUnreachablePrivateDaemon(paths, normalized.socketPath)) {
+        return unavailable;
+      }
+      return await privateDaemonHandshake(
+        paths,
+        election,
+        normalized.socketPath,
+        provisional,
+        normalized.lifecycleReceiptAuthorityId,
+        capturedRuntimeBuildIdentity(),
+      );
+    },
+    spawn: async (bootstrap) => {
+      spawned = await spawnProductionDaemon({
+        options: normalized,
+        actionId: bootstrap.actionId,
+        electionGeneration: bootstrap.electionGeneration,
+        paths,
+        election,
+      });
+      return {
+        ready: (async () => {
+          provisional = await spawned.identity;
+          return {
+            daemonInstanceGeneration: provisional.daemonInstanceGeneration,
+            socketPath: provisional.socketPath,
+            protocolVersion: FABRIC_PROTOCOL_VERSION,
+            features: ["rpc", MCP_BOOTSTRAP_CREDENTIALS_FEATURE, MCP_BOOTSTRAP_RESULT_SHAPE_FEATURE],
+            evidence: {
+              databaseOwned: true,
+              migrationsComplete: true,
+              recoveryComplete: true,
+              socketBound: true,
+            },
+          };
+        })(),
+      };
+    },
+  };
   let attached;
   try {
-    attached = await attachOrStartDaemon<PrivateDaemonAttachment>({
-      actionId,
-      socketPath: normalized.socketPath,
-      requiredProtocolVersion: FABRIC_PROTOCOL_VERSION,
-      requiredFeatures: ["rpc", MCP_BOOTSTRAP_CREDENTIALS_FEATURE, MCP_BOOTSTRAP_RESULT_SHAPE_FEATURE],
-      requiredRuntimeBuildIdentity: normalized.runtimeBuildIdentity ?? RUNTIME_BUILD_IDENTITY,
-      election,
-      preflight: async () => {
-        // The current build must be proved before an incumbent is accepted.
-        await preflightFabricDaemonStart(normalized);
-      },
-      handshake: async () => {
-        if (!bootstrapDirectoriesPrepared && !existsSync(normalized.runtimeDirectory)) {
-          return {
-            status: "unavailable" as const,
-            reason: "absent" as const,
-            message: "private daemon discovery is absent",
-          };
-        }
-        return await privateDaemonHandshake(
-          paths,
-          election,
-          normalized.socketPath,
-          provisional,
-          normalized.lifecycleReceiptAuthorityId,
-          normalized.runtimeBuildIdentity ?? RUNTIME_BUILD_IDENTITY,
-        );
-      },
-      preBootstrap: async () => {
-        inspectFabricDatabase(normalized.databasePath, normalized.inspectionHooks);
-        await Promise.all([
-          ensurePrivateDirectory(normalized.stateDirectory),
-          ensurePrivateDirectory(normalized.runtimeDirectory),
-        ]);
-        bootstrapDirectoriesPrepared = true;
-      },
-      reconcile: async (unavailable) => {
-        if (!await reconcileUnreachablePrivateDaemon(paths, normalized.socketPath)) {
-          return unavailable;
-        }
-        return await privateDaemonHandshake(
-          paths,
-          election,
-          normalized.socketPath,
-          provisional,
-          normalized.lifecycleReceiptAuthorityId,
-          normalized.runtimeBuildIdentity ?? RUNTIME_BUILD_IDENTITY,
-        );
-      },
-      spawn: async (bootstrap) => {
-        spawned = await spawnProductionDaemon({
-          options: normalized,
-          actionId: bootstrap.actionId,
-          electionGeneration: bootstrap.electionGeneration,
-          paths,
-          election,
-        });
-        return {
-          ready: (async () => {
-            provisional = await spawned.identity;
-            return {
-              daemonInstanceGeneration: provisional.daemonInstanceGeneration,
-              socketPath: provisional.socketPath,
-              protocolVersion: FABRIC_PROTOCOL_VERSION,
-              features: ["rpc", MCP_BOOTSTRAP_CREDENTIALS_FEATURE, MCP_BOOTSTRAP_RESULT_SHAPE_FEATURE],
-              runtimeBuildIdentity: normalized.runtimeBuildIdentity ?? RUNTIME_BUILD_IDENTITY,
-              evidence: {
-                databaseOwned: true,
-                migrationsComplete: true,
-                recoveryComplete: true,
-                socketBound: true,
-              },
-            };
-          })(),
-        };
-      },
-    });
+    attached = await attachOrStartDaemon(attachOptions);
   } catch (error: unknown) {
     await spawned?.stop(false).catch(() => undefined);
     if (
@@ -799,6 +817,7 @@ export async function startFabricDaemon(options: DaemonStartOptions): Promise<Fa
 export async function forceStartFabricDaemonForTests(options: DaemonStartOptions): Promise<FabricDaemonHandle> {
   const normalized = normalizedStartOptions(options);
   normalized.databasePath = safeDatabasePath(normalized.databasePath);
+  normalized.runtimeBuildIdentity ??= await currentRuntimeBuildIdentity();
   await Promise.all([
     ensurePrivateDirectory(normalized.stateDirectory),
     ensurePrivateDirectory(normalized.runtimeDirectory),

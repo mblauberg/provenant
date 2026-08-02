@@ -60,7 +60,24 @@ export type LifecycleActionReceipt = Readonly<{
   mutated: boolean;
   healthy: boolean;
   actions: readonly LifecycleAction[];
-  failure?: Readonly<{ phase: string; message: string; code: string | null }>;
+  failure?: Readonly<{
+    phase: string;
+    message: string;
+    code: string | null;
+    evidence?: DaemonStaleBuildEvidence;
+  }>;
+}>;
+
+/** Typed, non-secret context for a live incumbent blocked by build freshness. */
+export type DaemonStaleBuildEvidence = Readonly<{
+  kind: "daemon-stale-build";
+  expectedRuntimeBuildIdentity: string;
+  currentRuntimeBuildIdentity: string | null;
+  pid: number;
+  socketPath: string;
+  electionGeneration: number;
+  daemonInstanceGeneration: number;
+  gate: "reconciliation-required";
 }>;
 
 type ReceiptRecord = Record<string, unknown>;
@@ -81,6 +98,53 @@ function receiptBoolean(value: unknown): boolean | null {
 
 function receiptNullableString(value: unknown): string | null | undefined {
   return value === null ? null : value === undefined ? undefined : receiptString(value);
+}
+
+function validatedDaemonStaleBuildEvidence(value: unknown): DaemonStaleBuildEvidence | null {
+  const record = receiptRecord(value);
+  if (record === null) return null;
+  const expectedKeys = [
+    "currentRuntimeBuildIdentity",
+    "daemonInstanceGeneration",
+    "electionGeneration",
+    "expectedRuntimeBuildIdentity",
+    "gate",
+    "kind",
+    "pid",
+    "socketPath",
+  ];
+  const actualKeys = Object.keys(record).sort();
+  if (actualKeys.length !== expectedKeys.length || actualKeys.some((key, index) => key !== expectedKeys[index])) return null;
+  const expectedRuntimeBuildIdentity = record.expectedRuntimeBuildIdentity;
+  const currentRuntimeBuildIdentity = record.currentRuntimeBuildIdentity;
+  const pid = record.pid;
+  const socketPath = record.socketPath;
+  const electionGeneration = record.electionGeneration;
+  const daemonInstanceGeneration = record.daemonInstanceGeneration;
+  if (
+    record.kind !== "daemon-stale-build" ||
+    typeof expectedRuntimeBuildIdentity !== "string" ||
+    !/^sha256:[a-f0-9]{64}$/u.test(expectedRuntimeBuildIdentity) ||
+    !(currentRuntimeBuildIdentity === null || (
+      typeof currentRuntimeBuildIdentity === "string" &&
+      /^sha256:[a-f0-9]{64}$/u.test(currentRuntimeBuildIdentity)
+    )) ||
+    !Number.isSafeInteger(pid) || (pid as number) < 1 ||
+    typeof socketPath !== "string" || socketPath.length === 0 || socketPath.length > 4096 ||
+    !Number.isSafeInteger(electionGeneration) || (electionGeneration as number) < 1 ||
+    !Number.isSafeInteger(daemonInstanceGeneration) || (daemonInstanceGeneration as number) < 1 ||
+    record.gate !== "reconciliation-required"
+  ) return null;
+  return {
+    kind: "daemon-stale-build",
+    expectedRuntimeBuildIdentity,
+    currentRuntimeBuildIdentity,
+    pid: pid as number,
+    socketPath,
+    electionGeneration: electionGeneration as number,
+    daemonInstanceGeneration: daemonInstanceGeneration as number,
+    gate: "reconciliation-required",
+  };
 }
 
 function validatedLifecycleAction(value: unknown): LifecycleAction | null {
@@ -198,14 +262,26 @@ export function validateLifecycleActionReceipt(value: unknown): LifecycleActionR
   if (actions.some((action): action is null => action === null)) return null;
   const validatedActions = actions as LifecycleAction[];
   const failure = record.failure;
-  let safeFailure: Readonly<{ phase: string; message: string; code: string | null }> | undefined;
+  let safeFailure: Readonly<{
+    phase: string;
+    message: string;
+    code: string | null;
+    evidence?: DaemonStaleBuildEvidence;
+  }> | undefined;
   if (failure !== undefined) {
     const failureRecord = receiptRecord(failure);
     const phase = failureRecord === null ? null : receiptString(failureRecord.phase);
     const message = failureRecord === null ? null : receiptString(failureRecord.message);
     const code = failureRecord === null ? null : receiptNullableString(failureRecord.code);
+    const evidenceValue = failureRecord?.evidence;
     if (phase === null || message === null || code === undefined) return null;
-    safeFailure = { phase, message, code };
+    if (evidenceValue === undefined) {
+      safeFailure = { phase, message, code };
+    } else {
+      const evidence = validatedDaemonStaleBuildEvidence(evidenceValue);
+      if (evidence === null) return null;
+      safeFailure = { phase, message, code, evidence };
+    }
   }
   if (mutated !== validatedActions.some((action) => action.mutated)) return null;
   if (healthy && (safeFailure !== undefined || validatedActions.some((action) => action.outcome === "failed"))) return null;
@@ -240,6 +316,12 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function errorStaleBuildEvidence(error: unknown): DaemonStaleBuildEvidence | undefined {
+  if (typeof error !== "object" || error === null || !("staleBuildEvidence" in error)) return undefined;
+  const evidence = validatedDaemonStaleBuildEvidence(error.staleBuildEvidence);
+  return evidence === null ? undefined : evidence;
+}
+
 export function lifecycleFailureReceipt(input: {
   canonicalRoot: string;
   seat: "claude" | "codex";
@@ -248,6 +330,7 @@ export function lifecycleFailureReceipt(input: {
   phase: string;
   cause: unknown;
 }): LifecycleActionReceipt {
+  const evidence = errorStaleBuildEvidence(input.cause);
   return {
     schemaVersion: 1,
     kind: "agent-fabric-lifecycle-action",
@@ -257,7 +340,12 @@ export function lifecycleFailureReceipt(input: {
     mutated: input.actions.some((action) => action.mutated),
     healthy: false,
     actions: input.actions,
-    failure: { phase: input.phase, message: errorMessage(input.cause), code: errorCode(input.cause) },
+    failure: {
+      phase: input.phase,
+      message: errorMessage(input.cause),
+      code: errorCode(input.cause),
+      ...(evidence === undefined ? {} : { evidence }),
+    },
   };
 }
 
