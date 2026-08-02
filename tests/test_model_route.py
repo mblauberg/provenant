@@ -2726,6 +2726,7 @@ def test_optional_adapter_preference_policy_is_ordered_and_native_first_for_fall
 
 
 def test_split_root_defaults_use_instance_routing_and_product_compatibility(tmp_path):
+    import shutil as _shutil
     product_root = tmp_path / "product"
     instance_root = tmp_path / "instance"
     shutil.copytree(ROOT / "scripts", product_root / "scripts")
@@ -2734,6 +2735,7 @@ def test_split_root_defaults_use_instance_routing_and_product_compatibility(tmp_
         "runtime/agent-fabric/scripts/validate-adapter-executables.ts",
         "runtime/agent-fabric/src/adapters/compatibility.ts",
         "runtime/agent-fabric/src/adapters/primary-adapters.ts",
+        "runtime/agent-fabric/src/adapters/provider-identity.ts",
         "runtime/agent-fabric/src/domain/record.ts",
         "runtime/agent-fabric/src/domain/versions.ts",
         "runtime/agent-fabric/src/errors.ts",
@@ -2743,6 +2745,16 @@ def test_split_root_defaults_use_instance_routing_and_product_compatibility(tmp_
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(ROOT / relative_path, destination)
     (product_root / "node_modules").symlink_to(ROOT / "node_modules", target_is_directory=True)
+    # Symlink wrapper provider directory from the real repository to preserve Git history
+    provider_dir = product_root / "runtime" / "agent-fabric" / "src" / "adapters" / "providers"
+    if provider_dir.exists():
+        _shutil.rmtree(provider_dir)
+    (product_root / "runtime" / "agent-fabric" / "src" / "adapters").mkdir(parents=True, exist_ok=True)
+    provider_dir.symlink_to(
+        (ROOT / "runtime" / "agent-fabric" / "src" / "adapters" / "providers").resolve(),
+        target_is_directory=True
+    )
+
     (product_root / "config").mkdir()
     shutil.copy2(
         ROOT / "config/adapter-compatibility.yaml",
