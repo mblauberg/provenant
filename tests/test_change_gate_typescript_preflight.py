@@ -116,6 +116,12 @@ def _typescript_freshness_fixture(tmp_path, dist_value):
     build.chmod(0o755)
     (source / "tests").mkdir()
     (source / "tests" / "protocol.test.ts").write_text("base test\n", encoding="utf-8")
+    (source / "tests" / "test_index.py").write_text(
+        "from pathlib import Path\n"
+        "assert Path('runtime/agent-fabric-protocol/dist/index.js').read_text().strip() == "
+        "Path('tests/expected.ts').read_text().strip()\n",
+        encoding="utf-8",
+    )
     (source / "tests" / "expected.ts").write_text(
         "export const value = 'new';\n", encoding="utf-8"
     )
@@ -150,7 +156,7 @@ def _typescript_dist_command():
 
 def _typescript_commands():
     return {
-        "py": f'{sys.executable} -c "raise SystemExit(0)" {{test}}',
+        "py": f'{sys.executable} {{test}}',
         "ts": _typescript_dist_command(),
     }
 
@@ -211,6 +217,47 @@ def test_typescript_mutation_rebuilds_dist_after_each_mutant(tmp_path, capsys):
     )
 
     assert result == 0, capsys.readouterr().out
+
+
+def test_typescript_revert_probe_prepares_for_python_stem_target(tmp_path, capsys):
+    source, hunk = _typescript_freshness_fixture(tmp_path, "new")
+
+    result = gate_revert_probe(
+        source,
+        [hunk],
+        _typescript_commands(),
+        ["tests/test_index.py"],
+        tmp_path / "scratch",
+    )
+    output = capsys.readouterr().out
+
+    assert result == 0, output
+    assert "status=KILLED" in output
+
+
+def test_typescript_mutation_prepares_for_python_stem_target(tmp_path, capsys):
+    source, _ = _typescript_freshness_fixture(tmp_path, "new")
+    mutant = Mutant(
+        path="runtime/agent-fabric-protocol/src/index.ts",
+        line=1,
+        before="export const value = 'new';",
+        after="export const value = 'old';",
+        description="current value reverted",
+    )
+
+    result = gate_changed_line_mutation(
+        source,
+        [mutant],
+        _typescript_commands(),
+        ["tests/test_index.py"],
+        tmp_path / "scratch",
+        "crucial",
+    )
+    output = capsys.readouterr().out
+
+    assert result == 0, output
+    assert "MUTANT 1" in output
+    assert "status=KILLED" in output
 
 
 def test_typescript_right_reason_red_prepares_base_with_its_own_writer_and_build(
