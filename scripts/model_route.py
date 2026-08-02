@@ -162,19 +162,18 @@ def _validated_agent_fabric_node() -> str | None:
     return str(candidate.resolve())
 
 
-def validate_adapter_executable(adapter: str, compatibility_path: Path) -> str:
-    """Validate the selected executable through the installed TypeScript seam.
+def validate_adapter_executable(adapter: str, compatibility_path: Path) -> tuple[str, bool]:
+    """Validate the selected adapter declaration through the TypeScript seam.
 
-    This is deliberately separate from the Fabric activation gate: direct CLI
-    routing still does not activate a disabled adapter, but a selected enabled
-    adapter must have a usable executable. The TypeScript primary-adapter list
-    remains the sole owner of mandatory-primary semantics.
+    Route resolution records executable availability without requiring the
+    provider binary. Dispatch remains responsible for validating the executable
+    before starting the adapter process.
     """
     loader_script = PRODUCT_ROOT / "scripts" / "lib" / "agent-fabric-tsx-loader.sh"
     validator = PRODUCT_ROOT / "runtime" / "agent-fabric" / "scripts" / "validate-adapter-executables.ts"
     node_executable = _validated_agent_fabric_node()
     if node_executable is None:
-        return "adapter_compatibility_unavailable"
+        return "adapter_compatibility_unavailable", False
     environment = os.environ.copy()
     environment["AGENT_FABRIC_NODE"] = node_executable
     try:
@@ -194,7 +193,7 @@ def validate_adapter_executable(adapter: str, compatibility_path: Path) -> str:
             timeout=10,
         )
         if loader.returncode != 0 or not loader.stdout.strip():
-            return "adapter_compatibility_unavailable"
+            return "adapter_compatibility_unavailable", False
         completed = subprocess.run(
             [
                 node_executable,
@@ -203,6 +202,7 @@ def validate_adapter_executable(adapter: str, compatibility_path: Path) -> str:
                 "--compatibility", str(compatibility_path),
                 "--schema", str(PRODUCT_ROOT / "runtime" / "agent-fabric" / "schemas" / "adapter-compatibility.schema.json"),
                 "--adapter", COMPATIBILITY_ADAPTER_IDS[adapter],
+                "--declaration-only",
             ],
             check=False,
             capture_output=True,
@@ -211,19 +211,26 @@ def validate_adapter_executable(adapter: str, compatibility_path: Path) -> str:
             timeout=30,
         )
     except (OSError, subprocess.SubprocessError):
-        return "adapter_compatibility_unavailable"
+        return "adapter_compatibility_unavailable", False
     if completed.returncode == 0:
-        return ""
+        try:
+            result = json.loads(completed.stdout.strip().splitlines()[-1])
+        except (json.JSONDecodeError, IndexError):
+            return "adapter_compatibility_unavailable", False
+        executable_available = (
+            isinstance(result, dict) and result.get("executable_available") is True
+        )
+        return "", executable_available
     try:
         result = json.loads(completed.stderr.strip().splitlines()[-1])
     except (json.JSONDecodeError, IndexError):
-        return "adapter_compatibility_unavailable"
+        return "adapter_compatibility_unavailable", False
     code = result.get("code") if isinstance(result, dict) else None
     if code == "ADAPTER_ARTIFACT_MISSING":
-        return "adapter_executable_unavailable"
+        return "adapter_executable_unavailable", False
     if code == "ADAPTER_COMPATIBILITY_INVALID":
-        return "adapter_compatibility_invalid"
-    return "adapter_compatibility_unavailable"
+        return "adapter_compatibility_invalid", False
+    return "adapter_compatibility_unavailable", False
 
 
 def check_adapter_compatibility(
@@ -566,24 +573,8 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
         compatibility_metadata = {
             "compatibility_adapter": compatibility["compatibility_adapter"],
             "adapter_enabled": compatibility["enabled"],
+            "executable_available": False,
         }
-        # A Fabric-disabled adapter is rejected by the activation gate before
-        # point of use. Direct CLI selection has no such gate, so it must still
-        # prove that the selected optional executable is usable.
-        if args.adapter_gate != "fabric" or compatibility["enabled"]:
-            executable_status = validate_adapter_executable(
-                args.adapter, Path(args.adapter_compatibility)
-            )
-            if executable_status:
-                return emit_route(
-                    {
-                        **base,
-                        "status": executable_status,
-                        "endpoint_provider": endpoint,
-                        **compatibility_metadata,
-                    },
-                    2,
-                )
         if args.adapter_gate == "fabric":
             active_adapters, activation_status = load_active_adapters(Path(args.fabric_config))
             if activation_status:
@@ -599,6 +590,22 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
             compatibility_metadata["adapter_active"] = (
                 compatibility["compatibility_adapter"] in active_adapters
             )
+        # Availability is recorded during planning but enforced at dispatch.
+        if args.adapter_gate != "fabric" or compatibility["enabled"]:
+            executable_status, executable_available = validate_adapter_executable(
+                args.adapter, Path(args.adapter_compatibility)
+            )
+            compatibility_metadata["executable_available"] = executable_available
+            if executable_status:
+                return emit_route(
+                    {
+                        **base,
+                        "status": executable_status,
+                        "endpoint_provider": endpoint,
+                        **compatibility_metadata,
+                    },
+                    2,
+                )
         if account_default != (not compatibility["requires_explicit_model"]):
             # The routing catalogue and adapter policy must agree on
             # account-default dispatch in both directions (#190).
