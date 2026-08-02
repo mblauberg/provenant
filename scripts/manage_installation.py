@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Plan, install, reconcile or remove only harness-managed skill links."""
+"""Plan, install, reconcile or remove harness-managed skill and agent links."""
 
 from __future__ import annotations
 
@@ -17,6 +17,14 @@ except ModuleNotFoundError as exc:
     if exc.name != "scripts":
         raise
     import managed_installation_manifest as manifest_io  # type: ignore[no-redef]
+
+try:
+    import scripts.agent_installation as agent_installation
+except ModuleNotFoundError:
+    try:
+        import agent_installation  # type: ignore[no-redef]
+    except ModuleNotFoundError:
+        agent_installation = None
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -636,10 +644,22 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--target", required=True, type=Path)
     parser.add_argument("--source", type=Path, default=ROOT / "skills")
+    parser.add_argument("--surface", choices=("skills", "agents"), default="skills")
     parser.add_argument("--custom-source", type=Path)
     parser.add_argument("--renames", type=Path)
     parser.add_argument("--summary", action="store_true")
     args = parser.parse_args(argv)
+    if args.surface == "agents":
+        if agent_installation is None:
+            print("conflicting: agents installation mechanics are unavailable", file=sys.stderr)
+            return 3
+        try:
+            return agent_installation.run(
+                args.action, args.source, args.target, args.summary
+            )
+        except (OSError, agent_installation.InstallError) as exc:
+            print(f"conflicting: {exc}", file=sys.stderr)
+            return 3
     try:
         result = execute(
             args.action,

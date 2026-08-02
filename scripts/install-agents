@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+TARGET=""
+
+usage() {
+  echo "usage: install-agents --target <global-agents-directory>" >&2
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --target)
+      [[ $# -ge 2 ]] || { usage; exit 2; }
+      TARGET="$2"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      usage
+      exit 2
+      ;;
+  esac
+done
+
+[[ -n "$TARGET" ]] || { usage; exit 2; }
+manager=("$ROOT/scripts/manage_installation.py" --surface agents --source "$ROOT/agents" --target "$TARGET")
+
+# Preserve the canonical directory-link layout without creating a receipt in
+# either the client home or the product root. Validate the source first so a
+# symlinked source directory cannot bypass the ownership boundary.
+"${manager[@]}" validate-sources --summary >/dev/null
+if [[ -L "$TARGET" ]]; then
+  target_real=""
+  if target_real="$(cd "$TARGET" 2>/dev/null && pwd -P)" \
+    && [[ "$target_real" == "$(cd "$ROOT/agents" && pwd -P)" ]]; then
+    echo "agents existing=directory-link target=$TARGET"
+    exit 0
+  fi
+  echo "conflicting: target must not be a non-canonical symlink" >&2
+  exit 3
+fi
+
+"${manager[@]}" install --summary
+exec "${manager[@]}" check --summary
