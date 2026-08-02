@@ -11,7 +11,24 @@ VALIDATOR = ROOT / "runtime" / "agent-fabric" / "scripts" / "validate-adapter-ex
 SCHEMA = ROOT / "runtime" / "agent-fabric" / "schemas" / "adapter-compatibility.schema.json"
 
 
-def run_validator(tmp_path, executable, path):
+def run_validator(tmp_path, executable, path, optional_executable=None):
+    optional_adapter = "" if optional_executable is None else f"""  agy:
+    enabled: true
+    delivery_stage: 3
+    implementation:
+      kind: native-cli
+      executable: {json.dumps(optional_executable)}
+      provider_identity: apple-designated
+      wrapper_entrypoint: fixture-wrapper.js
+    contract:
+      protocol: example
+    runtime_range:
+      platforms: [linux-x64]
+    model_family_constraints:
+      allowed: [example]
+      requires_explicit_model: true
+    official_source_url: https://example.invalid/example
+"""
     compatibility = tmp_path / "adapter-compatibility.yaml"
     compatibility.write_text(f"""schema_version: 1
 activation_policy:
@@ -35,7 +52,7 @@ adapters:
       allowed: [example]
       requires_explicit_model: true
     official_source_url: https://example.invalid/example
-""")
+{optional_adapter}""")
     environment = os.environ.copy()
     environment["PATH"] = path + os.pathsep + os.environ.get("PATH", "")
     node = shutil.which("node", path=environment["PATH"])
@@ -55,6 +72,17 @@ def test_install_time_check_rejects_enabled_adapter_with_unresolvable_executable
     result = run_validator(tmp_path, "missing-example", str(tmp_path / "empty-bin"))
     assert result.returncode != 0
     assert "adapter claude-agent-sdk is enabled but executable 'missing-example' is not resolvable on PATH" in result.stderr
+
+
+def test_install_time_check_rejects_enabled_optional_adapter_without_filter(tmp_path):
+    result = run_validator(
+        tmp_path,
+        sys.executable,
+        str(tmp_path / "empty-bin"),
+        optional_executable="missing-optional",
+    )
+    assert result.returncode != 0
+    assert "adapter agy is enabled but executable 'missing-optional' is not resolvable on PATH" in result.stderr
 
 
 def test_install_time_check_accepts_enabled_adapter_with_resolvable_executable(tmp_path):
