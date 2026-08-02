@@ -517,6 +517,63 @@ describe("machine status and doctor", () => {
     expect(JSON.stringify(status)).not.toMatch(/capability|credentialPath|afb_|afc_/u);
   });
 
+  it("reports missing primary and optional adapter binaries without throwing", async () => {
+    const productRoot = await mkdtemp(join(tmpdir(), "fabric-status-missing-adapters-"));
+    cleanup.push(productRoot);
+    const repositoryRoot = resolve(import.meta.dirname, "../../../..");
+    const wrapperPath = join(productRoot, "wrapper.ts");
+    const compatibilityPath = join(productRoot, "config", "adapter-compatibility.yaml");
+    const schemaPath = join(productRoot, "runtime", "agent-fabric", "schemas", "adapter-compatibility.schema.json");
+    await mkdir(join(productRoot, "config"), { recursive: true });
+    await mkdir(dirname(schemaPath), { recursive: true });
+    await writeFile(wrapperPath, "export const execute = () => undefined;\n");
+    const compatibility = parse(await readFile(join(repositoryRoot, "config", "adapter-compatibility.yaml"), "utf8")) as {
+      adapters: Record<string, { implementation: Record<string, unknown> }>;
+    };
+    for (const adapterId of ["claude-agent-sdk", "agy"]) {
+      compatibility.adapters[adapterId] = {
+        ...compatibility.adapters[adapterId],
+        implementation: {
+          ...compatibility.adapters[adapterId]?.implementation,
+          executable: `missing-${adapterId}`,
+          wrapper_entrypoint: wrapperPath,
+        },
+      };
+    }
+    await Promise.all([
+      writeFile(compatibilityPath, stringify(compatibility)),
+      writeFile(
+        schemaPath,
+        await readFile(join(repositoryRoot, "runtime", "agent-fabric", "schemas", "adapter-compatibility.schema.json"), "utf8"),
+      ),
+      writeFile(
+        join(productRoot, "config", "agent-fabric.yaml"),
+        stringify({
+          schemaVersion: 1,
+          allowedAdapters: ["claude-agent-sdk", "agy"],
+          activeAdapters: ["claude-agent-sdk", "agy"],
+          allowedProfiles: ["headless"],
+          adapters: {
+            "claude-agent-sdk": { command: ["node", wrapperPath] },
+            agy: { command: ["node", wrapperPath] },
+          },
+          workspaceRoots: ["${AGENTS_HOME}"],
+          limits: { maximumConcurrentProviderTurns: 1 },
+        }),
+      ),
+    ]);
+
+    const status = await fabricStatus(
+      ["--agents-home", productRoot, "--project", productRoot],
+      await paths(),
+    );
+
+    expect(status.optionalAdapters).toEqual(expect.arrayContaining([
+      expect.objectContaining({ adapterId: "claude-agent-sdk", executable: "missing-claude-agent-sdk" }),
+      expect.objectContaining({ adapterId: "agy", executable: "missing-agy" }),
+    ]));
+  });
+
   it("reports an exact bootstrap remedy when the project has no chair seat", async () => {
     const value = await paths();
     const agentsHome = resolve(import.meta.dirname, "../../../..");

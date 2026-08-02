@@ -122,6 +122,23 @@ describe("adapter wrapper Git provenance", () => {
     });
   });
 
+  it("does not treat a missing Git binary as packaged provenance", async () => {
+    const fixture = await createProvenanceFixture();
+    const noGitPath = await mkdtemp(join(tmpdir(), "agent-fabric-no-git-"));
+    temporaryDirectories.push(noGitPath);
+    const originalPath = process.env.PATH;
+    process.env.PATH = noGitPath;
+    try {
+      await expect(verify(fixture)).rejects.toMatchObject({
+        code: "ADAPTER_COMPATIBILITY_INVALID",
+        cause: { code: "ENOENT" },
+      });
+    } finally {
+      if (originalPath === undefined) delete process.env.PATH;
+      else process.env.PATH = originalPath;
+    }
+  });
+
   it("fails closed when the configured wrapper is not tracked", async () => {
     const fixture = await createProvenanceFixture();
     const untrackedWrapper = join(fixture.directory, "untracked-wrapper.js");

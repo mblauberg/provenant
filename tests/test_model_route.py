@@ -2981,17 +2981,27 @@ def test_resolve_succeeds_without_adapter_binaries(tmp_path, monkeypatch):
     assert route["status"] == "ok"
 
 
-def test_resolve_succeeds_with_dirty_wrapper():
-    wrapper = ROOT / "runtime" / "agent-fabric" / "src" / "adapters" / "providers" / "claude-agent-sdk.ts"
-    original = wrapper.read_bytes()
-    try:
-        wrapper.write_bytes(original + b"\n// active development change\n")
-        result, route = resolve(
-            "--adapter", "claude", "--model", "claude-opus-4-6",
-            "--alias", "flagship", "--role", "worker", adapter_gate="fabric",
+def test_resolve_succeeds_with_dirty_wrapper(tmp_path):
+    wrapper = tmp_path / "claude-agent-sdk.ts"
+    wrapper.write_bytes(
+        (ROOT / "runtime" / "agent-fabric" / "src" / "adapters" / "providers" / "claude-agent-sdk.ts").read_bytes()
+        + b"\n// active development change\n"
+    )
+    compatibility = tmp_path / "adapter-compatibility.yaml"
+    compatibility.write_text(
+        (ROOT / "config" / "adapter-compatibility.yaml")
+        .read_text()
+        .replace(
+            'wrapper_entrypoint: "runtime/agent-fabric/src/adapters/providers/claude-agent-sdk.ts"',
+            f'wrapper_entrypoint: "{wrapper}"',
         )
-    finally:
-        wrapper.write_bytes(original)
+    )
+
+    result, route = resolve(
+        "--adapter", "claude", "--model", "claude-opus-4-6",
+        "--alias", "flagship", "--role", "worker",
+        "--adapter-compatibility", str(compatibility), adapter_gate="fabric",
+    )
 
     assert result.returncode == 0
     assert route["status"] == "ok"
