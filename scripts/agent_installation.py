@@ -174,7 +174,13 @@ def _state(
     if entry is None:
         if not destination.exists() and not destination.is_symlink():
             return "missing"
-        return "adoptable" if _same_file_content(destination, source) else "unmanaged"
+        return (
+            "adoptable"
+            if _same_link(destination, source) or _same_file_content(destination, source)
+            else "unmanaged"
+        )
+    if _same_file_content(destination, source):
+        return "adoptable"
     if _same_link(destination, source):
         return (
             "managed"
@@ -232,7 +238,16 @@ def _raise_on_conflicts(
         ):
             conflicts.append(name)
     if conflicts:
-        raise InstallError("conflicting managed targets: " + ", ".join(sorted(conflicts)))
+        remedies = []
+        for name in sorted(set(conflicts)):
+            recorded_source = manifest["managed"].get(name, {}).get("source_target")
+            if recorded_source is None:
+                recorded_source = str(sources[name])
+            remedies.append(
+                f"{name}: manually restore the managed link to {recorded_source} "
+                f"or remove {target / name}"
+            )
+        raise InstallError("conflicting managed targets: " + "; ".join(remedies))
 
 
 def install(source: Path, target: Path) -> tuple[int, int, list[str]]:
@@ -293,7 +308,9 @@ def _check_items(source: Path, target: Path) -> list[dict[str, str]]:
         entry = manifest["managed"].get(name)
         state = _integrity_state(target / name, path)
         if entry is None:
-            if state not in {"missing", "adoptable"}:
+            if state == "present":
+                state = "adoptable"
+            elif state not in {"missing", "adoptable"}:
                 state = "unmanaged"
         elif state == "present" and (
             Path(entry["source_target"]).resolve() != path.resolve()
@@ -317,7 +334,7 @@ def check(source: Path, target: Path) -> list[str]:
     target = target.resolve()
     failures = []
     for item in items:
-        if item["state"] in {"present", "adoptable"}:
+        if item["state"] in {"present", "adoptable", "foreign"}:
             continue
         if item["state"] == "unmanaged":
             name = item["name"]
@@ -340,6 +357,8 @@ def plan(source: Path, target: Path) -> dict[str, str]:
         name: _state(target / name, path, manifest["managed"].get(name))
         for name, path in sources.items()
     }
+    for name in sorted(set(manifest["managed"]) - set(sources)):
+        states[name] = "retired"
     _raise_on_conflicts(states, sources, target, manifest)
     return states
 
@@ -447,6 +466,15 @@ def run(action: str, source: Path, target: Path, summary: bool) -> int:
     if action == "check":
         items = _check_items(source, target)
         failures = check(source, target)
+        warnings = [item for item in items if item["state"] == "foreign"]
+        if warnings:
+            detail = ", ".join(
+                f'{item["name"]}={item["state"]}' for item in warnings
+            )
+            print(
+                f"warning: unmanaged agent entries outside catalogue: {detail}",
+                file=sys.stderr,
+            )
         if summary:
             print(f"agents checked={len(_sources(source))} target={target}")
         else:
