@@ -225,6 +225,22 @@ def test_structured_runner_pass_output_is_text(tmp_path):
     assert isinstance(result.output, str)
 
 
+def test_run_structured_does_not_deadlock_on_large_output(tmp_path, monkeypatch):
+    monkeypatch.setattr(change_gate_runner, "DIRECT_PROCESS_TIMEOUT", 0.1)
+    code = "import sys; sys.stdout.write('x' * 131072 + '\\nFINAL-LINE\\n')"
+
+    result = run_command(
+        f"{sys.executable} -c {shlex.quote(code)}",
+        tmp_path,
+        runner=Runner.PYTEST,
+    )
+
+    assert result.returncode == 0
+    assert result.timed_out is False
+    assert len(result.output) > 64 * 1024
+    assert result.output.endswith("FINAL-LINE\n")
+
+
 def test_structured_runner_closes_descendants_that_hold_output_pipes(tmp_path):
     child_pid = tmp_path / "child.pid"
     child_code = (
