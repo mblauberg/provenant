@@ -51,7 +51,7 @@ try {
       ...(adapter === undefined ? {} : { adapterIds: [adapter] }),
       mandatoryPrimary: process.argv.includes("--mandatory-primary"),
     });
-  if (adapter !== undefined && result.unavailableOptionalAdapters.length > 0) {
+  if (result.unavailableOptionalAdapters.length > 0) {
     throw new FabricError(
       "ADAPTER_ARTIFACT_MISSING",
       result.unavailableOptionalAdapters.flatMap((failure) => failure.reasons).join("\n"),

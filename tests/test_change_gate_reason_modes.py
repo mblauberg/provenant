@@ -268,7 +268,7 @@ def test_structured_runner_does_not_promote_test_body_module_error(tmp_path):
         encoding="utf-8",
     )
 
-    result = run_command("pytest {test} -q", tmp_path, str(test_file), runner=Runner.PYTEST)
+    result = run_command(f"{sys.executable} -m pytest {{test}} -q", tmp_path, str(test_file), runner=Runner.PYTEST)
 
     assert result.classification is FailureClass.IMPORT
     assert result.unresolved_module is None
@@ -282,7 +282,7 @@ def test_structured_runner_preserves_one_real_collection_module(tmp_path):
         encoding="utf-8",
     )
 
-    result = run_command("pytest {test} -q", tmp_path, str(test_file), runner=Runner.PYTEST)
+    result = run_command(f"{sys.executable} -m pytest {{test}} -q", tmp_path, str(test_file), runner=Runner.PYTEST)
 
     assert result.classification is FailureClass.IMPORT
     assert result.unresolved_module == "new_helper"
