@@ -259,7 +259,7 @@ owner_json_option_is_unsupported() {
   local diagnostic
   diagnostic="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
   case "$diagnostic" in
-    *unknown*--json*|*unrecognized*--json*|*unsupported*--json*|*--json*unknown*|*--json*unrecognized*|*--json*unsupported*)
+    *"adapter executable received unknown option: --json"*)
       return 0;;
     *) return 1;;
   esac
@@ -329,6 +329,12 @@ print("true" if isinstance(value, dict) and value.get("certifying_answer_bearing
           full-vendor-identity|lockfile-install-attestation) owner_certifying="true";;
           partial-signed-helpers|owner-controlled-install-root|*) owner_certifying="false";;
         esac
+        if [ "$owner_json_fallback" = true ]; then
+          # A legacy response has no negotiated assurance authority, even if
+          # its bytes happen to be structured and claim a certifying value.
+          owner_assurance=""
+          owner_certifying="false"
+        fi
         if [ -n "$owner_executable" ] && [ "${owner_executable#*/}" != "$owner_executable" ] && [ -f "$owner_executable" ] && [ -x "$owner_executable" ]; then
           adapter_resolution="verified-owner"
           adapter_executable="$owner_executable"
