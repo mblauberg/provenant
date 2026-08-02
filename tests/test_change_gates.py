@@ -912,6 +912,13 @@ def test_print_output_reports_the_cap_under_direct_script_import():
         cwd=ROOT,
     )
 
-    assert completed.returncode == 0, completed.stderr
+    # Assert on the child's exit status alone and keep its traceback out of the
+    # message. `classify_failure` substring-matches the failure text, and a
+    # child traceback replayed into this assertion reads as the child's error
+    # class rather than as this file's assertion. Rerun the program above to see
+    # the traceback. Same idiom as the collection marker earlier in this file.
+    assert completed.returncode == 0, (
+        "the direct-script import path could not report a target killed at the cap"
+    )
     assert "timed_out=yes" in completed.stdout, completed.stdout
     assert f"cap={_cap_seconds():.0f}s" in completed.stdout, completed.stdout
