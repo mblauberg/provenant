@@ -79,9 +79,10 @@ needs durable peer exchange. Only the chair mutates shared pair state.
   the local orchestration-lease helper is not a substitute.
 
 Use `skills/orchestrate/scripts/lease.py` for atomic acquire/renew/transfer/
-release of the chair or autonomous-loop lease. Transfers require the expected
-generation; a stale or competing holder fails closed. Its `takeover` action is
-deliberately expired-lease-only. Active-chair loss first needs Fabric
+release of the chair or autonomous-loop lease. A stale or competing holder fails
+closed, and `--expected-generation` binds any action to an exact generation when
+the caller supplies it. Only its `takeover` action requires that generation, and
+it is deliberately expired-lease-only. Active-chair loss first needs Fabric
 freeze/revocation plus a generation-bound recovery proof; never remove the
 active-lease guard to force promotion.
 
