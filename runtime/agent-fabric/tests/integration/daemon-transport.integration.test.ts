@@ -121,6 +121,40 @@ class ConnectionLimitDaemonSocket extends Duplex {
   }
 }
 
+class DelayedWriteDaemonSocket extends Duplex {
+  #heldWrite: ((error?: Error | null) => void) | undefined;
+
+  constructor() {
+    super();
+    queueMicrotask(() => this.emit("connect"));
+  }
+
+  override _read(): void {}
+
+  override _write(chunk: Buffer, _encoding: BufferEncoding, callback: (error?: Error | null) => void): void {
+    const request = JSON.parse(chunk.toString("utf8")) as { id: string; method: string };
+    if (request.method === "initialize") {
+      this.push(`${JSON.stringify({ id: request.id, result: daemonInitializeResult([]) })}\n`);
+      callback();
+      return;
+    }
+    this.#heldWrite = callback;
+    this.push(`${JSON.stringify(daemonConnectionLimitFrame)}\n`);
+  }
+
+  releaseWrite(): void {
+    const callback = this.#heldWrite;
+    this.#heldWrite = undefined;
+    callback?.();
+  }
+
+  override _final(callback: (error?: Error | null) => void): void {
+    this.push(null);
+    this.destroy();
+    callback();
+  }
+}
+
 const bootstrapInput: BootstrapMcpSeatInput = {
   canonicalRoot: "/project-one",
   trustRecordDigest: `sha256:${"b".repeat(64)}`,
@@ -526,6 +560,45 @@ describe("timed daemon NDJSON transport", () => {
     expect(results[1]).toBeInstanceOf(FabricRemoteError);
     expect(transport.closed).toBe(true);
     await transport.close();
+  });
+
+  it("rejects promptly without an unhandled error when a connection error precedes a delayed write callback", async () => {
+    const socket = new DelayedWriteDaemonSocket();
+    const transport = await TimedNdjsonTransport.connect({
+      socketPath: "/fixture/fabric.sock",
+      capability: "afb_test",
+      connectTimeoutMs: 200,
+      requestTimeoutMs: 5_000,
+    }, {
+      connect: () => socket as unknown as Socket,
+    });
+    cleanup.unshift(() => transport.close());
+
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => { unhandled.push(reason); };
+    process.on("unhandledRejection", onUnhandled);
+    const request = transport.call("hold", {});
+    const timedOut = Symbol("timed out");
+    try {
+      const outcome = await Promise.race([
+        request.then(
+          () => ({ kind: "resolved" as const }),
+          (error: unknown) => ({ kind: "rejected" as const, error }),
+        ),
+        new Promise<typeof timedOut>((resolve) => setTimeout(() => resolve(timedOut), 100)),
+      ]);
+      expect(outcome).not.toBe(timedOut);
+      expect(outcome).toMatchObject({
+        kind: "rejected",
+        error: expect.objectContaining({ code: daemonConnectionLimitFrame.error.code }),
+      });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(unhandled).toEqual([]);
+    } finally {
+      socket.releaseWrite();
+      await request.catch(() => undefined);
+      process.off("unhandledRejection", onUnhandled);
+    }
   });
 
   it("rejects all pending calls from the real daemon connection-limit frame", async () => {
