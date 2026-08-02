@@ -1198,7 +1198,7 @@ const completeSlotCommonSchema = {
     routeObservationDigest: nonnullSchema,
     actualRouteIdentityDigest: nonnullSchema,
     readCoverageDigest: nonnullSchema,
-    providerAssurance: { enum: ["full-vendor-identity", "lockfile-install-attestation"] },
+    providerAssurance: { enum: ["full-vendor-identity"] },
     currentCertificationBasis: nonnullSchema,
     certifying: { const: true },
     openFindingSet: {

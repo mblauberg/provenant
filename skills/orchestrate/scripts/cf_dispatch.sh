@@ -326,7 +326,7 @@ print("true" if isinstance(value, dict) and value.get("certifying_answer_bearing
         # Derive the gate from the observed assurance so an inconsistent
         # owner response cannot certify an advisory route.
         case "$owner_assurance" in
-          full-vendor-identity|lockfile-install-attestation) owner_certifying="true";;
+          full-vendor-identity) owner_certifying="true";;
           partial-signed-helpers|owner-controlled-install-root|*) owner_certifying="false";;
         esac
         if [ "$owner_json_fallback" = true ]; then

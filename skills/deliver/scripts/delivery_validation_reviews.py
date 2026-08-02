@@ -17,6 +17,9 @@ from delivery_validation_common import (
     fail,
 )
 
+CERTIFYING_PROVIDER_ASSURANCE = frozenset({"full-vendor-identity"})
+
+
 def _validate_route_receipt(
     run: dict[str, Any], item: dict[str, Any], linked: dict[str, Any], *,
     workspace_root: Path | None, artifacts: dict[str, dict[str, Any]] | None,
@@ -52,7 +55,11 @@ def _validate_route_receipt(
     fail("sha256:" + hashlib.sha256(raw).hexdigest() != route_ref["digest"], "other-primary route receipt digest does not match live bytes")
     route = _mapping(route, "other-primary route receipt")
     fail(route.get("status") != "ok", "other-primary route receipt is not closed successfully")
-    fail(route.get("cross_family") is not True or route.get("certification_eligible") is not True, "other-primary review requires a closed cross-family route receipt")
+    fail(
+        route.get("cross_family") is not True
+        or route.get("provider_assurance") not in CERTIFYING_PROVIDER_ASSURANCE,
+        "other-primary review requires a closed cross-family route receipt",
+    )
     fail(route.get("adapter") != item.get("adapter") or route.get("reviewer_id") != item.get("reviewer_id") or route.get("model_family") != item.get("provider_family") or route.get("resolved_model", route.get("model")) != item.get("model"), "other-primary route receipt identity does not match review lineage")
 
 

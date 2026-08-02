@@ -876,8 +876,7 @@
             "enum": [
               "full-vendor-identity",
               "partial-signed-helpers",
-              "owner-controlled-install-root",
-              "lockfile-install-attestation"
+              "owner-controlled-install-root"
             ]
           }
         },
@@ -1027,8 +1026,7 @@
                       },
                       "providerAssurance": {
                         "enum": [
-                          "full-vendor-identity",
-                          "lockfile-install-attestation"
+                          "full-vendor-identity"
                         ]
                       },
                       "currentCertificationBasis": {
@@ -1132,8 +1130,7 @@
                       },
                       "providerAssurance": {
                         "enum": [
-                          "full-vendor-identity",
-                          "lockfile-install-attestation"
+                          "full-vendor-identity"
                         ]
                       },
                       "currentCertificationBasis": {
@@ -1237,8 +1234,7 @@
                       },
                       "providerAssurance": {
                         "enum": [
-                          "full-vendor-identity",
-                          "lockfile-install-attestation"
+                          "full-vendor-identity"
                         ]
                       },
                       "currentCertificationBasis": {
@@ -1342,8 +1338,7 @@
                       },
                       "providerAssurance": {
                         "enum": [
-                          "full-vendor-identity",
-                          "lockfile-install-attestation"
+                          "full-vendor-identity"
                         ]
                       },
                       "currentCertificationBasis": {
@@ -1532,8 +1527,7 @@
                       },
                       "providerAssurance": {
                         "enum": [
-                          "full-vendor-identity",
-                          "lockfile-install-attestation"
+                          "full-vendor-identity"
                         ]
                       },
                       "currentCertificationBasis": {
@@ -1637,8 +1631,7 @@
                       },
                       "providerAssurance": {
                         "enum": [
-                          "full-vendor-identity",
-                          "lockfile-install-attestation"
+                          "full-vendor-identity"
                         ]
                       },
                       "currentCertificationBasis": {
@@ -1742,8 +1735,7 @@
                       },
                       "providerAssurance": {
                         "enum": [
-                          "full-vendor-identity",
-                          "lockfile-install-attestation"
+                          "full-vendor-identity"
                         ]
                       },
                       "currentCertificationBasis": {
@@ -1847,8 +1839,7 @@
                       },
                       "providerAssurance": {
                         "enum": [
-                          "full-vendor-identity",
-                          "lockfile-install-attestation"
+                          "full-vendor-identity"
                         ]
                       },
                       "currentCertificationBasis": {

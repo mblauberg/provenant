@@ -1787,3 +1787,72 @@ def test_pass_output_binds_resolved_product_root(tmp_path):
     assert result.returncode == 0, result.stderr
     assert result.stdout.startswith("PASS: delivery-v1 delivery receipt"), result.stdout
     assert f"(product_root={product_copy.resolve()})" in result.stdout
+
+
+def _rewrite_other_primary_route(run, workspace, *, provider_assurance, certification_eligible):
+    review = next(item for item in run["reviews"] if item["role"] == "other-primary")
+    evidence = next(item for item in run["evidence"] if item["id"] == review["evidence_id"])
+    route_path = workspace / evidence["route_receipt"]["path"]
+    route = json.loads(route_path.read_text())
+    route.update({
+        "provider_assurance": provider_assurance,
+        "certification_eligible": certification_eligible,
+    })
+    route_path.write_text(json.dumps(route, sort_keys=True) + "\n")
+    digest = "sha256:" + hashlib.sha256(route_path.read_bytes()).hexdigest()
+    evidence["route_receipt"]["digest"] = digest
+    artifact = next(item for item in run["artifacts"] if item["path"] == evidence["route_receipt"]["path"])
+    artifact["digest"] = digest
+
+
+def _run_delivery_cli(receipt, workspace):
+    return subprocess.run(
+        [
+            sys.executable,
+            str(VALIDATOR_PATH),
+            str(receipt),
+            "--workspace-root",
+            str(workspace),
+            "--product-root",
+            str(ROOT),
+            "--verify-hashes",
+        ],
+        text=True,
+        capture_output=True,
+    )
+
+
+def test_validate_delivery_hashes_accepts_full_assurance_without_boolean_authority(tmp_path):
+    workspace = tmp_path / "workspace"
+    run = fixture("software", workspace)
+    _rewrite_other_primary_route(
+        run,
+        workspace,
+        provider_assurance="full-vendor-identity",
+        certification_eligible=False,
+    )
+    receipt = workspace / "receipt.json"
+    receipt.write_text(json.dumps(run))
+
+    result = _run_delivery_cli(receipt, workspace)
+
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("provider_assurance", ["partial-signed-helpers", "owner-controlled-install-root"])
+def test_validate_delivery_hashes_rejects_advisory_assurance_with_true_boolean(tmp_path, provider_assurance):
+    workspace = tmp_path / "workspace"
+    run = fixture("software", workspace)
+    _rewrite_other_primary_route(
+        run,
+        workspace,
+        provider_assurance=provider_assurance,
+        certification_eligible=True,
+    )
+    receipt = workspace / "receipt.json"
+    receipt.write_text(json.dumps(run))
+
+    result = _run_delivery_cli(receipt, workspace)
+
+    assert result.returncode == 1
+    assert "other-primary review requires a closed cross-family route receipt" in result.stderr

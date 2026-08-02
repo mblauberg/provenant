@@ -769,7 +769,8 @@ def _materialise_reference_routes(
         if not isinstance(linked, dict) or not isinstance(route_artifact, dict):
             continue
         route = {
-            "status": "ok", "cross_family": True, "certification_eligible": True,
+            "status": "ok", "cross_family": True,
+            "provider_assurance": "full-vendor-identity", "certification_eligible": True,
             "adapter": review["adapter"], "reviewer_id": review.get("reviewer_id", "reference-anthropic"),
             "model_family": review["provider_family"], "resolved_model": review["model"],
         }

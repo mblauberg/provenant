@@ -40,34 +40,10 @@ describe("provider conformance smoke evidence", () => {
     });
   });
 
-  it("preserves lockfile install attestation in the conformance projection", () => {
-    const observation: ProviderConformanceObservation = {
-      identity: {
-        adapterId: "lockfile-provider",
-        canonicalPath: "/provider/lockfile-provider",
-        regularFile: true,
-        ownerUid: 501,
-        mode: 0o755,
-        sha256: "b".repeat(64),
-        assurance: "lockfile-install-attestation",
-        signing: [],
-      },
-      interface: {
-        adapterId: "lockfile-provider",
-        conformant: true,
-        probe: "bounded-help-version",
-        version: "observed-current-version",
-      },
-    };
-
-    expect(providerConformanceEvidence(observation).assurance).toBe("lockfile-install-attestation");
-  });
-
   it.each([
     ["apple-designated", "full-vendor-identity"],
     ["cursor-partial-signed-helpers", "partial-signed-helpers"],
     ["owner-controlled-install-root", "owner-controlled-install-root"],
-    ["lockfile-install-attestation", "lockfile-install-attestation"],
   ] as const)("keeps %s policy and %s assurance in parity", (policy, assurance) => {
     expect(providerIdentityAssuranceForPolicy(policy)).toBe(assurance);
   });
@@ -78,7 +54,6 @@ describe("provider conformance smoke evidence", () => {
 
   it.each([
     ["full-vendor-identity", true],
-    ["lockfile-install-attestation", true],
     ["partial-signed-helpers", false],
     ["owner-controlled-install-root", false],
   ] as const)("%s certification eligibility is %s", (assurance: ProviderIdentityAssurance, eligible) => {

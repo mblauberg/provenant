@@ -36,20 +36,17 @@ export type ProviderIdentityPort = {
 export type ProviderIdentityPolicy =
   | "apple-designated"
   | "cursor-partial-signed-helpers"
-  | "owner-controlled-install-root"
-  | "lockfile-install-attestation";
+  | "owner-controlled-install-root";
 
 export type ProviderIdentityAssurance =
   | "full-vendor-identity"
   | "partial-signed-helpers"
-  | "owner-controlled-install-root"
-  | "lockfile-install-attestation";
+  | "owner-controlled-install-root";
 
 const PROVIDER_IDENTITY_ASSURANCE_BY_POLICY = {
   "apple-designated": "full-vendor-identity",
   "cursor-partial-signed-helpers": "partial-signed-helpers",
   "owner-controlled-install-root": "owner-controlled-install-root",
-  "lockfile-install-attestation": "lockfile-install-attestation",
 } as const satisfies Readonly<Record<ProviderIdentityPolicy, ProviderIdentityAssurance>>;
 
 function isProviderIdentityPolicy(value: string): value is ProviderIdentityPolicy {
@@ -71,7 +68,6 @@ function assertNever(value: never): never {
 export function supportsCertifyingAnswerBearingLeg(assurance: ProviderIdentityAssurance): boolean {
   switch (assurance) {
     case "full-vendor-identity":
-    case "lockfile-install-attestation":
       return true;
     case "partial-signed-helpers":
     case "owner-controlled-install-root":

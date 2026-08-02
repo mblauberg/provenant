@@ -112,11 +112,11 @@ describe("adapter executable resolver CLI", () => {
     ], {
       verifyNpmInstall: async () => undefined,
       verifyProvider: async () => ({
-        identity: { assurance: "lockfile-install-attestation" },
+        identity: { assurance: "full-vendor-identity" },
       }) as never,
     })).resolves.toStrictEqual({
       executable,
-      providerAssurance: "lockfile-install-attestation",
+      providerAssurance: "full-vendor-identity",
       certifyingAnswerBearingLeg: true,
     });
   });

@@ -169,7 +169,7 @@ describe("Stage 1 versioned JSON Schemas", () => {
     expect(unknown.keywords).toContain("additionalProperties");
   });
 
-  it("accepts the lockfile install attestation provider identity policy", async () => {
+  it("rejects the unreachable lockfile install attestation provider identity policy", async () => {
     const schema = await readSchema("adapter-compatibility.schema.json");
     const compatibility = await readYamlObject("adapter-compatibility.yaml");
     const adapters = compatibility.adapters;
@@ -192,7 +192,7 @@ describe("Stage 1 versioned JSON Schemas", () => {
         },
       },
     };
-    expect(validateWithSchema(schema, lockfileAttested).valid).toBe(true);
+    expect(validateWithSchema(schema, lockfileAttested).valid).toBe(false);
     expect(validateWithSchema(schema, {
       ...lockfileAttested,
       adapters: {

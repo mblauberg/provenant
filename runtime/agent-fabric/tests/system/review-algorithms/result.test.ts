@@ -149,8 +149,6 @@ describe("closed provider review terminal results", () => {
       .toMatchObject({ certifying: false });
     expect(reduceTerminalEvidenceEffect({ ...base, providerAssurance: "full-vendor-identity",
       reviewVerdict: "CLEAN", parsedFindingDigests: [] })).toMatchObject({ certifying: true });
-    expect(reduceTerminalEvidenceEffect({ ...base, providerAssurance: "lockfile-install-attestation",
-      reviewVerdict: "CLEAN", parsedFindingDigests: [] })).toMatchObject({ certifying: true });
     expect(reduceTerminalEvidenceEffect({ ...base, providerAssurance: "owner-controlled-install-root",
       reviewVerdict: "CLEAN", parsedFindingDigests: [] })).toMatchObject({ certifying: false });
     expect(reduceTerminalEvidenceEffect({ ...base, actualRouteProvedEqual: false,

@@ -52,7 +52,6 @@ REQUIRED_GATES = {
 }
 CERTIFYING_PROVIDER_ASSURANCE = frozenset({
     "full-vendor-identity",
-    "lockfile-install-attestation",
 })
 
 

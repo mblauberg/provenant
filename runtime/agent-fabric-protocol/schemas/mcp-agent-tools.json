@@ -10114,14 +10114,13 @@
             "enum": [
               "full-vendor-identity",
               "partial-signed-helpers",
-              "owner-controlled-install-root",
-              "lockfile-install-attestation"
+              "owner-controlled-install-root"
             ]
           }
         }
       },
       "inputCodecDigest": "sha256:7f37498fd0633a6a8a6a0c79dbf402279c8819a0241c4c342a8f6bc867ad4d74",
-      "outputCodecDigest": "sha256:314ed5b0626e98be6c85c542095811698fa240f3002512c74e9c72744c0ab26f"
+      "outputCodecDigest": "sha256:1b2da66d64f5add4a2bde3f276e174614657b85f3c41e3ca8f840475dee6333a"
     },
     {
       "operation": "fabric.v1.provider-action.read",
@@ -11545,14 +11544,13 @@
             "enum": [
               "full-vendor-identity",
               "partial-signed-helpers",
-              "owner-controlled-install-root",
-              "lockfile-install-attestation"
+              "owner-controlled-install-root"
             ]
           }
         }
       },
       "inputCodecDigest": "sha256:acaf2439712c4dcb0ce2c1f1ffc1ec8aa49d5cf1fff5434120d3a61e56b92627",
-      "outputCodecDigest": "sha256:314ed5b0626e98be6c85c542095811698fa240f3002512c74e9c72744c0ab26f"
+      "outputCodecDigest": "sha256:1b2da66d64f5add4a2bde3f276e174614657b85f3c41e3ca8f840475dee6333a"
     },
     {
       "operation": "fabric.v1.provider-action.reconcile",
@@ -12980,14 +12978,13 @@
             "enum": [
               "full-vendor-identity",
               "partial-signed-helpers",
-              "owner-controlled-install-root",
-              "lockfile-install-attestation"
+              "owner-controlled-install-root"
             ]
           }
         }
       },
       "inputCodecDigest": "sha256:28ee48268d11ba40ced5a25a1d8273f6fb1be4cec62b084b9381449a01c16037",
-      "outputCodecDigest": "sha256:314ed5b0626e98be6c85c542095811698fa240f3002512c74e9c72744c0ab26f"
+      "outputCodecDigest": "sha256:1b2da66d64f5add4a2bde3f276e174614657b85f3c41e3ca8f840475dee6333a"
     },
     {
       "operation": "fabric.v1.provider-context-pressure.read",
@@ -20319,8 +20316,7 @@
                       "enum": [
                         "full-vendor-identity",
                         "partial-signed-helpers",
-                        "owner-controlled-install-root",
-                        "lockfile-install-attestation"
+                        "owner-controlled-install-root"
                       ]
                     }
                   },
@@ -20680,8 +20676,7 @@
               },
               "providerAssurance": {
                 "enum": [
-                  "full-vendor-identity",
-                  "lockfile-install-attestation"
+                  "full-vendor-identity"
                 ]
               },
               "currentCertificationBasis": {
@@ -20747,7 +20742,7 @@
         }
       },
       "inputCodecDigest": "sha256:665fe0ba3fd5598d8ca4dcdf8b81c771a4818b88d54d90e19e7e854de0446bb7",
-      "outputCodecDigest": "sha256:922137b2e88e25a1a9d48e826dcd9edfdce8aa40fe57ba856c309438e0b22a80"
+      "outputCodecDigest": "sha256:a0466649b9cd79b63e169da477f6dae3ce23c49472a19960e83f82c3811f8837"
     },
     {
       "operation": "fabric.v1.review-evidence-annotation.current.read",
@@ -22166,14 +22161,13 @@
             "enum": [
               "full-vendor-identity",
               "partial-signed-helpers",
-              "owner-controlled-install-root",
-              "lockfile-install-attestation"
+              "owner-controlled-install-root"
             ]
           }
         }
       },
       "inputCodecDigest": "sha256:a023e90e3b5dd6df9405ec9c67ab6c80aec02b932398145a23e2da60754365b4",
-      "outputCodecDigest": "sha256:e80cfd3ce6d9ce9c1ddcb40cb77d6b404aa3a124976dc34e84f911de727a60f4"
+      "outputCodecDigest": "sha256:e9cb6c6d1d8186182ff5fded995329b48501203d01cb1c45a1f43463fdc84e5e"
     },
     {
       "operation": "fabric.v1.review-evidence.read",
@@ -23104,14 +23098,13 @@
             "enum": [
               "full-vendor-identity",
               "partial-signed-helpers",
-              "owner-controlled-install-root",
-              "lockfile-install-attestation"
+              "owner-controlled-install-root"
             ]
           }
         }
       },
       "inputCodecDigest": "sha256:025640b921e0d7496ebfceea9e165c2947efd38375791542cda96206088acb0b",
-      "outputCodecDigest": "sha256:a2dae7c676c560fbd40431849d43e82ba6a58f5371e5e3a2386d0dc7ebc36516"
+      "outputCodecDigest": "sha256:afdd136df07d82f30b0e4a68e92dbef1f72c3ad6f29dff9a64f81dbe74f46ce4"
     },
     {
       "operation": "fabric.v1.review-finding-page.read",

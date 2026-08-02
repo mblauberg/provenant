@@ -17,7 +17,6 @@ from typing import Any
 
 CERTIFYING_PROVIDER_ASSURANCE = frozenset({
     "full-vendor-identity",
-    "lockfile-install-attestation",
 })
 
 

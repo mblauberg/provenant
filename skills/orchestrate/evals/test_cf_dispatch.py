@@ -78,7 +78,7 @@ def provision_test_verified_owner(tmp, *, adapter_id, executable):
         "cursor-agent": "partial-signed-helpers",
         "opencode-acp": "owner-controlled-install-root",
     }.get(adapter_id, "full-vendor-identity")
-    certifying = assurance in {"full-vendor-identity", "lockfile-install-attestation"}
+    certifying = assurance == "full-vendor-identity"
     write_executable(
         owner_dir / "agent-fabric",
         f"""\

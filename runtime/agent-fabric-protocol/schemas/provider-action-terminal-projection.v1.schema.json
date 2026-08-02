@@ -431,8 +431,7 @@
               "enum": [
                 "full-vendor-identity",
                 "partial-signed-helpers",
-                "owner-controlled-install-root",
-                "lockfile-install-attestation"
+                "owner-controlled-install-root"
               ]
             }
           }
@@ -753,8 +752,7 @@
                   "enum": [
                     "full-vendor-identity",
                     "partial-signed-helpers",
-                    "owner-controlled-install-root",
-                    "lockfile-install-attestation"
+                    "owner-controlled-install-root"
                   ]
                 }
               }
@@ -1050,8 +1048,7 @@
                   "enum": [
                     "full-vendor-identity",
                     "partial-signed-helpers",
-                    "owner-controlled-install-root",
-                    "lockfile-install-attestation"
+                    "owner-controlled-install-root"
                   ]
                 }
               }
@@ -1350,8 +1347,7 @@
                   "enum": [
                     "full-vendor-identity",
                     "partial-signed-helpers",
-                    "owner-controlled-install-root",
-                    "lockfile-install-attestation"
+                    "owner-controlled-install-root"
                   ]
                 }
               }
@@ -1645,8 +1641,7 @@
                   "enum": [
                     "full-vendor-identity",
                     "partial-signed-helpers",
-                    "owner-controlled-install-root",
-                    "lockfile-install-attestation"
+                    "owner-controlled-install-root"
                   ]
                 }
               }
@@ -1940,8 +1935,7 @@
                   "enum": [
                     "full-vendor-identity",
                     "partial-signed-helpers",
-                    "owner-controlled-install-root",
-                    "lockfile-install-attestation"
+                    "owner-controlled-install-root"
                   ]
                 }
               }
@@ -2235,8 +2229,7 @@
                   "enum": [
                     "full-vendor-identity",
                     "partial-signed-helpers",
-                    "owner-controlled-install-root",
-                    "lockfile-install-attestation"
+                    "owner-controlled-install-root"
                   ]
                 }
               }
