@@ -1,4 +1,4 @@
-import { readFile, rm } from "node:fs/promises";
+import { rm } from "node:fs/promises";
 
 import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
@@ -294,7 +294,7 @@ describe("provider-action owner boundary wiring", () => {
   });
 
   it("quarantines certifying-review owner failure after awaited startup lookup", async () => {
-    const fixture = await createLifecycleFixture({ payloadMaxTurns: true });
+    const fixture = await createLifecycleFixture({ payloadMaxTurns: true, spawnBarrier: true });
     let originalClosed = false;
     let restarted: Awaited<ReturnType<typeof reopenLifecycleFabric>> | undefined;
     cleanup.push(async () => {
@@ -345,28 +345,9 @@ describe("provider-action owner boundary wiring", () => {
 
     restarted = await reopenLifecycleFabric(fixture);
     const recovery = restarted.recoverStartupState();
-    const timeoutMs = 3_000;
-    const description = "Action lookup start";
-    let lookupCount = 0;
-    let lookupStarted = false;
-    try {
-      await waitUntil(async () => {
-        const journal = JSON.parse(await readFile(fixture.providerJournalPath, "utf8")) as {
-          actions?: Record<string, { lookupCount?: number }>;
-        };
-        lookupCount = journal.actions?.[actionId]?.lookupCount ?? 0;
-        lookupStarted = lookupCount >= 1;
-        return lookupStarted;
-      }, timeoutMs, description);
-    } catch (error: unknown) {
-      if (error instanceof DeadlineTimeoutError) {
-        throw new Error(
-          `Action lookup did not start: lookupCount=${String(lookupCount)} after ${String(timeoutMs)}ms`,
-        );
-      }
-      throw error;
-    }
-    expect(lookupStarted).toBe(true);
+    const providerBarrier = fixture.providerSpawnBarrier;
+    if (providerBarrier === undefined) throw new Error("provider lookup barrier is required");
+    await providerBarrier.waitUntilEntered();
     const mutated = new Database(fixture.databasePath);
     mutated.pragma("foreign_keys = OFF");
     const immutableRouteTrigger = mutated.prepare(`
@@ -380,6 +361,7 @@ describe("provider-action owner boundary wiring", () => {
     `).run(fixture.runId, actionId);
     mutated.exec(immutableRouteTrigger);
     mutated.close();
+    await providerBarrier.release();
     await expect(recovery).resolves.toMatchObject({ actionsQuarantined: 1 });
 
     const observed = new Database(fixture.databasePath, { readonly: true });
