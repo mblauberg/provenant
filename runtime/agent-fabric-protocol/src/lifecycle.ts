@@ -12,7 +12,7 @@ import {
   type Codec,
 } from "./codec.js";
 import { PROVIDER_ACTION_REF_V1_CODEC } from "./launch.js";
-import { LIFECYCLE_CUSTODY_REF_V1_CODEC } from "./provider-review.js";
+import { LIFECYCLE_CUSTODY_REF_V1_CODEC } from "./provider-review-core.js";
 
 const positive = integer({ minimum: 1 });
 const nonnegative = integer();
