@@ -199,7 +199,7 @@ jobs:
               trap release EXIT INT TERM HUP
               break
             fi
-            holder=$(cat "$lock/pid" 2>/dev/null)
+            holder=$(cat "$lock/pid" 2>/dev/null || true)
             if [ -n "$holder" ] && ! kill -0 "$holder" 2>/dev/null; then
               echo "breaking gate lock held by dead pid $holder"
               rm -rf "$lock"

@@ -811,6 +811,7 @@ def test_change_gate_lock_wait_is_counted_and_names_the_holding_pid() -> None:
 
     assert "while true" not in command
     assert 'while [ "$attempt" -lt 10 ]' in command
+    assert 'holder=$(cat "$lock/pid" 2>/dev/null || true)' in command
     assert "gate lock acquisition failed: held by pid ${holder:-unknown}" in command
 
 
