@@ -153,24 +153,29 @@ def _ambient_skill_names(texts, available):
     return names
 
 
-def ambient_skill_names_and_resolver_root():
+def ambient_skill_names_and_resolver_roots():
     available = expected_skills()
     texts = []
     resolver_roots = set()
     for ambient in (ROOT / "AGENTS.md", ROOT / "HARNESS.md"):
         text = ambient.read_text()
         texts.append(text)
-        roots = re.findall(r"`(\$HOME/\.agents/skills/<name>/)`", text)
-        # D12 amendment: HARNESS.md is the sole resolver root. AGENTS.md must not
-        # restate it - both harnesses already discover skills through their own
-        # symlinked skills directory.
-        expected = ["$HOME/.agents/skills/<name>/"] if ambient.name == "HARNESS.md" else []
+        roots = re.findall(r"`(~/\.(?:claude|codex)/skills/)`", text)
+        # D12 amendment: HARNESS.md is the sole home of the resolver line. AGENTS.md
+        # must not restate it - both harnesses already discover skills through their
+        # own installed skills directory. Skills ship in the product checkout and are
+        # linked into those platform homes; the thin instance root holds none, so
+        # `.agents/skills/` must not appear in either ambient file.
+        expected = ["~/.claude/skills/", "~/.codex/skills/"] if ambient.name == "HARNESS.md" else []
         assert roots == expected, (
             f"{ambient.name} must state {len(expected)} D12 resolver root(s)"
         )
+        assert ".agents/skills/" not in text, (
+            f"{ambient.name} names an instance skills root that is never installed"
+        )
         resolver_roots.update(roots)
-    assert len(resolver_roots) == 1
-    return _ambient_skill_names(texts, available), resolver_roots.pop()
+    assert resolver_roots == {"~/.claude/skills/", "~/.codex/skills/"}
+    return _ambient_skill_names(texts, available), sorted(resolver_roots)
 
 
 def test_installs_claude_skills_and_global_instructions_idempotently(tmp_path):
@@ -514,13 +519,13 @@ def test_ambient_skill_names_resolve_on_both_installed_platform_layouts(
     tmp_path, platform, config_name, variable
 ):
     """AC-P3: ambient skill names resolve through each static install layout."""
-    names, resolver_template = ambient_skill_names_and_resolver_root()
+    names, resolver_templates = ambient_skill_names_and_resolver_roots()
     assert names == EXPECTED_AMBIENT_SKILL_NAMES
 
     home = tmp_path / platform
     home.mkdir()
-    # Model the canonical checkout location named by the D12 resolver line
-    # while keeping the isolated install's actual source tree immutable.
+    # Model a fused layout, so the isolated install's actual source tree stays
+    # immutable while the instance root still resolves.
     (home / ".agents").symlink_to(ROOT, target_is_directory=True)
     config = home / config_name
     result = run(platform, home, **{variable: str(config)})
@@ -529,21 +534,23 @@ def test_ambient_skill_names_resolve_on_both_installed_platform_layouts(
     installed_root = config / "skills"
     installed_names = {path.name for path in installed_root.iterdir()}
     assert installed_names == expected_installed_entries()
-    resolver_root = Path(
-        resolver_template.replace("$HOME", str(home)).replace("<name>/", "")
+    # The resolver root for this platform is the one HARNESS.md names for it, and
+    # it must be exactly where install-harness placed the managed links.
+    resolver_template = next(
+        template for template in resolver_templates if f"/{config_name}/" in template
     )
-    assert resolver_root.resolve() == (ROOT / "skills").resolve()
+    resolver_root = Path(resolver_template.replace("~", str(home), 1))
+    assert resolver_root.resolve() == installed_root.resolve()
     installed_source_roots = {
         (installed_root / name / "SKILL.md").resolve().parents[1] for name in names
     }
-    assert installed_source_roots == {resolver_root.resolve()}
+    # Every installed entry is a managed link back to the one product checkout.
+    assert installed_source_roots == {(ROOT / "skills").resolve()}
     for name in names:
-        installed = installed_root / name / "SKILL.md"
         resolved = resolver_root / name / "SKILL.md"
-        assert installed.is_file(), f"{platform} did not install skills/{name}/SKILL.md"
         assert resolved.is_file(), f"resolver root cannot find skills/{name}/SKILL.md"
-        assert installed.resolve() == resolved.resolve(), (
-            f"{platform} installed root disagrees with $HOME/.agents/skills/{name}/"
+        assert resolved.resolve() == (ROOT / "skills" / name / "SKILL.md").resolve(), (
+            f"{platform} resolver root disagrees with the product checkout for {name}"
         )
 
 
