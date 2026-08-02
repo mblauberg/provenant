@@ -96,7 +96,8 @@ FILTER_HELPER_KEYS = frozenset({"ci-contract", "node-workspace"})
 # executes at import: a change to it alone reaches the fabric suite at runtime,
 # so it must retrigger the job that runs it for the same reason cycle 3 added
 # model_route.py itself. Issue #445 adds model_route_preferences.py under the
-# same path-loaded execution convention.
+# same path-loaded execution convention. The fabric job also consumes uv.lock
+# while setting up its locked Python test environment.
 FABRIC_EXECUTED_DEPENDENCIES = frozenset(
     {
         "scripts/model-route",
@@ -105,6 +106,7 @@ FABRIC_EXECUTED_DEPENDENCIES = frozenset(
         "scripts/model_route_catalog.py",
         "scripts/model_route_preferences.py",
         "skills/deliver/scripts/**",
+        "uv.lock",
     }
 )
 JOB_PERMISSIONS = {
@@ -149,6 +151,77 @@ def _steps(job: dict[str, object]) -> list[dict[str, object]]:
     assert isinstance(value, list)
     assert all(isinstance(item, dict) for item in value)
     return value
+
+
+def _harness_python_consumers() -> frozenset[str]:
+    source_pattern = re.compile(r"(?m)^\s*(?:source|\.)\s+.*harness-python\.sh")
+    return frozenset(
+        path.name
+        for path in (ROOT / "scripts").iterdir()
+        if path.is_file() and source_pattern.search(path.read_text(encoding="utf-8"))
+    )
+
+
+def _step_harness_python_consumers(
+    step: dict[str, object], consumers: frozenset[str]
+) -> set[str]:
+    command_lines = [
+        line.strip()
+        for line in str(step.get("run", "")).splitlines()
+        if not line.lstrip().startswith("#")
+    ]
+    return {
+        consumer
+        for consumer in consumers
+        if any(
+            re.match(rf"^(?:env\s+)?(?:bash\s+)?scripts/{re.escape(consumer)}(?:\s|$)", line)
+            for line in command_lines
+        )
+    }
+
+
+def _assert_harness_python_consumers_have_interpreters(
+    document: dict[str, object],
+) -> None:
+    jobs = document.get("jobs")
+    assert isinstance(jobs, dict)
+    consumers = _harness_python_consumers()
+    assert consumers
+    for job_name, job in jobs.items():
+        assert isinstance(job, dict)
+        steps = _steps(job)
+        for consumer_index, step in enumerate(steps):
+            invoked = _step_harness_python_consumers(step, consumers)
+            if not invoked:
+                continue
+            setup_uv_index = next(
+                (
+                    index
+                    for index, candidate in enumerate(steps)
+                    if str(candidate.get("uses", "")).startswith("astral-sh/setup-uv@")
+                ),
+                None,
+            )
+            assert setup_uv_index is not None, (job_name, invoked)
+            assert setup_uv_index < consumer_index, (job_name, invoked)
+            setup_uv = steps[setup_uv_index]
+            options = setup_uv.get("with")
+            assert isinstance(options, dict)
+            assert options.get("python-version") == "3.12", job_name
+            assert options.get("enable-cache") is True, job_name
+            assert options.get("cache-dependency-glob") == "uv.lock", job_name
+
+            run_commands = [str(candidate.get("run", "")) for candidate in steps if "run" in candidate]
+            prior_run_commands = [
+                str(candidate.get("run", ""))
+                for candidate in steps[:consumer_index]
+                if "run" in candidate
+            ]
+            assert "uv sync --locked --only-group test" in "\n".join(prior_run_commands), (
+                job_name,
+                invoked,
+            )
+            assert not any("pip install" in command for command in run_commands), job_name
 
 
 def _flatten_rules(rules: object) -> list[str]:
@@ -418,6 +491,10 @@ def test_ci_gates_build_jobs_behind_path_filters_and_one_aggregate_check() -> No
         "uv.lock",
     ):
         assert required in flattened["harness"], required
+    for job_name, filter_name in FILTERED_JOBS.items():
+        commands = "\n".join(str(step.get("run", "")) for step in _steps(_job(document, job_name)))
+        if "uv sync --locked --only-group test" in commands:
+            assert "uv.lock" in flattened[filter_name], job_name
     # Non-harness jobs must not path-trigger on docs/ or skills/ broadly.
     # The only exception is the exact executed-dependency allowlist for the
     # fabric job (repair cycle 2): the blanket prohibition is narrowed, not
@@ -429,6 +506,7 @@ def test_ci_gates_build_jobs_behind_path_filters_and_one_aggregate_check() -> No
         "scripts/model_route_catalog.py",
         "scripts/model_route_preferences.py",
         "skills/deliver/scripts/**",
+        "uv.lock",
     }
     assert FABRIC_EXECUTED_DEPENDENCIES <= set(flattened["fabric"])
     for name, rules in flattened.items():
@@ -571,6 +649,17 @@ def test_no_job_or_step_sets_continue_on_error() -> None:
     # PR #168 repair cycle 3 (P2): continue-on-error on any required job or
     # step would neutralise failure propagation invisibly.
     _assert_no_continue_on_error(_workflow())
+
+
+def test_harness_python_consumers_have_prior_locked_interpreter_setup() -> None:
+    _assert_harness_python_consumers_have_interpreters(_workflow())
+
+
+def test_harness_python_consumer_before_setup_fails_the_invariant() -> None:
+    document = _workflow()
+    _steps(_job(document, "harness")).insert(0, {"run": "scripts/check-harness"})
+    with pytest.raises(AssertionError):
+        _assert_harness_python_consumers_have_interpreters(document)
 
 
 def test_continue_on_error_on_a_step_fails_the_guard() -> None:
