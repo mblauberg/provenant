@@ -23,14 +23,19 @@ _run_harness_python() {
   PYTHONNOUSERSITE=1 "$candidate" "$@"
 }
 
+# The floor is checked with an explicit exit rather than `assert`, because
+# PYTHONOPTIMIZE in the caller's environment compiles an assert away and would
+# let a stock 3.9 interpreter through the probe.
+_VERSION_FLOOR='import sys; sys.version_info >= (3, 11) or sys.exit(1)'
+
 run_stdlib() {
-  _run_harness_python 'import sys; assert sys.version_info >= (3, 11)' "$@"
+  _run_harness_python "$_VERSION_FLOOR" "$@"
 }
 
 run_yaml() {
-  _run_harness_python 'import sys; assert sys.version_info >= (3, 11); import yaml' "$@"
+  _run_harness_python "$_VERSION_FLOOR; import yaml" "$@"
 }
 
 run_test() {
-  _run_harness_python 'import sys; assert sys.version_info >= (3, 11); import pytest, yaml' "$@"
+  _run_harness_python "$_VERSION_FLOOR; import pytest, yaml" "$@"
 }
