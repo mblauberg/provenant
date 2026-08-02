@@ -93,4 +93,16 @@ describe("runtime build identity", () => {
     await writeFile(join(root, "runtime", "agent-fabric", "dist", "daemon", "runtime.js"), "compiled source changed");
     expect(await computeRuntimeBuildIdentity({ repositoryRoot: root, mode: "dist" })).not.toBe(distIdentity);
   });
+
+  it("hashes the protocol dist loaded by the source launcher", async () => {
+    const root = await fixtureRoot();
+    const sourceIdentity = await computeRuntimeBuildIdentity({ repositoryRoot: root, mode: "source" });
+
+    await writeFile(
+      join(root, "runtime", "agent-fabric-protocol", "dist", "protocol.js"),
+      "compiled protocol changed",
+    );
+
+    expect(await computeRuntimeBuildIdentity({ repositoryRoot: root, mode: "source" })).not.toBe(sourceIdentity);
+  });
 });

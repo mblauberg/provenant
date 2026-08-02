@@ -22,6 +22,12 @@ const MANIFEST_PATHS = [
 ] as const;
 
 function sourceOrDist(mode: RuntimeBuildMode, packageName: string): string {
+  // The source launcher executes agent-fabric and Herdr through tsx, while the
+  // protocol package also loads its compiled exports. Its source tree is added
+  // separately to the source-mode identity below.
+  if (mode === "source" && packageName === "agent-fabric-protocol") {
+    return `runtime/${packageName}/dist`;
+  }
   return `runtime/${packageName}/${mode === "source" ? "src" : "dist"}`;
 }
 
@@ -29,7 +35,13 @@ function treeSpecs(mode: RuntimeBuildMode): readonly TreeSpec[] {
   const runtimeExtensions = mode === "source" ? [".ts"] : [".js", ".mjs", ".json"];
   return [
     { path: sourceOrDist(mode, "agent-fabric"), extensions: runtimeExtensions },
-    { path: sourceOrDist(mode, "agent-fabric-protocol"), extensions: runtimeExtensions },
+    {
+      path: sourceOrDist(mode, "agent-fabric-protocol"),
+      extensions: [".js", ".mjs", ".json"],
+    },
+    ...(mode === "source"
+      ? [{ path: "runtime/agent-fabric-protocol/src", extensions: [".ts"] }]
+      : []),
     { path: sourceOrDist(mode, "agent-fabric-herdr"), extensions: runtimeExtensions },
     { path: "runtime/agent-fabric/migrations", extensions: [".sql"] },
     { path: "runtime/agent-fabric/schemas", extensions: [".json", ".sql"] },

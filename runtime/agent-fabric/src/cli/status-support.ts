@@ -8,8 +8,13 @@ import {
   type AdapterExecutableFailure,
 } from "../adapters/compatibility.js";
 import { admitTsxLoader } from "../adapters/tsx-loader.js";
+import { BootstrapElection } from "../daemon/bootstrap-election.js";
 import { connectFabricDaemon } from "../daemon/client.js";
-import { readDiscoveryReceipt } from "./mcp-provision.js";
+import {
+  privateDiscoveryMatchesBootstrapReady,
+  privateDiscoveryPaths,
+  readPrivateDiscovery,
+} from "../daemon/private-discovery.js";
 import type { FabricPaths } from "./paths.js";
 import { FABRIC_PROTOCOL_VERSION } from "../daemon/protocol.js";
 import { currentRuntimeBuildIdentity } from "../daemon/runtime-build-identity.js";
@@ -54,8 +59,11 @@ export async function daemonState(
 ): Promise<FabricDaemonStatus> {
   let discovery;
   try {
-    discovery = await readDiscoveryReceipt(paths);
-    process.kill(discovery.pid, 0);
+    const directory = await lstat(paths.runtimeDirectory);
+    if (directory.isSymbolicLink() || !directory.isDirectory() || (directory.mode & 0o777) !== 0o700) {
+      throw new Error("fabric runtime directory is not a private non-symlink directory");
+    }
+    discovery = await readPrivateDiscovery(privateDiscoveryPaths(paths.runtimeDirectory), paths.socketPath);
   } catch {
     return {
       reachable: false,
@@ -66,16 +74,83 @@ export async function daemonState(
       activeAdapters: [],
     };
   }
+  if (discovery.status === "ambiguous") {
+    return {
+      reachable: false,
+      status: "offline",
+      pid: discovery.owner?.pid ?? discovery.receipt?.pid ?? null,
+      socketPath: paths.socketPath,
+      protocolVersion: FABRIC_PROTOCOL_VERSION,
+      activeAdapters: [],
+      code: "DAEMON_DISCOVERY_AMBIGUOUS",
+      detail: discovery.message,
+    };
+  }
+  if (discovery.status !== "active") {
+    return {
+      reachable: false,
+      status: "offline",
+      pid: null,
+      socketPath: paths.socketPath,
+      protocolVersion: FABRIC_PROTOCOL_VERSION,
+      activeAdapters: [],
+    };
+  }
+  let election;
+  try {
+    election = await new BootstrapElection({ runtimeDirectory: paths.runtimeDirectory })
+      .inspectCurrentReadOnlyWith(async (inspection) => inspection);
+  } catch (error: unknown) {
+    return {
+      reachable: false,
+      status: "offline",
+      pid: discovery.receipt.pid,
+      socketPath: discovery.receipt.socketPath,
+      protocolVersion: FABRIC_PROTOCOL_VERSION,
+      activeAdapters: [],
+      code: errorCode(error, "DAEMON_ELECTION_INCONSISTENT"),
+      detail: errorDetail(error),
+    };
+  }
+  if (
+    election.status !== "ready" ||
+    !privateDiscoveryMatchesBootstrapReady(discovery.owner, election.receipt)
+  ) {
+    return {
+      reachable: false,
+      status: "offline",
+      pid: discovery.receipt.pid,
+      socketPath: discovery.receipt.socketPath,
+      protocolVersion: FABRIC_PROTOCOL_VERSION,
+      activeAdapters: [],
+      code: election.status === "active" ? "BOOTSTRAP_IN_PROGRESS" : "DAEMON_ELECTION_INCONSISTENT",
+      detail: election.status === "active"
+        ? "bootstrap election is active"
+        : "active daemon discovery does not match the successful bootstrap election",
+    };
+  }
+  try {
+    process.kill(discovery.receipt.pid, 0);
+  } catch {
+    return {
+      reachable: false,
+      status: "offline",
+      pid: discovery.receipt.pid,
+      socketPath: discovery.receipt.socketPath,
+      protocolVersion: FABRIC_PROTOCOL_VERSION,
+      activeAdapters: [],
+    };
+  }
   const expectedRuntimeBuildIdentity = dependencies.runtimeBuildIdentity ?? await currentRuntimeBuildIdentity();
-  if (discovery.runtimeBuildIdentity !== expectedRuntimeBuildIdentity) {
+  if (discovery.receipt.runtimeBuildIdentity !== expectedRuntimeBuildIdentity) {
     try {
-      const info = await (dependencies.inspectDaemonSocket ?? lstat)(discovery.socketPath);
+      const info = await (dependencies.inspectDaemonSocket ?? lstat)(discovery.receipt.socketPath);
       if (!info.isSocket() || info.uid !== process.getuid?.()) {
         return {
           reachable: false,
           status: "offline",
-          pid: discovery.pid,
-          socketPath: discovery.socketPath,
+          pid: discovery.receipt.pid,
+          socketPath: discovery.receipt.socketPath,
           protocolVersion: FABRIC_PROTOCOL_VERSION,
           activeAdapters: [],
         };
@@ -84,8 +159,8 @@ export async function daemonState(
       return {
         reachable: false,
         status: "offline",
-        pid: discovery.pid,
-        socketPath: discovery.socketPath,
+        pid: discovery.receipt.pid,
+        socketPath: discovery.receipt.socketPath,
         protocolVersion: FABRIC_PROTOCOL_VERSION,
         activeAdapters: [],
       };
@@ -93,12 +168,12 @@ export async function daemonState(
     return {
       reachable: true,
       status: "stale",
-      pid: discovery.pid,
-      socketPath: discovery.socketPath,
+      pid: discovery.receipt.pid,
+      socketPath: discovery.receipt.socketPath,
       protocolVersion: FABRIC_PROTOCOL_VERSION,
       activeAdapters: [],
       code: "DAEMON_STALE_BUILD",
-      detail: discovery.runtimeBuildIdentity === undefined
+      detail: discovery.receipt.runtimeBuildIdentity === undefined
         ? "daemon discovery has no runtime build identity; operator reconciliation is required"
         : "daemon runtime build identity does not match the current client build; operator reconciliation is required",
       remedy: "do not signal the live daemon; reconcile its owning lifecycle, then rerun provenant status",
@@ -106,8 +181,8 @@ export async function daemonState(
   }
   try {
     const client = await (dependencies.connectDaemon ?? connectFabricDaemon)({
-      socketPath: discovery.socketPath,
-      capability: discovery.bootstrapCapability,
+      socketPath: discovery.receipt.socketPath,
+      capability: discovery.receipt.bootstrapCapability,
       requiredCapabilities: [MCP_BOOTSTRAP_CREDENTIALS_FEATURE],
     });
     const activeAdapters = client.initializeResult.activeAdapters;
@@ -115,8 +190,8 @@ export async function daemonState(
     return {
       reachable: true,
       status: "live",
-      pid: discovery.pid,
-      socketPath: discovery.socketPath,
+      pid: discovery.receipt.pid,
+      socketPath: discovery.receipt.socketPath,
       protocolVersion: FABRIC_PROTOCOL_VERSION,
       activeAdapters,
     };
@@ -125,8 +200,8 @@ export async function daemonState(
       return {
         reachable: true,
         status: "incompatible",
-        pid: discovery.pid,
-        socketPath: discovery.socketPath,
+        pid: discovery.receipt.pid,
+        socketPath: discovery.receipt.socketPath,
         protocolVersion: FABRIC_PROTOCOL_VERSION,
         activeAdapters: [],
         code: "DAEMON_PROTOCOL_INCOMPATIBLE",
@@ -137,8 +212,8 @@ export async function daemonState(
     return {
       reachable: false,
       status: "offline",
-      pid: discovery.pid,
-      socketPath: discovery.socketPath,
+      pid: discovery.receipt.pid,
+      socketPath: discovery.receipt.socketPath,
       protocolVersion: FABRIC_PROTOCOL_VERSION,
       activeAdapters: [],
     };

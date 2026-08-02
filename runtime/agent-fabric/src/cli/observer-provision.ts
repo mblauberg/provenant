@@ -8,6 +8,7 @@ import { connectFabricDaemon } from "../daemon/client.js";
 import { FABRIC_OPERATIONS } from "../domain/operations.js";
 import type { AuthorityInput } from "../domain/types.js";
 import type { FabricPaths } from "./paths.js";
+import { startMcpProvisionDaemon } from "./mcp-provision.js";
 import { MCP_SEATS, resolveSeatPaths, type SeatMetadata } from "./seat-store.js";
 
 async function privateRead(path: string): Promise<string> {
@@ -156,8 +157,13 @@ export async function provisionObserverCredential(input: { project: string; path
   } finally {
     database.close();
   }
-  const client = await connectFabricDaemon({ socketPath: input.paths.socketPath, capability });
+  const daemonHandle = await startMcpProvisionDaemon(input.paths, process.env, input.project);
   try {
+    const client = await connectFabricDaemon({
+      socketPath: daemonHandle.address.path,
+      capability,
+    });
+    try {
     const observerExpiresAt = parentAuthority.expiresAt;
     const authority = observerAuthority(parentAuthority);
     const delegated = await client.delegateAuthority({
@@ -176,7 +182,10 @@ export async function provisionObserverCredential(input: { project: string; path
       agentId, role: "observer", credentialPath, expiresAt: observerExpiresAt,
     }, null, 2)}\n`);
     return { schemaVersion: 1, runId: chair.runId, agentId, credentialPath, metadataPath, expiresAt: observerExpiresAt };
+    } finally {
+      await client.close();
+    }
   } finally {
-    await client.close();
+    daemonHandle.release();
   }
 }

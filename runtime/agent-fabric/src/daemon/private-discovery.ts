@@ -222,6 +222,16 @@ function identityMatchesOwner(identity: PrivateDiscoveryIdentity, owner: Private
     && identity.bootstrapCapabilityHash === owner.bootstrapCapabilityHash;
 }
 
+export function privateDiscoveryMatchesBootstrapReady(
+  owner: Pick<PrivateDiscoveryOwner, "actionId" | "electionGeneration" | "daemonInstanceGeneration" | "socketPath">,
+  ready: { actionId: string; electionGeneration: number; daemonInstanceGeneration: number; socketPath: string },
+): boolean {
+  return ready.actionId === owner.actionId
+    && ready.electionGeneration === owner.electionGeneration
+    && ready.daemonInstanceGeneration === owner.daemonInstanceGeneration
+    && ready.socketPath === owner.socketPath;
+}
+
 export function privateDiscoveryPaths(runtimeDirectory: string): PrivateDiscoveryPaths {
   const directory = resolve(runtimeDirectory);
   return {

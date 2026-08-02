@@ -1969,8 +1969,13 @@ printf '%s\\n' '{"schema_version":1,"source":"claude subscription canary","obser
       lifecycleReceiptAuthorityId: null,
     })}\n`, { mode: 0o600 });
     const agentsHome = resolve(import.meta.dirname, "../../../..");
-    await expect(fabricStatus(["--agents-home", agentsHome, "--project", agentsHome], value)).resolves.toMatchObject({
-      daemon: { reachable: false }, activeAdapters: [],
+    await expect(fabricStatus(["--agents-home", agentsHome, "--project", agentsHome], value, {
+      inspectDaemonSocket: async () => ({
+        isSocket: () => true,
+        uid: process.getuid?.() ?? 0,
+      }),
+    })).resolves.toMatchObject({
+      daemon: { reachable: false, status: "offline", code: "DAEMON_DISCOVERY_AMBIGUOUS" }, activeAdapters: [],
     });
     const fixture = await createPortableActivatedPrimaryFixture();
     cleanup.push(fixture.directory);

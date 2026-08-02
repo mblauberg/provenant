@@ -31,7 +31,11 @@ import {
 import { assertDatabaseIntegrity } from "../persistence/invariants.js";
 import { BootstrapElection, FLOCK_ELECTION_LOCK_PORT } from "../daemon/bootstrap-election.js";
 import { connectFabricDaemon } from "../daemon/client.js";
-import { privateDiscoveryPaths, readPrivateDiscovery } from "../daemon/private-discovery.js";
+import {
+  privateDiscoveryMatchesBootstrapReady,
+  privateDiscoveryPaths,
+  readPrivateDiscovery,
+} from "../daemon/private-discovery.js";
 import { preflightProtocolBuild } from "../daemon/protocol-build-preflight.js";
 import { currentRuntimeBuildIdentity } from "../daemon/runtime-build-identity.js";
 import {
@@ -171,16 +175,6 @@ function option(arguments_: string[], name: string): string | undefined {
 
 function checkCode(id: string, outcome: "OK" | "FAILED"): string {
   return `${id.replaceAll("-", "_").toUpperCase()}_${outcome}`;
-}
-
-function generationIdentityMatches(
-  owner: { actionId: string; electionGeneration: number; daemonInstanceGeneration: number; socketPath: string },
-  ready: { actionId: string; electionGeneration: number; daemonInstanceGeneration: number; socketPath: string },
-): boolean {
-  return ready.actionId === owner.actionId
-    && ready.electionGeneration === owner.electionGeneration
-    && ready.daemonInstanceGeneration === owner.daemonInstanceGeneration
-    && ready.socketPath === owner.socketPath;
 }
 
 /**
@@ -608,7 +602,7 @@ async function doctorDaemonState(
       }
       if (
         discovery.status === "terminal"
-        && (election.status !== "ready" || !generationIdentityMatches(discovery.owner, election.receipt))
+        && (election.status !== "ready" || !privateDiscoveryMatchesBootstrapReady(discovery.owner, election.receipt))
       ) {
         return {
           status: "failed",
@@ -637,7 +631,7 @@ async function doctorDaemonState(
     }
     if (
       election.status !== "ready" ||
-      !generationIdentityMatches(discovery.owner, election.receipt)
+      !privateDiscoveryMatchesBootstrapReady(discovery.owner, election.receipt)
     ) {
       return {
         status: "failed",
