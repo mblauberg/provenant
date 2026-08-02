@@ -36,6 +36,11 @@ function errorDetail(error: unknown): string {
 
 export async function resolveProjectRoots(path = process.cwd()): Promise<ProjectRoots> {
   const boundary = await resolveProjectBoundary(path, { selection: "exact" });
+  if (boundary.evidence.kind === "refused") {
+    throw new Error(
+      `project boundary refused for ${boundary.requestedDirectory}: ${boundary.evidence.reason}; ${boundary.evidence.detail}`,
+    );
+  }
   const gitRoot = boundary.evidence.kind === "git" ? boundary.evidence.root : null;
   const projectRoot = boundary.evidence.kind === "project-marker"
     ? boundary.evidence.root
@@ -162,7 +167,15 @@ export async function runProjectActivate(
     status?: typeof projectStatusFromRoots;
   } = {},
 ): Promise<ProjectStatus & { action: "trusted" | "already-trusted"; message: string }> {
-  const roots = await resolveProjectRoots(path);
+  let roots: ProjectRoots;
+  try {
+    roots = await resolveProjectRoots(path);
+  } catch (error: unknown) {
+    throw new Error(
+      `project activation refused for ${path}: ${errorDetail(error)}; no trust was added.`,
+      { cause: error },
+    );
+  }
   if (roots.gitProbe === "unavailable") {
     throw new Error(
       `project activation refused: Git repository probe was unavailable (${roots.gitProbeError}); ` +

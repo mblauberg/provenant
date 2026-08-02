@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join, parse } from "node:path";
 import { promisify } from "node:util";
@@ -152,7 +152,7 @@ describe("MCP bootstrap workspace-trust guidance", () => {
     expect(failure.message).not.toContain("workspace trust");
   });
 
-  it("refuses a plain non-Git root reached through a symlinked ancestor", async () => {
+  it("auto-enrols a plain non-Git root reached through a stable ancestor alias", async () => {
     const temporaryRoot = await mkdtemp(join(tmpdir(), "fabric-symlinked-ancestor-bootstrap-"));
     temporaryDirectories.push(temporaryRoot);
     const targetParent = join(temporaryRoot, "target-parent");
@@ -162,12 +162,19 @@ describe("MCP bootstrap workspace-trust guidance", () => {
     await symlink(targetParent, linkedParent);
 
     const failure = await bootstrapFailure(join(linkedParent, "project"), temporaryRoot);
+    const canonicalProject = await realpath(project);
 
     expect(failure).toMatchObject({
-      code: "WORKSPACE_NOT_TRUSTED",
-      message: expect.stringMatching(/symbolic-link|symlink/iu),
+      code: "BOOTSTRAP_SPAWN_FAILED",
     });
     expect(failure.message).not.toContain("workspace trust");
+    await expect(readFile(join(paths(temporaryRoot).stateDirectory, "trusted-workspaces.json"), "utf8").then(JSON.parse)).resolves.toMatchObject({
+      entries: [expect.objectContaining({
+        canonicalPath: canonicalProject,
+        establishmentKind: "automatic-bootstrap",
+        boundaryKind: "non-git",
+      })],
+    });
   });
 
   it("gives malformed collection children repair guidance without activation commands", async () => {

@@ -474,7 +474,11 @@ async function canonicalDirectory(path: string): Promise<{ canonical: string; sy
   }
   const info = await lstat(canonical);
   if (!info.isDirectory() || info.isSymbolicLink()) throw new Error(`project path is not a directory: ${canonical}`);
-  return { canonical, symbolicLink: snapshots.some((snapshot) => snapshot.symbolicLink) || requestedSnapshot.symbolicLink };
+  // Ancestor aliases are part of the path used to reach the requested object;
+  // the canonical result and the complete identity recheck above preserve
+  // which object was selected. Only an explicitly symlinked final component
+  // changes the requested directory's identity and must be refused.
+  return { canonical, symbolicLink: requestedSnapshot.symbolicLink };
 }
 
 function refusedBoundary(

@@ -300,7 +300,7 @@ describe("project activation front doors", () => {
     }
   });
 
-  it("passes the canonical requested path to the trust writer", async () => {
+  it("does not pass an explicitly symlinked project path to the trust writer", async () => {
     const value = await fixture();
     const linked = join(value.root, "linked-project");
     await symlink(value.project, linked);
@@ -311,11 +311,8 @@ describe("project activation front doors", () => {
         received.push(arguments_[1] ?? "");
         return await runWorkspaceTrust(arguments_, paths, now);
       },
-    })).resolves.toMatchObject({
-      action: "trusted",
-      requestedPath: await realpath(value.project),
-    });
-    expect(received).toEqual([await realpath(value.project)]);
+    })).rejects.toThrow(/symbolic link/u);
+    expect(received).toEqual([]);
   });
 
   it("revokes a trust record if the trust owner reports a different canonical path", async () => {
@@ -461,16 +458,13 @@ describe("project activation front doors", () => {
     await expect(access(runtimeDirectory), "D5: refused symlink-root activation must not create the Fabric runtime directory").rejects.toThrow();
   });
 
-  it("canonicalizes a symbolic-link project path before activation", async () => {
+  it("refuses an explicitly symlinked project path through both public project APIs", async () => {
     const value = await fixture();
     const linked = join(value.root, "linked-project");
     await symlink(value.project, linked);
 
-    await expect(runProjectActivate(linked, value.paths)).resolves.toMatchObject({
-      action: "trusted",
-      requestedPath: await realpath(value.project),
-      trustedRoot: await realpath(value.project),
-    });
+    await expect(resolveProjectRoots(linked)).rejects.toThrow(/symbolic link/u);
+    await expect(runProjectActivate(linked, value.paths)).rejects.toThrow(/symbolic link/u);
   });
 
   it("canonicalizes a lexical project-path alias before activation", async () => {

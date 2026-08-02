@@ -95,6 +95,28 @@ describe("shared project boundary resolver", () => {
     });
   });
 
+  it("accepts a stable ancestor alias but refuses an explicitly symlinked directory", async () => {
+    const root = await fixture("ancestor-alias-boundary");
+    const actualParent = join(root, "actual-parent");
+    const project = join(actualParent, "project");
+    const ancestorAlias = join(root, "ancestor-alias");
+    const requestedAlias = join(root, "requested-alias");
+    await mkdir(project, { recursive: true });
+    await symlink(actualParent, ancestorAlias);
+    await symlink(project, requestedAlias);
+
+    await expect(resolveProjectBoundary(join(ancestorAlias, "project"))).resolves.toMatchObject({
+      requestedDirectory: await realpath(project),
+      selectedProjectRoot: await realpath(project),
+      evidence: { kind: "ambiguous", reason: "unmarked-non-git" },
+    });
+    await expect(resolveProjectBoundary(requestedAlias)).resolves.toMatchObject({
+      requestedDirectory: await realpath(project),
+      selectedProjectRoot: await realpath(project),
+      evidence: { kind: "refused", reason: "symbolic-link" },
+    });
+  });
+
   it("refuses malformed YAML at the exact marker root", async () => {
     const root = await fixture("malformed-project-marker");
     const project = join(root, "project");
