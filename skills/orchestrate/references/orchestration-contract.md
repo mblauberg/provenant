@@ -103,6 +103,18 @@ neutral state. A chair observing idle-without-report verifies the deliverable
 directly from the filesystem, then queries the worker once; completion is
 judged from the verified artifact, never inferred from silence.
 
+### Producer separation default
+
+Distinct artifacts get distinct authors by default. The chair joins the artifacts and decides from
+the evidence, rather than writing the artifacts that support its decision. This is an adjustable
+default for each session and project, not a rigid rule: an explicit local preference may override it,
+and a small or tightly coupled job may not justify splitting production across workers.
+
+The default exists because routing all writing through one agent creates a throughput bottleneck,
+bloats that agent's context window, and makes a cross-check self-referential when the artifact has
+the same author as the claim it corroborates. In that case the cross-check is a field compared against
+itself rather than an independent join.
+
 ## Non-goals
 
 This contract does not prescribe a topology (single chair, paired-primary, or
