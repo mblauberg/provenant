@@ -17,18 +17,11 @@ MANAGED_MARKER = (
     b"# Managed by scripts/install-harness; "
     b"local edits to an installed copy are not preserved."
 )
-OWNED_STATES = {"absent", "existing", "managed-file", "legacy-link"}
+OWNED_STATES = {"absent", "existing", "managed-file"}
 
 
 class Collision(RuntimeError):
     pass
-
-
-def _normalised_link(destination: Path) -> Path:
-    value = Path(os.readlink(destination))
-    if not value.is_absolute():
-        value = destination.parent / value
-    return Path(os.path.abspath(value))
 
 
 def _raw_snapshot(destination: Path) -> tuple[object, ...]:
@@ -90,15 +83,12 @@ def _raw_snapshot(destination: Path) -> tuple[object, ...]:
 def _owned_snapshot(
     source: Path,
     destination: Path,
-    legacy_target: Path,
 ) -> tuple[str, tuple[object, ...]]:
     snapshot = _raw_snapshot(destination)
     if snapshot == ("absent",):
         return "absent", snapshot
     mode = snapshot[2]
     if stat.S_ISLNK(mode):
-        if _normalised_link(destination) == legacy_target:
-            return "legacy-link", snapshot
         raise Collision(f"provenant command collision={destination}; remove or repoint the link to continue")
     if not stat.S_ISREG(mode):
         raise Collision(f"provenant command collision={destination}; remove the file to continue")
@@ -110,8 +100,8 @@ def _owned_snapshot(
     raise Collision(f"provenant command collision={destination}; remove or replace the file to continue")
 
 
-def classify(source: Path, destination: Path, legacy_target: Path) -> str:
-    return _owned_snapshot(source, destination, legacy_target)[0]
+def classify(source: Path, destination: Path) -> str:
+    return _owned_snapshot(source, destination)[0]
 
 
 def _exchange(first: Path, second: Path) -> None:
@@ -166,12 +156,11 @@ def _restore_after_mismatch(
 def publish(
     source: Path,
     destination: Path,
-    legacy_target: Path,
     expected: str,
 ) -> str:
     if expected not in OWNED_STATES:
         raise Collision(f"invalid expected Provenant command state: {expected}")
-    current, original_snapshot = _owned_snapshot(source, destination, legacy_target)
+    current, original_snapshot = _owned_snapshot(source, destination)
     if current != expected:
         raise Collision(
             f"provenant command collision={destination}; "
@@ -206,9 +195,7 @@ def publish(
             _exchange(temporary, destination)
             preserve_temporary = True
             try:
-                displaced, displaced_snapshot = _owned_snapshot(
-                    source, temporary, legacy_target,
-                )
+                displaced, displaced_snapshot = _owned_snapshot(source, temporary)
             except Collision:
                 restored = _restore_after_mismatch(
                     temporary, destination, prepared_snapshot,
@@ -253,7 +240,6 @@ def parser() -> argparse.ArgumentParser:
         command = commands.add_parser(name)
         command.add_argument("--source", required=True, type=Path)
         command.add_argument("--destination", required=True, type=Path)
-        command.add_argument("--legacy-target", required=True, type=Path)
         if name == "publish":
             command.add_argument("--expected", required=True)
     return root
@@ -261,19 +247,18 @@ def parser() -> argparse.ArgumentParser:
 
 def main(arguments: list[str] | None = None) -> int:
     args = parser().parse_args(arguments)
-    for field in ("source", "destination", "legacy_target"):
+    for field in ("source", "destination"):
         value = getattr(args, field)
         if not value.is_absolute():
             print(f"{field.replace('_', '-')} must be absolute", file=sys.stderr)
             return 3
     try:
         if args.command == "classify":
-            result = classify(args.source, args.destination, args.legacy_target)
+            result = classify(args.source, args.destination)
         else:
             result = publish(
                 args.source,
                 args.destination,
-                args.legacy_target,
                 args.expected,
             )
     except (Collision, OSError) as exc:
