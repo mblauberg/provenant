@@ -2043,6 +2043,11 @@ def test_non_git_fallback_routes_via_product_root_model_route():
             destination = product / relative_path
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(PRODUCT_ROOT / relative_path, destination)
+        # PRODUCT_ROOT is checked first, so on CI and in any installed tree this
+        # resolves exactly where the plain symlink used to point. The climb
+        # exists for linked worktrees, which carry no node_modules of their own;
+        # without it the symlink dangles and adapter validation fails for a
+        # reason that has nothing to do with what this test is proving.
         node_modules_source = next(
             (
                 candidate / "node_modules"
