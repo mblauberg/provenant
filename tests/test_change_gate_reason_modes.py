@@ -269,7 +269,13 @@ def test_structured_runner_does_not_promote_test_body_module_error(tmp_path):
         encoding="utf-8",
     )
 
-    result = run_command(PYTEST_COMMAND, tmp_path, str(test_file), runner=Runner.PYTEST)
+    result = run_command(
+        PYTEST_COMMAND,
+        tmp_path,
+        str(test_file),
+        runner=Runner.PYTEST,
+        timeout_seconds=10.0,
+    )
 
     assert result.classification is FailureClass.IMPORT
     assert result.unresolved_module is None
@@ -283,7 +289,13 @@ def test_structured_runner_preserves_one_real_collection_module(tmp_path):
         encoding="utf-8",
     )
 
-    result = run_command(PYTEST_COMMAND, tmp_path, str(test_file), runner=Runner.PYTEST)
+    result = run_command(
+        PYTEST_COMMAND,
+        tmp_path,
+        str(test_file),
+        runner=Runner.PYTEST,
+        timeout_seconds=10.0,
+    )
 
     assert result.classification is FailureClass.IMPORT
     assert result.unresolved_module == "new_helper"
@@ -584,8 +596,8 @@ def test_mutation_verdict_rejects_inconclusive_evidence_without_calling_it_inval
         description="inconclusive evidence",
     )
 
-    def run_suite(commands, cwd, tests, *, fail_fast=False):
-        del commands, cwd, tests
+    def run_suite(commands, cwd, tests, *, fail_fast=False, budget=None):
+        del commands, cwd, tests, budget
         if fail_fast:
             return [CommandResult("test", 1, "", FailureClass.PASS)]
         return [CommandResult("test", 0, "", FailureClass.PASS)]
@@ -618,8 +630,8 @@ def test_mutation_verdict_keeps_green_mutants_as_survivors(tmp_path, monkeypatch
         description="surviving evidence",
     )
 
-    def run_suite(commands, cwd, tests, *, fail_fast=False):
-        del commands, cwd, tests, fail_fast
+    def run_suite(commands, cwd, tests, *, fail_fast=False, budget=None):
+        del commands, cwd, tests, fail_fast, budget
         return [CommandResult("test", 0, "", FailureClass.PASS)]
 
     monkeypatch.setattr(change_gates, "_run_suite", run_suite)

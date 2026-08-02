@@ -796,6 +796,8 @@ def test_harness_job_runs_demonstrated_change_gates_with_a_merge_base_and_scratc
     assert "--test-command-py" in command
     assert "--test-command-ts" in command
     assert gate_step.get("env", {}).get("CHANGE_GATE_BASE")
+    assert "gate_deadline=$(($(date +%s) + 1200))" in command
+    assert command.count('--budget-deadline "$gate_deadline"') == 2
 
 
 def test_clean_ci_builds_locked_protocol_before_daemon_typecheck() -> None:

@@ -82,6 +82,38 @@ def test_local_subprocess_run_calls_all_state_finite_timeouts():
     assert all(any(keyword.arg == "timeout" for keyword in call.keywords) for call in calls)
 
 
+def test_gate_budget_caps_each_target_and_rejects_exhaustion(monkeypatch):
+    monkeypatch.setattr(change_gates.time, "time", lambda: 100.0)
+
+    assert change_gates.GateBudget(deadline=150.0).remaining() == 50.0
+    assert (
+        change_gates.GateBudget(deadline=1_000.0).remaining()
+        == change_gates.PER_TARGET_CAP
+    )
+    with pytest.raises(GateError, match="job budget exhausted"):
+        change_gates.GateBudget(deadline=100.0).remaining()
+
+
+def test_run_suite_passes_the_remaining_job_budget_to_each_target(tmp_path, monkeypatch):
+    remaining = iter((3.0, 2.0))
+    observed = []
+
+    class Budget:
+        def remaining(self):
+            return next(remaining)
+
+    def run(command, cwd, target, *, runner, timeout_seconds):
+        del cwd, target, runner
+        observed.append((command, timeout_seconds))
+        return CommandResult(command, 0, "", FailureClass.PASS)
+
+    monkeypatch.setattr(change_gates, "run_command", run)
+
+    change_gates._run_suite(["first", "second"], tmp_path, [], budget=Budget())
+
+    assert observed == [("first", 3.0), ("second", 2.0)]
+
+
 def test_right_reason_red_rejects_collection_errors_as_assertion_reds():
     assert classify_failure(1, "ERROR during collection") is not FailureClass.ASSERTION
 
@@ -229,7 +261,9 @@ def test_revert_probe_does_not_count_missing_report_as_a_survivor(tmp_path, monk
     monkeypatch.setattr(
         change_gates,
         "_run_suite",
-        lambda commands, cwd, tests: [CommandResult("test", 0, "", _missing_failure_class())],
+        lambda commands, cwd, tests, *, budget=None: [
+            CommandResult("test", 0, "", _missing_failure_class())
+        ],
     )
 
     assert gate_revert_probe(source, [_hunk()], ["unused"], [], tmp_path / "scratch") == 1
@@ -254,8 +288,8 @@ def test_revert_probe_uses_the_cohesive_test_module_for_each_source_hunk(tmp_pat
     )
     selected = []
 
-    def run_selected(commands, cwd, tests):
-        del commands, cwd
+    def run_selected(commands, cwd, tests, *, budget=None):
+        del commands, cwd, budget
         selected.append(tests)
         return [CommandResult("test", 1, "", FailureClass.ASSERTION)]
 
@@ -315,8 +349,8 @@ def test_custom_commands_use_shared_process_semantics_for_known_file_suffixes(tm
 def test_run_suite_does_not_enable_fail_fast_by_default(tmp_path, monkeypatch):
     commands_seen = []
 
-    def observe(command, cwd, target, *, runner=None):
-        del cwd, target, runner
+    def observe(command, cwd, target, *, runner=None, timeout_seconds):
+        del cwd, target, runner, timeout_seconds
         commands_seen.append(command)
         return CommandResult(command, 0, "", FailureClass.PASS)
 
@@ -333,8 +367,8 @@ def test_run_suite_does_not_enable_fail_fast_by_default(tmp_path, monkeypatch):
 def test_structured_runner_dispatch_is_explicit_for_known_file_suffixes(tmp_path, monkeypatch):
     runners = []
 
-    def observe(command, cwd, target, *, runner=None):
-        del command, cwd, target
+    def observe(command, cwd, target, *, runner=None, timeout_seconds):
+        del command, cwd, target, timeout_seconds
         runners.append(runner)
         return CommandResult("test", 0, "", FailureClass.PASS)
 
@@ -526,7 +560,7 @@ def test_revert_probe_rejects_result_target_count_mismatch(tmp_path, monkeypatch
     monkeypatch.setattr(
         change_gates,
         "_run_suite",
-        lambda commands, cwd, tests: [
+        lambda commands, cwd, tests, *, budget=None: [
             CommandResult("one", 1, "", FailureClass.ASSERTION),
             CommandResult("two", 1, "", FailureClass.ASSERTION),
         ],
@@ -596,8 +630,8 @@ def test_changed_line_mutation_uses_the_cohesive_test_module_and_fail_fast(
     (source / "scripts" / "change_gates.py").write_text("enabled = True\n", encoding="utf-8")
     observed = []
 
-    def observe(commands, cwd, selected_tests, *, fail_fast=False):
-        del commands, cwd
+    def observe(commands, cwd, selected_tests, *, fail_fast=False, budget=None):
+        del commands, cwd, budget
         observed.append((selected_tests, fail_fast))
         classification = FailureClass.ASSERTION if fail_fast else FailureClass.PASS
         return [CommandResult("test", 1 if fail_fast else 0, "", classification)]

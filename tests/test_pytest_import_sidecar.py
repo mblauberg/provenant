@@ -23,6 +23,7 @@ def test_body_stdout_stderr_and_module_error_are_not_structured_evidence(tmp_pat
         tmp_path,
         str(test_file),
         runner=Runner.PYTEST,
+        timeout_seconds=10.0,
     )
 
     assert result.classification is FailureClass.IMPORT
@@ -51,6 +52,7 @@ def test_real_collection_import_uses_sidecar_when_junit_omits_identity(tmp_path)
         tmp_path,
         str(test_file),
         runner=Runner.PYTEST,
+        timeout_seconds=10.0,
     )
 
     assert result.classification is FailureClass.COLLECTION

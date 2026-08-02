@@ -100,6 +100,18 @@ _NPM_ATTESTATION_WRITER = Path(
 _PROTOCOL_BUILD_SCRIPT = Path("scripts/agent-fabric-protocol-build")
 _GIT_COMMAND_TIMEOUT_SECONDS = 60.0
 _SCRATCH_PREPARATION_TIMEOUT_SECONDS = 300.0
+PER_TARGET_CAP = DIRECT_PROCESS_TIMEOUT
+
+
+@dataclass(frozen=True, slots=True)
+class GateBudget:
+    deadline: float
+
+    def remaining(self) -> float:
+        time_left = self.deadline - time.time()
+        if time_left <= 0:
+            raise GateError("change gate job budget exhausted")
+        return min(time_left, PER_TARGET_CAP)
 
 
 _HUNK_RE = re.compile(r"^@@ -(?P<old_start>\d+)(?:,(?P<old_count>\d+))? \+(?P<new_start>\d+)(?:,(?P<new_count>\d+))? @@")
@@ -619,7 +631,10 @@ def _run_suite(
     tests: list[str],
     *,
     fail_fast: bool = False,
+    budget: GateBudget | None = None,
 ) -> list[CommandResult]:
+    active_budget = budget or GateBudget(time.time() + PER_TARGET_CAP)
+
     def commands_for_target(target: str | None) -> list[tuple[str, Runner | str | None]]:
         if not isinstance(commands, dict):
             return [(command, None) for command in commands]
@@ -642,7 +657,13 @@ def _run_suite(
         return [(command, runner)]
 
     return [
-        run_command(command, cwd, target, runner=runner)
+        run_command(
+            command,
+            cwd,
+            target,
+            runner=runner,
+            timeout_seconds=active_budget.remaining(),
+        )
         for target in _targets(commands, tests)
         for command, runner in commands_for_target(target)
     ]
@@ -730,12 +751,13 @@ def gate_right_reason_red(
     *,
     mode: ChangeMode | str = ChangeMode.BEHAVIOUR,
     added_modules: frozenset[str] | set[str] = frozenset(),
+    budget: GateBudget | None = None,
 ) -> int:
     with _temporary_tree(source_root, scratch_root) as directory:
         base_root = Path(directory)
         _materialise_base(source_root, base, base_root, tests)
         _prepare_typescript_scratch(source_root, base_root, commands, tests)
-        results = _run_suite(commands, base_root, tests)
+        results = _run_suite(commands, base_root, tests, budget=budget)
         targets = _targets(commands, tests)
         evidence = [
             right_reason_red_evidence(
@@ -782,6 +804,8 @@ def _gate_refactor_no_production(
     tests: list[str],
     scratch_root: Path,
     gate_name: str,
+    *,
+    budget: GateBudget | None = None,
 ) -> int:
     """Run the mandatory non-red gate when refactor work has no production hunk."""
 
@@ -791,7 +815,7 @@ def _gate_refactor_no_production(
         base_root = Path(directory)
         _materialise_base(source_root, base, base_root, tests)
         _prepare_typescript_scratch(source_root, base_root, commands, tests)
-        results = _run_suite(commands, base_root, tests)
+        results = _run_suite(commands, base_root, tests, budget=budget)
     for result in results:
         _print_output(result)
     if not results or any(
@@ -899,13 +923,20 @@ def gate_revert_probe(
     *,
     mode: ChangeMode | str = ChangeMode.BEHAVIOUR,
     base: str | None = None,
+    budget: GateBudget | None = None,
 ) -> int:
     mode = ChangeMode(mode)
     probes = production_hunks(hunks)
     if not probes:
         if mode is ChangeMode.REFACTOR and base is not None:
             return _gate_refactor_no_production(
-                source_root, base, commands, tests, scratch_root, "REVERT_PROBE"
+                source_root,
+                base,
+                commands,
+                tests,
+                scratch_root,
+                "REVERT_PROBE",
+                budget=budget,
             )
         raise GateError("revert-probe found no changed production hunks")
     survivors: list[DiffHunk] = []
@@ -923,7 +954,7 @@ def gate_revert_probe(
             _prepare_typescript_scratch(
                 source_root, probe_root, commands, probe_tests, [hunk.path]
             )
-            results = _run_suite(commands, probe_root, probe_tests)
+            results = _run_suite(commands, probe_root, probe_tests, budget=budget)
         for result in results:
             _print_output(result)
         targets = _targets(commands, locals().get("probe_tests", tests))
@@ -1006,12 +1037,19 @@ def gate_changed_line_mutation(
     *,
     mode: ChangeMode | str = ChangeMode.BEHAVIOUR,
     base: str | None = None,
+    budget: GateBudget | None = None,
 ) -> int:
     mode = ChangeMode(mode)
     if not mutants:
         if mode is ChangeMode.REFACTOR and base is not None:
             return _gate_refactor_no_production(
-                source_root, base, commands, tests, scratch_root, "CHANGED_LINES_MUTATION"
+                source_root,
+                base,
+                commands,
+                tests,
+                scratch_root,
+                "CHANGED_LINES_MUTATION",
+                budget=budget,
             )
         raise GateError("changed-lines-only mutation found no supported executable mutants")
     with _temporary_tree(source_root, scratch_root) as directory:
@@ -1023,7 +1061,7 @@ def gate_changed_line_mutation(
             tests,
             [mutant.path for mutant in mutants],
         )
-        baseline = _run_suite(commands, baseline_root, tests)
+        baseline = _run_suite(commands, baseline_root, tests, budget=budget)
     for result in baseline:
         _print_output(result)
     invalid_baseline = [result for result in baseline if result.classification is not FailureClass.PASS]
@@ -1047,7 +1085,13 @@ def gate_changed_line_mutation(
             _prepare_typescript_scratch(
                 source_root, mutant_root, commands, mutant_tests, [mutant.path]
             )
-            results = _run_suite(commands, mutant_root, mutant_tests, fail_fast=True)
+            results = _run_suite(
+                commands,
+                mutant_root,
+                mutant_tests,
+                fail_fast=True,
+                budget=budget,
+            )
         for result in results:
             _print_output(result)
         if _all_assertion_failures(results):
@@ -1083,6 +1127,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--test-command-py", required=True)
     parser.add_argument("--test-command-ts", required=True)
     parser.add_argument("--test", dest="tests", action="append", default=[])
+    parser.add_argument("--budget-deadline", type=float)
     parser.add_argument("--risk", choices=("routine", "substantial", "crucial", "terminal"), default="crucial")
     parser.add_argument(
         "--mode",
@@ -1096,6 +1141,13 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    budget = GateBudget(
+        deadline=(
+            args.budget_deadline
+            if args.budget_deadline is not None
+            else time.time() + PER_TARGET_CAP
+        )
+    )
     source_root = args.source_root.resolve()
     diff_text = git_diff(source_root, args.base)
     hunks = parse_diff(diff_text)
@@ -1137,6 +1189,7 @@ def main(argv: list[str] | None = None) -> int:
             args.scratch_root.resolve(),
             mode=mode,
             added_modules=added_modules,
+            budget=budget,
         )
     if args.gate == "revert-probe":
         return gate_revert_probe(
@@ -1147,6 +1200,7 @@ def main(argv: list[str] | None = None) -> int:
             args.scratch_root.resolve(),
             mode=mode,
             base=args.base,
+            budget=budget,
         )
     mutants = build_mutants(source_root, hunks)
     return gate_changed_line_mutation(
@@ -1158,6 +1212,7 @@ def main(argv: list[str] | None = None) -> int:
         args.risk,
         mode=mode,
         base=args.base,
+        budget=budget,
     )
 
 

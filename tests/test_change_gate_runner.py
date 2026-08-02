@@ -1,5 +1,6 @@
 import os
 from dataclasses import FrozenInstanceError
+import inspect
 from pathlib import Path
 import shlex
 import sys
@@ -14,11 +15,31 @@ from scripts.change_gate_runner import (
     FailureClass,
     Runner,
     runner_for_command,
-    run_command,
+    run_command as _run_command,
 )
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def run_command(command, cwd, test_path=None, *, runner=None, timeout_seconds=10.0):
+    return _run_command(
+        command,
+        cwd,
+        test_path,
+        runner=runner,
+        timeout_seconds=timeout_seconds,
+    )
+
+
+def test_direct_process_timeout_has_measured_headroom():
+    assert change_gate_runner.DIRECT_PROCESS_TIMEOUT == 180.0
+
+
+def test_runner_requires_its_caller_to_state_a_timeout():
+    parameter = inspect.signature(_run_command).parameters["timeout_seconds"]
+    assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
+    assert parameter.default is inspect.Parameter.empty
 
 
 def _runner(name):
@@ -87,7 +108,7 @@ def test_structured_runner_uses_the_bounded_process_helper(tmp_path, monkeypatch
     run_command("pytest tests/example.py", tmp_path, runner=Runner.PYTEST)
 
     assert observed["cwd"] == tmp_path
-    assert observed["timeout_seconds"] == change_gate_runner.DIRECT_PROCESS_TIMEOUT
+    assert observed["timeout_seconds"] == 10.0
     assert sum(argument.startswith("--junitxml=") for argument in observed["command"]) == 1
     assert observed["env"]["PROVENANT_PYTEST_IMPORT_SIDECAR"].endswith("pytest-import.json")
 
@@ -206,8 +227,7 @@ def test_structured_runner_pass_output_is_text(tmp_path):
     assert isinstance(result.output, str)
 
 
-def test_run_structured_does_not_deadlock_on_large_output(tmp_path, monkeypatch):
-    monkeypatch.setattr(change_gate_runner, "DIRECT_PROCESS_TIMEOUT", 0.1)
+def test_run_structured_does_not_deadlock_on_large_output(tmp_path):
     code = "import sys; sys.stdout.write('x' * 131072 + '\\nFINAL-LINE\\n')"
 
     result = run_command(
@@ -268,14 +288,13 @@ def test_structured_runner_closes_descendants_that_hold_output_pipes(tmp_path):
     assert child_is_alive is False
 
 
-def test_structured_runner_bounds_a_direct_process_that_does_not_exit(tmp_path, monkeypatch):
-    monkeypatch.setattr(change_gate_runner, "DIRECT_PROCESS_TIMEOUT", 0.1)
-
+def test_structured_runner_bounds_a_direct_process_that_does_not_exit(tmp_path):
     started = time.monotonic()
     result = run_command(
         f"{sys.executable} -c {shlex.quote('import time; time.sleep(60)')}",
         tmp_path,
         runner=Runner.PYTEST,
+        timeout_seconds=0.1,
     )
 
     assert time.monotonic() - started < 3
@@ -300,7 +319,7 @@ def test_unstructured_runner_uses_the_bounded_process_helper(tmp_path, monkeypat
 
     assert observed["command"] == [sys.executable, "-c", "print(42)"]
     assert observed["cwd"] == tmp_path
-    assert observed["timeout_seconds"] == change_gate_runner.DIRECT_PROCESS_TIMEOUT
+    assert observed["timeout_seconds"] == 10.0
     assert result.returncode == 0
     assert result.output.strip() == "42"
 

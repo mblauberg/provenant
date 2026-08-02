@@ -38,15 +38,10 @@ class CommandResult:
     timed_out: bool = False
 
 
-# A cap on a target run, so a genuine hang cannot stall the gate forever. It has
-# to clear the slowest legitimate target rather than the average one: at 30s a
-# hang and a merely slow suite were indistinguishable, and any change touching
-# skills/orchestrate/evals/test_cf_dispatch.py was permanently unlandable because
-# the reverted run was killed part way and came back as an unclassified SIGTERM
-# rather than an assertion. That file takes 76s on macOS but over 300s at its own
-# merge base on a Linux runner, so the cap is set well clear of the slowest known
-# target rather than just above it. A hang is unbounded and is still caught.
-DIRECT_PROCESS_TIMEOUT = 1800.0
+# The slowest measured target is 79 seconds. A 180-second cap leaves more than
+# 2x headroom for runner variance while turning a genuine hang into a prompt,
+# typed gate failure.
+DIRECT_PROCESS_TIMEOUT = 180.0
 
 _PYTEST_IMPORT_PLUGIN = """import json
 import os
@@ -169,6 +164,7 @@ def _run_captured(
     arguments: list[str],
     cwd: Path,
     rendered: str,
+    timeout_seconds: float,
     runner: Runner | None = None,
     report_path: Path | None = None,
 ) -> CommandResult:
@@ -188,7 +184,7 @@ def _run_captured(
     result = run_bounded(
         arguments,
         cwd=cwd,
-        timeout_seconds=DIRECT_PROCESS_TIMEOUT,
+        timeout_seconds=timeout_seconds,
         env=environment,
     )
     if runner is None:
@@ -234,6 +230,7 @@ def run_command(
     test_path: str | None = None,
     *,
     runner: Runner | str | None = None,
+    timeout_seconds: float,
 ) -> CommandResult:
     arguments = shlex.split(command)
     if test_path:
@@ -248,7 +245,7 @@ def run_command(
 
     rendered = shlex.join(arguments)
     if resolved_runner is None:
-        return _run_captured(arguments, cwd, rendered)
+        return _run_captured(arguments, cwd, rendered, timeout_seconds)
 
     with tempfile.TemporaryDirectory(prefix="report-", dir=cwd) as report_directory:
         report_path = Path(report_directory) / (
@@ -262,4 +259,11 @@ def run_command(
         elif resolved_runner is Runner.VITEST:
             arguments.extend(["--reporter=json", f"--outputFile={report_path}"])
         rendered = shlex.join(arguments)
-        return _run_captured(arguments, cwd, rendered, resolved_runner, report_path)
+        return _run_captured(
+            arguments,
+            cwd,
+            rendered,
+            timeout_seconds,
+            resolved_runner,
+            report_path,
+        )
