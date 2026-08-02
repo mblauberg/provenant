@@ -140,12 +140,19 @@ def run_dispatch_with_stub(
     extra_args=None,
     provenant_stub=None,
     output_path=None,
+    harness_python=None,
+    reject_bare_python=False,
 ):
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
         bin_dir = tmp / "bin"
         bin_dir.mkdir()
         write_executable(bin_dir / "claude", stub)
+        if reject_bare_python:
+            write_executable(
+                bin_dir / "python3",
+                "#!/usr/bin/env bash\necho 'bare python3 must not be used' >&2\nexit 97\n",
+            )
         if provenant_stub is not None:
             write_executable(bin_dir / "provenant", provenant_stub)
         out = Path(output_path) if output_path is not None else tmp / "out.txt"
@@ -156,6 +163,17 @@ def run_dispatch_with_stub(
         # Keep the owner-unavailable branch deterministic; the verified-owner
         # branch has its own test with an explicit owner stub.
         env["AGENTS_HOME"] = str(tmp / "unavailable-owner")
+        if harness_python is not None:
+            env["HARNESS_PYTHON"] = harness_python
+        if reject_bare_python:
+            env["HOME"] = str(tmp)
+            provenant = shutil.which("provenant", path=env["PATH"])
+            if provenant is not None:
+                provenant_dir = str(Path(provenant).parent)
+                env["PATH"] = os.pathsep.join(
+                    entry for entry in env["PATH"].split(os.pathsep)
+                    if entry != provenant_dir
+                )
         command = [
                 str(SCRIPT),
                 "--tool",
@@ -1822,7 +1840,9 @@ def test_successful_output_with_auth_words_stays_ok():
         cat >/dev/null
         echo "The string Not logged in appears in the artifact under review."
     """
-    result, record, output = run_dispatch_with_stub(stub)
+    result, record, output = run_dispatch_with_stub(
+        stub, harness_python=sys.executable, reject_bare_python=True
+    )
     assert result.returncode == 0, result.stderr
     assert record["status"] == "ok"
     assert output.strip() == "The string Not logged in appears in the artifact under review."
