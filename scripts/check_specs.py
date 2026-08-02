@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Check the small, durable invariants of current specifications."""
 
 from __future__ import annotations

@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Write the machine-local Agent Fabric product-root pointer."""
 
 from __future__ import annotations

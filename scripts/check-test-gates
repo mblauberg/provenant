@@ -2,5 +2,5 @@
 set -euo pipefail
 
 PRODUCT_ROOT="${AGENT_FABRIC_PRODUCT_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
-PYTHON="${HARNESS_PYTHON:-python3}"
-exec "$PYTHON" "$PRODUCT_ROOT/scripts/change_gates.py" "$@"
+source "$PRODUCT_ROOT/scripts/lib/harness-python.sh"
+run_test "$PRODUCT_ROOT/scripts/change_gates.py" "$@"

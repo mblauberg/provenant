@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+source "$ROOT/scripts/lib/harness-python.sh"
 TARGET=""
 
 usage() {
@@ -27,11 +28,11 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n "$TARGET" ]] || { usage; exit 2; }
-manager=("$ROOT/scripts/manage_installation.py" --surface agents --source "$ROOT/agents" --target "$TARGET")
+manager_args=(--surface agents --source "$ROOT/agents" --target "$TARGET")
 
 # Validate the source first so a symlinked source directory cannot bypass the
 # ownership boundary. Agent mechanics own the canonical directory-link rule.
-"${manager[@]}" validate-sources --summary >/dev/null
+run_stdlib "$ROOT/scripts/manage_installation.py" "${manager_args[@]}" validate-sources --summary >/dev/null
 
-"${manager[@]}" install --summary
-exec "${manager[@]}" check --summary
+run_stdlib "$ROOT/scripts/manage_installation.py" "${manager_args[@]}" install --summary
+run_stdlib "$ROOT/scripts/manage_installation.py" "${manager_args[@]}" check --summary

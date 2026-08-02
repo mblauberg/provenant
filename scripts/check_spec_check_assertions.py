@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Require fixture CHECK error constants to come from the shipped migration."""
 
 from __future__ import annotations

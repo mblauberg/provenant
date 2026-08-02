@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Fail on a small, deterministic set of high-risk Python call patterns."""
 
 from __future__ import annotations

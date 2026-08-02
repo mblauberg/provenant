@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Validate repeated held-out lifecycle-routing evaluation receipts."""
 
 from __future__ import annotations

@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Resolve durable harness model aliases into auditable concrete routes."""
 
 from __future__ import annotations

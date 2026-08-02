@@ -31,6 +31,44 @@ def copy_release_scripts(repository: Path) -> Path:
     return target / "public_release_check.py"
 
 
+def test_shell_surface_gate_rejects_python_dispatch_and_python_scripts(
+    tmp_path: Path,
+):
+    python_script = tmp_path / "scripts/unsafe.py"
+    python_script.parent.mkdir(parents=True)
+    python_script.write_text("#!/usr/bin/env python3\nprint('unsafe')\n")
+    python_script.chmod(0o755)
+    shell_script = tmp_path / "scripts/unsafe.sh"
+    shell_script.write_text("#!/bin/sh\npython3 unsafe.py\n")
+    workflow = tmp_path / ".github/workflows/unsafe.yml"
+    workflow.parent.mkdir(parents=True)
+    workflow.write_text("jobs:\n  check:\n    steps:\n      - run: python unsafe.py\n")
+
+    errors = release_check.scan_paths(
+        [
+            "scripts/unsafe.py",
+            "scripts/unsafe.sh",
+            ".github/workflows/unsafe.yml",
+        ],
+        tmp_path,
+    )
+
+    assert "forbidden Python shebang: scripts/unsafe.py" in errors
+    assert "forbidden executable Python script: scripts/unsafe.py" in errors
+    assert "bare Python command in shell surface: scripts/unsafe.sh" in errors
+    assert "bare Python command in shell surface: .github/workflows/unsafe.yml" in errors
+
+
+def test_shell_surface_gate_exempts_the_interpreter_resolver(tmp_path: Path):
+    resolver = tmp_path / "scripts/lib/harness-python.sh"
+    resolver.parent.mkdir(parents=True)
+    resolver.write_text("#!/bin/sh\npython3 -c 'pass'\n")
+
+    errors = release_check.scan_paths(["scripts/lib/harness-python.sh"], tmp_path)
+
+    assert not any("harness-python.sh" in error for error in errors)
+
+
 def git_at(root: Path, *args: str) -> str:
     result = subprocess.run(
         ["git", *args],

@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Run read-only Git evidence commands without inherited routing state."""
 
 from __future__ import annotations

@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Create and remove shared, project-local Git worktrees safely."""
 
 from __future__ import annotations

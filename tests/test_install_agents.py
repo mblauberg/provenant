@@ -1,6 +1,7 @@
 from pathlib import Path
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -11,6 +12,7 @@ SCRIPT = ROOT / "scripts" / "install-agents"
 MANAGER = ROOT / "scripts" / "manage_installation.py"
 MECHANICS = ROOT / "scripts" / "agent_installation.py"
 SKILL_MANIFEST = ROOT / "scripts" / "managed_installation_manifest.py"
+PYTHON_RESOLVER = ROOT / "scripts" / "lib" / "harness-python.sh"
 MANIFEST_NAME = ".agent-harness-agents-installation.json"
 AGENT_NAMES = {
     "agy-reviewer.md",
@@ -173,6 +175,8 @@ def test_agent_installer_rejects_a_symlinked_source_directory(tmp_path):
     external.mkdir()
     (external / "evil.md").write_text("# external definition\n")
     shutil.copy2(SCRIPT, scripts / "install-agents")
+    (scripts / "lib").mkdir()
+    shutil.copy2(PYTHON_RESOLVER, scripts / "lib" / "harness-python.sh")
     shutil.copy2(MANAGER, scripts / "manage_installation.py")
     shutil.copy2(MECHANICS, scripts / "agent_installation.py")
     shutil.copy2(SKILL_MANIFEST, scripts / "managed_installation_manifest.py")
@@ -182,6 +186,7 @@ def test_agent_installer_rejects_a_symlinked_source_directory(tmp_path):
     result = subprocess.run(
         [str(scripts / "install-agents"), "--target", str(target)],
         cwd=fixture_root,
+        env={**os.environ, "HARNESS_PYTHON": sys.executable},
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -214,6 +219,8 @@ def test_agent_installer_preserves_a_directory_link_to_canonical_sources(tmp_pat
     scripts = fixture_root / "scripts"
     scripts.mkdir(parents=True)
     shutil.copy2(SCRIPT, scripts / "install-agents")
+    (scripts / "lib").mkdir()
+    shutil.copy2(PYTHON_RESOLVER, scripts / "lib" / "harness-python.sh")
     shutil.copy2(MANAGER, scripts / "manage_installation.py")
     shutil.copy2(MECHANICS, scripts / "agent_installation.py")
     shutil.copy2(SKILL_MANIFEST, scripts / "managed_installation_manifest.py")
@@ -225,6 +232,7 @@ def test_agent_installer_preserves_a_directory_link_to_canonical_sources(tmp_pat
     result = subprocess.run(
         [str(scripts / "install-agents"), "--target", str(target)],
         cwd=fixture_root,
+        env={**os.environ, "HARNESS_PYTHON": sys.executable},
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,

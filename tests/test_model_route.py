@@ -37,6 +37,41 @@ def resolve(*args, adapter_gate="direct-cli"):
     return result, json.loads(result.stdout) if result.stdout else None
 
 
+@pytest.mark.parametrize("harness_python", ["/deliberately/missing/python", "/tmp"])
+def test_model_route_emits_structured_refusal_when_interpreter_is_unusable(
+    tmp_path, harness_python,
+):
+    env = {
+        **os.environ,
+        "AGENT_FABRIC_PRODUCT_ROOT": str(ROOT),
+        "HARNESS_PYTHON": harness_python,
+        "HOME": str(tmp_path / "home"),
+    }
+    result = subprocess.run(
+        [
+            str(SCRIPT),
+            "resolve",
+            "--adapter", "copilot",
+            "--alias", "scout",
+            "--role", "worker",
+            "--model", "gpt-5.6-luna",
+            "--adapter-gate", "direct-cli",
+        ],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    refusal = json.loads(result.stdout)
+    assert refusal["status"] == "interpreter_unavailable"
+    assert "Traceback" not in result.stderr
+    assert f"uv sync --project {ROOT} --locked --only-group test" in result.stderr
+
+
 def usable_pi_compatibility(tmp_path):
     compatibility = tmp_path / "adapter-compatibility.yaml"
     wrapper_entrypoint = ROOT / "runtime" / "agent-fabric" / "src" / "adapters" / "providers" / "optional" / "pi-rpc.ts"

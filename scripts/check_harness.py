@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Static checks for the global agent harness."""
 
 from __future__ import annotations

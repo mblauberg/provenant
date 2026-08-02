@@ -141,7 +141,13 @@ def copy_product_fixture(tmp_path: Path) -> Path:
     return product
 
 
-def run_product(product: Path, platform: str, home: Path, *arguments: str):
+def run_product(
+    product: Path,
+    platform: str,
+    home: Path,
+    *arguments: str,
+    path_python: Path | None = None,
+):
     provider_bin = home / ".local/bin"
     provider_bin.mkdir(parents=True, exist_ok=True)
     for name in ("claude", "codex", "agy", "cursor-agent", "kiro-cli", "opencode"):
@@ -151,17 +157,20 @@ def run_product(product: Path, platform: str, home: Path, *arguments: str):
 
     node = shutil.which("node")
     assert node is not None, "node is required for the install harness"
+    path_entries = [str(provider_bin)]
+    if path_python is not None:
+        path_entries.append(str(path_python.parent))
+    path_entries.extend(
+        [
+            str(Path(sys.executable).parent),
+            str(Path(node).parent),
+            "/opt/homebrew/bin",
+            os.defpath,
+        ]
+    )
     env = {
         "HOME": str(home),
-        "PATH": os.pathsep.join(
-            (
-                str(provider_bin),
-                str(Path(sys.executable).parent),
-                str(Path(node).parent),
-                "/opt/homebrew/bin",
-                os.defpath,
-            )
-        ),
+        "PATH": os.pathsep.join(path_entries),
         "LANG": "C",
         "LC_ALL": "C",
     }
@@ -176,6 +185,8 @@ def run_product(product: Path, platform: str, home: Path, *arguments: str):
         env["CLAUDE_CONFIG_DIR"] = str(home / ".claude")
     else:
         env["CODEX_HOME"] = str(home / ".codex")
+    if path_python is None:
+        env["HARNESS_PYTHON"] = sys.executable
     return subprocess.run(
         [str(product / "scripts/install-harness"), "--platform", platform, *arguments],
         cwd=product,
@@ -185,6 +196,30 @@ def run_product(product: Path, platform: str, home: Path, *arguments: str):
         stderr=subprocess.PIPE,
         check=False,
     )
+
+
+def test_install_harness_uses_product_interpreter_when_path_python_is_old(tmp_path):
+    product = copy_product_fixture(tmp_path)
+    product_python = product / ".venv/bin/python"
+    product_python.parent.mkdir(parents=True)
+    product_python.symlink_to(sys.executable)
+
+    old_python_bin = tmp_path / "python39-bin"
+    old_python_bin.mkdir()
+    old_python = old_python_bin / "python3"
+    if not Path("/usr/bin/python3").exists():
+        pytest.skip("stock /usr/bin/python3 is not available")
+    old_python.symlink_to("/usr/bin/python3")
+
+    result = run_product(
+        product,
+        "codex",
+        tmp_path / "home",
+        path_python=old_python,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "ModuleNotFoundError: No module named 'tomllib'" not in result.stderr
 
 
 def test_install_harness_requires_acknowledgement_for_a_linked_worktree(tmp_path):

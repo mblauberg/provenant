@@ -3,6 +3,7 @@ import errno
 import os
 from pathlib import Path
 import subprocess
+import sys
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -21,7 +22,7 @@ def load_helper():
 
 def invoke(*arguments: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        [str(HELPER), *arguments],
+        [sys.executable, str(HELPER), *arguments],
         cwd=ROOT,
         text=True,
         stdout=subprocess.PIPE,

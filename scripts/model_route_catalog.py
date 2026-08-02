@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Catalogue-validation unit for `model_route.py`.
 
 The cohesive family/alias/risk-tier-override validators that `model_route.py`

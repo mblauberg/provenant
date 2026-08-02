@@ -2,6 +2,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -17,7 +18,7 @@ def run_check(tmp_path: Path) -> subprocess.CompletedProcess[str]:
         f'{{"schema_version": 1, "product_root": "{ROOT}"}}\n'
     )
     return subprocess.run(
-        [str(SCRIPT)],
+        [sys.executable, str(SCRIPT)],
         env={
             **os.environ,
             "AGENT_FABRIC_INSTANCE_ROOT": str(instance_root),

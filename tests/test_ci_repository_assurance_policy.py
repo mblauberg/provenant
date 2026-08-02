@@ -100,6 +100,7 @@ FILTER_HELPER_KEYS = frozenset({"ci-contract", "node-workspace"})
 FABRIC_EXECUTED_DEPENDENCIES = frozenset(
     {
         "scripts/model-route",
+        "scripts/lib/harness-python.sh",
         "scripts/model_route.py",
         "scripts/model_route_catalog.py",
         "scripts/model_route_preferences.py",
@@ -423,6 +424,7 @@ def test_ci_gates_build_jobs_behind_path_filters_and_one_aggregate_check() -> No
     # deleted, and any new entry must be added to the allowlist deliberately.
     assert FABRIC_EXECUTED_DEPENDENCIES == {
         "scripts/model-route",
+        "scripts/lib/harness-python.sh",
         "scripts/model_route.py",
         "scripts/model_route_catalog.py",
         "scripts/model_route_preferences.py",

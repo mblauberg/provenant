@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Install the harness-owned Codex skill conflict override safely."""
 
 from __future__ import annotations

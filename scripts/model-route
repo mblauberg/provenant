@@ -2,4 +2,14 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-exec python3 "$ROOT/scripts/model_route.py" "$@"
+source "$ROOT/scripts/lib/harness-python.sh"
+
+if run_yaml "$ROOT/scripts/model_route.py" "$@"; then
+  exit 0
+else
+  status=$?
+fi
+if [[ "$status" -eq 3 ]]; then
+  printf '{"schema_version":1,"status":"interpreter_unavailable"}\n'
+fi
+exit "$status"

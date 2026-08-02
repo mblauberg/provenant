@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Check the pointer-owned installed Provenant stub against its template."""
 
 from __future__ import annotations

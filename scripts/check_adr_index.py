@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Check docs/adr/README.md against the ADR files it indexes.
 
 The index drifted twice before this gate existed: ADR 0008 gained an amendment

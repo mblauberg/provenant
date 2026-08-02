@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Own the instance side of an installation: desired state and seeded files.
 
 Two artifacts are easy to confuse and must never merge, so [ADR

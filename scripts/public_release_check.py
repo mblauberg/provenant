@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Fail closed on common mistakes before this harness is published."""
 
 from __future__ import annotations
@@ -70,6 +69,7 @@ SECRET_PATTERNS = {
     "AWS access key": re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
 }
 PERSONAL_EMAIL = re.compile(r"@(?:gmail|outlook|hotmail|icloud|yahoo)\.[A-Za-z.]+$", re.I)
+BARE_PYTHON_COMMAND = re.compile(r"(?<![A-Za-z0-9_./-])python(?:3)?(?![A-Za-z0-9_.-])")
 HOME_PATH_BYTES = re.compile(HOME_PATH.pattern.encode("ascii"))
 SECRET_BYTE_PATTERNS = {
     label: re.compile(pattern.pattern.encode("ascii"))
@@ -1990,6 +1990,23 @@ def tracked_files() -> list[str]:
     return [value for value in result.stdout.split("\0") if value]
 
 
+def _is_script_python(relative: str) -> bool:
+    return relative.startswith("scripts/") and relative.endswith(".py")
+
+
+def _is_shell_surface(relative: str, text: str) -> bool:
+    if relative == "scripts/lib/harness-python.sh":
+        return False
+    if relative.startswith(".github/workflows/"):
+        return True
+    if not relative.startswith("scripts/") or _is_script_python(relative):
+        return False
+    first_line = text.splitlines()[0] if text else ""
+    if first_line.startswith("#!") and re.search(r"\bpython(?:3)?\b", first_line):
+        return False
+    return Path(relative).suffix in {"", ".sh"}
+
+
 def scan_paths(paths: list[str], root: Path = ROOT) -> list[str]:
     errors: list[str] = []
     tracked = set(paths)
@@ -2008,6 +2025,8 @@ def scan_paths(paths: list[str], root: Path = ROOT) -> list[str]:
             continue
         if not path.is_file():
             continue
+        if _is_script_python(relative) and path.stat().st_mode & 0o111:
+            errors.append(f"forbidden executable Python script: {relative}")
         if path.stat().st_size > MAX_PUBLIC_FILE_BYTES:
             errors.append(f"tracked file exceeds 5 MiB: {relative}")
             continue
@@ -2015,6 +2034,10 @@ def scan_paths(paths: list[str], root: Path = ROOT) -> list[str]:
             text = path.read_text()
         except (UnicodeDecodeError, OSError):
             continue
+        if _is_script_python(relative) and text.startswith("#!"):
+            errors.append(f"forbidden Python shebang: {relative}")
+        if _is_shell_surface(relative, text) and BARE_PYTHON_COMMAND.search(text):
+            errors.append(f"bare Python command in shell surface: {relative}")
         if HOME_PATH.search(text):
             errors.append(f"personal absolute home path: {relative}")
         for label, pattern in SECRET_PATTERNS.items():

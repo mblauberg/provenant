@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Install the machine-local Provenant stub without clobbering foreign paths."""
 
 from __future__ import annotations

@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Comparison-form drift checks: doc claims must equal their source constants.
 
 These claims are checked by comparison instead of marked-region generation,

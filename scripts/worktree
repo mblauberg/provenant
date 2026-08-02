@@ -2,4 +2,5 @@
 set -eu
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-exec python3 "$SCRIPT_DIR/worktree.py" "$@"
+source "$SCRIPT_DIR/lib/harness-python.sh"
+run_stdlib "$SCRIPT_DIR/worktree.py" "$@"

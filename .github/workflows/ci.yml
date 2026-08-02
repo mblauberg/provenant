@@ -114,6 +114,7 @@ jobs:
               # Exact executed dependencies only — the policy test rejects
               # broader docs/skills globs.
               - 'scripts/model-route'
+              - 'scripts/lib/harness-python.sh'
               - 'scripts/model_route.py'
               - 'scripts/model_route_catalog.py'
               - 'scripts/model_route_preferences.py'
@@ -314,9 +315,6 @@ jobs:
             chmod 700 "$provider_bin/$provider"
           done
           fabric_node="$(command -v node)"
-          fabric_python="$(command -v python3)"
-          printf '#!/bin/sh\nexec %s "$@"\n' "$fabric_python" > "$provider_bin/python3"
-          chmod 700 "$provider_bin/python3"
           export HOME="$split_home"
           export CODEX_HOME="$split_home/.codex"
           export PROVENANT_BIN_DIR="$split_home/.local/bin"

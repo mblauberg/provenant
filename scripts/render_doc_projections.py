@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Render the derived regions of docs/ARCHITECTURE.md from their source constants.
 
 Two marked regions are owned here (issue #548, design council P5):

@@ -19,33 +19,21 @@ for component_root in "$PRODUCT_ROOT" "$SCRIPTS_ROOT" "$SKILLS_ROOT" "$DOCS_ROOT
     exit 3
   }
 done
-if [[ -x "${HARNESS_PYTHON:-}" ]]; then
-  PYTHON=("$HARNESS_PYTHON")
-elif [[ -x "$PRODUCT_ROOT/.venv/bin/python" ]]; then
-  PYTHON=("$PRODUCT_ROOT/.venv/bin/python")
-elif PYTHON3="$(command -v python3 2>/dev/null)" &&
-     "$PYTHON3" -c 'import pytest, yaml' >/dev/null 2>&1; then
-  PYTHON=("$PYTHON3")
-elif command -v uv >/dev/null 2>&1; then
-  PYTHON=(uv run --frozen --only-group test python)
-else
-  echo "check-harness: no Python with pytest and PyYAML found; install uv or set HARNESS_PYTHON" >&2
-  exit 3
-fi
+source "$SCRIPTS_ROOT/lib/harness-python.sh"
 
 cd "$PRODUCT_ROOT"
-"${PYTHON[@]}" "$SCRIPTS_ROOT/check-provenant-install.py"
-"${PYTHON[@]}" "$SCRIPTS_ROOT/check_harness.py"
-"${PYTHON[@]}" "$SCRIPTS_ROOT/check_specs.py"
-"${PYTHON[@]}" "$SCRIPTS_ROOT/check_adr_index.py"
-"${PYTHON[@]}" "$SCRIPTS_ROOT/check_spec_schema_drift.py"
-"${PYTHON[@]}" "$SCRIPTS_ROOT/check_spec_check_assertions.py"
-"${PYTHON[@]}" "$SKILLS_ROOT/orchestrate/evals/check_skill_triggers.py"
+run_test "$SCRIPTS_ROOT/check-provenant-install.py"
+run_test "$SCRIPTS_ROOT/check_harness.py"
+run_test "$SCRIPTS_ROOT/check_specs.py"
+run_test "$SCRIPTS_ROOT/check_adr_index.py"
+run_test "$SCRIPTS_ROOT/check_spec_schema_drift.py"
+run_test "$SCRIPTS_ROOT/check_spec_check_assertions.py"
+run_test "$SKILLS_ROOT/orchestrate/evals/check_skill_triggers.py"
 # Lifecycle-skill alignment is a deterministic current-tree gate. Historical
 # provider routing evidence stays immutable under docs/archive and is not
 # rewritten or treated as a live-catalogue result.
-"${PYTHON[@]}" "$SKILLS_ROOT/orchestrate/evals/lifecycle_skill_evaluation.py" validate-inputs
-"${PYTHON[@]}" "$SKILLS_ROOT/orchestrate/evals/lifecycle_skill_evaluation.py" probe
+run_test "$SKILLS_ROOT/orchestrate/evals/lifecycle_skill_evaluation.py" validate-inputs
+run_test "$SKILLS_ROOT/orchestrate/evals/lifecycle_skill_evaluation.py" probe
 
 while IFS= read -r -d '' script; do
   case "$script" in
@@ -61,27 +49,27 @@ if [[ -d "$HOME/.claude/workflows" ]]; then
   done < <(find "$HOME/.claude/workflows" -maxdepth 1 -type f -name '*.js' -print0)
 fi
 
-"${PYTHON[@]}" "$SCRIPTS_ROOT/public_release_check.py"
-"${PYTHON[@]}" "$SCRIPTS_ROOT/static-security-check.py"
-"${PYTHON[@]}" "$SCRIPTS_ROOT/validate_delivery_scenarios.py" \
+run_test "$SCRIPTS_ROOT/public_release_check.py"
+run_test "$SCRIPTS_ROOT/static-security-check.py"
+run_test "$SCRIPTS_ROOT/validate_delivery_scenarios.py" \
   --product-root "$PRODUCT_ROOT" --skills-root "$SKILLS_ROOT"
-"${PYTHON[@]}" "$SCRIPTS_ROOT/render_skill_catalogue.py" --check \
+run_test "$SCRIPTS_ROOT/render_skill_catalogue.py" --check \
   --readme "$PRODUCT_ROOT/README.md" --skills-root "$SKILLS_ROOT"
 # Derived doc regions and drift gates (issue #548). --check renders in memory
 # and diffs; CI never writes. Maintainers regenerate with --write.
-"${PYTHON[@]}" "$SCRIPTS_ROOT/render_doc_projections.py" --check \
+run_test "$SCRIPTS_ROOT/render_doc_projections.py" --check \
   --architecture "$DOCS_ROOT/ARCHITECTURE.md" --skills-root "$SKILLS_ROOT"
-"${PYTHON[@]}" "$SCRIPTS_ROOT/check_doc_constants.py" \
+run_test "$SCRIPTS_ROOT/check_doc_constants.py" \
   --architecture "$DOCS_ROOT/ARCHITECTURE.md" \
   --harness "$PRODUCT_ROOT/HARNESS.md" \
   --readme "$PRODUCT_ROOT/README.md" \
   --skills-root "$SKILLS_ROOT"
-"${PYTHON[@]}" "$SCRIPTS_ROOT/check_doc_paths.py" \
+run_test "$SCRIPTS_ROOT/check_doc_paths.py" \
   --root "$PRODUCT_ROOT" \
   "$DOCS_ROOT/ARCHITECTURE.md" "$PRODUCT_ROOT/README.md"
 # House style is gated on the root documents and on every skill front door.
 # skills/*/references/ and docs/ are not yet clean and are not gated.
-"${PYTHON[@]}" "$SKILLS_ROOT/engineering-writing/scripts/check_engineering_style.py" \
+run_test "$SKILLS_ROOT/engineering-writing/scripts/check_engineering_style.py" \
   "$PRODUCT_ROOT/README.md" \
   "$PRODUCT_ROOT/HARNESS.md" \
   "$PRODUCT_ROOT/MAINTAINING.md" \
@@ -89,7 +77,7 @@ fi
   "$DOCS_ROOT/ARCHITECTURE.md" \
   "$SKILLS_ROOT"/*/SKILL.md
 
-"${PYTHON[@]}" -m pytest -q \
+run_test -m pytest -q \
   "$TESTS_ROOT" \
   "$SKILLS_ROOT/implement/tests/test_checkpoint_run.py" \
   "$SKILLS_ROOT/orchestrate/evals/test_cf_dispatch.py"

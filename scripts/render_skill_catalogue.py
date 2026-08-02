@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Render the README skill catalogue and headline count from the skills on disk."""
 
 from __future__ import annotations

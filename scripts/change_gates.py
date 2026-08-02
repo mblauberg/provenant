@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Fail-closed red, revert-probe, and changed-line mutation gates.
 
 The runner deliberately treats test-process failures as typed evidence.  A

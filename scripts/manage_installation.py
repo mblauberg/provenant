@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Plan, install, reconcile or remove harness-managed skill and agent links."""
 
 from __future__ import annotations

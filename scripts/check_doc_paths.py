@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Every repository path cited in the given documents must exist.
 
 The check is deliberately narrow so that it stays honest and low-noise:

@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Compare the SQL in docs/specs against the migration that actually ships.
 
 `runtime/agent-fabric/migrations/0001-current-baseline.sql` is the sole schema

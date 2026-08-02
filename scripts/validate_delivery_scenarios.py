@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Run independently authored delivery-profile cases against the kernel."""
 
 from __future__ import annotations

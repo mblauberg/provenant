@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Validate candidate, comparison, and failed skill-routing evidence."""
 
 from __future__ import annotations

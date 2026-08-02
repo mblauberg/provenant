@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Configure project-dynamic Agent Fabric MCP entries for supported clients."""
 
 from __future__ import annotations
