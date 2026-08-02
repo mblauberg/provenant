@@ -336,6 +336,13 @@ def run_dispatch_with_stub(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
+        # Callers use this helper for both success and expected-failure routes, so
+        # it cannot assert a returncode. It can still refuse to decode nothing: an
+        # aborted dispatcher emits a bare newline, and json.loads would report
+        # "Expecting value: line 2 column 1" instead of naming what broke.
+        assert result.stdout.strip(), (
+            f"dispatcher wrote no decodable stdout (returncode={result.returncode}): {result.stderr}"
+        )
         record = json.loads(result.stdout)
         return result, record, out.read_text(encoding="utf-8") if out.exists() else ""
 
