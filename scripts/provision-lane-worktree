@@ -1,0 +1,119 @@
+#!/bin/sh
+# Create a policy-approved lane worktree and provision its dependencies/build.
+set -eu
+
+script_path=$0
+while [ -L "$script_path" ]; do
+  link=$(readlink "$script_path")
+  case "$link" in
+    /*) script_path=$link ;;
+    *) script_path=$(dirname "$script_path")/$link ;;
+  esac
+done
+# CDPATH is intentionally an environment assignment for the subshell.
+# shellcheck disable=SC1007
+script_dir=$(CDPATH= cd -- "$(dirname -- "$script_path")" && pwd)
+
+usage() {
+  echo "usage: provision-lane-worktree <name> --repo <primary-root> --human-authorised (--detach <rev>|--existing-branch <branch>|--new-branch <branch> [--branch-authorised] [--start-point <rev>])" >&2
+}
+
+name=
+repo=$(pwd)
+human_authorised=false
+branch_authorised=false
+mode=
+mode_value=
+start_point=HEAD
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --repo)
+      [ "$#" -ge 2 ] || { usage; exit 2; }
+      repo=$2
+      shift 2
+      ;;
+    --human-authorised)
+      human_authorised=true
+      shift
+      ;;
+    --branch-authorised)
+      branch_authorised=true
+      shift
+      ;;
+    --detach|--existing-branch|--new-branch)
+      [ "$#" -ge 2 ] || { usage; exit 2; }
+      [ -z "$mode" ] || { echo "provision-lane-worktree: choose exactly one worktree mode" >&2; exit 2; }
+      mode=$1
+      mode_value=$2
+      shift 2
+      ;;
+    --start-point)
+      [ "$#" -ge 2 ] || { usage; exit 2; }
+      start_point=$2
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --*)
+      echo "provision-lane-worktree: unknown option: $1" >&2
+      usage
+      exit 2
+      ;;
+    *)
+      [ -z "$name" ] || { echo "provision-lane-worktree: expected one worktree name" >&2; exit 2; }
+      name=$1
+      shift
+      ;;
+  esac
+done
+
+[ -n "$name" ] && [ -n "$mode" ] && [ "$human_authorised" = true ] || {
+  echo "provision-lane-worktree: name, one worktree mode, and --human-authorised are required" >&2
+  usage
+  exit 2
+}
+
+primary_root=$(git -C "$repo" rev-parse --show-toplevel) || {
+  echo "provision-lane-worktree: cannot resolve primary root from $repo" >&2
+  exit 2
+}
+worktree_path="$primary_root/.worktrees/$name"
+case "$mode" in
+  --detach)
+    if ! "$script_dir/worktree" create "$name" --repo "$repo" --human-authorised --detach "$mode_value" >/dev/null; then
+      echo "provision-lane-worktree: worktree creation failed: $worktree_path is not usable" >&2
+      exit 1
+    fi
+    ;;
+  --existing-branch)
+    if ! "$script_dir/worktree" create "$name" --repo "$repo" --human-authorised --existing-branch "$mode_value" >/dev/null; then
+      echo "provision-lane-worktree: worktree creation failed: $worktree_path is not usable" >&2
+      exit 1
+    fi
+    ;;
+  --new-branch)
+    [ "$branch_authorised" = true ] || {
+      echo "provision-lane-worktree: --new-branch also requires --branch-authorised" >&2
+      exit 2
+    }
+    if ! "$script_dir/worktree" create "$name" --repo "$repo" --human-authorised --branch-authorised --new-branch "$mode_value" --start-point "$start_point" >/dev/null; then
+      echo "provision-lane-worktree: worktree creation failed: $worktree_path is not usable" >&2
+      exit 1
+    fi
+    ;;
+esac
+
+if ! "$worktree_path/scripts/install-agent-fabric-dependencies"; then
+  echo "provision-lane-worktree: provisioning failed at dependency installation: $worktree_path is not usable" >&2
+  exit 1
+fi
+
+if ! AGENTS_HOME="$worktree_path" "$worktree_path/scripts/agent-fabric-protocol-build"; then
+  echo "provision-lane-worktree: provisioning failed at protocol build: $worktree_path is not usable" >&2
+  exit 1
+fi
+
+echo "worktree ready=$worktree_path"
