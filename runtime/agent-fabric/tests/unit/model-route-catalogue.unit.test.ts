@@ -246,15 +246,17 @@ it("uses a valid per-task-class capability probe alias override", async () => {
       },
     },
   })}\n`);
-  await writeFile(routerPath, `#!/usr/bin/env node
-console.log(JSON.stringify({
-  schema_version: 1, status: "ok", adapter: "claude", role: "orchestrator",
-  task_class: "orchestration", route_source: "task-class", alias: "flagship",
-  requested_effort: "high", effort: "high", effort_capability_source: "runtime-model-catalog",
-  endpoint_provider: "anthropic", lead_family: "openai", model_family: "anthropic",
-  distinct_from_lead: true, resolved_model: "claude-opus-5",
-  identity_source: "runtime-capability+catalog"
-}));
+  await writeFile(routerPath, `#!/usr/bin/env python3
+import json
+
+print(json.dumps({
+    "schema_version": 1, "status": "ok", "adapter": "claude", "role": "orchestrator",
+    "task_class": "orchestration", "route_source": "task-class", "alias": "flagship",
+    "requested_effort": "high", "effort": "high", "effort_capability_source": "runtime-model-catalog",
+    "endpoint_provider": "anthropic", "lead_family": "openai", "model_family": "anthropic",
+    "distinct_from_lead": True, "resolved_model": "claude-opus-5",
+    "identity_source": "runtime-capability+catalog"
+}))
 `, { mode: 0o700 });
   await writeFile(producerPath, `#!/usr/bin/env node
 const fs = require("node:fs");

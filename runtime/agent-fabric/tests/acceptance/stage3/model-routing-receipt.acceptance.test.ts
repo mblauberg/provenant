@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -11,6 +11,101 @@ import {
 } from "../../support/primary-adapter-testkit.ts";
 
 describe("FR-015 controlled model routing receipt", () => {
+  it("reports the router exit status and stderr when resolve emits no JSON", async () => {
+    const resolveRoute = requirePublicFunction("resolveModelRouteReceipt");
+    const directory = await mkdtemp(join(tmpdir(), "agent-fabric-router-failure-"));
+    const receiptPath = join(directory, "model-route.json");
+    const routerPath = join(directory, "failing-router");
+    await writeFile(routerPath, `#!/usr/bin/env python3
+import sys
+
+print("router diagnostic", file=sys.stderr)
+sys.exit(7)
+`, { mode: 0o700 });
+
+    try {
+      await expect(resolveRoute({
+        routerPath,
+        receiptPath,
+        request: {
+          adapter: "codex",
+          alias: "scout",
+          role: "worker",
+          leadFamily: "anthropic",
+          requireDistinct: true,
+        },
+      })).rejects.toSatisfy((error: unknown) => {
+        return error instanceof Error &&
+          /model router failed.*exit code 7.*router diagnostic/su.test(error.message) &&
+          !error.message.includes("Unexpected end of JSON input");
+      });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("reports the selector exit status and stderr when select emits no JSON", async () => {
+    const selectRoute = requirePublicFunction("selectPreferredModelRouteReceipt");
+    const directory = await mkdtemp(join(tmpdir(), "agent-fabric-selector-failure-"));
+    const receiptPath = join(directory, "selection.json");
+    const routerPath = join(directory, "failing-selector");
+    await writeFile(routerPath, `#!/usr/bin/env python3
+import json
+import sys
+
+if sys.argv[1] == "select":
+    print("selector diagnostic", file=sys.stderr)
+    sys.exit(9)
+
+print(json.dumps({
+    "schema_version": 1,
+    "status": "ok",
+    "adapter": "codex",
+    "role": "critical-review",
+    "task_class": "critical-review",
+    "route_source": "task-class",
+    "alias": "flagship",
+    "requested_effort": "high",
+    "effort": "high",
+    "effort_capability_source": "runtime-model-catalog",
+    "endpoint_provider": "openai",
+    "lead_family": "anthropic",
+    "model_family": "openai",
+    "distinct_from_lead": True,
+    "resolved_model": "reviewer",
+    "identity_source": "runtime-capability+catalog"
+}))
+`, { mode: 0o700 });
+
+    try {
+      await expect(selectRoute({
+        routerPath,
+        receiptPath,
+        preferencesPath: join(directory, "preferences.json"),
+        spreadStatePath: join(directory, "spread-state.json"),
+        taskClass: "critical-review",
+        role: "critical-review",
+        candidates: [{
+          candidateId: "critical-review",
+          request: {
+            adapter: "codex",
+            taskClass: "critical-review",
+            role: "critical-review",
+            leadFamily: "anthropic",
+            requireDistinct: true,
+          },
+          availability: { observation: "Unknown", reason: "AvailabilityNotObserved" },
+        }],
+      })).rejects.toSatisfy((error: unknown) => {
+        return error instanceof Error &&
+          /model preference selector failed.*exit code 9.*selector diagnostic/su.test(error.message) &&
+          !error.message.includes("Unexpected end of JSON input");
+      });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("admits a Claude task-class route at the probed effort and records unverified effort provenance", async () => {
     const resolveRoute = requirePublicFunction("resolveModelRouteReceipt");
     const directory = await mkdtemp(join(tmpdir(), "agent-fabric-claude-capability-"));
@@ -135,10 +230,12 @@ fs.writeFileSync(out, JSON.stringify({
         requireDistinct: true,
       },
     }) as {
-      invocation: { arguments: string[] };
+      invocation: { executable: string; arguments: string[] };
       receipt: Record<string, unknown>;
     };
 
+    expect(resolution.invocation.executable).not.toBe(routerPath);
+    expect(resolution.invocation.arguments[0]).toBe(repositoryPath("scripts/model_route.py"));
     expect(resolution.invocation.arguments).toEqual(expect.arrayContaining([
       "--task-class", "mechanical",
       "--capabilities-file", capabilitiesFile,
@@ -217,13 +314,15 @@ fs.writeFileSync(out, JSON.stringify({
     const directory = await mkdtemp(join(tmpdir(), "agent-fabric-bad-route-receipt-"));
     const receiptPath = join(directory, "model-route.json");
     const routerPath = join(directory, "fake-router");
-    await writeFile(routerPath, `#!/usr/bin/env node
-console.log(JSON.stringify({
-  schema_version: 1, status: "ok", adapter: "claude", role: "worker",
-  alias: "scout", requested_effort: "low", effort: "low",
-  effort_capability_source: "runtime-model-catalog", endpoint_provider: "anthropic",
-  model_family: "anthropic", resolved_model: "haiku", identity_source: "runtime-capability+catalog"
-}));
+    await writeFile(routerPath, `#!/usr/bin/env python3
+import json
+
+print(json.dumps({
+    "schema_version": 1, "status": "ok", "adapter": "claude", "role": "worker",
+    "alias": "scout", "requested_effort": "low", "effort": "low",
+    "effort_capability_source": "runtime-model-catalog", "endpoint_provider": "anthropic",
+    "model_family": "anthropic", "resolved_model": "haiku", "identity_source": "runtime-capability+catalog"
+}))
 `, { mode: 0o700 });
 
     await expect(resolveRoute({
@@ -245,8 +344,10 @@ console.log(JSON.stringify({
     const directory = await mkdtemp(join(tmpdir(), "agent-fabric-malformed-route-receipt-"));
     const receiptPath = join(directory, "model-route.json");
     const routerPath = join(directory, "fake-router");
-    await writeFile(routerPath, `#!/usr/bin/env node
-console.log(JSON.stringify({ schema_version: 1, status: "ok", adapter: "codex", role: "worker", alias: "scout" }));
+    await writeFile(routerPath, `#!/usr/bin/env python3
+import json
+
+print(json.dumps({ "schema_version": 1, "status": "ok", "adapter": "codex", "role": "worker", "alias": "scout" }))
 `, { mode: 0o700 });
 
     await expect(resolveRoute({
@@ -277,16 +378,18 @@ console.log(JSON.stringify({ schema_version: 1, status: "ok", adapter: "codex", 
     const directory = await mkdtemp(join(tmpdir(), "agent-fabric-policy-mismatch-"));
     const receiptPath = join(directory, "model-route.json");
     const routerPath = join(directory, "fake-router");
-    await writeFile(routerPath, `#!/usr/bin/env node
-console.log(JSON.stringify({
-  schema_version: 1, status: "ok", adapter: "codex", role: "critical-review",
-  task_class: "critical-review", route_source: "task-class", alias: ${JSON.stringify(alias)},
-  requested_effort: ${JSON.stringify(requestedEffort)}, effort: ${JSON.stringify(effectiveEffort)},
-  effort_capability_source: "runtime-model-catalog", endpoint_provider: "openai",
-  lead_family: ${JSON.stringify(receiptLeadFamily)}, model_family: ${JSON.stringify(modelFamily)},
-  distinct_from_lead: ${JSON.stringify(distinctFromLead)}, resolved_model: "reviewer",
-  identity_source: "runtime-capability+catalog"
-}));
+    await writeFile(routerPath, `#!/usr/bin/env python3
+import json
+
+print(json.dumps({
+    "schema_version": 1, "status": "ok", "adapter": "codex", "role": "critical-review",
+    "task_class": "critical-review", "route_source": "task-class", "alias": ${JSON.stringify(alias)},
+    "requested_effort": ${JSON.stringify(requestedEffort)}, "effort": ${JSON.stringify(effectiveEffort)},
+    "effort_capability_source": "runtime-model-catalog", "endpoint_provider": "openai",
+    "lead_family": ${JSON.stringify(receiptLeadFamily)}, "model_family": ${JSON.stringify(modelFamily)},
+    "distinct_from_lead": ${distinctFromLead ? "True" : "False"}, "resolved_model": "reviewer",
+    "identity_source": "runtime-capability+catalog"
+}))
 `, { mode: 0o700 });
 
     await expect(resolveRoute({
