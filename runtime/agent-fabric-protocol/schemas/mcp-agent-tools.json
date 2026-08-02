@@ -8927,7 +8927,6 @@
                           "adapterId",
                           "adapterContractDigest",
                           "providerFamily",
-                          "providerAssurance",
                           "resolvedModel",
                           "requestedEffort",
                           "resolvedEffort",
@@ -8976,9 +8975,6 @@
                             "maxLength": 256,
                             "x-minUtf8Bytes": 1,
                             "x-maxUtf8Bytes": 256
-                          },
-                          "providerAssurance": {
-                            "$ref": "#/$defs/generated_10"
                           },
                           "resolvedModel": {
                             "type": "string",
@@ -9265,6 +9261,9 @@
                                 "type": "null"
                               }
                             ]
+                          },
+                          "providerAssurance": {
+                            "$ref": "#/$defs/generated_10"
                           }
                         }
                       },
@@ -9296,7 +9295,6 @@
                               "terminalSequence",
                               "terminalResultDigest",
                               "currentCertificationBasis",
-                              "providerAssurance",
                               "certifying",
                               "providerAnswerDigest",
                               "reviewResultDigest",
@@ -9322,9 +9320,6 @@
                               },
                               "currentCertificationBasis": {
                                 "$ref": "#/$defs/generated_1"
-                              },
-                              "providerAssurance": {
-                                "$ref": "#/$defs/generated_10"
                               },
                               "certifying": {
                                 "type": "boolean"
@@ -9363,6 +9358,9 @@
                               "coverageSummaryDigest": {
                                 "type": "string",
                                 "pattern": "^sha256:[a-f0-9]{64}$"
+                              },
+                              "providerAssurance": {
+                                "$ref": "#/$defs/generated_10"
                               }
                             }
                           },
@@ -9374,7 +9372,6 @@
                               "terminalSequence",
                               "terminalResultDigest",
                               "currentCertificationBasis",
-                              "providerAssurance",
                               "certifying",
                               "providerAnswerDigest",
                               "reviewResultDigest",
@@ -9400,9 +9397,6 @@
                               },
                               "currentCertificationBasis": {
                                 "$ref": "#/$defs/generated_1"
-                              },
-                              "providerAssurance": {
-                                "$ref": "#/$defs/generated_10"
                               },
                               "certifying": {
                                 "type": "boolean"
@@ -9436,6 +9430,9 @@
                               "coverageSummaryDigest": {
                                 "type": "string",
                                 "pattern": "^sha256:[a-f0-9]{64}$"
+                              },
+                              "providerAssurance": {
+                                "$ref": "#/$defs/generated_10"
                               }
                             }
                           },
@@ -9447,7 +9444,6 @@
                               "terminalSequence",
                               "terminalResultDigest",
                               "currentCertificationBasis",
-                              "providerAssurance",
                               "certifying",
                               "providerAnswerDigest",
                               "reviewResultDigest",
@@ -9473,9 +9469,6 @@
                               },
                               "currentCertificationBasis": {
                                 "$ref": "#/$defs/generated_1"
-                              },
-                              "providerAssurance": {
-                                "$ref": "#/$defs/generated_10"
                               },
                               "certifying": {
                                 "type": "boolean"
@@ -9512,6 +9505,9 @@
                               },
                               "coverageSummaryDigest": {
                                 "const": null
+                              },
+                              "providerAssurance": {
+                                "$ref": "#/$defs/generated_10"
                               }
                             }
                           },
@@ -9523,7 +9519,6 @@
                               "terminalSequence",
                               "terminalResultDigest",
                               "currentCertificationBasis",
-                              "providerAssurance",
                               "certifying",
                               "providerAnswerDigest",
                               "reviewResultDigest",
@@ -9550,9 +9545,6 @@
                               "currentCertificationBasis": {
                                 "$ref": "#/$defs/generated_1"
                               },
-                              "providerAssurance": {
-                                "$ref": "#/$defs/generated_10"
-                              },
                               "certifying": {
                                 "type": "boolean"
                               },
@@ -9583,6 +9575,9 @@
                               },
                               "coverageSummaryDigest": {
                                 "const": null
+                              },
+                              "providerAssurance": {
+                                "$ref": "#/$defs/generated_10"
                               }
                             }
                           },
@@ -9594,7 +9589,6 @@
                               "terminalSequence",
                               "terminalResultDigest",
                               "currentCertificationBasis",
-                              "providerAssurance",
                               "certifying",
                               "providerAnswerDigest",
                               "reviewResultDigest",
@@ -9621,9 +9615,6 @@
                               "currentCertificationBasis": {
                                 "$ref": "#/$defs/generated_1"
                               },
-                              "providerAssurance": {
-                                "$ref": "#/$defs/generated_10"
-                              },
                               "certifying": {
                                 "type": "boolean"
                               },
@@ -9654,6 +9645,9 @@
                               },
                               "coverageSummaryDigest": {
                                 "const": null
+                              },
+                              "providerAssurance": {
+                                "$ref": "#/$defs/generated_10"
                               }
                             }
                           },
@@ -9665,7 +9659,6 @@
                               "terminalSequence",
                               "terminalResultDigest",
                               "currentCertificationBasis",
-                              "providerAssurance",
                               "certifying",
                               "providerAnswerDigest",
                               "reviewResultDigest",
@@ -9692,9 +9685,6 @@
                               "currentCertificationBasis": {
                                 "$ref": "#/$defs/generated_1"
                               },
-                              "providerAssurance": {
-                                "$ref": "#/$defs/generated_10"
-                              },
                               "certifying": {
                                 "type": "boolean"
                               },
@@ -9725,6 +9715,9 @@
                               },
                               "coverageSummaryDigest": {
                                 "const": null
+                              },
+                              "providerAssurance": {
+                                "$ref": "#/$defs/generated_10"
                               }
                             }
                           }
@@ -10128,7 +10121,7 @@
         }
       },
       "inputCodecDigest": "sha256:7f37498fd0633a6a8a6a0c79dbf402279c8819a0241c4c342a8f6bc867ad4d74",
-      "outputCodecDigest": "sha256:54aa2984762d3b82f5d4e15165e1ff29e2e29b18bb34d09e13b6639bf47e2d0d"
+      "outputCodecDigest": "sha256:314ed5b0626e98be6c85c542095811698fa240f3002512c74e9c72744c0ab26f"
     },
     {
       "operation": "fabric.v1.provider-action.read",
@@ -10365,7 +10358,6 @@
                           "adapterId",
                           "adapterContractDigest",
                           "providerFamily",
-                          "providerAssurance",
                           "resolvedModel",
                           "requestedEffort",
                           "resolvedEffort",
@@ -10414,9 +10406,6 @@
                             "maxLength": 256,
                             "x-minUtf8Bytes": 1,
                             "x-maxUtf8Bytes": 256
-                          },
-                          "providerAssurance": {
-                            "$ref": "#/$defs/generated_10"
                           },
                           "resolvedModel": {
                             "type": "string",
@@ -10703,6 +10692,9 @@
                                 "type": "null"
                               }
                             ]
+                          },
+                          "providerAssurance": {
+                            "$ref": "#/$defs/generated_10"
                           }
                         }
                       },
@@ -10734,7 +10726,6 @@
                               "terminalSequence",
                               "terminalResultDigest",
                               "currentCertificationBasis",
-                              "providerAssurance",
                               "certifying",
                               "providerAnswerDigest",
                               "reviewResultDigest",
@@ -10760,9 +10751,6 @@
                               },
                               "currentCertificationBasis": {
                                 "$ref": "#/$defs/generated_1"
-                              },
-                              "providerAssurance": {
-                                "$ref": "#/$defs/generated_10"
                               },
                               "certifying": {
                                 "type": "boolean"
@@ -10801,6 +10789,9 @@
                               "coverageSummaryDigest": {
                                 "type": "string",
                                 "pattern": "^sha256:[a-f0-9]{64}$"
+                              },
+                              "providerAssurance": {
+                                "$ref": "#/$defs/generated_10"
                               }
                             }
                           },
@@ -10812,7 +10803,6 @@
                               "terminalSequence",
                               "terminalResultDigest",
                               "currentCertificationBasis",
-                              "providerAssurance",
                               "certifying",
                               "providerAnswerDigest",
                               "reviewResultDigest",
@@ -10838,9 +10828,6 @@
                               },
                               "currentCertificationBasis": {
                                 "$ref": "#/$defs/generated_1"
-                              },
-                              "providerAssurance": {
-                                "$ref": "#/$defs/generated_10"
                               },
                               "certifying": {
                                 "type": "boolean"
@@ -10874,6 +10861,9 @@
                               "coverageSummaryDigest": {
                                 "type": "string",
                                 "pattern": "^sha256:[a-f0-9]{64}$"
+                              },
+                              "providerAssurance": {
+                                "$ref": "#/$defs/generated_10"
                               }
                             }
                           },
@@ -10885,7 +10875,6 @@
                               "terminalSequence",
                               "terminalResultDigest",
                               "currentCertificationBasis",
-                              "providerAssurance",
                               "certifying",
                               "providerAnswerDigest",
                               "reviewResultDigest",
@@ -10911,9 +10900,6 @@
                               },
                               "currentCertificationBasis": {
                                 "$ref": "#/$defs/generated_1"
-                              },
-                              "providerAssurance": {
-                                "$ref": "#/$defs/generated_10"
                               },
                               "certifying": {
                                 "type": "boolean"
@@ -10950,6 +10936,9 @@
                               },
                               "coverageSummaryDigest": {
                                 "const": null
+                              },
+                              "providerAssurance": {
+                                "$ref": "#/$defs/generated_10"
                               }
                             }
                           },
@@ -10961,7 +10950,6 @@
                               "terminalSequence",
                               "terminalResultDigest",
                               "currentCertificationBasis",
-                              "providerAssurance",
                               "certifying",
                               "providerAnswerDigest",
                               "reviewResultDigest",
@@ -10988,9 +10976,6 @@
                               "currentCertificationBasis": {
                                 "$ref": "#/$defs/generated_1"
                               },
-                              "providerAssurance": {
-                                "$ref": "#/$defs/generated_10"
-                              },
                               "certifying": {
                                 "type": "boolean"
                               },
@@ -11021,6 +11006,9 @@
                               },
                               "coverageSummaryDigest": {
                                 "const": null
+                              },
+                              "providerAssurance": {
+                                "$ref": "#/$defs/generated_10"
                               }
                             }
                           },
@@ -11032,7 +11020,6 @@
                               "terminalSequence",
                               "terminalResultDigest",
                               "currentCertificationBasis",
-                              "providerAssurance",
                               "certifying",
                               "providerAnswerDigest",
                               "reviewResultDigest",
@@ -11059,9 +11046,6 @@
                               "currentCertificationBasis": {
                                 "$ref": "#/$defs/generated_1"
                               },
-                              "providerAssurance": {
-                                "$ref": "#/$defs/generated_10"
-                              },
                               "certifying": {
                                 "type": "boolean"
                               },
@@ -11092,6 +11076,9 @@
                               },
                               "coverageSummaryDigest": {
                                 "const": null
+                              },
+                              "providerAssurance": {
+                                "$ref": "#/$defs/generated_10"
                               }
                             }
                           },
@@ -11103,7 +11090,6 @@
                               "terminalSequence",
                               "terminalResultDigest",
                               "currentCertificationBasis",
-                              "providerAssurance",
                               "certifying",
                               "providerAnswerDigest",
                               "reviewResultDigest",
@@ -11130,9 +11116,6 @@
                               "currentCertificationBasis": {
                                 "$ref": "#/$defs/generated_1"
                               },
-                              "providerAssurance": {
-                                "$ref": "#/$defs/generated_10"
-                              },
                               "certifying": {
                                 "type": "boolean"
                               },
@@ -11163,6 +11146,9 @@
                               },
                               "coverageSummaryDigest": {
                                 "const": null
+                              },
+                              "providerAssurance": {
+                                "$ref": "#/$defs/generated_10"
                               }
                             }
                           }
@@ -11566,7 +11552,7 @@
         }
       },
       "inputCodecDigest": "sha256:acaf2439712c4dcb0ce2c1f1ffc1ec8aa49d5cf1fff5434120d3a61e56b92627",
-      "outputCodecDigest": "sha256:54aa2984762d3b82f5d4e15165e1ff29e2e29b18bb34d09e13b6639bf47e2d0d"
+      "outputCodecDigest": "sha256:314ed5b0626e98be6c85c542095811698fa240f3002512c74e9c72744c0ab26f"
     },
     {
       "operation": "fabric.v1.provider-action.reconcile",
@@ -11807,7 +11793,6 @@
                           "adapterId",
                           "adapterContractDigest",
                           "providerFamily",
-                          "providerAssurance",
                           "resolvedModel",
                           "requestedEffort",
                           "resolvedEffort",
@@ -11856,9 +11841,6 @@
                             "maxLength": 256,
                             "x-minUtf8Bytes": 1,
                             "x-maxUtf8Bytes": 256
-                          },
-                          "providerAssurance": {
-                            "$ref": "#/$defs/generated_10"
                           },
                           "resolvedModel": {
                             "type": "string",
@@ -12145,6 +12127,9 @@
                                 "type": "null"
                               }
                             ]
+                          },
+                          "providerAssurance": {
+                            "$ref": "#/$defs/generated_10"
                           }
                         }
                       },
@@ -12176,7 +12161,6 @@
                               "terminalSequence",
                               "terminalResultDigest",
                               "currentCertificationBasis",
-                              "providerAssurance",
                               "certifying",
                               "providerAnswerDigest",
                               "reviewResultDigest",
@@ -12202,9 +12186,6 @@
                               },
                               "currentCertificationBasis": {
                                 "$ref": "#/$defs/generated_1"
-                              },
-                              "providerAssurance": {
-                                "$ref": "#/$defs/generated_10"
                               },
                               "certifying": {
                                 "type": "boolean"
@@ -12243,6 +12224,9 @@
                               "coverageSummaryDigest": {
                                 "type": "string",
                                 "pattern": "^sha256:[a-f0-9]{64}$"
+                              },
+                              "providerAssurance": {
+                                "$ref": "#/$defs/generated_10"
                               }
                             }
                           },
@@ -12254,7 +12238,6 @@
                               "terminalSequence",
                               "terminalResultDigest",
                               "currentCertificationBasis",
-                              "providerAssurance",
                               "certifying",
                               "providerAnswerDigest",
                               "reviewResultDigest",
@@ -12280,9 +12263,6 @@
                               },
                               "currentCertificationBasis": {
                                 "$ref": "#/$defs/generated_1"
-                              },
-                              "providerAssurance": {
-                                "$ref": "#/$defs/generated_10"
                               },
                               "certifying": {
                                 "type": "boolean"
@@ -12316,6 +12296,9 @@
                               "coverageSummaryDigest": {
                                 "type": "string",
                                 "pattern": "^sha256:[a-f0-9]{64}$"
+                              },
+                              "providerAssurance": {
+                                "$ref": "#/$defs/generated_10"
                               }
                             }
                           },
@@ -12327,7 +12310,6 @@
                               "terminalSequence",
                               "terminalResultDigest",
                               "currentCertificationBasis",
-                              "providerAssurance",
                               "certifying",
                               "providerAnswerDigest",
                               "reviewResultDigest",
@@ -12353,9 +12335,6 @@
                               },
                               "currentCertificationBasis": {
                                 "$ref": "#/$defs/generated_1"
-                              },
-                              "providerAssurance": {
-                                "$ref": "#/$defs/generated_10"
                               },
                               "certifying": {
                                 "type": "boolean"
@@ -12392,6 +12371,9 @@
                               },
                               "coverageSummaryDigest": {
                                 "const": null
+                              },
+                              "providerAssurance": {
+                                "$ref": "#/$defs/generated_10"
                               }
                             }
                           },
@@ -12403,7 +12385,6 @@
                               "terminalSequence",
                               "terminalResultDigest",
                               "currentCertificationBasis",
-                              "providerAssurance",
                               "certifying",
                               "providerAnswerDigest",
                               "reviewResultDigest",
@@ -12430,9 +12411,6 @@
                               "currentCertificationBasis": {
                                 "$ref": "#/$defs/generated_1"
                               },
-                              "providerAssurance": {
-                                "$ref": "#/$defs/generated_10"
-                              },
                               "certifying": {
                                 "type": "boolean"
                               },
@@ -12463,6 +12441,9 @@
                               },
                               "coverageSummaryDigest": {
                                 "const": null
+                              },
+                              "providerAssurance": {
+                                "$ref": "#/$defs/generated_10"
                               }
                             }
                           },
@@ -12474,7 +12455,6 @@
                               "terminalSequence",
                               "terminalResultDigest",
                               "currentCertificationBasis",
-                              "providerAssurance",
                               "certifying",
                               "providerAnswerDigest",
                               "reviewResultDigest",
@@ -12501,9 +12481,6 @@
                               "currentCertificationBasis": {
                                 "$ref": "#/$defs/generated_1"
                               },
-                              "providerAssurance": {
-                                "$ref": "#/$defs/generated_10"
-                              },
                               "certifying": {
                                 "type": "boolean"
                               },
@@ -12534,6 +12511,9 @@
                               },
                               "coverageSummaryDigest": {
                                 "const": null
+                              },
+                              "providerAssurance": {
+                                "$ref": "#/$defs/generated_10"
                               }
                             }
                           },
@@ -12545,7 +12525,6 @@
                               "terminalSequence",
                               "terminalResultDigest",
                               "currentCertificationBasis",
-                              "providerAssurance",
                               "certifying",
                               "providerAnswerDigest",
                               "reviewResultDigest",
@@ -12572,9 +12551,6 @@
                               "currentCertificationBasis": {
                                 "$ref": "#/$defs/generated_1"
                               },
-                              "providerAssurance": {
-                                "$ref": "#/$defs/generated_10"
-                              },
                               "certifying": {
                                 "type": "boolean"
                               },
@@ -12605,6 +12581,9 @@
                               },
                               "coverageSummaryDigest": {
                                 "const": null
+                              },
+                              "providerAssurance": {
+                                "$ref": "#/$defs/generated_10"
                               }
                             }
                           }
@@ -13008,7 +12987,7 @@
         }
       },
       "inputCodecDigest": "sha256:28ee48268d11ba40ced5a25a1d8273f6fb1be4cec62b084b9381449a01c16037",
-      "outputCodecDigest": "sha256:54aa2984762d3b82f5d4e15165e1ff29e2e29b18bb34d09e13b6639bf47e2d0d"
+      "outputCodecDigest": "sha256:314ed5b0626e98be6c85c542095811698fa240f3002512c74e9c72744c0ab26f"
     },
     {
       "operation": "fabric.v1.provider-context-pressure.read",
@@ -19918,7 +19897,6 @@
                     "adapterId",
                     "endpointProvider",
                     "providerFamily",
-                    "providerAssurance",
                     "model",
                     "routeObservationDigest",
                     "actualRouteIdentityDigest",
@@ -20077,15 +20055,6 @@
                       "maxLength": 256,
                       "x-minUtf8Bytes": 1,
                       "x-maxUtf8Bytes": 256
-                    },
-                    "providerAssurance": {
-                      "type": "string",
-                      "enum": [
-                        "full-vendor-identity",
-                        "partial-signed-helpers",
-                        "owner-controlled-install-root",
-                        "lockfile-install-attestation"
-                      ]
                     },
                     "model": {
                       "type": "string",
@@ -20344,6 +20313,15 @@
                       "minItems": 0,
                       "maxItems": 20,
                       "uniqueItems": true
+                    },
+                    "providerAssurance": {
+                      "type": "string",
+                      "enum": [
+                        "full-vendor-identity",
+                        "partial-signed-helpers",
+                        "owner-controlled-install-root",
+                        "lockfile-install-attestation"
+                      ]
                     }
                   },
                   "x-reviewSlotCorrelated": true
@@ -20769,7 +20747,7 @@
         }
       },
       "inputCodecDigest": "sha256:665fe0ba3fd5598d8ca4dcdf8b81c771a4818b88d54d90e19e7e854de0446bb7",
-      "outputCodecDigest": "sha256:08ad2fef28d4b93e1e8f48319125d0bfb5a9c72c8bf73a4dec1ed97bb5f5fe38"
+      "outputCodecDigest": "sha256:922137b2e88e25a1a9d48e826dcd9edfdce8aa40fe57ba856c309438e0b22a80"
     },
     {
       "operation": "fabric.v1.review-evidence-annotation.current.read",
@@ -21325,7 +21303,6 @@
                         "providerFailureCode",
                         "providerFailureDigest",
                         "routeReceiptDigest",
-                        "providerAssurance",
                         "routeObservationDigest",
                         "actualRouteIdentityDigest",
                         "finalPromptDigest",
@@ -21453,9 +21430,6 @@
                         "routeReceiptDigest": {
                           "type": "string",
                           "pattern": "^sha256:[a-f0-9]{64}$"
-                        },
-                        "providerAssurance": {
-                          "$ref": "#/$defs/generated_9"
                         },
                         "routeObservationDigest": {
                           "oneOf": [
@@ -21700,6 +21674,9 @@
                         "mutationReceiptDigest": {
                           "type": "string",
                           "pattern": "^sha256:[a-f0-9]{64}$"
+                        },
+                        "providerAssurance": {
+                          "$ref": "#/$defs/generated_9"
                         }
                       },
                       "x-reviewEvidenceCorrelated": true
@@ -21713,7 +21690,6 @@
                         "chair",
                         "profile",
                         "currentCertificationBasis",
-                        "providerAssurance",
                         "certifying",
                         "blockerCodes"
                       ],
@@ -21757,9 +21733,6 @@
                             }
                           ]
                         },
-                        "providerAssurance": {
-                          "$ref": "#/$defs/generated_9"
-                        },
                         "certifying": {
                           "type": "boolean"
                         },
@@ -21800,6 +21773,9 @@
                           "minItems": 0,
                           "maxItems": 32,
                           "uniqueItems": true
+                        },
+                        "providerAssurance": {
+                          "$ref": "#/$defs/generated_9"
                         }
                       },
                       "x-reviewEvidenceCurrencyCorrelated": true
@@ -22197,7 +22173,7 @@
         }
       },
       "inputCodecDigest": "sha256:a023e90e3b5dd6df9405ec9c67ab6c80aec02b932398145a23e2da60754365b4",
-      "outputCodecDigest": "sha256:38486935d53d910b57a8c98eda5d9dcf1a912732580f3fc8016145e07aa3be14"
+      "outputCodecDigest": "sha256:e80cfd3ce6d9ce9c1ddcb40cb77d6b404aa3a124976dc34e84f911de727a60f4"
     },
     {
       "operation": "fabric.v1.review-evidence.read",
@@ -22276,7 +22252,6 @@
                   "providerFailureCode",
                   "providerFailureDigest",
                   "routeReceiptDigest",
-                  "providerAssurance",
                   "routeObservationDigest",
                   "actualRouteIdentityDigest",
                   "finalPromptDigest",
@@ -22404,9 +22379,6 @@
                   "routeReceiptDigest": {
                     "type": "string",
                     "pattern": "^sha256:[a-f0-9]{64}$"
-                  },
-                  "providerAssurance": {
-                    "$ref": "#/$defs/generated_8"
                   },
                   "routeObservationDigest": {
                     "oneOf": [
@@ -22662,6 +22634,9 @@
                   "mutationReceiptDigest": {
                     "type": "string",
                     "pattern": "^sha256:[a-f0-9]{64}$"
+                  },
+                  "providerAssurance": {
+                    "$ref": "#/$defs/generated_8"
                   }
                 },
                 "x-reviewEvidenceCorrelated": true
@@ -22675,7 +22650,6 @@
                   "chair",
                   "profile",
                   "currentCertificationBasis",
-                  "providerAssurance",
                   "certifying",
                   "blockerCodes"
                 ],
@@ -22719,9 +22693,6 @@
                       }
                     ]
                   },
-                  "providerAssurance": {
-                    "$ref": "#/$defs/generated_8"
-                  },
                   "certifying": {
                     "type": "boolean"
                   },
@@ -22762,6 +22733,9 @@
                     "minItems": 0,
                     "maxItems": 32,
                     "uniqueItems": true
+                  },
+                  "providerAssurance": {
+                    "$ref": "#/$defs/generated_8"
                   }
                 },
                 "x-reviewEvidenceCurrencyCorrelated": true
@@ -23137,7 +23111,7 @@
         }
       },
       "inputCodecDigest": "sha256:025640b921e0d7496ebfceea9e165c2947efd38375791542cda96206088acb0b",
-      "outputCodecDigest": "sha256:ea908260c1ec6dbf1c37592bb4867f921ff83d1da7b563609c922e0091d9a4c3"
+      "outputCodecDigest": "sha256:a2dae7c676c560fbd40431849d43e82ba6a58f5371e5e3a2386d0dc7ebc36516"
     },
     {
       "operation": "fabric.v1.review-finding-page.read",

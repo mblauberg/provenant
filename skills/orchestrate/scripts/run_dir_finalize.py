@@ -50,6 +50,10 @@ REQUIRED_GATES = {
     "Final claims have source/test/file anchors",
     "Context hygiene classified: durable outputs retained; owned ephemeral payload archived/removed",
 }
+CERTIFYING_PROVIDER_ASSURANCE = frozenset({
+    "full-vendor-identity",
+    "lockfile-install-attestation",
+})
 
 
 def _inside(root: Path, candidate: Path) -> bool:
@@ -190,7 +194,7 @@ def _validate_review_plan(raw: object, run_dir: Path | None = None) -> list[str]
                                 errors.append(f"receipt review_plan.reviews[{index}].route_receipt does not prove flagship strength")
                             if review["scope"] == "primary" and (
                                 route_value.get("cross_family") is not True
-                                or route_value.get("certification_eligible") is not True
+                                or route_value.get("provider_assurance") not in CERTIFYING_PROVIDER_ASSURANCE
                             ):
                                 errors.append(f"receipt review_plan.reviews[{index}].route_receipt is not certification eligible")
         if not isinstance(review["wave"], int) or isinstance(review["wave"], bool) or review["wave"] < 0:

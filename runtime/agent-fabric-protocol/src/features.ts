@@ -7,6 +7,8 @@ import {
 export const FABRIC_PROTOCOL_VERSION = 1 as const;
 export const ACTIVITY_NARRATIVE_GROUPING_FEATURE =
   "activity-narrative-grouping.v1" as const;
+export const PROVIDER_ASSURANCE_RESULT_SHAPE_FEATURE =
+  "provider-assurance-result-shape.v1" as const;
 
 export const OPERATION_FEATURES = [
   "fabric-core.v1",
@@ -51,12 +53,14 @@ export const RESULT_SHAPE_FEATURES = [
   ACTIVITY_NARRATIVE_GROUPING_FEATURE,
   "mcp-bootstrap-credentials.v2",
   "mcp-bootstrap-result-shape.v1",
+  PROVIDER_ASSURANCE_RESULT_SHAPE_FEATURE,
 ] as const;
 
 export const GATE_SYSTEM_SUPERSESSION_FEATURE = "gate-system-supersession.v1" as const;
 
 export const AGENT_RESULT_SHAPE_FEATURES = [
   GATE_SYSTEM_SUPERSESSION_FEATURE,
+  PROVIDER_ASSURANCE_RESULT_SHAPE_FEATURE,
 ] as const;
 
 export const PROTOCOL_FEATURES = [

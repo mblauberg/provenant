@@ -255,13 +255,24 @@ owner_failure_is_unavailable() {
   esac
 }
 
+owner_json_option_is_unsupported() {
+  local diagnostic
+  diagnostic="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+  case "$diagnostic" in
+    *unknown*--json*|*unrecognized*--json*|*unsupported*--json*|*--json*unknown*|*--json*unrecognized*|*--json*unsupported*)
+      return 0;;
+    *) return 1;;
+  esac
+}
+
 resolve_adapter_executable() {
-  local tool="$1" diag="$2" adapter_id="$3" command_name owner_root owner owner_output owner_rc
+  local tool="$1" diag="$2" adapter_id="$3" command_name owner_root owner owner_output owner_rc owner_json_fallback
   adapter_resolution=""
   adapter_executable=""
   adapter_resolution_reason=""
   provider_assurance=""
   certifying_answer_bearing_leg="false"
+  owner_json_fallback=false
   command_name="$(adapter_command_for_tool "$tool")" || {
     adapter_resolution="unavailable"
     adapter_resolution_reason="no adapter command mapping for $tool"
@@ -279,6 +290,15 @@ resolve_adapter_executable() {
         --instance-root "${AGENT_FABRIC_INSTANCE_ROOT:-$PRODUCT_ROOT}" \
         --json; } 2>"$diag")"
       owner_rc=$?
+      if [ "$owner_rc" -ne 0 ] && owner_json_option_is_unsupported "$(cat "$diag" 2>/dev/null)"; then
+        owner_json_fallback=true
+        echo "DEGRADED: owner CLI does not support --json; retrying legacy plain-path resolution" >>"$diag"
+        owner_output="$({ "$owner" adapter executable \
+          --adapter "$adapter_id" \
+          --product-root "$PRODUCT_ROOT" \
+          --instance-root "${AGENT_FABRIC_INSTANCE_ROOT:-$PRODUCT_ROOT}"; } 2>>"$diag")"
+        owner_rc=$?
+      fi
       if [ "$owner_rc" -eq 0 ]; then
         local owner_executable owner_assurance owner_certifying
         owner_executable="$(printf '%s' "$owner_output" | python3 -c 'import json,sys
@@ -314,6 +334,10 @@ print("true" if isinstance(value, dict) and value.get("certifying_answer_bearing
           adapter_executable="$owner_executable"
           provider_assurance="$owner_assurance"
           certifying_answer_bearing_leg="$owner_certifying"
+          if [ "$owner_json_fallback" = true ]; then
+            adapter_resolution_reason="DEGRADED: owner CLI legacy plain-path response has unknown provider assurance"
+            echo "$adapter_resolution_reason" >>"$diag"
+          fi
           return 0
         fi
         adapter_resolution="rejected"

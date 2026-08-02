@@ -46,6 +46,7 @@ function terminalProjection() {
     slot: "native",
     slotHeadGeneration: 0,
     attemptGeneration: 1,
+    providerAssurance: "full-vendor-identity",
   } as const;
   const terminalReview = {
     kind: "safe-answer",
@@ -105,6 +106,7 @@ function cleanSlot(slot: "native" | "other-primary" | "cursor-grok" | "agy-gemin
     readCoverageDigest: digestA,
     reviewerFamilyRelation: slot === "native" ? "same-family-exempt" : "distinct-family-proved",
     currentCertificationBasis: activeBasis(),
+    providerAssurance: "full-vendor-identity",
     certifying: true,
     openFindingSet: { findingSetDigest: digestA, findingCount: 0, pageDigests: [] },
     blockers: [],
@@ -443,6 +445,7 @@ describe("Agent Fabric re-review protocol repair", () => {
       ...REVIEW_EVIDENCE_CURRENCY_V1_CODEC.example,
       target: "stale",
       currentCertificationBasis: activeBasis(),
+      providerAssurance: "full-vendor-identity",
       certifying: true,
       blockerCodes: [],
     };
@@ -461,7 +464,13 @@ describe("Agent Fabric re-review protocol repair", () => {
         answerSafety: "unusable",
         reviewResultDigest: null,
       },
-      currency: { ...readCurrency, currentCertificationBasis: activeBasis(), certifying: true, blockerCodes: [] },
+      currency: {
+        ...readCurrency,
+        currentCertificationBasis: activeBasis(),
+        providerAssurance: "full-vendor-identity",
+        certifying: true,
+        blockerCodes: [],
+      },
     };
     expect(() => REVIEW_EVIDENCE_READ_V1_CODEC.parse(invalidRead, "read")).toThrow(/certifying|safe/);
     expect(ajv().compile(REVIEW_EVIDENCE_READ_V1_CODEC.schema)(invalidRead)).toBe(false);
@@ -473,6 +482,7 @@ describe("Agent Fabric re-review protocol repair", () => {
         routeObservationDigest: digestA,
         actualRouteIdentityDigest: digestA,
         reviewerFamilyRelation: "same-family-exempt",
+        providerAssurance: "full-vendor-identity",
       },
       currency: {
         ...readCurrency,
@@ -481,6 +491,7 @@ describe("Agent Fabric re-review protocol repair", () => {
         chair: "current",
         profile: "current",
         currentCertificationBasis: activeBasis(),
+        providerAssurance: "full-vendor-identity",
         certifying: true,
         blockerCodes: [],
       },
@@ -503,6 +514,7 @@ describe("Agent Fabric re-review protocol repair", () => {
         actualRouteIdentityDigest: digestA,
         reviewerFamilyRelation: "same-family-exempt",
         certificationBasisAtTerminal: activeBasis(),
+        providerAssurance: "full-vendor-identity",
       },
       currency: {
         ...readCurrency,
@@ -511,6 +523,7 @@ describe("Agent Fabric re-review protocol repair", () => {
         chair: "current",
         profile: "current",
         currentCertificationBasis: activeBasis(),
+        providerAssurance: "full-vendor-identity",
         certifying: true,
         blockerCodes: [],
       },

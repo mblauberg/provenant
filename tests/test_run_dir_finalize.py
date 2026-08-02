@@ -167,7 +167,7 @@ def test_primary_advisory_assurance_route_cannot_finalize_as_certifying(tmp_path
     primary = plan["reviews"][-1]
     route_path = tmp_path / primary["route_receipt"]["path"]
     route = json.loads(route_path.read_text())
-    route.update({"provider_assurance": "partial-signed-helpers", "certification_eligible": False})
+    route.update({"provider_assurance": "partial-signed-helpers", "certification_eligible": True})
     route_path.write_text(json.dumps(route))
     primary["route_receipt"]["digest"] = "sha256:" + __import__("hashlib").sha256(route_path.read_bytes()).hexdigest()
 

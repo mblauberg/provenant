@@ -1180,6 +1180,35 @@ def test_artifact_add_rejects_validator_invalid_shape(tmp_path, artifact_class, 
     assert "artifact" in result.stderr
 
 
+@pytest.mark.parametrize("assurance", ["partial-signed-helpers", "owner-controlled-install-root"])
+def test_review_add_rejects_advisory_assurance_even_with_true_certification_boolean(tmp_path, assurance):
+    run_dir = init_run(tmp_path)
+    review = tmp_path / "review.md"
+    review.write_text("review\n")
+    route = tmp_path / "route.json"
+    route.write_text(json.dumps({
+        "status": "ok",
+        "adapter": "claude",
+        "reviewer_id": "reviewer-01",
+        "resolved_model": "opus",
+        "model_family": "anthropic",
+        "cross_family": True,
+        "provider_assurance": assurance,
+        "certification_eligible": True,
+    }))
+
+    result = run_producer(
+        tmp_path, "review", "add", "--run-dir", str(run_dir), "--id", "review-01",
+        "--role", "other-primary", "--artifact", review.name,
+        "--route-receipt", route.name, "--reviewer-id", "reviewer-01",
+        "--adapter", "claude", "--provider-family", "anthropic", "--model", "opus",
+        "--lens", "correctness",
+    )
+
+    assert result.returncode == 1
+    assert "route receipt identity" in result.stderr
+
+
 def test_approval_gate_rehashes_changed_live_design_bytes(tmp_path):
     run_dir = init_run(tmp_path)
     module = load_module(PRODUCER, "delivery_receipt_live_design_test")
