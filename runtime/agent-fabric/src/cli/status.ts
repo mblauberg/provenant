@@ -7,7 +7,11 @@ import {
   assertRequiredResultShapeFeatures,
 } from "@local/agent-fabric-protocol";
 
-import { verifyAdapterCompatibility, type AdapterExecutableFailure } from "../adapters/compatibility.js";
+import {
+  validateEnabledAdapterExecutables,
+  verifyAdapterCompatibility,
+  type AdapterExecutableFailure,
+} from "../adapters/compatibility.js";
 import { isPrimaryAdapter } from "../adapters/primary-adapters.js";
 import { verifyProviderConformance } from "../adapters/provider-conformance.js";
 import {
@@ -482,13 +486,22 @@ export async function fabricStatus(
     allowUnavailableOptional: true,
     resolveExecutables: false,
   });
+  const executables = await validateEnabledAdapterExecutables({
+    compatibilityPath: selected.compatibility,
+    schemaPath: selected.compatibilitySchema,
+    adapterIds: config.adapterIds,
+    mandatoryPrimary: false,
+  });
   return {
     schemaVersion: 1,
     daemon,
     executionProfile: config.executionProfile ?? "headless",
     configuredAdapters: config.adapterIds,
     activeAdapters: daemon.activeAdapters,
-    optionalAdapters: compatibility.unavailableOptionalAdapters,
+    optionalAdapters: mergeOptionalAdapterFailures(
+      compatibility.unavailableOptionalAdapters,
+      executables.unavailableOptionalAdapters,
+    ),
     trustedWorkspaceRoots: roots,
     project: { path: project, seats: await seatStatus(paths, project, selected.productRoot) },
   };

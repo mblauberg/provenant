@@ -31,6 +31,11 @@ export function resolveCompatibilityArtifact(compatibilityPath: string, value: s
 
 const execFileAsync = promisify(execFile);
 
+function isNotGitRepositoryError(error: unknown): boolean {
+  return isRecord(error) && typeof error.code === "number" && error.code !== 0 &&
+    typeof error.stderr === "string" && /not a git repository/u.test(error.stderr);
+}
+
 type ExecutableLookup = (name: string, path: string) => Promise<string | undefined>;
 
 async function defaultExecutableLookup(name: string, path: string): Promise<string | undefined> {
@@ -201,8 +206,15 @@ async function deriveWrapperProvenance(input: {
   try {
     repositoryRoot = resolve(await gitOutput(wrapperDirectory, ["rev-parse", "--show-toplevel"]));
   } catch (error: unknown) {
-    await verifyWrapperFile({ adapterId: input.adapterId, wrapperPath: configuredWrapperPath });
-    return undefined;
+    if (isNotGitRepositoryError(error)) {
+      await verifyWrapperFile({ adapterId: input.adapterId, wrapperPath: configuredWrapperPath });
+      return undefined;
+    }
+    throw new FabricError(
+      "ADAPTER_COMPATIBILITY_INVALID",
+      `wrapper repository provenance could not be determined: ${input.adapterId}`,
+      { cause: error },
+    );
   }
   try {
     repositoryCommit = await gitOutput(repositoryRoot, ["rev-parse", "HEAD"]);
@@ -471,7 +483,11 @@ export async function validateEnabledAdapterExecutables(input: {
     }
     resolvedExecutables[adapterId] = candidate;
   }
-  const mandatoryIds = new Set(input.activeAdapterIds ?? PRIMARY_ADAPTER_IDS);
+  const mandatoryIds = new Set(
+    input.mandatoryPrimary === false
+      ? (input.activeAdapterIds ?? [])
+      : (input.activeAdapterIds ?? PRIMARY_ADAPTER_IDS),
+  );
   const primaryFailures = failures.filter((failure) => mandatoryIds.has(failure.adapterId) || (input.mandatoryPrimary === true && isPrimaryAdapter(failure.adapterId)));
   if (primaryFailures.length > 0) {
     throw new FabricError("ADAPTER_ARTIFACT_MISSING", ["enabled adapter executable validation failed:", ...failures.flatMap((failure) => failure.reasons.map((reason) => `- ${reason}`))].join("\n"));
