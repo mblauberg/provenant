@@ -26,6 +26,8 @@ PRODUCT_ROOT = HERE.parents[2]
 SCRIPT = HERE.parent / "scripts" / "cf_dispatch.sh"
 PUBLISH_HELPER = HERE.parent / "scripts" / "cf_dispatch_publish.py"
 RUN_DIR_SCRIPT = HERE.parent / "scripts" / "run_dir_init.sh"
+DISPATCH_SUBPROCESS_TIMEOUT = 30.0
+PIPE_DRAIN_TIMEOUT = 5.0
 DISPATCH_SCHEMA = {
     "id",
     "attempt_id",
@@ -67,6 +69,76 @@ DISPATCH_SCHEMA = {
     "certification_eligible",
     "cross_family",
 }
+
+
+def _terminate_process_group(process_id):
+    """Terminate a test subprocess and descendants that inherited its pipes."""
+    try:
+        os.killpg(process_id, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    except OSError:
+        pass
+    try:
+        os.killpg(process_id, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    except OSError:
+        pass
+
+
+def _run_bounded_subprocess(
+    *popenargs, input=None, capture_output=False, timeout=None, check=False, **kwargs
+):
+    """Run a test subprocess with a bounded, process-group-safe timeout."""
+    if input is not None:
+        if kwargs.get("stdin") is not None:
+            raise ValueError("stdin and input arguments may not both be used")
+        kwargs["stdin"] = subprocess.PIPE
+    if capture_output:
+        if kwargs.get("stdout") is not None or kwargs.get("stderr") is not None:
+            raise ValueError("stdout and stderr arguments may not be used with capture_output")
+        kwargs["stdout"] = subprocess.PIPE
+        kwargs["stderr"] = subprocess.PIPE
+    kwargs["start_new_session"] = True
+    wait_timeout = DISPATCH_SUBPROCESS_TIMEOUT if timeout is None else timeout
+    process = subprocess.Popen(*popenargs, **kwargs)
+    stdout = stderr = None
+    try:
+        try:
+            stdout, stderr = process.communicate(input=input, timeout=wait_timeout)
+        except subprocess.TimeoutExpired:
+            _terminate_process_group(process.pid)
+            try:
+                stdout, stderr = process.communicate(timeout=PIPE_DRAIN_TIMEOUT)
+            except subprocess.TimeoutExpired:
+                _terminate_process_group(process.pid)
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    pass
+                try:
+                    stdout, stderr = process.communicate(timeout=PIPE_DRAIN_TIMEOUT)
+                except subprocess.TimeoutExpired as final_error:
+                    stdout, stderr = final_error.output, final_error.stderr
+            raise subprocess.TimeoutExpired(
+                process.args,
+                wait_timeout,
+                output=stdout,
+                stderr=stderr,
+            )
+    finally:
+        _terminate_process_group(process.pid)
+        if process.poll() is None:
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass
+            process.wait(timeout=PIPE_DRAIN_TIMEOUT)
+    completed = subprocess.CompletedProcess(process.args, process.returncode, stdout, stderr)
+    if check:
+        completed.check_returncode()
+    return completed
 
 
 DECLARATORS = {"local", "declare", "typeset"}
@@ -256,7 +328,7 @@ def run_dispatch_with_stub(
             # states one. Tests that assert on containment pass their own.
             extra.extend(["--evidence-root", str(out.parent)])
         command.extend(extra)
-        result = subprocess.run(
+        result = _run_bounded_subprocess(
             command,
             cwd=str(tmp),
             env=env,
@@ -266,6 +338,53 @@ def run_dispatch_with_stub(
         )
         record = json.loads(result.stdout)
         return result, record, out.read_text(encoding="utf-8") if out.exists() else ""
+
+
+def test_bounded_dispatch_wait_does_not_wait_for_orphaned_child():
+    # A route child can exit while its background descendant keeps the
+    # dispatcher's stdout pipe open. The bounded helper must kill that group
+    # before the descendant writes its survivor marker.
+    with tempfile.TemporaryDirectory() as td:
+        marker = Path(td) / "orphan-survived"
+        child = Path(td) / "orphan-child.py"
+        child.write_text(
+            textwrap.dedent(
+                """\
+            import os
+            import time
+            from pathlib import Path
+
+            time.sleep(0.5)
+            Path(os.environ["ORPHAN_MARKER"]).write_text("survived", encoding="utf-8")
+                """
+            ),
+            encoding="utf-8",
+        )
+        dispatch = Path(td) / "orphaning-dispatch.sh"
+        write_executable(
+            dispatch,
+            f"""\
+            #!/usr/bin/env bash
+            {shlex.quote(sys.executable)} {shlex.quote(str(child))} &
+            sleep 10
+            """,
+        )
+        env = os.environ.copy()
+        env["ORPHAN_MARKER"] = str(marker)
+        started = time.monotonic()
+        with pytest.raises(subprocess.TimeoutExpired):
+            _run_bounded_subprocess(
+                [str(dispatch)],
+                cwd=td,
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=0.1,
+            )
+        assert time.monotonic() - started < 0.75
+        time.sleep(0.65)
+        assert not marker.exists()
 
 
 def test_invalid_routing_output_returns_a_structured_failure_record():
@@ -337,7 +456,7 @@ def test_direct_cli_executes_the_verified_adapter_path_once():
             tmp, bin_dir, adapter_id="claude-agent-sdk", executable=bin_dir / "claude"
         )
         env["AGENTS_HOME"] = str(tmp / "owner")
-        result = subprocess.run(
+        result = _run_bounded_subprocess(
             [
                 str(SCRIPT),
                 "--tool", "claude",
@@ -384,7 +503,7 @@ def test_direct_cli_refuses_a_tampered_path_when_owner_rejects_it():
             tmp, bin_dir, adapter_id="claude-agent-sdk", executable=bin_dir / "claude"
         )
         env["AGENTS_HOME"] = str(tmp / "owner")
-        result = subprocess.run(
+        result = _run_bounded_subprocess(
             [
                 str(SCRIPT),
                 "--tool", "claude",
@@ -461,7 +580,7 @@ def test_dispatch_receipt_owns_terminal_fact_and_output_digest():
         env, _ = env_with_test_verified_owner(
             tmp, bin_dir, adapter_id="claude-agent-sdk", executable=bin_dir / "claude"
         )
-        result = subprocess.run(
+        result = _run_bounded_subprocess(
             [
                 str(SCRIPT), "--tool", "claude", "--orchestrator-family", "codex",
                 "--task-id", "task-1", "--attempt-id", "attempt-2", "--receipt", str(receipt_path),
@@ -500,7 +619,7 @@ def test_documented_workflow_separates_answer_from_terminal_artifact_and_joins_e
         env, _ = env_with_test_verified_owner(
             tmp, bin_dir, adapter_id="claude-agent-sdk", executable=bin_dir / "claude"
         )
-        result = subprocess.run(
+        result = _run_bounded_subprocess(
             [
                 str(SCRIPT), "--tool", "claude", "--orchestrator-family", "codex",
                 "--task-id", "review-1", "--attempt-id", "attempt-1",
@@ -722,7 +841,7 @@ def test_publisher_refuses_to_replace_existing_evidence():
         target.write_text("original\n", encoding="utf-8")
         source.write_text("replacement\n", encoding="utf-8")
 
-        result = subprocess.run(
+        result = _run_bounded_subprocess(
             [
                 sys.executable, str(PUBLISH_HELPER), "--root", str(tmp),
                 "publish", str(target), str(source),
@@ -746,7 +865,7 @@ def test_publisher_rejects_symlinked_parent_below_the_bound_run_root():
         source.write_text("immutable evidence\n", encoding="utf-8")
         target = run_dir / "answers" / "answer.txt"
 
-        result = subprocess.run(
+        result = _run_bounded_subprocess(
             [
                 sys.executable, str(PUBLISH_HELPER), "--root", str(run_dir),
                 "publish", str(target), str(source),
@@ -770,7 +889,7 @@ def test_publisher_rejects_fifo_without_blocking(command):
         if command == "identity":
             arguments.append(str(tmp / "other.txt"))
 
-        result = subprocess.run(
+        result = _run_bounded_subprocess(
             arguments,
             cwd=str(tmp), text=True, capture_output=True, timeout=2,
         )
@@ -790,7 +909,7 @@ def test_publisher_accepts_an_unresolved_symlink_alias_for_the_run_root():
         evidence.write_text("immutable evidence\n", encoding="utf-8")
         alias_evidence = alias_run_dir / evidence.name
 
-        result = subprocess.run(
+        result = _run_bounded_subprocess(
             [
                 sys.executable, str(PUBLISH_HELPER), "--root", str(alias_run_dir),
                 "digest", str(alias_evidence),
@@ -817,7 +936,7 @@ def test_dispatch_rejects_evidence_paths_outside_explicit_evidence_root(escaped_
         }
         paths[escaped_option] = outside / paths[escaped_option].name
 
-        result = subprocess.run(
+        result = _run_bounded_subprocess(
             [
                 str(SCRIPT), "--tool", "codex", "--orchestrator-family", "anthropic",
                 "--evidence-root", str(evidence_root), "--out", str(paths["out"]),
@@ -849,7 +968,7 @@ def test_dispatch_accepts_explicit_root_with_receipt_and_default_output_in_diffe
         )
         env["TMPDIR"] = str(temp_root)
 
-        result = subprocess.run(
+        result = _run_bounded_subprocess(
             [
                 str(SCRIPT), "--tool", "claude", "--orchestrator-family", "codex",
                 "--evidence-root", str(run_dir), "--receipt", str(receipt),
@@ -886,7 +1005,7 @@ def test_chain_failed_then_success_preserves_attempt_evidence_and_summary():
         answer = tmp / "review.txt"
         terminal = tmp / "review.terminal.json"
         receipt = tmp / "review.route.json"
-        result = subprocess.run(
+        result = _run_bounded_subprocess(
             [
                 str(SCRIPT), "--chain", "claude claude",
                 "--orchestrator-family", "codex", "--task-id", "chain-1",
@@ -934,7 +1053,7 @@ def test_receipt_write_failure_is_explicitly_non_successful():
         receipt = tmp / "missing" / "dispatch.json"
         env = fabric_free_env()
         env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
-        result = subprocess.run(
+        result = _run_bounded_subprocess(
             [
                 str(SCRIPT), "--tool", "claude", "--orchestrator-family", "codex",
                 "--task-id", "task-1", "--attempt-id", "attempt-1", "--receipt", str(receipt),
@@ -988,7 +1107,7 @@ def test_claude_fallback_runs_after_oauth_safe_mode_model_failure():
 
 
 def test_help_exits_cleanly():
-    result = subprocess.run(
+    result = _run_bounded_subprocess(
         [str(SCRIPT), "--help"],
         text=True,
         stdout=subprocess.PIPE,
@@ -1000,7 +1119,7 @@ def test_help_exits_cleanly():
 
 
 def test_doctor_exits_cleanly():
-    result = subprocess.run(
+    result = _run_bounded_subprocess(
         [str(SCRIPT), "--doctor"],
         text=True,
         stdout=subprocess.PIPE,
@@ -1013,7 +1132,7 @@ def test_doctor_exits_cleanly():
 
 
 def test_missing_option_value_is_clean_error():
-    result = subprocess.run(
+    result = _run_bounded_subprocess(
         [str(SCRIPT), "--tool"],
         text=True,
         stdout=subprocess.PIPE,
@@ -1025,7 +1144,7 @@ def test_missing_option_value_is_clean_error():
 
 
 def test_missing_prompt_file_is_clean_error():
-    result = subprocess.run(
+    result = _run_bounded_subprocess(
         [str(SCRIPT), "--tool", "claude", "--orchestrator-family", "codex", "--prompt-file", "/no/such/file", "--evidence-root", str(Path.cwd())],
         text=True,
         stdout=subprocess.PIPE,
@@ -1092,7 +1211,7 @@ def test_claude_oauth_fallback_uses_verifier_system_prompt():
             adapter_id="claude-agent-sdk",
             executable=bin_dir / "claude",
         )
-        result = subprocess.run(
+        result = _run_bounded_subprocess(
             [
                 str(SCRIPT),
                 "--tool",
@@ -1129,7 +1248,7 @@ def test_claude_oauth_fallback_uses_verifier_system_prompt():
 
 def test_removed_agy_direct_route_fails_closed_with_schema():
     with tempfile.TemporaryDirectory() as td:
-        result = subprocess.run(
+        result = _run_bounded_subprocess(
             [str(SCRIPT), "--tool", "agy", "--model", "gemini-test", "--orchestrator-family", "codex", "--prompt", "Reply exactly OK", "--evidence-root", os.environ.get("TMPDIR", "/tmp")],
             cwd=td,
             text=True,
@@ -1150,7 +1269,7 @@ def test_default_failure_retains_only_the_declared_output_tempfile():
         temp_root.mkdir()
         env = fabric_free_env()
         env["TMPDIR"] = str(temp_root)
-        result = subprocess.run(
+        result = _run_bounded_subprocess(
             [str(SCRIPT), "--tool", "kiro", "--orchestrator-family", "codex", "--prompt", "Review", "--evidence-root", str(temp_root)],
             cwd=td,
             env=env,
@@ -1181,7 +1300,7 @@ def test_default_failure_retains_only_the_declared_output_tempfile():
 
 def test_orchestrator_family_is_required():
     with tempfile.TemporaryDirectory() as td:
-        result = subprocess.run(
+        result = _run_bounded_subprocess(
             [str(SCRIPT), "--tool", "claude", "--prompt", "Reply exactly OK", "--evidence-root", os.environ.get("TMPDIR", "/tmp")],
             cwd=td,
             text=True,
@@ -1200,7 +1319,7 @@ def test_evidence_root_is_required():
         tmp = Path(td).resolve()
         env = fabric_free_env()
         env["TMPDIR"] = str(tmp)
-        result = subprocess.run(
+        result = _run_bounded_subprocess(
             [
                 str(SCRIPT),
                 "--tool",
@@ -1226,7 +1345,7 @@ def test_evidence_root_is_required():
 
 def test_same_family_cli_is_forbidden_when_family_declared():
     with tempfile.TemporaryDirectory() as td:
-        result = subprocess.run(
+        result = _run_bounded_subprocess(
             [
                 str(SCRIPT),
                 "--tool",
@@ -1259,7 +1378,7 @@ def test_cursor_model_provider_prevents_disguised_same_family_review():
         write_executable(bin_dir / "cursor-agent", "#!/usr/bin/env bash\necho OK\n")
         env = fabric_free_env()
         env["PATH"] = f"{bin_dir}:{env['PATH']}"
-        result = subprocess.run(
+        result = _run_bounded_subprocess(
             [
                 str(SCRIPT),
                 "--tool",
@@ -1303,7 +1422,7 @@ def test_cursor_distinct_model_records_adapter_and_provider_family():
             adapter_id="cursor-agent",
             executable=bin_dir / "cursor-agent",
         )
-        result = subprocess.run(
+        result = _run_bounded_subprocess(
             [
                 str(SCRIPT),
                 "--tool",
@@ -1361,7 +1480,7 @@ def test_full_vendor_owner_attestation_can_certify_a_direct_route():
         env = fabric_free_env()
         env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
         env["AGENTS_HOME"] = str(owner_root)
-        result = subprocess.run([
+        result = _run_bounded_subprocess([
             str(SCRIPT), "--tool", "claude", "--orchestrator-family", "codex",
             "--out", str(out), "--prompt", "Review", "--evidence-root", str(tmp),
         ], cwd=td, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -1387,7 +1506,7 @@ def test_direct_cli_does_not_trust_inconsistent_owner_certification_boolean():
         env = fabric_free_env()
         env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
         env["AGENTS_HOME"] = str(tmp / "owner")
-        result = subprocess.run([
+        result = _run_bounded_subprocess([
             str(SCRIPT), "--tool", "cursor", "--model", "cursor-grok-4.5-high",
             "--orchestrator-family", "openai", "--out", str(out), "--prompt", "Review",
             "--evidence-root", str(tmp),
@@ -1414,7 +1533,7 @@ def test_explicit_output_path_preserves_adapter_failure_diagnostics():
             adapter_id="cursor-agent",
             executable=bin_dir / "cursor-agent",
         )
-        result = subprocess.run(
+        result = _run_bounded_subprocess(
             [
                 str(SCRIPT),
                 "--tool",
@@ -1464,7 +1583,7 @@ def test_unwritable_output_path_cannot_certify_success():
             adapter_id="codex-app-server",
             executable=bin_dir / "codex",
         )
-        result = subprocess.run(
+        result = _run_bounded_subprocess(
             [str(SCRIPT), "--tool", "codex", "--orchestrator-family", "anthropic", "--out", str(tmp / "missing" / "out.txt"), "--prompt", "Review", "--evidence-root", str(tmp)],
             cwd=td,
             env=env,
@@ -1516,7 +1635,7 @@ def test_resolved_role_effort_reaches_codex_adapter_and_receipt():
                 entry for entry in env["PATH"].split(os.pathsep)
                 if entry != provenant_dir
             )
-        result = subprocess.run(
+        result = _run_bounded_subprocess(
             [
                 str(SCRIPT),
                 "--tool",
@@ -1574,7 +1693,7 @@ def test_codex_capability_discovery_failure_blocks_execution_with_receipt():
             adapter_id="codex-app-server",
             executable=bin_dir / "codex",
         )
-        result = subprocess.run(
+        result = _run_bounded_subprocess(
             [
                 str(SCRIPT),
                 "--tool",
@@ -1627,7 +1746,7 @@ def test_mixed_malformed_codex_capabilities_block_execution_with_receipt():
             adapter_id="codex-app-server",
             executable=bin_dir / "codex",
         )
-        result = subprocess.run(
+        result = _run_bounded_subprocess(
             [
                 str(SCRIPT),
                 "--tool",
@@ -1678,7 +1797,7 @@ def test_unrelated_codex_model_without_efforts_blocks_execution_with_receipt():
             adapter_id="codex-app-server",
             executable=bin_dir / "codex",
         )
-        result = subprocess.run(
+        result = _run_bounded_subprocess(
             [
                 str(SCRIPT),
                 "--tool",
@@ -1729,7 +1848,7 @@ def test_duplicate_codex_discovery_member_blocks_execution_with_receipt():
             adapter_id="codex-app-server",
             executable=bin_dir / "codex",
         )
-        result = subprocess.run(
+        result = _run_bounded_subprocess(
             [
                 str(SCRIPT),
                 "--tool",
@@ -1780,7 +1899,7 @@ def test_codex_explicit_model_rejection_never_reports_it_as_resolved():
             adapter_id="codex-app-server",
             executable=bin_dir / "codex",
         )
-        result = subprocess.run(
+        result = _run_bounded_subprocess(
             [
                 str(SCRIPT),
                 "--tool",
@@ -1846,7 +1965,7 @@ def test_interrupted_dispatch_cleans_internal_tempfiles():
 
 def test_broker_adapter_requires_resolvable_provider_family():
     with tempfile.TemporaryDirectory() as td:
-        result = subprocess.run(
+        result = _run_bounded_subprocess(
             [
                 str(SCRIPT),
                 "--tool",
@@ -1871,7 +1990,7 @@ def test_broker_adapter_requires_resolvable_provider_family():
 
 def test_manual_provider_override_is_not_supported():
     with tempfile.TemporaryDirectory() as td:
-        result = subprocess.run(
+        result = _run_bounded_subprocess(
             [
                 str(SCRIPT),
                 "--tool",
@@ -1896,7 +2015,7 @@ def test_manual_provider_override_is_not_supported():
 
 def test_invalid_orchestrator_family_fails_closed():
     with tempfile.TemporaryDirectory() as td:
-        result = subprocess.run(
+        result = _run_bounded_subprocess(
             [
                 str(SCRIPT),
                 "--tool",
@@ -1936,7 +2055,7 @@ def test_successful_output_with_auth_words_stays_ok():
 
 def test_chain_all_failed_uses_dispatch_schema():
     with tempfile.TemporaryDirectory() as td:
-        result = subprocess.run(
+        result = _run_bounded_subprocess(
             [
                 str(SCRIPT),
                 "--chain",
@@ -1963,7 +2082,7 @@ def test_chain_all_failed_uses_dispatch_schema():
 
 def test_run_dir_init_force_flag_only_creates_final_gate():
     with tempfile.TemporaryDirectory() as td:
-        result = subprocess.run(
+        result = _run_bounded_subprocess(
             [str(RUN_DIR_SCRIPT), "--force"],
             cwd=td,
             text=True,
@@ -1990,7 +2109,7 @@ def test_run_dir_init_force_does_not_clobber_existing_manifest():
         run_dir.mkdir()
         manifest = run_dir / "MANIFEST.md"
         manifest.write_text("KEEP\\n", encoding="utf-8")
-        result = subprocess.run(
+        result = _run_bounded_subprocess(
             [str(RUN_DIR_SCRIPT), str(run_dir), "--force"],
             cwd=td,
             text=True,
@@ -2078,7 +2197,7 @@ def test_non_git_fallback_routes_via_product_root_model_route():
         # point HOME at the sandbox so an installed provenant cannot leak in.
         env["HOME"] = str(tmp)
         out = tmp / "out.txt"
-        result = subprocess.run(
+        result = _run_bounded_subprocess(
             [
                 str(product / "skills" / "orchestrate" / "scripts" / "cf_dispatch.sh"),
                 "--tool",
