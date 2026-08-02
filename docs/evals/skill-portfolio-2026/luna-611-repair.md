@@ -1,7 +1,7 @@
 # Issue #611 repair evidence
 
 Date: 2026-08-02
-Worktree: `/Users/user/.agents/.worktrees/eval-result-contract`
+Worktree: `$AGENTS_HOME/.worktrees/eval-result-contract`
 Scope: sole-writer repair of the existing uncommitted validator/test diff
 
 ## Result

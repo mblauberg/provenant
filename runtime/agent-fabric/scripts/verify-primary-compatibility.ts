@@ -32,6 +32,7 @@ try {
     schemaPath: join(root, "runtime/agent-fabric/schemas/adapter-compatibility.schema.json"),
     adapterIds,
     requireEnabled: true,
+    resolveExecutables: !compatibilityOnly,
   });
   const observations = [];
   if (!compatibilityOnly) {

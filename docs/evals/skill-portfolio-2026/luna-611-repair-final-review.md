@@ -1,7 +1,7 @@
 # Issue #611 repair final review
 
 Date: 2026-08-02
-Worktree: `/Users/user/.agents/.worktrees/eval-result-contract`
+Worktree: `$AGENTS_HOME/.worktrees/eval-result-contract`
 Scope: current uncommitted validator and fixture-test repair only
 
 ## Verdict

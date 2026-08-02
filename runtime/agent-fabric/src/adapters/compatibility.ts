@@ -250,6 +250,8 @@ export async function verifyAdapterCompatibility(input: {
   adapterIds: string[];
   requireEnabled: boolean;
   allowUnavailableOptional?: boolean;
+  // Metadata callers validate the declaration without the machine's binaries.
+  resolveExecutables?: boolean;
 }): Promise<{
   valid: true;
   adapterIds: string[];
@@ -319,7 +321,11 @@ export async function verifyAdapterCompatibility(input: {
         );
       }
     }
-    if (typeof executable === "string" && (adapter.enabled === true || input.requireEnabled)) {
+    if (
+      input.resolveExecutables !== false
+      && typeof executable === "string"
+      && (adapter.enabled === true || input.requireEnabled)
+    ) {
       try {
         const candidate = await resolveAdapterExecutable({ executable, compatibilityPath: input.compatibilityPath });
         if (!(await isExecutableFile(candidate))) {

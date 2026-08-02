@@ -15,7 +15,7 @@ Supersedes: none
 
 ## Goal and authority
 
-Build a clean, stable, reliable, flexible, extensible, interoperable and easy-to-maintain Provenant baseline without inappropriate production-scale complexity. Provenant is primarily a local personal tool. Keep the current fused `/Users/user/.agents` layout until the user confirms the baseline; the user will perform the `.agents` / Provenant repository split afterward.
+Build a clean, stable, reliable, flexible, extensible, interoperable and easy-to-maintain Provenant baseline without inappropriate production-scale complexity. Provenant is primarily a local personal tool. Keep the current fused `$AGENTS_HOME` layout until the user confirms the baseline; the user will perform the `.agents` / Provenant repository split afterward.
 
 The finished installation must automatically register and use Agent Fabric when Claude Code or Codex starts in arbitrary Git and non-Git projects on this computer. The incoming Claude session is the chair and remains the orchestrator. It should use GPT-5.6 Luna workers for implementation and its own native Opus 5 subagents for independent architecture, correctness and minimality review. Sol is optional only at critical adjudication points; Agy/Gemini may add advisory cross-family pressure after Fabric is healthy.
 
@@ -35,7 +35,7 @@ Reduce findings by evidence rather than vote. Prefer the smallest architectural 
 
 ## Current integration baseline
 
-- Worktree: `/Users/user/.agents/.worktrees/baseline-integration`
+- Worktree: `$AGENTS_HOME/.worktrees/baseline-integration`
 - Branch/head: `baseline-integration` at `8a4ea700`
 - Relationship: `main` is an ancestor; integration is 71 commits ahead.
 - State at handoff: clean.
@@ -59,7 +59,7 @@ Use `ps -p <pid> -o pid=,etime=,time=,command=` and worktree `git status`. Prese
 
 ### Paired completion, issue #608
 
-- Worktree: `/Users/user/.agents/.worktrees/paired-completion-608`
+- Worktree: `$AGENTS_HOME/.worktrees/paired-completion-608`
 - Commits: `137efa62`, `c61efe40`, `9b476a89`
 - Uncommitted final repair: two files, deriving bootstrap expiry from persisted project creation provenance and rejecting forged expiry before CAS.
 - Fresh Luna verification: 8 focused authority tests and schema checks passed. Full typecheck/integration was blocked by the branch's stale external protocol-package link missing `MCP_BOOTSTRAP_RESULT_SHAPE_FEATURE`, not by the two-file repair.
@@ -68,7 +68,7 @@ Use `ps -p <pid> -o pid=,etime=,time=,command=` and worktree `git status`. Prese
 
 ### Automatic trust provenance
 
-- Worktree: `/Users/user/.agents/.worktrees/auto-trust-provenance-fix`
+- Worktree: `$AGENTS_HOME/.worktrees/auto-trust-provenance-fix`
 - Commits: `0f2325c2`, `eae44999`; the latter was an intermediate rejected JSON+SQLite migration design.
 - Current six-file uncommitted redesign removes DB migration/writes. V2 records truthfully persist a versioned trust digest; migrated V1 records retain a validated legacy-compatible digest; new/retrust records use canonical V2.
 - Fresh Luna verification: 83 unit tests, 5 adjacent tests, schema check, typecheck, build and diff check passed. Unix-socket lifecycle tests were sandbox-blocked with `EPERM` (1 pass, 9 blocked/failures). No commit was made.
@@ -136,11 +136,11 @@ Use `ps -p <pid> -o pid=,etime=,time=,command=` and worktree `git status`. Prese
 ## Useful commands
 
 ```sh
-git -C /Users/user/.agents/.worktrees/baseline-integration status --short --branch
-git -C /Users/user/.agents/.worktrees/baseline-integration log --oneline main..HEAD
+git -C $AGENTS_HOME/.worktrees/baseline-integration status --short --branch
+git -C $AGENTS_HOME/.worktrees/baseline-integration log --oneline main..HEAD
 for w in provider-integrated-final-fix paired-completion-608 daemon-build-freshness-fix auto-trust-provenance-fix worker-outcome-consolidated; do
-  git -C "/Users/user/.agents/.worktrees/$w" status --short --branch
-  git -C "/Users/user/.agents/.worktrees/$w" diff --check
+  git -C "$AGENTS_HOME/.worktrees/$w" status --short --branch
+  git -C "$AGENTS_HOME/.worktrees/$w" diff --check
 done
 ps -p 72869,6908,69123 -o pid=,etime=,time=,command=
 lsof -p 12858 | wc -l
