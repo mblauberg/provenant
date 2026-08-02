@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { parse, stringify } from "yaml";
 
-import { composeDaemonAdapters, composeDaemonConfiguration } from "../../src/daemon/composition.ts";
+import { composeDaemonAdapters, composeDaemonConfiguration, parseDaemonAdapters } from "../../src/daemon/composition.ts";
 import { runWorkspaceTrust } from "../../src/cli/workspace-trust.ts";
 import { FabricError } from "../../src/errors.ts";
 import { commitFixtureRepository, writeWrapperPackageScaffold } from "../support/fixture-repository.ts";
@@ -15,6 +15,17 @@ import {
 } from "../support/primary-adapter-testkit.ts";
 
 describe("daemon trusted adapter composition", () => {
+  it("retains partial and owner-controlled assurance as advisory adapter metadata", () => {
+    const adapters = parseDaemonAdapters(JSON.stringify({
+      "cursor-agent": { command: ["cursor"], environment: {}, providerAssurance: "partial-signed-helpers" },
+      "opencode-acp": { command: ["opencode"], environment: {}, providerAssurance: "owner-controlled-install-root" },
+    }));
+    expect(adapters).toMatchObject({
+      "cursor-agent": { providerAssurance: "partial-signed-helpers" },
+      "opencode-acp": { providerAssurance: "owner-controlled-install-root" },
+    });
+  });
+
   it("skips an unavailable active optional adapter and reports its degradation", async () => {
     const fixture = await createPortableActivatedPrimaryFixture();
     try {
@@ -75,7 +86,9 @@ describe("daemon trusted adapter composition", () => {
 
   it("composes only the explicitly activated and runtime-conformant adapters", async () => {
     const fixture = await createPortableActivatedPrimaryFixture();
-    const verifyProvider = vi.fn(async () => ({}) as never);
+    const verifyProvider = vi.fn(async () => ({
+      identity: { assurance: "full-vendor-identity" },
+    }) as never);
     try {
       const adapters = await composeDaemonAdapters({
         globalConfigPath: fixture.configPath,
@@ -88,6 +101,8 @@ describe("daemon trusted adapter composition", () => {
       expect(Object.keys(adapters).sort()).toEqual(
         ["claude-agent-sdk", "codex-app-server"],
       );
+      expect(adapters["claude-agent-sdk"]).toMatchObject({ providerAssurance: "full-vendor-identity" });
+      expect(adapters["codex-app-server"]).toMatchObject({ providerAssurance: "full-vendor-identity" });
       expect(verifyProvider).toHaveBeenCalledTimes(2);
     } finally {
       await rm(fixture.directory, { recursive: true, force: true });

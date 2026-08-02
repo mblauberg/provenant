@@ -112,6 +112,7 @@ describe("Agent Fabric review correlation repair", () => {
         terminalSequence: 1,
         terminalResultDigest: digest,
         currentCertificationBasis: null,
+        providerAssurance: "full-vendor-identity",
         certifying: true,
         providerAnswerDigest: null,
         reviewResultDigest: null,

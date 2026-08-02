@@ -17,6 +17,7 @@ import {
   type CodecOutput,
 } from "./codec.js";
 import { PROVIDER_ACTION_REF_V1_CODEC } from "./launch.js";
+import { PROVIDER_IDENTITY_ASSURANCE_V1_CODEC } from "./provider-assurance.js";
 import { OPERATION_REGISTRY } from "./operations.js";
 
 const positive = integer({ minimum: 1 });
@@ -457,6 +458,7 @@ export const LOCAL_PROVIDER_ROUTE_V1_CODEC = objectCodec({
   adapterId: id256,
   adapterContractDigest: sha256,
   providerFamily: id256,
+  providerAssurance: PROVIDER_IDENTITY_ASSURANCE_V1_CODEC,
   resolvedModel: id256,
   requestedEffort: nullableId,
   resolvedEffort: RESOLVED_EFFORT_V1_CODEC,

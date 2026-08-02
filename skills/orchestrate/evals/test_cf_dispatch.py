@@ -40,6 +40,7 @@ DISPATCH_SCHEMA = {
     "model_family",
     "resolved_model",
     "identity_source",
+    "provider_assurance",
     "catalog_model",
     "model_selection",
     "route_alias",
@@ -73,6 +74,11 @@ def provision_test_verified_owner(tmp, *, adapter_id, executable):
     owner_dir = owner_root / "scripts"
     owner_dir.mkdir(parents=True)
     calls = owner_root / "adapter-owner.calls"
+    assurance = {
+        "cursor-agent": "partial-signed-helpers",
+        "opencode-acp": "owner-controlled-install-root",
+    }.get(adapter_id, "full-vendor-identity")
+    certifying = assurance in {"full-vendor-identity", "lockfile-install-attestation"}
     write_executable(
         owner_dir / "agent-fabric",
         f"""\
@@ -87,7 +93,7 @@ def provision_test_verified_owner(tmp, *, adapter_id, executable):
           esac
         done
         [ "$resolved_adapter" = {shlex.quote(adapter_id)} ] || exit 3
-        printf '%s\\n' {shlex.quote(str(executable))}
+        printf '%s\\n' '{{"executable":{json.dumps(str(executable))},"provider_assurance":{json.dumps(assurance)},"certifying_answer_bearing_leg":{str(certifying).lower()}}}'
         """,
     )
     return owner_root, calls
@@ -249,7 +255,7 @@ def test_direct_cli_executes_the_verified_adapter_path_once():
         assert record["adapter_resolution"] == "verified-owner"
         assert record["adapter_executable"] == str(verified_path)
         assert owner_calls.read_text(encoding="utf-8").splitlines() == [
-            f"adapter executable --adapter claude-agent-sdk --product-root {PRODUCT_ROOT} --instance-root {PRODUCT_ROOT}",
+            f"adapter executable --adapter claude-agent-sdk --product-root {PRODUCT_ROOT} --instance-root {PRODUCT_ROOT} --json",
         ]
 
 
@@ -658,7 +664,8 @@ def test_cursor_distinct_model_records_adapter_and_provider_family():
         assert record["endpoint_provider"] == "cursor"
         assert record["model_family"] == "xai"
         assert record["resolved_model"] == "cursor-grok-4.5-high"
-        assert record["certification_eligible"] is True
+        assert record["provider_assurance"] == "partial-signed-helpers"
+        assert record["certification_eligible"] is False
         assert record["adapter_resolution"] == "verified-owner"
         assert record["cross_family"] is True
         cursor_args = args_file.read_text(encoding="utf-8").splitlines()
@@ -667,6 +674,59 @@ def test_cursor_distinct_model_records_adapter_and_provider_family():
         assert "enabled" in cursor_args
         assert "--mode" in cursor_args
         assert cursor_args[cursor_args.index("--mode") + 1] == "ask"
+
+
+def test_full_vendor_owner_attestation_can_certify_a_direct_route():
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        executable = bin_dir / "claude"
+        write_executable(executable, "#!/usr/bin/env bash\necho OK\n")
+        owner_root = tmp / "owner"
+        owner_dir = owner_root / "scripts"
+        owner_dir.mkdir(parents=True)
+        write_executable(owner_dir / "agent-fabric", f'''#!/usr/bin/env bash
+        printf '%s\\n' '{{"executable":{json.dumps(str(executable))},"provider_assurance":"full-vendor-identity","certifying_answer_bearing_leg":true}}'
+        ''')
+        out = tmp / "out.txt"
+        env = fabric_free_env()
+        env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
+        env["AGENTS_HOME"] = str(owner_root)
+        result = subprocess.run([
+            str(SCRIPT), "--tool", "claude", "--orchestrator-family", "codex",
+            "--out", str(out), "--prompt", "Review",
+        ], cwd=td, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        record = json.loads(result.stdout)
+        assert result.returncode == 0, result.stderr
+        assert record["provider_assurance"] == "full-vendor-identity"
+        assert record["certification_eligible"] is True
+
+
+def test_direct_cli_does_not_trust_inconsistent_owner_certification_boolean():
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        executable = bin_dir / "cursor-agent"
+        write_executable(executable, "#!/usr/bin/env bash\ncat >/dev/null\necho OK\n")
+        owner_dir = (tmp / "owner" / "scripts")
+        owner_dir.mkdir(parents=True)
+        write_executable(owner_dir / "agent-fabric", f'''#!/usr/bin/env bash
+        printf '%s\n' '{{"executable":{json.dumps(str(executable))},"provider_assurance":"partial-signed-helpers","certifying_answer_bearing_leg":true}}'
+        ''')
+        out = tmp / "out.txt"
+        env = fabric_free_env()
+        env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
+        env["AGENTS_HOME"] = str(tmp / "owner")
+        result = subprocess.run([
+            str(SCRIPT), "--tool", "cursor", "--model", "cursor-grok-4.5-high",
+            "--orchestrator-family", "openai", "--out", str(out), "--prompt", "Review",
+        ], cwd=td, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        record = json.loads(result.stdout)
+        assert result.returncode == 0, result.stderr
+        assert record["provider_assurance"] == "partial-signed-helpers"
+        assert record["certification_eligible"] is False
 
 
 def test_explicit_output_path_preserves_adapter_failure_diagnostics():

@@ -3,6 +3,7 @@ import type {
   DisclosurePolicy,
   DisclosureTarget,
 } from "@local/agent-fabric-protocol";
+import type { ProviderIdentityAssurance } from "../adapters/provider-identity.js";
 
 export type AuthorityInput = AuthorityEnvelopeV2;
 export type { DisclosurePolicy, DisclosureTarget };
@@ -20,6 +21,7 @@ export type FabricOpenOptions = {
     modelPolicy?: { allowedFamilies: string[]; allowedModelPatterns: string[]; requiresExplicitModel: boolean };
     wrapperProvenance?: { repositoryCommit: string; wrapperPath: string };
     npmInstallProductRoot?: string;
+    providerAssurance?: ProviderIdentityAssurance;
   }>;
   capabilityKey?: string;
   executionProfile?: string;

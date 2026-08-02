@@ -102,6 +102,7 @@ describe("closed provider review terminal results", () => {
       certifyingInputsCurrent: true,
       mandatoryReadsSatisfied: true,
       actualRouteProvedEqual: true,
+      providerAssurance: "full-vendor-identity",
       findingWindowMode: "normal",
       reviewVerdict: null,
       parsedFindingDigests: [],
@@ -128,7 +129,8 @@ describe("closed provider review terminal results", () => {
       terminal: arms()[0]!, priorHeadGeneration: 1, priorEvidenceId: "evidence-1",
       priorOpenFindingSetDigest: digest("open"), priorRepairRequiredSetDigest: digest("repair"),
       reportedResolvedFindingDigests: [digest("prior")], certifyingInputsCurrent: true,
-      mandatoryReadsSatisfied: true, actualRouteProvedEqual: true, findingWindowMode: "normal" as const,
+      mandatoryReadsSatisfied: true, actualRouteProvedEqual: true,
+      providerAssurance: "partial-signed-helpers" as const, findingWindowMode: "normal" as const,
       reviewVerdict: "CLEAN" as const, parsedFindingDigests: [] as const,
     };
     const insufficientClean = reduceTerminalEvidenceEffect({ ...base, mandatoryReadsSatisfied: false });
@@ -143,6 +145,14 @@ describe("closed provider review terminal results", () => {
       publicTerminalKind: "safe-answer", certifying: false, acceptedResolvedFindingDigests: [],
       retainedAdverseFindingDigests: adverse,
     });
+    expect(reduceTerminalEvidenceEffect({ ...base, reviewVerdict: "CLEAN", parsedFindingDigests: [] }))
+      .toMatchObject({ certifying: false });
+    expect(reduceTerminalEvidenceEffect({ ...base, providerAssurance: "full-vendor-identity",
+      reviewVerdict: "CLEAN", parsedFindingDigests: [] })).toMatchObject({ certifying: true });
+    expect(reduceTerminalEvidenceEffect({ ...base, providerAssurance: "lockfile-install-attestation",
+      reviewVerdict: "CLEAN", parsedFindingDigests: [] })).toMatchObject({ certifying: true });
+    expect(reduceTerminalEvidenceEffect({ ...base, providerAssurance: "owner-controlled-install-root",
+      reviewVerdict: "CLEAN", parsedFindingDigests: [] })).toMatchObject({ certifying: false });
     expect(reduceTerminalEvidenceEffect({ ...base, actualRouteProvedEqual: false,
       reviewVerdict: "FINDINGS", parsedFindingDigests: adverse })).toMatchObject({
       publicTerminalKind: "safe-answer", certifying: false, acceptedResolvedFindingDigests: [],

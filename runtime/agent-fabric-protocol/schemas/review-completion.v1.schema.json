@@ -367,6 +367,7 @@
           "adapterId",
           "endpointProvider",
           "providerFamily",
+          "providerAssurance",
           "model",
           "routeObservationDigest",
           "actualRouteIdentityDigest",
@@ -536,6 +537,15 @@
             "maxLength": 256,
             "x-minUtf8Bytes": 1,
             "x-maxUtf8Bytes": 256
+          },
+          "providerAssurance": {
+            "type": "string",
+            "enum": [
+              "full-vendor-identity",
+              "partial-signed-helpers",
+              "owner-controlled-install-root",
+              "lockfile-install-attestation"
+            ]
           },
           "model": {
             "type": "string",
@@ -1016,6 +1026,12 @@
                           "type": "null"
                         }
                       },
+                      "providerAssurance": {
+                        "enum": [
+                          "full-vendor-identity",
+                          "lockfile-install-attestation"
+                        ]
+                      },
                       "currentCertificationBasis": {
                         "not": {
                           "type": "null"
@@ -1114,6 +1130,12 @@
                         "not": {
                           "type": "null"
                         }
+                      },
+                      "providerAssurance": {
+                        "enum": [
+                          "full-vendor-identity",
+                          "lockfile-install-attestation"
+                        ]
                       },
                       "currentCertificationBasis": {
                         "not": {
@@ -1214,6 +1236,12 @@
                           "type": "null"
                         }
                       },
+                      "providerAssurance": {
+                        "enum": [
+                          "full-vendor-identity",
+                          "lockfile-install-attestation"
+                        ]
+                      },
                       "currentCertificationBasis": {
                         "not": {
                           "type": "null"
@@ -1312,6 +1340,12 @@
                         "not": {
                           "type": "null"
                         }
+                      },
+                      "providerAssurance": {
+                        "enum": [
+                          "full-vendor-identity",
+                          "lockfile-install-attestation"
+                        ]
                       },
                       "currentCertificationBasis": {
                         "not": {
@@ -1497,6 +1531,12 @@
                           "type": "null"
                         }
                       },
+                      "providerAssurance": {
+                        "enum": [
+                          "full-vendor-identity",
+                          "lockfile-install-attestation"
+                        ]
+                      },
                       "currentCertificationBasis": {
                         "not": {
                           "type": "null"
@@ -1595,6 +1635,12 @@
                         "not": {
                           "type": "null"
                         }
+                      },
+                      "providerAssurance": {
+                        "enum": [
+                          "full-vendor-identity",
+                          "lockfile-install-attestation"
+                        ]
                       },
                       "currentCertificationBasis": {
                         "not": {
@@ -1695,6 +1741,12 @@
                           "type": "null"
                         }
                       },
+                      "providerAssurance": {
+                        "enum": [
+                          "full-vendor-identity",
+                          "lockfile-install-attestation"
+                        ]
+                      },
                       "currentCertificationBasis": {
                         "not": {
                           "type": "null"
@@ -1793,6 +1845,12 @@
                         "not": {
                           "type": "null"
                         }
+                      },
+                      "providerAssurance": {
+                        "enum": [
+                          "full-vendor-identity",
+                          "lockfile-install-attestation"
+                        ]
                       },
                       "currentCertificationBasis": {
                         "not": {

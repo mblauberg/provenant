@@ -5,6 +5,10 @@ import { verifyAdapterCompatibility } from "../adapters/compatibility.js";
 import { loadFabricConfig } from "../config/index.js";
 import { FabricError } from "../errors.js";
 import { verifyProviderConformance } from "../adapters/provider-conformance.js";
+import {
+  supportsCertifyingAnswerBearingLeg,
+  type ProviderIdentityAssurance,
+} from "../adapters/provider-identity.js";
 import { loadAdapterModelConstraints } from "../adapters/model-selection.js";
 import { resolveFabricRoots } from "../domain/fabric-roots.js";
 import { hasPairedInstanceRoot, type RootPairingDependencies } from "./instance-root-pairing.js";
@@ -22,11 +26,19 @@ const VALUE_OPTIONS = [
 
 type ValueOption = typeof VALUE_OPTIONS[number];
 
-function parseArguments(arguments_: string[]): Partial<Record<ValueOption, string>> {
+type ParsedArguments = Partial<Record<ValueOption, string>> & { json?: boolean };
+
+function parseArguments(arguments_: string[]): ParsedArguments {
   const allowed = new Set<string>(VALUE_OPTIONS);
-  const parsed: Partial<Record<ValueOption, string>> = {};
-  for (let index = 0; index < arguments_.length; index += 2) {
+  const parsed: ParsedArguments = {};
+  for (let index = 0; index < arguments_.length;) {
     const name = arguments_[index];
+    if (name === "--json") {
+      if (parsed.json === true) throw new Error("adapter executable received duplicate option: --json");
+      parsed.json = true;
+      index += 1;
+      continue;
+    }
     if (name === undefined || !allowed.has(name)) {
       throw new Error(`adapter executable received unknown option: ${name ?? "<missing>"}`);
     }
@@ -39,18 +51,25 @@ function parseArguments(arguments_: string[]): Partial<Record<ValueOption, strin
       throw new Error(`adapter executable requires a value for ${option}`);
     }
     parsed[option] = value;
+    index += 2;
   }
   return parsed;
 }
 
-export async function resolveAdapterExecutableCli(
+type AdapterExecutableResolution = Readonly<{
+  executable: string;
+  providerAssurance?: ProviderIdentityAssurance;
+  certifyingAnswerBearingLeg: boolean;
+}>;
+
+async function resolveAdapterExecutableResolutionCli(
   arguments_: string[],
   dependencies: {
     verifyProvider?: typeof verifyProviderConformance;
     rootPairing?: RootPairingDependencies;
     verifyNpmInstall?: typeof verifyNpmInstallAttestation;
   } = {},
-): Promise<string> {
+): Promise<AdapterExecutableResolution> {
   const parsed = parseArguments(arguments_);
   const adapterId = parsed["--adapter"];
   if (adapterId === undefined) {
@@ -106,11 +125,50 @@ export async function resolveAdapterExecutableCli(
   }
   await (dependencies.verifyNpmInstall ?? verifyNpmInstallAttestation)(productRoot);
   const policy = await loadAdapterModelConstraints({ compatibilityPath, schemaPath, adapterId, requireEnabled: true });
-  await (dependencies.verifyProvider ?? verifyProviderConformance)({
+  const providerVerification = await (dependencies.verifyProvider ?? verifyProviderConformance)({
     adapterId,
     executable,
     ...(policy.cursorInstallRoot === undefined ? {} : { cursorInstallRoot: policy.cursorInstallRoot }),
     ...(policy.providerInstallRoot === undefined ? {} : { providerInstallRoot: policy.providerInstallRoot }),
   });
-  return executable;
+  const providerAssurance = providerVerification.identity?.assurance;
+  return {
+    executable,
+    providerAssurance,
+    certifyingAnswerBearingLeg: providerAssurance === undefined
+      ? false
+      : supportsCertifyingAnswerBearingLeg(providerAssurance),
+  };
+}
+
+export type AdapterExecutableAttestation = Readonly<{
+  executable: string;
+  providerAssurance: ProviderIdentityAssurance;
+  certifyingAnswerBearingLeg: boolean;
+}>;
+
+export async function resolveAdapterExecutableAttestationCli(
+  arguments_: string[],
+  dependencies: {
+    verifyProvider?: typeof verifyProviderConformance;
+    rootPairing?: RootPairingDependencies;
+    verifyNpmInstall?: typeof verifyNpmInstallAttestation;
+  } = {},
+): Promise<AdapterExecutableAttestation> {
+  const result = await resolveAdapterExecutableResolutionCli(arguments_, dependencies);
+  if (result.providerAssurance === undefined) {
+    throw new FabricError("ADAPTER_IDENTITY_MISMATCH", "provider conformance did not observe an assurance level");
+  }
+  return result as AdapterExecutableAttestation;
+}
+
+export async function resolveAdapterExecutableCli(
+  arguments_: string[],
+  dependencies: {
+    verifyProvider?: typeof verifyProviderConformance;
+    rootPairing?: RootPairingDependencies;
+    verifyNpmInstall?: typeof verifyNpmInstallAttestation;
+  } = {},
+): Promise<string> {
+  return (await resolveAdapterExecutableResolutionCli(arguments_, dependencies)).executable;
 }
