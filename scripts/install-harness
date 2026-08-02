@@ -78,6 +78,12 @@ case "$instance_root" in
   *) echo "Agent Fabric instance root must be absolute" >&2; exit 3 ;;
 esac
 
+source "$PRODUCT_ROOT/scripts/lib/model-route-python.sh"
+PYTHON="$(resolve_model_route_python)" || {
+  echo "unable to resolve a supported Python interpreter for installer configuration" >&2
+  exit 3
+}
+
 # Validate the complete skill namespace before publishing the command, product
 # pointer, seeded instance files, client links or installation receipt.
 "$PRODUCT_ROOT/scripts/manage_installation.py" validate-sources \
@@ -141,10 +147,10 @@ mcp_args=(
   --opencode-config "${OPENCODE_MCP_CONFIG:-$HOME/.config/opencode/opencode.jsonc}"
 )
 
-"$PRODUCT_ROOT/scripts/configure-agent-fabric-mcp.py" "${mcp_args[@]}" --preflight
+"$PYTHON" "$PRODUCT_ROOT/scripts/configure-agent-fabric-mcp.py" "${mcp_args[@]}" --preflight
 
 if [[ "$PLATFORM" == "codex" ]]; then
-  "$PRODUCT_ROOT/scripts/configure-codex-skill-overrides.py" --preflight \
+  "$PYTHON" "$PRODUCT_ROOT/scripts/configure-codex-skill-overrides.py" --preflight \
     --config "$platform_home/config.toml"
 fi
 
@@ -180,10 +186,10 @@ if [[ "$PLATFORM" == "claude" ]]; then
   "$PRODUCT_ROOT/scripts/install-agents" --target "$platform_home/agents"
 fi
 if [[ "$PLATFORM" == "codex" ]]; then
-  "$PRODUCT_ROOT/scripts/configure-codex-skill-overrides.py" \
+  "$PYTHON" "$PRODUCT_ROOT/scripts/configure-codex-skill-overrides.py" \
     --config "$platform_home/config.toml"
 fi
-"$PRODUCT_ROOT/scripts/configure-agent-fabric-mcp.py" "${mcp_args[@]}"
+"$PYTHON" "$PRODUCT_ROOT/scripts/configure-agent-fabric-mcp.py" "${mcp_args[@]}"
 
 # AGENTS.md is instance-owned once seeded and HARNESS.md stays product-shipped
 # (ADR 0019), so the client reads doctrine from the instance and the harness
