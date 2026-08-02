@@ -682,10 +682,12 @@ exit 1
     });
     const registryPath = join(value.paths.stateDirectory, "trusted-workspaces.json");
     const legacy = JSON.parse(await readFile(registryPath, "utf8")) as {
+      schemaVersion: number;
       entries: Record<string, unknown>[];
     };
     const legacyEntry = legacy.entries[0];
     if (legacyEntry === undefined) throw new Error("legacy trust entry is missing");
+    legacy.schemaVersion = 1;
     legacyEntry.approvedBy = "local-operator";
     await writeFile(registryPath, `${JSON.stringify(legacy, null, 2)}\n`, { mode: 0o600 });
 
@@ -706,8 +708,10 @@ exit 1
     });
     expect(observedLegacyBeforeAtomicReplace).toBe(true);
     const canonical = JSON.parse(await readFile(registryPath, "utf8")) as {
+      schemaVersion: number;
       entries: Record<string, unknown>[];
     };
+    expect(canonical.schemaVersion).toBe(2);
     expect(canonical.entries[0]).toMatchObject({ establishmentKind: "automatic-bootstrap" });
     expect(canonical.entries[0]).not.toHaveProperty("approvedBy");
 
@@ -718,10 +722,17 @@ exit 1
       paths: value.paths,
       smokeDeadlineMs: 1,
     });
+    expect(JSON.parse(await readFile(registryPath, "utf8"))).toMatchObject({ schemaVersion: 2 });
     expect(first.receipt.actions).toEqual(expect.arrayContaining([expect.objectContaining({
       action: "custody",
       outcome: "committed",
       mutated: true,
+    })]));
+    expect(first.receipt.actions).toEqual(expect.arrayContaining([expect.objectContaining({
+      action: "workspace-trust",
+      outcome: "already-trusted",
+      mutated: true,
+      alreadyTrusted: true,
     })]));
     expect(replay.receipt.actions).toEqual(expect.arrayContaining([expect.objectContaining({
       action: "custody",
@@ -732,6 +743,43 @@ exit 1
     const replayTrust = replay.receipt.actions.find((action) => action.action === "workspace-trust");
     expect(firstTrust).toMatchObject({ trustRecordDigest: expect.stringMatching(/^sha256:[0-9a-f]{64}$/u) });
     expect(replayTrust).toMatchObject({ trustRecordDigest: firstTrust && "trustRecordDigest" in firstTrust ? firstTrust.trustRecordDigest : null });
+  });
+
+  it("reports a legacy explicit grant as resolved rather than newly enrolled", async () => {
+    const value = await fixture();
+    await runWorkspaceTrust(["trust", value.inner], value.paths);
+    await bootstrapMcpSeat({
+      environment: { AGENT_FABRIC_SEAT: "codex" },
+      cwd: value.cwd,
+      paths: value.paths,
+      smokeDeadlineMs: 1,
+    });
+    const registryPath = join(value.paths.stateDirectory, "trusted-workspaces.json");
+    const legacy = JSON.parse(await readFile(registryPath, "utf8")) as {
+      schemaVersion: number;
+      entries: Record<string, unknown>[];
+    };
+    const legacyEntry = legacy.entries[0];
+    if (legacyEntry === undefined) throw new Error("legacy trust entry is missing");
+    legacy.schemaVersion = 1;
+    legacyEntry.approvedBy = "local-operator";
+    delete legacyEntry.establishmentKind;
+    await writeFile(registryPath, `${JSON.stringify(legacy, null, 2)}\n`, { mode: 0o600 });
+
+    daemon.result = { ...daemon.result!, custodyMutated: false };
+    const replay = await bootstrapMcpSeat({
+      environment: { AGENT_FABRIC_SEAT: "codex" },
+      cwd: value.cwd,
+      paths: value.paths,
+      smokeDeadlineMs: 1,
+    });
+    expect(replay.receipt.actions).toEqual(expect.arrayContaining([expect.objectContaining({
+      action: "workspace-trust",
+      outcome: "resolved",
+      mutated: true,
+      alreadyTrusted: true,
+      establishmentKind: "local-operator",
+    })]));
   });
 
   it("retains known custody but publishes no credentials after the trust binding changes", async () => {

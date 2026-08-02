@@ -93,6 +93,45 @@ describe("machine-local workspace trust", () => {
     })).rejects.toThrow(/profile/u);
   });
 
+  it("keeps a legacy digest on read-only and status paths until the registry is migrated", async () => {
+    const value = await fixture();
+    await runWorkspaceTrust(["trust", value.workspace], value.paths);
+    const registryPath = join(value.paths.stateDirectory, "trusted-workspaces.json");
+    const canonical = JSON.parse(await readFile(registryPath, "utf8")) as {
+      schemaVersion: number;
+      entries: Record<string, unknown>[];
+    };
+    const entry = canonical.entries[0];
+    if (entry === undefined) throw new Error("canonical trust entry is missing");
+    canonical.schemaVersion = 1;
+    entry.approvedBy = "local-operator";
+    delete entry.establishmentKind;
+    await writeFile(registryPath, `${JSON.stringify(canonical, null, 2)}\n`, { mode: 0o600 });
+    const legacyBytes = await readFile(registryPath, "utf8");
+    const legacyDigest = `sha256:${createHash("sha256").update(JSON.stringify({
+      allowedProfiles: entry.allowedProfiles,
+      approvedAt: entry.approvedAt,
+      approvedBy: "local-operator",
+      canonicalPath: entry.canonicalPath,
+      device: entry.device,
+      inode: entry.inode,
+    })).digest("hex")}`;
+
+    await expect(trustedWorkspaceIdentity({
+      stateDirectory: value.paths.stateDirectory,
+      canonicalRoot: value.workspace,
+    })).resolves.toMatchObject({ trustRecordDigest: legacyDigest });
+    await expect(runWorkspaceTrust(["status", value.workspace], value.paths)).resolves.toMatchObject({
+      schemaVersion: 2,
+      trusted: true,
+      entry: { establishmentKind: "local-operator" },
+    });
+    await expect(runWorkspaceTrust(["list"], value.paths)).resolves.toMatchObject({
+      entries: [{ canonicalPath: await realpath(value.workspace), trusted: true }],
+    });
+    await expect(readFile(registryPath, "utf8")).resolves.toBe(legacyBytes);
+  });
+
   it("fails closed on an unknown trust establishment kind", async () => {
     const value = await fixture();
     const canonicalPath = await realpath(value.workspace);
@@ -177,7 +216,7 @@ describe("machine-local workspace trust", () => {
 
     const registryPath = join(value.paths.stateDirectory, "trusted-workspaces.json");
     expect((await lstat(registryPath)).mode & 0o077).toBe(0);
-    expect(JSON.parse(await readFile(registryPath, "utf8"))).toMatchObject({ schemaVersion: 1 });
+    expect(JSON.parse(await readFile(registryPath, "utf8"))).toMatchObject({ schemaVersion: 2 });
   });
 
   it("trusts a first-use project exactly without trusting its parent", async () => {
@@ -556,7 +595,7 @@ describe("machine-local workspace trust", () => {
       value.paths,
       new Date("2026-07-11T05:00:00.000Z"),
     )).resolves.toEqual({
-      schemaVersion: 1,
+      schemaVersion: 2,
       trusted: true,
       alreadyTrusted: true,
       entry: first.entry,

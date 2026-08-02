@@ -148,8 +148,10 @@ function workspaceTrustAction(
   const entry = trust.identity.entry;
   return {
     action: "workspace-trust",
-    outcome: trust.mutated ? "enrolled" : trust.alreadyTrusted
+    outcome: trust.alreadyTrusted
       ? (entry.establishmentKind === "automatic-bootstrap" ? "already-trusted" : "resolved")
+      : trust.mutated
+        ? "enrolled"
       : "resolved",
     mutated: trust.mutated,
     alreadyTrusted: trust.alreadyTrusted,
@@ -438,6 +440,7 @@ export async function bootstrapMcpSeat(input: {
   try {
     trust = await ensureAutomaticBootstrapTrust({
       stateDirectory: input.paths.stateDirectory,
+      databasePath: input.paths.databasePath,
       bootstrapAttemptId,
       cwd: input.cwd,
       ...(input.now === undefined ? {} : { now: input.now }),

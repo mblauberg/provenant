@@ -25,6 +25,44 @@ export type BootstrapMcpCustody = {
   bindCurrentMcpSeats: (input: CurrentMcpSeatBindingInput) => CurrentMcpSeatBindingResult;
 };
 
+export type TrustedWorkspaceDigestMigration = Readonly<{
+  canonicalRoot: string;
+  legacyTrustRecordDigest: string;
+  trustRecordDigest: string;
+}>;
+
+/**
+ * Migrate only the known legacy digest for a trusted root while the caller's
+ * existing custody transaction is open. This is deliberately a one-cutover
+ * helper, not a general schema migration mechanism.
+ */
+export function migrateTrustedWorkspaceDigestsInTransaction(
+  database: Database.Database,
+  migrations: readonly TrustedWorkspaceDigestMigration[],
+): void {
+  const findProject = database.prepare(
+    "SELECT trust_record_digest FROM projects WHERE canonical_root=?",
+  );
+  const updateProject = database.prepare(
+    "UPDATE projects SET trust_record_digest=? WHERE canonical_root=? AND trust_record_digest=?",
+  );
+  for (const migration of migrations) {
+    const existing = findProject.get(migration.canonicalRoot);
+    if (existing === undefined) continue;
+    if (!isRow(existing) || typeof existing.trust_record_digest !== "string") {
+      throw new FabricError("DEDUPE_CONFLICT", "trusted workspace custody digest is invalid");
+    }
+    if (existing.trust_record_digest === migration.trustRecordDigest) continue;
+    if (existing.trust_record_digest !== migration.legacyTrustRecordDigest) {
+      throw new FabricError("DEDUPE_CONFLICT", "trusted workspace custody digest conflicts with the legacy trust record");
+    }
+    const result = updateProject.run(migration.trustRecordDigest, migration.canonicalRoot, migration.legacyTrustRecordDigest);
+    if (result.changes !== 1) {
+      throw new FabricError("DEDUPE_CONFLICT", "trusted workspace custody changed during trust migration");
+    }
+  }
+}
+
 function isRow(value: unknown): value is Row {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }

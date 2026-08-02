@@ -14,7 +14,11 @@ import {
 import { Fabric } from "../../../src/core/fabric.ts";
 import type { FabricPaths } from "../../../src/cli/paths.ts";
 import { projectKey } from "../../../src/cli/seat-store.ts";
-import { runWorkspaceTrust } from "../../../src/cli/workspace-trust.ts";
+import {
+  ensureAutomaticBootstrapTrust,
+  runWorkspaceTrust,
+  trustedWorkspaceIdentity,
+} from "../../../src/cli/workspace-trust.ts";
 import { terminateTrackedTestProcess, trackTestProcess } from "../../support/test-process-registry.ts";
 
 const roots: string[] = [];
@@ -22,9 +26,10 @@ const daemonPids = new Set<number>();
 const compatibilitySource = fileURLToPath(new URL("../../../../../config/adapter-compatibility.yaml", import.meta.url));
 const compatibilitySchemaSource = fileURLToPath(new URL("../../../schemas/adapter-compatibility.schema.json", import.meta.url));
 
+type TrustMode = "automatic" | "explicit";
 type Fixture = { projectRoot: string; paths: FabricPaths; agentsHome: string };
 
-async function fixture(): Promise<Fixture> {
+async function fixture(trustMode: TrustMode = "explicit"): Promise<Fixture> {
   const root = await realpath(await mkdtemp("/tmp/afb-lifecycle-"));
   roots.push(root);
   const projectRoot = join(root, "project");
@@ -61,7 +66,15 @@ async function fixture(): Promise<Fixture> {
     databasePath: join(stateDirectory, "fabric-v1.sqlite3"),
     socketPath: join(runtimeDirectory, "fabric-v1.sock"),
   };
-  await runWorkspaceTrust(["trust", projectRoot], paths);
+  if (trustMode === "automatic") {
+    await ensureAutomaticBootstrapTrust({
+      stateDirectory,
+      bootstrapAttemptId: "initial-automatic-bootstrap",
+      cwd: projectRoot,
+    });
+  } else {
+    await runWorkspaceTrust(["trust", projectRoot], paths);
+  }
   return { projectRoot, paths, agentsHome };
 }
 
@@ -130,6 +143,38 @@ function custodyCounts(databasePath: string): Record<string, number> {
   } finally {
     database.close();
   }
+}
+
+async function makeLegacyTrustAndCustody(value: Fixture, trustMode: TrustMode): Promise<{
+  legacyBytes: string;
+  legacyDigest: string;
+}> {
+  const registryPath = join(value.paths.stateDirectory, "trusted-workspaces.json");
+  const registry = JSON.parse(await readFile(registryPath, "utf8")) as {
+    schemaVersion: number;
+    entries: Record<string, unknown>[];
+  };
+  const entry = registry.entries[0];
+  if (entry === undefined) throw new Error("legacy trust entry is missing");
+  registry.schemaVersion = 1;
+  entry.approvedBy = "local-operator";
+  if (trustMode === "explicit") delete entry.establishmentKind;
+  await writeFile(registryPath, `${JSON.stringify(registry, null, 2)}\n`, { mode: 0o600 });
+  const legacyBytes = await readFile(registryPath, "utf8");
+  const identity = await trustedWorkspaceIdentity({
+    stateDirectory: value.paths.stateDirectory,
+    canonicalRoot: value.projectRoot,
+  });
+  const database = new Database(value.paths.databasePath);
+  try {
+    const result = database.prepare(
+      "UPDATE projects SET trust_record_digest=? WHERE canonical_root=?",
+    ).run(identity.trustRecordDigest, value.projectRoot);
+    if (result.changes !== 1) throw new Error("existing project custody was not found");
+  } finally {
+    database.close();
+  }
+  return { legacyBytes, legacyDigest: identity.trustRecordDigest };
 }
 
 afterEach(async () => {
@@ -313,6 +358,83 @@ describe("zero-touch lifecycle action receipt", () => {
     expect(custodyCounts(value.paths.databasePath)).toEqual(countsBefore);
     expect(second.credential).toBe(first.credential);
   });
+
+  it.each([
+    ["automatic", "already-trusted"],
+    ["explicit", "resolved"],
+  ] as const)(
+    "replays an existing %s legacy trust grant through a real daemon without changing custody",
+    async (trustMode, expectedOutcome) => {
+      const value = await fixture(trustMode);
+      const first = await bootstrap(value);
+      const countsBefore = custodyCounts(value.paths.databasePath);
+      const { legacyBytes, legacyDigest } = await makeLegacyTrustAndCustody(value, trustMode);
+
+      await expect(trustedWorkspaceIdentity({
+        stateDirectory: value.paths.stateDirectory,
+        canonicalRoot: value.projectRoot,
+      })).resolves.toMatchObject({ trustRecordDigest: legacyDigest });
+      await expect(runWorkspaceTrust(["status", value.projectRoot], value.paths)).resolves.toMatchObject({
+        trusted: true,
+        entry: { establishmentKind: trustMode === "automatic" ? "automatic-bootstrap" : "local-operator" },
+      });
+      await expect(runWorkspaceTrust(["list"], value.paths)).resolves.toMatchObject({
+        entries: [{ canonicalPath: value.projectRoot, trusted: true }],
+      });
+      await expect(readFile(join(value.paths.stateDirectory, "trusted-workspaces.json"), "utf8")).resolves.toBe(legacyBytes);
+
+      const interrupted = await bootstrapMcpSeat({
+        environment: { AGENT_FABRIC_SEAT: "codex", AGENTS_HOME: value.agentsHome },
+        cwd: value.projectRoot,
+        paths: value.paths,
+        testOnly: {
+          beforeRegistryRename: async () => {
+            throw new Error("simulated trust custody migration interruption");
+          },
+        },
+      }).then(() => undefined, (error: unknown) => error);
+      expect(interrupted).toBeDefined();
+      await expect(readFile(join(value.paths.stateDirectory, "trusted-workspaces.json"), "utf8")).resolves.toBe(legacyBytes);
+      const interruptedDatabase = new Database(value.paths.databasePath, { readonly: true });
+      try {
+        expect(interruptedDatabase.prepare("SELECT trust_record_digest FROM projects WHERE canonical_root=?")
+          .get(value.projectRoot)).toMatchObject({ trust_record_digest: legacyDigest });
+      } finally {
+        interruptedDatabase.close();
+      }
+
+      const replay = await bootstrap(value);
+
+      expect(action(replay.receipt, "workspace-trust")).toMatchObject({
+        outcome: expectedOutcome,
+        mutated: true,
+        alreadyTrusted: true,
+      });
+      expect(action(replay.receipt, "custody")).toMatchObject({ outcome: "replayed", mutated: false });
+      expect(action(replay.receipt, "seat-generation")).toMatchObject({
+        outcome: "replayed",
+        mutated: false,
+        generation: first.generation,
+      });
+      expect(replay.generation).toBe(first.generation);
+      expect(custodyCounts(value.paths.databasePath)).toEqual(countsBefore);
+
+      const canonical = JSON.parse(await readFile(join(value.paths.stateDirectory, "trusted-workspaces.json"), "utf8")) as {
+        entries: Record<string, unknown>[];
+      };
+      expect(canonical.entries[0]).not.toHaveProperty("approvedBy");
+      expect(canonical.entries[0]).toHaveProperty("establishmentKind", trustMode === "automatic"
+        ? "automatic-bootstrap"
+        : "local-operator");
+      const database = new Database(value.paths.databasePath, { readonly: true });
+      try {
+        expect(database.prepare("SELECT trust_record_digest FROM projects WHERE canonical_root=?")
+          .get(value.projectRoot)).toMatchObject({ trust_record_digest: action(replay.receipt, "workspace-trust").trustRecordDigest });
+      } finally {
+        database.close();
+      }
+    },
+  );
 
   it("reports first legacy bootstrap provenance exactly once without changing custody mutation semantics", async () => {
     const value = await fixture();

@@ -13,6 +13,7 @@ import {
   resolveProjectBoundary,
   type ProjectBoundary,
 } from "./project-boundary.js";
+import { migrateTrustedWorkspaceDigestsInTransaction } from "../core/bootstrap-mcp-custody.js";
 
 export {
   looksLikeRepositoryCollection,
@@ -88,10 +89,16 @@ export function workspaceTrustFailureContext(error: unknown): WorkspaceTrustFail
   return error instanceof WorkspaceTrustError ? workspaceTrustFailureContexts.get(error) : undefined;
 }
 
-type WorkspaceTrustRegistry = { schemaVersion: 1; entries: WorkspaceTrustEntry[] };
+const LEGACY_WORKSPACE_TRUST_SCHEMA_VERSION = 1;
+const WORKSPACE_TRUST_SCHEMA_VERSION = 2;
+// Version 1 is accepted only while this process performs the one-way local
+// cutover. Persisted canonical records are version 2, so an old reader fails
+// closed instead of treating a field-removed record as version 1.
+type WorkspaceTrustRegistry = { schemaVersion: typeof WORKSPACE_TRUST_SCHEMA_VERSION; entries: WorkspaceTrustEntry[] };
 type ParsedWorkspaceTrustRegistry = Readonly<{
   registry: WorkspaceTrustRegistry;
   requiresCanonicalization: boolean;
+  legacyTrustRecordDigests: ReadonlyMap<string, `sha256:${string}`>;
 }>;
 let mutationQueue: Promise<void> = Promise.resolve();
 
@@ -116,10 +123,14 @@ function timestamp(value: string, field: string): number {
 }
 
 function parseRegistry(value: unknown): ParsedWorkspaceTrustRegistry {
-  if (typeof value !== "object" || value === null || Array.isArray(value) || !("schemaVersion" in value) || value.schemaVersion !== 1 || !("entries" in value) || !Array.isArray(value.entries)) {
+  if (typeof value !== "object" || value === null || Array.isArray(value) || !("schemaVersion" in value) ||
+    (value.schemaVersion !== LEGACY_WORKSPACE_TRUST_SCHEMA_VERSION && value.schemaVersion !== WORKSPACE_TRUST_SCHEMA_VERSION) ||
+    !("entries" in value) || !Array.isArray(value.entries)) {
     throw new Error("workspace trust registry is invalid");
   }
-  let requiresCanonicalization = false;
+  const legacySchema = value.schemaVersion === LEGACY_WORKSPACE_TRUST_SCHEMA_VERSION;
+  let requiresCanonicalization = legacySchema;
+  const legacyTrustRecordDigests = new Map<string, `sha256:${string}`>();
   const entries: WorkspaceTrustEntry[] = value.entries.map((candidate) => {
     if (
       typeof candidate !== "object" || candidate === null || Array.isArray(candidate) ||
@@ -135,6 +146,7 @@ function parseRegistry(value: unknown): ParsedWorkspaceTrustRegistry {
     const establishmentKind = record.establishmentKind;
     const approvedBy = record.approvedBy;
     const hasLegacyApproval = "approvedBy" in record;
+    if (!legacySchema && hasLegacyApproval) throw new Error("workspace trust registry contains legacy approval provenance");
     if (hasLegacyApproval && approvedBy !== "local-operator") throw new Error("workspace trust entry approval provenance is invalid");
     if (establishmentKind !== undefined && establishmentKind !== "automatic-bootstrap" && establishmentKind !== "local-operator") {
       throw new Error("workspace trust entry establishment kind is invalid");
@@ -159,7 +171,7 @@ function parseRegistry(value: unknown): ParsedWorkspaceTrustRegistry {
     }
     timestamp(candidate.approvedAt, "workspace approval");
     if (typeof candidate.expiresAt === "string") timestamp(candidate.expiresAt, "workspace expiry");
-    return {
+    const entry: WorkspaceTrustEntry = {
       canonicalPath: candidate.canonicalPath,
       approvedAt: candidate.approvedAt,
       device: candidate.device,
@@ -173,11 +185,14 @@ function parseRegistry(value: unknown): ParsedWorkspaceTrustRegistry {
         bootstrapAttemptId: bootstrapAttemptId as string,
       } : {}),
     };
+    if (hasLegacyApproval) legacyTrustRecordDigests.set(entry.canonicalPath, legacyTrustRecordDigest(entry));
+    return entry;
   });
   if (new Set(entries.map((entry) => entry.canonicalPath)).size !== entries.length) throw new Error("workspace trust entries must be unique");
   return {
-    registry: { schemaVersion: 1, entries: entries.sort((left, right) => left.canonicalPath.localeCompare(right.canonicalPath)) },
+    registry: { schemaVersion: WORKSPACE_TRUST_SCHEMA_VERSION, entries: entries.sort((left, right) => left.canonicalPath.localeCompare(right.canonicalPath)) },
     requiresCanonicalization,
+    legacyTrustRecordDigests,
   };
 }
 
@@ -198,7 +213,11 @@ async function readRegistry(path: string): Promise<ParsedWorkspaceTrustRegistry>
       await handle.close();
     }
   } catch (error: unknown) {
-    if (errorCode(error) === "ENOENT") return { registry: { schemaVersion: 1, entries: [] }, requiresCanonicalization: false };
+    if (errorCode(error) === "ENOENT") return {
+      registry: { schemaVersion: WORKSPACE_TRUST_SCHEMA_VERSION, entries: [] },
+      requiresCanonicalization: false,
+      legacyTrustRecordDigests: new Map(),
+    };
     throw error;
   }
 }
@@ -243,6 +262,54 @@ async function writeRegistry(
     } catch { /* directory fsync is best effort after commit */ }
   } finally {
     await rm(temporary, { force: true });
+  }
+}
+
+async function writeRegistryWithCustodyMigration(input: {
+  path: string;
+  parsed: ParsedWorkspaceTrustRegistry;
+  registry: WorkspaceTrustRegistry;
+  databasePath?: string;
+  testOnly?: AutomaticBootstrapTrustTestOnly;
+}): Promise<void> {
+  if (!input.parsed.requiresCanonicalization || input.databasePath === undefined) {
+    await writeRegistry(input.path, input.registry, input.testOnly);
+    return;
+  }
+  let databaseInfo;
+  try {
+    databaseInfo = await lstat(input.databasePath);
+  } catch (error: unknown) {
+    if (errorCode(error) === "ENOENT") {
+      await writeRegistry(input.path, input.registry, input.testOnly);
+      return;
+    }
+    throw error;
+  }
+  if (!databaseInfo.isFile() || databaseInfo.isSymbolicLink()) throw new Error("fabric database must be a regular file");
+
+  const database = new Database(input.databasePath, { timeout: 10_000 });
+  let transactionOpen = false;
+  try {
+    database.exec("BEGIN IMMEDIATE");
+    transactionOpen = true;
+    const migrations = input.registry.entries.flatMap((entry) => {
+      const legacyTrustRecordDigest = input.parsed.legacyTrustRecordDigests.get(entry.canonicalPath);
+      return legacyTrustRecordDigest === undefined ? [] : [{
+        canonicalRoot: entry.canonicalPath,
+        legacyTrustRecordDigest,
+        trustRecordDigest: trustRecordDigest(entry),
+      }];
+    });
+    migrateTrustedWorkspaceDigestsInTransaction(database, migrations);
+    await writeRegistry(input.path, input.registry, input.testOnly);
+    database.exec("COMMIT");
+    transactionOpen = false;
+  } catch (error: unknown) {
+    if (transactionOpen && database.inTransaction) database.exec("ROLLBACK");
+    throw error;
+  } finally {
+    database.close();
   }
 }
 
@@ -348,6 +415,25 @@ function trustRecordDigest(entry: WorkspaceTrustEntry): `sha256:${string}` {
     inode: entry.inode,
     establishmentKind: entry.establishmentKind,
     ...(entry.establishmentKind === "automatic-bootstrap" ? {
+      boundaryKind: entry.boundaryKind,
+      boundaryEvidenceDigest: entry.boundaryEvidenceDigest,
+      bootstrapAttemptId: entry.bootstrapAttemptId,
+    } : {}),
+  });
+  return `sha256:${createHash("sha256").update(normalized).digest("hex")}`;
+}
+
+function legacyTrustRecordDigest(entry: WorkspaceTrustEntry): `sha256:${string}` {
+  const normalized = JSON.stringify({
+    allowedProfiles: entry.allowedProfiles,
+    approvedAt: entry.approvedAt,
+    approvedBy: "local-operator",
+    canonicalPath: entry.canonicalPath,
+    device: entry.device,
+    ...(entry.expiresAt === undefined ? {} : { expiresAt: entry.expiresAt }),
+    inode: entry.inode,
+    ...(entry.establishmentKind === "automatic-bootstrap" ? {
+      establishmentKind: entry.establishmentKind,
       boundaryKind: entry.boundaryKind,
       boundaryEvidenceDigest: entry.boundaryEvidenceDigest,
       bootstrapAttemptId: entry.bootstrapAttemptId,
@@ -544,6 +630,7 @@ function automaticTrustIdentity(entry: WorkspaceTrustEntry): TrustedWorkspaceIde
  */
 export async function ensureAutomaticBootstrapTrust(input: {
   stateDirectory: string;
+  databasePath?: string;
   bootstrapAttemptId: string;
   cwd: string;
   now?: Date;
@@ -552,6 +639,7 @@ export async function ensureAutomaticBootstrapTrust(input: {
   const boundary = await resolveProjectBoundary(input.cwd);
   return ensureAutomaticBootstrapTrustAtBoundary({
     stateDirectory: input.stateDirectory,
+    ...(input.databasePath === undefined ? {} : { databasePath: input.databasePath }),
     boundary,
     requestAttemptId: input.bootstrapAttemptId,
     ...(input.now === undefined ? {} : { now: input.now }),
@@ -561,6 +649,7 @@ export async function ensureAutomaticBootstrapTrust(input: {
 
 async function ensureAutomaticBootstrapTrustAtBoundary(input: {
   stateDirectory: string;
+  databasePath?: string;
   boundary: ProjectBoundary;
   requestAttemptId: string;
   now?: Date;
@@ -653,7 +742,13 @@ async function ensureAutomaticBootstrapTrustAtBoundary(input: {
       if (liveBoundary.evidence.kind === "ambiguous" && liveBoundary.evidence.reason === "repository-collection") {
         throw await automaticBoundaryRefusal(liveBoundary);
       }
-      if (parsedCurrent.requiresCanonicalization) await writeRegistry(registryPath, current, input.testOnly);
+      if (parsedCurrent.requiresCanonicalization) await writeRegistryWithCustodyMigration({
+        path: registryPath,
+        parsed: parsedCurrent,
+        registry: current,
+        ...(input.databasePath === undefined ? {} : { databasePath: input.databasePath }),
+        ...(input.testOnly === undefined ? {} : { testOnly: input.testOnly }),
+      });
       return {
         identity: automaticTrustIdentity(currentEntry),
         mutated: parsedCurrent.requiresCanonicalization,
@@ -691,7 +786,14 @@ async function ensureAutomaticBootstrapTrustAtBoundary(input: {
       boundaryEvidenceDigest: persistedBoundaryEvidenceDigest,
       bootstrapAttemptId: input.requestAttemptId,
     };
-    await writeRegistry(registryPath, { schemaVersion: 1, entries: [...current.entries, entry] }, input.testOnly);
+    const next: WorkspaceTrustRegistry = { schemaVersion: WORKSPACE_TRUST_SCHEMA_VERSION, entries: [...current.entries, entry] };
+    await writeRegistryWithCustodyMigration({
+      path: registryPath,
+      parsed: parsedCurrent,
+      registry: next,
+      ...(input.databasePath === undefined ? {} : { databasePath: input.databasePath }),
+      ...(input.testOnly === undefined ? {} : { testOnly: input.testOnly }),
+    });
     return {
       identity: automaticTrustIdentity(entry),
       mutated: true,
@@ -732,7 +834,8 @@ export async function trustedWorkspaceIdentity(input: {
   now?: Date;
 }): Promise<TrustedWorkspaceIdentity> {
   const identity = await canonicalWorkspace(input.canonicalRoot);
-  const registry = (await readRegistry(join(input.stateDirectory, "trusted-workspaces.json"))).registry;
+  const parsed = await readRegistry(join(input.stateDirectory, "trusted-workspaces.json"));
+  const registry = parsed.registry;
   const entry = registry.entries.find((candidate) => candidate.canonicalPath === identity.canonicalPath);
   if (entry === undefined) throw new Error("workspace root is not trusted");
   if (entry.expiresAt !== undefined && timestamp(entry.expiresAt, "workspace expiry") <= (input.now ?? new Date()).getTime()) {
@@ -748,7 +851,7 @@ export async function trustedWorkspaceIdentity(input: {
   }
   return {
     canonicalRoot: entry.canonicalPath,
-    trustRecordDigest: trustRecordDigest(entry),
+    trustRecordDigest: parsed.legacyTrustRecordDigests.get(entry.canonicalPath) ?? trustRecordDigest(entry),
     entry: { ...entry, allowedProfiles: [...entry.allowedProfiles] },
   };
 }
@@ -761,14 +864,15 @@ export async function runWorkspaceTrust(
   const requestedAction = arguments_[0];
   const action = requestedAction === "status" ? "inspect" : requestedAction;
   const registryPath = join(paths.stateDirectory, "trusted-workspaces.json");
-  const registry = (await readRegistry(registryPath)).registry;
+  const parsedRegistry = await readRegistry(registryPath);
+  const registry = parsedRegistry.registry;
   if (action === "list") {
     // A record whose root has been removed or replaced is dead, but rendering it
     // exactly like a live one made `list` say trusted where `inspect` said false.
     const states = await Promise.all(registry.entries.map(identityState));
     const liveEntries = await Promise.all(registry.entries.map(automaticEntryIsLive));
     return {
-      schemaVersion: 1,
+      schemaVersion: WORKSPACE_TRUST_SCHEMA_VERSION,
       registryPath,
       entries: registry.entries.map((entry, index) => ({
         ...entry,
@@ -797,12 +901,12 @@ export async function runWorkspaceTrust(
         (entry) => entry.canonicalPath === canonicalCandidate || entry.canonicalPath === resolvedPath,
       );
       const [first] = doomed;
-      if (first === undefined) return { schemaVersion: 1, canonicalPath: canonicalCandidate, revoked: false };
+      if (first === undefined) return { schemaVersion: WORKSPACE_TRUST_SCHEMA_VERSION, canonicalPath: canonicalCandidate, revoked: false };
       await writeRegistry(registryPath, {
-        schemaVersion: 1,
+        schemaVersion: WORKSPACE_TRUST_SCHEMA_VERSION,
         entries: current.entries.filter((entry) => !doomed.includes(entry)),
       });
-      return { schemaVersion: 1, canonicalPath: first.canonicalPath, revoked: true };
+      return { schemaVersion: WORKSPACE_TRUST_SCHEMA_VERSION, canonicalPath: first.canonicalPath, revoked: true };
     });
   }
   const identity = await canonicalWorkspace(requested);
@@ -811,7 +915,7 @@ export async function runWorkspaceTrust(
   if (action === "inspect") {
     const expired = existing?.expiresAt !== undefined && timestamp(existing.expiresAt, "workspace expiry") <= now.getTime();
     const trusted = existing !== undefined && !expired && await automaticEntryIsLive(existing);
-    return { schemaVersion: 1, canonicalPath, trusted, expired, entry: existing ?? null };
+    return { schemaVersion: WORKSPACE_TRUST_SCHEMA_VERSION, canonicalPath, trusted, expired, entry: existing ?? null };
   }
   if (action !== "trust") throw new Error("workspace command must be trust, inspect, status, list or revoke");
   ensureFabricPaths(paths);
@@ -862,18 +966,28 @@ export async function runWorkspaceTrust(
       throw collectionBoundaryError(canonicalPath, await repositoryCollectionChildren(canonicalPath));
     }
     if (alreadyTrusted && currentEntry !== undefined) {
-      if (parsedCurrent.requiresCanonicalization) await writeRegistry(registryPath, current);
+      if (parsedCurrent.requiresCanonicalization) await writeRegistryWithCustodyMigration({
+        path: registryPath,
+        parsed: parsedCurrent,
+        registry: current,
+        databasePath: paths.databasePath,
+      });
       return {
-        schemaVersion: 1,
+        schemaVersion: WORKSPACE_TRUST_SCHEMA_VERSION,
         trusted: true,
         alreadyTrusted: true,
         entry: { ...currentEntry, allowedProfiles: [...currentEntry.allowedProfiles] },
       };
     }
-    await writeRegistry(registryPath, {
-      schemaVersion: 1,
+    await writeRegistryWithCustodyMigration({
+      path: registryPath,
+      parsed: parsedCurrent,
+      registry: {
+      schemaVersion: WORKSPACE_TRUST_SCHEMA_VERSION,
       entries: [...current.entries.filter((item) => item.canonicalPath !== canonicalPath), entry],
+      },
+      databasePath: paths.databasePath,
     });
-    return { schemaVersion: 1, trusted: true, entry };
+    return { schemaVersion: WORKSPACE_TRUST_SCHEMA_VERSION, trusted: true, entry };
   });
 }
