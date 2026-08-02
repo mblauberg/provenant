@@ -236,7 +236,7 @@ import {
 import {
   DAEMON_SHUTDOWN_FABRIC_CLOSE_TIMEOUT,
   waitWithShutdownDeadline,
-} from "../daemon/recoverable-serving-socket.js";
+} from "../lifecycle/shutdown-deadline.js";
 
 export { FabricClient } from "./client.js";
 
