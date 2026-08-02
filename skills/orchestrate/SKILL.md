@@ -13,7 +13,7 @@ Decompose -> waves -> reduce -> gate.
 
 - **Use parallel fan-out only after the decomposition/value gate passes.**
 - Preflight dependencies/shared errors.
-- Before running gates in a linked worktree, run the owning repository's declared lockfile bootstrap and build commands, record the exact commands and results, and classify a failure as environmental only after that. See [worktree provisioning](../../docs/worktrees.md).
+- Before gating a linked worktree, run the repository's declared bootstrap and build commands and record them. Only then is a failure environmental. See [worktree provisioning](../../docs/worktrees.md).
 - **No concurrent shared-state writes.** Partition authorised writers into
   repository `.worktrees/<task-agent>`; otherwise use a serial applier.
 - Parallel lanes stop ready-to-merge. The chair merges serially, refreshes the
@@ -26,10 +26,9 @@ Decompose -> waves -> reduce -> gate.
   `FABRIC-ROUNDTRIP-UNAVAILABLE` and collect an artifact.
 - Record worker cwd; never assume repository.
 - **Workers write full output to files**; return a digest/path.
-- **A worker's report is a claim, not evidence.** Confirm claimed commits in
-  `git log`, claimed counts against its own transcript, and re-run any failure
-  it calls environmental. Lanes routinely report a clean result their own
-  output contradicts.
+- **A worker's report is a claim, not evidence.** Confirm commits in `git log`
+  and counts against its transcript; re-run any failure it calls environmental.
+  Lanes routinely report a clean result their own output contradicts.
 - **Liveness: size proves nothing.** Compare CPU and session-log mtime; see
   `worker-liveness.md`. A detached task is not dead: check the PID before
   reusing a worktree.
@@ -45,9 +44,8 @@ interfaces and dependencies; non-overlapping writes; independently checkable
 return contracts; and expected information gain **greater than** coordination,
 shared-state and tool-density cost.
 
-If the gate fails, keep serial ownership with the chair or one specialist;
-shared-error or tightly coupled work stays serial. Choose the smallest
-passing topology.
+If the gate fails, keep serial ownership; coupled or shared-error work stays
+serial. Choose the smallest passing topology.
 
 ## Adaptive Loop
 
@@ -85,12 +83,11 @@ Load relevant [references](references/) only:
 `herdr-panes.md`, `layering-and-context.md`, `retrieval-and-tool-routing.md`,
 `verification.md`, `cli-headless.md`,
 `memory-scratchpad.md`, `evaluation-and-observability.md`, `domain-adaptation.md`,
-`worker-liveness.md`, and `autonomous-implementation.md`. `scripts/` and
-`evals/` hold helpers/guards;
-`cf_dispatch.sh` is degraded fallback/preflight only.
+`worker-liveness.md`, and `autonomous-implementation.md`. `scripts/`, `evals/`
+hold helpers/guards; `cf_dispatch.sh` is fallback/preflight only.
 
 ## Adapter-absent path
 
 Without adapters, emit the skill-owned [portable kind](portable-workflow.v1.json).
-It proves context only, not evidence, route state or ownership. Keep context
-separate. Validate `accepted_artifact_identity`.
+It proves context only, not evidence, route state or ownership. Validate
+`accepted_artifact_identity`.

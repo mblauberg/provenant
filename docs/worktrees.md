@@ -65,6 +65,13 @@ run contract requires them. A removal receipt emits only `status`, `name` and
   protocol `dist` unbuilt, so suites fail with
   `NPM_INSTALL_ATTESTATION_MISMATCH` or `AGENT_FABRIC_PROTOCOL_BUILD_STALE`
   for reasons that have nothing to do with the change under test.
+- The Python suite needs its own per-worktree environment: `uv sync --locked
+  --only-group test` creates `.venv`, and every run goes through
+  `.venv/bin/pytest`. A worktree without it has no `.venv` at all, and an agent
+  that falls back to a system `pytest` gets a different interpreter with
+  different packages. One lane did exactly that and reported nine failures that
+  do not exist, plus a `README` check that passes under the pinned environment.
+  Treat a suite result from an unpinned interpreter as no result.
 - Before removal, confirm a clean status, no live agent/pane and no unconsumed
   handoff. Use `git worktree remove`, never filesystem deletion.
 - Force removal of a dirty worktree, and deletion of an unmerged branch, require
