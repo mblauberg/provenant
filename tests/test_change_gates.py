@@ -7,6 +7,7 @@ import sys
 
 import pytest
 
+from _change_gate_helpers import PYTEST_COMMAND
 from scripts import change_gates
 from scripts.change_gates import (
     DiffHunk,
@@ -483,7 +484,7 @@ def test_revert_probe_rejects_mixed_test_evidence(tmp_path):
     (source / "tests" / "test_pass.py").write_text(
         "def test_pass():\n    assert True\n", encoding="utf-8"
     )
-    commands = {"py": "pytest {test} -q", "ts": "npm exec vitest run {test}"}
+    commands = {"py": PYTEST_COMMAND, "ts": "npm exec vitest run {test}"}
 
     assert (
         gate_revert_probe(
@@ -762,7 +763,7 @@ def test_right_reason_red_and_revert_probe_close_structured_runner_children(tmp_
         check=True,
     )
     target.write_text("def test_target():\n    assert False\n", encoding="utf-8")
-    commands = {"py": "pytest {test} -q", "ts": "npm exec vitest run {test}"}
+    commands = {"py": PYTEST_COMMAND, "ts": "npm exec vitest run {test}"}
     right_reason_scratch = tmp_path / "right-reason-scratch"
 
     assert (
