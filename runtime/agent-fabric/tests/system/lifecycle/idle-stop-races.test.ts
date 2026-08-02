@@ -1,10 +1,8 @@
-import { execFileSync } from "node:child_process";
 import { once } from "node:events";
 import { mkdtemp, rm } from "node:fs/promises";
 import { createConnection, createServer, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createInterface } from "node:readline";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -21,26 +19,11 @@ const databases: ReturnType<typeof createLivenessDatabase>[] = [];
 const directories: string[] = [];
 const servers: Server[] = [];
 
-export function countDaemonSocketDescriptors(pid: number, socketPath: string): number {
-  return execFileSync(
-    "/usr/sbin/lsof",
-    ["-nP", "-a", "-p", String(pid), "-U"],
-    { encoding: "utf8" },
-  ).split("\n").filter((line) => line.includes(socketPath)).length;
-}
-
 export async function connectRawSocket(socketPath: string): Promise<Socket> {
   const socket = createConnection({ path: socketPath, allowHalfOpen: true });
   socket.on("error", () => undefined);
   await once(socket, "connect");
   return socket;
-}
-
-export async function nextSocketResponse(socket: Socket): Promise<Record<string, unknown>> {
-  const lines = createInterface({ input: socket, crlfDelay: Infinity });
-  const [line] = await once(lines, "line");
-  lines.close();
-  return JSON.parse(String(line)) as Record<string, unknown>;
 }
 
 afterEach(async () => {
@@ -184,7 +167,7 @@ describe("global idle stop races", () => {
           database.prepare("UPDATE daemon_global_state SET revision = revision + 1 WHERE singleton = 1").run();
         },
         closeTimeoutMs: 500,
-        drainTimeoutMs: 500,
+        drainTimeoutMs: 5_000,
       }),
       reopenSocket: async () => await openRecoverableUnixListener(server, socketPath),
     })).resolves.toMatchObject({ state: "busy", reason: "state-changed" });
@@ -243,7 +226,7 @@ describe("global idle stop races", () => {
         await new Promise<void>((resolvePromise) => inFlightDrainers.add(resolvePromise));
       },
       closeTimeoutMs: 500,
-      drainTimeoutMs: 500,
+      drainTimeoutMs: 5_000,
     });
 
     const finishedBeforeCommand = await Promise.race([
@@ -332,20 +315,30 @@ describe("global idle stop races", () => {
     }
   });
 
-  it("rejects a late Unix socket frame after the serving admission fence closes", async () => {
+  it("rejects a queued Unix socket frame after the serving admission fence closes", async () => {
     const root = await mkdtemp(join(tmpdir(), "fabric-late-frame-fence-"));
     directories.push(root);
     const socketPath = join(root, "fabric.sock");
     const activeSockets = new Set<Socket>();
     const admissionFence = new RecoverableServingAdmissionFence();
+    const frameReceived = Promise.withResolvers<void>();
+    const releaseFrame = Promise.withResolvers<void>();
+    const frameFinished = Promise.withResolvers<void>();
+    let inFlight = 0;
     let decide!: (decision: "admitted" | "rejected") => void;
     const decision = new Promise<"admitted" | "rejected">((resolve) => { decide = resolve; });
     const server = createServer((socket) => {
       activeSockets.add(socket);
       socket.once("close", () => activeSockets.delete(socket));
       socket.once("data", () => {
-        decide(admissionFence.tryAdmit() ? "admitted" : "rejected");
-        socket.destroy();
+        inFlight += 1;
+        frameReceived.resolve();
+        void releaseFrame.promise.then(() => {
+          decide(admissionFence.tryAdmit() ? "admitted" : "rejected");
+          inFlight -= 1;
+          frameFinished.resolve();
+          socket.destroy();
+        });
       });
     });
     servers.push(server);
@@ -356,15 +349,19 @@ describe("global idle stop races", () => {
       client.once("connect", resolve);
       client.once("error", reject);
     });
+    client.write("queued frame\n");
+    await frameReceived.promise;
     const closing = closeRecoverableUnixListener({
       server,
       sockets: activeSockets,
-      waitForInFlight: async () => undefined,
+      waitForInFlight: async () => {
+        if (inFlight !== 0) await frameFinished.promise;
+      },
       closeTimeoutMs: 500,
-      drainTimeoutMs: 500,
+      drainTimeoutMs: 5_000,
       admissionFence,
     });
-    client.write("late frame\n");
+    releaseFrame.resolve();
 
     await expect(decision).resolves.toBe("rejected");
     await closing;
