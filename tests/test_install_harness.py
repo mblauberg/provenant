@@ -161,8 +161,12 @@ def ambient_skill_names_and_resolver_root():
         text = ambient.read_text()
         texts.append(text)
         roots = re.findall(r"`(\$HOME/\.agents/skills/<name>/)`", text)
-        assert roots == ["$HOME/.agents/skills/<name>/"], (
-            f"{ambient.name} must state exactly one D12 resolver root"
+        # D12 amendment: HARNESS.md is the sole resolver root. AGENTS.md must not
+        # restate it - both harnesses already discover skills through their own
+        # symlinked skills directory.
+        expected = ["$HOME/.agents/skills/<name>/"] if ambient.name == "HARNESS.md" else []
+        assert roots == expected, (
+            f"{ambient.name} must state {len(expected)} D12 resolver root(s)"
         )
         resolver_roots.update(roots)
     assert len(resolver_roots) == 1
