@@ -88,6 +88,9 @@ The current pre-release tree includes:
 
 ### Changed
 
+- The adapter wrapper byte-identity guarantee moved from activation to the
+  immediate pre-spawn check; activation now records the tracked repository
+  commit and wrapper path used as the composition pin.
 - `AGENTS_HOME` now names only the product root. When it names a non-`~/.agents`
   checkout without an explicit instance root, the next `install-harness` run
   seeds the instance at `~/.agents` and rewrites that instance's machine-local

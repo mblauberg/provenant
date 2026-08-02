@@ -52,14 +52,14 @@ Then verify the selected compatibility entries. The adapter registry records
 activation policy, stable launch paths, runtime requirements and provider
 identity policy. It does not record or compare provider versions or digests.
 Repository-owned wrapper code carries Git provenance
-(`runtime/agent-fabric/src/adapters/compatibility.ts`): the wrapper
-entrypoint must resolve inside a Git repository, be tracked at HEAD and
-byte-identical to its committed content. Provenance, adapter-specific vendor
-identity and the bounded non-answer provider interface are required at
-activation and revalidated at point of use. Missing runtime configuration,
-disabled entries or any provenance, identity or interface mismatch fails
-closed. A provider auto-update that preserves those capabilities remains
-admissible.
+(`runtime/agent-fabric/src/adapters/compatibility.ts`): at activation, the
+wrapper entrypoint must be tracked at the repository HEAD and recorded as the
+repository commit plus wrapper path. Immediately before every spawn, Fabric
+re-derives that provenance, checks the wrapper bytes against HEAD and checks the
+repository commit and path against the composition pin. Missing runtime
+configuration, disabled entries or any provenance, identity or interface
+mismatch fails closed at the point where it is checked. A provider auto-update
+that preserves those capabilities remains admissible.
 
 ## Keep the CLI dist warm
 
