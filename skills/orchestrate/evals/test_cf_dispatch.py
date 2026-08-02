@@ -117,7 +117,12 @@ def run_dispatch_with_stub(
                 "--prompt",
                 "Reply exactly OK",
             ]
-        command.extend(extra_args or [])
+        extra = list(extra_args or [])
+        if "--evidence-root" not in extra:
+            # The dispatcher no longer derives its own boundary, so every caller
+            # states one. Tests that assert on containment pass their own.
+            extra.extend(["--evidence-root", str(out.parent)])
+        command.extend(extra)
         result = subprocess.run(
             command,
             cwd=str(tmp),
@@ -227,6 +232,7 @@ def test_dispatch_receipt_owns_terminal_fact_and_output_digest():
                 str(SCRIPT), "--tool", "claude", "--orchestrator-family", "codex",
                 "--task-id", "task-1", "--attempt-id", "attempt-2", "--receipt", str(receipt_path),
                 "--out", str(out), "--prompt", "Reply exactly OK",
+                "--evidence-root", str(tmp),
             ],
             cwd=str(tmp), env=env, text=True, capture_output=True,
         )
@@ -265,6 +271,7 @@ def test_documented_workflow_separates_answer_from_terminal_artifact_and_joins_e
                 "--task-id", "review-1", "--attempt-id", "attempt-1",
                 "--receipt", str(receipt_path), "--out", str(answer),
                 "--terminal-artifact", str(terminal), "--prompt", "Reply exactly OK",
+                "--evidence-root", str(tmp),
             ],
             cwd=str(tmp), env=env, text=True, capture_output=True,
         )
@@ -398,6 +405,7 @@ def test_publication_race_over_answer_terminal_or_receipt_fails_closed(target_na
             "--task-id", "race-1", "--attempt-id", "race-attempt",
             "--receipt", str(receipt), "--out", str(answer),
             "--terminal-artifact", str(terminal), "--prompt", "Reply exactly OK",
+            "--evidence-root", str(tmp),
         ]
         process = subprocess.Popen(
             command, cwd=str(tmp), env=env, text=True,
@@ -646,6 +654,7 @@ def test_chain_failed_then_success_preserves_attempt_evidence_and_summary():
                 "--orchestrator-family", "codex", "--task-id", "chain-1",
                 "--receipt", str(receipt), "--out", str(answer),
                 "--terminal-artifact", str(terminal), "--prompt", "Review",
+                "--evidence-root", str(tmp),
             ],
             cwd=str(tmp), env=env, text=True, capture_output=True,
         )
@@ -692,6 +701,7 @@ def test_receipt_write_failure_is_explicitly_non_successful():
                 str(SCRIPT), "--tool", "claude", "--orchestrator-family", "codex",
                 "--task-id", "task-1", "--attempt-id", "attempt-1", "--receipt", str(receipt),
                 "--out", str(out), "--prompt", "Reply exactly OK",
+                "--evidence-root", str(tmp),
             ],
             cwd=str(tmp), env=env, text=True, capture_output=True,
         )
@@ -778,7 +788,7 @@ def test_missing_option_value_is_clean_error():
 
 def test_missing_prompt_file_is_clean_error():
     result = subprocess.run(
-        [str(SCRIPT), "--tool", "claude", "--orchestrator-family", "codex", "--prompt-file", "/no/such/file"],
+        [str(SCRIPT), "--tool", "claude", "--orchestrator-family", "codex", "--prompt-file", "/no/such/file", "--evidence-root", str(Path.cwd())],
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -851,6 +861,8 @@ def test_claude_oauth_fallback_uses_verifier_system_prompt():
                 str(out),
                 "--prompt",
                 "Reply exactly OK",
+                "--evidence-root",
+                str(tmp),
             ],
             cwd=str(tmp),
             env=env,
@@ -876,7 +888,7 @@ def test_claude_oauth_fallback_uses_verifier_system_prompt():
 def test_removed_agy_direct_route_fails_closed_with_schema():
     with tempfile.TemporaryDirectory() as td:
         result = subprocess.run(
-            [str(SCRIPT), "--tool", "agy", "--model", "gemini-test", "--orchestrator-family", "codex", "--prompt", "Reply exactly OK"],
+            [str(SCRIPT), "--tool", "agy", "--model", "gemini-test", "--orchestrator-family", "codex", "--prompt", "Reply exactly OK", "--evidence-root", os.environ.get("TMPDIR", "/tmp")],
             cwd=td,
             text=True,
             stdout=subprocess.PIPE,
@@ -897,7 +909,7 @@ def test_default_failure_retains_only_the_declared_output_tempfile():
         env = fabric_free_env()
         env["TMPDIR"] = str(temp_root)
         result = subprocess.run(
-            [str(SCRIPT), "--tool", "kiro", "--orchestrator-family", "codex", "--prompt", "Review"],
+            [str(SCRIPT), "--tool", "kiro", "--orchestrator-family", "codex", "--prompt", "Review", "--evidence-root", str(temp_root)],
             cwd=td,
             env=env,
             text=True,
@@ -918,7 +930,7 @@ def test_default_failure_retains_only_the_declared_output_tempfile():
 def test_orchestrator_family_is_required():
     with tempfile.TemporaryDirectory() as td:
         result = subprocess.run(
-            [str(SCRIPT), "--tool", "claude", "--prompt", "Reply exactly OK"],
+            [str(SCRIPT), "--tool", "claude", "--prompt", "Reply exactly OK", "--evidence-root", os.environ.get("TMPDIR", "/tmp")],
             cwd=td,
             text=True,
             stdout=subprocess.PIPE,
@@ -929,6 +941,35 @@ def test_orchestrator_family_is_required():
         assert DISPATCH_SCHEMA <= set(record)
         assert record["status"] == "orchestrator_family_required"
         assert record["cross_family"] is False
+
+
+def test_evidence_root_is_required():
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td).resolve()
+        env = fabric_free_env()
+        env["TMPDIR"] = str(tmp)
+        result = subprocess.run(
+            [
+                str(SCRIPT),
+                "--tool",
+                "claude",
+                "--orchestrator-family",
+                "codex",
+                "--out",
+                str(tmp / "out.txt"),
+                "--prompt",
+                "Reply exactly OK",
+            ],
+            cwd=td,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        record = json.loads(result.stdout)
+        assert result.returncode != 0
+        assert record["status"] == "evidence_root_required"
+        assert record["certification_eligible"] is False
 
 
 def test_same_family_cli_is_forbidden_when_family_declared():
@@ -942,6 +983,8 @@ def test_same_family_cli_is_forbidden_when_family_declared():
                 "codex",
                 "--prompt",
                 "Reply exactly OK",
+                "--evidence-root",
+                os.environ.get("TMPDIR", "/tmp"),
             ],
             cwd=td,
             text=True,
@@ -975,6 +1018,8 @@ def test_cursor_model_provider_prevents_disguised_same_family_review():
                 "openai",
                 "--prompt",
                 "Review",
+                "--evidence-root",
+                os.environ.get("TMPDIR", "/tmp"),
             ],
             cwd=td,
             env=env,
@@ -1015,6 +1060,8 @@ def test_cursor_distinct_model_records_adapter_and_provider_family():
                 str(out),
                 "--prompt",
                 "Review",
+                "--evidence-root",
+                str(tmp),
             ],
             cwd=td,
             env=env,
@@ -1064,6 +1111,8 @@ def test_explicit_output_path_preserves_adapter_failure_diagnostics():
                 str(out),
                 "--prompt",
                 "Review",
+                "--evidence-root",
+                str(tmp),
             ],
             cwd=td,
             env=env,
@@ -1096,7 +1145,7 @@ def test_unwritable_output_path_cannot_certify_success():
         env = fabric_free_env()
         env["PATH"] = f"{bin_dir}:{env['PATH']}"
         result = subprocess.run(
-            [str(SCRIPT), "--tool", "codex", "--orchestrator-family", "anthropic", "--out", str(tmp / "missing" / "out.txt"), "--prompt", "Review"],
+            [str(SCRIPT), "--tool", "codex", "--orchestrator-family", "anthropic", "--out", str(tmp / "missing" / "out.txt"), "--prompt", "Review", "--evidence-root", str(tmp)],
             cwd=td,
             env=env,
             text=True,
@@ -1143,6 +1192,8 @@ def test_resolved_role_effort_reaches_codex_adapter_and_receipt():
                 str(tmp / "out.txt"),
                 "--prompt",
                 "Review",
+                "--evidence-root",
+                str(tmp),
             ],
             cwd=td,
             env=env,
@@ -1193,6 +1244,8 @@ def test_codex_capability_discovery_failure_blocks_execution_with_receipt():
                 str(tmp / "out.txt"),
                 "--prompt",
                 "Review",
+                "--evidence-root",
+                str(tmp),
             ],
             cwd=td,
             env=env,
@@ -1240,6 +1293,8 @@ def test_mixed_malformed_codex_capabilities_block_execution_with_receipt():
                 str(tmp / "out.txt"),
                 "--prompt",
                 "Review",
+                "--evidence-root",
+                str(tmp),
             ],
             cwd=td,
             env=env,
@@ -1285,6 +1340,8 @@ def test_unrelated_codex_model_without_efforts_blocks_execution_with_receipt():
                 str(tmp / "out.txt"),
                 "--prompt",
                 "Review",
+                "--evidence-root",
+                str(tmp),
             ],
             cwd=td,
             env=env,
@@ -1330,6 +1387,8 @@ def test_duplicate_codex_discovery_member_blocks_execution_with_receipt():
                 str(tmp / "out.txt"),
                 "--prompt",
                 "Review",
+                "--evidence-root",
+                str(tmp),
             ],
             cwd=td,
             env=env,
@@ -1375,6 +1434,8 @@ def test_codex_explicit_model_rejection_never_reports_it_as_resolved():
                 "anthropic",
                 "--prompt",
                 "Review",
+                "--evidence-root",
+                os.environ.get("TMPDIR", "/tmp"),
             ],
             cwd=td,
             env=env,
@@ -1405,7 +1466,7 @@ def test_interrupted_dispatch_cleans_internal_tempfiles():
         env["PATH"] = f"{bin_dir}:{env['PATH']}"
         env["TMPDIR"] = str(temp_root)
         proc = subprocess.Popen(
-            [str(SCRIPT), "--tool", "codex", "--orchestrator-family", "anthropic", "--out", str(tmp / "out.txt"), "--prompt", "Review"],
+            [str(SCRIPT), "--tool", "codex", "--orchestrator-family", "anthropic", "--out", str(tmp / "out.txt"), "--prompt", "Review", "--evidence-root", str(tmp)],
             cwd=td,
             env=env,
             text=True,
@@ -1433,6 +1494,8 @@ def test_broker_adapter_requires_resolvable_provider_family():
                 "openai",
                 "--prompt",
                 "Review",
+                "--evidence-root",
+                os.environ.get("TMPDIR", "/tmp"),
             ],
             cwd=td,
             text=True,
@@ -1458,6 +1521,8 @@ def test_manual_provider_override_is_not_supported():
                 "anthropic",
                 "--prompt",
                 "Review",
+                "--evidence-root",
+                str(Path(td)),
             ],
             cwd=td,
             text=True,
@@ -1479,6 +1544,8 @@ def test_invalid_orchestrator_family_fails_closed():
                 "Claude",
                 "--prompt",
                 "Reply exactly OK",
+                "--evidence-root",
+                os.environ.get("TMPDIR", "/tmp"),
             ],
             cwd=td,
             text=True,
@@ -1515,6 +1582,8 @@ def test_chain_all_failed_uses_dispatch_schema():
                 "codex",
                 "--prompt",
                 "Reply exactly OK",
+                "--evidence-root",
+                os.environ.get("TMPDIR", "/tmp"),
             ],
             cwd=td,
             text=True,
@@ -1627,6 +1696,8 @@ def test_non_git_fallback_routes_via_product_root_model_route():
                 str(out),
                 "--prompt",
                 "Reply exactly OK",
+                "--evidence-root",
+                str(tmp),
             ],
             cwd=str(tmp),
             env=env,

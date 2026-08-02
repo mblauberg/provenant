@@ -144,17 +144,8 @@ fi
 if [ -z "$TERMINAL_ARTIFACT" ]; then
   TERMINAL_ARTIFACT="${OUT}.terminal.json"
 fi
-if [ -z "$EVIDENCE_ROOT" ]; then
-  EVIDENCE_ROOT="$(python3 - "$OUT" "$TERMINAL_ARTIFACT" "$DISPATCH_RECEIPT" <<'PY'
-import os
-from pathlib import Path
-import sys
-
-parents = [str(Path(value).absolute().parent) for value in sys.argv[1:] if value]
-print(os.path.commonpath(parents))
-PY
-)"
-fi
+# EVIDENCE_ROOT is caller-supplied only. Deriving it from the evidence paths
+# would let the boundary certify itself, which is the defect this replaced.
 PROMPT_TMP="$(make_tmp)"
 printf '%s' "$PROMPT" >"$PROMPT_TMP"
 trap 'rm -f "$PROMPT_TMP"' EXIT
@@ -428,6 +419,11 @@ run_one() {  # $1 tool $2 model $3 effort -> writes answer and optional terminal
     guarantee="none"
     status="orchestrator_family_required"
     echo "$tool disabled: pass --orchestrator-family so cross-family status can be proven" >"$diag"
+    rc=1
+  elif [ -z "$EVIDENCE_ROOT" ]; then
+    guarantee="none"
+    status="evidence_root_required"
+    echo "$tool disabled: pass --evidence-root so the evidence boundary is stated, not inferred" >"$diag"
     rc=1
   else
     if [ "$tool" = "codex" ]; then
