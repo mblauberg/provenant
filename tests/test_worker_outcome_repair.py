@@ -175,7 +175,8 @@ def test_workflow_emits_reviewed_patches_for_host_application_only():
     text = workflow.read_text(encoding="utf-8")
 
     assert "acceptance:implementation-claim" not in text
-    assert "awaiting-host-apply" in text
+    assert "state: 'executing'" in text
+    assert "awaiting-host-application" in text
     assert "machineGatePassed: false" in text
     for forbidden in (
         "apply:serial",
@@ -193,7 +194,7 @@ def test_workflow_fails_closed_before_host_apply_on_failed_checks_or_blockers():
     workflow = Path(__file__).parents[1] / "workflows" / "implement-run.js"
     text = workflow.read_text(encoding="utf-8")
 
-    failure_guard = "if (!checksPass || blocking > 0)"
+    failure_guard = "if (!checksPass || blocking > 0 || !otherPrimaryRan)"
     guard_at = text.index(failure_guard)
     host_apply_at = text.index("phase('Host apply')")
 
@@ -202,7 +203,33 @@ def test_workflow_fails_closed_before_host_apply_on_failed_checks_or_blockers():
     assert "await failRun(" in failure_tail
     assert "state: 'failed'" in failure_tail
     assert "machineGatePassed: false" in failure_tail
-    assert text.index("state: 'awaiting-host-apply'", host_apply_at) > host_apply_at
+    assert text.index("state: 'executing'", host_apply_at) > host_apply_at
+
+
+def test_workflow_fails_closed_when_certified_other_primary_coverage_is_missing():
+    workflow = Path(__file__).parents[1] / "workflows" / "implement-run.js"
+    text = workflow.read_text(encoding="utf-8")
+
+    failure_guard = "if (!checksPass || blocking > 0 || !otherPrimaryRan)"
+    guard_at = text.index(failure_guard)
+    host_apply_at = text.index("phase('Host apply')")
+
+    assert guard_at < host_apply_at
+    failure_tail = text[guard_at:host_apply_at]
+    assert "required certified other-primary coverage did not run" in failure_tail
+    assert "state: 'failed'" in failure_tail
+
+
+def test_workflow_host_application_wait_is_transport_metadata_not_delivery_state():
+    workflow = Path(__file__).parents[1] / "workflows" / "implement-run.js"
+    text = workflow.read_text(encoding="utf-8")
+    handoff_at = text.index("// --- Phase 6: host apply handoff")
+    handoff = text[handoff_at:]
+
+    assert "state: 'executing'" in handoff
+    assert "transport:" in handoff
+    assert "handoff: 'awaiting-host-application'" in handoff
+    assert "state: 'awaiting-host-apply'" not in handoff
 
 
 def test_claimed_implementation_cannot_use_an_unused_verifier(tmp_path):
@@ -258,7 +285,8 @@ def test_implement_workflow_has_no_model_source_application_boundary():
     text = workflow.read_text(encoding="utf-8")
 
     assert "patches/" in text
-    assert "awaiting-host-apply" in text
+    assert "state: 'executing'" in text
+    assert "awaiting-host-application" in text
     assert "machineGatePassed: false" in text
     assert "acceptance:implementation-claim" not in text
     assert "reviewerId" in text

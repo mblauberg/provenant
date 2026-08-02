@@ -198,7 +198,8 @@ def test_claude_workflows_use_router_and_safe_implement_loop():
     assert "substantial: 4" in implementation
     assert "crucial: 5" in implementation
     assert "terminal: 5" in implementation
-    assert "awaiting-host-apply" in implementation
+    assert "state: 'executing'" in implementation
+    assert "handoff: 'awaiting-host-application'" in implementation
     assert "git checkout" not in implementation
     assert "git restore" not in implementation
     assert "git reset" not in implementation

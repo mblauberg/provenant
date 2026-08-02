@@ -632,7 +632,12 @@ for (let cycle = 0; cycle <= maxRepairCycles; cycle += 1) {
     { label: `verify:${cycle}`, phase: 'Verify', schema: VERIFY_SCHEMA, model: models.workhorse },
   )
   checksPass = !!(verify && verify.passed)
-  await checkpoint(`verify-${cycle}-complete`, checksPass && blocking === 0 ? 'prepare host apply' : 'repair blocking findings', [], [verify && verify.path].filter(Boolean))
+  await checkpoint(
+    `verify-${cycle}-complete`,
+    checksPass && blocking === 0 && otherPrimaryRan ? 'prepare host apply' : 'repair blocking findings',
+    [],
+    [verify && verify.path].filter(Boolean),
+  )
   if (checksPass && blocking === 0) break
   if (cycle === maxRepairCycles) break
 
@@ -685,12 +690,12 @@ if (!councilChallenge || !councilChallenge.anonymized || !councilChallenge.rando
 
 log(`Final machine checks: ${checksPass ? 'PASS' : 'FAIL/UNKNOWN'}; blocking reviews: ${blocking}; repair cycles: ${repairCycles}.`)
 
-if (!checksPass || blocking > 0) {
-  const failureReason = !checksPass && blocking > 0
-    ? 'objective verification failed and blocking review findings remain'
-    : !checksPass
-      ? 'objective verification failed'
-      : 'blocking review findings remain'
+if (!checksPass || blocking > 0 || !otherPrimaryRan) {
+  const failureReasons = []
+  if (!checksPass) failureReasons.push('objective verification failed')
+  if (blocking > 0) failureReasons.push('blocking review findings remain')
+  if (!otherPrimaryRan) failureReasons.push('required certified other-primary coverage did not run')
+  const failureReason = failureReasons.join('; ')
   log(`Machine work failed closed: ${failureReason}; host application is not permitted.`)
   await failRun(failureReason)
   phase('Human gate')
@@ -742,7 +747,12 @@ return {
   otherPrimaryReviewRan: otherPrimaryRan,
   distinctFamilyReviewRan: distinctFamilyRan,
   repairCycles,
-  state: 'awaiting-host-apply',
+  state: 'executing',
+  transport: {
+    handoff: 'awaiting-host-application',
+    kind: 'host-application',
+    nextAction: 'ordinary host chair applies and verifies reviewed patches',
+  },
   patches: built.patches,
   manifest: `${runDir}/MANIFEST.md`,
   runReceipt: `${runDir}/RUN.json`,

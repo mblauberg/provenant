@@ -12,6 +12,8 @@ import textwrap
 import time
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from _shared.worker_outcome import accept_worker_outcome
 from orchestrate.scripts import run_dir_finalize
@@ -88,6 +90,7 @@ def run_dispatch_with_stub(
     role="reviewer",
     extra_args=None,
     provenant_stub=None,
+    output_path=None,
 ):
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
@@ -96,7 +99,7 @@ def run_dispatch_with_stub(
         write_executable(bin_dir / "claude", stub)
         if provenant_stub is not None:
             write_executable(bin_dir / "provenant", provenant_stub)
-        out = tmp / "out.txt"
+        out = Path(output_path) if output_path is not None else tmp / "out.txt"
         # PATH precedence keeps the checkout's stubs first.
         env = fabric_free_env()
         env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
@@ -305,6 +308,38 @@ def test_documented_workflow_separates_answer_from_terminal_artifact_and_joins_e
         assert accepted["certifying"] is True
         assert finalizer_error is None
         assert finalizer_leg["status"] == "pass"
+
+
+@pytest.mark.parametrize("alias_kind", ("path", "symlink", "hardlink"))
+def test_cli_rejects_answer_and_dispatcher_terminal_aliases_before_certification(alias_kind):
+    stub = """
+        #!/usr/bin/env bash
+        cat >/dev/null
+        printf 'Human answer\\n'
+    """
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        answer = tmp / "answer.txt"
+        terminal = tmp / "dispatcher.terminal.json"
+        if alias_kind == "path":
+            terminal = answer
+        elif alias_kind == "symlink":
+            terminal.write_text("existing terminal\\n", encoding="utf-8")
+            answer.symlink_to(terminal)
+        else:
+            answer.write_text("existing answer\\n", encoding="utf-8")
+            terminal.hardlink_to(answer)
+
+        result, record, _ = run_dispatch_with_stub(
+            stub,
+            extra_args=["--terminal-artifact", str(terminal)],
+            output_path=answer,
+        )
+
+        assert result.returncode != 0
+        assert record["status"] == "evidence_paths_not_distinct"
+        assert record["certification_eligible"] is False
+        assert record["terminal_observed"] is False
 
 
 def test_receipt_write_failure_is_explicitly_non_successful():

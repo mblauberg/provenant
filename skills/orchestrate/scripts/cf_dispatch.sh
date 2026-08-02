@@ -193,7 +193,7 @@ emit_record() {
   cross="false"
   [ -n "$ORCH_FAMILY" ] && valid_family "$ORCH_FAMILY" && [ -n "$family" ] && [ "$ORCH_FAMILY" != "$family" ] && cross="true"
   cert="false"
-  [ "$status" = "ok" ] && [ "$cross" = "true" ] && { [ "$guarantee" = "enforced" ] || [ "$guarantee" = "oauth_safe_mode" ]; } && cert="true"
+  [ "${EVIDENCE_PATHS_DISTINCT:-false}" = "true" ] && [ "$status" = "ok" ] && [ "$cross" = "true" ] && { [ "$guarantee" = "enforced" ] || [ "$guarantee" = "oauth_safe_mode" ]; } && cert="true"
   record="$(printf '{"id":"%s","attempt_id":"%s","tool":"%s","adapter":"%s","adapter_gate":"direct-cli","model":"%s","requested_model":"%s","resolved_model":"%s","fallback_model":"%s","requested_effort":"%s","effort":"%s","effort_source":"%s","effort_capability_source":"%s","effort_substitution":"%s","substitution":"%s","status":"%s","exit":%s,"terminal_observed":%s,"output_path":"%s","output_sha256":"%s","terminal_artifact_path":"%s","terminal_artifact_sha256":"%s","read_only_guarantee":"%s","orchestrator_family":"%s","provider_family":"%s","model_family":"%s","endpoint_provider":"%s","identity_source":"%s","catalog_model":"%s","model_selection":"%s","route_alias":"%s","reviewer_id":"%s","risk_tier":"%s","policy_override":"%s","cross_family":%s,"certification_eligible":%s}\n' \
     "$(printf '%s' "${TASK_ID:-$REVIEWER_ID}" | json_escape)" \
     "$(printf '%s' "${ATTEMPT_ID:-attempt-1}" | json_escape)" \
@@ -276,6 +276,48 @@ PY
 }
 
 ORCH_FAMILY="$(normalise_family "$ORCH_FAMILY")"
+EVIDENCE_PATHS_DISTINCT=true
+
+evidence_paths_distinct() {
+  python3 - "$OUT" "$TERMINAL_ARTIFACT" <<'PY'
+from pathlib import Path
+import stat
+import sys
+
+answer = Path(sys.argv[1])
+terminal = Path(sys.argv[2])
+try:
+    if answer.resolve(strict=False) == terminal.resolve(strict=False):
+        raise ValueError("answer and dispatcher terminal paths resolve to the same file")
+    identities = []
+    for label, path in (("answer", answer), ("dispatcher terminal", terminal)):
+        try:
+            if stat.S_ISLNK(path.lstat().st_mode):
+                raise ValueError(f"{label} path is a symlink")
+            info = path.stat()
+        except FileNotFoundError:
+            continue
+        identities.append((info.st_dev, info.st_ino))
+        if info.st_nlink != 1:
+            raise ValueError(f"{label} path is hardlinked")
+    if len(identities) == 2 and len(set(identities)) != len(identities):
+        raise ValueError("answer and dispatcher terminal paths are hardlink aliases")
+except (OSError, RuntimeError) as error:
+    print(f"cannot verify answer and dispatcher terminal path identity: {error}", file=sys.stderr)
+    raise SystemExit(2)
+except ValueError as error:
+    print(str(error), file=sys.stderr)
+    raise SystemExit(1)
+PY
+}
+
+emit_evidence_path_rejection() {
+  local record
+  EVIDENCE_PATHS_DISTINCT=false
+  echo "answer and dispatcher terminal evidence paths must be distinct files; path, symlink, and hardlink aliases are rejected" >&2
+  record="$(emit_record "${TOOL:-chain}" "" "" "evidence_paths_not_distinct" 2 "" "none" "" "" "" "" "" "" "" "" "" "" "" "" "$RISK_TIER" "evidence-path-alias" false "" "$TERMINAL_ARTIFACT" "")"
+  printf '%s\n' "$record"
+}
 
 # Specific failure signatures only. Do not treat any mention of "quota" as a failure.
 fail_sig='(Authentication required|Please sign in|Please( run)? login|not logged in|not authenticated|Unauthorized|insufficient_quota|quota exceeded|rate limit exceeded|usage limit reached)'
@@ -559,11 +601,23 @@ run_one() {  # $1 tool $2 model $3 effort -> writes answer and optional terminal
       guarantee="none"
     fi
   fi
+  if ! evidence_paths_distinct; then
+    EVIDENCE_PATHS_DISTINCT=false
+    status="evidence_paths_not_distinct"
+    rc=2
+    guarantee="none"
+    opath=""
+  fi
   if ! emit_record "$tool" "$model" "$effort" "$status" "$rc" "$opath" "$guarantee" "$family" "$endpoint" "$identity" "$effort_substitution" "$requested_effort" "$effort_source" "$effort_capability_source" "$substitution" "$requested_model" "$fallback_model" "$catalog_model" "$model_selection" "$route_risk_tier" "$policy_override" true "$output_sha256" "$TERMINAL_ARTIFACT" "$terminal_artifact_sha256"; then
     return 1
   fi
   [ "$status" = "ok" ]
 }
+
+if ! evidence_paths_distinct; then
+  emit_evidence_path_rejection
+  exit 2
+fi
 
 if [ -n "$CHAIN" ]; then
   for spec in $CHAIN; do
