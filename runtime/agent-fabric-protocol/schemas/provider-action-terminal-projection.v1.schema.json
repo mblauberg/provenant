@@ -69,7 +69,6 @@
             "adapterId",
             "adapterContractDigest",
             "providerFamily",
-            "providerAssurance",
             "resolvedModel",
             "requestedEffort",
             "resolvedEffort",
@@ -118,15 +117,6 @@
               "maxLength": 256,
               "x-minUtf8Bytes": 1,
               "x-maxUtf8Bytes": 256
-            },
-            "providerAssurance": {
-              "type": "string",
-              "enum": [
-                "full-vendor-identity",
-                "partial-signed-helpers",
-                "owner-controlled-install-root",
-                "lockfile-install-attestation"
-              ]
             },
             "resolvedModel": {
               "type": "string",
@@ -435,6 +425,15 @@
                   "type": "null"
                 }
               ]
+            },
+            "providerAssurance": {
+              "type": "string",
+              "enum": [
+                "full-vendor-identity",
+                "partial-signed-helpers",
+                "owner-controlled-install-root",
+                "lockfile-install-attestation"
+              ]
             }
           }
         },
@@ -466,7 +465,6 @@
                 "terminalSequence",
                 "terminalResultDigest",
                 "currentCertificationBasis",
-                "providerAssurance",
                 "certifying",
                 "providerAnswerDigest",
                 "reviewResultDigest",
@@ -712,15 +710,6 @@
                     }
                   ]
                 },
-                "providerAssurance": {
-                  "type": "string",
-                  "enum": [
-                    "full-vendor-identity",
-                    "partial-signed-helpers",
-                    "owner-controlled-install-root",
-                    "lockfile-install-attestation"
-                  ]
-                },
                 "certifying": {
                   "type": "boolean"
                 },
@@ -758,6 +747,15 @@
                 "coverageSummaryDigest": {
                   "type": "string",
                   "pattern": "^sha256:[a-f0-9]{64}$"
+                },
+                "providerAssurance": {
+                  "type": "string",
+                  "enum": [
+                    "full-vendor-identity",
+                    "partial-signed-helpers",
+                    "owner-controlled-install-root",
+                    "lockfile-install-attestation"
+                  ]
                 }
               }
             },
@@ -769,7 +767,6 @@
                 "terminalSequence",
                 "terminalResultDigest",
                 "currentCertificationBasis",
-                "providerAssurance",
                 "certifying",
                 "providerAnswerDigest",
                 "reviewResultDigest",
@@ -1015,15 +1012,6 @@
                     }
                   ]
                 },
-                "providerAssurance": {
-                  "type": "string",
-                  "enum": [
-                    "full-vendor-identity",
-                    "partial-signed-helpers",
-                    "owner-controlled-install-root",
-                    "lockfile-install-attestation"
-                  ]
-                },
                 "certifying": {
                   "type": "boolean"
                 },
@@ -1056,6 +1044,15 @@
                 "coverageSummaryDigest": {
                   "type": "string",
                   "pattern": "^sha256:[a-f0-9]{64}$"
+                },
+                "providerAssurance": {
+                  "type": "string",
+                  "enum": [
+                    "full-vendor-identity",
+                    "partial-signed-helpers",
+                    "owner-controlled-install-root",
+                    "lockfile-install-attestation"
+                  ]
                 }
               }
             },
@@ -1067,7 +1064,6 @@
                 "terminalSequence",
                 "terminalResultDigest",
                 "currentCertificationBasis",
-                "providerAssurance",
                 "certifying",
                 "providerAnswerDigest",
                 "reviewResultDigest",
@@ -1313,15 +1309,6 @@
                     }
                   ]
                 },
-                "providerAssurance": {
-                  "type": "string",
-                  "enum": [
-                    "full-vendor-identity",
-                    "partial-signed-helpers",
-                    "owner-controlled-install-root",
-                    "lockfile-install-attestation"
-                  ]
-                },
                 "certifying": {
                   "type": "boolean"
                 },
@@ -1357,6 +1344,15 @@
                 },
                 "coverageSummaryDigest": {
                   "const": null
+                },
+                "providerAssurance": {
+                  "type": "string",
+                  "enum": [
+                    "full-vendor-identity",
+                    "partial-signed-helpers",
+                    "owner-controlled-install-root",
+                    "lockfile-install-attestation"
+                  ]
                 }
               }
             },
@@ -1368,7 +1364,6 @@
                 "terminalSequence",
                 "terminalResultDigest",
                 "currentCertificationBasis",
-                "providerAssurance",
                 "certifying",
                 "providerAnswerDigest",
                 "reviewResultDigest",
@@ -1614,15 +1609,6 @@
                     }
                   ]
                 },
-                "providerAssurance": {
-                  "type": "string",
-                  "enum": [
-                    "full-vendor-identity",
-                    "partial-signed-helpers",
-                    "owner-controlled-install-root",
-                    "lockfile-install-attestation"
-                  ]
-                },
                 "certifying": {
                   "type": "boolean"
                 },
@@ -1653,6 +1639,15 @@
                 },
                 "coverageSummaryDigest": {
                   "const": null
+                },
+                "providerAssurance": {
+                  "type": "string",
+                  "enum": [
+                    "full-vendor-identity",
+                    "partial-signed-helpers",
+                    "owner-controlled-install-root",
+                    "lockfile-install-attestation"
+                  ]
                 }
               }
             },
@@ -1664,7 +1659,6 @@
                 "terminalSequence",
                 "terminalResultDigest",
                 "currentCertificationBasis",
-                "providerAssurance",
                 "certifying",
                 "providerAnswerDigest",
                 "reviewResultDigest",
@@ -1910,15 +1904,6 @@
                     }
                   ]
                 },
-                "providerAssurance": {
-                  "type": "string",
-                  "enum": [
-                    "full-vendor-identity",
-                    "partial-signed-helpers",
-                    "owner-controlled-install-root",
-                    "lockfile-install-attestation"
-                  ]
-                },
                 "certifying": {
                   "type": "boolean"
                 },
@@ -1949,6 +1934,15 @@
                 },
                 "coverageSummaryDigest": {
                   "const": null
+                },
+                "providerAssurance": {
+                  "type": "string",
+                  "enum": [
+                    "full-vendor-identity",
+                    "partial-signed-helpers",
+                    "owner-controlled-install-root",
+                    "lockfile-install-attestation"
+                  ]
                 }
               }
             },
@@ -1960,7 +1954,6 @@
                 "terminalSequence",
                 "terminalResultDigest",
                 "currentCertificationBasis",
-                "providerAssurance",
                 "certifying",
                 "providerAnswerDigest",
                 "reviewResultDigest",
@@ -2206,15 +2199,6 @@
                     }
                   ]
                 },
-                "providerAssurance": {
-                  "type": "string",
-                  "enum": [
-                    "full-vendor-identity",
-                    "partial-signed-helpers",
-                    "owner-controlled-install-root",
-                    "lockfile-install-attestation"
-                  ]
-                },
                 "certifying": {
                   "type": "boolean"
                 },
@@ -2245,6 +2229,15 @@
                 },
                 "coverageSummaryDigest": {
                   "const": null
+                },
+                "providerAssurance": {
+                  "type": "string",
+                  "enum": [
+                    "full-vendor-identity",
+                    "partial-signed-helpers",
+                    "owner-controlled-install-root",
+                    "lockfile-install-attestation"
+                  ]
                 }
               }
             }

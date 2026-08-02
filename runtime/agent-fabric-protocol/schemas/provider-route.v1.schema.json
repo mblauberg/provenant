@@ -47,7 +47,6 @@
         "adapterId",
         "adapterContractDigest",
         "providerFamily",
-        "providerAssurance",
         "resolvedModel",
         "requestedEffort",
         "resolvedEffort",
@@ -96,15 +95,6 @@
           "maxLength": 256,
           "x-minUtf8Bytes": 1,
           "x-maxUtf8Bytes": 256
-        },
-        "providerAssurance": {
-          "type": "string",
-          "enum": [
-            "full-vendor-identity",
-            "partial-signed-helpers",
-            "owner-controlled-install-root",
-            "lockfile-install-attestation"
-          ]
         },
         "resolvedModel": {
           "type": "string",
@@ -412,6 +402,15 @@
             {
               "type": "null"
             }
+          ]
+        },
+        "providerAssurance": {
+          "type": "string",
+          "enum": [
+            "full-vendor-identity",
+            "partial-signed-helpers",
+            "owner-controlled-install-root",
+            "lockfile-install-attestation"
           ]
         }
       }

@@ -15,6 +15,12 @@ import sys
 from typing import Any
 
 
+CERTIFYING_PROVIDER_ASSURANCE = frozenset({
+    "full-vendor-identity",
+    "lockfile-install-attestation",
+})
+
+
 SKILLS_ROOT = Path(__file__).resolve().parents[2]
 if str(SKILLS_ROOT) not in sys.path:
     sys.path.insert(0, str(SKILLS_ROOT))
@@ -507,7 +513,7 @@ def command_review_add(args: Any, api: dict[str, Any]) -> dict[str, Any]:
             or route.get("reviewer_id") != args.reviewer_id
             or route.get("resolved_model", route.get("model")) != args.model
             or route.get("model_family") != args.provider_family
-            or route.get("certification_eligible") is not True
+            or route.get("provider_assurance") not in CERTIFYING_PROVIDER_ASSURANCE
         ):
             _error(api, "route receipt identity does not match review lineage")
         if args.role == "other-primary" and route.get("cross_family") is not True:

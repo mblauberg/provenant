@@ -562,11 +562,13 @@ const terminalReviewCommon = {
   terminalSequence: positive,
   terminalResultDigest: sha256,
   currentCertificationBasis: nullable(REVIEW_CERTIFICATION_BASIS_V1_CODEC),
-  providerAssurance: PROVIDER_IDENTITY_ASSURANCE_V1_CODEC,
   certifying: boolean,
 };
+const terminalReviewCodec = (required: Parameters<typeof objectCodec>[0]) => objectCodec(required, {
+  providerAssurance: PROVIDER_IDENTITY_ASSURANCE_V1_CODEC,
+});
 const terminalReviewProjectionBaseCodec = unionOf([
-  objectCodec({
+  terminalReviewCodec({
     kind: literal("safe-answer"),
     ...terminalReviewCommon,
     providerAnswerDigest: sha256,
@@ -579,7 +581,7 @@ const terminalReviewProjectionBaseCodec = unionOf([
     readCoverageDigest: sha256,
     coverageSummaryDigest: sha256,
   }),
-  objectCodec({
+  terminalReviewCodec({
     kind: literal("unusable-answer"),
     ...terminalReviewCommon,
     providerAnswerDigest: sha256,
@@ -592,7 +594,7 @@ const terminalReviewProjectionBaseCodec = unionOf([
     readCoverageDigest: sha256,
     coverageSummaryDigest: sha256,
   }),
-  objectCodec({
+  terminalReviewCodec({
     kind: literal("provider-terminal-failure"),
     ...terminalReviewCommon,
     providerAnswerDigest: literal(null),
@@ -605,7 +607,7 @@ const terminalReviewProjectionBaseCodec = unionOf([
     readCoverageDigest: literal(null),
     coverageSummaryDigest: literal(null),
   }),
-  objectCodec({
+  terminalReviewCodec({
     kind: literal("terminal-no-effect"),
     ...terminalReviewCommon,
     providerAnswerDigest: literal(null),
@@ -618,7 +620,7 @@ const terminalReviewProjectionBaseCodec = unionOf([
     readCoverageDigest: literal(null),
     coverageSummaryDigest: literal(null),
   }),
-  objectCodec({
+  terminalReviewCodec({
     kind: literal("integrity-terminal"),
     ...terminalReviewCommon,
     providerAnswerDigest: literal(null),
@@ -631,7 +633,7 @@ const terminalReviewProjectionBaseCodec = unionOf([
     readCoverageDigest: literal(null),
     coverageSummaryDigest: literal(null),
   }),
-  objectCodec({
+  terminalReviewCodec({
     kind: literal("retired-unknown"),
     ...terminalReviewCommon,
     providerAnswerDigest: literal(null),
@@ -769,7 +771,6 @@ const reviewEvidenceRecordBaseCodec = objectCodec({
   providerFailureCode: literal(null),
   providerFailureDigest: literal(null),
   routeReceiptDigest: sha256,
-  providerAssurance: PROVIDER_IDENTITY_ASSURANCE_V1_CODEC,
   routeObservationDigest: nullableDigest,
   actualRouteIdentityDigest: nullableDigest,
   finalPromptDigest: sha256,
@@ -796,6 +797,8 @@ const reviewEvidenceRecordBaseCodec = objectCodec({
   reviewerFamilyRelation,
   certificationBasisAtTerminal: REVIEW_CERTIFICATION_BASIS_V1_CODEC,
   mutationReceiptDigest: sha256,
+}, {
+  providerAssurance: PROVIDER_IDENTITY_ASSURANCE_V1_CODEC,
 });
 export const REVIEW_EVIDENCE_RECORD_V1_CODEC = parserBacked(
   defineCodec(
@@ -842,9 +845,10 @@ const reviewEvidenceCurrencyBaseCodec = objectCodec({
   chair: enumeration(["current", "stale"]),
   profile: enumeration(["current", "stale"]),
   currentCertificationBasis: nullable(REVIEW_CERTIFICATION_BASIS_V1_CODEC),
-  providerAssurance: PROVIDER_IDENTITY_ASSURANCE_V1_CODEC,
   certifying: boolean,
   blockerCodes: arrayOf(reviewCurrencyBlocker, { maximum: 32, unique: true }),
+}, {
+  providerAssurance: PROVIDER_IDENTITY_ASSURANCE_V1_CODEC,
 });
 const reviewCurrencyBlockerOrder = [
   ...TOP_REVIEW_BLOCKERS,
@@ -1048,7 +1052,6 @@ const reviewSlotBaseCodec = objectCodec({
   adapterId: id256,
   endpointProvider: id256,
   providerFamily: id256,
-  providerAssurance: PROVIDER_IDENTITY_ASSURANCE_V1_CODEC,
   model: id256,
   routeObservationDigest: nullableDigest,
   actualRouteIdentityDigest: nullableDigest,
@@ -1058,6 +1061,8 @@ const reviewSlotBaseCodec = objectCodec({
   certifying: boolean,
   openFindingSet: FINDING_SET_REF_V1_CODEC,
   blockers: arrayOf(enumeration(SLOT_REVIEW_BLOCKERS), { maximum: SLOT_REVIEW_BLOCKERS.length, unique: true }),
+}, {
+  providerAssurance: PROVIDER_IDENTITY_ASSURANCE_V1_CODEC,
 });
 export const REVIEW_SLOT_V1_CODEC = parserBacked(
   defineCodec(

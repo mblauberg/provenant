@@ -18,7 +18,6 @@
     "providerFailureCode",
     "providerFailureDigest",
     "routeReceiptDigest",
-    "providerAssurance",
     "routeObservationDigest",
     "actualRouteIdentityDigest",
     "finalPromptDigest",
@@ -146,15 +145,6 @@
     "routeReceiptDigest": {
       "type": "string",
       "pattern": "^sha256:[a-f0-9]{64}$"
-    },
-    "providerAssurance": {
-      "type": "string",
-      "enum": [
-        "full-vendor-identity",
-        "partial-signed-helpers",
-        "owner-controlled-install-root",
-        "lockfile-install-attestation"
-      ]
     },
     "routeObservationDigest": {
       "oneOf": [
@@ -740,6 +730,15 @@
     "mutationReceiptDigest": {
       "type": "string",
       "pattern": "^sha256:[a-f0-9]{64}$"
+    },
+    "providerAssurance": {
+      "type": "string",
+      "enum": [
+        "full-vendor-identity",
+        "partial-signed-helpers",
+        "owner-controlled-install-root",
+        "lockfile-install-attestation"
+      ]
     }
   },
   "x-reviewEvidenceCorrelated": true,

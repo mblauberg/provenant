@@ -259,6 +259,43 @@ def test_direct_cli_executes_the_verified_adapter_path_once():
         ]
 
 
+def test_legacy_owner_plain_path_fallback_is_advisory_and_not_certifying():
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        executable = tmp / "legacy-claude"
+        write_executable(executable, "#!/usr/bin/env bash\necho LEGACY-PATH\n")
+        owner_dir = tmp / "owner" / "scripts"
+        owner_dir.mkdir(parents=True)
+        owner_calls = tmp / "owner-calls"
+        write_executable(owner_dir / "agent-fabric", f'''#!/usr/bin/env bash
+        printf '%s\n' "$*" >> {owner_calls}
+        case " $* " in
+          *" --json "*) echo 'unknown option --json' >&2; exit 2;;
+        esac
+        printf '%s\n' {json.dumps(str(executable))}
+        ''')
+        out = tmp / "out.txt"
+        env = fabric_free_env()
+        env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
+        env["AGENTS_HOME"] = str(tmp / "owner")
+        result = subprocess.run([
+            str(SCRIPT), "--tool", "claude", "--orchestrator-family", "codex",
+            "--out", str(out), "--prompt", "Review",
+        ], cwd=td, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+        record = json.loads(result.stdout)
+        assert result.returncode == 0, result.stderr
+        assert out.read_text(encoding="utf-8").strip() == "LEGACY-PATH"
+        assert record["adapter_resolution"] == "verified-owner"
+        assert record["provider_assurance"] == ""
+        assert record["certification_eligible"] is False
+        assert len(owner_calls.read_text(encoding="utf-8").splitlines()) == 2
+        assert "--json" in owner_calls.read_text(encoding="utf-8").splitlines()[0]
+        assert "--json" not in owner_calls.read_text(encoding="utf-8").splitlines()[1]
+
+
 def test_direct_cli_refuses_a_tampered_path_when_owner_rejects_it():
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)

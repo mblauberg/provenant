@@ -458,7 +458,6 @@ export const LOCAL_PROVIDER_ROUTE_V1_CODEC = objectCodec({
   adapterId: id256,
   adapterContractDigest: sha256,
   providerFamily: id256,
-  providerAssurance: PROVIDER_IDENTITY_ASSURANCE_V1_CODEC,
   resolvedModel: id256,
   requestedEffort: nullableId,
   resolvedEffort: RESOLVED_EFFORT_V1_CODEC,
@@ -477,6 +476,8 @@ export const LOCAL_PROVIDER_ROUTE_V1_CODEC = objectCodec({
   profileDigest: nullable(sha256),
   slotHeadGeneration: nullable(nonnegative),
   attemptGeneration: nullable(positive),
+}, {
+  providerAssurance: PROVIDER_IDENTITY_ASSURANCE_V1_CODEC,
 });
 const providerRouteBaseCodec = objectCodec({
   actionRef: PROVIDER_ACTION_REF_V1_CODEC,

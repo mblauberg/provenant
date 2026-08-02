@@ -367,7 +367,6 @@
           "adapterId",
           "endpointProvider",
           "providerFamily",
-          "providerAssurance",
           "model",
           "routeObservationDigest",
           "actualRouteIdentityDigest",
@@ -537,15 +536,6 @@
             "maxLength": 256,
             "x-minUtf8Bytes": 1,
             "x-maxUtf8Bytes": 256
-          },
-          "providerAssurance": {
-            "type": "string",
-            "enum": [
-              "full-vendor-identity",
-              "partial-signed-helpers",
-              "owner-controlled-install-root",
-              "lockfile-install-attestation"
-            ]
           },
           "model": {
             "type": "string",
@@ -880,6 +870,15 @@
             "minItems": 0,
             "maxItems": 20,
             "uniqueItems": true
+          },
+          "providerAssurance": {
+            "type": "string",
+            "enum": [
+              "full-vendor-identity",
+              "partial-signed-helpers",
+              "owner-controlled-install-root",
+              "lockfile-install-attestation"
+            ]
           }
         },
         "x-reviewSlotCorrelated": true

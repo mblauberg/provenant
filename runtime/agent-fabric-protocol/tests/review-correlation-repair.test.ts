@@ -49,6 +49,7 @@ function cleanSlot(slot: "native" | "other-primary" | "cursor-grok" | "agy-gemin
     readCoverageDigest: digest,
     reviewerFamilyRelation: slot === "native" ? "same-family-exempt" : "distinct-family-proved",
     currentCertificationBasis: certificationBasis(),
+    providerAssurance: "full-vendor-identity",
     certifying: true,
     openFindingSet: { findingSetDigest: digest, findingCount: 0, pageDigests: [] },
     blockers: [],
