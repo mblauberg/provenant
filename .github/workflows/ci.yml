@@ -120,7 +120,6 @@ jobs:
             split-root:
               - *ci-contract
               - *node-workspace
-              - '.github/split-root-known-red-ts.txt'
               - '.github/split-root-known-flaky.txt'
               - 'config/**'
               - 'runtime/agent-fabric/**'
@@ -321,12 +320,9 @@ jobs:
           FORCE_COLOR: "0"
         run: |
           set -euo pipefail
-          # The suite is expected to fail here, on exactly the cases the
-          # TypeScript ledger names and no others.  Asserting the exact set is
-          # stronger than deselecting them: a ledger entry that starts passing
-          # shrinks the count and breaks this step, and a genuine regression
-          # grows it and breaks this step too, so the list cannot outlive the
-          # bugs it names in either direction.
+          # The suite must pass, except for failures explicitly recorded as
+          # intermittent in the flaky ledger.  A failure outside that ledger
+          # fails this step; a flaky entry that stops firing is harmless.
           set +e
           output="$(npm test 2>&1 | perl -pe 's/\e\[[0-9;]*[A-Za-z]//g; s/\^\[\[[0-9;]*[A-Za-z]//g')"
           # `pipefail` is still set from the top of this step, so the assignment
@@ -334,24 +330,10 @@ jobs:
           status=$?
           set -e
           printf '%s\n' "$output"
-          test "$status" -ne 0
           # Match ONLY within vitest's FAIL lines.  Searching the whole output
-          # matches the test name in its passing tick line just as happily, so
-          # the inverse gate below could never detect an entry going green,
-          # which is the one thing it exists to do.
+          # matches a test name in its passing tick line just as happily.
           failures="$(grep -E '^[[:space:]]*FAIL ' <<<"$output" || true)"
           expected=0
-          while IFS= read -r line; do
-            name="${line% #*}"
-            owner="${line##* }"
-            if grep -Fq "$name" <<<"$failures"; then
-              printf 'still red as recorded: %s (%s)\n' "$name" "$owner"
-              expected=$((expected + 1))
-            else
-              printf 'NOW PASSING or renamed, remove from the ledger: %s (%s)\n' "$name" "$owner"
-              exit 1
-            fi
-          done < <(grep -vE '^[[:space:]]*(#|$)' .github/split-root-known-red-ts.txt)
           # A known flake is not evidence of anything, but it does change the
           # arithmetic, so count the ones that actually fired rather than
           # tolerating a range.  An entry that did not fire adds nothing, so a
@@ -364,10 +346,13 @@ jobs:
               expected=$((expected + 1))
             fi
           done < <(grep -vE '^[[:space:]]*(#|$)' .github/split-root-known-flaky.txt)
-          # vitest pads its summary columns, so match on a whitespace-tolerant
-          # pattern rather than a fixed number of spaces.  Any failure named by
-          # neither ledger makes this count wrong and breaks the step, which is
-          # the whole point.
+          if test "$status" -eq 0; then
+            test -z "$failures"
+            printf 'split-root workspace suite passed with no failures\n'
+            exit 0
+          fi
+          # Any failure named by neither ledger makes this count wrong and
+          # breaks the step, which is the whole point.
           grep -Eq "Tests +${expected} failed \|" <<<"$output" || {
             printf 'FAILURE SET DOES NOT MATCH THE LEDGERS: expected %d\n' "$expected"
             printf '%s\n' "$failures"

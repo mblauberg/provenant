@@ -19,6 +19,8 @@ export async function runSourceCli(
   } = {},
 ): Promise<CliResult> {
   const environment: NodeJS.ProcessEnv = { ...process.env };
+  delete environment["AGENT_FABRIC_INSTANCE_ROOT"];
+  delete environment["AGENT_FABRIC_PRODUCT_ROOT"];
   for (const [key, value] of Object.entries(options.environment ?? {})) {
     if (value === undefined) {
       delete environment[key];

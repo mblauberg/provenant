@@ -79,6 +79,8 @@ async function fixture(): Promise<Fixture> {
       AGENTS_HOME: agentsHome,
       AGENT_FABRIC_STATE_DIRECTORY: stateDirectory,
       AGENT_FABRIC_RUNTIME_DIRECTORY: runtimeDirectory,
+      AGENT_FABRIC_INSTANCE_ROOT: undefined,
+      AGENT_FABRIC_PRODUCT_ROOT: undefined,
     },
   };
 }
