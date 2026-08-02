@@ -69,6 +69,26 @@ describe("shutdown deadline behaviour", () => {
     }
   });
 
+  it("rejects when pending shutdown work misses its deadline", async () => {
+    vi.useFakeTimers();
+    try {
+      const outcome = Promise.race([
+        waitWithShutdownDeadline(
+          new Promise<void>(() => undefined),
+          10,
+          DAEMON_SHUTDOWN_FABRIC_CLOSE_TIMEOUT,
+          "fabric close timed out",
+        ).catch((error: unknown) => error),
+        new Promise<{ code: string }>((resolve) => setTimeout(() => resolve({ code: "TEST_TIMEOUT" }), 100)),
+      ]);
+
+      await vi.advanceTimersByTimeAsync(100);
+      await expect(outcome).resolves.toMatchObject({ code: DAEMON_SHUTDOWN_FABRIC_CLOSE_TIMEOUT });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("tears down a wedged adapter child and closes the database after a drain timeout", async () => {
     const root = await mkdtemp(join(tmpdir(), "fabric-shutdown-deadline-"));
     roots.push(root);
