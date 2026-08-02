@@ -20,10 +20,14 @@ except ModuleNotFoundError as exc:
 
 try:
     import scripts.agent_installation as agent_installation
-except ModuleNotFoundError:
+except ModuleNotFoundError as exc:
+    if exc.name != "scripts":
+        raise
     try:
         import agent_installation  # type: ignore[no-redef]
-    except ModuleNotFoundError:
+    except ModuleNotFoundError as exc:
+        if exc.name != "agent_installation":
+            raise
         agent_installation = None
 
 
@@ -650,9 +654,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--summary", action="store_true")
     args = parser.parse_args(argv)
     if args.surface == "agents":
-        if agent_installation is None:
-            print("conflicting: agents installation mechanics are unavailable", file=sys.stderr)
-            return 3
         try:
             return agent_installation.run(
                 args.action, args.source, args.target, args.summary

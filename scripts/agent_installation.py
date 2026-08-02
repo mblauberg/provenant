@@ -37,7 +37,7 @@ def _sources(source: Path) -> dict[str, Path]:
     if not source.is_dir():
         raise InstallError("source must be an existing agent definition directory")
     paths = sorted(source.glob("*.md"))
-    if not paths or any(
+    if any(
         not AGENT_NAME.fullmatch(path.name)
         or path.is_symlink()
         or not path.is_file()
@@ -106,20 +106,44 @@ def _same_link(destination: Path, source: Path) -> bool:
         return False
 
 
-def _replace_link(destination: Path, source: Path) -> None:
-    descriptor, raw_path = tempfile.mkstemp(
-        dir=destination.parent,
-        prefix=f".{destination.name}.",
-        suffix=".tmp",
-    )
-    os.close(descriptor)
-    temporary = Path(raw_path)
+def _canonical_directory_link(source: Path, target: Path) -> bool:
+    if not target.is_symlink():
+        return False
     try:
+        if target.resolve(strict=True) == source.resolve(strict=True):
+            return True
+    except (OSError, RuntimeError):
+        pass
+    raise InstallError("target must not be a non-canonical symlink")
+
+
+def _same_file_content(destination: Path, source: Path) -> bool:
+    if destination.is_symlink() or not destination.is_file():
+        return False
+    try:
+        return _sha256(destination) == _sha256(source)
+    except OSError:
+        return False
+
+
+def _replace_link(destination: Path, source: Path) -> None:
+    """Publish one staged link; the temporary path stays on the target filesystem."""
+    temporary: Path | None = None
+    try:
+        descriptor, raw_path = tempfile.mkstemp(
+            dir=destination.parent,
+            prefix=f".{destination.name}.",
+            suffix=".tmp",
+        )
+        os.close(descriptor)
+        temporary = Path(raw_path)
         temporary.unlink()
         temporary.symlink_to(source)
         os.replace(temporary, destination)
+        temporary = None
     finally:
-        temporary.unlink(missing_ok=True)
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 def _write_manifest(target: Path, manifest: dict[str, Any]) -> None:
@@ -148,11 +172,9 @@ def _state(
     entry: dict[str, Any] | None,
 ) -> str:
     if entry is None:
-        return (
-            "unmanaged"
-            if destination.exists() or destination.is_symlink()
-            else "missing"
-        )
+        if not destination.exists() and not destination.is_symlink():
+            return "missing"
+        return "adoptable" if _same_file_content(destination, source) else "unmanaged"
     if _same_link(destination, source):
         return (
             "managed"
@@ -183,22 +205,24 @@ def _integrity_state(destination: Path, source: Path) -> str:
         return "missing"
     if destination.is_symlink():
         return "foreign"
-    try:
-        return "present" if _sha256(destination) == _sha256(source) else "noncanonical"
-    except OSError:
-        return "noncanonical"
+    return "adoptable" if _same_file_content(destination, source) else "noncanonical"
 
 
-def install(source: Path, target: Path) -> tuple[int, int, list[str]]:
-    if target.is_symlink():
-        raise InstallError("target must not be a symlink")
-    target = target.resolve()
-    sources = _sources(source)
-    manifest = _load_manifest(target)
-    states = {
-        name: _state(target / name, path, manifest["managed"].get(name))
-        for name, path in sources.items()
-    }
+def _raise_on_conflicts(
+    states: dict[str, str],
+    sources: dict[str, Path],
+    target: Path,
+    manifest: dict[str, Any],
+) -> None:
+    unmanaged = [name for name, state in states.items() if state == "unmanaged"]
+    if unmanaged:
+        remedies = "; ".join(
+            f"{name}: manually move or remove {target / name} before rerunning "
+            f"to adopt {sources[name]}"
+            for name in unmanaged
+        )
+        raise InstallError("unmanaged agent targets would be overwritten: " + remedies)
+
     conflicts = [name for name, state in states.items() if state == "conflicting"]
     for name in sorted(set(manifest["managed"]) - set(sources)):
         destination = target / name
@@ -208,10 +232,25 @@ def install(source: Path, target: Path) -> tuple[int, int, list[str]]:
         ):
             conflicts.append(name)
     if conflicts:
-        raise InstallError("conflicting managed targets: " + ", ".join(conflicts))
+        raise InstallError("conflicting managed targets: " + ", ".join(sorted(conflicts)))
+
+
+def install(source: Path, target: Path) -> tuple[int, int, list[str]]:
+    sources = _sources(source)
+    if _canonical_directory_link(source, target):
+        return 0, 0, []
+    target = target.resolve()
+    manifest = _load_manifest(target)
+    states = {
+        name: _state(target / name, path, manifest["managed"].get(name))
+        for name, path in sources.items()
+    }
+    _raise_on_conflicts(states, sources, target, manifest)
 
     target.mkdir(parents=True, exist_ok=True)
-    newly_managed = [name for name, state in states.items() if state == "missing"]
+    newly_managed = [
+        name for name, state in states.items() if state in {"missing", "adoptable"}
+    ]
     manifest_changed = bool(newly_managed)
     for name in newly_managed:
         manifest["managed"][name] = _entry(sources[name])
@@ -221,7 +260,7 @@ def install(source: Path, target: Path) -> tuple[int, int, list[str]]:
     linked = 0
     for name, path in sources.items():
         destination = target / name
-        if states[name] in {"missing", "stale"}:
+        if states[name] in {"missing", "stale", "adoptable"}:
             _replace_link(destination, path)
             manifest["managed"][name] = _entry(path)
             manifest_changed = True
@@ -232,73 +271,110 @@ def install(source: Path, target: Path) -> tuple[int, int, list[str]]:
             destination.unlink()
         del manifest["managed"][name]
         manifest_changed = True
-        linked += 1
     if manifest_changed:
         _write_manifest(target, manifest)
 
     failures = []
     for name, path in sources.items():
-        if states[name] == "unmanaged":
-            failures.append(f"{name}=unmanaged")
-            continue
         integrity = _integrity_state(target / name, path)
         if integrity != "present":
             failures.append(f"{name}={integrity}")
     return linked, len(sources) - linked, failures
 
 
-def check(source: Path, target: Path) -> list[str]:
-    if target.is_symlink():
-        raise InstallError("target must not be a symlink")
-    target = target.resolve()
+def _check_items(source: Path, target: Path) -> list[dict[str, str]]:
     sources = _sources(source)
+    if _canonical_directory_link(source, target):
+        return []
+    target = target.resolve()
     manifest = _load_manifest(target)
-    failures = []
+    items: list[dict[str, str]] = []
     for name, path in sources.items():
         entry = manifest["managed"].get(name)
         state = _integrity_state(target / name, path)
         if entry is None:
-            state = "unmanaged" if state != "missing" else "missing"
+            if state not in {"missing", "adoptable"}:
+                state = "unmanaged"
         elif state == "present" and (
             Path(entry["source_target"]).resolve() != path.resolve()
             or entry["source_sha256"] != _sha256(path)
         ):
             state = "stale"
-        if state != "present":
-            failures.append(f"{name}={state}")
+        items.append({"name": name, "state": state})
     for name in sorted(set(manifest["managed"]) - set(sources)):
-        failures.append(f"{name}=retired")
+        items.append({"name": name, "state": "retired"})
+    known = set(sources) | set(manifest["managed"])
+    if target.is_dir():
+        for destination in sorted(target.iterdir()):
+            if destination.name.endswith(".md") and destination.name not in known:
+                items.append({"name": destination.name, "state": "foreign"})
+    return items
+
+
+def check(source: Path, target: Path) -> list[str]:
+    items = _check_items(source, target)
+    sources = _sources(source)
+    target = target.resolve()
+    failures = []
+    for item in items:
+        if item["state"] in {"present", "adoptable"}:
+            continue
+        if item["state"] == "unmanaged":
+            name = item["name"]
+            failures.append(
+                f"{name}=unmanaged; manually move or remove {target / name} "
+                f"before rerunning to adopt {sources[name]}"
+            )
+        else:
+            failures.append(f"{item['name']}={item['state']}")
     return failures
 
 
 def plan(source: Path, target: Path) -> dict[str, str]:
     sources = _sources(source)
-    if target.is_symlink():
-        try:
-            if target.resolve(strict=True) == source.resolve(strict=True):
-                return {}
-        except (OSError, RuntimeError):
-            pass
-        raise InstallError("target must not be a non-canonical symlink")
+    if _canonical_directory_link(source, target):
+        return {}
     target = target.resolve()
     manifest = _load_manifest(target)
     states = {
         name: _state(target / name, path, manifest["managed"].get(name))
         for name, path in sources.items()
     }
-    conflicts = [
-        name for name, state in states.items() if state in {"conflicting", "unmanaged"}
-    ]
-    for name in sorted(set(manifest["managed"]) - set(sources)):
+    _raise_on_conflicts(states, sources, target, manifest)
+    return states
+
+
+def uninstall_managed(source: Path, target: Path) -> tuple[int, int, list[str]]:
+    _sources(source)
+    if _canonical_directory_link(source, target):
+        return 0, 0, []
+    target = target.resolve()
+    manifest = _load_manifest(target)
+    conflicts = []
+    for name, entry in manifest["managed"].items():
         destination = target / name
-        recorded_source = Path(manifest["managed"][name]["source_target"])
         if (destination.exists() or destination.is_symlink()) and not _same_link(
-            destination, recorded_source
+            destination, Path(entry["source_target"])
         ):
             conflicts.append(name)
     if conflicts:
-        raise InstallError("conflicting agent targets: " + ", ".join(conflicts))
-    return states
+        remedies = "; ".join(
+            f"{name}: manually restore the managed link to "
+            f"{manifest['managed'][name]['source_target']} or remove {target / name}"
+            for name in conflicts
+        )
+        raise InstallError("conflicting managed agent targets changed outside harness: " + remedies)
+
+    removed = 0
+    for name in list(manifest["managed"]):
+        destination = target / name
+        if destination.is_symlink():
+            destination.unlink()
+        del manifest["managed"][name]
+        removed += 1
+    if removed:
+        _write_manifest(target, manifest)
+    return removed, 0, []
 
 
 def run(action: str, source: Path, target: Path, summary: bool) -> int:
@@ -322,9 +398,44 @@ def run(action: str, source: Path, target: Path, summary: bool) -> int:
                 for name, state in states.items()
             ], "changed": []}, indent=2))
         return 0
-    if action == "install":
+    if action in {"install", "reconcile", "uninstall-managed"}:
+        _sources(source)
+        if _canonical_directory_link(source, target):
+            if summary:
+                print(f"agents existing=directory-link target={target}")
+            else:
+                print(json.dumps({
+                    "schema_version": 1,
+                    "action": action,
+                    "items": [],
+                    "changed": [],
+                }, indent=2))
+            return 0
+    if action in {"install", "reconcile"}:
+        before = plan(source, target)
+        before_managed = set(_load_manifest(target)["managed"])
         linked, existing, failures = install(source, target)
-        print(f"agents linked={linked} existing={existing} target={target}")
+        after = plan(source, target)
+        changed_names = {
+            name
+            for name in set(before) | set(after)
+            if before.get(name) != after.get(name)
+        }
+        changed_names.update(
+            before_managed - set(_load_manifest(target)["managed"])
+        )
+        if summary:
+            print(f"agents linked={linked} existing={existing} target={target}")
+        else:
+            print(json.dumps({
+                "schema_version": 1,
+                "action": action,
+                "items": [
+                    {"name": name, "state": state}
+                    for name, state in after.items()
+                ],
+                "changed": sorted(changed_names),
+            }, indent=2))
         if failures:
             print(
                 "conflicting: agent installation integrity failed: "
@@ -334,8 +445,40 @@ def run(action: str, source: Path, target: Path, summary: bool) -> int:
             return 3
         return 0
     if action == "check":
+        items = _check_items(source, target)
         failures = check(source, target)
-        print(f"agents checked={len(_sources(source))} target={target}")
+        if summary:
+            print(f"agents checked={len(_sources(source))} target={target}")
+        else:
+            print(json.dumps({
+                "schema_version": 1,
+                "action": action,
+                "items": items,
+                "changed": [],
+            }, indent=2))
+        if failures:
+            print(
+                "conflicting: agent installation integrity failed: "
+                + ", ".join(failures),
+                file=sys.stderr,
+            )
+            return 3
+        return 0
+    if action == "uninstall-managed":
+        before_managed = set(_load_manifest(target)["managed"])
+        removed, _, failures = uninstall_managed(source, target)
+        changed = sorted(
+            before_managed - set(_load_manifest(target)["managed"])
+        )
+        if summary:
+            print(f"agents uninstalled={removed} target={target}")
+        else:
+            print(json.dumps({
+                "schema_version": 1,
+                "action": action,
+                "items": [],
+                "changed": changed,
+            }, indent=2))
         if failures:
             print(
                 "conflicting: agent installation integrity failed: "

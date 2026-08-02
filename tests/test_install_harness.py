@@ -345,7 +345,8 @@ def test_claude_agent_conflict_fails_before_publishing_or_projecting(tmp_path):
     result = run("claude", tmp_path, CLAUDE_CONFIG_DIR=str(config))
 
     assert result.returncode == 3
-    assert "conflicting agent targets" in result.stderr
+    assert "codex-analyst.md" in result.stderr
+    assert "manually move or remove" in result.stderr
     assert not (tmp_path / ".local/bin/provenant").exists()
     assert not (config / "skills").exists()
     assert not (config / "workflows").exists()
