@@ -34,6 +34,7 @@ describe("Stage 4 Kiro ACP adapter public contract", () => {
           ?? repositoryPath("runtime/agent-fabric/schemas/adapter-compatibility.schema.json"),
         adapterIds: ["kiro-acp"],
         requireEnabled: true,
+        resolveExecutables: false,
       });
       await expect(verification).resolves.toMatchObject({ valid: true, adapterIds: ["kiro-acp"] });
     } finally {

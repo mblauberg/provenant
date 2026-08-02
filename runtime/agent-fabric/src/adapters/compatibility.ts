@@ -31,6 +31,11 @@ export function resolveCompatibilityArtifact(compatibilityPath: string, value: s
 
 const execFileAsync = promisify(execFile);
 
+function isNotGitRepositoryError(error: unknown): boolean {
+  return isRecord(error) && typeof error.code === "number" && error.code !== 0 &&
+    typeof error.stderr === "string" && /not a git repository/u.test(error.stderr);
+}
+
 type ExecutableLookup = (name: string, path: string) => Promise<string | undefined>;
 
 async function defaultExecutableLookup(name: string, path: string): Promise<string | undefined> {
@@ -136,15 +141,14 @@ async function gitOutput(directory: string, args: string[]): Promise<string> {
   return stdout.trim();
 }
 
-async function verifyWrapperTrackedAndClean(input: {
+async function verifyWrapperTracked(input: {
   adapterId: string;
   wrapperDirectory: string;
   wrapperArgument: string;
 }): Promise<string> {
   const { adapterId, wrapperDirectory, wrapperArgument } = input;
-  let wrapperPath: string;
   try {
-    wrapperPath = await gitOutput(wrapperDirectory, ["ls-files", "--full-name", "--error-unmatch", "--", wrapperArgument]);
+    return await gitOutput(wrapperDirectory, ["ls-files", "--full-name", "--error-unmatch", "--", wrapperArgument]);
   } catch (error: unknown) {
     throw new FabricError(
       "ADAPTER_COMPATIBILITY_INVALID",
@@ -152,28 +156,48 @@ async function verifyWrapperTrackedAndClean(input: {
       { cause: error },
     );
   }
+}
+
+async function verifyWrapperClean(input: {
+  adapterId: string;
+  wrapperDirectory: string;
+  wrapperArgument: string;
+}): Promise<void> {
+  const { adapterId, wrapperDirectory, wrapperArgument } = input;
   try {
     await gitOutput(wrapperDirectory, ["diff", "--quiet", "HEAD", "--", wrapperArgument]);
   } catch (error: unknown) {
     throw new FabricError(
       "ADAPTER_COMPATIBILITY_INVALID",
-      `wrapper entrypoint differs from its committed content: ${adapterId} (${wrapperPath})`,
+      `wrapper entrypoint differs from its committed content: ${adapterId} (${wrapperArgument})`,
       { cause: error },
     );
   }
-  return wrapperPath;
+}
+
+async function verifyWrapperFile(input: { adapterId: string; wrapperPath: string }): Promise<void> {
+  try {
+    const info = await stat(input.wrapperPath);
+    if (!info.isFile()) throw new Error("wrapper entrypoint is not a regular file");
+  } catch (error: unknown) {
+    throw new FabricError(
+      "ADAPTER_COMPATIBILITY_INVALID",
+      `wrapper entrypoint is not available: ${input.adapterId} (${input.wrapperPath})`,
+      { cause: error },
+    );
+  }
 }
 
 /**
- * Derives provenance from the Git repository containing the configured wrapper
- * entrypoint. The wrapper must be tracked and clean against HEAD; its owning
- * package, source spans, TypeScript configuration and dependency symlinks are
- * intentionally outside this compatibility check.
+ * Derives optional provenance from the Git repository containing the configured
+ * wrapper entrypoint. Repository-backed declarations must be tracked, but do
+ * not require a clean working tree. Packaged copies outside Git are validated
+ * as regular files and receive production provenance only at certification.
  */
 async function deriveWrapperProvenance(input: {
   adapterId: string;
   wrapperEntrypoint: string;
-}): Promise<WrapperProvenance> {
+}): Promise<WrapperProvenance | undefined> {
   const configuredWrapperPath = resolve(input.wrapperEntrypoint);
   const wrapperDirectory = dirname(configuredWrapperPath);
   const wrapperArgument = `./${basename(configuredWrapperPath)}`;
@@ -181,15 +205,27 @@ async function deriveWrapperProvenance(input: {
   let repositoryCommit: string;
   try {
     repositoryRoot = resolve(await gitOutput(wrapperDirectory, ["rev-parse", "--show-toplevel"]));
+  } catch (error: unknown) {
+    if (isNotGitRepositoryError(error)) {
+      await verifyWrapperFile({ adapterId: input.adapterId, wrapperPath: configuredWrapperPath });
+      return undefined;
+    }
+    throw new FabricError(
+      "ADAPTER_COMPATIBILITY_INVALID",
+      `wrapper repository provenance could not be determined: ${input.adapterId}`,
+      { cause: error },
+    );
+  }
+  try {
     repositoryCommit = await gitOutput(repositoryRoot, ["rev-parse", "HEAD"]);
   } catch (error: unknown) {
     throw new FabricError(
       "ADAPTER_COMPATIBILITY_INVALID",
-      `wrapper entrypoint has no Git repository provenance: ${input.adapterId}`,
+      `wrapper repository has no committed HEAD: ${input.adapterId}`,
       { cause: error },
     );
   }
-  const wrapperPath = await verifyWrapperTrackedAndClean({
+  const wrapperPath = await verifyWrapperTracked({
     adapterId: input.adapterId,
     wrapperDirectory,
     wrapperArgument,
@@ -236,6 +272,18 @@ export async function verifySpawnWrapperProvenance(input: {
     throw new FabricError("ADAPTER_COMPATIBILITY_INVALID", `adapter command has no wrapper entrypoint: ${input.adapterId}`);
   }
   const provenance = await deriveWrapperProvenance({ adapterId: input.adapterId, wrapperEntrypoint: entrypoint });
+  if (provenance === undefined) {
+    throw new FabricError(
+      "ADAPTER_COMPATIBILITY_INVALID",
+      `wrapper entrypoint has no Git repository provenance: ${input.adapterId}`,
+    );
+  }
+  const configuredWrapperPath = resolve(entrypoint);
+  await verifyWrapperClean({
+    adapterId: input.adapterId,
+    wrapperDirectory: dirname(configuredWrapperPath),
+    wrapperArgument: `./${basename(configuredWrapperPath)}`,
+  });
   if (provenance.repositoryCommit !== input.expected.repositoryCommit || provenance.wrapperPath !== input.expected.wrapperPath) {
     throw new FabricError(
       "ADAPTER_COMPATIBILITY_INVALID",
@@ -347,10 +395,11 @@ export async function verifyAdapterCompatibility(input: {
     if (unavailableOptionalAdapters.some((failure) => failure.adapterId === adapterId)) continue;
     const wrapperEntrypoint = adapter.implementation.wrapper_entrypoint;
     if (typeof wrapperEntrypoint === "string") {
-      wrapperProvenance.push(await deriveWrapperProvenance({
+      const provenance = await deriveWrapperProvenance({
         adapterId,
         wrapperEntrypoint: resolveCompatibilityArtifact(input.compatibilityPath, wrapperEntrypoint),
-      }));
+      });
+      if (provenance !== undefined) wrapperProvenance.push(provenance);
     }
   }
   return {
@@ -434,7 +483,11 @@ export async function validateEnabledAdapterExecutables(input: {
     }
     resolvedExecutables[adapterId] = candidate;
   }
-  const mandatoryIds = new Set(input.activeAdapterIds ?? PRIMARY_ADAPTER_IDS);
+  const mandatoryIds = new Set(
+    input.mandatoryPrimary === false
+      ? (input.activeAdapterIds ?? [])
+      : (input.activeAdapterIds ?? PRIMARY_ADAPTER_IDS),
+  );
   const primaryFailures = failures.filter((failure) => mandatoryIds.has(failure.adapterId) || (input.mandatoryPrimary === true && isPrimaryAdapter(failure.adapterId)));
   if (primaryFailures.length > 0) {
     throw new FabricError("ADAPTER_ARTIFACT_MISSING", ["enabled adapter executable validation failed:", ...failures.flatMap((failure) => failure.reasons.map((reason) => `- ${reason}`))].join("\n"));

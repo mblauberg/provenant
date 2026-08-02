@@ -21,12 +21,14 @@ export async function loadAdapterModelConstraints(input: {
   schemaPath: string;
   adapterId: string;
   requireEnabled?: boolean;
+  resolveExecutables?: boolean;
 }): Promise<{ enabled: boolean; allowed: string[]; patterns: string[]; requiresExplicitModel: boolean; wrapperEntrypoint?: string; providerExecutable?: string; cursorInstallRoot?: string; providerInstallRoot?: string; providerIdentity?: string }> {
   await verifyAdapterCompatibility({
     compatibilityPath: input.compatibilityPath,
     schemaPath: input.schemaPath,
     adapterIds: [input.adapterId],
     requireEnabled: input.requireEnabled ?? true,
+    resolveExecutables: false,
   });
   const document: unknown = parse(await readFile(input.compatibilityPath, "utf8"));
   if (!isRecord(document) || !isRecord(document.adapters)) {
@@ -43,7 +45,7 @@ export async function loadAdapterModelConstraints(input: {
   const wrapperEntrypoint = typeof implementation.wrapper_entrypoint === "string"
     ? resolveCompatibilityArtifact(input.compatibilityPath, implementation.wrapper_entrypoint)
     : undefined;
-  const providerExecutable = typeof implementation.executable === "string"
+  const providerExecutable = input.resolveExecutables !== false && typeof implementation.executable === "string"
     ? await resolveAdapterExecutable({
       executable: implementation.executable,
       compatibilityPath: input.compatibilityPath,
@@ -125,7 +127,12 @@ export async function resolveProviderAdapterSelection(input: {
   modelFamily: string;
   model?: string;
 }): Promise<{ adapterId: string; modelFamily: string; model: string; enabled: true }> {
-  const policy = await loadAdapterModelConstraints(input);
+  const policy = await loadAdapterModelConstraints({
+    compatibilityPath: input.compatibilityPath,
+    schemaPath: input.schemaPath,
+    adapterId: input.adapterId,
+    resolveExecutables: false,
+  });
   const assessment = assessAdapterModelPolicy({
     modelFamily: input.modelFamily,
     ...(input.model === undefined ? {} : { modelId: input.model }),
@@ -151,7 +158,13 @@ export async function validateAdapterModelSelection(input: {
   modelId: string | null;
   modelFamily: string;
 }): Promise<{ valid: true; adapterId: string; modelFamily: string; modelId: string }> {
-  const policy = await loadAdapterModelConstraints(input);
+  const policy = await loadAdapterModelConstraints({
+    compatibilityPath: input.compatibilityPath,
+    schemaPath: input.schemaPath,
+    adapterId: input.adapterId,
+    requireEnabled: input.requireEnabled,
+    resolveExecutables: false,
+  });
   const assessment = assessAdapterModelPolicy({
     modelFamily: input.modelFamily,
     modelId: input.modelId,

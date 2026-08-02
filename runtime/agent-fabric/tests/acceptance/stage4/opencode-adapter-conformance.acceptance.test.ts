@@ -21,6 +21,7 @@ describe("Stage 4 OpenCode ACP adapter public contract", () => {
         schemaPath: fixture?.schemaPath ?? repositoryPath("runtime/agent-fabric/schemas/adapter-compatibility.schema.json"),
         adapterIds: ["opencode-acp"],
         requireEnabled: true,
+        resolveExecutables: false,
       })).resolves.toMatchObject({ valid: true, adapterIds: ["opencode-acp"] });
     } finally {
       if (fixture !== undefined) await rm(fixture.directory, { recursive: true, force: true });

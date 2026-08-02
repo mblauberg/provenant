@@ -12,7 +12,7 @@ Promote the coordination-only agent fabric into a safely activated local model-e
 
 ## Required behaviour
 
-1. Every activated adapter is bound to Git wrapper provenance: the wrapper entrypoint is tracked source, verified against the owning repository's HEAD and recorded as repository commit plus wrapper path in the composed adapter evidence. Provenance is re-derived immediately before every adapter process spawn, so an untracked or locally modified wrapper fails activation closed. Provider CLIs are admitted through their stable launcher, adapter-specific vendor identity and bounded non-answer interface; observed version and digest never gate a normal update. Protocol schemas and Fabric SDK libraries remain hash/lockfile verified. The tsx loader that executes tracked TypeScript source is a lockfile-pinned third-party dependency.
+1. Every activated adapter is bound to Git wrapper provenance: the wrapper entrypoint must be tracked at the owning repository's HEAD and recorded as repository commit plus wrapper path in the composed adapter evidence. Immediately before every adapter process spawn, the wrapper is re-derived, its bytes are checked against HEAD and its repository commit and path are checked against the composition pin, so an untracked or locally modified wrapper fails closed at spawn. Provider CLIs are admitted through their stable launcher, adapter-specific vendor identity and bounded non-answer interface; observed version and digest never gate a normal update. Protocol schemas and Fabric SDK libraries remain hash/lockfile verified. The tsx loader that executes tracked TypeScript source is a lockfile-pinned third-party dependency.
 2. Provider work uses the admitted absolute working directory and exact matched
    permission profile. Generic work may use write tools/edit modes only when its
    task authority and matched profile explicitly grant them; approval bypasses,
@@ -34,7 +34,7 @@ Promote the coordination-only agent fabric into a safely activated local model-e
 Executable resolution is revisioned at `2`: configured command names are
 resolved natively against the current `PATH`, and the resolved file must be a
 regular executable. A missing or unavailable enabled optional adapter is
-reported as degraded and omitted from daemon composition, status and doctor;
+reported as degraded in status and doctor and omitted from daemon composition;
 an unavailable mandatory primary remains fatal. A directly selected optional
 adapter still fails closed when its executable is unavailable. This executable
 check is separate from activation: `direct-cli` does not turn disabled Pi into

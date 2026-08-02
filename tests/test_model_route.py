@@ -39,12 +39,17 @@ def resolve(*args, adapter_gate="direct-cli"):
 
 def usable_pi_compatibility(tmp_path):
     compatibility = tmp_path / "adapter-compatibility.yaml"
+    wrapper_entrypoint = ROOT / "runtime" / "agent-fabric" / "src" / "adapters" / "providers" / "optional" / "pi-rpc.ts"
     compatibility.write_text(
         (ROOT / "config" / "adapter-compatibility.yaml")
         .read_text()
         .replace(
             'executable: "@earendil-works/pi-coding-agent"',
             'executable: "sh"',
+        )
+        .replace(
+            'wrapper_entrypoint: "runtime/agent-fabric/src/adapters/providers/optional/pi-rpc.ts"',
+            f'wrapper_entrypoint: "{wrapper_entrypoint}"',
         )
     )
     return compatibility
@@ -2729,6 +2734,8 @@ def test_split_root_defaults_use_instance_routing_and_product_compatibility(tmp_
         "runtime/agent-fabric/scripts/validate-adapter-executables.ts",
         "runtime/agent-fabric/src/adapters/compatibility.ts",
         "runtime/agent-fabric/src/adapters/primary-adapters.ts",
+        "runtime/agent-fabric/src/adapters/provider-identity.ts",
+        "runtime/agent-fabric/src/adapters/providers/claude-agent-sdk.ts",
         "runtime/agent-fabric/src/domain/record.ts",
         "runtime/agent-fabric/src/domain/versions.ts",
         "runtime/agent-fabric/src/errors.ts",
@@ -2737,7 +2744,16 @@ def test_split_root_defaults_use_instance_routing_and_product_compatibility(tmp_
         destination = product_root / relative_path
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(ROOT / relative_path, destination)
-    (product_root / "node_modules").symlink_to(ROOT / "node_modules", target_is_directory=True)
+    node_modules_source = next(
+        (
+            candidate / "node_modules"
+            for candidate in (ROOT, *ROOT.parents)
+            if (candidate / "node_modules/tsx/dist/loader.mjs").is_file()
+        ),
+        None,
+    )
+    assert node_modules_source is not None
+    (product_root / "node_modules").symlink_to(node_modules_source, target_is_directory=True)
     (product_root / "config").mkdir()
     shutil.copy2(
         ROOT / "config/adapter-compatibility.yaml",
@@ -2918,7 +2934,7 @@ def test_disabled_pi_direct_route_remains_separate_from_fabric_activation_gate(t
     assert fabric_route["status"] == "adapter_disabled"
 
 
-def test_explicitly_selected_disabled_pi_requires_a_usable_executable(tmp_path):
+def test_explicitly_selected_disabled_pi_does_not_require_an_executable_at_resolution(tmp_path):
     compatibility = tmp_path / "adapter-compatibility.yaml"
     compatibility.write_text(
         (ROOT / "config" / "adapter-compatibility.yaml")
@@ -2926,6 +2942,10 @@ def test_explicitly_selected_disabled_pi_requires_a_usable_executable(tmp_path):
         .replace(
             'executable: "@earendil-works/pi-coding-agent"',
             'executable: "missing-pi"',
+        )
+        .replace(
+            'wrapper_entrypoint: "runtime/agent-fabric/src/adapters/providers/optional/pi-rpc.ts"',
+            f'wrapper_entrypoint: "{ROOT / "runtime" / "agent-fabric" / "src" / "adapters" / "providers" / "optional" / "pi-rpc.ts"}"',
         )
     )
 
@@ -2935,8 +2955,56 @@ def test_explicitly_selected_disabled_pi_requires_a_usable_executable(tmp_path):
         adapter_gate="direct-cli",
     )
 
-    assert result.returncode == 2
-    assert route["status"] == "adapter_executable_unavailable"
+    assert result.returncode == 0
+    assert route["status"] == "ok"
+
+
+def test_resolve_succeeds_without_adapter_binaries(tmp_path, monkeypatch):
+    restricted_bin = tmp_path / "minbin"
+    restricted_bin.mkdir()
+    for executable in ("node", "npx", "git"):
+        source = shutil.which(executable)
+        assert source is not None
+        (restricted_bin / executable).symlink_to(source)
+    restricted_path = f"{restricted_bin}:/usr/bin:/bin"
+    monkeypatch.setenv("PATH", restricted_path)
+
+    assert shutil.which("claude") is None
+    assert shutil.which("codex") is None
+
+    result, route = resolve(
+        "--adapter", "claude", "--model", "claude-opus-4-6",
+        "--alias", "flagship", "--role", "worker", adapter_gate="fabric",
+    )
+
+    assert result.returncode == 0
+    assert route["status"] == "ok"
+
+
+def test_resolve_succeeds_with_dirty_wrapper(tmp_path):
+    wrapper = tmp_path / "claude-agent-sdk.ts"
+    wrapper.write_bytes(
+        (ROOT / "runtime" / "agent-fabric" / "src" / "adapters" / "providers" / "claude-agent-sdk.ts").read_bytes()
+        + b"\n// active development change\n"
+    )
+    compatibility = tmp_path / "adapter-compatibility.yaml"
+    compatibility.write_text(
+        (ROOT / "config" / "adapter-compatibility.yaml")
+        .read_text()
+        .replace(
+            'wrapper_entrypoint: "runtime/agent-fabric/src/adapters/providers/claude-agent-sdk.ts"',
+            f'wrapper_entrypoint: "{wrapper}"',
+        )
+    )
+
+    result, route = resolve(
+        "--adapter", "claude", "--model", "claude-opus-4-6",
+        "--alias", "flagship", "--role", "worker",
+        "--adapter-compatibility", str(compatibility), adapter_gate="fabric",
+    )
+
+    assert result.returncode == 0
+    assert route["status"] == "ok"
 
 
 def test_fabric_gate_rejects_catalogue_adapter_without_compatibility_contract():
