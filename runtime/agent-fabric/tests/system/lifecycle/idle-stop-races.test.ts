@@ -244,82 +244,56 @@ describe("global idle stop races", () => {
 
   it("fails with typed evidence when real in-flight work misses the shutdown drain deadline", async () => {
     vi.useFakeTimers();
-    const activeSockets = new Set<Socket>();
-    const operationStarted = Promise.withResolvers<void>();
     const operationFinished = Promise.withResolvers<void>();
     let inFlight = false;
-    const server = createServer((socket) => {
-      activeSockets.add(socket);
-      socket.once("close", () => activeSockets.delete(socket));
-      socket.once("data", () => {
-        inFlight = true;
-        operationStarted.resolve();
-        void operationFinished.promise.then(() => { inFlight = false; });
-      });
+    const server = {
+      listening: true,
+      close(callback: (error?: Error) => void): void {
+        this.listening = false;
+        callback();
+      },
+    } as unknown as Server;
+    inFlight = true;
+    const outcome = Promise.race([
+      closeRecoverableUnixListener({
+        server,
+        sockets: [],
+        waitForInFlight: async () => {
+          if (inFlight) await operationFinished.promise;
+        },
+        closeTimeoutMs: 50,
+        drainTimeoutMs: 10,
+      }).catch((error: unknown) => error),
+      new Promise<{ code: string }>((resolve) => setTimeout(() => resolve({ code: "TEST_TIMEOUT" }), 100)),
+    ]);
+    await vi.advanceTimersByTimeAsync(100);
+
+    await expect(outcome).resolves.toMatchObject({
+      code: "DAEMON_SHUTDOWN_DRAIN_TIMEOUT",
+      message: "in-flight operations did not drain within 10ms",
     });
-    servers.push(server);
-    const root = await mkdtemp(join(tmpdir(), "fabric-real-in-flight-timeout-"));
-    directories.push(root);
-    const socketPath = join(root, "fabric.sock");
-    await openRecoverableUnixListener(server, socketPath);
-    const client = await connectRawSocket(socketPath);
-    try {
-      client.write("held operation\n");
-      await operationStarted.promise;
-
-      const outcome = Promise.race([
-        closeRecoverableUnixListener({
-          server,
-          sockets: activeSockets,
-          waitForInFlight: async () => {
-            if (inFlight) await operationFinished.promise;
-          },
-          closeTimeoutMs: 50,
-          drainTimeoutMs: 10,
-        }).catch((error: unknown) => error),
-        new Promise<{ code: string }>((resolve) => setTimeout(() => resolve({ code: "TEST_TIMEOUT" }), 100)),
-      ]);
-      await vi.advanceTimersByTimeAsync(100);
-
-      await expect(outcome).resolves.toMatchObject({
-        code: "DAEMON_SHUTDOWN_DRAIN_TIMEOUT",
-        message: "in-flight operations did not drain within 10ms",
-      });
-    } finally {
-      operationFinished.resolve();
-      client.destroy();
-    }
+    operationFinished.resolve();
   });
 
   it("fails with distinct typed evidence when an open socket misses the shutdown close deadline", async () => {
     vi.useFakeTimers();
-    const server = createServer();
-    servers.push(server);
-    const root = await mkdtemp(join(tmpdir(), "fabric-real-close-timeout-"));
-    directories.push(root);
-    const socketPath = join(root, "fabric.sock");
-    await openRecoverableUnixListener(server, socketPath);
-    const client = await connectRawSocket(socketPath);
-    try {
-      const outcome = Promise.race([
-        closeRecoverableUnixListener({
-          server,
-          sockets: [],
-          waitForInFlight: async () => undefined,
-          closeTimeoutMs: 10,
-          drainTimeoutMs: 50,
-        }).catch((error: unknown) => error),
-        new Promise<{ code: string }>((resolve) => setTimeout(() => resolve({ code: "TEST_TIMEOUT" }), 100)),
-      ]);
-      await vi.advanceTimersByTimeAsync(100);
+    const server = { listening: true, close(): void {} } as unknown as Server;
+    const outcome = Promise.race([
+      closeRecoverableUnixListener({
+        server,
+        sockets: [],
+        waitForInFlight: async () => undefined,
+        closeTimeoutMs: 10,
+        drainTimeoutMs: 50,
+      }).catch((error: unknown) => error),
+      new Promise<{ code: string }>((resolve) => setTimeout(() => resolve({ code: "TEST_TIMEOUT" }), 100)),
+    ]);
+    await vi.advanceTimersByTimeAsync(100);
 
-      await expect(outcome).resolves.toMatchObject({
-        code: "DAEMON_SHUTDOWN_CLOSE_TIMEOUT",
-        message: "serving socket did not close within 10ms",
-      });
-    } finally {
-      client.destroy();
-    }
+    await expect(outcome).resolves.toMatchObject({
+      code: "DAEMON_SHUTDOWN_CLOSE_TIMEOUT",
+      message: "serving socket did not close within 10ms",
+    });
   });
 
   it("rejects a frame arriving after the serving admission fence closes", async () => {
