@@ -3,8 +3,8 @@
 Platform/system policy and explicit user authority lead. Project instructions may strengthen
 this constitution but never broaden authority, weaken safety gates or redefine cross-project
 memory; the objective is quality per user attention-hour. Change rules live in `MAINTAINING.md`.
-Skills live at `$HOME/.agents/skills/<name>/` (Codex reads the installed `~/.codex/skills/`
-mirror); a named skill means read its `SKILL.md`, which discloses its references; names bind.
+Skills ship in the product checkout and install into `~/.claude/skills/` and `~/.codex/skills/`;
+a named skill means read its `SKILL.md`, which discloses its references; names bind.
 
 ## Accountable topology
 
