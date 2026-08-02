@@ -69,8 +69,10 @@ import type { TrustedGitConfiguration } from "../operator/trusted-git-registry.j
 import { inspectFabricDatabase } from "../core/migrations.js";
 import {
   closeRecoverableUnixListener,
+  DAEMON_SHUTDOWN_FABRIC_CLOSE_TIMEOUT,
   openRecoverableUnixListener,
   RecoverableServingAdmissionFence,
+  waitWithShutdownDeadline,
 } from "./recoverable-serving-socket.js";
 
 class DaemonProtocolError extends Error {
@@ -743,8 +745,17 @@ const closeServingSocket = async (): Promise<void> =>
     server,
     sockets,
     waitForInFlight,
+    drainTimeoutMs: 15_000,
+    closeTimeoutMs: 15_000,
     admissionFence: servingAdmission,
   });
+
+const daemonFailureEvidence = (error: unknown): { code: string; message: string } => ({
+  code: typeof error === "object" && error !== null && "code" in error && typeof error.code === "string"
+    ? error.code
+    : "DAEMON_SHUTDOWN_FAILED",
+  message: error instanceof Error ? error.message : String(error),
+});
 
 const finishProcess = async (input: {
   signal: NodeJS.Signals | null;
@@ -757,11 +768,19 @@ const finishProcess = async (input: {
     requestedExitCode: input.exitCode,
     closeFabric: async () => {
       try {
-        await fabric.close();
-      } finally {
-        lifecycleReceiptAuthority?.close();
-        lifecycleReceiptAuthority = undefined;
+        await waitWithShutdownDeadline(
+          fabric.close(),
+          30_000,
+          DAEMON_SHUTDOWN_FABRIC_CLOSE_TIMEOUT,
+          "fabric operations did not close within 30000ms",
+        );
+      } catch (error: unknown) {
+        const failure = daemonFailureEvidence(error);
+        process.stderr.write(`${failure.code}: ${failure.message}\n`);
+        throw error;
       }
+      lifecycleReceiptAuthority?.close();
+      lifecycleReceiptAuthority = undefined;
     },
     removeSocket: async () => { rmSync(socketPath, { force: true }); },
     releaseLocks: async () => await releaseDaemonLocks(daemonLocks),
@@ -799,6 +818,8 @@ const attemptIdleStopWithServingRecovery = async (input: {
     });
   } catch (error: unknown) {
     if (!socketClosed) throw error;
+    const failure = daemonFailureEvidence(error);
+    process.stderr.write(`${failure.code}: ${failure.message}\n`);
     shuttingDown = true;
     return await finishProcess({ signal: input.signal, state: "crashed", exitCode: 1 });
   }
@@ -901,18 +922,20 @@ completeQueuedDaemonStop = (custodyId: string): void => {
       shuttingDown = true;
       await finishProcess({ signal: null, state: "stopped", exitCode: 0 });
     }).catch(async (error: unknown) => {
+      const evidence = daemonFailureEvidence(error);
       let failure = error;
       try {
         fabric.recordDaemonStopCustodyResult({
           ...pending,
           daemonInstanceGeneration: pending.token.daemonInstanceGeneration,
           state: "failed",
-          result: { message: error instanceof Error ? error.message : String(error) },
+          result: evidence,
         });
       } catch (custodyError: unknown) {
         failure = new AggregateError([error, custodyError], "daemon stop and custody persistence both failed");
       }
-      process.stderr.write(`operator daemon stop failed: ${failure instanceof Error ? failure.message : String(failure)}\n`);
+      const persistenceFailure = failure === error ? "" : `; ${daemonFailureEvidence(failure).message}`;
+      process.stderr.write(`operator daemon stop failed: ${evidence.code}: ${evidence.message}${persistenceFailure}\n`);
       if (!socketClosed) return;
       shuttingDown = true;
       await finishProcess({ signal: null, state: "crashed", exitCode: 1 });

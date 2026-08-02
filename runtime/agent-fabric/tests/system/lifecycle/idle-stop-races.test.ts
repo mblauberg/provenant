@@ -1,7 +1,10 @@
+import { execFileSync } from "node:child_process";
+import { once } from "node:events";
 import { mkdtemp, rm } from "node:fs/promises";
 import { createConnection, createServer, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createInterface } from "node:readline";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -17,6 +20,28 @@ import { createLivenessDatabase, seedProject } from "./liveness-fixture.ts";
 const databases: ReturnType<typeof createLivenessDatabase>[] = [];
 const directories: string[] = [];
 const servers: Server[] = [];
+
+export function countDaemonSocketDescriptors(pid: number, socketPath: string): number {
+  return execFileSync(
+    "/usr/sbin/lsof",
+    ["-nP", "-a", "-p", String(pid), "-U"],
+    { encoding: "utf8" },
+  ).split("\n").filter((line) => line.includes(socketPath)).length;
+}
+
+export async function connectRawSocket(socketPath: string): Promise<Socket> {
+  const socket = createConnection({ path: socketPath, allowHalfOpen: true });
+  socket.on("error", () => undefined);
+  await once(socket, "connect");
+  return socket;
+}
+
+export async function nextSocketResponse(socket: Socket): Promise<Record<string, unknown>> {
+  const lines = createInterface({ input: socket, crlfDelay: Infinity });
+  const [line] = await once(lines, "line");
+  lines.close();
+  return JSON.parse(String(line)) as Record<string, unknown>;
+}
 
 afterEach(async () => {
   await Promise.all(servers.splice(0).map(async (server) => {
@@ -158,6 +183,8 @@ describe("global idle stop races", () => {
           seedProject(database, { sessionState: "active" });
           database.prepare("UPDATE daemon_global_state SET revision = revision + 1 WHERE singleton = 1").run();
         },
+        closeTimeoutMs: 500,
+        drainTimeoutMs: 500,
       }),
       reopenSocket: async () => await openRecoverableUnixListener(server, socketPath),
     })).resolves.toMatchObject({ state: "busy", reason: "state-changed" });
@@ -172,7 +199,7 @@ describe("global idle stop races", () => {
     expect(server.listening).toBe(true);
   });
 
-  it("does not finish a Unix listener drain while a late frame is still tracked", async () => {
+  it("does not finish a Unix listener drain while an in-flight operation remains tracked", async () => {
     const root = await mkdtemp(join(tmpdir(), "fabric-late-frame-drain-"));
     directories.push(root);
     const socketPath = join(root, "fabric.sock");
@@ -206,6 +233,8 @@ describe("global idle stop races", () => {
       client.once("connect", resolve);
       client.once("error", reject);
     });
+    client.write("held frame\n");
+    await commandStarted;
     const closing = closeRecoverableUnixListener({
       server,
       sockets: activeSockets,
@@ -213,9 +242,9 @@ describe("global idle stop races", () => {
         if (totalInFlight === 0) return;
         await new Promise<void>((resolvePromise) => inFlightDrainers.add(resolvePromise));
       },
+      closeTimeoutMs: 500,
+      drainTimeoutMs: 500,
     });
-    client.write("late frame\n");
-    await commandStarted;
 
     const finishedBeforeCommand = await Promise.race([
       closing.then(() => true),
@@ -225,6 +254,82 @@ describe("global idle stop races", () => {
     finishCommand();
     await closing;
     client.destroy();
+  });
+
+  it("fails with typed evidence when real in-flight work misses the shutdown drain deadline", async () => {
+    const activeSockets = new Set<Socket>();
+    const operationStarted = Promise.withResolvers<void>();
+    const operationFinished = Promise.withResolvers<void>();
+    let inFlight = false;
+    const server = createServer((socket) => {
+      activeSockets.add(socket);
+      socket.once("close", () => activeSockets.delete(socket));
+      socket.once("data", () => {
+        inFlight = true;
+        operationStarted.resolve();
+        void operationFinished.promise.then(() => { inFlight = false; });
+      });
+    });
+    servers.push(server);
+    const root = await mkdtemp(join(tmpdir(), "fabric-real-in-flight-timeout-"));
+    directories.push(root);
+    const socketPath = join(root, "fabric.sock");
+    await openRecoverableUnixListener(server, socketPath);
+    const client = await connectRawSocket(socketPath);
+    try {
+      client.write("held operation\n");
+      await operationStarted.promise;
+
+      const outcome = await Promise.race([
+        closeRecoverableUnixListener({
+          server,
+          sockets: activeSockets,
+          waitForInFlight: async () => {
+            if (inFlight) await operationFinished.promise;
+          },
+          closeTimeoutMs: 50,
+          drainTimeoutMs: 10,
+        }).catch((error: unknown) => error),
+        new Promise<{ code: string }>((resolve) => setTimeout(() => resolve({ code: "TEST_TIMEOUT" }), 100)),
+      ]);
+
+      expect(outcome).toMatchObject({
+        code: "DAEMON_SHUTDOWN_DRAIN_TIMEOUT",
+        message: "in-flight operations did not drain within 10ms",
+      });
+    } finally {
+      operationFinished.resolve();
+      client.destroy();
+    }
+  });
+
+  it("fails with distinct typed evidence when an open socket misses the shutdown close deadline", async () => {
+    const server = createServer();
+    servers.push(server);
+    const root = await mkdtemp(join(tmpdir(), "fabric-real-close-timeout-"));
+    directories.push(root);
+    const socketPath = join(root, "fabric.sock");
+    await openRecoverableUnixListener(server, socketPath);
+    const client = await connectRawSocket(socketPath);
+    try {
+      const outcome = await Promise.race([
+        closeRecoverableUnixListener({
+          server,
+          sockets: [],
+          waitForInFlight: async () => undefined,
+          closeTimeoutMs: 10,
+          drainTimeoutMs: 50,
+        }).catch((error: unknown) => error),
+        new Promise<{ code: string }>((resolve) => setTimeout(() => resolve({ code: "TEST_TIMEOUT" }), 100)),
+      ]);
+
+      expect(outcome).toMatchObject({
+        code: "DAEMON_SHUTDOWN_CLOSE_TIMEOUT",
+        message: "serving socket did not close within 10ms",
+      });
+    } finally {
+      client.destroy();
+    }
   });
 
   it("rejects a late Unix socket frame after the serving admission fence closes", async () => {
@@ -255,6 +360,8 @@ describe("global idle stop races", () => {
       server,
       sockets: activeSockets,
       waitForInFlight: async () => undefined,
+      closeTimeoutMs: 500,
+      drainTimeoutMs: 500,
       admissionFence,
     });
     client.write("late frame\n");
