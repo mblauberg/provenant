@@ -440,7 +440,10 @@ Because orchestration is judgement-bearing, deterministic tests are necessary bu
   Stage 2 subset in the MCP and client-interface contract.
 - Resource round-trip tests from both clients, with the documented read-only
   tool fallback if required.
-- No automatic registration without a separate human gate.
+- First `fabric_bootstrap` registration may establish only the exact current
+  project root under standing global harness policy; parent, home, root,
+  sibling-collection, linked-worktree, bare-root, symlink and uncertain-Git
+  boundaries still require explicit recovery or are refused.
 
 ### Stage 3: persistent primary pair
 

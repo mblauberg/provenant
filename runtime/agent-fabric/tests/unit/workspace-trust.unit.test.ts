@@ -66,11 +66,11 @@ describe("machine-local workspace trust", () => {
     const canonicalEntry = JSON.stringify({
       allowedProfiles: ["headless", "observed"],
       approvedAt: now.toISOString(),
-      approvedBy: "local-operator",
       canonicalPath: await realpath(value.workspace),
       device: identity.entry.device,
       expiresAt: "2026-07-12T04:00:00.000Z",
       inode: identity.entry.inode,
+      establishmentKind: "local-operator",
     });
     expect(identity).toEqual({
       canonicalRoot: await realpath(value.workspace),
@@ -78,8 +78,8 @@ describe("machine-local workspace trust", () => {
       entry: {
         canonicalPath: await realpath(value.workspace),
         approvedAt: now.toISOString(),
-        approvedBy: "local-operator",
         device: identity.entry.device,
+        establishmentKind: "local-operator",
         inode: identity.entry.inode,
         expiresAt: "2026-07-12T04:00:00.000Z",
         allowedProfiles: ["headless", "observed"],
@@ -91,6 +91,29 @@ describe("machine-local workspace trust", () => {
       executionProfile: "paired-visible",
       now,
     })).rejects.toThrow(/profile/u);
+  });
+
+  it("fails closed on an unknown trust establishment kind", async () => {
+    const value = await fixture();
+    const canonicalPath = await realpath(value.workspace);
+    const identity = await lstat(canonicalPath);
+    await writeFile(join(value.paths.stateDirectory, "trusted-workspaces.json"), `${JSON.stringify({
+      schemaVersion: 1,
+      entries: [{
+        canonicalPath,
+        approvedAt: "2026-07-11T04:00:00.000Z",
+        approvedBy: "local-operator",
+        device: identity.dev,
+        inode: identity.ino,
+        allowedProfiles: ["headless"],
+        establishmentKind: "unknown-source",
+      }],
+    })}\n`, { mode: 0o600 });
+
+    await expect(trustedWorkspaceIdentity({
+      stateDirectory: value.paths.stateDirectory,
+      canonicalRoot: value.workspace,
+    })).rejects.toThrow(/establishment kind is invalid/u);
   });
 
   it("rejects a trusted root after it becomes an unmarked collection and reuses its digest after marking it", async () => {

@@ -155,7 +155,7 @@ function workspaceTrustAction(
     alreadyTrusted: trust.alreadyTrusted,
     trustRetained: true,
     trustRecordDigest: trust.identity.trustRecordDigest,
-    establishmentKind: entry.establishmentKind ?? "local-operator",
+    establishmentKind: entry.establishmentKind,
     boundaryKind: trust.boundaryKind,
     boundaryEvidenceDigest: trust.boundaryEvidenceDigest,
     requestAttemptId: trust.requestAttemptId,

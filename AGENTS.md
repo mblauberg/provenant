@@ -14,11 +14,13 @@ which discloses its own references. Skill names are binding, not advisory.
   including parallel work; one writer per worktree. An authorised merge prunes
   its own worktree and merged refs; other deletion, force-removal, rewrites and
   shared-branch pushes need user authority.
-- **Fabric trust:** before first use, explicitly trust only the exact canonical
-  repository root (or current non-Git directory) with
-  `provenant fabric workspace trust`; never trust a parent, wildcard, home or
-  sibling collection. If no seat exists, call `fabric_bootstrap`. On
-  `WORKSPACE_NOT_TRUSTED`, run its exact recovery command and retry
+- **Fabric trust:** once installed, the first `fabric_bootstrap` from Claude Code
+  or Codex automatically enrols only the exact canonical repository root or
+  exact current non-Git directory under standing global harness policy;
+  this is not a local-operator approval; never trust a parent, wildcard, home
+  or sibling collection. Keep `provenant project activate` and
+  `provenant fabric workspace trust` for explicit recovery or refused roots.
+  On `WORKSPACE_NOT_TRUSTED`, run its exact recovery command and retry
   `fabric_bootstrap`; the same MCP connection exposes normal tools.
 - **CLI:** use `provenant help` for discovery; route answer-bearing external
   work through the `orchestrate` skill and Fabric.

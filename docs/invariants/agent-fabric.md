@@ -23,7 +23,7 @@ backfilled or rewritten.
 | Long-lived SQLite state receives bounded maintenance | `PRAGMA optimize = 0x10002` at open | `sqlite-connection-hardening.integration.test.ts` |
 | Wire frames, connections and in-flight work cannot exceed global maxima | shared bounded NDJSON parser, protocol handshake and daemon/client/adapter admission limits | `bounded-ndjson.unit.test.ts`, `daemon-transport.integration.test.ts`, adapter process tests |
 | A client cannot issue fabric methods before agreeing protocol v1 | mandatory `initialize` negotiation | `daemon-transport.integration.test.ts` |
-| Workspace admission is exact, canonical, private and profile-bound | machine-local trust registry plus portable-config narrowing | `workspace-trust.unit.test.ts`, configuration tests |
+| Workspace admission is exact, canonical, private and profile-bound; automatic first-use records carry `automatic-bootstrap` boundary evidence and explicit records carry `local-operator` establishment without a false approval actor | machine-local trust registry plus portable-config narrowing and lock-scoped legacy canonicalisation | `workspace-trust.unit.test.ts`, `mcp-bootstrap-auto-enrol.unit.test.ts`, configuration tests |
 | Retention never implies deletion authority | report/preview output fixes prune eligibility to false; archive is receipt-copy only | `retention-cli.unit.test.ts` |
 | Re-exporting unchanged committed state is byte-identical | receipt v2 canonical snapshot; export time stored separately | `receipt-export.acceptance.test.ts` |
 | Status and doctor never print bearer capabilities | metadata projection omits credential paths and values | `status-cli.unit.test.ts` |

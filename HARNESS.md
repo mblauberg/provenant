@@ -12,10 +12,10 @@ Claude Code and Codex are equal primary orchestrators; the harness the user star
 and owns authority, user communication, run state, gates and final synthesis; equal-primary
 is not concurrent bosses. For substantial work use native subagents and the other primary;
 approved authority may permit paired-primary mode, but one chair and one stage owner remain.
-Agent Fabric owns answer-bearing provider execution and durable communication; direct CLIs
-are preflight or degraded fallback, Herdr observes or wakes. Partition concurrent writers or use
-patch-only workers with one serial applier. Authors and decision-makers must not certify their own
-surface; receipts declare that independence and enforce family separation, they do not prove it.
+Agent Fabric owns answer-bearing provider execution and durable communication; direct CLIs are preflight or degraded fallback,
+Herdr observes or wakes. After installation, first `fabric_bootstrap` from Claude Code or Codex may enrol only the exact current
+root under standing policy; `project activate` and `fabric workspace trust` remain recovery paths. Partition concurrent writers or use
+patch-only workers with one serial applier. Authors and decision-makers must not certify their own surface; receipts declare independence, they do not prove it.
 
 ## Lifecycle and user gates
 

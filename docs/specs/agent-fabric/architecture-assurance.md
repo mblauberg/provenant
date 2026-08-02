@@ -55,16 +55,17 @@ and tracked wrapper path.
    closed.
 4. Response writes respect stream backpressure. Overload returns typed errors; it does not start more work and hope the
    process survives.
-5. Bootstrap authority remains limited after initialisation to exact-root local operator provisioning and current
-   private-control discovery. It cannot create a run, is never accepted on the public operator protocol and cannot
-   perform project-session, gate, Git or provider actions.
+5. Bootstrap authority remains limited after initialisation to standing-policy automatic enrolment of the exact current
+   project root, exact-root local operator provisioning and current private-control discovery. It cannot create a run,
+   is never accepted on the public operator protocol and cannot perform project-session, gate, Git or provider actions.
 
 ## Exact workspace trust
 
 1. Machine-local trust lives under the private fabric state directory, never in Git. Each entry records canonical root,
-   approval time, optional expiry and allowed execution profiles.
-2. `workspace trust`, `inspect`, `list` and `revoke` are explicit operator CLI actions. Symlinks, ancestor broadening,
-   `$HOME`-wide trust and malformed or expired entries fail closed.
+   establishment kind, boundary evidence where automatic, optional expiry and allowed execution profiles.
+2. `workspace trust`, `inspect`, `list` and `revoke` remain explicit operator CLI actions, while the first
+   `fabric_bootstrap` from Claude Code or Codex may establish only the exact current root under standing global policy.
+   Symlinks, ancestor broadening, `$HOME`-wide trust and malformed or expired entries fail closed.
 3. The portable configuration defines the maximum policy. The local registry admits exact additional roots; project and
    run authority only narrow them.
 4. Trust changes use private files, atomic replace and deterministic metadata; bearer capabilities are never stored in

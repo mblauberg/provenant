@@ -180,10 +180,11 @@ describe("automatic exact-project enrolment", () => {
       })]),
     });
     const registry = JSON.parse(await readFile(join(value.paths.stateDirectory, "trusted-workspaces.json"), "utf8")) as {
-      entries: { canonicalPath: string }[];
+      entries: Record<string, unknown>[];
     };
     expect(registry.entries.map(({ canonicalPath }) => canonicalPath)).toEqual([value.inner]);
     expect(registry.entries.some(({ canonicalPath }) => canonicalPath === value.outer)).toBe(false);
+    expect(registry.entries[0]).not.toHaveProperty("approvedBy");
     await expect(runWorkspaceTrust(["list"], value.paths)).resolves.toMatchObject({
       entries: [expect.objectContaining({ canonicalPath: value.inner, trusted: true })],
     });
@@ -426,14 +427,15 @@ exit 1
     await expect(readFile(join(value.paths.stateDirectory, "trusted-workspaces.json"), "utf8").then(JSON.parse)).resolves.toMatchObject({
       entries: [expect.objectContaining({
         canonicalPath: value.inner,
-        approvedBy: "local-operator",
         allowedProfiles: ["paired-visible"],
+        establishmentKind: "local-operator",
       })],
     });
     const registry = JSON.parse(await readFile(join(value.paths.stateDirectory, "trusted-workspaces.json"), "utf8")) as {
       entries: Record<string, unknown>[];
     };
-    expect(registry.entries[0]).not.toHaveProperty("establishmentKind");
+    expect(registry.entries[0]).toMatchObject({ establishmentKind: "local-operator" });
+    expect(registry.entries[0]).not.toHaveProperty("approvedBy");
   });
 
   it("serialises concurrent first-use grants into one mutation and one already-trusted result", async () => {
@@ -669,6 +671,67 @@ exit 1
       outcome: "replayed",
       mutated: false,
     })]));
+  });
+
+  it("canonicalises a legacy automatic grant before binding and replaying custody", async () => {
+    const value = await fixture();
+    await ensureAutomaticBootstrapTrust({
+      stateDirectory: value.paths.stateDirectory,
+      bootstrapAttemptId: "legacy-automatic-attempt",
+      cwd: value.cwd,
+    });
+    const registryPath = join(value.paths.stateDirectory, "trusted-workspaces.json");
+    const legacy = JSON.parse(await readFile(registryPath, "utf8")) as {
+      entries: Record<string, unknown>[];
+    };
+    const legacyEntry = legacy.entries[0];
+    if (legacyEntry === undefined) throw new Error("legacy trust entry is missing");
+    legacyEntry.approvedBy = "local-operator";
+    await writeFile(registryPath, `${JSON.stringify(legacy, null, 2)}\n`, { mode: 0o600 });
+
+    let observedLegacyBeforeAtomicReplace = false;
+    const first = await bootstrapMcpSeat({
+      environment: { AGENT_FABRIC_SEAT: "codex" },
+      cwd: value.cwd,
+      paths: value.paths,
+      smokeDeadlineMs: 1,
+      testOnly: {
+        beforeRegistryRename: async () => {
+          const beforeReplace = JSON.parse(await readFile(registryPath, "utf8")) as {
+            entries: Record<string, unknown>[];
+          };
+          observedLegacyBeforeAtomicReplace = Object.hasOwn(beforeReplace.entries[0] ?? {}, "approvedBy");
+        },
+      },
+    });
+    expect(observedLegacyBeforeAtomicReplace).toBe(true);
+    const canonical = JSON.parse(await readFile(registryPath, "utf8")) as {
+      entries: Record<string, unknown>[];
+    };
+    expect(canonical.entries[0]).toMatchObject({ establishmentKind: "automatic-bootstrap" });
+    expect(canonical.entries[0]).not.toHaveProperty("approvedBy");
+
+    daemon.result = { ...daemon.result!, custodyMutated: false };
+    const replay = await bootstrapMcpSeat({
+      environment: { AGENT_FABRIC_SEAT: "codex" },
+      cwd: value.cwd,
+      paths: value.paths,
+      smokeDeadlineMs: 1,
+    });
+    expect(first.receipt.actions).toEqual(expect.arrayContaining([expect.objectContaining({
+      action: "custody",
+      outcome: "committed",
+      mutated: true,
+    })]));
+    expect(replay.receipt.actions).toEqual(expect.arrayContaining([expect.objectContaining({
+      action: "custody",
+      outcome: "replayed",
+      mutated: false,
+    })]));
+    const firstTrust = first.receipt.actions.find((action) => action.action === "workspace-trust");
+    const replayTrust = replay.receipt.actions.find((action) => action.action === "workspace-trust");
+    expect(firstTrust).toMatchObject({ trustRecordDigest: expect.stringMatching(/^sha256:[0-9a-f]{64}$/u) });
+    expect(replayTrust).toMatchObject({ trustRecordDigest: firstTrust && "trustRecordDigest" in firstTrust ? firstTrust.trustRecordDigest : null });
   });
 
   it("retains known custody but publishes no credentials after the trust binding changes", async () => {

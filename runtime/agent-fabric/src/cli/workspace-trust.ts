@@ -26,13 +26,12 @@ const DEFAULT_PROFILES = ["headless", "observed", "interactive", "paired-visible
 export type WorkspaceTrustEntry = {
   canonicalPath: string;
   approvedAt: string;
-  approvedBy: "local-operator";
   device: number;
   inode: number;
   expiresAt?: string;
   allowedProfiles: string[];
+  establishmentKind: "automatic-bootstrap" | "local-operator";
   /** Present only on a grant made by the first-use bootstrap saga. */
-  establishmentKind?: "automatic-bootstrap";
   boundaryKind?: "git" | "project-marker" | "non-git";
   boundaryEvidenceDigest?: `sha256:${string}`;
   bootstrapAttemptId?: string;
@@ -90,6 +89,10 @@ export function workspaceTrustFailureContext(error: unknown): WorkspaceTrustFail
 }
 
 type WorkspaceTrustRegistry = { schemaVersion: 1; entries: WorkspaceTrustEntry[] };
+type ParsedWorkspaceTrustRegistry = Readonly<{
+  registry: WorkspaceTrustRegistry;
+  requiresCanonicalization: boolean;
+}>;
 let mutationQueue: Promise<void> = Promise.resolve();
 
 function errorCode(error: unknown): string | undefined {
@@ -112,16 +115,16 @@ function timestamp(value: string, field: string): number {
   return parsed;
 }
 
-function validateRegistry(value: unknown): WorkspaceTrustRegistry {
+function parseRegistry(value: unknown): ParsedWorkspaceTrustRegistry {
   if (typeof value !== "object" || value === null || Array.isArray(value) || !("schemaVersion" in value) || value.schemaVersion !== 1 || !("entries" in value) || !Array.isArray(value.entries)) {
     throw new Error("workspace trust registry is invalid");
   }
+  let requiresCanonicalization = false;
   const entries: WorkspaceTrustEntry[] = value.entries.map((candidate) => {
     if (
       typeof candidate !== "object" || candidate === null || Array.isArray(candidate) ||
       !("canonicalPath" in candidate) || typeof candidate.canonicalPath !== "string" || !isAbsolute(candidate.canonicalPath) ||
       !("approvedAt" in candidate) || typeof candidate.approvedAt !== "string" ||
-      !("approvedBy" in candidate) || candidate.approvedBy !== "local-operator" ||
       !("device" in candidate) || typeof candidate.device !== "number" || !Number.isSafeInteger(candidate.device) || candidate.device < 0 ||
       !("inode" in candidate) || typeof candidate.inode !== "number" || !Number.isSafeInteger(candidate.inode) || candidate.inode < 0 ||
       !("allowedProfiles" in candidate) || !Array.isArray(candidate.allowedProfiles) || candidate.allowedProfiles.length === 0 ||
@@ -130,14 +133,21 @@ function validateRegistry(value: unknown): WorkspaceTrustRegistry {
     ) throw new Error("workspace trust entry is invalid");
     const record = candidate as Record<string, unknown>;
     const establishmentKind = record.establishmentKind;
-    const hasAutomaticProvenance = establishmentKind !== undefined;
-    if (hasAutomaticProvenance && establishmentKind !== "automatic-bootstrap") {
+    const approvedBy = record.approvedBy;
+    const hasLegacyApproval = "approvedBy" in record;
+    if (hasLegacyApproval && approvedBy !== "local-operator") throw new Error("workspace trust entry approval provenance is invalid");
+    if (establishmentKind !== undefined && establishmentKind !== "automatic-bootstrap" && establishmentKind !== "local-operator") {
       throw new Error("workspace trust entry establishment kind is invalid");
     }
+    const canonicalEstablishmentKind = establishmentKind === undefined
+      ? (hasLegacyApproval ? "local-operator" : undefined)
+      : establishmentKind;
+    if (canonicalEstablishmentKind === undefined) throw new Error("workspace trust entry provenance is unknown");
+    if (hasLegacyApproval) requiresCanonicalization = true;
     const boundaryKind = record.boundaryKind;
     const boundaryEvidenceDigest = record.boundaryEvidenceDigest;
     const bootstrapAttemptId = record.bootstrapAttemptId;
-    if (hasAutomaticProvenance) {
+    if (canonicalEstablishmentKind === "automatic-bootstrap") {
       if (
         (boundaryKind !== "git" && boundaryKind !== "project-marker" && boundaryKind !== "non-git") ||
         typeof boundaryEvidenceDigest !== "string" || !/^sha256:[0-9a-f]{64}$/u.test(boundaryEvidenceDigest) ||
@@ -152,13 +162,12 @@ function validateRegistry(value: unknown): WorkspaceTrustRegistry {
     return {
       canonicalPath: candidate.canonicalPath,
       approvedAt: candidate.approvedAt,
-      approvedBy: "local-operator",
       device: candidate.device,
       inode: candidate.inode,
       ...(typeof candidate.expiresAt === "string" ? { expiresAt: candidate.expiresAt } : {}),
       allowedProfiles: [...new Set(candidate.allowedProfiles as string[])].sort(),
-      ...(hasAutomaticProvenance ? {
-        establishmentKind: "automatic-bootstrap" as const,
+      establishmentKind: canonicalEstablishmentKind,
+      ...(canonicalEstablishmentKind === "automatic-bootstrap" ? {
         boundaryKind: boundaryKind as "git" | "project-marker" | "non-git",
         boundaryEvidenceDigest: boundaryEvidenceDigest as `sha256:${string}`,
         bootstrapAttemptId: bootstrapAttemptId as string,
@@ -166,10 +175,17 @@ function validateRegistry(value: unknown): WorkspaceTrustRegistry {
     };
   });
   if (new Set(entries.map((entry) => entry.canonicalPath)).size !== entries.length) throw new Error("workspace trust entries must be unique");
-  return { schemaVersion: 1, entries: entries.sort((left, right) => left.canonicalPath.localeCompare(right.canonicalPath)) };
+  return {
+    registry: { schemaVersion: 1, entries: entries.sort((left, right) => left.canonicalPath.localeCompare(right.canonicalPath)) },
+    requiresCanonicalization,
+  };
 }
 
-async function readRegistry(path: string): Promise<WorkspaceTrustRegistry> {
+function validateRegistry(value: unknown): WorkspaceTrustRegistry {
+  return parseRegistry(value).registry;
+}
+
+async function readRegistry(path: string): Promise<ParsedWorkspaceTrustRegistry> {
   try {
     const before = await lstat(path);
     if (!before.isFile() || before.isSymbolicLink() || (before.mode & 0o077) !== 0) throw new Error("workspace trust registry must be a private regular file");
@@ -177,12 +193,12 @@ async function readRegistry(path: string): Promise<WorkspaceTrustRegistry> {
     try {
       const opened = await handle.stat();
       if (!opened.isFile() || opened.dev !== before.dev || opened.ino !== before.ino || (opened.mode & 0o077) !== 0) throw new Error("workspace trust registry changed while opening");
-      return validateRegistry(JSON.parse(await handle.readFile("utf8")));
+      return parseRegistry(JSON.parse(await handle.readFile("utf8")));
     } finally {
       await handle.close();
     }
   } catch (error: unknown) {
-    if (errorCode(error) === "ENOENT") return { schemaVersion: 1, entries: [] };
+    if (errorCode(error) === "ENOENT") return { registry: { schemaVersion: 1, entries: [] }, requiresCanonicalization: false };
     throw error;
   }
 }
@@ -326,17 +342,16 @@ function trustRecordDigest(entry: WorkspaceTrustEntry): `sha256:${string}` {
   const normalized = JSON.stringify({
     allowedProfiles: entry.allowedProfiles,
     approvedAt: entry.approvedAt,
-    approvedBy: entry.approvedBy,
     canonicalPath: entry.canonicalPath,
     device: entry.device,
     ...(entry.expiresAt === undefined ? {} : { expiresAt: entry.expiresAt }),
     inode: entry.inode,
-    ...(entry.establishmentKind === undefined ? {} : {
-      establishmentKind: entry.establishmentKind,
+    establishmentKind: entry.establishmentKind,
+    ...(entry.establishmentKind === "automatic-bootstrap" ? {
       boundaryKind: entry.boundaryKind,
       boundaryEvidenceDigest: entry.boundaryEvidenceDigest,
       bootstrapAttemptId: entry.bootstrapAttemptId,
-    }),
+    } : {}),
   });
   return `sha256:${createHash("sha256").update(normalized).digest("hex")}`;
 }
@@ -408,7 +423,7 @@ async function automaticBoundaryRefusal(boundary: ProjectBoundary, cause?: unkno
     return boundaryTrustError(
       boundary,
       `automatic bootstrap enrolment refused for ${shellQuote(root)}: ${probeDetail}; ` +
-      "non-Git admission requires a proven not-repository result. No automatic trust was added.",
+      "non-Git admission requires a proven not-repository result. Inspect and repair the boundary evidence, then retry from the exact repository root or exact marked non-Git project directory; no automatic trust was added.",
       cause === undefined ? undefined : { cause },
     );
   }
@@ -564,7 +579,7 @@ async function ensureAutomaticBootstrapTrustAtBoundary(input: {
       throw cause;
     });
     if (!stateDirectoryExists) throw await automaticBoundaryRefusal(input.boundary);
-    const existing = await readRegistry(registryPath);
+    const existing = (await readRegistry(registryPath)).registry;
     if (!existing.entries.some((entry) => entry.canonicalPath === initialSelectedIdentity.canonicalPath)) {
       throw await automaticBoundaryRefusal(input.boundary);
     }
@@ -572,7 +587,8 @@ async function ensureAutomaticBootstrapTrustAtBoundary(input: {
   await mkdir(input.stateDirectory, { recursive: true, mode: 0o700 });
 
   return await withRegistryMutationLock(input.stateDirectory, async () => {
-    const current = await readRegistry(registryPath);
+    const parsedCurrent = await readRegistry(registryPath);
+    const current = parsedCurrent.registry;
     // The first resolution is only a preflight. The registry lock must cover a
     // fresh boundary decision, identity lookup and the grant write so removing
     // or replacing `.git` while this request waits cannot leave stale evidence
@@ -637,9 +653,10 @@ async function ensureAutomaticBootstrapTrustAtBoundary(input: {
       if (liveBoundary.evidence.kind === "ambiguous" && liveBoundary.evidence.reason === "repository-collection") {
         throw await automaticBoundaryRefusal(liveBoundary);
       }
+      if (parsedCurrent.requiresCanonicalization) await writeRegistry(registryPath, current, input.testOnly);
       return {
         identity: automaticTrustIdentity(currentEntry),
-        mutated: false,
+        mutated: parsedCurrent.requiresCanonicalization,
         alreadyTrusted: true,
         requestAttemptId: input.requestAttemptId,
         bootstrapAttemptId: currentEntry.establishmentKind === "automatic-bootstrap"
@@ -666,7 +683,6 @@ async function ensureAutomaticBootstrapTrustAtBoundary(input: {
     const entry: WorkspaceTrustEntry = {
       canonicalPath: liveSelectedIdentity.canonicalPath,
       approvedAt: now.toISOString(),
-      approvedBy: "local-operator",
       device: liveSelectedIdentity.device,
       inode: liveSelectedIdentity.inode,
       allowedProfiles: ["headless"],
@@ -700,7 +716,7 @@ export async function trustedWorkspaceRoots(input: {
   executionProfile?: string;
   now?: Date;
 }): Promise<string[]> {
-  const registry = await readRegistry(join(input.stateDirectory, "trusted-workspaces.json"));
+  const registry = (await readRegistry(join(input.stateDirectory, "trusted-workspaces.json"))).registry;
   const now = (input.now ?? new Date()).getTime();
   const candidates = registry.entries
     .filter((entry) => input.executionProfile === undefined || entry.allowedProfiles.includes(input.executionProfile))
@@ -716,7 +732,7 @@ export async function trustedWorkspaceIdentity(input: {
   now?: Date;
 }): Promise<TrustedWorkspaceIdentity> {
   const identity = await canonicalWorkspace(input.canonicalRoot);
-  const registry = await readRegistry(join(input.stateDirectory, "trusted-workspaces.json"));
+  const registry = (await readRegistry(join(input.stateDirectory, "trusted-workspaces.json"))).registry;
   const entry = registry.entries.find((candidate) => candidate.canonicalPath === identity.canonicalPath);
   if (entry === undefined) throw new Error("workspace root is not trusted");
   if (entry.expiresAt !== undefined && timestamp(entry.expiresAt, "workspace expiry") <= (input.now ?? new Date()).getTime()) {
@@ -745,7 +761,7 @@ export async function runWorkspaceTrust(
   const requestedAction = arguments_[0];
   const action = requestedAction === "status" ? "inspect" : requestedAction;
   const registryPath = join(paths.stateDirectory, "trusted-workspaces.json");
-  const registry = await readRegistry(registryPath);
+  const registry = (await readRegistry(registryPath)).registry;
   if (action === "list") {
     // A record whose root has been removed or replaced is dead, but rendering it
     // exactly like a live one made `list` say trusted where `inspect` said false.
@@ -776,7 +792,7 @@ export async function runWorkspaceTrust(
     const canonicalCandidate = await bestEffortCanonicalPath(resolvedPath);
     ensureFabricPaths(paths);
     return await withRegistryMutationLock(paths.stateDirectory, async () => {
-      const current = await readRegistry(registryPath);
+      const current = (await readRegistry(registryPath)).registry;
       const doomed = current.entries.filter(
         (entry) => entry.canonicalPath === canonicalCandidate || entry.canonicalPath === resolvedPath,
       );
@@ -810,7 +826,8 @@ export async function runWorkspaceTrust(
   const expiresAt = option(arguments_, "--expires-at");
   if (expiresAt !== undefined && timestamp(expiresAt, "workspace expiry") <= now.getTime()) throw new Error("workspace trust expiry must be in the future");
   return await withRegistryMutationLock(paths.stateDirectory, async () => {
-    const current = await readRegistry(registryPath);
+    const parsedCurrent = await readRegistry(registryPath);
+    const current = parsedCurrent.registry;
     const currentEntry = current.entries.find((item) => item.canonicalPath === canonicalPath);
     const currentEntryState = currentEntry === undefined ? "mismatch" : await identityState(currentEntry);
     const currentEntryIdentityMatches = currentEntryState !== "mismatch";
@@ -835,16 +852,17 @@ export async function runWorkspaceTrust(
     const entry: WorkspaceTrustEntry = {
       canonicalPath,
       approvedAt: now.toISOString(),
-      approvedBy: "local-operator",
       device: identity.device,
       inode: identity.inode,
       ...(effectiveExpiry === undefined ? {} : { expiresAt: effectiveExpiry }),
       allowedProfiles: [...new Set(allowedProfiles)].sort(),
+      establishmentKind: "local-operator",
     };
     if (!await collectionBoundarySatisfied(canonicalPath)) {
       throw collectionBoundaryError(canonicalPath, await repositoryCollectionChildren(canonicalPath));
     }
     if (alreadyTrusted && currentEntry !== undefined) {
+      if (parsedCurrent.requiresCanonicalization) await writeRegistry(registryPath, current);
       return {
         schemaVersion: 1,
         trusted: true,

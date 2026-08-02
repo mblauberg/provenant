@@ -22,7 +22,8 @@ Standing global harness authority covers only automatic trust registration for
 the exact current project's canonical Git root, or its canonical current
 directory when no repository exists. This trust grants no task, write,
 credential, provider, provisioning, acceptance or release authority. Seat
-provisioning remains separately gated.
+provisioning remains separately gated, and the registry records
+`automatic-bootstrap` rather than a local-operator approval.
 
 Read the active authority before acting. Prior activation evidence does not
 authorise a different or broader root, login, registry mutation, provider call,
@@ -459,7 +460,7 @@ action it took, on both the CLI and the `fabric_bootstrap` tool result:
 
 | `action` | `outcome` | `mutated` |
 | --- | --- | --- |
-| `workspace-trust` | `enrolled`, `already-trusted`, `resolved` or `failed` | `true` only when automatic exact-root trust was added; explicit trust is never rewritten |
+| `workspace-trust` | `enrolled`, `already-trusted`, `resolved` or `failed` | `true` when automatic exact-root trust is added or a valid legacy provenance record is canonicalised; bootstrap never changes an explicit grant's authority or profiles |
 | `daemon` | `started` or `attached` | `true` only when this call spawned the daemon |
 | `custody` | `committed`, `replayed` or `reconciled` | `true` only when Fabric committed custody rows or a new active custody generation; a replay reconciliation is `false` |
 | `seat-generation` | `installed` or `replayed` | `true` only when the active generation changed |
@@ -723,10 +724,11 @@ project session is ready to launch:
 1. Resolve the owning Git root (`git rev-parse --show-toplevel`), or the
    canonical current project directory when no repository exists. Inspect that
    exact root and, when absent, establish trust with
-   `$HOME/.agents/scripts/agent-fabric workspace trust "$project_root"` before
-   opening the Console. This first-use step is automatic under the global
-   harness; never substitute a parent, wildcard, home directory or sibling
-   collection.
+   `provenant project activate "$project_root"` or
+   `$HOME/.agents/scripts/agent-fabric workspace trust "$project_root"` only
+   when an explicit recovery decision is needed. First use is automatic under
+   the global harness through `fabric_bootstrap`; never substitute a parent,
+   wildcard, home directory or sibling collection.
 2. Create or select the draft project session. If several sessions are
    attachable, pass its stable ID with `--session`.
 3. Open the complete, verified accepted-evidence row and choose
