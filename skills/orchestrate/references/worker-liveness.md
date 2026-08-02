@@ -24,10 +24,12 @@ indicated by elapsed time and CPU. At the start of a run, a 0-byte output file
 is ambiguous. After a minute it is suspicious, but output size alone is not a
 liveness test.
 
-Detached harness-task state is not process state. Before reusing a worktree,
-confirm the worker PID is gone. Otherwise the detached task and a fresh worker
-can become two writers in the same worktree, as happened when detached tasks
-continued running for hours.
+Detached harness-task state is not process state. Completion notification is
+only a wake signal. Before verification or worktree reuse, take two bounded
+file/directory mtime snapshots, require stability, confirm the worker PID is
+gone, and confirm no process has the worktree as its cwd. A worker once
+reported completion and a clean tree while its `codex exec` child kept writing
+for several more minutes.
 
 ## Waiting from inside a sub-agent
 
