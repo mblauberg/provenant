@@ -37,16 +37,38 @@ def resolve(*args, adapter_gate="direct-cli"):
     return result, json.loads(result.stdout) if result.stdout else None
 
 
-@pytest.mark.parametrize("harness_python", ["/deliberately/missing/python", "/tmp"])
+@pytest.mark.parametrize(
+    "harness_python",
+    ["/deliberately/missing/python", "/tmp", sys.executable],
+    ids=["missing", "directory", "below-floor"],
+)
+@pytest.mark.parametrize(
+    "python_optimize",
+    [None, "0", "1", "2"],
+    ids=["unset", "zero", "one", "two"],
+)
 def test_model_route_emits_structured_refusal_when_interpreter_is_unusable(
-    tmp_path, harness_python,
+    tmp_path, harness_python, python_optimize,
 ):
+    version_shim = tmp_path / "python-version-shim"
+    version_shim.mkdir()
+    (version_shim / "sitecustomize.py").write_text(
+        "import sys\n"
+        "sys.version_info = (3, 9, 6, 'final', 0)\n"
+    )
     env = {
         **os.environ,
         "AGENT_FABRIC_PRODUCT_ROOT": str(ROOT),
         "HARNESS_PYTHON": harness_python,
         "HOME": str(tmp_path / "home"),
+        # Keep the test portable: sitecustomize makes the real test interpreter
+        # report a below-floor version without requiring Python 3.9 on PATH.
+        "PYTHONPATH": str(version_shim),
     }
+    if python_optimize is None:
+        env.pop("PYTHONOPTIMIZE", None)
+    else:
+        env["PYTHONOPTIMIZE"] = python_optimize
     result = subprocess.run(
         [
             str(SCRIPT),
