@@ -310,6 +310,15 @@ const PROBE_SHIM_SOURCE = String.raw`
       return;
     }
     if (outcome === "gone") {
+      const directOutcome = signalProviderDirect("SIGTERM");
+      if (directOutcome !== "sent" && directOutcome !== "gone") {
+        reportCustodyFailure(directOutcome.failure);
+        return;
+      }
+      if (directOutcome === "sent") {
+        setTimeout(finalKill, TERMINATION_GRACE_MS + DRAIN_GRACE_MS);
+        return;
+      }
       exitWithoutFurtherSignal(0);
       return;
     }
