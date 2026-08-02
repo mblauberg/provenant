@@ -11,6 +11,8 @@ set -uo pipefail
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 PUBLISH_HELPER="$SCRIPT_DIR/cf_dispatch_publish.py"
 PRODUCT_ROOT="$(CDPATH= cd -- "$SCRIPT_DIR/../../.." && pwd)"
+# Keep routing, publication, and record formatting on the gate's locked interpreter.
+DISPATCH_PYTHON="${HARNESS_PYTHON:-python3}"
 
 usage() {
   cat <<'EOF'
@@ -154,7 +156,7 @@ trap 'rm -f "$PROMPT_TMP"; [ "$OUT_CREATED" = true ] && rm -f "$OUT"; exit 143' 
 
 strip_ansi() { sed $'s/\x1b\\[[0-9;?]*[A-Za-z]//g'; }
 json_escape() {
-  python3 -c 'import json,sys; print(json.dumps(sys.stdin.read())[1:-1])'
+  "$DISPATCH_PYTHON" -c 'import json,sys; print(json.dumps(sys.stdin.read())[1:-1])'
 }
 normalise_family() {
   case "$1" in
@@ -250,19 +252,19 @@ emit_record() {
     "$cert" )"
   if [ -n "$DISPATCH_RECEIPT" ] && [ -n "$EVIDENCE_ROOT" ] && [ "$status" != "evidence_paths_not_distinct" ] && [ "$status" != "evidence_root_required" ]; then
     receipt_tmp="$(make_tmp)" || receipt_tmp=""
-    if [ -z "$receipt_tmp" ] || ! printf '%s' "$record" >"$receipt_tmp" || ! python3 "$PUBLISH_HELPER" --root "$EVIDENCE_ROOT" publish "$DISPATCH_RECEIPT" "$receipt_tmp"; then
+    if [ -z "$receipt_tmp" ] || ! printf '%s' "$record" >"$receipt_tmp" || ! "$DISPATCH_PYTHON" "$PUBLISH_HELPER" --root "$EVIDENCE_ROOT" publish "$DISPATCH_RECEIPT" "$receipt_tmp"; then
       [ -n "$receipt_tmp" ] && rm -f "$receipt_tmp"
       echo "cannot write dispatcher receipt: $DISPATCH_RECEIPT" >&2
-      record="$(printf '%s' "$record" | python3 -c 'import json,sys; value=json.load(sys.stdin); value.update(status="receipt_write_error", exit=1, terminal_observed=False, read_only_guarantee="none", certification_eligible=False); print(json.dumps(value, separators=(",", ":")))')"
+      record="$(printf '%s' "$record" | "$DISPATCH_PYTHON" -c 'import json,sys; value=json.load(sys.stdin); value.update(status="receipt_write_error", exit=1, terminal_observed=False, read_only_guarantee="none", certification_eligible=False); print(json.dumps(value, separators=(",", ":")))')"
       printf '%s' "$record"
       return 1
     fi
     rm -f "$receipt_tmp"
-    record_digest="$(printf '%s' "$record" | python3 -c 'import hashlib,sys; print("sha256:" + hashlib.sha256(sys.stdin.buffer.read()).hexdigest())')"
+    record_digest="$(printf '%s' "$record" | "$DISPATCH_PYTHON" -c 'import hashlib,sys; print("sha256:" + hashlib.sha256(sys.stdin.buffer.read()).hexdigest())')"
   fi
   if [ "$status" != "evidence_paths_not_distinct" ] && [ -n "$output_sha256" ] && [ -n "$terminal_artifact_sha256" ] && ! evidence_paths_valid "$output_sha256" "$terminal_artifact_sha256" "$record_digest"; then
     EVIDENCE_PATHS_DISTINCT=false
-    record="$(printf '%s' "$record" | python3 -c 'import json,sys; value=json.load(sys.stdin); value.update(status="evidence_publication_invalid", exit=2, terminal_observed=False, read_only_guarantee="none", certification_eligible=False); print(json.dumps(value, separators=(",", ":")))')"
+    record="$(printf '%s' "$record" | "$DISPATCH_PYTHON" -c 'import json,sys; value=json.load(sys.stdin); value.update(status="evidence_publication_invalid", exit=2, terminal_observed=False, read_only_guarantee="none", certification_eligible=False); print(json.dumps(value, separators=(",", ":")))')"
     printf '%s' "$record"
     return 1
   fi
@@ -274,7 +276,7 @@ write_terminal_artifact() {
   [ -n "$path" ] || return 0
   outcome_id="${TASK_ID:-$REVIEWER_ID}"
   if [ "$status" = "ok" ] && [ "$rc" -eq 0 ]; then
-    payload="$(python3 - "$outcome_id" "${ATTEMPT_ID:-attempt-1}" <<'PY'
+    payload="$("$DISPATCH_PYTHON" - "$outcome_id" "${ATTEMPT_ID:-attempt-1}" <<'PY'
 import json
 import sys
 
@@ -287,7 +289,7 @@ print(json.dumps({
 PY
 )"
   else
-    payload="$(python3 - "$outcome_id" "${ATTEMPT_ID:-attempt-1}" "$status" "$rc" <<'PY'
+    payload="$("$DISPATCH_PYTHON" - "$outcome_id" "${ATTEMPT_ID:-attempt-1}" "$status" "$rc" <<'PY'
 import json
 import sys
 
@@ -301,7 +303,7 @@ PY
 )"
   fi
   temporary="$(make_tmp)" || return 1
-  if ! printf '%s' "$payload" >"$temporary" || ! python3 "$PUBLISH_HELPER" --root "$EVIDENCE_ROOT" publish "$path" "$temporary"; then
+  if ! printf '%s' "$payload" >"$temporary" || ! "$DISPATCH_PYTHON" "$PUBLISH_HELPER" --root "$EVIDENCE_ROOT" publish "$path" "$temporary"; then
     rm -f "$temporary"
     return 1
   fi
@@ -315,7 +317,7 @@ evidence_paths_distinct() {
   local -a paths
   paths=("$OUT" "$TERMINAL_ARTIFACT")
   [ -n "$DISPATCH_RECEIPT" ] && paths+=("$DISPATCH_RECEIPT")
-  python3 "$PUBLISH_HELPER" --root "$EVIDENCE_ROOT" identity "${paths[@]}"
+  "$DISPATCH_PYTHON" "$PUBLISH_HELPER" --root "$EVIDENCE_ROOT" identity "${paths[@]}"
 }
 
 evidence_paths_valid() {
@@ -323,7 +325,7 @@ evidence_paths_valid() {
   local -a entries
   entries=("$OUT" "$output_digest" "$TERMINAL_ARTIFACT" "$terminal_digest")
   [ -n "$DISPATCH_RECEIPT" ] && entries+=("$DISPATCH_RECEIPT" "$receipt_digest")
-  python3 "$PUBLISH_HELPER" --root "$EVIDENCE_ROOT" verify "${entries[@]}"
+  "$DISPATCH_PYTHON" "$PUBLISH_HELPER" --root "$EVIDENCE_ROOT" verify "${entries[@]}"
 }
 
 emit_evidence_path_rejection() {
@@ -391,7 +393,7 @@ resolve_adapter_executable() {
       owner_rc=$?
       if [ "$owner_rc" -eq 0 ]; then
         local owner_executable owner_assurance owner_certifying
-        owner_executable="$(printf '%s' "$owner_output" | python3 -c 'import json,sys
+        owner_executable="$(printf '%s' "$owner_output" | "$DISPATCH_PYTHON" -c 'import json,sys
 raw=sys.stdin.read()
 try:
     value=json.loads(raw)
@@ -399,14 +401,14 @@ except (json.JSONDecodeError, TypeError):
     value={"executable":raw.strip()}
 path=value.get("executable", "") if isinstance(value, dict) else ""
 print(path if isinstance(path, str) else "")')"
-        owner_assurance="$(printf '%s' "$owner_output" | python3 -c 'import json,sys
+        owner_assurance="$(printf '%s' "$owner_output" | "$DISPATCH_PYTHON" -c 'import json,sys
 try:
     value=json.load(sys.stdin)
 except (json.JSONDecodeError, TypeError):
     value={}
 assurance=value.get("provider_assurance", "") if isinstance(value, dict) else ""
 print(assurance if isinstance(assurance, str) else "")')"
-        owner_certifying="$(printf '%s' "$owner_output" | python3 -c 'import json,sys
+        owner_certifying="$(printf '%s' "$owner_output" | "$DISPATCH_PYTHON" -c 'import json,sys
 try:
     value=json.load(sys.stdin)
 except (json.JSONDecodeError, TypeError):
@@ -485,7 +487,7 @@ resolve_routing() {
   local product_root
   if product_root="$(cd "$SCRIPT_DIR" && git rev-parse --show-toplevel 2>/dev/null)"; then
     if [ -f "$product_root/scripts/model_route.py" ]; then
-      cmd=(python3 "$product_root/scripts/model_route.py" "resolve" "${route_args[@]}")
+      cmd=("$DISPATCH_PYTHON" "$product_root/scripts/model_route.py" "resolve" "${route_args[@]}")
       AGENT_FABRIC_PRODUCT_ROOT="$product_root" "${cmd[@]}" 2>>"$diag_file"
       return $?
     fi
@@ -494,7 +496,7 @@ resolve_routing() {
   # Try relative path from script directory (should resolve to product root)
   if [ -f "$SCRIPT_DIR/../../../scripts/model_route.py" ]; then
     product_root="$(CDPATH= cd -- "$SCRIPT_DIR/../../.." && pwd)"
-    cmd=(python3 "$product_root/scripts/model_route.py" "resolve" "${route_args[@]}")
+    cmd=("$DISPATCH_PYTHON" "$product_root/scripts/model_route.py" "resolve" "${route_args[@]}")
     AGENT_FABRIC_PRODUCT_ROOT="$product_root" "${cmd[@]}" 2>>"$diag_file"
     return $?
   fi
@@ -577,7 +579,7 @@ run_one() {  # $1 tool $2 model $3 effort -> writes answer and optional terminal
     fi
     route_json="$(resolve_routing "$tool" "$MODEL_ALIAS" "$ROUTE_ROLE" "$ORCH_FAMILY" "$diag" "$model" "$effort" "$RISK_TIER" "$capabilities_file")"
     route_rc=$?
-    if route_fields="$(printf '%s' "$route_json" | python3 -c 'import json,sys; r=json.load(sys.stdin); print("|".join(str(r.get(k,"")) for k in ("status","resolved_model","model_family","endpoint_provider","identity_source","requested_effort","effort","effort_source","effort_capability_source","effort_substitution","substitution","fallback_model","catalog_model","model_selection","risk_tier","policy_override","compatibility_adapter")))' 2>>"$diag")"; then
+    if route_fields="$(printf '%s' "$route_json" | "$DISPATCH_PYTHON" -c 'import json,sys; r=json.load(sys.stdin); print("|".join(str(r.get(k,"")) for k in ("status","resolved_model","model_family","endpoint_provider","identity_source","requested_effort","effort","effort_source","effort_capability_source","effort_substitution","substitution","fallback_model","catalog_model","model_selection","risk_tier","policy_override","compatibility_adapter")))' 2>>"$diag")"; then
       IFS='|' read -r status model family endpoint identity requested_effort effort effort_source effort_capability_source effort_substitution substitution fallback_model catalog_model model_selection route_risk_tier policy_override compatibility_adapter <<<"$route_fields"
       [ -n "$requested_model" ] || requested_model="$model"
       if [ "$adapter_resolution_failed" -eq 1 ]; then
@@ -745,7 +747,7 @@ run_one() {  # $1 tool $2 model $3 effort -> writes answer and optional terminal
   [ "$status" = "tool_not_found" ] && guarantee="none"
 
   if [ "$status" = "ok" ]; then
-    if python3 "$PUBLISH_HELPER" --root "$EVIDENCE_ROOT" publish "$OUT" "$clean"; then
+    if "$DISPATCH_PYTHON" "$PUBLISH_HELPER" --root "$EVIDENCE_ROOT" publish "$OUT" "$clean"; then
       opath="$OUT"
     else
       status="output_write_error"
@@ -754,7 +756,7 @@ run_one() {  # $1 tool $2 model $3 effort -> writes answer and optional terminal
       opath=""
     fi
   else
-    if python3 "$PUBLISH_HELPER" --root "$EVIDENCE_ROOT" publish "$OUT" "$combined"; then
+    if "$DISPATCH_PYTHON" "$PUBLISH_HELPER" --root "$EVIDENCE_ROOT" publish "$OUT" "$combined"; then
       opath="$OUT"
     else
       status="output_write_error"
@@ -765,7 +767,7 @@ run_one() {  # $1 tool $2 model $3 effort -> writes answer and optional terminal
   fi
   output_sha256=""
   if [ -n "$opath" ] && [ -f "$opath" ]; then
-    if ! output_sha256="$(python3 "$PUBLISH_HELPER" --root "$EVIDENCE_ROOT" digest "$opath")"; then
+    if ! output_sha256="$("$DISPATCH_PYTHON" "$PUBLISH_HELPER" --root "$EVIDENCE_ROOT" digest "$opath")"; then
       status="output_validation_error"
       rc=1
       guarantee="none"
@@ -775,7 +777,7 @@ run_one() {  # $1 tool $2 model $3 effort -> writes answer and optional terminal
   terminal_artifact_sha256=""
   if [ -n "$TERMINAL_ARTIFACT" ]; then
     if write_terminal_artifact "$TERMINAL_ARTIFACT" "$status" "$rc"; then
-      if ! terminal_artifact_sha256="$(python3 "$PUBLISH_HELPER" --root "$EVIDENCE_ROOT" digest "$TERMINAL_ARTIFACT")"; then
+      if ! terminal_artifact_sha256="$("$DISPATCH_PYTHON" "$PUBLISH_HELPER" --root "$EVIDENCE_ROOT" digest "$TERMINAL_ARTIFACT")"; then
         status="terminal_artifact_validation_error"
         rc=1
         guarantee="none"
@@ -833,11 +835,11 @@ if [ -n "$CHAIN" ]; then
       "$rec" "$(printf '%s' "$DISPATCH_RECEIPT" | json_escape)" >>"$chain_attempts_tmp"
     if [ $rc -eq 0 ]; then
       chain_record_tmp="$(make_tmp)" || exit 1
-      if ! python3 "$SCRIPT_DIR/cf_dispatch_chain.py" "$chain_attempts_tmp" "$rec" "$chain_summary_path" >"$chain_record_tmp"; then
+      if ! "$DISPATCH_PYTHON" "$SCRIPT_DIR/cf_dispatch_chain.py" "$chain_attempts_tmp" "$rec" "$chain_summary_path" >"$chain_record_tmp"; then
         rm -f "$chain_record_tmp" "$chain_attempts_tmp"
         exit 1
       fi
-      if ! python3 "$PUBLISH_HELPER" --root "$EVIDENCE_ROOT" publish "$chain_summary_path" "$chain_record_tmp"; then
+      if ! "$DISPATCH_PYTHON" "$PUBLISH_HELPER" --root "$EVIDENCE_ROOT" publish "$chain_summary_path" "$chain_record_tmp"; then
         echo "cannot write immutable chain summary: $chain_summary_path" >&2
         rm -f "$chain_record_tmp" "$chain_attempts_tmp"
         exit 1
@@ -848,11 +850,11 @@ if [ -n "$CHAIN" ]; then
     fi
   done
   chain_record_tmp="$(make_tmp)" || exit 1
-  if ! python3 "$SCRIPT_DIR/cf_dispatch_chain.py" "$chain_attempts_tmp" "" "$chain_summary_path" >"$chain_record_tmp"; then
+  if ! "$DISPATCH_PYTHON" "$SCRIPT_DIR/cf_dispatch_chain.py" "$chain_attempts_tmp" "" "$chain_summary_path" >"$chain_record_tmp"; then
     rm -f "$chain_record_tmp" "$chain_attempts_tmp"
     exit 1
   fi
-  if ! python3 "$PUBLISH_HELPER" --root "$EVIDENCE_ROOT" publish "$chain_summary_path" "$chain_record_tmp"; then
+  if ! "$DISPATCH_PYTHON" "$PUBLISH_HELPER" --root "$EVIDENCE_ROOT" publish "$chain_summary_path" "$chain_record_tmp"; then
     echo "cannot write immutable chain summary: $chain_summary_path" >&2
     rm -f "$chain_record_tmp" "$chain_attempts_tmp"
     exit 1
