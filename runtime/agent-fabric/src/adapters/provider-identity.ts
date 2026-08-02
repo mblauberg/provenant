@@ -4,8 +4,11 @@ import { lstat, readFile, realpath, stat } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative } from "node:path";
 import { promisify } from "node:util";
 
+import type { ProviderIdentityAssurance } from "../domain/types.js";
 import { FabricError } from "../errors.js";
 import { ADAPTER_INTERFACE_PROBE_INCOMPLETE } from "./provider-interface.js";
+
+export type { ProviderIdentityAssurance } from "../domain/types.js";
 
 const execFileAsync = promisify(execFile);
 const CODESIGN_PROBE_TIMEOUT_MS = 15_000;
@@ -36,12 +39,6 @@ export type ProviderIdentityPort = {
 export type ProviderIdentityPolicy =
   | "apple-designated"
   | "cursor-partial-signed-helpers"
-  | "owner-controlled-install-root"
-  | "lockfile-install-attestation";
-
-export type ProviderIdentityAssurance =
-  | "full-vendor-identity"
-  | "partial-signed-helpers"
   | "owner-controlled-install-root"
   | "lockfile-install-attestation";
 

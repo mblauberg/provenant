@@ -38,6 +38,9 @@ scripts/worktree create NAME --human-authorised --new-branch BRANCH \
 scripts/worktree create NAME --human-authorised --existing-branch BRANCH
 scripts/worktree list
 scripts/worktree check
+scripts/worktree verify-claim --repo <expected-linked-worktree> \
+  --claimed-worktree <claimed-worktree> --claimed-commit <full-sha> \
+  --base-revision <pre-dispatch-full-sha>
 scripts/worktree remove NAME --human-authorised
 ```
 
@@ -47,7 +50,13 @@ receipt emits `primary_root`, `worktree_root`, `common_git_dir`, `head_revision`
 and branch/detached state. It does not emit the supplied repo path as
 `repo_root`; record that path and the authority provenance separately when the
 run contract requires them. A removal receipt emits only `status`, `name` and
-`primary_root`.
+`primary_root`. At the chair acceptance boundary, `verify-claim` requires the
+recorded pre-dispatch `base_revision`, a new full `head_revision` descended from
+that base, the exact linked worktree and common Git directory, and a clean
+residue scan that is stable across verification. It emits `status: accepted`
+only with `clean: true`; generated dependency/cache paths are the only documented
+ignored exclusions. The helper is a bounded verifier, not a lock, watcher,
+daemon or worktree owner. Later mutation needs a fresh claim.
 
 ## Ownership and cleanup
 
@@ -59,6 +68,19 @@ run contract requires them. A removal receipt emits only `status`, `name` and
   a suite failure as a product defect, run the owning repository's declared
   lockfile bootstrap and build commands in that worktree, then record the exact
   commands and results. Do not guess the package manager or install mode.
+  In this repository that is `scripts/install-agent-fabric-dependencies`
+  followed by `AGENTS_HOME=$PWD scripts/agent-fabric-protocol-build`. A bare
+  `npm ci` is not enough: it leaves the install attestation unwritten and the
+  protocol `dist` unbuilt, so suites fail with
+  `NPM_INSTALL_ATTESTATION_MISMATCH` or `AGENT_FABRIC_PROTOCOL_BUILD_STALE`
+  for reasons that have nothing to do with the change under test.
+- The Python suite needs its own per-worktree environment: `uv sync --locked
+  --only-group test` creates `.venv`, and every run goes through
+  `.venv/bin/pytest`. A worktree without it has no `.venv` at all, and an agent
+  that falls back to a system `pytest` gets a different interpreter with
+  different packages. One lane did exactly that and reported nine failures that
+  do not exist, plus a `README` check that passes under the pinned environment.
+  Treat a suite result from an unpinned interpreter as no result.
 - Before removal, confirm a clean status, no live agent/pane and no unconsumed
   handoff. Use `git worktree remove`, never filesystem deletion.
 - Force removal of a dirty worktree, and deletion of an unmerged branch, require

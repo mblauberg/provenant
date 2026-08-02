@@ -9,6 +9,7 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+PUBLISH_HELPER="$SCRIPT_DIR/cf_dispatch_publish.py"
 PRODUCT_ROOT="$(CDPATH= cd -- "$SCRIPT_DIR/../../.." && pwd)"
 
 usage() {
@@ -25,9 +26,14 @@ Options:
   --role ROLE                  Route role (default: reviewer).
   --risk-tier TIER             Optional routine, substantial, crucial, or terminal risk tier.
   --reviewer-id ID             Stable worker/reviewer identity for receipt binding.
+  --task-id ID                 Stable task identity for the dispatch receipt.
+  --attempt-id ID              Stable attempt identity for the dispatch receipt.
+  --receipt PATH               Dispatcher-owned JSON receipt path.
   --model MODEL                Optional model passed to adapter.
   --effort EFFORT              Optional effort passed to adapter.
-  --out PATH                   Clean output path; defaults to mktemp.
+  --evidence-root PATH         Lexical root containing all dispatcher evidence paths.
+  --out PATH                   Human-readable answer path; defaults to mktemp.
+  --terminal-artifact PATH     Dispatcher-owned JSON terminal artifact path; defaults to PATH.terminal.json.
   --prompt TEXT                Prompt text.
   --prompt-file PATH           Read prompt from file.
   --doctor                     Print local dispatch diagnostics and exit.
@@ -37,7 +43,7 @@ Gemini/Agy execution belongs to Agent Fabric, not this direct-CLI helper.
 EOF
 }
 
-TOOL="" MODEL="" EFFORT="" OUT="" PROMPT="" PROMPT_FILE="" CHAIN="" ORCH_FAMILY="" MODEL_ALIAS="flagship" ROUTE_ROLE="reviewer" RISK_TIER="" REVIEWER_ID="" DOCTOR=0
+TOOL="" MODEL="" EFFORT="" EVIDENCE_ROOT="" OUT="" TERMINAL_ARTIFACT="" PROMPT="" PROMPT_FILE="" CHAIN="" ORCH_FAMILY="" MODEL_ALIAS="flagship" ROUTE_ROLE="reviewer" RISK_TIER="" REVIEWER_ID="" TASK_ID="" ATTEMPT_ID="" DISPATCH_RECEIPT="" DOCTOR=0
 OUT_CREATED=false
 need_value() {
   [ $# -ge 2 ] || { echo "missing value for $1" >&2; exit 2; }
@@ -49,6 +55,7 @@ while [ $# -gt 0 ]; do
     --tool) need_value "$@"; TOOL="$2"; shift 2;;
     --model) need_value "$@"; MODEL="$2"; shift 2;;
     --effort) need_value "$@"; EFFORT="$2"; shift 2;;
+    --evidence-root) need_value "$@"; EVIDENCE_ROOT="$2"; shift 2;;
     --out) need_value "$@"; OUT="$2"; shift 2;;
     --prompt) need_value "$@"; PROMPT="$2"; shift 2;;
     --prompt-file) need_value "$@"; PROMPT_FILE="$2"; shift 2;;
@@ -58,6 +65,10 @@ while [ $# -gt 0 ]; do
     --role) need_value "$@"; ROUTE_ROLE="$2"; shift 2;;
     --risk-tier) need_value "$@"; RISK_TIER="$2"; shift 2;;
     --reviewer-id) need_value "$@"; REVIEWER_ID="$2"; shift 2;;
+    --task-id) need_value "$@"; TASK_ID="$2"; shift 2;;
+    --attempt-id) need_value "$@"; ATTEMPT_ID="$2"; shift 2;;
+    --receipt) need_value "$@"; DISPATCH_RECEIPT="$2"; shift 2;;
+    --terminal-artifact) need_value "$@"; TERMINAL_ARTIFACT="$2"; shift 2;;
     *) echo "unknown arg: $1" >&2; exit 2;;
   esac
 done
@@ -116,15 +127,26 @@ make_tmp() {
   [ -d "$root" ] || { echo "temporary directory does not exist: $root" >&2; return 1; }
   mktemp "$root/cf-dispatch.XXXXXX"
 }
+make_tmp_path() {
+  local path
+  path="$(make_tmp)" || return 1
+  rm -f -- "$path"
+  printf '%s\n' "$path"
+}
 make_tmp_dir() {
   local root="${TMPDIR:-/tmp}"
   [ -d "$root" ] || { echo "temporary directory does not exist: $root" >&2; return 1; }
   mktemp -d "$root/cf-dispatch-run.XXXXXX"
 }
 if [ -z "$OUT" ]; then
-  OUT="$(make_tmp)"
+  OUT="$(make_tmp_path)"
   OUT_CREATED=true
 fi
+if [ -z "$TERMINAL_ARTIFACT" ]; then
+  TERMINAL_ARTIFACT="${OUT}.terminal.json"
+fi
+# EVIDENCE_ROOT is caller-supplied only. Deriving it from the evidence paths
+# would let the boundary certify itself, which is the defect this replaced.
 PROMPT_TMP="$(make_tmp)"
 printf '%s' "$PROMPT" >"$PROMPT_TMP"
 trap 'rm -f "$PROMPT_TMP"' EXIT
@@ -176,17 +198,19 @@ emit_record() {
   local requested_effort="${12:-}" effort_source="${13:-}" effort_capability_source="${14:-}" cross cert
   local substitution="${15:-}" requested_model="${16:-$model}" fallback_model="${17:-}"
   local catalog_model="${18:-}" model_selection="${19:-}"
-  local risk_tier="${20:-$RISK_TIER}" policy_override="${21:-}"
-  local adapter_resolution="${22:-}" adapter_executable="${23:-}" adapter_resolution_reason="${24:-}"
-  local provider_assurance="${25:-}" certifying_answer_bearing_leg="${26:-false}"
+  local risk_tier="${20:-$RISK_TIER}" policy_override="${21:-}" terminal_observed="${22:-false}" output_sha256="${23:-}" terminal_artifact_path="${24:-}" terminal_artifact_sha256="${25:-}" record receipt_tmp record_digest
+  local adapter_resolution="${26:-}" adapter_executable="${27:-}" adapter_resolution_reason="${28:-}"
+  local provider_assurance="${29:-}" certifying_answer_bearing_leg="${30:-false}"
   model="$(resolve_model "$tool" "$model")"
   [ -n "$endpoint" ] || endpoint="$(endpoint_provider "$tool")"
   [ -n "$identity" ] || identity="unresolved"
   cross="false"
   [ -n "$ORCH_FAMILY" ] && valid_family "$ORCH_FAMILY" && [ -n "$family" ] && [ "$ORCH_FAMILY" != "$family" ] && cross="true"
   cert="false"
-  [ "$status" = "ok" ] && [ "$cross" = "true" ] && [ "$adapter_resolution" = "verified-owner" ] && [ -n "$provider_assurance" ] && [ "$certifying_answer_bearing_leg" = "true" ] && { [ "$guarantee" = "enforced" ] || [ "$guarantee" = "oauth_safe_mode" ]; } && cert="true"
-  printf '{"tool":"%s","adapter":"%s","adapter_gate":"direct-cli","model":"%s","requested_model":"%s","resolved_model":"%s","fallback_model":"%s","requested_effort":"%s","effort":"%s","effort_source":"%s","effort_capability_source":"%s","effort_substitution":"%s","substitution":"%s","status":"%s","exit":%s,"output_path":"%s","read_only_guarantee":"%s","orchestrator_family":"%s","provider_family":"%s","model_family":"%s","endpoint_provider":"%s","identity_source":"%s","provider_assurance":"%s","catalog_model":"%s","model_selection":"%s","route_alias":"%s","reviewer_id":"%s","risk_tier":"%s","policy_override":"%s","adapter_resolution":"%s","adapter_executable":"%s","adapter_resolution_reason":"%s","cross_family":%s,"certification_eligible":%s}\n' \
+  [ "${EVIDENCE_PATHS_DISTINCT:-false}" = "true" ] && [ "$status" = "ok" ] && [ "$cross" = "true" ] && [ "$adapter_resolution" = "verified-owner" ] && [ -n "$provider_assurance" ] && [ "$certifying_answer_bearing_leg" = "true" ] && { [ "$guarantee" = "enforced" ] || [ "$guarantee" = "oauth_safe_mode" ]; } && cert="true"
+  record="$(printf '{"id":"%s","attempt_id":"%s","tool":"%s","adapter":"%s","adapter_gate":"direct-cli","model":"%s","requested_model":"%s","resolved_model":"%s","fallback_model":"%s","requested_effort":"%s","effort":"%s","effort_source":"%s","effort_capability_source":"%s","effort_substitution":"%s","substitution":"%s","status":"%s","exit":%s,"terminal_observed":%s,"output_path":"%s","output_sha256":"%s","terminal_artifact_path":"%s","terminal_artifact_sha256":"%s","read_only_guarantee":"%s","orchestrator_family":"%s","provider_family":"%s","model_family":"%s","endpoint_provider":"%s","identity_source":"%s","provider_assurance":"%s","catalog_model":"%s","model_selection":"%s","route_alias":"%s","reviewer_id":"%s","risk_tier":"%s","policy_override":"%s","adapter_resolution":"%s","adapter_executable":"%s","adapter_resolution_reason":"%s","cross_family":%s,"certification_eligible":%s}\n' \
+    "$(printf '%s' "${TASK_ID:-$REVIEWER_ID}" | json_escape)" \
+    "$(printf '%s' "${ATTEMPT_ID:-attempt-1}" | json_escape)" \
     "$(printf '%s' "$tool" | json_escape)" \
     "$(printf '%s' "$tool" | json_escape)" \
     "$(printf '%s' "$model" | json_escape)" \
@@ -201,7 +225,11 @@ emit_record() {
     "$(printf '%s' "$substitution" | json_escape)" \
     "$(printf '%s' "$status" | json_escape)" \
     "$rc" \
+    "$terminal_observed" \
     "$(printf '%s' "$path" | json_escape)" \
+    "$(printf '%s' "$output_sha256" | json_escape)" \
+    "$(printf '%s' "$terminal_artifact_path" | json_escape)" \
+    "$(printf '%s' "$terminal_artifact_sha256" | json_escape)" \
     "$(printf '%s' "$guarantee" | json_escape)" \
     "$(printf '%s' "$ORCH_FAMILY" | json_escape)" \
     "$(printf '%s' "$family" | json_escape)" \
@@ -219,10 +247,92 @@ emit_record() {
     "$(printf '%s' "$adapter_executable" | json_escape)" \
     "$(printf '%s' "$adapter_resolution_reason" | json_escape)" \
     "$cross" \
-    "$cert"
+    "$cert" )"
+  if [ -n "$DISPATCH_RECEIPT" ] && [ -n "$EVIDENCE_ROOT" ] && [ "$status" != "evidence_paths_not_distinct" ] && [ "$status" != "evidence_root_required" ]; then
+    receipt_tmp="$(make_tmp)" || receipt_tmp=""
+    if [ -z "$receipt_tmp" ] || ! printf '%s' "$record" >"$receipt_tmp" || ! python3 "$PUBLISH_HELPER" --root "$EVIDENCE_ROOT" publish "$DISPATCH_RECEIPT" "$receipt_tmp"; then
+      [ -n "$receipt_tmp" ] && rm -f "$receipt_tmp"
+      echo "cannot write dispatcher receipt: $DISPATCH_RECEIPT" >&2
+      record="$(printf '%s' "$record" | python3 -c 'import json,sys; value=json.load(sys.stdin); value.update(status="receipt_write_error", exit=1, terminal_observed=False, read_only_guarantee="none", certification_eligible=False); print(json.dumps(value, separators=(",", ":")))')"
+      printf '%s' "$record"
+      return 1
+    fi
+    rm -f "$receipt_tmp"
+    record_digest="$(printf '%s' "$record" | python3 -c 'import hashlib,sys; print("sha256:" + hashlib.sha256(sys.stdin.buffer.read()).hexdigest())')"
+  fi
+  if [ "$status" != "evidence_paths_not_distinct" ] && [ -n "$output_sha256" ] && [ -n "$terminal_artifact_sha256" ] && ! evidence_paths_valid "$output_sha256" "$terminal_artifact_sha256" "$record_digest"; then
+    EVIDENCE_PATHS_DISTINCT=false
+    record="$(printf '%s' "$record" | python3 -c 'import json,sys; value=json.load(sys.stdin); value.update(status="evidence_publication_invalid", exit=2, terminal_observed=False, read_only_guarantee="none", certification_eligible=False); print(json.dumps(value, separators=(",", ":")))')"
+    printf '%s' "$record"
+    return 1
+  fi
+  printf '%s' "$record"
+}
+
+write_terminal_artifact() {
+  local path="$1" status="$2" rc="$3" payload outcome_id temporary
+  [ -n "$path" ] || return 0
+  outcome_id="${TASK_ID:-$REVIEWER_ID}"
+  if [ "$status" = "ok" ] && [ "$rc" -eq 0 ]; then
+    payload="$(python3 - "$outcome_id" "${ATTEMPT_ID:-attempt-1}" <<'PY'
+import json
+import sys
+
+print(json.dumps({
+    "id": sys.argv[1],
+    "attempt_id": sys.argv[2],
+    "kind": "complete",
+    "summary": "dispatcher observed a completed provider answer",
+}, separators=(",", ":")))
+PY
+)"
+  else
+    payload="$(python3 - "$outcome_id" "${ATTEMPT_ID:-attempt-1}" "$status" "$rc" <<'PY'
+import json
+import sys
+
+print(json.dumps({
+    "id": sys.argv[1],
+    "attempt_id": sys.argv[2],
+    "kind": "failed",
+    "reason": f"dispatcher outcome {sys.argv[3]} (exit {sys.argv[4]})",
+}, separators=(",", ":")))
+PY
+)"
+  fi
+  temporary="$(make_tmp)" || return 1
+  if ! printf '%s' "$payload" >"$temporary" || ! python3 "$PUBLISH_HELPER" --root "$EVIDENCE_ROOT" publish "$path" "$temporary"; then
+    rm -f "$temporary"
+    return 1
+  fi
+  rm -f "$temporary"
 }
 
 ORCH_FAMILY="$(normalise_family "$ORCH_FAMILY")"
+EVIDENCE_PATHS_DISTINCT=true
+
+evidence_paths_distinct() {
+  local -a paths
+  paths=("$OUT" "$TERMINAL_ARTIFACT")
+  [ -n "$DISPATCH_RECEIPT" ] && paths+=("$DISPATCH_RECEIPT")
+  python3 "$PUBLISH_HELPER" --root "$EVIDENCE_ROOT" identity "${paths[@]}"
+}
+
+evidence_paths_valid() {
+  local output_digest="$1" terminal_digest="$2" receipt_digest="${3:-}"
+  local -a entries
+  entries=("$OUT" "$output_digest" "$TERMINAL_ARTIFACT" "$terminal_digest")
+  [ -n "$DISPATCH_RECEIPT" ] && entries+=("$DISPATCH_RECEIPT" "$receipt_digest")
+  python3 "$PUBLISH_HELPER" --root "$EVIDENCE_ROOT" verify "${entries[@]}"
+}
+
+emit_evidence_path_rejection() {
+  local record
+  EVIDENCE_PATHS_DISTINCT=false
+  echo "answer, dispatcher terminal, and receipt evidence paths must be distinct files; path, symlink, and hardlink aliases are rejected" >&2
+  record="$(emit_record "${TOOL:-chain}" "" "" "evidence_paths_not_distinct" 2 "" "none" "" "" "" "" "" "" "" "" "" "" "" "" "$RISK_TIER" "evidence-path-alias" false "" "$TERMINAL_ARTIFACT" "")"
+  printf '%s\n' "$record"
+}
 
 # Specific failure signatures only. Do not treat any mention of "quota" as a failure.
 fail_sig='(Authentication required|Please sign in|Please( run)? login|not logged in|not authenticated|Unauthorized|insufficient_quota|quota exceeded|rate limit exceeded|usage limit reached)'
@@ -249,30 +359,19 @@ fixed_provider_family_for_tool() {
 owner_failure_is_unavailable() {
   local diagnostic="$1"
   case "$diagnostic" in
-    *AGENT_FABRIC_PREFLIGHT_INCOMPLETE*|*AGENT_FABRIC_PROTOCOL_BUILD_INCOMPLETE*|*AGENT_FABRIC_PROTOCOL_BUILD_STALE*|*cannot\ resolve\ the\ tsx\ loader*|*found\ no\ valid\ tsx\ loader*|*node:\ not\ found*|*No\ such\ file\ or\ directory*|*npm\ install\ attestation\ is\ missing*)
-      return 0;;
-    *) return 1;;
-  esac
-}
-
-owner_json_option_is_unsupported() {
-  local diagnostic
-  diagnostic="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
-  case "$diagnostic" in
-    *"adapter executable received unknown option: --json"*)
+    *AGENT_FABRIC_PREFLIGHT_INCOMPLETE*|*AGENT_FABRIC_PROTOCOL_BUILD_INCOMPLETE*|*AGENT_FABRIC_PROTOCOL_BUILD_STALE*|*cannot\ resolve\ the\ tsx\ loader*|*found\ no\ valid\ tsx\ loader*|*node:\ not\ found*|*No\ such\ file\ or\ directory*|*npm\ install\ attestation\ is\ missing*|*provider\ signature\ is\ invalid*|*NODE_MODULE_VERSION*|*ERR_DLOPEN_FAILED*|*different\ Node.js\ version*)
       return 0;;
     *) return 1;;
   esac
 }
 
 resolve_adapter_executable() {
-  local tool="$1" diag="$2" adapter_id="$3" command_name owner_root owner owner_output owner_rc owner_json_fallback
+  local tool="$1" diag="$2" adapter_id="$3" command_name owner_root owner owner_output owner_rc
   adapter_resolution=""
   adapter_executable=""
   adapter_resolution_reason=""
   provider_assurance=""
   certifying_answer_bearing_leg="false"
-  owner_json_fallback=false
   command_name="$(adapter_command_for_tool "$tool")" || {
     adapter_resolution="unavailable"
     adapter_resolution_reason="no adapter command mapping for $tool"
@@ -284,21 +383,12 @@ resolve_adapter_executable() {
     owner_root="${AGENTS_HOME:-$PRODUCT_ROOT}"
     owner="$owner_root/scripts/agent-fabric"
     if [ -x "$owner" ]; then
-      owner_output="$({ "$owner" adapter executable \
+      owner_output="$({ AGENTS_HOME="$owner_root" "$owner" adapter executable \
         --adapter "$adapter_id" \
         --product-root "$PRODUCT_ROOT" \
         --instance-root "${AGENT_FABRIC_INSTANCE_ROOT:-$PRODUCT_ROOT}" \
         --json; } 2>"$diag")"
       owner_rc=$?
-      if [ "$owner_rc" -ne 0 ] && owner_json_option_is_unsupported "$(cat "$diag" 2>/dev/null)"; then
-        owner_json_fallback=true
-        echo "DEGRADED: owner CLI does not support --json; retrying legacy plain-path resolution" >>"$diag"
-        owner_output="$({ "$owner" adapter executable \
-          --adapter "$adapter_id" \
-          --product-root "$PRODUCT_ROOT" \
-          --instance-root "${AGENT_FABRIC_INSTANCE_ROOT:-$PRODUCT_ROOT}"; } 2>>"$diag")"
-        owner_rc=$?
-      fi
       if [ "$owner_rc" -eq 0 ]; then
         local owner_executable owner_assurance owner_certifying
         owner_executable="$(printf '%s' "$owner_output" | python3 -c 'import json,sys
@@ -329,21 +419,11 @@ print("true" if isinstance(value, dict) and value.get("certifying_answer_bearing
           full-vendor-identity|lockfile-install-attestation) owner_certifying="true";;
           partial-signed-helpers|owner-controlled-install-root|*) owner_certifying="false";;
         esac
-        if [ "$owner_json_fallback" = true ]; then
-          # A legacy response has no negotiated assurance authority, even if
-          # its bytes happen to be structured and claim a certifying value.
-          owner_assurance=""
-          owner_certifying="false"
-        fi
         if [ -n "$owner_executable" ] && [ "${owner_executable#*/}" != "$owner_executable" ] && [ -f "$owner_executable" ] && [ -x "$owner_executable" ]; then
           adapter_resolution="verified-owner"
           adapter_executable="$owner_executable"
           provider_assurance="$owner_assurance"
           certifying_answer_bearing_leg="$owner_certifying"
-          if [ "$owner_json_fallback" = true ]; then
-            adapter_resolution_reason="DEGRADED: owner CLI legacy plain-path response has unknown provider assurance"
-            echo "$adapter_resolution_reason" >>"$diag"
-          fi
           return 0
         fi
         adapter_resolution="rejected"
@@ -424,8 +504,8 @@ resolve_routing() {
   return 127
 }
 
-run_one() {  # $1 tool $2 model $3 effort -> writes clean answer to OUT, echoes JSON, returns 0/1
-  local tool="$1" model="$2" effort="$3" tmpdir raw diag combined clean rc status opath guarantee family endpoint identity effort_substitution substitution requested_model requested_effort effort_source effort_capability_source route_json route_rc route_fields capabilities_file fallback_model primary_model catalog_model model_selection policy_override route_risk_tier compatibility_adapter adapter_resolution_failed provider_assurance certifying_answer_bearing_leg
+run_one() {  # $1 tool $2 model $3 effort -> writes answer and optional terminal artifact, echoes JSON, returns 0/1
+  local tool="$1" model="$2" effort="$3" tmpdir raw diag combined clean rc status opath guarantee family endpoint identity effort_substitution substitution requested_model requested_effort effort_source effort_capability_source route_json route_rc route_fields capabilities_file fallback_model primary_model catalog_model model_selection policy_override route_risk_tier output_sha256 terminal_artifact_sha256 compatibility_adapter adapter_resolution_failed adapter_resolution adapter_executable adapter_resolution_reason provider_assurance certifying_answer_bearing_leg terminal_observed
   model="$(resolve_model "$tool" "$model")"
   tmpdir="$(make_tmp_dir)"
   raw="$tmpdir/raw"
@@ -449,6 +529,7 @@ run_one() {  # $1 tool $2 model $3 effort -> writes clean answer to OUT, echoes 
   adapter_resolution_reason=""
   provider_assurance=""
   certifying_answer_bearing_leg="false"
+  terminal_observed="false"
   adapter_resolution_failed=0
   route_risk_tier="$RISK_TIER"
   requested_effort="$effort"
@@ -468,6 +549,15 @@ run_one() {  # $1 tool $2 model $3 effort -> writes clean answer to OUT, echoes 
     status="orchestrator_family_required"
     echo "$tool disabled: pass --orchestrator-family so cross-family status can be proven" >"$diag"
     rc=1
+  elif [ -z "$EVIDENCE_ROOT" ]; then
+    guarantee="none"
+    status="evidence_root_required"
+    echo "$tool disabled: pass --evidence-root so the evidence boundary is stated, not inferred" >"$diag"
+    rc=1
+    record="$(emit_record "$tool" "$model" "$effort" "$status" "$rc" "" "$guarantee" "$family" "$endpoint" "$identity" "$effort_substitution" "$requested_effort" "$effort_source" "$effort_capability_source" "$substitution" "$requested_model" "$fallback_model" "$catalog_model" "$model_selection" "$route_risk_tier" "$policy_override" false "" "" "" "$adapter_resolution" "$adapter_executable" "$adapter_resolution_reason" "$provider_assurance" "$certifying_answer_bearing_leg")"
+    cat "$diag" >&2
+    printf '%s' "$record"
+    return 1
   elif [ -n "$family" ] && [ "$family" = "$ORCH_FAMILY" ]; then
     guarantee="none"
     status="same_family_forbidden"
@@ -655,7 +745,7 @@ run_one() {  # $1 tool $2 model $3 effort -> writes clean answer to OUT, echoes 
   [ "$status" = "tool_not_found" ] && guarantee="none"
 
   if [ "$status" = "ok" ]; then
-    if cp "$clean" "$OUT"; then
+    if python3 "$PUBLISH_HELPER" --root "$EVIDENCE_ROOT" publish "$OUT" "$clean"; then
       opath="$OUT"
     else
       status="output_write_error"
@@ -664,7 +754,7 @@ run_one() {  # $1 tool $2 model $3 effort -> writes clean answer to OUT, echoes 
       opath=""
     fi
   else
-    if cp "$combined" "$OUT"; then
+    if python3 "$PUBLISH_HELPER" --root "$EVIDENCE_ROOT" publish "$OUT" "$combined"; then
       opath="$OUT"
     else
       status="output_write_error"
@@ -673,24 +763,102 @@ run_one() {  # $1 tool $2 model $3 effort -> writes clean answer to OUT, echoes 
       opath=""
     fi
   fi
-  emit_record "$tool" "$model" "$effort" "$status" "$rc" "$opath" "$guarantee" "$family" "$endpoint" "$identity" "$effort_substitution" "$requested_effort" "$effort_source" "$effort_capability_source" "$substitution" "$requested_model" "$fallback_model" "$catalog_model" "$model_selection" "$route_risk_tier" "$policy_override" "$adapter_resolution" "$adapter_executable" "$adapter_resolution_reason" "$provider_assurance" "$certifying_answer_bearing_leg"
+  output_sha256=""
+  if [ -n "$opath" ] && [ -f "$opath" ]; then
+    if ! output_sha256="$(python3 "$PUBLISH_HELPER" --root "$EVIDENCE_ROOT" digest "$opath")"; then
+      status="output_validation_error"
+      rc=1
+      guarantee="none"
+      opath=""
+    fi
+  fi
+  terminal_artifact_sha256=""
+  if [ -n "$TERMINAL_ARTIFACT" ]; then
+    if write_terminal_artifact "$TERMINAL_ARTIFACT" "$status" "$rc"; then
+      if ! terminal_artifact_sha256="$(python3 "$PUBLISH_HELPER" --root "$EVIDENCE_ROOT" digest "$TERMINAL_ARTIFACT")"; then
+        status="terminal_artifact_validation_error"
+        rc=1
+        guarantee="none"
+      else
+        terminal_observed="true"
+      fi
+    else
+      status="terminal_artifact_write_error"
+      rc=1
+      guarantee="none"
+    fi
+  fi
+  if ! evidence_paths_distinct; then
+    EVIDENCE_PATHS_DISTINCT=false
+    status="evidence_paths_not_distinct"
+    rc=2
+    guarantee="none"
+    terminal_observed="false"
+    opath=""
+  fi
+  if ! emit_record "$tool" "$model" "$effort" "$status" "$rc" "$opath" "$guarantee" "$family" "$endpoint" "$identity" "$effort_substitution" "$requested_effort" "$effort_source" "$effort_capability_source" "$substitution" "$requested_model" "$fallback_model" "$catalog_model" "$model_selection" "$route_risk_tier" "$policy_override" "$terminal_observed" "$output_sha256" "$TERMINAL_ARTIFACT" "$terminal_artifact_sha256" "$adapter_resolution" "$adapter_executable" "$adapter_resolution_reason" "$provider_assurance" "$certifying_answer_bearing_leg"; then
+    return 1
+  fi
   [ "$status" = "ok" ]
 }
 
 if [ -n "$CHAIN" ]; then
+  chain_base_out="$OUT"
+  chain_base_terminal="$TERMINAL_ARTIFACT"
+  chain_base_receipt="$DISPATCH_RECEIPT"
+  chain_summary_path="${chain_base_receipt:-${chain_base_out}.chain.json}"
+  chain_attempts_tmp="$(make_tmp)" || exit 1
+  : >"$chain_attempts_tmp"
+  chain_attempt_index=0
+  chain_attempt_base="${ATTEMPT_ID:-attempt-1}"
   for spec in $CHAIN; do
+    chain_attempt_index=$((chain_attempt_index + 1))
     t="${spec%%:*}"
     rest="${spec#*:}"
     m="${rest%%:*}"
     e="${rest#*:}"
     [ "$rest" = "$spec" ] && { m=""; e=""; }
     [ "$e" = "$m" ] && e=""
+    OUT="${chain_base_out}.attempt-${chain_attempt_index}"
+    TERMINAL_ARTIFACT="${chain_base_terminal}.attempt-${chain_attempt_index}"
+    if [ -n "$chain_base_receipt" ]; then
+      DISPATCH_RECEIPT="${chain_base_receipt}.attempt-${chain_attempt_index}"
+    else
+      DISPATCH_RECEIPT="${chain_base_out}.route.attempt-${chain_attempt_index}.json"
+    fi
+    ATTEMPT_ID="${chain_attempt_base}.attempt-${chain_attempt_index}"
     rec="$(run_one "$t" "$m" "$e")"; rc=$?
     echo "$rec" >&2
-    if [ $rc -eq 0 ]; then echo "$rec"; exit 0; fi
+    printf '{"record":%s,"receipt_path":"%s"}\n' \
+      "$rec" "$(printf '%s' "$DISPATCH_RECEIPT" | json_escape)" >>"$chain_attempts_tmp"
+    if [ $rc -eq 0 ]; then
+      chain_record_tmp="$(make_tmp)" || exit 1
+      if ! python3 "$SCRIPT_DIR/cf_dispatch_chain.py" "$chain_attempts_tmp" "$rec" "$chain_summary_path" >"$chain_record_tmp"; then
+        rm -f "$chain_record_tmp" "$chain_attempts_tmp"
+        exit 1
+      fi
+      if ! python3 "$PUBLISH_HELPER" --root "$EVIDENCE_ROOT" publish "$chain_summary_path" "$chain_record_tmp"; then
+        echo "cannot write immutable chain summary: $chain_summary_path" >&2
+        rm -f "$chain_record_tmp" "$chain_attempts_tmp"
+        exit 1
+      fi
+      cat "$chain_record_tmp"
+      rm -f "$chain_record_tmp" "$chain_attempts_tmp"
+      exit 0
+    fi
   done
-  [ "$OUT_CREATED" = true ] && rm -f "$OUT"
-  emit_record "chain" "" "" "all_failed" 1 "" "none"
+  chain_record_tmp="$(make_tmp)" || exit 1
+  if ! python3 "$SCRIPT_DIR/cf_dispatch_chain.py" "$chain_attempts_tmp" "" "$chain_summary_path" >"$chain_record_tmp"; then
+    rm -f "$chain_record_tmp" "$chain_attempts_tmp"
+    exit 1
+  fi
+  if ! python3 "$PUBLISH_HELPER" --root "$EVIDENCE_ROOT" publish "$chain_summary_path" "$chain_record_tmp"; then
+    echo "cannot write immutable chain summary: $chain_summary_path" >&2
+    rm -f "$chain_record_tmp" "$chain_attempts_tmp"
+    exit 1
+  fi
+  cat "$chain_record_tmp"
+  rm -f "$chain_record_tmp" "$chain_attempts_tmp"
   exit 1
 else
   [ -z "$TOOL" ] && { echo "need --tool or --chain" >&2; exit 2; }

@@ -19,6 +19,11 @@ WORKFLOW_NAMES = {
     "cross-verify.js",
     "implement-run.js",
 }
+AGENT_NAMES = {
+    "agy-reviewer.md",
+    "codex-analyst.md",
+    "codex-implementer.md",
+}
 UNMANAGED_WORKFLOW_BYTES = (
     b"export const meta = { name: 'mine' };\r\n"
     b"// User-owned workflow with no trailing newline"
@@ -99,7 +104,7 @@ def copy_product_fixture(tmp_path: Path) -> Path:
     product.mkdir()
     for name in ("AGENTS.md", "HARNESS.md", "package.json", "package-lock.json"):
         shutil.copy2(ROOT / name, product / name)
-    for name in ("config", "scripts", "skills", "workflows"):
+    for name in ("agents", "config", "scripts", "skills", "workflows"):
         shutil.copytree(ROOT / name, product / name, symlinks=True)
     shutil.copytree(
         ROOT / "runtime" / "agent-fabric",
@@ -298,6 +303,14 @@ def test_installs_claude_skills_and_global_instructions_idempotently(tmp_path):
         (config / ".agent-harness-workflows-installation.json").read_text()
     )
     assert set(workflow_manifest["managed"]) == WORKFLOW_NAMES
+    agents = config / "agents"
+    assert {path.name for path in agents.iterdir()} == AGENT_NAMES
+    assert all((agents / name).is_symlink() for name in AGENT_NAMES)
+    assert all((agents / name).resolve() == ROOT / "agents" / name for name in AGENT_NAMES)
+    agent_manifest = json.loads(
+        (config / ".agent-harness-agents-installation.json").read_text()
+    )
+    assert set(agent_manifest["managed"]) == AGENT_NAMES
     instructions = config / "CLAUDE.md"
     content = instructions.read_text()
     # Doctrine is read from the seeded instance copy; the harness constitution
@@ -321,6 +334,22 @@ def test_installs_claude_skills_and_global_instructions_idempotently(tmp_path):
     )
     assert second.returncode == 0, second.stderr
     assert f"instructions existing={instructions}" in second.stdout
+
+
+def test_claude_agent_conflict_fails_before_publishing_or_projecting(tmp_path):
+    config = tmp_path / "claude-config"
+    agents = config / "agents"
+    agents.mkdir(parents=True)
+    (agents / "codex-analyst.md").write_text("# User-owned definition\n")
+
+    result = run("claude", tmp_path, CLAUDE_CONFIG_DIR=str(config))
+
+    assert result.returncode == 3
+    assert "conflicting agent targets" in result.stderr
+    assert not (tmp_path / ".local/bin/provenant").exists()
+    assert not (config / "skills").exists()
+    assert not (config / "workflows").exists()
+    assert not (config / ".agent-harness-agents-installation.json").exists()
 
 
 def test_install_harness_uses_absolute_node_with_a_sanitized_provider_path(tmp_path):
@@ -436,7 +465,13 @@ def test_fused_install_converges_claude_then_codex_without_client_projections(tm
         for path in optional_paths
     )
     assert not (product / "doctrine").exists()
-    assert not (claude_home / ".claude/agents").exists()
+    assert {
+        path.name for path in (claude_home / ".claude/agents").iterdir()
+    } == AGENT_NAMES
+    assert all(
+        (claude_home / ".claude/agents" / name).is_symlink()
+        for name in AGENT_NAMES
+    )
     assert not (codex_home / ".codex/agents").exists()
 
 

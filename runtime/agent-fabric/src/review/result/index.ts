@@ -1,12 +1,13 @@
 import {
+  supportsCertifyingAnswerBearingLeg,
+  type ProviderIdentityAssurance,
+} from "@local/agent-fabric-protocol";
+
+import {
   digestCanonical,
   sha256Digest,
   type Sha256Digest,
 } from "../canonical/index.js";
-import {
-  supportsCertifyingAnswerBearingLeg,
-  type ProviderIdentityAssurance,
-} from "../../adapters/provider-identity.js";
 
 export interface ProviderActionRef {
   adapterId: string;

@@ -13,7 +13,7 @@ import {
   type CodecOutput,
 } from "./codec.js";
 import { PROVIDER_ACTION_REF_V1_CODEC } from "./launch.js";
-import { PROVIDER_ACTION_TERMINAL_PROJECTION_V1_CODEC } from "./provider-review.js";
+import { PROVIDER_ACTION_TERMINAL_PROJECTION_V1_CODEC } from "./provider-review-evidence.js";
 
 const id256 = boundedString({ maxBytes: 256, example: "id_01" });
 const routeRequestCodec = objectCodec({

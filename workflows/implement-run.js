@@ -15,22 +15,20 @@
 //   4. review        -> independent code-review lenses + other-family reviewer.
 //   5. verify        -> objective checks mapped to acceptance criteria.
 //   6. repair        -> risk-tier budget: substantial 4, crucial/terminal 5 cycles.
-//   7. apply-gate    -> a SINGLE SERIAL applier auto-applies LOW-risk patches after checks pass,
-//                       guarding on a clean target worktree + `git apply --check` before each apply;
-//                       HIGH-risk patches (and any that drift / fail --check) are left validated +
-//                       with a written recommendation for a separate approve-then-apply step. The run
+//   7. host-apply    -> reviewed patches are handed to the ordinary host chair for application;
+//                       this workflow has no source mutation authority.
 //   8. human-gate    -> machine work ends awaiting explicit human acceptance.
 //
 // Concrete models are resolved once at bootstrap from durable aliases; later stages receive them.
 //   bulk read / convention sniff / grep-map      -> cheap tier (intent)
 //   plan framing / per-angle review / build       -> mid tier (intent)
-//   plan adjudication / synthesis / apply-gate     -> flagship tier (intent; the orchestrator session)
+//   plan adjudication / synthesis / host handoff  -> flagship tier (intent; the orchestrator session)
 //   other-primary explore + review                 -> Codex via cf_dispatch.sh
 //   distinct-family independent lens               -> Cursor/xAI or Agy/Gemini when warranted
 
 export const meta = {
   name: 'implement-run',
-  description: 'Claude accelerator for ~/.agents/skills/implement: approved contract, routed implementation, independent review, bounded repair, serial apply/escalation, human gate.',
+  description: 'Claude accelerator for ~/.agents/skills/implement: approved contract, routed implementation, independent review, bounded repair, host apply handoff, human gate.',
   whenToUse: 'an approved ordinary software change with acceptance criteria; unresolved requirements route to scope',
   phases: [
     { title: 'Bootstrap' },
@@ -40,7 +38,7 @@ export const meta = {
     { title: 'Review' },
     { title: 'Verify' },
     { title: 'Repair' },
-    { title: 'Apply' },
+    { title: 'Host apply' },
     { title: 'Human gate' },
   ],
 }
@@ -68,7 +66,7 @@ const BOOTSTRAP_SCHEMA = {
       type: 'string',
       description: 'Absolute path to a git repo dir usable as cwd for codex dispatch; empty string if none (cf_dispatch.sh has NO --skip-git-repo-check flag, so codex cross-family then falls back to a nested git repo, else cursor/agy, else CROSS-FAMILY-NOT-RUN)',
     },
-    baseRevision: { type: 'string', description: 'Git HEAD captured before any source mutation' },
+    baseRevision: { type: 'string', description: 'Git HEAD captured during bootstrap for advisory metadata' },
     effectiveRisk: { type: 'string', enum: ['substantial', 'crucial', 'terminal'] },
     riskPreflightPassed: { type: 'boolean' },
     conventions: {
@@ -170,9 +168,10 @@ const IMPLEMENT_SCHEMA = {
 const REVIEW_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['angle', 'verdict', 'issues', 'crossFamily', 'path'],
+  required: ['angle', 'reviewerId', 'verdict', 'issues', 'crossFamily', 'path'],
   properties: {
     angle: { type: 'string', description: 'correctness | regression | scope | cross-family' },
+    reviewerId: { type: 'string', description: 'Stable review-row identity; dispatched commands must pass this exact value as --reviewer-id.' },
     verdict: { type: 'string', enum: ['approve', 'approve-with-nits', 'block'] },
     issues: {
       type: 'array',
@@ -190,7 +189,7 @@ const REVIEW_SCHEMA = {
     crossFamily: {
       type: 'object',
       additionalProperties: false,
-      required: ['ran', 'tool', 'status', 'modelFamily', 'endpointProvider', 'crossFamily', 'certificationEligible', 'readOnlyGuarantee', 'outputPath', 'routeReceipt', 'notRunReason'],
+      required: ['ran', 'tool', 'status', 'modelFamily', 'endpointProvider', 'crossFamily', 'certificationEligible', 'readOnlyGuarantee', 'outputPath', 'routeReceipt', 'terminalResult', 'notRunReason'],
       properties: {
         ran: { type: 'boolean' },
         tool: { type: 'string', description: 'codex | cursor | agy | "" if Claude reviewer' },
@@ -202,6 +201,7 @@ const REVIEW_SCHEMA = {
         readOnlyGuarantee: { type: 'string', description: 'cf_dispatch.sh value: enforced | oauth_safe_mode | best_effort | prompt_only | none (none only for a Claude reviewer)' },
         outputPath: { type: 'string' },
         routeReceipt: { type: 'string', description: 'Exact cf_dispatch JSON receipt path; empty for native review' },
+        terminalResult: { type: 'string', description: 'Digest-bound semantic worker result JSON path; empty for native review' },
         notRunReason: { type: 'string', description: 'CROSS-FAMILY-NOT-RUN reason if ran=false; else ""' },
       },
     },
@@ -240,43 +240,6 @@ const COUNCIL_REDUCTION_SCHEMA = {
   },
 }
 
-// Apply gate: what the serial applier landed vs escalated.
-const APPLY_SCHEMA = {
-  type: 'object',
-  additionalProperties: false,
-  required: ['applied', 'escalated', 'manifestPath', 'recommendationPath', 'runPath', 'machineGatePassed'],
-  properties: {
-    applied: {
-      type: 'array',
-      items: {
-        type: 'object',
-        additionalProperties: false,
-        required: ['patchPath', 'targetFiles'],
-        properties: {
-          patchPath: { type: 'string' },
-          targetFiles: { type: 'array', items: { type: 'string' } },
-        },
-      },
-    },
-    escalated: {
-      type: 'array',
-      items: {
-        type: 'object',
-        additionalProperties: false,
-        required: ['patchPath', 'reason'],
-        properties: {
-          patchPath: { type: 'string' },
-          reason: { type: 'string', description: 'Why high-risk; the approval gate it needs' },
-        },
-      },
-    },
-    manifestPath: { type: 'string', description: 'Run-dir MANIFEST.md' },
-    recommendationPath: { type: 'string', description: 'Run-dir file with the human approve-then-apply recommendation' },
-    runPath: { type: 'string', description: 'Run-dir RUN.json lifecycle receipt' },
-    machineGatePassed: { type: 'boolean' },
-  },
-}
-
 // ---------------------------------------------------------------------------
 // Shared prose: the worker contract + the escalation rules every agent must obey.
 // ---------------------------------------------------------------------------
@@ -293,10 +256,10 @@ const WORKER_CONTRACT =
 // generic defaults that degrade gracefully — they simply never fire on a repo that lacks them.
 const ESCALATION_RULES =
   'Risk tagging (the proposing agent tags every edit; a later stage adjudicates):\n' +
-  '- LOW-RISK (eligible for auto-apply after objective checks): formatting, dead-code removal, ' +
+  '- LOW-RISK: formatting, dead-code removal, ' +
   'comment/docstring/doc typos, import cleanup, an isolated single-function internal change with NO ' +
   'signature change, design-token nits within the project design system.\n' +
-  '- HIGH-RISK (NEVER auto-apply; emit a validated patch + written rationale for a separate approve step): ' +
+  '- HIGH-RISK: emit a validated patch + written rationale for the host chair to review before application: ' +
   'cross-file refactors; public API / contract / route changes (and any generated-contract regen); ' +
   'release/artifact logic; HPC/cluster paths; ADR-governed areas; Makefile/markers/test infrastructure; ' +
   'dataset/corpus build.\n' +
@@ -310,7 +273,7 @@ const ESCALATION_RULES =
 // (non-git) dirs, so the dispatch runs with cwd inside a git repo; cf_dispatch.sh has NO
 // --skip-git-repo-check flag. The "codex cursor" --chain lets the dispatcher own failover in one call
 // (codex enforced -> cursor enforced), so cursor is attempted deterministically, not on agent whim.
-function crossFamilyDispatchHint(runDir, gitCwd, kind = 'primary') {
+function crossFamilyDispatchHint(runDir, gitCwd, kind = 'primary', reviewerId = '<reviewer-id>') {
   const cwdClause = gitCwd
     ? `Run the dispatcher with your shell cwd set to the git repo at ${gitCwd} (codex refuses non-git trees).`
     : 'No git repo was found at bootstrap. Set the shell cwd inside a nested git repo before the Codex dispatch; if none exists, record OTHER-PRIMARY-NOT-RUN.'
@@ -320,10 +283,12 @@ function crossFamilyDispatchHint(runDir, gitCwd, kind = 'primary') {
     ' Write your prompt to a file, then run:\n' +
     '  ~/.agents/skills/orchestrate/scripts/cf_dispatch.sh ' +
     '--orchestrator-family anthropic --tool codex --alias flagship --role other-primary --prompt-file <your-prompt-file> ' +
-    `--out ${runDir}/crossfamily/<name>.txt > ${runDir}/crossfamily/<name>.route.json\n` +
-    'The dispatcher prints a normalised JSON record (model_family, endpoint_provider, cross_family, certification_eligible, read_only_guarantee, ' +
+    `--evidence-root ${runDir} --out ${runDir}/crossfamily/<name>.txt --terminal-artifact ${runDir}/crossfamily/<name>.terminal.json ` +
+    `--task-id <review-id> --attempt-id <attempt-id> --reviewer-id ${reviewerId} ` +
+    `--receipt ${runDir}/crossfamily/<name>.route.json > /dev/null\n` +
+    'The dispatcher prints a normalised JSON record (model_family, endpoint_provider, cross_family, certification_eligible, output_sha256, terminal_artifact_sha256, read_only_guarantee, ' +
     'status) — preserve that exact route JSON and return its path as routeReceipt. Certified only when cross_family=true and read_only_guarantee ' +
-    'is enforced or oauth_safe_mode. On failure, set ran=false and record OTHER-PRIMARY-NOT-RUN: <reason>. ' +
+    'is enforced or oauth_safe_mode. Keep the normalised worker result as a separate terminal_result JSON artifact and return its path as terminalResult; the dispatcher terminal JSON is not its semantic verdict. On failure, set ran=false and record OTHER-PRIMARY-NOT-RUN: <reason>. ' +
     'Apply the host data policy before dispatch.'
   )
   return (
@@ -331,7 +296,7 @@ function crossFamilyDispatchHint(runDir, gitCwd, kind = 'primary') {
     'Gemini through Agy is also valid. Discover and pin the exact model, keep the route read-only or ' +
     'best-effort, and capture adapter, model_family, status and output. Do not substitute Claude or ' +
     'OpenAI and do not wait or retry on quota/API failure. Any skipped leg is ' +
-    'DISTINCT-FAMILY-NOT-RUN: <reason> and never replaces the other-primary gate. Distinct-family ' +
+    'DISTINCT-FAMILY-NOT-RUN: <reason> and never replaces the other-primary gate; distinct-family availability never replaces other-primary coverage. Distinct-family ' +
     'findings are advisory until a primary-family reviewer corroborates their evidence.'
   )
 }
@@ -343,7 +308,6 @@ function crossFamilyDispatchHint(runDir, gitCwd, kind = 'primary') {
 const task = (args && args.task) || ''
 const riskHint = (args && args.risk) || 'unspecified'
 const normalisedRisk = String(riskHint).toLowerCase()
-const requiresOtherPrimary = true
 const receiptRisk = ['crucial', 'terminal'].includes(normalisedRisk)
   ? normalisedRisk
   : 'substantial'
@@ -396,9 +360,12 @@ const boot = await agent(
     `The resulting contract=delivery-run, schema_version=1 receipt has profile=software and risk_tier=${receiptRisk}. ` +
     `Fill every risk_assessment factor from config/risk-policy.json conservatively; never lower the supplied tier. ` +
     `Fill authority from this human-requested task only: bounded allowed_source_paths and allowed_artifact_paths ` +
-    `(when the run dir is inside repoRoot, include that exact repo-relative run-dir subtree), expiry, denied_paths, ` +
-    `prohibited_actions, disclosure, secrets_access, deployment=false and irreversible_actions=false. Do not invent broader authority. ` +
+    `(when the run dir is inside repoRoot, include that exact repo-relative run-dir subtree), with artifact_write_paths ` +
+    `covering that exact repo-relative run-dir subtree, expiry, denied_paths and prohibited paths/actions, ` +
+    `disclosure/external_disclosure, secrets_access/secrets, deployment=false, irreversible_actions=false, ` +
+    `and explicit ignored_path_exemptions. Do not invent broader authority. ` +
     `Capture git HEAD before mutation as implementation.base_revision and return it as baseRevision; fill implementation.repo_root. ` +
+    `Never use a model-authored base, path, command, exit status or digest as execution proof. ` +
     `Require a clean source baseline: if tracked or untracked source changes already exist, fail preflight instead of hiding them in preexisting_paths. ` +
     `Bind the named human approval to matching human evidence and the canonical spec digest. ` +
     `Run deliver/scripts/validate_delivery.py <RUN.json> --workspace-root <repo-root>; return riskPreflightPassed=true only on exit 0, and return the receipt risk as effectiveRisk. ` +
@@ -503,7 +470,7 @@ const understanding = (
           `Task: """${task}"""\nRepo root: ${boot.repoRoot}\nConventions: ${JSON.stringify(conv)}\n` +
           WORKER_CONTRACT +
           `\nWrite full notes to ${runDir}/findings/understand-${r.angle}.md.` +
-          (r.cf ? '\n' + crossFamilyDispatchHint(runDir, gitCwd, 'primary') + ' Summarise the other-primary read in your findings.' : ''),
+          (r.cf ? '\n' + crossFamilyDispatchHint(runDir, gitCwd, 'primary', `understand-${r.angle}`) + ' Summarise the other-primary read in your findings.' : ''),
         { label: `understand:${r.angle}`, phase: 'Understand', schema: UNDERSTAND_SCHEMA, model: r.model },
       ),
     ),
@@ -569,7 +536,7 @@ let built = await agent(
     'Before emitting a patch, name the governing skill for this change in the implementation narrative; ' +
     'for every new or changed observable behaviour that skill must include `tdd` and a right-reason red. ' +
     ESCALATION_RULES +
-    '\nKeep patches minimal and self-contained; one logical change per patch so the applier can land ' +
+    '\nKeep patches minimal and self-contained; one logical change per patch so the host chair can apply ' +
     'low-risk ones independently. Add a brief code comment for any unobvious decision.\n' +
     'CRITICAL patch-only contract: you have file-edit tools but you MUST NOT mutate any source file. ' +
     'Write ONLY to the run dir (patches/ + findings/). Before you finish, if the repo root is a git ' +
@@ -599,8 +566,13 @@ const REVIEW_ANGLES = [
 let reviews = []
 let verify = null
 let blocking = 0
-let otherPrimaryRan = false
-let distinctFamilyRan = false
+let otherPrimaryReviewAttempted = false
+let distinctFamilyReviewAttempted = false
+let otherPrimaryReview = {
+  status: 'not-attempted',
+  reviewerId: '',
+  candidatePaths: { outputPath: '', routeReceipt: '', terminalResult: '' },
+}
 let checksPass = false
 let repairCycles = 0
 let patchDigest = ''
@@ -619,10 +591,10 @@ for (let cycle = 0; cycle <= maxRepairCycles; cycle += 1) {
           ESCALATION_RULES +
           '\nFor a native Claude review, set crossFamily to ran=false, tool="", status="not-applicable", ' +
           'modelFamily="anthropic", endpointProvider="anthropic", crossFamily=false, certificationEligible=false, readOnlyGuarantee="none", ' +
-          'outputPath="", routeReceipt="", notRunReason="targeted-review". For a dispatched review, copy every normalised field ' +
+          'outputPath="", routeReceipt="", terminalResult="", notRunReason="targeted-review". For a dispatched review, copy every normalised field ' +
           'from the dispatcher record; do not infer or relabel lineage.\n' +
-          `\nWrite full review to ${runDir}/findings/review-${cycle}-${rv.angle}.md and return the structured verdict.` +
-          (rv.cf ? '\n' + crossFamilyDispatchHint(runDir, gitCwd, rv.cf) : ''),
+          `\nWrite full review to ${runDir}/findings/review-${cycle}-${rv.angle}.md and return the structured verdict. Return reviewerId="review-${cycle}-${rv.angle}" and use that exact stable ID for any dispatcher route.` +
+          (rv.cf ? '\n' + crossFamilyDispatchHint(runDir, gitCwd, rv.cf, `review-${cycle}-${rv.angle}`) : ''),
         { label: `review:${cycle}:${rv.angle}`, phase: 'Review', schema: REVIEW_SCHEMA, model: rv.model },
       ),
     ),
@@ -630,11 +602,12 @@ for (let cycle = 0; cycle <= maxRepairCycles; cycle += 1) {
   reviews = rawReviews.map((result, index) =>
     result || {
       angle: REVIEW_ANGLES[index].angle,
+      reviewerId: `review-${cycle}-${REVIEW_ANGLES[index].angle}`,
       verdict: REVIEW_ANGLES[index].required ? 'block' : 'approve-with-nits',
       issues: REVIEW_ANGLES[index].required
         ? [{ severity: 'P1', patchPath: '', detail: 'required review lane failed or returned no result' }]
         : [],
-      crossFamily: { ran: false, tool: '', status: 'unavailable', modelFamily: '', endpointProvider: '', crossFamily: false, certificationEligible: false, readOnlyGuarantee: 'none', outputPath: '', routeReceipt: '', notRunReason: REVIEW_ANGLES[index].required ? 'review-lane-failed' : 'distinct-family-review-unavailable' },
+      crossFamily: { ran: false, tool: '', status: 'unavailable', modelFamily: '', endpointProvider: '', crossFamily: false, certificationEligible: false, readOnlyGuarantee: 'none', outputPath: '', routeReceipt: '', terminalResult: '', notRunReason: REVIEW_ANGLES[index].required ? 'review-lane-failed' : 'distinct-family-review-unavailable' },
       path: '',
     },
   )
@@ -645,8 +618,8 @@ for (let cycle = 0; cycle <= maxRepairCycles; cycle += 1) {
       'Treat it as a lead, not authority. Return block only for a reproducible, task-relevant defect supported by ' +
         'primary evidence; otherwise approve or approve-with-nits. This is a native Claude corroboration: set ' +
         'crossFamily to ran=false, tool="", status="not-applicable", modelFamily="anthropic", ' +
-        'endpointProvider="anthropic", crossFamily=false, certificationEligible=false, readOnlyGuarantee="none", outputPath="", routeReceipt="", ' +
-        'notRunReason="native-corroboration".\n' +
+        'endpointProvider="anthropic", crossFamily=false, certificationEligible=false, readOnlyGuarantee="none", outputPath="", routeReceipt="", terminalResult="", ' +
+        'notRunReason="native-corroboration" and reviewerId="review-${cycle}-distinct-family-corroboration".\n' +
         `Distinct-family review: ${JSON.stringify(distinctFamilyReview)}\nPatches: ${patchDigest}\nTask: ${task}`,
       { label: `review:${cycle}:distinct-family-corroboration`, phase: 'Review', schema: REVIEW_SCHEMA, model: models.criticalReviewer },
     )
@@ -655,16 +628,29 @@ for (let cycle = 0; cycle <= maxRepairCycles; cycle += 1) {
   blocking = reviews.filter((r, index) =>
     (index >= REVIEW_ANGLES.length || REVIEW_ANGLES[index].required) && r.verdict === 'block'
   ).length
-  otherPrimaryRan = reviews.some((r) => r.angle === 'other-primary' && r.crossFamily && r.crossFamily.ran && r.crossFamily.status === 'ok' && r.crossFamily.crossFamily && r.crossFamily.certificationEligible && ['enforced', 'oauth_safe_mode'].includes(r.crossFamily.readOnlyGuarantee))
-  distinctFamilyRan = reviews.some((r) => r.angle === 'distinct-family' && r.crossFamily && r.crossFamily.ran && r.crossFamily.status === 'ok')
-  log(`Review cycle ${cycle}: ${reviews.length} verdicts, ${blocking} blocking; other-primary ${otherPrimaryRan ? 'ran' : 'NOT run'}; distinct-family ${distinctFamilyRan ? 'ran' : 'not available'}.`)
+  const candidate = reviews.find((r) => r.angle === 'other-primary')
+  otherPrimaryReviewAttempted = Boolean(candidate)
+  if (candidate) {
+    const candidateCrossFamily = candidate.crossFamily || {}
+    otherPrimaryReview = {
+      status: 'attempted-awaiting-host-certification',
+      reviewerId: typeof candidate.reviewerId === 'string' ? candidate.reviewerId : '',
+      candidatePaths: {
+        outputPath: typeof candidateCrossFamily.outputPath === 'string' ? candidateCrossFamily.outputPath : '',
+        routeReceipt: typeof candidateCrossFamily.routeReceipt === 'string' ? candidateCrossFamily.routeReceipt : '',
+        terminalResult: typeof candidateCrossFamily.terminalResult === 'string' ? candidateCrossFamily.terminalResult : '',
+      },
+    }
+  }
+  distinctFamilyReviewAttempted = reviews.some((r) => r.angle === 'distinct-family')
+  log(`Review cycle ${cycle}: ${reviews.length} verdicts, ${blocking} blocking; other-primary ${otherPrimaryReviewAttempted ? 'attempted' : 'NOT attempted'}; distinct-family ${distinctFamilyReviewAttempted ? 'attempted' : 'not available'}.`)
   await checkpoint(`review-${cycle}-complete`, 'run objective verification', [], reviews.map((r) => r.path).filter(Boolean))
 
   phase('Verify')
   await checkpoint(`verify-${cycle}-dispatch`, 'reconcile objective verification', [`verify:${cycle}`], [])
   verify = await agent(
-    'Run objective verification for the proposed patches on the narrowest meaningful lane. Apply patches ' +
-      'only to an isolated scratch copy; never land them in the real tree. Map every acceptance criterion ' +
+    'Run objective verification for the proposed patches on the narrowest meaningful lane. Evaluate the proposed changes ' +
+      'only in an isolated scratch copy; never land them in the real tree. Map every acceptance criterion ' +
       'to evidence and report skipped/unavailable checks as failures.\n' +
       `Acceptance criteria: ${JSON.stringify(acceptanceCriteria)}\n` +
       `Discovered test lane: ${conv.testLane || '(none)'}\nLint/format: ${conv.lintCmd || '(none)'} / ${conv.formatCmd || '(none)'}\n` +
@@ -673,7 +659,12 @@ for (let cycle = 0; cycle <= maxRepairCycles; cycle += 1) {
     { label: `verify:${cycle}`, phase: 'Verify', schema: VERIFY_SCHEMA, model: models.workhorse },
   )
   checksPass = !!(verify && verify.passed)
-  await checkpoint(`verify-${cycle}-complete`, checksPass && blocking === 0 ? 'prepare serial apply' : 'repair blocking findings', [], [verify && verify.path].filter(Boolean))
+  await checkpoint(
+    `verify-${cycle}-complete`,
+    checksPass && blocking === 0 ? 'prepare host certification and application' : 'repair blocking findings',
+    [],
+    [verify && verify.path].filter(Boolean),
+  )
   if (checksPass && blocking === 0) break
   if (cycle === maxRepairCycles) break
 
@@ -726,95 +717,14 @@ if (!councilChallenge || !councilChallenge.anonymized || !councilChallenge.rando
 
 log(`Final machine checks: ${checksPass ? 'PASS' : 'FAIL/UNKNOWN'}; blocking reviews: ${blocking}; repair cycles: ${repairCycles}.`)
 
-// --- Phase 6: apply gate. SINGLE SERIAL applier. Auto-apply low-risk iff checks pass + no block; ---
-// --- escalate everything else as a validated recommendation. NEVER blocks for approval. ---
-phase('Apply')
-// Auto-apply policy (explicit): gate low-risk auto-apply on objective checks passing AND no reviewer
-// block. Cross-family NOT running is a recorded outcome (CROSS-FAMILY-NOT-RUN), NOT a hard block on
-// low-risk auto-apply — but we surface it so the skipped decorrelated review is a conscious record,
-// per the orchestrate skill's recovery doctrine ("never silently skip a verification step").
-const autoApplyAllowed = checksPass && blocking === 0 && otherPrimaryRan && ['substantial', 'crucial'].includes(effectiveRisk)
-if (autoApplyAllowed && !otherPrimaryRan) {
-  log('Auto-apply proceeding only for routine LOW-risk patches without an other-primary review; native reviews passed.')
-}
-await checkpoint('apply-dispatch', 'reconcile serial apply and final machine gate', ['apply:serial'], [])
-const apply = await agent(
-  'You are the SINGLE SERIAL applier — the only agent allowed to mutate the real tree, applied one ' +
-    'patch at a time (avoids concurrent-write corruption on non-git trees).\n' +
-    `Auto-apply permitted this run: ${autoApplyAllowed} (objective checks passed, no reviewer blocked, ` +
-    `and required other-primary coverage ran for this risk tier). Other-primary ran: ${otherPrimaryRan}; ` +
-    `distinct-family availability never replaces other-primary coverage; ran: ${distinctFamilyRan}.\n` +
-    'Pre-apply freshness guard (do this BEFORE applying anything):\n' +
-    '- If the repo root is a git tree, run `git -C <repo-root> status --porcelain`. Each patch targets ' +
-    'specific files; for every target file that already shows uncommitted local changes, DO NOT apply ' +
-    'that patch — escalate it as "target drifted (dirty worktree); needs manual rebase". A clean target ' +
-    'is required because the patches were built against the worktree at implement time.\n' +
-    '- For each candidate patch, run `git -C <repo-root> apply --check <patch>` first. If it does not ' +
-    'apply cleanly, DO NOT force it — escalate it with the --check error as the reason.\n' +
-    'Rules:\n' +
-    '- Apply LOW-risk patches, plus HIGH-risk patches only when effectiveRisk=crucial and the preflight authority expressly covers every path/action. ' +
-    'Terminal, destructive, irreversible, deployment or externally communicating patches always escalate. In every case auto-apply must be permitted, the target clean, ' +
-    'and `git apply --check` passed. After each apply, re-run the relevant narrow check; if it fails, ' +
-    'reverse only that just-applied patch with `git apply -R`; never checkout, restore, reset or overwrite ' +
-    'a pre-existing dirty file. Then escalate it.\n' +
-    '- Leave terminal/destructive/irreversible high-risk patches in patches/ unapplied; crucial high-risk patches follow the scoped rule above.\n' +
-    ESCALATION_RULES +
-    `\nPatches: ${patchDigest}\nReview verdicts and dispatcher lineage: ${JSON.stringify(reviews)}\n` +
-    `Verify outcome: ${JSON.stringify(verify || {})}\nRepo root: ${boot.repoRoot}\n` +
-    `Before mutating, read the existing live ${runDir}/RUN.json receipt created at bootstrap; do not recreate or replace it; do not edit it directly. ` +
-    `Use delivery_receipt.py bind, checkpoint and transition commands for every RUN.json mutation. ` +
-    `For effectiveRisk=terminal, apply nothing: preserve recommendation evidence, leave status=executing/current_slice=awaiting-apply-approval, ` +
-    `return machineGatePassed=false, and do not pretend the final implementation gate ran. ` +
-    `For non-terminal runs only, after all patch apply/escalate decisions and narrow re-checks, use the producer to transition to awaiting_acceptance, bind the human-approved ` +
-    `spec/design status, risk/authority profile, assurance receipt/status, acceptance criteria with evidence, ` +
-    `implementation outcome with repo_root=${boot.repoRoot}, base_revision=${boot.baseRevision}, preexisting_paths=[], ` +
-    `every applied path's add|modify|delete operation and SHA-256, and the validator's canonical result_revision; exact verification results, ` +
-    `repair_cycles=${repairCycles}, current_slice, next_action, empty in_flight IDs and artifact_paths. ` +
-    `Then run the global session context_audit.py read-only and record context_hygiene status, audit command + exit code, ` +
-    `graduation/archive/cleanup actions and retained recovery artifacts. Never remove unknown or pre-existing files. ` +
-    `Update ${runDir}/RUN_RECEIPT.json task/owner, artifact retention and owned/handed-off pane fields; leave its ` +
-    `status=active while this change awaits human acceptance. Record unresolved blockers and every reviewer lane ` +
-    `including failures. The preserved cross-family dispatch record supplies ` +
-    `adapter/model_family, output_path, dispatch_status, cross_family, certification_eligible and read_only_guarantee; ` +
-    `role=targeted for fresh targeted lenses, role=other-primary only for a certified ` +
-    `OpenAI-family reviewer with its exact route_receipt path, output sha256 and reviewed_revision, and role=distinct-family for advisory distinct-family attempts including failed/unavailable ` +
-    `status plus reason. For terminal work, apply stronger targeted and adversarial pressure; if a distinct family is skipped, record distinct_family_coverage_reason. ` +
-    `Distinct-family failure never replaces other-primary coverage. Populate review_council from at least two distinct blind ` +
-    `targeted/other-primary review artifacts, ${JSON.stringify(councilChallenge || {})}, and ${JSON.stringify(councilReduction || {})}; ` +
-    `record distinct paths, output SHA-256 values, actor family/adapter/review role, final reviewed_revision and post_repair_review; ` +
-    `name the correctness lens exactly correctness-spec. Run ` +
-    `${'${AGENTS_HOME:-$HOME/.agents}'}/skills/deliver/scripts/validate_delivery.py ${runDir}/RUN.json --workspace-root ${gitCwd} --verify-hashes. ` +
-    `If validation fails, machineGatePassed=false, stop further mutation and escalate with the validator output; ` +
-    `preserve any already-applied, independently checked low-risk patch honestly.\n` +
-    `Update ${runDir}/MANIFEST.md with every run artifact after serial work. Use stable artifact IDs, ` +
-    `status=draft|verified|superseded|retired, retention=capsule|evidence|ephemeral, and supersedes=<artifact ID|->. ` +
-    `Record applied/escalated as topic/outcome, not as manifest status. For escalated patches, write a ` +
-    `fully-reasoned approve-then-apply recommendation to ${runDir}/RECOMMENDATION.md (what, why high-risk, ` +
-    'validation evidence, the exact approval gate it needs). Return the structured result.',
-  { label: 'apply:serial', phase: 'Apply', schema: APPLY_SCHEMA, model: models.workhorse },
-)
-
-const appliedN = apply && apply.applied ? apply.applied.length : 0
-const escalatedN = apply && apply.escalated ? apply.escalated.length : 0
-log(`Apply: ${appliedN} low-risk patch(es) landed, ${escalatedN} escalated for approval.`)
-if (escalatedN > 0 && apply) {
-  log(`Escalation recommendation: ${apply.recommendationPath}. Run a separate approve-then-apply step.`)
-}
-if (effectiveRisk === 'terminal' && appliedN === 0 && escalatedN > 0) {
+if (!checksPass || blocking > 0) {
+  const failureReasons = []
+  if (!checksPass) failureReasons.push('objective verification failed')
+  if (blocking > 0) failureReasons.push('blocking review findings remain')
+  const failureReason = failureReasons.join('; ')
+  log(`Machine work failed closed: ${failureReason}; host application is not permitted.`)
+  await failRun(failureReason)
   phase('Human gate')
-  log('Terminal-risk change is awaiting explicit apply authority; this is not a failed implementation or final acceptance gate.')
-  return {
-    task, runId, runDir, chosenFraming: chosen.chosenFraming, patchesEmitted: built.patches.length,
-    checksPass, blockingReviews: blocking, otherPrimaryReviewRan: otherPrimaryRan,
-    distinctFamilyReviewRan: distinctFamilyRan, repairCycles, state: 'awaiting-apply-approval',
-    applied: appliedN, escalated: escalatedN, manifest: apply.manifestPath,
-    recommendation: apply.recommendationPath, runReceipt: apply.runPath, machineGatePassed: false,
-  }
-}
-if (!apply || !apply.machineGatePassed) {
-  await failRun(apply ? 'machine lifecycle gate failed' : 'serial apply returned no result')
-  phase('Human gate')
-  log('Machine gate FAILED. The run is terminal failed with recovery evidence; do not present it for acceptance.')
   return {
     task,
     runId,
@@ -823,22 +733,36 @@ if (!apply || !apply.machineGatePassed) {
     patchesEmitted: built.patches.length,
     checksPass,
     blockingReviews: blocking,
-    otherPrimaryReviewRan: otherPrimaryRan,
-    distinctFamilyReviewRan: distinctFamilyRan,
+    otherPrimaryReviewAttempted,
+    otherPrimaryReview,
+    distinctFamilyReviewAttempted,
     repairCycles,
     state: 'failed',
-    applied: appliedN,
-    escalated: escalatedN,
-    manifest: apply ? apply.manifestPath : `${runDir}/MANIFEST.md`,
-    recommendation: apply ? apply.recommendationPath : null,
-    runReceipt: apply ? apply.runPath : `${runDir}/RUN.json`,
+    patches: built.patches,
+    manifest: `${runDir}/MANIFEST.md`,
+    runReceipt: `${runDir}/RUN.json`,
     machineGatePassed: false,
   }
 }
 
-phase('Human gate')
-log('Machine work is awaiting human acceptance. Do not mark the change complete until the human approves it.')
+// --- Phase 6: host apply handoff. This workflow emits reviewed artifacts only. ---
+phase('Host apply')
+await checkpoint(
+  'host-apply-handoff',
+  'ordinary host chair applies and verifies reviewed patches',
+  [],
+  [
+    built.path,
+    ...built.patches.map((patch) => patch.patchPath),
+    ...reviews.map((review) => review.path).filter(Boolean),
+    verify && verify.path,
+    councilChallenge && councilChallenge.path,
+    councilReduction && councilReduction.path,
+  ].filter(Boolean),
+)
 
+phase('Human gate')
+log('Reviewed patch artifacts are awaiting ordinary host-chair application and verification; failed checks or review findings remain explicit.')
 return {
   task,
   runId,
@@ -847,14 +771,18 @@ return {
   patchesEmitted: built.patches.length,
   checksPass,
   blockingReviews: blocking,
-  otherPrimaryReviewRan: otherPrimaryRan,
-  distinctFamilyReviewRan: distinctFamilyRan,
+  otherPrimaryReviewAttempted,
+  otherPrimaryReview,
+  distinctFamilyReviewAttempted,
   repairCycles,
-  state: 'awaiting-human',
-  applied: appliedN,
-  escalated: escalatedN,
-  manifest: apply ? apply.manifestPath : `${runDir}/MANIFEST.md`,
-  recommendation: apply ? apply.recommendationPath : null,
-  runReceipt: apply ? apply.runPath : `${runDir}/RUN.json`,
-  machineGatePassed: !!(apply && apply.machineGatePassed),
+  state: 'executing',
+  transport: {
+    handoff: 'awaiting-host-certification/application',
+    kind: 'host-application',
+    nextAction: 'host finalizer certifies candidate evidence, then ordinary host chair applies and verifies reviewed patches',
+  },
+  patches: built.patches,
+  manifest: `${runDir}/MANIFEST.md`,
+  runReceipt: `${runDir}/RUN.json`,
+  machineGatePassed: false,
 }

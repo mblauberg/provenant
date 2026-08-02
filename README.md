@@ -6,8 +6,8 @@ scoped, verified and independently reviewed delivery workflow.**
 [![CI](https://github.com/mblauberg/provenant/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/mblauberg/provenant/actions/workflows/ci.yml)
 [![Licence: MIT](https://img.shields.io/github/license/mblauberg/provenant)](LICENSE)
 
-Provenant is a personal harness, used daily by its author. Interfaces change
-without notice and support is best effort. Propose changes through
+Provenant is a personal harness. Interfaces change without notice and support
+is best effort. Propose changes through
 [GitHub issues](https://github.com/mblauberg/provenant/issues); report
 vulnerabilities privately through [`SECURITY.md`](SECURITY.md).
 
@@ -23,9 +23,8 @@ author as the only reviewer. Provenant puts structure around that:
   Claude checks Codex, Codex checks Claude; and
 - it keeps **acceptance and release as separate user decisions**.
 
-A change therefore arrives already scoped, verified and read by a context that
-did not write it, so user attention goes to judgement rather than to catching an
-agent's own mistakes.
+Each change arrives scoped, verified and read by a context that did not write it,
+so user attention goes to judgement, not catching an agent's mistakes.
 
 ## How it fits together
 
@@ -36,12 +35,12 @@ None of them is a stage the work passes through.
 ```mermaid
 flowchart TB
     accTitle: The three parts and the delivery loop they serve
-    accDescr: A user request enters the delivery loop, which runs scope, implement, verify and review, and produces a scoped, verified, independently reviewed change. Three parts act on that loop concurrently rather than in sequence. HARNESS.md, the constitution, sets the rules — authority, lifecycle and review pressure. The skills library supplies the procedure, one SKILL.md per task loaded when the task matches. Agent Fabric runs and reviews the work across providers, with Claude Code and Codex as primaries reviewing each other and optional providers separately activated.
+    accDescr: A user request enters the delivery loop, which runs scope, implement, verify and review, and produces a scoped, verified, independently reviewed change. Three parts act on that loop concurrently rather than in sequence. HARNESS.md, the constitution, sets the rules: authority, lifecycle and review pressure. The skills library supplies the procedure, one SKILL.md per task loaded when the task matches. Agent Fabric runs and reviews the work across providers, with Claude Code and Codex as primaries reviewing each other and optional providers separately activated.
     U(["User request"]) --> LOOP["Delivery loop<br/>scope · implement · verify · review"]
     LOOP --> OUT(["Scoped, verified,<br/>independently reviewed change"])
-    H["HARNESS.md — the constitution<br/>authority · lifecycle · review pressure"] -. "sets the rules" .-> LOOP
-    SK["Skills library — 33 Agent Skills<br/>one procedure per task, loaded on match"] -. "supplies the procedure" .-> LOOP
-    F["Agent Fabric — cross-provider execution<br/>Claude Code and Codex review each other;<br/>optional providers stay separately activated"] -. "runs and reviews the work" .-> LOOP
+    H["HARNESS.md: the constitution<br/>authority · lifecycle · review pressure"] -. "sets the rules" .-> LOOP
+    SK["Skills library: 33 Agent Skills<br/>one procedure per task, loaded on match"] -. "supplies the procedure" .-> LOOP
+    F["Agent Fabric: cross-provider execution<br/>Claude Code and Codex review each other;<br/>optional providers stay separately activated"] -. "runs and reviews the work" .-> LOOP
     classDef out fill:#1f6f43,stroke:#4fd08a,color:#ffffff,stroke-width:2px
     class OUT out
 ```
@@ -94,16 +93,11 @@ Each installer command registers the Fabric MCP server for the platform it
 installs. Pass `--mcp-clients all` to either one to register all six clients
 instead.
 
-Installation links each skill into `~/.claude/skills/` and `~/.codex/skills/`,
-and installs a managed copy of the thin `provenant` command in
-`${PROVENANT_BIN_DIR:-$HOME/.local/bin}`; it warns when that directory is not
-on `PATH`, and never edits shell startup files. During an upgrade, the installer
-replaces only the legacy link that exactly names
-`<instance-root>/scripts/provenant`, including a dangling link. It preserves
-other files and links as user-owned. If the installer exits
-non-zero, follow the message it prints: exit `3` flags a command collision,
-incompatible instruction target, or managed skill-link conflict, and
-instruction conflicts include the bootstrap line to add.
+Installation links skills for Claude and Codex and installs a managed
+`provenant` command in `${PROVENANT_BIN_DIR:-$HOME/.local/bin}`. It warns when
+the bin directory is not on `PATH` and never edits shell startup files. Exit
+`3` indicates a command collision, incompatible instruction target, or managed
+skill-link conflict.
 
 `provenant doctor` checks Fabric configuration and enabled adapters (identity
 and non-answer interfaces, not login or quota); Provenant never sets or persists

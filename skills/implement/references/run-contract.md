@@ -25,6 +25,14 @@ the same trigger `docs/runbooks/github-workflow.md` uses for the merge-gate
 escalation. A new requirement, authority expansion or one-way-door decision
 returns to `scope`; it is not a repair.
 
+Workflow adapters that have emitted reviewed patches but still require the
+ordinary host chair to apply and verify them keep the canonical delivery state
+as `executing`. They may return transport metadata such as
+`transport.handoff: awaiting-host-application`, `transport.kind:
+host-application`, and the next host action. This adapter handoff is not a new
+delivery-lifecycle state and must not advance the canonical receipt until the
+host has applied, verified, and accepted the resulting Git claim.
+
 Validate from the project root:
 
 ```sh
