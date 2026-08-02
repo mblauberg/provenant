@@ -24,6 +24,7 @@
   },
   "scripts": {
     "prepack": "npm run build --include-workspace-root",
+    "prebuild": "node --import tsx scripts/generate-runtime-build-identity.ts",
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run --exclude 'tests/evaluation/**' --exclude 'tests/performance/**'",

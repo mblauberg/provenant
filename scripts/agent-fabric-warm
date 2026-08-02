@@ -33,6 +33,8 @@ repair_command="AGENTS_HOME=\"$agents_home\" \"$agents_home/scripts/agent-fabric
 
 . "$script_dir/lib/agent-fabric-workspace-freshness.sh"
 
+node --import tsx "$package_root/scripts/generate-runtime-build-identity.ts"
+
 workspace_stale=false
 if workspace_is_stale "$protocol_root" "$protocol_dist" \
   || workspace_is_stale "$package_root" "$dist_cli" "$dist_mcp" \

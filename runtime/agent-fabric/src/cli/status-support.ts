@@ -1,3 +1,4 @@
+import { lstat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
 import { MCP_BOOTSTRAP_CREDENTIALS_FEATURE } from "@local/agent-fabric-protocol";
@@ -11,10 +12,11 @@ import { connectFabricDaemon } from "../daemon/client.js";
 import { readDiscoveryReceipt } from "./mcp-provision.js";
 import type { FabricPaths } from "./paths.js";
 import { FABRIC_PROTOCOL_VERSION } from "../daemon/protocol.js";
+import { RUNTIME_BUILD_IDENTITY } from "../daemon/runtime-build-identity.generated.js";
 
 export type FabricDaemonStatus = {
   reachable: boolean;
-  status: "live" | "offline" | "incompatible";
+  status: "live" | "offline" | "incompatible" | "stale";
   pid: number | null;
   socketPath: string;
   protocolVersion: typeof FABRIC_PROTOCOL_VERSION;
@@ -27,6 +29,8 @@ export type FabricDaemonStatus = {
 type StatusDaemonClient = Pick<Awaited<ReturnType<typeof connectFabricDaemon>>, "initializeResult" | "close">;
 export type StatusDependencies = {
   connectDaemon?: (input: Parameters<typeof connectFabricDaemon>[0]) => Promise<StatusDaemonClient>;
+  inspectDaemonSocket?: (path: string) => Promise<{ isSocket(): boolean; uid: number }>;
+  runtimeBuildIdentity?: string;
 };
 
 export function errorDetail(error: unknown): string {
@@ -60,6 +64,44 @@ export async function daemonState(
       socketPath: paths.socketPath,
       protocolVersion: FABRIC_PROTOCOL_VERSION,
       activeAdapters: [],
+    };
+  }
+  const expectedRuntimeBuildIdentity = dependencies.runtimeBuildIdentity ?? RUNTIME_BUILD_IDENTITY;
+  if (discovery.runtimeBuildIdentity !== expectedRuntimeBuildIdentity) {
+    try {
+      const info = await (dependencies.inspectDaemonSocket ?? lstat)(discovery.socketPath);
+      if (!info.isSocket() || info.uid !== process.getuid?.()) {
+        return {
+          reachable: false,
+          status: "offline",
+          pid: discovery.pid,
+          socketPath: discovery.socketPath,
+          protocolVersion: FABRIC_PROTOCOL_VERSION,
+          activeAdapters: [],
+        };
+      }
+    } catch {
+      return {
+        reachable: false,
+        status: "offline",
+        pid: discovery.pid,
+        socketPath: discovery.socketPath,
+        protocolVersion: FABRIC_PROTOCOL_VERSION,
+        activeAdapters: [],
+      };
+    }
+    return {
+      reachable: true,
+      status: "stale",
+      pid: discovery.pid,
+      socketPath: discovery.socketPath,
+      protocolVersion: FABRIC_PROTOCOL_VERSION,
+      activeAdapters: [],
+      code: "DAEMON_STALE_BUILD",
+      detail: discovery.runtimeBuildIdentity === undefined
+        ? "daemon discovery has no runtime build identity; operator reconciliation is required"
+        : "daemon runtime build identity does not match the current client build; operator reconciliation is required",
+      remedy: "do not signal the live daemon; reconcile its owning lifecycle, then rerun provenant status",
     };
   }
   try {

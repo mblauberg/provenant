@@ -19,6 +19,8 @@ afterEach(async () => {
 });
 
 describe("private daemon discovery receipt", () => {
+  const runtimeBuildIdentity = "sha256:" + "1".repeat(64);
+
   it("uses the shared parser for the current CLI discovery receipt", async () => {
     const root = await mkdtemp(join(tmpdir(), "fabric-cli-discovery-"));
     roots.push(root);
@@ -38,12 +40,14 @@ describe("private daemon discovery receipt", () => {
       lifecycleReceiptAuthorityId: null,
       protocolVersion: 1,
       features: ["rpc", "mcp-bootstrap-credentials.v2"],
+      runtimeBuildIdentity,
       futureCompatibleEvidence: { schemaVersion: 1 },
     })}\n`, { mode: 0o600 });
 
     await expect(readDiscoveryReceipt(paths)).resolves.toMatchObject({
       protocolVersion: 1,
       features: ["rpc", "mcp-bootstrap-credentials.v2"],
+      runtimeBuildIdentity,
     });
   });
 

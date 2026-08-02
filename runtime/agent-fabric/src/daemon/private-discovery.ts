@@ -16,6 +16,7 @@ export type PrivateDiscoveryCapabilityReceipt = {
   lifecycleReceiptAuthorityId: string | null;
   protocolVersion?: number;
   features?: readonly string[];
+  runtimeBuildIdentity?: string;
 };
 
 export type PrivateDiscoveryOwner = {
@@ -92,6 +93,13 @@ function positiveInteger(value: unknown, label: string): number {
   return value;
 }
 
+function runtimeBuildIdentity(value: unknown, label: string): string {
+  if (typeof value !== "string" || !/^sha256:[a-f0-9]{64}$/u.test(value)) {
+    throw new PrivateDiscoveryError("DAEMON_DISCOVERY_INVALID", `${label} is invalid`);
+  }
+  return value;
+}
+
 export function parseCapabilityReceipt(value: unknown, socketPath: string): PrivateDiscoveryCapabilityReceipt {
   const receipt = record(value, "daemon discovery receipt");
   const hasProtocolVersion = Object.hasOwn(receipt, "protocolVersion");
@@ -137,6 +145,9 @@ export function parseCapabilityReceipt(value: unknown, socketPath: string): Priv
     lifecycleReceiptAuthorityId: receipt.lifecycleReceiptAuthorityId === null
       ? null
       : nonEmptyString(receipt.lifecycleReceiptAuthorityId, "lifecycle receipt authority ID"),
+    ...(receipt.runtimeBuildIdentity === undefined
+      ? {}
+      : { runtimeBuildIdentity: runtimeBuildIdentity(receipt.runtimeBuildIdentity, "daemon runtime build identity") }),
     ...protocolEvidence,
   };
 }
@@ -376,6 +387,7 @@ export async function publishPrivateDiscovery(input: {
   lifecycleReceiptAuthorityId: string | null;
   protocolVersion: number;
   features: readonly string[];
+  runtimeBuildIdentity: string;
 }): Promise<PrivateDiscoveryIdentity> {
   await ensurePrivateDirectory(input.paths.runtimeDirectory);
   const current = await readPrivateDiscovery(input.paths, input.socketPath);
@@ -409,6 +421,7 @@ export async function publishPrivateDiscovery(input: {
     lifecycleReceiptAuthorityId: input.lifecycleReceiptAuthorityId,
     protocolVersion: input.protocolVersion,
     features: [...input.features],
+    runtimeBuildIdentity: runtimeBuildIdentity(input.runtimeBuildIdentity, "daemon runtime build identity"),
   };
   await atomicPrivateJson(input.paths.ownerPath, owner);
   await atomicPrivateJson(input.paths.receiptPath, receipt);

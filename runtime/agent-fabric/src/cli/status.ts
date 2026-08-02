@@ -33,6 +33,7 @@ import { BootstrapElection, FLOCK_ELECTION_LOCK_PORT } from "../daemon/bootstrap
 import { connectFabricDaemon } from "../daemon/client.js";
 import { privateDiscoveryPaths, readPrivateDiscovery } from "../daemon/private-discovery.js";
 import { preflightProtocolBuild } from "../daemon/protocol-build-preflight.js";
+import { RUNTIME_BUILD_IDENTITY } from "../daemon/runtime-build-identity.generated.js";
 import {
   mcpBootstrapRenewalCommand,
   mcpRosterRenewalCommand,
@@ -86,10 +87,12 @@ type DoctorDependencies = {
     capability: string;
   }) => Promise<DoctorDaemonConnection>;
   inspectDaemonSocket?: (path: string) => Promise<{ isSocket(): boolean; uid: number }>;
+  runtimeBuildIdentity?: string;
 };
 
 type DoctorDaemonState =
   | { status: "live"; code: "DAEMON_LIVE"; detail: string; pid: number; socketPath: string }
+  | { status: "stale"; code: "DAEMON_STALE_BUILD"; detail: string; pid: number; socketPath: string }
   | { status: "idle"; code: "DAEMON_ON_DEMAND_IDLE"; detail: string; pid: null; socketPath: null }
   | { status: "failed"; code: string; detail: string; pid: number | null; socketPath: string | null };
 
@@ -672,6 +675,18 @@ async function doctorDaemonState(
         status: "failed",
         code: "DAEMON_SOCKET_UNSAFE",
         detail: "daemon socket is not owned by the current user",
+        pid: discovery.receipt.pid,
+        socketPath: discovery.receipt.socketPath,
+      };
+    }
+    const expectedRuntimeBuildIdentity = dependencies.runtimeBuildIdentity ?? RUNTIME_BUILD_IDENTITY;
+    if (discovery.receipt.runtimeBuildIdentity !== expectedRuntimeBuildIdentity) {
+      return {
+        status: "stale",
+        code: "DAEMON_STALE_BUILD",
+        detail: discovery.receipt.runtimeBuildIdentity === undefined
+          ? "daemon discovery has no runtime build identity; operator reconciliation is required"
+          : "daemon runtime build identity does not match the current client build; operator reconciliation is required",
         pid: discovery.receipt.pid,
         socketPath: discovery.receipt.socketPath,
       };

@@ -27,6 +27,7 @@ import { PIN_OBSERVATION_CACHE_FILE } from "../../src/review/profile/pin-observe
 import { digestCanonical } from "../../src/review/canonical/index.ts";
 import { deployReviewProfileCatalogue } from "../../scripts/deploy-review-profile-catalogue.ts";
 import { FABRIC_PROTOCOL_LIMITS } from "../../src/transport/bounded-ndjson.ts";
+import { RUNTIME_BUILD_IDENTITY } from "../../src/daemon/runtime-build-identity.generated.ts";
 import { createPortableActivatedPrimaryFixture } from "../support/primary-adapter-testkit.ts";
 import { runSourceCli } from "../support/cli-process.ts";
 import { installSeatGeneration, projectKey } from "../../src/cli/seat-store.ts";
@@ -330,7 +331,10 @@ async function writeStoppedGeneration(
   })}\n`, { mode: 0o600 });
 }
 
-async function writeActiveGeneration(value: FabricPaths): Promise<void> {
+async function writeActiveGeneration(
+  value: FabricPaths,
+  runtimeBuildIdentity = RUNTIME_BUILD_IDENTITY,
+): Promise<void> {
   const actionId = "active-doctor-action";
   const bootstrapCapability = `afb_${"A".repeat(43)}`;
   const bootstrapCapabilityHash = createHash("sha256").update(bootstrapCapability).digest("hex");
@@ -340,6 +344,7 @@ async function writeActiveGeneration(value: FabricPaths): Promise<void> {
     pid: process.pid,
     bootstrapCapability,
     lifecycleReceiptAuthorityId: null,
+    runtimeBuildIdentity,
   })}\n`, { mode: 0o600 });
   await writeFile(join(value.runtimeDirectory, "fabric-v1.discovery-owner.json"), `${JSON.stringify({
     schemaVersion: 1,
@@ -372,6 +377,7 @@ async function writeActiveGeneration(value: FabricPaths): Promise<void> {
     socketPath: value.socketPath,
     protocolVersion: 2,
     features: ["rpc"],
+    runtimeBuildIdentity,
     readyAt: 2,
     evidence: { databaseOwned: true, migrationsComplete: true, recoveryComplete: true, socketBound: true },
   })}\n`, { mode: 0o600 });
@@ -2057,6 +2063,54 @@ printf '%s\\n' '{"schema_version":1,"source":"claude subscription canary","obser
         code: "DAEMON_PROTOCOL_INCOMPATIBLE",
         remedy: expect.stringContaining("restart the daemon"),
       },
+    });
+  });
+
+  it("reports a live legacy build as stale in both status and doctor", async () => {
+    const value = await paths();
+    await writeActiveGeneration(value, "sha256:" + "b".repeat(64));
+    const fixture = await createPortableActivatedPrimaryFixture();
+    cleanup.push(fixture.directory);
+    const arguments_ = [
+      "--agents-home", fixture.directory,
+      "--trusted-config", fixture.configPath,
+      "--compatibility", fixture.compatibilityPath,
+      "--compatibility-schema", fixture.schemaPath,
+    ];
+
+    const status = await fabricStatus([...arguments_, "--project", fixture.directory], value, {
+      runtimeBuildIdentity: RUNTIME_BUILD_IDENTITY,
+      inspectDaemonSocket: async () => ({
+        isSocket: () => true,
+        uid: process.getuid?.() ?? 0,
+      }),
+    });
+    const doctor = await fabricDoctor(arguments_, value, {
+      runtimeBuildIdentity: RUNTIME_BUILD_IDENTITY,
+      inspectDaemonSocket: async () => ({
+        isSocket: () => true,
+        uid: process.getuid?.() ?? 0,
+      }),
+    });
+
+    expect(status).toMatchObject({
+      daemon: {
+        reachable: true,
+        status: "stale",
+        code: "DAEMON_STALE_BUILD",
+      },
+    });
+    expect(doctor).toMatchObject({
+      healthy: false,
+      state: "blocked",
+      daemon: { status: "stale", pid: process.pid },
+      checks: expect.arrayContaining([
+        expect.objectContaining({
+          id: "daemon-socket",
+          status: "fail",
+          code: "DAEMON_STALE_BUILD",
+        }),
+      ]),
     });
   });
 

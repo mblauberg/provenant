@@ -13,11 +13,13 @@ export type DaemonHandshakeResult<Client> =
       protocolVersion: number;
       daemonInstanceGeneration: number;
       features: readonly string[];
+      runtimeBuildIdentity?: string;
     }
   | {
       status: "unavailable";
       reason: "absent" | "stale" | "unreachable" | "timeout";
       message: string;
+      code?: string;
       terminalEvidence?: DaemonTerminalEvidence;
       reconciliationRequired?: boolean;
     }
@@ -65,6 +67,7 @@ export type BootstrapSpawnReady = {
   socketPath: string;
   protocolVersion: number;
   features: readonly string[];
+  runtimeBuildIdentity?: string;
   evidence: BootstrapReadyEvidence;
 };
 
@@ -77,6 +80,7 @@ export type AttachOrStartOptions<Client> = {
   socketPath: string;
   requiredProtocolVersion: number;
   requiredFeatures: readonly string[];
+  requiredRuntimeBuildIdentity?: string;
   election: BootstrapElection;
   handshake(): Promise<DaemonHandshakeResult<Client>>;
   preflight?(): Promise<void>;
@@ -96,7 +100,7 @@ export type AttachedDaemon<Client> = {
 
 function compatibleDaemon<Client>(
   result: Extract<DaemonHandshakeResult<Client>, { status: "compatible" }>,
-  options: Pick<AttachOrStartOptions<Client>, "requiredProtocolVersion" | "requiredFeatures">,
+  options: Pick<AttachOrStartOptions<Client>, "requiredProtocolVersion" | "requiredFeatures" | "requiredRuntimeBuildIdentity">,
   electionGeneration: number | null,
   started: boolean,
 ): AttachedDaemon<Client> {
@@ -105,6 +109,15 @@ function compatibleDaemon<Client>(
   }
   if (result.protocolVersion !== options.requiredProtocolVersion) {
     throw new BootstrapClientError("BOOTSTRAP_INCOMPATIBLE_INCUMBENT", "daemon protocol version is incompatible");
+  }
+  if (
+    options.requiredRuntimeBuildIdentity !== undefined &&
+    result.runtimeBuildIdentity !== options.requiredRuntimeBuildIdentity
+  ) {
+    throw new BootstrapClientError(
+      "DAEMON_STALE_BUILD",
+      "daemon runtime build identity does not match the current client build",
+    );
   }
   const available = new Set(result.features);
   const missing = options.requiredFeatures.filter((feature) => !available.has(feature));
@@ -124,7 +137,7 @@ function compatibleDaemon<Client>(
 
 function validateReadyReceipt(
   receipt: BootstrapReadyReceipt,
-  options: Pick<AttachOrStartOptions<unknown>, "actionId" | "socketPath" | "requiredProtocolVersion" | "requiredFeatures">,
+  options: Pick<AttachOrStartOptions<unknown>, "actionId" | "socketPath" | "requiredProtocolVersion" | "requiredFeatures" | "requiredRuntimeBuildIdentity">,
   requireRequestedAction: boolean,
 ): void {
   if (requireRequestedAction && receipt.actionId !== options.actionId) {
@@ -135,6 +148,15 @@ function validateReadyReceipt(
   }
   if (receipt.protocolVersion !== options.requiredProtocolVersion) {
     throw new BootstrapClientError("BOOTSTRAP_PROTOCOL_MISMATCH", "ready receipt protocol version is incompatible");
+  }
+  if (
+    options.requiredRuntimeBuildIdentity !== undefined &&
+    receipt.runtimeBuildIdentity !== options.requiredRuntimeBuildIdentity
+  ) {
+    throw new BootstrapClientError(
+      "DAEMON_STALE_BUILD",
+      "bootstrap ready runtime build identity does not match the current client build",
+    );
   }
   const available = new Set(receipt.features);
   const missing = options.requiredFeatures.filter((feature) => !available.has(feature));
@@ -162,6 +184,15 @@ function validateSpawnReady<Client>(ready: BootstrapSpawnReady, options: AttachO
   }
   if (ready.protocolVersion !== options.requiredProtocolVersion) {
     throw new BootstrapClientError("BOOTSTRAP_PROTOCOL_MISMATCH", "spawn ready protocol version is incompatible");
+  }
+  if (
+    options.requiredRuntimeBuildIdentity !== undefined &&
+    ready.runtimeBuildIdentity !== options.requiredRuntimeBuildIdentity
+  ) {
+    throw new BootstrapClientError(
+      "DAEMON_STALE_BUILD",
+      "spawn ready runtime build identity does not match the current client build",
+    );
   }
   const available = new Set(ready.features);
   const missing = options.requiredFeatures.filter((feature) => !available.has(feature));
@@ -216,9 +247,9 @@ function typedFailureCode(error: unknown): string | undefined {
 }
 
 export async function attachOrStartDaemon<Client>(options: AttachOrStartOptions<Client>): Promise<AttachedDaemon<Client>> {
+  await options.preflight?.();
   const initial = await options.handshake();
   if (initial.status === "compatible") return compatibleDaemon(initial, options, null, false);
-  await options.preflight?.();
   let preBootstrapComplete = false;
   const preBootstrap = async (): Promise<void> => {
     if (preBootstrapComplete) return;
@@ -244,7 +275,7 @@ export async function attachOrStartDaemon<Client>(options: AttachOrStartOptions<
       throw new BootstrapClientError("BOOTSTRAP_INCOMPATIBLE_INCUMBENT", recheck.message);
     }
     if (recheck.reconciliationRequired === true) {
-      throw new BootstrapClientError("BOOTSTRAP_RECONCILIATION_REQUIRED", recheck.message);
+      throw new BootstrapClientError(recheck.code ?? "BOOTSTRAP_RECONCILIATION_REQUIRED", recheck.message);
     }
     await preBootstrap();
 

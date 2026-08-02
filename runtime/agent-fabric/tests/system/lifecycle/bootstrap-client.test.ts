@@ -18,6 +18,7 @@ afterEach(async () => {
 });
 
 describe("attachOrStartDaemon", () => {
+  const currentBuildIdentity = "sha256:" + "1".repeat(64);
   it("never grants destructive cleanup preservation semantics to inspection instability", () => {
     const error = new BootstrapClientError(
       "DATABASE_INSPECTION_UNSTABLE",
@@ -89,6 +90,161 @@ describe("attachOrStartDaemon", () => {
       started: false,
     });
     expect(handshake).toHaveBeenCalledTimes(1);
+    expect(spawn).not.toHaveBeenCalled();
+  });
+
+  it("runs the current-build preflight before accepting a compatible incumbent", async () => {
+    const root = await mkdtemp(join(tmpdir(), "fabric-bootstrap-preflight-order-"));
+    cleanup.push(root);
+    const events: string[] = [];
+    const client = { id: "current-build-incumbent" };
+
+    await expect(attachOrStartDaemon({
+      actionId: "bootstrap_preflight_order_01",
+      socketPath: join(root, "runtime", "fabric.sock"),
+      requiredProtocolVersion: 1,
+      requiredFeatures: ["project-sessions.v1"],
+      election: new BootstrapElection({ runtimeDirectory: join(root, "runtime") }),
+      preflight: async () => { events.push("preflight"); },
+      handshake: async () => {
+        events.push("handshake");
+        return {
+          status: "compatible" as const,
+          client,
+          protocolVersion: 1,
+          daemonInstanceGeneration: 4,
+          features: ["project-sessions.v1"],
+        };
+      },
+      spawn: vi.fn(),
+    })).resolves.toMatchObject({ client, started: false });
+
+    expect(events).toEqual(["preflight", "handshake"]);
+  });
+
+  it("returns a typed stale-build gate without marking or spawning the live incumbent", async () => {
+    const root = await mkdtemp(join(tmpdir(), "fabric-bootstrap-stale-build-"));
+    cleanup.push(root);
+    const spawn = vi.fn();
+    const handshake = vi.fn().mockResolvedValue({
+      status: "unavailable",
+      reason: "stale",
+      message: "daemon build identity is missing",
+      reconciliationRequired: true,
+      code: "DAEMON_STALE_BUILD",
+    } as never);
+
+    await expect(attachOrStartDaemon({
+      actionId: "bootstrap_stale_build_01",
+      socketPath: join(root, "runtime", "fabric.sock"),
+      requiredProtocolVersion: 1,
+      requiredFeatures: ["project-sessions.v1"],
+      election: new BootstrapElection({ runtimeDirectory: join(root, "runtime") }),
+      handshake,
+      spawn,
+    })).rejects.toMatchObject({ code: "DAEMON_STALE_BUILD" });
+
+    expect(handshake).toHaveBeenCalledTimes(2);
+    expect(spawn).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["missing", undefined],
+    ["mismatched", "sha256:" + "2".repeat(64)],
+  ] as const)("fails closed for a %s legacy incumbent without spawning a second daemon", async (_label, runtimeBuildIdentity) => {
+    const root = await mkdtemp(join(tmpdir(), "fabric-bootstrap-legacy-build-"));
+    cleanup.push(root);
+    const spawn = vi.fn();
+
+    await expect(attachOrStartDaemon({
+      actionId: "bootstrap_legacy_build_01",
+      socketPath: join(root, "runtime", "fabric.sock"),
+      requiredProtocolVersion: 1,
+      requiredFeatures: ["project-sessions.v1"],
+      requiredRuntimeBuildIdentity: currentBuildIdentity,
+      election: new BootstrapElection({ runtimeDirectory: join(root, "runtime") }),
+      handshake: async () => ({
+        status: "compatible" as const,
+        client: { id: "legacy-live-daemon" },
+        protocolVersion: 1,
+        daemonInstanceGeneration: 7,
+        features: ["project-sessions.v1"],
+        ...(runtimeBuildIdentity === undefined ? {} : { runtimeBuildIdentity }),
+      }),
+      spawn,
+    })).rejects.toMatchObject({ code: "DAEMON_STALE_BUILD" });
+
+    expect(spawn).not.toHaveBeenCalled();
+  });
+
+  it("attaches to an incumbent only when its runtime build identity exactly matches", async () => {
+    const root = await mkdtemp(join(tmpdir(), "fabric-bootstrap-current-build-"));
+    cleanup.push(root);
+    const client = { id: "current-live-daemon" };
+    const election = new BootstrapElection({ runtimeDirectory: join(root, "runtime") });
+    const handshake = vi.fn().mockResolvedValue({
+      status: "compatible" as const,
+      client,
+      protocolVersion: 1,
+      daemonInstanceGeneration: 8,
+      features: ["project-sessions.v1"],
+      runtimeBuildIdentity: currentBuildIdentity,
+    });
+    const preflight = vi.fn();
+    const spawn = vi.fn();
+
+    await expect(attachOrStartDaemon({
+      actionId: "bootstrap_current_build_01",
+      socketPath: join(root, "runtime", "fabric.sock"),
+      requiredProtocolVersion: 1,
+      requiredFeatures: ["project-sessions.v1"],
+      requiredRuntimeBuildIdentity: currentBuildIdentity,
+      election,
+      preflight,
+      handshake,
+      spawn,
+    })).resolves.toMatchObject({ client, started: false, electionGeneration: null });
+
+    expect(preflight).toHaveBeenCalledOnce();
+    expect(handshake).toHaveBeenCalledOnce();
+    expect(spawn).not.toHaveBeenCalled();
+  });
+
+  it("rechecks a stale incumbent under election before deciding whether a spawn is safe", async () => {
+    const root = await mkdtemp(join(tmpdir(), "fabric-bootstrap-stale-recheck-"));
+    cleanup.push(root);
+    const socketPath = join(root, "runtime", "fabric.sock");
+    const client = { id: "rechecked-current-daemon" };
+    const handshake = vi.fn()
+      .mockResolvedValueOnce({
+        status: "unavailable" as const,
+        reason: "stale" as const,
+        message: "legacy build",
+        reconciliationRequired: true,
+        code: "DAEMON_STALE_BUILD",
+      })
+      .mockResolvedValueOnce({
+        status: "compatible" as const,
+        client,
+        protocolVersion: 1,
+        daemonInstanceGeneration: 9,
+        features: ["project-sessions.v1"],
+        runtimeBuildIdentity: currentBuildIdentity,
+      });
+    const spawn = vi.fn();
+
+    await expect(attachOrStartDaemon({
+      actionId: "bootstrap_stale_recheck_01",
+      socketPath,
+      requiredProtocolVersion: 1,
+      requiredFeatures: ["project-sessions.v1"],
+      requiredRuntimeBuildIdentity: currentBuildIdentity,
+      election: new BootstrapElection({ runtimeDirectory: join(root, "runtime") }),
+      handshake,
+      spawn,
+    })).resolves.toMatchObject({ client, started: false });
+
+    expect(handshake).toHaveBeenCalledTimes(2);
     expect(spawn).not.toHaveBeenCalled();
   });
 

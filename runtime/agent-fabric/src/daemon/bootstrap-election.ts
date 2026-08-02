@@ -43,6 +43,7 @@ export type BootstrapReadyReceipt = {
   socketPath: string;
   protocolVersion: number;
   features: readonly string[];
+  runtimeBuildIdentity?: string;
   readyAt: number;
   evidence: BootstrapReadyEvidence;
 };
@@ -191,6 +192,13 @@ function parsePositiveInteger(value: unknown, label: string): number {
   return positiveInteger(value, label);
 }
 
+function parseRuntimeBuildIdentity(value: unknown): string {
+  if (typeof value !== "string" || !/^sha256:[a-f0-9]{64}$/u.test(value)) {
+    throw new BootstrapElectionError("BOOTSTRAP_RECEIPT_INVALID", "bootstrap ready runtime build identity is invalid");
+  }
+  return value;
+}
+
 function parseLease(value: unknown): BootstrapLeaseReceipt {
   const record = receiptRecord(value, "bootstrap lease");
   const status = record.status;
@@ -228,9 +236,11 @@ function parseLease(value: unknown): BootstrapLeaseReceipt {
 
 function parseReady(value: unknown): BootstrapReadyReceipt {
   const record = receiptRecord(value, "bootstrap ready receipt");
+  const hasRuntimeBuildIdentity = Object.hasOwn(record, "runtimeBuildIdentity");
   exactKeys(record, [
     "schemaVersion", "actionId", "electionGeneration", "daemonInstanceGeneration", "socketPath",
     "protocolVersion", "features", "readyAt", "evidence",
+    ...(hasRuntimeBuildIdentity ? ["runtimeBuildIdentity"] : []),
   ], "bootstrap ready receipt");
   if (record.schemaVersion !== 1) throw new BootstrapElectionError("BOOTSTRAP_RECEIPT_INVALID", "bootstrap ready schema is invalid");
   const evidence = receiptRecord(record.evidence, "bootstrap ready evidence");
@@ -254,6 +264,7 @@ function parseReady(value: unknown): BootstrapReadyReceipt {
     socketPath,
     protocolVersion: parsePositiveInteger(record.protocolVersion, "bootstrap ready protocol version"),
     features: [...record.features],
+    ...(hasRuntimeBuildIdentity ? { runtimeBuildIdentity: parseRuntimeBuildIdentity(record.runtimeBuildIdentity) } : {}),
     readyAt: parsePositiveInteger(record.readyAt, "bootstrap ready time"),
     evidence: { databaseOwned: true, migrationsComplete: true, recoveryComplete: true, socketBound: true },
   };
