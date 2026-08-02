@@ -47,7 +47,7 @@ class CommandResult:
 # rather than an assertion. That file takes 76s on macOS but over 300s at its own
 # merge base on a Linux runner, so the cap is set well clear of the slowest known
 # target rather than just above it. A hang is unbounded and is still caught.
-DIRECT_PROCESS_TIMEOUT = 900.0
+DIRECT_PROCESS_TIMEOUT = 1800.0
 PIPE_DRAIN_TIMEOUT = 5.0
 
 _PYTEST_IMPORT_PLUGIN = """import json

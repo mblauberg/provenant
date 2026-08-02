@@ -150,7 +150,7 @@ jobs:
     # The suite is ~5 minutes and the two change gates each rerun one target
     # against the merge base, so the ceiling has to cover the suite plus two
     # slow-target runs rather than the suite alone.
-    timeout-minutes: 30
+    timeout-minutes: 45
     permissions:
       contents: read
     needs: detect-changes
@@ -214,12 +214,12 @@ jobs:
           esac
           scripts/check-test-gates right-reason-red \
             --base "$CHANGE_GATE_BASE" --scratch-root "$scratch" \
-            --test-command-py "$HARNESS_PYTHON -m pytest {test} -q" \
+            --test-command-py "$HARNESS_PYTHON -m pytest {test} -q --durations=15" \
             --test-command-ts "npm exec vitest run {test}" \
             --mode "$change_gate_mode"
           scripts/check-test-gates revert-probe \
             --base "$CHANGE_GATE_BASE" --scratch-root "$scratch" \
-            --test-command-py "$HARNESS_PYTHON -m pytest {test} -q" \
+            --test-command-py "$HARNESS_PYTHON -m pytest {test} -q --durations=15" \
             --test-command-ts "npm exec vitest run {test}" \
             --mode "$change_gate_mode"
           release
