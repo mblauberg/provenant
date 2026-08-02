@@ -67,7 +67,9 @@ run_test "$SCRIPTS_ROOT/check_doc_constants.py" \
   --skills-root "$SKILLS_ROOT"
 run_test "$SCRIPTS_ROOT/check_doc_paths.py" \
   --root "$PRODUCT_ROOT" \
-  "$DOCS_ROOT/ARCHITECTURE.md" "$PRODUCT_ROOT/README.md"
+  "$DOCS_ROOT/ARCHITECTURE.md" "$PRODUCT_ROOT/README.md" \
+  "$PRODUCT_ROOT/MAINTAINING.md" \
+  "$DOCS_ROOT/runbooks/agent-fabric-operations.md"
 # House style is gated on the root documents and on every skill front door.
 # skills/*/references/ and docs/ are not yet clean and are not gated.
 run_test "$SKILLS_ROOT/engineering-writing/scripts/check_engineering_style.py" \

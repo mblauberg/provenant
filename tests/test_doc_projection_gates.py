@@ -36,7 +36,16 @@ def constants_args(architecture: Path = ARCHITECTURE, harness: Path | None = Non
 def test_the_checked_in_documents_pass_every_gate():
     assert render_doc_projections.main(render_args(ARCHITECTURE)) == 0
     assert check_doc_constants.main(constants_args()) == 0
-    assert check_doc_paths.main([str(ARCHITECTURE), str(ROOT / "README.md"), "--root", str(ROOT)]) == 0
+    assert check_doc_paths.main(
+        [
+            str(ARCHITECTURE),
+            str(ROOT / "README.md"),
+            str(ROOT / "MAINTAINING.md"),
+            str(ROOT / "docs" / "runbooks" / "agent-fabric-operations.md"),
+            "--root",
+            str(ROOT),
+        ]
+    ) == 0
 
 
 def test_editing_the_generated_graph_structure_fails_check(tmp_path, capsys):
@@ -122,3 +131,27 @@ def test_cited_paths_tolerate_line_suffixes_and_globs_but_not_absence(tmp_path, 
     doc.write_text("The gate reads `scripts/no_such_checker.py` on every run.\n")
     assert check_doc_paths.main([str(doc), "--root", str(ROOT)]) == 1
     assert "scripts/no_such_checker.py" in capsys.readouterr().err
+
+
+def test_cited_python_commands_are_invocable_and_shell_fences_are_checked(
+    tmp_path, capsys
+):
+    doc = tmp_path / "doc.md"
+    doc.write_text(
+        "```sh\n"
+        "scripts/check_doc_paths.py --root .\n"
+        "python3 skills/deliver/scripts/validate_delivery.py RUN.json\n"
+        "```\n"
+        "```text\n"
+        "scripts/no_such_checker.py\n"
+        "```\n"
+    )
+
+    assert check_doc_paths.main([str(doc), "--root", str(ROOT)]) == 1
+    assert "Python command must use an interpreter" in capsys.readouterr().err
+
+    doc.write_text(
+        '```sh\n"${HARNESS_PYTHON:-.venv/bin/python}" '
+        "scripts/check_doc_paths.py --root .\n```\n"
+    )
+    assert check_doc_paths.main([str(doc), "--root", str(ROOT)]) == 0

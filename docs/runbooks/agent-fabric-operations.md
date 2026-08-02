@@ -307,8 +307,8 @@ Pass `--mcp-clients all` to register all six clients. Configure and verify all
 six clients, including Claude Code and Codex, from the harness checkout with:
 
 ```sh
-scripts/configure-agent-fabric-mcp.py --platform all
-scripts/configure-agent-fabric-mcp.py --platform all --check
+"${HARNESS_PYTHON:-.venv/bin/python}" scripts/configure-agent-fabric-mcp.py --platform all
+"${HARNESS_PYTHON:-.venv/bin/python}" scripts/configure-agent-fabric-mcp.py --platform all --check
 opencode mcp list
 ```
 

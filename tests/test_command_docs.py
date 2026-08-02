@@ -42,10 +42,30 @@ def test_managed_reconciliation_stays_documented_for_maintainers():
     # the bare command forbade documenting the flag that makes it runnable, and
     # the invariant here is that the command stays documented, not that it stays
     # documented incompletely.
-    assert "scripts/manage_installation.py plan" in source
+    assert (
+        '"${HARNESS_PYTHON:-.venv/bin/python}" scripts/manage_installation.py plan'
+        in source
+    )
     assert "--target" in source
     assert "reconcile" in source
     assert "Never claim or overwrite an unmanaged target." in source
+
+
+def test_documented_python_commands_use_the_product_interpreter():
+    expected = (
+        '"${HARNESS_PYTHON:-.venv/bin/python}" scripts/manage_installation.py',
+        '"${HARNESS_PYTHON:-.venv/bin/python}" scripts/static-security-check.py',
+        '"${HARNESS_PYTHON:-.venv/bin/python}" scripts/configure-agent-fabric-mcp.py',
+    )
+    for path in (
+        "README.md",
+        "MAINTAINING.md",
+        "docs/runbooks/agent-fabric-operations.md",
+    ):
+        source = read(path)
+        for command in expected:
+            if command.split(" scripts/", 1)[1].split()[0] in source:
+                assert command in source, path
 
 
 def test_delivery_scenario_replay_command_is_portable():

@@ -132,7 +132,7 @@ Codex's bundled `skill-creator`, leaving `skill-craft` canonical; the rest of
 that file is preserved.
 
 From the product checkout,
-`scripts/manage_installation.py uninstall-managed --target <skills-dir>`
+`"${HARNESS_PYTHON:-.venv/bin/python}" scripts/manage_installation.py uninstall-managed --target <skills-dir>`
 reclaims the harness-owned skill links and nothing else. Use the same action
 with `--surface agents --source agents --target <agents-dir>` for agent links.
 The bootstrap line and the Codex block remain until removed by hand.

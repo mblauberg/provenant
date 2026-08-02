@@ -33,9 +33,10 @@ Documentation claims sit in three tiers, and the third is deliberate:
    the ADR index, the spec schema baseline, tier row names and order, selected
    constants, the machine-checking sentence and the repair budgets
    (`scripts/check_doc_constants.py`), plus relative Markdown links and
-   recognised outside-fence inline paths in `docs/ARCHITECTURE.md` and
-   `README.md` (`scripts/check_doc_paths.py`). Table prose, fenced commands and
-   placeholders remain review-owned.
+   recognised paths and runnable Python commands in `docs/ARCHITECTURE.md`,
+   `README.md`, this file and the agent-fabric operations runbook
+   (`scripts/check_doc_paths.py`). Shell fences are checked; table prose,
+   other fenced blocks and placeholders remain review-owned.
    `HARNESS.md` stays in this tier because its hard line cap leaves no room
    for markers.
 3. **Unchecked prose.** Design intent and rationale carry no machine gate,
@@ -103,8 +104,8 @@ doctrine (tiered anti-AI taxonomy, Australian-English house style, condense pass
 and claim discipline); `engineering-writing`, `academic-writing` and
 `legal-writing` keep only their domain overlay and link back to the hub. Change
 the shared doctrine in the hub, not in a domain skill. The hub's
-`scripts/style_lint.py` owns the shared lint vocabulary the domain linters
-import, so a change there ripples to all of them.
+`skills/natural-writing/scripts/style_lint.py` owns the shared lint vocabulary
+the domain linters import, so a change there ripples to all of them.
 
 ## Promote and retire
 
@@ -118,7 +119,8 @@ live backup folders as the normal safety boundary.
 
 Record a public rename in `config/skill-renames.json`. Test the managed
 reconciliation path; do not rely on users deleting or replacing global links by
-hand. Run `scripts/manage_installation.py plan --target <skills-dir>`, then
+hand. Run
+`"${HARNESS_PYTHON:-.venv/bin/python}" scripts/manage_installation.py plan --target <skills-dir>`, then
 `reconcile --target <skills-dir> --renames config/skill-renames.json`. Ordinary
 installation does not apply the rename registry.
 Never claim or overwrite an unmanaged target.
@@ -171,7 +173,7 @@ cargo fmt --manifest-path runtime/agent-fabric-review-portal-supervisor/Cargo.to
 cargo metadata --manifest-path runtime/agent-fabric-review-portal-supervisor/Cargo.toml --locked --offline --no-deps --format-version 1
 cargo clippy --manifest-path runtime/agent-fabric-review-portal-supervisor/Cargo.toml --locked --offline --all-targets -- -D warnings
 cargo test --manifest-path runtime/agent-fabric-review-portal-supervisor/Cargo.toml --locked --offline
-scripts/static-security-check.py
+"${HARNESS_PYTHON:-.venv/bin/python}" scripts/static-security-check.py
 scripts/public-release-check
 git diff --check
 ```
