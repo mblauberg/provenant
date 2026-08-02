@@ -1424,12 +1424,25 @@ def test_resolved_role_effort_reaches_codex_adapter_and_receipt():
             echo OK
             ''',
         )
+        write_executable(
+            bin_dir / "python3",
+            "#!/usr/bin/env bash\necho 'bare python3 must not be used' >&2\nexit 97\n",
+        )
         env, _ = env_with_test_verified_owner(
             tmp,
             bin_dir,
             adapter_id="codex-app-server",
             executable=bin_dir / "codex",
         )
+        env["HARNESS_PYTHON"] = sys.executable
+        env["HOME"] = str(tmp)
+        provenant = shutil.which("provenant", path=env["PATH"])
+        if provenant is not None:
+            provenant_dir = str(Path(provenant).parent)
+            env["PATH"] = os.pathsep.join(
+                entry for entry in env["PATH"].split(os.pathsep)
+                if entry != provenant_dir
+            )
         result = subprocess.run(
             [
                 str(SCRIPT),
