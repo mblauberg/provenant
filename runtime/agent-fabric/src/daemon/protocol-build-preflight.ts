@@ -13,12 +13,21 @@ const preflightPath = fileURLToPath(
 // check cannot be redirected to a different product selection.
 const installRoot = fileURLToPath(new URL("../../../../", import.meta.url)).replace(/\/$/u, "");
 
-export class ProtocolBuildPreflightError extends Error {
-  readonly code = "AGENT_FABRIC_PROTOCOL_BUILD_STALE";
+type ProtocolBuildPreflightErrorCode =
+  | "AGENT_FABRIC_PROTOCOL_BUILD_STALE"
+  | "AGENT_FABRIC_PREFLIGHT_INCOMPLETE";
 
-  constructor(message: string, options?: ErrorOptions) {
+export class ProtocolBuildPreflightError extends Error {
+  readonly code: ProtocolBuildPreflightErrorCode;
+
+  constructor(
+    message: string,
+    options?: ErrorOptions,
+    code: ProtocolBuildPreflightErrorCode = "AGENT_FABRIC_PROTOCOL_BUILD_STALE",
+  ) {
     super(message, options);
     this.name = "ProtocolBuildPreflightError";
+    this.code = code;
   }
 }
 
@@ -30,7 +39,13 @@ export async function preflightProtocolBuild(): Promise<void> {
       error instanceof Error &&
       "code" in error &&
       error.code === "ENOENT"
-    ) return;
+    ) {
+      throw new ProtocolBuildPreflightError(
+        `missing preflight script at ${preflightPath}; repair: git -C "${installRoot}" restore --source=HEAD -- scripts/agent-fabric-protocol-preflight`,
+        { cause: error },
+        "AGENT_FABRIC_PREFLIGHT_INCOMPLETE",
+      );
+    }
     throw error;
   }
   try {
