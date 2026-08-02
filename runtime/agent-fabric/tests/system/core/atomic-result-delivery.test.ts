@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -17,15 +17,21 @@ import {
   resultDeliveryProviderActionBinding,
   type ResultDeliveryIntegrationContext,
 } from "../../../src/results/store.ts";
+import { sha256 } from "../../../src/persistence/row-codec.ts";
 import {
   chairContext,
   openSystemDatabase,
   workerContext,
+  workerTwoContext,
 } from "./restart-recovery-fixtures.ts";
 import { admitProviderActionFixture } from "../../support/provider-action-fixture.ts";
 
 const databases: Database.Database[] = [];
 const roots: string[] = [];
+const ARTIFACT_BYTES = "Bounded answer artifact.\n";
+const ARTIFACT_DIGEST = `sha256:${sha256(ARTIFACT_BYTES)}`;
+const UNRELATED_ARTIFACT_BYTES = "Unrelated artifact.\n";
+const UNRELATED_ARTIFACT_DIGEST = `sha256:${sha256(UNRELATED_ARTIFACT_BYTES)}`;
 afterEach(() => {
   for (const database of databases.splice(0)) database.close();
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
@@ -33,6 +39,13 @@ afterEach(() => {
 
 function open(): Database.Database {
   const database = openSystemDatabase();
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "result-artifact-root-")));
+  roots.push(root);
+  mkdirSync(join(root, ".agent-run", "run_01", "artifacts"), { recursive: true });
+  writeFileSync(join(root, ".agent-run", "run_01", "artifacts", "answer.md"), ARTIFACT_BYTES);
+  writeFileSync(join(root, ".agent-run", "run_01", "artifacts", "unrelated.md"), UNRELATED_ARTIFACT_BYTES);
+  database.prepare("UPDATE projects SET canonical_root=? WHERE project_id='project_01'").run(root);
+  database.prepare("UPDATE runs SET workspace_root=? WHERE run_id='run_01'").run(root);
   databases.push(database);
   return database;
 }
@@ -82,7 +95,7 @@ function completion(): TaskCompleteWithReply {
       conversationId: "conversation_answer",
       replyToMessageId: "message_request",
       body: "Bounded answer.",
-      artifactRefs: [{ path: "artifacts/answer.md", digest: `sha256:${"b".repeat(64)}` }],
+      artifactRefs: [{ path: "artifacts/answer.md", digest: ARTIFACT_DIGEST }],
     },
     terminalResult: {
       status: "complete",
@@ -90,6 +103,31 @@ function completion(): TaskCompleteWithReply {
       completedAt: "2026-07-11T00:00:01.000Z",
     },
   } as unknown as TaskCompleteWithReply;
+}
+
+function requestFor(taskId: string, messageId: string, callbackId: string, conversationId: string): TaskRequest {
+  const value = request();
+  return {
+    ...value,
+    commandId: `request_${taskId}`,
+    task: { ...value.task, taskId },
+    request: { ...value.request, messageId, callbackId, conversationId, dedupeKey: `request_${taskId}` },
+  } as TaskRequest;
+}
+
+function completionFor(overrides: Readonly<{
+  taskId?: string;
+  ownerLeaseId?: string;
+  requestMessageId?: string;
+  callbackId?: string;
+  reply?: Readonly<Record<string, unknown>>;
+}> = {}): TaskCompleteWithReply {
+  const value = completion();
+  return {
+    ...value,
+    ...overrides,
+    reply: { ...value.reply, ...overrides.reply },
+  } as TaskCompleteWithReply;
 }
 
 function requestWithDeadline(responseDeadline: string): TaskRequest {
@@ -109,6 +147,84 @@ const integrationContext: ResultDeliveryIntegrationContext = {
 };
 
 describe("atomic request, result, and callback delivery", () => {
+  it("does not complete task B with task A's active owner lease", () => {
+    const database = open();
+    const store = new AtomicDeliveryStore({ database, clock: () => 1_000 });
+    store.request(chairContext, request());
+    store.request(chairContext, requestFor("task_other", "message_other", "callback_other", "conversation_other"));
+
+    expect(() => store.completeWithReply(workerContext, completionFor({
+      taskId: "task_other",
+      requestMessageId: "message_other",
+      callbackId: "callback_other",
+      ownerLeaseId: "task-owner:run_01:task_answer:1",
+      reply: {
+        messageId: "message_other_reply",
+        conversationId: "conversation_other",
+        replyToMessageId: "message_other",
+      },
+    }))).toThrowError("task owner lease changed");
+    expect(database.prepare("SELECT task_id, state FROM tasks WHERE task_id IN ('task_answer', 'task_other') ORDER BY task_id").all()).toEqual([
+      { task_id: "task_answer", state: "active" },
+      { task_id: "task_other", state: "active" },
+    ]);
+    expect(database.prepare("SELECT task_id, status FROM task_owner_leases WHERE task_id IN ('task_answer', 'task_other') ORDER BY task_id").all()).toEqual([
+      { task_id: "task_answer", status: "active" },
+      { task_id: "task_other", status: "active" },
+    ]);
+    expect(database.prepare("SELECT COUNT(*) AS count FROM task_results").get()).toEqual({ count: 0 });
+    expect(database.prepare("SELECT COUNT(*) AS count FROM messages WHERE kind='response'").get()).toEqual({ count: 0 });
+  });
+
+  it("binds the reply conversation to the pending request conversation", () => {
+    const database = open();
+    const store = new AtomicDeliveryStore({ database, clock: () => 1_000 });
+    store.request(chairContext, request());
+
+    expect(() => store.completeWithReply(workerContext, completionFor({
+      reply: { conversationId: "conversation_forged" },
+    }))).toThrowError("task request ownership or revision changed");
+    expect(database.prepare("SELECT state FROM tasks WHERE task_id='task_answer'").get()).toEqual({ state: "active" });
+    expect(database.prepare("SELECT state FROM task_requests WHERE request_id='message_request'").get()).toEqual({ state: "pending" });
+    expect(database.prepare("SELECT COUNT(*) AS count FROM messages WHERE kind='response'").get()).toEqual({ count: 0 });
+  });
+
+  it.each([
+    ["empty", []],
+    ["unrelated", [{ path: "artifacts/unrelated.md", digest: UNRELATED_ARTIFACT_DIGEST }]],
+  ] as const)("requires completion artifact refs to exactly match obligations: %s", (_label, artifactRefs) => {
+    const database = open();
+    const store = new AtomicDeliveryStore({ database, clock: () => 1_000 });
+    store.request(chairContext, request());
+
+    expect(() => store.completeWithReply(workerContext, completionFor({
+      reply: { artifactRefs: artifactRefs as TaskCompleteWithReply["reply"]["artifactRefs"] },
+    }))).toThrowError("completion artifacts must exactly match task obligations");
+    expect(database.prepare("SELECT state FROM tasks WHERE task_id='task_answer'").get()).toEqual({ state: "active" });
+    expect(database.prepare("SELECT COUNT(*) AS count FROM artifacts").get()).toEqual({ count: 0 });
+  });
+
+  it.each([
+    ["lease", { ownerLeaseId: "task-owner:run_01:task_answer:99" }, workerContext, "STALE_LEASE_GENERATION"],
+    ["callback", { callbackId: "callback_forged" }, workerContext, "STALE_REVISION"],
+    ["task", { taskId: "task_forged" }, workerContext, "NOT_FOUND"],
+    ["owner", {}, workerTwoContext, "STALE_REVISION"],
+    ["conversation", { reply: { conversationId: "conversation_forged" } }, workerContext, "STALE_REVISION"],
+  ] as const)("rejects an existing request forged by %s without partial effects", (_label, overrides, context, code) => {
+    const database = open();
+    const store = new AtomicDeliveryStore({ database, clock: () => 1_000 });
+    store.request(chairContext, request());
+
+    expect(() => store.completeWithReply(context, completionFor(overrides))).toThrowError(
+      expect.objectContaining({ code }),
+    );
+    expect(database.prepare("SELECT state FROM tasks WHERE task_id='task_answer'").get()).toEqual({ state: "active" });
+    expect(database.prepare("SELECT status FROM task_owner_leases WHERE task_id='task_answer'").get()).toEqual({ status: "active" });
+    expect(database.prepare("SELECT state FROM task_requests WHERE request_id='message_request'").get()).toEqual({ state: "pending" });
+    expect(database.prepare("SELECT COUNT(*) AS count FROM task_results").get()).toEqual({ count: 0 });
+    expect(database.prepare("SELECT COUNT(*) AS count FROM messages WHERE kind='response'").get()).toEqual({ count: 0 });
+  });
+
   it("rejects a task-result artifact through a symlinked ancestor before registration", () => {
     const database = open();
     const root = mkdtempSync(join(tmpdir(), "result-artifact-authority-"));
@@ -117,6 +233,7 @@ describe("atomic request, result, and callback delivery", () => {
     const canonicalRoot = realpathSync(root);
     const runDirectory = join(canonicalRoot, ".agent-run", "run_01");
     mkdirSync(runDirectory, { recursive: true });
+    rmSync(join(runDirectory, "artifacts"), { recursive: true, force: true });
     symlinkSync(outside, join(runDirectory, "artifacts"));
     database.prepare("UPDATE projects SET canonical_root=? WHERE project_id='project_01'").run(canonicalRoot);
     database.prepare("UPDATE runs SET workspace_root=? WHERE run_id='run_01'").run(canonicalRoot);
@@ -127,6 +244,21 @@ describe("atomic request, result, and callback delivery", () => {
       "artifact source resolves through a symlinked path",
     );
     expect(database.prepare("SELECT COUNT(*) AS count FROM artifacts").get()).toEqual({ count: 0 });
+  });
+
+  it("rejects a completion artifact whose digest does not match workspace bytes", () => {
+    const database = open();
+    const store = new AtomicDeliveryStore({ database, clock: () => 1_000 });
+    store.request(chairContext, request());
+
+    expect(() => store.completeWithReply(workerContext, completionFor({
+      reply: {
+        artifactRefs: [{ path: "artifacts/answer.md", digest: `sha256:${"0".repeat(64)}` }],
+      },
+    }))).toThrowError("artifact source digest does not match bytes");
+    expect(database.prepare("SELECT state FROM tasks WHERE task_id='task_answer'").get()).toEqual({ state: "active" });
+    expect(database.prepare("SELECT COUNT(*) AS count FROM artifacts").get()).toEqual({ count: 0 });
+    expect(database.prepare("SELECT COUNT(*) AS count FROM messages WHERE kind='response'").get()).toEqual({ count: 0 });
   });
 
   it.each([

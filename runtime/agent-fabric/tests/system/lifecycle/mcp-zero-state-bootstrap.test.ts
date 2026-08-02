@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { access, copyFile, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -415,6 +416,7 @@ describe("fresh Agent Fabric launch bootstrap", () => {
     let chairDaemon: Awaited<ReturnType<typeof connectFabricDaemon>> | undefined;
     let requester: McpProxy | undefined;
     let worker: McpProxy | undefined;
+    let forgedOwner: McpProxy | undefined;
     try {
       const bootstrapped = await callTool(chair, "fabric_bootstrap", {});
       if (bootstrapped.isError) throw new Error(bootstrapped.text);
@@ -490,6 +492,11 @@ describe("fresh Agent Fabric launch bootstrap", () => {
         "provider-bootstrap-worker",
         [FABRIC_OPERATIONS.taskCompleteWithReply],
       );
+      forgedOwner = await deriveProxy(
+        "bootstrap-forged-owner",
+        "provider-bootstrap-forged-owner",
+        [FABRIC_OPERATIONS.taskCompleteWithReply],
+      );
       const chairToolNames = (await chair.listTools()).tools.map(({ name }) => name);
       expect(chairToolNames).toContain("fabric_task_request");
       expect(chairToolNames).toContain("fabric_task_complete_with_reply");
@@ -503,8 +510,14 @@ describe("fresh Agent Fabric launch bootstrap", () => {
       const taskId = "bootstrap-paired-task";
       const requestMessageId = "bootstrap-paired-request";
       const callbackId = "bootstrap-paired-callback";
-      const artifactPath = `${rootAuthority.artifactPaths[0]}/paired-reply.md`;
-      const artifactDigest = `sha256:${"b".repeat(64)}`;
+      const artifactPath = "paired-reply.md";
+      const artifactBytes = "Paired completion evidence.\n";
+      const artifactDigest = `sha256:${createHash("sha256").update(artifactBytes).digest("hex")}`;
+      const artifactRoot = rootAuthority.artifactPaths[0];
+      if (artifactRoot === undefined) throw new Error("bootstrap artifact authority is empty");
+      const artifactAbsolutePath = join(projectRoot, artifactRoot, artifactPath);
+      await mkdir(dirname(artifactAbsolutePath), { recursive: true });
+      await writeFile(artifactAbsolutePath, artifactBytes);
       const request = {
         commandId: "bootstrap-paired:request",
         projectSessionId,
@@ -542,6 +555,23 @@ describe("fresh Agent Fabric launch bootstrap", () => {
       expect(requestReplay.isError).toBe(false);
       expect(requestReplay.structured).toEqual(requested.structured);
 
+      await expect(chair.callTool({
+        name: "fabric_task_claim",
+        arguments: {
+          commandId: "bootstrap-paired:raw-claim",
+          taskId,
+          expectedTaskRevision: 1,
+        },
+      })).rejects.toThrow(/unknown tool/iu);
+      await expect(chairDaemon.delegateAuthority({
+        parentAuthorityId: identity.authorityId,
+        commandId: "bootstrap-paired:widen-claim",
+        authority: {
+          ...rootAuthority,
+          actions: [...rootAuthority.actions, FABRIC_OPERATIONS.claimTask],
+        },
+      })).rejects.toMatchObject({ code: "CAPABILITY_FORBIDDEN" });
+
       const completion = {
         commandId: "bootstrap-paired:complete",
         taskId,
@@ -565,6 +595,24 @@ describe("fresh Agent Fabric launch bootstrap", () => {
           completedAt: "2099-01-01T00:00:00.000Z",
         },
       };
+      const forgedCases = [
+        ["lease", worker.client, { ownerLeaseId: `task-owner:${identity.runId}:${taskId}:99` }, "STALE_LEASE_GENERATION"],
+        ["callback", worker.client, { callbackId: "bootstrap-forged-callback" }, "STALE_REVISION"],
+        ["task", worker.client, { taskId: "bootstrap-forged-task" }, "NOT_FOUND"],
+        ["owner", forgedOwner?.client, {}, "STALE_REVISION"],
+        ["conversation", worker.client, { reply: { ...completion.reply, conversationId: "bootstrap-forged-conversation" } }, "STALE_REVISION"],
+      ] as const;
+      for (const [label, client, overrides, code] of forgedCases) {
+        if (client === undefined) throw new Error("forged owner client is unavailable");
+        const forged = await callTool(client, "fabric_task_complete_with_reply", {
+          ...completion,
+          ...overrides,
+          commandId: `bootstrap-paired:forged:${label}`,
+          reply: "reply" in overrides ? { ...completion.reply, ...overrides.reply } : completion.reply,
+        });
+        expect(forged.isError).toBe(true);
+        expect(forged.structured).toMatchObject({ code });
+      }
       const uncorrelated = await callTool(worker.client, "fabric_task_complete_with_reply", {
         ...completion,
         commandId: "bootstrap-paired:uncorrelated",
@@ -573,6 +621,15 @@ describe("fresh Agent Fabric launch bootstrap", () => {
       });
       expect(uncorrelated.isError).toBe(true);
       expect(uncorrelated.structured).toMatchObject({ code: "NOT_FOUND" });
+      const forgedDatabase = new Database(paths.databasePath, { readonly: true });
+      try {
+        expect(forgedDatabase.prepare("SELECT state FROM tasks WHERE run_id=? AND task_id=?").get(identity.runId, taskId)).toEqual({ state: "active" });
+        expect(forgedDatabase.prepare("SELECT status FROM task_owner_leases WHERE run_id=? AND task_id=?").get(identity.runId, taskId)).toEqual({ status: "active" });
+        expect(forgedDatabase.prepare("SELECT COUNT(*) AS count FROM task_results WHERE run_id=? AND task_id=?").get(identity.runId, taskId)).toEqual({ count: 0 });
+        expect(forgedDatabase.prepare("SELECT COUNT(*) AS count FROM messages WHERE run_id=? AND kind='response'").get(identity.runId)).toEqual({ count: 0 });
+      } finally {
+        forgedDatabase.close();
+      }
 
       const completed = await callTool(worker.client, "fabric_task_complete_with_reply", completion);
       expect(completed.isError).toBe(false);
@@ -615,6 +672,7 @@ describe("fresh Agent Fabric launch bootstrap", () => {
       await Promise.allSettled([
         requester?.close() ?? Promise.resolve(),
         worker?.close() ?? Promise.resolve(),
+        forgedOwner?.close() ?? Promise.resolve(),
         chairDaemon?.close() ?? Promise.resolve(),
         chair.close(),
       ]);

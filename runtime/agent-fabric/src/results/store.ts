@@ -335,7 +335,6 @@ export class AtomicDeliveryStore {
           evidenceKind: "artifact",
           relativePath: artifact.path,
           digest: artifact.digest,
-          verifyBytes: false,
         });
         artifactIds.push(registered.evidenceId);
       }
@@ -400,10 +399,27 @@ export class AtomicDeliveryStore {
         UPDATE tasks SET state='complete', revision=revision+1
          WHERE run_id=? AND task_id=? AND revision=? AND owner_agent_id=?
       `).run(context.coordinationRunId, request.taskId, request.expectedTaskRevision, context.agentId);
-      this.#database.prepare(`
+      const releasedLease = this.#database.prepare(`
         UPDATE task_owner_leases SET status='released', updated_at=?
-         WHERE lease_id=? AND generation=? AND status='active'
-      `).run(now, request.ownerLeaseId, request.ownerLeaseGeneration);
+         WHERE project_session_id=?
+           AND run_id=?
+           AND task_id=?
+           AND lease_id=?
+           AND holder_agent_id=?
+           AND generation=?
+           AND status='active'
+      `).run(
+        now,
+        context.projectSessionId,
+        context.coordinationRunId,
+        request.taskId,
+        request.ownerLeaseId,
+        context.agentId,
+        request.ownerLeaseGeneration,
+      );
+      if (releasedLease.changes !== 1) {
+        throw new ProjectFabricCoreError("STALE_LEASE_GENERATION", "task owner lease changed");
+      }
       this.#database.prepare(`
         UPDATE task_requests SET state='answered', updated_at=? WHERE request_id=?
       `).run(now, text(pending, "request_id"));
@@ -1058,9 +1074,31 @@ export class AtomicDeliveryStore {
       integer(pending, "request_revision") !== request.expectedRequestRevision ||
       text(pending, "callback_id") !== request.callbackId ||
       integer(pending, "callback_generation") !== request.callbackGeneration ||
+      text(pending, "conversation_id") !== request.reply.conversationId ||
       !["pending", "overdue"].includes(text(pending, "state"))
     ) {
       throw new ProjectFabricCoreError("STALE_REVISION", "task request ownership or revision changed");
+    }
+    let expectedArtifactPathsValue: unknown;
+    try {
+      expectedArtifactPathsValue = JSON.parse(text(pending, "expected_artifacts_json")) as unknown;
+    } catch {
+      throw new ProjectFabricCoreError("RECOVERY_REQUIRED", "stored task artifact obligations are invalid");
+    }
+    if (
+      !Array.isArray(expectedArtifactPathsValue) ||
+      !expectedArtifactPathsValue.every((path): path is string => typeof path === "string") ||
+      new Set(expectedArtifactPathsValue).size !== expectedArtifactPathsValue.length
+    ) {
+      throw new ProjectFabricCoreError("RECOVERY_REQUIRED", "stored task artifact obligations are invalid");
+    }
+    const actualArtifactPaths = request.reply.artifactRefs.map((artifact) => artifact.path);
+    if (
+      actualArtifactPaths.length !== expectedArtifactPathsValue.length ||
+      new Set(actualArtifactPaths).size !== actualArtifactPaths.length ||
+      !actualArtifactPaths.every((path) => expectedArtifactPathsValue.includes(path))
+    ) {
+      throw new ProjectFabricCoreError("PROTOCOL_INVALID", "completion artifacts must exactly match task obligations");
     }
     const task = row(this.#database.prepare(`
       SELECT state, revision, owner_agent_id FROM tasks WHERE run_id=? AND task_id=?
@@ -1072,14 +1110,25 @@ export class AtomicDeliveryStore {
     ) {
       throw new ProjectFabricCoreError("TASK_NOT_OWNER", "task completion owner or revision changed");
     }
-    const lease = row(this.#database.prepare(`
-      SELECT holder_agent_id, generation, status FROM task_owner_leases WHERE lease_id=?
-    `).get(request.ownerLeaseId), "task owner lease");
-    if (
-      text(lease, "holder_agent_id") !== context.agentId ||
-      integer(lease, "generation") !== request.ownerLeaseGeneration ||
-      text(lease, "status") !== "active"
-    ) {
+    const leaseRows = this.#database.prepare(`
+      SELECT holder_agent_id, generation, status
+        FROM task_owner_leases
+       WHERE project_session_id=?
+         AND run_id=?
+         AND task_id=?
+         AND lease_id=?
+         AND holder_agent_id=?
+         AND generation=?
+         AND status='active'
+    `).all(
+      context.projectSessionId,
+      context.coordinationRunId,
+      request.taskId,
+      request.ownerLeaseId,
+      context.agentId,
+      request.ownerLeaseGeneration,
+    );
+    if (leaseRows.length !== 1) {
       throw new ProjectFabricCoreError("STALE_LEASE_GENERATION", "task owner lease changed");
     }
   }
