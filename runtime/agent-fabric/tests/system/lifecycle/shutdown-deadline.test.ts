@@ -123,7 +123,6 @@ describe("shutdown deadline behaviour", () => {
           sleep: async () => await new Promise<void>((resolve) => realSetImmediate(resolve)),
         },
       });
-      console.log("shutdown-debug: adapter exit marker");
       await expect(chair.getMailboxState()).rejects.toThrow();
     } finally {
       vi.useRealTimers();
