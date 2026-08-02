@@ -54,6 +54,10 @@ import {
   closeFabricWithLifecycleReceiptAuthority,
   finalizeDaemonShutdown,
 } from "./shutdown-finalizer.js";
+import {
+  DAEMON_SHUTDOWN_CLOSE_TIMEOUT_MS,
+  DAEMON_SHUTDOWN_DRAIN_TIMEOUT_MS,
+} from "../lifecycle/shutdown-deadline.js";
 import { acquireDaemonLocks, releaseDaemonLocks, writeDaemonLockReceipt } from "./client.js";
 import {
   markPrivateDiscoveryTerminal,
@@ -746,8 +750,8 @@ const closeServingSocket = async (): Promise<void> =>
     server,
     sockets,
     waitForInFlight,
-    drainTimeoutMs: 15_000,
-    closeTimeoutMs: 15_000,
+    drainTimeoutMs: DAEMON_SHUTDOWN_DRAIN_TIMEOUT_MS,
+    closeTimeoutMs: DAEMON_SHUTDOWN_CLOSE_TIMEOUT_MS,
     admissionFence: servingAdmission,
   });
 
