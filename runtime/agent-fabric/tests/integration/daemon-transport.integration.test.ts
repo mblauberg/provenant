@@ -1,6 +1,6 @@
 import { Duplex } from "node:stream";
 import { mkdtemp, rm } from "node:fs/promises";
-import { createServer, type Socket } from "node:net";
+import { connect, createServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
@@ -18,6 +18,7 @@ import type {
 import { FabricDaemonClient } from "../../src/daemon/rpc-client.ts";
 import { FabricRemoteError, TimedNdjsonTransport } from "../../src/transport/ndjson-rpc.ts";
 import { daemonInitializeResult } from "../../src/transport/daemon-rpc-contract.ts";
+import { createDaemonFixture } from "../support/daemon-testkit.ts";
 
 const cleanup: Array<() => Promise<void>> = [];
 
@@ -74,6 +75,42 @@ class FixtureDaemonSocket extends Duplex {
         }
       : this.#legacyCredentialResult;
     this.push(`${JSON.stringify({ id: request.id, result })}\n`);
+    callback();
+  }
+
+  override _final(callback: (error?: Error | null) => void): void {
+    this.push(null);
+    this.destroy();
+    callback();
+  }
+}
+
+const daemonConnectionLimitFrame = {
+  id: "connection",
+  error: {
+    name: "DaemonProtocolError",
+    code: "DAEMON_CONNECTION_LIMIT",
+    message: "daemon accepts at most 32 connections",
+  },
+} as const;
+
+class ConnectionLimitDaemonSocket extends Duplex {
+  #pendingCalls = 0;
+
+  constructor() {
+    super();
+    queueMicrotask(() => this.emit("connect"));
+  }
+
+  override _read(): void {}
+
+  override _write(chunk: Buffer, _encoding: BufferEncoding, callback: (error?: Error | null) => void): void {
+    const request = JSON.parse(chunk.toString("utf8")) as { id: string; method: string };
+    if (request.method === "initialize") {
+      this.push(`${JSON.stringify({ id: request.id, result: daemonInitializeResult([]) })}\n`);
+    } else if (++this.#pendingCalls === 2) {
+      this.push(`${JSON.stringify(daemonConnectionLimitFrame)}\n`);
+    }
     callback();
   }
 
@@ -461,6 +498,119 @@ describe("timed daemon NDJSON transport", () => {
       { capability: "afb_test", method: "first", params: { sequence: 1 } },
       { capability: "afb_test", method: "second", params: { sequence: 2 } },
     ]);
+  });
+
+  it("fans out a connection-level error to every pending call without waiting for request timeout", async () => {
+    const socket = new ConnectionLimitDaemonSocket();
+    const transport = await TimedNdjsonTransport.connect({
+      socketPath: "/fixture/fabric.sock",
+      capability: "afb_test",
+      connectTimeoutMs: 200,
+      requestTimeoutMs: 500,
+    }, {
+      connect: () => socket as unknown as Socket,
+    });
+    cleanup.unshift(() => transport.close());
+    const startedAt = performance.now();
+    const results = await Promise.all([
+      transport.call("first", {}).catch((error: unknown) => error),
+      transport.call("second", {}).catch((error: unknown) => error),
+    ]);
+
+    expect(performance.now() - startedAt).toBeLessThan(250);
+    expect(results).toEqual([
+      expect.objectContaining({ code: daemonConnectionLimitFrame.error.code }),
+      expect.objectContaining({ code: daemonConnectionLimitFrame.error.code }),
+    ]);
+    expect(results[0]).toBeInstanceOf(FabricRemoteError);
+    expect(results[1]).toBeInstanceOf(FabricRemoteError);
+    expect(transport.closed).toBe(true);
+    await transport.close();
+  });
+
+  it("rejects all pending calls from the real daemon connection-limit frame", async () => {
+    const fixture = await createDaemonFixture("run-connection-limit-transport");
+    cleanup.push(fixture.cleanup);
+    const held = await Promise.all(Array.from({ length: 29 }, () => {
+      const socket = connect(fixture.socketPath);
+      cleanup.unshift(async () => { socket.destroy(); });
+      return new Promise<Socket>((resolve, reject) => {
+        socket.once("connect", () => resolve(socket));
+        socket.once("error", reject);
+      });
+    }));
+    expect(held).toHaveLength(29);
+
+    const overflow = connect(fixture.socketPath);
+    cleanup.unshift(async () => { overflow.destroy(); });
+    const overflowFrame = await new Promise<Record<string, unknown>>((resolve, reject) => {
+      const lines = createInterface({ input: overflow, crlfDelay: Infinity });
+      overflow.once("error", reject);
+      lines.once("line", (line) => resolve(JSON.parse(line) as Record<string, unknown>));
+    });
+    expect(overflowFrame).toMatchObject({
+      id: "connection",
+      error: { code: "DAEMON_CONNECTION_LIMIT" },
+    });
+    const connectStartedAt = performance.now();
+    await expect(TimedNdjsonTransport.connect({
+      socketPath: fixture.socketPath,
+      capability: fixture.daemon.bootstrapCapability,
+      connectTimeoutMs: 200,
+      requestTimeoutMs: 5_000,
+    })).rejects.toMatchObject({ code: "DAEMON_CONNECTION_LIMIT" });
+    expect(performance.now() - connectStartedAt).toBeLessThan(1_000);
+
+    const overflowDirectory = await mkdtemp(join(tmpdir(), "fabric-transport-connection-frame-"));
+    const overflowSocketPath = join(overflowDirectory, "fabric.sock");
+    const pendingRequestIds: string[] = [];
+    const server = createServer((socket) => {
+      const lines = createInterface({ input: socket, crlfDelay: Infinity });
+      lines.on("line", (line) => {
+        const request = JSON.parse(line) as { id: string; method: string };
+        if (request.method === "initialize") {
+          socket.write(`${JSON.stringify({ id: request.id, result: daemonInitializeResult([]) })}\n`);
+          return;
+        }
+        pendingRequestIds.push(request.id);
+        if (pendingRequestIds.length !== 2) return;
+        socket.write(`${JSON.stringify(overflowFrame)}\n`);
+        socket.end();
+      });
+    });
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(overflowSocketPath, resolve);
+    });
+    cleanup.push(async () => {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await rm(overflowDirectory, { recursive: true, force: true });
+    });
+
+    const transport = await TimedNdjsonTransport.connect({
+      socketPath: overflowSocketPath,
+      capability: "afb_test",
+      connectTimeoutMs: 200,
+      requestTimeoutMs: 5_000,
+    });
+    cleanup.unshift(() => transport.close());
+    const startedAt = performance.now();
+    const pending = [
+      transport.call("first", {}).catch((error: unknown) => error),
+      transport.call("second", {}).catch((error: unknown) => error),
+    ];
+    const results = await Promise.all(pending);
+
+    expect(performance.now() - startedAt).toBeLessThan(1_000);
+    expect(results).toEqual([
+      expect.objectContaining({ code: "DAEMON_CONNECTION_LIMIT" }),
+      expect.objectContaining({ code: "DAEMON_CONNECTION_LIMIT" }),
+    ]);
+    expect(results[0]).toBeInstanceOf(FabricRemoteError);
+    expect(results[1]).toBeInstanceOf(FabricRemoteError);
+    expect(transport.closed).toBe(true);
+    expect(pendingRequestIds).toHaveLength(2);
+    await transport.close();
   });
 
   it("rejects a thirty-third pending client call without writing it", async () => {

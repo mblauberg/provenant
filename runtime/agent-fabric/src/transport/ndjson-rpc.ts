@@ -178,6 +178,12 @@ export class TimedNdjsonTransport {
       this.#socket.destroy();
       return;
     }
+    if (response.id === "connection" && "error" in response) {
+      this.#terminalError = new FabricRemoteError(response.error.code, response.error.message);
+      this.#disconnect();
+      this.#socket.destroy();
+      return;
+    }
     const pending = this.#pending.get(response.id);
     if (pending === undefined) return;
     this.#pending.delete(response.id);
