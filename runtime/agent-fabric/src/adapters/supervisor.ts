@@ -118,7 +118,6 @@ function parseBridgeHealth(value: unknown, kind: "chair" | "child"): boolean {
 export class AdapterSupervisor {
   readonly #definitions: Record<string, AdapterProcessDefinition>;
   readonly #transports = new Map<string, AdapterProcessTransport>();
-  readonly #openingTransports = new Set<AdapterProcessTransport>();
   readonly #chairTransports = new Map<string, AdapterProcessTransport>();
   readonly #knownChairSessions = new Map<string, number>();
   readonly #chairSessionByAction = new Map<string, string>();
@@ -141,11 +140,6 @@ export class AdapterSupervisor {
   readonly #verifyNpmInstall: typeof verifyNpmInstallAttestation;
   readonly #bridgeHealthTimer: NodeJS.Timeout;
   #bridgeHealthAuditInFlight = false;
-  #closing = false;
-
-  #assertOpen(): void {
-    if (this.#closing) throw new ProviderAdapterError("PROVIDER_CLOSED", "adapter supervisor is closed");
-  }
 
   /**
    * Every adapter process spawn rechecks npm-installed execution bytes and
@@ -157,7 +151,6 @@ export class AdapterSupervisor {
     definition: AdapterProcessDefinition,
     environment?: Record<string, string>,
   ): Promise<AdapterProcessTransport> {
-    this.#assertOpen();
     if (definition.npmInstallProductRoot !== undefined) {
       await this.#verifyNpmInstall(definition.npmInstallProductRoot);
     }
@@ -173,10 +166,7 @@ export class AdapterSupervisor {
     // command below. An attacker with concurrent write access could swap the
     // loader or wrapper bytes inside that window. Full closure needs snapshot execution
     // (spawning from a verified, immutable copy) and is out of scope for #132.
-    this.#assertOpen();
-    const transport = new AdapterProcessTransport(environment === undefined ? definition : { ...definition, environment });
-    this.#openingTransports.add(transport);
-    return transport;
+    return new AdapterProcessTransport(environment === undefined ? definition : { ...definition, environment });
   }
 
   constructor(definitions: Record<string, AdapterProcessDefinition>, options: AdapterSupervisorOptions = {}) {
@@ -280,7 +270,6 @@ export class AdapterSupervisor {
   }
 
   async request(adapterId: string, method: string, params: Record<string, unknown>): Promise<unknown> {
-    this.#assertOpen();
     const definition = this.#definitions[adapterId];
     if (definition === undefined) throw new Error(`adapter is not configured: ${adapterId}`);
     enforceModelPolicy(adapterId, definition.modelPolicy, method, params);
@@ -370,8 +359,6 @@ export class AdapterSupervisor {
         throw new ProviderAdapterError("CHAIR_BRIDGE_LOST", `${adapterId} retained chair bridge is unavailable`);
       }
       transport = await this.#openTransport(adapterId, definition);
-      this.#assertOpen();
-      this.#openingTransports.delete(transport);
       this.#transports.set(adapterId, transport);
     }
     try {
@@ -391,7 +378,6 @@ export class AdapterSupervisor {
       }
       return result;
     } catch (error: unknown) {
-      this.#openingTransports.delete(transport);
       let fencingError: unknown;
       if (retainedChairTransport !== undefined && chairKey !== undefined) {
         if (!isRetainedChairLoss(error, transport)) throw error;
@@ -424,7 +410,6 @@ export class AdapterSupervisor {
     request: AdapterAgentProvisionRequest,
     handoff: AgentBridgeHandoff,
   ): Promise<AgentProvisionProviderResult> {
-    this.#assertOpen();
     const definition = this.#definitions[adapterId];
     if (definition === undefined) throw new Error(`adapter is not configured: ${adapterId}`);
     if (
@@ -464,7 +449,6 @@ export class AdapterSupervisor {
         }),
     });
     try {
-      this.#assertOpen();
       const publicRequest = {
         schemaVersion: request.schemaVersion,
         runId: request.runId,
@@ -502,7 +486,6 @@ export class AdapterSupervisor {
       }, handoff.expectedPrincipal)) {
         throw new ProviderAdapterError("AGENT_BRIDGE_LOST", "inner child bridge closed before retention");
       }
-      this.#assertOpen();
       if (transport.closed) throw new ProviderAdapterError("AGENT_BRIDGE_LOST", "agent bridge closed before retention");
       const key = chairTransportKey(adapterId, result.providerSessionRef);
       if (this.#childTransports.has(key) || this.#chairTransports.has(key)) {
@@ -517,7 +500,6 @@ export class AdapterSupervisor {
         providerSessionGeneration: result.providerSessionGeneration,
         bridgeGeneration: result.bridgeGeneration,
       });
-      this.#openingTransports.delete(transport);
       this.#childTransports.set(key, transport);
       this.#lostChildSessions.delete(key);
       this.#knownChildSessions.set(key, result.providerSessionGeneration);
@@ -531,7 +513,6 @@ export class AdapterSupervisor {
       });
       return result;
     } catch (error: unknown) {
-      this.#openingTransports.delete(transport);
       await transport.close().catch(() => undefined);
       throw error;
     }
@@ -648,7 +629,6 @@ export class AdapterSupervisor {
     request: AdapterChairLaunchRequest,
     handoff: ChairLaunchHandoff,
   ): Promise<ChairLaunchProviderResult> {
-    this.#assertOpen();
     const definition = this.#definitions[adapterId];
     if (definition === undefined) throw new Error(`adapter is not configured: ${adapterId}`);
     if (
@@ -684,7 +664,6 @@ export class AdapterSupervisor {
         AGENT_FABRIC_EXPECTED_PRINCIPAL_GENERATION: String(handoff.expectedPrincipal.principalGeneration),
     });
     try {
-      this.#assertOpen();
       const result = parseChairLaunchProviderResult(await transport.request("launch_chair", request, {
         timeoutMs: this.#providerTurnTimeoutMs,
       }), {
@@ -710,12 +689,10 @@ export class AdapterSupervisor {
       if (transport.closed) {
         throw new ProviderAdapterError("CHAIR_BRIDGE_LOST", `${adapterId} chair bridge closed before terminal handoff`);
       }
-      this.#assertOpen();
       const key = chairTransportKey(adapterId, result.resumeReference);
       if (this.#knownChairSessions.has(key)) {
         throw new ProviderAdapterError("CHAIR_BRIDGE_CONFLICT", `${adapterId} already owns the provider chair session`);
       }
-      this.#openingTransports.delete(transport);
       this.#chairTransports.set(key, transport);
       this.#knownChairSessions.set(key, result.providerSessionGeneration);
       this.#chairSessionByAction.set(chairActionKey(adapterId, request.actionId), key);
@@ -728,7 +705,6 @@ export class AdapterSupervisor {
       });
       return result;
     } catch {
-      this.#openingTransports.delete(transport);
       await transport.close().catch(() => undefined);
       throw new ProviderAdapterError("CHAIR_LAUNCH_FAILED", `${adapterId} chair launch adapter handoff failed`);
     }
@@ -739,7 +715,6 @@ export class AdapterSupervisor {
     request: AdapterChairRecoveryRequest,
     handoff: ChairLaunchHandoff,
   ): Promise<ChairLaunchProviderResult> {
-    this.#assertOpen();
     const definition = this.#definitions[adapterId];
     if (definition === undefined) throw new Error(`adapter is not configured: ${adapterId}`);
     if (
@@ -768,7 +743,6 @@ export class AdapterSupervisor {
         AGENT_FABRIC_EXPECTED_PRINCIPAL_GENERATION: String(handoff.expectedPrincipal.principalGeneration),
     });
     try {
-      this.#assertOpen();
       const result = parseChairLaunchProviderResult(await transport.request("recover_chair", request, {
         timeoutMs: this.#providerTurnTimeoutMs,
       }), {
@@ -793,14 +767,12 @@ export class AdapterSupervisor {
       if (!await this.#probeChairBridge(transport, entry)) {
         throw new ProviderAdapterError("CHAIR_BRIDGE_LOST", "inner recovered chair bridge is unavailable");
       }
-      this.#assertOpen();
       const key = chairTransportKey(adapterId, result.resumeReference);
       const prior = this.#chairTransports.get(key);
       if (prior !== undefined && prior !== transport) {
         this.#removeChairBridge(key);
         await prior.close().catch(() => undefined);
       }
-      this.#openingTransports.delete(transport);
       this.#chairTransports.set(key, transport);
       this.#knownChairSessions.set(key, result.providerSessionGeneration);
       this.#chairSessionByAction.set(chairActionKey(adapterId, request.actionId), key);
@@ -813,7 +785,6 @@ export class AdapterSupervisor {
       });
       return result;
     } catch (error: unknown) {
-      this.#openingTransports.delete(transport);
       await transport.close().catch(() => undefined);
       throw error;
     }
@@ -980,15 +951,8 @@ export class AdapterSupervisor {
   }
 
   async close(): Promise<void> {
-    this.#closing = true;
     clearInterval(this.#bridgeHealthTimer);
-    const transports = [...new Set([
-      ...this.#openingTransports,
-      ...this.#transports.values(),
-      ...this.#chairTransports.values(),
-      ...this.#childTransports.values(),
-    ])];
-    this.#openingTransports.clear();
+    const transports = [...new Set([...this.#transports.values(), ...this.#chairTransports.values(), ...this.#childTransports.values()])];
     this.#transports.clear();
     this.#chairTransports.clear();
     this.#knownChairSessions.clear();
