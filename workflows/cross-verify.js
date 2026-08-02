@@ -267,6 +267,7 @@ function claudeSkepticPrompt(boot, claim) {
 // Attacks a DIFFERENT angle from the Claude skeptic (independent evidence hunt) and
 // returns the dispatcher's normalised guarantees verbatim.
 function crossFamilyPrompt(boot, claim, idx) {
+  const runDir = boot.runDir
   // Per-item variation by INDEX (no RNG): even claims lead with codex, odd lead with
   // cursor, so the two cross-family tools spread across the claim set deterministically.
   const lead = idx % 2 === 0 ? 'codex' : 'cursor'
@@ -298,7 +299,7 @@ function crossFamilyPrompt(boot, claim, idx) {
     '  Before using cursor in the chain, run cursor-agent --list-models and export CF_DISPATCH_CURSOR_MODEL to a current model from a family distinct from Claude and OpenAI. The dispatcher fails closed if it cannot prove the provider family.',
     `  Use the --chain form so it fails over automatically:`,
     `    ${SKILL_SCRIPTS}/cf_dispatch.sh --orchestrator-family claude --chain "${chain}" \\`,
-    `      --prompt-file <abs path to ${claim.id}.prompt.txt> --out <abs path to crossfamily/${claim.id}.out.txt> ` +
+    `      --evidence-root ${runDir} --prompt-file <abs path to ${claim.id}.prompt.txt> --out <abs path to crossfamily/${claim.id}.out.txt> ` +
     `--terminal-artifact <abs path to crossfamily/${claim.id}.terminal.json> ` +
     `--task-id ${claim.id} --attempt-id cross-verify-${claim.id} --reviewer-id cross-verify-${claim.id}-external --receipt <abs path to crossfamily/${claim.id}.route.json>`,
     '  (codex runs `exec -s read-only` enforced; cursor runs `--mode plan`. Never use claude as the cross-family tool — same family. agy is advisory-only and disabled unless CF_DISPATCH_ENABLE_AGY=1; do not enable it here.)',

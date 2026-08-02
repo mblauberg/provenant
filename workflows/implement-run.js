@@ -283,7 +283,7 @@ function crossFamilyDispatchHint(runDir, gitCwd, kind = 'primary', reviewerId = 
     ' Write your prompt to a file, then run:\n' +
     '  ~/.agents/skills/orchestrate/scripts/cf_dispatch.sh ' +
     '--orchestrator-family anthropic --tool codex --alias flagship --role other-primary --prompt-file <your-prompt-file> ' +
-    `--out ${runDir}/crossfamily/<name>.txt --terminal-artifact ${runDir}/crossfamily/<name>.terminal.json ` +
+    `--evidence-root ${runDir} --out ${runDir}/crossfamily/<name>.txt --terminal-artifact ${runDir}/crossfamily/<name>.terminal.json ` +
     `--task-id <review-id> --attempt-id <attempt-id> --reviewer-id ${reviewerId} ` +
     `--receipt ${runDir}/crossfamily/<name>.route.json > /dev/null\n` +
     'The dispatcher prints a normalised JSON record (model_family, endpoint_provider, cross_family, certification_eligible, output_sha256, terminal_artifact_sha256, read_only_guarantee, ' +

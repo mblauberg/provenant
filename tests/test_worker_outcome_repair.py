@@ -418,6 +418,19 @@ def test_documented_direct_commands_bind_the_row_reviewer_id():
     assert "cand.reviewerId" not in (root / "workflows" / "codebase-polish.js").read_text(encoding="utf-8")
 
 
+def test_cross_family_workflows_bind_dispatch_evidence_to_run_directory():
+    root = Path(__file__).parents[1]
+    for relative in (
+        "workflows/implement-run.js",
+        "workflows/cross-verify.js",
+        "workflows/codebase-polish.js",
+    ):
+        workflow = (root / relative).read_text(encoding="utf-8")
+        assert "--evidence-root ${runDir}" in workflow, relative
+    cross_verify = (root / "workflows" / "cross-verify.js").read_text(encoding="utf-8")
+    assert "const runDir = boot.runDir" in cross_verify
+
+
 def test_claim_acceptance_helper_is_the_executable_common_join():
     helper = Path(__file__).parents[1] / "skills" / "implement" / "scripts" / "accept_claim.py"
     text = helper.read_text(encoding="utf-8")

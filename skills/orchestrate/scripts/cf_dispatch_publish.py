@@ -29,6 +29,15 @@ def _digest(data: bytes) -> str:
     return "sha256:" + hashlib.sha256(data).hexdigest()
 
 
+def _validate_evidence_path(path: Path, evidence_root: Path) -> None:
+    root = lexical_path(evidence_root)
+    candidate = lexical_path(path if path.is_absolute() else evidence_root / path)
+    try:
+        candidate.relative_to(root)
+    except ValueError as exc:
+        raise PublicationError(f"evidence path escapes evidence root: {path}") from exc
+
+
 def _barrier(path: Path, phase: str) -> None:
     """Optional deterministic test barrier; inactive for normal dispatches."""
     barrier_dir = os.environ.get("CF_DISPATCH_TEST_BARRIER_DIR")
@@ -135,11 +144,14 @@ def _publish_bytes(target: Path, data: bytes, root: Path) -> None:
 
 
 def publish(target: Path, source: Path, root: Path) -> None:
+    _validate_evidence_path(target, root)
     source_data, _source_identity = _read(source, "publication source", source.parent)
     _publish_bytes(target, source_data, root)
 
 
 def verify(entries: list[tuple[Path, str]], root: Path) -> None:
+    for path, _expected in entries:
+        _validate_evidence_path(path, root)
     opened: list[tuple[Path, str, tuple[int, int]]] = []
     try:
         for path, expected in entries:
@@ -165,6 +177,8 @@ def verify(entries: list[tuple[Path, str]], root: Path) -> None:
 
 
 def identity(paths: list[Path], root: Path) -> None:
+    for path in paths:
+        _validate_evidence_path(path, root)
     paths_seen: set[Path] = set()
     identities: set[tuple[int, int]] = set()
     for path in paths:
@@ -197,7 +211,9 @@ def main(argv: list[str]) -> int:
         elif command == "verify" and len(argv) >= 3 and len(argv[1:]) % 2 == 0:
             verify([(Path(argv[index]), argv[index + 1]) for index in range(1, len(argv), 2)], root)
         elif command == "digest" and len(argv) == 2:
-            data, _identity_value = _read(Path(argv[1]), "digest target", root)
+            target = Path(argv[1])
+            _validate_evidence_path(target, root)
+            data, _identity_value = _read(target, "digest target", root)
             print(_digest(data))
         else:
             raise PublicationError(

@@ -30,6 +30,7 @@ Options:
   --receipt PATH               Dispatcher-owned JSON receipt path.
   --model MODEL                Optional model passed to adapter.
   --effort EFFORT              Optional effort passed to adapter.
+  --evidence-root PATH         Lexical root containing all dispatcher evidence paths.
   --out PATH                   Human-readable answer path; defaults to mktemp.
   --terminal-artifact PATH     Dispatcher-owned JSON terminal artifact path; defaults to PATH.terminal.json.
   --prompt TEXT                Prompt text.
@@ -41,7 +42,7 @@ Gemini/Agy execution belongs to Agent Fabric, not this direct-CLI helper.
 EOF
 }
 
-TOOL="" MODEL="" EFFORT="" OUT="" TERMINAL_ARTIFACT="" PROMPT="" PROMPT_FILE="" CHAIN="" ORCH_FAMILY="" MODEL_ALIAS="flagship" ROUTE_ROLE="reviewer" RISK_TIER="" REVIEWER_ID="" TASK_ID="" ATTEMPT_ID="" DISPATCH_RECEIPT="" DOCTOR=0
+TOOL="" MODEL="" EFFORT="" EVIDENCE_ROOT="" OUT="" TERMINAL_ARTIFACT="" PROMPT="" PROMPT_FILE="" CHAIN="" ORCH_FAMILY="" MODEL_ALIAS="flagship" ROUTE_ROLE="reviewer" RISK_TIER="" REVIEWER_ID="" TASK_ID="" ATTEMPT_ID="" DISPATCH_RECEIPT="" DOCTOR=0
 OUT_CREATED=false
 need_value() {
   [ $# -ge 2 ] || { echo "missing value for $1" >&2; exit 2; }
@@ -53,6 +54,7 @@ while [ $# -gt 0 ]; do
     --tool) need_value "$@"; TOOL="$2"; shift 2;;
     --model) need_value "$@"; MODEL="$2"; shift 2;;
     --effort) need_value "$@"; EFFORT="$2"; shift 2;;
+    --evidence-root) need_value "$@"; EVIDENCE_ROOT="$2"; shift 2;;
     --out) need_value "$@"; OUT="$2"; shift 2;;
     --prompt) need_value "$@"; PROMPT="$2"; shift 2;;
     --prompt-file) need_value "$@"; PROMPT_FILE="$2"; shift 2;;
@@ -142,7 +144,8 @@ fi
 if [ -z "$TERMINAL_ARTIFACT" ]; then
   TERMINAL_ARTIFACT="${OUT}.terminal.json"
 fi
-EVIDENCE_ROOT="$(python3 - "$OUT" "$TERMINAL_ARTIFACT" "$DISPATCH_RECEIPT" <<'PY'
+if [ -z "$EVIDENCE_ROOT" ]; then
+  EVIDENCE_ROOT="$(python3 - "$OUT" "$TERMINAL_ARTIFACT" "$DISPATCH_RECEIPT" <<'PY'
 import os
 from pathlib import Path
 import sys
@@ -151,6 +154,7 @@ parents = [str(Path(value).absolute().parent) for value in sys.argv[1:] if value
 print(os.path.commonpath(parents))
 PY
 )"
+fi
 PROMPT_TMP="$(make_tmp)"
 printf '%s' "$PROMPT" >"$PROMPT_TMP"
 trap 'rm -f "$PROMPT_TMP"' EXIT

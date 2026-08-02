@@ -418,6 +418,7 @@ const reviewStage = (cand, _orig, _i) => parallel([
         `${cfDispatch} --orchestrator-family claude \\`,
         `  --chain "codex::low cursor:: agy:: " \\`,
         `  --prompt-file ${runDir}/crossfamily/${cand.id}.prompt \\`,
+        `  --evidence-root ${runDir} \\`,
         `  --out ${runDir}/crossfamily/${cand.id}.out.txt \\`,
         `  --terminal-artifact ${runDir}/crossfamily/${cand.id}.terminal.json \\`,
         `  --task-id ${cand.id} --attempt-id review-${cand.id} --reviewer-id review-${cand.id} \\`,

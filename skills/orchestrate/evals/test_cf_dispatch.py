@@ -558,6 +558,65 @@ def test_publisher_accepts_an_unresolved_symlink_alias_for_the_run_root():
         assert result.stdout.startswith("sha256:")
 
 
+@pytest.mark.parametrize("escaped_option", ("out", "terminal-artifact", "receipt"))
+def test_dispatch_rejects_evidence_paths_outside_explicit_evidence_root(escaped_option):
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        evidence_root = tmp / "run"
+        evidence_root.mkdir()
+        outside = tmp / "outside"
+        outside.mkdir()
+        paths = {
+            "out": evidence_root / "answer.txt",
+            "terminal-artifact": evidence_root / "answer.terminal.json",
+            "receipt": evidence_root / "answer.route.json",
+        }
+        paths[escaped_option] = outside / paths[escaped_option].name
+
+        result = subprocess.run(
+            [
+                str(SCRIPT), "--tool", "codex", "--orchestrator-family", "anthropic",
+                "--evidence-root", str(evidence_root), "--out", str(paths["out"]),
+                "--terminal-artifact", str(paths["terminal-artifact"]),
+                "--receipt", str(paths["receipt"]), "--prompt", "Review",
+            ],
+            cwd=str(tmp), env=fabric_free_env(), text=True, capture_output=True,
+        )
+
+        assert result.returncode != 0
+        assert "evidence path escapes evidence root" in result.stderr
+        assert not paths[escaped_option].exists()
+
+
+def test_dispatch_accepts_explicit_root_with_receipt_and_default_output_in_different_trees():
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        run_dir = tmp / "run"
+        receipts = run_dir / "receipts"
+        temp_root = run_dir / "temporary"
+        receipts.mkdir(parents=True)
+        temp_root.mkdir()
+        receipt = receipts / "dispatch.json"
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        write_executable(bin_dir / "claude", "#!/usr/bin/env bash\ncat >/dev/null\necho OK\n")
+        env = fabric_free_env()
+        env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
+        env["TMPDIR"] = str(temp_root)
+
+        result = subprocess.run(
+            [
+                str(SCRIPT), "--tool", "claude", "--orchestrator-family", "codex",
+                "--evidence-root", str(run_dir), "--receipt", str(receipt),
+                "--prompt", "Review",
+            ],
+            cwd=str(run_dir), env=env, text=True, capture_output=True,
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert receipt.is_file()
+
+
 def test_chain_failed_then_success_preserves_attempt_evidence_and_summary():
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
