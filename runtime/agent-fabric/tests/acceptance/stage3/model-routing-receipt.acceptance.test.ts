@@ -44,6 +44,61 @@ sys.exit(7)
     }
   });
 
+  it("reports a zero-exit router that emits no JSON as a router failure", async () => {
+    const resolveRoute = requirePublicFunction("resolveModelRouteReceipt");
+    const directory = await mkdtemp(join(tmpdir(), "agent-fabric-router-empty-"));
+    const receiptPath = join(directory, "model-route.json");
+    const routerPath = join(directory, "empty-router");
+    await writeFile(routerPath, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+
+    try {
+      await expect(resolveRoute({
+        routerPath,
+        receiptPath,
+        request: {
+          adapter: "codex",
+          alias: "scout",
+          role: "worker",
+          leadFamily: "anthropic",
+          requireDistinct: true,
+        },
+      })).rejects.toSatisfy((error: unknown) => {
+        return error instanceof Error &&
+          /model router failed.*exit code 0.*stderr unavailable/su.test(error.message) &&
+          !error.message.includes("Unexpected end of JSON input");
+      });
+      await expect(readFile(receiptPath, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("reports a router spawn error without presenting it as an exit code", async () => {
+    const resolveRoute = requirePublicFunction("resolveModelRouteReceipt");
+    const directory = await mkdtemp(join(tmpdir(), "agent-fabric-router-enoent-"));
+    const receiptPath = join(directory, "model-route.json");
+
+    try {
+      await expect(resolveRoute({
+        routerPath: join(directory, "missing-router"),
+        receiptPath,
+        request: {
+          adapter: "codex",
+          alias: "scout",
+          role: "worker",
+          leadFamily: "anthropic",
+          requireDistinct: true,
+        },
+      })).rejects.toSatisfy((error: unknown) => {
+        return error instanceof Error &&
+          error.message.includes("spawn error ENOENT") &&
+          !error.message.includes("exit code ENOENT");
+      });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("reports the selector exit status and stderr when select emits no JSON", async () => {
     const selectRoute = requirePublicFunction("selectPreferredModelRouteReceipt");
     const directory = await mkdtemp(join(tmpdir(), "agent-fabric-selector-failure-"));
@@ -101,6 +156,8 @@ print(json.dumps({
           /model preference selector failed.*exit code 9.*selector diagnostic/su.test(error.message) &&
           !error.message.includes("Unexpected end of JSON input");
       });
+      await expect(readFile(`${receiptPath}.candidates.json`, "utf8"))
+        .rejects.toMatchObject({ code: "ENOENT" });
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
@@ -234,8 +291,8 @@ fs.writeFileSync(out, JSON.stringify({
       receipt: Record<string, unknown>;
     };
 
-    expect(resolution.invocation.executable).not.toBe(routerPath);
-    expect(resolution.invocation.arguments[0]).toBe(repositoryPath("scripts/model_route.py"));
+    expect(resolution.invocation.executable).toBe(routerPath);
+    expect(resolution.invocation.arguments[0]).toBe("resolve");
     expect(resolution.invocation.arguments).toEqual(expect.arrayContaining([
       "--task-class", "mechanical",
       "--capabilities-file", capabilitiesFile,

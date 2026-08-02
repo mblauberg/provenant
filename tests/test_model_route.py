@@ -37,6 +37,92 @@ def resolve(*args, adapter_gate="direct-cli"):
     return result, json.loads(result.stdout) if result.stdout else None
 
 
+def test_model_route_wrapper_resolves_yaml_under_a_clean_home(tmp_path):
+    clean_home = tmp_path / "home"
+    clean_home.mkdir()
+    env = {
+        **os.environ,
+        "HOME": str(clean_home),
+    }
+    env.pop("AGENT_FABRIC_PRODUCT_ROOT", None)
+    env.pop("AGENT_FABRIC_INSTANCE_ROOT", None)
+    env.pop("HARNESS_PYTHON", None)
+    capabilities_file = write_codex_capability_snapshot(tmp_path)
+
+    result = subprocess.run(
+        [
+            str(SCRIPT),
+            "resolve",
+            "--adapter", "codex",
+            "--alias", "scout",
+            "--role", "worker",
+            "--lead-family", "anthropic",
+            "--capabilities-file", str(capabilities_file),
+        ],
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    receipt = json.loads(result.stdout)
+    assert receipt["schema_version"] == 1
+    assert receipt["status"] == "ok"
+    assert receipt["adapter"] == "codex"
+    assert receipt["alias"] == "scout"
+
+
+def test_model_route_wrapper_does_not_walk_outside_the_product_root(tmp_path):
+    product_root = tmp_path / "product"
+    shutil.copytree(ROOT / "scripts", product_root / "scripts")
+    shutil.copytree(ROOT / "config", product_root / "config")
+
+    marker = tmp_path / "escaped-interpreter-used"
+    for venv_root in (tmp_path / ".venv", tmp_path / "cwd" / ".venv"):
+        python_path = venv_root / "bin" / "python"
+        python_path.parent.mkdir(parents=True)
+        python_path.write_text(f"#!/bin/sh\nprintf escaped > {marker}\nexit 97\n")
+        python_path.chmod(0o700)
+
+    path_python = tmp_path / "path-bin" / "python3"
+    path_python.parent.mkdir()
+    path_python.symlink_to(ROOT / ".venv" / "bin" / "python")
+    cwd = tmp_path / "cwd"
+    env = {
+        **os.environ,
+        "AGENT_FABRIC_PRODUCT_ROOT": str(product_root),
+        "HOME": str(tmp_path / "home"),
+        "PATH": f"{path_python.parent}:{os.environ['PATH']}",
+        "PYTHONNOUSERSITE": "1",
+    }
+    env.pop("HARNESS_PYTHON", None)
+
+    result = subprocess.run(
+        [
+            str(product_root / "scripts/model-route"),
+            "resolve",
+            "--adapter", "copilot",
+            "--alias", "scout",
+            "--role", "worker",
+            "--lead-family", "anthropic",
+            "--model", "gpt-5.6-luna",
+            "--adapter-gate", "direct-cli",
+        ],
+        cwd=cwd,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["status"] == "ok"
+    assert not marker.exists()
+
+
 def usable_pi_compatibility(tmp_path):
     compatibility = tmp_path / "adapter-compatibility.yaml"
     wrapper_entrypoint = ROOT / "runtime" / "agent-fabric" / "src" / "adapters" / "providers" / "optional" / "pi-rpc.ts"

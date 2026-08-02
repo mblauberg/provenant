@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
-import { access, constants, readFile, rm, writeFile } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { readFile, rm, writeFile } from "node:fs/promises";
+import { dirname, resolve } from "node:path";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
@@ -21,68 +21,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-async function isExecutable(path: string): Promise<boolean> {
-  try {
-    await access(path, constants.X_OK);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function findProjectPython(routerPath: string): Promise<string | undefined> {
-  const roots = new Set([resolve(dirname(routerPath)), resolve(process.cwd())]);
-  for (const root of roots) {
-    let current = root;
-    while (true) {
-      const candidate = join(current, ".venv", "bin", "python");
-      if (await isExecutable(candidate)) return candidate;
-      const parent = dirname(current);
-      if (parent === current) break;
-      current = parent;
-    }
-  }
-  return undefined;
-}
-
-async function resolveRouterScriptPath(routerPath: string): Promise<string> {
-  try {
-    const source = await readFile(routerPath, "utf8");
-    if (source.startsWith("#!/usr/bin/env bash") && source.includes("model_route.py")) {
-      const pythonRouterPath = join(dirname(routerPath), "model_route.py");
-      if (await isExecutable(pythonRouterPath)) return pythonRouterPath;
-    }
-  } catch {
-    // Let the interpreter report a missing or unreadable router path.
-  }
-  return routerPath;
-}
-
-async function resolveRouterInterpreter(routerPath: string): Promise<string> {
-  const harnessPython = process.env.HARNESS_PYTHON;
-  if (harnessPython !== undefined && harnessPython.length > 0 && await isExecutable(harnessPython)) {
-    return harnessPython;
-  }
-  const projectPython = await findProjectPython(routerPath);
-  if (projectPython !== undefined) return projectPython;
-  try {
-    await execFileAsync("python3", ["-c", "import pytest, yaml"], {
-      encoding: "utf8",
-      timeout: 10_000,
-      maxBuffer: 1024 * 1024,
-    });
-    return "python3";
-  } catch {
-    throw new Error(
-      "model router requires Python with pytest and PyYAML; set HARNESS_PYTHON or install the repository .venv",
-    );
-  }
-}
-
 function describeRouterFailure(error: unknown): string {
   if (!isRecord(error)) return "exit status unavailable; stderr unavailable";
-  const exitCode = typeof error.code === "number" || typeof error.code === "string"
+  const exitCode = typeof error.code === "number"
     ? `exit code ${String(error.code)}`
+    : typeof error.code === "string"
+      ? `spawn error ${error.code}; exit status unavailable`
     : "exit status unavailable";
   const signal = typeof error.signal === "string" ? `, signal ${error.signal}` : "";
   const stderr = typeof error.stderr === "string" && error.stderr.trim().length > 0
@@ -91,14 +35,19 @@ function describeRouterFailure(error: unknown): string {
   return `${exitCode}${signal}; stderr: ${stderr}`;
 }
 
-function parseRouterOutput(stdout: string, operation: string, failure: unknown | undefined): unknown {
+function parseRouterOutput(
+  stdout: string,
+  operation: string,
+  failure: unknown | undefined,
+  successfulStderr = "",
+): unknown {
   try {
     return JSON.parse(stdout);
   } catch (error: unknown) {
-    if (failure !== undefined) {
-      throw new Error(`${operation} failed (${describeRouterFailure(failure)})`, { cause: error });
-    }
-    throw error;
+    const description = failure === undefined
+      ? `exit code 0; stderr: ${successfulStderr.trim().length > 0 ? successfulStderr.trimEnd() : "stderr unavailable"}`
+      : describeRouterFailure(failure);
+    throw new Error(`${operation} failed (${description})`, { cause: error });
   }
 }
 
@@ -273,13 +222,14 @@ export async function resolveModelRouteReceipt(input: {
     input.request.leadFamily,
     ...(input.request.requireDistinct ? ["--require-distinct"] : []),
   ];
-  const routerScriptPath = await resolveRouterScriptPath(input.routerPath);
-  const interpreter = await resolveRouterInterpreter(routerScriptPath);
-  const invocation = { executable: interpreter, arguments: [routerScriptPath, ...argumentsList] };
+  // The repository wrapper owns the shared interpreter ladder. Keeping this
+  // caller on the wrapper also keeps operator and Fabric execution identical.
+  const invocation = { executable: input.routerPath, arguments: argumentsList };
   let stdout: string;
+  let stderr = "";
   let failure: unknown;
   try {
-    ({ stdout } = await execFileAsync(interpreter, invocation.arguments, {
+    ({ stdout, stderr } = await execFileAsync(invocation.executable, invocation.arguments, {
       encoding: "utf8",
       timeout: 50_000,
       maxBuffer: 1024 * 1024,
@@ -288,7 +238,7 @@ export async function resolveModelRouteReceipt(input: {
     failure = error;
     stdout = isRecord(error) && typeof error.stdout === "string" ? error.stdout : "";
   }
-  const parsed: unknown = parseRouterOutput(stdout, "model router", failure);
+  const parsed: unknown = parseRouterOutput(stdout, "model router", failure, stderr);
   if (!isRecord(parsed) || !isValidReceipt(parsed, input.request)) {
     throw new TypeError("model router returned an invalid receipt");
   }
@@ -530,40 +480,41 @@ export async function selectPreferredModelRouteReceipt(input: {
     "--preferences-file", input.preferencesPath,
     "--spread-state-file", input.spreadStatePath,
   ];
-  const routerScriptPath = await resolveRouterScriptPath(input.routerPath);
-  const interpreter = await resolveRouterInterpreter(routerScriptPath);
-  const invocation = { executable: interpreter, arguments: [routerScriptPath, ...argumentsList] };
-  let stdout: string;
-  let failure: unknown;
+  const invocation = { executable: input.routerPath, arguments: argumentsList };
   try {
-    ({ stdout } = await execFileAsync(interpreter, invocation.arguments, {
-      encoding: "utf8",
-      timeout: 50_000,
-      maxBuffer: 4 * 1024 * 1024,
-    }));
-  } catch (error: unknown) {
-    failure = error;
-    stdout = isRecord(error) && typeof error.stdout === "string" ? error.stdout : "";
+    let stdout: string;
+    let stderr = "";
+    let failure: unknown;
+    try {
+      ({ stdout, stderr } = await execFileAsync(invocation.executable, invocation.arguments, {
+        encoding: "utf8",
+        timeout: 50_000,
+        maxBuffer: 4 * 1024 * 1024,
+      }));
+    } catch (error: unknown) {
+      failure = error;
+      stdout = isRecord(error) && typeof error.stdout === "string" ? error.stdout : "";
+    }
+    const parsed: unknown = parseRouterOutput(stdout, "model preference selector", failure, stderr);
+    if (
+      !isRecord(parsed) ||
+      parsed.schema_version !== 1 ||
+      typeof parsed.status !== "string" ||
+      parsed.task_class !== input.taskClass ||
+      parsed.role !== input.role
+    ) {
+      throw new TypeError("model preference selector returned an invalid receipt");
+    }
+    if (parsed.status !== "ok") {
+      await writeFile(input.receiptPath, `${JSON.stringify(parsed, null, 2)}\n`, { mode: 0o600 });
+      throw new ModelRouteRejectedError(parsed, invocation);
+    }
+    if (!isValidSelectionReceipt(parsed, input.taskClass, input.role, hardCandidates)) {
+      throw new TypeError("model preference selector returned an invalid receipt");
+    }
+    await writeFile(input.receiptPath, `${JSON.stringify(parsed, null, 2)}\n`, { mode: 0o600 });
+    return { receipt: parsed, invocation };
   } finally {
     await rm(candidatesPath, { force: true });
   }
-  const parsed: unknown = parseRouterOutput(stdout, "model preference selector", failure);
-  if (
-    !isRecord(parsed) ||
-    parsed.schema_version !== 1 ||
-    typeof parsed.status !== "string" ||
-    parsed.task_class !== input.taskClass ||
-    parsed.role !== input.role
-  ) {
-    throw new TypeError("model preference selector returned an invalid receipt");
-  }
-  if (parsed.status !== "ok") {
-    await writeFile(input.receiptPath, `${JSON.stringify(parsed, null, 2)}\n`, { mode: 0o600 });
-    throw new ModelRouteRejectedError(parsed, invocation);
-  }
-  if (!isValidSelectionReceipt(parsed, input.taskClass, input.role, hardCandidates)) {
-    throw new TypeError("model preference selector returned an invalid receipt");
-  }
-  await writeFile(input.receiptPath, `${JSON.stringify(parsed, null, 2)}\n`, { mode: 0o600 });
-  return { receipt: parsed, invocation };
 }
