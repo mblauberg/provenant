@@ -30,8 +30,9 @@ Documentation claims sit in three tiers, and the third is deliberate:
    with `--write`, and never edit the region by hand; `scripts/check-harness`
    fails on drift and on a deleted marker, and CI never writes.
 2. **Drift-checked.** Claims compared against source without being generated:
-   the ADR index, the spec schema baseline, tier row names and order, selected
-   constants, the machine-checking sentence and the repair budgets
+   the ADR index (`scripts/check_adr_index.py`), the spec schema baseline
+   (`scripts/check_spec_schema_drift.py`), and tier row names and order,
+   selected constants, the machine-checking sentence and the repair budgets
    (`scripts/check_doc_constants.py`), plus relative Markdown links and
    recognised outside-fence inline paths in `docs/ARCHITECTURE.md` and
    `README.md` (`scripts/check_doc_paths.py`). Table prose, fenced commands and
@@ -102,8 +103,8 @@ doctrine (tiered anti-AI taxonomy, Australian-English house style, condense pass
 and claim discipline); `engineering-writing`, `academic-writing` and
 `legal-writing` keep only their domain overlay and link back to the hub. Change
 the shared doctrine in the hub, not in a domain skill. The hub's
-`scripts/style_lint.py` owns the shared lint vocabulary the domain linters
-import, so a change there ripples to all of them.
+`skills/natural-writing/scripts/style_lint.py` owns the shared lint vocabulary
+the domain linters import, so a change there ripples to all of them.
 
 ## Promote and retire
 
