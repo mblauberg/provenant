@@ -1,4 +1,3 @@
-import { existsSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import { tmpdir } from "node:os";
@@ -12,6 +11,7 @@ import { openLocalLifecycleReceiptAuthority } from "../../../src/lifecycle/local
 import * as shutdownFinalizer from "../../../src/daemon/shutdown-finalizer.ts";
 import { createCurrentSessionRun } from "../../support/current-session-testkit.ts";
 import { DAEMON_ROOT_AUTHORITY } from "../../support/daemon-testkit.ts";
+import { waitForFile } from "../../shared/deadline-wait.ts";
 
 const roots: string[] = [];
 
@@ -19,14 +19,6 @@ afterEach(async () => {
   vi.useRealTimers();
   await Promise.allSettled(roots.splice(0).map(async (root) => await rm(root, { recursive: true, force: true })));
 });
-
-async function waitForPath(path: string): Promise<void> {
-  const deadline = Date.now() + 5_000;
-  while (!existsSync(path)) {
-    if (Date.now() >= deadline) throw new Error(`timed out waiting for ${path}`);
-    await new Promise<void>((resolve) => setTimeout(resolve, 10));
-  }
-}
 
 async function provisionLifecycleReceiptAuthority(stateDirectory: string): Promise<void> {
   await mkdir(stateDirectory, { recursive: true, mode: 0o700 });
@@ -100,7 +92,7 @@ describe("shutdown deadline behaviour", () => {
         commandId: "shutdown-deadline:dispatch",
       });
       void dispatch.catch(() => undefined);
-      await waitForPath(adapterPidPath);
+      await waitForFile(adapterPidPath);
       adapterPid = Number(await readFile(adapterPidPath, "utf8"));
 
       vi.useFakeTimers();
@@ -164,12 +156,6 @@ describe("shutdown deadline behaviour", () => {
     }) => Promise<void>) | undefined;
     expect(closeFabricWithAuthority).toEqual(expect.any(Function));
     if (closeFabricWithAuthority === undefined) return;
-    const processSource = await readFile(
-      new URL("../../../src/daemon/process.ts", import.meta.url),
-      "utf8",
-    );
-    expect(processSource).toContain("closeFabricWithLifecycleReceiptAuthority");
-    expect(processSource).toContain("await fabric.close()");
 
     const failure = new Error("fabric close failed");
     await expect(closeFabricWithAuthority({

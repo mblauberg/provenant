@@ -167,7 +167,7 @@ describe("global idle stop races", () => {
           database.prepare("UPDATE daemon_global_state SET revision = revision + 1 WHERE singleton = 1").run();
         },
         closeTimeoutMs: 500,
-        drainTimeoutMs: 5_000,
+        drainTimeoutMs: 500,
       }),
       reopenSocket: async () => await openRecoverableUnixListener(server, socketPath),
     })).resolves.toMatchObject({ state: "busy", reason: "state-changed" });
@@ -226,7 +226,7 @@ describe("global idle stop races", () => {
         await new Promise<void>((resolvePromise) => inFlightDrainers.add(resolvePromise));
       },
       closeTimeoutMs: 500,
-      drainTimeoutMs: 5_000,
+      drainTimeoutMs: 500,
     });
 
     const finishedBeforeCommand = await Promise.race([
@@ -315,30 +315,35 @@ describe("global idle stop races", () => {
     }
   });
 
-  it("rejects a queued Unix socket frame after the serving admission fence closes", async () => {
+  it("rejects a frame arriving after the serving admission fence closes", async () => {
     const root = await mkdtemp(join(tmpdir(), "fabric-late-frame-fence-"));
     directories.push(root);
     const socketPath = join(root, "fabric.sock");
     const activeSockets = new Set<Socket>();
     const admissionFence = new RecoverableServingAdmissionFence();
-    const frameReceived = Promise.withResolvers<void>();
-    const releaseFrame = Promise.withResolvers<void>();
-    const frameFinished = Promise.withResolvers<void>();
+    const operationStarted = Promise.withResolvers<void>();
+    const releaseOperation = Promise.withResolvers<void>();
+    const operationFinished = Promise.withResolvers<void>();
     let inFlight = 0;
     let decide!: (decision: "admitted" | "rejected") => void;
     const decision = new Promise<"admitted" | "rejected">((resolve) => { decide = resolve; });
     const server = createServer((socket) => {
       activeSockets.add(socket);
       socket.once("close", () => activeSockets.delete(socket));
-      socket.once("data", () => {
-        inFlight += 1;
-        frameReceived.resolve();
-        void releaseFrame.promise.then(() => {
+      socket.on("data", (chunk) => {
+        if (chunk.toString("utf8").includes("held frame")) {
+          inFlight += 1;
+          operationStarted.resolve();
+          void releaseOperation.promise.then(() => {
+            inFlight -= 1;
+            operationFinished.resolve();
+            socket.destroy();
+          });
+          return;
+        }
+        if (chunk.toString("utf8").includes("queued frame")) {
           decide(admissionFence.tryAdmit() ? "admitted" : "rejected");
-          inFlight -= 1;
-          frameFinished.resolve();
-          socket.destroy();
-        });
+        }
       });
     });
     servers.push(server);
@@ -349,21 +354,22 @@ describe("global idle stop races", () => {
       client.once("connect", resolve);
       client.once("error", reject);
     });
-    client.write("queued frame\n");
-    await frameReceived.promise;
+    client.write("held frame\n");
+    await operationStarted.promise;
     const closing = closeRecoverableUnixListener({
       server,
       sockets: activeSockets,
       waitForInFlight: async () => {
-        if (inFlight !== 0) await frameFinished.promise;
+        if (inFlight !== 0) await operationFinished.promise;
       },
       closeTimeoutMs: 500,
-      drainTimeoutMs: 5_000,
+      drainTimeoutMs: 500,
       admissionFence,
     });
-    releaseFrame.resolve();
+    client.write("queued frame\n");
 
     await expect(decision).resolves.toBe("rejected");
+    releaseOperation.resolve();
     await closing;
     client.destroy();
   });
