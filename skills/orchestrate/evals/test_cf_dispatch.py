@@ -471,8 +471,8 @@ def test_direct_cli_executes_the_verified_adapter_path_once():
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
-        record = json.loads(result.stdout)
         assert result.returncode == 0, result.stderr
+        record = json.loads(result.stdout)
         assert out.read_text(encoding="utf-8").strip() == "VERIFIED-PATH"
         assert record["adapter_resolution"] == "verified-owner"
         assert record["adapter_executable"] == str(verified_path)
@@ -518,8 +518,8 @@ def test_direct_cli_refuses_a_tampered_path_when_owner_rejects_it():
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
-        record = json.loads(result.stdout)
         assert result.returncode != 0
+        record = json.loads(result.stdout)
         assert record["status"] == "adapter_resolution_failed"
         assert record["adapter_resolution"] == "rejected"
         assert "ADAPTER_IDENTITY_MISMATCH" in out.read_text(encoding="utf-8")
@@ -589,9 +589,9 @@ def test_dispatch_receipt_owns_terminal_fact_and_output_digest():
             ],
             cwd=str(tmp), env=env, text=True, capture_output=True,
         )
+        assert result.returncode == 0, result.stderr
         record = json.loads(result.stdout)
         persisted = json.loads(receipt_path.read_text(encoding="utf-8"))
-        assert result.returncode == 0, result.stderr
         assert persisted == record
         assert record["id"] == "task-1"
         assert record["attempt_id"] == "attempt-2"
@@ -630,6 +630,7 @@ def test_documented_workflow_separates_answer_from_terminal_artifact_and_joins_e
             cwd=str(tmp), env=env, text=True, capture_output=True,
         )
 
+        assert result.returncode == 0, result.stderr
         record = json.loads(result.stdout)
         persisted = json.loads(receipt_path.read_text(encoding="utf-8"))
         terminal_value = json.loads(terminal.read_text(encoding="utf-8"))
@@ -655,7 +656,6 @@ def test_documented_workflow_separates_answer_from_terminal_artifact_and_joins_e
             "substantial",
         )
 
-        assert result.returncode == 0, result.stderr
         assert answer.read_text(encoding="utf-8") == "Human answer\n"
         assert terminal_value == {
             "id": "review-1", "attempt_id": "attempt-1", "kind": "complete",
@@ -1016,8 +1016,8 @@ def test_chain_failed_then_success_preserves_attempt_evidence_and_summary():
             cwd=str(tmp), env=env, text=True, capture_output=True,
         )
 
-        record = json.loads(result.stdout)
         assert result.returncode == 0, result.stderr
+        record = json.loads(result.stdout)
         assert receipt.is_file()
         assert json.loads(receipt.read_text(encoding="utf-8")) == record
         attempts = record["chain"]["attempts"]
@@ -1063,8 +1063,8 @@ def test_receipt_write_failure_is_explicitly_non_successful():
             cwd=str(tmp), env=env, text=True, capture_output=True,
         )
 
-        record = json.loads(result.stdout)
         assert result.returncode != 0
+        record = json.loads(result.stdout)
         assert record["status"] == "receipt_write_error"
         assert record["terminal_observed"] is False
         assert record["certification_eligible"] is False
@@ -1231,8 +1231,8 @@ def test_claude_oauth_fallback_uses_verifier_system_prompt():
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
-        record = json.loads(result.stdout)
         assert result.returncode == 0, result.stderr
+        record = json.loads(result.stdout)
         assert record["status"] == "ok"
         args = args_file.read_text(encoding="utf-8")
         assert "--system-prompt" in args
@@ -1255,8 +1255,8 @@ def test_removed_agy_direct_route_fails_closed_with_schema():
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
-        record = json.loads(result.stdout)
         assert result.returncode != 0
+        record = json.loads(result.stdout)
         assert DISPATCH_SCHEMA <= set(record)
         assert record["status"] == "unknown_tool"
         assert record["read_only_guarantee"] == "none"
@@ -1277,9 +1277,9 @@ def test_default_failure_retains_only_the_declared_output_tempfile():
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
+        assert result.returncode != 0
         record = json.loads(result.stdout)
         output = Path(record["output_path"])
-        assert result.returncode != 0
         assert output.exists()
         # Only the dispatcher's own tempfiles are its responsibility. The tsx
         # loader caches into a tsx-<uid> directory under TMPDIR, which is not a
@@ -1307,8 +1307,8 @@ def test_orchestrator_family_is_required():
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
-        record = json.loads(result.stdout)
         assert result.returncode != 0
+        record = json.loads(result.stdout)
         assert DISPATCH_SCHEMA <= set(record)
         assert record["status"] == "orchestrator_family_required"
         assert record["cross_family"] is False
@@ -1337,8 +1337,8 @@ def test_evidence_root_is_required():
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
-        record = json.loads(result.stdout)
         assert result.returncode != 0
+        record = json.loads(result.stdout)
         assert record["status"] == "evidence_root_required"
         assert record["certification_eligible"] is False
 
@@ -1362,8 +1362,8 @@ def test_same_family_cli_is_forbidden_when_family_declared():
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
-        record = json.loads(result.stdout)
         assert result.returncode != 0
+        record = json.loads(result.stdout)
         assert DISPATCH_SCHEMA <= set(record)
         assert record["status"] == "same_family_forbidden"
         assert record["read_only_guarantee"] == "none"
@@ -1398,8 +1398,8 @@ def test_cursor_model_provider_prevents_disguised_same_family_review():
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
-        record = json.loads(result.stdout)
         assert result.returncode != 0
+        record = json.loads(result.stdout)
         assert record["provider_family"] == "openai"
         assert record["status"] == "same_family_forbidden"
         assert record["cross_family"] is False
@@ -1444,8 +1444,8 @@ def test_cursor_distinct_model_records_adapter_and_provider_family():
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
-        record = json.loads(result.stdout)
         assert result.returncode == 0
+        record = json.loads(result.stdout)
         assert record["adapter"] == "cursor"
         assert record["provider_family"] == "xai"
         assert record["endpoint_provider"] == "cursor"
@@ -1484,8 +1484,8 @@ def test_full_vendor_owner_attestation_can_certify_a_direct_route():
             str(SCRIPT), "--tool", "claude", "--orchestrator-family", "codex",
             "--out", str(out), "--prompt", "Review", "--evidence-root", str(tmp),
         ], cwd=td, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        record = json.loads(result.stdout)
         assert result.returncode == 0, result.stderr
+        record = json.loads(result.stdout)
         assert record["provider_assurance"] == "full-vendor-identity"
         assert record["certification_eligible"] is True
 
@@ -1511,8 +1511,8 @@ def test_direct_cli_does_not_trust_inconsistent_owner_certification_boolean():
             "--orchestrator-family", "openai", "--out", str(out), "--prompt", "Review",
             "--evidence-root", str(tmp),
         ], cwd=td, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        record = json.loads(result.stdout)
         assert result.returncode == 0, result.stderr
+        record = json.loads(result.stdout)
         assert record["provider_assurance"] == "partial-signed-helpers"
         assert record["certification_eligible"] is False
 
@@ -1555,8 +1555,8 @@ def test_explicit_output_path_preserves_adapter_failure_diagnostics():
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
-        record = json.loads(result.stdout)
         assert result.returncode != 0
+        record = json.loads(result.stdout)
         assert record["status"] == "error"
         assert record["output_path"] == str(out)
         assert "simulated adapter failure" in out.read_text(encoding="utf-8")
@@ -1591,8 +1591,8 @@ def test_unwritable_output_path_cannot_certify_success():
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
-        record = json.loads(result.stdout)
         assert result.returncode != 0
+        record = json.loads(result.stdout)
         assert record["status"] == "terminal_artifact_write_error"
         assert record["certification_eligible"] is False
         assert record["output_path"] == ""
@@ -1657,8 +1657,8 @@ def test_resolved_role_effort_reaches_codex_adapter_and_receipt():
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
-        record = json.loads(result.stdout)
         assert result.returncode == 0, result.stderr
+        record = json.loads(result.stdout)
         assert record["requested_effort"] == "max"
         assert record["effort"] == "xhigh"
         assert record["effort_capability_source"] == "runtime-model-catalog"
@@ -1713,8 +1713,8 @@ def test_codex_capability_discovery_failure_blocks_execution_with_receipt():
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
-        record = json.loads(result.stdout)
         assert result.returncode != 0
+        record = json.loads(result.stdout)
         assert DISPATCH_SCHEMA <= set(record)
         assert record["status"] == "capability_discovery_failed"
         assert record["effort_capability_source"] == "runtime-discovery-failed"
@@ -1766,8 +1766,8 @@ def test_mixed_malformed_codex_capabilities_block_execution_with_receipt():
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
-        record = json.loads(result.stdout)
         assert result.returncode != 0
+        record = json.loads(result.stdout)
         assert DISPATCH_SCHEMA <= set(record)
         assert record["status"] == "capability_discovery_failed"
         assert record["certification_eligible"] is False
@@ -1817,8 +1817,8 @@ def test_unrelated_codex_model_without_efforts_blocks_execution_with_receipt():
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
-        record = json.loads(result.stdout)
         assert result.returncode != 0
+        record = json.loads(result.stdout)
         assert DISPATCH_SCHEMA <= set(record)
         assert record["status"] == "capability_discovery_failed"
         assert record["certification_eligible"] is False
@@ -1868,8 +1868,8 @@ def test_duplicate_codex_discovery_member_blocks_execution_with_receipt():
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
-        record = json.loads(result.stdout)
         assert result.returncode != 0
+        record = json.loads(result.stdout)
         assert DISPATCH_SCHEMA <= set(record)
         assert record["status"] == "capability_discovery_failed"
         assert record["certification_eligible"] is False
@@ -1919,8 +1919,8 @@ def test_codex_explicit_model_rejection_never_reports_it_as_resolved():
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
-        record = json.loads(result.stdout)
         assert result.returncode != 0
+        record = json.loads(result.stdout)
         assert record["status"] == "adapter_account_default_only"
         assert record["resolved_model"] == ""
         assert record["requested_model"] == "gpt-5.6-sol"
@@ -1982,8 +1982,8 @@ def test_broker_adapter_requires_resolvable_provider_family():
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
-        record = json.loads(result.stdout)
         assert result.returncode != 0
+        record = json.loads(result.stdout)
         assert record["status"] == "model_required_for_broker"
         assert record["cross_family"] is False
 
@@ -2032,8 +2032,8 @@ def test_invalid_orchestrator_family_fails_closed():
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
-        record = json.loads(result.stdout)
         assert result.returncode != 0
+        record = json.loads(result.stdout)
         assert DISPATCH_SCHEMA <= set(record)
         assert record["status"] == "invalid_orchestrator_family"
         assert record["cross_family"] is False
@@ -2072,8 +2072,8 @@ def test_chain_all_failed_uses_dispatch_schema():
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
-        record = json.loads(result.stdout)
         assert result.returncode != 0
+        record = json.loads(result.stdout)
         assert DISPATCH_SCHEMA <= set(record)
         assert record["tool"] == "chain"
         assert record["status"] == "all_failed"
@@ -2219,8 +2219,8 @@ def test_non_git_fallback_routes_via_product_root_model_route():
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
-        record = json.loads(result.stdout)
         assert result.returncode == 0, result.stderr
+        record = json.loads(result.stdout)
         assert record["status"] == "ok"
         assert record["resolved_model"]
         assert out.read_text(encoding="utf-8").strip() == "OK"
