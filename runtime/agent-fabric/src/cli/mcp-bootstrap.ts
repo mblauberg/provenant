@@ -258,12 +258,63 @@ export async function repositoryCollectionChildren(canonicalRoot: string): Promi
   return repositories;
 }
 
+const WORKSPACE_FILE_MARKERS = new Set([
+  "AGENTS.md",
+  "CLAUDE.md",
+  "package.json",
+  "pyproject.toml",
+  "Cargo.toml",
+  "go.mod",
+]);
+
+function workspaceMarkerKind(name: string): "file" | "directory" | null {
+  if (name === ".claude") return "directory";
+  if (WORKSPACE_FILE_MARKERS.has(name) || name.endsWith(".code-workspace")) return "file";
+  return null;
+}
+
+async function isRepositoryRoot(canonicalPath: string): Promise<boolean> {
+  try {
+    const marker = await lstat(join(canonicalPath, ".git"));
+    return marker.isDirectory() || marker.isFile();
+  } catch (error: unknown) {
+    if (isMissingPathError(error)) return false;
+    throw error;
+  }
+}
+
+async function hasWorkspaceMarker(canonicalRoot: string): Promise<boolean> {
+  const children = await readdir(canonicalRoot, { withFileTypes: true });
+  for (const child of children) {
+    const kind = workspaceMarkerKind(child.name);
+    if (kind === null) continue;
+    try {
+      // Resolve before inspecting so a project marker symlinked into a child
+      // repository is treated the same as a marker stored at this root.
+      const resolved = await realpath(join(canonicalRoot, child.name));
+      const marker = await lstat(resolved);
+      // A directory marker that is itself a repository root is a sibling
+      // clone, not a project signal. Anyone able to place a repository here
+      // could otherwise name it `.claude` and turn the collection guard off
+      // for every other repository beside it.
+      if (kind === "directory" && await isRepositoryRoot(resolved)) continue;
+      if ((kind === "file" && marker.isFile()) || (kind === "directory" && marker.isDirectory())) return true;
+    } catch (error: unknown) {
+      if (!isMissingPathError(error)) throw error;
+    }
+  }
+  return false;
+}
+
 // The collection heuristic is intentionally shallow: direct repository
 // children show that trusting this directory would grant sibling authority,
 // while recursively searching would misclassify an ordinary project that
-// happens to contain nested fixtures or vendored repositories.
+// happens to contain nested fixtures or vendored repositories. A conventional
+// marker at this exact root is an explicit project signal, even when the
+// project deliberately composes several repositories.
 export async function looksLikeRepositoryCollection(canonicalRoot: string): Promise<boolean> {
-  return (await repositoryCollectionChildren(canonicalRoot)).length > 1;
+  if ((await repositoryCollectionChildren(canonicalRoot)).length <= 1) return false;
+  return !await hasWorkspaceMarker(canonicalRoot);
 }
 
 async function workspaceTrustRecoveryMessage(
