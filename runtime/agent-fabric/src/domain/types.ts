@@ -3,7 +3,12 @@ import type {
   DisclosurePolicy,
   DisclosureTarget,
 } from "@local/agent-fabric-protocol";
-import type { ProviderIdentityAssurance } from "../adapters/provider-identity.js";
+
+export type ProviderIdentityAssurance =
+  | "full-vendor-identity"
+  | "partial-signed-helpers"
+  | "owner-controlled-install-root"
+  | "lockfile-install-attestation";
 
 export type AuthorityInput = AuthorityEnvelopeV2;
 export type { DisclosurePolicy, DisclosureTarget };
