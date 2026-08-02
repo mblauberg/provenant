@@ -115,7 +115,6 @@ def _fixture(
     *,
     launcher_mode: str,
     protocol_dist: str,
-    linked_worktree: bool = False,
 ) -> tuple[Path, Path, Path]:
     root = tmp_path / "agents"
     _copy_launcher_scripts(root)
@@ -150,10 +149,7 @@ def _fixture(
         output_time = now + 20 if protocol_dist == "current" else now - 20
         os.utime(protocol_output, (output_time, output_time))
 
-    if linked_worktree:
-        _write(root / ".git", "gitdir: /external/common/worktrees/fixture\n")
-    else:
-        _commit_fixture(root)
+    _commit_fixture(root)
     _write_fixture_attestation(root)
 
     marker = tmp_path / "daemon-election-attempt"
