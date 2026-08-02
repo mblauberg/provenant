@@ -374,3 +374,79 @@ def test_legacy_runner_keeps_the_subprocess_run_path(tmp_path, monkeypatch):
 )
 def test_runner_detection_is_bound_to_the_configured_command(command, expected):
     assert runner_for_command(command) is expected
+
+
+def test_structured_runner_records_how_long_the_target_ran(tmp_path):
+    """A gate line that says only "non-zero" cannot separate slow from hung.
+
+    The runner therefore has to measure the run, not just report its exit. This
+    pins the measurement to real wall-clock time so an unpopulated default of
+    0.0 cannot pass for a timing.
+    """
+    result = run_command(
+        f"{sys.executable} -c {shlex.quote('import time; time.sleep(0.4)')}",
+        tmp_path,
+        runner=Runner.PYTEST,
+    )
+
+    assert result.timed_out is False
+    assert result.elapsed_seconds >= 0.4, (
+        "structured runner reported "
+        f"elapsed_seconds={result.elapsed_seconds} for a target that slept 0.4s"
+    )
+    assert result.elapsed_seconds < 60
+
+
+def test_structured_runner_flags_a_target_killed_at_the_cap(tmp_path, monkeypatch):
+    """A target killed at the cap must say so on the result.
+
+    Without the flag, a cap kill and a target that failed on its own merits are
+    both an unclassified non-zero return, and telling them apart meant raising
+    the cap and rerunning CI.
+    """
+    monkeypatch.setattr(change_gate_runner, "DIRECT_PROCESS_TIMEOUT", 0.1)
+
+    result = run_command(
+        f"{sys.executable} -c {shlex.quote('import time; time.sleep(60)')}",
+        tmp_path,
+        runner=Runner.PYTEST,
+    )
+
+    assert result.timed_out is True, "a target killed at the cap did not carry timed_out"
+    assert result.classification is FailureClass.UNKNOWN
+    assert result.elapsed_seconds >= 0.1
+
+
+# The slowest legitimate target observed at its own merge base:
+# skills/orchestrate/evals/test_cf_dispatch.py takes 76s on macOS but over 300s
+# on a Linux CI runner.
+SLOWEST_KNOWN_TARGET_SECONDS = 300.0
+
+
+def test_direct_process_timeout_clears_the_slowest_known_target():
+    """The cap bounds hangs; it must not bound slow-but-honest targets.
+
+    At 30s the cap sat below the slowest real target, so any change touching
+    that target was permanently unlandable: the reverted run was killed part way
+    and came back as an unclassified SIGTERM rather than an assertion.
+    """
+    assert change_gate_runner.DIRECT_PROCESS_TIMEOUT >= 4 * SLOWEST_KNOWN_TARGET_SECONDS, (
+        "DIRECT_PROCESS_TIMEOUT="
+        f"{change_gate_runner.DIRECT_PROCESS_TIMEOUT}s does not comfortably clear the slowest "
+        f"known target ({SLOWEST_KNOWN_TARGET_SECONDS}s for "
+        "skills/orchestrate/evals/test_cf_dispatch.py on a Linux runner); a cap at or below "
+        "that turns a slow target into an unclassified SIGTERM and makes the change unlandable"
+    )
+
+
+def test_structured_runner_keeps_no_pipe_draining_helper():
+    """Output custody is a temp file, so no pipe drainer may survive.
+
+    `_run_structured` hands the child a `tempfile.TemporaryFile` rather than a
+    pipe, which is what stops a target that outruns the pipe buffer from
+    deadlocking. A resurrected `_drain_output` would mean the pipe path is back.
+    """
+    assert not hasattr(change_gate_runner, "_drain_output"), (
+        "change_gate_runner still defines _drain_output; the structured runner captures output "
+        "through a temp file and must not carry a pipe-draining path"
+    )
