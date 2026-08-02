@@ -571,7 +571,7 @@ run_one() {  # $1 tool $2 model $3 effort -> writes answer and optional terminal
         adapter_resolution_failed=1
       fi
       capabilities_file="$tmpdir/codex-capabilities.json"
-      if [ "$adapter_resolution_failed" -eq 0 ] && ! "$SCRIPT_DIR/codex_capabilities.py" \
+      if [ "$adapter_resolution_failed" -eq 0 ] && ! "$DISPATCH_PYTHON" "$SCRIPT_DIR/codex_capabilities.py" \
         --codex-bin "$adapter_executable" \
         --out "$capabilities_file" >>"$diag" 2>&1; then
         rm -f "$capabilities_file"
