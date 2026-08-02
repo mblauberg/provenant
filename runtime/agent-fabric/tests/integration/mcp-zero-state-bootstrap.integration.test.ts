@@ -1,13 +1,34 @@
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
-import { access, mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { access, copyFile, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
 import Database from "better-sqlite3";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+import type { BootstrapMcpSeatResult } from "../../src/core/contracts.ts";
+
+const daemon = vi.hoisted((): { result: BootstrapMcpSeatResult | undefined } => ({ result: undefined }));
+
+vi.mock("../../src/daemon/client.js", () => ({
+  startFabricDaemon: vi.fn(async () => ({
+    address: { path: join(tmpdir(), "fabric-zero-state-missing.sock") },
+    bootstrapCapability: "unused-bootstrap-capability",
+    ownsProcess: false,
+    pid: 4242,
+    release: vi.fn(),
+  })),
+  connectFabricDaemon: vi.fn(async () => ({
+    bootstrapMcpSeat: vi.fn(async () => {
+      if (daemon.result === undefined) throw new Error("test bootstrap result is missing");
+      return daemon.result;
+    }),
+    close: vi.fn(async () => undefined),
+  })),
+}));
 
 import { Fabric } from "../../src/core/fabric.ts";
 import { bootstrapMcpSeat } from "../../src/cli/mcp-bootstrap.ts";
@@ -19,6 +40,97 @@ const roots: string[] = [];
 const execFileAsync = promisify(execFile);
 const cliMain = fileURLToPath(new URL("../../src/cli/main.ts", import.meta.url));
 const tsxLoader = fileURLToPath(import.meta.resolve("tsx"));
+const sourceProductRoot = fileURLToPath(new URL("../../../..", import.meta.url));
+
+function bootstrapResult(canonicalRoot: string): BootstrapMcpSeatResult {
+  return {
+    projectId: `project-${canonicalRoot}`,
+    canonicalRoot,
+    bootstrapRunDirectory: ".agent-run/bootstrap",
+    expectedPreviousGeneration: null,
+    generation: "a".repeat(64),
+    projectSessionId: "session-test",
+    sessionRevision: 1,
+    sessionGeneration: 1,
+    runId: "run-test",
+    runRevision: 1,
+    chairAgentId: "codex-test-agent",
+    chairGeneration: 1,
+    chairLeaseId: "chair:test:1",
+    expiresAt: "2099-01-01T00:00:00.000Z",
+    credentials: [{
+      seat: "codex",
+      agentId: "codex-test-agent",
+      expectedPrincipalGeneration: 1,
+      capability: `afc_${"c".repeat(43)}`,
+      authorityId: "authority-test",
+    }],
+  };
+}
+
+async function createBootstrapProduct(root: string): Promise<string> {
+  const product = join(root, "product");
+  await mkdir(join(product, "config"), { recursive: true });
+  await mkdir(join(product, "runtime", "agent-fabric", "schemas"), { recursive: true });
+  await writeFile(join(product, "config", "agent-fabric.yaml"), [
+    "schemaVersion: 1",
+    "allowedAdapters: []",
+    "activeAdapters: []",
+    "allowedProfiles:",
+    "  - headless",
+    "workspaceRoots:",
+    "  - \"${AGENTS_HOME}\"",
+    "limits:",
+    "  maximumConcurrentProviderTurns: 8",
+    "",
+  ].join("\n"));
+  await Promise.all([
+    copyFile(
+      join(sourceProductRoot, "config", "adapter-compatibility.yaml"),
+      join(product, "config", "adapter-compatibility.yaml"),
+    ),
+    copyFile(
+      join(sourceProductRoot, "runtime", "agent-fabric", "schemas", "adapter-compatibility.schema.json"),
+      join(product, "runtime", "agent-fabric", "schemas", "adapter-compatibility.schema.json"),
+    ),
+  ]);
+  return product;
+}
+
+async function recordedTrustPaths(stateDirectory: string): Promise<string[]> {
+  try {
+    const registry = JSON.parse(await readFile(join(stateDirectory, "trusted-workspaces.json"), "utf8")) as {
+      entries?: Array<{ canonicalPath?: unknown }>;
+    };
+    return (registry.entries ?? []).map((entry) => {
+      if (typeof entry.canonicalPath !== "string") throw new Error("test trust entry is missing its canonical path");
+      return entry.canonicalPath;
+    });
+  } catch (error: unknown) {
+    if (typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT") return [];
+    throw error;
+  }
+}
+
+async function stopStartedDaemon(result: Awaited<ReturnType<typeof bootstrapMcpSeat>>): Promise<void> {
+  const daemon = result.receipt.actions.find((action) => action.action === "daemon");
+  if (daemon?.action !== "daemon" || daemon.outcome !== "started") return;
+  try {
+    process.kill(daemon.pid, "SIGTERM");
+  } catch (error: unknown) {
+    if (!(typeof error === "object" && error !== null && "code" in error && error.code === "ESRCH")) throw error;
+  }
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    try {
+      process.kill(daemon.pid, 0);
+    } catch (error: unknown) {
+      if (typeof error === "object" && error !== null && "code" in error && error.code === "ESRCH") return;
+      throw error;
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`test daemon ${String(daemon.pid)} did not stop`);
+}
 
 function canonicalFixtureJson(value: unknown): string {
   if (value === null || typeof value === "boolean" || typeof value === "number" || typeof value === "string") {
@@ -49,6 +161,7 @@ function fixtureMcpSeatGeneration(identity: {
 }
 
 afterEach(async () => {
+  daemon.result = undefined;
   await Promise.all(roots.splice(0).map(async (root) => rm(root, { recursive: true, force: true })));
 });
 
@@ -94,63 +207,68 @@ describe("zero-state MCP bootstrap", () => {
     }
   });
 
-  it("rejects an untrusted exact root before daemon discovery", async () => {
+  it("automatically enrols an untrusted exact root before daemon discovery", async () => {
     const temporaryRoot = await mkdtemp(join(tmpdir(), "fabric-untrusted-bootstrap-"));
     roots.push(temporaryRoot);
     const root = await realpath(temporaryRoot);
     const stateDirectory = join(root, "state");
-    await expect(bootstrapMcpSeat({
-      environment: {
-        AGENT_FABRIC_SEAT: "codex",
-        AGENT_FABRIC_PRODUCT_ROOT: join(root, "product"),
-      },
-      cwd: root,
-      paths: {
-        stateDirectory,
-        runtimeDirectory: join(root, "runtime"),
-        databasePath: join(stateDirectory, "fabric-v1.sqlite3"),
-        socketPath: join(root, "runtime", "fabric-v1.sock"),
-      },
-    })).rejects.toMatchObject({
-      code: "WORKSPACE_NOT_TRUSTED",
-      message: `Fabric bootstrap requires the exact current project root to be trusted; run '${join(root, "product", "scripts", "agent-fabric")}' workspace trust '${root}'; then retry fabric_bootstrap`,
-    });
-  });
-
-  it("emits an executable recovery command for a spaced home and exact root", async () => {
-    const temporaryRoot = await mkdtemp(join(tmpdir(), "fabric-spaced-bootstrap-"));
-    roots.push(temporaryRoot);
-    const home = join(temporaryRoot, "operator home");
-    const project = join(temporaryRoot, "project root");
-    const launcher = join(home, ".agents", "scripts", "agent-fabric");
-    await mkdir(join(home, ".agents", "scripts"), { recursive: true });
-    await mkdir(project);
-    await writeFile(launcher, "#!/bin/sh\nprintf '%s' \"$3\"\n", { mode: 0o700 });
-    let message = "";
+    const product = await createBootstrapProduct(root);
+    daemon.result = bootstrapResult(root);
+    let installed: Awaited<ReturnType<typeof bootstrapMcpSeat>> | undefined;
     try {
-      await bootstrapMcpSeat({
+      installed = await bootstrapMcpSeat({
         environment: {
           AGENT_FABRIC_SEAT: "codex",
-          AGENT_FABRIC_PRODUCT_ROOT: join(home, ".agents"),
+          AGENT_FABRIC_PRODUCT_ROOT: product,
+        },
+        cwd: root,
+        paths: {
+          stateDirectory,
+          runtimeDirectory: join(root, "r"),
+          databasePath: join(stateDirectory, "fabric-v1.sqlite3"),
+          socketPath: join(root, "r", "f.sock"),
+        },
+      });
+      expect(installed.canonicalRoot).toBe(root);
+      expect(installed.receipt.actions).toContainEqual(expect.objectContaining({
+        action: "workspace-trust",
+        outcome: "resolved",
+        mutated: true,
+      }));
+      await expect(recordedTrustPaths(stateDirectory)).resolves.toEqual([root]);
+    } finally {
+      if (installed !== undefined) await stopStartedDaemon(installed);
+    }
+  });
+
+  it("automatically enrols a spaced plain directory exactly", async () => {
+    const temporaryRoot = await mkdtemp(join(tmpdir(), "fabric-spaced-bootstrap-"));
+    roots.push(temporaryRoot);
+    const project = join(temporaryRoot, "project root");
+    await mkdir(project);
+    const product = await createBootstrapProduct(temporaryRoot);
+    daemon.result = bootstrapResult(await realpath(project));
+    const stateDirectory = join(temporaryRoot, "state");
+    let installed: Awaited<ReturnType<typeof bootstrapMcpSeat>> | undefined;
+    try {
+      installed = await bootstrapMcpSeat({
+        environment: {
+          AGENT_FABRIC_SEAT: "codex",
+          AGENT_FABRIC_PRODUCT_ROOT: product,
         },
         cwd: project,
         paths: {
-          stateDirectory: join(temporaryRoot, "state"),
-          runtimeDirectory: join(temporaryRoot, "runtime"),
-          databasePath: join(temporaryRoot, "state", "fabric-v1.sqlite3"),
-          socketPath: join(temporaryRoot, "runtime", "fabric-v1.sock"),
+          stateDirectory,
+          runtimeDirectory: join(temporaryRoot, "r"),
+          databasePath: join(stateDirectory, "fabric-v1.sqlite3"),
+          socketPath: join(temporaryRoot, "r", "f.sock"),
         },
       });
-    } catch (error: unknown) {
-      if (error instanceof Error) message = error.message;
+      expect(installed.canonicalRoot).toBe(await realpath(project));
+      await expect(recordedTrustPaths(stateDirectory)).resolves.toEqual([await realpath(project)]);
+    } finally {
+      if (installed !== undefined) await stopStartedDaemon(installed);
     }
-    const recovery = /; run (?<command>.+); then retry fabric_bootstrap$/u.exec(message)?.groups?.command;
-    expect(recovery).toBeDefined();
-
-    const result = await execFileAsync("/bin/sh", ["-c", recovery!], {
-      env: { ...process.env, HOME: home },
-    });
-    expect(result.stdout).toBe(await realpath(project));
   });
 
   it("creates one deterministic scoping run and converges a second primary into its peer seat", async () => {

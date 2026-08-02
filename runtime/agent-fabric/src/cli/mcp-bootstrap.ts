@@ -32,7 +32,11 @@ import {
   SeatGenerationChangedError,
   type SeatMetadata,
 } from "./seat-store.js";
-import { trustedWorkspaceIdentity } from "./workspace-trust.js";
+import {
+  runWorkspaceTrust,
+  trustedWorkspaceIdentity,
+  WorkspaceTrustRecordMissingError,
+} from "./workspace-trust.js";
 
 /**
  * Whole-smoke wall-clock budget covering connect, `whoami` and `mailbox.read`.
@@ -57,7 +61,7 @@ export type LifecycleAction =
   | Readonly<{
     action: "workspace-trust";
     outcome: "resolved";
-    mutated: false;
+    mutated: boolean;
     trustRecordDigest: string;
   }>
   | Readonly<{
@@ -266,34 +270,105 @@ export async function looksLikeRepositoryCollection(canonicalRoot: string): Prom
   return (await repositoryCollectionChildren(canonicalRoot)).length > 1;
 }
 
+type WorkspaceTrustBoundary = Readonly<{
+  root: string;
+  refusal: string | null;
+}>;
+
+async function workspaceTrustBoundary(
+  canonicalRoot: string,
+): Promise<WorkspaceTrustBoundary> {
+  const home = await realpath(homedir());
+  if (canonicalRoot === parse(canonicalRoot).root) {
+    return {
+      root: canonicalRoot,
+      refusal: `Fabric bootstrap cannot proceed from ${shellQuote(canonicalRoot)}: the filesystem root can never be trusted because root-wide authority is forbidden by policy. Choose the exact repository root or current non-Git project directory instead`,
+    };
+  }
+  if (canonicalRoot === home) {
+    return {
+      root: canonicalRoot,
+      refusal: `Fabric bootstrap cannot proceed from ${shellQuote(canonicalRoot)}: this exact path can never be trusted because home-wide trust is forbidden by policy. Choose the exact repository root or current non-Git project directory instead`,
+    };
+  }
+  const workspace = await nearestGitWorkspace(canonicalRoot);
+  if (workspace !== null && workspace.root === parse(workspace.root).root) {
+    return {
+      root: workspace.root,
+      refusal: `Fabric bootstrap cannot proceed from ${shellQuote(workspace.root)}: the filesystem root can never be trusted because root-wide authority is forbidden by policy. Choose the exact repository root or current non-Git project directory instead`,
+    };
+  }
+  if (workspace?.root === home) {
+    return {
+      root: workspace.root,
+      refusal: `Fabric bootstrap cannot proceed from ${shellQuote(workspace.root)}: this exact path can never be trusted because home-wide trust is forbidden by policy. Choose the exact repository root or current non-Git project directory instead`,
+    };
+  }
+  if (workspace?.linkedWorktree === true) {
+    return {
+      root: workspace.root,
+      refusal: `Fabric bootstrap cannot proceed from ${shellQuote(workspace.root)} because it is a linked worktree; granting a worktree-path trust exception is a user-only decision, and the agent must not run a trust command unprompted`,
+    };
+  }
+  if (workspace === null && await looksLikeRepositoryCollection(canonicalRoot)) {
+    return {
+      root: canonicalRoot,
+      refusal: `Fabric bootstrap cannot proceed from ${shellQuote(canonicalRoot)} because it looks like a parent collection of several repositories; policy forbids trusting a parent or collection directory. Run fabric_bootstrap again from inside the specific project it actually needs`,
+    };
+  }
+  return {
+    root: workspace?.root ?? canonicalRoot,
+    refusal: null,
+  };
+}
+
 async function workspaceTrustRecoveryMessage(
   canonicalRoot: string,
   environment: NodeJS.ProcessEnv = process.env,
 ): Promise<string> {
-  const home = await realpath(homedir());
-  if (canonicalRoot === parse(canonicalRoot).root) {
-    return `Fabric bootstrap cannot proceed from ${shellQuote(canonicalRoot)}: the filesystem root can never be trusted because root-wide authority is forbidden by policy. Choose the exact repository root or current non-Git project directory instead`;
+  const boundary = await workspaceTrustBoundary(canonicalRoot);
+  if (boundary.refusal !== null) return boundary.refusal;
+  if (boundary.root !== canonicalRoot) {
+    return `Fabric bootstrap requires the exact current project root to be trusted; run ${fabricCliCommand({ environment })} workspace trust ${shellQuote(boundary.root)}; then retry fabric_bootstrap from ${shellQuote(boundary.root)}`;
   }
-  if (canonicalRoot === home) {
-    return `Fabric bootstrap cannot proceed from ${shellQuote(canonicalRoot)}: this exact path can never be trusted because home-wide trust is forbidden by policy. Choose the exact repository root or current non-Git project directory instead`;
+  return `Fabric bootstrap requires the exact current project root to be trusted; run ${fabricCliCommand({ environment })} workspace trust ${shellQuote(boundary.root)}; then retry fabric_bootstrap`;
+}
+
+async function resolveBootstrapWorkspaceIdentity(input: {
+  stateDirectory: string;
+  paths: FabricPaths;
+  canonicalRoot: string;
+  now?: Date;
+}): Promise<Readonly<{
+  identity: Awaited<ReturnType<typeof trustedWorkspaceIdentity>>;
+  automaticallyEnrolled: boolean;
+}>> {
+  const boundary = await workspaceTrustBoundary(input.canonicalRoot);
+  try {
+    return {
+      identity: await trustedWorkspaceIdentity({
+        stateDirectory: input.stateDirectory,
+        canonicalRoot: boundary.root,
+        ...(input.now === undefined ? {} : { now: input.now }),
+      }),
+      automaticallyEnrolled: false,
+    };
+  } catch (cause: unknown) {
+    if (!(cause instanceof WorkspaceTrustRecordMissingError) || boundary.refusal !== null) throw cause;
+    await runWorkspaceTrust(
+      ["trust", boundary.root],
+      input.paths,
+      input.now ?? new Date(),
+    );
+    return {
+      identity: await trustedWorkspaceIdentity({
+        stateDirectory: input.stateDirectory,
+        canonicalRoot: boundary.root,
+        ...(input.now === undefined ? {} : { now: input.now }),
+      }),
+      automaticallyEnrolled: true,
+    };
   }
-  const workspace = await nearestGitWorkspace(canonicalRoot);
-  if (workspace !== null && workspace.root === parse(workspace.root).root) {
-    return `Fabric bootstrap cannot proceed from ${shellQuote(workspace.root)}: the filesystem root can never be trusted because root-wide authority is forbidden by policy. Choose the exact repository root or current non-Git project directory instead`;
-  }
-  if (workspace?.root === home) {
-    return `Fabric bootstrap cannot proceed from ${shellQuote(workspace.root)}: this exact path can never be trusted because home-wide trust is forbidden by policy. Choose the exact repository root or current non-Git project directory instead`;
-  }
-  if (workspace?.linkedWorktree === true) {
-    return `Fabric bootstrap cannot proceed from ${shellQuote(workspace.root)} because it is a linked worktree; granting a worktree-path trust exception is a user-only decision, and the agent must not run a trust command unprompted`;
-  }
-  if (workspace === null && await looksLikeRepositoryCollection(canonicalRoot)) {
-    return `Fabric bootstrap cannot proceed from ${shellQuote(canonicalRoot)} because it looks like a parent collection of several repositories; policy forbids trusting a parent or collection directory. Run fabric_bootstrap again from inside the specific project it actually needs`;
-  }
-  if (workspace !== null && workspace.root !== canonicalRoot) {
-    return `Fabric bootstrap requires the exact current project root to be trusted; run ${fabricCliCommand({ environment })} workspace trust ${shellQuote(workspace.root)}; then retry fabric_bootstrap from ${shellQuote(workspace.root)}`;
-  }
-  return `Fabric bootstrap requires the exact current project root to be trusted; run ${fabricCliCommand({ environment })} workspace trust ${shellQuote(workspace?.root ?? canonicalRoot)}; then retry fabric_bootstrap`;
 }
 
 export function isSchemaCutoverRefusal(error: unknown): boolean {
@@ -516,17 +591,26 @@ export async function bootstrapMcpSeat(input: {
       `${fabricCliCommand({ environment: input.environment })} mcp peer-provision --project ${shellQuote(input.cwd)} --seat ${seat} instead`,
     );
   }
-  const canonicalRoot = await realpath(input.cwd);
+  let canonicalRoot: string | undefined;
   let identity: Awaited<ReturnType<typeof trustedWorkspaceIdentity>>;
+  let automaticallyEnrolled = false;
   try {
-    identity = await trustedWorkspaceIdentity({
+    canonicalRoot = await realpath(input.cwd);
+    const resolvedIdentity = await resolveBootstrapWorkspaceIdentity({
       stateDirectory: input.paths.stateDirectory,
+      paths: input.paths,
       canonicalRoot,
+      ...(input.now === undefined ? {} : { now: input.now }),
     });
+    identity = resolvedIdentity.identity;
+    automaticallyEnrolled = resolvedIdentity.automaticallyEnrolled;
   } catch (cause: unknown) {
-    const message = await workspaceTrustRecoveryMessage(canonicalRoot, input.environment).catch(
-      () => `Fabric bootstrap cannot safely determine the trust boundary for ${shellQuote(canonicalRoot)}, so no trust command is suggested. Inspect the workspace and retry from the exact repository root or current non-Git project directory`,
-    );
+    const recoveredRoot = canonicalRoot;
+    const message = recoveredRoot === undefined
+      ? `Fabric bootstrap cannot safely determine the trust boundary for ${shellQuote(input.cwd)}, so no trust command is suggested. Inspect the workspace and retry from the exact repository root or current non-Git project directory`
+      : await workspaceTrustRecoveryMessage(recoveredRoot, input.environment).catch(
+        () => `Fabric bootstrap cannot safely determine the trust boundary for ${shellQuote(recoveredRoot)}, so no trust command is suggested. Inspect the workspace and retry from the exact repository root or current non-Git project directory`,
+      );
     throw new McpBootstrapError(
       "WORKSPACE_NOT_TRUSTED",
       message,
@@ -665,7 +749,7 @@ export async function bootstrapMcpSeat(input: {
       {
         action: "workspace-trust",
         outcome: "resolved",
-        mutated: false,
+        mutated: automaticallyEnrolled,
         trustRecordDigest: identity.trustRecordDigest,
       },
       {

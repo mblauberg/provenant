@@ -31,6 +31,15 @@ export type TrustedWorkspaceIdentity = {
   entry: WorkspaceTrustEntry;
 };
 
+export class WorkspaceTrustRecordMissingError extends Error {
+  readonly code = "WORKSPACE_TRUST_RECORD_MISSING" as const;
+
+  constructor() {
+    super("workspace root is not trusted");
+    this.name = "WorkspaceTrustRecordMissingError";
+  }
+}
+
 type WorkspaceTrustRegistry = { schemaVersion: 1; entries: WorkspaceTrustEntry[] };
 let mutationQueue: Promise<void> = Promise.resolve();
 
@@ -263,7 +272,7 @@ export async function trustedWorkspaceIdentity(input: {
   const identity = await canonicalWorkspace(input.canonicalRoot);
   const registry = await readRegistry(join(input.stateDirectory, "trusted-workspaces.json"));
   const entry = registry.entries.find((candidate) => candidate.canonicalPath === identity.canonicalPath);
-  if (entry === undefined) throw new Error("workspace root is not trusted");
+  if (entry === undefined) throw new WorkspaceTrustRecordMissingError();
   if (entry.expiresAt !== undefined && timestamp(entry.expiresAt, "workspace expiry") <= (input.now ?? new Date()).getTime()) {
     throw new Error("workspace trust record is expired");
   }
