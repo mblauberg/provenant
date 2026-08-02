@@ -648,8 +648,7 @@ def _run_suite(
         if language not in commands:
             return [("", "unknown-runner")]
         command = commands[language]
-        detector = globals().get("runner_for_command")
-        runner = detector(command) if detector is not None else None
+        runner = runner_for_command(command)
         if fail_fast and runner is Runner.PYTEST:
             command = f"{command} --maxfail=1"
         elif fail_fast and runner is Runner.VITEST:
