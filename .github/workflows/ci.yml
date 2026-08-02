@@ -192,7 +192,8 @@ jobs:
           set -euo pipefail
           lock="$RUNNER_TEMP/provenant-change-gates.lock"
           release() { rm -rf "$lock"; }
-          while true; do
+          attempt=0
+          while [ "$attempt" -lt 10 ]; do
             if mkdir "$lock" 2>/dev/null; then
               echo $$ > "$lock/pid"
               trap release EXIT INT TERM HUP
@@ -204,6 +205,8 @@ jobs:
               rm -rf "$lock"
               continue
             fi
+            attempt=$((attempt + 1))
+            [ "$attempt" -lt 10 ] || { echo "gate lock acquisition failed: held by pid ${holder:-unknown}" >&2; exit 1; }
             sleep 30
           done
           scratch="$RUNNER_TEMP/provenant-change-gates"

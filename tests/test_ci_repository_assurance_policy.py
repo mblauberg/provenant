@@ -800,6 +800,20 @@ def test_harness_job_runs_demonstrated_change_gates_with_a_merge_base_and_scratc
     assert command.count('--budget-deadline "$gate_deadline"') == 2
 
 
+def test_change_gate_lock_wait_is_counted_and_names_the_holding_pid() -> None:
+    document = _workflow()
+    harness_steps = _steps(_job(document, "harness"))
+    command = next(
+        str(step["run"])
+        for step in harness_steps
+        if "provenant-change-gates.lock" in str(step.get("run", ""))
+    )
+
+    assert "while true" not in command
+    assert 'while [ "$attempt" -lt 10 ]' in command
+    assert "gate lock acquisition failed: held by pid ${holder:-unknown}" in command
+
+
 def test_clean_ci_builds_locked_protocol_before_daemon_typecheck() -> None:
     document = _workflow()
     fabric_steps = _steps(_job(document, "fabric"))
