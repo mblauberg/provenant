@@ -246,13 +246,14 @@ describe("global idle stop races", () => {
     vi.useFakeTimers();
     const operationFinished = Promise.withResolvers<void>();
     let inFlight = false;
-    const server = {
+    const fakeServer: { listening: boolean; close(callback: (error?: Error) => void): void } = {
       listening: true,
       close(callback: (error?: Error) => void): void {
-        this.listening = false;
+        fakeServer.listening = false;
         callback();
       },
-    } as unknown as Server;
+    };
+    const server = fakeServer as unknown as Server;
     inFlight = true;
     const outcome = Promise.race([
       closeRecoverableUnixListener({
