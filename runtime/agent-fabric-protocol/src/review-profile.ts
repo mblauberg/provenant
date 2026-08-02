@@ -11,7 +11,7 @@ import {
   sha256,
 } from "./codec.js";
 import { RESOLVED_EFFORT_V1_CODEC } from "./route-lineage.js";
-import { REVIEW_SLOTS } from "./provider-review.js";
+import { REVIEW_SLOTS } from "./provider-review-core.js";
 
 const positive = integer({ minimum: 1 });
 const nonnegative = integer();

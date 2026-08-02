@@ -10,7 +10,6 @@ source_size_ceilings:
   runtime/agent-fabric-console/src/workflow.ts: 1678
   runtime/agent-fabric-console/src/protocol-adapter.ts: 1508
   runtime/agent-fabric/src/operator/store.ts: 1532
-  runtime/agent-fabric-protocol/src/provider-review.ts: 1448
   runtime/agent-fabric-console/src/runtime.ts: 1320
   runtime/agent-fabric/src/operator/git-repository-read.ts: 1244
   runtime/agent-fabric/src/results/store.ts: 1232
