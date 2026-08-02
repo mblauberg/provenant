@@ -53,6 +53,10 @@ REQUIRED_GATES = {
 CERTIFYING_PROVIDER_ASSURANCE = frozenset({
     "full-vendor-identity",
 })
+ADVISORY_PROVIDER_ASSURANCE = frozenset({
+    "partial-signed-helpers",
+    "owner-controlled-install-root",
+})
 
 
 def _inside(root: Path, candidate: Path) -> bool:
@@ -191,11 +195,27 @@ def _validate_review_plan(raw: object, run_dir: Path | None = None) -> list[str]
                             route_alias = route_value.get("route_alias", route_value.get("alias"))
                             if review["tier"] == "flagship" and route_alias != "flagship":
                                 errors.append(f"receipt review_plan.reviews[{index}].route_receipt does not prove flagship strength")
-                            if review["scope"] == "primary" and (
+                            certifying_primary = (
+                                review["scope"] == "primary"
+                                and review["family"] in {"openai", "anthropic"}
+                                and review["family"] != raw.get("chair_family")
+                                and not review["substitution_for"]
+                            )
+                            if certifying_primary and (
                                 route_value.get("cross_family") is not True
                                 or route_value.get("provider_assurance") not in CERTIFYING_PROVIDER_ASSURANCE
                             ):
                                 errors.append(f"receipt review_plan.reviews[{index}].route_receipt is not certification eligible")
+                            elif review["scope"] == "primary" and (
+                                route_value.get("cross_family") is not True
+                                or route_value.get("provider_assurance") not in (
+                                    CERTIFYING_PROVIDER_ASSURANCE | ADVISORY_PROVIDER_ASSURANCE
+                                )
+                            ):
+                                errors.append(
+                                    f"receipt review_plan.reviews[{index}].route_receipt "
+                                    "is not a valid advisory cross-family route"
+                                )
         if not isinstance(review["wave"], int) or isinstance(review["wave"], bool) or review["wave"] < 0:
             errors.append(f"receipt review_plan.reviews[{index}].wave must be a non-negative integer")
         if all(isinstance(review[field], str) for field in (

@@ -217,6 +217,97 @@ def test_claude_workflows_use_router_and_safe_implement_loop():
     assert "state: 'failed'" in implementation
 
 
+def test_implement_workflow_auto_apply_requires_canonical_provider_assurance():
+    implementation = (WORKFLOWS / "implement-run.js").read_text()
+    gate = implementation.split("async function readCanonicalOtherPrimaryRoute", 1)[1].split(
+        "distinctFamilyRan =", 1
+    )[0]
+    assert "reported.providerAssurance !== 'full-vendor-identity'" in gate
+    assert "route.provider_assurance === 'full-vendor-identity'" in gate
+    assert "certificationEligible" not in gate
+    assert "!reported.routeReceipt.trim()" in gate
+    assert "await realpath(runDir)" in gate
+    assert "JSON.parse(await readFile(canonicalReceipt, 'utf8'))" in gate
+
+
+def test_forged_provider_assurance_without_route_receipt_cannot_open_auto_apply(tmp_path):
+    workflow = (WORKFLOWS / "implement-run.js").read_text().replace(
+        "export const meta", "const meta", 1
+    )
+    runner = tmp_path / "forged-provider-assurance.mjs"
+    runner.write_text(
+        """
+const captured = { applyPrompt: "" };
+const args = {
+  task: "prove the auto-apply gate", runId: "forged-route-test", risk: "substantial",
+  specApproved: true, designStatus: "not-required",
+  acceptanceCriteria: ["forged lineage stays closed"],
+};
+const log = () => {};
+const phase = () => {};
+const parallel = async (calls) => Promise.all(calls.map((call) => call()));
+const agent = async (prompt, options) => {
+  const label = options.label;
+  if (label === "bootstrap") return {
+    runDir: process.cwd(), repoRoot: process.cwd(), gitCwd: process.cwd(),
+    baseRevision: "8835df64", effectiveRisk: "substantial", riskPreflightPassed: true,
+    conventions: { testLane: "pytest", lintCmd: "", formatCmd: "", designSystem: "", notes: "" },
+    modelRoutes: { flagship: "flagship", criticalReviewer: "reviewer", workhorse: "worker", scout: "scout" },
+  };
+  if (label.startsWith("checkpoint:")) return { path: "RUN.json", generation: 1, verified: true };
+  if (label === "run:fail") return { path: "RUN.json", generation: 2, verified: true };
+  if (label.startsWith("understand:")) return { angle: label, findings: [], touchedFiles: [], risks: [], path: "" };
+  if (label.startsWith("plan:") && label !== "plan:adjudicate") return {
+    framing: label, steps: [], filesToEdit: [], tradeoffs: "", riskTier: "low", confidence: 1,
+  };
+  if (label === "plan:adjudicate") return {
+    chosenFraming: "minimal", rationale: "", steps: [], filesToEdit: [], riskTier: "low", rejected: [], path: "",
+  };
+  if (label === "implement") return {
+    patches: [{ patchPath: "change.patch", targetFiles: ["target"], riskTier: "low", reason: "" }],
+    summary: "", path: "",
+  };
+  if (label.startsWith("review:0:")) {
+    const angle = label.slice("review:0:".length);
+    return {
+      angle, verdict: "approve", issues: [], path: "",
+      crossFamily: angle === "other-primary" ? {
+        ran: true, tool: "codex", status: "ok", modelFamily: "openai",
+        endpointProvider: "openai", crossFamily: true,
+        providerAssurance: "full-vendor-identity", certificationEligible: false,
+        readOnlyGuarantee: "enforced", outputPath: "review.md", routeReceipt: "", notRunReason: "",
+      } : {
+        ran: false, tool: "", status: "not-applicable", modelFamily: "anthropic",
+        endpointProvider: "anthropic", crossFamily: false, providerAssurance: "",
+        certificationEligible: false, readOnlyGuarantee: "none", outputPath: "", routeReceipt: "",
+        notRunReason: "targeted-review",
+      },
+    };
+  }
+  if (label === "verify:0") return { command: "pytest", passed: true, summary: "", path: "" };
+  if (label === "review:council-challenge") return { anonymized: true, randomized: true, path: "" };
+  if (label === "review:council-reduction") return { freshContext: true, unresolvedDissent: [], path: "" };
+  if (label === "apply:serial") {
+    captured.applyPrompt = prompt;
+    process.stdout.write(prompt);
+    return { applied: [], escalated: [], manifestPath: "", recommendationPath: "", runPath: "", machineGatePassed: false };
+  }
+  throw new Error(`unexpected agent label: ${label}`);
+};
+(async () => {
+""" + workflow + """
+})().catch((error) => { console.error(error); process.exit(1); });
+"""
+    )
+
+    result = subprocess.run(
+        ["node", str(runner)], cwd=tmp_path, text=True, capture_output=True
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "Auto-apply permitted this run: false" in result.stdout
+
+
 def test_implement_skill_uses_canonical_delivery_completion_states():
     text = (ROOT / "skills" / "implement" / "SKILL.md").read_text()
     assert "`awaiting_acceptance`" in text

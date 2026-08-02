@@ -169,7 +169,7 @@ describe("Stage 1 versioned JSON Schemas", () => {
     expect(unknown.keywords).toContain("additionalProperties");
   });
 
-  it("rejects the unreachable lockfile install attestation provider identity policy", async () => {
+  it("rejects an unknown provider identity policy", async () => {
     const schema = await readSchema("adapter-compatibility.schema.json");
     const compatibility = await readYamlObject("adapter-compatibility.yaml");
     const adapters = compatibility.adapters;
@@ -179,7 +179,7 @@ describe("Stage 1 versioned JSON Schemas", () => {
       throw new TypeError("Claude implementation compatibility is invalid");
     }
 
-    const lockfileAttested = {
+    const unknownProviderIdentity = {
       ...compatibility,
       adapters: {
         ...adapters,
@@ -187,25 +187,12 @@ describe("Stage 1 versioned JSON Schemas", () => {
           ...claude,
           implementation: {
             ...claude.implementation,
-            provider_identity: "lockfile-install-attestation",
-          },
-        },
-      },
-    };
-    expect(validateWithSchema(schema, lockfileAttested).valid).toBe(false);
-    expect(validateWithSchema(schema, {
-      ...lockfileAttested,
-      adapters: {
-        ...lockfileAttested.adapters,
-        "claude-agent-sdk": {
-          ...lockfileAttested.adapters["claude-agent-sdk"],
-          implementation: {
-            ...claude.implementation,
             provider_identity: "unrecognised-assurance",
           },
         },
       },
-    }).valid).toBe(false);
+    };
+    expect(validateWithSchema(schema, unknownProviderIdentity).valid).toBe(false);
   });
 
   it("publishes only the exact current operation vocabulary and rejects coarse actions", async () => {

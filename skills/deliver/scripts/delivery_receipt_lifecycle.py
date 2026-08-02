@@ -18,6 +18,10 @@ from typing import Any
 CERTIFYING_PROVIDER_ASSURANCE = frozenset({
     "full-vendor-identity",
 })
+ADVISORY_PROVIDER_ASSURANCE = frozenset({
+    "partial-signed-helpers",
+    "owner-controlled-install-root",
+})
 
 
 SKILLS_ROOT = Path(__file__).resolve().parents[2]
@@ -512,7 +516,12 @@ def command_review_add(args: Any, api: dict[str, Any]) -> dict[str, Any]:
             or route.get("reviewer_id") != args.reviewer_id
             or route.get("resolved_model", route.get("model")) != args.model
             or route.get("model_family") != args.provider_family
-            or route.get("provider_assurance") not in CERTIFYING_PROVIDER_ASSURANCE
+            or route.get("provider_assurance") not in (
+                CERTIFYING_PROVIDER_ASSURANCE
+                | ADVISORY_PROVIDER_ASSURANCE
+                if args.role in {"distinct-family", "targeted"}
+                else CERTIFYING_PROVIDER_ASSURANCE
+            )
         ):
             _error(api, "route receipt identity does not match review lineage")
         if args.role == "other-primary" and route.get("cross_family") is not True:

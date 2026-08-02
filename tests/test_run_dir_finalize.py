@@ -161,7 +161,26 @@ def test_real_run_complete_primary_still_requires_route_receipt(tmp_path):
     assert any("route_receipt is missing or does not match" in error for error in errors)
 
 
-def test_primary_advisory_assurance_route_cannot_finalize_as_certifying(tmp_path):
+@pytest.mark.parametrize("assurance", ["partial-signed-helpers", "owner-controlled-install-root"])
+def test_primary_advisory_distinct_family_route_is_accepted_as_advisory(tmp_path, assurance):
+    plan = substantial_plan()
+    plan["reviews"].append(
+        review("distinct-family-advisory", "primary", "blind-spots", "google", wave=2)
+    )
+    bind_complete_reviews(tmp_path, plan)
+    primary = plan["reviews"][-1]
+    route_path = tmp_path / primary["route_receipt"]["path"]
+    route = json.loads(route_path.read_text())
+    route.update({"provider_assurance": assurance, "certification_eligible": True})
+    route_path.write_text(json.dumps(route))
+    primary["route_receipt"]["digest"] = "sha256:" + __import__("hashlib").sha256(route_path.read_bytes()).hexdigest()
+
+    errors = run_dir_finalize._validate_review_plan(plan, tmp_path)
+
+    assert errors == []
+
+
+def test_certifying_primary_advisory_route_remains_fail_closed(tmp_path):
     plan = substantial_plan()
     bind_complete_reviews(tmp_path, plan)
     primary = plan["reviews"][-1]
@@ -174,6 +193,39 @@ def test_primary_advisory_assurance_route_cannot_finalize_as_certifying(tmp_path
     errors = run_dir_finalize._validate_review_plan(plan, tmp_path)
 
     assert any("not certification eligible" in error for error in errors)
+
+
+@pytest.mark.parametrize(
+    ("provider_assurance", "cross_family"),
+    [
+        ("", True),
+        ("totally-forged-assurance", True),
+        ("partial-signed-helpers", False),
+    ],
+)
+def test_advisory_primary_requires_recognised_cross_family_route(
+    tmp_path, provider_assurance, cross_family
+):
+    plan = substantial_plan()
+    plan["reviews"].append(
+        review("distinct-family-advisory", "primary", "blind-spots", "google", wave=2)
+    )
+    bind_complete_reviews(tmp_path, plan)
+    advisory = plan["reviews"][-1]
+    route_path = tmp_path / advisory["route_receipt"]["path"]
+    route = json.loads(route_path.read_text())
+    route.update({
+        "provider_assurance": provider_assurance,
+        "cross_family": cross_family,
+    })
+    route_path.write_text(json.dumps(route))
+    advisory["route_receipt"]["digest"] = (
+        "sha256:" + __import__("hashlib").sha256(route_path.read_bytes()).hexdigest()
+    )
+
+    errors = run_dir_finalize._validate_review_plan(plan, tmp_path)
+
+    assert any("route_receipt is not a valid advisory cross-family route" in error for error in errors)
 
 
 def test_substantial_review_topology_is_machine_checked():

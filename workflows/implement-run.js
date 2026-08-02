@@ -190,7 +190,7 @@ const REVIEW_SCHEMA = {
     crossFamily: {
       type: 'object',
       additionalProperties: false,
-      required: ['ran', 'tool', 'status', 'modelFamily', 'endpointProvider', 'crossFamily', 'certificationEligible', 'readOnlyGuarantee', 'outputPath', 'routeReceipt', 'notRunReason'],
+      required: ['ran', 'tool', 'status', 'modelFamily', 'endpointProvider', 'crossFamily', 'providerAssurance', 'readOnlyGuarantee', 'outputPath', 'routeReceipt', 'notRunReason'],
       properties: {
         ran: { type: 'boolean' },
         tool: { type: 'string', description: 'codex | cursor | agy | "" if Claude reviewer' },
@@ -198,7 +198,11 @@ const REVIEW_SCHEMA = {
         modelFamily: { type: 'string', description: 'Actual model lineage from the dispatcher' },
         endpointProvider: { type: 'string' },
         crossFamily: { type: 'boolean' },
-        certificationEligible: { type: 'boolean' },
+        providerAssurance: {
+          type: 'string',
+          enum: ['', 'full-vendor-identity', 'partial-signed-helpers', 'owner-controlled-install-root'],
+          description: 'Exact provider_assurance from the canonical route receipt; empty for native review',
+        },
         readOnlyGuarantee: { type: 'string', description: 'cf_dispatch.sh value: enforced | oauth_safe_mode | best_effort | prompt_only | none (none only for a Claude reviewer)' },
         outputPath: { type: 'string' },
         routeReceipt: { type: 'string', description: 'Exact cf_dispatch JSON receipt path; empty for native review' },
@@ -321,8 +325,8 @@ function crossFamilyDispatchHint(runDir, gitCwd, kind = 'primary') {
     '  ~/.agents/skills/orchestrate/scripts/cf_dispatch.sh ' +
     '--orchestrator-family anthropic --tool codex --alias flagship --role other-primary --prompt-file <your-prompt-file> ' +
     `--out ${runDir}/crossfamily/<name>.txt > ${runDir}/crossfamily/<name>.route.json\n` +
-    'The dispatcher prints a normalised JSON record (model_family, endpoint_provider, cross_family, certification_eligible, read_only_guarantee, ' +
-    'status) — preserve that exact route JSON and return its path as routeReceipt. Certified only when cross_family=true and read_only_guarantee ' +
+    'The dispatcher prints a normalised JSON record (model_family, endpoint_provider, cross_family, provider_assurance, certification_eligible, read_only_guarantee, ' +
+    'status) — preserve that exact route JSON and return its path as routeReceipt. Certified only when provider_assurance=full-vendor-identity, cross_family=true and read_only_guarantee ' +
     'is enforced or oauth_safe_mode. On failure, set ran=false and record OTHER-PRIMARY-NOT-RUN: <reason>. ' +
     'Apply the host data policy before dispatch.'
   )
@@ -334,6 +338,44 @@ function crossFamilyDispatchHint(runDir, gitCwd, kind = 'primary') {
     'DISTINCT-FAMILY-NOT-RUN: <reason> and never replaces the other-primary gate. Distinct-family ' +
     'findings are advisory until a primary-family reviewer corroborates their evidence.'
   )
+}
+
+async function readCanonicalOtherPrimaryRoute(review, runDir) {
+  const reported = review && review.crossFamily
+  if (
+    !reported
+    || review.angle !== 'other-primary'
+    || !reported.ran
+    || reported.status !== 'ok'
+    || !reported.crossFamily
+    || reported.providerAssurance !== 'full-vendor-identity'
+    || !['enforced', 'oauth_safe_mode'].includes(reported.readOnlyGuarantee)
+    || typeof reported.routeReceipt !== 'string'
+    || !reported.routeReceipt.trim()
+  ) return false
+
+  try {
+    const { readFile, realpath } = await import('node:fs/promises')
+    const { isAbsolute, relative, resolve } = await import('node:path')
+    const canonicalRunDir = await realpath(runDir)
+    const canonicalReceipt = await realpath(resolve(canonicalRunDir, reported.routeReceipt))
+    const receiptRelative = relative(canonicalRunDir, canonicalReceipt)
+    if (!receiptRelative || receiptRelative.startsWith('..') || isAbsolute(receiptRelative)) return false
+    const route = JSON.parse(await readFile(canonicalReceipt, 'utf8'))
+    return (
+      route && typeof route === 'object'
+      && route.status === 'ok'
+      && route.tool === reported.tool
+      && route.model_family === reported.modelFamily
+      && route.endpoint_provider === reported.endpointProvider
+      && route.cross_family === true
+      && route.provider_assurance === 'full-vendor-identity'
+      && route.read_only_guarantee === reported.readOnlyGuarantee
+      && route.output_path === reported.outputPath
+    )
+  } catch {
+    return false
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -618,7 +660,7 @@ for (let cycle = 0; cycle <= maxRepairCycles; cycle += 1) {
           `Patches: ${patchDigest}\nConventions: ${JSON.stringify(conv)}\n` +
           ESCALATION_RULES +
           '\nFor a native Claude review, set crossFamily to ran=false, tool="", status="not-applicable", ' +
-          'modelFamily="anthropic", endpointProvider="anthropic", crossFamily=false, certificationEligible=false, readOnlyGuarantee="none", ' +
+          'modelFamily="anthropic", endpointProvider="anthropic", crossFamily=false, providerAssurance="", readOnlyGuarantee="none", ' +
           'outputPath="", routeReceipt="", notRunReason="targeted-review". For a dispatched review, copy every normalised field ' +
           'from the dispatcher record; do not infer or relabel lineage.\n' +
           `\nWrite full review to ${runDir}/findings/review-${cycle}-${rv.angle}.md and return the structured verdict.` +
@@ -634,7 +676,7 @@ for (let cycle = 0; cycle <= maxRepairCycles; cycle += 1) {
       issues: REVIEW_ANGLES[index].required
         ? [{ severity: 'P1', patchPath: '', detail: 'required review lane failed or returned no result' }]
         : [],
-      crossFamily: { ran: false, tool: '', status: 'unavailable', modelFamily: '', endpointProvider: '', crossFamily: false, certificationEligible: false, readOnlyGuarantee: 'none', outputPath: '', routeReceipt: '', notRunReason: REVIEW_ANGLES[index].required ? 'review-lane-failed' : 'distinct-family-review-unavailable' },
+      crossFamily: { ran: false, tool: '', status: 'unavailable', modelFamily: '', endpointProvider: '', crossFamily: false, providerAssurance: '', readOnlyGuarantee: 'none', outputPath: '', routeReceipt: '', notRunReason: REVIEW_ANGLES[index].required ? 'review-lane-failed' : 'distinct-family-review-unavailable' },
       path: '',
     },
   )
@@ -645,7 +687,7 @@ for (let cycle = 0; cycle <= maxRepairCycles; cycle += 1) {
       'Treat it as a lead, not authority. Return block only for a reproducible, task-relevant defect supported by ' +
         'primary evidence; otherwise approve or approve-with-nits. This is a native Claude corroboration: set ' +
         'crossFamily to ran=false, tool="", status="not-applicable", modelFamily="anthropic", ' +
-        'endpointProvider="anthropic", crossFamily=false, certificationEligible=false, readOnlyGuarantee="none", outputPath="", routeReceipt="", ' +
+        'endpointProvider="anthropic", crossFamily=false, providerAssurance="", readOnlyGuarantee="none", outputPath="", routeReceipt="", ' +
         'notRunReason="native-corroboration".\n' +
         `Distinct-family review: ${JSON.stringify(distinctFamilyReview)}\nPatches: ${patchDigest}\nTask: ${task}`,
       { label: `review:${cycle}:distinct-family-corroboration`, phase: 'Review', schema: REVIEW_SCHEMA, model: models.criticalReviewer },
@@ -655,7 +697,9 @@ for (let cycle = 0; cycle <= maxRepairCycles; cycle += 1) {
   blocking = reviews.filter((r, index) =>
     (index >= REVIEW_ANGLES.length || REVIEW_ANGLES[index].required) && r.verdict === 'block'
   ).length
-  otherPrimaryRan = reviews.some((r) => r.angle === 'other-primary' && r.crossFamily && r.crossFamily.ran && r.crossFamily.status === 'ok' && r.crossFamily.crossFamily && r.crossFamily.certificationEligible && ['enforced', 'oauth_safe_mode'].includes(r.crossFamily.readOnlyGuarantee))
+  otherPrimaryRan = (
+    await Promise.all(reviews.map((review) => readCanonicalOtherPrimaryRoute(review, runDir)))
+  ).some(Boolean)
   distinctFamilyRan = reviews.some((r) => r.angle === 'distinct-family' && r.crossFamily && r.crossFamily.ran && r.crossFamily.status === 'ok')
   log(`Review cycle ${cycle}: ${reviews.length} verdicts, ${blocking} blocking; other-primary ${otherPrimaryRan ? 'ran' : 'NOT run'}; distinct-family ${distinctFamilyRan ? 'ran' : 'not available'}.`)
   await checkpoint(`review-${cycle}-complete`, 'run objective verification', [], reviews.map((r) => r.path).filter(Boolean))
@@ -775,7 +819,7 @@ const apply = await agent(
     `Update ${runDir}/RUN_RECEIPT.json task/owner, artifact retention and owned/handed-off pane fields; leave its ` +
     `status=active while this change awaits human acceptance. Record unresolved blockers and every reviewer lane ` +
     `including failures. The preserved cross-family dispatch record supplies ` +
-    `adapter/model_family, output_path, dispatch_status, cross_family, certification_eligible and read_only_guarantee; ` +
+    `adapter/model_family, output_path, dispatch_status, cross_family, provider_assurance and read_only_guarantee; ` +
     `role=targeted for fresh targeted lenses, role=other-primary only for a certified ` +
     `OpenAI-family reviewer with its exact route_receipt path, output sha256 and reviewed_revision, and role=distinct-family for advisory distinct-family attempts including failed/unavailable ` +
     `status plus reason. For terminal work, apply stronger targeted and adversarial pressure; if a distinct family is skipped, record distinct_family_coverage_reason. ` +
