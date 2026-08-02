@@ -36,7 +36,13 @@ class CommandResult:
     structured_import_evidence: bool = False
 
 
-DIRECT_PROCESS_TIMEOUT = 30.0
+# A cap on a target run, so a genuine hang cannot stall the gate forever. It has
+# to clear the slowest legitimate target rather than the average one: at 30s a
+# hang and a merely slow suite were indistinguishable, and any change touching
+# skills/orchestrate/evals/test_cf_dispatch.py (66 tests, over a minute) was
+# permanently unlandable because the reverted run was killed at 30s and came
+# back as an unclassified SIGTERM rather than an assertion.
+DIRECT_PROCESS_TIMEOUT = 300.0
 PIPE_DRAIN_TIMEOUT = 5.0
 
 _PYTEST_IMPORT_PLUGIN = """import json
