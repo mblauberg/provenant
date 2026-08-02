@@ -109,7 +109,7 @@ The loop is driven by a self-pacing scheduler (`{{WAKE_SCHEDULER}}`), not a busy
 - **Long** (`{{LONG_WAKE_SECONDS}}`, ~3600s) while backed off behind a hard limit;
   a genuinely dry frontier uses the validated idle pause and schedules no wake.
 
-**Completion-notify is the primary signal; the scheduled wake is a fallback.** The harness re-invokes the orchestrator *on background-job completion*. So set a **long** fallback and rely on the notify — short polling fallbacks just waste iterations re-reading an unchanged in-flight table. Where a delay is genuinely optional, prefer one that stays within the runtime's cache window rather than re-paying cold-start cost.
+**Completion-notify is only a wake signal; before verification apply the `orchestrate` skill's `worker-liveness.md` quiescence rule.** The scheduled wake is a fallback. The harness re-invokes the orchestrator *on background-job completion*. So set a **long** fallback and rely on the notify: short polling fallbacks just waste iterations re-reading an unchanged in-flight table. Where a delay is genuinely optional, prefer one that stays within the runtime's cache window rather than re-paying cold-start cost.
 
 **Steady-state transition** (once all reachable work appears complete):
 

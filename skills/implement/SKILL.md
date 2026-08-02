@@ -33,6 +33,9 @@ reconciliation run.
    before changing code. Invoke `tdd` for every new or changed observable
    behaviour, and use `refactor`
    for behaviour-preserving structure and `diagnose` for unknown causes.
+   Retain the focused test command and its red output for each changed
+   behaviour. A first-run green, or a red failing for a different reason than
+   the one claimed, returns to `tdd`/`diagnose`.
    Migrations may need behaviour tests and equivalence evidence. Use
    `orchestrate` when decomposition helps; adapt topology inside authority.
    For a version-sensitive external interface or migration, apply

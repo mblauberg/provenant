@@ -113,6 +113,15 @@ into a second receipt. A question is terminal for the attempt but remains
 blocked for the task, and failed, unavailable and blocked outcomes are explicit
 non-certifying results.
 
+A worker's final act before idling is its report: the digest plus artifact
+path through its return channel or a direct message to the chair, or an
+explicit failure report. Going idle without one is a contract breach, not a
+neutral state. A chair observing idle-without-report verifies the deliverable
+directly from the filesystem, then queries the worker once; completion is
+judged from the verified artifact, never inferred from silence. Before that
+verification, apply the [worker-liveness.md](worker-liveness.md) quiescence
+rule.
+
 ## Non-goals
 
 This contract does not prescribe a topology (single chair, paired-primary, or

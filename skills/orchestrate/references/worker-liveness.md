@@ -22,10 +22,12 @@ to stop or reuse the worktree. CPU, session-log mtime, elapsed time and a
 0-byte first snapshot are supporting observations only. Terminality comes from
 the execution owner that waited for the worker and recorded its exit.
 
-Detached harness-task state is not process state. Before reusing a worktree,
-confirm the worker PID is gone. Otherwise the detached task and a fresh worker
-can become two writers in the same worktree, as happened when detached tasks
-continued running for hours.
+Detached harness-task state is not process state. Completion notification is
+only a wake signal. Before verification or worktree reuse, take two bounded
+file/directory mtime snapshots, require stability, confirm the worker PID is
+gone, and confirm no process has the worktree as its cwd. A worker once
+reported completion and a clean tree while its `codex exec` child kept writing
+for several more minutes.
 
 ## Native launcher ownership
 

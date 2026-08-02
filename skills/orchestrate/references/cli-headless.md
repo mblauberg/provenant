@@ -136,6 +136,12 @@ questions: <what to refute, complete, or falsify>
 return: hypothesis | risk | evidence_needed | likely_files | falsification_check
 ```
 
+Headless Agy prompts must be self-contained: embed the necessary material or
+use `--add-dir`; do not ask for shell commands or writes, because `agy -p`
+auto-denies `command` and `write_file` permissions and returns no useful result.
+Use a narrow operator-approved allow-rule only when unavoidable; otherwise
+record the route as unavailable.
+
 Do not treat distinct-family output as established fact. Feed its claims to targeted reviewers or certified
 cross-family verifiers for source/test/schema confirmation.
 
@@ -152,6 +158,9 @@ Four failure modes are specific to this lane:
 - **Never pipe `codex exec` stdout.** `codex exec ... | tail -5` hangs indefinitely; one run
   sat at 14 minutes elapsed against 0.16 CPU-seconds. Redirect to a file, then read the file.
   Judge liveness by [worker-liveness.md](worker-liveness.md), never by output size.
+- **Unix-socket and daemon-lifecycle suites are not delegable to sandboxed Codex workers.**
+  `EPERM: operation not permitted` on socket open is a sandbox capability result, not product
+  evidence, and must never be recorded as a test failure. The orchestrator runs those suites itself.
 - **One writer per worktree, and never the primary checkout.** `-C` hands Codex the whole
   tree. Two lanes sharing one worktree corrupt both, not always visibly.
 - **A worker cannot commit inside a linked worktree.** Its `.git` metadata lives in the
