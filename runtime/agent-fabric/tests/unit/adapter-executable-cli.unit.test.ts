@@ -5,8 +5,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { parse } from "yaml";
 
 import { runSourceCli } from "../support/cli-process.ts";
+import { createCursorKiroCompatibilityFixture } from "../support/stage4-cursor-kiro-testkit.ts";
 import { createResolvedStage4Compatibility } from "../support/stage4-pi-agy-testkit.ts";
-import { resolveAdapterExecutableCli } from "../../src/cli/adapter-executable.ts";
+import { resolveAdapterExecutableAttestationCli, resolveAdapterExecutableCli } from "../../src/cli/adapter-executable.ts";
 import { FabricError } from "../../src/errors.ts";
 
 type Fixture = Awaited<ReturnType<typeof createResolvedStage4Compatibility>>;
@@ -93,6 +94,54 @@ describe("adapter executable resolver CLI", () => {
     const result = await resolveFixtureExecutable(fixture);
 
     expect(result).toBe(executable);
+  });
+
+  it("returns the observed assurance and shared certification decision", async () => {
+    const fixture = await createResolvedStage4Compatibility("agy");
+    fixtures.push(fixture);
+    const executable = await fixtureExecutable(fixture);
+    const configPath = join(fixture.directory, "agent-fabric.json");
+    await writeFile(configPath, "schemaVersion: 1\nallowedAdapters: [agy]\nactiveAdapters: [agy]\n");
+
+    await expect(resolveAdapterExecutableAttestationCli([
+      "--adapter", "agy",
+      "--config", configPath,
+      "--compatibility", fixture.compatibilityPath,
+      "--compatibility-schema", fixture.schemaPath,
+      "--json",
+    ], {
+      verifyNpmInstall: async () => undefined,
+      verifyProvider: async () => ({
+        identity: { assurance: "lockfile-install-attestation" },
+      }) as never,
+    })).resolves.toStrictEqual({
+      executable,
+      providerAssurance: "lockfile-install-attestation",
+      certifyingAnswerBearingLeg: true,
+    });
+  });
+
+  it("keeps an OpenCode owner-controlled route advisory", async () => {
+    const fixture = await createCursorKiroCompatibilityFixture();
+    fixtures.push(fixture);
+    const configPath = join(fixture.directory, "agent-fabric.json");
+    await writeFile(configPath, "schemaVersion: 1\nallowedAdapters: [opencode-acp]\nactiveAdapters: [opencode-acp]\n");
+
+    await expect(resolveAdapterExecutableAttestationCli([
+      "--adapter", "opencode-acp",
+      "--config", configPath,
+      "--compatibility", fixture.compatibilityPath,
+      "--compatibility-schema", fixture.schemaPath,
+      "--json",
+    ], {
+      verifyNpmInstall: async () => undefined,
+      verifyProvider: async () => ({
+        identity: { assurance: "owner-controlled-install-root" },
+      }) as never,
+    })).resolves.toMatchObject({
+      providerAssurance: "owner-controlled-install-root",
+      certifyingAnswerBearingLeg: false,
+    });
   });
 
   it("loads shipped configuration, compatibility and schemas from the product root", async () => {

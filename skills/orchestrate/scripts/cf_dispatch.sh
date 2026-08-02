@@ -178,14 +178,15 @@ emit_record() {
   local catalog_model="${18:-}" model_selection="${19:-}"
   local risk_tier="${20:-$RISK_TIER}" policy_override="${21:-}"
   local adapter_resolution="${22:-}" adapter_executable="${23:-}" adapter_resolution_reason="${24:-}"
+  local provider_assurance="${25:-}" certifying_answer_bearing_leg="${26:-false}"
   model="$(resolve_model "$tool" "$model")"
   [ -n "$endpoint" ] || endpoint="$(endpoint_provider "$tool")"
   [ -n "$identity" ] || identity="unresolved"
   cross="false"
   [ -n "$ORCH_FAMILY" ] && valid_family "$ORCH_FAMILY" && [ -n "$family" ] && [ "$ORCH_FAMILY" != "$family" ] && cross="true"
   cert="false"
-  [ "$status" = "ok" ] && [ "$cross" = "true" ] && [ "$adapter_resolution" = "verified-owner" ] && { [ "$guarantee" = "enforced" ] || [ "$guarantee" = "oauth_safe_mode" ]; } && cert="true"
-  printf '{"tool":"%s","adapter":"%s","adapter_gate":"direct-cli","model":"%s","requested_model":"%s","resolved_model":"%s","fallback_model":"%s","requested_effort":"%s","effort":"%s","effort_source":"%s","effort_capability_source":"%s","effort_substitution":"%s","substitution":"%s","status":"%s","exit":%s,"output_path":"%s","read_only_guarantee":"%s","orchestrator_family":"%s","provider_family":"%s","model_family":"%s","endpoint_provider":"%s","identity_source":"%s","catalog_model":"%s","model_selection":"%s","route_alias":"%s","reviewer_id":"%s","risk_tier":"%s","policy_override":"%s","adapter_resolution":"%s","adapter_executable":"%s","adapter_resolution_reason":"%s","cross_family":%s,"certification_eligible":%s}\n' \
+  [ "$status" = "ok" ] && [ "$cross" = "true" ] && [ "$adapter_resolution" = "verified-owner" ] && [ -n "$provider_assurance" ] && [ "$certifying_answer_bearing_leg" = "true" ] && { [ "$guarantee" = "enforced" ] || [ "$guarantee" = "oauth_safe_mode" ]; } && cert="true"
+  printf '{"tool":"%s","adapter":"%s","adapter_gate":"direct-cli","model":"%s","requested_model":"%s","resolved_model":"%s","fallback_model":"%s","requested_effort":"%s","effort":"%s","effort_source":"%s","effort_capability_source":"%s","effort_substitution":"%s","substitution":"%s","status":"%s","exit":%s,"output_path":"%s","read_only_guarantee":"%s","orchestrator_family":"%s","provider_family":"%s","model_family":"%s","endpoint_provider":"%s","identity_source":"%s","provider_assurance":"%s","catalog_model":"%s","model_selection":"%s","route_alias":"%s","reviewer_id":"%s","risk_tier":"%s","policy_override":"%s","adapter_resolution":"%s","adapter_executable":"%s","adapter_resolution_reason":"%s","cross_family":%s,"certification_eligible":%s}\n' \
     "$(printf '%s' "$tool" | json_escape)" \
     "$(printf '%s' "$tool" | json_escape)" \
     "$(printf '%s' "$model" | json_escape)" \
@@ -207,6 +208,7 @@ emit_record() {
     "$(printf '%s' "$family" | json_escape)" \
     "$(printf '%s' "$endpoint" | json_escape)" \
     "$(printf '%s' "$identity" | json_escape)" \
+    "$(printf '%s' "$provider_assurance" | json_escape)" \
     "$(printf '%s' "$catalog_model" | json_escape)" \
     "$(printf '%s' "$model_selection" | json_escape)" \
     "$(printf '%s' "$MODEL_ALIAS" | json_escape)" \
@@ -258,6 +260,8 @@ resolve_adapter_executable() {
   adapter_resolution=""
   adapter_executable=""
   adapter_resolution_reason=""
+  provider_assurance=""
+  certifying_answer_bearing_leg="false"
   command_name="$(adapter_command_for_tool "$tool")" || {
     adapter_resolution="unavailable"
     adapter_resolution_reason="no adapter command mapping for $tool"
@@ -272,12 +276,44 @@ resolve_adapter_executable() {
       owner_output="$({ "$owner" adapter executable \
         --adapter "$adapter_id" \
         --product-root "$PRODUCT_ROOT" \
-        --instance-root "${AGENT_FABRIC_INSTANCE_ROOT:-$PRODUCT_ROOT}"; } 2>"$diag")"
+        --instance-root "${AGENT_FABRIC_INSTANCE_ROOT:-$PRODUCT_ROOT}" \
+        --json; } 2>"$diag")"
       owner_rc=$?
       if [ "$owner_rc" -eq 0 ]; then
-        if [ -n "$owner_output" ] && [ "${owner_output#*/}" != "$owner_output" ] && [ -f "$owner_output" ] && [ -x "$owner_output" ]; then
+        local owner_executable owner_assurance owner_certifying
+        owner_executable="$(printf '%s' "$owner_output" | python3 -c 'import json,sys
+raw=sys.stdin.read()
+try:
+    value=json.loads(raw)
+except (json.JSONDecodeError, TypeError):
+    value={"executable":raw.strip()}
+path=value.get("executable", "") if isinstance(value, dict) else ""
+print(path if isinstance(path, str) else "")')"
+        owner_assurance="$(printf '%s' "$owner_output" | python3 -c 'import json,sys
+try:
+    value=json.load(sys.stdin)
+except (json.JSONDecodeError, TypeError):
+    value={}
+assurance=value.get("provider_assurance", "") if isinstance(value, dict) else ""
+print(assurance if isinstance(assurance, str) else "")')"
+        owner_certifying="$(printf '%s' "$owner_output" | python3 -c 'import json,sys
+try:
+    value=json.load(sys.stdin)
+except (json.JSONDecodeError, TypeError):
+    value={}
+print("true" if isinstance(value, dict) and value.get("certifying_answer_bearing_leg") is True else "false")')"
+        # The owner boolean is a status projection, not an authority input.
+        # Derive the gate from the observed assurance so an inconsistent
+        # owner response cannot certify an advisory route.
+        case "$owner_assurance" in
+          full-vendor-identity|lockfile-install-attestation) owner_certifying="true";;
+          partial-signed-helpers|owner-controlled-install-root|*) owner_certifying="false";;
+        esac
+        if [ -n "$owner_executable" ] && [ "${owner_executable#*/}" != "$owner_executable" ] && [ -f "$owner_executable" ] && [ -x "$owner_executable" ]; then
           adapter_resolution="verified-owner"
-          adapter_executable="$owner_output"
+          adapter_executable="$owner_executable"
+          provider_assurance="$owner_assurance"
+          certifying_answer_bearing_leg="$owner_certifying"
           return 0
         fi
         adapter_resolution="rejected"
@@ -359,7 +395,7 @@ resolve_routing() {
 }
 
 run_one() {  # $1 tool $2 model $3 effort -> writes clean answer to OUT, echoes JSON, returns 0/1
-  local tool="$1" model="$2" effort="$3" tmpdir raw diag combined clean rc status opath guarantee family endpoint identity effort_substitution substitution requested_model requested_effort effort_source effort_capability_source route_json route_rc route_fields capabilities_file fallback_model primary_model catalog_model model_selection policy_override route_risk_tier compatibility_adapter adapter_resolution_failed
+  local tool="$1" model="$2" effort="$3" tmpdir raw diag combined clean rc status opath guarantee family endpoint identity effort_substitution substitution requested_model requested_effort effort_source effort_capability_source route_json route_rc route_fields capabilities_file fallback_model primary_model catalog_model model_selection policy_override route_risk_tier compatibility_adapter adapter_resolution_failed provider_assurance certifying_answer_bearing_leg
   model="$(resolve_model "$tool" "$model")"
   tmpdir="$(make_tmp_dir)"
   raw="$tmpdir/raw"
@@ -381,6 +417,8 @@ run_one() {  # $1 tool $2 model $3 effort -> writes clean answer to OUT, echoes 
   adapter_resolution=""
   adapter_executable=""
   adapter_resolution_reason=""
+  provider_assurance=""
+  certifying_answer_bearing_leg="false"
   adapter_resolution_failed=0
   route_risk_tier="$RISK_TIER"
   requested_effort="$effort"
@@ -605,7 +643,7 @@ run_one() {  # $1 tool $2 model $3 effort -> writes clean answer to OUT, echoes 
       opath=""
     fi
   fi
-  emit_record "$tool" "$model" "$effort" "$status" "$rc" "$opath" "$guarantee" "$family" "$endpoint" "$identity" "$effort_substitution" "$requested_effort" "$effort_source" "$effort_capability_source" "$substitution" "$requested_model" "$fallback_model" "$catalog_model" "$model_selection" "$route_risk_tier" "$policy_override" "$adapter_resolution" "$adapter_executable" "$adapter_resolution_reason"
+  emit_record "$tool" "$model" "$effort" "$status" "$rc" "$opath" "$guarantee" "$family" "$endpoint" "$identity" "$effort_substitution" "$requested_effort" "$effort_source" "$effort_capability_source" "$substitution" "$requested_model" "$fallback_model" "$catalog_model" "$model_selection" "$route_risk_tier" "$policy_override" "$adapter_resolution" "$adapter_executable" "$adapter_resolution_reason" "$provider_assurance" "$certifying_answer_bearing_leg"
   [ "$status" = "ok" ]
 }
 

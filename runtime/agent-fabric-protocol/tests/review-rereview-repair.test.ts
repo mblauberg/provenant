@@ -52,6 +52,7 @@ function terminalProjection() {
     terminalSequence: 1,
     terminalResultDigest: digestA,
     currentCertificationBasis: activeBasis(),
+    providerAssurance: "full-vendor-identity",
     certifying: true,
     providerAnswerDigest: digestA,
     reviewResultDigest: digestA,
@@ -373,6 +374,34 @@ describe("Agent Fabric re-review protocol repair", () => {
     };
     expect(() => PROVIDER_ACTION_TERMINAL_PROJECTION_V1_CODEC.parse(invalidTerminal, "terminal")).toThrow(/certifying/);
     expect(ajv().compile(PROVIDER_ACTION_TERMINAL_PROJECTION_V1_CODEC.schema)(invalidTerminal)).toBe(false);
+  });
+
+  it("requires certifying provider assurance across terminal, slot and currency projections", () => {
+    const advisorySlot = { ...cleanSlot("native"), providerAssurance: "partial-signed-helpers" };
+    expect(() => REVIEW_SLOT_V1_CODEC.parse(advisorySlot, "slot")).toThrow(/provider assurance/);
+    expect(ajv().compile(REVIEW_SLOT_V1_CODEC.schema)(advisorySlot)).toBe(false);
+
+    const advisoryTerminal = {
+      ...terminalProjection(),
+      route: { ...terminalProjection().route, providerAssurance: "partial-signed-helpers" },
+      terminalReview: { ...terminalProjection().terminalReview, providerAssurance: "partial-signed-helpers" },
+    };
+    expect(() => PROVIDER_ACTION_TERMINAL_PROJECTION_V1_CODEC.parse(advisoryTerminal, "terminal")).toThrow(/provider assurance/);
+    expect(ajv().compile(PROVIDER_ACTION_TERMINAL_PROJECTION_V1_CODEC.schema)(advisoryTerminal)).toBe(false);
+
+    const advisoryCurrency = {
+      ...REVIEW_EVIDENCE_CURRENCY_V1_CODEC.example,
+      target: "current",
+      source: "current",
+      chair: "current",
+      profile: "current",
+      currentCertificationBasis: activeBasis(),
+      providerAssurance: "owner-controlled-install-root",
+      certifying: true,
+      blockerCodes: [],
+    };
+    expect(() => REVIEW_EVIDENCE_CURRENCY_V1_CODEC.parse(advisoryCurrency, "currency")).toThrow(/provider assurance/);
+    expect(ajv().compile(REVIEW_EVIDENCE_CURRENCY_V1_CODEC.schema)(advisoryCurrency)).toBe(false);
   });
 
   it("allows observed null normalized effort only with observed inapplicable effort", () => {

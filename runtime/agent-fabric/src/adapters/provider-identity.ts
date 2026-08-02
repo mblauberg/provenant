@@ -60,6 +60,10 @@ export function providerIdentityAssuranceForPolicy(policy: string): ProviderIden
   return isProviderIdentityPolicy(policy) ? PROVIDER_IDENTITY_ASSURANCE_BY_POLICY[policy] : undefined;
 }
 
+export function isProviderIdentityAssurance(value: string): value is ProviderIdentityAssurance {
+  return (Object.values(PROVIDER_IDENTITY_ASSURANCE_BY_POLICY) as readonly string[]).includes(value);
+}
+
 function assertNever(value: never): never {
   throw new Error(`unhandled provider identity assurance: ${value}`);
 }
