@@ -670,13 +670,11 @@ def _run_suite(
 
 
 def _print_output(result: CommandResult) -> None:
-    # Elapsed time and an explicit timed_out flag, because a target killed at the
-    # cap and a target that failed on its own merits both surface as an
-    # unclassified non-zero return. Without these two numbers the only way to
-    # tell them apart was to raise the cap and rerun CI.
+    # Preserve the elapsed time and actual cap alongside the timeout class so a
+    # reader can distinguish a killed target without rerunning CI.
     timing = f"elapsed={result.elapsed_seconds:.1f}s"
     if result.timed_out:
-        timing += f" timed_out=yes cap={DIRECT_PROCESS_TIMEOUT:.0f}s"
+        timing += f" timed_out=yes cap={result.timeout_seconds:.0f}s"
     print(
         f"COMMAND classification={result.classification.value} returncode={result.returncode} "
         f"{timing}: {result.command}"

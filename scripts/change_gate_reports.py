@@ -16,6 +16,7 @@ from pathlib import Path
 
 class FailureClass(str, Enum):
     PASS = "pass"
+    TIMEOUT = "timeout"
     ASSERTION = "assertion-failure"
     IMPORT = "import-error"
     COLLECTION = "collection-error"

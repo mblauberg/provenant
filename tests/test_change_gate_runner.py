@@ -298,7 +298,7 @@ def test_structured_runner_bounds_a_direct_process_that_does_not_exit(tmp_path):
     )
 
     assert time.monotonic() - started < 3
-    assert result.classification is FailureClass.UNKNOWN
+    assert result.classification is FailureClass.TIMEOUT
 
 
 def test_unstructured_runner_uses_the_bounded_process_helper(tmp_path, monkeypatch):
@@ -322,6 +322,26 @@ def test_unstructured_runner_uses_the_bounded_process_helper(tmp_path, monkeypat
     assert observed["timeout_seconds"] == 10.0
     assert result.returncode == 0
     assert result.output.strip() == "42"
+
+
+def test_unstructured_timeout_is_classified_explicitly(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        change_gate_runner,
+        "run_bounded",
+        lambda *args, **kwargs: BoundedProcessResult(
+            -9,
+            "started",
+            7,
+            False,
+            True,
+            0.1,
+        ),
+    )
+
+    result = run_command("tool", tmp_path, timeout_seconds=0.1)
+
+    assert result.classification is FailureClass.TIMEOUT
+    assert result.timeout_seconds == 0.1
 
 
 @pytest.mark.parametrize(

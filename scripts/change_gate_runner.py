@@ -36,6 +36,7 @@ class CommandResult:
     structured_import_evidence: bool = False
     elapsed_seconds: float = 0.0
     timed_out: bool = False
+    timeout_seconds: float = 0.0
 
 
 # The slowest measured target is 79 seconds. A 180-second cap leaves more than
@@ -188,7 +189,11 @@ def _run_captured(
         env=environment,
     )
     if runner is None:
-        classification = classify_failure(result.returncode, result.output)
+        classification = (
+            FailureClass.TIMEOUT
+            if result.timed_out
+            else classify_failure(result.returncode, result.output)
+        )
         return CommandResult(
             command=rendered,
             returncode=result.returncode,
@@ -196,6 +201,7 @@ def _run_captured(
             classification=classification,
             elapsed_seconds=result.elapsed_seconds,
             timed_out=result.timed_out,
+            timeout_seconds=timeout_seconds,
         )
 
     assert report_path is not None
@@ -206,7 +212,7 @@ def _run_captured(
         pytest_sidecar=sidecar_path if runner is Runner.PYTEST else None,
     )
     if result.timed_out:
-        classification = FailureClass.UNKNOWN
+        classification = FailureClass.TIMEOUT
         unresolved_module = None
     structured_import_evidence = (
         classification in {FailureClass.IMPORT, FailureClass.COLLECTION}
@@ -221,6 +227,7 @@ def _run_captured(
         structured_import_evidence=structured_import_evidence,
         elapsed_seconds=result.elapsed_seconds,
         timed_out=result.timed_out,
+        timeout_seconds=timeout_seconds,
     )
 
 

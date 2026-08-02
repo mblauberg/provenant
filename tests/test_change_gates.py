@@ -744,6 +744,63 @@ def test_right_reason_red_names_the_target_it_rejected(tmp_path):
     assert "REJECTED" in target_lines[0]
 
 
+def test_right_reason_red_rejects_timeout_with_explicit_diagnostic(
+    tmp_path, monkeypatch, capsys
+):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "tests").mkdir()
+    (source / "tests" / "existing.py").write_text("base test\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(source), "init", "--quiet"], check=True)
+    subprocess.run(["git", "-C", str(source), "add", "-A"], check=True)
+    subprocess.run(
+        [
+            "git", "-C", str(source),
+            "-c", "user.name=Gate Test",
+            "-c", "user.email=gate-test@example.invalid",
+            "commit", "--quiet", "-m", "base",
+        ],
+        check=True,
+    )
+    timed_out = CommandResult(
+        "pytest tests/existing.py",
+        -9,
+        "started",
+        FailureClass.TIMEOUT,
+        elapsed_seconds=180.0,
+        timed_out=True,
+        timeout_seconds=180.0,
+    )
+
+    monkeypatch.setattr(
+        change_gates,
+        "_run_suite",
+        lambda commands, cwd, tests, *, budget=None: [timed_out],
+    )
+
+    result = gate_right_reason_red(
+        source,
+        "HEAD",
+        ["pytest {test}"],
+        ["tests/existing.py"],
+        tmp_path / "scratch",
+    )
+
+    assert result == 1
+    assert timed_out.classification is FailureClass.TIMEOUT
+    assert timed_out.classification is not FailureClass.UNKNOWN
+    output = capsys.readouterr().out
+    assert (
+        "TARGET tests/existing.py status=REJECTED classification=timeout returncode=-9"
+        in output
+    )
+    assert (
+        "COMMAND classification=timeout returncode=-9 elapsed=180.0s "
+        "timed_out=yes cap=180s"
+        in output
+    )
+
+
 def test_right_reason_red_survives_a_scratch_tree_that_will_not_delete(tmp_path, monkeypatch):
     """A scratch tree that will not delete must not destroy the verdict.
 
