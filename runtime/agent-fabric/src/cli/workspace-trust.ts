@@ -408,7 +408,7 @@ async function automaticBoundaryRefusal(boundary: ProjectBoundary, cause?: unkno
     return boundaryTrustError(
       boundary,
       `automatic bootstrap enrolment refused for ${shellQuote(root)}: ${probeDetail}; ` +
-      "non-Git admission requires a proven not-repository result. No automatic trust was added.",
+      "non-Git admission requires a proven not-repository result. Inspect and repair the boundary evidence, then retry from the exact repository root or exact marked non-Git project directory; no automatic trust was added.",
       cause === undefined ? undefined : { cause },
     );
   }
