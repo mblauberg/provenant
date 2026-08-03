@@ -425,7 +425,10 @@ export async function bootstrapMcpSeat(input: {
   paths: FabricPaths;
   now?: Date;
   smokeDeadlineMs?: number;
-  testOnly?: { beforeRegistryRename?: () => Promise<void> };
+  testOnly?: {
+    beforeRegistryRename?: () => Promise<void>;
+    afterRegistryRename?: () => Promise<void>;
+  };
 }): Promise<InstalledBootstrapMcpSeat> {
   const seat = parseMcpSeat(input.environment.AGENT_FABRIC_SEAT ?? "");
   if (seat !== "claude" && seat !== "codex") {
@@ -440,7 +443,6 @@ export async function bootstrapMcpSeat(input: {
   try {
     trust = await ensureAutomaticBootstrapTrust({
       stateDirectory: input.paths.stateDirectory,
-      databasePath: input.paths.databasePath,
       bootstrapAttemptId,
       cwd: input.cwd,
       ...(input.now === undefined ? {} : { now: input.now }),

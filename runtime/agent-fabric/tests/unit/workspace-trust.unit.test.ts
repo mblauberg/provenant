@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmod, lstat, mkdir, mkdtemp, readFile, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, link, lstat, mkdir, mkdtemp, readFile, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -10,6 +10,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   looksLikeRepositoryCollection,
   nearestGitWorkspace,
+  ensureAutomaticBootstrapTrust,
   runWorkspaceTrust,
   trustedWorkspaceIdentity,
   trustedWorkspaceRoots,
@@ -83,6 +84,8 @@ describe("machine-local workspace trust", () => {
         inode: identity.entry.inode,
         expiresAt: "2026-07-12T04:00:00.000Z",
         allowedProfiles: ["headless", "observed"],
+        trustRecordDigest: identity.trustRecordDigest,
+        trustRecordDigestVersion: "canonical-v2",
       },
     });
     await expect(trustedWorkspaceIdentity({
@@ -106,6 +109,8 @@ describe("machine-local workspace trust", () => {
     canonical.schemaVersion = 1;
     entry.approvedBy = "local-operator";
     delete entry.establishmentKind;
+    delete entry.trustRecordDigest;
+    delete entry.trustRecordDigestVersion;
     await writeFile(registryPath, `${JSON.stringify(canonical, null, 2)}\n`, { mode: 0o600 });
     const legacyBytes = await readFile(registryPath, "utf8");
     const legacyDigest = `sha256:${createHash("sha256").update(JSON.stringify({
@@ -130,6 +135,22 @@ describe("machine-local workspace trust", () => {
       entries: [{ canonicalPath: await realpath(value.workspace), trusted: true }],
     });
     await expect(readFile(registryPath, "utf8")).resolves.toBe(legacyBytes);
+
+    await expect(runWorkspaceTrust(["trust", value.workspace], value.paths)).resolves.toMatchObject({
+      schemaVersion: 2,
+      trusted: true,
+      alreadyTrusted: true,
+    });
+    const migrated = JSON.parse(await readFile(registryPath, "utf8")) as {
+      schemaVersion: number;
+      entries: Record<string, unknown>[];
+    };
+    expect(migrated).toMatchObject({ schemaVersion: 2 });
+    expect(migrated.entries[0]).toMatchObject({
+      trustRecordDigest: legacyDigest,
+      trustRecordDigestVersion: "legacy-v1",
+    });
+    expect(migrated.entries[0]).not.toHaveProperty("approvedBy");
   });
 
   it("fails closed on an unknown trust establishment kind", async () => {
@@ -153,6 +174,153 @@ describe("machine-local workspace trust", () => {
       stateDirectory: value.paths.stateDirectory,
       canonicalRoot: value.workspace,
     })).rejects.toThrow(/establishment kind is invalid/u);
+  });
+
+  it("canonicalises a legacy registry at one JSON rename boundary", async () => {
+    const value = await fixture();
+    await mkdir(join(value.workspace, ".git"));
+    await ensureAutomaticBootstrapTrust({
+      stateDirectory: value.paths.stateDirectory,
+      bootstrapAttemptId: "initial-automatic-bootstrap",
+      cwd: value.workspace,
+    });
+    const registryPath = join(value.paths.stateDirectory, "trusted-workspaces.json");
+    const legacy = JSON.parse(await readFile(registryPath, "utf8")) as {
+      schemaVersion: number;
+      entries: Record<string, unknown>[];
+    };
+    const legacyEntry = legacy.entries[0];
+    if (legacyEntry === undefined) throw new Error("legacy trust entry is missing");
+    legacy.schemaVersion = 1;
+    legacyEntry.approvedBy = "local-operator";
+    delete legacyEntry.trustRecordDigest;
+    delete legacyEntry.trustRecordDigestVersion;
+    const legacyBytes = `${JSON.stringify(legacy, null, 2)}\n`;
+    await writeFile(registryPath, legacyBytes, { mode: 0o600 });
+
+    await expect(ensureAutomaticBootstrapTrust({
+      stateDirectory: value.paths.stateDirectory,
+      bootstrapAttemptId: "before-rename",
+      cwd: value.workspace,
+      testOnly: { beforeRegistryRename: async () => { throw new Error("crash before rename"); } },
+    })).rejects.toThrow("crash before rename");
+    await expect(readFile(registryPath, "utf8")).resolves.toBe(legacyBytes);
+
+    await expect(ensureAutomaticBootstrapTrust({
+      stateDirectory: value.paths.stateDirectory,
+      bootstrapAttemptId: "after-rename",
+      cwd: value.workspace,
+      testOnly: { afterRegistryRename: async () => { throw new Error("crash after rename"); } },
+    })).rejects.toThrow("crash after rename");
+    const published = JSON.parse(await readFile(registryPath, "utf8")) as {
+      schemaVersion: number;
+      entries: Record<string, unknown>[];
+    };
+    expect(published.schemaVersion).toBe(2);
+    expect(published.entries[0]).toMatchObject({ trustRecordDigestVersion: "legacy-v1" });
+    expect(published.entries[0]).not.toHaveProperty("approvedBy");
+
+    await expect(ensureAutomaticBootstrapTrust({
+      stateDirectory: value.paths.stateDirectory,
+      bootstrapAttemptId: "after-retry",
+      cwd: value.workspace,
+    })).resolves.toMatchObject({ mutated: false, alreadyTrusted: true });
+  });
+
+  it("canonicalises legacy entries without opening an incompatible or hardlinked custody database", async () => {
+    const value = await fixture();
+    await runWorkspaceTrust(["trust", value.workspace], value.paths);
+    const registryPath = join(value.paths.stateDirectory, "trusted-workspaces.json");
+    const registry = JSON.parse(await readFile(registryPath, "utf8")) as {
+      schemaVersion: number;
+      entries: Record<string, unknown>[];
+    };
+    const entry = registry.entries[0];
+    if (entry === undefined) throw new Error("trust entry is missing");
+    registry.schemaVersion = 1;
+    entry.approvedBy = "local-operator";
+    delete entry.establishmentKind;
+    delete entry.trustRecordDigest;
+    delete entry.trustRecordDigestVersion;
+    await writeFile(registryPath, `${JSON.stringify(registry, null, 2)}\n`, { mode: 0o600 });
+
+    const incompatibleSource = join(value.root, "incompatible-database-source");
+    const incompatibleBytes = "not a SQLite database\n";
+    await writeFile(incompatibleSource, incompatibleBytes, { mode: 0o600 });
+    await link(incompatibleSource, value.paths.databasePath);
+    const sourceIdentity = await lstat(incompatibleSource);
+    await expect(runWorkspaceTrust(["trust", value.workspace], value.paths)).resolves.toMatchObject({
+      schemaVersion: 2,
+      alreadyTrusted: true,
+    });
+    expect(await readFile(incompatibleSource, "utf8")).toBe(incompatibleBytes);
+    expect((await lstat(value.paths.databasePath)).ino).toBe(sourceIdentity.ino);
+  });
+
+  it("preserves legacy digest evidence across multi-entry revoke and gives a new entry the v2 digest", async () => {
+    const value = await fixture();
+    const secondWorkspace = join(value.root, "second-workspace");
+    await mkdir(secondWorkspace);
+    await runWorkspaceTrust(["trust", value.workspace], value.paths);
+    await runWorkspaceTrust(["trust", secondWorkspace], value.paths);
+    const registryPath = join(value.paths.stateDirectory, "trusted-workspaces.json");
+    const legacy = JSON.parse(await readFile(registryPath, "utf8")) as {
+      schemaVersion: number;
+      entries: Record<string, unknown>[];
+    };
+    legacy.schemaVersion = 1;
+    for (const entry of legacy.entries) {
+      entry.approvedBy = "local-operator";
+      delete entry.establishmentKind;
+      delete entry.trustRecordDigest;
+      delete entry.trustRecordDigestVersion;
+    }
+    await writeFile(registryPath, `${JSON.stringify(legacy, null, 2)}\n`, { mode: 0o600 });
+
+    await expect(runWorkspaceTrust(["revoke", value.workspace], value.paths)).resolves.toMatchObject({ revoked: true });
+    const afterRevoke = JSON.parse(await readFile(registryPath, "utf8")) as {
+      entries: (Record<string, unknown> & { canonicalPath: string })[];
+    };
+    const canonicalFirst = await realpath(value.workspace);
+    const canonicalSecond = await realpath(secondWorkspace);
+    expect(afterRevoke.entries).toHaveLength(1);
+    expect(afterRevoke.entries[0]).toMatchObject({
+      canonicalPath: canonicalSecond,
+      trustRecordDigestVersion: "legacy-v1",
+    });
+
+    await expect(runWorkspaceTrust(["trust", value.workspace], value.paths)).resolves.toMatchObject({ trusted: true });
+    const afterRetrust = JSON.parse(await readFile(registryPath, "utf8")) as {
+      entries: (Record<string, unknown> & { canonicalPath: string; trustRecordDigestVersion: string })[];
+    };
+    expect(afterRetrust.entries).toHaveLength(2);
+    expect(afterRetrust.entries.find((entry) => entry.canonicalPath === canonicalSecond))
+      .toMatchObject({ trustRecordDigestVersion: "legacy-v1" });
+    expect(afterRetrust.entries.find((entry) => entry.canonicalPath === canonicalFirst))
+      .toMatchObject({ trustRecordDigestVersion: "canonical-v2" });
+  });
+
+  it.each([
+    ["tampered", "canonical-v2", "sha256:" + "0".repeat(64)],
+    ["tampered compatible", "legacy-v1", "sha256:" + "0".repeat(64)],
+    ["unknown version", "unknown", "sha256:" + "0".repeat(64)],
+  ] as const)("fails closed on %s digest provenance", async (_label, version, digest) => {
+    const value = await fixture();
+    await runWorkspaceTrust(["trust", value.workspace], value.paths);
+    const registryPath = join(value.paths.stateDirectory, "trusted-workspaces.json");
+    const registry = JSON.parse(await readFile(registryPath, "utf8")) as {
+      entries: Record<string, unknown>[];
+    };
+    const entry = registry.entries[0];
+    if (entry === undefined) throw new Error("trust entry is missing");
+    entry.trustRecordDigestVersion = version;
+    entry.trustRecordDigest = digest;
+    await writeFile(registryPath, `${JSON.stringify(registry, null, 2)}\n`, { mode: 0o600 });
+
+    await expect(trustedWorkspaceIdentity({
+      stateDirectory: value.paths.stateDirectory,
+      canonicalRoot: value.workspace,
+    })).rejects.toThrow(/digest provenance/iu);
   });
 
   it("rejects a trusted root after it becomes an unmarked collection and reuses its digest after marking it", async () => {
@@ -620,12 +788,40 @@ describe("machine-local workspace trust", () => {
   async function driftRecordedDevice(paths: { stateDirectory: string }, canonicalPath: string): Promise<number> {
     const registryPath = join(paths.stateDirectory, "trusted-workspaces.json");
     const registry = JSON.parse(await readFile(registryPath, "utf8")) as {
-      entries: { canonicalPath: string; device: number }[];
+      entries: {
+        canonicalPath: string;
+        device: number;
+        allowedProfiles: string[];
+        approvedAt: string;
+        inode: number;
+        establishmentKind: "automatic-bootstrap" | "local-operator";
+        expiresAt?: string;
+        boundaryKind?: string;
+        boundaryEvidenceDigest?: string;
+        bootstrapAttemptId?: string;
+        trustRecordDigest: string;
+        trustRecordDigestVersion: string;
+      }[];
     };
     const entry = registry.entries.find((item) => item.canonicalPath === canonicalPath);
     if (entry === undefined) throw new Error("expected a record to drift");
     const stale = entry.device + 3;
     entry.device = stale;
+    const canonicalProjection = {
+      allowedProfiles: entry.allowedProfiles,
+      approvedAt: entry.approvedAt,
+      canonicalPath: entry.canonicalPath,
+      device: entry.device,
+      ...(entry.expiresAt === undefined ? {} : { expiresAt: entry.expiresAt }),
+      inode: entry.inode,
+      establishmentKind: entry.establishmentKind,
+      ...(entry.establishmentKind === "automatic-bootstrap" ? {
+        boundaryKind: entry.boundaryKind,
+        boundaryEvidenceDigest: entry.boundaryEvidenceDigest,
+        bootstrapAttemptId: entry.bootstrapAttemptId,
+      } : {}),
+    };
+    entry.trustRecordDigest = `sha256:${createHash("sha256").update(JSON.stringify(canonicalProjection)).digest("hex")}`;
     await writeFile(registryPath, `${JSON.stringify(registry, null, 2)}\n`);
     return stale;
   }

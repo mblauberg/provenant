@@ -689,6 +689,8 @@ exit 1
     if (legacyEntry === undefined) throw new Error("legacy trust entry is missing");
     legacy.schemaVersion = 1;
     legacyEntry.approvedBy = "local-operator";
+    delete legacyEntry.trustRecordDigest;
+    delete legacyEntry.trustRecordDigestVersion;
     await writeFile(registryPath, `${JSON.stringify(legacy, null, 2)}\n`, { mode: 0o600 });
 
     let observedLegacyBeforeAtomicReplace = false;
@@ -764,6 +766,8 @@ exit 1
     legacy.schemaVersion = 1;
     legacyEntry.approvedBy = "local-operator";
     delete legacyEntry.establishmentKind;
+    delete legacyEntry.trustRecordDigest;
+    delete legacyEntry.trustRecordDigestVersion;
     await writeFile(registryPath, `${JSON.stringify(legacy, null, 2)}\n`, { mode: 0o600 });
 
     daemon.result = { ...daemon.result!, custodyMutated: false };
