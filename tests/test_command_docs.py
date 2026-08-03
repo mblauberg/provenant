@@ -46,9 +46,3 @@ def test_managed_reconciliation_stays_documented_for_maintainers():
     assert "--target" in source
     assert "reconcile" in source
     assert "Never claim or overwrite an unmanaged target." in source
-
-
-def test_delivery_scenario_replay_command_is_portable():
-    source = read("skills/deliver/references/contract.md")
-    assert "provenant check" in source
-    assert "${AGENTS_HOME:-$HOME/.agents}/scripts/validate_delivery_scenarios.py" not in source

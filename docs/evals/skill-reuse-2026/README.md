@@ -27,13 +27,10 @@ the missing equal-primary Claude family.
 `receipt.json` binds the dataset, complete candidate catalogue, classifier,
 packet and raw JSON outputs to candidate commit
 `1bb67fd77c7aaabc6e8917c2c4f6a404c1e090a7` and tree
-`07a5b1df35e9b7489a2398b1928d445f49832c9c`. Validate it from the repository
-root:
-
-```sh
-python3 scripts/validate_skill_routing_evaluation.py \
-  docs/evals/skill-reuse-2026/receipt.json
-```
+`07a5b1df35e9b7489a2398b1928d445f49832c9c`. The receipt was validated from
+the repository root at the time of the evaluation. The evaluator has since
+been retired; this directory is retained as historical evidence and is not a
+current gate.
 
 `attempts.json` retains two response-schema rejections that occurred before
 inference and two semantic non-passes. Raw CLI errors for the pre-inference

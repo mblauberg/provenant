@@ -5,8 +5,8 @@ different workers, tools, and intermediate steps. Evaluate outcomes, safety gate
 
 ## Eval layers
 
-1. **Static guards.** Frontmatter parses, trigger phrases overlap real prompts, doctrine invariants exist,
-   scripts parse. This is what `evals/check_skill_triggers.py` currently does.
+1. **Static guards.** Frontmatter parses, trigger fixtures and links exist,
+   sidecars are valid, and scripts parse.
 2. **Pressure scenarios.** Give a fresh agent realistic prompts and inspect whether it uses the skill,
    scopes workers, prevents shared writes, and verifies before finalising.
 3. **Trace review.** For real runs, inspect worker count, duplicate work, unsafe tools, missing sources,

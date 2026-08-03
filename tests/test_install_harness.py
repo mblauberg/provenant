@@ -47,6 +47,7 @@ AMBIENT_NON_SKILL_CODE_NAMES = frozenset(
     {
         "clean",
         "crucial",
+        "fabric",
         "flagship",
         "routine",
         "scout",

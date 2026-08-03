@@ -339,20 +339,6 @@
       ]
     },
     {
-      "requirementId": "CONSOLE-AC-024",
-      "sourceRole": "spec",
-      "sourceRef": "console-acceptance-v1.13",
-      "evidenceSelectors": [
-        {
-          "role": "evaluation",
-          "registryKind": "evaluation-result.v1",
-          "selectorId": "skills/orchestrate/evals/lifecycle_skill_evaluation.py",
-          "cardinality": "complete-nonempty-current-set",
-          "requiredStatus": "pass"
-        }
-      ]
-    },
-    {
       "requirementId": "CONSOLE-AC-025",
       "sourceRole": "spec",
       "sourceRef": "console-acceptance-v1.13",

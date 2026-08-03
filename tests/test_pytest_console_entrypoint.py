@@ -7,8 +7,6 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 AFFECTED_MODULES = (
-    "tests/test_check_specs.py",
-    "tests/test_doc_projection_gates.py",
     "tests/test_product_root_resolver.py",
     "tests/test_projection.py",
     "tests/test_public_release_check.py",

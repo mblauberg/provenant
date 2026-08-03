@@ -2,15 +2,12 @@
 
 Original RED/GREEN date: 2026-07-12
 
-Current deterministic gate: 2026-07-16
+Historical deterministic gate: 2026-07-16
 
 ## RED
 
-Command:
-
-```sh
-python3 -m pytest -q tests/test_lifecycle_skill_alignment.py
-```
+The focused command used the former lifecycle-skill alignment test module;
+that module is no longer a current gate.
 
 Result: `1 failed, 1 passed`. The focused lifecycle route/portability fixtures
 were valid; the doctrine gate failed for the intended reason because the
@@ -27,11 +24,9 @@ routes or the adapter-absent workflows, so it was not accepted as AC24 evidence.
 Supporting static gates:
 
 ```text
-scripts/check_harness.py
-PASS: 33 skills; catalogue=7354/8000 chars; frontmatter, fixtures, links and sidecars clean
+the former harness checker
 
-skills/orchestrate/evals/check_skill_triggers.py
-SKILL DOCTRINE CHECK: PASS (16 doctrine, 21 reference)
+the former skill-doctrine checker
 ```
 
 The first repository pass also exposed the stricter whole-entrypoint budget;
