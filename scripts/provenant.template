@@ -15,6 +15,7 @@ REPAIR = (
     "repair: re-run install-harness from the product checkout, "
     "or set AGENT_FABRIC_PRODUCT_ROOT"
 )
+FABRIC_MCP = "runtime/fabric/bin/fabric-mcp"
 
 
 def instance_root() -> Path:
@@ -63,9 +64,9 @@ def resolve_product_root(root: Path) -> Path:
     if not candidate.is_absolute():
         raise ValueError(f"{label} must be an absolute path, got {candidate}; {REPAIR}")
     candidate = candidate.resolve()
-    wrapper = candidate / "scripts/agent-fabric-mcp"
+    wrapper = candidate / FABRIC_MCP
     if not wrapper.is_file() or not os.access(wrapper, os.X_OK):
-        raise ValueError(f"Agent Fabric MCP target is missing or not executable at {wrapper}; {REPAIR}")
+        raise ValueError(f"Fabric MCP launcher is missing or not executable at {wrapper}; {REPAIR}")
     return candidate
 
 
@@ -95,7 +96,7 @@ def main(arguments: list[str]) -> int:
         print(f"provenant: {exc}", file=sys.stderr)
         return 3
     if not arguments and "AGENT_FABRIC_SEAT" in os.environ:
-        target = product_root / "scripts/agent-fabric-mcp"
+        target = product_root / FABRIC_MCP
         delegated_arguments: list[str] = []
     else:
         target = product_root / "scripts/provenant"

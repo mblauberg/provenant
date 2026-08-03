@@ -115,7 +115,7 @@ mcp_args=(
   --opencode-config "${OPENCODE_MCP_CONFIG:-$HOME/.config/opencode/opencode.jsonc}"
 )
 
-"$PRODUCT_ROOT/scripts/configure-agent-fabric-mcp.py" "${mcp_args[@]}" --preflight
+"$PRODUCT_ROOT/scripts/configure-fabric-mcp.py" "${mcp_args[@]}" --preflight
 
 if [[ "$PLATFORM" == "codex" ]]; then
   "$PRODUCT_ROOT/scripts/configure-codex-skill-overrides.py" --preflight \
@@ -156,7 +156,7 @@ if [[ "$PLATFORM" == "codex" ]]; then
   "$PRODUCT_ROOT/scripts/configure-codex-skill-overrides.py" \
     --config "$platform_home/config.toml"
 fi
-"$PRODUCT_ROOT/scripts/configure-agent-fabric-mcp.py" "${mcp_args[@]}"
+"$PRODUCT_ROOT/scripts/configure-fabric-mcp.py" "${mcp_args[@]}"
 
 # AGENTS.md is instance-owned once seeded and HARNESS.md stays product-shipped
 # (ADR 0019), so the client reads doctrine from the instance and the harness

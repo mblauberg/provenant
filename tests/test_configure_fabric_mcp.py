@@ -13,7 +13,7 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SCRIPT = ROOT / "scripts" / "configure-agent-fabric-mcp.py"
+SCRIPT = ROOT / "scripts" / "configure-fabric-mcp.py"
 PROVENANT_TEMPLATE = ROOT / "scripts" / "provenant.template"
 
 
@@ -27,7 +27,7 @@ def stable_shim(tmp_path: Path) -> Path:
 
 
 def load_configurer():
-    spec = importlib.util.spec_from_file_location("configure_agent_fabric_mcp", SCRIPT)
+    spec = importlib.util.spec_from_file_location("configure_fabric_mcp", SCRIPT)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
@@ -114,7 +114,7 @@ def test_configures_all_global_clients_without_a_fixed_project_path(tmp_path: Pa
         "unrelatedSecret": "never-print-claude",
         "mcpServers": {
             "other": {"command": "other"},
-            "agent-fabric": {
+            "fabric": {
                 "command": "/old/proxy",
                 "env": {"AGENT_FABRIC_PROJECT_PATH": "/wrong/project"},
             },
@@ -124,10 +124,10 @@ def test_configures_all_global_clients_without_a_fixed_project_path(tmp_path: Pa
 [custom]
 secret = "never-print-codex"
 
-[mcp_servers.agent-fabric]
+[mcp_servers.fabric]
 command = "/old/proxy"
 
-[mcp_servers.agent-fabric.env]
+[mcp_servers.fabric.env]
 AGENT_FABRIC_PROJECT_PATH = "/wrong/project"
 AGENT_FABRIC_CAPABILITY = "never-print-capability"
 """)
@@ -136,7 +136,7 @@ AGENT_FABRIC_CAPABILITY = "never-print-capability"
             "unrelatedSecret": "never-print-optional",
             "mcpServers": {
                 "other": {"command": "other"},
-                "agent-fabric": {
+                "fabric": {
                     "command": "/old/proxy",
                     "env": {"AGENT_FABRIC_PROJECT_PATH": "/wrong/project"},
                 },
@@ -155,26 +155,26 @@ AGENT_FABRIC_CAPABILITY = "never-print-capability"
     expected_common = {
         "AGENT_FABRIC_STATE_DIRECTORY": str(tmp_path / "state"),
     }
-    assert claude["mcpServers"]["agent-fabric"] == {
+    assert claude["mcpServers"]["fabric"] == {
         "type": "stdio",
         "command": str(shim),
         "args": [],
         "env": {**expected_common, "AGENT_FABRIC_SEAT": "claude", "AGENT_FABRIC_CLIENT_LABEL": "claude"},
     }
-    assert codex["mcp_servers"]["agent-fabric"] == {
+    assert codex["mcp_servers"]["fabric"] == {
         "command": str(shim),
         "env": {**expected_common, "AGENT_FABRIC_SEAT": "codex", "AGENT_FABRIC_CLIENT_LABEL": "codex"},
     }
     for client, path in json_configs.items():
         value = json.loads(path.read_text())
-        assert value["mcpServers"]["agent-fabric"] == {
+        assert value["mcpServers"]["fabric"] == {
             "command": str(shim),
             "env": {**expected_common, "AGENT_FABRIC_SEAT": "codex", "AGENT_FABRIC_CLIENT_LABEL": client},
         }
         assert value["mcpServers"]["other"] == {"command": "other"}
         assert value["unrelatedSecret"] == "never-print-optional"
     opencode = json.loads(opencode_config.read_text())
-    assert opencode["mcp"]["agent-fabric"] == {
+    assert opencode["mcp"]["fabric"] == {
         "type": "local",
         "command": [str(shim)],
         "enabled": True,
@@ -198,10 +198,10 @@ AGENT_FABRIC_CAPABILITY = "never-print-capability"
         "claude", "codex", "cursor", "agy", "kiro", "opencode",
     ]
     assert str(ROOT) not in json.dumps([
-        claude["mcpServers"]["agent-fabric"],
-        codex["mcp_servers"]["agent-fabric"],
-        *(json.loads(path.read_text())["mcpServers"]["agent-fabric"] for path in json_configs.values()),
-        opencode["mcp"]["agent-fabric"],
+        claude["mcpServers"]["fabric"],
+        codex["mcp_servers"]["fabric"],
+        *(json.loads(path.read_text())["mcpServers"]["fabric"] for path in json_configs.values()),
+        opencode["mcp"]["fabric"],
     ])
 
     original_claude = claude_config.read_bytes()
@@ -223,7 +223,7 @@ def test_stable_registration_launches_after_product_relocation(tmp_path: Path) -
     pointer = instance_root / ".agent-fabric/product-root.json"
     pointer.parent.mkdir(parents=True)
     old_product = tmp_path / "old-product"
-    wrapper = old_product / "scripts/agent-fabric-mcp"
+    wrapper = old_product / "runtime/fabric/bin/fabric-mcp"
     wrapper.parent.mkdir(parents=True)
     wrapper.write_text(
         "#!/bin/sh\n"
@@ -309,14 +309,14 @@ def test_stable_registration_reports_repair_for_missing_product(tmp_path: Path) 
     )
 
     assert launched.returncode != 0
-    assert "Agent Fabric MCP target is missing or not executable" in launched.stderr
+    assert "Fabric MCP launcher is missing or not executable" in launched.stderr
     assert "repair: re-run install-harness from the product checkout" in launched.stderr
 
 
 def test_present_empty_seat_still_enters_mcp_mode(tmp_path: Path) -> None:
     shim = stable_shim(tmp_path)
     product = tmp_path / "product"
-    wrapper = product / "scripts/agent-fabric-mcp"
+    wrapper = product / "runtime/fabric/bin/fabric-mcp"
     wrapper.parent.mkdir(parents=True)
     wrapper.write_text("#!/bin/sh\nprintf 'mcp-mode:%s\\n' \"$AGENT_FABRIC_SEAT\"\n")
     wrapper.chmod(0o755)
@@ -376,10 +376,10 @@ def test_check_reports_only_agent_fabric_entry_status(tmp_path: Path) -> None:
     assert configured.returncode == 0, configured.stderr
     checked = run_configure(tmp_path, "--check")
     assert checked.returncode == 0, checked.stderr
-    assert "agent-fabric MCP verified platform=claude" in checked.stdout
-    assert "agent-fabric MCP verified platform=codex" in checked.stdout
+    assert "fabric MCP verified platform=claude" in checked.stdout
+    assert "fabric MCP verified platform=codex" in checked.stdout
     for client in ("cursor", "agy", "kiro", "opencode"):
-        assert f"agent-fabric MCP verified platform={client}" in checked.stdout
+        assert f"fabric MCP verified platform={client}" in checked.stdout
     assert "AGENT_FABRIC_" not in checked.stdout + checked.stderr
 
 
@@ -400,7 +400,7 @@ def test_preflight_rejects_malformed_codex_without_mutating_claude(tmp_path: Pat
     codex_config = tmp_path / "codex.toml"
     original = '{"unrelatedSecret":"preserved"}\n'
     claude_config.write_text(original)
-    codex_config.write_text("[mcp_servers.agent-fabric\n")
+    codex_config.write_text("[mcp_servers.fabric\n")
 
     result = run_configure(tmp_path, "--preflight")
 
@@ -412,7 +412,7 @@ def test_preflight_rejects_malformed_codex_without_mutating_claude(tmp_path: Pat
 
 def test_rejects_inline_codex_entry_instead_of_rewriting_ambiguous_toml(tmp_path: Path) -> None:
     codex_config = tmp_path / "codex.toml"
-    original = '[mcp_servers]\nagent-fabric = { command = "/old" }\n'
+    original = '[mcp_servers]\nfabric = { command = "/old" }\n'
     codex_config.write_text(original)
 
     result = run_configure(tmp_path, "--platform", "codex")
@@ -482,12 +482,12 @@ def test_platform_all_revalidates_codex_after_writing_claude(tmp_path: Path, mon
 
     captured = capsys.readouterr()
     assert result == 4
-    assert "partial-state: agent-fabric MCP registration" in captured.err
+    assert "partial-state: fabric MCP registration" in captured.err
     assert "committed=claude" in captured.err
     assert "remaining=codex,cursor,agy,kiro,opencode" in captured.err
     assert "Codex config changed" in captured.err
     assert codex_config.read_text() == external
-    assert json.loads(claude_config.read_text())["mcpServers"]["agent-fabric"]["env"]["AGENT_FABRIC_SEAT"] == "claude"
+    assert json.loads(claude_config.read_text())["mcpServers"]["fabric"]["env"]["AGENT_FABRIC_SEAT"] == "claude"
 
 
 @pytest.mark.parametrize("failure", ["post-exchange-mismatch", "post-link-fsync"])
@@ -530,10 +530,10 @@ def test_first_client_post_install_failure_reports_partial_state(
 
     captured = capsys.readouterr()
     assert result == 4
-    assert "partial-state: agent-fabric MCP registration" in captured.err
+    assert "partial-state: fabric MCP registration" in captured.err
     assert "committed=none" in captured.err
     assert "remaining=claude" in captured.err
-    assert "agent-fabric" in config.read_text()
+    assert "fabric" in config.read_text()
     assert len(list(tmp_path.glob(".claude.json.recovery.*/*"))) == 1
 
 
@@ -561,9 +561,9 @@ def test_platform_all_revalidates_an_existing_client_after_an_earlier_commit(
     captured = capsys.readouterr()
     assert result == 4
     assert captured.out.splitlines() == [
-        f"agent-fabric MCP configured platform=claude config={paths['claude']}"
+        f"fabric MCP configured platform=claude config={paths['claude']}"
     ]
-    assert "partial-state: agent-fabric MCP registration" in captured.err
+    assert "partial-state: fabric MCP registration" in captured.err
     assert "cause=config-conflict" in captured.err
     assert "committed=claude" in captured.err
     assert "remaining=codex,cursor,agy,kiro,opencode" in captured.err
@@ -659,21 +659,21 @@ def test_platform_all_reports_commits_and_typed_recovery_on_late_conflict(
     assert [line.split("platform=", 1)[1].split(" ", 1)[0] for line in receipts] == [
         "claude", "codex", "cursor", "agy", "kiro",
     ]
-    assert all("agent-fabric MCP configured" in line for line in receipts)
-    assert "partial-state: agent-fabric MCP registration" in captured.err
+    assert all("fabric MCP configured" in line for line in receipts)
+    assert "partial-state: fabric MCP registration" in captured.err
     assert "committed=claude,codex,cursor,agy,kiro" in captured.err
     assert "remaining=opencode" in captured.err
     assert "OpenCode config changed" in captured.err
     assert "reconcile the reported configuration and any recovery file, then rerun --platform all" in captured.err
     assert paths["opencode"].read_text() == external
     for client in ("claude", "codex", "cursor", "agy", "kiro"):
-        assert "agent-fabric" in paths[client].read_text()
+        assert "fabric" in paths[client].read_text()
 
     recovered = configurer.main(arguments)
     recovery_output = capsys.readouterr()
     assert recovered == 0, recovery_output.err
     assert '"unrelated": "concurrent-opencode-write"' in paths["opencode"].read_text()
-    assert "agent-fabric" in paths["opencode"].read_text()
+    assert "fabric" in paths["opencode"].read_text()
     assert "configured platform=opencode" in recovery_output.out
 
 
@@ -717,9 +717,9 @@ def test_committed_receipt_output_failure_reports_partial_state_and_stops(
     diagnostic = error_output.getvalue()
     assert result == 4
     assert writes == ["claude"]
-    assert "agent-fabric" in paths["claude"].read_text()
+    assert "fabric" in paths["claude"].read_text()
     assert paths["codex"].read_text() == '[unrelated]\nvalue = "before"\n'
-    assert "partial-state: agent-fabric MCP registration" in diagnostic
+    assert "partial-state: fabric MCP registration" in diagnostic
     assert "cause=receipt-output" in diagnostic
     assert "committed=claude" in diagnostic
     assert "remaining=codex,cursor,agy,kiro,opencode" in diagnostic
@@ -738,9 +738,9 @@ def test_closed_stdout_reader_exits_with_typed_partial_state_without_shutdown_ov
     return_code, error_output = run_configure_with_closed_stdout(tmp_path)
 
     assert return_code == 4
-    assert "agent-fabric" in paths["claude"].read_text()
+    assert "fabric" in paths["claude"].read_text()
     assert paths["codex"].read_text() == '[unrelated]\nvalue = "before"\n'
-    assert "partial-state: agent-fabric MCP registration" in error_output
+    assert "partial-state: fabric MCP registration" in error_output
     assert "cause=receipt-output" in error_output
     assert "committed=claude" in error_output
     assert "remaining=codex,cursor,agy,kiro,opencode" in error_output
@@ -761,7 +761,7 @@ def test_closed_stdout_before_any_commit_preserves_conflict_exit(
     )
 
     assert return_code == 3
-    assert "conflicting: agent-fabric MCP receipt output failed" in error_output
+    assert "conflicting: fabric MCP receipt output failed" in error_output
     assert "Exception ignored" not in error_output
 
 
@@ -780,7 +780,7 @@ def test_existing_direct_config_under_symlinked_parent_binds_installed_inode(tmp
 
     configurer.write_proposal(proposal)
 
-    assert "agent-fabric" in requested.read_text()
+    assert "fabric" in requested.read_text()
 
 
 @pytest.mark.parametrize("client", ["claude", "codex"])
@@ -797,7 +797,7 @@ def test_absent_config_under_symlinked_parent_binds_installed_inode(tmp_path: Pa
 
     configurer.write_proposal(proposal)
 
-    assert "agent-fabric" in requested.read_text()
+    assert "fabric" in requested.read_text()
 
 
 @pytest.mark.parametrize("client", ["claude", "codex"])
@@ -827,7 +827,7 @@ def test_existing_write_preserves_post_validation_interleave_as_recovery(tmp_pat
     with pytest.raises(configurer.RegistrationConflictError, match=f"{client.title()} config changed") as caught:
         configurer.write_proposal(proposal)
 
-    assert "agent-fabric" in requested.read_text()
+    assert "fabric" in requested.read_text()
     recovery = Path(str(caught.value).rsplit(" ", 1)[-1])
     assert recovery.read_text() == external
     assert recovery.parent != tmp_path
@@ -893,7 +893,7 @@ def test_post_exchange_fsync_error_retains_private_displaced_recovery(tmp_path: 
     with pytest.raises(configurer.RegistrationConflictError, match="preserve private recovery file") as caught:
         configurer.write_proposal(proposal)
 
-    assert "agent-fabric" in requested.read_text()
+    assert "fabric" in requested.read_text()
     recovery = Path(str(caught.value).rsplit(" ", 1)[-1])
     assert recovery.read_text() == original
     assert stat.S_IMODE(recovery.parent.stat().st_mode) == 0o700
@@ -928,7 +928,7 @@ def test_post_commit_cleanup_fsync_error_does_not_report_conflict(
 
     configurer.write_proposal(proposal)
 
-    assert "agent-fabric" in requested.read_text()
+    assert "fabric" in requested.read_text()
     assert not list(tmp_path.glob(f".{requested.name}.recovery.*"))
     operation = "recovery-directory-fsync" if failure_call == 3 else "target-parent-fsync"
     assert capsys.readouterr().err.strip() == (
@@ -960,7 +960,7 @@ def test_post_commit_recovery_rmdir_error_warns_without_reporting_conflict(
 
     configurer.write_proposal(proposal)
 
-    assert "agent-fabric" in requested.read_text()
+    assert "fabric" in requested.read_text()
     assert failed_path is not None and failed_path.is_dir()
     assert capsys.readouterr().err.strip() == (
         f"warning: post-commit recovery cleanup failed operation=recovery-directory-rmdir path={failed_path}"
@@ -1011,7 +1011,7 @@ def test_post_commit_recovery_unlink_error_does_not_report_conflict(
 
     configurer.write_proposal(proposal)
 
-    assert "agent-fabric" in requested.read_text()
+    assert "fabric" in requested.read_text()
     recovery_directories = list(tmp_path.glob(f".{requested.name}.recovery.*"))
     assert len(recovery_directories) == 1
     assert stat.S_IMODE(recovery_directories[0].stat().st_mode) == 0o700
@@ -1147,7 +1147,7 @@ def test_absent_target_replaced_after_link_fails_closed_with_recovery(tmp_path: 
 
     assert requested.read_text() == external
     recovery = Path(str(caught.value).rsplit(" ", 1)[-1])
-    assert "agent-fabric" in recovery.read_text()
+    assert "fabric" in recovery.read_text()
     recovery.unlink()
 
 
@@ -1155,7 +1155,7 @@ def test_operations_docs_define_dynamic_primary_registration_and_bounded_fixed_p
     runbook = (ROOT / "docs/runbooks/agent-fabric-operations.md").read_text()
     runtime_readme = (ROOT / "runtime/agent-fabric/README.md").read_text()
     for document in (runbook, runtime_readme):
-        assert "configure-agent-fabric-mcp.py" in document
+        assert "configure-fabric-mcp.py" in document
         assert "AGENT_FABRIC_PROJECT_PATH" in document
         assert "Claude Code and Codex" in document
         assert "cannot preserve" in document

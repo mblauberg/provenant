@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Configure project-dynamic Agent Fabric MCP entries for supported clients."""
+"""Configure project-dynamic Fabric MCP entries for supported clients."""
 
 from __future__ import annotations
 
@@ -19,8 +19,8 @@ import tomllib
 from typing import Any
 
 
-SERVER_NAME = "agent-fabric"
-CODEX_TABLES = {"mcp_servers.agent-fabric", "mcp_servers.agent-fabric.env"}
+SERVER_NAME = "fabric"
+CODEX_TABLES = {"mcp_servers.fabric", "mcp_servers.fabric.env"}
 TABLE_HEADER = re.compile(r"^\s*\[([^\[\]]+)]\s*(?:#.*)?$")
 CLIENT_LABELS = {"opencode": "OpenCode"}
 
@@ -262,11 +262,11 @@ def _toml_string(value: str) -> str:
 def _codex_block(desired: dict[str, Any]) -> str:
     environment = desired["env"]
     return "\n".join([
-        "# agent-harness: project-dynamic agent-fabric MCP",
-        "[mcp_servers.agent-fabric]",
+        "# agent-harness: project-dynamic fabric MCP",
+        "[mcp_servers.fabric]",
         f"command = {_toml_string(desired['command'])}",
         "",
-        "[mcp_servers.agent-fabric.env]",
+        "[mcp_servers.fabric.env]",
         *[f"{key} = {_toml_string(value)}" for key, value in environment.items()],
         "",
     ])
@@ -284,11 +284,11 @@ def codex_update(path: Path, desired: dict[str, Any]) -> ConfigProposal:
         return ConfigProposal("codex", snapshot, text, "existing")
     prefix, found = _remove_codex_tables(text)
     if existing is not None and not found:
-        raise RegistrationError("Codex agent-fabric entry uses an unsupported inline or quoted table form")
+        raise RegistrationError("Codex fabric entry uses an unsupported inline or quoted table form")
     updated = (prefix + "\n\n" if prefix else "") + _codex_block(desired)
     parsed = _codex_value(updated)
     if parsed.get("mcp_servers", {}).get(SERVER_NAME) != desired:
-        raise RegistrationError("composed Codex agent-fabric entry is invalid")
+        raise RegistrationError("composed Codex fabric entry is invalid")
     return ConfigProposal("codex", snapshot, updated, "ready")
 
 
@@ -504,12 +504,12 @@ def write_proposal(proposal: ConfigProposal) -> None:
 def _report(proposal: ConfigProposal, verb: str) -> None:
     try:
         print(
-            f"agent-fabric MCP {verb} platform={proposal.client} config={proposal.snapshot.target_path}",
+            f"fabric MCP {verb} platform={proposal.client} config={proposal.snapshot.target_path}",
             flush=True,
         )
     except (OSError, ValueError) as exc:
         _neutralize_failed_stream("stdout")
-        raise RegistrationOutputError(f"agent-fabric MCP receipt output failed: {exc}") from exc
+        raise RegistrationOutputError(f"fabric MCP receipt output failed: {exc}") from exc
 
 
 def _neutralize_failed_stream(name: str) -> None:
@@ -532,7 +532,7 @@ def _report_partial_state(
     recovery: str,
 ) -> None:
     diagnostic = (
-        "partial-state: agent-fabric MCP registration "
+        "partial-state: fabric MCP registration "
         f"cause={cause} committed={','.join(committed) or 'none'} "
         f"remaining={','.join(remaining) or 'none'} config={config} "
         f"error={str(error).replace(chr(10), ' ')}; recovery={recovery}"
@@ -638,7 +638,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.check:
             missing = [proposal.client for proposal in proposals if proposal.status != "existing"]
             if missing:
-                print("missing: agent-fabric MCP registration for " + ", ".join(missing))
+                print("missing: fabric MCP registration for " + ", ".join(missing))
                 return 1
             for proposal in proposals:
                 _assert_unchanged(proposal)
