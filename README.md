@@ -81,7 +81,7 @@ npm ci
 scripts/install-harness --platform claude
 scripts/install-harness --platform codex
 
-# discover commands, then verify Fabric
+# discover commands, then verify the daemonless Fabric bus
 provenant help
 provenant fabric whoami
 
@@ -105,11 +105,10 @@ non-zero, follow the message it prints: exit `3` flags a command collision,
 incompatible instruction target, or managed skill-link conflict, and
 instruction conflicts include the bootstrap line to add.
 
-`provenant doctor` checks Fabric configuration and enabled adapters (identity
-and non-answer interfaces, not login or quota); Provenant never sets or persists
-provider API keys. `provenant check` runs the harness policy gate; `npm run
-check` covers TypeScript build, type, schema and tests. Evaluation, load, audit
-and Rust review-portal gates run in CI.
+`provenant fabric whoami` creates the project-local Fabric identity and shared
+SQLite bus on first use. There is no daemon, trust record, seat bootstrap or
+warm/build step. `provenant check` runs the harness policy gate; `npm run check`
+covers the Fabric typecheck and tests.
 
 <details>
 <summary>Filesystem layout, Codex config and uninstall</summary>
@@ -142,18 +141,16 @@ From the product checkout,
 reclaims the harness-owned skill links and nothing else. The bootstrap line and
 the Codex block remain until removed by hand.
 
-Before first use, run `provenant project activate [PATH]`. Git PATH must be its
-exact repository root or a non-Git directory; activation verifies trust, never
-bootstraps seats. Use `fabric_bootstrap`; trust remains
-`provenant fabric workspace trust`. If bootstrap runs first,
-`WORKSPACE_NOT_TRUSTED` provides recovery.
+Fabric derives the project from the current working directory. Run
+`provenant fabric whoami` from the project you mean; the first call creates its
+database and registers the caller without a separate activation step.
 
 </details>
 
 ## Providers
 
 The checked-in profile enables all six clients below. Install and authenticate
-each before `provenant doctor`.
+each before dispatching work through that provider.
 
 | Client or provider | Current integration |
 |---|---|

@@ -1,6 +1,7 @@
 import importlib.util
 import hashlib
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -19,6 +20,18 @@ def load_module():
     return module
 
 
+@pytest.fixture(autouse=True)
+def _detach_deleted_fabric_authority_registry(monkeypatch):
+    validator = load_module()._delivery_validator()
+    policy = validator._policy_validation_module()
+    monkeypatch.setattr(
+        policy, "_fabric_operations", lambda _root, _invalid_type: frozenset()
+    )
+    monkeypatch.setattr(
+        policy, "_fabric_cost_pattern", lambda _root, _invalid_type: re.compile(r"(?!)")
+    )
+
+
 def make_run(tmp_path):
     run = tmp_path / "run"
     run.mkdir()
@@ -28,6 +41,9 @@ def make_run(tmp_path):
     assert spec.loader
     spec.loader.exec_module(reference)
     receipt = reference.make_reference_run("research", ROOT)
+    assert receipt["authority"]["allowed_fabric_operations"] == []
+    assert receipt["authority"]["denied_fabric_operations"] == []
+    assert not any(key.startswith("cost:") for key in receipt["authority"]["budget"])
     receipt["run_id"] = "CLEAN-1"
     receipt["fabric_relationships"]["delivery_run_id"] = "CLEAN-1"
     receipt["authority"]["allowed_artifact_paths"] = ["run"]

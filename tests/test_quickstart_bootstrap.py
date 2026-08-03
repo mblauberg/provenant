@@ -8,13 +8,13 @@ import subprocess
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_documented_fresh_checkout_sequence_produces_runnable_doctor(tmp_path):
+def test_documented_fresh_checkout_sequence_produces_runnable_fabric(tmp_path):
     readme = (ROOT / "README.md").read_text()
     commands = [
-        'scripts/install-agent-fabric-dependencies',
-        'scripts/agent-fabric-warm',
+        'npm ci',
         'scripts/install-harness --platform claude',
-        'provenant doctor',
+        'provenant help',
+        'provenant fabric whoami',
     ]
     positions = [readme.index(command) for command in commands]
     assert positions == sorted(positions)
@@ -22,101 +22,39 @@ def test_documented_fresh_checkout_sequence_produces_runnable_doctor(tmp_path):
     checkout = tmp_path / "fresh-checkout"
     scripts = checkout / "scripts"
     scripts.mkdir(parents=True)
-    for name in (
-        "agent-fabric",
-        "agent-fabric-mcp",
-        "agent-fabric-protocol-build",
-        "agent-fabric-protocol-preflight",
-        "agent-fabric-warm",
-        "install-agent-fabric-dependencies",
-        "provenant",
-    ):
-        shutil.copy2(ROOT / "scripts" / name, scripts / name)
-    # Copy the whole library directory. Enumerating its members here meant that
-    # adding a scripts/lib file broke this fixture rather than exercising the
-    # bootstrap it is meant to test.
+    shutil.copy2(ROOT / "scripts" / "provenant", scripts / "provenant")
     shutil.copytree(ROOT / "scripts" / "lib", scripts / "lib")
+    shutil.copytree(ROOT / "runtime" / "fabric", checkout / "runtime" / "fabric")
 
-    for workspace in (
-        "agent-fabric-protocol",
-        "agent-fabric",
-        "agent-fabric-herdr",
-        "agent-fabric-console",
-    ):
-        (checkout / "runtime" / workspace).mkdir(parents=True)
-    (checkout / "runtime" / "agent-fabric" / "scripts").mkdir(parents=True)
-    (checkout / "runtime" / "agent-fabric" / "scripts" / "lib").mkdir(parents=True)
-    shutil.copy2(
-        ROOT / "runtime" / "agent-fabric" / "scripts" / "write-npm-ci-attestation.mjs",
-        checkout / "runtime" / "agent-fabric" / "scripts" / "write-npm-ci-attestation.mjs",
+    common_dir = Path(
+        subprocess.run(
+            ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
     )
-    shutil.copy2(
-        ROOT / "runtime" / "agent-fabric" / "scripts" / "verify-npm-ci-attestation.mjs",
-        checkout / "runtime" / "agent-fabric" / "scripts" / "verify-npm-ci-attestation.mjs",
-    )
-    shutil.copy2(
-        ROOT / "runtime" / "agent-fabric" / "scripts" / "lib" / "npm-install-attestation.mjs",
-        checkout / "runtime" / "agent-fabric" / "scripts" / "lib" / "npm-install-attestation.mjs",
-    )
-    (checkout / "package.json").write_text("{}\n")
-    (checkout / "package-lock.json").write_text(
-        json.dumps({"name": "fixture", "lockfileVersion": 3, "packages": {}}) + "\n"
-    )
-    (checkout / "tsconfig.json").write_text("{}\n")
-    subprocess.run(["git", "init", "-q"], cwd=checkout, check=True)
-    subprocess.run(["git", "add", "."], cwd=checkout, check=True)
-    subprocess.run(
-        [
-            "git",
-            "-c",
-            "user.name=Quickstart Test",
-            "-c",
-            "user.email=quickstart@example.invalid",
-            "commit",
-            "-qm",
-            "fixture",
-        ],
-        cwd=checkout,
-        check=True,
-    )
+    installed_modules = common_dir.parent / "node_modules"
+    assert (installed_modules / "tsx" / "dist" / "loader.mjs").is_file()
+    (checkout / "node_modules").symlink_to(installed_modules, target_is_directory=True)
 
-    fake_bin = tmp_path / "fake-bin"
-    fake_bin.mkdir()
-    fake_npm = fake_bin / "npm"
-    fake_npm.write_text(
-        "#!/bin/sh\n"
-        "set -eu\n"
-        "if [ \"${1:-}\" = ci ]; then mkdir -p \"$AGENTS_HOME/node_modules\"; exit 0; fi\n"
-        "[ \"${1:-} ${2:-}\" = 'run build' ]\n"
-        "mkdir -p \"$AGENTS_HOME/runtime/agent-fabric-protocol/dist\"\n"
-        "mkdir -p \"$AGENTS_HOME/runtime/agent-fabric/dist/cli\"\n"
-        "mkdir -p \"$AGENTS_HOME/runtime/agent-fabric/dist/mcp\"\n"
-        "mkdir -p \"$AGENTS_HOME/runtime/agent-fabric-herdr/dist\"\n"
-        "mkdir -p \"$AGENTS_HOME/runtime/agent-fabric-console/dist\"\n"
-        "printf '%s\\n' 'export {};' > \"$AGENTS_HOME/runtime/agent-fabric-protocol/dist/index.js\"\n"
-        "printf '%s\\n' 'process.stdout.write(JSON.stringify({argv: process.argv.slice(2), cwd: process.cwd()}));' > \"$AGENTS_HOME/runtime/agent-fabric/dist/cli/main.js\"\n"
-        "printf '%s\\n' 'export {};' > \"$AGENTS_HOME/runtime/agent-fabric/dist/mcp/main.js\"\n"
-        "printf '%s\\n' 'export {};' > \"$AGENTS_HOME/runtime/agent-fabric-herdr/dist/bin.js\"\n"
-        "printf '%s\\n' 'export {};' > \"$AGENTS_HOME/runtime/agent-fabric-console/dist/bin.js\"\n"
-    )
-    fake_npm.chmod(0o755)
     env = {
         **os.environ,
+        "HOME": str(tmp_path / "home"),
         "AGENTS_HOME": str(checkout),
-        "PATH": f"{fake_bin}:{os.environ['PATH']}",
+        "AGENT_FABRIC_PRODUCT_ROOT": str(checkout),
+        "AGENT_FABRIC_SEAT": "codex",
+        "AGENT_FABRIC_STATE_DIRECTORY": str(tmp_path / "state"),
     }
 
     installed_bin = tmp_path / "installed-bin"
     installed_bin.mkdir()
     (installed_bin / "provenant").symlink_to(scripts / "provenant")
-    subprocess.run([str(scripts / "install-agent-fabric-dependencies")], cwd=checkout, env=env, check=True)
-    warmed = subprocess.run(
-        [str(scripts / "agent-fabric-warm")], cwd=checkout, env=env, text=True, capture_output=True, check=False
-    )
     caller_cwd = tmp_path / "project"
     caller_cwd.mkdir()
-    doctor = subprocess.run(
-        [str(installed_bin / "provenant"), "doctor"],
+    fabric = subprocess.run(
+        [str(installed_bin / "provenant"), "fabric", "whoami"],
         cwd=caller_cwd,
         env=env,
         text=True,
@@ -124,7 +62,10 @@ def test_documented_fresh_checkout_sequence_produces_runnable_doctor(tmp_path):
         check=False,
     )
 
-    assert warmed.returncode == 0, warmed.stderr
-    assert "rebuilding workspace" in warmed.stdout
-    assert doctor.returncode == 0, doctor.stderr
-    assert json.loads(doctor.stdout) == {"argv": ["doctor"], "cwd": str(caller_cwd)}
+    assert fabric.returncode == 0, fabric.stderr
+    payload = json.loads(fabric.stdout)
+    assert payload["project"] == str(caller_cwd)
+    assert payload["agentId"] == "codex"
+    assert payload["provider"] == "codex"
+    assert payload["database"] == str(tmp_path / "state" / "fabric.sqlite3")
+    assert (tmp_path / "state" / "fabric.sqlite3").is_file()

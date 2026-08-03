@@ -214,7 +214,7 @@ def test_installs_claude_skills_and_global_instructions_idempotently(tmp_path):
     # stays product-shipped (ADR 0019).
     assert str(instance_root_for(tmp_path) / "AGENTS.md") in content
     assert str(ROOT / "HARNESS.md") in content
-    registration = json.loads((tmp_path / ".claude.json").read_text())["mcpServers"]["agent-fabric"]
+    registration = json.loads((tmp_path / ".claude.json").read_text())["mcpServers"]["fabric"]
     assert registration["command"] == str(command)
     assert registration["env"] == {
         "AGENT_FABRIC_CLIENT_LABEL": "claude",
@@ -249,7 +249,7 @@ def test_installs_codex_skills_and_global_instructions(tmp_path):
     assert "[custom]\nvalue = 'preserved'" in configured
     assert configured.count('name = "skill-creator"') == 1
     assert "enabled = false" in configured
-    registration = tomllib.loads(configured)["mcp_servers"]["agent-fabric"]
+    registration = tomllib.loads(configured)["mcp_servers"]["fabric"]
     assert registration == {
         "command": str(tmp_path / ".local/bin/provenant"),
         "env": {
@@ -567,12 +567,12 @@ def test_all_mcp_clients_are_an_explicit_subscription_native_opt_in(tmp_path):
         "agy": tmp_path / ".gemini/config/mcp_config.json",
         "kiro": tmp_path / ".kiro/settings/mcp.json",
     }.items():
-        registration = json.loads(path.read_text())["mcpServers"]["agent-fabric"]
+        registration = json.loads(path.read_text())["mcpServers"]["fabric"]
         assert registration["env"]["AGENT_FABRIC_SEAT"] == "codex"
         assert registration["env"]["AGENT_FABRIC_CLIENT_LABEL"] == client
         assert "AGENT_FABRIC_PROJECT_PATH" not in registration["env"]
     opencode = json.loads((tmp_path / ".config/opencode/opencode.jsonc").read_text())
-    registration = opencode["mcp"]["agent-fabric"]
+    registration = opencode["mcp"]["fabric"]
     assert registration["command"] == [str(tmp_path / ".local/bin/provenant")]
     assert registration["environment"]["AGENT_FABRIC_SEAT"] == "codex"
     assert registration["environment"]["AGENT_FABRIC_CLIENT_LABEL"] == "opencode"

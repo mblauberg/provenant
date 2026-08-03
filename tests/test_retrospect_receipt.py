@@ -2,6 +2,7 @@ import importlib.util
 import hashlib
 import json
 from pathlib import Path
+import re
 
 import pytest
 
@@ -17,6 +18,18 @@ def load_module():
     assert spec.loader
     spec.loader.exec_module(module)
     return module
+
+
+@pytest.fixture(autouse=True)
+def _detach_deleted_fabric_authority_registry(monkeypatch):
+    validator = load_module()._delivery_validator()
+    policy = validator._policy_validation_module()
+    monkeypatch.setattr(
+        policy, "_fabric_operations", lambda _root, _invalid_type: frozenset()
+    )
+    monkeypatch.setattr(
+        policy, "_fabric_cost_pattern", lambda _root, _invalid_type: re.compile(r"(?!)")
+    )
 
 
 def data():
@@ -283,6 +296,9 @@ def test_valid_canonical_delivery_source_is_accepted(tmp_path):
     assert spec.loader
     spec.loader.exec_module(reference)
     delivery = reference.make_reference_run("software", ROOT)
+    assert delivery["authority"]["allowed_fabric_operations"] == []
+    assert delivery["authority"]["denied_fabric_operations"] == []
+    assert not any(key.startswith("cost:") for key in delivery["authority"]["budget"])
     delivery["run_id"] = "DEL-example"
     delivery["fabric_relationships"]["delivery_run_id"] = "DEL-example"
     source = tmp_path / "RUN.json"
@@ -299,6 +315,9 @@ def _write_policy_bound_delivery_source(workspace, policy_path="delivery-policy.
     assert spec.loader
     spec.loader.exec_module(reference)
     delivery = reference.make_reference_run("software", ROOT)
+    assert delivery["authority"]["allowed_fabric_operations"] == []
+    assert delivery["authority"]["denied_fabric_operations"] == []
+    assert not any(key.startswith("cost:") for key in delivery["authority"]["budget"])
     delivery["run_id"] = "DEL-example"
     delivery["fabric_relationships"]["delivery_run_id"] = "DEL-example"
     policy = {

@@ -34,8 +34,14 @@ print(json.dumps(payload, sort_keys=True))
 print("dummy stderr", file=sys.stderr)
 raise SystemExit(int(os.environ.get("PROVENANT_TEST_EXIT", "0")))
 """
-    for owner in ("model-route", "worktree", "check-harness", "agent-fabric", "agent-fabric-mcp"):
+    for owner in ("model-route", "worktree", "check-harness"):
         path = scripts / owner
+        path.write_text(recorder)
+        path.chmod(0o755)
+    fabric_bin = checkout / "runtime" / "fabric" / "bin"
+    fabric_bin.mkdir(parents=True)
+    for owner in ("fabric", "fabric-mcp"):
+        path = fabric_bin / owner
         path.write_text(recorder)
         path.chmod(0o755)
 
@@ -139,20 +145,20 @@ def test_worktree_runs_from_arbitrary_cwd_without_changing_it(tmp_path):
 
 def test_installed_copy_ignores_same_named_commands_in_its_bin_directory(tmp_path):
     checkout, _ = make_checkout(tmp_path)
-    product_owner = checkout / "scripts/agent-fabric"
+    product_owner = checkout / "runtime/fabric/bin/fabric"
     product_owner.write_text("#!/bin/sh\nprintf '%s\\n' \"$AGENTS_HOME\"\n")
     product_owner.chmod(0o755)
     bin_dir = tmp_path / "stable-bin"
     bin_dir.mkdir()
     command = bin_dir / "provenant"
     shutil.copy2(STUB, command)
-    shadow = bin_dir / "agent-fabric"
+    shadow = bin_dir / "fabric"
     shadow.write_text("#!/bin/sh\nprintf 'wrong-bin-owner\\n'\n")
     shadow.chmod(0o755)
 
     result = invoke(
         command,
-        "doctor",
+        "fabric",
         cwd=tmp_path,
         AGENT_FABRIC_PRODUCT_ROOT=str(checkout),
         AGENTS_HOME=str(tmp_path / "stale-product"),
@@ -167,7 +173,7 @@ def test_split_root_preserves_instance_root_for_mcp_child(tmp_path):
     command = install_stub(tmp_path)
     instance_root = tmp_path / "instance"
     instance_root.mkdir()
-    wrapper = checkout / "scripts/agent-fabric-mcp"
+    wrapper = checkout / "runtime/fabric/bin/fabric-mcp"
     wrapper.write_text(
         "#!/bin/sh\n"
         "printf '%s\\n' \"$AGENT_FABRIC_INSTANCE_ROOT|$AGENT_FABRIC_PRODUCT_ROOT|$AGENTS_HOME\"\n"
@@ -190,7 +196,7 @@ def test_split_root_preserves_instance_root_for_mcp_child(tmp_path):
 def test_installed_stub_does_not_materialize_the_default_instance_root(tmp_path):
     checkout, _ = make_checkout(tmp_path)
     command = install_stub(tmp_path)
-    wrapper = checkout / "scripts/agent-fabric-mcp"
+    wrapper = checkout / "runtime/fabric/bin/fabric-mcp"
     wrapper.write_text(
         "#!/bin/sh\n"
         "printf '%s|%s|%s\\n' "
@@ -220,7 +226,7 @@ def test_checkout_dispatcher_does_not_inherit_agents_home_as_instance_root(tmp_p
     shutil.copytree(ROOT / "scripts/lib", dispatcher_scripts / "lib")
 
     product, _ = make_checkout(tmp_path / "product")
-    owner = product / "scripts/agent-fabric"
+    owner = product / "runtime/fabric/bin/fabric"
     owner.write_text(
         "#!/bin/sh\n"
         "printf '%s|%s|%s\\n' "
@@ -259,7 +265,7 @@ def test_checkout_dispatcher_resolves_the_instance_pointer_without_agents_home_f
         "product_root": str(pointed_product),
     }))
     for product, marker in ((ambient_product, "ambient"), (pointed_product, "pointed")):
-        owner = product / "scripts/agent-fabric"
+        owner = product / "runtime/fabric/bin/fabric"
         owner.write_text(f"#!/bin/sh\nprintf '%s\\n' {marker}\n")
         owner.chmod(0o755)
 
@@ -286,7 +292,7 @@ def test_explicit_product_root_overrides_instance_pointer_and_agents_home(tmp_pa
         "schema_version": 1,
         "product_root": str(pointed_product),
     }))
-    explicit_wrapper = explicit_product / "scripts/agent-fabric-mcp"
+    explicit_wrapper = explicit_product / "runtime/fabric/bin/fabric-mcp"
     explicit_wrapper.write_text("#!/bin/sh\nprintf 'explicit\\n'\n")
     explicit_wrapper.chmod(0o755)
 
@@ -337,8 +343,7 @@ def test_owner_exec_failure_reports_command_context_without_traceback(tmp_path):
         ("route", ["resolve"]),
         ("worktree", ["check"]),
         ("check", ["--doctor"]),
-        ("fabric", ["workspace", "inspect"]),
-        ("doctor", []),
+        ("fabric", ["tasks"]),
     ],
 )
 @pytest.mark.parametrize("cwd_kind", ["provenant-root", "unrelated-git", "nonrepo"])
@@ -364,25 +369,14 @@ def test_every_delegated_command_preserves_each_supported_caller_cwd(
     assert json.loads(result.stdout)["cwd"] == str(caller_cwd)
 
 
-def test_doctor_is_owned_by_agent_fabric_and_forwards_explicit_arguments(tmp_path):
-    _, command = make_checkout(tmp_path)
-
-    result = invoke(command, "doctor", "--help", "--consume-provider-quota", cwd=tmp_path)
-
-    assert result.returncode == 0
-    payload = json.loads(result.stdout)
-    assert payload["argv"][0].endswith("/scripts/agent-fabric")
-    assert payload["argv"][1:] == ["doctor", "--help", "--consume-provider-quota"]
-
-
 def test_check_and_fabric_delegate_without_reinterpreting_arguments(tmp_path):
     _, command = make_checkout(tmp_path)
 
     check = invoke(command, "check", "--doctor", cwd=tmp_path)
-    fabric = invoke(command, "fabric", "workspace", "inspect", "--path", "x y", cwd=tmp_path)
+    fabric = invoke(command, "fabric", "send", "reviewer", "x y", cwd=tmp_path)
 
     assert json.loads(check.stdout)["argv"][1:] == ["--doctor"]
-    assert json.loads(fabric.stdout)["argv"][1:] == ["workspace", "inspect", "--path", "x y"]
+    assert json.loads(fabric.stdout)["argv"][1:] == ["send", "reviewer", "x y"]
 
 
 def test_missing_or_unknown_command_prints_usage_to_stderr_and_exits_2(tmp_path):
@@ -403,6 +397,7 @@ def test_help_is_concise_and_names_existing_command_owners(tmp_path):
     assert result.returncode == 0
     assert result.stderr == ""
     assert "route" in result.stdout and "scripts/model-route" in result.stdout
-    assert "doctor ...     scripts/agent-fabric doctor ..." in result.stdout
-    assert "Kiro: optional subscription-native provider (ACP v1)." in result.stdout
-    assert "OpenCode: optional provider for explicit opencode/* account models (ACP v1)." in result.stdout
+    assert "fabric ...     runtime/fabric/bin/fabric ..." in result.stdout
+    assert "doctor" not in result.stdout
+    assert "project ..." not in result.stdout
+    assert "Fabric derives who you are from the working directory" in result.stdout
