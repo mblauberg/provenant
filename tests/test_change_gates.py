@@ -3,6 +3,7 @@ from pathlib import Path
 import io
 import subprocess
 import sys
+import tarfile
 
 import pytest
 
@@ -63,6 +64,32 @@ def test_right_reason_red_rejects_collection_errors_as_assertion_reds():
     assert classify_failure(1, "ERROR during collection") is not FailureClass.ASSERTION
 
 
+@pytest.mark.parametrize(
+    "output",
+    [
+        "AssertionError: expected value containing ERROR during collection",
+        "AssertionError: expected fixture 'missing' not found",
+        "AssertionError: expected ModuleNotFoundError: missing dependency",
+        "AssertionError: expected TypeError: marker text only",
+        "AssertionError: expected foo is not a function",
+    ],
+)
+def test_assertion_message_markers_do_not_override_assertion_classification(output):
+    assert classify_failure(1, output) is FailureClass.ASSERTION
+
+
+def test_unstructured_runner_marker_does_not_classify_as_mechanical_failure():
+    output = "the assertion message mentioned ModuleNotFoundError but the runner gave no diagnostic"
+
+    assert classify_failure(1, output) is FailureClass.UNKNOWN
+
+
+def test_assertion_with_pytest_fixture_dump_stays_an_assertion():
+    fixture_dump = "capsys = <Capture" + "Fixture object>"
+
+    assert classify_failure(1, "AssertionError: expected value\n" + fixture_dump) is FailureClass.ASSERTION
+
+
 def test_existing_target_collection_error_is_rejected():
     output = "ERROR during collection"
     result = CommandResult("test", 1, output, classify_failure(1, output))
@@ -70,11 +97,33 @@ def test_existing_target_collection_error_is_rejected():
     assert right_reason_red_evidence(result, target_existed=True) is None
 
 
-def test_new_target_collection_error_is_accepted():
+def test_new_target_collection_error_is_rejected_without_an_explicit_policy():
     output = "ERROR during collection"
     result = CommandResult("test", 1, output, classify_failure(1, output))
 
-    assert right_reason_red_evidence(result, target_existed=False) == "new-target"
+    assert right_reason_red_evidence(result, target_existed=False) is None
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        "SyntaxError: invalid syntax",
+        "fixture 'missing' not found",
+        "ModuleNotFoundError: No module named 'missing'",
+        "runner exited with status 1",
+    ],
+)
+def test_new_target_mechanical_failures_are_rejected(output):
+    result = CommandResult("test", 1, output, classify_failure(1, output))
+
+    assert right_reason_red_evidence(result, target_existed=False) is None
+
+
+def test_new_target_assertion_failure_is_accepted_as_assertion_evidence():
+    output = "AssertionError: expected new behaviour"
+    result = CommandResult("test", 1, output, classify_failure(1, output))
+
+    assert right_reason_red_evidence(result, target_existed=False) == "assertion"
 
 
 def test_existing_target_assertion_failure_is_accepted():
@@ -95,7 +144,7 @@ def test_existing_target_import_typo_is_rejected():
     assert right_reason_red_evidence(result, target_existed=True) is None
 
 
-def test_right_reason_red_accepts_collection_error_for_target_new_at_base(tmp_path):
+def test_right_reason_red_rejects_collection_error_for_target_new_at_base(tmp_path):
     source = tmp_path / "source"
     source.mkdir()
     (source / "tracked.py").write_text("base\n", encoding="utf-8")
@@ -128,10 +177,10 @@ def test_right_reason_red_accepts_collection_error_for_target_new_at_base(tmp_pa
         tmp_path / "scratch",
     )
 
-    assert result == 0
+    assert result == 1
 
 
-def test_ts_right_reason_red_provisions_protocol_build_in_materialised_tree(tmp_path, capsys):
+def test_ts_right_reason_red_provisions_protocol_build_in_materialised_tree(tmp_path):
     source = tmp_path / "source"
     source.mkdir()
     (source / "scripts").mkdir()
@@ -187,24 +236,26 @@ def test_ts_right_reason_red_provisions_protocol_build_in_materialised_tree(tmp_
     verifier.write_text("current verifier\n", encoding="utf-8")
     target.write_text("current test\n", encoding="utf-8")
 
-    result = gate_right_reason_red(
-        source,
-        "HEAD",
-        {
-            "py": f'{sys.executable} -c "raise SystemExit(1)" {{test}}',
-            "ts": f'{sys.executable} tests/ts_gate.py {{test}}',
-        },
-        ["tests/protocol.test.ts"],
-        tmp_path / "scratch",
-    )
-    output = capsys.readouterr().out
+    capture = io.StringIO()
+    with redirect_stdout(capture):
+        result = gate_right_reason_red(
+            source,
+            "HEAD",
+            {
+                "py": f'{sys.executable} -c "raise SystemExit(1)" {{test}}',
+                "ts": f'{sys.executable} tests/ts_gate.py {{test}}',
+            },
+            ["tests/protocol.test.ts"],
+            tmp_path / "scratch",
+        )
+    output = capture.getvalue()
 
     assert result == 0, f"expected TS gate to accept the assertion red, got {result}:\n{output}"
     assert "classification=assertion-failure" in output
     assert "AGENT_FABRIC_PROTOCOL_BUILD_STALE" not in output
 
 
-def test_ts_right_reason_red_reprovisions_untracked_install_artifacts(tmp_path, capsys):
+def test_ts_right_reason_red_reprovisions_untracked_install_artifacts(tmp_path):
     source = tmp_path / "source"
     source.mkdir()
     (source / "scripts").mkdir()
@@ -229,7 +280,8 @@ def test_ts_right_reason_red_reprovisions_untracked_install_artifacts(tmp_path, 
     build.write_text(
         "#!/bin/sh\n"
         "set -eu\n"
-        "if test -L \"$AGENTS_HOME/node_modules\" && "
+        "if test -d \"$AGENTS_HOME/node_modules\" && "
+        "test ! -L \"$AGENTS_HOME/node_modules\" && "
         "test -f \"$AGENTS_HOME/node_modules/installed-marker\" && "
         "test \"$(cat \"$AGENTS_HOME/runtime/agent-fabric/.npm-ci-attestation\")\" = refreshed; then\n"
         "    : > \"$AGENTS_HOME/install-artifacts-provisioned\"\n"
@@ -267,21 +319,82 @@ def test_ts_right_reason_red_reprovisions_untracked_install_artifacts(tmp_path, 
     )
     (source / "tests" / "provisioning.test.ts").write_text("current test\n", encoding="utf-8")
 
-    result = gate_right_reason_red(
-        source,
-        "HEAD",
-        {
-            "py": f'{sys.executable} -c "raise SystemExit(1)" {{test}}',
-            "ts": f'{sys.executable} tests/provisioning_gate.py {{test}}',
-        },
-        ["tests/provisioning.test.ts"],
-        tmp_path / "scratch",
-    )
-    output = capsys.readouterr().out
+    capture = io.StringIO()
+    with redirect_stdout(capture):
+        result = gate_right_reason_red(
+            source,
+            "HEAD",
+            {
+                "py": f'{sys.executable} -c "raise SystemExit(1)" {{test}}',
+                "ts": f'{sys.executable} tests/provisioning_gate.py {{test}}',
+            },
+            ["tests/provisioning.test.ts"],
+            tmp_path / "scratch",
+        )
+    output = capture.getvalue()
 
     assert result == 0, f"expected install artifacts to be provisioned, got {result}:\n{output}"
     assert "classification=assertion-failure" in output
     assert "AGENT_FABRIC_PROTOCOL_BUILD_STALE" not in output
+
+
+def test_materialised_tests_remap_workspace_links_into_the_scratch_tree(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / ".gitignore").write_text("node_modules/\n", encoding="utf-8")
+    package = source / "runtime" / "workspace-package"
+    package.mkdir(parents=True)
+    (package / "sentinel.txt").write_text("base\n", encoding="utf-8")
+    (source / "node_modules" / "@local").mkdir(parents=True)
+    (source / "node_modules" / "@local" / "workspace").symlink_to(
+        "../../runtime/workspace-package", target_is_directory=True
+    )
+    (source / "tests").mkdir()
+    (source / "tests" / "workspace.test.ts").write_text("base test\n", encoding="utf-8")
+    (source / "check_workspace.py").write_text(
+        "from pathlib import Path\n"
+        "value = Path('node_modules/@local/workspace/sentinel.txt').read_text()\n"
+        "if value == 'current\\n':\n"
+        "    print('SOURCE_WORKSPACE_LINK_LEAK')\n"
+        "    raise SystemExit(1)\n"
+        "raise AssertionError('expected isolated materialised workspace link')\n",
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "-C", str(source), "init", "--quiet"], check=True)
+    subprocess.run(["git", "-C", str(source), "add", "-A"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(source),
+            "-c",
+            "user.name=Gate Test",
+            "-c",
+            "user.email=gate-test@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "base",
+        ],
+        check=True,
+    )
+    (package / "sentinel.txt").write_text("current\n", encoding="utf-8")
+    (source / "tests" / "workspace.test.ts").write_text("current test\n", encoding="utf-8")
+
+    capture = io.StringIO()
+    with redirect_stdout(capture):
+        result = gate_right_reason_red(
+            source,
+            "HEAD",
+            [f"{sys.executable} check_workspace.py {{test}}"],
+            ["tests/workspace.test.ts"],
+            tmp_path / "scratch",
+        )
+
+    output = capture.getvalue()
+    assert result == 0, f"materialised workspace link leaked to source:\n{output}"
+    assert "SOURCE_WORKSPACE_LINK_LEAK" not in output
+    assert "classification=assertion-failure" in output
 
 
 def test_materialised_install_provisioning_rejects_symlinked_attestation_parents(tmp_path):
@@ -338,6 +451,127 @@ def test_materialised_install_provisioning_rejects_symlinked_attestation_parents
     assert not (outside / "agent-fabric" / ".npm-ci-attestation").exists()
 
 
+def test_changed_test_copy_rejects_symlinked_destination_components(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (source / "tracked.py").write_text("base\n", encoding="utf-8")
+    (source / "tests").symlink_to(outside, target_is_directory=True)
+    subprocess.run(["git", "-C", str(source), "init", "--quiet"], check=True)
+    subprocess.run(["git", "-C", str(source), "add", "-A"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(source),
+            "-c",
+            "user.name=Gate Test",
+            "-c",
+            "user.email=gate-test@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "base",
+        ],
+        check=True,
+    )
+    (source / "tests").unlink()
+    (source / "tests").mkdir()
+    (source / "tests" / "changed.py").write_text("current test\n", encoding="utf-8")
+    destination = tmp_path / "destination"
+    destination.mkdir()
+
+    with pytest.raises(GateError, match="contains a symlink"):
+        _materialise_base(source, "HEAD", destination, ["tests/changed.py"])
+
+    assert not (outside / "changed.py").exists()
+
+
+def test_archive_materialisation_rejects_symlinked_destination_components(tmp_path, monkeypatch):
+    source = tmp_path / "source"
+    source.mkdir()
+    destination = tmp_path / "destination"
+    destination.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    archive_bytes = io.BytesIO()
+    with tarfile.open(fileobj=archive_bytes, mode="w") as archive:
+        link = tarfile.TarInfo("tests")
+        link.type = tarfile.SYMTYPE
+        link.linkname = "../outside"
+        archive.addfile(link)
+        payload = b"escaped\n"
+        member = tarfile.TarInfo("tests/escaped.py")
+        member.size = len(payload)
+        archive.addfile(member, io.BytesIO(payload))
+    archive_payload = archive_bytes.getvalue()
+    real_run = change_gates.subprocess.run
+
+    def fake_run(arguments, *args, **kwargs):
+        if arguments[:4] == ["git", "-C", str(source), "archive"]:
+            return subprocess.CompletedProcess(arguments, 0, stdout=archive_payload, stderr=b"")
+        return real_run(arguments, *args, **kwargs)
+
+    monkeypatch.setattr(change_gates.subprocess, "run", fake_run)
+
+    with pytest.raises(GateError, match="contains a symlink"):
+        _materialise_base(source, "HEAD", destination, [])
+
+    assert not (outside / "escaped.py").exists()
+
+
+def test_overlay_rejects_symlinked_destination_components(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    outside = tmp_path / "outside.mjs"
+    outside.write_text("outside verifier\n", encoding="utf-8")
+    base_library = source / "runtime" / "agent-fabric" / "scripts" / "lib" / "npm-install-attestation.mjs"
+    base_library.parent.mkdir(parents=True)
+    base_library.symlink_to(outside)
+    (source / "scripts").mkdir()
+    build = source / "scripts" / "agent-fabric-protocol-build"
+    build.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    build.chmod(0o755)
+    (source / "tests").mkdir()
+    (source / "tests" / "overlay.test.ts").write_text("base test\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(source), "init", "--quiet"], check=True)
+    subprocess.run(["git", "-C", str(source), "add", "-A"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(source),
+            "-c",
+            "user.name=Gate Test",
+            "-c",
+            "user.email=gate-test@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "base",
+        ],
+        check=True,
+    )
+    base_library.unlink()
+    base_library.write_text("current verifier\n", encoding="utf-8")
+    (source / "tests" / "overlay.test.ts").write_text("current test\n", encoding="utf-8")
+
+    with pytest.raises(GateError, match="contains a symlink"):
+        gate_right_reason_red(
+            source,
+            "HEAD",
+            {
+                "py": f'{sys.executable} -c "pass" {{test}}',
+                "ts": f'{sys.executable} -c "raise AssertionError(\\"expected\\")" {{test}}',
+            },
+            ["tests/overlay.test.ts"],
+            tmp_path / "scratch",
+        )
+
+    assert outside.read_text(encoding="utf-8") == "outside verifier\n"
+
+
 def test_revert_probe_fails_when_a_reverted_hunk_survives(tmp_path):
     source = tmp_path / "source"
     source.mkdir()
@@ -375,20 +609,52 @@ def _hunk(path="production.py"):
 
 
 def test_revert_probe_does_not_count_a_non_assertion_red_as_a_survivor(tmp_path):
-    """A suite that cannot run is not evidence that nothing constrains the hunk.
+    """A suite that cannot run fails the probe rather than laundering uncertainty.
 
     Reverting a hunk can break the very import the tests need, which reds the
-    suite for a mechanical reason. That is an inability to measure, and counting
-    it as a survivor reports "this change is unconstrained" on evidence that says
-    only "I could not tell". A survivor is a suite that stayed GREEN.
+    suite for a mechanical reason. That is an inability to measure, and treating
+    it as a passing probe reports certification on evidence that says only "I
+    could not tell". A survivor is a suite that stayed GREEN.
     """
     source = tmp_path / "source"
     source.mkdir()
     (source / "production.py").write_text("new\n", encoding="utf-8")
-    # Exits non-zero with a collection error, never an assertion failure.
+    # Exits non-zero with a non-assertion setup error, never an assertion failure.
     command = "python3 -c 'import no_such_module_at_all'"
 
-    assert gate_revert_probe(source, [_hunk()], [command], [], tmp_path / "scratch") == 0
+    capture = io.StringIO()
+    with redirect_stdout(capture):
+        result = gate_revert_probe(source, [_hunk()], [command], [], tmp_path / "scratch")
+
+    assert result == 1
+    assert "REVERT_PROBE: FAIL" in capture.getvalue()
+    assert "inconclusive=1" in capture.getvalue()
+
+
+def test_revert_probe_turns_materialisation_gate_errors_into_inconclusive_evidence(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "production.py").write_text("new\n", encoding="utf-8")
+    (source / "tests").mkdir()
+    (source / "tests" / "missing-build.test.ts").write_text("base\n", encoding="utf-8")
+
+    raised = False
+    capture = io.StringIO()
+    with redirect_stdout(capture):
+        try:
+            result = gate_revert_probe(
+                source,
+                [_hunk()],
+                {"py": "python3 -c 'pass'", "ts": "python3 -c 'pass' {test}"},
+                ["tests/missing-build.test.ts"],
+                tmp_path / "scratch",
+            )
+        except GateError:
+            raised = True
+
+    assert not raised
+    assert result == 1
+    assert "inconclusive=1" in capture.getvalue()
 
 
 def test_changed_lines_mutation_fails_for_a_surviving_crucial_mutant(tmp_path):
@@ -411,6 +677,53 @@ def test_changed_lines_mutation_fails_for_a_surviving_crucial_mutant(tmp_path):
         tmp_path / "scratch",
         "crucial",
     ) == 1
+
+
+def test_mutation_write_rejects_a_symlinked_destination(tmp_path):
+    outside = tmp_path / "outside.py"
+    outside.write_text("outside\n", encoding="utf-8")
+    target = tmp_path / "production.py"
+    target.symlink_to(outside)
+    mutant = Mutant(
+        path="production.py",
+        line=1,
+        before="enabled = True",
+        after="enabled = False",
+        description="symlink destination",
+    )
+
+    with pytest.raises(GateError, match="contains a symlink"):
+        change_gates._write_mutant(tmp_path, mutant)
+
+    assert outside.read_text(encoding="utf-8") == "outside\n"
+
+
+def test_mutation_write_rechecks_the_destination_before_writing(tmp_path, monkeypatch):
+    outside = tmp_path / "outside.py"
+    outside.write_text("enabled = True\n", encoding="utf-8")
+    target = tmp_path / "production.py"
+    target.write_text("enabled = True\n", encoding="utf-8")
+    real_read_text = Path.read_text
+
+    def swap_to_symlink(path, *args, **kwargs):
+        if path == target:
+            target.unlink()
+            target.symlink_to(outside)
+        return real_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", swap_to_symlink)
+    mutant = Mutant(
+        path="production.py",
+        line=1,
+        before="enabled = True",
+        after="enabled = False",
+        description="symlink race destination",
+    )
+
+    with pytest.raises(GateError, match="contains a symlink"):
+        change_gates._write_mutant(tmp_path, mutant)
+
+    assert outside.read_text(encoding="utf-8") == "enabled = True\n"
 
 
 def test_changed_behaviour_doctrine_invokes_tdd_and_has_no_retrospective_red_clause():
@@ -546,7 +859,64 @@ def test_revert_probe_replaces_only_one_hunk_in_the_probe_copy(tmp_path):
     assert target.read_text(encoding="utf-8") == "return False\nkeep\nreturn 2\n"
 
 
-def test_revert_probe_rejects_mixed_test_evidence(tmp_path):
+def test_reverse_hunk_rejects_a_symlinked_destination(tmp_path):
+    outside = tmp_path / "outside.py"
+    outside.write_text("outside\n", encoding="utf-8")
+    target = tmp_path / "example.py"
+    target.symlink_to(outside)
+    hunk = DiffHunk(
+        path="example.py",
+        header=(),
+        hunk_header="@@ -1,1 +1,1 @@",
+        body=("-return False", "+return True"),
+        old_start=1,
+        old_count=1,
+        new_start=1,
+        new_count=1,
+        old_lines=("return False",),
+        new_lines=("return True",),
+    )
+
+    with pytest.raises(GateError, match="contains a symlink"):
+        _apply_reverse_hunk(tmp_path, hunk)
+
+    assert outside.read_text(encoding="utf-8") == "outside\n"
+
+
+def test_reverse_hunk_rechecks_the_destination_before_writing(tmp_path, monkeypatch):
+    outside = tmp_path / "outside.py"
+    outside.write_text("return True\n", encoding="utf-8")
+    target = tmp_path / "example.py"
+    target.write_text("return True\n", encoding="utf-8")
+    real_read_text = Path.read_text
+
+    def swap_to_symlink(path, *args, **kwargs):
+        if path == target:
+            target.unlink()
+            target.symlink_to(outside)
+        return real_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", swap_to_symlink)
+    hunk = DiffHunk(
+        path="example.py",
+        header=(),
+        hunk_header="@@ -1,1 +1,1 @@",
+        body=("-return False", "+return True"),
+        old_start=1,
+        old_count=1,
+        new_start=1,
+        new_count=1,
+        old_lines=("return False",),
+        new_lines=("return True",),
+    )
+
+    with pytest.raises(GateError, match="contains a symlink"):
+        _apply_reverse_hunk(tmp_path, hunk)
+
+    assert outside.read_text(encoding="utf-8") == "return True\n"
+
+
+def test_revert_probe_rejects_mixed_assertion_and_green_evidence(tmp_path):
     source = tmp_path / "source"
     source.mkdir()
     (source / "production.py").write_text("new\n", encoding="utf-8")
@@ -564,7 +934,13 @@ def test_revert_probe_rejects_mixed_test_evidence(tmp_path):
     )
     commands = ["python3 -c 'assert False, \"one target failed\"'", "python3 -c 'pass'"]
 
-    assert gate_revert_probe(source, [hunk], commands, [], tmp_path / "scratch") == 1
+    capture = io.StringIO()
+    with redirect_stdout(capture):
+        result = gate_revert_probe(source, [hunk], commands, [], tmp_path / "scratch")
+
+    assert result == 1
+    assert "INCONCLUSIVE mixed assertion/green evidence" in capture.getvalue()
+    assert "inconclusive=1" in capture.getvalue()
 
 
 def test_probe_scratch_tree_contains_the_current_source(tmp_path):
@@ -664,10 +1040,9 @@ def test_right_reason_red_names_the_target_it_rejected(tmp_path):
 
     # The target existed at the base and cannot be imported, so its red is a
     # typo rather than missing behaviour. That is the rejected case.
-    # Split so this line does not itself read as a collection marker. pytest
-    # echoes the source of a failing test, `classify_failure` substring-matches
-    # the whole capture, and this file has to fail at the merge base by design.
-    # The same idiom is already used above for the import marker. See #622.
+    # Keep the diagnostic-shaped line separate from the target result. This
+    # models a genuine mechanical collection failure and ensures it cannot be
+    # accepted as justified assertion-red evidence. See #622.
     marker = "ERROR during " + "collection"
     command = f'{sys.executable} -c "print(\\"{marker}\\"); raise SystemExit(1)" {{test}}'
     capture = io.StringIO()
@@ -675,11 +1050,9 @@ def test_right_reason_red_names_the_target_it_rejected(tmp_path):
         result = gate_right_reason_red(source, "HEAD", [command], ["tests/existing.py"], tmp_path / "scratch")
 
     assert result == 1
-    # Assert against the TARGET lines alone rather than the whole capture.
-    # `classify_failure` substring-matches the output, the command above emits a
-    # marker string on purpose, and pytest echoes the entire asserted value when
-    # an assertion fails. Asserting on the whole capture would replay that marker
-    # into this file's own failure text and misclassify it. See #622.
+    # Assert against TARGET lines alone rather than the whole capture. The
+    # command emits a structured collection diagnostic, and target-level
+    # assertions must not be accepted through that mechanical failure. See #622.
     target_lines = [line for line in capture.getvalue().splitlines() if line.startswith("TARGET ")]
     assert target_lines, "gate printed no per-target line"
     assert "tests/existing.py" in target_lines[0]

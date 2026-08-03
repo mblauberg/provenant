@@ -59,6 +59,16 @@ async function readAttestation(root: string): Promise<Record<string, unknown>> {
 }
 
 describe("npm install attestation", () => {
+  it("has no Git-HEAD provenance path in the bare-node verifier", async () => {
+    const implementation = await readFile(
+      join(scriptsDirectory, "lib", "npm-install-attestation.mjs"),
+      "utf8",
+    );
+
+    expect(implementation).not.toContain("productCommit");
+    expect(implementation).not.toMatch(/node:(?:child_process|util)|execFileAsync/u);
+  });
+
   it("keeps the bare-node implementation in the packed package surface", async () => {
     const packageJson = JSON.parse(
       await readFile(join(scriptsDirectory, "..", "package.json"), "utf8"),

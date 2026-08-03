@@ -17,6 +17,7 @@ from enum import Enum
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
@@ -69,58 +70,41 @@ class Mutant:
     description: str
 
 
-_INSTALL_ARTIFACTS = ("node_modules", ".venv")
-_NPM_INSTALL_ATTESTATION = Path("runtime/agent-fabric/.npm-ci-attestation")
-_NPM_INSTALL_ATTESTATION_LIBRARY = Path(
-    "runtime/agent-fabric/scripts/lib/npm-install-attestation.mjs"
+_IMPORT_DIAGNOSTICS = (
+    re.compile(r"^\s*(?:E\s+)?(?:ImportError|ModuleNotFoundError)(?::|\b)", re.IGNORECASE),
+    re.compile(
+        r"^\s*(?:E\s+)?(?:Error:\s+)?(?:Cannot find module|Failed to (?:load url|resolve import)|ERR_MODULE_NOT_FOUND\b|does not provide an export named)\b",
+        re.IGNORECASE,
+    ),
 )
-
-
-_IMPORT_MARKERS = (
-    "importerror",
-    "modulenotfounderror",
-    "cannot find module",
-    "failed to load url",
-    "failed to resolve import",
-    "err_module_not_found",
-    "does not provide an export named",
+_COLLECTION_DIAGNOSTICS = (
+    re.compile(r"^\s*(?:E\s+)?ERROR\s+(?:collecting\b|during\s+collection\b)", re.IGNORECASE),
+    re.compile(r"^\s*(?:E\s+)?(?:\d+\s+)?errors?\s+during\s+collection\b", re.IGNORECASE),
+    re.compile(r"^\s*(?:E\s+)?(?:No test files found|No tests collected|Test file not found)\b", re.IGNORECASE),
 )
-_COLLECTION_MARKERS = (
-    "collection error",
-    "error during collection",
-    "errors during collection",
-    "no test files found",
-    "no tests collected",
-    "test file not found",
+_SETUP_DIAGNOSTICS = (
+    re.compile(
+        r"^\s*(?:E\s+)?ERROR\s+(?:at\s+)?(?:setup|teardown)\b|^\s*(?:E\s+)?(?:setup|teardown)\s+failed\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^\s*(?:E\s+)?(?:beforeAll|before_all|beforeEach|before_each|afterAll|after_all|afterEach|after_each)\b.*\b(?:failed|error)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"^\s*(?:E\s+)?fixture\s+['\"][^'\"]+['\"]\s+not found\b", re.IGNORECASE),
 )
-_SETUP_MARKERS = (
-    # Quoted deliberately.  pytest dumps local variables on an assertion
-    # failure, so a test that merely uses a fixture prints something like
-    # `capsys = <_pytest.capture.CaptureFixture object ...>`, and a bare
-    # "fixture " matches the tail of "CaptureFixture".  That misread every
-    # genuine assertion red in a fixture-using test as a setup error.  The
-    # real pytest setup failure is `fixture 'name' not found`.
-    "fixture '",
-    "setup failed",
-    "teardown failed",
-    "beforeall",
-    "before_all",
-    "beforeeach",
-    "afterall",
-    "aftereach",
+_RUNTIME_DIAGNOSTICS = (
+    re.compile(r"^\s*(?:E\s+)?(?:TypeError|ReferenceError|SyntaxError)(?::|\b)", re.IGNORECASE),
+    re.compile(
+        r"^\s*(?:E\s+)?(?:Cannot read properties of .+|[A-Za-z_$][\w.$]*\s+is not a function\b)",
+        re.IGNORECASE,
+    ),
 )
-_RUNTIME_ERROR_MARKERS = (
-    "typeerror:",
-    "referenceerror:",
-    "syntaxerror:",
-    " is not a function",
-    "cannot read properties of",
+_ASSERTION_DIAGNOSTICS = (
+    re.compile(r"^\s*(?:E\s+)?AssertionError(?:\s+\[[^\]]+\])?(?::|\b)", re.IGNORECASE),
+    re.compile(r"^\s*(?:E\s+)?assert\b", re.IGNORECASE),
+    re.compile(r"^\s*(?:E\s+)?Error:\s+expected\b", re.IGNORECASE),
 )
-_ASSERTION_RE = re.compile(
-    r"(?:assertionerror|assert(?:ion)?\s+(?:error|failed)|expected .+\s+to\s+|\bassert\s+.+\s+failed)",
-    re.IGNORECASE,
-)
-_PYTEST_ASSERT_RE = re.compile(r"(?m)^\s*(?:E\s+)?assert\b")
 _HUNK_RE = re.compile(
     r"^@@ -(?P<old_start>\d+)(?:,(?P<old_count>\d+))? "
     r"\+(?P<new_start>\d+)(?:,(?P<new_count>\d+))? @@"
@@ -129,21 +113,27 @@ _DIFF_FILE_RE = re.compile(r"^diff --git a/(.+) b/(.+)$")
 
 
 def classify_failure(returncode: int, output: str) -> FailureClass:
-    """Classify a test process without accepting arbitrary non-zero exits."""
+    """Classify a test process from anchored runner diagnostics.
+
+    Diagnostics are matched line-by-line in output order.  This keeps marker
+    words printed inside an assertion message from overriding the assertion
+    that actually failed, while an earlier setup, import, collection, or
+    runtime diagnostic remains mechanical evidence.
+    """
 
     if returncode == 0:
         return FailureClass.PASS
-    folded = output.casefold()
-    if any(marker in folded for marker in _IMPORT_MARKERS):
-        return FailureClass.IMPORT
-    if any(marker in folded for marker in _COLLECTION_MARKERS):
-        return FailureClass.COLLECTION
-    if any(marker in folded for marker in _SETUP_MARKERS):
-        return FailureClass.SETUP
-    if any(marker in folded for marker in _RUNTIME_ERROR_MARKERS):
-        return FailureClass.UNKNOWN
-    if _ASSERTION_RE.search(output) or _PYTEST_ASSERT_RE.search(output):
-        return FailureClass.ASSERTION
+    diagnostics = (
+        (FailureClass.IMPORT, _IMPORT_DIAGNOSTICS),
+        (FailureClass.COLLECTION, _COLLECTION_DIAGNOSTICS),
+        (FailureClass.SETUP, _SETUP_DIAGNOSTICS),
+        (FailureClass.UNKNOWN, _RUNTIME_DIAGNOSTICS),
+        (FailureClass.ASSERTION, _ASSERTION_DIAGNOSTICS),
+    )
+    for line in output.splitlines():
+        for classification, patterns in diagnostics:
+            if any(pattern.search(line) for pattern in patterns):
+                return classification
     return FailureClass.UNKNOWN
 
 
@@ -342,31 +332,127 @@ def build_mutants(source_root: Path, hunks: list[DiffHunk]) -> list[Mutant]:
     return mutants
 
 
-def _copy_tree(source_root: Path, destination: Path) -> None:
-    def ignore(path: str, names: list[str]) -> set[str]:
-        ignored = {".git", ".pytest_cache", ".mypy_cache", ".ruff_cache", "node_modules", ".venv"}
-        return {name for name in names if name in ignored}
+def _ensure_no_symlink_components(root: Path, path: Path) -> None:
+    """Reject a destination whose write could traverse outside its scratch root."""
 
+    try:
+        relative_path = path.relative_to(root)
+    except ValueError as exc:
+        raise GateError(f"scratch destination escapes scratch tree: {path}") from exc
+    if relative_path.is_absolute() or ".." in relative_path.parts:
+        raise GateError(f"scratch destination escapes scratch tree: {path}")
+    current = root
+    for component in relative_path.parts:
+        current /= component
+        if current.is_symlink():
+            raise GateError(f"scratch destination contains a symlink: {current}")
+
+
+def _remove_scratch_path(root: Path, path: Path) -> None:
+    _ensure_no_symlink_components(root, path)
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+    elif path.is_dir():
+        shutil.rmtree(path)
+
+
+def _remap_source_symlink(
+    source: Path, target: Path, source_root: Path, destination_root: Path
+) -> str:
+    link = os.readlink(source)
+    resolved = (source.parent / link).resolve(strict=False)
+    try:
+        relative_target = resolved.relative_to(source_root.resolve())
+    except ValueError:
+        return link
+    return os.path.relpath(destination_root / relative_target, target.parent)
+
+
+def _safe_copy_entry(
+    source: Path,
+    target: Path,
+    source_root: Path,
+    destination_root: Path,
+    ignored_names: frozenset[str] = frozenset(),
+) -> None:
+    """Copy one tree entry without following source workspace links."""
+
+    _ensure_no_symlink_components(destination_root, target)
+    metadata = source.lstat()
+    if stat.S_ISLNK(metadata.st_mode):
+        link = _remap_source_symlink(source, target, source_root, destination_root)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        _ensure_no_symlink_components(destination_root, target)
+        target.symlink_to(link, target_is_directory=(source.parent / os.readlink(source)).is_dir())
+        return
+    if stat.S_ISDIR(metadata.st_mode):
+        target.mkdir(parents=True, exist_ok=True)
+        for child in source.iterdir():
+            if child.name in ignored_names:
+                continue
+            _safe_copy_entry(child, target / child.name, source_root, destination_root, ignored_names)
+        return
+    if stat.S_ISREG(metadata.st_mode):
+        target.parent.mkdir(parents=True, exist_ok=True)
+        _ensure_no_symlink_components(destination_root, target)
+        shutil.copy2(source, target, follow_symlinks=False)
+        return
+    raise GateError(f"unsupported source filesystem entry: {source}")
+
+
+def _copy_tree(source_root: Path, destination: Path) -> None:
+    ignored_names = frozenset({".git", ".pytest_cache", ".mypy_cache", ".ruff_cache", "node_modules", ".venv"})
     destination.mkdir(parents=True, exist_ok=True)
     for child in source_root.iterdir():
-        target = destination / child.name
-        if child.name in {".git", ".pytest_cache", ".mypy_cache", ".ruff_cache", "node_modules", ".venv"}:
+        if child.name in ignored_names:
             continue
-        if child.is_symlink():
-            target.symlink_to(os.readlink(child))
-        elif child.is_dir():
-            shutil.copytree(child, target, symlinks=True, ignore=ignore)
+        _safe_copy_entry(child, destination / child.name, source_root, destination, ignored_names)
+    _provision_install_artifacts(source_root, destination)
+
+
+def _provision_install_artifacts(source_root: Path, destination: Path) -> None:
+    source = source_root / "node_modules"
+    if source.exists() or source.is_symlink():
+        target = destination / "node_modules"
+        _remove_scratch_path(destination, target)
+        _safe_copy_entry(source, target, source_root, destination)
+
+    source = source_root / ".venv"
+    if source.exists() or source.is_symlink():
+        target = destination / ".venv"
+        _remove_scratch_path(destination, target)
+        _ensure_no_symlink_components(destination, target)
+        target.symlink_to(source, target_is_directory=source.is_dir())
+
+
+def _safe_extract_archive(archive: tarfile.TarFile, destination: Path) -> None:
+    for member in archive:
+        member_path = Path(member.name)
+        if member_path.is_absolute() or ".." in member_path.parts:
+            raise GateError(f"archive member escapes scratch tree: {member.name}")
+        target = destination.joinpath(*member_path.parts)
+        _ensure_no_symlink_components(destination, target)
+        if member.isdir():
+            target.mkdir(parents=True, exist_ok=True)
+        elif member.issym():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            _ensure_no_symlink_components(destination, target)
+            target.symlink_to(member.linkname)
+        elif member.isfile():
+            source = archive.extractfile(member)
+            if source is None:
+                raise GateError(f"archive member has no file payload: {member.name}")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            _ensure_no_symlink_components(destination, target)
+            with target.open("wb") as handle:
+                shutil.copyfileobj(source, handle)
+            target.chmod(member.mode & 0o7777)
         else:
-            shutil.copy2(child, target)
-    for name in ("node_modules", ".venv"):
-        source = source_root / name
-        target = destination / name
-        if source.exists() and not target.exists():
-            target.symlink_to(source, target_is_directory=source.is_dir())
+            raise GateError(f"unsupported archive member: {member.name}")
 
 
 def _materialise_base(source_root: Path, base: str, destination: Path, tests: list[str]) -> None:
-    for child in list(destination.iterdir()):
+    for child in destination.iterdir():
         if child.is_symlink() or child.is_file():
             child.unlink()
         elif child.is_dir():
@@ -380,7 +466,7 @@ def _materialise_base(source_root: Path, base: str, destination: Path, tests: li
     if archive.returncode != 0:
         raise GateError(f"unable to materialise merge base {base}: {archive.stderr.decode().strip()}")
     with tarfile.open(fileobj=io.BytesIO(archive.stdout), mode="r:") as tar:
-        tar.extractall(destination)
+        _safe_extract_archive(tar, destination)
 
     git_commands = (
         (["init", "--quiet"], "initialise the materialised base repository"),
@@ -426,70 +512,24 @@ def _materialise_base(source_root: Path, base: str, destination: Path, tests: li
     for relative in tests:
         source = source_root / relative
         target = destination / relative
-        if not source.is_file():
+        if source.is_symlink() or not source.is_file():
             raise GateError(f"changed test is unavailable in the source tree: {relative}")
+        _ensure_no_symlink_components(source_root, source)
+        _ensure_no_symlink_components(destination, target)
         target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, target)
+        _ensure_no_symlink_components(destination, target)
+        shutil.copy2(source, target, follow_symlinks=False)
 
+    _provision_install_artifacts(source_root, destination)
 
-def _provision_install_artifacts(source_root: Path, destination: Path) -> None:
-    for name in _INSTALL_ARTIFACTS:
-        source = source_root / name
-        target = destination / name
-        if not source.exists():
-            continue
-        if target.is_symlink() or target.is_file():
-            target.unlink()
-        elif target.is_dir():
-            shutil.rmtree(target)
-        target.symlink_to(source, target_is_directory=source.is_dir())
-
-    source_attestation = source_root / _NPM_INSTALL_ATTESTATION
-    if source_attestation.is_file():
-        target_attestation = destination / _NPM_INSTALL_ATTESTATION
+    source_attestation = source_root / Path("runtime/agent-fabric/.npm-ci-attestation")
+    if source_attestation.is_file() and not source_attestation.is_symlink():
+        target_attestation = destination / Path("runtime/agent-fabric/.npm-ci-attestation")
+        _ensure_no_symlink_components(source_root, source_attestation)
         _ensure_no_symlink_components(destination, target_attestation)
         target_attestation.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source_attestation, target_attestation)
-
-
-def _ensure_no_symlink_components(root: Path, path: Path) -> None:
-    try:
-        relative = path.relative_to(root)
-    except ValueError as exc:
-        raise GateError(f"provisioned path escapes scratch tree: {path}") from exc
-    current = root
-    for component in relative.parts:
-        current /= component
-        if current.is_symlink():
-            raise GateError(f"provisioned path contains a symlink: {current}")
-
-
-@contextmanager
-def _current_npm_attestation_library(
-    source_root: Path, destination: Path
-):
-    # The materialised base must keep its production code for the changed-test
-    # run. Its protocol preflight nevertheless needs the current attestation
-    # contract to read the current install record. Overlay only the helper for
-    # that preflight, then restore the base file before tests execute.
-    source = source_root / _NPM_INSTALL_ATTESTATION_LIBRARY
-    target = destination / _NPM_INSTALL_ATTESTATION_LIBRARY
-    _ensure_no_symlink_components(destination, target)
-    if not source.is_file() or not target.is_file():
-        yield
-        return
-
-    original = target.read_bytes()
-    original_stat = target.stat()
-    shutil.copy2(source, target)
-    try:
-        yield
-    finally:
-        target.write_bytes(original)
-        os.utime(
-            target,
-            ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns),
-        )
+        _ensure_no_symlink_components(destination, target_attestation)
+        shutil.copy2(source_attestation, target_attestation, follow_symlinks=False)
 
 
 @contextmanager
@@ -562,6 +602,9 @@ def _provision_protocol_build(
 
 def _refresh_materialised_npm_attestation(cwd: Path) -> None:
     writer = cwd / "runtime" / "agent-fabric" / "scripts" / "write-npm-ci-attestation.mjs"
+    attestation = cwd / "runtime" / "agent-fabric" / ".npm-ci-attestation"
+    _ensure_no_symlink_components(cwd, writer)
+    _ensure_no_symlink_components(cwd, attestation)
     if not writer.is_file():
         return
     try:
@@ -584,20 +627,48 @@ def _refresh_materialised_npm_attestation(cwd: Path) -> None:
         )
 
 
+@contextmanager
+def _current_npm_attestation_library(source_root: Path, destination: Path):
+    """Expose the current verifier to a materialised protocol preflight only."""
+
+    source = source_root / Path("runtime/agent-fabric/scripts/lib/npm-install-attestation.mjs")
+    target = destination / Path("runtime/agent-fabric/scripts/lib/npm-install-attestation.mjs")
+    _ensure_no_symlink_components(source_root, source)
+    _ensure_no_symlink_components(destination, target)
+    if source.is_symlink() or not source.is_file() or target.is_symlink() or not target.is_file():
+        yield
+        return
+
+    original = target.read_bytes()
+    original_stat = target.stat()
+    _ensure_no_symlink_components(destination, target)
+    shutil.copy2(source, target, follow_symlinks=False)
+    try:
+        yield
+    finally:
+        _ensure_no_symlink_components(destination, target)
+        target.write_bytes(original)
+        os.utime(
+            target,
+            ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns),
+            follow_symlinks=False,
+        )
+
+
 def _run_suite(
     commands: list[str] | dict[str, str],
     cwd: Path,
     tests: list[str],
     protocol_build_source_root: Path | None = None,
 ) -> list[CommandResult]:
-    if protocol_build_source_root is None or not _uses_ts_command(commands, tests):
-        if _uses_ts_command(commands, tests):
-            _refresh_materialised_npm_attestation(cwd)
-        _provision_protocol_build(commands, cwd, tests)
-    else:
-        with _current_npm_attestation_library(protocol_build_source_root, cwd):
+    if _uses_ts_command(commands, tests):
+        if protocol_build_source_root is None:
             _refresh_materialised_npm_attestation(cwd)
             _provision_protocol_build(commands, cwd, tests)
+        else:
+            with _current_npm_attestation_library(protocol_build_source_root, cwd):
+                _refresh_materialised_npm_attestation(cwd)
+                _provision_protocol_build(commands, cwd, tests)
 
     def commands_for_target(target: str | None) -> list[str]:
         if not isinstance(commands, dict):
@@ -636,12 +707,11 @@ def target_existed_at_base(base_root: Path, target: str) -> bool:
 def right_reason_red_evidence(result: CommandResult, target_existed: bool) -> str | None:
     """Return the accepted evidence kind, or ``None`` for a defective red."""
 
+    del target_existed
     if result.returncode == 0:
         return None
     if result.classification is FailureClass.ASSERTION:
         return "assertion"
-    if not target_existed:
-        return "new-target"
     return None
 
 
@@ -659,7 +729,6 @@ def gate_right_reason_red(
     with _temporary_tree(source_root, scratch_root) as directory:
         base_root = Path(directory)
         _materialise_base(source_root, base, base_root, tests)
-        _provision_install_artifacts(source_root, base_root)
         results = _run_suite(
             commands,
             base_root,
@@ -701,7 +770,8 @@ def gate_right_reason_red(
 
 def _apply_reverse_hunk(root: Path, hunk: DiffHunk) -> None:
     path = root / hunk.path
-    if not path.is_file():
+    _ensure_no_symlink_components(root, path)
+    if path.is_symlink() or not path.is_file():
         raise GateError(f"reverse probe target is absent: {hunk.path}")
     original = path.read_text(encoding="utf-8")
     lines = original.splitlines()
@@ -714,6 +784,7 @@ def _apply_reverse_hunk(root: Path, hunk: DiffHunk) -> None:
         )
     lines[start : start + len(expected)] = hunk.old_lines
     suffix = "\n" if original.endswith("\n") else ""
+    _ensure_no_symlink_components(root, path)
     path.write_text("\n".join(lines) + suffix, encoding="utf-8")
 
 
@@ -738,11 +809,16 @@ def gate_revert_probe(
                 print(f"HUNK {index} path={hunk.path} status=INVALID reason={exc}")
                 return 1
             try:
-                results = _run_suite(commands, probe_root, tests)
+                results = _run_suite(
+                    commands,
+                    probe_root,
+                    tests,
+                    protocol_build_source_root=source_root,
+                )
             except GateError as exc:
                 # Reverting one hunk can leave a deliberately incomplete
                 # implementation that cannot reach the test process. That
-                # is inconclusive evidence, not a surviving hunk.
+                # is inconclusive evidence, and therefore a failed probe.
                 inconclusive.append(hunk)
                 print(f"HUNK {index} path={hunk.path} status=INCONCLUSIVE non-assertion red: {exc}")
                 continue
@@ -756,25 +832,25 @@ def gate_revert_probe(
         #
         # Anything else is INCONCLUSIVE, not a survivor. Reverting a hunk can
         # break the very import the tests need, and a suite that could not run
-        # is evidence of nothing. Counting that as a survivor reports "this
-        # change is unconstrained" on evidence that says only "I could not
-        # tell", which is the failure this gate is supposed to prevent, not
-        # commit.
+        # is evidence of nothing. Inconclusive evidence fails the probe rather
+        # than laundering uncertainty into a passing gate.
         failures = [result for result in results if result.returncode != 0]
-        if not failures:
+        if len(failures) == 0:
             survivors.append(hunk)
             print(f"HUNK {index} path={hunk.path} status=SURVIVED suite stayed green")
         elif any(result.classification is not FailureClass.ASSERTION for result in failures):
             inconclusive.append(hunk)
             print(f"HUNK {index} path={hunk.path} status=INCONCLUSIVE non-assertion red")
         elif len(failures) != len(results):
-            # Mixed evidence: one target caught the revert and another stayed
-            # green. Ambiguous is not good enough, so this stays a finding.
-            survivors.append(hunk)
-            print(f"HUNK {index} path={hunk.path} status=SURVIVED mixed evidence")
+            # This interface carries no machine-readable proof that the green
+            # target is inapplicable to the reverted hunk. Mixed evidence is
+            # therefore inconclusive and cannot certify that the hunk was killed.
+            inconclusive.append(hunk)
+            print(f"HUNK {index} path={hunk.path} status=INCONCLUSIVE mixed assertion/green evidence")
         else:
+            # Every target ran and every red is a meaningful assertion red.
             print(f"HUNK {index} path={hunk.path} status=KILLED")
-    if survivors:
+    if survivors or inconclusive:
         print(
             f"REVERT_PROBE: FAIL hunks={len(probes)} survivors={len(survivors)} "
             f"inconclusive={len(inconclusive)}"
@@ -790,6 +866,9 @@ def gate_revert_probe(
 
 def _write_mutant(root: Path, mutant: Mutant) -> None:
     path = root / mutant.path
+    _ensure_no_symlink_components(root, path)
+    if path.is_symlink() or not path.is_file():
+        raise GateError(f"mutant source is not a regular scratch file: {mutant.path}")
     lines = path.read_text(encoding="utf-8").splitlines()
     if lines[mutant.line - 1] != mutant.before:
         raise GateError(f"mutant source drift at {mutant.path}:{mutant.line}")
@@ -797,6 +876,7 @@ def _write_mutant(root: Path, mutant: Mutant) -> None:
         del lines[mutant.line - 1]
     else:
         lines[mutant.line - 1] = mutant.after
+    _ensure_no_symlink_components(root, path)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
