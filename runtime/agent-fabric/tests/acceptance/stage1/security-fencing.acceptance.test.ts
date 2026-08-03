@@ -224,7 +224,7 @@ describe("Stage 1 security fencing: symlink escapes are rejected (finding A5; sp
     const projectPath = join(project, ".agents", "agent-fabric.yaml");
     const writeJson = async (path: string, value: unknown): Promise<void> => {
       await mkdir(dirname(path), { recursive: true });
-      await writeFile(path, `${JSON.stringify(value, null, 2)}\n`);
+      await writeFile(path, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
     };
     await writeJson(globalPath, {
       schemaVersion: 1,

@@ -235,6 +235,66 @@ export async function trustedWorkspaceRoots(input: {
   return candidates.filter((_entry, index) => matches[index] === true).map((entry) => entry.canonicalPath);
 }
 
+/**
+ * Resolve the optional project layer for one explicitly selected workspace.
+ *
+ * Project configuration is bound to the exact enrolled root. It must never be
+ * found by walking ancestors, because a parent, home directory or sibling
+ * collection is not an authority boundary. The returned path is checked here
+ * before the config loader reads it; the loader repeats the file-handle checks
+ * to close the open/read race.
+ */
+export async function trustedProjectConfigPath(input: {
+  stateDirectory: string;
+  projectRoot: string;
+  executionProfile?: string;
+  now?: Date;
+}): Promise<string | undefined> {
+  let identity: { canonicalPath: string };
+  try {
+    identity = await canonicalWorkspace(input.projectRoot);
+  } catch (error: unknown) {
+    // An ordinary untrusted directory simply has no project layer. The
+    // filesystem root and home-wide authority are likewise never candidates;
+    // malformed, missing, or symlinked explicit roots still fail closed.
+    if (error instanceof Error && error.message === "workspace trust refuses filesystem-root or home-wide authority") {
+      return undefined;
+    }
+    throw error;
+  }
+  const roots = await trustedWorkspaceRoots({
+    stateDirectory: input.stateDirectory,
+    ...(input.executionProfile === undefined ? {} : { executionProfile: input.executionProfile }),
+    ...(input.now === undefined ? {} : { now: input.now }),
+  });
+  if (!roots.includes(identity.canonicalPath)) return undefined;
+
+  const projectDirectory = join(identity.canonicalPath, ".provenant");
+  let directory: Awaited<ReturnType<typeof lstat>>;
+  try {
+    directory = await lstat(projectDirectory);
+  } catch (error: unknown) {
+    if (errorCode(error) === "ENOENT") return undefined;
+    throw error;
+  }
+  if (!directory.isDirectory() || directory.isSymbolicLink()) {
+    throw new Error(`project configuration directory must be a non-symlink directory: ${projectDirectory}`);
+  }
+
+  const configPath = join(projectDirectory, "agent-fabric.yaml");
+  let file: Awaited<ReturnType<typeof lstat>>;
+  try {
+    file = await lstat(configPath);
+  } catch (error: unknown) {
+    if (errorCode(error) === "ENOENT") return undefined;
+    throw error;
+  }
+  if (!file.isFile() || file.isSymbolicLink() || (file.mode & 0o077) !== 0) {
+    throw new Error(`project configuration must be a private regular file: ${configPath}`);
+  }
+  return configPath;
+}
+
 export async function trustedWorkspaceIdentity(input: {
   stateDirectory: string;
   canonicalRoot: string;

@@ -3,7 +3,7 @@ import { isAbsolute, resolve } from "node:path";
 import { verifyAdapterCompatibility, wrapperCommandEntrypointIndex } from "../adapters/compatibility.js";
 import { loadAdapterModelConstraints } from "../adapters/model-selection.js";
 import { loadFabricConfig } from "../config/index.js";
-import { trustedWorkspaceRoots } from "../cli/workspace-trust.js";
+import { trustedProjectConfigPath, trustedWorkspaceRoots } from "../cli/workspace-trust.js";
 import { verifyProviderConformance } from "../adapters/provider-conformance.js";
 
 type AdapterMap = NonNullable<FabricOpenOptions["adapters"]>;
@@ -75,7 +75,7 @@ export function parseDaemonAdapters(serialized: string | undefined): AdapterMap 
 export async function composeDaemonConfiguration(options: {
   globalConfigPath: string;
   localConfigPath?: string;
-  projectConfigPath?: string;
+  projectRoot?: string;
   runConfigPath?: string;
   compatibilityPath: string;
   compatibilitySchemaPath: string;
@@ -88,9 +88,19 @@ export async function composeDaemonConfiguration(options: {
     agentsHome: options.agentsHome,
     ...(options.localConfigPath === undefined ? {} : { localPath: options.localConfigPath }),
   };
+  if (options.projectRoot !== undefined && options.stateDirectory === undefined) {
+    throw new TypeError("daemon projectRoot requires a state directory for workspace trust resolution");
+  }
+  const resolvedProjectConfigPath = options.projectRoot === undefined
+    ? undefined
+    : await trustedProjectConfigPath({
+        stateDirectory: options.stateDirectory as string,
+        projectRoot: options.projectRoot,
+        executionProfile: "headless",
+      });
   const configOptions = {
     ...trustedConfigOptions,
-    ...(options.projectConfigPath === undefined ? {} : { projectPath: options.projectConfigPath }),
+    ...(resolvedProjectConfigPath === undefined ? {} : { projectPath: resolvedProjectConfigPath }),
     ...(options.runConfigPath === undefined ? {} : { runPath: options.runConfigPath }),
   };
   const allLocalTrustedRoots = options.stateDirectory === undefined
@@ -103,7 +113,7 @@ export async function composeDaemonConfiguration(options: {
     ? []
     : await trustedWorkspaceRoots({
         stateDirectory: options.stateDirectory,
-        executionProfile: candidateConfig.executionProfile ?? "headless",
+        executionProfile: "headless",
       });
   const config = eligibleLocalTrustedRoots.length === allLocalTrustedRoots.length &&
       eligibleLocalTrustedRoots.every((root, index) => root === allLocalTrustedRoots[index])
@@ -176,7 +186,7 @@ export async function composeDaemonConfiguration(options: {
   })));
   return {
     adapters,
-    executionProfile: config.executionProfile ?? "headless",
+    executionProfile: "headless",
     maximumConcurrentProviderTurns: config.limits.maximumConcurrentProviderTurns,
     workspaceRoots: config.workspaceRoots,
   };

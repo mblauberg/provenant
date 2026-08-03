@@ -13,7 +13,7 @@ function option(arguments_: string[], name: string): string | undefined {
   return resolve(value);
 }
 
-function daemonConfiguration(arguments_: string[]): DaemonStartOptions["configuration"] {
+export function daemonConfiguration(arguments_: string[]): DaemonStartOptions["configuration"] {
   const noAdapters = arguments_.includes("--no-adapters");
   const trustedConfigPath = option(arguments_, "--trusted-config");
   if (noAdapters === (trustedConfigPath !== undefined)) {
@@ -33,13 +33,13 @@ function daemonConfiguration(arguments_: string[]): DaemonStartOptions["configur
       "trusted daemon start requires --trusted-config, --compatibility, --compatibility-schema and --agents-home",
     );
   }
-  const projectConfigPath = option(arguments_, "--project-config");
+  const projectRoot = option(arguments_, "--project");
   const localConfigPath = option(arguments_, "--local-config");
   const runConfigPath = option(arguments_, "--run-config");
   return {
     globalConfigPath: trustedConfigPath,
     ...(localConfigPath === undefined ? {} : { localConfigPath }),
-    ...(projectConfigPath === undefined ? {} : { projectConfigPath }),
+    ...(projectRoot === undefined ? {} : { projectRoot }),
     ...(runConfigPath === undefined ? {} : { runConfigPath }),
     compatibilityPath,
     compatibilitySchemaPath,

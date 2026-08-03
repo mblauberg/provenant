@@ -1,7 +1,7 @@
-import { readFile } from "node:fs/promises";
-import { existsSync, realpathSync, statSync } from "node:fs";
+import { constants, existsSync, realpathSync } from "node:fs";
+import { lstat, open, readFile } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname } from "node:path";
 
 import type { ErrorObject, ValidateFunction } from "ajv";
 import { Ajv2020 } from "ajv/dist/2020.js";
@@ -20,13 +20,11 @@ type ConfigDocument = {
   environmentSources?: string[];
   listener?: string;
   providerCredentialSelector?: string;
-  namedExecutionProfile?: string;
   allowListedAdapterId?: string;
 };
 
 export type ResolvedFabricConfig = {
   schemaVersion: 1;
-  executionProfile?: string;
   adapterIds: string[];
   workspaceRoots: string[];
   limits: { maximumConcurrentProviderTurns: number };
@@ -91,46 +89,60 @@ function validationField(error: ErrorObject | undefined): string | undefined {
   return displayInstancePath(error.instancePath);
 }
 
-async function parseDocument(path: string): Promise<unknown> {
-  return parse(await readFile(path, "utf8"));
-}
+const MAXIMUM_PROJECT_CONFIG_BYTES = 64 * 1024;
 
-function isDirectory(path: string): boolean {
-  try {
-    return statSync(path).isDirectory();
-  } catch {
-    return false;
+async function readProjectConfig(path: string): Promise<string> {
+  const directoryPath = dirname(path);
+  const directoryBefore = await lstat(directoryPath);
+  if (!directoryBefore.isDirectory() || directoryBefore.isSymbolicLink()) {
+    throw new Error(`project configuration directory must be a non-symlink directory: ${directoryPath}`);
   }
-}
-
-function isFile(path: string): boolean {
-  try {
-    return statSync(path).isFile();
-  } catch {
-    return false;
+  const before = await lstat(path);
+  if (!before.isFile() || before.isSymbolicLink() || (before.mode & 0o077) !== 0) {
+    throw new Error(`project configuration must be a private regular file: ${path}`);
   }
-}
-
-/**
- * Find the nearest project configuration from a working directory.
- *
- * The first ancestor containing a `.provenant/` directory is the project root.
- * The walk then stops, even when that directory is empty, and never falls
- * through to an outer project root. This makes nested projects independent and
- * keeps an absent or empty project layer a no-op.
- */
-export function discoverProjectConfigPath(workingDirectory = process.cwd()): string | undefined {
-  let cursor = canonicalConfigPath(workingDirectory);
-  while (true) {
-    const projectDirectory = join(cursor, ".provenant");
-    if (isDirectory(projectDirectory)) {
-      const configPath = join(projectDirectory, "agent-fabric.yaml");
-      return isFile(configPath) ? canonicalConfigPath(configPath) : undefined;
+  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const opened = await handle.stat();
+    if (
+      !opened.isFile() ||
+      opened.isSymbolicLink() ||
+      opened.dev !== before.dev ||
+      opened.ino !== before.ino ||
+      (opened.mode & 0o077) !== 0
+    ) {
+      throw new Error(`project configuration changed while opening: ${path}`);
     }
-    const parent = dirname(cursor);
-    if (parent === cursor) return undefined;
-    cursor = parent;
+    const directoryAfter = await lstat(directoryPath);
+    if (
+      !directoryAfter.isDirectory() ||
+      directoryAfter.isSymbolicLink() ||
+      directoryAfter.dev !== directoryBefore.dev ||
+      directoryAfter.ino !== directoryBefore.ino
+    ) {
+      throw new Error(`project configuration directory changed while opening: ${directoryPath}`);
+    }
+    if (opened.size > MAXIMUM_PROJECT_CONFIG_BYTES) {
+      throw new RangeError(`project configuration exceeds the ${String(MAXIMUM_PROJECT_CONFIG_BYTES)}-byte size limit: ${path}`);
+    }
+    const buffer = Buffer.allocUnsafe(MAXIMUM_PROJECT_CONFIG_BYTES + 1);
+    let offset = 0;
+    while (offset < buffer.length) {
+      const { bytesRead } = await handle.read(buffer, offset, buffer.length - offset, offset);
+      if (bytesRead === 0) break;
+      offset += bytesRead;
+    }
+    if (offset > MAXIMUM_PROJECT_CONFIG_BYTES) {
+      throw new RangeError(`project configuration exceeds the ${String(MAXIMUM_PROJECT_CONFIG_BYTES)}-byte size limit: ${path}`);
+    }
+    return buffer.subarray(0, offset).toString("utf8");
+  } finally {
+    await handle.close();
   }
+}
+
+async function parseDocument(path: string, layer?: ConfigLayer): Promise<unknown> {
+  return parse(layer === "project" ? await readProjectConfig(path) : await readFile(path, "utf8"));
 }
 
 async function validateDocument(value: unknown, layer: ConfigLayer): Promise<ConfigDocument> {
@@ -290,8 +302,6 @@ function mergeTrustedConfig(globalConfig: ConfigDocument, localConfig: ConfigDoc
 }
 
 type NarrowingState = {
-  allowedProfiles: string[];
-  executionProfile?: string;
   adapterIds: string[];
   workspaceRoots: string[];
   maximumConcurrentProviderTurns: number;
@@ -302,18 +312,9 @@ function applyUntrustedLayer(
   config: ConfigDocument,
   layer: "project" | "run",
 ): void {
-  if (config.namedExecutionProfile !== undefined) {
-    if (
-      !state.allowedProfiles.includes(config.namedExecutionProfile) ||
-      (state.executionProfile !== undefined && state.executionProfile !== config.namedExecutionProfile)
-    ) {
-      throw new FabricError(
-        "CONFIG_WIDENING_FORBIDDEN",
-        `${layer} selected a profile outside ${layer === "project" ? "the allow-list" : "the current allow-list"}`,
-      );
-    }
-    state.executionProfile = config.namedExecutionProfile;
-  }
+  // Untrusted layers deliberately cannot select an execution profile. A profile
+  // is an authorization key for trusted workspace roots, not a narrowing value;
+  // accepting it here would let a project admit roots through another registry.
   if (config.allowListedAdapterId !== undefined) {
     if (!state.adapterIds.includes(config.allowListedAdapterId)) {
       throw new FabricError(
@@ -344,7 +345,6 @@ export async function loadFabricConfig(options: {
   localPath?: string;
   projectPath?: string;
   runPath?: string;
-  workingDirectory?: string;
   agentsHome?: string;
   additionalWorkspaceRoots?: string[];
 }): Promise<ResolvedFabricConfig> {
@@ -370,7 +370,6 @@ export async function loadFabricConfig(options: {
     );
   }
   const state: NarrowingState = {
-    allowedProfiles: trustedConfig.allowedProfiles ?? [],
     adapterIds: activeAdapters,
     workspaceRoots: (trustedConfig.workspaceRoots ?? []).map(canonicalConfigPath),
     maximumConcurrentProviderTurns: trustedConfig.limits?.maximumConcurrentProviderTurns ?? 8,
@@ -380,20 +379,18 @@ export async function loadFabricConfig(options: {
     ...(options.additionalWorkspaceRoots ?? []).map(canonicalConfigPath),
   ])].sort();
 
-  const projectPath = options.projectPath ?? discoverProjectConfigPath(options.workingDirectory);
   for (const [layer, path] of [
-    ["project", projectPath],
+    ["project", options.projectPath],
     ["run", options.runPath],
   ] as const) {
     if (path === undefined) continue;
-    const value = await parseDocument(path);
+    const value = await parseDocument(path, layer);
     if (isRecord(value)) rejectTrustedFields(value as ConfigDocument, layer);
     applyUntrustedLayer(state, await validateDocument(value, layer), layer);
   }
 
   return {
     schemaVersion: 1,
-    ...(state.executionProfile === undefined ? {} : { executionProfile: state.executionProfile }),
     adapterIds: state.adapterIds,
     workspaceRoots: state.workspaceRoots.map(canonicalConfigPath),
     limits: { maximumConcurrentProviderTurns: state.maximumConcurrentProviderTurns },

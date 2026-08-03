@@ -7,9 +7,12 @@ import { FabricError } from "../errors.js";
 import { verifyProviderConformance } from "../adapters/provider-conformance.js";
 import { loadAdapterModelConstraints } from "../adapters/model-selection.js";
 import { resolveFabricRoots } from "../domain/fabric-roots.js";
+import { resolveFabricPaths } from "./paths.js";
+import { trustedProjectConfigPath, trustedWorkspaceRoots } from "./workspace-trust.js";
 
 const VALUE_OPTIONS = [
   "--adapter",
+  "--project",
   "--agents-home",
   "--product-root",
   "--instance-root",
@@ -69,6 +72,18 @@ export async function resolveAdapterExecutableCli(
     parsed["--compatibility-schema"] ??
       join(productRoot, "runtime", "agent-fabric", "schemas", "adapter-compatibility.schema.json"),
   );
+  const paths = resolveFabricPaths();
+  const trustedRoots = await trustedWorkspaceRoots({
+    stateDirectory: paths.stateDirectory,
+    executionProfile: "headless",
+  });
+  const projectConfigPath = parsed["--project"] === undefined
+    ? undefined
+    : await trustedProjectConfigPath({
+        stateDirectory: paths.stateDirectory,
+        projectRoot: parsed["--project"],
+        executionProfile: "headless",
+      });
   // #528 keeps ${AGENTS_HOME} as the product-side token; ADR 0019 makes the
   // shipped configuration and compatibility product-owned and the instance file
   // a narrowing layer. Composing both here means this command agrees with the
@@ -76,7 +91,9 @@ export async function resolveAdapterExecutableCli(
   const config = await loadFabricConfig({
     globalPath: configPath,
     ...(localConfigPath === undefined ? {} : { localPath: localConfigPath }),
+    ...(projectConfigPath === undefined ? {} : { projectPath: projectConfigPath }),
     agentsHome: productRoot,
+    additionalWorkspaceRoots: trustedRoots,
   });
   if (!config.adapterIds.includes(adapterId)) {
     throw new FabricError("ADAPTER_DISABLED", `adapter is not active in trusted Fabric configuration: ${adapterId}`);

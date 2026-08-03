@@ -56,7 +56,7 @@ export type DaemonStartOptions = {
   configuration?: {
     globalConfigPath: string;
     localConfigPath?: string;
-    projectConfigPath?: string;
+    projectRoot?: string;
     runConfigPath?: string;
     compatibilityPath: string;
     compatibilitySchemaPath: string;

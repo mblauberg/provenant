@@ -20,6 +20,10 @@ const mocks = vi.hoisted(() => ({
   bind: vi.fn(),
   connect: vi.fn(),
   release: vi.fn(),
+  start: vi.fn(async () => ({
+    address: { path: "/fixture/fabric.sock" },
+    release: mocks.release,
+  })),
 }));
 
 vi.mock("../../src/daemon/client.ts", () => ({
@@ -28,10 +32,7 @@ vi.mock("../../src/daemon/client.ts", () => ({
 
 vi.mock("../../src/cli/mcp-provision.ts", () => ({
   bindProvisionedSeatRoster: mocks.bind,
-  startMcpProvisionDaemon: vi.fn(async () => ({
-    address: { path: "/fixture/fabric.sock" },
-    release: mocks.release,
-  })),
+  startMcpProvisionDaemon: mocks.start,
 }));
 
 const { provisionMcpPeerSeats } = await import("../../src/cli/mcp-peer-provision.ts");
@@ -42,6 +43,7 @@ afterEach(async () => {
   mocks.bind.mockReset();
   mocks.connect.mockReset();
   mocks.release.mockReset();
+  mocks.start.mockClear();
   await Promise.all(roots.splice(0).map(async (root) => rm(root, { recursive: true, force: true })));
 });
 
@@ -250,6 +252,7 @@ describe("MCP peer provision daemon lifecycle", () => {
       "--expires-at", new Date(Date.now() + 30 * 60 * 1_000).toISOString(),
     ], value.paths)).rejects.toThrow("explicit expiry reached renewal");
     expect(mocks.connect).toHaveBeenCalledOnce();
+    expect(mocks.start).toHaveBeenCalledWith(value.paths, value.project);
     expect(mocks.release).toHaveBeenCalledOnce();
   });
 

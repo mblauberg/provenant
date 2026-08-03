@@ -31,7 +31,7 @@ The daemon also persists two trusted registries before accepting a grant:
 
 - `git_execution_profiles` binds profile ID/revision, Git binary path/version/ digest, object format, deterministic
   backend IDs, sanitised config/environment digest, helper/sandbox registry digest and hard result bounds. Trusted
-  machine configuration alone may add a profile; project configuration may only select an allow-listed profile.
+  machine configuration alone may add a profile; project configuration cannot select an execution profile.
 - `git_remote_registrations` binds registration ID/revision/generation, project, display name, normalised secret-free
   target identity/digest, transport kind, remote-port adapter/contract and credential-selector digest. Retargeting
   appends a revision and advances generation. One display name may have only one active target per project, but that

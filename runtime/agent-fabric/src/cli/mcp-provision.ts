@@ -82,10 +82,14 @@ export type ProvisionedSeatRosterInput = {
 
 export async function startMcpProvisionDaemon(
   paths: FabricPaths,
+  projectRoot?: string,
   environment: NodeJS.ProcessEnv = process.env,
 ): Promise<Awaited<ReturnType<typeof startFabricDaemon>>> {
   try {
-    return await startFabricDaemon(defaultDaemonStartOptions(paths, { environment }));
+    return await startFabricDaemon(defaultDaemonStartOptions(paths, {
+      environment,
+      ...(projectRoot === undefined ? {} : { projectRoot }),
+    }));
   } catch (cause: unknown) {
     if (!isSchemaCutoverRefusal(cause)) throw cause;
     throw new McpBootstrapSchemaCutoverGateError(
@@ -251,7 +255,7 @@ export async function provisionMcpSeats(arguments_: string[], paths: FabricPaths
     bindings,
     expiresAt,
   };
-  const daemonHandle = await startMcpProvisionDaemon(paths);
+  const daemonHandle = await startMcpProvisionDaemon(paths, project);
   try {
     return await bindProvisionedSeatRoster(input, paths);
   } finally {

@@ -1,187 +1,273 @@
-import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, realpath, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import { discoverProjectConfigPath, loadFabricConfig } from "../../../src/config/index.ts";
+import { composeDaemonConfiguration } from "../../../src/daemon/composition.ts";
+import { loadFabricConfig } from "../../../src/config/index.ts";
+import { fabricStatus } from "../../../src/cli/status.ts";
+import { runWorkspaceTrust, trustedProjectConfigPath } from "../../../src/cli/workspace-trust.ts";
+import { openFabric } from "../../../src/index.ts";
+import { createPortableActivatedPrimaryFixture } from "../../support/primary-adapter-testkit.ts";
 
-async function writeYaml(path: string, value: string): Promise<void> {
-  await mkdir(join(path, ".."), { recursive: true });
-  await writeFile(path, value);
+async function writeYaml(path: string, value: string, mode = 0o600): Promise<void> {
+  await mkdir(dirname(path), { recursive: true });
+  await writeFile(path, value, { mode });
 }
 
 async function writeGlobalConfig(path: string, workspaceRoot: string): Promise<void> {
   await writeYaml(path, [
     "schemaVersion: 1",
+    "allowedAdapters: [alpha, beta]",
+    "activeAdapters: [alpha, beta]",
     "allowedProfiles: [headless, paired-visible]",
     `workspaceRoots: [${JSON.stringify(workspaceRoot)}]`,
     "limits:",
     "  maximumConcurrentProviderTurns: 8",
     "",
-  ].join("\n"));
+  ].join("\n"), 0o644);
 }
 
-describe(".provenant project configuration discovery", () => {
-  it("discovers the nearest project layer and applies it through the untrusted merge", async () => {
-    const root = await mkdtemp(join(tmpdir(), "fabric-project-discovery-"));
+async function trustedPaths(root: string): Promise<{
+  stateDirectory: string;
+  runtimeDirectory: string;
+  databasePath: string;
+  socketPath: string;
+}> {
+  const stateDirectory = join(root, "state");
+  const runtimeDirectory = join(stateDirectory, "runtime");
+  await mkdir(runtimeDirectory, { recursive: true, mode: 0o700 });
+  return {
+    stateDirectory,
+    runtimeDirectory,
+    databasePath: join(stateDirectory, "fabric-v1.sqlite3"),
+    socketPath: join(runtimeDirectory, "fabric-v1.sock"),
+  };
+}
+
+async function enroll(root: string, paths: Awaited<ReturnType<typeof trustedPaths>>): Promise<void> {
+  await runWorkspaceTrust(["trust", root, "--profiles", "headless"], paths);
+}
+
+describe("enrolled .provenant project configuration", () => {
+  it("loads the exact enrolled-root layer when the caller resolves it", async () => {
+    const root = await mkdtemp(join(tmpdir(), "fabric-project-enrolled-"));
     const projectRoot = join(root, "project");
     const workingDirectory = join(projectRoot, "src", "nested");
     const globalPath = join(root, "global.yaml");
-    const projectPath = join(projectRoot, ".provenant", "agent-fabric.yaml");
     await mkdir(workingDirectory, { recursive: true });
     await writeGlobalConfig(globalPath, projectRoot);
-    await writeYaml(projectPath, [
-      "schemaVersion: 1",
-      "namedExecutionProfile: paired-visible",
-      "limits:",
-      "  maximumConcurrentProviderTurns: 2",
-      "",
-    ].join("\n"));
+    const paths = await trustedPaths(root);
+    await enroll(projectRoot, paths);
+    const projectPath = join(projectRoot, ".provenant", "agent-fabric.yaml");
+    await writeYaml(projectPath, "schemaVersion: 1\nlimits:\n  maximumConcurrentProviderTurns: 2\n");
+    await writeYaml(join(workingDirectory, ".provenant", "agent-fabric.yaml"), "schemaVersion: 1\nlimits:\n  maximumConcurrentProviderTurns: 1\n");
 
-    expect(discoverProjectConfigPath(workingDirectory)).toBe(await realpath(projectPath));
-    await expect(loadFabricConfig({ globalPath, workingDirectory })).resolves.toMatchObject({
-      executionProfile: "paired-visible",
+    await expect(trustedProjectConfigPath({
+      stateDirectory: paths.stateDirectory,
+      projectRoot: workingDirectory,
+    })).resolves.toBeUndefined();
+    await expect(trustedProjectConfigPath({
+      stateDirectory: paths.stateDirectory,
+      projectRoot,
+    })).resolves.toBe(await realpath(projectPath));
+
+    const symlinkParent = join(root, "symlink-parent");
+    await symlink(root, symlinkParent);
+    await expect(trustedProjectConfigPath({
+      stateDirectory: paths.stateDirectory,
+      projectRoot: join(symlinkParent, "project"),
+    })).resolves.toBe(await realpath(projectPath));
+    await expect(loadFabricConfig({
+      globalPath,
+      projectPath: await realpath(projectPath),
+    })).resolves.toMatchObject({
+      limits: { maximumConcurrentProviderTurns: 2 },
+      workspaceRoots: [await realpath(projectRoot)],
+    });
+  });
+
+  it("does not discover from cwd or hostile ancestors when no project path is handed in", async () => {
+    const root = await mkdtemp(join(tmpdir(), "fabric-project-no-discovery-"));
+    const projectRoot = join(root, "project");
+    const globalPath = join(root, "global.yaml");
+    await mkdir(projectRoot, { recursive: true });
+    await writeGlobalConfig(globalPath, projectRoot);
+    await writeYaml(join(root, ".provenant", "agent-fabric.yaml"), "schemaVersion: 1\nlimits:\n  maximumConcurrentProviderTurns: 1\n");
+    const paths = await trustedPaths(root);
+    await enroll(projectRoot, paths);
+
+    await expect(trustedProjectConfigPath({
+      stateDirectory: paths.stateDirectory,
+      projectRoot,
+    })).resolves.toBeUndefined();
+    await expect(loadFabricConfig({ globalPath })).resolves.toMatchObject({
+      limits: { maximumConcurrentProviderTurns: 8 },
+    });
+  });
+
+  it("uses an explicit project path even when another project-shaped file exists", async () => {
+    const root = await mkdtemp(join(tmpdir(), "fabric-project-explicit-"));
+    const globalPath = join(root, "global.yaml");
+    const explicitPath = join(root, "selected.yaml");
+    await writeGlobalConfig(globalPath, root);
+    await writeYaml(join(root, ".provenant", "agent-fabric.yaml"), "schemaVersion: 1\nlimits:\n  maximumConcurrentProviderTurns: 1\n");
+    await writeYaml(explicitPath, "schemaVersion: 1\nlimits:\n  maximumConcurrentProviderTurns: 2\n");
+
+    await expect(loadFabricConfig({ globalPath, projectPath: explicitPath })).resolves.toMatchObject({
       limits: { maximumConcurrentProviderTurns: 2 },
     });
   });
 
-  it("does not discover a project layer when no ancestor has .provenant/", async () => {
-    const root = await mkdtemp(join(tmpdir(), "fabric-project-no-discovery-"));
-    const workingDirectory = join(root, "project", "src");
+  it("refuses an untrusted layer from selecting an execution profile", async () => {
+    const root = await mkdtemp(join(tmpdir(), "fabric-project-profile-"));
     const globalPath = join(root, "global.yaml");
-    await mkdir(workingDirectory, { recursive: true });
-    await writeGlobalConfig(globalPath, join(root, "project"));
+    const projectPath = join(root, "project.yaml");
+    await writeGlobalConfig(globalPath, root);
+    await writeYaml(projectPath, "schemaVersion: 1\nnamedExecutionProfile: paired-visible\n");
 
-    expect(discoverProjectConfigPath(workingDirectory)).toBeUndefined();
-    await expect(loadFabricConfig({ globalPath, workingDirectory })).resolves.toMatchObject({
-      limits: { maximumConcurrentProviderTurns: 8 },
+    await expect(loadFabricConfig({ globalPath, projectPath })).rejects.toMatchObject({
+      code: "CONFIG_UNTRUSTED_FIELD",
+      field: "namedExecutionProfile",
     });
   });
 
-  it("treats a nearest empty .provenant/ directory as a no-op and stops there", async () => {
-    const root = await mkdtemp(join(tmpdir(), "fabric-project-empty-"));
-    const outerRoot = join(root, "outer");
-    const innerRoot = join(outerRoot, "inner");
-    const workingDirectory = join(innerRoot, "src");
-    const globalPath = join(root, "global.yaml");
-    await mkdir(join(outerRoot, ".provenant"), { recursive: true });
-    await mkdir(workingDirectory, { recursive: true });
-    await writeGlobalConfig(globalPath, outerRoot);
-    await writeYaml(join(outerRoot, ".provenant", "agent-fabric.yaml"), "schemaVersion: 1\nnamedExecutionProfile: paired-visible\n");
-    await mkdir(join(innerRoot, ".provenant"));
-
-    expect(discoverProjectConfigPath(workingDirectory)).toBeUndefined();
-    await expect(loadFabricConfig({ globalPath, workingDirectory })).resolves.toMatchObject({
-      limits: { maximumConcurrentProviderTurns: 8 },
-    });
-  });
-
-  it("rejects malformed discovered YAML through the project layer", async () => {
-    const root = await mkdtemp(join(tmpdir(), "fabric-project-malformed-"));
-    const projectRoot = join(root, "project");
-    const workingDirectory = join(projectRoot, "src");
-    const globalPath = join(root, "global.yaml");
-    await mkdir(workingDirectory, { recursive: true });
-    await writeGlobalConfig(globalPath, projectRoot);
-    await writeYaml(join(projectRoot, ".provenant", "agent-fabric.yaml"), "schemaVersion: [\n");
-
-    await expect(loadFabricConfig({ globalPath, workingDirectory })).rejects.toThrow();
-  });
-
-  it("accepts a discovered narrowing but refuses a widened workspace root", async () => {
+  it("rejects a trusted-root project layer that tries to widen a workspace root", async () => {
     const root = await mkdtemp(join(tmpdir(), "fabric-project-boundary-"));
     const projectRoot = join(root, "project");
-    const workingDirectory = join(projectRoot, "src");
     const globalPath = join(root, "global.yaml");
-    const projectPath = join(projectRoot, ".provenant", "agent-fabric.yaml");
-    await mkdir(workingDirectory, { recursive: true });
+    await mkdir(projectRoot, { recursive: true });
     await writeGlobalConfig(globalPath, projectRoot);
-    await writeYaml(projectPath, [
-      "schemaVersion: 1",
-      "namedExecutionProfile: paired-visible",
-      "limits:",
-      "  maximumConcurrentProviderTurns: 2",
-      "",
-    ].join("\n"));
-    await expect(loadFabricConfig({ globalPath, workingDirectory })).resolves.toMatchObject({
-      executionProfile: "paired-visible",
-      limits: { maximumConcurrentProviderTurns: 2 },
-    });
-
+    const paths = await trustedPaths(root);
+    await enroll(projectRoot, paths);
+    const projectPath = join(projectRoot, ".provenant", "agent-fabric.yaml");
     await writeYaml(projectPath, "schemaVersion: 1\nworkspaceRoots: [\"/\"]\n");
-    await expect(loadFabricConfig({ globalPath, workingDirectory })).rejects.toMatchObject({
+    const resolved = await trustedProjectConfigPath({ stateDirectory: paths.stateDirectory, projectRoot });
+    if (resolved === undefined) throw new Error("enrolled project configuration was not resolved");
+
+    await expect(loadFabricConfig({ globalPath, projectPath: resolved })).rejects.toMatchObject({
       code: "CONFIG_WIDENING_FORBIDDEN",
     });
   });
 
-  it("rejects a trusted field in a discovered layer with the field name", async () => {
-    const root = await mkdtemp(join(tmpdir(), "fabric-project-trusted-field-"));
+  it("makes status use the same enrolled project layer and trusted roots", async () => {
+    const root = await mkdtemp(join(tmpdir(), "fabric-project-status-"));
     const projectRoot = join(root, "project");
-    const workingDirectory = join(projectRoot, "src");
     const globalPath = join(root, "global.yaml");
-    await mkdir(workingDirectory, { recursive: true });
+    await mkdir(projectRoot, { recursive: true });
     await writeGlobalConfig(globalPath, projectRoot);
-    await writeYaml(join(projectRoot, ".provenant", "agent-fabric.yaml"), [
+    const paths = await trustedPaths(root);
+    await enroll(projectRoot, paths);
+    const fabric = await openFabric({ databasePath: paths.databasePath, workspaceRoots: [projectRoot] });
+    await fabric.close();
+    await writeYaml(join(projectRoot, ".provenant", "agent-fabric.yaml"), "schemaVersion: 1\nallowListedAdapterId: alpha\n");
+
+    const status = await fabricStatus([
+      "--agents-home", root,
+      "--trusted-config", globalPath,
+      "--project", projectRoot,
+    ], paths);
+    expect(status).toMatchObject({
+      configuredAdapters: ["alpha"],
+      trustedWorkspaceRoots: [await realpath(projectRoot)],
+      project: { path: projectRoot },
+    });
+  });
+
+  it("makes daemon composition use the explicit project root rather than its process cwd", async () => {
+    const root = await mkdtemp(join(tmpdir(), "fabric-project-daemon-"));
+    const projectRoot = join(root, "project");
+    const globalPath = join(root, "global.yaml");
+    const compatibility = await createPortableActivatedPrimaryFixture();
+    await mkdir(projectRoot, { recursive: true });
+    await writeYaml(globalPath, [
       "schemaVersion: 1",
-      "listener: tcp://0.0.0.0:9999",
+      "allowedAdapters: []",
+      "activeAdapters: []",
+      "allowedProfiles: [headless]",
+      `workspaceRoots: [${JSON.stringify(projectRoot)}]`,
+      "limits:",
+      "  maximumConcurrentProviderTurns: 8",
       "",
-    ].join("\n"));
+    ].join("\n"), 0o644);
+    await writeYaml(join(root, ".provenant", "agent-fabric.yaml"), "schemaVersion: 1\nlimits:\n  maximumConcurrentProviderTurns: 1\n");
+    const paths = await trustedPaths(root);
+    await enroll(projectRoot, paths);
+    await writeYaml(join(projectRoot, ".provenant", "agent-fabric.yaml"), "schemaVersion: 1\nlimits:\n  maximumConcurrentProviderTurns: 2\n");
 
-    await expect(loadFabricConfig({ globalPath, workingDirectory })).rejects.toMatchObject({
-      code: "CONFIG_UNTRUSTED_FIELD",
-      field: "listener",
+    await expect(composeDaemonConfiguration({
+      globalConfigPath: globalPath,
+      projectRoot,
+      compatibilityPath: compatibility.compatibilityPath,
+      compatibilitySchemaPath: compatibility.schemaPath,
+      agentsHome: root,
+      stateDirectory: paths.stateDirectory,
+    })).resolves.toMatchObject({
+      maximumConcurrentProviderTurns: 2,
+      workspaceRoots: [await realpath(projectRoot)],
     });
+    await rm(compatibility.directory, { recursive: true, force: true });
   });
 
-  it("uses the nearest project root when project roots are nested", async () => {
-    const root = await mkdtemp(join(tmpdir(), "fabric-project-nested-"));
-    const outerRoot = join(root, "outer");
-    const innerRoot = join(outerRoot, "inner");
-    const workingDirectory = join(innerRoot, "src");
-    const globalPath = join(root, "global.yaml");
-    await mkdir(workingDirectory, { recursive: true });
-    await writeGlobalConfig(globalPath, outerRoot);
-    await writeYaml(join(outerRoot, ".provenant", "agent-fabric.yaml"), "schemaVersion: 1\nnamedExecutionProfile: headless\nlimits:\n  maximumConcurrentProviderTurns: 7\n");
-    await writeYaml(join(innerRoot, ".provenant", "agent-fabric.yaml"), "schemaVersion: 1\nnamedExecutionProfile: paired-visible\nlimits:\n  maximumConcurrentProviderTurns: 3\n");
-
-    await expect(loadFabricConfig({ globalPath, workingDirectory })).resolves.toMatchObject({
-      executionProfile: "paired-visible",
-      limits: { maximumConcurrentProviderTurns: 3 },
-    });
-  });
-
-  it("discovers a project root that is not a git repository", async () => {
-    const root = await mkdtemp(join(tmpdir(), "fabric-project-non-git-"));
-    const projectRoot = join(root, "project");
-    const workingDirectory = join(projectRoot, "src");
-    const globalPath = join(root, "global.yaml");
-    await mkdir(workingDirectory, { recursive: true });
-    await writeGlobalConfig(globalPath, projectRoot);
-    await writeYaml(join(projectRoot, ".provenant", "agent-fabric.yaml"), "schemaVersion: 1\nnamedExecutionProfile: paired-visible\n");
-
-    expect(existsSync(join(projectRoot, ".git"))).toBe(false);
-    await expect(loadFabricConfig({ globalPath, workingDirectory })).resolves.toMatchObject({
-      executionProfile: "paired-visible",
-    });
-  });
-
-  it("canonicalises a symlinked project root before discovering its layer", async () => {
+  it("refuses symlinked project directories and files", async () => {
     const root = await mkdtemp(join(tmpdir(), "fabric-project-symlink-"));
-    const actualRoot = join(root, "actual");
-    const linkedRoot = join(root, "linked");
-    const workingDirectory = join(linkedRoot, "src");
-    const globalPath = join(root, "global.yaml");
-    await mkdir(join(actualRoot, "src"), { recursive: true });
-    await symlink(actualRoot, linkedRoot, "dir");
-    await writeGlobalConfig(globalPath, actualRoot);
-    const actualConfigPath = join(actualRoot, ".provenant", "agent-fabric.yaml");
-    await writeYaml(actualConfigPath, "schemaVersion: 1\nnamedExecutionProfile: paired-visible\n");
+    const projectRoot = join(root, "project");
+    const outside = join(root, "outside");
+    const paths = await trustedPaths(root);
+    await mkdir(projectRoot, { recursive: true });
+    await mkdir(outside, { recursive: true });
+    await enroll(projectRoot, paths);
+    await writeYaml(join(outside, "agent-fabric.yaml"), "schemaVersion: 1\n");
+    await symlink(outside, join(projectRoot, ".provenant"));
+    await expect(trustedProjectConfigPath({ stateDirectory: paths.stateDirectory, projectRoot })).rejects.toThrow(/non-symlink/u);
 
-    expect(discoverProjectConfigPath(workingDirectory)).toBe(await realpath(actualConfigPath));
-    await expect(loadFabricConfig({ globalPath, workingDirectory })).resolves.toMatchObject({
-      executionProfile: "paired-visible",
-    });
+    await rm(join(projectRoot, ".provenant"), { recursive: true, force: true });
+    await mkdir(join(projectRoot, ".provenant"));
+    await symlink(join(outside, "agent-fabric.yaml"), join(projectRoot, ".provenant", "agent-fabric.yaml"));
+    await expect(trustedProjectConfigPath({ stateDirectory: paths.stateDirectory, projectRoot })).rejects.toThrow(/private regular file/u);
+  });
+
+  it("fails closed on an inaccessible project directory", async () => {
+    const root = await mkdtemp(join(tmpdir(), "fabric-project-inaccessible-"));
+    const projectRoot = join(root, "project");
+    const paths = await trustedPaths(root);
+    await mkdir(join(projectRoot, ".provenant"), { recursive: true });
+    await enroll(projectRoot, paths);
+    await chmod(join(projectRoot, ".provenant"), 0o000);
+    try {
+      await expect(trustedProjectConfigPath({ stateDirectory: paths.stateDirectory, projectRoot })).rejects.toMatchObject({
+        code: "EACCES",
+      });
+    } finally {
+      await chmod(join(projectRoot, ".provenant"), 0o700);
+    }
+  });
+
+  it("rejects a project file that is not private", async () => {
+    const root = await mkdtemp(join(tmpdir(), "fabric-project-permissions-"));
+    const projectRoot = join(root, "project");
+    const globalPath = join(root, "global.yaml");
+    const paths = await trustedPaths(root);
+    await mkdir(projectRoot, { recursive: true });
+    await enroll(projectRoot, paths);
+    await writeGlobalConfig(globalPath, projectRoot);
+    await writeYaml(join(projectRoot, ".provenant", "agent-fabric.yaml"), "schemaVersion: 1\n", 0o644);
+
+    await expect(trustedProjectConfigPath({ stateDirectory: paths.stateDirectory, projectRoot })).rejects.toThrow(/private regular file/u);
+    await expect(loadFabricConfig({
+      globalPath,
+      projectPath: join(projectRoot, ".provenant", "agent-fabric.yaml"),
+    })).rejects.toThrow(/private regular file/u);
+  });
+
+  it("rejects a project file above the byte limit before YAML parsing", async () => {
+    const root = await mkdtemp(join(tmpdir(), "fabric-project-size-"));
+    const globalPath = join(root, "global.yaml");
+    const projectPath = join(root, ".provenant", "agent-fabric.yaml");
+    await writeGlobalConfig(globalPath, root);
+    await writeYaml(projectPath, `schemaVersion: 1\n#${"x".repeat(65 * 1024)}\n`);
+
+    await expect(loadFabricConfig({ globalPath, projectPath })).rejects.toThrow(/size limit/u);
   });
 });

@@ -42,7 +42,7 @@ import {
 import type { FabricPaths } from "./paths.js";
 import { fabricCliCommand, resolveFabricRoots } from "../domain/fabric-roots.js";
 import { MCP_SEATS, resolveSeatPaths, type SeatMetadata } from "./seat-store.js";
-import { trustedWorkspaceRoots } from "./workspace-trust.js";
+import { trustedProjectConfigPath, trustedWorkspaceRoots } from "./workspace-trust.js";
 
 type Check = {
   id: string;
@@ -466,24 +466,33 @@ async function seatStatus(
 export async function fabricStatus(arguments_: string[], paths: FabricPaths): Promise<Record<string, unknown>> {
   const selected = resolveStatusPaths(arguments_);
   const project = resolve(option(arguments_, "--project") ?? process.cwd());
-  // ${AGENTS_HOME} expands against the product root (#528); the layering is the
-  // same composition daemon startup performs, so a widening instance file is
-  // refused here exactly as the daemon would refuse it.
+  // ${AGENTS_HOME} expands against the product root (#528). Project config is
+  // resolved from this exact enrolled root, matching daemon composition; no
+  // ambient cwd or ancestor discovery is permitted.
+  const projectConfigPath = await trustedProjectConfigPath({
+    stateDirectory: paths.stateDirectory,
+    projectRoot: project,
+    executionProfile: "headless",
+  });
+  const trustedRoots = await trustedWorkspaceRoots({
+    stateDirectory: paths.stateDirectory,
+    executionProfile: "headless",
+  });
   const config = await loadFabricConfig({
     globalPath: selected.config,
     ...(selected.localConfig === undefined ? {} : { localPath: selected.localConfig }),
-    workingDirectory: project,
+    ...(projectConfigPath === undefined ? {} : { projectPath: projectConfigPath }),
     agentsHome: selected.productRoot,
+    additionalWorkspaceRoots: trustedRoots,
   });
-  const roots = [...new Set([...config.workspaceRoots, ...await trustedWorkspaceRoots({ stateDirectory: paths.stateDirectory, executionProfile: config.executionProfile ?? "headless" })])].sort();
   const daemon = await daemonState(paths);
   return {
     schemaVersion: 1,
     daemon,
-    executionProfile: config.executionProfile ?? "headless",
+    executionProfile: "headless",
     configuredAdapters: config.adapterIds,
     activeAdapters: daemon.activeAdapters,
-    trustedWorkspaceRoots: roots,
+    trustedWorkspaceRoots: config.workspaceRoots,
     project: { path: project, seats: await seatStatus(paths, project, selected.productRoot) },
   };
 }
@@ -736,6 +745,15 @@ export async function fabricDoctor(
 ): Promise<Record<string, unknown>> {
   const selected = resolveStatusPaths(arguments_);
   const workingDirectory = resolve(option(arguments_, "--project") ?? process.cwd());
+  const projectConfigPath = await trustedProjectConfigPath({
+    stateDirectory: paths.stateDirectory,
+    projectRoot: workingDirectory,
+    executionProfile: "headless",
+  });
+  const trustedRoots = await trustedWorkspaceRoots({
+    stateDirectory: paths.stateDirectory,
+    executionProfile: "headless",
+  });
   const consumeProviderQuota = arguments_.includes("--consume-provider-quota");
   let adapterIds: string[] = [];
   let adapterCommands: string[][] = [];
@@ -763,8 +781,9 @@ export async function fabricDoctor(
     const config = await loadFabricConfig({
       globalPath: selected.config,
       ...(selected.localConfig === undefined ? {} : { localPath: selected.localConfig }),
-      workingDirectory,
+      ...(projectConfigPath === undefined ? {} : { projectPath: projectConfigPath }),
       agentsHome: selected.productRoot,
+      additionalWorkspaceRoots: trustedRoots,
     });
     adapterIds = config.adapterIds;
     adapterCommands = adapterIds.map((adapterId) => config.adapterCommands[adapterId] ?? []);

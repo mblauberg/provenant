@@ -74,7 +74,7 @@ current coverage claim.
 | NFR-006 | 1 | `tests/acceptance/stage1/fake-adapter-conformance.acceptance.test.ts` | A second fixture adapter passes without changes to mailbox, task or lease core. |
 | NFR-007 | 2 | `tests/acceptance/stage2/mcp-facade-symmetry.acceptance.test.ts` | Both clients consume the same schemas with no harness fork. |
 | NFR-008 | 3 | `tests/acceptance/stage3/operator-intervention-receipt.acceptance.test.ts` | Mediated and reported intervention plus provenance classification appear in the fabric receipt. |
-| NFR-009 | 3 | `tests/acceptance/stage3/config-profile-selection.acceptance.test.ts` | Named profiles are selected from configuration without adapter-code edits. |
+| NFR-009 | 3 | `tests/acceptance/stage3/config-profile-selection.acceptance.test.ts` | An untrusted project layer cannot select an execution profile. |
 | NFR-010 | 1 | `tests/acceptance/stage1/restart-state-recovery.acceptance.test.ts` | Restart restores contiguous watermark, acknowledgements above it, task revision and lease generation. |
 
 ## Acceptance scenarios

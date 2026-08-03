@@ -540,7 +540,10 @@ export async function bootstrapMcpSeat(input: {
   let daemonHandle: Awaited<ReturnType<typeof startFabricDaemon>>;
   try {
     daemonHandle = await startFabricDaemon(
-      defaultDaemonStartOptions(input.paths, { environment: input.environment }),
+      defaultDaemonStartOptions(input.paths, {
+        environment: input.environment,
+        projectRoot: identity.canonicalRoot,
+      }),
     );
   } catch (cause: unknown) {
     if (!isSchemaCutoverRefusal(cause)) throw cause;

@@ -271,6 +271,32 @@ by one side. There is deliberately no three-way merge anywhere in the
 installer: a three-way merge needs a common ancestor per file, which is
 precisely the state the seeded-once rule refuses to keep.
 
+### The enrolled project layer is exact and narrowing-only
+
+The optional project layer is `.provenant/agent-fabric.yaml` under one exact
+canonical workspace root. The caller resolves that root from the trusted
+workspace registry, which is the user's deliberate enrollment of the project.
+The loader is handed that path; it does not search the current directory,
+walk parent directories, or treat a parent, home directory, or sibling
+collection as authoritative. A project that is not enrolled has no project
+layer, even if an ancestor happens to contain a `.provenant` directory.
+
+The file may only narrow the already trusted configuration: `allowListedAdapterId`,
+contained `workspaceRoots`, and smaller `limits`. It may not set adapter
+commands, listeners, environment or credential sources, trusted fields, or
+`namedExecutionProfile`. An execution profile is an authorization key used to
+select trusted workspace roots, so an untrusted project layer cannot choose it.
+In particular, this file cannot enroll a project: a local layer cannot widen
+`workspaceRoots`; enrollment remains a separate trusted-registry operation.
+
+An absent file is a no-op. A present file must be a private regular file under
+the exact non-symlink `.provenant` directory, is opened without following
+symlinks, is checked again after opening, and is limited to 64 KiB before YAML
+parsing. Permission, type, symlink, size, and other stat/open errors refuse
+configuration rather than silently reverting to the baseline. `status`,
+`doctor`, daemon composition, and adapter-executable resolution use the same
+enrolled-root rule.
+
 ## Consequences
 
 The installer now writes the desired-state file when it is absent and leaves it

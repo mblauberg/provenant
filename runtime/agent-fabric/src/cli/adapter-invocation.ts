@@ -9,6 +9,7 @@ import { resolveAdapterExecutableCli } from "./adapter-executable.js";
 
 const COMMON_OPTIONS = new Set([
   "--adapter",
+  "--project",
   "--agents-home",
   "--product-root",
   "--instance-root",

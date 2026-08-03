@@ -8,6 +8,7 @@ import { runSourceCli } from "../support/cli-process.ts";
 import { createResolvedStage4Compatibility } from "../support/stage4-pi-agy-testkit.ts";
 import { resolveAdapterExecutableCli } from "../../src/cli/adapter-executable.ts";
 import { FabricError } from "../../src/errors.ts";
+import { runWorkspaceTrust } from "../../src/cli/workspace-trust.ts";
 
 type Fixture = Awaited<ReturnType<typeof createResolvedStage4Compatibility>>;
 
@@ -96,6 +97,65 @@ describe("adapter executable resolver CLI", () => {
     });
 
     expect(result).toBe(await fixtureExecutable(fixture));
+  });
+
+  it("does not discover a project layer from the adapter command's inherited cwd", async () => {
+    const fixture = await createResolvedStage4Compatibility("agy");
+    fixtures.push(fixture);
+    const globalPath = join(fixture.directory, "config", "agent-fabric.yaml");
+    const projectDirectory = join(fixture.directory, ".provenant");
+    await mkdir(join(fixture.directory, "config"), { recursive: true });
+    await mkdir(projectDirectory, { mode: 0o700 });
+    await writeFile(globalPath, "schemaVersion: 1\nallowedAdapters: [agy, other]\nactiveAdapters: [agy, other]\n");
+    await writeFile(join(projectDirectory, "agent-fabric.yaml"), `schemaVersion: 1\nallowListedAdapterId: other\nworkspaceRoots: [${JSON.stringify(fixture.directory)}]\n`, { mode: 0o600 });
+
+    const previousDirectory = process.cwd();
+    process.chdir(fixture.directory);
+    try {
+      const result = await resolveAdapterExecutableCli([
+        "--adapter", "agy",
+        "--agents-home", fixture.directory,
+        "--config", globalPath,
+        "--compatibility", fixture.compatibilityPath,
+        "--compatibility-schema", fixture.schemaPath,
+      ], {
+        verifyProvider: async () => ({} as never),
+      });
+
+      expect(result).toBe(await fixtureExecutable(fixture));
+    } finally {
+      process.chdir(previousDirectory);
+    }
+  });
+
+  it("uses an explicitly named enrolled project layer", async () => {
+    const fixture = await createResolvedStage4Compatibility("agy");
+    fixtures.push(fixture);
+    const globalPath = join(fixture.directory, "config", "agent-fabric.yaml");
+    const projectDirectory = join(fixture.directory, ".provenant");
+    const stateDirectory = join(fixture.directory, "state");
+    await mkdir(join(fixture.directory, "config"), { recursive: true });
+    await mkdir(projectDirectory, { mode: 0o700 });
+    await mkdir(stateDirectory, { mode: 0o700 });
+    vi.stubEnv("AGENT_FABRIC_STATE_DIRECTORY", stateDirectory);
+    await writeFile(globalPath, "schemaVersion: 1\nallowedAdapters: [agy, other]\nactiveAdapters: [agy, other]\n");
+    await writeFile(join(projectDirectory, "agent-fabric.yaml"), "schemaVersion: 1\nallowListedAdapterId: other\n", { mode: 0o600 });
+    await runWorkspaceTrust(["trust", fixture.directory], {
+      stateDirectory,
+      runtimeDirectory: join(stateDirectory, "runtime"),
+      databasePath: join(stateDirectory, "fabric-v1.sqlite3"),
+      socketPath: join(stateDirectory, "runtime", "fabric-v1.sock"),
+    });
+
+    await expect(resolveAdapterExecutableCli([
+      "--adapter", "agy",
+      "--project", fixture.directory,
+      "--agents-home", fixture.directory,
+      "--compatibility", fixture.compatibilityPath,
+      "--compatibility-schema", fixture.schemaPath,
+    ], {
+      verifyProvider: async () => ({} as never),
+    })).rejects.toMatchObject({ code: "ADAPTER_DISABLED" });
   });
 
   it("refuses an adapter the instance layer narrowed away", async () => {

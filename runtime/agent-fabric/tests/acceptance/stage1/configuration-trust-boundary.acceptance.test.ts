@@ -8,7 +8,7 @@ import { loadFabricConfig } from "../../../src/config/index.ts";
 
 async function writeJson(path: string, value: unknown): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
-  await writeFile(path, `${JSON.stringify(value, null, 2)}\n`);
+  await writeFile(path, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
 }
 
 describe("Stage 1 configuration trust boundary", () => {
@@ -38,7 +38,7 @@ describe("Stage 1 configuration trust boundary", () => {
     });
   });
 
-  it("permits allow-listed selection and narrowing but rejects widened roots and limits", async () => {
+  it("permits narrowing but rejects widened roots and limits", async () => {
     const root = await mkdtemp(join(tmpdir(), "fabric-config-narrowing-"));
     const projectRoot = join(root, "project");
     const globalPath = join(root, "global.yaml");
@@ -53,7 +53,6 @@ describe("Stage 1 configuration trust boundary", () => {
     });
     await writeJson(projectPath, {
       schemaVersion: 1,
-      namedExecutionProfile: "paired-visible",
       allowListedAdapterId: "codex",
       workspaceRoots: [join(projectRoot, "src")],
       limits: { maximumConcurrentProviderTurns: 2 },
@@ -62,7 +61,6 @@ describe("Stage 1 configuration trust boundary", () => {
     const narrowed = await loadFabricConfig({ globalPath, projectPath });
     const canonicalProjectRoot = await realpath(projectRoot);
     expect(narrowed).toMatchObject({
-      executionProfile: "paired-visible",
       adapterIds: ["codex"],
       workspaceRoots: [join(canonicalProjectRoot, "src")],
       limits: { maximumConcurrentProviderTurns: 2 },
@@ -70,7 +68,6 @@ describe("Stage 1 configuration trust boundary", () => {
 
     await writeJson(projectPath, {
       schemaVersion: 1,
-      namedExecutionProfile: "paired-visible",
       allowListedAdapterId: "codex",
       workspaceRoots: [root],
       limits: { maximumConcurrentProviderTurns: 9 },
@@ -102,14 +99,12 @@ describe("Stage 1 configuration trust boundary", () => {
     });
     await writeJson(projectPath, {
       schemaVersion: 1,
-      namedExecutionProfile: "paired-visible",
       allowListedAdapterId: "codex",
       workspaceRoots: [sourceRoot],
       limits: { maximumConcurrentProviderTurns: 4 },
     });
     const narrowedRun = {
       schemaVersion: 1,
-      namedExecutionProfile: "paired-visible",
       allowListedAdapterId: "codex",
       workspaceRoots: [packageRoot],
       limits: { maximumConcurrentProviderTurns: 2 },
@@ -117,7 +112,6 @@ describe("Stage 1 configuration trust boundary", () => {
     await writeJson(runPath, narrowedRun);
 
     await expect(loadFabricConfig({ globalPath, projectPath, runPath })).resolves.toMatchObject({
-      executionProfile: "paired-visible",
       adapterIds: ["codex"],
       workspaceRoots: [join(await realpath(projectRoot), "src", "package")],
       limits: { maximumConcurrentProviderTurns: 2 },
@@ -130,9 +124,10 @@ describe("Stage 1 configuration trust boundary", () => {
       { limits: { maximumConcurrentProviderTurns: 6 } },
     ]) {
       await writeJson(runPath, { ...narrowedRun, ...widening });
-      await expect(loadFabricConfig({ globalPath, projectPath, runPath })).rejects.toMatchObject({
-        code: "CONFIG_WIDENING_FORBIDDEN",
-      });
+      const expected = "namedExecutionProfile" in widening
+        ? { code: "CONFIG_UNTRUSTED_FIELD", field: "namedExecutionProfile" }
+        : { code: "CONFIG_WIDENING_FORBIDDEN" };
+      await expect(loadFabricConfig({ globalPath, projectPath, runPath })).rejects.toMatchObject(expected);
     }
   });
 

@@ -137,7 +137,7 @@ describe("daemon trusted adapter composition", () => {
     }
   });
 
-  it("admits a machine-only root before project profile and path narrowing", async () => {
+  it("refuses a project layer that selects an execution profile", async () => {
     const compatibilityFixture = await createPortableActivatedPrimaryFixture();
     const directory = await mkdtemp(join(tmpdir(), "fabric-machine-composition-"));
     const portableRoot = join(directory, "portable");
@@ -146,11 +146,11 @@ describe("daemon trusted adapter composition", () => {
     const stateDirectory = join(directory, "state");
     const runtimeDirectory = join(stateDirectory, "runtime");
     await Promise.all([
-      mkdir(portableRoot, { recursive: true }), mkdir(projectRoot, { recursive: true }),
+      mkdir(portableRoot, { recursive: true }), mkdir(join(projectRoot, ".provenant"), { recursive: true }),
       mkdir(runtimeDirectory, { recursive: true, mode: 0o700 }),
     ]);
     const globalConfigPath = join(directory, "global.yaml");
-    const projectConfigPath = join(directory, "project.yaml");
+    const projectConfigPath = join(projectRoot, ".provenant", "agent-fabric.yaml");
     await writeFile(globalConfigPath, stringify({
       schemaVersion: 1, allowedAdapters: [], activeAdapters: [], adapters: {},
       allowedProfiles: ["paired-visible"], workspaceRoots: [portableRoot],
@@ -158,19 +158,19 @@ describe("daemon trusted adapter composition", () => {
     }));
     await writeFile(projectConfigPath, stringify({
       schemaVersion: 1, namedExecutionProfile: "paired-visible", workspaceRoots: [projectRoot],
-    }));
+    }), { mode: 0o600 });
     const paths = {
       stateDirectory, runtimeDirectory,
       databasePath: join(stateDirectory, "fabric.sqlite3"), socketPath: join(runtimeDirectory, "fabric.sock"),
     };
     try {
-      await runWorkspaceTrust(["trust", machineRoot, "--profiles", "paired-visible"], paths);
+      await runWorkspaceTrust(["trust", projectRoot, "--profiles", "headless"], paths);
       await expect(composeDaemonConfiguration({
-        globalConfigPath, projectConfigPath,
+        globalConfigPath, projectRoot,
         compatibilityPath: compatibilityFixture.compatibilityPath,
         compatibilitySchemaPath: compatibilityFixture.schemaPath,
         agentsHome: directory, stateDirectory,
-      })).resolves.toMatchObject({ executionProfile: "paired-visible", workspaceRoots: [await realpath(projectRoot)] });
+      })).rejects.toMatchObject({ code: "CONFIG_UNTRUSTED_FIELD", field: "namedExecutionProfile" });
     } finally {
       await Promise.all([
         rm(directory, { recursive: true, force: true }),

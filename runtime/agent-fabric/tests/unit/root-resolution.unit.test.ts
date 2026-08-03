@@ -117,4 +117,21 @@ describe("Fabric root resolution", () => {
       },
     });
   });
+
+  it("threads an explicit enrolled project root into daemon startup", () => {
+    const paths = {
+      stateDirectory: "/fixture/state",
+      runtimeDirectory: "/fixture/state/runtime",
+      databasePath: "/fixture/state/fabric.sqlite3",
+      socketPath: "/fixture/state/runtime/fabric.sock",
+    };
+
+    expect(defaultDaemonStartOptions(paths, {
+      projectRoot: "/fixture/project",
+      environment: { AGENT_FABRIC_PRODUCT_ROOT: "/fixture/product" },
+    }).configuration).toMatchObject({
+      projectRoot: resolve("/fixture/project"),
+      globalConfigPath: resolve("/fixture/product/config/agent-fabric.yaml"),
+    });
+  });
 });

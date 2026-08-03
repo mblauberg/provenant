@@ -9,6 +9,8 @@ export type SplitConfiguration = NonNullable<DaemonStartOptions["configuration"]
 export type SplitConfigurationOptions = FabricRootResolutionOptions & {
   /** Injected for tests; production reads the filesystem. */
   exists?: ((path: string) => boolean) | undefined;
+  /** The exact workspace root whose enrolled project layer may be applied. */
+  projectRoot?: string;
 };
 
 /**
@@ -37,6 +39,7 @@ export function resolveSplitConfiguration(
   return {
     globalConfigPath,
     ...(offerLocal ? { localConfigPath } : {}),
+    ...(options.projectRoot === undefined ? {} : { projectRoot: options.projectRoot }),
     compatibilityPath: join(productRoot, "config", "adapter-compatibility.yaml"),
     compatibilitySchemaPath: join(
       productRoot,

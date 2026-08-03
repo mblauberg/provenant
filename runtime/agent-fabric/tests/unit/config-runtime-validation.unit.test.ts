@@ -8,7 +8,7 @@ import { loadFabricConfig } from "../../src/config/index.ts";
 
 async function writeJson(path: string, value: unknown): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
-  await writeFile(path, `${JSON.stringify(value, null, 2)}\n`);
+  await writeFile(path, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
 }
 
 function validGlobal(root: string): Record<string, unknown> {
@@ -49,7 +49,6 @@ describe("runtime configuration schema validation", () => {
     await writeJson(globalPath, validGlobal(projectRoot));
     await writeJson(projectPath, {
       schemaVersion: 1,
-      namedExecutionProfile: "paired-visible",
       limits: { maximumConcurrentProviderTurns: 2, surprise: true },
     });
 

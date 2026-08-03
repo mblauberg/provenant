@@ -174,14 +174,14 @@ configuration_contract:
   trusted_layers:
     - ${AGENTS_HOME}/config/agent-fabric.yaml
     - ${XDG_CONFIG_HOME}/agent-fabric/local.yaml
-  untrusted_project_layer: <project>/.agents/agent-fabric.yaml
+  untrusted_project_layer: <enrolled-project-root>/.provenant/agent-fabric.yaml
   run_layer: validated-run-authority-envelope
   merge_rules:
     authority_sets: intersection
     numeric_limits: minimum
     expiries: earliest
     deny_flags: false-dominates
-    named_profile_selection: later-layer-within-trusted-allow-list
+    named_profile_selection: trusted-caller-or-registry-only
   trusted_only_fields:
     - adapter-command
     - adapter-package-or-plugin-path
@@ -190,9 +190,7 @@ configuration_contract:
     - listener-or-socket-location
     - provider-credential-selector
   project_permitted_fields:
-    - named-execution-profile
     - allow-listed-adapter-id
-    - role-routing-within-global-policy
     - narrowed-workspace-roots
     - narrowed-resource-limits
 secrets:

@@ -51,7 +51,6 @@
       "required": ["schemaVersion"],
       "properties": {
         "schemaVersion": {"const": 1},
-        "namedExecutionProfile": {"type": "string"},
         "allowListedAdapterId": {"type": "string"},
         "workspaceRoots": {"$ref": "#/$defs/workspaceRoots"},
         "limits": {"$ref": "#/$defs/projectLimits"}
