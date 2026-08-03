@@ -87,12 +87,10 @@ esac
 
 # Refuse a command collision before any installation mutation. Publication
 # revalidates this state and uses atomic no-replace or exchange primitives.
-legacy_provenant_target="$instance_root/scripts/provenant"
 provenant_preflight="$(
   "$PRODUCT_ROOT/scripts/install-provenant-command.py" classify \
     --source "$provenant_source" \
-    --destination "$provenant_command" \
-    --legacy-target "$legacy_provenant_target"
+    --destination "$provenant_command"
 )" || exit 3
 
 state_directory="${AGENT_FABRIC_STATE_DIRECTORY:-$HOME/.local/state/agent-harness/fabric}"
@@ -127,7 +125,6 @@ provenant_status="$(
   "$PRODUCT_ROOT/scripts/install-provenant-command.py" publish \
     --source "$provenant_source" \
     --destination "$provenant_command" \
-    --legacy-target "$legacy_provenant_target" \
     --expected "$provenant_preflight"
 )" || exit 3
 echo "command $provenant_status=$provenant_command"
@@ -163,36 +160,7 @@ fi
 # constitution from the product. In a fused layout both roots are one directory,
 # so this is the text that was always emitted.
 instance_doctrine="$instance_root/AGENTS.md"
-# Every installer before this one wrote the product path here. That text is
-# stale, not foreign, so it is migrated rather than refused: refusing it would
-# break every upgrade from a previous install. In a fused layout the two paths
-# are the same string and the migration is a byte-for-byte no-op.
-legacy_doctrine="$PRODUCT_ROOT/AGENTS.md"
 bootstrap="Read and follow \`$instance_doctrine\` and \`$PRODUCT_ROOT/HARNESS.md\` before making orchestration, delegation, model-routing or memory decisions. Platform/system policy and explicit user authority lead; the nearest project instruction may specialise or strengthen the global harness but may not silently broaden authority, weaken safety gates or redefine global cross-project memory policy."
-
-migrate_instructions() {
-  # Replace only the exact legacy path, leaving anything the user wrote around
-  # it untouched. Scanning left to right and never rescanning replaced text
-  # keeps this correct even when one path contains the other.
-  local temporary
-  temporary=$(mktemp "$(dirname "$instructions")/.instructions.XXXXXX")
-  if ! LEGACY_DOCTRINE="$legacy_doctrine" INSTANCE_DOCTRINE="$instance_doctrine" awk '
-    BEGIN { legacy = ENVIRON["LEGACY_DOCTRINE"]; instance = ENVIRON["INSTANCE_DOCTRINE"] }
-    {
-      out = ""; rest = $0
-      while ((at = index(rest, legacy)) > 0) {
-        out = out substr(rest, 1, at - 1) instance
-        rest = substr(rest, at + length(legacy))
-      }
-      print out rest
-    }
-  ' "$instructions" > "$temporary"; then
-    rm -f "$temporary"
-    return 1
-  fi
-  cat "$temporary" > "$instructions"
-  rm -f "$temporary"
-}
 
 if [[ ! -e "$instructions" && ! -L "$instructions" ]]; then
   {
@@ -201,18 +169,12 @@ if [[ ! -e "$instructions" && ! -L "$instructions" ]]; then
     echo "$bootstrap"
   } > "$instructions"
   echo "instructions created=$instructions"
-elif [[ -L "$instructions" ]] && { [[ "$instructions" -ef "$instance_doctrine" ]] || [[ "$instructions" -ef "$legacy_doctrine" ]]; }; then
-  # A link the user made to either doctrine file already resolves to doctrine;
+elif [[ -L "$instructions" ]] && [[ "$instructions" -ef "$instance_doctrine" ]]; then
+  # A link the user made to the instance doctrine already resolves to doctrine;
   # repointing someone's deliberate symlink is more than an upgrade should do.
   echo "instructions existing=$instructions"
 elif grep -Fq "$instance_doctrine" "$instructions" && grep -Fq "$PRODUCT_ROOT/HARNESS.md" "$instructions"; then
   echo "instructions existing=$instructions"
-elif grep -Fq "$legacy_doctrine" "$instructions" && grep -Fq "$PRODUCT_ROOT/HARNESS.md" "$instructions"; then
-  if ! migrate_instructions; then
-    echo "instructions unmigrated=$instructions" >&2
-    exit 3
-  fi
-  echo "instructions migrated=$instructions"
 else
   echo "instructions preserved=$instructions" >&2
   echo "add this line to that file:" >&2
