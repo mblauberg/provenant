@@ -45,9 +45,6 @@ jobs:
       harness: ${{ github.event_name == 'push' && 'true' || steps.filter.outputs.harness }}
       fabric: ${{ github.event_name == 'push' && 'true' || steps.filter.outputs.fabric }}
       split-root: ${{ github.event_name == 'push' && 'true' || steps.filter.outputs.split-root }}
-      console: ${{ github.event_name == 'push' && 'true' || steps.filter.outputs.console }}
-      herdr: ${{ github.event_name == 'push' && 'true' || steps.filter.outputs.herdr }}
-      review-portal-supervisor: ${{ github.event_name == 'push' && 'true' || steps.filter.outputs.review-portal-supervisor }}
       workflows: ${{ github.event_name == 'push' && 'true' || steps.filter.outputs.workflows }}
     steps:
       - name: Filter changed paths
@@ -66,8 +63,6 @@ jobs:
             node-workspace: &node-workspace
               - 'package.json'
               - 'package-lock.json'
-              - 'tsconfig.json'
-              - 'runtime/agent-fabric-protocol/**'
             harness:
               - *ci-contract
               - *node-workspace
@@ -98,42 +93,14 @@ jobs:
             fabric:
               - *ci-contract
               - *node-workspace
-              - 'config/**'
-              - 'runtime/agent-fabric/**'
-              # Executed by fabric tests: the model-routing acceptance suite
-              # runs scripts/model-route, a bash wrapper that execs
-              # scripts/model_route.py where the routing logic lives, and the
-              # delivery-run fixture runs skills/deliver/scripts/*.py. Both the
-              # wrapper, the Python module it execs, and the catalogue and
-              # preference modules that module loads must all retrigger fabric.
-              # Exact executed dependencies only — the policy test rejects
-              # broader docs/skills globs.
-              - 'scripts/model-route'
-              - 'scripts/model_route.py'
-              - 'scripts/model_route_catalog.py'
-              - 'scripts/model_route_preferences.py'
-              - 'skills/deliver/scripts/**'
+              - 'runtime/fabric/**'
             split-root:
               - *ci-contract
               - *node-workspace
-              - '.github/split-root-known-red-ts.txt'
-              - '.github/split-root-known-flaky.txt'
               - 'config/**'
-              - 'runtime/agent-fabric/**'
+              - 'runtime/**'
               - 'scripts/**'
               - 'tests/**'
-            console:
-              - *ci-contract
-              - *node-workspace
-              - 'runtime/agent-fabric/**'
-              - 'runtime/agent-fabric-console/**'
-            herdr:
-              - *ci-contract
-              - *node-workspace
-              - 'runtime/agent-fabric-herdr/**'
-            review-portal-supervisor:
-              - *ci-contract
-              - 'runtime/agent-fabric-review-portal-supervisor/**'
             workflows:
               - '.github/workflows/**'
               - '.github/actions/**'
@@ -155,15 +122,6 @@ jobs:
           fetch-depth: 0
       - name: Set up Node.js workspace
         uses: ./.github/actions/setup-node-workspace
-      - name: Build TypeScript workspace for schema verification
-        run: npm run build:types
-      - name: Verify committed protocol schemas
-        run: npm run schema:check:generated
-      - name: Build workspace for source-tree wrapper tests
-        run: npm run build
-      - name: Verify generated protocol schema tree is unchanged
-        run: |
-          test -z "$(git status --porcelain --untracked-files=all -- runtime/agent-fabric-protocol/schemas)"
       - name: Set up uv and Python
         uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:
@@ -178,9 +136,9 @@ jobs:
         run: scripts/check-harness
 
   fabric:
-    name: Agent fabric TypeScript, tests and audit
+    name: Fabric typecheck, tests and audit
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 15
     permissions:
       contents: read
     needs: detect-changes
@@ -190,42 +148,14 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Assert protocol build starts clean
-        run: test ! -e runtime/agent-fabric-protocol/dist
       - name: Set up Node.js workspace
         uses: ./.github/actions/setup-node-workspace
-      - name: Build workspace in dependency order
-        run: npm run build
-      - name: Assert deterministic adapter build artifacts
-        run: |
-          comparison_root="$(mktemp -d)"
-          npx tsc --build runtime/agent-fabric/tsconfig.build.json --force
-          cp -R runtime/agent-fabric/dist/adapters "$comparison_root/first"
-          npx tsc --build runtime/agent-fabric/tsconfig.build.json --force
-          diff -qr "$comparison_root/first" runtime/agent-fabric/dist/adapters
-          echo "Adapter build artifacts are byte-identical across two forced builds."
-      - name: Verify adapter activation metadata
-        run: |
-          set -euo pipefail
-          node --import tsx runtime/agent-fabric/scripts/verify-primary-compatibility.ts \
-            --compatibility-only
-      - name: Run protocol tests
-        run: npm run test --workspace=@local/agent-fabric-protocol
-      - name: Run fabric typecheck, build and tests
-        env:
-          AGENT_FABRIC_PORTABLE_TESTS: "1"
-        run: |
-          npm run schema:check --workspace=@local/agent-fabric
-          npm run typecheck --workspace=@local/agent-fabric
-          npm run test --workspace=@local/agent-fabric
-      - name: Verify local protocol dependency was built
-        run: test -f runtime/agent-fabric-protocol/dist/index.d.ts
-      - name: Run fabric evaluation suite
-        run: npm run test:evaluation --workspace=@local/agent-fabric
-      - name: Run fabric load suite
-        run: npm run test:load --workspace=@local/agent-fabric
+      - name: Run typecheck and tests
+        run: npm run check
+      - name: Drive the registered MCP launcher end to end
+        run: node runtime/fabric/mcp-smoke.mjs
       - name: Audit production dependencies
-        run: npm audit --workspace=@local/agent-fabric --omit=dev --audit-level=high
+        run: npm audit --workspace=@local/fabric --omit=dev --audit-level=high
 
   split-root:
     name: Split-root contract rig
@@ -245,8 +175,6 @@ jobs:
           fetch-depth: 0
       - name: Set up Node.js workspace
         uses: ./.github/actions/setup-node-workspace
-      - name: Build workspace
-        run: npm run build
       - name: Set up uv
         uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:
@@ -275,22 +203,11 @@ jobs:
           test -f "$split_instance/config/model-preferences.json"
           test "$AGENT_FABRIC_PRODUCT_ROOT" != "$AGENT_FABRIC_INSTANCE_ROOT"
           printf 'product root: %s\ninstance root: %s\n' "$AGENT_FABRIC_PRODUCT_ROOT" "$AGENT_FABRIC_INSTANCE_ROOT"
-          # The instance layer is whatever `install-harness` actually seeds and
-          # nothing more.  An earlier revision hand-wrote an instance
-          # `agent-fabric.yaml` naming `codex-app-server`, which put an adapter
-          # back into `allowedAdapters` for acceptance tests that deliberately
-          # set it to `[]`, and they then failed reaching for a provider
-          # executable.  That was the rig inventing a config layer the split
-          # install does not create, so the suite failed on the fixture rather
-          # than on the roots.
-          test ! -e "$split_instance/config/agent-fabric.yaml"
           # Export the two roots and nothing else.  The seeding above needs a
           # split HOME, CODEX_HOME and PROVENANT_BIN_DIR, but exporting those
           # to later steps makes the suite fail on the ambient installer
           # environment rather than on the split roots, which is not what this
-          # job is for.  GITHUB_ENV cannot unset a variable, so AGENTS_HOME is
-          # simply never written: writing it empty sets it to the empty string,
-          # which `herdr_prompt.sh` correctly rejects as not absolute.
+          # job is for.
           {
             echo "AGENT_FABRIC_PRODUCT_ROOT=$AGENT_FABRIC_PRODUCT_ROOT"
             echo "AGENT_FABRIC_INSTANCE_ROOT=$AGENT_FABRIC_INSTANCE_ROOT"
@@ -298,186 +215,15 @@ jobs:
       - name: Run full Python suite under split roots
         env:
           HARNESS_PYTHON: ${{ github.workspace }}/.venv/bin/python
-        # No deselect list and no inverse gate any more.  Both entries of
-        # `.github/split-root-known-red.txt` were owned by #563 and both went
-        # green with the root-pairing fix in this change, which the inverse gate
-        # reported as `NOW PASSING, remove from the ledger` before failing the
-        # job.  That is the gate working, so the ledger and its machinery are
-        # deleted here rather than kept empty: a Python split-root failure now
-        # simply fails this step, which is what should have happened all along.
         run: |
           set -euo pipefail
           $HARNESS_PYTHON -m pytest tests/ -q
+      # Both split-root failure ledgers are gone with the daemon that owned
+      # every entry in them: each named a provisioning, seat or lease case in
+      # the retired coordination runtime. The workspace suite is now an
+      # ordinary must-be-green step under split roots.
       - name: Run full workspace suite under split roots
-        env:
-          # vitest colours its summary on this runner, and the escape codes sit
-          # between "Tests" and the count, so any grep over the summary silently
-          # never matches.  Turn colour off at the source and strip it anyway.
-          NO_COLOR: "1"
-          FORCE_COLOR: "0"
-        run: |
-          set -euo pipefail
-          # The suite is expected to fail here, on exactly the cases the
-          # TypeScript ledger names and no others.  Asserting the exact set is
-          # stronger than deselecting them: a ledger entry that starts passing
-          # shrinks the count and breaks this step, and a genuine regression
-          # grows it and breaks this step too, so the list cannot outlive the
-          # bugs it names in either direction.
-          set +e
-          output="$(npm test 2>&1 | perl -pe 's/\e\[[0-9;]*[A-Za-z]//g; s/\^\[\[[0-9;]*[A-Za-z]//g')"
-          # `pipefail` is still set from the top of this step, so the assignment
-          # carries the vitest failure through the colour-stripping filter.
-          status=$?
-          set -e
-          printf '%s\n' "$output"
-          test "$status" -ne 0
-          # Match ONLY within vitest's FAIL lines.  Searching the whole output
-          # matches the test name in its passing tick line just as happily, so
-          # the inverse gate below could never detect an entry going green,
-          # which is the one thing it exists to do.
-          failures="$(grep -E '^[[:space:]]*FAIL ' <<<"$output" || true)"
-          expected=0
-          while IFS= read -r line; do
-            name="${line% #*}"
-            owner="${line##* }"
-            if grep -Fq "$name" <<<"$failures"; then
-              printf 'still red as recorded: %s (%s)\n' "$name" "$owner"
-              expected=$((expected + 1))
-            else
-              printf 'NOW PASSING or renamed, remove from the ledger: %s (%s)\n' "$name" "$owner"
-              exit 1
-            fi
-          done < <(grep -vE '^[[:space:]]*(#|$)' .github/split-root-known-red-ts.txt)
-          # A known flake is not evidence of anything, but it does change the
-          # arithmetic, so count the ones that actually fired rather than
-          # tolerating a range.  An entry that did not fire adds nothing, so a
-          # flake ledger cannot be used to absorb a real regression.
-          while IFS= read -r line; do
-            name="${line% #*}"
-            owner="${line##* }"
-            if grep -Fq "$name" <<<"$failures"; then
-              printf 'known flake fired, not counted as a split-root finding: %s (%s)\n' "$name" "$owner"
-              expected=$((expected + 1))
-            fi
-          done < <(grep -vE '^[[:space:]]*(#|$)' .github/split-root-known-flaky.txt)
-          # vitest pads its summary columns, so match on a whitespace-tolerant
-          # pattern rather than a fixed number of spaces.  Any failure named by
-          # neither ledger makes this count wrong and breaks the step, which is
-          # the whole point.
-          grep -Eq "Tests +${expected} failed \|" <<<"$output" || {
-            printf 'FAILURE SET DOES NOT MATCH THE LEDGERS: expected %d\n' "$expected"
-            printf '%s\n' "$failures"
-            exit 1
-          }
-          printf 'split-root failures accounted for exactly: %d\n' "$expected"
-      - name: Run split-root TypeScript oracle
-        working-directory: runtime/agent-fabric
-        env:
-          NO_COLOR: "1"
-          FORCE_COLOR: "0"
-        # The oracle used to be pinned to exactly one named failure, because
-        # `does not offer a defaulted instance layer as an explicit narrowing
-        # layer` was the fail-open defect #549 owned and had not yet fixed. That
-        # pin has done its job: the probe passes, so the pin is deleted here
-        # rather than left to rot into a gate that asserts a bug still exists.
-        # The oracle is now an ordinary must-be-green step, and any regression
-        # in it fails this job on its own merits.
-        run: npx vitest run --config vitest.split-root.config.ts
-
-  review-portal-supervisor:
-    name: Review portal supervisor (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 10
-    permissions:
-      contents: read
-    needs: detect-changes
-    if: needs.detect-changes.outputs.review-portal-supervisor == 'true'
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-15]
-    defaults:
-      run:
-        working-directory: runtime/agent-fabric-review-portal-supervisor
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Install pinned Rust toolchain
-        run: rustup toolchain install 1.94.1 --profile minimal --component clippy --component rustfmt
-      - name: Cache Rust build artifacts
-        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-        with:
-          workspaces: runtime/agent-fabric-review-portal-supervisor
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: Verify checked-out SHA
-        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-      - name: Check formatting
-        run: cargo fmt --check
-      - name: Require a dependency-free locked graph
-        run: |
-          package_count="$(awk '/^\[\[package\]\]/{count++} END{print count+0}' Cargo.lock)"
-          test "$package_count" -eq 1
-          cargo metadata --locked --offline --no-deps --format-version 1 >/dev/null
-      - name: Run Clippy
-        run: cargo clippy --locked --offline --all-targets -- -D warnings
-      - name: Run tests
-        run: cargo test --locked --offline
-      - name: Prove nominal relay launch closes ambient descriptors
-        run: bash -c 'exec 9</dev/null; cargo test --locked --offline --test portal_relay -- --test-threads=1'
-
-  console:
-    name: Agent fabric Console, evaluation, load and audit
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    permissions:
-      contents: read
-    needs: detect-changes
-    if: needs.detect-changes.outputs.console == 'true'
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Set up Node.js workspace
-        uses: ./.github/actions/setup-node-workspace
-      - name: Build workspace in dependency order
-        run: npm run build
-      - name: Run Console typecheck, build and tests
-        run: |
-          npm run typecheck --workspace=@local/agent-fabric-console
-          npm run test --workspace=@local/agent-fabric-console
-      - name: Run Console evaluation suite
-        run: npm run test:evaluation --workspace=@local/agent-fabric-console
-      - name: Run Console load suite
-        run: npm run test:load --workspace=@local/agent-fabric-console
-      - name: Audit Console production dependencies
-        run: npm audit --workspace=@local/agent-fabric-console --omit=dev --audit-level=high
-
-  herdr:
-    name: Agent fabric Herdr adapter and audit
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    permissions:
-      contents: read
-    needs: detect-changes
-    if: needs.detect-changes.outputs.herdr == 'true'
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Set up Node.js workspace
-        uses: ./.github/actions/setup-node-workspace
-      - name: Build workspace in dependency order
-        run: npm run build
-      - name: Run Herdr typecheck, build and tests
-        run: |
-          npm run typecheck --workspace=@local/agent-fabric-herdr
-          npm run test --workspace=@local/agent-fabric-herdr
-      - name: Audit Herdr production dependencies
-        run: npm audit --workspace=@local/agent-fabric-herdr --omit=dev --audit-level=high
+        run: npm test
 
   zizmor:
     name: Workflow security lint
@@ -515,9 +261,6 @@ jobs:
       - harness
       - fabric
       - split-root
-      - review-portal-supervisor
-      - console
-      - herdr
       - zizmor
     if: always()
     steps:
