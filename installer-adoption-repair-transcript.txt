@@ -1,0 +1,106 @@
+Installer adoption repair transcript
+Worktree: /Users/user/.agents/.worktrees/installer-adoption-repair
+Date: 2026-08-02
+
+Red regressions before the production patch
+
+tests/test_install_agents.py::test_agent_check_warns_about_foreign_markdown_entries
+1 failed in 5.69s
+AssertionError: conflicting: agent installation integrity failed: my-notes.md=foreign
+
+tests/test_install_agents.py::test_byte_identical_replacement_of_a_managed_link_is_adopted
+1 failed in 0.29s
+AssertionError: conflicting: conflicting managed targets: codex-analyst.md
+
+tests/test_install_agents.py::test_canonical_source_symlinks_without_a_manifest_are_adopted
+1 failed in 5.69s
+AssertionError: conflicting: unmanaged agent targets would be overwritten: .../agy-reviewer.md: manually move or remove ...
+
+tests/test_install_agents.py::test_agent_plan_discloses_retired_manifest_entries
+1 failed in 5.69s
+KeyError: 'agy-reviewer.md'
+
+Focused gate
+
+$ /Users/user/.agents/.venv/bin/pytest tests/test_install_agents.py tests/test_install_harness.py -q
+..............................................................           [100%]
+62 passed in 48.08s
+
+Final focused gate after formatting-only adjustment
+
+$ /Users/user/.agents/.venv/bin/pytest tests/test_install_agents.py tests/test_install_harness.py -q
+..............................................................           [100%]
+62 passed in 55.07s
+
+Literal manual State 1 command output
+
+conflicting: [Errno 62] Too many levels of symbolic links: '/private/tmp/repro-1-parent/agents/agy-reviewer.md'
+install exit=3
+conflicting: source contains an invalid agent definition
+check exit=3
+
+Literal manual State 2 command output
+
+conflicting: [Errno 62] Too many levels of symbolic links: '/private/tmp/repro-2-parent/agents/agy-reviewer.md'
+install exit=3
+=== plan ===
+conflicting: source contains an invalid agent definition
+exit=3
+=== check ===
+conflicting: source contains an invalid agent definition
+exit=3
+=== install ===
+conflicting: source contains an invalid agent definition
+exit=3
+
+Literal manual State 3 command output
+
+agents linked=3 existing=0 target=target
+install exit=0
+
+Source-separated verification of State 1
+
+install exit=0
+warning: unmanaged agent entries outside catalogue: my-notes.md=foreign
+agents checked=3 target=agents
+check exit=0
+
+Source-separated verification of State 2
+
+install exit=0
+=== plan ===
+{
+  "schema_version": 1,
+  "action": "plan",
+  "items": [
+    {"name": "agy-reviewer.md", "state": "managed"},
+    {"name": "codex-analyst.md", "state": "adoptable"},
+    {"name": "codex-implementer.md", "state": "managed"}
+  ],
+  "changed": []
+}
+exit=0
+=== check ===
+{
+  "schema_version": 1,
+  "action": "check",
+  "items": [
+    {"name": "agy-reviewer.md", "state": "present"},
+    {"name": "codex-analyst.md", "state": "adoptable"},
+    {"name": "codex-implementer.md", "state": "present"}
+  ],
+  "changed": []
+}
+exit=0
+=== install ===
+{
+  "schema_version": 1,
+  "action": "install",
+  "items": [
+    {"name": "agy-reviewer.md", "state": "managed"},
+    {"name": "codex-analyst.md", "state": "managed"},
+    {"name": "codex-implementer.md", "state": "managed"}
+  ],
+  "changed": ["codex-analyst.md"]
+}
+exit=0
