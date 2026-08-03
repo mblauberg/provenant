@@ -1,6 +1,0 @@
-{
-  "approvalPolicy": "never",
-  "cwd": "$WORKSPACE_ROOT/src",
-  "model": "gpt-5.4",
-  "sandbox": "read-only"
-}

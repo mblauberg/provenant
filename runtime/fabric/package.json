@@ -3,6 +3,20 @@
   "version": "2.0.0",
   "type": "module",
   "private": true,
-  "scripts": { "test": "vitest run tests" },
-  "bin": { "fabric-mcp": "./src/server.ts" }
+  "scripts": {
+    "test": "vitest run tests",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "bin": { "fabric-mcp": "./src/server.ts" },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "better-sqlite3": "13.0.1",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "7.6.13",
+    "@types/node": "24.13.3",
+    "typescript": "7.0.2",
+    "vitest": "4.1.10"
+  }
 }

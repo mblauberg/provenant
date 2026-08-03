@@ -3,7 +3,12 @@ import { setTimeout as delay } from "node:timers/promises";
 import { identify } from "../src/identity.js";
 import { Store } from "../src/store.js";
 
-const [databasePath, indexText, operationsText, workerCountText, projectCwd, startAtText] = process.argv.slice(2);
+const argv = process.argv.slice(2);
+if (argv.length !== 6) {
+  throw new Error(`concurrency-worker takes six arguments, got ${argv.length}`);
+}
+const [databasePath, indexText, operationsText, workerCountText, projectCwd, startAtText] =
+  argv as [string, string, string, string, string, string];
 const index = Number(indexText);
 const operations = Number(operationsText);
 const workerCount = Number(workerCountText);
