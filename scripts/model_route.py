@@ -25,7 +25,6 @@ INSTANCE_ROOT = Path(
 ).expanduser()
 CATALOG_PATH = INSTANCE_ROOT / "config" / "model-routing.json"
 COMPATIBILITY_PATH = PRODUCT_ROOT / "config" / "adapter-compatibility.yaml"
-FABRIC_CONFIG_PATH = PRODUCT_ROOT / "config" / "agent-fabric.yaml"
 COMPATIBILITY_ADAPTER_IDS = {
     "claude": "claude-agent-sdk",
     "codex": "codex-app-server",
@@ -127,19 +126,6 @@ def load_adapter_compatibility(
         if isinstance(constraints, dict)
         else True,
     }, ""
-
-
-def load_active_adapters(path: Path) -> tuple[set[str], str]:
-    try:
-        data = yaml.safe_load(path.read_text())
-    except (OSError, yaml.YAMLError):
-        return set(), "fabric_activation_unavailable"
-    active = data.get("activeAdapters") if isinstance(data, dict) else None
-    if not isinstance(data, dict) or data.get("schemaVersion") != 1 or not isinstance(active, list) or any(
-        not isinstance(item, str) for item in active
-    ):
-        return set(), "fabric_activation_invalid"
-    return set(active), ""
 
 
 def check_adapter_compatibility(
@@ -419,7 +405,6 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
         "effort": requested_effort,
         "effort_source": effort_source,
         "lead_family": args.lead_family,
-        "adapter_gate": args.adapter_gate,
     }
     if args.task_class:
         base.update({"task_class": args.task_class, "route_source": "task-class"})
@@ -456,16 +441,6 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
     endpoint = adapter["endpoint_provider"]
     compatibility: dict[str, Any] | None = None
     compatibility_metadata: dict[str, Any] = {}
-    active_adapters: set[str] = set()
-    if args.adapter_gate == "fabric" and args.adapter not in COMPATIBILITY_ADAPTER_IDS:
-        return emit_route(
-            {
-                **base,
-                "status": "adapter_compatibility_unknown",
-                "endpoint_provider": endpoint,
-            },
-            2,
-        )
     if args.adapter in COMPATIBILITY_ADAPTER_IDS:
         compatibility, compatibility_status = load_adapter_compatibility(
             args.adapter, Path(args.adapter_compatibility),
@@ -483,21 +458,6 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
             "compatibility_adapter": compatibility["compatibility_adapter"],
             "adapter_enabled": compatibility["enabled"],
         }
-        if args.adapter_gate == "fabric":
-            active_adapters, activation_status = load_active_adapters(Path(args.fabric_config))
-            if activation_status:
-                return emit_route(
-                    {
-                        **base,
-                        "status": activation_status,
-                        "endpoint_provider": endpoint,
-                        **compatibility_metadata,
-                    },
-                    2,
-                )
-            compatibility_metadata["adapter_active"] = (
-                compatibility["compatibility_adapter"] in active_adapters
-            )
         if account_default != (not compatibility["requires_explicit_model"]):
             # The routing catalogue and adapter policy must agree on
             # account-default dispatch in both directions (#190).
@@ -634,33 +594,6 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
     if is_risk_override_model and not args.risk_override:
         return emit_route({**base, "status": "risk_tier_override_required"}, 1)
     compatibility_family = ""
-    if compatibility:
-        if args.adapter_gate == "fabric" and not compatibility["enabled"]:
-            return emit_route(
-                {
-                    **base,
-                    "status": "adapter_disabled",
-                    "endpoint_provider": endpoint,
-                    "model_family": family,
-                    "resolved_model": model,
-                    "identity_source": identity_source,
-                    **compatibility_metadata,
-                },
-                1,
-            )
-        if args.adapter_gate == "fabric" and not compatibility_metadata["adapter_active"]:
-            return emit_route(
-                {
-                    **base,
-                    "status": "adapter_inactive",
-                    "endpoint_provider": endpoint,
-                    "model_family": family,
-                    "resolved_model": model,
-                    "identity_source": identity_source,
-                    **compatibility_metadata,
-                },
-                1,
-            )
     distinct = bool(args.lead_family and family != args.lead_family)
     if compatibility and args.require_distinct and not args.lead_family:
         return emit_route(
@@ -829,17 +762,6 @@ def parser() -> argparse.ArgumentParser:
     command.add_argument("--lead-family")
     command.add_argument("--require-distinct", action="store_true")
     command.add_argument(
-        "--adapter-gate",
-        choices=("fabric", "direct-cli"),
-        default="fabric",
-        help="Apply Fabric activation and conformance gates (default) or defer activation to a direct CLI caller.",
-    )
-    command.add_argument(
-        "--fabric-config",
-        default=str(FABRIC_CONFIG_PATH),
-        help=argparse.SUPPRESS,
-    )
-    command.add_argument(
         "--catalog",
         default=str(CATALOG_PATH),
         help=argparse.SUPPRESS,
@@ -873,7 +795,6 @@ def main(argv: list[str] | None = None) -> int:
                 "requested_effort": effort or args.effort or "",
                 "effort": "",
                 "lead_family": args.lead_family,
-                "adapter_gate": args.adapter_gate,
             }
             if args.task_class:
                 record.update({"task_class": args.task_class, "route_source": "task-class"})

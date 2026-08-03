@@ -15,9 +15,10 @@ def test_agy_is_a_fabric_adapter_not_a_parallel_provider_skill():
     assert "Answer-bearing external work uses Fabric request/reply" in orchestrate
 
 
-def test_headless_helpers_cannot_bypass_fabric_for_agy():
+def test_headless_dispatcher_uses_direct_router_without_daemon_gate():
     dispatcher = read("skills/orchestrate/scripts/cf_dispatch.sh")
     assert not (ROOT / "skills/autopilot/scripts/cross-family.sh").exists()
+    assert "--adapter-gate" not in dispatcher
     for forbidden in (
         "CF_DISPATCH_ENABLE_AGY",
         "agy_cmd=(",
@@ -33,9 +34,6 @@ def test_autopilot_routes_bonus_gemini_through_fabric():
     assert "direct `agy`" not in reference
 
 
-def test_fabric_keeps_the_activated_agy_adapter():
-    configuration = read("config/agent-fabric.yaml")
+def test_direct_agy_dispatch_keeps_the_compatibility_contract():
     compatibility = read("config/adapter-compatibility.yaml")
-    assert "  - agy" in configuration
-    assert "  agy:" in configuration
     assert "  agy:" in compatibility
