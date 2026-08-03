@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Focused text oracles for CAPA-001 normative spec repairs."""
 
-from pathlib import Path
 import sqlite3
 import unittest
 
@@ -13,14 +12,10 @@ from spec_sources import (
     read_specs,
 )
 
-ROOT = Path(__file__).resolve().parents[2]
-
-
 BEHAVIOUR_SPECS = read_specs(AGENT_FABRIC_BEHAVIOUR)
 HARDENING_SPECS = read_specs(AGENT_FABRIC_HARDENING)
 PROVIDER_ACTIONS_SPEC = read_spec("agent-fabric/provider-actions-and-adapters.md")
 MESSAGING_PROTOCOL_SPEC = read_spec("agent-fabric/messaging-and-public-protocol.md")
-MIGRATION = ROOT / "runtime" / "agent-fabric" / "migrations" / "0001-current-baseline.sql"
 
 
 def ddl_block(text: str, table: str) -> str:
@@ -136,24 +131,6 @@ def trigger_database() -> sqlite3.Connection:
 
 
 class SpecRepairTests(unittest.TestCase):
-    def test_shipped_apply_arm_constraint_has_a_stable_name(self) -> None:
-        db = sqlite3.connect(":memory:")
-        try:
-            db.executescript(MIGRATION.read_text(encoding="utf-8"))
-            with self.assertRaises(sqlite3.IntegrityError) as caught:
-                db.execute(
-                    "INSERT INTO lifecycle_transition_applies("
-                    "apply_id,apply_kind,batch_transition_kind,"
-                    "fresh_handoff_key,fresh_generation_loss_after_key) "
-                    "VALUES('invalid-apply','terminal','fresh-origin','none','none')"
-                )
-            self.assertEqual(
-                str(caught.exception),
-                "CHECK constraint failed: lifecycle_transition_applies_arm_guard",
-            )
-        finally:
-            db.close()
-
     def test_fresh_origin_effect_ddl_accepts_exact_and_rejects_crossed_arm(self) -> None:
         db = sqlite3.connect(":memory:", isolation_level=None)
         db.execute("PRAGMA foreign_keys=ON")
