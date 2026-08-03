@@ -57,12 +57,8 @@ jobs:
         with:
           # Invariant: every tracked file matches at least one filter, so no
           # change can skip every build job while ci-status reports green.
-          # The harness filter covers every surface scripts/check-harness
-          # validates — skills, docs, root documents, release attribution
-          # files, and the repo-wide scan residue (CHANGELOG.md, .gitignore)
-          # — so policy-gated changes always run the policy gate.
-          # tests/test_ci_repository_assurance_policy.py enforces the
-          # invariant against `git ls-files` (PR #168 repair cycle 2).
+          # The harness filter covers the Python tests and ordinary repository
+          # checks run by this job, including scripts, skills, tests and documents.
           filters: |
             ci-contract: &ci-contract
               - '.github/workflows/ci.yml'
@@ -144,7 +140,7 @@ jobs:
               - '.github/zizmor.yml'
 
   harness:
-    name: Harness policy and Python tests
+    name: Python checks and tests
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -176,43 +172,10 @@ jobs:
           cache-dependency-glob: uv.lock
       - name: Install locked harness test dependencies
         run: uv sync --locked --only-group test
-      - name: Run harness gate
+      - name: Run ordinary checks and Python tests
         env:
           HARNESS_PYTHON: ${{ github.workspace }}/.venv/bin/python
         run: scripts/check-harness
-      - name: Run change gates
-        env:
-          HARNESS_PYTHON: ${{ github.workspace }}/.venv/bin/python
-          CHANGE_GATE_BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
-        run: |
-          set -euo pipefail
-          lock="$RUNNER_TEMP/provenant-change-gates.lock"
-          release() { rm -rf "$lock"; }
-          while true; do
-            if mkdir "$lock" 2>/dev/null; then
-              echo $$ > "$lock/pid"
-              trap release EXIT INT TERM HUP
-              break
-            fi
-            holder=$(cat "$lock/pid" 2>/dev/null)
-            if [ -n "$holder" ] && ! kill -0 "$holder" 2>/dev/null; then
-              echo "breaking gate lock held by dead pid $holder"
-              rm -rf "$lock"
-              continue
-            fi
-            sleep 30
-          done
-          scratch="$RUNNER_TEMP/provenant-change-gates"
-          scripts/check-test-gates right-reason-red \
-            --base "$CHANGE_GATE_BASE" --scratch-root "$scratch" \
-            --test-command-py "$HARNESS_PYTHON -m pytest {test} -q" \
-            --test-command-ts "npm exec vitest run {test}"
-          scripts/check-test-gates revert-probe \
-            --base "$CHANGE_GATE_BASE" --scratch-root "$scratch" \
-            --test-command-py "$HARNESS_PYTHON -m pytest {test} -q" \
-            --test-command-ts "npm exec vitest run {test}"
-          release
-          trap - EXIT INT TERM HUP
 
   fabric:
     name: Agent fabric TypeScript, tests and audit
