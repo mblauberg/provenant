@@ -2,4 +2,5 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-exec "${HARNESS_PYTHON:-python3}" "$ROOT/scripts/public_release_check.py" "$@"
+source "$ROOT/scripts/lib/harness-python.sh"
+run_stdlib "$ROOT/scripts/public_release_check.py" "$@"

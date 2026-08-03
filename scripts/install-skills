@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+source "$ROOT/scripts/lib/harness-python.sh"
 TARGET=""
 CUSTOM_SOURCE=""
 
@@ -44,7 +45,7 @@ fi
 if [[ -L "$TARGET" ]] \
   && [[ "$(cd "$TARGET" && pwd -P)" == "$(cd "$ROOT/skills" && pwd -P)" ]]; then
   if [[ -n "$CUSTOM_SOURCE" ]]; then
-    "$ROOT/scripts/manage_installation.py" validate-sources \
+    run_stdlib "$ROOT/scripts/manage_installation.py" validate-sources \
       "${manager_args[@]}" >/dev/null
     skipped_custom=()
     for skill_file in "$CUSTOM_SOURCE"/*/SKILL.md; do
@@ -63,10 +64,10 @@ if [[ -L "$TARGET" ]] \
   exit 0
 fi
 
-"$ROOT/scripts/manage_installation.py" install \
+run_stdlib "$ROOT/scripts/manage_installation.py" install \
   "${manager_args[@]}" \
   --summary
 
-exec "$ROOT/scripts/manage_installation.py" check \
+run_stdlib "$ROOT/scripts/manage_installation.py" check \
   "${manager_args[@]}" \
   --summary

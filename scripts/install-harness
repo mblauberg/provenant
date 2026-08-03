@@ -78,9 +78,12 @@ case "$instance_root" in
   *) echo "Agent Fabric instance root must be absolute" >&2; exit 3 ;;
 esac
 
+# shellcheck source=scripts/lib/harness-python.sh
+source "$PRODUCT_ROOT/scripts/lib/harness-python.sh"
+
 # Validate the complete skill namespace before publishing the command, product
 # pointer, seeded instance files, client links or installation receipt.
-"$PRODUCT_ROOT/scripts/manage_installation.py" validate-sources \
+run_stdlib "$PRODUCT_ROOT/scripts/manage_installation.py" validate-sources \
   --source "$PRODUCT_ROOT/skills" \
   --custom-source "$instance_root/custom-skills" \
   --target "$platform_home/skills" >/dev/null
@@ -89,7 +92,7 @@ esac
 # revalidates this state and uses atomic no-replace or exchange primitives.
 legacy_provenant_target="$instance_root/scripts/provenant"
 provenant_preflight="$(
-  "$PRODUCT_ROOT/scripts/install-provenant-command.py" classify \
+  run_stdlib "$PRODUCT_ROOT/scripts/install-provenant-command.py" classify \
     --source "$provenant_source" \
     --destination "$provenant_command" \
     --legacy-target "$legacy_provenant_target"
@@ -115,23 +118,23 @@ mcp_args=(
   --opencode-config "${OPENCODE_MCP_CONFIG:-$HOME/.config/opencode/opencode.jsonc}"
 )
 
-"$PRODUCT_ROOT/scripts/configure-fabric-mcp.py" "${mcp_args[@]}" --preflight
+run_stdlib "$PRODUCT_ROOT/scripts/configure-fabric-mcp.py" "${mcp_args[@]}" --preflight
 
 if [[ "$PLATFORM" == "codex" ]]; then
-  "$PRODUCT_ROOT/scripts/configure-codex-skill-overrides.py" --preflight \
+  run_stdlib "$PRODUCT_ROOT/scripts/configure-codex-skill-overrides.py" --preflight \
     --config "$platform_home/config.toml"
 fi
 
 mkdir -p "$provenant_bin_dir"
 provenant_status="$(
-  "$PRODUCT_ROOT/scripts/install-provenant-command.py" publish \
+  run_stdlib "$PRODUCT_ROOT/scripts/install-provenant-command.py" publish \
     --source "$provenant_source" \
     --destination "$provenant_command" \
     --legacy-target "$legacy_provenant_target" \
     --expected "$provenant_preflight"
 )" || exit 3
 echo "command $provenant_status=$provenant_command"
-"$PRODUCT_ROOT/scripts/write-product-root-pointer.py" "$instance_root" "$PRODUCT_ROOT"
+run_stdlib "$PRODUCT_ROOT/scripts/write-product-root-pointer.py" "$instance_root" "$PRODUCT_ROOT"
 echo "product root pointer updated=$instance_root/.agent-fabric/product-root.json"
 case ":${PATH:-}:" in
   *":$provenant_bin_dir:"*) ;;
@@ -142,7 +145,7 @@ esac
 # desired state and the seeded templates are instance-owned once written (ADR
 # 0019), so this is a no-op on every install after the first. `instance_root` is
 # resolved once, above, on the contract #529 established.
-"$PRODUCT_ROOT/scripts/instance_installation.py" seed \
+run_stdlib "$PRODUCT_ROOT/scripts/instance_installation.py" seed \
   --product-root "$PRODUCT_ROOT" --instance-root "$instance_root" --summary
 
 mkdir -p "$platform_home"
@@ -153,10 +156,10 @@ if [[ "$PLATFORM" == "claude" ]]; then
   "$PRODUCT_ROOT/scripts/install-workflows" --target "$platform_home/workflows"
 fi
 if [[ "$PLATFORM" == "codex" ]]; then
-  "$PRODUCT_ROOT/scripts/configure-codex-skill-overrides.py" \
+  run_stdlib "$PRODUCT_ROOT/scripts/configure-codex-skill-overrides.py" \
     --config "$platform_home/config.toml"
 fi
-"$PRODUCT_ROOT/scripts/configure-fabric-mcp.py" "${mcp_args[@]}"
+run_stdlib "$PRODUCT_ROOT/scripts/configure-fabric-mcp.py" "${mcp_args[@]}"
 
 # AGENTS.md is instance-owned once seeded and HARNESS.md stays product-shipped
 # (ADR 0019), so the client reads doctrine from the instance and the harness
