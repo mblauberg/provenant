@@ -98,9 +98,13 @@ export class Store {
       );
     }
     const messageId = randomUUID();
-    const conversationId = options.replyTo === undefined
-      ? messageId
-      : this.#conversationOf(options.replyTo) ?? messageId;
+    const parentConversation = options.replyTo === undefined
+      ? undefined
+      : this.#conversationOf(options.replyTo);
+    const conversationId = parentConversation ?? messageId;
+    // A stale or externally supplied reply id starts a new conversation. Do
+    // not write a dangling foreign-key value into the message row.
+    const replyTo = parentConversation === undefined ? null : options.replyTo ?? null;
     const now = Date.now();
 
     this.#db.transaction(() => {
@@ -116,7 +120,7 @@ export class Store {
           body,
           options.kind ?? "note",
           conversationId,
-          options.replyTo ?? null,
+          replyTo,
           now,
         );
       const delivery = this.#db.prepare(
@@ -297,6 +301,9 @@ export class Store {
       .all(who.project, to)
       .map((row) => (row as { agent_id: string }).agent_id);
     if (team.length > 0) return team.filter((agentId) => agentId !== who.agentId);
-    return [to];
+    const knownAgent = this.#db
+      .prepare(`SELECT 1 FROM agents WHERE project = ? AND agent_id = ?`)
+      .get(who.project, to);
+    return knownAgent === undefined ? [] : [to];
   }
 }

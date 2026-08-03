@@ -3,5 +3,6 @@
   "version": "2.0.0",
   "type": "module",
   "private": true,
+  "scripts": { "test": "vitest run tests" },
   "bin": { "fabric-mcp": "./src/server.ts" }
 }
