@@ -185,7 +185,7 @@ def test_verify_claim_requires_a_recorded_pre_dispatch_base(tmp_path, capsys):
     _repo, _base, worktree = _implementation_worktree(tmp_path, capsys)
 
     assert worktree_policy.main([
-        "verify-claim", "--repo", str(worktree),
+        "verify-claim", "--expected-worktree", str(worktree),
         "--claimed-worktree", str(worktree), "--claimed-commit", "0" * 40,
     ]) == 2
 
@@ -251,7 +251,7 @@ def test_verify_claim_rejects_unchanged_base_and_dirty_residue(tmp_path, capsys)
     (worktree / "tracked.txt").write_text("uncommitted\n")
 
     assert worktree_policy.main([
-        "verify-claim", "--repo", str(worktree),
+        "verify-claim", "--expected-worktree", str(worktree),
         "--claimed-worktree", str(worktree), "--claimed-commit", base,
         "--base-revision", base,
     ]) == 2
@@ -262,7 +262,7 @@ def test_verify_claim_rejects_unchanged_base_and_dirty_residue(tmp_path, capsys)
     (worktree / "lane-output.txt").write_text("uncommitted\n")
     changed = base
     assert worktree_policy.main([
-        "verify-claim", "--repo", str(worktree),
+        "verify-claim", "--expected-worktree", str(worktree),
         "--claimed-worktree", str(worktree), "--claimed-commit", changed,
         "--base-revision", base,
     ]) == 2
@@ -281,7 +281,7 @@ def test_verify_claim_rejects_dirty_residue_against_a_new_claim(tmp_path, capsys
     (worktree / "lane-output.txt").write_text("uncommitted\n")
 
     assert worktree_policy.main([
-        "verify-claim", "--repo", str(worktree),
+        "verify-claim", "--expected-worktree", str(worktree),
         "--claimed-worktree", str(worktree), "--claimed-commit", claimed,
         "--base-revision", base,
     ]) == 2
@@ -299,7 +299,7 @@ def test_verify_claim_accepts_new_descended_clean_head_with_receipt_evidence(tmp
     ).strip()
 
     assert worktree_policy.main([
-        "verify-claim", "--repo", str(worktree),
+        "verify-claim", "--expected-worktree", str(worktree),
         "--claimed-worktree", str(worktree), "--claimed-commit", claimed,
         "--base-revision", base,
     ]) == 0
@@ -318,7 +318,7 @@ def test_verify_claim_allows_only_documented_generated_ignored_paths(tmp_path, c
     (worktree / "node_modules" / "generated.js").write_text("generated\n")
 
     assert worktree_policy.main([
-        "verify-claim", "--repo", str(worktree),
+        "verify-claim", "--expected-worktree", str(worktree),
         "--claimed-worktree", str(worktree), "--claimed-commit", base,
         "--base-revision", base,
     ]) == 2
@@ -334,7 +334,7 @@ def test_verify_claim_allows_only_documented_generated_ignored_paths(tmp_path, c
     (worktree / ".env").write_text("unexpected\n")
 
     assert worktree_policy.main([
-        "verify-claim", "--repo", str(worktree),
+        "verify-claim", "--expected-worktree", str(worktree),
         "--claimed-worktree", str(worktree), "--claimed-commit", claimed,
         "--base-revision", base,
     ]) == 2
@@ -365,7 +365,7 @@ def test_verify_claim_rejects_a_head_change_during_verification(tmp_path, capsys
 
     monkeypatch.setattr(worktree_policy, "git", racing_git)
     assert worktree_policy.main([
-        "verify-claim", "--repo", str(worktree),
+        "verify-claim", "--expected-worktree", str(worktree),
         "--claimed-worktree", str(worktree), "--claimed-commit", claimed,
         "--base-revision", base,
     ]) == 2

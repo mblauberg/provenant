@@ -364,7 +364,7 @@ def check_worktrees(args: argparse.Namespace) -> dict[str, object]:
 def verify_claim_command(args: argparse.Namespace) -> dict[str, object]:
     try:
         return verify_claim(
-            args.repo,
+            args.expected_worktree,
             args.claimed_worktree,
             args.claimed_commit,
             args.expected_common,
@@ -402,14 +402,11 @@ def parser() -> argparse.ArgumentParser:
         "verify-claim",
         help="verify a claimed commit and linked worktree at the chair acceptance boundary",
     )
-    verify_parser.add_argument("--repo", type=Path, required=True, help="chair-expected linked worktree")
+    verify_parser.add_argument("--expected-worktree", type=Path, required=True)
     verify_parser.add_argument("--claimed-worktree", type=Path, required=True)
     verify_parser.add_argument("--claimed-commit")
     verify_parser.add_argument("--base-revision")
-    verify_parser.add_argument(
-        "--expected-common", "--expected-common-directory",
-        dest="expected_common", type=Path,
-    )
+    verify_parser.add_argument("--expected-common", type=Path)
     verify_parser.set_defaults(handler=verify_claim_command)
 
     remove_parser = sub.add_parser("remove")
