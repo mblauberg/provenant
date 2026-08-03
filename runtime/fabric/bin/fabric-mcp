@@ -1,0 +1,27 @@
+#!/bin/sh
+# Fabric over MCP. Registered directly in ~/.claude.json and ~/.codex/config.toml.
+#
+# There is no build step and no install step: this runs the TypeScript source in
+# place, so what the agents talk to is what is in the tree.
+set -eu
+
+here=$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")
+root=$(cd "$here/../../.." && pwd)
+
+# MCP clients do not always pass a login shell's PATH.
+node=${FABRIC_NODE:-$(command -v node 2>/dev/null || true)}
+if [ ! -x "${node:-}" ]; then
+  for candidate in /opt/homebrew/bin/node /usr/local/bin/node; do
+    if [ -x "$candidate" ]; then
+      node=$candidate
+      break
+    fi
+  done
+fi
+if [ ! -x "${node:-}" ]; then
+  echo "fabric: no node on PATH. Set FABRIC_NODE to a node binary." >&2
+  exit 127
+fi
+
+exec "$node" --import "$root/node_modules/tsx/dist/loader.mjs" \
+  "$root/runtime/fabric/src/server.ts" "$@"

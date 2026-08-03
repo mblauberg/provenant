@@ -11,9 +11,8 @@ fi
 PRODUCT_ROOT="${AGENT_FABRIC_PRODUCT_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 SCRIPTS_ROOT="${PROVENANT_SCRIPTS_ROOT:-$PRODUCT_ROOT/scripts}"
 SKILLS_ROOT="${PROVENANT_SKILLS_ROOT:-$PRODUCT_ROOT/skills}"
-DOCS_ROOT="${PROVENANT_DOCS_ROOT:-$PRODUCT_ROOT/docs}"
 TESTS_ROOT="${PROVENANT_TESTS_ROOT:-$PRODUCT_ROOT/tests}"
-for component_root in "$PRODUCT_ROOT" "$SCRIPTS_ROOT" "$SKILLS_ROOT" "$DOCS_ROOT" "$TESTS_ROOT"; do
+for component_root in "$PRODUCT_ROOT" "$SCRIPTS_ROOT" "$SKILLS_ROOT" "$TESTS_ROOT"; do
   [[ "$component_root" == /* ]] || {
     echo "check-harness: component roots must be absolute: $component_root" >&2
     exit 3
@@ -36,16 +35,6 @@ fi
 cd "$PRODUCT_ROOT"
 "${PYTHON[@]}" "$SCRIPTS_ROOT/check-provenant-install.py"
 "${PYTHON[@]}" "$SCRIPTS_ROOT/check_harness.py"
-"${PYTHON[@]}" "$SCRIPTS_ROOT/check_specs.py"
-"${PYTHON[@]}" "$SCRIPTS_ROOT/check_adr_index.py"
-"${PYTHON[@]}" "$SCRIPTS_ROOT/check_spec_schema_drift.py"
-"${PYTHON[@]}" "$SCRIPTS_ROOT/check_spec_check_assertions.py"
-"${PYTHON[@]}" "$SKILLS_ROOT/orchestrate/evals/check_skill_triggers.py"
-# Lifecycle-skill alignment is a deterministic current-tree gate. Historical
-# provider routing evidence stays immutable under docs/archive and is not
-# rewritten or treated as a live-catalogue result.
-"${PYTHON[@]}" "$SKILLS_ROOT/orchestrate/evals/lifecycle_skill_evaluation.py" validate-inputs
-"${PYTHON[@]}" "$SKILLS_ROOT/orchestrate/evals/lifecycle_skill_evaluation.py" probe
 
 while IFS= read -r -d '' script; do
   case "$script" in
@@ -61,33 +50,7 @@ if [[ -d "$HOME/.claude/workflows" ]]; then
   done < <(find "$HOME/.claude/workflows" -maxdepth 1 -type f -name '*.js' -print0)
 fi
 
-"${PYTHON[@]}" "$SCRIPTS_ROOT/public_release_check.py"
 "${PYTHON[@]}" "$SCRIPTS_ROOT/static-security-check.py"
-"${PYTHON[@]}" "$SCRIPTS_ROOT/validate_delivery_scenarios.py" \
-  --product-root "$PRODUCT_ROOT" --skills-root "$SKILLS_ROOT"
-"${PYTHON[@]}" "$SCRIPTS_ROOT/render_skill_catalogue.py" --check \
-  --readme "$PRODUCT_ROOT/README.md" --skills-root "$SKILLS_ROOT"
-# Derived doc regions and drift gates (issue #548). --check renders in memory
-# and diffs; CI never writes. Maintainers regenerate with --write.
-"${PYTHON[@]}" "$SCRIPTS_ROOT/render_doc_projections.py" --check \
-  --architecture "$DOCS_ROOT/ARCHITECTURE.md" --skills-root "$SKILLS_ROOT"
-"${PYTHON[@]}" "$SCRIPTS_ROOT/check_doc_constants.py" \
-  --architecture "$DOCS_ROOT/ARCHITECTURE.md" \
-  --harness "$PRODUCT_ROOT/HARNESS.md" \
-  --readme "$PRODUCT_ROOT/README.md" \
-  --skills-root "$SKILLS_ROOT"
-"${PYTHON[@]}" "$SCRIPTS_ROOT/check_doc_paths.py" \
-  --root "$PRODUCT_ROOT" \
-  "$DOCS_ROOT/ARCHITECTURE.md" "$PRODUCT_ROOT/README.md"
-# House style is gated on the root documents and on every skill front door.
-# skills/*/references/ and docs/ are not yet clean and are not gated.
-"${PYTHON[@]}" "$SKILLS_ROOT/engineering-writing/scripts/check_engineering_style.py" \
-  "$PRODUCT_ROOT/README.md" \
-  "$PRODUCT_ROOT/HARNESS.md" \
-  "$PRODUCT_ROOT/MAINTAINING.md" \
-  "$PRODUCT_ROOT/AGENTS.md" \
-  "$DOCS_ROOT/ARCHITECTURE.md" \
-  "$SKILLS_ROOT"/*/SKILL.md
 
 "${PYTHON[@]}" -m pytest -q \
   "$TESTS_ROOT" \

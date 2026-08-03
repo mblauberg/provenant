@@ -21,6 +21,7 @@ def write_accepted_document_delivery(tmp_path, status="awaiting_release"):
     reference = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(reference)
     delivery = reference.make_reference_run("document", ROOT)
+    assert not any(key.startswith("cost:") for key in delivery["authority"]["budget"])
 
     materializer_path = ROOT / "skills" / "deliver" / "scripts" / "reference_evaluation.py"
     materializer_spec = importlib.util.spec_from_file_location(

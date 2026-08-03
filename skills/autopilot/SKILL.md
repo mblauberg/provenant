@@ -32,7 +32,7 @@ clean exit; otherwise use a lighter-weight skill.
    [state-contract.md](references/state-contract.md) for the file set and
    `.agent-run/<mission-id>/` location.
 2. Use `orchestrate` for every bounded wave: it owns topology, provider
-   routing, Agent Fabric transport, the review ladder and degradation.
+   routing, coordination, the review ladder and degradation.
    Delegate decisions/software change to `implement`/`deliver` and record
    the returned route/result in `QUEUE.md`.
 3. Operate one iteration at a time after reading

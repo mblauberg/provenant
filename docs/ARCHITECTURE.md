@@ -29,8 +29,8 @@ the `deliver` kernel is agent work bound to one receipt.
 The tier is derived rather than declared. `scope` rates every factor in
 `config/risk-policy.json`, the highest tier any rating maps to is the run's
 minimum tier, and a lower declared tier needs a user-approved override carrying
-an approver, a reason and evidence. The table between the markers is rendered
-from that file by `scripts/render_doc_projections.py`.
+an approver, a reason and evidence. The table between the markers records the
+current policy and is maintained with that source file.
 
 <!-- risk-factor-table:start -->
 
@@ -156,9 +156,9 @@ loaded through `skills/deliver/contract/lifecycle.py` and materialised by
 `skills/deliver/scripts/delivery_validation_common.py`;
 `skills/deliver/scripts/delivery_validation_lifecycle.py` rejects a receipt
 whose recorded history jumps a gate, so the states below are the ones a run can
-actually occupy. The diagram body between the markers is rendered from those
-constants by `scripts/render_doc_projections.py`; the accessibility text,
-palette, class lines and edge labels stay hand-written.
+actually occupy. The diagram body between the markers is maintained alongside
+those constants; the accessibility text, palette, class lines and edge labels
+stay hand-written.
 
 <!-- delivery-state-machine:start -->
 ```mermaid
@@ -276,9 +276,9 @@ degradation note that buys past it: a run may execute without that leg, but
 `validate_delivery.py` rejects the receipt once it reaches acceptance. The only
 relief is a user-approved risk downgrade carrying an approver, a reason and
 evidence. Provider-backed external workers, including the other primary and
-distinct families, run through Agent Fabric. Direct CLIs are preflight or an
-explicitly recorded degraded fallback, not the primary answer-bearing path;
-provider adapters remain under `orchestrate`, not standalone skills.
+distinct families, are dispatched as direct command-line calls and coordinated
+through Fabric; dispatch procedure remains under `orchestrate`, not standalone
+skills.
 
 The picture below separates the legs that can block a run from the legs that
 cannot.
@@ -295,7 +295,7 @@ flowchart TB
     SUB ==> CH
 
     CH ==> NRV["targeted reviewers<br/>fresh context<br/>authored nothing, so they may certify"]
-    CH ==> AF["Agent Fabric<br/>answer-bearing execution<br/>durable communication, receipts"]
+    CH ==> AF["cross-provider dispatch<br/>answer-bearing execution<br/>coordinated through Fabric"]
 
     AF ==> OP["other primary<br/>Claude or Codex, not the chair<br/>independent review, fresh context"]
     AF -. "advisory" .-> BF["distinct family<br/>available when warranted<br/>dissent and blind-spot pressure"]
@@ -336,8 +336,8 @@ targeted and adversarial pressure; a distinct-family skip is recorded when it is
 not warranted.
 
 Paired-primary mode lets Claude and Codex rotate stage ownership, coordinated
-through Agent Fabric, which owns answer-bearing execution and durable
-communication; Herdr only observes and wakes.
+through Fabric, which carries the messages, shared tasks and activity log
+between them.
 It still has one chair and one active owner per stage, namespaced artifacts and
 non-overlapping write scopes. Pane transcripts are transport, not durable state.
 Pi is dormant by default until its provider, economics, permissions and receipt
@@ -448,37 +448,8 @@ committed. The same class holds `.agent-fabric/product-root.json`, the pointer
 to this machine's product checkout, rewritten on every install so that
 committed instance state never carries an absolute machine path and relocating
 the product is always a re-run of the installer. Split-layout startup binds the product root for the global
-configuration layer, the compatibility policy, the schemas and `${AGENTS_HOME}`,
-and offers the instance's own `config/agent-fabric.yaml` as the local layer of
-the existing typed narrowing-only merge.
-
-## Project Fabric Console
-
-The Console remains a projection-only executable over the public
-Fabric protocol. Its terminal layer uses Node 24 with a project-owned
-responsive cell-grid renderer and bounded keyboard/SGR parser, selected through the
-[terminal-runtime decision](research/project-fabric-console-terminal-runtime.md).
-It does not use Ink, blessed or a native UI core. The TypeScript spike passed
-the default/reference 80 by 24 frame, dynamic terminal reflow, resize-state
-preservation, mouse selection, hostile-text handling and terminal-restoration
-gates. Those oracles remain required; Rust/Ratatui is the objective fallback
-only if a future mandatory terminal gate fails after bounded repair.
-
-The language choice does not move authority into the Console. Fabric remains
-the transaction owner, and keyboard, mouse and typed commands converge on one
-revision-bound action-intent and confirmation path.
-
-The live control path follows `observe external facts -> commit durable facts
--> derive projection and attention -> typed action`. A snapshot cursor and the
-snapshot are read atomically; live transport is a wake accelerator for durable
-at-least-once cursor catch-up with stable-cursor idempotence, never another
-event truth. Consequential Git actions bind the source and expected destination
-object IDs plus state digests, hold or revalidate local state through the
-effect, and use an atomic destination lease. These and other retained patterns
-are recorded in the
-[native orchestration and discovery reference](research/native-orchestration-and-discovery-surfaces.md),
-with adapter/runtime seams kept in the separate
-[provider boundary reference](research/provider-adapter-and-runtime-boundaries.md).
+configuration layer, the compatibility policy and `${AGENTS_HOME}`, and the
+instance root for the routing and preference configuration seeded into it.
 
 The canonical skill catalogue is also a constrained interface. Every skill has
 balanced positive, negative and boundary routes; descriptions place the trigger

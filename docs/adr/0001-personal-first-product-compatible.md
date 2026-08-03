@@ -20,8 +20,8 @@ is actually pursued.
 - Installer, cross-platform, supply-chain and contribution-surface work remains
   deferred to a productisation cycle.
 - Portable/local configuration boundaries are owned by the standalone
-  [scope and invariants](../specs/agent-fabric/scope-and-invariants.md) and
-  [architecture assurance](../specs/agent-fabric/architecture-assurance.md)
+  scope and invariants and
+  architecture assurance
   specifications. The root workspace is implemented by the root `package.json`
   and `package-lock.json`, landed through [PR
   #7](https://github.com/mblauberg/provenant/pull/7). Earlier roadmap labels and

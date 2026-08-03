@@ -61,8 +61,6 @@ def test_model_route_reads_instance_catalogue_without_an_instance_environment_ov
             "scout",
             "--role",
             "worker",
-            "--adapter-gate",
-            "direct-cli",
         ],
         cwd=ROOT,
         env=_clean_split_environment(tmp_path, ROOT),
@@ -82,7 +80,8 @@ def test_installed_wrapper_does_not_promote_default_instance_root_to_explicit_en
     target = scripts / "provenant"
     target.write_text("#!/bin/sh\nprintf 'instance=%s\\n' \"${AGENT_FABRIC_INSTANCE_ROOT-<unset>}\"\n")
     target.chmod(0o755)
-    mcp_target = scripts / "agent-fabric-mcp"
+    mcp_target = product / "runtime" / "fabric" / "bin" / "fabric-mcp"
+    mcp_target.parent.mkdir(parents=True)
     mcp_target.write_text("#!/bin/sh\nexit 0\n")
     mcp_target.chmod(0o755)
     wrapper = tmp_path / "provenant"

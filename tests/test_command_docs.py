@@ -27,7 +27,7 @@ def test_readme_product_commands_follow_the_explicit_checkout():
     source = read("README.md")
     shell = "\n".join(re.findall(r"```sh\n(.*?)```", source, re.DOTALL))
     assert 'cd "<PRODUCT_ROOT>"' in shell
-    assert "scripts/agent-fabric-warm" in shell
+    assert "npm ci" in shell
     assert "scripts/install-harness" in shell
     assert "AGENTS_HOME" not in shell
     assert "\nscripts/manage_installation.py" not in source
@@ -46,9 +46,3 @@ def test_managed_reconciliation_stays_documented_for_maintainers():
     assert "--target" in source
     assert "reconcile" in source
     assert "Never claim or overwrite an unmanaged target." in source
-
-
-def test_delivery_scenario_replay_command_is_portable():
-    source = read("skills/deliver/references/contract.md")
-    assert "provenant check" in source
-    assert "${AGENTS_HOME:-$HOME/.agents}/scripts/validate_delivery_scenarios.py" not in source

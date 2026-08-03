@@ -11,12 +11,11 @@ routing, delegation, memory or pane decisions.
   including parallel work; one writer per worktree. An authorised merge prunes
   its own worktree and merged refs; other deletion, force-removal, rewrites and
   shared-branch pushes need user authority.
-- **Fabric trust:** before first use, explicitly trust only the exact canonical
-  repository root (or current non-Git directory) with
-  `provenant fabric workspace trust`; never trust a parent, wildcard, home or
-  sibling collection. If no seat exists, call `fabric_bootstrap`. On
-  `WORKSPACE_NOT_TRUSTED`, run its exact recovery command and retry
-  `fabric_bootstrap`; the same MCP connection exposes normal tools.
+- **Fabric:** messages, shared tasks and an activity log for agents in one
+  project, over MCP (`fabric_*`) or the `fabric` command. Identity is derived
+  from the working directory, so there is nothing to trust, bootstrap or
+  provision; run it from the project you mean. `AGENT_FABRIC_LABEL` gives
+  several agents of one provider separate inboxes.
 - **CLI:** use `provenant help` for discovery; route answer-bearing external
   work through the `orchestrate` skill and Fabric.
 - **Style:** terse for inter-agent, mechanical, and status traffic;

@@ -4,8 +4,8 @@
 # This script is a helper, not an authority. The caller still chooses an appropriate
 # different-family verifier, checks data policy, and records failures in the run manifest.
 # Pass --orchestrator-family when known so same-family verifier routes fail closed.
-# It is an explicit degraded fallback or adapter preflight; normal answer-bearing
-# external work uses Agent Fabric request/reply.
+# Record the dispatch and its result in Fabric so the chair and the other lanes
+# can see it; Fabric carries the coordination, this helper carries the call.
 set -uo pipefail
 
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
@@ -32,7 +32,7 @@ Options:
   --doctor                     Print local dispatch diagnostics and exit.
   -h, --help                   Show this help.
 
-Gemini/Agy execution belongs to Agent Fabric, not this direct-CLI helper.
+Record every dispatch and result in Fabric so the chair can follow the lane.
 EOF
 }
 
@@ -235,7 +235,7 @@ resolve_routing() {
   local model="$6" effort="$7" risk_tier="$8" capabilities_file="$9"
   local -a cmd route_args
 
-  route_args=(--adapter "$tool" --alias "$alias" --role "$role" --lead-family "$lead_family" --require-distinct --adapter-gate direct-cli)
+  route_args=(--adapter "$tool" --alias "$alias" --role "$role" --lead-family "$lead_family" --require-distinct)
   [ -n "$model" ] && route_args+=(--model "$model")
   [ -n "$effort" ] && route_args+=(--effort "$effort")
   [ -n "$risk_tier" ] && route_args+=(--risk-tier "$risk_tier")

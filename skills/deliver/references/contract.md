@@ -31,25 +31,25 @@ workstream and lead values set exactly to `not_applicable`. Partial objects,
 unknown fields or modes, invented parents, invalid identifiers and a mismatched
 delivery run fail closed. `lead_agent_id` identifies the bounded workstream
 lead, never a second chair; live Fabric membership and chair authority remain
-daemon-owned rather than being recreated in this receipt.
+coordination state rather than being recreated in this receipt.
 
 ## Authority V2
 
 The delivery receipt remains `delivery-run` schema version 1. Its nested
 `authority` is a closed schema-version-2 object covering approval evidence,
-workspace/source/artifact paths, allowed and denied Fabric operations, explicit
-denials, disclosure, secrets, deployment, irreversible actions, tool egress,
-expiry and budget. Every field is required; disabled union arms use an explicit
-empty companion list rather than an omitted value or default.
+workspace/source/artifact paths, denied paths, prohibited actions, disclosure,
+secrets, deployment, irreversible actions, tool egress, expiry and budget.
+Every field is required; disabled union arms use an explicit empty companion
+list rather than an omitted value or default.
 
 `authority.evidence_digest` must equal the digest of the artifact linked by the
 passing human `authority-approval` evidence row. The pure
-`scripts/authority_mapping.py` mapper converts that object mechanically to the
-protocol-owned `AuthorityEnvelopeV2`; it performs no I/O or provider call.
+`scripts/authority_mapping.py` mapper validates and normalises that object for
+containment checks; it performs no I/O or provider call.
 
-Each `delegations[]` item contains `actor` plus a complete V2 scope. Its Fabric
-envelope inherits the parent's exact approval binding and must narrow every
-authority dimension. Partial delegations and any widening fail closed.
+Each `delegations[]` item contains `actor` plus a complete V2 scope. Its
+normalised scope inherits the parent's exact approval binding and must narrow
+every authority dimension. Partial delegations and any widening fail closed.
 
 Non-Git artifact digests use `sha256:<64 lowercase hex>`. Local paths are
 relative to the explicit workspace root; validate with `--workspace-root` and

@@ -24,10 +24,8 @@ NON_OCCUPANT_MODELS = tuple(
 )
 
 
-def resolve(*args, adapter_gate="direct-cli"):
+def resolve(*args):
     arguments = [str(SCRIPT), "resolve", *args]
-    if "--adapter-gate" not in args:
-        arguments.extend(("--adapter-gate", adapter_gate))
     result = subprocess.run(
         arguments,
         text=True,
@@ -35,6 +33,38 @@ def resolve(*args, adapter_gate="direct-cli"):
         stderr=subprocess.PIPE,
     )
     return result, json.loads(result.stdout) if result.stdout else None
+
+
+@pytest.mark.parametrize(
+    "removed_args",
+    (
+        ("--adapter-gate", "direct-cli"),
+        ("--fabric-config", "unused.yaml"),
+    ),
+)
+def test_removed_fabric_activation_arguments_are_rejected(removed_args):
+    result = subprocess.run(
+        [
+            str(SCRIPT),
+            "resolve",
+            "--adapter",
+            "copilot",
+            "--model",
+            "gemini-3.1-pro",
+            "--alias",
+            "flagship",
+            "--role",
+            "worker",
+            *removed_args,
+        ],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert "unrecognized arguments" in result.stderr
 
 
 def capability_snapshot(models, source="codex debug models"):
@@ -779,7 +809,6 @@ def test_risk_tier_override_catalogue_retargets_single_model(
         "resolve", "--adapter", "claude", "--alias", override["alias"],
         "--role", override["roles"][0], "--risk-tier", "crucial",
         "--model", override["models"][0], "--effort", "high",
-        "--adapter-gate", "direct-cli",
     ])
 
     route = json.loads(capsys.readouterr().out)
@@ -805,7 +834,6 @@ def test_retargeted_override_occupant_requires_explicit_risk_tier(
     result = router.main([
         "resolve", "--adapter", "claude", "--alias", "flagship",
         "--role", "worker", "--model", "claude-newcomer",
-        "--adapter-gate", "direct-cli",
     ])
 
     route = json.loads(capsys.readouterr().out)
@@ -828,7 +856,6 @@ def test_retargeting_override_occupant_ungates_previous_occupant(
     result = router.main([
         "resolve", "--adapter", "claude", "--alias", "flagship",
         "--role", "worker", "--model", "fable",
-        "--adapter-gate", "direct-cli",
     ])
 
     route = json.loads(capsys.readouterr().out)
@@ -852,7 +879,6 @@ def test_retargeting_one_tier_keeps_occupant_gated_by_another_tier(
     result = router.main([
         "resolve", "--adapter", "claude", "--alias", "flagship",
         "--role", "worker", "--model", "fable",
-        "--adapter-gate", "direct-cli",
     ])
 
     route = json.loads(capsys.readouterr().out)
@@ -881,7 +907,6 @@ def test_foreign_family_risk_override_does_not_gate_explicit_model(
     result = router.main([
         "resolve", "--adapter", "claude", "--alias", "flagship",
         "--role", "worker", "--model", "claude-opus-4-6",
-        "--adapter-gate", "direct-cli",
     ])
 
     route = json.loads(capsys.readouterr().out)
@@ -905,7 +930,7 @@ def test_risk_tier_override_occupant_cannot_be_reached_by_alias(
 
     result = router.main([
         "resolve", "--adapter", "claude", "--alias", "flagship",
-        "--role", "worker", "--adapter-gate", "direct-cli",
+        "--role", "worker",
     ])
 
     route = json.loads(capsys.readouterr().out)
@@ -928,7 +953,7 @@ def test_risk_tier_override_occupant_cannot_match_versioned_alias_candidate(
 
     result = router.main([
         "resolve", "--adapter", "claude", "--alias", "flagship",
-        "--role", "worker", "--adapter-gate", "direct-cli",
+        "--role", "worker",
     ])
 
     route = json.loads(capsys.readouterr().out)
@@ -960,7 +985,6 @@ def test_risk_tier_override_occupant_cannot_partially_match_explicit_model(
     result = router.main([
         "resolve", "--adapter", "claude", "--alias", "flagship",
         "--role", "worker", "--model", explicit_model,
-        "--adapter-gate", "direct-cli",
     ])
 
     route = json.loads(capsys.readouterr().out)
@@ -982,7 +1006,7 @@ def test_risk_tier_override_occupant_cannot_be_reached_by_role_alias_override(
 
     result = router.main([
         "resolve", "--adapter", "claude", "--alias", "flagship",
-        "--role", "worker", "--adapter-gate", "direct-cli",
+        "--role", "worker",
     ])
 
     route = json.loads(capsys.readouterr().out)
@@ -1006,7 +1030,6 @@ def test_foreign_family_override_collision_does_not_reject_adapter_route(
     result = router.main([
         "resolve", "--adapter", "codex", "--alias", "workhorse",
         "--role", "worker", "--capabilities-file", str(snapshot),
-        "--adapter-gate", "direct-cli",
     ])
 
     route = json.loads(capsys.readouterr().out)
@@ -1029,7 +1052,6 @@ def test_missing_route_input_precedes_risk_tier_configuration_validation(
 
     result = router.main([
         "resolve", "--adapter", "claude", "--role", "worker",
-        "--adapter-gate", "direct-cli",
     ])
 
     route = json.loads(capsys.readouterr().out)
@@ -1130,7 +1152,7 @@ def test_capability_resolved_override_occupant_requires_explicit_risk_tier(
 
     result = router.main([
         "resolve", "--adapter", "claude", *route,
-        "--capabilities-file", str(snapshot_path), "--adapter-gate", "direct-cli",
+        "--capabilities-file", str(snapshot_path),
     ])
 
     receipt = json.loads(capsys.readouterr().out)
@@ -1164,7 +1186,7 @@ def test_capability_resolved_override_occupant_records_explicit_risk_tier(
     result = router.main([
         "resolve", "--adapter", "claude", "--alias", CRUCIAL_RISK_OVERRIDE["alias"],
         "--role", CRUCIAL_RISK_OVERRIDE["roles"][0], "--risk-tier", "crucial",
-        "--capabilities-file", str(snapshot_path), "--adapter-gate", "direct-cli",
+        "--capabilities-file", str(snapshot_path),
     ])
 
     receipt = json.loads(capsys.readouterr().out)
@@ -1290,7 +1312,6 @@ def test_risk_tier_override_configuration_is_closed_and_bounded(
     result = router.main([
         "resolve", "--adapter", "claude", "--alias", CRUCIAL_RISK_OVERRIDE["alias"],
         "--role", CRUCIAL_RISK_OVERRIDE["roles"][0], "--risk-tier", "crucial",
-        "--adapter-gate", "direct-cli",
     ])
 
     route = json.loads(capsys.readouterr().out)
@@ -1311,7 +1332,6 @@ def test_non_dict_risk_tier_override_is_rejected_as_malformed(tmp_path, monkeypa
     result = router.main([
         "resolve", "--adapter", "claude", "--alias", "flagship",
         "--role", "synthesis", "--risk-tier", "crucial",
-        "--adapter-gate", "direct-cli",
     ])
 
     route = json.loads(capsys.readouterr().out)
@@ -1331,7 +1351,6 @@ def test_absent_risk_tier_is_still_reported_unavailable(tmp_path, monkeypatch, c
     result = router.main([
         "resolve", "--adapter", "claude", "--alias", "flagship",
         "--role", "synthesis", "--risk-tier", "crucial",
-        "--adapter-gate", "direct-cli",
     ])
 
     route = json.loads(capsys.readouterr().out)
@@ -1365,7 +1384,6 @@ def test_malformed_override_models_never_unreserve_the_occupant(
     result = router.main([
         "resolve", "--adapter", "claude", "--alias", "flagship",
         "--role", "worker", "--model", "fable",
-        "--adapter-gate", "direct-cli",
     ])
 
     route = json.loads(capsys.readouterr().out)
@@ -1389,7 +1407,6 @@ def test_malformed_override_in_one_family_does_not_reject_another_family(
     result = router.main([
         "resolve", "--adapter", "codex", "--alias", "workhorse",
         "--role", "worker", "--capabilities-file", str(snapshot),
-        "--adapter-gate", "direct-cli",
     ])
 
     route = json.loads(capsys.readouterr().out)
@@ -1425,7 +1442,7 @@ def test_unusable_families_table_fails_closed(
 
     result = router.main([
         "resolve", "--adapter", adapter, "--model", "fable",
-        "--alias", "flagship", "--role", "worker", "--adapter-gate", "direct-cli",
+        "--alias", "flagship", "--role", "worker",
     ])
 
     route = json.loads(capsys.readouterr().out)
@@ -1446,7 +1463,7 @@ def test_adapter_pinned_to_an_undefined_family_requires_an_explicit_model(capsys
 
     result = router.main([
         "resolve", "--adapter", "opencode", "--alias", "flagship",
-        "--role", "worker", "--adapter-gate", "direct-cli",
+        "--role", "worker",
     ])
 
     route = json.loads(capsys.readouterr().out)
@@ -1488,7 +1505,7 @@ def test_unroutable_pinned_family_rejects_with_a_receipt(
 
     result = router.main([
         "resolve", "--adapter", "codex", "--alias", "flagship",
-        "--role", "worker", "--adapter-gate", "direct-cli",
+        "--role", "worker",
     ])
 
     route = json.loads(capsys.readouterr().out)
@@ -1524,7 +1541,7 @@ def test_empty_routed_family_validates_every_family_the_scan_consults(
 
     result = router.main([
         "resolve", "--adapter", "cursor", "--alias", "flagship", "--role", "worker",
-        "--model", "gpt-5.6-sol", "--adapter-gate", "direct-cli",
+        "--model", "gpt-5.6-sol",
     ])
 
     route = json.loads(capsys.readouterr().out)
@@ -1551,7 +1568,7 @@ def test_unusable_alias_table_rejects_on_an_explicit_model_route(
 
     result = router.main([
         "resolve", "--adapter", "codex", "--alias", "flagship", "--role", "worker",
-        "--model", "gpt-5.6-sol", "--adapter-gate", "direct-cli",
+        "--model", "gpt-5.6-sol",
     ])
 
     route = json.loads(capsys.readouterr().out)
@@ -1589,7 +1606,6 @@ def test_override_field_of_the_wrong_type_fails_closed(
     result = router.main([
         "resolve", "--adapter", "claude", "--alias", "flagship", "--role", "a",
         "--risk-tier", "crucial", "--model", "fable", "--available-model", "fable",
-        "--adapter-gate", "direct-cli",
     ])
 
     route = json.loads(capsys.readouterr().out)
@@ -2017,7 +2033,7 @@ def test_invalid_task_class_effort_vocabulary_fails_closed(tmp_path, monkeypatch
 
     result = router.main([
         "resolve", "--adapter", "claude", "--task-class", "critical-review",
-        "--role", "critical-review", "--adapter-gate", "direct-cli",
+        "--role", "critical-review",
     ])
 
     route = json.loads(capsys.readouterr().out)
@@ -2036,7 +2052,7 @@ def test_task_class_role_policy_cannot_be_reconfigured_to_worker(tmp_path, monke
 
     result = router.main([
         "resolve", "--adapter", "claude", "--task-class", "critical-review",
-        "--role", "worker", "--adapter-gate", "direct-cli",
+        "--role", "worker",
     ])
 
     route = json.loads(capsys.readouterr().out)
@@ -2060,7 +2076,7 @@ def test_critical_review_policy_rejects_valid_vocabulary_downgrade(
 
     result = router.main([
         "resolve", "--adapter", "claude", "--task-class", "critical-review",
-        "--role", "critical-review", "--adapter-gate", "direct-cli",
+        "--role", "critical-review",
     ])
 
     route = json.loads(capsys.readouterr().out)
@@ -2080,7 +2096,7 @@ def test_task_class_effort_must_equal_the_capability_probe_effort(
 
     result = router.main([
         "resolve", "--adapter", "claude", "--task-class", "critical-review",
-        "--role", "critical-review", "--adapter-gate", "direct-cli",
+        "--role", "critical-review",
     ])
 
     route = json.loads(capsys.readouterr().out)
@@ -2105,7 +2121,6 @@ def test_role_default_cannot_lower_task_class_effort(tmp_path, monkeypatch, caps
     result = router.main([
         "resolve", "--adapter", "codex", "--task-class", "orchestration",
         "--role", "orchestrator", "--capabilities-file", str(snapshot),
-        "--adapter-gate", "direct-cli",
     ])
 
     route = json.loads(capsys.readouterr().out)
@@ -2122,7 +2137,6 @@ def test_openai_route_without_runtime_snapshot_fails_closed(
 
     result = router.main([
         "resolve", "--adapter", "codex", "--alias", "flagship", "--role", "lead",
-        "--adapter-gate", "direct-cli",
     ])
 
     route = json.loads(capsys.readouterr().out)
@@ -2144,7 +2158,7 @@ def test_stale_openai_capability_snapshot_fails_closed(
 
     result = router.main([
         "resolve", "--adapter", "codex", "--alias", "flagship", "--role", "lead",
-        "--capabilities-file", str(snapshot), "--adapter-gate", "direct-cli",
+        "--capabilities-file", str(snapshot),
     ])
 
     route = json.loads(capsys.readouterr().out)
@@ -2187,7 +2201,7 @@ def test_fresh_openai_snapshot_accepts_ultra_role_default(
 
     result = router.main([
         "resolve", "--adapter", "codex", "--alias", "flagship", "--role", "lead",
-        "--capabilities-file", str(snapshot), "--adapter-gate", "direct-cli",
+        "--capabilities-file", str(snapshot),
     ])
 
     route = json.loads(capsys.readouterr().out)
@@ -2221,7 +2235,7 @@ def test_noneligible_ultra_fallback_reports_runtime_capability_source(
 
     result = router.main([
         "resolve", "--adapter", "codex", "--alias", "flagship", "--role", "worker",
-        "--capabilities-file", str(snapshot), "--adapter-gate", "direct-cli",
+        "--capabilities-file", str(snapshot),
     ])
 
     route = json.loads(capsys.readouterr().out)
@@ -2244,7 +2258,7 @@ def test_ultra_eligible_roles_must_be_a_list_of_role_names(
 
     result = router.main([
         "resolve", "--adapter", "codex", "--alias", "flagship", "--role", "lead",
-        "--capabilities-file", str(snapshot), "--adapter-gate", "direct-cli",
+        "--capabilities-file", str(snapshot),
     ])
 
     route = json.loads(capsys.readouterr().out)
@@ -2347,7 +2361,6 @@ def test_capability_snapshot_controls_default_fallback(
     result = router.main([
         "resolve", "--adapter", "codex", "--alias", "flagship", "--role", "lead",
         "--capabilities-file", str(snapshot),
-        "--adapter-gate", "direct-cli",
     ])
     route = json.loads(capsys.readouterr().out)
     assert result == 0
@@ -2425,7 +2438,6 @@ def test_fresh_openai_snapshot_missing_catalog_model_fails_closed(
     result = router.main([
         "resolve", "--adapter", "codex", "--alias", "flagship", "--role", "lead",
         "--capabilities-file", str(snapshot),
-        "--adapter-gate", "direct-cli",
     ])
     route = json.loads(capsys.readouterr().out)
     assert result == 1
@@ -2566,7 +2578,6 @@ def test_model_id_effort_uses_last_token_and_explicit_unresolved_fails():
     result, route = resolve(
         "--adapter", "cursor", "--model", "cursor-grok-4.5-low", "--alias", "flagship",
         "--role", "reviewer", "--lead-family", "anthropic", "--require-distinct",
-        "--adapter-gate", "direct-cli",
     )
     assert result.returncode == 0
     assert route["status"] == "ok"
@@ -2574,7 +2585,6 @@ def test_model_id_effort_uses_last_token_and_explicit_unresolved_fails():
     result, route = resolve(
         "--adapter", "agy", "--model", "Gemini 3.1 Pro (High)", "--alias", "flagship",
         "--role", "reviewer", "--effort", "high", "--lead-family", "openai", "--require-distinct",
-        "--adapter-gate", "direct-cli",
     )
     assert result.returncode == 0
     assert route["status"] == "ok"
@@ -2583,7 +2593,6 @@ def test_model_id_effort_uses_last_token_and_explicit_unresolved_fails():
     result, route = resolve(
         "--adapter", "cursor", "--model", "composer-2-extra-high", "--alias", "flagship",
         "--role", "reviewer", "--lead-family", "anthropic", "--require-distinct",
-        "--adapter-gate", "direct-cli",
     )
     assert result.returncode == 0
     assert route["status"] == "ok"
@@ -2601,8 +2610,6 @@ def test_distinct_requirement_fails_closed_for_same_family():
         "--lead-family",
         "openai",
         "--require-distinct",
-        "--adapter-gate",
-        "direct-cli",
     )
     assert result.returncode == 1
     assert route["status"] == "same_family_forbidden"
@@ -2621,8 +2628,6 @@ def test_broker_route_records_endpoint_separately_from_model_family():
         "--lead-family",
         "openai",
         "--require-distinct",
-        "--adapter-gate",
-        "direct-cli",
     )
     assert result.returncode == 0
     assert route["status"] == "ok"
@@ -2645,8 +2650,6 @@ def test_cursor_composer_route_uses_cursor_model_family():
         "--lead-family",
         "openai",
         "--require-distinct",
-        "--adapter-gate",
-        "direct-cli",
     )
     assert result.returncode == 0
     assert route["status"] == "ok"
@@ -2659,7 +2662,6 @@ def test_cursor_composer_route_uses_cursor_model_family():
 def test_agy_accepts_only_explicit_gemini_routing():
     allowed, allowed_route = resolve(
         "--adapter", "agy", "--model", "gemini-3.1-pro", "--alias", "flagship", "--role", "worker",
-        "--adapter-gate", "direct-cli",
     )
     forbidden, forbidden_route = resolve(
         "--adapter", "agy", "--model", "grok-4", "--alias", "flagship", "--role", "worker"
@@ -2676,19 +2678,19 @@ def test_agy_accepts_only_explicit_gemini_routing():
 def test_opencode_accepts_only_explicit_account_catalogue_models():
     allowed, route = resolve(
         "--adapter", "opencode", "--model", "opencode/deepseek-v4-flash-free",
-        "--alias", "scout", "--role", "worker", "--adapter-gate", "fabric",
+        "--alias", "scout", "--role", "worker",
         "--effort", "high",
     )
     assert allowed.returncode == 0
     assert route["status"] == "ok"
     assert route["model_family"] == "generic-open"
     assert route["compatibility_adapter"] == "opencode-acp"
-    assert route["adapter_active"] is True
+    assert route["adapter_enabled"] is True
     assert route["effort"] == "high"
 
     forbidden, forbidden_route = resolve(
         "--adapter", "opencode", "--model", "anthropic/claude-opus",
-        "--alias", "scout", "--role", "worker", "--adapter-gate", "fabric",
+        "--alias", "scout", "--role", "worker",
     )
     assert forbidden.returncode == 1
     assert forbidden_route["status"] in {"adapter_family_mismatch", "adapter_model_forbidden"}
@@ -2737,8 +2739,6 @@ def test_split_root_defaults_use_instance_routing_and_product_compatibility(tmp_
             "scout",
             "--role",
             "worker",
-            "--adapter-gate",
-            "direct-cli",
         ],
         env=env,
         text=True,
@@ -2762,7 +2762,6 @@ def test_cursor_accepts_preferred_and_supported_fallback_families_without_model_
     ):
         allowed, allowed_route = resolve(
             "--adapter", "cursor", "--model", model, "--alias", "flagship", "--role", "worker",
-            "--adapter-gate", "direct-cli",
         )
         assert allowed.returncode == 0
         assert allowed_route["status"] == "ok"
@@ -2785,7 +2784,6 @@ def test_kiro_accepts_only_open_weight_models():
     for model, family in allowed_models:
         allowed, allowed_route = resolve(
             "--adapter", "kiro", "--model", model, "--alias", "scout", "--role", "worker",
-            "--adapter-gate", "direct-cli",
         )
         assert allowed.returncode == 0
         assert allowed_route["status"] == "ok"
@@ -2826,14 +2824,13 @@ def test_same_family_rejection_precedes_adapter_family_rejection():
         ("cursor", "cursor-grok-4.5-high", "xai", "high"),
     ],
 )
-def test_activated_optional_reviewers_route_through_fabric_with_exact_identity(
+def test_optional_reviewers_route_directly_with_exact_identity(
     adapter, model, family, effort
 ):
     result, route = resolve(
         "--adapter", adapter, "--model", model, "--alias", "flagship",
         "--role", "reviewer", "--effort", effort,
         "--lead-family", "openai", "--require-distinct",
-        adapter_gate="fabric",
     )
 
     assert result.returncode == 0
@@ -2842,71 +2839,31 @@ def test_activated_optional_reviewers_route_through_fabric_with_exact_identity(
     assert route["model_family"] == family
     assert route["effort"] == effort
     assert route["adapter_enabled"] is True
-    assert route["adapter_active"] is True
 
 
-def test_primary_adapters_honour_fabric_activation_gate(tmp_path):
+def test_primary_adapters_route_directly_with_compatibility_metadata(tmp_path):
     snapshot = write_codex_capability_snapshot(tmp_path)
     for adapter in ("claude", "codex"):
         capability_args = (
             ("--capabilities-file", str(snapshot)) if adapter == "codex" else ()
         )
-        fabric, fabric_route = resolve(
+        result, route = resolve(
             "--adapter", adapter, "--alias", "flagship", "--role", "lead",
             *capability_args,
-            adapter_gate="fabric",
-        )
-        direct, direct_route = resolve(
-            "--adapter", adapter, "--alias", "flagship", "--role", "lead",
-            *capability_args,
-            "--adapter-gate", "direct-cli",
         )
 
-        assert fabric.returncode == 0
-        assert fabric_route["status"] == "ok"
-        assert fabric_route["adapter_enabled"] is True
-        assert direct.returncode == 0
-        assert direct_route["status"] == "ok"
+        assert result.returncode == 0
+        assert route["status"] == "ok"
+        assert route["adapter_enabled"] is True
 
 
-def test_fabric_gate_rejects_catalogue_adapter_without_compatibility_contract():
+def test_catalogue_adapter_without_compatibility_contract_routes_directly():
     arguments = (
         "--adapter", "copilot", "--model", "gemini-3.1-pro",
         "--alias", "flagship", "--role", "worker",
     )
 
-    fabric, fabric_route = resolve(*arguments, adapter_gate="fabric")
-    direct, direct_route = resolve(*arguments)
+    result, route = resolve(*arguments)
 
-    assert fabric.returncode == 2
-    assert fabric_route["status"] == "adapter_compatibility_unknown"
-    assert direct.returncode == 0
-    assert direct_route["status"] == "ok"
-
-
-def test_fabric_gate_rejects_inactive_adapter_before_dispatch(tmp_path):
-    fabric_config = tmp_path / "agent-fabric.yaml"
-    fabric_config.write_text("schemaVersion: 1\nactiveAdapters: []\n")
-
-    result, route = resolve(
-        "--adapter", "agy", "--model", "gemini-3.1-pro", "--alias", "flagship",
-        "--role", "reviewer", "--lead-family", "openai", "--require-distinct",
-        "--fabric-config", str(fabric_config), adapter_gate="fabric",
-    )
-
-    assert result.returncode == 1
-    assert route["status"] == "adapter_inactive"
-    assert route["adapter_enabled"] is True
-
-
-def test_fabric_gate_fails_closed_for_invalid_activation_config(tmp_path):
-    fabric_config = tmp_path / "agent-fabric.yaml"
-    fabric_config.write_text("schemaVersion: 1\nactiveAdapters: agy\n")
-
-    result, route = resolve(
-        "--adapter", "agy", "--model", "gemini-3.1-pro", "--alias", "flagship",
-        "--role", "worker", "--fabric-config", str(fabric_config), adapter_gate="fabric",
-    )
-
-    assert result.returncode == 2
-    assert route["status"] == "fabric_activation_invalid"
+    assert result.returncode == 0
+    assert route["status"] == "ok"

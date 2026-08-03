@@ -9,10 +9,10 @@ Status fields own all live work state.
 ## Route
 
 - [Programme issue #23](https://github.com/mblauberg/provenant/issues/23)
-- [Authority specification](../specs/agent-fabric/authority.md)
-- [Workspace-containment specification](../specs/agent-fabric/workspace-containment.md)
-- [Provider-actions specification](../specs/agent-fabric/provider-actions-and-adapters.md)
-- [Provider-write specification](../specs/agent-fabric/provider-write-containment.md)
+- Authority specification
+- Workspace-containment specification
+- Provider-actions specification
+- Provider-write specification
 - [Lifecycle-authority issue #118](https://github.com/mblauberg/provenant/issues/118)
 - [Authority-envelope issue #123](https://github.com/mblauberg/provenant/issues/123)
 - [Provider-write issue #129](https://github.com/mblauberg/provenant/issues/129)

@@ -28,6 +28,7 @@ def make_run(tmp_path):
     assert spec.loader
     spec.loader.exec_module(reference)
     receipt = reference.make_reference_run("research", ROOT)
+    assert not any(key.startswith("cost:") for key in receipt["authority"]["budget"])
     receipt["run_id"] = "CLEAN-1"
     receipt["fabric_relationships"]["delivery_run_id"] = "CLEAN-1"
     receipt["authority"]["allowed_artifact_paths"] = ["run"]

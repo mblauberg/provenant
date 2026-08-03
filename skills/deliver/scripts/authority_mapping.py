@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Pure Delivery Authority V2 to Fabric AuthorityEnvelopeV2 mapping."""
+"""Validate and normalise Delivery Authority V2 scopes."""
 
 from __future__ import annotations
 
 from datetime import datetime
 from pathlib import PurePosixPath
 import re
-from typing import Any, Collection, Pattern
+from typing import Any
 
 
 class AuthorityMappingError(ValueError):
@@ -41,9 +41,7 @@ _SCOPE_FIELDS = {
     "workspace_roots",
     "allowed_source_paths",
     "allowed_artifact_paths",
-    "allowed_fabric_operations",
     "denied_paths",
-    "denied_fabric_operations",
     "prohibited_actions",
     "disclosure",
     "secrets_access",
@@ -120,13 +118,6 @@ def _strings(
     return sorted(parsed)
 
 
-def _operations(value: Any, field: str, valid_operations: Collection[str]) -> list[str]:
-    allowed = set(valid_operations)
-    operations = _strings(value, field, _token)
-    _fail(any(operation not in allowed for operation in operations), f"{field} contains an unknown Fabric operation")
-    return operations
-
-
 def _timestamp_value(value: str) -> datetime:
     return datetime.fromisoformat(value[:-1] + "+00:00" if value.endswith("Z") else value)
 
@@ -157,7 +148,7 @@ def _timestamp(value: Any, field: str) -> str:
     return value
 
 
-def _budget(value: Any, field: str, valid_cost_pattern: Pattern[str]) -> dict[str, int]:
+def _budget(value: Any, field: str) -> dict[str, int]:
     budget = _object(value, field)
     _fail(len(budget) > _MAX_BUDGET_UNITS, f"{field} must contain at most {_MAX_BUDGET_UNITS} units")
     result: dict[str, int] = {}
@@ -167,7 +158,6 @@ def _budget(value: Any, field: str, valid_cost_pattern: Pattern[str]) -> dict[st
             or (
                 key not in _GENERIC_BUDGET_UNITS
                 and not _PROVIDER_TOKEN_BUDGET.fullmatch(key)
-                and not valid_cost_pattern.fullmatch(key)
             ),
             f"{field} contains an invalid budget unit",
         )
@@ -194,8 +184,6 @@ def _map_scope(
     scope: dict[str, Any],
     approval: dict[str, str],
     *,
-    valid_operations: Collection[str],
-    valid_cost_pattern: Pattern[str],
     field: str,
 ) -> dict[str, Any]:
     _fail(scope.get("schema_version") != 2, f"{field}.schema_version must be 2")
@@ -213,9 +201,7 @@ def _map_scope(
         not _allowed_paths_contained(artifact_paths, workspace_roots),
         f"{field}.allowed_artifact_paths must be contained by {field}.workspace_roots",
     )
-    actions = _operations(scope.get("allowed_fabric_operations"), f"{field}.allowed_fabric_operations", valid_operations)
     denied_paths = _strings(scope.get("denied_paths"), f"{field}.denied_paths", _path)
-    denied_actions = _operations(scope.get("denied_fabric_operations"), f"{field}.denied_fabric_operations", valid_operations)
     prohibited_actions = _strings(scope.get("prohibited_actions"), f"{field}.prohibited_actions", _token)
 
     secret_refs = _strings(scope.get("secret_refs"), f"{field}.secret_refs", _token)
@@ -258,9 +244,7 @@ def _map_scope(
         "workspaceRoots": workspace_roots,
         "sourcePaths": source_paths,
         "artifactPaths": artifact_paths,
-        "actions": actions,
         "deniedPaths": denied_paths,
-        "deniedActions": denied_actions,
         "prohibitedActions": prohibited_actions,
         "disclosure": _disclosure(scope.get("disclosure")),
         "secrets": secrets,
@@ -268,7 +252,7 @@ def _map_scope(
         "irreversibleActions": irreversible_policy,
         "network": network_policy,
         "expiresAt": _timestamp(scope.get("expires_at"), f"{field}.expires_at"),
-        "budget": _budget(scope.get("budget"), f"{field}.budget", valid_cost_pattern),
+        "budget": _budget(scope.get("budget"), f"{field}.budget"),
     }
 
 
@@ -279,11 +263,8 @@ def _host(value: Any, field: str) -> str:
 
 def map_delivery_authority(
     authority: Any,
-    *,
-    valid_operations: Collection[str],
-    valid_cost_pattern: Pattern[str],
 ) -> dict[str, Any]:
-    """Map one closed Delivery Authority V2 object to a Fabric envelope."""
+    """Normalise one closed Delivery Authority V2 object."""
 
     authority = _object(authority, "authority")
     _closed(authority, _AUTHORITY_FIELDS, "authority")
@@ -301,26 +282,17 @@ def map_delivery_authority(
     return _map_scope(
         authority,
         approval,
-        valid_operations=valid_operations,
-        valid_cost_pattern=valid_cost_pattern,
         field="authority",
     )
 
 
 def map_delivery_delegations(
     authority: Any,
-    *,
-    valid_operations: Collection[str],
-    valid_cost_pattern: Pattern[str],
 ) -> list[dict[str, Any]]:
     """Map complete Delivery delegation scopes and reject every widening."""
 
     authority = _object(authority, "authority")
-    parent = map_delivery_authority(
-        authority,
-        valid_operations=valid_operations,
-        valid_cost_pattern=valid_cost_pattern,
-    )
+    parent = map_delivery_authority(authority)
     mapped: list[dict[str, Any]] = []
     for index, raw in enumerate(authority["delegations"]):
         field = f"authority.delegations[{index}]"
@@ -330,8 +302,6 @@ def map_delivery_delegations(
         child = _map_scope(
             delegation,
             parent["approval"],
-            valid_operations=valid_operations,
-            valid_cost_pattern=valid_cost_pattern,
             field=field,
         )
         _fail(not authority_contained(child, parent), f"delegation {index} broadens parent authority")
@@ -384,9 +354,7 @@ def authority_contained(child: dict[str, Any], parent: dict[str, Any]) -> bool:
         and _allowed_paths_contained(child["workspaceRoots"], parent["workspaceRoots"])
         and _allowed_paths_contained(child["sourcePaths"], parent["sourcePaths"])
         and _allowed_paths_contained(child["artifactPaths"], parent["artifactPaths"])
-        and set(child["actions"]) <= set(parent["actions"])
         and _denied_paths_preserved(child["deniedPaths"], parent["deniedPaths"])
-        and set(child["deniedActions"]) >= set(parent["deniedActions"])
         and set(child["prohibitedActions"]) >= set(parent["prohibitedActions"])
         and disclosure_ok
         and secrets_ok

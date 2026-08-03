@@ -55,10 +55,10 @@ for the subjects cited here are:
 
 | Subject | Current owner |
 |---|---|
-| Lifecycle, custody and recovery | [Lifecycle and gates](../../specs/agent-fabric/lifecycle-and-gates.md) and [recovery](../../specs/agent-fabric/recovery.md) |
-| Persistence | [Persistence](../../specs/agent-fabric/persistence.md) |
-| Route and review evidence | [Evidence and review](../../specs/agent-fabric/evidence-and-review.md) and [review custody](../../specs/agent-fabric/review-custody.md) |
-| Provider actions, activation and wire | [Provider actions and adapters](../../specs/agent-fabric/provider-actions-and-adapters.md), [activation](../../specs/agent-fabric/activation.md) and [daemon and wire](../../specs/agent-fabric/daemon-and-wire.md) |
+| Lifecycle, custody and recovery | Lifecycle and gates and recovery |
+| Persistence | Persistence |
+| Route and review evidence | Evidence and review and review custody |
+| Provider actions, activation and wire | Provider actions and adapters, activation and daemon and wire |
 | Harness lifecycle and skill routing | [Harness lifecycle](../../specs/harness/lifecycle.md) |
 
 Later numeric labels 01–05 and their section numbers are provenance keys, not

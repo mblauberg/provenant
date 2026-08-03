@@ -2,13 +2,13 @@
 
 Use this reference only for the durable mission-state seam around an
 independently routed review. `orchestrate` owns provider routing, topology,
-the HARNESS risk ladder, reviewer selection, Agent Fabric transport,
+the HARNESS risk ladder, reviewer selection, coordination,
 degradation and result contracts. Do not copy those policies here.
 
-All answer-bearing cross-family work goes through Agent Fabric under an
-`orchestrate` wave. Direct CLIs are preflight or an explicitly recorded
-degraded fallback. This mission adds persistence and recovery; it never
-invents a second routing policy.
+All answer-bearing cross-family work runs under an `orchestrate` wave and is
+recorded in Fabric so the mission state is visible across providers. This
+mission adds persistence and recovery; it never invents a second routing
+policy.
 
 ## Before dispatch
 

@@ -19,7 +19,6 @@ RUN_TEMPLATE_PATH = ROOT / "skills" / "deliver" / "templates" / "RUN.template.js
 AUTHORITY_MAPPER_PATH = ROOT / "skills" / "deliver" / "scripts" / "authority_mapping.py"
 POLICY_VALIDATOR_PATH = ROOT / "skills" / "deliver" / "scripts" / "delivery_policy_validation.py"
 AUTHORITY_FIXTURE_ROOT = ROOT / "tests" / "fixtures" / "authority-envelope-v2"
-COST_PATTERN = re.compile(r"^cost:(?:AUD|USD)$")
 
 
 def load_validator():
@@ -47,6 +46,30 @@ def load(path: Path, name: str):
     assert spec.loader
     spec.loader.exec_module(module)
     return module
+
+
+def delivery_authority_fixture():
+    authority = json.loads((AUTHORITY_FIXTURE_ROOT / "delivery-authority.json").read_text())
+    fields = (
+        "schema_version", "approved_by", "evidence", "evidence_digest",
+        "workspace_roots", "allowed_source_paths", "allowed_artifact_paths",
+        "denied_paths", "prohibited_actions", "disclosure", "secrets_access",
+        "secret_refs", "deployment", "deployment_targets",
+        "irreversible_actions", "irreversible_action_ids", "network",
+        "expires_at", "budget", "delegations",
+    )
+    return {field: authority[field] for field in fields}
+
+
+def mapped_authority_fixture():
+    authority = json.loads((AUTHORITY_FIXTURE_ROOT / "fabric-authority.json").read_text())
+    fields = (
+        "schemaVersion", "approval", "workspaceRoots", "sourcePaths",
+        "artifactPaths", "deniedPaths", "prohibitedActions", "disclosure",
+        "secrets", "deployment", "irreversibleActions", "network",
+        "expiresAt", "budget",
+    )
+    return {field: authority[field] for field in fields}
 
 
 def terminalise_reference_evaluation(run, status="failed"):
@@ -127,14 +150,10 @@ def at_risk_tier(candidate, risk_tier):
 
 def test_delivery_authority_v2_maps_to_the_cross_language_golden():
     module = load(AUTHORITY_MAPPER_PATH, "authority_mapping")
-    delivery = json.loads((AUTHORITY_FIXTURE_ROOT / "delivery-authority.json").read_text())
-    expected = json.loads((AUTHORITY_FIXTURE_ROOT / "fabric-authority.json").read_text())
+    delivery = delivery_authority_fixture()
+    expected = mapped_authority_fixture()
 
-    actual = module.map_delivery_authority(
-        delivery,
-        valid_operations={*delivery["allowed_fabric_operations"], *delivery["denied_fabric_operations"]},
-        valid_cost_pattern=COST_PATTERN,
-    )
+    actual = module.map_delivery_authority(delivery)
     def canonical(value):
         return json.dumps(value, sort_keys=True, separators=(",", ":"))
     assert canonical(actual) == canonical(expected)
@@ -142,86 +161,44 @@ def test_delivery_authority_v2_maps_to_the_cross_language_golden():
 
 def test_delivery_authority_timestamp_validation_matches_protocol_vectors():
     module = load(AUTHORITY_MAPPER_PATH, "authority_mapping_timestamp_vectors")
-    delivery = json.loads((AUTHORITY_FIXTURE_ROOT / "delivery-authority.json").read_text())
+    delivery = delivery_authority_fixture()
     vectors = json.loads((AUTHORITY_FIXTURE_ROOT / "timestamp-vectors.json").read_text())
-    valid_operations = {*delivery["allowed_fabric_operations"], *delivery["denied_fabric_operations"]}
 
     for timestamp in vectors["accepted"]:
         delivery["expires_at"] = timestamp
-        mapped = module.map_delivery_authority(
-            delivery,
-            valid_operations=valid_operations,
-            valid_cost_pattern=COST_PATTERN,
-        )
+        mapped = module.map_delivery_authority(delivery)
         assert mapped["expiresAt"] == timestamp
 
     for timestamp in vectors["rejected"]:
         delivery["expires_at"] = timestamp
         with pytest.raises(module.AuthorityMappingError, match="strict RFC3339 timestamp"):
-            module.map_delivery_authority(
-                delivery,
-                valid_operations=valid_operations,
-                valid_cost_pattern=COST_PATTERN,
-            )
+            module.map_delivery_authority(delivery)
 
-    authority = json.loads((AUTHORITY_FIXTURE_ROOT / "fabric-authority.json").read_text())
+    authority = mapped_authority_fixture()
     for vector in vectors["ordering"]:
         child = {**authority, "expiresAt": vector["child"]}
         parent = {**authority, "expiresAt": vector["parent"]}
         assert module.authority_contained(child, parent) is vector["contained"]
 
 
-def test_delivery_authority_v2_is_closed_and_rejects_unknown_operations():
+def test_delivery_authority_v2_is_closed_and_rejects_invalid_budget_units():
     module = load(AUTHORITY_MAPPER_PATH, "authority_mapping_closed")
-    delivery = json.loads((AUTHORITY_FIXTURE_ROOT / "delivery-authority.json").read_text())
-    valid_operations = {*delivery["allowed_fabric_operations"], *delivery["denied_fabric_operations"]}
+    delivery = delivery_authority_fixture()
 
     missing = copy.deepcopy(delivery)
     del missing["network"]
     with pytest.raises(module.AuthorityMappingError, match="missing=.*network"):
-        module.map_delivery_authority(missing, valid_operations=valid_operations, valid_cost_pattern=COST_PATTERN)
+        module.map_delivery_authority(missing)
 
     unknown = copy.deepcopy(delivery)
     unknown["implicit_default"] = True
     with pytest.raises(module.AuthorityMappingError, match="unknown=.*implicit_default"):
-        module.map_delivery_authority(unknown, valid_operations=valid_operations, valid_cost_pattern=COST_PATTERN)
-
-    unknown_operation = copy.deepcopy(delivery)
-    unknown_operation["allowed_fabric_operations"] = ["fabric.v1.not-real"]
-    with pytest.raises(module.AuthorityMappingError, match="unknown Fabric operation"):
-        module.map_delivery_authority(
-            unknown_operation,
-            valid_operations=valid_operations,
-            valid_cost_pattern=COST_PATTERN,
-        )
+        module.map_delivery_authority(unknown)
 
     unknown_currency = copy.deepcopy(delivery)
     unknown_currency["budget"] = {"cost:ZZZ": 1}
     with pytest.raises(module.AuthorityMappingError, match="invalid budget unit"):
-        module.map_delivery_authority(
-            unknown_currency,
-            valid_operations=valid_operations,
-            valid_cost_pattern=COST_PATTERN,
-        )
-
-
-@pytest.mark.parametrize(
-    ("operation_class", "operation"),
-    [
-        ("operator-only", "fabric.v1.operator-action.preview"),
-        ("integration-only", "fabric.v1.integration.input-attest"),
-        ("provider-launch-only", "fabric.v1.launch.attest"),
-    ],
-)
-def test_delivery_authority_rejects_non_grantable_operation_classes(
-    operation_class, operation,
-):
-    module = load_validator()
-    candidate = fixture()
-    candidate["authority"]["allowed_fabric_operations"] = [operation]
-
-    with pytest.raises(module.Invalid, match="unknown Fabric operation"):
-        module.validate(candidate, ROOT)
+        module.map_delivery_authority(unknown_currency)
 
 
 @pytest.mark.parametrize(
@@ -237,32 +214,21 @@ def test_delivery_authority_rejects_non_grantable_operation_classes(
 )
 def test_delivery_authority_budget_matches_canonical_bounds(budget):
     module = load(AUTHORITY_MAPPER_PATH, "authority_mapping_budget_bounds")
-    delivery = json.loads((AUTHORITY_FIXTURE_ROOT / "delivery-authority.json").read_text())
+    delivery = delivery_authority_fixture()
     delivery["budget"] = budget
-    valid_operations = {*delivery["allowed_fabric_operations"], *delivery["denied_fabric_operations"]}
 
     with pytest.raises(module.AuthorityMappingError, match="budget"):
-        module.map_delivery_authority(
-            delivery,
-            valid_operations=valid_operations,
-            valid_cost_pattern=COST_PATTERN,
-        )
+        module.map_delivery_authority(delivery)
 
 
 def test_delivery_authority_budget_accepts_canonical_128_key_boundary():
     module = load(AUTHORITY_MAPPER_PATH, "authority_mapping_budget_boundary")
-    delivery = json.loads((AUTHORITY_FIXTURE_ROOT / "delivery-authority.json").read_text())
+    delivery = delivery_authority_fixture()
     delivery["budget"] = {
         **{f"input_tokens:provider-{index}": 1 for index in range(122)},
         **{unit: 1 for unit in ("turns", "provider_calls", "concurrent_turns", "descendants", "message_bytes", "artifact_bytes")},
     }
-    valid_operations = {*delivery["allowed_fabric_operations"], *delivery["denied_fabric_operations"]}
-
-    mapped = module.map_delivery_authority(
-        delivery,
-        valid_operations=valid_operations,
-        valid_cost_pattern=COST_PATTERN,
-    )
+    mapped = module.map_delivery_authority(delivery)
     assert len(mapped["budget"]) == 128
 
 
@@ -295,31 +261,23 @@ def test_delivery_authority_budget_accepts_canonical_128_key_boundary():
 )
 def test_delivery_authority_mapper_rejects_the_canonical_codec_negative_boundaries(mutate, message):
     module = load(AUTHORITY_MAPPER_PATH, f"authority_mapping_parity_{message}")
-    delivery = json.loads((AUTHORITY_FIXTURE_ROOT / "delivery-authority.json").read_text())
+    delivery = delivery_authority_fixture()
     mutate(delivery)
-    valid_operations = {*delivery["allowed_fabric_operations"], *delivery["denied_fabric_operations"]}
 
     with pytest.raises(module.AuthorityMappingError, match=message):
-        module.map_delivery_authority(
-            delivery,
-            valid_operations=valid_operations,
-            valid_cost_pattern=COST_PATTERN,
-        )
+        module.map_delivery_authority(delivery)
 
 
 def test_complete_delivery_delegation_inherits_approval_and_must_narrow_every_dimension():
     module = load(AUTHORITY_MAPPER_PATH, "authority_mapping_delegation")
-    delivery = json.loads((AUTHORITY_FIXTURE_ROOT / "delivery-authority.json").read_text())
-    valid_operations = {*delivery["allowed_fabric_operations"], *delivery["denied_fabric_operations"]}
+    delivery = delivery_authority_fixture()
     delegation = {
         "actor": "worker-1",
         "schema_version": 2,
         "workspace_roots": ["."],
         "allowed_source_paths": ["input"],
         "allowed_artifact_paths": ["output/worker-1"],
-        "allowed_fabric_operations": ["fabric.v1.task.read"],
         "denied_paths": [".git"],
-        "denied_fabric_operations": ["fabric.v1.write-lease.acquire"],
         "prohibited_actions": ["deployment", "external-release"],
         "disclosure": "local-only",
         "secrets_access": "none",
@@ -334,16 +292,8 @@ def test_complete_delivery_delegation_inherits_approval_and_must_narrow_every_di
     }
     delivery["delegations"] = [delegation]
 
-    mapped = module.map_delivery_delegations(
-        delivery,
-        valid_operations=valid_operations,
-        valid_cost_pattern=COST_PATTERN,
-    )
-    parent = module.map_delivery_authority(
-        delivery,
-        valid_operations=valid_operations,
-        valid_cost_pattern=COST_PATTERN,
-    )
+    mapped = module.map_delivery_delegations(delivery)
+    parent = module.map_delivery_authority(delivery)
     assert len(mapped) == 1
     assert mapped[0]["actor"] == "worker-1"
     assert mapped[0]["authority"]["artifactPaths"] == ["output/worker-1"]
@@ -355,38 +305,24 @@ def test_complete_delivery_delegation_inherits_approval_and_must_narrow_every_di
         "allowed_hosts": ["api.example.test", "outside.example.test"],
     }
     with pytest.raises(module.AuthorityMappingError, match="broadens parent authority"):
-        module.map_delivery_delegations(
-            widened,
-            valid_operations=valid_operations,
-            valid_cost_pattern=COST_PATTERN,
-        )
+        module.map_delivery_delegations(widened)
 
     widened_budget = copy.deepcopy(delivery)
-    widened_budget["delegations"][0]["budget"] = {"cost:AUD": 1}
+    widened_budget["delegations"][0]["budget"] = {"wall_clock_milliseconds": 1}
     with pytest.raises(module.AuthorityMappingError, match="broadens parent authority"):
-        module.map_delivery_delegations(
-            widened_budget,
-            valid_operations=valid_operations,
-            valid_cost_pattern=COST_PATTERN,
-        )
+        module.map_delivery_delegations(widened_budget)
 
 
-def test_review_delegation_separates_source_read_artifacts_and_correlated_fabric_reply():
+def test_review_delegation_separates_source_reads_and_artifacts():
     module = load(AUTHORITY_MAPPER_PATH, "authority_mapping_review_delegation")
-    delivery = json.loads((AUTHORITY_FIXTURE_ROOT / "delivery-authority.json").read_text())
-    reply_operation = "fabric.v1.task.complete-with-reply"
-    delivery["allowed_fabric_operations"].append(reply_operation)
+    delivery = delivery_authority_fixture()
     delivery["delegations"] = [{
         "actor": "reviewer-1",
         "schema_version": 2,
         "workspace_roots": ["."],
         "allowed_source_paths": ["input"],
         "allowed_artifact_paths": ["output/reviews/reviewer-1"],
-        "allowed_fabric_operations": [
-            "fabric.v1.artifact.publish", "fabric.v1.task.read", reply_operation,
-        ],
         "denied_paths": [".git"],
-        "denied_fabric_operations": ["fabric.v1.write-lease.acquire"],
         "prohibited_actions": ["deployment", "external-release"],
         "disclosure": "approved-providers",
         "secrets_access": "none",
@@ -399,21 +335,12 @@ def test_review_delegation_separates_source_read_artifacts_and_correlated_fabric
         "expires_at": "2026-07-19T00:00:00Z",
         "budget": {"turns": 2},
     }]
-    valid_operations = {
-        *delivery["allowed_fabric_operations"], *delivery["denied_fabric_operations"],
-    }
 
-    mapped = module.map_delivery_delegations(
-        delivery, valid_operations=valid_operations, valid_cost_pattern=COST_PATTERN,
-    )[0]["authority"]
+    mapped = module.map_delivery_delegations(delivery)[0]["authority"]
 
     assert mapped["sourcePaths"] == ["input"]
     assert mapped["artifactPaths"] == ["output/reviews/reviewer-1"]
     assert set(mapped["sourcePaths"]).isdisjoint(mapped["artifactPaths"])
-    assert mapped["actions"] == [
-        "fabric.v1.artifact.publish", "fabric.v1.task.complete-with-reply", "fabric.v1.task.read",
-    ]
-    assert mapped["deniedActions"] == ["fabric.v1.write-lease.acquire"]
 
 
 def test_authority_evidence_digest_must_bind_the_linked_approval_artifact():
@@ -746,7 +673,7 @@ def test_authority_requires_approver_expiry_and_external_action_controls():
     candidate = fixture()
     for field in (
         "schema_version", "approved_by", "evidence", "evidence_digest",
-        "workspace_roots", "expires_at", "allowed_fabric_operations",
+        "workspace_roots", "expires_at",
         "denied_paths", "secrets_access", "deployment",
         "irreversible_actions", "network", "budget",
     ):
@@ -1134,9 +1061,6 @@ def test_required_retrospective_cannot_borrow_another_delivery_cycle(tmp_path):
     module = load_validator()
     product_root = tmp_path / "separate-product"
     shutil.copytree(ROOT / "config", product_root / "config")
-    schema = "runtime/agent-fabric-protocol/schemas/authority-envelope.v2.schema.json"
-    (product_root / schema).parent.mkdir(parents=True)
-    shutil.copy2(ROOT / schema, product_root / schema)
     candidate = fixture("agent-product", tmp_path)
     candidate["risk_tier"] = "crucial"
     candidate["status"] = "closed"
@@ -1560,9 +1484,6 @@ def test_explicit_product_policy_root_can_be_separate_from_installed_skills(tmp_
     module = load_validator()
     product_root = tmp_path / "product"
     shutil.copytree(ROOT / "config", product_root / "config")
-    schema = "runtime/agent-fabric-protocol/schemas/authority-envelope.v2.schema.json"
-    (product_root / schema).parent.mkdir(parents=True)
-    shutil.copy2(ROOT / schema, product_root / schema)
 
     module.validate(fixture(), product_root)
 
@@ -1650,10 +1571,6 @@ def test_project_defined_technical_profile_cannot_bypass_artifact_security(tmp_p
 def test_pass_output_binds_resolved_product_root(tmp_path):
     product_copy = tmp_path / "copy" / "product"
     shutil.copytree(ROOT / "config", product_copy / "config")
-    shutil.copytree(
-        ROOT / "runtime" / "agent-fabric-protocol" / "schemas",
-        product_copy / "runtime" / "agent-fabric-protocol" / "schemas",
-    )
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     runs = load(REFERENCE_RUNS_PATH, "reference_runs_product_root_cli")

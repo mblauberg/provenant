@@ -24,3 +24,4 @@ node_modules/
 .agent-harness-workflows-installation.json
 # The pointer to this machine's product checkout, rewritten on every install.
 .agent-fabric/
+.fabric-trial/

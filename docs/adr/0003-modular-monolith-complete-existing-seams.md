@@ -28,8 +28,8 @@ parallel second implementation.
 ## Consequences
 
 - Characterisation and recovery tests guard every extraction.
-- Import-boundary/architecture tests ([F-033 test](../../runtime/agent-fabric/tests/unit/f033-module-boundaries.unit.test.ts)
-  and [edge golden](../../runtime/agent-fabric/tests/fixtures/f033-module-boundaries.json))
+- Import-boundary/architecture tests (F-033 test
+  and edge golden)
   precede extraction.
 - Extraction after the write-pilot steps uses the merged
   `ProviderActionDispatchInputV1` contract shape.

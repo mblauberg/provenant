@@ -1,6 +1,7 @@
 # ADR 0018 — Accept `portal-stdio-v1` as review-portal launch custody
 
-**Status:** Accepted 2026-07-28 (user, issue #489); applies [ADR
+**Status:** Superseded 2026-08-02 by [ADR 0020](0020-retire-the-daemon-fabric.md);
+originally accepted 2026-07-28 (user, issue #489); applied [ADR
 0001](0001-personal-first-product-compatible.md) and [ADR
 0017](0017-specifications-own-non-derivable-intent.md)
 

@@ -1,6 +1,0 @@
-#!/usr/bin/env bash
-set -euo pipefail
-
-PRODUCT_ROOT="${AGENT_FABRIC_PRODUCT_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
-PYTHON="${HARNESS_PYTHON:-python3}"
-exec "$PYTHON" "$PRODUCT_ROOT/scripts/change_gates.py" "$@"

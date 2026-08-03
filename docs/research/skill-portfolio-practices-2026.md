@@ -96,18 +96,18 @@ is not planned until new evidence opens a scoped issue.
 
 | System inspected | Useful mechanism | Current disposition |
 |---|---|---|
-| [GitHub Agentic Workflows `0e0d373`](https://github.com/github/gh-aw/tree/0e0d3736527cc5029115b7a49a63388da83cc1b2) | Withhold credentials from the planning runtime; validate a typed effect request before a scoped executor applies it. | Implemented by the current [typed effects owner](../specs/agent-fabric/effects.md) and `release`; no separate work item. |
+| [GitHub Agentic Workflows `0e0d373`](https://github.com/github/gh-aw/tree/0e0d3736527cc5029115b7a49a63388da83cc1b2) | Withhold credentials from the planning runtime; validate a typed effect request before a scoped executor applies it. | Implemented by the current typed effects owner and `release`; no separate work item. |
 | [OpenHands SDK/docs `a7d4182`](https://github.com/OpenHands/docs/tree/a7d418214914617674139b741d9d22691390457d) | Detect normalised repeated action/result, repeated-error and alternating loop signatures. | Deferred, not planned. `autopilot` owns bounded retry, budget and stop rules; no signature detector is authorised. |
 | [mini-SWE-agent `e187bcb`](https://github.com/SWE-agent/mini-swe-agent/tree/e187bcb2ff5825d85761a6f9c1f98c9fa6cfbc79) | A small linear single-agent loop is a meaningful counterfactual to harness complexity. | Deferred, not planned. `evaluate` owns any future measured baseline or mechanism-ablation study. |
-| [Goose `3c1fdd6`](https://github.com/aaif-goose/goose/tree/3c1fdd692cc8aaa5f09b9175410c09a09d4dfe49) | Minimise visible tools and declare permitted operations. | Implemented as progressive capability-correct projection in the [Fabric scope and invariants](../specs/agent-fabric/scope-and-invariants.md); recipes/subrecipes remain rejected. |
+| [Goose `3c1fdd6`](https://github.com/aaif-goose/goose/tree/3c1fdd692cc8aaa5f09b9175410c09a09d4dfe49) | Minimise visible tools and declare permitted operations. | Implemented as progressive capability-correct projection in the Fabric scope and invariants; recipes/subrecipes remain rejected. |
 | [Trailblaze `0e13954`](https://github.com/block/trailblaze/tree/0e13954a52126e8bbdc33d1dc97cf0d7aa77786a) | Promote a successful exploratory UI path into deterministic replay. | Deferred, not planned. If Console evidence activates it, [issue #141](https://github.com/mblauberg/provenant/issues/141) owns the bounded UI work. |
 | [Aider `5dc9490`](https://github.com/Aider-AI/aider/tree/5dc9490bb35f9729ef2c95d00a19ccd30c26339c) | Rank repository symbols into a bounded navigation map. | Deferred, not planned. [Issue #328](https://github.com/mblauberg/provenant/issues/328) owned the structural reviewability work, resolved without adopting a repository-map service. |
 | [OpenAI Symphony `4cbe3a9`](https://github.com/openai/symphony/tree/4cbe3a9699a73b862466c0b157ceca0c1985d6d7) | Reconcile durable work state before dispatch under one scheduler. | Already covered by receipts, `work-map` and one-chair ownership; no new action. |
 | [GitHub Spec Kit](https://github.com/github/spec-kit) | Constitution/specification/plan/task separation. | Already covered by `HARNESS.md`, `scope`, engineering docs and `implement`; avoid a parallel lifecycle. |
 
 The provider-neutral pre-action guard and typed external-effect request proposed
-at the cut-off now belong to the [authority](../specs/agent-fabric/authority.md)
-and [typed effects](../specs/agent-fabric/effects.md) owners. The proposed
+at the cut-off now belong to the authority
+and typed effects owners. The proposed
 deterministic loop-signature detector is deferred and not planned; `autopilot`
 owns the current bounded retry, child-depth and descendant-budget rules. The
 public provider-action task-binding defect,
@@ -116,7 +116,7 @@ through PR #331 and is not retained as a research follow-up.
 
 Standalone `api-design` and `observability` skills are not planned. Current
 Fabric observability belongs to the
-[observability specification](../specs/agent-fabric/observability.md); a new
+observability specification; a new
 global skill would require fresh cross-project evidence and a scoped issue.
 Source-mutating hooks, host-permissive behavioural runners, automatic
 installation, fixed personas, provider-prefixed copies and second lifecycle

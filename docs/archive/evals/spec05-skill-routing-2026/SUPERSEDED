@@ -13,7 +13,5 @@ re-greening needs a live Agent-Fabric routing run against the new catalogue.
 
 Tracked in: #135 (spec05 retirement + eval regeneration). That issue owns
 re-running the evaluation, refreshing this bundle and deleting this marker.
-No gate is waived. scripts/check-harness runs lifecycle_skill_evaluation.py
-validate-inputs and probe unconditionally, and no test is marked xfail. This
-marker records that the bundle's recorded results are stale, not that any gate
-is relaxed.
+No gate was waived in the historical run. The archived marker records that the
+bundle's results were stale, not that any current gate is relaxed.

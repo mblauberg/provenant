@@ -32,7 +32,7 @@ The current pre-release tree includes:
 - The delivery kernel: profiles in `config/delivery-profiles.json` for software,
   research, analysis, document and agent-product work, the neutral
   `delivery-run` schema-v1 receipt owned by `deliver`, and
-  `scripts/validate_delivery_scenarios.py`.
+  the delivery-scenario evaluator.
 - Risk and authority policy in `config/risk-policy.json`: the `routine`,
   `substantial`, `crucial` and `terminal` tiers and the factors that raise a
   tier. The review-pressure ladder those tiers select lives in `HARNESS.md`.
@@ -40,17 +40,16 @@ The current pre-release tree includes:
   `workhorse` and `scout` aliases from runtime capability discovery, with
   receipts that separate adapter, endpoint, model family, requested and
   effective effort, capability source and any substitution.
-- The Agent Fabric runtime under `runtime/`: the fabric itself, the wire
-  protocol, the console, the Herdr adapter and the Rust review-portal
-  supervisor, with an MCP server for agent spawn, durable messaging, budgets
-  and run state.
+- Fabric, at `runtime/fabric`: messages, shared tasks and an activity log for
+  the agents working on one project, over MCP or a shell CLI. One SQLite file,
+  no daemon, and identity derived from the working directory, so there is
+  nothing to trust, bootstrap or provision.
 - Gates: `scripts/check-harness` (policy checks, skill trigger fixtures, shell
   parse, `pytest`), `scripts/static-security-check.py` and
-  `scripts/public-release-check`, plus a CI workflow that runs the harness gate;
-  the fabric, console and Herdr typecheck, tests, evaluation, load and
-  production dependency audit; the review-portal-supervisor Rust fmt, clippy and
-  test jobs; and a `zizmor` workflow security lint. The aggregate `ci-status`
-  job is the single required check.
+  `scripts/public-release-check`, plus a CI workflow that runs the harness
+  gate, the Fabric typecheck, tests, MCP smoke and dependency audit, a
+  split-root contract rig and a `zizmor` workflow security lint. The aggregate
+  `ci-status` job is the single required check.
 - The shared worktree invariant and the checked `scripts/worktree` helper: an
   authorised linked worktree lives at the owning repository's
   `.worktrees/<task-agent>` path and nowhere else.
@@ -59,16 +58,8 @@ The current pre-release tree includes:
   `THIRD_PARTY_NOTICES.md`, under the MIT licence.
 - Community files: this changelog and the bug, feature, skill-proposal and
   work-item issue forms.
-- Standalone Agent Fabric specifications for run-plan declaration, agent
-  topology projection and work-facts projection.
 - The `setup-repo` skill, extending the former `github-setup` owner with
   inspect-first repository process, tracker and documentation setup.
-- Typed zero-touch Agent Fabric bootstrap receipts covering trust resolution,
-  daemon start-or-attach, seat install-or-replay and a bounded identity/mailbox
-  smoke, plus a schema-cutover gate that leaves incompatible state untouched.
-- `database archive-and-fresh`, with a digest-bound read-only preview,
-  byte-correctness confirmation interlock, durable exact-source archive,
-  typed conflict and recovery results, and distinct exit `4` recovery handling.
 - Certifying-profile pin observation in `doctor` and the separate uncached
   `npm run profile:pin` live-provider repair command. Doctor accepts capability
   observations cached within the last six hours; the repair command edits the
@@ -81,10 +72,30 @@ The current pre-release tree includes:
   per-task-class and per-role preference, family/model/adapter deprioritisation
   and fair-round-robin spreading inside the hard routing tiers rather than
   across them (#478).
-- Four daemon-side lifecycle facts emitted by the fabric (#486).
 - Review panels for `orchestrate`, with council and breadth presets (#485).
 - An advisory model dossier for route selection, `docs/model-dossier.md`, with
   Gemini 3.6 Flash recorded as a reachable google route (#470, #484).
+
+### Removed
+
+- The daemon fabric and everything that served it: `runtime/agent-fabric`, the
+  wire protocol, the operator console, the Herdr adapter and the Rust
+  review-portal supervisor, with their specifications, operations runbooks, CI
+  jobs and gate scripts. Roughly 350,000 lines. The capability boundary the
+  daemon enforced was never real on a single-user machine, and the eighteen
+  preconditions between a fresh directory and its first message were why agents
+  could not use it in ordinary projects. See
+  [ADR 0020](docs/adr/0020-retire-the-daemon-fabric.md); the tree is preserved
+  on the `legacy/agent-fabric` branch.
+- The model router's daemon-activation gate and `config/agent-fabric.yaml`.
+  There are no in-process provider adapters left to activate, so every
+  cross-provider dispatch is a direct CLI call. Adapter compatibility, which
+  constrains which model families each provider CLI accepts, is unchanged.
+- The `allowed_fabric_operations` and `denied_fabric_operations` delivery
+  receipt fields, which scoped authority against the retired protocol's
+  operation enum.
+- `provenant doctor` and `provenant project`, which delegated to the daemon CLI.
+  `provenant fabric` now runs the new Fabric CLI.
 
 ### Changed
 
@@ -151,12 +162,10 @@ The current pre-release tree includes:
   `npm run profile:catalogue:pin` and `profile:catalogue:deploy` owning the pin
   and deployment (#473, #481).
 - Both review validators now share one leg-status vocabulary (#479).
-- `runtime/agent-fabric-protocol` splits projection from operator-projection to
-  stay under the module size cap (#471).
 
 ### Fixed
 
-- Prevented `scripts/configure-agent-fabric-mcp.py` from crashing under Python
+- Prevented `scripts/configure-fabric-mcp.py` from crashing under Python
   3.14 when its standard-output stream is already closed (#396).
 - Accepted a readable SQLite database plus WAL source set without SHM, while
   still rejecting SHM without WAL and mixed rollback/WAL state. Recovery
@@ -168,10 +177,6 @@ The current pre-release tree includes:
   the request, anchored Claude alias-to-model identity, rejected colliding
   alias/resolved-model snapshot keys, and rejected task-class effort that
   diverges from its probe policy's `minimum_effort` (#440).
-- Content-addressed the protocol freshness preflight's root-manifest arm with a
-  build-time digest stamp, so unchanged manifest rewrites no longer block
-  `agent-fabric` or `agent-fabric-mcp`; `doctor` now reports a stale build and
-  its exact repair instead of being blocked by the wrapper (#438, #439).
 - Killed and reported incomplete macOS codesign probes that exceed the
   15-second bound instead of leaving a provider-identity check hung (#423).
 - Rejected stale daemon result shapes before bootstrap, seat renewal or Console
@@ -195,9 +200,8 @@ The current pre-release tree includes:
 The name Provenant is the public identity. Several internal identifiers keep the
 older `agent-harness` string on purpose, because renaming them would break
 existing installations: the installation manifest owner in
-`scripts/managed_installation_manifest.py`, the schema `$id` values under
-`runtime/agent-fabric/schemas/`, the run-state path under
-`~/.local/state/agent-harness/`, and the `HARNESS.md` filename that installed
+`scripts/managed_installation_manifest.py`, the run-state path under
+`~/.local/state/agent-harness/`, the `AGENT_FABRIC_*` environment variables, and the `HARNESS.md` filename that installed
 global instructions point at by name. `AGENTS_HOME` and `$HOME/.agents` are
 unchanged, so no existing installation moves.
 

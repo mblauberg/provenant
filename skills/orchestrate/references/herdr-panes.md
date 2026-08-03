@@ -94,27 +94,23 @@ and resolved model in the run receipt.
 
 ## Send steering
 
-Use the bundled helper only for fire-and-forget steering with no expected
-answer. It is a thin client for the authenticated public Fabric operation;
-Fabric validates the exact task or message revision and target before its
-daemon-owned Herdr integration performs any pane I/O. Its terminal result is
-`dispatched-unconfirmed` with `referenceValidation: verified`, not proof that
-the target process consumed the prompt:
+Steer a pane with Herdr's own command, and only for fire-and-forget steering
+with no expected answer:
 
 ```sh
-printf '%s' '<bounded prompt>' | \
-  "${AGENTS_HOME:-$HOME/.agents}/skills/orchestrate/scripts/herdr_prompt.sh" \
-  <name> --fire-and-forget --action-id <stable-action-id> \
-  --pane-ref <pane-id> --task-ref <task-id> --expected-revision <revision>
+herdr agent send <target> '<bounded prompt>'
 ```
 
-The helper never waits and cannot return an answer. Do not use it for an
-assignment, review, research request or any work the lead must consume. Prefer
-it over separate raw text/key sends only for steering an already tracked task.
-The helper has no direct Herdr fallback. Unknown, stale, target-mismatched or
-answer-bearing references fail before pane I/O; unavailable Fabric or Herdr
-fails closed with a typed result. Exact retries reuse the stable action without
-duplicating the pane effect.
+That call writes literal text into the target's terminal and returns. It is not
+proof that the target process consumed the prompt, and it cannot return an
+answer. Do not use it for an assignment, review, research request or any work
+the lead must consume: those go through a Fabric message with a `reply_to`, so
+the answer is durable and addressable rather than scrollback. Prefer steering
+over raw key sends only for nudging an already tracked task.
+
+Herdr is not transactional and will not validate a task revision for you.
+Record the steer in Fabric yourself if the lane needs to know it happened, and
+be aware that a repeated send repeats the pane effect.
 
 ## Send answer-bearing work
 
@@ -138,7 +134,7 @@ never blindly redispatches. Late replies remain evidence but do not silently
 complete superseded work. Claim generation and stable callback IDs make
 provider acceptance and requester consumption idempotent across restart.
 
-If the active integration cannot provide Fabric request/reply, record
+If the active integration cannot carry a Fabric request and reply, record
 `FABRIC-ROUNDTRIP-UNAVAILABLE`, use a named artifact plus an explicit bounded
 collection step, and report the degraded manual path. Never describe pane
 status or scrollback as an automatic callback.

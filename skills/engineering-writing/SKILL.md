@@ -53,12 +53,6 @@ For condensation, follow the reference stop and integrity checks and report the
 before/after word delta. Review mode returns severity, evidence, impact and fix;
 rewrite mode returns text first; final scrub makes defect fixes only.
 
-For local files, use the checker as a review prompt, not proof:
-
-```sh
-python3 "${AGENTS_HOME:-$HOME/.agents}/skills/engineering-writing/scripts/check_engineering_style.py" path/to/file.md
-```
-
 Flag unverifiable support, audience dependence, domain-required terms, or a cut
 that would drop an obligation. Use `[FLAG: verify source]`,
 `[FLAG: define audience]`, `[FLAG: preserve exact term]` or
