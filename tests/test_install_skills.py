@@ -1,5 +1,6 @@
 from pathlib import Path
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -10,6 +11,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 SCRIPT = ROOT / "scripts" / "install-skills"
 MANAGER = ROOT / "scripts" / "manage_installation.py"
+PYTHON_RESOLVER = ROOT / "scripts" / "lib" / "harness-python.sh"
 SHARED = "_shared"
 
 
@@ -20,6 +22,7 @@ def run(target: Path, custom_source: Path | None = None):
     return subprocess.run(
         command,
         cwd=ROOT,
+        env={**os.environ, "HARNESS_PYTHON": sys.executable},
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -323,6 +326,8 @@ def test_directory_symlink_to_canonical_skills_is_preserved_without_manifest(tmp
     scripts = fixture_root / "scripts"
     scripts.mkdir(parents=True)
     shutil.copy2(SCRIPT, scripts / "install-skills")
+    (scripts / "lib").mkdir()
+    shutil.copy2(PYTHON_RESOLVER, scripts / "lib" / "harness-python.sh")
     shutil.copy2(MANAGER, scripts / "manage_installation.py")
     shutil.copytree(ROOT / "skills", fixture_root / "skills")
     platform_home = tmp_path / "claude"
@@ -333,6 +338,7 @@ def test_directory_symlink_to_canonical_skills_is_preserved_without_manifest(tmp
     result = subprocess.run(
         [str(scripts / "install-skills"), "--target", str(target)],
         cwd=fixture_root,
+        env={**os.environ, "HARNESS_PYTHON": sys.executable},
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -355,6 +361,8 @@ def test_directory_symlink_layout_warns_about_skipped_custom_skills(tmp_path):
     scripts = fixture_root / "scripts"
     scripts.mkdir(parents=True)
     shutil.copy2(SCRIPT, scripts / "install-skills")
+    (scripts / "lib").mkdir()
+    shutil.copy2(PYTHON_RESOLVER, scripts / "lib" / "harness-python.sh")
     shutil.copy2(MANAGER, scripts / "manage_installation.py")
     shutil.copy2(
         ROOT / "scripts" / "managed_installation_manifest.py",
@@ -376,6 +384,7 @@ def test_directory_symlink_layout_warns_about_skipped_custom_skills(tmp_path):
             str(custom_source),
         ],
         cwd=fixture_root,
+        env={**os.environ, "HARNESS_PYTHON": sys.executable},
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -397,6 +406,8 @@ def test_directory_symlink_layout_rejects_two_source_name_collision(tmp_path):
     scripts = fixture_root / "scripts"
     scripts.mkdir(parents=True)
     shutil.copy2(SCRIPT, scripts / "install-skills")
+    (scripts / "lib").mkdir()
+    shutil.copy2(PYTHON_RESOLVER, scripts / "lib" / "harness-python.sh")
     shutil.copy2(MANAGER, scripts / "manage_installation.py")
     shutil.copy2(
         ROOT / "scripts" / "managed_installation_manifest.py",
@@ -423,6 +434,7 @@ def test_directory_symlink_layout_rejects_two_source_name_collision(tmp_path):
             str(custom_source),
         ],
         cwd=fixture_root,
+        env={**os.environ, "HARNESS_PYTHON": sys.executable},
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -596,7 +608,7 @@ def manager(
     source: Path | None = None,
     custom_source: Path | None = None,
 ):
-    command = [str(MANAGER), action, "--target", str(target)]
+    command = [sys.executable, str(MANAGER), action, "--target", str(target)]
     if source:
         command.extend(["--source", str(source)])
     if custom_source:
