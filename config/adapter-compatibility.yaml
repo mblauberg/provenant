@@ -5,6 +5,7 @@ schema_version: 1
 activation_policy:
   real_adapters_require_separate_gate: true
   default_enabled: false
+  executable_resolution_version: 2
 
 adapters:
   claude-agent-sdk:
@@ -13,9 +14,8 @@ adapters:
     implementation:
       kind: npm-package
       package: "@anthropic-ai/claude-agent-sdk"
-      executable: "/opt/homebrew/bin/claude"
+      executable: "claude"
       provider_identity: apple-designated
-      wrapper_entrypoint: "runtime/agent-fabric/src/adapters/providers/claude-agent-sdk.ts"
     contract:
       protocol: claude-agent-sdk+claude-code-cli
     runtime_range:
@@ -34,9 +34,8 @@ adapters:
     delivery_stage: 3
     implementation:
       kind: native-cli
-      executable: "/opt/homebrew/bin/codex"
+      executable: "codex"
       provider_identity: apple-designated
-      wrapper_entrypoint: "runtime/agent-fabric/src/adapters/providers/codex-app-server.ts"
     contract:
       protocol: codex-app-server
     runtime_range:
@@ -57,7 +56,7 @@ adapters:
     implementation:
       kind: native-cli
       command: herdr
-      executable: "/opt/homebrew/bin/herdr"
+      executable: "herdr"
     contract:
       protocol: herdr-local-api
     runtime_range:
@@ -76,8 +75,7 @@ adapters:
     implementation:
       kind: npm-cli
       package: "@earendil-works/pi-coding-agent"
-      executable: "/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/dist/cli.js"
-      wrapper_entrypoint: "runtime/agent-fabric/src/adapters/providers/optional/pi-rpc.ts"
+      executable: "pi"
     contract:
       protocol: pi-jsonl-rpc
     runtime_range:
@@ -108,9 +106,8 @@ adapters:
     implementation:
       kind: native-cli
       command: agy
-      executable: "${USER_HOME}/.local/bin/agy"
+      executable: "agy"
       provider_identity: apple-designated
-      wrapper_entrypoint: "runtime/agent-fabric/src/adapters/providers/optional/agy.ts"
     contract:
       protocol: agy-cli
     runtime_range:
@@ -130,10 +127,9 @@ adapters:
     implementation:
       kind: bundled-cli
       command: cursor-agent
-      executable: "${USER_HOME}/.local/bin/cursor-agent"
+      executable: "cursor-agent"
       cursor_install_root: "${USER_HOME}/.local/share/cursor-agent"
       provider_identity: cursor-partial-signed-helpers
-      wrapper_entrypoint: "runtime/agent-fabric/src/adapters/providers/optional/cursor-agent.ts"
     contract:
       protocol: cursor-agent-stream-json-cli
     runtime_range:
@@ -155,9 +151,8 @@ adapters:
     implementation:
       kind: native-cli
       command: kiro-cli
-      executable: "${USER_HOME}/.local/bin/kiro-cli"
+      executable: "kiro-cli"
       provider_identity: apple-designated
-      wrapper_entrypoint: "runtime/agent-fabric/src/adapters/providers/optional/kiro-acp.ts"
     contract:
       protocol: agent-client-protocol
     runtime_range:
@@ -184,10 +179,8 @@ adapters:
     implementation:
       kind: native-cli
       command: opencode
-      executable: "/opt/homebrew/bin/opencode"
-      provider_install_root: "/opt/homebrew/Cellar/opencode"
+      executable: "opencode"
       provider_identity: owner-controlled-install-root
-      wrapper_entrypoint: "runtime/agent-fabric/src/adapters/providers/optional/opencode-acp.ts"
     contract:
       protocol: agent-client-protocol
     runtime_range:
