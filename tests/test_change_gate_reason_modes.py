@@ -110,7 +110,11 @@ def test_junit_collection_testcase_uses_its_parent_suite_for_import_identity(tmp
 
     from scripts.change_gate_reports import _junit_import_values
 
-    assert len(_junit_import_values(report)) == 2
+    assert _junit_import_values(report) == []
+    assert classify_structured_report("pytest", report, 1, include_evidence=True) == (
+        FailureClass.MALFORMED,
+        None,
+    )
 
 
 def test_junit_testcase_error_without_native_collection_traceback_has_no_identity(tmp_path):
@@ -537,10 +541,10 @@ def test_pure_type_only_change_is_owned_by_type_gate(tmp_path, capsys):
             "--test-command-ts", "npm exec vitest run {test}",
         ]
     )
-    assert revert_result == 0
+    assert revert_result == 1
     output = capsys.readouterr().out
-    assert "REVERT_PROBE: PASS owner=type-gate" in output
-    assert "hunks=1 killed=0 survivors=0 inconclusive=0" in output
+    assert "REVERT_PROBE: FAIL owner=type-gate" in output
+    assert "hunks=1 survivors=0 inconclusive=1" in output
 
     mutation_result = change_gates.main(
         [
@@ -550,8 +554,8 @@ def test_pure_type_only_change_is_owned_by_type_gate(tmp_path, capsys):
             "--test-command-ts", "npm exec vitest run {test}",
         ]
     )
-    assert mutation_result == 0
-    assert "CHANGED_LINES_MUTATION: PASS owner=type-gate" in capsys.readouterr().out
+    assert mutation_result == 1
+    assert "CHANGED_LINES_MUTATION: FAIL owner=type-gate" in capsys.readouterr().out
 
 
 def test_live_ci_consumes_the_tracked_change_gate_mode_declaration():

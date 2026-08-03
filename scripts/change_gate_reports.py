@@ -39,6 +39,11 @@ _UNRESOLVED_MODULE_PATTERNS = (
     re.compile(r"Cannot find package ['\"]([^'\"]+)['\"]", re.IGNORECASE),
     re.compile(r"Failed to resolve import ['\"]([^'\"]+)['\"]", re.IGNORECASE),
 )
+_NATIVE_COLLECTION_MARKERS = (
+    "importing test module",
+    "error during collection",
+    "errors during collection",
+)
 
 
 def _combine_failure_classes(classes: list[FailureClass]) -> FailureClass:
@@ -130,9 +135,7 @@ def _junit_import_values(report: Path) -> list[str]:
         current_suite_tests = (
             node.attrib.get("tests", "1") if node_tag == "testsuite" else suite_tests
         )
-        if node_tag in {"testsuite", "testcase"}:
-            is_testcase = node_tag in {"testcase"}
-            suite_has_no_tests = current_suite_tests == "0"
+        if node_tag == "testsuite" and current_suite_tests == "0":
             for record in node:
                 if tag(record) not in {"error"}:
                     continue
@@ -143,21 +146,23 @@ def _junit_import_values(report: Path) -> list[str]:
                 if text:
                     detail_values.append(text)
                 detail = " ".join(detail_values).casefold()
-                native_collection_error = (
-                    record.attrib.get("message", "").casefold() == "collection failure"
-                    and (
-                        "importing test module" in detail
-                        or "error during collection" in detail
-                    )
-                )
-                if is_testcase and not suite_has_no_tests and not native_collection_error:
-                    continue
                 values.extend(detail_values)
         for child in node:
             visit(child, current_suite_tests)
 
     visit(root)
     return values
+
+
+def unresolved_module_from_native_collection_output(output: str) -> str | None:
+    """Return one module only when runner output confirms native collection failure."""
+
+    if not isinstance(output, str):
+        return None
+    folded = output.casefold()
+    if not any(marker in folded for marker in _NATIVE_COLLECTION_MARKERS):
+        return None
+    return _one_unresolved_module([output])
 
 
 def _vitest_import_values_from_report(report: Path) -> list[str]:

@@ -763,42 +763,18 @@ def gate_type_only_probe(
         )
         return 0
     if gate_name == "REVERT_PROBE":
-        for hunk in probes:
-            with _temporary_tree(source_root, scratch_root) as directory:
-                _apply_reverse_hunk(Path(directory), hunk)
         print(
-            "REVERT_PROBE: PASS owner=type-gate "
-            f"hunks={len(probes)} killed=0 survivors=0 inconclusive=0"
+            "REVERT_PROBE: FAIL owner=type-gate "
+            f"hunks={len(probes)} survivors=0 inconclusive=1 "
+            "reason=no-runtime-evidence"
         )
-        return 0
-    killed = 0
-    for hunk in probes:
-        mutated_body = tuple(
-            f"{line} runtime()" if line.startswith(("+", "-")) else line
-            for line in hunk.body
+    else:
+        print(
+            "CHANGED_LINES_MUTATION: FAIL owner=type-gate "
+            f"hunks={len(probes)} survivors=0 inconclusive=1 "
+            "reason=no-runtime-evidence"
         )
-        mutated = DiffHunk(
-            hunk.path,
-            hunk.header,
-            hunk.hunk_header,
-            mutated_body,
-            hunk.old_start,
-            hunk.old_count,
-            hunk.new_start,
-            hunk.new_count,
-            hunk.old_lines,
-            hunk.new_lines,
-        )
-        if hunk_mode(mutated) is ChangeMode.TYPE_ONLY:
-            print(f"TYPE_ONLY_MUTATION: SURVIVED path={hunk.path}")
-            return 1
-        killed += 1
-    print(
-        "CHANGED_LINES_MUTATION: PASS owner=type-gate "
-        f"hunks={len(probes)} mutants={killed} killed={killed} "
-        "survivors=0 inconclusive=0"
-    )
-    return 0
+    return 1
 
 
 def _apply_reverse_hunk(root: Path, hunk: DiffHunk) -> None:

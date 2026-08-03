@@ -16,9 +16,14 @@ try:
     from .change_gate_reports import (
         FailureClass,
         classify_structured_report_with_evidence,
+        unresolved_module_from_native_collection_output,
     )
 except ImportError:  # pragma: no cover - direct script execution fallback
-    from change_gate_reports import FailureClass, classify_structured_report_with_evidence
+    from change_gate_reports import (
+        FailureClass,
+        classify_structured_report_with_evidence,
+        unresolved_module_from_native_collection_output,
+    )
 
 
 class Runner(str, Enum):
@@ -220,6 +225,11 @@ def _run_structured(
     classification, unresolved_module = classify_structured_report_with_evidence(
         runner, report_path, returncode
     )
+    if unresolved_module is None and classification in {
+        FailureClass.IMPORT,
+        FailureClass.COLLECTION,
+    }:
+        unresolved_module = unresolved_module_from_native_collection_output(output)
     if direct_timed_out or not group_closed or not pipes_drained:
         classification = FailureClass.UNKNOWN
         unresolved_module = None
