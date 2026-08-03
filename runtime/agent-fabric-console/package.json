@@ -35,7 +35,7 @@
     "@local/agent-fabric": "file:../agent-fabric",
     "@local/agent-fabric-protocol": "file:../agent-fabric-protocol",
     "string-width": "8.2.2",
-    "unicode-segmenter": "0.17.2"
+    "unicode-segmenter": "0.17.3"
   },
   "devDependencies": {
     "@types/node": "24.13.3",
