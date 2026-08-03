@@ -30,55 +30,15 @@ def invoke(*arguments: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def test_publish_rejects_a_destination_changed_after_legacy_preflight(tmp_path):
-    destination = tmp_path / "bin/provenant"
-    destination.parent.mkdir()
-    legacy_target = tmp_path / "instance/scripts/provenant"
-    destination.symlink_to(legacy_target)
-
-    classified = invoke(
-        "classify",
-        "--source",
-        str(SOURCE),
-        "--destination",
-        str(destination),
-        "--legacy-target",
-        str(legacy_target),
-    )
-    assert classified.returncode == 0, classified.stderr
-    assert classified.stdout.strip() == "legacy-link"
-
-    destination.unlink()
-    foreign_target = tmp_path / "foreign/provenant"
-    destination.symlink_to(foreign_target)
-
-    published = invoke(
-        "publish",
-        "--source",
-        str(SOURCE),
-        "--destination",
-        str(destination),
-        "--legacy-target",
-        str(legacy_target),
-        "--expected",
-        "legacy-link",
-    )
-
-    assert published.returncode == 3
-    assert "collision" in published.stderr
-    assert destination.is_symlink()
-    assert destination.readlink() == foreign_target
-
-
-def test_publish_restores_a_same_target_link_raced_into_atomic_exchange(
+def test_publish_rejects_a_foreign_link_raced_into_atomic_exchange(
     tmp_path,
     monkeypatch,
 ):
     helper = load_helper()
     destination = tmp_path / "bin/provenant"
     destination.parent.mkdir()
-    legacy_target = tmp_path / "instance/scripts/provenant"
-    destination.symlink_to(legacy_target)
+    destination.write_bytes(SOURCE.read_bytes() + b"\n" + helper.MANAGED_MARKER)
+    foreign_target = tmp_path / "foreign/provenant"
     exchange = helper._exchange
     raced = False
 
@@ -86,14 +46,14 @@ def test_publish_restores_a_same_target_link_raced_into_atomic_exchange(
         nonlocal raced
         if not raced:
             second.unlink()
-            second.symlink_to(legacy_target)
+            second.symlink_to(foreign_target)
             raced = True
         exchange(first, second)
 
     monkeypatch.setattr(helper, "_exchange", race_then_exchange)
 
     try:
-        helper.publish(SOURCE, destination, legacy_target, "legacy-link")
+        helper.publish(SOURCE, destination, "managed-file")
     except helper.Collision as exc:
         assert "changed during atomic publication" in str(exc)
     else:
@@ -101,7 +61,7 @@ def test_publish_restores_a_same_target_link_raced_into_atomic_exchange(
 
     assert raced
     assert destination.is_symlink()
-    assert destination.readlink() == legacy_target
+    assert destination.readlink() == foreign_target
 
 
 def test_publish_preserves_a_displaced_file_when_rollback_also_races(
@@ -111,8 +71,7 @@ def test_publish_preserves_a_displaced_file_when_rollback_also_races(
     helper = load_helper()
     destination = tmp_path / "bin/provenant"
     destination.parent.mkdir()
-    legacy_target = tmp_path / "instance/scripts/provenant"
-    destination.symlink_to(legacy_target)
+    destination.write_bytes(SOURCE.read_bytes() + b"\n" + helper.MANAGED_MARKER)
     first_foreign = b"first foreign file\n"
     second_foreign = b"second foreign file\n"
     exchange = helper._exchange
@@ -133,7 +92,7 @@ def test_publish_preserves_a_displaced_file_when_rollback_also_races(
     monkeypatch.setattr(helper, "_exchange", race_exchange)
 
     try:
-        helper.publish(SOURCE, destination, legacy_target, "legacy-link")
+        helper.publish(SOURCE, destination, "managed-file")
     except helper.Collision as exc:
         assert "displaced path preserved=" in str(exc)
     else:
@@ -152,8 +111,7 @@ def test_publish_preserves_a_displaced_file_when_rollback_raises(
     helper = load_helper()
     destination = tmp_path / "bin/provenant"
     destination.parent.mkdir()
-    legacy_target = tmp_path / "instance/scripts/provenant"
-    destination.symlink_to(legacy_target)
+    destination.write_bytes(SOURCE.read_bytes() + b"\n" + helper.MANAGED_MARKER)
     foreign = b"foreign file requiring recovery\n"
     exchange = helper._exchange
     raced = False
@@ -173,7 +131,7 @@ def test_publish_preserves_a_displaced_file_when_rollback_raises(
     monkeypatch.setattr(helper, "_restore_after_mismatch", fail_rollback)
 
     try:
-        helper.publish(SOURCE, destination, legacy_target, "legacy-link")
+        helper.publish(SOURCE, destination, "managed-file")
     except OSError as exc:
         assert "injected rollback failure" in str(exc)
     else:
@@ -188,8 +146,8 @@ def test_snapshot_maps_a_racing_type_swap_to_a_collision(tmp_path, monkeypatch):
     helper = load_helper()
     destination = tmp_path / "bin/provenant"
     destination.parent.mkdir()
-    legacy_target = tmp_path / "instance/scripts/provenant"
-    destination.symlink_to(legacy_target)
+    foreign_target = tmp_path / "foreign/provenant"
+    destination.symlink_to(foreign_target)
     real_readlink = os.readlink
 
     def swapped_before_read(path, *args, **kwargs):
@@ -211,8 +169,8 @@ def test_snapshot_propagates_a_non_race_read_failure(tmp_path, monkeypatch):
     helper = load_helper()
     destination = tmp_path / "bin/provenant"
     destination.parent.mkdir()
-    legacy_target = tmp_path / "instance/scripts/provenant"
-    destination.symlink_to(legacy_target)
+    foreign_target = tmp_path / "foreign/provenant"
+    destination.symlink_to(foreign_target)
     real_readlink = os.readlink
 
     def denied_before_read(path, *args, **kwargs):
@@ -236,8 +194,8 @@ def test_snapshot_maps_a_racing_delete_to_a_collision(tmp_path, monkeypatch):
     helper = load_helper()
     destination = tmp_path / "bin/provenant"
     destination.parent.mkdir()
-    legacy_target = tmp_path / "instance/scripts/provenant"
-    destination.symlink_to(legacy_target)
+    foreign_target = tmp_path / "foreign/provenant"
+    destination.symlink_to(foreign_target)
     real_readlink = os.readlink
 
     def deleted_before_read(path, *args, **kwargs):
