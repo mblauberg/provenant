@@ -99,15 +99,18 @@ describe("daemon first-frame routing bounds", () => {
     const { socket, accepted } = await startRouter({ allowHalfOpen: true });
     const serving = await accepted;
     const response = nextResponse(socket);
-    socket.write('{"operation":"initialize","method":"ping"}\n');
+    socket.write(Buffer.concat([
+      Buffer.from('{"operation":"initialize","method":"ping"}\n'),
+      Buffer.alloc(256 * 1_024, 0x61),
+    ]));
 
     await expect(response).resolves.toMatchObject({
       id: "connection",
       error: { code: "DAEMON_PROTOCOL_AMBIGUOUS" },
     });
 
-    // end() would only half-close, leaving the serving socket waiting for a FIN
-    // that never arrives and holding its descriptor for the daemon's lifetime.
+    // end() would only half-close while unread inbound bytes keep the serving
+    // socket from observing EOF, retaining its descriptor indefinitely.
     const released = serving.destroyed
       ? Promise.resolve(true)
       : new Promise<true>((resolve) => serving.once("close", () => resolve(true)));

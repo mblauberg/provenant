@@ -650,7 +650,7 @@ const server = createServer((socket) => {
         code: "DAEMON_CONNECTION_LIMIT",
         message: `daemon accepts at most ${String(FABRIC_PROTOCOL_LIMITS.maximumConnections)} connections`,
       },
-    }).catch(() => undefined).finally(() => socket.end());
+    }).catch(() => undefined).finally(() => socket.destroy());
     return;
   }
   sockets.add(socket);
