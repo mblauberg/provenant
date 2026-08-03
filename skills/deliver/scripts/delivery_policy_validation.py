@@ -1,4 +1,4 @@
-"""Validate delivery policy registries and Fabric authority bindings."""
+"""Validate delivery policy registries and authority bindings."""
 
 from __future__ import annotations
 
@@ -396,44 +396,6 @@ def _authority_mapping_module():
     return module
 
 
-@lru_cache(maxsize=1)
-def _fabric_operations(root: Path, invalid_type: type[ValueError]) -> frozenset[str]:
-    schema_path = root / "runtime" / "agent-fabric-protocol" / "schemas" / "authority-envelope.v2.schema.json"
-    try:
-        schema = json.loads(schema_path.read_text())
-        operations = schema["properties"]["actions"]["items"]["enum"]
-    except (OSError, KeyError, TypeError, json.JSONDecodeError) as exc:
-        raise invalid_type("canonical Fabric authority schema is unavailable") from exc
-    _fail(
-        not isinstance(operations, list)
-        or not operations
-        or any(not isinstance(operation, str) for operation in operations),
-        "canonical Fabric operation registry is invalid",
-        invalid_type,
-    )
-    return frozenset(operations)
-
-
-@lru_cache(maxsize=1)
-def _fabric_cost_pattern(root: Path, invalid_type: type[ValueError]) -> re.Pattern[str]:
-    schema_path = root / "runtime" / "agent-fabric-protocol" / "schemas" / "authority-envelope.v2.schema.json"
-    try:
-        schema = json.loads(schema_path.read_text())
-        alternatives = schema["properties"]["budget"]["propertyNames"]["oneOf"]
-        pattern = next(
-            item["pattern"]
-            for item in alternatives
-            if isinstance(item, dict)
-            and isinstance(item.get("pattern"), str)
-            and item["pattern"].startswith("^cost:")
-        )
-        return re.compile(pattern)
-    except (
-        OSError, KeyError, TypeError, StopIteration, re.error, json.JSONDecodeError,
-    ) as exc:
-        raise invalid_type("canonical Fabric cost-unit registry is unavailable") from exc
-
-
 def validate_authority(
     authority: dict[str, Any],
     run: dict[str, Any],
@@ -446,16 +408,8 @@ def validate_authority(
     except RuntimeError as exc:
         raise invalid_type(str(exc)) from exc
     try:
-        mapper.map_delivery_authority(
-            authority,
-            valid_operations=_fabric_operations(root, invalid_type),
-            valid_cost_pattern=_fabric_cost_pattern(root, invalid_type),
-        )
-        mapper.map_delivery_delegations(
-            authority,
-            valid_operations=_fabric_operations(root, invalid_type),
-            valid_cost_pattern=_fabric_cost_pattern(root, invalid_type),
-        )
+        mapper.map_delivery_authority(authority)
+        mapper.map_delivery_delegations(authority)
     except mapper.AuthorityMappingError as exc:
         raise invalid_type(str(exc)) from exc
     expiry = _utc(authority.get("expires_at"), "authority.expires_at", invalid_type)
