@@ -235,7 +235,7 @@ resolve_routing() {
   local model="$6" effort="$7" risk_tier="$8" capabilities_file="$9"
   local -a cmd route_args
 
-  route_args=(--adapter "$tool" --alias "$alias" --role "$role" --lead-family "$lead_family" --require-distinct --adapter-gate direct-cli)
+  route_args=(--adapter "$tool" --alias "$alias" --role "$role" --lead-family "$lead_family" --require-distinct)
   [ -n "$model" ] && route_args+=(--model "$model")
   [ -n "$effort" ] && route_args+=(--effort "$effort")
   [ -n "$risk_tier" ] && route_args+=(--risk-tier "$risk_tier")
