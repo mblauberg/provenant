@@ -27,7 +27,7 @@ def test_readme_product_commands_follow_the_explicit_checkout():
     source = read("README.md")
     shell = "\n".join(re.findall(r"```sh\n(.*?)```", source, re.DOTALL))
     assert 'cd "<PRODUCT_ROOT>"' in shell
-    assert "scripts/agent-fabric-warm" in shell
+    assert "npm ci" in shell
     assert "scripts/install-harness" in shell
     assert "AGENTS_HOME" not in shell
     assert "\nscripts/manage_installation.py" not in source

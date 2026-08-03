@@ -7,11 +7,9 @@ def read(path: str) -> str:
     return (ROOT / path).read_text()
 
 
-def test_agy_is_a_fabric_adapter_not_a_parallel_provider_skill():
+def test_agy_has_no_parallel_provider_skill():
     assert not (ROOT / "skills/agy-headless").exists()
-    spec = read("docs/specs/agent-fabric/provider-actions-and-adapters.md")
     orchestrate = read("skills/orchestrate/SKILL.md")
-    assert "Agy | Gemini or Antigravity access | Adapter only; no separate provider skill" in spec
     assert "Answer-bearing external work uses Fabric request/reply" in orchestrate
 
 
@@ -27,11 +25,10 @@ def test_headless_dispatcher_uses_direct_router_without_daemon_gate():
         assert forbidden not in dispatcher
 
 
-def test_autopilot_routes_bonus_gemini_through_fabric():
+def test_autopilot_records_cross_family_work_in_fabric():
     reference = read("skills/autopilot/references/cross-family-review.md")
-    assert "All answer-bearing cross-family work goes through Agent Fabric" in reference
+    assert "recorded in Fabric so the mission state is visible across providers" in reference
     assert "agy-headless" not in reference
-    assert "direct `agy`" not in reference
 
 
 def test_direct_agy_dispatch_keeps_the_compatibility_contract():

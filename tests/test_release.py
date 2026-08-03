@@ -2,7 +2,6 @@ import importlib.util
 import hashlib
 import json
 from pathlib import Path
-import re
 
 import pytest
 
@@ -15,17 +14,6 @@ MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
 
 
-@pytest.fixture(autouse=True)
-def _detach_deleted_fabric_authority_registry(monkeypatch):
-    policy = MODULE.DELIVERY_VALIDATOR._policy_validation_module()
-    monkeypatch.setattr(
-        policy, "_fabric_operations", lambda _root, _invalid_type: frozenset()
-    )
-    monkeypatch.setattr(
-        policy, "_fabric_cost_pattern", lambda _root, _invalid_type: re.compile(r"(?!)")
-    )
-
-
 def write_accepted_document_delivery(tmp_path, status="awaiting_release"):
     reference_path = ROOT / "skills" / "deliver" / "scripts" / "reference_runs.py"
     spec = importlib.util.spec_from_file_location("release_document_fixture", reference_path)
@@ -33,8 +21,6 @@ def write_accepted_document_delivery(tmp_path, status="awaiting_release"):
     reference = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(reference)
     delivery = reference.make_reference_run("document", ROOT)
-    assert delivery["authority"]["allowed_fabric_operations"] == []
-    assert delivery["authority"]["denied_fabric_operations"] == []
     assert not any(key.startswith("cost:") for key in delivery["authority"]["budget"])
 
     materializer_path = ROOT / "skills" / "deliver" / "scripts" / "reference_evaluation.py"

@@ -191,7 +191,7 @@ def test_research_currentness_routes_live_work_out_of_dated_recommendations():
 
     assert "GitHub issues and Project Status" in index
     assert "11 July historical dispositions, not current work" in portfolio
-    assert "../specs/agent-fabric/effects.md" in portfolio
+    assert "typed effects owners" in portfolio
     for issue in (141, 328, 330):
         assert f"https://github.com/mblauberg/provenant/issues/{issue}" in portfolio
 
