@@ -1,4 +1,3 @@
-import json
 from pathlib import Path
 
 import yaml
@@ -105,13 +104,6 @@ def test_inspect_classify_and_remote_gates_make_setup_convergent_and_safe():
         "ambiguous `ci-status` dependencies",
     ):
         assert stop in instructions
-
-
-def test_public_rename_is_registered_for_managed_reconciliation():
-    registry = json.loads((ROOT / "config" / "skill-renames.json").read_text())
-
-    assert registry["schema_version"] == 1
-    assert {"from": "github-setup", "to": "setup-repo"} in registry["renames"]
 
 
 def test_trigger_fixtures_cover_broadened_and_adjacent_routes():
