@@ -30,18 +30,19 @@ agent's own mistakes.
 ## How it fits together
 
 Three parts act on every request at once: the constitution sets the rules, a
-skill supplies the procedure, and Agent Fabric runs and cross-reviews the work.
+skill supplies the procedure, and cross-provider dispatch runs and cross-reviews
+the work.
 None of them is a stage the work passes through.
 
 ```mermaid
 flowchart TB
     accTitle: The three parts and the delivery loop they serve
-    accDescr: A user request enters the delivery loop, which runs scope, implement, verify and review, and produces a scoped, verified, independently reviewed change. Three parts act on that loop concurrently rather than in sequence. HARNESS.md, the constitution, sets the rules — authority, lifecycle and review pressure. The skills library supplies the procedure, one SKILL.md per task loaded when the task matches. Agent Fabric runs and reviews the work across providers, with Claude Code and Codex as primaries reviewing each other and optional providers separately activated.
+    accDescr: A user request enters the delivery loop, which runs scope, implement, verify and review, and produces a scoped, verified, independently reviewed change. Three parts act on that loop concurrently rather than in sequence. HARNESS.md, the constitution, sets the rules — authority, lifecycle and review pressure. The skills library supplies the procedure, one SKILL.md per task loaded when the task matches. Cross-provider dispatch runs and reviews the work, with Claude Code and Codex as primaries reviewing each other and Fabric carrying the messages, tasks and activity between them.
     U(["User request"]) --> LOOP["Delivery loop<br/>scope · implement · verify · review"]
     LOOP --> OUT(["Scoped, verified,<br/>independently reviewed change"])
     H["HARNESS.md — the constitution<br/>authority · lifecycle · review pressure"] -. "sets the rules" .-> LOOP
     SK["Skills library — 33 Agent Skills<br/>one procedure per task, loaded on match"] -. "supplies the procedure" .-> LOOP
-    F["Agent Fabric — cross-provider execution<br/>Claude Code and Codex review each other;<br/>optional providers stay separately activated"] -. "runs and reviews the work" .-> LOOP
+    F["Cross-provider dispatch<br/>Claude Code and Codex review each other;<br/>Fabric carries messages, tasks and activity"] -. "runs and reviews the work" .-> LOOP
     classDef out fill:#1f6f43,stroke:#4fd08a,color:#ffffff,stroke-width:2px
     class OUT out
 ```
@@ -52,9 +53,9 @@ flowchart TB
 - **Skills:** the <!--skills-->33<!--/skills--> Agent Skills are task-specific
   procedures, one folder with a `SKILL.md` each. Only the one-line descriptions
   sit in permanent context; a full body loads only when the task matches it.
-- **Agent Fabric:** cross-provider execution and durable coordination, so the
-  primaries can run and review each other's work. Optional providers stay
-  separately activated.
+- **Fabric:** messages, shared tasks and an activity log between the agents
+  working on one project, so the primaries can run and review each other's
+  work. One SQLite file, no daemon, nothing to provision.
 
 ## Quick start
 
@@ -74,16 +75,15 @@ Install either platform independently, or both:
 git clone https://github.com/mblauberg/provenant.git "<PRODUCT_ROOT>"
 cd "<PRODUCT_ROOT>"
 
-# install, attest and compile the pinned workspace dependencies
-scripts/install-agent-fabric-dependencies
-scripts/agent-fabric-warm
+# install the pinned workspace dependencies
+npm ci
 
 scripts/install-harness --platform claude
 scripts/install-harness --platform codex
 
 # discover commands, then verify Fabric
 provenant help
-provenant doctor
+provenant fabric whoami
 
 # run the repository gates when changing Provenant
 provenant check   # harness policy gate
@@ -246,8 +246,8 @@ The canonical ladder lives in [`HARNESS.md`](HARNESS.md).
 - specification approval, acceptance and release stay separate user decisions
   ([`HARNESS.md`](HARNESS.md)).
 
-Agent Fabric owns answer-bearing provider execution and durable coordination;
-direct command-line calls are a preflight or a recorded degraded fallback.
+Provider workers are dispatched as direct command-line calls; Fabric carries
+the messages, shared tasks and activity log between them.
 [Herdr](https://herdr.dev) is optional: it observes and wakes, never decides.
 
 ## Skill library

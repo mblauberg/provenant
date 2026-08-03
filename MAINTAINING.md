@@ -156,13 +156,8 @@ Run the checkout gates, or require exact-head `ci-status`:
 ```sh
 scripts/check-harness
 npm run check
-npm run test:evaluation --workspace=@local/agent-fabric
-npm run test:load --workspace=@local/agent-fabric
-npm audit --workspace=@local/agent-fabric --omit=dev --audit-level=high
-cargo fmt --manifest-path runtime/agent-fabric-review-portal-supervisor/Cargo.toml --check
-cargo metadata --manifest-path runtime/agent-fabric-review-portal-supervisor/Cargo.toml --locked --offline --no-deps --format-version 1
-cargo clippy --manifest-path runtime/agent-fabric-review-portal-supervisor/Cargo.toml --locked --offline --all-targets -- -D warnings
-cargo test --manifest-path runtime/agent-fabric-review-portal-supervisor/Cargo.toml --locked --offline
+node runtime/fabric/mcp-smoke.mjs
+npm audit --workspace=@local/fabric --omit=dev --audit-level=high
 scripts/static-security-check.py
 scripts/public-release-check
 git diff --check

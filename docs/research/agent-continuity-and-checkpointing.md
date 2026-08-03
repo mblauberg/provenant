@@ -4,9 +4,9 @@ Status: Durable research reference
 
 Evidence snapshot: [July 2026 continuity and routing evidence](evidence-snapshots/agent-continuity-routing-2026-07.md)
 
-Normative owners: [lifecycle and gates](../specs/agent-fabric/lifecycle-and-gates.md),
-[recovery and reconciliation](../specs/agent-fabric/recovery.md), and
-[intake and fresh-context continuation](../specs/console/intake-and-continuation.md)
+Normative owners: lifecycle and gates,
+recovery and reconciliation, and
+intake and fresh-context continuation
 
 ## Conclusions
 

@@ -265,8 +265,8 @@ Afterwards:
    recorded, and confirm Status is `Done`.
 3. After syncing the main checkout, keep the fabric dist warm so
    `scripts/agent-fabric` never falls back to the slow tsx loader path
-   (no-op when the dist is fresh; see [Keep the CLI dist
-   warm](agent-fabric-operations.md#keep-the-cli-dist-warm)):
+   (no-op when the dist is fresh; see Keep the CLI dist
+   warm):
 
    ```sh
    scripts/agent-fabric-warm

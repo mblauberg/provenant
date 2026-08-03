@@ -33,7 +33,7 @@ links and verify volatile provider or model claims at the live runtime.
 | Harness policy and topology | [`HARNESS.md`](../../HARNESS.md) |
 | Current architecture | [`docs/ARCHITECTURE.md`](../ARCHITECTURE.md) |
 | Skill names and catalogue | [Repository README](../../README.md#skill-library) and `skills/*/SKILL.md` |
-| Agent Fabric contracts | [Specification index](../specs/README.md) |
-| Provider activation and compatibility | [`config/agent-fabric.yaml`](../../config/agent-fabric.yaml) and [`config/adapter-compatibility.yaml`](../../config/adapter-compatibility.yaml) |
+| Fabric | [`runtime/fabric/README.md`](../../runtime/fabric/README.md) |
+| Provider compatibility | [`config/adapter-compatibility.yaml`](../../config/adapter-compatibility.yaml) |
 | Current skill-portfolio evaluation | [Evaluation appendix](../evals/skill-portfolio-2026/README.md) |
 | Live work, dependencies and user gates | [GitHub issues and Project Status](https://github.com/mblauberg/provenant/issues) |

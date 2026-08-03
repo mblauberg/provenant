@@ -14,8 +14,8 @@ The W012/W013 reducer and programme-acceptance work closed through
 The linked Console specifications own current implementation and acceptance
 status; this historical research note does not.
 
-Normative owners: [Console operator views](../specs/console/operator-interaction.md)
-and [acceptance and usability](../specs/console/acceptance.md)
+Normative owners: Console operator views
+and acceptance and usability
 
 ## Decision
 

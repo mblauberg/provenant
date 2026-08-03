@@ -8,9 +8,9 @@ W010-A implementation or W010-B live-execution authority.
 Fabric-managed headless provider sessions are compiled read-only, enforced
 twice (both provider adapters and `Fabric.#admitProviderPayload`). This is
 correct for certifying review but blocks Fabric from serving as the managed
-implementation plane. The standalone [authority](../specs/agent-fabric/authority.md),
-[workspace-containment](../specs/agent-fabric/workspace-containment.md) and
-[provider-action](../specs/agent-fabric/provider-actions-and-adapters.md)
+implementation plane. The standalone authority,
+workspace-containment and
+provider-action
 specifications preserve the read-only posture, so enabling writes requires a
 normative specification change as well as code.
 
@@ -30,8 +30,8 @@ provider-native settings in four stages:
    `AuthorityCompiler`, behaviour unchanged.
 3. **One-provider write pilot** (`workspace-write-offline`: one owned
    worktree, no network egress, no external effects), gated by the standalone
-   [provider-write containment
-   specification](../specs/agent-fabric/provider-write-containment.md) —
+   provider-write containment
+   specification —
    worktrees are not permission boundaries; provider settings are intent, not
    containment proof; model refusal without a tool attempt is inconclusive.
 4. **Second provider, then structural extraction** from the merged

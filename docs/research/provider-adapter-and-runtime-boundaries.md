@@ -4,9 +4,9 @@ Status: Durable research reference
 
 Evidence snapshot: [July 2026 continuity and routing evidence](evidence-snapshots/agent-continuity-routing-2026-07.md)
 
-Normative owners: [provider actions and adapters](../specs/agent-fabric/provider-actions-and-adapters.md),
-[activation](../specs/agent-fabric/activation.md), and
-[daemon and wire hardening](../specs/agent-fabric/daemon-and-wire.md)
+Normative owners: provider actions and adapters,
+activation, and
+daemon and wire hardening
 
 ## Conclusions
 

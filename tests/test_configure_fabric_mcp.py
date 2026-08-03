@@ -1151,29 +1151,24 @@ def test_absent_target_replaced_after_link_fails_closed_with_recovery(tmp_path: 
     recovery.unlink()
 
 
-def test_operations_docs_define_dynamic_primary_registration_and_bounded_fixed_paths() -> None:
-    runbook = (ROOT / "docs/runbooks/agent-fabric-operations.md").read_text()
-    runtime_readme = (ROOT / "runtime/agent-fabric/README.md").read_text()
-    for document in (runbook, runtime_readme):
-        assert "configure-fabric-mcp.py" in document
-        assert "AGENT_FABRIC_PROJECT_PATH" in document
-        assert "Claude Code and Codex" in document
-        assert "cannot preserve" in document
-        assert "exactly three environment variables" in document
-        assert "AGENT_FABRIC_STATE_DIRECTORY" in document
-        assert "AGENT_FABRIC_SEAT" in document
-        assert "AGENT_FABRIC_CLIENT_LABEL" in document
-        assert "six clients" in document
-    assert "opencode mcp list" in runbook
-    assert "exit code `4`" in runbook
-    assert "partial-state" in runbook
-    assert "first-client atomic install" in runbook
-    assert "affected current client and later" in runbook
-    assert "shutdown-time status override" in runbook
-    assert "Registry entries bind `AGENT_FABRIC_PROJECT_PATH`" not in runbook
-    verification = runbook.split("## Verify registrations", 1)[1].split("\n## ", 1)[0]
+def test_registration_runbook_documents_a_project_free_registration_and_its_recovery() -> None:
+    runbook = (ROOT / "docs/runbooks/fabric-mcp-registration.md").read_text()
+    assert "configure-fabric-mcp.py" in runbook
+    # The registration binds no project: cwd decides. The fourth variable is an
+    # exception for one client, never a global.
+    assert "exactly three environment variables" in runbook
+    assert "AGENT_FABRIC_STATE_DIRECTORY" in runbook
+    assert "AGENT_FABRIC_SEAT" in runbook
+    assert "AGENT_FABRIC_CLIENT_LABEL" in runbook
+    assert "AGENT_FABRIC_PROJECT_PATH" in runbook
+    assert "not a fourth global variable" in runbook
+    assert "cannot preserve" in runbook
+    assert "Claude Code and Codex" in runbook
+    assert "six clients" in runbook
+    verification = runbook.split("## Verify", 1)[1].split("\n## ", 1)[0]
     assert "opencode mcp list" in verification
-    assert "exactly three global" in verification
-    assert "four non-secret" not in verification
-    assert "AGENT_FABRIC_PROJECT_PATH" in verification
-    assert "explicit project-scoped compatibility" in verification
+    # A part-written set of registries must say so rather than report success.
+    recovery = runbook.split("## When a write fails partway", 1)[1]
+    assert "first-client atomic install" in recovery
+    assert "partial-state" in recovery
+    assert "exit code `4`" in recovery
