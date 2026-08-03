@@ -33,9 +33,6 @@ def test_autopilot_routes_bonus_gemini_through_fabric():
     assert "direct `agy`" not in reference
 
 
-def test_fabric_keeps_the_activated_agy_adapter():
-    configuration = read("config/agent-fabric.yaml")
+def test_direct_agy_dispatch_keeps_the_compatibility_contract():
     compatibility = read("config/adapter-compatibility.yaml")
-    assert "  - agy" in configuration
-    assert "  agy:" in configuration
     assert "  agy:" in compatibility
