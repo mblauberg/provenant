@@ -3,7 +3,12 @@ import { readFile } from "node:fs/promises";
 import { parse } from "yaml";
 
 import { FabricError } from "../errors.js";
-import { resolveAdapterExecutable, resolveCompatibilityArtifact, verifyAdapterCompatibility } from "./compatibility.js";
+import {
+  resolveAdapterExecutable,
+  resolveCompatibilityArtifact,
+  resolveProviderInstallRoot,
+  verifyAdapterCompatibility,
+} from "./compatibility.js";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -56,7 +61,12 @@ export async function loadAdapterModelConstraints(input: {
     ? resolveCompatibilityArtifact(input.compatibilityPath, implementation.cursor_install_root)
     : undefined;
   const providerInstallRoot = typeof implementation.provider_install_root === "string"
-    ? resolveCompatibilityArtifact(input.compatibilityPath, implementation.provider_install_root)
+    ? await resolveProviderInstallRoot({
+      adapterId: input.adapterId,
+      configuredRoot: implementation.provider_install_root,
+      executable: providerExecutable ?? "",
+      compatibilityPath: input.compatibilityPath,
+    })
     : undefined;
   const providerIdentity = typeof implementation.provider_identity === "string"
     ? implementation.provider_identity

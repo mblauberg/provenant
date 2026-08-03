@@ -9,6 +9,7 @@ import { Duplex } from "node:stream";
 import Database from "better-sqlite3";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { MCP_BOOTSTRAP_CREDENTIALS_FEATURE } from "@local/agent-fabric-protocol";
+import { parse, stringify } from "yaml";
 
 import {
   fabricDoctor as realFabricDoctor,
@@ -64,6 +65,7 @@ class DoctorFixtureDaemonSocket extends Duplex {
         result: {
           protocolVersion: 1,
           daemonVersion: "pre-0636854",
+          executableResolutionVersion: 2,
           capabilities: this.capabilities,
           limits: FABRIC_PROTOCOL_LIMITS,
           activeAdapters: [],
@@ -352,6 +354,98 @@ describe("machine status and doctor", () => {
       productRoot: process.cwd(),
       instanceRoot: process.cwd(),
     });
+  });
+
+  it("does not probe an absent optional Kiro adapter when doctor has only primary adapters configured", async () => {
+    const value = await paths();
+    const fixture = await createPortableActivatedPrimaryFixture();
+    cleanup.push(fixture.directory);
+    const probed: string[] = [];
+
+    const result = await fabricDoctor([
+      "--agents-home", fixture.directory,
+      "--trusted-config", fixture.configPath,
+      "--compatibility", fixture.compatibilityPath,
+      "--compatibility-schema", fixture.schemaPath,
+    ], value, {
+      verifyProvider: async (input) => {
+        probed.push(input.adapterId);
+        if (input.adapterId === "kiro-acp") throw new Error("Kiro must not be probed");
+        return {
+          identity: {
+            adapterId: input.adapterId,
+            executable: input.executable,
+            canonicalPath: input.executable,
+            regularFile: true,
+            ownerUid: process.getuid?.() ?? 0,
+            mode: 0o755,
+            sha256: "a".repeat(64),
+            assurance: "full-vendor-identity",
+            signing: [],
+          },
+          interface: {
+            adapterId: input.adapterId,
+            conformant: true,
+            probe: "fixture",
+            version: "fixture",
+          },
+        };
+      },
+      preflightProtocolBuild: async () => undefined,
+    });
+
+    expect(probed).not.toContain("kiro-acp");
+    expect(result.checks).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "provider-conformance", status: "pass" }),
+    ]));
+  });
+
+  it("reports an unavailable active optional adapter as degraded without failing doctor", async () => {
+    const value = await paths();
+    const fixture = await createPortableActivatedPrimaryFixture();
+    cleanup.push(fixture.directory);
+    const compatibility = parse(await readFile(fixture.compatibilityPath, "utf8")) as Record<string, any>;
+    compatibility.adapters.agy = {
+      enabled: true,
+      delivery_stage: 4,
+      implementation: {
+        kind: "fixture-process",
+        executable: "missing-agy",
+        provider_identity: "apple-designated",
+        wrapper_entrypoint: fixture.artifactPaths[1],
+      },
+      contract: { protocol: "agy-fixture" },
+      runtime_range: { platforms: [process.platform] },
+      model_family_constraints: { allowed: ["google"], requires_explicit_model: true },
+      official_source_url: "https://example.invalid/agy-fixture",
+    };
+    compatibility.activation_policy = {
+      real_adapters_require_separate_gate: true,
+      default_enabled: false,
+      executable_resolution_version: 2,
+    };
+    await writeFile(fixture.compatibilityPath, stringify(compatibility));
+    const config = parse(await readFile(fixture.configPath, "utf8")) as Record<string, any>;
+    config.allowedAdapters = [...config.allowedAdapters, "agy"];
+    config.activeAdapters = [...config.activeAdapters, "agy"];
+    config.adapters.agy = { command: [process.execPath, fixture.artifactPaths[1]] };
+    await writeFile(fixture.configPath, stringify(config));
+
+    const result = await fabricDoctor([
+      "--agents-home", fixture.directory,
+      "--trusted-config", fixture.configPath,
+      "--compatibility", fixture.compatibilityPath,
+      "--compatibility-schema", fixture.schemaPath,
+    ], value, { preflightProtocolBuild: async () => undefined });
+
+    expect(result).toMatchObject({
+      healthy: true,
+      code: "OPTIONAL_ADAPTERS_DEGRADED",
+      optionalAdapters: [expect.objectContaining({ adapterId: "agy" })],
+    });
+    expect(result.checks).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "provider-conformance", status: "idle", code: "OPTIONAL_ADAPTERS_DEGRADED" }),
+    ]));
   });
 
   it("derives shipped policy from the product root and instance state from the instance root", () => {

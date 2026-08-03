@@ -46,6 +46,14 @@ describe("Stage 1 versioned JSON Schemas", () => {
     const result = validateWithSchema(schema, configuration);
     expect(result.details).toEqual([]);
     expect(result.valid).toBe(true);
+    expect(configuration.activeAdapters).toEqual([
+      "claude-agent-sdk",
+      "codex-app-server",
+      "agy",
+      "cursor-agent",
+      "opencode-acp",
+      "kiro-acp",
+    ]);
 
     const unknown = validateWithSchema(schema, {
       ...configuration,
@@ -125,8 +133,8 @@ describe("Stage 1 versioned JSON Schemas", () => {
     });
     expect(adapters["opencode-acp"]).toMatchObject({
       implementation: {
-        executable: "/opt/homebrew/bin/opencode",
-        provider_install_root: "/opt/homebrew/Cellar/opencode",
+        executable: "opencode",
+        provider_install_root: "${EXECUTABLE_ROOT}",
         provider_identity: "owner-controlled-install-root",
       },
       contract: { protocol: "agent-client-protocol" },
@@ -135,10 +143,18 @@ describe("Stage 1 versioned JSON Schemas", () => {
         allowed_model_patterns: ["opencode/*"],
       },
     });
+    expect(adapters["pi-rpc"]).toMatchObject({
+      implementation: {
+        executable: "pi",
+      },
+    });
     expect(adapters["kiro-acp"]).toMatchObject({
       implementation: { executable: "${USER_HOME}/.local/bin/kiro-cli" },
       contract: { protocol: "agent-client-protocol" },
       model_family_constraints: { allowed: ["open-weight"] },
+    });
+    expect(compatibility.activation_policy).toMatchObject({
+      executable_resolution_version: 2,
     });
     const claude = adapters["claude-agent-sdk"];
     if (!isJsonObject(claude) || !isJsonObject(claude.implementation) || !isJsonObject(claude.contract)) {

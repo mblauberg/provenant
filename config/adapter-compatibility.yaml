@@ -5,6 +5,9 @@ schema_version: 1
 activation_policy:
   real_adapters_require_separate_gate: true
   default_enabled: false
+  # Revision 2 makes PATH names and ${EXECUTABLE_ROOT} explicit. Older
+  # daemons reject this field during schema validation and must restart.
+  executable_resolution_version: 2
 
 adapters:
   claude-agent-sdk:
@@ -76,7 +79,7 @@ adapters:
     implementation:
       kind: npm-cli
       package: "@earendil-works/pi-coding-agent"
-      executable: "@earendil-works/pi-coding-agent"
+      executable: "pi"
       wrapper_entrypoint: "runtime/agent-fabric/src/adapters/providers/optional/pi-rpc.ts"
     contract:
       protocol: pi-jsonl-rpc
@@ -185,7 +188,7 @@ adapters:
       kind: native-cli
       command: opencode
       executable: "opencode"
-      provider_install_root: "/opt/homebrew/Cellar/opencode"
+      provider_install_root: "${EXECUTABLE_ROOT}"
       provider_identity: owner-controlled-install-root
       wrapper_entrypoint: "runtime/agent-fabric/src/adapters/providers/optional/opencode-acp.ts"
     contract:

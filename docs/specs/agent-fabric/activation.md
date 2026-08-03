@@ -10,6 +10,21 @@ The current contract closes effective-configuration identity, subject lineage an
 
 Promote the coordination-only agent fabric into a safely activated local model-execution fabric for Claude, Codex, Agy, Cursor and Kiro, with Pi ready but unavailable until an open-weight provider/model is installed. Add operator-started human-readable Herdr observation and coordinated seat rotation without weakening authority, disclosure, certifying-review/Kiro read-only boundaries or fail-closed compatibility gates.
 
+The shipped router activation remains explicit for `agy`, `cursor-agent`,
+`opencode-acp` and `kiro-acp` as well as the two mandatory primaries. Their
+compatibility entries are not a claim that the provider executable is installed:
+an absent optional executable is reported as unavailable/degraded, omitted from
+the default daemon composition, and does not make ordinary doctor or install
+unhealthy. A direct route or adapter invocation still fails closed with the
+missing-adapter reason. Missing active primaries remain fatal.
+
+Compatibility revision 2 is the small restart boundary for portable executable
+resolution. PATH names are resolved once against the current environment and
+`${EXECUTABLE_ROOT}` is derived from the resolved OpenCode executable. A daemon
+that does not understand `executable_resolution_version: 2` fails schema
+validation and must restart; no compatibility framework or silent fallback is
+retained.
+
 ## Required behaviour
 
 1. Every activated adapter is bound to Git wrapper provenance: the wrapper entrypoint is tracked source, verified against the owning repository's HEAD and recorded as repository commit plus wrapper path in the composed adapter evidence. Provenance is re-derived immediately before every adapter process spawn, so an untracked or locally modified wrapper fails activation closed. Provider CLIs are admitted through their stable launcher, adapter-specific vendor identity and bounded non-answer interface; observed version and digest never gate a normal update. Protocol schemas and Fabric SDK libraries remain hash/lockfile verified. The tsx loader that executes tracked TypeScript source is a lockfile-pinned third-party dependency.

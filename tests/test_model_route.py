@@ -2716,6 +2716,18 @@ def test_split_root_defaults_use_instance_routing_and_product_compatibility(tmp_
         ROOT / "config/adapter-compatibility.yaml",
         product_root / "config/adapter-compatibility.yaml",
     )
+    shutil.copy2(ROOT / "package.json", product_root / "package.json")
+    for relative_path in (
+        "runtime/agent-fabric/scripts/validate-adapter-executables.ts",
+        "runtime/agent-fabric/src/adapters/compatibility.ts",
+        "runtime/agent-fabric/src/adapters/primary-adapters.ts",
+        "runtime/agent-fabric/src/errors.ts",
+        "runtime/agent-fabric/schemas/adapter-compatibility.schema.json",
+    ):
+        destination = product_root / relative_path
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(ROOT / relative_path, destination)
+    (product_root / "node_modules").symlink_to(ROOT / "node_modules", target_is_directory=True)
     (instance_root / "config").mkdir(parents=True)
     catalogue = json.loads((ROOT / "config/model-routing.json").read_text())
     catalogue["catalog_date"] = "2099-01-01"
@@ -2867,6 +2879,75 @@ def test_primary_adapters_honour_fabric_activation_gate(tmp_path):
         assert fabric_route["adapter_enabled"] is True
         assert direct.returncode == 0
         assert direct_route["status"] == "ok"
+
+
+def test_direct_route_rejects_unavailable_primary_executable(tmp_path, monkeypatch, capsys):
+    router = load_router()
+    compatibility_path = tmp_path / "adapter-compatibility.yaml"
+    compatibility_path.write_text(
+        (ROOT / "config" / "adapter-compatibility.yaml")
+        .read_text()
+        .replace('executable: "claude"', 'executable: "missing-claude"', 1)
+    )
+    monkeypatch.setattr(router, "COMPATIBILITY_PATH", compatibility_path)
+
+    result = router.main([
+        "resolve", "--adapter", "claude", "--alias", "scout", "--role", "worker",
+        "--adapter-gate", "direct-cli", "--adapter-compatibility", str(compatibility_path),
+    ])
+
+    route = json.loads(capsys.readouterr().out)
+    assert result == 2
+    assert route["status"] == "adapter_executable_unavailable"
+
+
+def test_direct_optional_route_rejects_unavailable_required_primary(tmp_path, monkeypatch, capsys):
+    router = load_router()
+    agy_executable = tmp_path / "agy"
+    agy_executable.write_text("#!/bin/sh\n")
+    agy_executable.chmod(0o755)
+    compatibility_path = tmp_path / "adapter-compatibility.yaml"
+    compatibility_path.write_text(
+        (ROOT / "config" / "adapter-compatibility.yaml")
+        .read_text()
+        .replace('executable: "claude"', 'executable: "missing-claude"', 1)
+        .replace(
+            'executable: "${USER_HOME}/.local/bin/agy"',
+            f'executable: "${{USER_HOME}}/.local/bin/agy"\n      executable_override: "{agy_executable}"',
+            1,
+        )
+    )
+    monkeypatch.setattr(router, "COMPATIBILITY_PATH", compatibility_path)
+
+    result = router.main([
+        "resolve", "--adapter", "agy", "--model", "gemini-3.1-pro", "--alias", "scout",
+        "--role", "worker", "--adapter-gate", "direct-cli",
+        "--adapter-compatibility", str(compatibility_path),
+    ])
+
+    route = json.loads(capsys.readouterr().out)
+    assert result == 2
+    assert route["status"] == "adapter_executable_unavailable"
+
+
+def test_direct_route_rejects_path_resolution_without_revision_two(tmp_path, monkeypatch, capsys):
+    router = load_router()
+    compatibility_path = tmp_path / "adapter-compatibility.yaml"
+    compatibility_path.write_text(
+        (ROOT / "config" / "adapter-compatibility.yaml")
+        .read_text()
+        .replace("  executable_resolution_version: 2\n", "", 1)
+    )
+    monkeypatch.setattr(router, "COMPATIBILITY_PATH", compatibility_path)
+
+    result = router.main([
+        "resolve", "--adapter", "claude", "--alias", "scout", "--role", "worker",
+        "--adapter-gate", "direct-cli", "--adapter-compatibility", str(compatibility_path),
+    ])
+
+    route = json.loads(capsys.readouterr().out)
+    assert result == 2
+    assert route["status"] == "adapter_compatibility_invalid"
 
 
 def test_fabric_gate_rejects_catalogue_adapter_without_compatibility_contract():

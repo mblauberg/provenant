@@ -5,11 +5,13 @@ import { createHash } from "node:crypto";
 import { lstat, mkdir, mkdtemp, readFile, readdir, readlink, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { parse } from "yaml";
 
 const execFileAsync = promisify(execFile);
 
+import { resolveAdapterExecutable, resolveCompatibilityArtifact, resolveProviderInstallRoot } from "../dist/adapters/compatibility.js";
 import { AdapterProcessTransport } from "../dist/adapters/process.js";
 import { providerConformanceEvidence, verifyProviderConformance } from "../dist/adapters/provider-conformance.js";
 
@@ -36,7 +38,12 @@ const wrapper = {
   "opencode-acp": "adapters/providers/optional/opencode-acp.ts",
 }[adapterId];
 if (wrapper === undefined) throw new Error(`unsupported adapter ${adapterId}`);
-const agentsRoot = resolve(new URL("../../../", import.meta.url).pathname);
+const agentsRoot = fileURLToPath(new URL("../../../", import.meta.url));
+const fabricConfig = parse(await readFile(join(agentsRoot, "config/agent-fabric.yaml"), "utf8"));
+const activeAdapters = fabricConfig?.activeAdapters;
+if (!Array.isArray(activeAdapters) || !activeAdapters.includes(adapterId)) {
+  throw new Error(`adapter ${adapterId} is not active in the current Fabric configuration`);
+}
 const compatibility = parse(await readFile(join(agentsRoot, "config/adapter-compatibility.yaml"), "utf8"));
 const compatibilityEntry = compatibility?.adapters?.[adapterId];
 if (
@@ -46,13 +53,28 @@ if (
   throw new Error(`adapter ${adapterId} is not enabled`);
 }
 const implementation = compatibilityEntry.implementation;
-const expandPath = (value) => value
-  .replaceAll("${USER_HOME}", process.env.HOME ?? "")
-  .replaceAll("${AGENTS_HOME}", agentsRoot);
-const configuredExecutable = expandPath(implementation.executable);
+const compatibilityPath = join(agentsRoot, "config/adapter-compatibility.yaml");
+const configuredExecutable = await resolveAdapterExecutable({
+  executable: implementation.executable,
+  ...(typeof implementation.executable_override === "string"
+    ? { executableOverride: implementation.executable_override }
+    : {}),
+  compatibilityPath,
+});
 if (await realpath(providerExecutable) !== await realpath(configuredExecutable)) {
   throw new Error("provider executable does not match the compatibility path");
 }
+const cursorInstallRoot = implementation.cursor_install_root === undefined
+  ? undefined
+  : resolveCompatibilityArtifact(compatibilityPath, implementation.cursor_install_root);
+const providerInstallRoot = implementation.provider_install_root === undefined
+  ? undefined
+  : await resolveProviderInstallRoot({
+    adapterId,
+    configuredRoot: implementation.provider_install_root,
+    executable: configuredExecutable,
+    compatibilityPath,
+  });
 const providerConfigRoot = adapterId === "opencode-acp"
   ? join(process.env.XDG_CONFIG_HOME ?? join(process.env.HOME ?? "", ".config"), "opencode")
   : undefined;
@@ -60,14 +82,10 @@ const providerConfigBefore = providerConfigRoot === undefined ? undefined : awai
 const providerConformance = await verifyProviderConformance({
   adapterId,
   executable: configuredExecutable,
-  ...(implementation.cursor_install_root === undefined ? {} : {
-    cursorInstallRoot: expandPath(implementation.cursor_install_root),
-  }),
-  ...(implementation.provider_install_root === undefined ? {} : {
-    providerInstallRoot: expandPath(implementation.provider_install_root),
-  }),
+  ...(cursorInstallRoot === undefined ? {} : { cursorInstallRoot }),
+  ...(providerInstallRoot === undefined ? {} : { providerInstallRoot }),
 });
-const wrapperPath = resolve(new URL("../src", import.meta.url).pathname, wrapper);
+const wrapperPath = resolve(fileURLToPath(new URL("../src/", import.meta.url)), wrapper);
 if (await realpath(wrapperPath) !== await realpath(join(agentsRoot, implementation.wrapper_entrypoint))) {
   throw new Error("wrapper entrypoint does not match the compatibility path");
 }
@@ -137,9 +155,9 @@ const args = [
   "--journal", join(directory, "journal.sqlite3"),
   "--provider-executable", configuredExecutable,
   ...(implementation.provider_identity === undefined ? [] : ["--provider-identity-policy", implementation.provider_identity]),
-  ...((implementation.provider_install_root ?? implementation.cursor_install_root) === undefined
+  ...((providerInstallRoot ?? cursorInstallRoot) === undefined
     ? []
-    : ["--provider-install-root", expandPath(implementation.provider_install_root ?? implementation.cursor_install_root)]),
+    : ["--provider-install-root", providerInstallRoot ?? cursorInstallRoot]),
   ...(provider === undefined ? [] : ["--allowed-provider", provider]),
 ];
 const transport = new AdapterProcessTransport({ command: [process.execPath, ...args], environment: {}, responseTimeoutMs: 120_000 });

@@ -11,6 +11,8 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
+import subprocess
 import sys
 from typing import Any
 
@@ -35,6 +37,7 @@ COMPATIBILITY_ADAPTER_IDS = {
     "opencode": "opencode-acp",
     "pi": "pi-rpc",
 }
+PRIMARY_COMPATIBILITY_ADAPTER_IDS = ("claude-agent-sdk", "codex-app-server")
 TRUSTED_CAPABILITY_SOURCES = {
     "codex debug models": "codex",
     "claude subscription canary": "claude",
@@ -116,6 +119,12 @@ def load_adapter_compatibility(
         or any(not isinstance(item, str) for item in patterns)
     ):
         return None, "adapter_compatibility_invalid"
+    executable_ids = list(PRIMARY_COMPATIBILITY_ADAPTER_IDS)
+    if entry["enabled"] is True and compatibility_id not in executable_ids:
+        executable_ids.append(compatibility_id)
+    validation_status = validate_adapter_executables(executable_ids, path or COMPATIBILITY_PATH)
+    if validation_status:
+        return None, validation_status
     return {
         "compatibility_adapter": compatibility_id,
         "enabled": entry["enabled"],
@@ -127,6 +136,52 @@ def load_adapter_compatibility(
         if isinstance(constraints, dict)
         else True,
     }, ""
+
+def validate_adapter_executables(adapter_ids: list[str], compatibility_path: Path) -> str:
+    validator = PRODUCT_ROOT / "runtime/agent-fabric/scripts/validate-adapter-executables.ts"
+    schema = PRODUCT_ROOT / "runtime/agent-fabric/schemas/adapter-compatibility.schema.json"
+    loader = PRODUCT_ROOT / "node_modules/tsx/dist/loader.mjs"
+    if not validator.is_file() or not schema.is_file() or not loader.is_file():
+        return "adapter_compatibility_unavailable"
+    node = shutil.which("node")
+    if node is None:
+        return "adapter_compatibility_unavailable"
+    command = [
+        node,
+        "--import",
+        str(loader),
+        str(validator),
+        "--compatibility",
+        str(compatibility_path),
+        "--schema",
+        str(schema),
+    ]
+    for adapter_id in adapter_ids:
+        command.extend(("--adapter", adapter_id))
+    try:
+        result = subprocess.run(
+            command,
+            cwd=PRODUCT_ROOT,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return "adapter_compatibility_unavailable"
+    if result.returncode == 0:
+        return ""
+    try:
+        error = json.loads(result.stderr.strip().splitlines()[-1])
+    except (IndexError, json.JSONDecodeError):
+        return "adapter_compatibility_unavailable"
+    code = error.get("code") if isinstance(error, dict) else None
+    if code == "ADAPTER_COMPATIBILITY_INVALID":
+        return "adapter_compatibility_invalid"
+    if code in {"ADAPTER_ARTIFACT_MISSING", "ADAPTER_DISABLED", "NOT_FOUND"}:
+        return "adapter_executable_unavailable"
+    return "adapter_compatibility_unavailable"
 
 
 def load_active_adapters(path: Path) -> tuple[set[str], str]:

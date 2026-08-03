@@ -12,7 +12,8 @@
       "required": ["real_adapters_require_separate_gate", "default_enabled"],
       "properties": {
         "real_adapters_require_separate_gate": {"const": true},
-        "default_enabled": {"const": false}
+        "default_enabled": {"const": false},
+        "executable_resolution_version": {"const": 2}
       }
     },
     "adapters": {

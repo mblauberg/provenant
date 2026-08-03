@@ -28,7 +28,7 @@ import {
   type PrivateDiscoveryOwner,
   type PrivateDiscoveryPaths,
 } from "./private-discovery.js";
-import { FABRIC_PROTOCOL_VERSION, isRecord } from "./protocol.js";
+import { EXECUTABLE_RESOLUTION_VERSION, FABRIC_PROTOCOL_VERSION, isRecord } from "./protocol.js";
 import { preflightProtocolBuild } from "./protocol-build-preflight.js";
 import { FabricDaemonClient } from "./rpc-client.js";
 import { composeDaemonConfiguration } from "./composition.js";
@@ -407,6 +407,17 @@ async function privateDaemonHandshake(
   try {
     client = await FabricDaemonClient.connect(discovery.receipt.socketPath, discovery.receipt.bootstrapCapability);
   } catch (error: unknown) {
+    if (
+      error instanceof FabricRemoteError &&
+      error.code === "DAEMON_PROTOCOL_MISMATCH" &&
+      error.message.includes("executable resolution")
+    ) {
+      return {
+        status: "incompatible",
+        responsive: true,
+        message: error.message,
+      };
+    }
     return {
       status: "unavailable",
       reason: error instanceof FabricRemoteError && error.code === "DAEMON_CONNECT_TIMEOUT" ? "timeout" : "unreachable",
@@ -418,6 +429,20 @@ async function privateDaemonHandshake(
   await client.close();
   if (initialized.protocolVersion !== FABRIC_PROTOCOL_VERSION || !initialized.capabilities.includes("rpc")) {
     return { status: "incompatible", responsive: true, message: "daemon private protocol is incompatible" };
+  }
+  if (!initialized.capabilities.includes(MCP_BOOTSTRAP_CREDENTIALS_FEATURE)) {
+    return {
+      status: "incompatible",
+      responsive: true,
+      message: `daemon is missing required features: ${MCP_BOOTSTRAP_CREDENTIALS_FEATURE}`,
+    };
+  }
+  if (initialized.executableResolutionVersion !== EXECUTABLE_RESOLUTION_VERSION) {
+    return {
+      status: "incompatible",
+      responsive: true,
+      message: "daemon handshake cannot prove executable resolution revision 2",
+    };
   }
   if (
     discovery.receipt.protocolVersion !== undefined &&

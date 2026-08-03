@@ -63,13 +63,6 @@ def instance_root_for(home: Path) -> Path:
 
 
 def run(platform: str, home: Path, *arguments: str, **extra_env):
-    provider_bin = home / ".local" / "bin"
-    provider_bin.mkdir(parents=True, exist_ok=True)
-    for name in ("agy", "cursor-agent", "kiro-cli"):
-        executable = provider_bin / name
-        if not executable.exists():
-            executable.write_text("#!/bin/sh\nexit 0\n")
-            executable.chmod(0o700)
     env = os.environ.copy()
     env.update({"HOME": str(home)})
     # Keep the instance root deterministic in the scratch HOME. AGENTS_HOME now
@@ -78,6 +71,13 @@ def run(platform: str, home: Path, *arguments: str, **extra_env):
     env["AGENT_FABRIC_INSTANCE_ROOT"] = str(instance_root_for(home))
     env["PROVENANT_ALLOW_LINKED_WORKTREE_INSTALL"] = "1"
     env.update(extra_env)
+    provider_bin = home / ".local" / "bin"
+    provider_bin.mkdir(parents=True, exist_ok=True)
+    for name in ("claude", "codex"):
+        executable = provider_bin / name
+        executable.write_text("#!/bin/sh\nexit 0\n")
+        executable.chmod(0o700)
+    env["PATH"] = str(provider_bin) + os.pathsep + env.get("PATH", "")
     return subprocess.run(
         [str(SCRIPT), "--platform", platform, *arguments],
         cwd=ROOT,
@@ -585,6 +585,9 @@ def test_primary_mcp_clients_remain_the_default(tmp_path):
     assert not (tmp_path / ".gemini/config/mcp_config.json").exists()
     assert not (tmp_path / ".kiro/settings/mcp.json").exists()
     assert not (tmp_path / ".config/opencode/opencode.jsonc").exists()
+    assert not (tmp_path / ".local/bin/agy").exists()
+    assert not (tmp_path / ".local/bin/cursor-agent").exists()
+    assert not (tmp_path / ".local/bin/kiro-cli").exists()
 
 
 def test_rejects_unknown_mcp_client_selection(tmp_path):

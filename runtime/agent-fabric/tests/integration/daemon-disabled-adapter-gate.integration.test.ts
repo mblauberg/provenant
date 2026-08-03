@@ -14,6 +14,55 @@ import {
 } from "../support/primary-adapter-testkit.ts";
 
 describe("daemon trusted adapter composition", () => {
+  it("skips an unavailable active optional adapter while retaining the primary daemon", async () => {
+    const fixture = await createPortableActivatedPrimaryFixture();
+    try {
+      const compatibility = parse(await readFile(fixture.compatibilityPath, "utf8")) as Record<string, any>;
+      const adapters = compatibility.adapters as Record<string, any>;
+      adapters.agy = {
+        enabled: true,
+        delivery_stage: 4,
+        implementation: {
+          kind: "fixture-process",
+          executable: "missing-agy",
+          provider_identity: "apple-designated",
+          wrapper_entrypoint: fixture.artifactPaths[1],
+        },
+        contract: { protocol: "agy-fixture" },
+        runtime_range: { platforms: [process.platform] },
+        model_family_constraints: { allowed: ["google"], requires_explicit_model: true },
+        official_source_url: "https://example.invalid/agy-fixture",
+      };
+      compatibility.activation_policy = {
+        real_adapters_require_separate_gate: true,
+        default_enabled: false,
+        executable_resolution_version: 2,
+      };
+      await writeFile(fixture.compatibilityPath, stringify(compatibility));
+      const config = parse(await readFile(fixture.configPath, "utf8")) as Record<string, any>;
+      config.allowedAdapters = [...config.allowedAdapters, "agy"];
+      config.activeAdapters = [...config.activeAdapters, "agy"];
+      config.adapters.agy = { command: [process.execPath, fixture.artifactPaths[1]] };
+      await writeFile(fixture.configPath, stringify(config));
+
+      const composed = await composeDaemonConfiguration({
+        globalConfigPath: fixture.configPath,
+        compatibilityPath: fixture.compatibilityPath,
+        compatibilitySchemaPath: fixture.schemaPath,
+        agentsHome: fixture.directory,
+        verifyNpmInstall: async () => undefined,
+        verifyProvider: async () => ({}) as never,
+      });
+
+      expect(Object.keys(composed.adapters).sort()).toEqual(["claude-agent-sdk", "codex-app-server"]);
+      expect(composed.unavailableOptionalAdapters).toEqual([
+        expect.objectContaining({ adapterId: "agy" }),
+      ]);
+    } finally {
+      await rm(fixture.directory, { recursive: true, force: true });
+    }
+  });
+
   it("refuses adapter composition when npm install attestation is missing", async () => {
     const fixture = await createPortableActivatedPrimaryFixture();
     try {

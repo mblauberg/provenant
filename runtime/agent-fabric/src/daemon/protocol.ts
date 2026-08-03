@@ -12,6 +12,7 @@ import { fabricCliCommand } from "../domain/fabric-roots.js";
 
 export { isRecord } from "../domain/record.js";
 export {
+  EXECUTABLE_RESOLUTION_VERSION,
   FABRIC_DAEMON_VERSION,
   FABRIC_PROTOCOL_VERSION,
   daemonInitializeParams,

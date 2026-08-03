@@ -1,6 +1,17 @@
-import { describe, expect, it } from "vitest";
+import { readFile, rm, writeFile } from "node:fs/promises";
+import { dirname } from "node:path";
 
-import { assessAdapterModelPolicy } from "../../src/adapters/model-selection.ts";
+import { afterEach, describe, expect, it } from "vitest";
+import { parse, stringify } from "yaml";
+
+import { loadAdapterModelConstraints, assessAdapterModelPolicy } from "../../src/adapters/model-selection.ts";
+import { createCursorKiroCompatibilityFixture } from "../support/stage4-cursor-kiro-testkit.ts";
+
+const fixtures: Array<{ directory: string; compatibilityPath: string }> = [];
+
+afterEach(async () => {
+  await Promise.all(fixtures.splice(0).map((fixture) => rm(fixture.directory, { recursive: true, force: true })));
+});
 
 describe("adapter model matching conformance", () => {
   it("matches Python-style wildcards case-insensitively", () => {
@@ -80,5 +91,26 @@ describe("adapter model matching conformance", () => {
       allowedFamilies: ["open-weight"],
       requiresExplicitModel: true,
     })).toEqual({ allowed: false, reason: "family-forbidden" });
+  });
+
+  it("derives the OpenCode install root from its resolved executable", async () => {
+    const fixture = await createCursorKiroCompatibilityFixture();
+    fixtures.push(fixture);
+    const document = parse(await readFile(fixture.compatibilityPath, "utf8")) as {
+      activation_policy: Record<string, unknown>;
+      adapters: Record<string, { implementation: { executable: string; provider_install_root?: string } }>;
+    };
+    const executable = document.adapters["opencode-acp"]!.implementation.executable;
+    document.adapters["opencode-acp"]!.implementation.provider_install_root = "${EXECUTABLE_ROOT}";
+    document.activation_policy.executable_resolution_version = 2;
+    await writeFile(fixture.compatibilityPath, stringify(document));
+
+    const constraints = await loadAdapterModelConstraints({
+      compatibilityPath: fixture.compatibilityPath,
+      schemaPath: fixture.schemaPath,
+      adapterId: "opencode-acp",
+    });
+
+    expect(constraints.providerInstallRoot).toBe(dirname(executable));
   });
 });

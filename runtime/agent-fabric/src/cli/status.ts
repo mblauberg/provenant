@@ -7,7 +7,8 @@ import {
   assertRequiredResultShapeFeatures,
 } from "@local/agent-fabric-protocol";
 
-import { verifyAdapterCompatibility } from "../adapters/compatibility.js";
+import { verifyAdapterCompatibility, type AdapterExecutableFailure } from "../adapters/compatibility.js";
+import { isPrimaryAdapter } from "../adapters/primary-adapters.js";
 import { verifyProviderConformance } from "../adapters/provider-conformance.js";
 import { verifyProviderExecutableIdentity } from "../adapters/provider-identity.js";
 import { ADAPTER_INTERFACE_PROBE_INCOMPLETE, probeProviderInterface } from "../adapters/provider-interface.js";
@@ -136,7 +137,6 @@ const RECOVERABLE_CODES: ReadonlySet<string> = new Set([
   "DATABASE_INSPECTION_UNSTABLE",
 ]);
 
-const PRIMARY_ADAPTER_IDS = ["claude-agent-sdk", "codex-app-server"] as const;
 const PROVIDER_PROBE_TIMEOUT_MS = 16_000;
 const STALENESS_THRESHOLD_DAYS = 30;
 const PROFILE_PIN_REPAIR_COMMAND = "npm run profile:pin";
@@ -745,6 +745,7 @@ export async function fabricDoctor(
   let adapterCommands: string[][] = [];
   let compatibilityVerification: Awaited<ReturnType<typeof verifyAdapterCompatibility>> | undefined;
   const providerObservations: ProviderObservation[] = [];
+  const optionalAdapterFailures: AdapterExecutableFailure[] = [];
   const checks: Check[] = [];
   checks.push(await check("protocol-build", async () => {
     if (process.env.AGENT_FABRIC_PROTOCOL_BUILD_VERDICT === "stale") {
@@ -788,17 +789,35 @@ export async function fabricDoctor(
     return loaderParts.length === 0 ? "no tsx wrapper commands configured" : "tsx loader present";
   }));
   checks.push(await check("adapter-compatibility", async () => {
-    compatibilityVerification = await verifyAdapterCompatibility({ compatibilityPath: selected.compatibility, schemaPath: selected.compatibilitySchema, adapterIds, requireEnabled: true });
+    compatibilityVerification = await verifyAdapterCompatibility({
+      compatibilityPath: selected.compatibility,
+      schemaPath: selected.compatibilitySchema,
+      adapterIds,
+      requireEnabled: true,
+      allowUnavailableOptional: true,
+    });
+    optionalAdapterFailures.push(...compatibilityVerification.unavailableOptionalAdapters);
     return compatibilityVerification.wrapperProvenance
       .map((item) => `${item.adapterId}=${item.repositoryCommit}:${item.wrapperPath}`)
       .join(" ");
   }));
   checks.push(await check("provider-conformance", async () => {
-    const verification = compatibilityVerification ?? await verifyAdapterCompatibility({ compatibilityPath: selected.compatibility, schemaPath: selected.compatibilitySchema, adapterIds, requireEnabled: true });
+    const verification = compatibilityVerification ?? await verifyAdapterCompatibility({
+      compatibilityPath: selected.compatibility,
+      schemaPath: selected.compatibilitySchema,
+      adapterIds,
+      requireEnabled: true,
+      allowUnavailableOptional: true,
+    });
+    if (compatibilityVerification === undefined) optionalAdapterFailures.push(...verification.unavailableOptionalAdapters);
     const observations = [];
     for (const adapterId of adapterIds) {
       const executable = verification.resolvedExecutables[adapterId];
-      if (executable === undefined) throw new Error(`provider executable is missing: ${adapterId}`);
+      if (executable === undefined) {
+        const unavailable = verification.unavailableOptionalAdapters.find((item) => item.adapterId === adapterId);
+        if (unavailable !== undefined) continue;
+        throw new Error(`provider executable is missing: ${adapterId}`);
+      }
       const policy = await loadAdapterModelConstraints({
         compatibilityPath: selected.compatibility,
         schemaPath: selected.compatibilitySchema,
@@ -811,7 +830,7 @@ export async function fabricDoctor(
         ...(policy.cursorInstallRoot === undefined ? {} : { cursorInstallRoot: policy.cursorInstallRoot }),
         ...(policy.providerInstallRoot === undefined ? {} : { providerInstallRoot: policy.providerInstallRoot }),
       };
-      if (PRIMARY_ADAPTER_IDS.some((primaryId) => primaryId === adapterId)) {
+      if (isPrimaryAdapter(adapterId)) {
         const timeoutMs = dependencies.providerProbeTimeoutMs ?? PROVIDER_PROBE_TIMEOUT_MS;
         const [identity, providerInterface] = await Promise.allSettled([
           bounded(Promise.resolve().then(async () => await (dependencies.verifyProviderIdentity ?? verifyProviderExecutableIdentity)(input)), timeoutMs, `${adapterId} provider identity probe`),
@@ -830,11 +849,30 @@ export async function fabricDoctor(
         }
         continue;
       }
-      const observation = await (dependencies.verifyProvider ?? verifyProviderConformance)(input);
-      observations.push(`${adapterId}=${observation.interface.version}:${observation.identity.sha256}:${observation.identity.assurance}`);
+      try {
+        const observation = await (dependencies.verifyProvider ?? verifyProviderConformance)(input);
+        observations.push(`${adapterId}=${observation.interface.version}:${observation.identity.sha256}:${observation.identity.assurance}`);
+      } catch (error: unknown) {
+        optionalAdapterFailures.push({
+          adapterId,
+          executable,
+          reason: errorDetail(error),
+        });
+      }
     }
     return observations.join(" ");
   }));
+  if (optionalAdapterFailures.length > 0) {
+    const providerCheck = checks.find((item) => item.id === "provider-conformance");
+    if (providerCheck !== undefined && providerCheck.status === "pass") {
+      providerCheck.status = "idle";
+      providerCheck.code = "OPTIONAL_ADAPTERS_DEGRADED";
+      providerCheck.detail = [
+        providerCheck.detail,
+        ...optionalAdapterFailures.map((item) => `${item.adapterId}=unavailable: ${item.reason}`),
+      ].filter((item) => item.length > 0).join(" ");
+    }
+  }
   const metadata = await readDoctorMetadata(selected.modelRouting);
   const providerIdentity = providerObservations.map((observation) =>
     primaryProviderState(observation));
@@ -942,7 +980,7 @@ export async function fabricDoctor(
     schemaVersion: 1,
     healthy,
     state,
-    code: failed?.code ?? daemon.code,
+    code: failed?.code ?? (optionalAdapterFailures.length > 0 ? "OPTIONAL_ADAPTERS_DEGRADED" : daemon.code),
     // Why the state holds, not merely which state it is: the exact check whose
     // precondition decided it, and whether this lifecycle may repair it.
     // `satisfied` reports that check's own precondition and is independent of
@@ -964,6 +1002,7 @@ export async function fabricDoctor(
       socketPath: daemon.socketPath,
     },
     providerIdentity: { adapters: providerIdentity },
+    optionalAdapters: optionalAdapterFailures,
     reviewProfilePins: { repairCommand: PROFILE_PIN_REPAIR_COMMAND, ...pinReport },
     staleness: {
       advisory: true,

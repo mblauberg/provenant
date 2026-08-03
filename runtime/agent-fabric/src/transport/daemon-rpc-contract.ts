@@ -1,7 +1,10 @@
 import { MCP_BOOTSTRAP_CREDENTIALS_FEATURE } from "@local/agent-fabric-protocol";
 
 import { isRecord } from "../domain/record.js";
+import { EXECUTABLE_RESOLUTION_VERSION } from "../adapters/compatibility.js";
 import { FABRIC_PROTOCOL_LIMITS, type FabricProtocolLimits } from "./bounded-ndjson.js";
+
+export { EXECUTABLE_RESOLUTION_VERSION } from "../adapters/compatibility.js";
 
 export const FABRIC_PROTOCOL_VERSION = 1 as const;
 export const FABRIC_DAEMON_VERSION = "0.1.0";
@@ -15,6 +18,7 @@ export type DaemonInitializeParams = {
 export type DaemonInitializeResult = {
   protocolVersion: typeof FABRIC_PROTOCOL_VERSION;
   daemonVersion: string;
+  executableResolutionVersion?: typeof EXECUTABLE_RESOLUTION_VERSION;
   capabilities: string[];
   limits: FabricProtocolLimits;
   activeAdapters: string[];
@@ -24,6 +28,7 @@ export function daemonInitializeResult(activeAdapters: string[]): DaemonInitiali
   return {
     protocolVersion: FABRIC_PROTOCOL_VERSION,
     daemonVersion: FABRIC_DAEMON_VERSION,
+    executableResolutionVersion: EXECUTABLE_RESOLUTION_VERSION,
     capabilities: ["rpc", MCP_BOOTSTRAP_CREDENTIALS_FEATURE],
     limits: FABRIC_PROTOCOL_LIMITS,
     activeAdapters: [...new Set(activeAdapters)].sort(),
@@ -92,9 +97,10 @@ export function isDaemonInitializeResult(value: unknown): value is DaemonInitial
   const limits = isRecord(value) ? value.limits : undefined;
   if (
     !isRecord(value) ||
-    Object.keys(value).some((key) => !["protocolVersion", "daemonVersion", "capabilities", "limits", "activeAdapters"].includes(key)) ||
+    Object.keys(value).some((key) => !["protocolVersion", "daemonVersion", "executableResolutionVersion", "capabilities", "limits", "activeAdapters"].includes(key)) ||
     value.protocolVersion !== FABRIC_PROTOCOL_VERSION ||
     typeof value.daemonVersion !== "string" ||
+    (value.executableResolutionVersion !== undefined && value.executableResolutionVersion !== EXECUTABLE_RESOLUTION_VERSION) ||
     !Array.isArray(value.capabilities) ||
     !value.capabilities.every((capability) => typeof capability === "string") ||
     !value.capabilities.includes("rpc") ||

@@ -29,6 +29,7 @@ import {
   TimedNdjsonTransport,
   type TimedNdjsonTransportDependencies,
 } from "../transport/ndjson-rpc.js";
+import { EXECUTABLE_RESOLUTION_VERSION } from "../adapters/compatibility.js";
 import { isRecord, type DaemonInitializeResult } from "./protocol.js";
 
 function isMessageKind(value: unknown): value is MessageInput["kind"] {
@@ -323,11 +324,19 @@ export class FabricDaemonClient {
     requiredCapabilities: readonly string[] = [],
     transportDependencies?: TimedNdjsonTransportDependencies,
   ): Promise<FabricDaemonClient> {
-    return new FabricDaemonClient(await TimedNdjsonTransport.connect({
+    const transport = await TimedNdjsonTransport.connect({
       socketPath,
       capability,
       requiredCapabilities,
-    }, transportDependencies));
+    }, transportDependencies);
+    if (transport.initializeResult.executableResolutionVersion !== EXECUTABLE_RESOLUTION_VERSION) {
+      await transport.close();
+      throw new FabricRemoteError(
+        "DAEMON_PROTOCOL_MISMATCH",
+        "daemon handshake cannot prove executable resolution revision 2",
+      );
+    }
+    return new FabricDaemonClient(transport);
   }
 
   get initializeResult(): DaemonInitializeResult {
