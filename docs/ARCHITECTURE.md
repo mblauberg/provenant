@@ -150,12 +150,15 @@ agent product. The high-stakes overlay adds source-authority, privacy,
 qualified-review and explicit user-action controls without multiplying the
 base profiles.
 
-The state machine is enforced rather than advisory.
-`skills/deliver/scripts/validate_delivery.py` holds the transition table and
-rejects a receipt whose recorded history jumps a gate, so the states below are
-the ones a run can actually occupy. The diagram body between the markers is
-rendered from those constants by `scripts/render_doc_projections.py`; the
-accessibility text, palette, class lines and edge labels stay hand-written.
+The state machine is enforced rather than advisory. The states, side states and
+transitions are declared once in `skills/deliver/contract/lifecycle.v1.json`,
+loaded through `skills/deliver/contract/lifecycle.py` and materialised by
+`skills/deliver/scripts/delivery_validation_common.py`;
+`skills/deliver/scripts/delivery_validation_lifecycle.py` rejects a receipt
+whose recorded history jumps a gate, so the states below are the ones a run can
+actually occupy. The diagram body between the markers is rendered from those
+constants by `scripts/render_doc_projections.py`; the accessibility text,
+palette, class lines and edge labels stay hand-written.
 
 <!-- delivery-state-machine:start -->
 ```mermaid

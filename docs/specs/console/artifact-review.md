@@ -346,10 +346,12 @@ generation/state/reason, reservation, route/lookup/settlement/evidence fields.
 Retire is visible only when that live row says `awaiting-human-retire` and
 eligible; Preview/Commit binds the same generation/state/reservation. Receipt
 recovery history is audit-only and never enables an action.
-The schema-v2 Fabric receipt exports this same reducer under
+The schema-v2 Fabric receipt is specified to export this same reducer under
 `reviewCompletion`, exact safe route/review rows under `providerRoutes` and
-`providerReviews`, and safe recovery digests under `routeIntegrityRecoveries`;
-the Console does not invent alternate receipt
+`providerReviews`, and safe recovery digests under `routeIntegrityRecoveries`.
+That extension is not yet in the shipped closed schema
+(`runtime/agent-fabric/schemas/fabric-receipt.v2.schema.json`); until it lands
+the Console must not invent alternate receipt
 fields. Receipt v2 validates standalone with literal local objective/provider/
 operator catalogues and no resolver; unknown future codes fail instead of
 being displayed as current truth. Raw provider-specific detail stays private

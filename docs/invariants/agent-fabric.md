@@ -42,19 +42,19 @@ backfilled or rewritten.
 | A task-bound answer-bearing provider review returns only a validated bounded answer and canonical result digest | closed provider-action codec, exact task/authority admission and adapter capability check | provider-action and MCP acceptance tests |
 | Typed Git grants preserve exact human-input provenance and are rechecked after asynchronous observation | operator-action input-record digest propagation plus final authority/grant/gate/profile/remote/writer claim transaction | `operator-projection-actions.test.ts`, `typed-git-service.test.ts` |
 | `workspace-write-offline` is an internal exact-workspace projection, never a caller-selectable profile; an attempted use reuses provider-action and adapter-journal custody | authority compiler rejects payload selection before workspace resolution; adapter projection parser binds the exact root and fixed offline controls before journal preparation or dispatch; Codex threads stay read-only, exact write authority exists only on its admitted turn, and ordinary turns restate read-only | `authority-compiler.unit.test.ts`, `primary-provider-adapters.unit.test.ts` |
-| A fixed local Git mutation starts only with a verified native first-mutation fence | no-follow pinned path/index bytes, native `index.lock`, atomic index install, `update-ref` old-object CAS, or an exact 0700 worktree-destination reservation followed by `--no-checkout`; every other fixed-port variant reports `CAPABILITY_UNAVAILABLE` before custody | `fixed-git-mutation-port.test.ts` |
+| A fixed local Git mutation never starts without a verified native first-mutation fence | the bundled `FixedGitMutationPort` holds no native fence, so it refuses every variant with `CAPABILITY_UNAVAILABLE` before any point-of-use claim; a fence-holding substrate port must be injected by trusted daemon composition before any variant becomes executable | `fixed-git-mutation-port.test.ts` |
 | Git profiles, secret-free remote targets and run allow-lists come only from trusted daemon composition | production child composition forwards only typed trusted Git configuration; `TrustedGitRegistry` digest-checks profiles/remotes, defers configured run allow-lists until their exact authority tuple exists, and persists every registry/allow-list revision behind immutable triggers | `production-bootstrap-wire.test.ts`, `trusted-git-registry.test.ts`, `migration-runner.integration.test.ts` |
 
-The bundled fixed local mutation port currently admits `stage`, `unstage`,
-`commit`, `branch-create` and the three `worktree-create-*` variants. Worktree
-creation pins the exact source object/ref, owns one canonical direct-child
-destination and never materialises checkout content. Remote effects, pull,
-merge/rebase and successors, branch rename/delete, worktree move/remove and
-upstream configuration remain in the closed protocol vocabulary but return
-typed unavailability unless trusted daemon composition supplies a port with the
-required native/remote CAS and deterministic-result contract. The Console must
-display that unavailable state; it must not fall back to porcelain or arbitrary
-Git execution.
+The bundled fixed local mutation port currently admits no variant. Every typed
+Git variant, including `stage`, `unstage`, `commit`, `branch-create` and the
+three `worktree-create-*` modes, returns `CAPABILITY_UNAVAILABLE` before any
+custody claim, because the Node runtime advertises no mutation until a native
+helper can bind locks, path identities and the point-of-use claim without a
+pathname gap. The complete closed protocol vocabulary therefore remains
+declarable and grantable, but nothing is executable unless trusted daemon
+composition injects a substrate port with the required native/remote CAS and
+deterministic-result contract. The Console must display that unavailable state;
+it must not fall back to porcelain or arbitrary Git execution.
 
 The selected machine database can also be checked without provider execution:
 

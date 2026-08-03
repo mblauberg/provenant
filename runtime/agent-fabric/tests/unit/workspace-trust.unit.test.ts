@@ -6,6 +6,10 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
+  looksLikeRepositoryCollection,
+  nearestGitWorkspace,
+} from "../../src/cli/mcp-bootstrap.ts";
+import {
   runWorkspaceTrust,
   trustedWorkspaceIdentity,
   trustedWorkspaceRoots,
@@ -149,12 +153,77 @@ describe("machine-local workspace trust", () => {
     await expect(runWorkspaceTrust(["list"], value.paths)).resolves.toMatchObject({ entries: [] });
   });
 
-  it("trusts a non-Git directory beside repository neighbours", async () => {
+  it("trusts a marker-bearing multi-repository project and keeps it outside Git discovery", async () => {
     const value = await fixture();
-    await gitRepository(value.root, "first-repo");
-    await gitRepository(value.root, "second-repo");
+    const project = join(value.root, "composed-project");
+    await mkdir(project, { mode: 0o700 });
+    await gitRepository(project, "first-repo");
+    await gitRepository(project, "second-repo");
+    await writeFile(join(project, "AGENTS.md"), "# composed project\n");
+    const canonicalProject = await realpath(project);
+
+    await expect(nearestGitWorkspace(canonicalProject)).resolves.toBeNull();
+    await expect(looksLikeRepositoryCollection(canonicalProject)).resolves.toBe(false);
+    await expect(runWorkspaceTrust(["trust", project], value.paths)).resolves.toMatchObject({ trusted: true });
+  });
+
+  it("refuses a collection whose .claude entry is itself a cloned repository", async () => {
+    const value = await fixture();
+    const collection = join(value.root, "cloned-marker-collection");
+    await mkdir(collection, { mode: 0o700 });
+    await gitRepository(collection, "first-repo");
+    await gitRepository(collection, "second-repo");
+    // Anyone who can drop a repository beside the others could otherwise name
+    // it .claude and switch the collection guard off for every sibling.
+    await gitRepository(collection, ".claude");
+    const canonicalCollection = await realpath(collection);
+
+    await expect(looksLikeRepositoryCollection(canonicalCollection)).resolves.toBe(true);
+    await expect(runWorkspaceTrust(["trust", collection], value.paths)).rejects.toThrow(/collection/u);
+  });
+
+  it("accepts a marker reached through a symlink into a child repository", async () => {
+    const value = await fixture();
+    const project = join(value.root, "symlinked-marker-project");
+    await mkdir(project, { mode: 0o700 });
+    const repository = await gitRepository(project, "repository");
+    await gitRepository(project, "second-repo");
+    const target = join(repository, "CLAUDE.md");
+    await writeFile(target, "# child project marker\n");
+    await symlink(target, join(project, "CLAUDE.md"));
+    const canonicalProject = await realpath(project);
+
+    await expect(nearestGitWorkspace(canonicalProject)).resolves.toBeNull();
+    await expect(looksLikeRepositoryCollection(canonicalProject)).resolves.toBe(false);
+    await expect(runWorkspaceTrust(["trust", project], value.paths)).resolves.toMatchObject({ trusted: true });
+  });
+
+  it.each([
+    "AGENTS.md",
+    "CLAUDE.md",
+    ".claude",
+    "workspace.code-workspace",
+    "package.json",
+    "pyproject.toml",
+    "Cargo.toml",
+    "go.mod",
+  ])("honours the project marker %s at the candidate root", async (marker) => {
+    const value = await fixture();
+    const project = join(value.root, `marked-${marker.replaceAll(/[^a-z0-9]+/giu, "-")}`);
+    await mkdir(project, { mode: 0o700 });
+    await gitRepository(project, "first-repo");
+    await gitRepository(project, "second-repo");
+    if (marker === ".claude") await mkdir(join(project, marker), { mode: 0o700 });
+    else await writeFile(join(project, marker), "# project marker\n");
+
+    await expect(looksLikeRepositoryCollection(await realpath(project))).resolves.toBe(false);
+  });
+
+  it("trusts a non-Git directory with one direct-child repository and no marker", async () => {
+    const value = await fixture();
     const project = join(value.root, "ordinary-project");
     await mkdir(project, { mode: 0o700 });
+    await gitRepository(project, "repository");
 
     await expect(runWorkspaceTrust(["trust", project], value.paths)).resolves.toMatchObject({ trusted: true });
   });
@@ -172,6 +241,25 @@ describe("machine-local workspace trust", () => {
 
     await expect(runWorkspaceTrust(["trust", home], value.paths)).rejects.toThrow(/never be trusted.*home-wide/u);
     await expect(runWorkspaceTrust(["list"], value.paths)).resolves.toMatchObject({ entries: [] });
+  });
+
+  it("refuses a marked resolved home directory before recording a grant", async () => {
+    const value = await fixture();
+    const home = join(value.root, "home");
+    await mkdir(join(home, ".git"), { recursive: true, mode: 0o700 });
+    await writeFile(join(home, "AGENTS.md"), "# home marker must not widen trust\n");
+    const previousHome = process.env.HOME;
+    process.env.HOME = home;
+    try {
+      expect(await realpath(homedir())).toBe(await realpath(home));
+      await expect(runWorkspaceTrust(["trust", home], value.paths)).rejects.toThrow(
+        /never be trusted.*home-wide/u,
+      );
+      await expect(runWorkspaceTrust(["list"], value.paths)).resolves.toMatchObject({ entries: [] });
+    } finally {
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+    }
   });
 
   it("reports ancestor broadening when an exact repository was trusted before its parent collection", async () => {
