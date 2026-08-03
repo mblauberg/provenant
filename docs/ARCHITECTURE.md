@@ -29,8 +29,8 @@ the `deliver` kernel is agent work bound to one receipt.
 The tier is derived rather than declared. `scope` rates every factor in
 `config/risk-policy.json`, the highest tier any rating maps to is the run's
 minimum tier, and a lower declared tier needs a user-approved override carrying
-an approver, a reason and evidence. The table between the markers is rendered
-from that file by `scripts/render_doc_projections.py`.
+an approver, a reason and evidence. The table between the markers records the
+current policy and is maintained with that source file.
 
 <!-- risk-factor-table:start -->
 
@@ -154,8 +154,8 @@ The state machine is enforced rather than advisory.
 `skills/deliver/scripts/validate_delivery.py` holds the transition table and
 rejects a receipt whose recorded history jumps a gate, so the states below are
 the ones a run can actually occupy. The diagram body between the markers is
-rendered from those constants by `scripts/render_doc_projections.py`; the
-accessibility text, palette, class lines and edge labels stay hand-written.
+maintained with those constants; the accessibility text, palette, class lines
+and edge labels stay hand-written.
 
 <!-- delivery-state-machine:start -->
 ```mermaid

@@ -29,7 +29,8 @@ frontmatter descriptions available in that snapshot. The dataset contains five
 profile-positive, five negative and five boundary cases. Expected labels were
 withheld from classifiers. Three hash-bound batch invocations per snapshot
 retain actual adapter/family/model lineage, input digests and parsed outputs.
-Both canonical receipts pass `scripts/validate_lifecycle_routing.py`.
+Both canonical receipts passed the lifecycle-routing validator used at the
+time; this historical evaluation is not a current gate.
 
 | Snapshot | Correct | Total | Rate | Result |
 |---|---:|---:|---:|---|

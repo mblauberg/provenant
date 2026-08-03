@@ -32,7 +32,7 @@ The current pre-release tree includes:
 - The delivery kernel: profiles in `config/delivery-profiles.json` for software,
   research, analysis, document and agent-product work, the neutral
   `delivery-run` schema-v1 receipt owned by `deliver`, and
-  `scripts/validate_delivery_scenarios.py`.
+  the delivery-scenario evaluator.
 - Risk and authority policy in `config/risk-policy.json`: the `routine`,
   `substantial`, `crucial` and `terminal` tiers and the factors that raise a
   tier. The review-pressure ladder those tiers select lives in `HARNESS.md`.

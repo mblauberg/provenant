@@ -117,7 +117,7 @@ Consumer migration, single change with the prune:
    `debate-and-panels.md`.
 3. Update `evals/contract_cases.yaml:40,54` reference invariants.
 4. Replace the hand-maintained `REQUIRED_REFS`
-   (`check_skill_triggers.py:39-54`) with a set **derived from this manifest's
+   (the former trigger checker) with a set **derived from this manifest's
    keep+slim rows** — never from the directory listing itself (a
    directory-derived expectation is circular and cannot detect accidental
    deletion).
@@ -149,11 +149,9 @@ Static gates (machine-checkable, final tree):
   absent with its content demonstrably in the absorbing file (retained-content
   invariants greppable); migration steps 1–5 verifiable. Advisory budgets
   reported, not enforced.
-- AC-S5: catalogue within cap as measured by `scripts/check-harness`
-  (`check_harness.py` `catalogue_chars`; the binding measure — not
-  `render_skill_catalogue.py`, which measures a different span). Baseline at
-  r3: 7,341/8,000 chars, 259 under the 7,600 target; PR3 must not add
-  catalogue entries.
+- AC-S5: catalogue within the approved cap, reviewed against the source
+  catalogue. The former generated-catalogue measurement is historical and is
+  not a current gate.
 
 Per-PR checks:
 
