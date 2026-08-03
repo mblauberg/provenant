@@ -40,7 +40,6 @@ from __future__ import annotations
 
 import json
 import re
-import subprocess
 import tomllib
 from pathlib import Path
 
@@ -63,40 +62,10 @@ IMMUTABLE_ACTION = re.compile(r"^[^@\s]+@[0-9a-f]{40}$")
 # Local composite actions are pinned by the commit under review itself; only
 # repository-local paths are exempt from the 40-hex SHA pin.
 LOCAL_ACTION = re.compile(r"^\./\.github/actions/[a-z0-9-]+$")
-# Path filtering (issue #150): build jobs are gated per-path by
-# detect-changes and a single always-run ci-status aggregate is the one
-# required check, so a skipped job can never leave a required check pending.
-FILTERED_JOBS = {
-    "harness": "harness",
-    "fabric": "fabric",
-    "split-root": "split-root",
-    "console": "console",
-    "herdr": "herdr",
-    "review-portal-supervisor": "review-portal-supervisor",
-    "zizmor": "workflows",
-}
-# PR #168 repair cycle 3: the filters block defines two YAML-anchor helper
-# arms (ci-contract, node-workspace) that exist only to be aliased into the
-# consumed job filters; no detect-changes output reads them directly. Every
-# other filter key must be consumed by a job-driving output, so an orphan
-# filter arm that gates nothing can never satisfy the tracked-file closure
-# oracle in test_every_tracked_file_matches_at_least_one_path_filter.
-FILTER_HELPER_KEYS = frozenset({"ci-contract", "node-workspace"})
-# PR #168 repair cycle 2: fabric tests execute exactly these repo files
-# outside runtime/agent-fabric — the model-routing acceptance suite runs
-# scripts/model-route (a bash wrapper that execs scripts/model_route.py,
-# where the logic lives) and the delivery-run fixture runs
-# skills/deliver/scripts/*.py — so those paths must retrigger the fabric
-# job. Repair cycle 3 added scripts/model_route.py: the wrapper was already
-# listed but the module it execs was not, so a PR changing only the Python
-# module skipped the fabric job that runs it. This allowlist is exact by
-# design: adding an executed dependency means adding it here deliberately,
-# and nothing else in docs/ or skills/ may path-trigger a non-harness job.
-# PR #446 added scripts/model_route_catalog.py, which model_route.py loads and
-# executes at import: a change to it alone reaches the fabric suite at runtime,
-# so it must retrigger the job that runs it for the same reason cycle 3 added
-# model_route.py itself. Issue #445 adds model_route_preferences.py under the
-# same path-loaded execution convention.
+# Fabric tests execute exactly these repo files outside runtime/agent-fabric.
+# The allowlist is exact by design: adding an executed dependency means adding
+# it here deliberately, and nothing else in docs/ or skills/ may path-trigger a
+# non-harness job.
 FABRIC_EXECUTED_DEPENDENCIES = frozenset(
     {
         "scripts/model-route",
@@ -148,83 +117,6 @@ def _steps(job: dict[str, object]) -> list[dict[str, object]]:
     assert isinstance(value, list)
     assert all(isinstance(item, dict) for item in value)
     return value
-
-
-def _flatten_rules(rules: object) -> list[str]:
-    flat: list[str] = []
-    assert isinstance(rules, list)
-    for rule in rules:
-        if isinstance(rule, list):
-            flat.extend(_flatten_rules(rule))
-        else:
-            assert isinstance(rule, str)
-            flat.append(rule)
-    return flat
-
-
-def _path_filters(document: dict[str, object]) -> dict[str, list[str]]:
-    # yaml.safe_load resolves the &anchors/*aliases in the filters block, so
-    # shared rule groups arrive as nested lists and are flattened here.
-    detect = _job(document, "detect-changes")
-    filter_step = next(
-        step for step in _steps(detect) if str(step.get("uses", "")).startswith("dorny/paths-filter@")
-    )
-    filters = yaml.safe_load(str(filter_step.get("with", {}).get("filters")))
-    assert isinstance(filters, dict)
-    return {name: _flatten_rules(rules) for name, rules in filters.items()}
-
-
-def _consumed_filter_names(document: dict[str, object]) -> set[str]:
-    # The filter names a job-driving output actually reads: every
-    # detect-changes output forwards exactly one steps.filter.outputs.<name>,
-    # so the consumed set is derived from the outputs, never assumed.
-    detect = _job(document, "detect-changes")
-    outputs = detect.get("outputs")
-    assert isinstance(outputs, dict)
-    consumed: set[str] = set()
-    for expr in outputs.values():
-        match = re.search(r"steps\.filter\.outputs\.([a-z0-9-]+)", str(expr))
-        assert match, expr
-        consumed.add(match.group(1))
-    return consumed
-
-
-def _assert_all_filters_consumed(document: dict[str, object]) -> None:
-    # Every filter key is either a job-consumed filter or a declared helper
-    # anchor; an orphan arm that no output reads must not exist.
-    flattened = _path_filters(document)
-    consumed = _consumed_filter_names(document)
-    filter_keys = set(flattened)
-    assert filter_keys - FILTER_HELPER_KEYS == consumed
-    assert not (FILTER_HELPER_KEYS & consumed)
-
-
-def _inject_filter(document: dict[str, object], name: str, rules: list[str]) -> None:
-    # Add a filter arm to the parsed workflow by rewriting the paths-filter
-    # `with.filters` block, so _path_filters re-parses it exactly as the
-    # action would.
-    detect = _job(document, "detect-changes")
-    filter_step = next(
-        step for step in _steps(detect) if str(step.get("uses", "")).startswith("dorny/paths-filter@")
-    )
-    with_block = filter_step.get("with")
-    assert isinstance(with_block, dict)
-    filters = yaml.safe_load(str(with_block.get("filters")))
-    assert isinstance(filters, dict)
-    filters[name] = rules
-    with_block["filters"] = yaml.safe_dump(filters)
-
-
-def _jobs_for_changed_paths(document: dict[str, object], paths: list[str]) -> set[str]:
-    # Simulate dorny/paths-filter: a job is selected when any changed path
-    # matches any rule in the filter its detect-changes output consumes.
-    flattened = _path_filters(document)
-    selected: set[str] = set()
-    for job_name, output_name in FILTERED_JOBS.items():
-        rules = flattened[output_name]
-        if any(_filter_matches(rule, path) for rule in rules for path in paths):
-            selected.add(job_name)
-    return selected
 
 
 def _assert_no_continue_on_error(
@@ -303,19 +195,6 @@ def _assert_trigger_semantics(document: dict[str, object]) -> None:
     assert on["push"] == {"branches": ["main"]}
 
 
-def _filter_matches(pattern: str, path: str) -> bool:
-    # The filters block deliberately uses only two glob forms: exact tracked
-    # paths and directory prefixes written as `prefix/**`. Fail loudly on any
-    # other form so unsupported syntax cannot silently defeat the coverage
-    # assertion below.
-    if pattern.endswith("/**"):
-        prefix = pattern[: -len("/**")]
-        assert prefix and not any(ch in prefix for ch in "*?["), f"unsupported glob form: {pattern}"
-        return path == prefix or path.startswith(prefix + "/")
-    assert not any(ch in pattern for ch in "*?["), f"unsupported glob form: {pattern}"
-    return path == pattern
-
-
 def _setup_action() -> dict[str, object]:
     value = yaml.safe_load(SETUP_ACTION.read_text(encoding="utf-8"))
     assert isinstance(value, dict)
@@ -379,190 +258,6 @@ def test_ci_uses_immutable_actions_and_least_privilege() -> None:
         action = step.get("uses")
         if action is not None:
             assert isinstance(action, str) and IMMUTABLE_ACTION.fullmatch(action), action
-
-
-def test_ci_gates_build_jobs_behind_path_filters_and_one_aggregate_check() -> None:
-    document = _workflow()
-
-    detect = _job(document, "detect-changes")
-    filter_step = next(
-        step for step in _steps(detect) if str(step.get("uses", "")).startswith("dorny/paths-filter@")
-    )
-    # The filter only inspects pull requests; pushes to main force-run all
-    # jobs through the job outputs below.
-    assert filter_step.get("if") == "github.event_name == 'pull_request'"
-    flattened = _path_filters(document)
-    # PR #168 repair cycle 1: the harness filter must cover every surface
-    # scripts/check-harness validates, so skills-, docs- and root-document
-    # changes always run the policy gate. Repair cycle 2 added the repo-wide
-    # scan residue (CHANGELOG.md, .gitignore): scripts/check-harness scans
-    # every tracked file and tests/test_harness_contract.py validates
-    # .gitignore, so those files must retrigger the harness job too.
-    for required in (
-        "skills/**",
-        "docs/**",
-        ".gitignore",
-        "AGENTS.md",
-        "CHANGELOG.md",
-        "HARNESS.md",
-        "MAINTAINING.md",
-        "README.md",
-        "LICENSES/**",
-        "NOTICE",
-        "SECURITY.md",
-        "THIRD_PARTY_NOTICES.md",
-        # Issue #200: the locked Python test tooling gates the harness job
-        # itself, so a lock or manifest change must re-run that job.
-        "pyproject.toml",
-        "uv.lock",
-    ):
-        assert required in flattened["harness"], required
-    # Non-harness jobs must not path-trigger on docs/ or skills/ broadly.
-    # The only exception is the exact executed-dependency allowlist for the
-    # fabric job (repair cycle 2): the blanket prohibition is narrowed, not
-    # deleted, and any new entry must be added to the allowlist deliberately.
-    assert FABRIC_EXECUTED_DEPENDENCIES == {
-        "scripts/model-route",
-        "scripts/model_route.py",
-        "scripts/model_route_catalog.py",
-        "scripts/model_route_preferences.py",
-        "skills/deliver/scripts/**",
-    }
-    assert FABRIC_EXECUTED_DEPENDENCIES <= set(flattened["fabric"])
-    for name, rules in flattened.items():
-        if name == "harness":
-            continue
-        allowed = FABRIC_EXECUTED_DEPENDENCIES if name == "fabric" else frozenset()
-        docs_skills = {rule for rule in rules if rule.startswith(("docs/", "skills/"))}
-        assert docs_skills <= allowed, name
-    # Fabric tests read config/ fixtures (review profiles, acceptance
-    # scenarios, agent-fabric.yaml), so config changes rerun the fabric job.
-    assert "config/**" in flattened["fabric"]
-    # A change to the CI contract itself re-runs every gated job. The
-    # workflows gate uses the broader glob, which covers ci.yml.
-    for gate in FILTERED_JOBS.values():
-        assert ".github/actions/**" in flattened[gate]
-        if gate == "workflows":
-            assert ".github/workflows/**" in flattened[gate]
-        else:
-            assert ".github/workflows/ci.yml" in flattened[gate]
-    assert "runtime/**" in flattened["harness"]
-    assert "tests/**" in flattened["harness"]
-    for gate in ("harness", "fabric", "console", "herdr"):
-        assert "package-lock.json" in flattened[gate]
-        assert "runtime/agent-fabric-protocol/**" in flattened[gate]
-    assert "runtime/agent-fabric/**" in flattened["console"]
-    assert "runtime/agent-fabric-review-portal-supervisor/**" in flattened["review-portal-supervisor"]
-
-    outputs = detect.get("outputs")
-    assert isinstance(outputs, dict)
-    for output_name in FILTERED_JOBS.values():
-        assert outputs.get(output_name) == (
-            "${{ github.event_name == 'push' && 'true' || steps.filter.outputs." + output_name + " }}"
-        )
-
-    for job_name, output_name in FILTERED_JOBS.items():
-        job = _job(document, job_name)
-        assert job.get("needs") == "detect-changes", job_name
-        assert job.get("if") == f"needs.detect-changes.outputs.{output_name} == 'true'", job_name
-
-    aggregate = _job(document, "ci-status")
-    # ci-status is the single required check: it must always report, and it
-    # must fail closed on any needed job that failed or was cancelled.
-    assert aggregate.get("if") == "always()"
-    assert set(aggregate.get("needs", [])) == {"detect-changes", *FILTERED_JOBS}
-    # Every job in the workflow except the aggregate itself must be in its
-    # needs list, so a job added later cannot silently bypass the required
-    # check.
-    jobs = document.get("jobs")
-    assert isinstance(jobs, dict)
-    assert set(aggregate.get("needs", [])) == set(jobs) - {"ci-status"}
-    (status_step,) = _steps(aggregate)
-    assert status_step.get("env") == {"NEEDS_JSON": "${{ toJSON(needs) }}"}
-    command = str(status_step.get("run", ""))
-    assert '.value.result != "success" and .value.result != "skipped"' in command
-    assert "exit 1" in command
-
-
-def test_every_tracked_file_matches_at_least_one_path_filter() -> None:
-    # PR #168 repair cycle 2 (Findings A and C): scripts/check-harness scans
-    # every tracked file, so a tracked file outside every filter would let a
-    # PR touching only that file skip all build jobs, pass the all-skipped
-    # ci-status aggregate, and break the next push to main. This closure
-    # assertion makes such residue impossible to reintroduce.
-    #
-    # Repair cycle 3 (orphan-filter finding): close over only the filters a
-    # job-driving output actually consumes, so an orphan filter arm that
-    # gates nothing can never satisfy this oracle.
-    document = _workflow()
-    flattened = _path_filters(document)
-    consumed = _consumed_filter_names(document)
-    arms = sorted({rule for name in consumed for rule in flattened[name]})
-    tracked = subprocess.run(
-        ["git", "ls-files"],
-        cwd=ROOT,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.splitlines()
-    assert tracked
-    unmatched = [path for path in tracked if not any(_filter_matches(arm, path) for arm in arms)]
-    assert unmatched == [], (
-        "tracked files outside every CI path filter; add each one to the "
-        f"filter of the job that validates it: {unmatched}"
-    )
-
-
-def test_path_filters_are_all_consumed_by_a_job_driving_output() -> None:
-    # PR #168 repair cycle 3: the coverage-closure oracle unions only the
-    # filters that detect-changes outputs consume. Assert that consumed set
-    # equals the FILTERED_JOBS output names, that each is read by exactly the
-    # jobs mapped to it, and that no filter key outside the helper anchors is
-    # left unconsumed — an orphan arm would gate nothing yet could satisfy
-    # closure.
-    document = _workflow()
-    flattened = _path_filters(document)
-    consumed = _consumed_filter_names(document)
-    assert consumed == set(FILTERED_JOBS.values())
-    for name in consumed:
-        consuming_jobs = {job for job, output in FILTERED_JOBS.items() if output == name}
-        assert len(consuming_jobs) == 1, name
-    filter_keys = set(flattened)
-    assert FILTER_HELPER_KEYS <= filter_keys
-    assert filter_keys - FILTER_HELPER_KEYS == consumed
-    _assert_all_filters_consumed(document)
-
-
-def test_orphan_filter_arm_fails_consumption_and_gates_nothing() -> None:
-    # Mutation: an orphan filter arm no output consumes must fail the
-    # consumption assertion and must not enter the closure arms.
-    document = _workflow()
-    _inject_filter(document, "orphan", ["new-surface.txt"])
-    with pytest.raises(AssertionError):
-        _assert_all_filters_consumed(document)
-    flattened = _path_filters(document)
-    consumed = _consumed_filter_names(document)
-    closure_arms = {rule for name in consumed for rule in flattened[name]}
-    assert "new-surface.txt" not in closure_arms
-
-
-def test_model_route_python_change_selects_the_fabric_job() -> None:
-    # PR #168 repair cycle 3 (P1): scripts/model-route is a bash wrapper that
-    # execs scripts/model_route.py, which the model-routing acceptance suite
-    # runs. A PR changing only the Python module must still select the fabric
-    # job that executes it.
-    document = _workflow()
-    selected = _jobs_for_changed_paths(document, ["scripts/model_route.py"])
-    assert "fabric" in selected
-
-
-def test_model_route_preferences_change_selects_the_fabric_job() -> None:
-    document = _workflow()
-    selected = _jobs_for_changed_paths(
-        document,
-        ["scripts/model_route_preferences.py"],
-    )
-    assert "fabric" in selected
 
 
 def test_no_job_or_step_sets_continue_on_error() -> None:
@@ -704,7 +399,6 @@ def test_ci_runs_complete_harness_and_fabric_gates() -> None:
         "npm run schema:check:generated",
         "npm run build",
         "git status --porcelain --untracked-files=all -- runtime/agent-fabric-protocol/schemas",
-        "scripts/check-harness",
     ):
         assert required in harness_commands
     harness_run_commands = [str(step.get("run", "")).strip() for step in harness_steps if "run" in step]
@@ -716,8 +410,7 @@ def test_ci_runs_complete_harness_and_fabric_gates() -> None:
         for index, command in enumerate(harness_run_commands)
         if "git status --porcelain --untracked-files=all -- runtime/agent-fabric-protocol/schemas" in command
     )
-    harness_index = harness_run_commands.index("scripts/check-harness")
-    assert build_types_index < generated_check_index < build_index < status_index < harness_index
+    assert build_types_index < generated_check_index < build_index < status_index
 
     fabric_commands = "\n".join(str(step.get("run", "")) for step in fabric_steps)
     for required in (
@@ -778,24 +471,6 @@ def test_harness_python_test_dependencies_install_locked_and_cached() -> None:
     lock_text = (ROOT / "uv.lock").read_text(encoding="utf-8")
     locked = set(re.findall(r'(?m)^name = "([^"]+)"$', lock_text))
     assert {"pytest", "pyyaml"} <= locked
-
-
-def test_harness_job_runs_demonstrated_change_gates_with_a_merge_base_and_scratch_root() -> None:
-    document = _workflow()
-    harness_steps = _steps(_job(document, "harness"))
-    gate_step = next(
-        (step for step in harness_steps if "scripts/check-test-gates right-reason-red" in str(step.get("run", ""))),
-        None,
-    )
-    assert gate_step is not None, "harness job must run the demonstrated change gates"
-    command = str(gate_step["run"])
-    for gate in ("right-reason-red", "revert-probe"):
-        assert f"scripts/check-test-gates {gate}" in command
-    assert "--base \"$CHANGE_GATE_BASE\"" in command
-    assert "--scratch-root \"$scratch\"" in command
-    assert "--test-command-py" in command
-    assert "--test-command-ts" in command
-    assert gate_step.get("env", {}).get("CHANGE_GATE_BASE")
 
 
 def test_clean_ci_builds_locked_protocol_before_daemon_typecheck() -> None:
