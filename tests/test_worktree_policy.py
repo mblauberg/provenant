@@ -1,10 +1,13 @@
 import importlib.util
+import hashlib
 import json
 import os
 from pathlib import Path
 import subprocess
 import sys
 import time
+
+import pytest
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "worktree.py"
@@ -445,6 +448,8 @@ def test_git_oversized_failure_diagnostic_is_bounded(tmp_path, capsys):
     receipt = json.loads(capsys.readouterr().out)
     assert receipt["status"] == "failed"
     assert len(receipt["stderr"].encode()) <= worktree_policy.MAX_DIAGNOSTIC_BYTES
+    assert "[truncated; bytes=" in receipt["stderr"]
+    assert "sha256=" in receipt["stderr"]
 
 
 def test_failed_git_receipt_redacts_credential_bearing_command_arguments(tmp_path, capsys):
@@ -460,6 +465,29 @@ def test_failed_git_receipt_redacts_credential_bearing_command_arguments(tmp_pat
     assert receipt["status"] == "failed"
     assert "revision-secret" not in json.dumps(receipt)
     assert receipt["command"][-1] == "https://[REDACTED]@example.test/missing"
+
+
+def test_failed_git_receipt_redacts_token_only_credential_arguments(tmp_path, capsys):
+    repo = tmp_path / "project"
+    init_repo(repo)
+    revision = "https://:token-only-secret@example.test/missing"
+
+    assert worktree_policy.main([
+        "create", "token-only-credential", "--repo", str(repo), "--detach", revision,
+        "--human-authorised",
+    ]) == 2
+    receipt = json.loads(capsys.readouterr().out)
+
+    assert "token-only-secret" not in json.dumps(receipt)
+    assert receipt["command"][-1] == "https://[REDACTED]@example.test/missing"
+
+
+@pytest.mark.parametrize("suffix", ["", "\n"])
+def test_diagnostics_redact_incomplete_credential_urls(suffix):
+    value = f"https://review-user:partial-secret{suffix}"
+
+    assert "partial-secret" not in worktree_policy.bounded_diagnostic(value)
+    assert "partial-secret" not in worktree_policy.bounded_command(["git", value])[-1]
 
 
 def test_provision_retries_failed_install_then_returns_ready(tmp_path, capsys):
@@ -705,6 +733,299 @@ def test_real_process_diagnostic_redacts_before_capture_boundary(monkeypatch):
     assert secret not in diagnostic
     assert secret[:8] not in diagnostic
     assert len(diagnostic.encode()) <= worktree_policy.MAX_DIAGNOSTIC_BYTES
+
+
+def test_real_process_capture_is_bounded_but_counts_and_digests_all_output():
+    message = b"x" * (worktree_policy.MAX_DIAGNOSTIC_BYTES * 2 + 17)
+    process = subprocess.Popen(
+        [sys.executable, "-c", "import sys; sys.stdout.buffer.write(sys.argv[1].encode())", message.decode()],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+    captures = worktree_policy._drain_process(process)
+    capture = captures["stdout"]
+
+    assert len(capture["buffer"]) <= worktree_policy.MAX_DIAGNOSTIC_BYTES
+    assert capture["size"] == len(message)
+    assert capture["digest"].hexdigest() == hashlib.sha256(message).hexdigest()
+
+
+def test_capture_diagnostic_preserves_exact_marker_when_utf8_expands():
+    message = b"\xff" * worktree_policy.MAX_DIAGNOSTIC_BYTES
+    process = subprocess.Popen(
+        [sys.executable, "-c", "import sys; sys.stdout.buffer.write(bytes([255]) * int(sys.argv[1]))", str(len(message))],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+    capture = worktree_policy._drain_process(process)["stdout"]
+    diagnostic = worktree_policy._capture_text(capture)
+
+    assert f"bytes={len(message)}" in diagnostic
+    assert f"sha256={hashlib.sha256(message).hexdigest()}" in diagnostic
+    assert len(diagnostic.encode()) <= worktree_policy.MAX_DIAGNOSTIC_BYTES
+
+
+def test_capture_diagnostic_redacts_secret_prefix_at_exact_capture_cap(monkeypatch):
+    secret = "exact-cap-configured-secret-987654321"
+    monkeypatch.setenv("npm_config_registry", secret)
+    prefix = secret[:12]
+    raw = ("x" * (worktree_policy.MAX_DIAGNOSTIC_BYTES - len(prefix)) + prefix).encode()
+    capture = {
+        "buffer": bytearray(raw),
+        "size": len(raw),
+        "digest": hashlib.sha256(raw),
+        "limit": worktree_policy.MAX_DIAGNOSTIC_BYTES,
+    }
+
+    diagnostic = worktree_policy._capture_text(capture)
+
+    assert prefix not in diagnostic
+    assert len(diagnostic.encode()) <= worktree_policy.MAX_DIAGNOSTIC_BYTES
+
+
+@pytest.mark.parametrize("key", ["npm_config_proxy", "npm_config_registry"])
+@pytest.mark.parametrize("extra", [b"", b"z" * 17])
+def test_capture_diagnostic_redacts_unicode_secret_prefix_at_capture_boundary(monkeypatch, key, extra):
+    secret = "a" * 1000 + "é"
+    monkeypatch.setenv(key, secret)
+    prefix = secret.encode()[:-1]
+    raw = (b"x" * (worktree_policy.MAX_DIAGNOSTIC_BYTES - len(prefix)) + prefix + extra)
+    capture = {
+        "buffer": bytearray(raw[:worktree_policy.MAX_DIAGNOSTIC_BYTES]),
+        "size": len(raw),
+        "digest": hashlib.sha256(raw),
+        "limit": worktree_policy.MAX_DIAGNOSTIC_BYTES,
+    }
+
+    diagnostic = worktree_policy._capture_text(capture)
+
+    assert "a" * 32 not in diagnostic
+    assert len(diagnostic.encode()) <= worktree_policy.MAX_DIAGNOSTIC_BYTES
+
+
+def test_capture_diagnostic_redacts_credential_url_at_exact_capture_cap():
+    secret = "exact-cap-url-secret-987654321"
+    fragment = f"https://review-user:{secret}-{'s' * 80}"
+    raw = ("x" * (worktree_policy.MAX_DIAGNOSTIC_BYTES - len(fragment)) + fragment).encode()
+    capture = {
+        "buffer": bytearray(raw),
+        "size": len(raw),
+        "digest": hashlib.sha256(raw),
+        "limit": worktree_policy.MAX_DIAGNOSTIC_BYTES,
+    }
+
+    diagnostic = worktree_policy._capture_text(capture)
+
+    assert secret not in diagnostic
+    assert secret[:8] not in diagnostic
+    assert len(diagnostic.encode()) <= worktree_policy.MAX_DIAGNOSTIC_BYTES
+
+
+@pytest.mark.parametrize("extra", [b"", b"tail" * 17])
+def test_capture_diagnostic_redacts_url_prefix_at_capture_boundary(extra):
+    fragment = b"https://credential-user-secret-" + b"u" * 64
+    raw = b"x" * (worktree_policy.MAX_DIAGNOSTIC_BYTES - len(fragment)) + fragment + extra
+    capture = {
+        "buffer": bytearray(raw[:worktree_policy.MAX_DIAGNOSTIC_BYTES]),
+        "size": len(raw),
+        "digest": hashlib.sha256(raw),
+        "limit": worktree_policy.MAX_DIAGNOSTIC_BYTES,
+    }
+
+    diagnostic = worktree_policy._capture_text(capture)
+
+    assert b"credential-user-secret" not in diagnostic.encode()
+    assert len(diagnostic.encode()) <= worktree_policy.MAX_DIAGNOSTIC_BYTES
+
+
+@pytest.mark.parametrize("key", ["npm_config_proxy", "npm_config_registry"])
+def test_capture_diagnostic_handles_surrogate_secret(key, monkeypatch):
+    secret = "surrogate-secret-\udcff"
+    monkeypatch.setitem(os.environ, key, secret)
+    raw = b"prefix " + secret.encode(errors="surrogateescape") + b" suffix"
+    capture = {
+        "buffer": bytearray(raw),
+        "size": len(raw),
+        "digest": hashlib.sha256(raw),
+        "limit": worktree_policy.MAX_DIAGNOSTIC_BYTES,
+    }
+
+    diagnostic = worktree_policy._capture_text(capture)
+
+    assert "surrogate-secret-" not in diagnostic
+    assert len(diagnostic.encode()) <= worktree_policy.MAX_DIAGNOSTIC_BYTES
+
+
+def test_git_failure_receipt_redacts_partial_credential_url_at_capture_boundary(tmp_path, capsys):
+    repo = tmp_path / "project"
+    head = init_repo(repo)
+    secret = "boundary-url-secret-987654321"
+    url = f"https://review-user:{secret}-{'s' * 240}@registry.example.test/path"
+    payload = "x" * (worktree_policy.MAX_DIAGNOSTIC_BYTES - 142) + url + "tail" * 100
+    hook = repo / ".git" / "hooks" / "post-checkout"
+    hook.write_text(f"#!/bin/sh\nprintf '%s' '{payload}' >&2\nexit 1\n")
+    hook.chmod(0o755)
+
+    assert worktree_policy.main([
+        "create", "partial-url", "--repo", str(repo), "--detach", head,
+        "--human-authorised",
+    ]) == 2
+    receipt = json.loads(capsys.readouterr().out)
+
+    assert receipt["failed_step"] == "git"
+    assert secret not in json.dumps(receipt)
+    assert secret[:8] not in json.dumps(receipt)
+    assert "sha256=" in receipt["stderr"]
+
+
+def test_worktree_records_rejects_bounded_porcelain_overflow(tmp_path, monkeypatch):
+    repo = tmp_path / "project"
+    overflow = b"worktree /project/.worktrees/overflow\0" + b"x" * worktree_policy.MAX_DIAGNOSTIC_BYTES
+    command = ["git", "-C", str(repo), "worktree", "list", "--porcelain", "-z"]
+
+    def fake_run_git(repo_path, *args):
+        assert repo_path == repo
+        assert args == ("worktree", "list", "--porcelain", "-z")
+        return (
+            subprocess.CompletedProcess(command, 0, "", ""),
+            {
+                "stdout": {
+                    "buffer": bytearray(overflow[:worktree_policy.MAX_DIAGNOSTIC_BYTES]),
+                    "size": len(overflow),
+                    "digest": hashlib.sha256(overflow),
+                    "limit": worktree_policy.MAX_DIAGNOSTIC_BYTES,
+                },
+                "stderr": {
+                    "buffer": bytearray(),
+                    "size": 0,
+                    "digest": hashlib.sha256(),
+                    "limit": worktree_policy.MAX_DIAGNOSTIC_BYTES,
+                },
+            },
+        )
+
+    monkeypatch.setattr(worktree_policy, "_run_git", fake_run_git)
+
+    with pytest.raises(worktree_policy.PolicyError) as raised:
+        worktree_policy.worktree_records(repo)
+
+    assert raised.value.failed_step == "git"
+    assert raised.value.command == command
+    assert raised.value.exit_code == 0
+    assert f"bytes={len(overflow)}" in raised.value.stdout
+    assert f"sha256={hashlib.sha256(overflow).hexdigest()}" in raised.value.stdout
+    assert len(raised.value.stdout.encode()) <= worktree_policy.MAX_DIAGNOSTIC_BYTES
+
+
+def test_worktree_records_rejects_incomplete_porcelain_result(tmp_path, monkeypatch):
+    repo = tmp_path / "project"
+    incomplete = b"worktree /project/.worktrees/partial"
+    command = ["git", "-C", str(repo), "worktree", "list", "--porcelain", "-z"]
+
+    def fake_run_git(repo_path, *args):
+        assert repo_path == repo
+        assert args == ("worktree", "list", "--porcelain", "-z")
+        return (
+            subprocess.CompletedProcess(command, 0, "", ""),
+            {
+                "stdout": {
+                    "buffer": bytearray(incomplete),
+                    "size": len(incomplete),
+                    "digest": hashlib.sha256(incomplete),
+                    "limit": worktree_policy.MAX_DIAGNOSTIC_BYTES,
+                },
+                "stderr": {
+                    "buffer": bytearray(),
+                    "size": 0,
+                    "digest": hashlib.sha256(),
+                    "limit": worktree_policy.MAX_DIAGNOSTIC_BYTES,
+                },
+            },
+        )
+
+    monkeypatch.setattr(worktree_policy, "_run_git", fake_run_git)
+
+    with pytest.raises(worktree_policy.PolicyError) as raised:
+        worktree_policy.worktree_records(repo)
+
+    assert raised.value.failed_step == "git"
+    assert raised.value.command == command
+    assert raised.value.exit_code == 0
+    assert "incomplete" in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    "malformed",
+    [
+        b"garbage\0\0",
+        b"\0\0",
+        b"\0\0worktree /one\0HEAD abc\0detached\0\0",
+        b"worktree /one\0detached\0\0",
+        b"worktree\0\0",
+        b"worktree /one\0worktree /two\0\0",
+        b"worktree /one\0HEAD abc\0detached\0\0\0\0worktree /two\0HEAD def\0detached\0\0",
+    ],
+)
+def test_worktree_records_rejects_malformed_porcelain(tmp_path, monkeypatch, malformed):
+    repo = tmp_path / "project"
+    command = ["git", "-C", str(repo), "worktree", "list", "--porcelain", "-z"]
+
+    def fake_run_git(repo_path, *args):
+        assert repo_path == repo
+        assert args == ("worktree", "list", "--porcelain", "-z")
+        return (
+            subprocess.CompletedProcess(command, 0, "", ""),
+            {
+                "stdout": {
+                    "buffer": bytearray(malformed),
+                    "size": len(malformed),
+                    "digest": hashlib.sha256(malformed),
+                    "limit": worktree_policy.MAX_DIAGNOSTIC_BYTES,
+                },
+                "stderr": {
+                    "buffer": bytearray(),
+                    "size": 0,
+                    "digest": hashlib.sha256(),
+                    "limit": worktree_policy.MAX_DIAGNOSTIC_BYTES,
+                },
+            },
+        )
+
+    monkeypatch.setattr(worktree_policy, "_run_git", fake_run_git)
+
+    with pytest.raises(worktree_policy.PolicyError) as raised:
+        worktree_policy.worktree_records(repo)
+
+    assert raised.value.failed_step == "git"
+    assert raised.value.command == command
+    assert raised.value.exit_code == 0
+    assert "malformed" in str(raised.value)
+
+
+def test_git_launcher_oserror_is_typed_as_git_failure(tmp_path, capsys, monkeypatch):
+    repo = tmp_path / "project"
+    head = init_repo(repo)
+
+    def fail_popen(*args, **kwargs):
+        raise OSError("git launcher unavailable")
+
+    monkeypatch.setattr(worktree_policy.subprocess, "Popen", fail_popen)
+
+    assert worktree_policy.main([
+        "create", "launcher-failure", "--repo", str(repo), "--detach", head,
+        "--human-authorised",
+    ]) == 2
+    receipt = json.loads(capsys.readouterr().out)
+
+    assert receipt["status"] == "failed"
+    assert receipt["failed_step"] == "git"
+    assert receipt["command"] == [
+        "git", "-C", str(repo), "rev-parse", "--show-toplevel",
+    ]
+    assert receipt["exit_code"] is None
+    assert "git launcher unavailable" in receipt["stderr"]
 
 
 def test_expected_create_provision_remove_and_git_failures_are_typed(tmp_path, capsys):
