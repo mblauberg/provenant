@@ -6,9 +6,22 @@
 _run_harness_python() {
   local probe="$1"
   shift
-  local product_root candidate
+  local product_root candidate primary_root common_dir
   product_root="${AGENT_FABRIC_PRODUCT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
   candidate="${HARNESS_PYTHON:-$product_root/.venv/bin/python}"
+
+  # A linked worktree is a checkout, not a built environment, and provisioning
+  # one virtualenv per lane would be wasteful. When this checkout has no venv,
+  # borrow the primary checkout's: the common Git directory names it.
+  if test -z "${HARNESS_PYTHON:-}" && ! test -x "$candidate"; then
+    common_dir="$(git -C "$product_root" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)"
+    if test -n "$common_dir"; then
+      primary_root="$(dirname "$common_dir")"
+      if test -x "$primary_root/.venv/bin/python"; then
+        candidate="$primary_root/.venv/bin/python"
+      fi
+    fi
+  fi
 
   if ! test -f "$candidate" || ! test -x "$candidate"; then
     printf 'harness-python: unusable interpreter: %s\n' "$candidate" >&2
