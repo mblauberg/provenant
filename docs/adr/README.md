@@ -12,7 +12,7 @@ ratified on 2026-07-30 and amended on 2026-07-31.
 | ADR | Title | Status |
 |---|---|---|
 | [0001](0001-personal-first-product-compatible.md) | Personal-first, product-compatible posture | Accepted |
-| [0002](0002-capability-compiled-execution-authority.md) | Capability-compiled execution authority (write profiles) | Accepted |
+| [0002](0002-capability-compiled-execution-authority.md) | Capability-compiled execution authority (write profiles) | Superseded by ADR 0020 |
 | [0003](0003-modular-monolith-complete-existing-seams.md) | Modular monolith; complete existing seams | Accepted |
 | [0004](0004-per-domain-truth-owners.md) | Per-domain truth owners, no god manifest | Accepted |
 | [0005](0005-lifecycle-kernel-extends-delivery.md) | Lifecycle kernel extends the delivery kernel | Accepted (amended 2026-07-15) |
@@ -28,5 +28,6 @@ ratified on 2026-07-30 and amended on 2026-07-31.
 | [0015](0015-bootstrap-paired-task-completion-evidence-bound-reply.md) | Bootstrap paired-task completion via an evidence-bound reply, not authority widening | Accepted |
 | [0016](0016-gate-b-restate-permanent-by-design.md) | Keep GATE-B' skipped by design after the RESTATE decision | Accepted |
 | [0017](0017-specifications-own-non-derivable-intent.md) | Specifications own non-derivable intent only | Accepted |
-| [0018](0018-accept-portal-stdio-v1-launch-custody.md) | Accept `portal-stdio-v1` as review-portal launch custody | Accepted |
+| [0018](0018-accept-portal-stdio-v1-launch-custody.md) | Accept `portal-stdio-v1` as review-portal launch custody | Superseded by ADR 0020 |
 | [0019](0019-installed-file-class-ownership.md) | Installed file-class ownership by product, instance, or seeded template | Accepted (amended 2026-07-31) |
+| [0020](0020-retire-the-daemon-fabric.md) | Retire the daemon fabric for a daemonless SQLite bus | Accepted |

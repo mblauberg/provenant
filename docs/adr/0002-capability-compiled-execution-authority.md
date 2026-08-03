@@ -1,7 +1,8 @@
 # ADR 0002 — Capability-compiled execution authority (write profiles)
 
-**Status:** Architecture accepted 2026-07-13 (human). This decision grants no
-W010-A implementation or W010-B live-execution authority.
+**Status:** Superseded 2026-08-02 by [ADR 0020](0020-retire-the-daemon-fabric.md);
+originally architecture accepted 2026-07-13. The compiled write profiles had no
+runtime left to enforce them once the daemon was retired.
 
 ## Context
 

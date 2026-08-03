@@ -117,8 +117,8 @@ Driver notes:
 ## Cross-family, family-relative
 
 The independence rule is "a family **≠ the operator's**", never a fixed vendor list. With Codex
-(OpenAI) operating: the load-bearing verifier is **claude** (Anthropic) through
-Agent Fabric. Gemini (Google) is an optional Fabric distinct-family task. A `codex exec` "verifier" from a
+(OpenAI) operating: the load-bearing verifier is **claude** (Anthropic).
+Gemini (Google) is an optional distinct-family lane. A `codex exec` "verifier" from a
 Codex operator is a same-family self-review: it **cannot certify** a hard gate — the wrapper
 fail-closes it. All capture/independence rules of `cross-family-review.md` (raw-verdict-to-disk,
 never-trust-self-report, build≠verdict-reporter) apply unchanged.

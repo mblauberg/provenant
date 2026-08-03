@@ -16,10 +16,10 @@ Verified locally on macOS, 2026-06-07. Model IDs, flags, auth, and safety modes 
 
 ## Safety rule
 
-Normal answer-bearing external work uses Agent Fabric. Use headless CLIs only
-for adapter/auth preflight or an explicitly recorded degraded fallback, never
-as the primary worker substrate. A fallback verifier must enforce read-only or
-planning mode; advisory claims require independent verification.
+Headless CLIs are how external work reaches another provider. Fabric carries
+the request, the reply and the activity record around that call; it does not
+run the provider itself. A verifier that is not certifying must enforce
+read-only or planning mode; advisory claims require independent verification.
 
 ## Harness-conditioned rule
 
@@ -111,11 +111,11 @@ the result in the run manifest and move to the next tool.
 | `kiro-cli` | `kiro-cli chat --list-models` | credits / auth |
 | `copilot` | `copilot --help`; `copilot -p "OK" --mode plan` | login / permission prompt |
 
-## Fabric distinct-family lane
+## Distinct-family lane
 
-Gemini/Agy work is an Agent Fabric provider task, never a `cf_dispatch.sh`
-direct-CLI route. The chair supplies a narrowed authority and budget; Fabric
-records the activated adapter, model lineage, action state and recovery. Treat
+Gemini/Agy work is dispatched like any other headless CLI route. The chair
+supplies the budget and scope, and records the route, the model lineage and the
+result in Fabric so the lane is visible to everyone else on the project. Treat
 the result as advisory until primary-family evidence corroborates it.
 
 Preferred prompt packet:

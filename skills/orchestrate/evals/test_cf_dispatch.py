@@ -230,7 +230,7 @@ def test_help_exits_cleanly():
         stderr=subprocess.PIPE,
     )
     assert result.returncode == 0
-    assert "Gemini/Agy execution belongs to Agent Fabric" in result.stdout
+    assert "Record every dispatch and result in Fabric" in result.stdout
     assert "--doctor" in result.stdout
 
 

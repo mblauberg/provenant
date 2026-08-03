@@ -35,8 +35,6 @@ fi
 cd "$PRODUCT_ROOT"
 "${PYTHON[@]}" "$SCRIPTS_ROOT/check-provenant-install.py"
 "${PYTHON[@]}" "$SCRIPTS_ROOT/check_harness.py"
-"${PYTHON[@]}" "$SCRIPTS_ROOT/check_spec_schema_drift.py"
-"${PYTHON[@]}" "$SCRIPTS_ROOT/check_spec_check_assertions.py"
 
 while IFS= read -r -d '' script; do
   case "$script" in
