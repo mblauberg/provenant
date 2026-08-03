@@ -82,7 +82,8 @@ def test_installed_wrapper_does_not_promote_default_instance_root_to_explicit_en
     target = scripts / "provenant"
     target.write_text("#!/bin/sh\nprintf 'instance=%s\\n' \"${AGENT_FABRIC_INSTANCE_ROOT-<unset>}\"\n")
     target.chmod(0o755)
-    mcp_target = scripts / "agent-fabric-mcp"
+    mcp_target = product / "runtime" / "fabric" / "bin" / "fabric-mcp"
+    mcp_target.parent.mkdir(parents=True)
     mcp_target.write_text("#!/bin/sh\nexit 0\n")
     mcp_target.chmod(0o755)
     wrapper = tmp_path / "provenant"

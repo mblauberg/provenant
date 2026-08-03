@@ -2,9 +2,10 @@
 
 The first invariant ratchets every oversized hand-written runtime TypeScript
 source file while holding every new source file to 1,000 lines. The second
-keeps protocol, implementation, and console imports on the intended dependency
-side of three explicit boundaries, with temporary allowances and permanent
-declared placements kept live by staleness checks.
+keeps the daemonless Fabric package independent of the retired runtime packages,
+inside its package boundary, and layered so its store cannot depend on its CLI
+or MCP surfaces. Temporary allowances and permanent declared placements stay
+live through staleness checks.
 
 Specifier extraction deliberately uses regexes over comment-masked source
 rather than a TypeScript AST: the relevant ESM forms have literal string
@@ -30,7 +31,16 @@ DEFAULT_SOURCE_SIZE_CAP = 1_000
 EXCLUDED_SOURCE_DIRECTORIES = frozenset(
     {"__tests__", "generated", "vendor", "vendored"}
 )
-RESTRICTED_FABRIC_DIRECTORIES = frozenset({"daemon", "mcp", "cli"})
+RETIRED_FABRIC_PACKAGES = frozenset(
+    {
+        "agent-fabric",
+        "agent-fabric-console",
+        "agent-fabric-herdr",
+        "agent-fabric-protocol",
+        "agent-fabric-review-portal-supervisor",
+    }
+)
+FABRIC_SURFACE_FILES = frozenset({"cli.ts", "server.ts"})
 REMOVAL_ISSUE = re.compile(r"^#\d+$")
 IMPORT_ALLOWANCE_KEYS = frozenset(
     {"file", "specifier_prefix", "removal_issue", "rationale"}
@@ -214,38 +224,24 @@ def _violated_rules(root: Path, importer: Path, specifier: str) -> list[str]:
     root = root.resolve()
     importer = importer.resolve()
     resolved = _resolved_relative_import(importer, specifier)
-    protocol_package = root / "runtime" / "agent-fabric-protocol"
-    protocol_source = protocol_package / "src"
-    fabric_source = root / "runtime" / "agent-fabric" / "src"
-    console_source = root / "runtime" / "agent-fabric-console" / "src"
+    runtime = root / "runtime"
+    fabric_package = runtime / "fabric"
+    fabric_source = fabric_package / "src"
     rules: list[str] = []
 
-    if _is_below(importer, protocol_source):
-        forbidden_packages = {
-            "agent-fabric",
-            "agent-fabric-console",
-            "agent-fabric-herdr",
-            "agent-fabric-review-portal-supervisor",
-        }
-        package_violation = any(
-            _matches_package(specifier, package) for package in forbidden_packages
-        )
-        relative_violation = _is_below(resolved, root / "runtime") and not _is_below(
-            resolved, protocol_package
-        )
-        if package_violation or relative_violation:
-            rules.append("R1")
-
     if _is_below(importer, fabric_source):
-        importer_relative = importer.relative_to(fabric_source)
-        importer_layer = importer_relative.parts[0] if len(importer_relative.parts) > 1 else ""
-        if importer_layer not in RESTRICTED_FABRIC_DIRECTORIES and any(
-            _is_below(resolved, fabric_source / directory)
-            for directory in RESTRICTED_FABRIC_DIRECTORIES
+        if any(
+            _matches_package(specifier, package)
+            for package in RETIRED_FABRIC_PACKAGES
         ):
+            rules.append("R1")
+        if _is_below(resolved, runtime) and not _is_below(resolved, fabric_package):
             rules.append("R2")
-        if _matches_package(specifier, "agent-fabric-console") or _is_below(
-            resolved, console_source
+        if (
+            importer.name in {"identity.ts", "store.ts"}
+            and resolved is not None
+            and resolved.parent == fabric_source.resolve()
+            and resolved.name in FABRIC_SURFACE_FILES
         ):
             rules.append("R3")
 
@@ -390,18 +386,18 @@ def test_source_size_checker_rejects_new_and_grown_files_but_warns_on_shrink(
     ("relative_file", "source", "rule_id"),
     (
         (
-            "runtime/agent-fabric-protocol/src/protocol.ts",
+            "runtime/fabric/src/store.ts",
             'import { x } from "@local/agent-fabric";\n',
             "R1",
         ),
         (
-            "runtime/agent-fabric/src/gates/store.ts",
-            'import { x } from "../daemon/protocol.js";\n',
+            "runtime/fabric/src/store.ts",
+            'import { x } from "../../other-runtime/src/index.js";\n',
             "R2",
         ),
         (
-            "runtime/agent-fabric/src/core/fabric.ts",
-            'import { x } from "@local/agent-fabric-console";\n',
+            "runtime/fabric/src/store.ts",
+            'import { x } from "./server.js";\n',
             "R3",
         ),
     ),
@@ -418,19 +414,19 @@ def test_import_checker_detects_each_rule(
 def test_import_checker_detects_dynamic_import(tmp_path: Path) -> None:
     _write_source(
         tmp_path,
-        "runtime/agent-fabric/src/gates/store.ts",
-        'const protocol = import("../daemon/protocol.js");\n',
+        "runtime/fabric/src/store.ts",
+        'const server = import("./server.js");\n',
     )
 
-    with pytest.raises(AssertionError, match=r"R2 import-boundary violation"):
+    with pytest.raises(AssertionError, match=r"R3 import-boundary violation"):
         _check_import_boundaries(tmp_path, [])
 
 
 def test_import_checker_rejects_stale_allowance(tmp_path: Path) -> None:
-    _write_source(tmp_path, "runtime/agent-fabric/src/gates/store.ts", "export {};\n")
+    _write_source(tmp_path, "runtime/fabric/src/store.ts", "export {};\n")
     allowance = {
-        "file": "runtime/agent-fabric/src/gates/store.ts",
-        "specifier_prefix": "../daemon/protocol.js",
+        "file": "runtime/fabric/src/store.ts",
+        "specifier_prefix": "./server.js",
         "removal_issue": "#344",
     }
 
@@ -441,12 +437,12 @@ def test_import_checker_rejects_stale_allowance(tmp_path: Path) -> None:
 def test_import_checker_accepts_permanent_allowance(tmp_path: Path) -> None:
     _write_source(
         tmp_path,
-        "runtime/agent-fabric/src/gates/store.ts",
-        'import { x } from "../daemon/protocol.js";\n',
+        "runtime/fabric/src/store.ts",
+        'import { x } from "./server.js";\n',
     )
     allowance = {
-        "file": "runtime/agent-fabric/src/gates/store.ts",
-        "specifier_prefix": "../daemon/protocol.js",
+        "file": "runtime/fabric/src/store.ts",
+        "specifier_prefix": "./server.js",
         "rationale": "permanent composition placement",
     }
 
@@ -454,10 +450,10 @@ def test_import_checker_accepts_permanent_allowance(tmp_path: Path) -> None:
 
 
 def test_import_checker_rejects_allowance_missing_both_fields(tmp_path: Path) -> None:
-    _write_source(tmp_path, "runtime/agent-fabric/src/gates/store.ts", "export {};\n")
+    _write_source(tmp_path, "runtime/fabric/src/store.ts", "export {};\n")
     allowance = {
-        "file": "runtime/agent-fabric/src/gates/store.ts",
-        "specifier_prefix": "../daemon/protocol.js",
+        "file": "runtime/fabric/src/store.ts",
+        "specifier_prefix": "./server.js",
     }
 
     with pytest.raises(AssertionError, match="exactly one of removal_issue or rationale"):
@@ -465,10 +461,10 @@ def test_import_checker_rejects_allowance_missing_both_fields(tmp_path: Path) ->
 
 
 def test_import_checker_rejects_empty_rationale(tmp_path: Path) -> None:
-    _write_source(tmp_path, "runtime/agent-fabric/src/gates/store.ts", "export {};\n")
+    _write_source(tmp_path, "runtime/fabric/src/store.ts", "export {};\n")
     allowance = {
-        "file": "runtime/agent-fabric/src/gates/store.ts",
-        "specifier_prefix": "../daemon/protocol.js",
+        "file": "runtime/fabric/src/store.ts",
+        "specifier_prefix": "./server.js",
         "rationale": " ",
     }
 
@@ -479,9 +475,9 @@ def test_import_checker_rejects_empty_rationale(tmp_path: Path) -> None:
 def test_import_checker_ignores_comment_only_daemon_mention(tmp_path: Path) -> None:
     _write_source(
         tmp_path,
-        "runtime/agent-fabric/src/core/migrations.ts",
-        '// import { x } from "../daemon/protocol.js";\n'
-        '/* export { x } from "../daemon/protocol.js"; */\n',
+        "runtime/fabric/src/store.ts",
+        '// import { x } from "./server.js";\n'
+        '/* export { x } from "./server.js"; */\n',
     )
 
     _check_import_boundaries(tmp_path, [])
