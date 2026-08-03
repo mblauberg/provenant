@@ -81,6 +81,12 @@ function authorityExpiry(authorityJson: string): number {
   return expiresAt;
 }
 
+function deriveBootstrapAuthorityExpiry(createdAt: number): string {
+  const expiresAt = new Date(createdAt + BOOTSTRAP_AUTHORITY_LIFETIME_MS);
+  if (!Number.isFinite(expiresAt.getTime())) throw new Error("bootstrap authority creation time is invalid");
+  return expiresAt.toISOString();
+}
+
 function canonicalJson(value: unknown): string {
   if (value === null || typeof value === "boolean" || typeof value === "number" || typeof value === "string") return JSON.stringify(value);
   if (Array.isArray(value)) return "[" + value.map(canonicalJson).join(",") + "]";
@@ -148,6 +154,7 @@ function migrateBootstrapAuthority(input: {
   runId: string;
   authorityId: string;
   parentAuthorityId: string | null;
+  expectedExpiresAt: string;
   required: boolean;
 }): boolean {
   const { custody } = input;
@@ -187,6 +194,9 @@ function migrateBootstrapAuthority(input: {
   if (canonicalJson(normalisedStoredAuthority) !== authorityJson) {
     throw bootstrapAuthorityMigrationError("stored authority is not canonical");
   }
+  if (normalisedStoredAuthority.expiresAt !== input.expectedExpiresAt) {
+    throw bootstrapAuthorityMigrationError("stored authority expiry is not the bootstrap expiry");
+  }
 
   const legacyAuthority = bootstrapAuthorityInput(
     custody,
@@ -194,7 +204,7 @@ function migrateBootstrapAuthority(input: {
     input.identityDigest,
     input.trustRecordDigest,
     input.bootstrapRunDirectory,
-    normalisedStoredAuthority.expiresAt,
+    input.expectedExpiresAt,
     BOOTSTRAP_AUTHORITY_LEGACY_ACTIONS,
   );
   const currentAuthority = bootstrapAuthorityInput(
@@ -203,7 +213,7 @@ function migrateBootstrapAuthority(input: {
     input.identityDigest,
     input.trustRecordDigest,
     input.bootstrapRunDirectory,
-    normalisedStoredAuthority.expiresAt,
+    input.expectedExpiresAt,
     BOOTSTRAP_AUTHORITY_ACTIONS,
   );
   const storedActionsHash = sha256(canonicalJson(normalisedStoredAuthority.actions));
@@ -274,18 +284,22 @@ export function bootstrapCurrentMcpSeat(custody: BootstrapMcpCustody, input: Boo
 
     return custody.database.transaction((): BootstrapMcpSeatResult => {
       const existingProject = custody.database.prepare(
-        "SELECT project_id,trust_record_digest FROM projects WHERE canonical_root=?",
+        "SELECT project_id,trust_record_digest,created_at FROM projects WHERE canonical_root=?",
       ).get(canonicalRoot);
       const now = custody.clock();
-      const bootstrapAuthorityExpiresAt = new Date(now + BOOTSTRAP_AUTHORITY_LIFETIME_MS).toISOString();
+      let bootstrapCreatedAt = now;
       if (existingProject === undefined) {
         custody.database.prepare(`
           INSERT INTO projects(project_id,canonical_root,trust_record_digest,revision,authority_generation,created_at,updated_at)
           VALUES (?,?,?,1,1,?,?)
         `).run(projectId, canonicalRoot, input.trustRecordDigest, now, now);
-      } else if (!isRow(existingProject) || existingProject.project_id !== projectId || existingProject.trust_record_digest !== input.trustRecordDigest) {
-        throw new FabricError("DEDUPE_CONFLICT", "bootstrap project identity conflicts with stored trust custody");
+      } else {
+        if (!isRow(existingProject) || existingProject.project_id !== projectId || existingProject.trust_record_digest !== input.trustRecordDigest) {
+          throw new FabricError("DEDUPE_CONFLICT", "bootstrap project identity conflicts with stored trust custody");
+        }
+        bootstrapCreatedAt = numberField(existingProject, "created_at");
       }
+      const bootstrapAuthorityExpiresAt = deriveBootstrapAuthorityExpiry(bootstrapCreatedAt);
 
       const existingSession = custody.database.prepare(
         "SELECT project_session_id FROM project_sessions WHERE project_id=?",
@@ -379,6 +393,7 @@ export function bootstrapCurrentMcpSeat(custody: BootstrapMcpCustody, input: Boo
         runId,
         authorityId: rootAuthorityId,
         parentAuthorityId: null,
+        expectedExpiresAt: bootstrapAuthorityExpiresAt,
         required: true,
       });
       const peerAuthorityMigrated = migrateBootstrapAuthority({
@@ -390,6 +405,7 @@ export function bootstrapCurrentMcpSeat(custody: BootstrapMcpCustody, input: Boo
         runId,
         authorityId: bootstrapAuthorityId(identityDigest, peerSeat),
         parentAuthorityId: rootAuthorityId,
+        expectedExpiresAt: bootstrapAuthorityExpiresAt,
         required: false,
       });
       const authorityMigrationMutated = rootAuthorityMigrated || peerAuthorityMigrated;

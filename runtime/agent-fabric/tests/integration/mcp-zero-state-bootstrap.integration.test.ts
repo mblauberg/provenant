@@ -432,6 +432,75 @@ describe("zero-state MCP bootstrap", () => {
     }
   });
 
+  it.each([
+    { label: "legacy action set", actions: "legacy" as const },
+    { label: "current action set", actions: "current" as const },
+  ])("rejects a recomputed custom bootstrap expiry without mutation for the $label", async ({ actions }) => {
+    const temporaryRoot = await mkdtemp(join(tmpdir(), "fabric-zero-state-authority-expiry-refuse-"));
+    roots.push(temporaryRoot);
+    const root = await realpath(temporaryRoot);
+    const databasePath = join(root, "fabric.sqlite3");
+    const request = {
+      canonicalRoot: root,
+      trustRecordDigest: `sha256:${"9".repeat(64)}`,
+      seat: "codex" as const,
+      expiresAt: "2026-07-19T00:00:00.000Z",
+    };
+    const fabric = new Fabric({ databasePath, workspaceRoots: [root], clock: () => Date.parse("2026-07-18T00:00:00.000Z") });
+
+    try {
+      const original = fabric.bootstrapCurrentMcpSeat(request);
+      const database = new Database(databasePath);
+      try {
+        const authority = database.prepare(
+          "SELECT authority_id,authority_json FROM authorities WHERE run_id=? AND parent_authority_id IS NULL",
+        ).get(original.runId) as { authority_id: string; authority_json: string } | undefined;
+        if (authority === undefined) throw new Error("bootstrap authority is missing");
+        const custom = JSON.parse(authority.authority_json) as { actions: string[]; expiresAt: string } & Record<string, unknown>;
+        if (actions === "legacy") {
+          custom.actions = custom.actions.filter((action) =>
+            action !== FABRIC_OPERATIONS.taskRequest && action !== FABRIC_OPERATIONS.taskCompleteWithReply,
+          );
+        }
+        custom.expiresAt = "2099-01-01T00:00:00.000Z";
+        const customJson = canonicalFixtureJson(custom);
+        const customHash = createHash("sha256").update(customJson).digest("hex");
+        database.prepare("UPDATE authorities SET authority_json=?,authority_hash=? WHERE authority_id=? AND run_id=?")
+          .run(customJson, customHash, authority.authority_id, original.runId);
+      } finally {
+        database.close();
+      }
+
+      const before = new Database(databasePath, { readonly: true });
+      let authorityRows: unknown;
+      let activeGeneration: unknown;
+      try {
+        authorityRows = before.prepare(
+          "SELECT authority_id,parent_authority_id,authority_json,authority_hash FROM authorities WHERE run_id=? ORDER BY authority_id",
+        ).all(original.runId);
+        activeGeneration = before.prepare("SELECT generation FROM mcp_active_seat_generations WHERE project_id=?")
+          .get(`project:local:${createHash("sha256").update(canonicalFixtureJson({ canonicalRoot: root })).digest("hex")}`);
+      } finally {
+        before.close();
+      }
+
+      expect(() => fabric.bootstrapCurrentMcpSeat(request)).toThrow(expect.objectContaining({ code: "AUTHORITY_WIDENING" }));
+
+      const after = new Database(databasePath, { readonly: true });
+      try {
+        expect(after.prepare(
+          "SELECT authority_id,parent_authority_id,authority_json,authority_hash FROM authorities WHERE run_id=? ORDER BY authority_id",
+        ).all(original.runId)).toEqual(authorityRows);
+        expect(after.prepare("SELECT generation FROM mcp_active_seat_generations WHERE project_id=?")
+          .get(`project:local:${createHash("sha256").update(canonicalFixtureJson({ canonicalRoot: root })).digest("hex")}`)).toEqual(activeGeneration);
+      } finally {
+        after.close();
+      }
+    } finally {
+      await fabric.close();
+    }
+  });
+
   it("renews an expiring bootstrap roster in place and revokes its predecessor", async () => {
     const temporaryRoot = await mkdtemp(join(tmpdir(), "fabric-zero-state-renewal-"));
     roots.push(temporaryRoot);
