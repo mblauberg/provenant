@@ -1,0 +1,7 @@
+{
+  "name": "@local/fabric",
+  "version": "2.0.0",
+  "type": "module",
+  "private": true,
+  "bin": { "fabric-mcp": "./src/server.ts" }
+}
