@@ -12,6 +12,9 @@ import textwrap
 import time
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from _shared.bounded_process import run_bounded
+
 
 HERE = Path(__file__).resolve().parent
 PRODUCT_ROOT = HERE.parents[2]
@@ -104,15 +107,14 @@ def run_dispatch_with_stub(
                 "Reply exactly OK",
             ]
         command.extend(extra_args or [])
-        result = subprocess.run(
+        result = run_bounded(
             command,
-            cwd=str(tmp),
+            cwd=tmp,
             env=env,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            timeout_seconds=30,
+            output_limit_bytes=1_048_576,
         )
-        record = json.loads(result.stdout)
+        record = json.loads(result.output)
         return result, record, out.read_text(encoding="utf-8") if out.exists() else ""
 
 
@@ -147,7 +149,7 @@ def test_claude_other_primary_uses_opus_without_implicit_fable_route():
         echo "OPUS OK"
     """
     result, record, output = run_dispatch_with_stub(stub, role="other-primary")
-    assert result.returncode == 0, result.stderr
+    assert result.returncode == 0, result.output
     assert record["resolved_model"] == "opus"
     assert record["requested_model"] == "opus"
     assert record["fallback_model"] == ""
@@ -172,7 +174,7 @@ def test_claude_crucial_synthesis_dispatches_explicit_fable_override():
         role="synthesis",
         extra_args=["--risk-tier", "crucial", "--model", "fable", "--effort", "medium"],
     )
-    assert result.returncode == 0, result.stderr
+    assert result.returncode == 0, result.output
     assert record["resolved_model"] == "fable"
     assert record["risk_tier"] == "crucial"
     assert record["policy_override"] == "crucial-fable-synthesis-adjudication"
@@ -188,7 +190,7 @@ def test_reviewer_id_round_trips_into_dispatch_receipt():
     result, record, output = run_dispatch_with_stub(
         stub, extra_args=["--reviewer-id", "reviewer-1"]
     )
-    assert result.returncode == 0, result.stderr
+    assert result.returncode == 0, result.output
     assert record["reviewer_id"] == "reviewer-1"
     assert output.strip() == "OK"
 
@@ -216,7 +218,7 @@ def test_claude_fallback_runs_after_oauth_safe_mode_model_failure():
         exit 9
     """
     result, record, output = run_dispatch_with_stub(stub, role="other-primary")
-    assert result.returncode == 0, result.stderr
+    assert result.returncode == 0, result.output
     assert record["resolved_model"] == "opus"
     assert record["read_only_guarantee"] == "oauth_safe_mode"
     assert output.strip() == "SAFE OPUS"
