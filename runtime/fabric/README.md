@@ -14,9 +14,15 @@ database and registers the caller.
     fabric watch                        # tail everything my agents are doing
     fabric --help                       # every command and flag
 
+`bin/fabric` is the shell entry point; symlink it onto PATH. It runs the
+TypeScript in place, so there is no build to keep in step with the source.
+
 The same operations are exposed over MCP as `fabric_whoami`, `fabric_send`,
 `fabric_inbox`, `fabric_team_create`, `fabric_task_create`, `fabric_task_update`,
-`fabric_tasks`, `fabric_note` and `fabric_activity`.
+`fabric_tasks`, `fabric_note` and `fabric_activity`. Register `bin/fabric-mcp`
+as the server command; Claude and Codex both already do. The client's working
+directory picks the project, so one registration covers every directory you
+work in.
 
 ## Identity
 
@@ -64,3 +70,4 @@ boundary.
     src/store.ts    every operation, one class
     src/server.ts   MCP surface
     src/cli.ts      shell surface
+    bin/            launchers the registrations and PATH point at

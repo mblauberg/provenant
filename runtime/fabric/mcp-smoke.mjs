@@ -8,11 +8,20 @@ import { resolve } from "node:path";
 const state = resolve(tmpdir(), `fabric-mcp-smoke-${String(process.pid)}`);
 rmSync(state, { recursive: true, force: true });
 
+// Spawn the launcher the MCP registrations name, with the sparse environment an
+// MCP client actually gives it. If this works, the registration works.
+const launcher = resolve(import.meta.dirname, "bin/fabric-mcp");
+
 const spawnAgent = async (seat) => {
   const transport = new StdioClientTransport({
-    command: "node",
-    args: ["--import", "/Users/user/.agents/node_modules/tsx/dist/loader.mjs", "src/server.ts"],
-    env: { ...process.env, AGENT_FABRIC_SEAT: seat, AGENT_FABRIC_STATE_DIRECTORY: state },
+    command: launcher,
+    cwd: process.cwd(),
+    env: {
+      HOME: process.env.HOME,
+      PATH: "/usr/bin:/bin",
+      AGENT_FABRIC_SEAT: seat,
+      AGENT_FABRIC_STATE_DIRECTORY: state,
+    },
   });
   const client = new Client({ name: `test-${seat}`, version: "1" });
   await client.connect(transport);
