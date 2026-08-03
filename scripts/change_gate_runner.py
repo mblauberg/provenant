@@ -29,6 +29,7 @@ class CommandResult:
     returncode: int
     output: str
     classification: FailureClass
+    unresolved_module: str | None = None
 
 
 DIRECT_PROCESS_TIMEOUT = 30.0
@@ -212,14 +213,22 @@ def _run_structured(
     returncode = process.returncode
     if returncode is None:
         returncode = -signal.SIGKILL
-    classification = classify_structured_report(runner, report_path, returncode)
+    classified = classify_structured_report(
+        runner, report_path, returncode, include_evidence=True
+    )
+    if isinstance(classified, tuple):
+        classification, unresolved_module = classified
+    else:
+        classification, unresolved_module = classified, None
     if direct_timed_out or not group_closed or not pipes_drained:
         classification = FailureClass.UNKNOWN
+        unresolved_module = None
     return CommandResult(
         command=rendered,
         returncode=returncode,
         output=output,
         classification=classification,
+        unresolved_module=unresolved_module,
     )
 
 

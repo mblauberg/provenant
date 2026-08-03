@@ -92,6 +92,69 @@ def _structured_message_class(message: object, *, allow_assertion: bool = True) 
     return _combine_failure_classes(classes) if classes else FailureClass.UNKNOWN
 
 
+_UNRESOLVED_MODULE_PATTERNS = (
+    re.compile(r"No module named ['\"]([^'\"]+)['\"]"),
+    re.compile(r"Cannot find module ['\"]([^'\"]+)['\"]"),
+    re.compile(r"Cannot find package ['\"]([^'\"]+)['\"]"),
+    re.compile(r"Failed to resolve import ['\"]([^'\"]+)['\"]"),
+)
+
+
+def _one_unresolved_module(values: list[str]) -> str | None:
+    modules = {
+        match.group(1).strip()
+        for value in values
+        for pattern in _UNRESOLVED_MODULE_PATTERNS
+        for match in pattern.finditer(value)
+        if match.group(1).strip()
+    }
+    return next(iter(modules)) if len(modules) == 1 else None
+
+
+def _junit_import_values(report: Path) -> list[str]:
+    try:
+        root = ET.parse(report).getroot()
+    except (ET.ParseError, OSError):
+        return []
+    values: list[str] = []
+    for record in root.iter():
+        if record.tag.rsplit("}", 1)[-1] not in {"error", "failure"}:
+            continue
+        values.extend(value for value in record.attrib.values() if isinstance(value, str))
+        text = "".join(record.itertext())
+        if text:
+            values.append(text)
+    return values
+
+
+def _vitest_import_values(value: object, key: str | None = None) -> list[str]:
+    if isinstance(value, dict):
+        values: list[str] = []
+        for child_key, child in value.items():
+            if child_key in {
+                "error",
+                "message",
+                "failureMessages",
+                "failureMessage",
+                "testResults",
+            }:
+                values.extend(_vitest_import_values(child, child_key))
+        return values
+    if isinstance(value, list):
+        return [text for child in value for text in _vitest_import_values(child, key)]
+    if isinstance(value, str) and key in {"error", "message", "failureMessages", "failureMessage"}:
+        return [value]
+    return []
+
+
+def _vitest_import_values_from_report(report: Path) -> list[str]:
+    try:
+        document = json.loads(report.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return []
+    return _vitest_import_values(document)
+
+
 def _junit_failure_class(record: ET.Element, *, include_text: bool = False) -> FailureClass:
     """Classify one JUnit failure/error with ``type`` as the authority."""
 
@@ -362,8 +425,14 @@ def parse_vitest_report(report: Path) -> FailureClass:
     return FailureClass.COLLECTION if document["numTotalTests"] == 0 and document["numFailedTestSuites"] else FailureClass.UNKNOWN
 
 
-def classify_structured_report(runner: object, report: Path, returncode: int) -> FailureClass:
-    """Classify one known runner's report, failing closed on unusable evidence."""
+def classify_structured_report(
+    runner: object,
+    report: Path,
+    returncode: int,
+    *,
+    include_evidence: bool = False,
+) -> FailureClass | tuple[FailureClass, str | None]:
+    """Classify one known runner's report, optionally returning import evidence."""
 
     name = getattr(runner, "value", runner)
     if name == "pytest":
@@ -371,7 +440,12 @@ def classify_structured_report(runner: object, report: Path, returncode: int) ->
     elif name == "vitest":
         result = parse_vitest_report(report)
     else:
-        return FailureClass.UNKNOWN_RUNNER
+        return (FailureClass.UNKNOWN_RUNNER, None) if include_evidence else FailureClass.UNKNOWN_RUNNER
     if returncode != 0 and result is FailureClass.PASS:
-        return FailureClass.UNKNOWN
-    return result
+        return (FailureClass.UNKNOWN, None) if include_evidence else FailureClass.UNKNOWN
+    if not include_evidence:
+        return result
+    if result is not FailureClass.IMPORT:
+        return result, None
+    values = _junit_import_values(report) if name == "pytest" else _vitest_import_values_from_report(report)
+    return result, _one_unresolved_module(values)
