@@ -11,11 +11,38 @@
 import { databasePath, identify } from "./identity.js";
 import { Store } from "./store.js";
 
-const USAGE = `fabric whoami | send <to> <body...> | inbox [--peek] | note <text...>
-       tasks [state] | task <objective...> | done <task-id> | watch [--interval N]`;
+const USAGE = `fabric <command>
+
+  whoami                      who am I, and who else is in this project
+  send <to> <body...>         to an agent id, a team id, or "all"
+       [--reply-to <id>]      thread this onto an existing message
+       [--kind <kind>]        note (default), request, response
+  inbox [--peek]              my unread messages; --peek leaves them unread
+  note <text...>              record something in the activity log
+  tasks [state]               list tasks, optionally filtered by state
+  task <objective...>         open a task
+  done <task-id>              close a task
+  watch [--interval N]        tail everything agents here are doing
+
+Identity comes from the working directory and AGENT_FABRIC_LABEL. There is
+nothing to install, trust or provision.`;
 
 const argv = process.argv.slice(2);
 const command = argv[0] ?? "whoami";
+
+if (command === "--help" || command === "-h" || command === "help") {
+  console.log(USAGE);
+  process.exit(0);
+}
+
+/** Read `--flag value` out of argv, so the remaining words form the body. */
+const flag = (name: string): string | undefined => {
+  const at = argv.indexOf(`--${name}`);
+  if (at === -1) return undefined;
+  const value = argv[at + 1];
+  argv.splice(at, value === undefined ? 1 : 2);
+  return value;
+};
 const who = identify();
 const store = new Store(databasePath());
 store.announce(who);
@@ -33,10 +60,15 @@ switch (command) {
     break;
 
   case "send": {
+    // Strip the flags first so whatever is left is the recipient and the body.
+    const replyTo = flag("reply-to");
+    const kind = flag("kind");
     const to = argv[1];
     const body = argv.slice(2).join(" ");
-    if (to === undefined || body.length === 0) throw new Error(`usage: fabric send <to> <body...>`);
-    show(store.send(who, to, body));
+    if (to === undefined || body.length === 0) {
+      throw new Error("usage: fabric send [--reply-to <id>] [--kind <kind>] <to> <body...>");
+    }
+    show(store.send(who, to, body, { kind, replyTo }));
     break;
   }
 
