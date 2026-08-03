@@ -61,8 +61,6 @@ def test_model_route_reads_instance_catalogue_without_an_instance_environment_ov
             "scout",
             "--role",
             "worker",
-            "--adapter-gate",
-            "direct-cli",
         ],
         cwd=ROOT,
         env=_clean_split_environment(tmp_path, ROOT),
