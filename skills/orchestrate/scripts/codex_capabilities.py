@@ -7,9 +7,11 @@ import argparse
 from datetime import datetime, timezone
 import json
 from pathlib import Path
-import subprocess
 import sys
 from typing import Any
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from _shared.bounded_process import run_bounded
 
 
 def load_json(raw: str) -> Any:
@@ -70,18 +72,20 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--codex-bin", default="codex")
     args = parser.parse_args(argv)
     try:
-        result = subprocess.run(
+        result = run_bounded(
             [args.codex_bin, "debug", "models"],
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=10,
-            check=False,
+            cwd=Path.cwd(),
+            timeout_seconds=10,
+            output_limit_bytes=1_048_576,
         )
+        if result.timed_out:
+            raise ValueError("codex debug models timed out")
         if result.returncode != 0:
-            raise ValueError(f"codex debug models exited {result.returncode}: {result.stderr.strip()}")
-        snapshot = normalize(load_json(result.stdout))
-    except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError, ValueError) as exc:
+            raise ValueError(
+                f"codex debug models exited {result.returncode}: {result.output.strip()}"
+            )
+        snapshot = normalize(load_json(result.output))
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
         print(f"capability discovery failed: {exc}", file=sys.stderr)
         return 1
     encoded = json.dumps(snapshot, indent=2, sort_keys=True) + "\n"

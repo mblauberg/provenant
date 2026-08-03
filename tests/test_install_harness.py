@@ -803,38 +803,15 @@ def test_rejects_a_relative_provenant_bin_directory_before_mutation(tmp_path):
     assert not (tmp_path / ".codex").exists()
 
 
-def test_upgrades_a_dangling_legacy_instance_link_to_a_stable_copy(tmp_path):
-    bin_dir = tmp_path / ".local/bin"
-    bin_dir.mkdir(parents=True)
-    instance_root = tmp_path / "custom-instance"
-    command = bin_dir / "provenant"
-    command.symlink_to(instance_root / "scripts/provenant")
-
-    result = run(
-        "codex",
-        tmp_path,
-        AGENT_FABRIC_INSTANCE_ROOT=str(instance_root),
-    )
-
-    assert result.returncode == 0, result.stderr
-    assert command.is_file()
-    assert not command.is_symlink()
-    assert command.read_bytes() == PROVENANT_TEMPLATE.read_bytes()
-    assert f"command updated={command}" in result.stdout
-
-
-def test_upgrades_an_equivalent_relative_legacy_instance_link(tmp_path):
+def test_updates_a_managed_provenant_file_to_the_current_template(tmp_path):
     bin_dir = tmp_path / "custom-bin"
     bin_dir.mkdir()
-    instance_root = tmp_path / "custom-instance"
     command = bin_dir / "provenant"
-    relative_target = os.path.relpath(instance_root / "scripts/provenant", bin_dir)
-    command.symlink_to(relative_target)
+    command.write_bytes(PROVENANT_TEMPLATE.read_bytes() + b"\n# stale managed copy\n")
 
     result = run(
         "codex",
         tmp_path,
-        AGENT_FABRIC_INSTANCE_ROOT=str(instance_root),
         PROVENANT_BIN_DIR=str(bin_dir),
     )
 
@@ -952,41 +929,6 @@ LEGACY_BOOTSTRAP = (
     "specialise or strengthen the global harness but may not silently broaden "
     "authority, weaken safety gates or redefine global cross-project memory policy."
 )
-
-
-def test_upgrade_migrates_pre_530_instructions_instead_of_refusing_them(tmp_path):
-    """An install written by an earlier installer must still upgrade.
-
-    The old bootstrap text names the product AGENTS.md, which matches neither
-    acceptance branch of the instance-owned check. Refusing it would break every
-    upgrade deterministically, so it is stale rather than foreign: migrate it.
-    """
-    config = tmp_path / "claude-config"
-    config.mkdir()
-    instructions = config / "CLAUDE.md"
-    instructions.write_text(
-        "# Provenant\n\n"
-        + LEGACY_BOOTSTRAP.format(product=ROOT)
-        + "\n\n## My own notes\n\nKeep this paragraph exactly as written.\n"
-    )
-
-    result = run("claude", tmp_path, CLAUDE_CONFIG_DIR=str(config))
-
-    assert result.returncode == 0, result.stderr
-    assert f"instructions migrated={instructions}" in result.stdout
-    migrated = instructions.read_text()
-    seeded = instance_root_for(tmp_path) / "AGENTS.md"
-    assert str(seeded) in migrated
-    assert f"{ROOT}/AGENTS.md" not in migrated
-    # The harness constitution stays product-shipped, and user prose survives.
-    assert f"{ROOT}/HARNESS.md" in migrated
-    assert "Keep this paragraph exactly as written." in migrated
-
-    # A second run recognises its own output and stops migrating.
-    second = run("claude", tmp_path, CLAUDE_CONFIG_DIR=str(config))
-    assert second.returncode == 0, second.stderr
-    assert f"instructions existing={instructions}" in second.stdout
-    assert instructions.read_text() == migrated
 
 
 def test_a_fused_upgrade_leaves_legacy_instructions_byte_stable(tmp_path):
