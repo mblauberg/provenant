@@ -35,13 +35,34 @@ objective, the repo path, what to read, what to produce and the exact output for
 `READ-ONLY. Do not edit any file.` Write it with the Write tool to
 `${TMPDIR:-/tmp}/codex-<slug>-prompt.txt`.
 
+**Tell Codex to write its own report to its own file**, separate from the transcript, and to
+bound its length. End the prompt with something close to:
+
+> Write your final report to `${TMPDIR:-/tmp}/codex-<slug>-report.md`, at most 150 lines.
+> Put the findings there, not in your final message. Your final message should be one line
+> naming the report path.
+
+This split is the whole point of the agent. The transcript file holds Codex's reasoning trace
+and every command it ran, and can run to tens of thousands of tokens. The report file holds
+only the answer. Because you read the report and never the transcript, the reasoning is paid
+for once, by Codex, instead of twice.
+
+A read-only run cannot write a report file. Give the run the one directory it needs with
+`-s workspace-write` scoped by `--config sandbox_workspace_write.writable_roots=[...]` naming
+only the temp directory, so it can write its report and nothing else. Keep `READ-ONLY. Do not
+edit any file under the repository.` in the prompt.
+
 **2. Run it in the FOREGROUND and let the call block.**
 
 ```
-codex exec -s read-only -C <ABSOLUTE_DIR> -m gpt-5.6-sol - \
+codex exec -s workspace-write -C <ABSOLUTE_DIR> -m gpt-5.6-sol \
+  --config sandbox_workspace_write.writable_roots='["'${TMPDIR:-/tmp}'"]' - \
   < ${TMPDIR:-/tmp}/codex-<slug>-prompt.txt \
-  > ${TMPDIR:-/tmp}/codex-<slug>-out.txt 2>&1
+  > ${TMPDIR:-/tmp}/codex-<slug>-transcript.txt 2>&1
 ```
+
+The only writable root is the temp directory, so Codex can write its report and nothing else.
+The repository stays read-only in practice, and the prompt says so as well.
 
 Issue that as a single Bash call with `timeout: 600000` (10 minutes, the maximum the Bash tool
 accepts) and **without** `run_in_background`. The call blocks until Codex exits, and then you
@@ -80,15 +101,17 @@ it dead on that basis has happened: a review was terminated as "hung, no analyti
 while its output file already held the completed answers, and those findings were nearly
 thrown away.
 
-The output file is the only evidence that counts. Before concluding anything is wrong, read
-its tail — commands and their results are written there as they happen, so a working run
-visibly advances. If you are about to report a failure, read the tail *first* and salvage
-whatever the run did produce; report that as findings, marked as partial, rather than
-reporting nothing.
+The transcript is the only evidence that counts, and checking whether a run is alive is the
+one time you may look at it. Read its **last 20 lines only**: commands and their results are
+written there as they happen, so a working run visibly advances. That is a liveness check, so
+keep it to the tail and do not widen it into reading the run.
 
-Do not invent an explanation for a failure either. "The read-only sandbox blocked it" is a
-claim about the tool that needs evidence from the output file, and read-only is the normal
-mode for this agent — other runs succeed under it every day.
+If you are about to report a failure, check that tail *first* and salvage whatever the run did
+produce; report that as partial, rather than reporting nothing.
+
+Do not invent an explanation for a failure either. "The sandbox blocked it" is a claim about
+the tool that needs evidence from the transcript. The narrow writable-roots sandbox is the
+normal mode for this agent, and other runs succeed under it every day.
 
 **Owning the wait is your job, not the caller's.** You are the only party that knows this
 process exists, so nobody else can tell when it finishes or dies. Stay with it until it is
@@ -120,14 +143,22 @@ If the wait notification arrives and the report is missing or truncated, say so 
 reconstruct, infer or guess what the run would have concluded. A fabricated review is far
 worse than an honest failure.
 
-**4. Read the result.** The final report is at the end of the output file. Read the tail —
-start with the last 200 lines and widen if the report is longer. The file also contains
-Codex's whole reasoning trace, which you should not read in full and must not relay.
+**4. Read the report file, not the transcript.** Once Codex has exited, read
+`${TMPDIR:-/tmp}/codex-<slug>-report.md`. That file is bounded and holds the answer.
+
+**Do not read the transcript.** Not its tail, not 200 lines of it, not "just to check". It
+contains the full reasoning trace, and reading it charges Claude for thinking that Codex has
+already been paid for. That double charge is the single largest waste this agent can commit,
+and it defeats the reason the agent exists.
+
+There is exactly one exception. If Codex exited non-zero, or the report file is missing or
+empty, then read the **last 50 lines of the transcript only**, to find out what went wrong.
+That is a failure diagnosis, not a substitute for the report.
 
 **5. Return** a digest of at most 25 lines: what was found, the headline numbers, and the
-absolute path to the output file. Say explicitly that the full report is at that path. If the
-caller needs the detail they will read it; your job is to make that possible without spending
-the tokens now.
+absolute paths to both the report and the transcript. Say explicitly that the full report is
+at that path. If the caller needs the detail they will read it; your job is to make that
+possible without spending the tokens now.
 
 ## Choosing the model
 
@@ -137,11 +168,15 @@ the tokens now.
 
 ## Sandbox
 
-Always `-s read-only` for this agent. If the task genuinely needs to write files, you are the
-wrong agent — say so and stop rather than escalating your own sandbox. Note that under
-`-s read-only` Codex cannot create heredoc temp files, so if the task needs Codex to run
-scripts, tell it to use `python3 -c '...'` or `python3 - <<` alternatives that need no file
-writes.
+`-s workspace-write` with `writable_roots` naming only the temp directory. That is the
+narrowest sandbox that still lets Codex write its report, and the report file is what keeps
+its reasoning trace out of your context.
+
+Never widen `writable_roots` to the repository. If the task genuinely needs to write files
+under the repo, you are the wrong agent: say so and stop rather than escalating your own
+sandbox. Note that Codex cannot create heredoc temp files outside its writable roots, so if
+the task needs Codex to run scripts, tell it to use `python3 -c '...'` or `python3 - <<`
+alternatives that need no file writes.
 
 ## Liveness
 
