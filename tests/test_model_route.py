@@ -2582,14 +2582,18 @@ def test_model_id_effort_uses_last_token_and_explicit_unresolved_fails():
     assert result.returncode == 0
     assert route["status"] == "ok"
     assert route["effort"] == "low"
+    # Agy used to be a model-id adapter, which made every bare google alias
+    # undispatchable: `agy --model gemini-3.1-pro` exits 1 asking for --effort.
+    # It now carries effort in its own flag, so without a runtime snapshot the
+    # effort resolves but is not capability-evidenced.
     result, route = resolve(
-        "--adapter", "agy", "--model", "Gemini 3.1 Pro (High)", "--alias", "flagship",
+        "--adapter", "agy", "--model", "gemini-3.1-pro", "--alias", "flagship",
         "--role", "reviewer", "--effort", "high", "--lead-family", "openai", "--require-distinct",
     )
     assert result.returncode == 0
     assert route["status"] == "ok"
     assert route["effort"] == "high"
-    assert route["effort_capability_source"] == "model-id"
+    assert route["effort_capability_source"] == "provider-unverified"
     result, route = resolve(
         "--adapter", "cursor", "--model", "composer-2-extra-high", "--alias", "flagship",
         "--role", "reviewer", "--lead-family", "anthropic", "--require-distinct",
@@ -2867,3 +2871,55 @@ def test_catalogue_adapter_without_compatibility_contract_routes_directly():
 
     assert result.returncode == 0
     assert route["status"] == "ok"
+
+
+def write_agy_capability_snapshot(tmp_path, models=None):
+    if models is None:
+        # Measured against agy 1.1.10: efforts are per model, and
+        # gemini-3.1-pro genuinely has no medium.
+        models = {
+            "gemini-3.1-pro": {
+                "resolved_model": "gemini-3.1-pro",
+                "supported_efforts": ["low", "high"],
+            },
+            "gemini-3.6-flash": {
+                "resolved_model": "gemini-3.6-flash",
+                "supported_efforts": ["low", "medium", "high"],
+            },
+        }
+    snapshot = tmp_path / "agy-caps.json"
+    snapshot.write_text(json.dumps(capability_snapshot(models, source="agy models")))
+    return snapshot
+
+
+def test_agy_effort_is_validated_against_the_runtime_model_catalogue(tmp_path):
+    snapshot = write_agy_capability_snapshot(tmp_path)
+
+    def route_for(model, effort):
+        return resolve(
+            "--adapter", "agy", "--model", model, "--alias", "flagship",
+            "--role", "reviewer", "--effort", effort, "--lead-family", "openai",
+            "--require-distinct", "--capabilities-file", str(snapshot),
+        )
+
+    result, route = route_for("gemini-3.1-pro", "high")
+    assert result.returncode == 0
+    assert route["status"] == "ok"
+    assert route["effort"] == "high"
+    assert route["effort_capability_source"] == "runtime-model-catalog"
+
+    # The catalogue used to offer flagship at medium, which agy cannot serve:
+    # gemini-3.1-pro exposes only low and high. It must fail closed rather than
+    # silently dispatching at some other effort.
+    result, route = route_for("gemini-3.1-pro", "medium")
+    assert result.returncode != 0
+    assert route["status"] == "effort_unsupported"
+
+    result, route = route_for("gemini-3.6-flash", "medium")
+    assert result.returncode == 0
+    assert route["status"] == "ok"
+    assert route["effort"] == "medium"
+
+    result, route = route_for("gemini-9-does-not-exist", "high")
+    assert result.returncode != 0
+    assert route["status"] == "capability_model_unavailable"
