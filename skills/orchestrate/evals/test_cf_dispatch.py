@@ -514,7 +514,56 @@ def test_agy_success_with_empty_response_is_non_passing():
         assert result.returncode != 0
         assert record["status"] == "empty_output"
         assert record["certification_eligible"] is False
-        assert out.read_text(encoding="utf-8") == ""
+        # The output carries the diagnostic rather than a review body. It must
+        # never be empty, or the caller cannot tell a failed dispatch from a
+        # dispatch that has not run.
+        written = out.read_text(encoding="utf-8")
+        assert "status=empty_output" in written
+
+
+def test_agy_failure_preserves_the_provider_reason_in_the_output():
+    """agy reports failures in the stdout envelope, not on stderr.
+
+    Classifying the status is not enough on its own: an exhausted quota and a
+    revoked credential both land on auth_or_quota_error and want opposite
+    responses, so the provider's own words have to survive into the output.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        write_executable(
+            bin_dir / "agy",
+            """\
+            #!/usr/bin/env bash
+            cat >/dev/null
+            printf '%s\\n' '{"status":"ERROR","response":"","error":"Individual quota reached. Resets in 55m39s."}'
+            exit 1
+            """,
+        )
+        out = tmp / "out.txt"
+        env = fabric_free_env()
+        env["PATH"] = f"{bin_dir}:{env['PATH']}"
+        result = subprocess.run(
+            [
+                str(SCRIPT), "--tool", "agy",
+                "--model", "gemini-3.1-pro-high",
+                "--orchestrator-family", "codex",
+                "--out", str(out), "--prompt", "Reply",
+            ],
+            cwd=td,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        record = json.loads(result.stdout)
+        assert result.returncode != 0
+        assert record["status"] == "auth_or_quota_error"
+        assert record["certification_eligible"] is False
+        written = out.read_text(encoding="utf-8")
+        assert "Individual quota reached" in written
+        assert "Resets in 55m39s" in written
 
 
 def test_agy_permission_denial_overrides_false_success_envelope():
