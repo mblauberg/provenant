@@ -95,6 +95,7 @@ installs. Pass `--mcp-clients all` to either one to register all six clients
 instead.
 
 Installation links each skill into `~/.claude/skills/` and `~/.codex/skills/`,
+installs the Claude subagents from `agents/` into `~/.claude/agents/`,
 and installs a managed copy of the thin `provenant` command in
 `${PROVENANT_BIN_DIR:-$HOME/.local/bin}`; it warns when that directory is not
 on `PATH`, and never edits shell startup files. During an upgrade, the installer
@@ -104,6 +105,11 @@ other files and links as user-owned. If the installer exits
 non-zero, follow the message it prints: exit `3` flags a command collision,
 incompatible instruction target, or managed skill-link conflict, and
 instruction conflicts include the bootstrap line to add.
+
+The Claude subagent links have a separate
+`.agent-harness-agents-installation.json` receipt beside `~/.claude/agents/`.
+Re-running the installer repairs recorded links, while unmanaged files remain
+untouched.
 
 `provenant fabric whoami` creates the project-local Fabric identity and shared
 SQLite bus on first use. There is no daemon, trust record, seat bootstrap or
@@ -116,7 +122,7 @@ covers the Fabric typecheck and tests.
 ```text
 <PRODUCT_ROOT>/                product checkout
   HARNESS.md                      product constitution
-  runtime/  skills/  workflows/
+  runtime/  agents/  skills/  workflows/
   scripts/  config/
           |
           | scripts/install-harness
@@ -127,6 +133,7 @@ covers the Fabric typecheck and tests.
   .agent-fabric/product-root.json machine-local product pointer
 
 ~/.claude/skills/                 managed links
+~/.claude/agents/                 managed Claude subagent links
 ~/.codex/skills/                  managed links
 ~/.claude/workflows/              managed links
 ~/.local/bin/provenant            managed command

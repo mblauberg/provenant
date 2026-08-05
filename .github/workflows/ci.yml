@@ -67,6 +67,7 @@ jobs:
               - *ci-contract
               - *node-workspace
               - '.github/**'
+              - 'agents/**'
               - 'config/**'
               - 'docs/**'
               - 'evals/**'
