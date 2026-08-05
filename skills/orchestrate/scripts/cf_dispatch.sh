@@ -17,7 +17,7 @@ Usage: cf_dispatch.sh --tool TOOL --orchestrator-family FAMILY --prompt TEXT [op
        cf_dispatch.sh --doctor
 
 Options:
-  --tool TOOL                  One of claude, codex, cursor, kiro, copilot.
+  --tool TOOL                  One of claude, codex, cursor, agy, kiro, copilot.
   --chain SPECS                Space-separated fallback chain.
   --orchestrator-family FAMILY Current orchestrator family; same-family routes fail closed.
   --alias ALIAS                Durable route alias: flagship, workhorse, scout (default: flagship).
@@ -26,6 +26,7 @@ Options:
   --reviewer-id ID             Stable worker/reviewer identity for receipt binding.
   --model MODEL                Optional model passed to adapter.
   --effort EFFORT              Optional effort passed to adapter.
+  --add-dir PATH               Additional agy read directory; repeatable.
   --out PATH                   Clean output path; defaults to mktemp.
   --prompt TEXT                Prompt text.
   --prompt-file PATH           Read prompt from file.
@@ -38,6 +39,7 @@ EOF
 
 TOOL="" MODEL="" EFFORT="" OUT="" PROMPT="" PROMPT_FILE="" CHAIN="" ORCH_FAMILY="" MODEL_ALIAS="flagship" ROUTE_ROLE="reviewer" RISK_TIER="" REVIEWER_ID="" DOCTOR=0
 OUT_CREATED=false
+AGY_ADD_DIRS=()
 need_value() {
   [ $# -ge 2 ] || { echo "missing value for $1" >&2; exit 2; }
 }
@@ -48,6 +50,7 @@ while [ $# -gt 0 ]; do
     --tool) need_value "$@"; TOOL="$2"; shift 2;;
     --model) need_value "$@"; MODEL="$2"; shift 2;;
     --effort) need_value "$@"; EFFORT="$2"; shift 2;;
+    --add-dir) need_value "$@"; AGY_ADD_DIRS+=("$2"); shift 2;;
     --out) need_value "$@"; OUT="$2"; shift 2;;
     --prompt) need_value "$@"; PROMPT="$2"; shift 2;;
     --prompt-file) need_value "$@"; PROMPT_FILE="$2"; shift 2;;
@@ -75,6 +78,12 @@ append_cli_paths() {
 }
 append_cli_paths
 
+if [ -n "${CF_DISPATCH_AGY_ADD_DIR:-}" ]; then
+  while IFS= read -r agy_dir; do
+    [ -n "$agy_dir" ] && AGY_ADD_DIRS+=("$agy_dir")
+  done < <(printf '%s\n' "$CF_DISPATCH_AGY_ADD_DIR" | tr ':' '\n')
+fi
+
 show_doctor() {
   local tool cmd
   printf 'cf_dispatch doctor\n'
@@ -88,11 +97,12 @@ show_doctor() {
   fi
   printf 'CF_DISPATCH_ENABLE_KIRO=%s\n' "${CF_DISPATCH_ENABLE_KIRO:-0}"
   printf 'CF_DISPATCH_ENABLE_COPILOT=%s\n' "${CF_DISPATCH_ENABLE_COPILOT:-0}"
-  for tool in claude codex cursor-agent kiro-cli copilot; do
+  printf 'CF_DISPATCH_AGY_ADD_DIR=%s\n' "${CF_DISPATCH_AGY_ADD_DIR:-}"
+  for tool in claude codex cursor-agent agy kiro-cli copilot; do
     if cmd="$(command -v "$tool" 2>/dev/null)"; then
       printf '%s=%s\n' "$tool" "$cmd"
       case "$tool" in
-        claude|codex) "$cmd" --version 2>/dev/null | sed "s/^/${tool}_version=/" | head -n 1;;
+        claude|codex|agy) "$cmd" --version 2>/dev/null | sed "s/^/${tool}_version=/" | head -n 1;;
       esac
     else
       printf '%s=NOT_FOUND\n' "$tool"
@@ -237,7 +247,10 @@ resolve_routing() {
 
   route_args=(--adapter "$tool" --alias "$alias" --role "$role" --lead-family "$lead_family" --require-distinct)
   [ -n "$model" ] && route_args+=(--model "$model")
-  [ -n "$effort" ] && route_args+=(--effort "$effort")
+  # agy 1.1.10 accepts --model and --effort independently. The historical
+  # model-id resolver rejects a bare model plus an explicit effort, so preserve
+  # an explicit agy effort for the adapter and resolve model/family here.
+  [ -n "$effort" ] && [ "$tool" != "agy" ] && route_args+=(--effort "$effort")
   [ -n "$risk_tier" ] && route_args+=(--risk-tier "$risk_tier")
   [ -n "$capabilities_file" ] && [ -f "$capabilities_file" ] && route_args+=(--capabilities-file "$capabilities_file")
 
@@ -272,9 +285,17 @@ resolve_routing() {
   return 127
 }
 
+agy_has_unsafe_arg() {
+  case "$1 $2 ${CF_DISPATCH_AGY_ADD_DIR:-}" in
+    *--dangerously-skip-permissions*) return 0;;
+    *) return 1;;
+  esac
+}
+
 run_one() {  # $1 tool $2 model $3 effort -> writes clean answer to OUT, echoes JSON, returns 0/1
-  local tool="$1" model="$2" effort="$3" tmpdir raw diag combined clean rc status opath guarantee family endpoint identity effort_substitution substitution requested_model requested_effort effort_source effort_capability_source route_json route_rc route_fields capabilities_file fallback_model primary_model catalog_model model_selection policy_override route_risk_tier
+  local tool="$1" model="$2" effort="$3" tmpdir raw diag combined clean rc status opath guarantee family endpoint identity effort_substitution substitution requested_model requested_effort effort_source effort_capability_source route_json route_rc route_fields capabilities_file fallback_model primary_model catalog_model model_selection policy_override route_risk_tier agy_status agy_requested_effort agy_dir agy_prompt_bytes
   model="$(resolve_model "$tool" "$model")"
+  agy_requested_effort="$effort"
   tmpdir="$(make_tmp_dir)"
   raw="$tmpdir/raw"
   diag="$tmpdir/diag"
@@ -282,6 +303,7 @@ run_one() {  # $1 tool $2 model $3 effort -> writes clean answer to OUT, echoes 
   combined="$tmpdir/combined"
   : >"$raw"
   : >"$diag"
+  : >"$clean"
   trap "rm -rf -- '$tmpdir'" EXIT
   trap "rm -rf -- '$tmpdir'; exit 143" INT TERM HUP
   family=""
@@ -300,7 +322,12 @@ run_one() {  # $1 tool $2 model $3 effort -> writes clean answer to OUT, echoes 
   requested_model="$model"
   capabilities_file=""
   primary_model=""
-  if [ -n "$ORCH_FAMILY" ] && ! valid_family "$ORCH_FAMILY"; then
+  if [ "$tool" = "agy" ] && agy_has_unsafe_arg "$model" "$effort"; then
+    guarantee="none"
+    status="unsafe_by_default"
+    echo "agy refused: --dangerously-skip-permissions is not allowed on the read-only route" >"$diag"
+    rc=1
+  elif [ -n "$ORCH_FAMILY" ] && ! valid_family "$ORCH_FAMILY"; then
     guarantee="none"
     status="invalid_orchestrator_family"
     echo "invalid orchestrator family: $ORCH_FAMILY" >"$diag"
@@ -323,6 +350,13 @@ run_one() {  # $1 tool $2 model $3 effort -> writes clean answer to OUT, echoes 
     if route_fields="$(printf '%s' "$route_json" | python3 -c 'import json,sys; r=json.load(sys.stdin); print("|".join(str(r.get(k,"")) for k in ("status","resolved_model","model_family","endpoint_provider","identity_source","requested_effort","effort","effort_source","effort_capability_source","effort_substitution","substitution","fallback_model","catalog_model","model_selection","risk_tier","policy_override")))' 2>>"$diag")"; then
       IFS='|' read -r status model family endpoint identity requested_effort effort effort_source effort_capability_source effort_substitution substitution fallback_model catalog_model model_selection route_risk_tier policy_override <<<"$route_fields"
       [ -n "$requested_model" ] || requested_model="$model"
+      if [ "$tool" = "agy" ] && [ -n "$agy_requested_effort" ]; then
+        requested_effort="$agy_requested_effort"
+        effort="$agy_requested_effort"
+        effort_source="explicit"
+        effort_capability_source="agy-cli"
+        effort_substitution=""
+      fi
       if [ "$route_rc" -ne 0 ]; then
         guarantee="none"
         printf '%s\n' "$route_json" >>"$diag"
@@ -405,6 +439,124 @@ run_one() {  # $1 tool $2 model $3 effort -> writes clean answer to OUT, echoes 
             cursor-agent -p --trust --mode ask --sandbox enabled --output-format text \
               ${model:+--model "$model"} "$(cat "$PROMPT_TMP")" </dev/null >"$raw" 2>"$diag"; rc=$?
           fi ;;
+        agy)
+          guarantee="enforced"
+          if ! require_cmd agy "$diag"; then
+            status="tool_not_found"
+            rc=127
+          else
+            local -a agy_cmd
+            agy_cmd=(agy --output-format json --disable-slash-commands --sandbox)
+            if [ -n "${CF_DISPATCH_AGY_TIMEOUT:-}" ]; then
+              agy_cmd+=(--print-timeout "${CF_DISPATCH_AGY_TIMEOUT}")
+            else
+              agy_cmd+=(--print-timeout 900s)
+            fi
+            [ -n "$model" ] && agy_cmd+=(--model "$model")
+            [ -n "$effort" ] && agy_cmd+=(--effort "$effort")
+            for agy_dir in "${AGY_ADD_DIRS[@]:-}"; do
+              [ -n "$agy_dir" ] || continue
+              if [ "${agy_dir#/}" = "$agy_dir" ]; then
+                agy_dir="$(CDPATH= cd -- "$agy_dir" 2>/dev/null && pwd -P)" || {
+                  status="error"
+                  echo "agy add-dir is not a readable directory" >"$diag"
+                  rc=1
+                  break
+                }
+              fi
+              case "$agy_dir" in
+                *--dangerously-skip-permissions*)
+                  status="unsafe_by_default"
+                  echo "agy refused: --dangerously-skip-permissions is not allowed on the read-only route" >"$diag"
+                  rc=1
+                  break
+                  ;;
+              esac
+              agy_cmd+=(--add-dir "$agy_dir")
+            done
+            if [ -z "${status:-}" ]; then
+              # agy has no file-backed prompt input. `--print` requires a value:
+              # with none it exits 2 on "flag needs an argument", and `--print -`
+              # is worse than useless, because agy treats the dash as the literal
+              # prompt, ignores stdin and answers it -- exit 0, plausible prose,
+              # wrong question. So the prompt goes in as one argv value.
+              #
+              # That puts it under ARG_MAX, 1 MiB on darwin. Measured: 900 KB
+              # dispatches fine. Refuse anything larger rather than let the
+              # kernel truncate the brief, and point large material at --add-dir.
+              agy_prompt_bytes=$(wc -c <"$PROMPT_TMP")
+              if [ "$agy_prompt_bytes" -gt 786432 ]; then
+                status="error"
+                echo "agy prompt is ${agy_prompt_bytes} bytes, over the 768 KiB argv ceiling; pass the material with --add-dir instead" >"$diag"
+                rc=1
+              else
+                agy_cmd+=(--print "$(cat "$PROMPT_TMP")")
+                "${agy_cmd[@]}" >"$raw" 2>"$diag"; rc=$?
+              fi
+            fi
+          fi
+          if [ "${status:-}" != "tool_not_found" ] && [ "${status:-}" != "unsafe_by_default" ] && [ "${status:-}" != "error" ]; then
+            agy_status="$(python3 - "$raw" "$diag" "$clean" "$rc" <<'PY'
+import json
+import re
+import sys
+from pathlib import Path
+
+raw_path, diag_path, clean_path = map(Path, sys.argv[1:4])
+exit_code = int(sys.argv[4])
+stdout = raw_path.read_text(encoding="utf-8", errors="replace")
+stderr = diag_path.read_text(encoding="utf-8", errors="replace")
+denial = re.compile(r'no output produced.*?a tool required the "[^"]+" permission', re.I | re.S)
+auth = re.compile(r"unauthenticated|not logged in|sign in|quota|rate.?limit|401|403", re.I)
+
+if denial.search(stderr):
+    status = "permission_denied"
+    response = ""
+else:
+    envelope = None
+    for line in stdout.splitlines():
+        line = line.strip()
+        if line.startswith("{"):
+            try:
+                envelope = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+    if envelope is None:
+        if auth.search(stderr) or auth.search(stdout):
+            status = "auth_or_quota_error"
+        elif exit_code == 0:
+            status = "empty_output"
+        else:
+            status = "error"
+        response = ""
+    else:
+        provider_status = str(envelope.get("status", "")).upper()
+        response = envelope.get("response") or ""
+        if not isinstance(response, str):
+            response = str(response)
+        if provider_status == "SUCCESS" and response.strip():
+            status = "ok"
+        elif provider_status == "SUCCESS":
+            status = "empty_output"
+            response = ""
+        else:
+            error = str(envelope.get("error", ""))
+            if "timeout" in error.lower():
+                status = "timeout"
+            elif auth.search(error) or auth.search(stderr) or auth.search(stdout):
+                status = "auth_or_quota_error"
+            else:
+                status = "error"
+            response = ""
+
+clean_path.write_text(response if status == "ok" else "", encoding="utf-8")
+print(status)
+PY
+            )"
+            status="$agy_status"
+            [ "$status" = "ok" ] || rc=1
+          fi
+          ;;
         kiro)
           guarantee="none"
           if [ "${CF_DISPATCH_ENABLE_KIRO:-0}" != "1" ]; then
@@ -449,7 +601,9 @@ run_one() {  # $1 tool $2 model $3 effort -> writes clean answer to OUT, echoes 
     fi
   fi
 
-  strip_ansi <"$raw" >"$clean"
+  if [ "$tool" != "agy" ]; then
+    strip_ansi <"$raw" >"$clean"
+  fi
   cat "$clean" "$diag" >"$combined"
   if [ -n "${status:-}" ] && [ "$rc" -ne 0 ]; then
     :

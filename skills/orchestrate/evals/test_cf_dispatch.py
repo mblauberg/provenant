@@ -246,7 +246,7 @@ def test_doctor_exits_cleanly():
     assert result.returncode == 0
     assert "cf_dispatch doctor" in result.stdout
     assert "PATH=" in result.stdout
-    assert "agy=" not in result.stdout
+    assert "agy=" in result.stdout
 
 
 def test_missing_option_value_is_clean_error():
@@ -358,20 +358,195 @@ def test_claude_oauth_fallback_uses_verifier_system_prompt():
         assert out.read_text(encoding="utf-8").strip() == "OK"
 
 
-def test_removed_agy_direct_route_fails_closed_with_schema():
+def test_agy_direct_route_dispatches_json_sandbox_and_file_prompt():
     with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        args_file = tmp / "agy.args"
+        stdin_file = tmp / "agy.stdin"
+        allowed_one = tmp / "allowed-one"
+        allowed_two = tmp / "allowed-two"
+        allowed_one.mkdir()
+        allowed_two.mkdir()
+        # The real agy requires a value for --print: with none it exits 2 on
+        # "flag needs an argument", and `--print -` is worse, because it treats
+        # the dash as the literal prompt, ignores stdin and answers it. The
+        # stub enforces that contract so this test cannot pass against a
+        # dispatcher the installed CLI would reject.
+        write_executable(
+            bin_dir / "agy",
+            f"""\
+            #!/usr/bin/env bash
+            printf '%s\\n' "$@" > {args_file}
+            cat > {stdin_file}
+            prev=""
+            prompt=""
+            for arg in "$@"; do
+              [ "$prev" = "--print" ] && prompt="$arg"
+              prev="$arg"
+            done
+            if [ -z "$prompt" ] || [ "$prompt" = "-" ]; then
+              echo "flag needs an argument: -print" >&2
+              exit 2
+            fi
+            printf '%s\\n' '{{"status":"SUCCESS","response":"AGY OK","conversation_id":"c1"}}'
+            """,
+        )
+        env = fabric_free_env()
+        env["PATH"] = f"{bin_dir}:{env['PATH']}"
+        env["CF_DISPATCH_AGY_ADD_DIR"] = str(allowed_one)
+        out = tmp / "out.txt"
         result = subprocess.run(
-            [str(SCRIPT), "--tool", "agy", "--model", "gemini-test", "--orchestrator-family", "codex", "--prompt", "Reply exactly OK"],
+            [
+                str(SCRIPT),
+                "--tool", "agy",
+                "--model", "gemini-3.6-flash",
+                "--effort", "medium",
+                "--add-dir", str(allowed_two),
+                "--orchestrator-family", "codex",
+                "--out", str(out),
+                "--prompt", "Reply exactly AGY OK",
+            ],
             cwd=td,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        record = json.loads(result.stdout)
+        assert result.returncode == 0, result.stderr
+        assert DISPATCH_SCHEMA <= set(record)
+        assert record["status"] == "ok"
+        assert record["adapter"] == "agy"
+        assert record["provider_family"] == "google"
+        assert record["endpoint_provider"] == "agy"
+        assert record["effort"] == "medium"
+        assert record["read_only_guarantee"] == "enforced"
+        assert record["certification_eligible"] is True
+        assert out.read_text(encoding="utf-8") == "AGY OK"
+        args = args_file.read_text(encoding="utf-8").splitlines()
+        assert args[args.index("--output-format") + 1] == "json"
+        assert "--sandbox" in args
+        assert args[args.index("--model") + 1] == "gemini-3.6-flash"
+        assert args[args.index("--effort") + 1] == "medium"
+        assert args.count("--add-dir") == 2, args
+        assert str(allowed_one) in args
+        assert str(allowed_two) in args
+        # agy has no file-backed prompt input, so the prompt is one argv value.
+        assert args[args.index("--print") + 1] == "Reply exactly AGY OK"
+
+
+def test_agy_oversized_prompt_fails_closed_instead_of_truncating():
+    """agy takes the prompt as one argv value, so ARG_MAX is a real ceiling.
+
+    A brief silently clipped by the kernel would be reviewed as if complete,
+    which is the same class of quiet wrongness as a denied read reported as
+    SUCCESS. It must fail closed instead.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        write_executable(
+            bin_dir / "agy",
+            """\
+            #!/usr/bin/env bash
+            printf '%s\\n' '{"status":"SUCCESS","response":"SHOULD NOT RUN"}'
+            """,
+        )
+        env = fabric_free_env()
+        env["PATH"] = f"{bin_dir}:{env['PATH']}"
+        out = tmp / "out.txt"
+        result = subprocess.run(
+            [
+                str(SCRIPT), "--tool", "agy",
+                "--model", "gemini-3.6-flash", "--effort", "low",
+                "--orchestrator-family", "anthropic",
+                "--out", str(out),
+                "--prompt", "x" * 800_000,
+            ],
+            cwd=td, env=env, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        record = json.loads(result.stdout)
+        assert result.returncode != 0
+        assert record["status"] == "error"
+        assert record["certification_eligible"] is False
+        assert "SHOULD NOT RUN" not in out.read_text(encoding="utf-8")
+
+
+def test_agy_success_with_empty_response_is_non_passing():
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        write_executable(
+            bin_dir / "agy",
+            """\
+            #!/usr/bin/env bash
+            cat >/dev/null
+            printf '%s\\n' '{"status":"SUCCESS","response":""}'
+            """,
+        )
+        out = tmp / "out.txt"
+        env = fabric_free_env()
+        env["PATH"] = f"{bin_dir}:{env['PATH']}"
+        result = subprocess.run(
+            [
+                str(SCRIPT), "--tool", "agy",
+                "--model", "gemini-3.1-pro-high",
+                "--orchestrator-family", "codex",
+                "--out", str(out), "--prompt", "Reply",
+            ],
+            cwd=td,
+            env=env,
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
         record = json.loads(result.stdout)
         assert result.returncode != 0
-        assert DISPATCH_SCHEMA <= set(record)
-        assert record["status"] == "unknown_tool"
-        assert record["read_only_guarantee"] == "none"
+        assert record["status"] == "empty_output"
+        assert record["certification_eligible"] is False
+        assert out.read_text(encoding="utf-8") == ""
+
+
+def test_agy_permission_denial_overrides_false_success_envelope():
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        write_executable(
+            bin_dir / "agy",
+            """\
+            #!/usr/bin/env bash
+            cat >/dev/null
+            printf '%s\\n' '{"status":"SUCCESS","response":""}'
+            echo 'jetski: no output produced - a tool required the "read_file" permission that headless mode cannot prompt for' >&2
+            exit 0
+            """,
+        )
+        out = tmp / "out.txt"
+        env = fabric_free_env()
+        env["PATH"] = f"{bin_dir}:{env['PATH']}"
+        result = subprocess.run(
+            [
+                str(SCRIPT), "--tool", "agy",
+                "--model", "gemini-3.1-pro-high",
+                "--orchestrator-family", "codex",
+                "--out", str(out), "--prompt", "Reply",
+            ],
+            cwd=td,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        record = json.loads(result.stdout)
+        assert result.returncode != 0
+        assert record["status"] == "permission_denied"
+        assert "read_file" in out.read_text(encoding="utf-8")
 
 
 def test_default_failure_retains_only_the_declared_output_tempfile():
@@ -1125,7 +1300,10 @@ if __name__ == "__main__":
     test_missing_prompt_file_is_clean_error()
     test_claude_oauth_fallback_after_bare_auth_failure()
     test_claude_oauth_fallback_uses_verifier_system_prompt()
-    test_removed_agy_direct_route_fails_closed_with_schema()
+    test_agy_direct_route_dispatches_json_sandbox_and_file_prompt()
+    test_agy_oversized_prompt_fails_closed_instead_of_truncating()
+    test_agy_success_with_empty_response_is_non_passing()
+    test_agy_permission_denial_overrides_false_success_envelope()
     test_orchestrator_family_is_required()
     test_same_family_cli_is_forbidden_when_family_declared()
     test_invalid_orchestrator_family_fails_closed()

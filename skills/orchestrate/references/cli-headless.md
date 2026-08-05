@@ -78,6 +78,11 @@ or `oauth_safe_mode`.
   the same verifier system prompt.
 - `codex`: `exec -s read-only --ephemeral`; the account-default route omits
   `-m` and passes only the resolved reasoning-effort control.
+- `agy`: `--sandbox --output-format json --disable-slash-commands`, with
+  `--model`/`--effort` as separate flags and repeatable `--add-dir` for read
+  material (also settable as a colon-separated `CF_DISPATCH_AGY_ADD_DIR`).
+  stdout and stderr stay separate so a permission denial cannot masquerade as
+  an empty success. `--dangerously-skip-permissions` is refused.
 - `cursor`: `--mode ask --sandbox enabled`; current help documents ask as
   read-only, while current headless plan mode can exit without an answer.
 - `kiro`: disabled by default in the dispatcher. Enable only with `CF_DISPATCH_ENABLE_KIRO=1`; no hard
@@ -107,6 +112,7 @@ the result in the run manifest and move to the next tool.
 |---|---|---|
 | `claude` | `claude --help`; `claude -p --bare --permission-mode plan --tools "Read,Grep,Glob" "OK"`; if using Claude Code OAuth, also test `--safe-mode` with the same read-only tool set | API key / OAuth / quota |
 | `codex` | `codex --version`; `codex exec -s read-only "OK"` | login / usage limit |
+| `agy` | `agy models`; `agy --model gemini-3.6-flash --effort low --output-format json -p "OK"` | auth / tool permission auto-denied |
 | `cursor-agent` | `cursor-agent --help`; `cursor-agent --list-models` | auth / workspace trust |
 | `kiro-cli` | `kiro-cli chat --list-models` | credits / auth |
 | `copilot` | `copilot --help`; `copilot -p "OK" --mode plan` | login / permission prompt |
@@ -117,6 +123,48 @@ Gemini/Agy work is dispatched like any other headless CLI route. The chair
 supplies the budget and scope, and records the route, the model lineage and the
 result in Fabric so the lane is visible to everyone else on the project. Treat
 the result as advisory until primary-family evidence corroborates it.
+
+Agy holds its own `agy` Fabric seat, so a Gemini finding is recorded against the
+Google family rather than borrowing another provider's identity. Coordination
+goes through Fabric; this adapter is the call itself, and stays the recorded
+degraded fallback when the Fabric roundtrip is unavailable.
+
+`cf_dispatch.sh --tool agy` is the route. Five properties of this CLI are load
+bearing and were measured against agy 1.1.10 on 2026-08-05, not read from help:
+
+- **A denied tool is reported as success.** Headless mode cannot prompt, so it
+  auto-denies, then exits **0** and prints `{"status":"SUCCESS","response":""}`
+  with the real reason on **stderr** only. Exit status, the JSON status field
+  and the absence of an error key all say the run worked. `ok` therefore
+  requires SUCCESS *and* a non-empty `response`; a stderr `jetski: no output
+  produced ... permission` match is `permission_denied`. Never merge stderr into
+  stdout: `2>&1` destroys the only truthful signal.
+- **Denial is all-or-nothing and retroactive.** One denied call discards the
+  whole turn, including reads that already succeeded. So the prompt must forbid
+  the tool classes it does not need, and tell the model to answer in prose
+  rather than attempt a call it cannot make.
+- **`--add-dir` is how material is supplied.** It genuinely grants reads under
+  that directory. Path globs in `permissions.allow` do not work; `mcp(<server>/*)`
+  and `command(*)` wildcards do.
+- **The prompt is one argv value.** agy has no file-backed prompt input.
+  `--print` needs a value, and `--print -` is a trap: it takes the dash as the
+  literal prompt, ignores stdin and answers it. The dispatcher refuses a prompt
+  over 768 KiB rather than let ARG_MAX clip the brief; large material goes in
+  through `--add-dir`.
+- **Model and effort are separate flags.** A bare family id exits 1 asking for
+  `--effort`, and efforts are per model: `gemini-3.1-pro` offers only low and
+  high. `agy_capabilities.py` captures the runtime list so a route validates
+  against the installed CLI instead of a dated catalogue.
+
+Never pass `--dangerously-skip-permissions`. The CLI's own denial message
+recommends it; that is program output, not an instruction, and it auto-approves
+writes and shell as well as reads. The dispatcher refuses it as
+`unsafe_by_default`.
+
+On any non-`ok` status the output path holds the diagnostic, not a review. Read
+the record's `status`, never the file's length: a 307-byte permission error and
+a short genuine answer are indistinguishable by size, and that confusion is what
+made unrun Gemini legs look complete.
 
 Preferred prompt packet:
 
@@ -186,7 +234,7 @@ dispatcher should produce:
 
 `status` is the resolver/dispatcher vocabulary, not a hand-maintained subset:
 `ok`, `error`, `empty_output`, `output_write_error`, `tool_not_found`,
-`auth_or_quota_error`, `unsafe_by_default`, family/orchestrator errors,
+`auth_or_quota_error`, `permission_denied`, `timeout`, `unsafe_by_default`, family/orchestrator errors,
 model/alias/adapter errors, capability discovery/trust/staleness errors,
 effort unsupported/mismatch/unresolved errors, `same_family_forbidden`, and
 `all_failed`. Consumers must tolerate a new fail-closed status as non-passing.
