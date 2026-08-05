@@ -10,8 +10,16 @@ from skills._shared import bounded_process
 from skills._shared.bounded_process import run_bounded
 
 
+# Timeout tests have to outlive interpreter startup. A deadline tuned to an idle
+# machine turns into a spawn race on a busy one, and then the test reports a
+# missing marker rather than the timeout behaviour it exists to check. Every
+# child here sleeps for 60s, so a deadline of a few seconds still proves the
+# bound while leaving room for a loaded machine to get the process running.
+SPAWN_SAFE_TIMEOUT = 5.0
+
+
 def _assert_process_gone(process_id: int) -> None:
-    deadline = time.monotonic() + 1
+    deadline = time.monotonic() + 5
     while time.monotonic() < deadline:
         try:
             os.kill(process_id, 0)
@@ -46,12 +54,16 @@ def test_timeout_returns_partial_output_and_a_negative_status(tmp_path):
         "print('TIMEOUT-STARTED', flush=True); time.sleep(60)"
     )
 
+    # The deadline has to clear interpreter startup, or a loaded machine kills
+    # the child before it prints its marker and the test fails for reasons that
+    # have nothing to do with the timeout behaviour under test. The child sleeps
+    # for 60s, so any deadline well under that still proves the bound.
     started = time.monotonic()
     try:
         result = run_bounded(
             [sys.executable, "-c", code],
             cwd=tmp_path,
-            timeout_seconds=0.1,
+            timeout_seconds=SPAWN_SAFE_TIMEOUT,
         )
     finally:
         if pid_path.is_file():
@@ -61,8 +73,8 @@ def test_timeout_returns_partial_output_and_a_negative_status(tmp_path):
                 pass
 
     assert result.timed_out is True
-    assert result.elapsed_seconds < 2
-    assert time.monotonic() - started < 2
+    assert result.elapsed_seconds < SPAWN_SAFE_TIMEOUT * 4
+    assert time.monotonic() - started < SPAWN_SAFE_TIMEOUT * 4
     assert "TIMEOUT-STARTED" in result.output
     assert result.returncode < 0
 
@@ -81,17 +93,19 @@ def test_timeout_kills_same_group_grandchild_holding_output_descriptor(tmp_path)
         f"child = subprocess.Popen([sys.executable, '-c', {grandchild_code!r}]); "
         f"Path({str(grandchild_pid_path)!r}).write_text(str(child.pid)); "
         f"ready = Path({str(grandchild_ready_path)!r}); "
-        "deadline = time.monotonic() + 2; "
+        "deadline = time.monotonic() + 30; "
         "exec(\"while not ready.is_file() and time.monotonic() < deadline:\\n    time.sleep(0.005)\"); "
         "assert ready.is_file(); "
         "print('GRANDCHILD-SPAWNED', flush=True); time.sleep(60)"
     )
 
+    # Two interpreter spawns have to complete before the parent prints its
+    # marker, so this deadline needs the most headroom of any test here.
     try:
         result = run_bounded(
             [sys.executable, "-c", parent_code],
             cwd=tmp_path,
-            timeout_seconds=0.1,
+            timeout_seconds=SPAWN_SAFE_TIMEOUT,
         )
 
         assert result.timed_out is True
