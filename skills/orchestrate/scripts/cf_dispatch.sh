@@ -511,12 +511,12 @@ stdout = raw_path.read_text(encoding="utf-8", errors="replace")
 stderr = diag_path.read_text(encoding="utf-8", errors="replace")
 denial = re.compile(r'no output produced.*?a tool required the "[^"]+" permission', re.I | re.S)
 auth = re.compile(r"unauthenticated|not logged in|sign in|quota|rate.?limit|401|403", re.I)
+envelope = None
 
 if denial.search(stderr):
     status = "permission_denied"
     response = ""
 else:
-    envelope = None
     for line in stdout.splitlines():
         line = line.strip()
         if line.startswith("{"):
@@ -553,6 +553,23 @@ else:
             response = ""
 
 clean_path.write_text(response if status == "ok" else "", encoding="utf-8")
+
+# agy reports its failures inside the stdout JSON envelope, not on stderr, so
+# without this the diagnostic is discarded and the caller is left with an empty
+# output file. The reason is worth keeping: an exhausted quota that resets in an
+# hour and a broken credential both classify as auth_or_quota_error, and they
+# want opposite responses. The response body itself is never written back on a
+# non-ok status, so a failed run still cannot be mistaken for a review.
+if status != "ok":
+    notes = ["agy dispatch failed: status=%s exit=%d" % (status, exit_code)]
+    detail = str(envelope.get("error", "")).strip() if envelope else ""
+    if detail:
+        notes.append("provider error: %s" % detail)
+    elif envelope is None and not stderr.strip() and stdout.strip():
+        notes.append("unparsed agy stdout: %s" % stdout.strip()[:2000])
+    with diag_path.open("a", encoding="utf-8") as handle:
+        handle.write("\n".join(notes) + "\n")
+
 print(status)
 PY
             )"
