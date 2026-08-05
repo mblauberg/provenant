@@ -37,6 +37,7 @@ COMPATIBILITY_ADAPTER_IDS = {
 TRUSTED_CAPABILITY_SOURCES = {
     "codex debug models": "codex",
     "claude subscription canary": "claude",
+    "agy models": "agy",
 }
 TASK_CLASS_POLICY = {
     "mechanical": {"minimum_alias": "scout", "minimum_effort": "low", "role": "worker"},

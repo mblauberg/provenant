@@ -46,9 +46,16 @@ controls and should be absent from every global client registration.
 | Kiro | `~/.kiro/settings/mcp.json` |
 | OpenCode | `~/.config/opencode/opencode.jsonc` |
 
-Claude Code and Codex take the `claude` and `codex` seats. Cursor, Agy and Kiro
-share the `codex` seat by design while keeping their own client label, so their
-messages are addressed separately without inventing a provider identity.
+Claude Code and Codex take the `claude` and `codex` seats. Cursor and Kiro share
+the `codex` seat by design while keeping their own client label, so their
+messages are addressed separately without inventing a provider identity: they
+are brokers that front whichever model the operator selects, so they have no
+family of their own to record.
+
+Agy holds its own `agy` seat. It is the harness's only route to the Gemini
+family, and the seat is what every Fabric record carries as its provider. Under
+the shared `codex` seat a cross-family Gemini finding was filed as OpenAI, which
+is exactly the attribution the review ladder depends on being true.
 
     scripts/configure-fabric-mcp.py --platform all
     scripts/configure-fabric-mcp.py --platform codex

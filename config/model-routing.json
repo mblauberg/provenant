@@ -61,7 +61,12 @@
         "scout": ["gemini-3.6-flash"]
       },
       "role_overrides": {},
-      "effort_fallback_order": ["max", "xhigh", "high", "medium", "low"]
+      "effort_fallback_order": ["high", "medium", "low"],
+      "per_model_efforts": {
+        "gemini-3.1-pro": ["low", "high"],
+        "gemini-3.6-flash": ["low", "medium", "high"],
+        "gemini-3.5-flash": ["low", "medium", "high"]
+      }
     }
   },
   "adapters": {
@@ -83,7 +88,7 @@
     "agy": {
       "endpoint_provider": "agy",
       "fixed_model_family": null,
-      "effort_transport": "model-id",
+      "effort_transport": "flag",
       "model_family_preferences": {
         "preferred": ["google", "anthropic"],
         "fallback": {}

@@ -562,13 +562,16 @@ def test_all_mcp_clients_are_an_explicit_subscription_native_opt_in(tmp_path):
     result = run("codex", tmp_path, "--mcp-clients", "all", CODEX_HOME=str(config))
 
     assert result.returncode == 0, result.stderr
-    for client, path in {
-        "cursor": tmp_path / ".cursor/mcp.json",
-        "agy": tmp_path / ".gemini/config/mcp_config.json",
-        "kiro": tmp_path / ".kiro/settings/mcp.json",
-    }.items():
+    # Brokers sit in the codex seat; Agy holds the `agy` seat so Gemini
+    # findings are attributed to their own family. See CLIENT_SEATS in
+    # scripts/configure-fabric-mcp.py.
+    for client, path, seat in (
+        ("cursor", tmp_path / ".cursor/mcp.json", "codex"),
+        ("agy", tmp_path / ".gemini/config/mcp_config.json", "agy"),
+        ("kiro", tmp_path / ".kiro/settings/mcp.json", "codex"),
+    ):
         registration = json.loads(path.read_text())["mcpServers"]["fabric"]
-        assert registration["env"]["AGENT_FABRIC_SEAT"] == "codex"
+        assert registration["env"]["AGENT_FABRIC_SEAT"] == seat
         assert registration["env"]["AGENT_FABRIC_CLIENT_LABEL"] == client
         assert "AGENT_FABRIC_PROJECT_PATH" not in registration["env"]
     opencode = json.loads((tmp_path / ".config/opencode/opencode.jsonc").read_text())
