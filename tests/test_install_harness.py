@@ -21,6 +21,7 @@ WORKFLOW_NAMES = {
 }
 AGENT_NAMES = {
     "agy-reviewer.md",
+    "agy-stylist.md",
     "codex-analyst.md",
     "codex-implementer.md",
 }

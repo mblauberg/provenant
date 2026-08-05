@@ -8,6 +8,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "install-agents"
 AGENT_NAMES = {
     "agy-reviewer.md",
+    "agy-stylist.md",
     "codex-analyst.md",
     "codex-implementer.md",
 }
@@ -55,7 +56,7 @@ def test_reinstalling_claude_subagents_is_idempotent(tmp_path):
     second = run(target)
 
     assert second.returncode == 0, second.stderr
-    assert "agents linked=0 existing=3" in second.stdout
+    assert f"agents linked=0 existing={len(AGENT_NAMES)}" in second.stdout
     assert (target.parent / MANIFEST_NAME).read_bytes() == manifest_before
     assert {
         path.name: path.lstat().st_mtime_ns for path in target.iterdir()
