@@ -50,12 +50,24 @@ the claims it is given and to report anything that turns out to be wrong rather 
 following it into a mistake. A brief that says "if I am wrong about this, saying so is more
 valuable than complying" reliably produces better work.
 
+**Tell Codex to write its own report to its own file**, separate from the transcript, and to
+bound its length. End the brief with something close to:
+
+> Write your final report to `${TMPDIR:-/tmp}/codex-<slug>-report.md`, at most 100 lines: what
+> you changed, what you could not do and why, and the exact final line of each verification
+> command. Put it there, not in your final message.
+
+The transcript holds Codex's whole reasoning trace and every command it ran, often tens of
+thousands of tokens. The report holds only the outcome. Reading the report instead of the
+transcript is what stops the caller paying twice for the same thinking, once through Codex and
+again through you.
+
 **2. Launch in the background, capture the PID.**
 
 ```
 nohup codex exec -s workspace-write -C <ABSOLUTE_WORKTREE> -m gpt-5.6-sol - \
   < ${TMPDIR:-/tmp}/codex-<slug>-brief.txt \
-  > ${TMPDIR:-/tmp}/codex-<slug>-out.txt 2>&1 &
+  > ${TMPDIR:-/tmp}/codex-<slug>-transcript.txt 2>&1 &
 echo $!
 ```
 
@@ -79,7 +91,7 @@ When you do detach, create a FIFO alongside it so the wait is event-driven rathe
 mkfifo ${TMPDIR:-/tmp}/codex-<slug>.fifo
 nohup bash -c 'codex exec -s workspace-write -C <ABSOLUTE_WORKTREE> -m gpt-5.6-sol - \
   < ${TMPDIR:-/tmp}/codex-<slug>-brief.txt \
-  > ${TMPDIR:-/tmp}/codex-<slug>-out.txt 2>&1; echo EXIT=$? > ${TMPDIR:-/tmp}/codex-<slug>.fifo' \
+  > ${TMPDIR:-/tmp}/codex-<slug>-transcript.txt 2>&1; echo EXIT=$? > ${TMPDIR:-/tmp}/codex-<slug>.fifo' \
   >/dev/null 2>&1 &
 echo $!
 ```
@@ -151,11 +163,24 @@ clean or are there stray uncommitted files; did any scaffolding file the brief s
 survive. A transcript claiming success while the tree is empty is a real and recurring failure
 mode, so this step is not optional.
 
+Then read `${TMPDIR:-/tmp}/codex-<slug>-report.md`, which is bounded and holds the outcome.
+Between that file and the git commands above you have everything you need.
+
+**Do not read the transcript.** Not its tail, not a few hundred lines, not "just to check".
+It carries the full reasoning trace, and reading it charges the caller a second time for
+thinking Codex has already been paid for. The git state is the authority on what landed and
+the report is the authority on what Codex believes it did, so the transcript adds cost without
+adding evidence.
+
+Two exceptions, both narrow. If Codex exited non-zero, or the report file is missing or empty,
+read the **last 50 lines** to diagnose the failure. If you are checking liveness mid-run, read
+the **last 20 lines** to confirm it is advancing. Neither is licence to read the run.
+
 **5. Report** at most 30 lines: the commit list, the diffstat summary, whether verification
 commands were actually run and what they said, anything the brief asked for that did NOT land
-and why, and the absolute path to the full transcript. Quote Codex's own stated failures
-faithfully — do not launder them into a clean summary. If it says a part did not land, that is
-the most important sentence in your report.
+and why, and the absolute paths to both the report and the transcript. Quote Codex's own stated
+failures faithfully, and do not launder them into a clean summary. If it says a part did not land,
+that is the most important sentence in your report.
 
 ## Choosing the model
 
