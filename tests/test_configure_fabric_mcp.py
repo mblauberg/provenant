@@ -165,11 +165,19 @@ AGENT_FABRIC_CAPABILITY = "never-print-capability"
         "command": str(shim),
         "env": {**expected_common, "AGENT_FABRIC_SEAT": "codex", "AGENT_FABRIC_CLIENT_LABEL": "codex"},
     }
+    # Brokers share the codex seat; Agy holds its own, because it is the only
+    # route to the Gemini family and its findings must not be attributed to
+    # OpenAI. See CLIENT_SEATS in scripts/configure-fabric-mcp.py.
+    expected_seats = {"cursor": "codex", "agy": "agy", "kiro": "codex"}
     for client, path in json_configs.items():
         value = json.loads(path.read_text())
         assert value["mcpServers"]["fabric"] == {
             "command": str(shim),
-            "env": {**expected_common, "AGENT_FABRIC_SEAT": "codex", "AGENT_FABRIC_CLIENT_LABEL": client},
+            "env": {
+                **expected_common,
+                "AGENT_FABRIC_SEAT": expected_seats[client],
+                "AGENT_FABRIC_CLIENT_LABEL": client,
+            },
         }
         assert value["mcpServers"]["other"] == {"command": "other"}
         assert value["unrelatedSecret"] == "never-print-optional"
