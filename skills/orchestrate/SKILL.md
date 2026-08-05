@@ -10,9 +10,9 @@ description: "Use when bounded fan-out, multi-agent research, cross-family revie
 Decompose -> waves -> reduce -> gate.
 
 Claude subagent definitions are versioned separately from skill provider
-metadata in `agents/`: `agy-reviewer.md`, `codex-analyst.md` and
-`codex-implementer.md`. `install-harness --platform claude` manages them under
-`~/.claude/agents/`.
+metadata in `agents/`: `agy-reviewer.md`, `agy-stylist.md`, `codex-analyst.md`
+and `codex-implementer.md`. `install-harness --platform claude` manages them
+under `~/.claude/agents/`.
 
 ## Rules
 

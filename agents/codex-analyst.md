@@ -166,6 +166,13 @@ possible without spending the tokens now.
   slice that is genuinely hard.
 - `-m gpt-5.6-luna` — cheaper and faster. Use only for mechanical, unambiguous work.
 
+**These names go stale.** `codex models` lists the current set, but it needs a terminal and fails
+headlessly with `stdin is not a terminal`, so you cannot discover them from here. That makes a
+rejected model name a specific, recognisable failure: if the run dies complaining about the model,
+the name in this file has aged out. Report that as the cause and name the model you tried. Do not
+guess a replacement, and do not silently fall back to doing the analysis yourself, which converts
+a one-line fix into an invisible substitution.
+
 ## Sandbox
 
 `-s workspace-write` with `writable_roots` naming only the temp directory. That is the

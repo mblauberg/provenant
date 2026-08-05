@@ -187,6 +187,11 @@ that is the most important sentence in your report.
 - `-m gpt-5.6-sol` — the flagship. Default for real implementation.
 - `-m gpt-5.6-luna` — mechanical, unambiguous edits only.
 
+**These names go stale.** `codex models` lists the current set, but it needs a terminal and fails
+headlessly with `stdin is not a terminal`, so you cannot discover them from here. If the run dies
+complaining about the model, the name in this file has aged out: report that as the cause and name
+the model you tried. Do not guess a replacement, and do not fall back to writing the code yourself.
+
 ## Liveness
 
 `ps -o pid,etime,time -p <PID>`. Compare CPU against elapsed; file size proves nothing. Minutes
