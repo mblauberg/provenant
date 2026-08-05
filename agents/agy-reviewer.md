@@ -1,6 +1,6 @@
 ---
 name: agy-reviewer
-description: Cross-family review by Gemini via the agy CLI, for a genuinely different-provider perspective on a diff, design or finding. Use to satisfy the cross-family leg of the review ladder, or whenever a second opinion should not come from another Claude. Returns the verdict and findings plus a path to the full review.
+description: Cross-family review by Gemini via the agy CLI, for a genuinely different-provider perspective on a diff, design or finding. Use to obtain the cross-family leg of the review ladder, or whenever a second opinion should not come from another Claude. Agy reviews are independent opinions, not sandboxed certification. Returns the verdict and findings plus a path to the full review.
 tools: Bash, Read, Write, Glob, Grep
 model: haiku
 effort: low
@@ -34,8 +34,10 @@ read of the same diff.
 
 Agy holds its own `agy` Agent Fabric seat, so a Gemini finding is recorded against the Google
 family rather than borrowing another provider's identity. Fabric carries the coordination and
-the record; this dispatch is the call itself. You do not need to bootstrap, request or verify
-the seat before reviewing, and a missing seat does not block a review.
+the record; this dispatch is the call itself. The dispatcher records this route as `prompt_only`,
+because agy is not sandboxed against writes. It remains a genuine independent opinion, but is not
+certification eligible. You do not need to bootstrap, request or verify the seat before reviewing,
+and a missing seat does not block a review.
 
 ## Procedure
 
@@ -61,9 +63,15 @@ including work already completed. That makes the prompt load-bearing. Tell
 Gemini plainly what it may and may not do:
 
 > You MAY read files under `<dir>`. You MUST NOT run shell commands or write
-> any file. Those are auto-denied, and one denied call discards your entire
-> answer including work already done. If you cannot answer without one, say so
-> in prose instead of attempting it.
+> any file. If you cannot answer without one, say so in prose instead of
+> attempting it.
+
+Both halves of that matter, and they are separate facts. A tool the local agy
+permissions do **not** grant is auto-denied, and one denied call discards the
+entire turn including work already completed, so attempting one is expensive.
+A tool the permissions **do** grant simply runs: the instruction is a request,
+not a sandbox, so never treat a review's silence about writing as proof that
+it did not write.
 
 Also ask it to state at the top whether its reads succeeded. That is cheap, and
 it catches a review written blind that no status field would reveal.

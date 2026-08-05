@@ -440,7 +440,11 @@ run_one() {  # $1 tool $2 model $3 effort -> writes clean answer to OUT, echoes 
               ${model:+--model "$model"} "$(cat "$PROMPT_TMP")" </dev/null >"$raw" 2>"$diag"; rc=$?
           fi ;;
         agy)
-          guarantee="enforced"
+          # agy --sandbox does not enforce read-only writes. On agy 1.1.10 a
+          # write probe under these dispatcher flags returned SUCCESS and
+          # created the file; --mode plan did the same, so only the prompt
+          # discourages mutation.
+          guarantee="prompt_only"
           if ! require_cmd agy "$diag"; then
             status="tool_not_found"
             rc=127
