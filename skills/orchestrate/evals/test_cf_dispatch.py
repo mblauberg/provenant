@@ -422,8 +422,8 @@ def test_agy_direct_route_dispatches_json_sandbox_and_file_prompt():
         assert record["provider_family"] == "google"
         assert record["endpoint_provider"] == "agy"
         assert record["effort"] == "medium"
-        assert record["read_only_guarantee"] == "enforced"
-        assert record["certification_eligible"] is True
+        assert record["read_only_guarantee"] == "prompt_only"
+        assert record["certification_eligible"] is False
         assert out.read_text(encoding="utf-8") == "AGY OK"
         args = args_file.read_text(encoding="utf-8").splitlines()
         assert args[args.index("--output-format") + 1] == "json"

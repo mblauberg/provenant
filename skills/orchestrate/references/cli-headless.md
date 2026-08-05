@@ -1,6 +1,6 @@
 # CLI headless reference (dated layer)
 
-Verified locally on macOS, 2026-06-07. Model IDs, flags, auth, and safety modes drift. Always run
+Verified locally on macOS, 2026-08-05. Model IDs, flags, auth, and safety modes drift. Always run
 `<tool> --help` / model discovery before depending on a chain.
 
 ## Contents
@@ -18,8 +18,9 @@ Verified locally on macOS, 2026-06-07. Model IDs, flags, auth, and safety modes 
 
 Headless CLIs are how external work reaches another provider. Fabric carries
 the request, the reply and the activity record around that call; it does not
-run the provider itself. A verifier that is not certifying must enforce
-read-only or planning mode; advisory claims require independent verification.
+run the provider itself. Certification requires an enforced read-only
+boundary. A prompt-only review can still provide a genuine independent
+opinion, but it is not certification eligible.
 
 ## Harness-conditioned rule
 
@@ -81,8 +82,12 @@ or `oauth_safe_mode`.
 - `agy`: `--sandbox --output-format json --disable-slash-commands`, with
   `--model`/`--effort` as separate flags and repeatable `--add-dir` for read
   material (also settable as a colon-separated `CF_DISPATCH_AGY_ADD_DIR`).
-  stdout and stderr stay separate so a permission denial cannot masquerade as
-  an empty success. `--dangerously-skip-permissions` is refused.
+  These flags do not enforce read-only access, so the dispatcher reports
+  `prompt_only`: the prompt asks agy not to mutate, but local permissions can
+  still allow writes. A write probe under agy 1.1.10's dispatcher flags
+  succeeded and created the file, and `--mode plan` did the same. stdout and
+  stderr stay separate so a permission denial cannot masquerade as an empty
+  success. `--dangerously-skip-permissions` is refused.
 - `cursor`: `--mode ask --sandbox enabled`; current help documents ask as
   read-only, while current headless plan mode can exit without an answer.
 - `kiro`: disabled by default in the dispatcher. Enable only with `CF_DISPATCH_ENABLE_KIRO=1`; no hard
@@ -91,8 +96,9 @@ or `oauth_safe_mode`.
   disabled (`--available-tools=''`); repo inspection cannot currently be guaranteed read-only from local
   help.
 
-If any adapter cannot enforce the promised safety level, log the failure and fail over. Do not silently
-downgrade certification. For large prompts, prefer `--prompt-file`; enforced adapters use
+If any adapter cannot enforce the promised safety level, record its actual guarantee and keep
+certification ineligible. Do not silently upgrade `prompt_only` to `enforced`. For large
+prompts, prefer `--prompt-file`; enforced adapters use
 stdin/file-backed input where supported to avoid shell argument limits.
 Orchestrated runs always pass `--out <run-dir>/<classified-artifact>` and list it
 in the manifest. Omitting `--out` creates one declared ephemeral output for a
@@ -212,8 +218,8 @@ every implementation leg, check `git -C <worktree> log --oneline <base>..HEAD`, 
 A worker has no conversation context, so the brief carries everything: absolute path and
 branch, what has already been verified so it is not redone, ordered parts, out-of-scope
 paths, how to verify, and that it must not push, open a pull request or merge. Always
-include the scepticism clause — *verify every claim in this brief before relying on it; if
-something here is wrong, saying so is more valuable than following it* — which has
+include the scepticism clause: *verify every claim in this brief before relying on it; if
+something here is wrong, saying so is more valuable than following it*, which has
 repeatedly produced the most valuable output of a run.
 
 ## Runtime routing
