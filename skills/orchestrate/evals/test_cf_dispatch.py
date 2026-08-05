@@ -458,13 +458,18 @@ def test_agy_oversized_prompt_fails_closed_instead_of_truncating():
         env = fabric_free_env()
         env["PATH"] = f"{bin_dir}:{env['PATH']}"
         out = tmp / "out.txt"
+        big_prompt = tmp / "big-prompt.txt"
+        big_prompt.write_text("x" * 200_000, encoding="utf-8")
         result = subprocess.run(
             [
                 str(SCRIPT), "--tool", "agy",
                 "--model", "gemini-3.6-flash", "--effort", "low",
                 "--orchestrator-family", "anthropic",
                 "--out", str(out),
-                "--prompt", "x" * 800_000,
+                # Via --prompt-file, not --prompt: Linux caps a single argv
+                # string at 128 KiB, so passing the oversized prompt directly
+                # would fail in this test's own exec before cf_dispatch ran.
+                "--prompt-file", str(big_prompt),
             ],
             cwd=td, env=env, text=True,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,

@@ -481,13 +481,16 @@ run_one() {  # $1 tool $2 model $3 effort -> writes clean answer to OUT, echoes 
               # prompt, ignores stdin and answers it -- exit 0, plausible prose,
               # wrong question. So the prompt goes in as one argv value.
               #
-              # That puts it under ARG_MAX, 1 MiB on darwin. Measured: 900 KB
-              # dispatches fine. Refuse anything larger rather than let the
-              # kernel truncate the brief, and point large material at --add-dir.
+              # That puts it under the kernel's argument limits, and the binding
+              # one is per-string, not total. Linux caps a single argv element at
+              # MAX_ARG_STRLEN, 32 pages = 128 KiB, and refuses the exec with
+              # E2BIG; darwin has no per-string cap and allows 1 MiB in total, so
+              # a prompt that works on a developer's Mac can fail on a Linux
+              # runner. Take the smaller limit on both, with room for the flags.
               agy_prompt_bytes=$(wc -c <"$PROMPT_TMP")
-              if [ "$agy_prompt_bytes" -gt 786432 ]; then
+              if [ "$agy_prompt_bytes" -gt 126976 ]; then
                 status="error"
-                echo "agy prompt is ${agy_prompt_bytes} bytes, over the 768 KiB argv ceiling; pass the material with --add-dir instead" >"$diag"
+                echo "agy prompt is ${agy_prompt_bytes} bytes, over the 124 KiB single-argument ceiling; pass the material with --add-dir instead" >"$diag"
                 rc=1
               else
                 agy_cmd+=(--print "$(cat "$PROMPT_TMP")")

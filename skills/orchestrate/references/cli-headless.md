@@ -148,9 +148,11 @@ bearing and were measured against agy 1.1.10 on 2026-08-05, not read from help:
   and `command(*)` wildcards do.
 - **The prompt is one argv value.** agy has no file-backed prompt input.
   `--print` needs a value, and `--print -` is a trap: it takes the dash as the
-  literal prompt, ignores stdin and answers it. The dispatcher refuses a prompt
-  over 768 KiB rather than let ARG_MAX clip the brief; large material goes in
-  through `--add-dir`.
+  literal prompt, ignores stdin and answers it. The binding kernel limit is
+  per-string, not total: Linux caps one argv element at 128 KiB and refuses the
+  exec, while darwin has no per-string cap, so a prompt that works on a Mac can
+  fail on a Linux runner. The dispatcher refuses over 124 KiB on both; large
+  material goes in through `--add-dir`.
 - **Model and effort are separate flags.** A bare family id exits 1 asking for
   `--effort`, and efforts are per model: `gemini-3.1-pro` offers only low and
   high. `agy_capabilities.py` captures the runtime list so a route validates
