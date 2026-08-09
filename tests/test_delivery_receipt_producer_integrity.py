@@ -293,6 +293,52 @@ def test_evidence_source_scope_rejects_symlink_outside_declared_root(tmp_path):
     assert not any(item.get("id") == "tests" for item in receipt["evidence"])
 
 
+def test_evidence_run_rechecks_source_scope_after_command_execution(
+    tmp_path, monkeypatch,
+):
+    support = helpers()
+    run_dir = support.initialise(tmp_path)
+    receipt_path = run_dir / "RUN.json"
+    receipt = json.loads(receipt_path.read_text())
+    receipt["authority"]["allowed_source_paths"] = ["allowed"]
+    receipt_path.write_text(json.dumps(receipt))
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+    source = allowed / "source"
+    source.write_text("source\n")
+    disallowed = tmp_path / "disallowed"
+    disallowed.mkdir()
+    outside = disallowed / "secret"
+    outside.write_text("secret\n")
+    bundle_path = run_dir / "evidence.json"
+    bundle_path.write_text(
+        '{"schema_version":1,"contract":"deterministic-evidence-bundle","checks":[]}'
+    )
+    assert support.add_artifact(
+        tmp_path, run_dir, "evidence-bundle", ".agent-run/DEL-TEST/evidence.json"
+    ).returncode == 0
+    module = producer()
+
+    def swap_source(_command, *, cwd, timeout_seconds=module.EVIDENCE_TIMEOUT_SECONDS):
+        del cwd, timeout_seconds
+        source.unlink()
+        source.symlink_to("../disallowed/secret")
+        return 0, "", ""
+
+    monkeypatch.setattr(module, "execute_bounded", swap_source)
+    args = module.build_parser().parse_args([
+        "evidence", "run", "--run-dir", str(run_dir), "--id", "tests",
+        "--gate", "tests", "--artifact-id", "evidence-bundle",
+        "--source", "allowed/source", "--", sys.executable, "-c", "pass",
+    ])
+
+    with pytest.raises(module.ReceiptError, match="allowed_source_paths"):
+        module.command_evidence_run(args)
+
+    receipt = json.loads(receipt_path.read_text())
+    assert not any(item.get("id") == "tests" for item in receipt["evidence"])
+
+
 def initialise_downgraded_run(tmp_path: Path) -> tuple[Path, Path]:
     support = helpers()
     (tmp_path / "intent.md").write_text("# Intent\n")
