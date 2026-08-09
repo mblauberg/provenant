@@ -41,9 +41,17 @@ correctness. A gate that is right in principle and refuses in practice is a
 defect, and the refusal being deliberate does not make it less of one.
 
 Concretely: no mechanism may fail closed on an environment it merely did not
-anticipate. Unknown is not hostile. Prefer resolving what is actually installed
-over asserting what should be, prefer a fallback over a refusal, and prefer a
-diagnosis naming the missing thing over a status code.
+anticipate. Unknown is not hostile, *about the environment*: an install layout,
+a shell, a `PATH`, a filesystem. Prefer resolving what is actually installed
+over asserting what should be, and prefer a diagnosis naming the missing thing
+over a status code.
+
+This is a rule about discovery, not about classification. Where the unknown
+thing is the subject of the check rather than the machine it runs on, refusing
+is correct: an unrecognised git object type, a repository whose hash algorithm
+the scanner cannot read, a liveness probe that could not run, a cross-family
+claim that could not be proved. A fallback there converts "I could not check"
+into "I checked", which is the failure the check exists to prevent.
 
 ### 2. Low maintenance
 
@@ -164,7 +172,10 @@ description, not just in your head.
    mechanism itself. A check that fails closed on an unanticipated environment
    is a reliability regression wearing a safety badge.
 
-A mechanism that cannot answer 1 and 2 does not go in.
+A mechanism that cannot answer 1 and 2 does not go in. Questions 3 and 4 are
+not advisory: if something cheaper closes the same named failure, the cheaper
+thing is what goes in, and a mechanism whose own failure mode costs more than
+the failure it prevents does not go in at all.
 
 ## The removal test
 
@@ -177,6 +188,26 @@ these holds:
   type, or a single grep;
 - it has never fired, and the failure it guards has never been observed;
 - it exists to satisfy a rule rather than a requirement.
+
+Two of those bullets need a guard of their own, because a mechanism that is
+working can present exactly like one nobody uses.
+
+**Never fired** does not count against a guard whose failure is unrecoverable
+or silent. Never firing is what those look like when they hold. A secret
+reaching published history and a replace ref hiding a commit that still ships
+in a pushed pack are unrecoverable. A dispatch inheriting a priority service
+tier is merely invisible, at roughly twice the usage. Every refusal branch in
+`scripts/public_release_check.py` is in this class, and so is the explicit
+`service_tier` pin in `cf_dispatch.sh`, which reads as redundant precisely
+because it is holding: pinning a safe value is not duplicating a default,
+because omitting the flag inherits whatever the user configuration happens to
+say.
+
+**Enforced somewhere cheaper** does not license folding a hardened call site
+into a shared helper that inherits what the hardening excluded.
+`scripts/git_evidence.py` is the case in this repository: its suppressed
+environment *is* the guarantee, and a helper that inherits repository, object
+and config routing would carry the same rule with none of its effect.
 
 Deletion is the default outcome, but diagnose before you act on it, because two
 different faults produce the same symptom. Code with no caller is sometimes

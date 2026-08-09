@@ -39,8 +39,15 @@ the tip on an archive branch and say so in the change description.
 
 Two exemptions, both narrow. The guarantees listed under "What is not
 negotiable" are not simplified away; only their mechanism is ever in question.
-Documentation and tests carry no such burden, because a wrong comment is cheap
-and a wrong gate blocks work.
+Documentation and coverage carry no such burden, because a wrong comment is
+cheap where a wrong gate blocks work.
+
+A test that asserts a policy about production code is not covered by that
+second exemption. It is a gate, and it is judged as one. The live example is
+the 1,000-line review cap in `tests/test_delivery_validator_structure.py`,
+which a module satisfied by passing `globals()` into a helper instead of
+importing it. The rule was met; reviewability, the requirement it stood for,
+was not.
 
 ## Documentation tiers
 

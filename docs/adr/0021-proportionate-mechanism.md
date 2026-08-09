@@ -83,6 +83,18 @@ citing this ADR. The exception list is the guard against that, and the
 priority order means a proposal to weaken a listed guarantee is answered on
 reliability grounds rather than on taste.
 
+That cost was not theoretical. Red-teaming the first draft found four ways to
+cite it against machinery that is working: the removal test counted "never
+fired" against guards whose whole point is an unrecoverable or silent first
+occurrence; "enforced somewhere cheaper" invited folding a hardened call site
+into a helper that inherits what the hardening excluded; "prefer a fallback
+over a refusal" read as licence to convert "I could not check" into "I
+checked"; and `MAINTAINING.md` exempted tests from the burden while the
+1,000-line cap that provoked this ADR lives in one. All four are closed in the
+text. The class is worth naming, because the next loophole will look the same:
+a mechanism that is holding is indistinguishable, from the outside, from one
+nobody uses.
+
 ## Rejected
 
 - **Leaving the attributes implicit in ADRs 0001 and 0020.** Tried already.
