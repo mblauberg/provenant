@@ -152,7 +152,10 @@ def test_claude_other_primary_uses_opus_without_implicit_fable_route():
     assert result.returncode == 0, result.output
     assert record["resolved_model"] == "opus"
     assert record["requested_model"] == "opus"
-    assert record["fallback_model"] == ""
+    # The role `other-primary` takes the workhorse default, whose anthropic
+    # candidates are opus then sonnet, so a fallback exists. What this test pins is
+    # that it is not fable: a crucial-tier model must never be reached implicitly.
+    assert record["fallback_model"] == "sonnet"
     assert record["identity_source"] == "dated-catalog"
     assert record["substitution"] == ""
     assert output.strip() == "OPUS OK"
@@ -874,6 +877,106 @@ def test_resolved_role_effort_reaches_codex_adapter_and_receipt():
         assert "gpt-5.6-sol" in args
         assert "service_tier=default" in args
         assert "model_reasoning_effort=xhigh" in args
+
+
+def test_bare_codex_dispatch_defaults_to_workhorse_not_flagship():
+    """A dispatch naming no alias, role or model must not land on the flagship.
+
+    The default alias used to be flagship unconditionally, so an ordinary dispatch
+    silently ran on the most expensive model in the family.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        args_file = tmp / "codex.args"
+        write_executable(
+            bin_dir / "codex",
+            f'''#!/usr/bin/env bash
+            if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
+              printf '%s\n' '{{"models":[{{"slug":"gpt-5.6-luna","supported_reasoning_levels":[{{"effort":"medium"}},{{"effort":"high"}}]}},{{"slug":"gpt-5.6-sol","supported_reasoning_levels":[{{"effort":"high"}},{{"effort":"max"}}]}}]}}'
+              exit 0
+            fi
+            printf '%s\\n' "$@" > {args_file}
+            cat >/dev/null
+            echo OK
+            ''',
+        )
+        env = fabric_free_env()
+        env["PATH"] = f"{bin_dir}:{env['PATH']}"
+        result = subprocess.run(
+            [
+                str(SCRIPT),
+                "--tool",
+                "codex",
+                "--orchestrator-family",
+                "anthropic",
+                "--out",
+                str(tmp / "out.txt"),
+                "--prompt",
+                "Review",
+            ],
+            cwd=td,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        record = json.loads(result.stdout)
+        assert result.returncode == 0, result.stderr
+        assert record["route_alias"] == "workhorse"
+        assert record["resolved_model"] == "gpt-5.6-luna"
+        args = args_file.read_text(encoding="utf-8").splitlines()
+        assert "gpt-5.6-luna" in args
+        assert "gpt-5.6-sol" not in args
+        assert "service_tier=default" in args
+
+
+def test_critical_review_role_still_defaults_to_flagship():
+    """The alias follows the role, so a critical review still reaches the flagship."""
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        args_file = tmp / "codex.args"
+        write_executable(
+            bin_dir / "codex",
+            f'''#!/usr/bin/env bash
+            if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
+              printf '%s\n' '{{"models":[{{"slug":"gpt-5.6-luna","supported_reasoning_levels":[{{"effort":"medium"}}]}},{{"slug":"gpt-5.6-sol","supported_reasoning_levels":[{{"effort":"max"}}]}}]}}'
+              exit 0
+            fi
+            printf '%s\\n' "$@" > {args_file}
+            cat >/dev/null
+            echo OK
+            ''',
+        )
+        env = fabric_free_env()
+        env["PATH"] = f"{bin_dir}:{env['PATH']}"
+        result = subprocess.run(
+            [
+                str(SCRIPT),
+                "--tool",
+                "codex",
+                "--orchestrator-family",
+                "anthropic",
+                "--role",
+                "critical-review",
+                "--out",
+                str(tmp / "out.txt"),
+                "--prompt",
+                "Review",
+            ],
+            cwd=td,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        record = json.loads(result.stdout)
+        assert result.returncode == 0, result.stderr
+        assert record["route_alias"] == "flagship"
+        assert record["resolved_model"] == "gpt-5.6-sol"
 
 
 def test_codex_capability_discovery_failure_blocks_execution_with_receipt():

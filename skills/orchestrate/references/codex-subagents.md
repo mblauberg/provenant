@@ -22,7 +22,7 @@ unresolved questions.
 ## Built-in roles
 
 - `explorer`: read-heavy scouting, source discovery, repo questions.
-- `worker`: bounded implementation or artifact work with an owned write scope.
+- `worker`: bounded implementation or artefact work with an owned write scope.
 - `default`: general sidecar work when no narrower role fits.
 
 Custom Codex agents are project-scoped configuration files under `.codex/agents/*.toml` when the
@@ -74,7 +74,7 @@ return:            3-6 bullets, surprises, unresolved, file path
 ```
 
 For subscription-native Codex workers, omit the literal transport `model` and bind the resolved `effort`.
-Retain Luna/Terra/Sol as the catalog identity in the
+Retain Luna/Terra/Sol as the catalogue identity in the
 receipt. If the native surface cannot bind that effort, stop or use an
 authorised adapter and record the substitution. Do not silently inherit the
 chair route. Explicit chair inheritance is valid only when the dispatch and

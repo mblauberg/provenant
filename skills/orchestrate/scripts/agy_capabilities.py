@@ -109,6 +109,10 @@ def main(argv: list[str] | None = None) -> int:
     except (OSError, ValueError) as exc:
         print(f"capability discovery failed: {exc}", file=sys.stderr)
         return 1
+    if stderr:
+        # Not a failure. Kept visible so a warning that used to be silently parsed
+        # as a phantom model id is still recorded somewhere a caller can read it.
+        print(f"agy models warned: {stderr}", file=sys.stderr)
     encoded = json.dumps(snapshot, indent=2, sort_keys=True) + "\n"
     if args.out:
         args.out.write_text(encoded)

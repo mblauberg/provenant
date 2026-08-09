@@ -35,6 +35,13 @@ objective, the repo path, what to read, what to produce and the exact output for
 `READ-ONLY. Do not edit any file.` Write it with the Write tool to
 `${TMPDIR:-/tmp}/codex-<slug>-prompt.txt`.
 
+**`<slug>` must be unique to this dispatch, not derived from the task.** A slug taken from the
+branch or the subject collides whenever two dispatches run at once, and the collision is silent:
+each overwrites the other's prompt, report and transcript, so a run reads someone else's brief
+and answers the wrong question. This has happened. Append something unique to the dispatch, such
+as `$$` or the output of `date +%s%N`, and reuse that one slug for all three paths. Before
+dispatching, confirm the prompt file you just wrote still holds your content.
+
 **Tell Codex to make its final message the report**, separate from the transcript, and to bound
 its length. Do not ask it to write a report file from inside the sandbox. End the prompt with
 something close to:
@@ -61,9 +68,11 @@ codex exec -s read-only -C <ABSOLUTE_DIR> \
   > ${TMPDIR:-/tmp}/codex-<slug>-transcript.txt 2>&1
 ```
 
-`-s read-only` enforces the repository boundary. `-o` writes Codex's final message to the report
-path outside the sandbox, while the shell redirect still captures the transcript. Keep the
-prompt's `READ-ONLY` instruction as a second control.
+`-s read-only` enforces that the run writes nothing, anywhere. It is a write boundary, not a
+read boundary: Codex can still read outside the repository, so it is not a confidentiality
+control. `-o` writes Codex's final message to the report path from outside the sandbox, while
+the shell redirect still captures the transcript. Keep the prompt's `READ-ONLY` instruction as
+a second control.
 
 Issue that as a single Bash call with `timeout: 600000` (10 minutes, the maximum the Bash tool
 accepts) and **without** `run_in_background`. The call blocks until Codex exits, and then you
@@ -111,8 +120,11 @@ If you are about to report a failure, run that bounded extraction first and salv
 shows; report it as partial, rather than reporting nothing.
 
 Do not invent an explanation for a failure either. "The sandbox blocked it" is a claim about
-the tool that needs evidence from the targeted transcript extraction. The narrow writable-roots
-sandbox is the normal mode for this agent, and other runs succeed under it every day.
+the tool that needs evidence from the targeted transcript extraction. `-s read-only` with `-o`
+is the normal mode for this agent, and other runs succeed under it every day. In particular, a
+report that arrives saying only that the sandbox prevented it from writing the report means the
+prompt told Codex to write a file: under `-o` its final message IS the report, so fix the
+prompt rather than widening the sandbox.
 
 **Owning the wait is your job, not the caller's.** You are the only party that knows this
 process exists, so nobody else can tell when it finishes or dies. Stay with it until it is
@@ -199,8 +211,9 @@ For the complete flag decision table, see `agents/codex-implementer.md`; this ag
 If the task genuinely needs to write files under
 the repo, you are the wrong agent: say so and stop rather than escalating your own sandbox. Note
 that Codex cannot create heredoc temp files under `-s read-only`, so if
-the task needs Codex to run scripts, tell it to use `python3 -c '...'` or `python3 - <<`
-alternatives that need no file writes.
+the task needs Codex to run scripts, tell it to use `python3 -c '...'` or a pipe such as
+`printf '%s' '<script>' | python3 -`. Do not suggest `python3 - <<EOF`: the shell writes a
+heredoc to a temp file, so it fails for the very reason just given.
 
 ## Liveness
 

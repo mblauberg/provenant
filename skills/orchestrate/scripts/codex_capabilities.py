@@ -92,6 +92,11 @@ def main(argv: list[str] | None = None) -> int:
     except (OSError, json.JSONDecodeError, ValueError) as exc:
         print(f"capability discovery failed: {exc}", file=sys.stderr)
         return 1
+    if stderr:
+        # A successful run that still said something on stderr is not a failure:
+        # rejecting it is what took the adapter offline for one warning line. Keep
+        # it visible so the dispatcher's diagnostics record it rather than losing it.
+        print(f"codex debug models warned: {stderr}", file=sys.stderr)
     encoded = json.dumps(snapshot, indent=2, sort_keys=True) + "\n"
     if args.out:
         args.out.write_text(encoded)

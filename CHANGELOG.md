@@ -177,6 +177,28 @@ The current pre-release tree includes:
 
 ### Fixed
 
+- Stopped a bare cross-family dispatch defaulting to the flagship model.
+  `cf_dispatch.sh` hardcoded `--alias flagship`, so any call that named no alias
+  ran on `gpt-5.6-sol`, which no reordering of the workhorse alias could reach.
+  The alias now follows the role: `flagship` for `lead`, `orchestrator` and
+  `critical-review`, or when a risk tier or an explicit model is named, and
+  `workhorse` otherwise. A bare codex dispatch resolves `gpt-5.6-luna`.
+- Stopped `cf_dispatch.sh` overriding a caller's explicit
+  `AGENT_FABRIC_PRODUCT_ROOT`. Deriving the product root from the script's own
+  checkout is right when nothing else says otherwise, but it silently replaced a
+  deliberate setting in vendored and nested layouts.
+- Required a unique per-dispatch slug in both Codex dispatcher agents. The slug
+  was derived from the task, so two concurrent dispatches overwrote each other's
+  prompt, report and transcript files and a run answered someone else's
+  question. Observed live, three dispatches deep.
+- Corrected the remaining claims that outlived their evidence: `cli-headless.md`
+  still called the linked-worktree commit failure intermittent, and
+  `codex-analyst.md` described `-s read-only` as enforcing a repository
+  boundary. It is a write boundary and not a read boundary, so it is not a
+  confidentiality control.
+- Kept a successful capability probe's stderr visible as a diagnostic instead of
+  discarding it. Rejecting unrecognised stderr would restore the outage this
+  release fixes, so the streams stay advisory rather than fatal.
 - Stopped a child process's stderr corrupting every capability snapshot.
   `run_bounded` merged stderr into stdout, and all three capability producers
   parsed that merged stream as machine-readable data, so a single warning line

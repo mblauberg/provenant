@@ -47,14 +47,18 @@ task shape does not establish one.
 
 | Task | Exact flags | Rule |
 |---|---|---|
-| Read-only analysis, no writes at all | `-s read-only`, report recovered with `-o <path>` | Use the report path for the bounded final message. |
+| Read-only analysis, no writes by the run | `-s read-only`, report recovered with `-o <path>` | `-o` is written by `codex exec` from outside the sandbox, so the run itself still writes nothing. |
 | Write code in a worktree the dispatcher owns, caller commits | `-s workspace-write -C <worktree>` | Keep the primary repository's git metadata out of the invocation. |
-| Write and commit in that worktree | `-s workspace-write -C <worktree> --add-dir <primary-repo>/.git` | Use only when the dispatcher is authorised to commit. |
-| Never | `-s danger-full-access`, `--dangerously-bypass-approvals-and-sandbox`, or `-C <primary-repo>` while another agent works there | These choices destroy the boundary. |
+| Write and commit in that worktree | `-s workspace-write -C <worktree> --add-dir <primary-repo>/.git` | Use only when the dispatcher is authorised to commit. Grants git metadata only, not the primary working tree. |
+| Never | `-s danger-full-access`, `--dangerously-bypass-approvals-and-sandbox`, `-C <primary-repo>` while another agent works there, or `--add-dir <primary-repo>` or any ancestor of it | The last one is the easy mistake: granting the repo root rather than its `.git` hands over the primary working tree and every sibling worktree at once. |
 
 `-s workspace-write` always writes to `[workdir, /tmp, $TMPDIR]`. `writable_roots` only adds
 paths; it does not narrow that set. The linked-worktree metadata rule below explains the
 `--add-dir <primary-repo>/.git` case; do not restate or broaden it.
+
+One consequence to keep in mind when testing any of this: a worktree placed under `$TMPDIR` is
+already writable, so it commits happily and proves nothing about the normal case. Put the
+worktree outside `/tmp` and `$TMPDIR` or your sandbox test is measuring the wrong thing.
 
 ## Procedure
 
@@ -65,6 +69,13 @@ background it needs (including anything already verified, so it does not redo it
 broken into ordered parts; what it must NOT touch; how to verify; the commit convention; and
 an explicit instruction not to push and not to open a PR. Write it to
 `${TMPDIR:-/tmp}/codex-<slug>-brief.txt`.
+
+**`<slug>` must be unique to this dispatch, not derived from the task.** A slug taken from the
+branch or the subject collides whenever two dispatches run at once, and the collision is silent:
+each overwrites the other's brief, report and transcript, so a lane implements someone else's
+brief. This has happened. Append something unique to the dispatch, such as `$$` or the output of
+`date +%s%N`, and reuse that one slug for all paths. Before dispatching, confirm the brief file
+you just wrote still holds your content.
 
 Include a scepticism clause. Line numbers drift and briefs contain errors: tell Codex to verify
 the claims it is given and to report anything that turns out to be wrong rather than
