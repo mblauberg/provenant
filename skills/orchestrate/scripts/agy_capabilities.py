@@ -93,14 +93,18 @@ def main(argv: list[str] | None = None) -> int:
             cwd=Path.cwd(),
             timeout_seconds=60,
             output_limit_bytes=1_048_576,
+            merge_stderr=False,
         )
+        stderr = (result.stderr or "").strip()
         if result.timed_out:
-            raise ValueError("agy models timed out")
+            detail = f": {stderr}" if stderr else ""
+            raise ValueError(f"agy models timed out{detail}")
         if result.returncode != 0:
+            detail = f": {stderr}" if stderr else ""
             raise ValueError(
-                f"agy models exited {result.returncode}: {result.output.strip()}"
+                f"agy models exited {result.returncode}{detail}"
             )
-        snapshot = normalize(result.output)
+        snapshot = normalize(result.stdout)
     except (OSError, ValueError) as exc:
         print(f"capability discovery failed: {exc}", file=sys.stderr)
         return 1

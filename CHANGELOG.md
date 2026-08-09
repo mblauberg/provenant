@@ -165,6 +165,29 @@ The current pre-release tree includes:
 
 ### Fixed
 
+- Reached explicit Codex models again. codex-cli 0.146.0 accepts an explicit
+  `-m` on a ChatGPT subscription account, so the codex adapter no longer
+  dispatches `account-default` and `gpt-5.6-luna` is selectable rather than
+  fixed to the account default. Luna now leads the OpenAI `workhorse` alias
+  ahead of `gpt-5.6-terra`, matching the dossier since the July 2026 price cut.
+  The generic account-default machinery is retained and tested through a
+  synthetic adapter.
+- Pinned Codex dispatch to `service_tier=default` and prohibited the priority
+  tier outright. The fast path is a config key rather than a flag, so it was
+  inheritable from `~/.codex/config.toml` without appearing in any transcript,
+  at roughly double the usage for about 1.5x speed.
+- Stopped `codex-analyst` claiming a read-only sandbox it did not have.
+  `sandbox_workspace_write.writable_roots` adds to the always-writable set
+  rather than restricting it, so the repository under analysis was writable and
+  the guarantee was `prompt_only`, not `enforced`. The analyst now runs
+  `-s read-only` and recovers its report through `--output-last-message`.
+- Corrected the Codex worktree commit failure from "intermittent" to its actual
+  deterministic cause, a linked worktree's git metadata falling outside the
+  sandbox's always-writable set, and documented the narrow
+  `--add-dir <primary>/.git` grant that fixes it.
+- Replaced the claim that Codex model discovery is impossible headlessly.
+  `codex models` is not a subcommand, but `codex debug models` works headlessly
+  and is already what `codex_capabilities.py` shells out to.
 - Prevented `scripts/configure-fabric-mcp.py` from crashing under Python
   3.14 when its standard-output stream is already closed (#396).
 - Accepted a readable SQLite database plus WAL source set without SHM, while
