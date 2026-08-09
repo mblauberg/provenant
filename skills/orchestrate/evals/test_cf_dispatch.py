@@ -35,6 +35,7 @@ DISPATCH_SCHEMA = {
     "status",
     "exit",
     "output_path",
+    "output_digest",
     "read_only_guarantee",
     "orchestrator_family",
     "provider_family",
@@ -743,6 +744,7 @@ def test_cursor_distinct_model_records_adapter_and_provider_family():
         assert record["endpoint_provider"] == "cursor"
         assert record["model_family"] == "xai"
         assert record["resolved_model"] == "cursor-grok-4.5-high"
+        assert record["output_digest"] == "sha256:" + __import__("hashlib").sha256(out.read_bytes()).hexdigest()
         assert record["certification_eligible"] is True
         assert record["cross_family"] is True
         cursor_args = args_file.read_text(encoding="utf-8").splitlines()
