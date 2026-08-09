@@ -24,6 +24,85 @@ NON_OCCUPANT_MODELS = tuple(
 )
 
 
+@pytest.fixture
+def harness_script(tmp_path):
+    script = tmp_path / "run-harness.sh"
+    script.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        f"source {ROOT / 'scripts' / 'lib' / 'harness-python.sh'}\n"
+        '"$HARNESS_RUNNER" -c "import sys; print(sys.version_info[:2])"\n'
+    )
+    script.chmod(0o755)
+    return script
+
+
+def run_harness(harness_script, runner, *, harness_python, pythonpath, optimize):
+    environment = {
+        **os.environ,
+        "HARNESS_PYTHON": harness_python,
+        "HARNESS_RUNNER": runner,
+        "PYTHONPATH": str(pythonpath) if pythonpath is not None else "",
+        "PYTHONOPTIMIZE": optimize,
+    }
+    return subprocess.run(
+        [str(harness_script)],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+
+
+@pytest.mark.parametrize("runner", ["run_stdlib", "run_yaml", "run_test"])
+def test_python_floor_rejects_wrong_version_under_optimization(
+    tmp_path, harness_script, runner,
+):
+    version_shim = tmp_path / "python-version-shim"
+    version_shim.mkdir()
+    (version_shim / "sitecustomize.py").write_text(
+        "import sys\n"
+        "import pytest\n"
+        "import yaml\n"
+        "sys.version_info = (3, 9, 6, 'final', 0)\n"
+    )
+
+    result = run_harness(
+        harness_script,
+        runner,
+        harness_python=sys.executable,
+        pythonpath=version_shim,
+        optimize="1",
+    )
+
+    if result.returncode != 3:
+        pytest.fail(f"expected probe refusal, got exit {result.returncode}: {result.stdout}")
+    if result.stdout:
+        pytest.fail(f"probe refusal wrote stdout: {result.stdout}")
+    if "harness-python: interpreter probe failed" not in result.stderr:
+        pytest.fail(f"missing probe refusal detail: {result.stderr}")
+
+
+@pytest.mark.parametrize("runner", ["run_stdlib", "run_yaml", "run_test"])
+def test_python_floor_rejects_missing_interpreter(harness_script, runner):
+    result = run_harness(
+        harness_script,
+        runner,
+        harness_python="/deliberately/missing/python",
+        pythonpath=None,
+        optimize="1",
+    )
+
+    if result.returncode != 3:
+        pytest.fail(f"expected unusable-interpreter refusal, got exit {result.returncode}")
+    if result.stdout:
+        pytest.fail(f"unusable-interpreter refusal wrote stdout: {result.stdout}")
+    if "harness-python: unusable interpreter" not in result.stderr:
+        pytest.fail(f"missing unusable-interpreter detail: {result.stderr}")
+
+
 def resolve(*args):
     arguments = [str(SCRIPT), "resolve", *args]
     result = subprocess.run(
