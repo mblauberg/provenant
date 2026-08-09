@@ -24,6 +24,7 @@ SCRIPTS_DIR = str(Path(__file__).resolve().parent)
 if SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, SCRIPTS_DIR)
 import delivery_receipt_lifecycle as lifecycle
+import delivery_receipt_paths as paths
 import delivery_receipt_process as process_runner
 
 PRODUCT_ROOT = Path(__file__).resolve().parents[3]
@@ -122,61 +123,19 @@ def load_json_argument(value: str, field: str) -> dict[str, Any]:
 
 
 def safe_workspace_path(workspace: Path, value: str, field: str) -> tuple[Path, str]:
-    path = Path(value)
-    if path.is_absolute() or ".." in path.parts or not value:
-        raise ReceiptError(f"{field} must be safe and workspace-relative")
-    target = (workspace / path).resolve()
-    try:
-        target.relative_to(workspace)
-    except ValueError as exc:
-        raise ReceiptError(f"{field} escapes the workspace") from exc
-    return target, path.as_posix().rstrip("/")
+    return paths.safe_workspace_path(workspace, value, field, ReceiptError)
 
 
 def ensure_allowed_artifact_target(
     run: dict[str, Any], workspace: Path, target: Path,
 ) -> None:
-    target = target.resolve()
-    authority = run.get("authority")
-    scopes = authority.get("allowed_artifact_paths") if isinstance(authority, dict) else None
-    if not isinstance(scopes, list) or not scopes:
-        raise ReceiptError("authority.allowed_artifact_paths must be a non-empty list")
-    roots: list[Path] = []
-    for scope in scopes:
-        if not isinstance(scope, str):
-            raise ReceiptError("authority.allowed_artifact_paths contains an invalid path")
-        root, _relative = safe_workspace_path(
-            workspace, scope, "authority.allowed_artifact_paths",
-        )
-        roots.append(root)
-    if not any(
-        target == root or target.is_relative_to(root)
-        for root in roots
-    ):
-        raise ReceiptError("artifact path leaves authority.allowed_artifact_paths")
+    paths.ensure_within_scope(run, workspace, target, "artifact", ReceiptError)
 
 
 def ensure_allowed_source_target(
     run: dict[str, Any], workspace: Path, target: Path,
 ) -> None:
-    target = target.resolve()
-    authority = run.get("authority")
-    scopes = authority.get("allowed_source_paths") if isinstance(authority, dict) else None
-    if not isinstance(scopes, list) or not scopes:
-        raise ReceiptError("authority.allowed_source_paths must be a non-empty list")
-    roots: list[Path] = []
-    for scope in scopes:
-        if not isinstance(scope, str):
-            raise ReceiptError("authority.allowed_source_paths contains an invalid path")
-        root, _relative = safe_workspace_path(
-            workspace, scope, "authority.allowed_source_paths",
-        )
-        roots.append(root)
-    if not any(
-        target == root or target.is_relative_to(root)
-        for root in roots
-    ):
-        raise ReceiptError("evidence source leaves authority.allowed_source_paths")
+    paths.ensure_within_scope(run, workspace, target, "source", ReceiptError)
 
 
 def check_evidence_sources(
@@ -186,12 +145,9 @@ def check_evidence_sources(
     *,
     after_command: bool = False,
 ) -> None:
-    suffix = " after command execution" if after_command else ""
-    for source in source_paths:
-        target, _relative = safe_workspace_path(workspace, source, "evidence source")
-        ensure_allowed_source_target(run, workspace, target)
-        if not target.exists():
-            raise ReceiptError(f"evidence source does not exist{suffix}: {source}")
+    paths.check_evidence_sources(
+        run, workspace, source_paths, ReceiptError, after_command=after_command,
+    )
 
 
 def resolve_run_dir(value: str | Path, *, run_id: str | None = None) -> tuple[Path, Path]:
