@@ -297,8 +297,7 @@ def review_ladder_error(run: dict[str, Any]) -> str | None:
         for item in legs
     ):
         return f"{risk_tier} review requires a distinct-family review or recorded skip"
-    errors = []
-    return errors[0] if errors else None
+    return None
 
 
 def required_profile_evidence(
