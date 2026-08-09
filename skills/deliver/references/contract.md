@@ -177,14 +177,26 @@ validate for historical readability, but release rejects software promotion
 without the post-merge binding. A URI or a reconstructed post-acceptance draft
 cannot substitute for these local typed artifacts.
 
-The profile gate uses independently authored positive, negative and boundary
-cases rather than receipts emitted by the reference generator:
+The profile gate runs inside the harness gate:
 
 ```sh
 provenant check
 ```
 
-The harness gate includes the delivery scenario replay. Every expected outcome
-must match. The dataset covers each base profile in both directions, exercises
-the high-stakes overlay twice, and repeats stochastic or boundary cases where
-reproducibility matters.
+What that replays today is `tests/test_delivery_contract.py`, which builds each
+profile's receipt with `skills/deliver/scripts/reference_runs.py` and judges it
+with `validate_delivery.py`. Producer and validator stay independent of each
+other, so the gate proves the contract is self-consistent. It does not prove
+the contract matches an independent reading of the profiles, because both sides
+are generated from the same harness.
+
+That independent reading exists and is not wired.
+`evals/delivery-profile-scenarios.yaml` holds held-out positive, negative and
+boundary cases authored against the profiles rather than emitted from them:
+each base profile in both directions, the high-stakes overlay twice, and
+repeated stochastic and boundary cases. Its header states the intent, that
+registry drift must break the gate. No loader reads it. Until a runner exists,
+do not cite that dataset as evidence that profile expectations were
+independently checked. It is under-wired rather than dead, in the sense the
+removal test in [`docs/ASRS.md`](../../../docs/ASRS.md) gives those words: the
+fix is a runner, not a deletion.
