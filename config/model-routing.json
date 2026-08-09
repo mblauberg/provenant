@@ -42,14 +42,15 @@
     "openai": {
       "aliases": {
         "flagship": ["gpt-5.6-sol"],
-        "workhorse": ["gpt-5.6-terra", "gpt-5.6-luna"],
+        "workhorse": ["gpt-5.6-luna", "gpt-5.6-terra"],
         "scout": ["gpt-5.6-luna"]
       },
       "role_overrides": {},
       "role_effort_defaults": {
         "lead": {"flagship": "ultra"},
         "orchestrator": {"flagship": "ultra"},
-        "critical-review": {"flagship": "max"}
+        "critical-review": {"flagship": "max"},
+        "worker": {"workhorse": "high"}
       },
       "ultra_eligible_roles": ["lead", "orchestrator"],
       "effort_fallback_order": ["max", "xhigh", "high", "medium", "low"]
@@ -71,7 +72,7 @@
   },
   "adapters": {
     "claude": {"endpoint_provider": "anthropic", "fixed_model_family": "anthropic", "effort_transport": "flag"},
-    "codex": {"endpoint_provider": "openai", "fixed_model_family": "openai", "effort_transport": "flag", "model_selection": "account-default"},
+    "codex": {"endpoint_provider": "openai", "fixed_model_family": "openai", "effort_transport": "flag"},
     "cursor": {
       "endpoint_provider": "cursor",
       "fixed_model_family": null,
