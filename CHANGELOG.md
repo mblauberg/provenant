@@ -99,6 +99,10 @@ The current pre-release tree includes:
 - Startup diagnosis for the `ui-ux-design` live server, plus `*.test.mjs`
   discovery in `scripts/check-harness` so a skill's JavaScript tests run in the
   gate the moment they land instead of sitting unexecuted (#666).
+- The default public-tree scan now runs inside `scripts/check-harness`, so
+  publication hygiene no longer depends on a release checklist being
+  remembered. The history and publication-range scans stay manual, because they
+  need refs a shallow checkout does not fetch.
 
 ### Removed
 
@@ -211,6 +215,10 @@ The current pre-release tree includes:
 
 ### Fixed
 
+- Stopped `scripts/check-harness` naming the skill Python suites it runs. The
+  same file already discovered `*.test.mjs` for exactly this reason, and the
+  enumeration eleven lines below it would have left the next skill suite
+  unexecuted in silence. Discovery reaches the same two files today.
 - Hardened `scripts/worktree.py` git invocation: bounded, non-blocking capture
   of both streams, strict `-z` porcelain parsing that refuses a truncated
   record, and complete inventory capture (#665).

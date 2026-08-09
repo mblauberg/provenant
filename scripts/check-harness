@@ -52,10 +52,25 @@ fi
 
 run_test "$SCRIPTS_ROOT/static-security-check.py"
 
-run_test -m pytest -q \
-  "$TESTS_ROOT" \
-  "$SKILLS_ROOT/implement/tests/test_checkpoint_run.py" \
-  "$SKILLS_ROOT/orchestrate/evals/test_cf_dispatch.py"
+# The default public-tree scan runs here rather than only from the release
+# checklist. Publication is one of the named adversaries in docs/ASRS.md and its
+# first occurrence is unrecoverable, so the check that already exists should not
+# depend on somebody remembering it. History and publication-range scans stay
+# manual, because they need refs a shallow checkout does not have.
+run_stdlib "$SCRIPTS_ROOT/public_release_check.py"
+
+# Skill Python tests are discovered on the same grounds as the JavaScript ones
+# above. Naming them here is what left the JavaScript suites unexecuted, and the
+# enumeration was still in place eleven lines further down.
+skill_python_tests=()
+while IFS= read -r -d '' skill_test; do
+  skill_python_tests+=("$skill_test")
+done < <(
+  find "$SKILLS_ROOT" -type f -name 'test_*.py' -not -path '*/node_modules/*' -print0 |
+    LC_ALL=C sort -z
+)
+
+run_test -m pytest -q "$TESTS_ROOT" ${skill_python_tests[@]+"${skill_python_tests[@]}"}
 
 if [[ "$DOCTOR" == true ]]; then
   echo "environment doctor"

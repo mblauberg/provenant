@@ -181,10 +181,13 @@ scripts/check-harness
 npm run check
 node runtime/fabric/mcp-smoke.mjs
 npm audit --workspace=@local/fabric --omit=dev --audit-level=high
-scripts/static-security-check.py
-scripts/public-release-check
 git diff --check
 ```
+
+`check-harness` runs `static-security-check.py` and the default public-tree scan
+itself, so the `ci-status` alternative above is a real equivalent rather than a
+shorter list. The history and publication-range scans below are not in the gate:
+they need refs a shallow CI checkout does not fetch.
 
 Audit every ref reachable in the local clone with:
 

@@ -30,6 +30,39 @@ def test_root_harness_checker_is_available():
     assert checker.stat().st_mode & 0o111
 
 
+def test_the_gate_discovers_skill_tests_instead_of_naming_them():
+    """A new skill suite must run the moment it lands, not when someone edits the gate.
+
+    Naming test files here is what left the skill JavaScript suites silently
+    unexecuted; the Python enumeration outlived the fix in the same file.
+    Discovery is the remedy docs/ASRS.md prefers over a list to remember.
+    """
+    gate = (ROOT / "scripts" / "check-harness").read_text()
+    discovered = sorted(
+        path
+        for path in (ROOT / "skills").rglob("test_*.py")
+        if "node_modules" not in path.parts
+    )
+    assert discovered, "no skill Python suites found; the guard would pass vacuously"
+    for path in discovered:
+        assert str(path.relative_to(ROOT)) not in gate, (
+            f"{path.relative_to(ROOT)} is named in the gate; discover it instead"
+        )
+    assert "-name 'test_*.py'" in gate
+
+
+def test_the_gate_scans_the_public_tree():
+    """Publication is unrecoverable, so the scan cannot depend on a checklist.
+
+    The history and publication-range modes stay manual: they need refs a
+    shallow CI checkout does not fetch.
+    """
+    gate = (ROOT / "scripts" / "check-harness").read_text()
+    assert "public_release_check.py" in gate
+    assert "--history" not in gate
+    assert "--publication-range" not in gate
+
+
 def test_dispatchers_use_the_stable_product_command_and_local_skill_helpers():
     dispatcher = (ROOT / "skills" / "orchestrate" / "scripts" / "cf_dispatch.sh").read_text()
     assert 'resolve_routing' in dispatcher  # tries provenant, falls back to model_route.py
