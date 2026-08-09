@@ -73,7 +73,7 @@ owner/destination, status (`promote`, `experiment`, `defer`, `reject`).
 
 ## Adapter-absent path
 
-Without optional Console, Herdr or GitHub, use canonical project artifacts and
+Without optional Herdr or GitHub, use canonical project artifacts and
 emit the skill-owned kind in
 [portable-workflow.v1.json](portable-workflow.v1.json). It proves context
 existence only, not retrospective evidence. Keep context separate. Improvements

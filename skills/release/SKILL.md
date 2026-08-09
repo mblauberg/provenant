@@ -78,7 +78,7 @@ Agent may prepare and verify; it may execute only within explicit authority.
 
 ## Adapter-absent path
 
-Console, Herdr and GitHub are optional. Use canonical project artifacts and
+Herdr and GitHub are optional. Use canonical project artifacts and
 emit the skill-owned artifact kind in
 [portable-workflow.v1.json](portable-workflow.v1.json). It proves context only,
 not release evidence, authority or deployment. Keep canonical context separate.

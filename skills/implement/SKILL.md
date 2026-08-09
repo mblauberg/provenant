@@ -71,7 +71,7 @@ reconciliation run.
 
 ## Adapter-absent path
 
-Without optional Console, Herdr or GitHub, use canonical project artifacts and
+Without optional Herdr or GitHub, use canonical project artifacts and
 emit the skill-owned [portable kind](portable-workflow.v1.json). It proves only
 that a context object existed, never implementation evidence, acceptance or
 promotion authority. Retain and identify the canonical context separately.

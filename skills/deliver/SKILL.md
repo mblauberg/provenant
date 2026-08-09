@@ -23,10 +23,12 @@ inventing.
 
 ## Lifecycle
 
-1. Create `.agent-run/<id>/RUN.json` from `templates/RUN.template.json` and
-   bind intent, design and authority by digest. When coordinated, bind
-   `fabric_relationships` to project session, coordination run and workstream
-   IDs per [the receipt contract](references/contract.md).
+1. Create `.agent-run/<id>/RUN.json` with `scripts/delivery_receipt.py init`,
+   the sole writer of the receipt, and bind intent, design and authority by
+   digest. `templates/RUN.template.json` documents the shape; the producer, not
+   a hand edit, applies it. When coordinated, bind `fabric_relationships` to
+   project session, coordination run and workstream IDs per
+   [the receipt contract](references/contract.md).
 2. Record each state transition. No state may jump an approval, evidence,
    review, acceptance or release gate.
 3. Execute through relevant skills. Software routes through `implement`;
@@ -69,7 +71,7 @@ For audience-ready HTML, apply the
 
 ## Adapter-absent path
 
-Console, Herdr and GitHub are optional. Continue from canonical project
+Herdr and GitHub are optional. Continue from canonical project
 artifacts and emit the skill-owned artifact kind in
 [portable-workflow.v1.json](portable-workflow.v1.json). That filesystem
 artifact proves only that a context object existed. Retain and identify the

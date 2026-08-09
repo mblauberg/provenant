@@ -66,8 +66,7 @@ What the route is intended to deliver. Link the owning specification.
 
 When GitHub is unavailable, use the project's designated canonical work
 tracker; a project with no tracker names one canonical work-state owner in
-its state file before any route map links it. Console and Herdr remain
-optional. The portable [effort-map artifact](portable-workflow.v1.json) proves
+its state file before any route map links it. Herdr remains optional. The portable [effort-map artifact](portable-workflow.v1.json) proves
 only that a context object existed. Retain and identify the canonical context
 separately; this output is not itself curated route state or a resumable
 handoff. The runner validates the contract's declared context fields, including

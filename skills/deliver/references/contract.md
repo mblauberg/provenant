@@ -7,6 +7,32 @@ requirements. `status` is the live state and `state_history` is its ordered,
 timestamped proof. Side states (`blocked`, `cancelled`, `degraded`) require a
 reason and recovery instruction and cannot replace a mandatory gate.
 
+## Producer and validator separation
+
+`scripts/delivery_receipt.py` is the only writer of `RUN.json`;
+`scripts/validate_delivery.py` is the only judge of it. Neither imports the
+other. Both read `contract/lifecycle.py`, the shared written contract that owns
+the state table, so the producer refuses an illegal transition at write time
+and the validator rejects it independently at read time. That independence is
+the guarantee: an agreement between two modules that share a checker is not the
+same as one module checking itself.
+
+Producer commands, all under `.agent-run/<id>/` and all taking an in-directory
+lock: `init` (profile, tier, chair family, authority, risk assessment, intent),
+`bind` (a section by digest), `artifact add` (hashes the live bytes),
+`evidence run` (executes the command and binds exit code, bundle entry, bundle
+digest and artifact digest in one transaction), `evidence human`,
+`evidence remove` and `evidence rebuild` (the path back to consistency after an
+aborted lane), `review add` (explicit lineage: adapter, provider family, model,
+role, lenses, artifact and route-receipt digests), `checkpoint`, `transition`
+and `show`.
+
+Refusals happen at write time, not only at validation: timestamps come from the
+process clock and strictly increase, evidence identifiers are minted against the
+validator's pattern, no flag can supply an exit code, and a tier downgrade after
+approval is refused. Do not hand-edit a receipt to work around one of these; the
+refusal is the contract holding.
+
 ## Fabric relationship binding
 
 New receipts declare the optional-in-v1 `fabric_relationships` object. Omission

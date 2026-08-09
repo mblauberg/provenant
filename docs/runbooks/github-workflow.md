@@ -185,8 +185,7 @@ merge --auto` may be queued once those gates are met.
 `ci-status` is the single required check on branch protection. It is the
 aggregate job at the end of [`ci.yml`](../../.github/workflows/ci.yml): it
 runs on `if: always()`, succeeds only when every needed job (`detect-changes`,
-`harness`, `fabric`, `review-portal-supervisor`, `console`, `herdr`,
-`split-root`, `zizmor`)
+`harness`, `fabric`, `split-root`, `zizmor`)
 either succeeded or was skipped by the path filter, and fails closed on any
 failure or cancellation, including `detect-changes` itself. "CI is green"
 means exactly this one context; no other check is required.

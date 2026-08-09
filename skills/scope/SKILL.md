@@ -75,7 +75,7 @@ decisions and authority; change creates a new revision and gate.
 
 ## Adapter-absent path
 
-Without optional Console, Herdr or GitHub, use canonical project artifacts and
+Without optional Herdr or GitHub, use canonical project artifacts and
 emit the skill-owned kind in
 [portable-workflow.v1.json](portable-workflow.v1.json). The runner validates
 declared fields, including `accepted_artifact_identity`. Output proves context

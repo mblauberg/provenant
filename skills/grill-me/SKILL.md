@@ -24,7 +24,7 @@ branch needs unavailable owner authority. Return the resolved register to
 
 ## Adapter-absent path
 
-Console, Herdr and GitHub are optional. Continue from canonical project
+Herdr and GitHub are optional. Continue from canonical project
 artifacts and emit the skill-owned artifact kind in
 [portable-workflow.v1.json](portable-workflow.v1.json). That filesystem
 artifact proves only that a context object existed. Retain and identify the

@@ -124,9 +124,9 @@ boundary. Reply, terminal task result and pending request-result delivery commit
 in one transaction or transactional outbox before completion-ready. The
 requesting chair/lead integration subscribes to the correlated terminal result
 and receives it at its next safe turn boundary. An idle requester is woken; an
-active requester is not interrupted mid-tool or mid-turn. The Console may
-display the committed reply before requester consumption, but does not
-acknowledge it on the requester's behalf.
+active requester is not interrupted mid-tool or mid-turn. An observer may
+display the committed reply before requester consumption, but never
+acknowledges it on the requester's behalf.
 
 Response deadlines persist as barrier-blocking obligations. On overdue work,
 the chair may retry the same stable action, reassign or abandon with reason; it
