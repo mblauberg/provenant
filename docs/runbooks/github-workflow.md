@@ -191,6 +191,14 @@ either succeeded or was skipped by the path filter, and fails closed on any
 failure or cancellation, including `detect-changes` itself. "CI is green"
 means exactly this one context; no other check is required.
 
+Read that check's state correctly. `gh pr view <n> --json statusCheckRollup`
+leaves `.conclusion` as an empty string while a check is still running, so a
+`jq` expression that only guards against `null` treats a running check as
+finished and reports a false green. Filter on `.status` first, treating anything
+other than `COMPLETED` as still running, and only then require every non-skipped
+`.conclusion` to be `SUCCESS`. Merging on `.conclusion` alone merges unverified
+heads.
+
 The user review/merge gate applies only when the agent is stuck: split review
 verdicts it cannot settle with primary-source evidence, an exhausted repair
 budget, or a decision outside its granted authority. Standing user gates are:
@@ -205,6 +213,20 @@ concurrent pull requests still integrate as a serialised merge train: merge
 one, update the next onto the new `main`, rerun the exact-head checks and
 independent review (an update-merge is a new commit and invalidates prior
 exact-head evidence), then merge it.
+
+### Reproducing a CI failure locally
+
+When a suite passes locally but fails in CI, the difference is usually developer
+configuration rather than the code. Vary `HOME` before `PATH`: run the suite
+with `HOME` pointed at an empty directory to find out whether local
+configuration is masking the failure, and change one environment axis per run so
+the result attributes to something.
+
+Do not model CI with a minimal allowlist `PATH`. It manufactures failures that
+have nothing to do with the real difference, and time then goes into those
+instead of the actual cause. If a PATH reduction is genuinely needed, start from
+the real `PATH` and subtract only the named executables under suspicion. Record
+the matrix and which single axis changed the outcome.
 
 ### Dependabot patch-only auto-merge
 
@@ -305,6 +327,15 @@ Afterwards:
    Scope the step-3 diff to the paths the branch touched. Unscoped, it also
    reports everything `main` gained after the branch was cut, which reads as
    divergence when the branch is merely behind.
+
+   `git cherry <upstream> <head>` is the other tool reached for here, and its
+   two signs are not equally trustworthy. It compares patch ids, so a leading
+   `-` proves an equivalent patch is already upstream and is sound grounds for
+   closing or dropping that commit. A leading `+` proves only that no
+   patch-identical commit was found, which is not the same as the work being
+   outstanding: upstream work that was reshaped on the way in, including by this
+   repository's own squash merges, still reports `+`. Close on `-`, and settle a
+   `+` by reading the current upstream content and comparing behaviour.
 
    One repository-specific retention rule overrides this: a substantial software
    change's canonical `delivery-run` receipt directory must survive the merge
