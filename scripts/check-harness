@@ -18,23 +18,12 @@ for component_root in "$PRODUCT_ROOT" "$SCRIPTS_ROOT" "$SKILLS_ROOT" "$TESTS_ROO
     exit 3
   }
 done
-if [[ -x "${HARNESS_PYTHON:-}" ]]; then
-  PYTHON=("$HARNESS_PYTHON")
-elif [[ -x "$PRODUCT_ROOT/.venv/bin/python" ]]; then
-  PYTHON=("$PRODUCT_ROOT/.venv/bin/python")
-elif PYTHON3="$(command -v python3 2>/dev/null)" &&
-     "$PYTHON3" -c 'import pytest, yaml' >/dev/null 2>&1; then
-  PYTHON=("$PYTHON3")
-elif command -v uv >/dev/null 2>&1; then
-  PYTHON=(uv run --frozen --only-group test python)
-else
-  echo "check-harness: no Python with pytest and PyYAML found; install uv or set HARNESS_PYTHON" >&2
-  exit 3
-fi
+# shellcheck source=scripts/lib/harness-python.sh
+source "$SCRIPTS_ROOT/lib/harness-python.sh"
 
 cd "$PRODUCT_ROOT"
-"${PYTHON[@]}" "$SCRIPTS_ROOT/check-provenant-install.py"
-"${PYTHON[@]}" "$SCRIPTS_ROOT/check_harness.py"
+run_test "$SCRIPTS_ROOT/check-provenant-install.py"
+run_test "$SCRIPTS_ROOT/check_harness.py"
 
 while IFS= read -r -d '' script; do
   case "$script" in
@@ -44,15 +33,26 @@ while IFS= read -r -d '' script; do
 done < <(find "$SKILLS_ROOT" -type f -name '*.sh' -print0)
 
 "$SCRIPTS_ROOT/check-skill-javascript" "$SKILLS_ROOT"
+
+# Skill JavaScript tests are discovered rather than listed, so a new one runs
+# in the gate the moment it lands instead of sitting unexecuted.
+skill_node_tests=()
+while IFS= read -r -d '' skill_test; do
+  skill_node_tests+=("$skill_test")
+done < <(find "$SKILLS_ROOT" -type f -name '*.test.mjs' -not -path '*/node_modules/*' -print0)
+if (( ${#skill_node_tests[@]} > 0 )); then
+  node --test "${skill_node_tests[@]}"
+fi
+
 if [[ -d "$HOME/.claude/workflows" ]]; then
   while IFS= read -r -d '' workflow; do
     node --check "$workflow" >/dev/null
   done < <(find "$HOME/.claude/workflows" -maxdepth 1 -type f -name '*.js' -print0)
 fi
 
-"${PYTHON[@]}" "$SCRIPTS_ROOT/static-security-check.py"
+run_test "$SCRIPTS_ROOT/static-security-check.py"
 
-"${PYTHON[@]}" -m pytest -q \
+run_test -m pytest -q \
   "$TESTS_ROOT" \
   "$SKILLS_ROOT/implement/tests/test_checkpoint_run.py" \
   "$SKILLS_ROOT/orchestrate/evals/test_cf_dispatch.py"

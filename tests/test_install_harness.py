@@ -19,6 +19,12 @@ WORKFLOW_NAMES = {
     "cross-verify.js",
     "implement-run.js",
 }
+AGENT_NAMES = {
+    "agy-reviewer.md",
+    "agy-stylist.md",
+    "codex-analyst.md",
+    "codex-implementer.md",
+}
 UNMANAGED_WORKFLOW_BYTES = (
     b"export const meta = { name: 'mine' };\r\n"
     b"// User-owned workflow with no trailing newline"
@@ -208,6 +214,18 @@ def test_installs_claude_skills_and_global_instructions_idempotently(tmp_path):
         (config / ".agent-harness-workflows-installation.json").read_text()
     )
     assert set(workflow_manifest["managed"]) == WORKFLOW_NAMES
+    agents = config / "agents"
+    assert {path.name for path in agents.iterdir()} == AGENT_NAMES
+    agent_manifest_path = config / ".agent-harness-agents-installation.json"
+    agent_manifest_before = agent_manifest_path.read_bytes()
+    agent_manifest = json.loads(agent_manifest_before)
+    assert set(agent_manifest["managed"]) == AGENT_NAMES
+    for name in AGENT_NAMES:
+        installed = agents / name
+        source = ROOT / "agents" / name
+        assert installed.is_symlink()
+        assert installed.resolve() == source
+        assert installed.read_bytes() == source.read_bytes()
     instructions = config / "CLAUDE.md"
     content = instructions.read_text()
     # Doctrine is read from the seeded instance copy; the harness constitution
@@ -231,6 +249,11 @@ def test_installs_claude_skills_and_global_instructions_idempotently(tmp_path):
     )
     assert second.returncode == 0, second.stderr
     assert f"instructions existing={instructions}" in second.stdout
+    assert agent_manifest_path.read_bytes() == agent_manifest_before
+    assert all(
+        (agents / name).read_bytes() == (ROOT / "agents" / name).read_bytes()
+        for name in AGENT_NAMES
+    )
 
 
 def test_installs_codex_skills_and_global_instructions(tmp_path):
@@ -262,6 +285,25 @@ def test_installs_codex_skills_and_global_instructions(tmp_path):
     second = run("codex", tmp_path, CODEX_HOME=str(config))
     assert second.returncode == 0, second.stderr
     assert codex_config.read_text() == configured
+
+
+def test_claude_subagent_conflict_fails_before_harness_mutation(tmp_path):
+    config = tmp_path / "claude-config"
+    agents = config / "agents"
+    agents.mkdir(parents=True)
+    unmanaged = agents / "codex-analyst.md"
+    original = b"# User-owned definition\n"
+    unmanaged.write_bytes(original)
+
+    result = run("claude", tmp_path, CLAUDE_CONFIG_DIR=str(config))
+
+    assert result.returncode == 3
+    assert "conflicting agent targets" in result.stderr
+    assert unmanaged.read_bytes() == original
+    assert not unmanaged.is_symlink()
+    assert not (config / "skills").exists()
+    assert not (config / "workflows").exists()
+    assert not (config / ".agent-harness-workflows-installation.json").exists()
 
 
 def test_codex_install_projects_instance_custom_skill_without_managed_ownership(
@@ -562,13 +604,16 @@ def test_all_mcp_clients_are_an_explicit_subscription_native_opt_in(tmp_path):
     result = run("codex", tmp_path, "--mcp-clients", "all", CODEX_HOME=str(config))
 
     assert result.returncode == 0, result.stderr
-    for client, path in {
-        "cursor": tmp_path / ".cursor/mcp.json",
-        "agy": tmp_path / ".gemini/config/mcp_config.json",
-        "kiro": tmp_path / ".kiro/settings/mcp.json",
-    }.items():
+    # Brokers sit in the codex seat; Agy holds the `agy` seat so Gemini
+    # findings are attributed to their own family. See CLIENT_SEATS in
+    # scripts/configure-fabric-mcp.py.
+    for client, path, seat in (
+        ("cursor", tmp_path / ".cursor/mcp.json", "codex"),
+        ("agy", tmp_path / ".gemini/config/mcp_config.json", "agy"),
+        ("kiro", tmp_path / ".kiro/settings/mcp.json", "codex"),
+    ):
         registration = json.loads(path.read_text())["mcpServers"]["fabric"]
-        assert registration["env"]["AGENT_FABRIC_SEAT"] == "codex"
+        assert registration["env"]["AGENT_FABRIC_SEAT"] == seat
         assert registration["env"]["AGENT_FABRIC_CLIENT_LABEL"] == client
         assert "AGENT_FABRIC_PROJECT_PATH" not in registration["env"]
     opencode = json.loads((tmp_path / ".config/opencode/opencode.jsonc").read_text())
@@ -803,38 +848,15 @@ def test_rejects_a_relative_provenant_bin_directory_before_mutation(tmp_path):
     assert not (tmp_path / ".codex").exists()
 
 
-def test_upgrades_a_dangling_legacy_instance_link_to_a_stable_copy(tmp_path):
-    bin_dir = tmp_path / ".local/bin"
-    bin_dir.mkdir(parents=True)
-    instance_root = tmp_path / "custom-instance"
-    command = bin_dir / "provenant"
-    command.symlink_to(instance_root / "scripts/provenant")
-
-    result = run(
-        "codex",
-        tmp_path,
-        AGENT_FABRIC_INSTANCE_ROOT=str(instance_root),
-    )
-
-    assert result.returncode == 0, result.stderr
-    assert command.is_file()
-    assert not command.is_symlink()
-    assert command.read_bytes() == PROVENANT_TEMPLATE.read_bytes()
-    assert f"command updated={command}" in result.stdout
-
-
-def test_upgrades_an_equivalent_relative_legacy_instance_link(tmp_path):
+def test_updates_a_managed_provenant_file_to_the_current_template(tmp_path):
     bin_dir = tmp_path / "custom-bin"
     bin_dir.mkdir()
-    instance_root = tmp_path / "custom-instance"
     command = bin_dir / "provenant"
-    relative_target = os.path.relpath(instance_root / "scripts/provenant", bin_dir)
-    command.symlink_to(relative_target)
+    command.write_bytes(PROVENANT_TEMPLATE.read_bytes() + b"\n# stale managed copy\n")
 
     result = run(
         "codex",
         tmp_path,
-        AGENT_FABRIC_INSTANCE_ROOT=str(instance_root),
         PROVENANT_BIN_DIR=str(bin_dir),
     )
 
@@ -952,41 +974,6 @@ LEGACY_BOOTSTRAP = (
     "specialise or strengthen the global harness but may not silently broaden "
     "authority, weaken safety gates or redefine global cross-project memory policy."
 )
-
-
-def test_upgrade_migrates_pre_530_instructions_instead_of_refusing_them(tmp_path):
-    """An install written by an earlier installer must still upgrade.
-
-    The old bootstrap text names the product AGENTS.md, which matches neither
-    acceptance branch of the instance-owned check. Refusing it would break every
-    upgrade deterministically, so it is stale rather than foreign: migrate it.
-    """
-    config = tmp_path / "claude-config"
-    config.mkdir()
-    instructions = config / "CLAUDE.md"
-    instructions.write_text(
-        "# Provenant\n\n"
-        + LEGACY_BOOTSTRAP.format(product=ROOT)
-        + "\n\n## My own notes\n\nKeep this paragraph exactly as written.\n"
-    )
-
-    result = run("claude", tmp_path, CLAUDE_CONFIG_DIR=str(config))
-
-    assert result.returncode == 0, result.stderr
-    assert f"instructions migrated={instructions}" in result.stdout
-    migrated = instructions.read_text()
-    seeded = instance_root_for(tmp_path) / "AGENTS.md"
-    assert str(seeded) in migrated
-    assert f"{ROOT}/AGENTS.md" not in migrated
-    # The harness constitution stays product-shipped, and user prose survives.
-    assert f"{ROOT}/HARNESS.md" in migrated
-    assert "Keep this paragraph exactly as written." in migrated
-
-    # A second run recognises its own output and stops migrating.
-    second = run("claude", tmp_path, CLAUDE_CONFIG_DIR=str(config))
-    assert second.returncode == 0, second.stderr
-    assert f"instructions existing={instructions}" in second.stdout
-    assert instructions.read_text() == migrated
 
 
 def test_a_fused_upgrade_leaves_legacy_instructions_byte_stable(tmp_path):

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Plan, install, reconcile or remove only harness-managed skill links."""
+"""Plan, install, reconcile or remove harness-managed skill and agent links."""
 
 from __future__ import annotations
 
@@ -18,12 +18,19 @@ except ModuleNotFoundError as exc:
         raise
     import managed_installation_manifest as manifest_io  # type: ignore[no-redef]
 
+try:
+    import scripts.agent_installation as agent_installation
+except ModuleNotFoundError:
+    try:
+        import agent_installation  # type: ignore[no-redef]
+    except ModuleNotFoundError:
+        agent_installation = None
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SKILL_NAME = manifest_io.SKILL_NAME
 SHARED_NAMES = manifest_io.SHARED_NAMES
 InstallError = manifest_io.InstallError
-_now = manifest_io.now
 _sha_skill = manifest_io.sha_skill
 _load_manifest = manifest_io.load_manifest
 _entry = manifest_io.entry
@@ -294,14 +301,11 @@ def _raise_on_conflicts(
     items: list[dict[str, str]],
     manifest: dict[str, Any],
     target: Path,
-    *,
-    excluded_names: set[str],
 ) -> None:
     custom_conflicts = [
         item["name"]
         for item in items
         if item["state"] == "custom-conflicting"
-        and item["name"] not in excluded_names
     ]
     if custom_conflicts:
         remedies = "; ".join(
@@ -315,7 +319,6 @@ def _raise_on_conflicts(
         item["name"]
         for item in items
         if item["state"] == "conflicting"
-        and item["name"] not in excluded_names
     ]
     if conflicts:
         raise InstallError(
@@ -324,131 +327,10 @@ def _raise_on_conflicts(
         )
 
 
-def _load_renames(path: Path | None) -> list[dict[str, str]]:
-    if path is None:
-        return []
-    try:
-        data = json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError) as exc:
-        raise InstallError(f"rename registry is unreadable: {exc}") from exc
-    renames = data.get("renames") if isinstance(data, dict) and data.get("schema_version") == 1 else None
-    if not isinstance(renames, list) or any(
-        not isinstance(item, dict)
-        or set(item) != {"from", "to"}
-        or not SKILL_NAME.fullmatch(str(item["from"]))
-        or not SKILL_NAME.fullmatch(str(item["to"]))
-        for item in renames
-    ):
-        raise InstallError("rename registry is invalid")
-    return renames
-
-
-def _prepare_renames(
-    source: Path,
-    target: Path,
-    manifest: dict[str, Any],
-    renames: list[dict[str, str]],
-) -> list[dict[str, Any]]:
-    skills = _skills(source)
-    managed = manifest["managed"]
-    operations: list[dict[str, Any]] = []
-    # Several sources may converge on one target: only the first such rename
-    # creates the shared link, while all source history remains on the target.
-    creating: set[str] = set()
-    target_history: dict[str, list[dict[str, str]]] = {}
-    for rename in renames:
-        old, new = rename["from"], rename["to"]
-        if old not in managed or new not in skills:
-            continue
-        # A manifest-recorded custom name stays custom-owned even while its
-        # projected link is missing, so a managed rename may never claim it.
-        if new in manifest["custom"]:
-            raise InstallError(
-                f"managed rename target {new} is a recorded custom skill: "
-                f"manually restore {new} from "
-                f"{manifest['custom'][new]['source_target']} or retire the "
-                "custom record via --custom-source before renaming onto it"
-            )
-        old_destination = target / old
-        new_destination = target / new
-        old_source = Path(managed[old]["source_target"])
-        if (old_destination.exists() or old_destination.is_symlink()) and not _same_link(old_destination, old_source):
-            raise InstallError(f"conflicting managed rename source: {old}")
-        new_is_correct = _same_link(new_destination, skills[new])
-        if (new_destination.exists() or new_destination.is_symlink()) and not new_is_correct:
-            raise InstallError(f"conflicting rename target: {new}")
-        if new_is_correct and new in managed and Path(managed[new]["source_target"]).resolve() != skills[new]:
-            raise InstallError(f"conflicting managed rename target: {new}")
-        if new not in target_history:
-            target_history[new] = list(managed.get(new, {}).get("history", []))
-        target_history[new].extend(managed.get(old, {}).get("history", []))
-        target_history[new].append({"from": old, "to": new, "at": _now()})
-        create_new = not new_is_correct and new not in creating
-        if create_new:
-            creating.add(new)
-        operations.append({
-            "old": old,
-            "new": new,
-            "old_destination": old_destination,
-            "old_source": old_source,
-            "new_destination": new_destination,
-            "new_source": skills[new],
-            "create_new": create_new,
-            "manage_new": new in managed or new in creating,
-            "entry": _entry(new, skills[new], list(target_history[new])),
-            "old_entry": managed[old],  # Store for potential rollback
-        })
-    return operations
-
-
-def _rollback_renames(
-    manifest: dict[str, Any],
-    operations: list[dict[str, Any]],
-) -> None:
-    """Undo the filesystem and manifest changes from _apply_renames."""
-    # Undo manifest changes (in reverse order)
-    for operation in reversed(operations):
-        # Restore the old entry if it was removed
-        if operation["manage_new"]:
-            manifest["managed"].pop(operation["new"], None)
-        # Restore the original old entry
-        manifest["managed"][operation["old"]] = operation.get("old_entry")
-    
-    # Undo filesystem changes (in reverse order)
-    for operation in reversed(operations):
-        # If we created a new symlink, remove it
-        if operation["create_new"] and operation["new_destination"].is_symlink():
-            operation["new_destination"].unlink()
-        # Restore the old symlink that was unlinked
-        if operation["old_destination"].exists() or operation["old_destination"].is_symlink():
-            # Already exists, don't restore (shouldn't happen)
-            pass
-        else:
-            # Restore the old symlink
-            operation["old_destination"].symlink_to(operation["old_source"])
-
-
-
-def _apply_renames(
-    manifest: dict[str, Any],
-    operations: list[dict[str, Any]],
-) -> None:
-    for operation in operations:
-        if operation["create_new"]:
-            _replace_link(operation["new_destination"], operation["new_source"])
-        if operation["old_destination"].is_symlink():
-            operation["old_destination"].unlink()
-    for operation in operations:
-        if operation["manage_new"]:
-            manifest["managed"][operation["new"]] = operation["entry"]
-        manifest["managed"].pop(operation["old"], None)
-
-
 def execute(
     action: str,
     source: Path,
     target: Path,
-    renames: Path | None = None,
     custom_source: Path | None = None,
 ) -> dict[str, Any]:
     if action not in {
@@ -521,9 +403,6 @@ def execute(
             "items": items,
             "changed": [],
         }
-    rename_operations: list[dict[str, Any]] = []
-    if action == "reconcile":
-        rename_operations = _prepare_renames(source, target, manifest, _load_renames(renames))
     items = _plan(
         managed_catalogue,
         custom_catalogue,
@@ -531,25 +410,9 @@ def execute(
         manifest,
         custom_source_provided=custom_source_provided,
     )
-    renamed_old = {operation["old"] for operation in rename_operations}
-    _raise_on_conflicts(items, manifest, target, excluded_names=renamed_old)
+    _raise_on_conflicts(items, manifest, target)
     target.mkdir(parents=True, exist_ok=True)
-    changed: list[str] = [operation["new"] for operation in rename_operations]
-    if rename_operations:
-        _apply_renames(manifest, rename_operations)
-        items = _plan(
-            managed_catalogue,
-            custom_catalogue,
-            target,
-            manifest,
-            custom_source_provided=custom_source_provided,
-        )
-        try:
-            _raise_on_conflicts(items, manifest, target, excluded_names=set())
-        except InstallError:
-            # Rollback filesystem and manifest changes before re-raising
-            _rollback_renames(manifest, rename_operations)
-            raise
+    changed: list[str] = []
     if action in {"install", "reconcile"}:
         for item in items:
             name, state = item["name"], item["state"]
@@ -636,16 +499,26 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--target", required=True, type=Path)
     parser.add_argument("--source", type=Path, default=ROOT / "skills")
+    parser.add_argument("--surface", choices=("skills", "agents"), default="skills")
     parser.add_argument("--custom-source", type=Path)
-    parser.add_argument("--renames", type=Path)
     parser.add_argument("--summary", action="store_true")
     args = parser.parse_args(argv)
+    if args.surface == "agents":
+        if agent_installation is None:
+            print("conflicting: agents installation mechanics are unavailable", file=sys.stderr)
+            return 3
+        try:
+            return agent_installation.run(
+                args.action, args.source, args.target, args.summary
+            )
+        except (OSError, agent_installation.InstallError) as exc:
+            print(f"conflicting: {exc}", file=sys.stderr)
+            return 3
     try:
         result = execute(
             args.action,
             args.source,
             args.target,
-            args.renames,
             args.custom_source,
         )
     except (OSError, InstallError) as exc:

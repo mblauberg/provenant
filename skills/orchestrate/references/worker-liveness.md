@@ -11,23 +11,48 @@ Git repository. Use `--repo PATH` to select another repository. Wrapper
 ancestors are collapsed into the real worker row, and `--cd` or `-C` determines
 the reported worktree instead of the wrapper's launch directory. Each row shows
 PID, elapsed wall time, accumulated CPU time, the newest matching
-`~/.codex/sessions/**/rollout-*.jsonl` mtime, worktree dirtiness, and worker
-cwd. The `STALLED?` label is advisory. It never signals, kills, restarts, or
-supervises a process.
+`~/.codex/sessions/**/rollout-*.jsonl` mtime and output size, worktree dirtiness,
+and worker cwd. The `STALLED?` label is advisory. It never signals, kills,
+restarts, watches or supervises a process.
 
-The helper's `STALL_WINDOW_SECONDS` is the single source of truth for the
-stall rule: once a worker has run for at least that window, it is stalled only
-when accumulated CPU is below one CPU-second per window of elapsed time and
-the matching session log has also been unchanged for at least that window.
-If no matching session log exists, that absence cannot clear a stall already
-indicated by elapsed time and CPU. At the start of a run, a 0-byte output file
-is ambiguous. After a minute it is suspicious, but output size alone is not a
-liveness test.
+Output growth is the positive liveness signal. Compare output size across
+snapshots keyed to the owned PID: growth means progress, while no growth means
+only that the chair must continue waiting or explicitly report/escalate. CPU
+use, session-log mtime, an empty first snapshot and elapsed time do not prove
+that a healthy API-bound worker is dead. A known unchanged output snapshot may
+be labelled `STALLED?` as an advisory prompt, never as permission to terminate
+or reuse the worktree. The one-shot helper reports the current output size; it
+does not retain baselines or own the foreground wait. If more than one live PID
+maps to the same worktree transcript, output attribution is ambiguous and the
+helper reports no liveness size for that snapshot.
 
-Detached harness-task state is not process state. Before reusing a worktree,
-confirm the worker PID is gone. Otherwise the detached task and a fresh worker
-can become two writers in the same worktree, as happened when detached tasks
-continued running for hours.
+When an elapsed polling budget expires, re-arm the same bounded wait while the
+owned PID remains live. Stop waiting only after the foreground wait observes
+that PID's exit and captures its exit status. Do not replace this with a
+watcher, scheduler, event bus or generic supervisor.
+
+Detached harness-task state is not process state. Before terminal reporting,
+inspection or reuse, confirm the run-owned worker PID is gone and its exit was
+observed. Otherwise the detached task and a fresh worker can become two writers
+in the same worktree. The existing foreground provider commands remain the
+preferred waiting path; this guidance adds the fence and evidence, not a new
+provider command.
+
+Use the concrete terminal fence after the foreground wait/provider boundary has
+returned an exit status:
+
+```bash
+python3 "${AGENTS_HOME:-$HOME/.agents}/skills/orchestrate/scripts/worker_liveness.py" \
+  terminal-report --pid "$PID" --classification complete --exit-status "$STATUS"
+```
+
+The command takes a fresh `ps` snapshot through the helper's existing
+`live_processes()` detection. It emits a JSON terminal report and exits zero
+only when the PID is no longer live and explicit exit evidence is supplied. A
+live PID or missing exit evidence is reported to stderr and exits non-zero.
+Use one of `blocked`, `question`, `unavailable`, `failed` or `complete` as
+appropriate. This is a one-shot enforcement command, not a
+watcher or supervisor.
 
 ## Waiting from inside a sub-agent
 

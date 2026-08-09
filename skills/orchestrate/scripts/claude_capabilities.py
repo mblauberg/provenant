@@ -7,9 +7,11 @@ import argparse
 from datetime import datetime, timezone
 import json
 from pathlib import Path
-import subprocess
 import sys
 from typing import Any
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from _shared.bounded_process import run_bounded
 
 
 EFFORTS = {"low", "medium", "high", "xhigh", "max"}
@@ -28,17 +30,21 @@ def load_json(raw: str) -> Any:
 
 
 def run_json(command: list[str], timeout: int) -> Any:
-    result = subprocess.run(
+    result = run_bounded(
         command,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        timeout=timeout,
-        check=False,
+        cwd=Path.cwd(),
+        timeout_seconds=timeout,
+        output_limit_bytes=1_048_576,
+        merge_stderr=False,
     )
+    stderr = (result.stderr or "").strip()
+    if result.timed_out:
+        detail = f": {stderr}" if stderr else ""
+        raise ValueError(f"command timed out after {timeout} seconds{detail}")
     if result.returncode != 0:
-        raise ValueError(f"command exited {result.returncode}")
-    if "Warning: Unknown --effort value" in result.stderr:
+        detail = f": {stderr}" if stderr else ""
+        raise ValueError(f"command exited {result.returncode}{detail}")
+    if "Warning: Unknown --effort value" in stderr:
         raise ValueError("Claude CLI rejected the requested effort")
     return load_json(result.stdout)
 
@@ -117,7 +123,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--alias must be non-empty")
     try:
         snapshot = discover(args.claude_bin, args.alias, args.effort)
-    except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError, ValueError) as exc:
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
         print(f"capability discovery failed: {exc}", file=sys.stderr)
         return 1
     args.out.write_text(json.dumps(snapshot, indent=2, sort_keys=True) + "\n")

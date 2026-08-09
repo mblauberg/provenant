@@ -1,6 +1,7 @@
 import importlib.util
+import json
 from pathlib import Path
-import subprocess
+from types import SimpleNamespace
 
 import pytest
 
@@ -11,6 +12,40 @@ SPEC = importlib.util.spec_from_file_location("codex_capabilities", PATH)
 assert SPEC and SPEC.loader
 MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
+
+
+def test_discovery_ignores_stderr_when_stdout_contains_valid_catalogue(tmp_path):
+    executable = tmp_path / "codex"
+    executable.write_text(
+        "#!/usr/bin/env python3\n"
+        "import sys; sys.stderr.write('provider warning\\n'); "
+        "sys.stdout.write('{\"models\":[{\"slug\":\"gpt-5.6-sol\","
+        "\"supported_reasoning_levels\":[{\"effort\":\"high\"}]}]}')"
+    )
+    executable.chmod(0o700)
+    output = tmp_path / "capabilities.json"
+
+    assert MODULE.main(["--out", str(output), "--codex-bin", str(executable)]) == 0
+
+    snapshot = json.loads(output.read_text())
+    assert snapshot["models"] == {
+        "gpt-5.6-sol": {
+            "resolved_model": "gpt-5.6-sol",
+            "supported_efforts": ["high"],
+        }
+    }
+
+
+def test_nonzero_exit_reports_stderr(tmp_path, capsys):
+    executable = tmp_path / "codex"
+    executable.write_text(
+        "#!/usr/bin/env python3\n"
+        "import sys; sys.stderr.write('codex failed\\n'); sys.exit(7)"
+    )
+    executable.chmod(0o700)
+
+    assert MODULE.main(["--codex-bin", str(executable)]) == 1
+    assert "codex debug models exited 7: codex failed" in capsys.readouterr().err
 
 
 def test_normalize_keeps_model_specific_efforts_only():
@@ -90,13 +125,14 @@ def test_normalize_rejects_empty_effort_sets_and_casefolded_duplicate_slugs(cata
     ],
 )
 def test_discovery_rejects_duplicate_json_members_before_normalization(tmp_path, monkeypatch, raw):
-    result = subprocess.CompletedProcess(
-        args=["codex", "debug", "models"],
+    result = SimpleNamespace(
         returncode=0,
+        output=raw,
         stdout=raw,
         stderr="",
+        timed_out=False,
     )
-    monkeypatch.setattr(MODULE.subprocess, "run", lambda *args, **kwargs: result)
+    monkeypatch.setattr(MODULE, "run_bounded", lambda *args, **kwargs: result)
     output = tmp_path / "capabilities.json"
     assert MODULE.main(["--out", str(output)]) == 1
     assert not output.exists()

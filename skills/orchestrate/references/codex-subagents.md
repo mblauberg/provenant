@@ -21,9 +21,9 @@ unresolved questions.
 
 ## Built-in roles
 
-- `explorer` — read-heavy scouting, source discovery, repo questions.
-- `worker` — bounded implementation or artifact work with an owned write scope.
-- `default` — general sidecar work when no narrower role fits.
+- `explorer`: read-heavy scouting, source discovery, repo questions.
+- `worker`: bounded implementation or artefact work with an owned write scope.
+- `default`: general sidecar work when no narrower role fits.
 
 Custom Codex agents are project-scoped configuration files under `.codex/agents/*.toml` when the
 project uses them. Do not assume a custom agent exists; discover current tools at runtime.
@@ -37,11 +37,13 @@ project uses them. Do not assume a custom agent exists; discover current tools a
   Codex subagents inside Codex.
 - Use `codex exec -s read-only --ephemeral` as a noninteractive verifier only when the orchestrator is
   another family.
-- Under `-s read-only`, a synthesis written via `apply_patch` is rejected and the content is
-  unrecoverable. Analysis and report workers therefore emit the full report to stdout and the
-  dispatching wrapper persists it to the run directory. A `codex exec` run that outlives its
-  foreground window is recovered by waiting on the detached PID (`worker-liveness.md`), never by
-  relaunching beside it.
+- Under `-s read-only`, a synthesis written via `apply_patch` is rejected. Analysis and report
+  workers use `-o <path>` to persist the final message directly outside the sandbox. Because
+  `-o` saves the final message and nothing else, a brief that demotes that message to a
+  pointer or a completion note destroys the work even when no write is rejected. Say both
+  halves: forbid `apply_patch` and any file write, and require the full report in the final
+  message. A `codex exec` run that outlives its foreground window is recovered by waiting on
+  the detached PID (`worker-liveness.md`), never by relaunching beside it.
 - For many slices, dispatch native subagents in adaptive waves and keep full outputs in run-dir files.
   After each reduce step, decide whether to widen, narrow, repair, verify, document, or stop.
 - For orchestrated work, run cross-family reviewers alongside native subagents when data policy and
@@ -75,7 +77,7 @@ return:            3-6 bullets, surprises, unresolved, file path
 ```
 
 For subscription-native Codex workers, omit the literal transport `model` and bind the resolved `effort`.
-Retain Luna/Terra/Sol as the catalog identity in the
+Retain Luna/Terra/Sol as the catalogue identity in the
 receipt. If the native surface cannot bind that effort, stop or use an
 authorised adapter and record the substitution. Do not silently inherit the
 chair route. Explicit chair inheritance is valid only when the dispatch and
@@ -103,7 +105,7 @@ surface. Otherwise, native subagents plus run-dir files are the Codex-native pat
 **User gate mechanics.** Neither native subagent collaboration nor an explicit-wave script can pause a
 live Codex run mid-collaboration and block on user approval. Realise the contract's user gate by
 ending the run at the gate-adjacent stage and recording `awaiting-user` in the run-dir manifest/receipt;
-a user-approved follow-up invocation continues the graph — it is a new run reading the prior run-dir
+a user-approved follow-up invocation continues the graph. It is a new run reading the prior run-dir
 state, not an in-process resume of a suspended session.
 
 GPT-5.6 Programmatic Tool Calling is a separate Responses API substrate for

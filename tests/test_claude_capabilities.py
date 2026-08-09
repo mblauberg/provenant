@@ -1,6 +1,7 @@
 import importlib.util
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -19,7 +20,7 @@ def load_module():
 
 def fake_claude(
     tmp_path, *, auth_method="claude.ai", model_usage=None, is_error=False,
-    effort_warning=False,
+    effort_warning=False, stderr_warning=False,
 ):
     path = tmp_path / "claude"
     path.write_text(f'''#!/usr/bin/env python3
@@ -36,6 +37,8 @@ else:
     if {effort_warning!r}:
         print("Warning: Unknown --effort value 'medium' - ignoring it and using the default effort.", file=sys.stderr)
         print("Valid values: low, medium, high, xhigh, max.", file=sys.stderr)
+    if {stderr_warning!r}:
+        print("provider warning", file=sys.stderr)
     print(json.dumps({{
         "type": "result", "subtype": "success", "is_error": {is_error!r},
         "result": "OK", "modelUsage": {model_usage or {
@@ -109,13 +112,58 @@ def test_subscription_canary_rejects_unknown_effort_warning(tmp_path):
     assert not output.exists()
 
 
+def test_subscription_canary_ignores_unrelated_stderr_warning(tmp_path):
+    module = load_module()
+    output = tmp_path / "capabilities.json"
+    executable = fake_claude(tmp_path, stderr_warning=True)
+
+    assert module.main([
+        "--out", str(output), "--claude-bin", str(executable),
+        "--alias", "opus", "--effort", "medium",
+    ]) == 0
+
+    assert json.loads(output.read_text())["models"]["opus"]["resolved_model"] == "claude-opus-4-8"
+
+
+def test_unknown_effort_warning_is_read_from_stderr(monkeypatch):
+    module = load_module()
+    payload = json.dumps({"ok": True})
+    warning = "Warning: Unknown --effort value"
+    result = SimpleNamespace(
+        returncode=0,
+        output=payload,
+        stdout=payload,
+        stderr=warning,
+        timed_out=False,
+    )
+    monkeypatch.setattr(module, "run_bounded", lambda *args, **kwargs: result)
+
+    with pytest.raises(ValueError, match="Claude CLI rejected the requested effort"):
+        module.run_json(["claude"], 2)
+
+
+def test_nonzero_exit_reports_stderr(monkeypatch):
+    module = load_module()
+    result = SimpleNamespace(
+        returncode=9,
+        output="",
+        stdout="",
+        stderr="claude failed",
+        timed_out=False,
+    )
+    monkeypatch.setattr(module, "run_bounded", lambda *args, **kwargs: result)
+
+    with pytest.raises(ValueError, match="command exited 9: claude failed"):
+        module.run_json(["claude"], 2)
+
+
 def test_ultra_effort_is_rejected_before_claude_subprocess(monkeypatch, tmp_path):
     module = load_module()
 
-    def fail_subprocess(*args, **kwargs):
+    def fail_bounded(*args, **kwargs):
         pytest.fail("claude subprocess should not be called")
 
-    monkeypatch.setattr(module.subprocess, "run", fail_subprocess)
+    monkeypatch.setattr(module, "run_bounded", fail_bounded)
     with pytest.raises(SystemExit) as exc_info:
         module.main([
             "--out", str(tmp_path / "capabilities.json"),

@@ -12,6 +12,9 @@ import textwrap
 import time
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from _shared.bounded_process import run_bounded
+
 
 HERE = Path(__file__).resolve().parent
 PRODUCT_ROOT = HERE.parents[2]
@@ -32,6 +35,7 @@ DISPATCH_SCHEMA = {
     "status",
     "exit",
     "output_path",
+    "output_digest",
     "read_only_guarantee",
     "orchestrator_family",
     "provider_family",
@@ -104,15 +108,14 @@ def run_dispatch_with_stub(
                 "Reply exactly OK",
             ]
         command.extend(extra_args or [])
-        result = subprocess.run(
+        result = run_bounded(
             command,
-            cwd=str(tmp),
+            cwd=tmp,
             env=env,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            timeout_seconds=30,
+            output_limit_bytes=1_048_576,
         )
-        record = json.loads(result.stdout)
+        record = json.loads(result.output)
         return result, record, out.read_text(encoding="utf-8") if out.exists() else ""
 
 
@@ -147,10 +150,13 @@ def test_claude_other_primary_uses_opus_without_implicit_fable_route():
         echo "OPUS OK"
     """
     result, record, output = run_dispatch_with_stub(stub, role="other-primary")
-    assert result.returncode == 0, result.stderr
+    assert result.returncode == 0, result.output
     assert record["resolved_model"] == "opus"
     assert record["requested_model"] == "opus"
-    assert record["fallback_model"] == ""
+    # The role `other-primary` takes the workhorse default, whose anthropic
+    # candidates are opus then sonnet, so a fallback exists. What this test pins is
+    # that it is not fable: a crucial-tier model must never be reached implicitly.
+    assert record["fallback_model"] == "sonnet"
     assert record["identity_source"] == "dated-catalog"
     assert record["substitution"] == ""
     assert output.strip() == "OPUS OK"
@@ -172,7 +178,7 @@ def test_claude_crucial_synthesis_dispatches_explicit_fable_override():
         role="synthesis",
         extra_args=["--risk-tier", "crucial", "--model", "fable", "--effort", "medium"],
     )
-    assert result.returncode == 0, result.stderr
+    assert result.returncode == 0, result.output
     assert record["resolved_model"] == "fable"
     assert record["risk_tier"] == "crucial"
     assert record["policy_override"] == "crucial-fable-synthesis-adjudication"
@@ -188,7 +194,7 @@ def test_reviewer_id_round_trips_into_dispatch_receipt():
     result, record, output = run_dispatch_with_stub(
         stub, extra_args=["--reviewer-id", "reviewer-1"]
     )
-    assert result.returncode == 0, result.stderr
+    assert result.returncode == 0, result.output
     assert record["reviewer_id"] == "reviewer-1"
     assert output.strip() == "OK"
 
@@ -216,7 +222,7 @@ def test_claude_fallback_runs_after_oauth_safe_mode_model_failure():
         exit 9
     """
     result, record, output = run_dispatch_with_stub(stub, role="other-primary")
-    assert result.returncode == 0, result.stderr
+    assert result.returncode == 0, result.output
     assert record["resolved_model"] == "opus"
     assert record["read_only_guarantee"] == "oauth_safe_mode"
     assert output.strip() == "SAFE OPUS"
@@ -244,7 +250,7 @@ def test_doctor_exits_cleanly():
     assert result.returncode == 0
     assert "cf_dispatch doctor" in result.stdout
     assert "PATH=" in result.stdout
-    assert "agy=" not in result.stdout
+    assert "agy=" in result.stdout
 
 
 def test_missing_option_value_is_clean_error():
@@ -356,20 +362,249 @@ def test_claude_oauth_fallback_uses_verifier_system_prompt():
         assert out.read_text(encoding="utf-8").strip() == "OK"
 
 
-def test_removed_agy_direct_route_fails_closed_with_schema():
+def test_agy_direct_route_dispatches_json_sandbox_and_file_prompt():
     with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        args_file = tmp / "agy.args"
+        stdin_file = tmp / "agy.stdin"
+        allowed_one = tmp / "allowed-one"
+        allowed_two = tmp / "allowed-two"
+        allowed_one.mkdir()
+        allowed_two.mkdir()
+        # The real agy requires a value for --print: with none it exits 2 on
+        # "flag needs an argument", and `--print -` is worse, because it treats
+        # the dash as the literal prompt, ignores stdin and answers it. The
+        # stub enforces that contract so this test cannot pass against a
+        # dispatcher the installed CLI would reject.
+        write_executable(
+            bin_dir / "agy",
+            f"""\
+            #!/usr/bin/env bash
+            printf '%s\\n' "$@" > {args_file}
+            cat > {stdin_file}
+            prev=""
+            prompt=""
+            for arg in "$@"; do
+              [ "$prev" = "--print" ] && prompt="$arg"
+              prev="$arg"
+            done
+            if [ -z "$prompt" ] || [ "$prompt" = "-" ]; then
+              echo "flag needs an argument: -print" >&2
+              exit 2
+            fi
+            printf '%s\\n' '{{"status":"SUCCESS","response":"AGY OK","conversation_id":"c1"}}'
+            """,
+        )
+        env = fabric_free_env()
+        env["PATH"] = f"{bin_dir}:{env['PATH']}"
+        env["CF_DISPATCH_AGY_ADD_DIR"] = str(allowed_one)
+        out = tmp / "out.txt"
         result = subprocess.run(
-            [str(SCRIPT), "--tool", "agy", "--model", "gemini-test", "--orchestrator-family", "codex", "--prompt", "Reply exactly OK"],
+            [
+                str(SCRIPT),
+                "--tool", "agy",
+                "--model", "gemini-3.6-flash",
+                "--effort", "medium",
+                "--add-dir", str(allowed_two),
+                "--orchestrator-family", "codex",
+                "--out", str(out),
+                "--prompt", "Reply exactly AGY OK",
+            ],
             cwd=td,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        record = json.loads(result.stdout)
+        assert result.returncode == 0, result.stderr
+        assert DISPATCH_SCHEMA <= set(record)
+        assert record["status"] == "ok"
+        assert record["adapter"] == "agy"
+        assert record["provider_family"] == "google"
+        assert record["endpoint_provider"] == "agy"
+        assert record["effort"] == "medium"
+        assert record["read_only_guarantee"] == "prompt_only"
+        assert record["certification_eligible"] is False
+        assert out.read_text(encoding="utf-8") == "AGY OK"
+        args = args_file.read_text(encoding="utf-8").splitlines()
+        assert args[args.index("--output-format") + 1] == "json"
+        assert "--sandbox" in args
+        assert args[args.index("--model") + 1] == "gemini-3.6-flash"
+        assert args[args.index("--effort") + 1] == "medium"
+        assert args.count("--add-dir") == 2, args
+        assert str(allowed_one) in args
+        assert str(allowed_two) in args
+        # agy has no file-backed prompt input, so the prompt is one argv value.
+        assert args[args.index("--print") + 1] == "Reply exactly AGY OK"
+
+
+def test_agy_oversized_prompt_fails_closed_instead_of_truncating():
+    """agy takes the prompt as one argv value, so ARG_MAX is a real ceiling.
+
+    A brief silently clipped by the kernel would be reviewed as if complete,
+    which is the same class of quiet wrongness as a denied read reported as
+    SUCCESS. It must fail closed instead.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        write_executable(
+            bin_dir / "agy",
+            """\
+            #!/usr/bin/env bash
+            printf '%s\\n' '{"status":"SUCCESS","response":"SHOULD NOT RUN"}'
+            """,
+        )
+        env = fabric_free_env()
+        env["PATH"] = f"{bin_dir}:{env['PATH']}"
+        out = tmp / "out.txt"
+        big_prompt = tmp / "big-prompt.txt"
+        big_prompt.write_text("x" * 200_000, encoding="utf-8")
+        result = subprocess.run(
+            [
+                str(SCRIPT), "--tool", "agy",
+                "--model", "gemini-3.6-flash", "--effort", "low",
+                "--orchestrator-family", "anthropic",
+                "--out", str(out),
+                # Via --prompt-file, not --prompt: Linux caps a single argv
+                # string at 128 KiB, so passing the oversized prompt directly
+                # would fail in this test's own exec before cf_dispatch ran.
+                "--prompt-file", str(big_prompt),
+            ],
+            cwd=td, env=env, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        record = json.loads(result.stdout)
+        assert result.returncode != 0
+        assert record["status"] == "error"
+        assert record["certification_eligible"] is False
+        assert "SHOULD NOT RUN" not in out.read_text(encoding="utf-8")
+
+
+def test_agy_success_with_empty_response_is_non_passing():
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        write_executable(
+            bin_dir / "agy",
+            """\
+            #!/usr/bin/env bash
+            cat >/dev/null
+            printf '%s\\n' '{"status":"SUCCESS","response":""}'
+            """,
+        )
+        out = tmp / "out.txt"
+        env = fabric_free_env()
+        env["PATH"] = f"{bin_dir}:{env['PATH']}"
+        result = subprocess.run(
+            [
+                str(SCRIPT), "--tool", "agy",
+                "--model", "gemini-3.1-pro-high",
+                "--orchestrator-family", "codex",
+                "--out", str(out), "--prompt", "Reply",
+            ],
+            cwd=td,
+            env=env,
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
         record = json.loads(result.stdout)
         assert result.returncode != 0
-        assert DISPATCH_SCHEMA <= set(record)
-        assert record["status"] == "unknown_tool"
-        assert record["read_only_guarantee"] == "none"
+        assert record["status"] == "empty_output"
+        assert record["certification_eligible"] is False
+        # The output carries the diagnostic rather than a review body. It must
+        # never be empty, or the caller cannot tell a failed dispatch from a
+        # dispatch that has not run.
+        written = out.read_text(encoding="utf-8")
+        assert "status=empty_output" in written
+
+
+def test_agy_failure_preserves_the_provider_reason_in_the_output():
+    """agy reports failures in the stdout envelope, not on stderr.
+
+    Classifying the status is not enough on its own: an exhausted quota and a
+    revoked credential both land on auth_or_quota_error and want opposite
+    responses, so the provider's own words have to survive into the output.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        write_executable(
+            bin_dir / "agy",
+            """\
+            #!/usr/bin/env bash
+            cat >/dev/null
+            printf '%s\\n' '{"status":"ERROR","response":"","error":"Individual quota reached. Resets in 55m39s."}'
+            exit 1
+            """,
+        )
+        out = tmp / "out.txt"
+        env = fabric_free_env()
+        env["PATH"] = f"{bin_dir}:{env['PATH']}"
+        result = subprocess.run(
+            [
+                str(SCRIPT), "--tool", "agy",
+                "--model", "gemini-3.1-pro-high",
+                "--orchestrator-family", "codex",
+                "--out", str(out), "--prompt", "Reply",
+            ],
+            cwd=td,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        record = json.loads(result.stdout)
+        assert result.returncode != 0
+        assert record["status"] == "auth_or_quota_error"
+        assert record["certification_eligible"] is False
+        written = out.read_text(encoding="utf-8")
+        assert "Individual quota reached" in written
+        assert "Resets in 55m39s" in written
+
+
+def test_agy_permission_denial_overrides_false_success_envelope():
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        write_executable(
+            bin_dir / "agy",
+            """\
+            #!/usr/bin/env bash
+            cat >/dev/null
+            printf '%s\\n' '{"status":"SUCCESS","response":""}'
+            echo 'jetski: no output produced - a tool required the "read_file" permission that headless mode cannot prompt for' >&2
+            exit 0
+            """,
+        )
+        out = tmp / "out.txt"
+        env = fabric_free_env()
+        env["PATH"] = f"{bin_dir}:{env['PATH']}"
+        result = subprocess.run(
+            [
+                str(SCRIPT), "--tool", "agy",
+                "--model", "gemini-3.1-pro-high",
+                "--orchestrator-family", "codex",
+                "--out", str(out), "--prompt", "Reply",
+            ],
+            cwd=td,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        record = json.loads(result.stdout)
+        assert result.returncode != 0
+        assert record["status"] == "permission_denied"
+        assert "read_file" in out.read_text(encoding="utf-8")
 
 
 def test_default_failure_retains_only_the_declared_output_tempfile():
@@ -509,6 +744,7 @@ def test_cursor_distinct_model_records_adapter_and_provider_family():
         assert record["endpoint_provider"] == "cursor"
         assert record["model_family"] == "xai"
         assert record["resolved_model"] == "cursor-grok-4.5-high"
+        assert record["output_digest"] == "sha256:" + __import__("hashlib").sha256(out.read_bytes()).hexdigest()
         assert record["certification_eligible"] is True
         assert record["cross_family"] is True
         cursor_args = args_file.read_text(encoding="utf-8").splitlines()
@@ -635,12 +871,114 @@ def test_resolved_role_effort_reaches_codex_adapter_and_receipt():
         assert record["requested_effort"] == "max"
         assert record["effort"] == "xhigh"
         assert record["effort_capability_source"] == "runtime-model-catalog"
-        assert record["resolved_model"] == ""
-        assert record["catalog_model"] == "gpt-5.6-sol"
-        assert record["model_selection"] == "account-default"
+        assert record["resolved_model"] == "gpt-5.6-sol"
+        assert record["catalog_model"] == ""
+        assert record["model_selection"] == ""
         args = args_file.read_text(encoding="utf-8").splitlines()
-        assert "-m" not in args
+        assert "-m" in args
+        assert "gpt-5.6-sol" in args
+        assert "service_tier=default" in args
         assert "model_reasoning_effort=xhigh" in args
+
+
+def test_bare_codex_dispatch_defaults_to_workhorse_not_flagship():
+    """A dispatch naming no alias, role or model must not land on the flagship.
+
+    The default alias used to be flagship unconditionally, so an ordinary dispatch
+    silently ran on the most expensive model in the family.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        args_file = tmp / "codex.args"
+        write_executable(
+            bin_dir / "codex",
+            f'''#!/usr/bin/env bash
+            if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
+              printf '%s\n' '{{"models":[{{"slug":"gpt-5.6-luna","supported_reasoning_levels":[{{"effort":"medium"}},{{"effort":"high"}}]}},{{"slug":"gpt-5.6-sol","supported_reasoning_levels":[{{"effort":"high"}},{{"effort":"max"}}]}}]}}'
+              exit 0
+            fi
+            printf '%s\\n' "$@" > {args_file}
+            cat >/dev/null
+            echo OK
+            ''',
+        )
+        env = fabric_free_env()
+        env["PATH"] = f"{bin_dir}:{env['PATH']}"
+        result = subprocess.run(
+            [
+                str(SCRIPT),
+                "--tool",
+                "codex",
+                "--orchestrator-family",
+                "anthropic",
+                "--out",
+                str(tmp / "out.txt"),
+                "--prompt",
+                "Review",
+            ],
+            cwd=td,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        record = json.loads(result.stdout)
+        assert result.returncode == 0, result.stderr
+        assert record["route_alias"] == "workhorse"
+        assert record["resolved_model"] == "gpt-5.6-luna"
+        args = args_file.read_text(encoding="utf-8").splitlines()
+        assert "gpt-5.6-luna" in args
+        assert "gpt-5.6-sol" not in args
+        assert "service_tier=default" in args
+
+
+def test_critical_review_role_still_defaults_to_flagship():
+    """The alias follows the role, so a critical review still reaches the flagship."""
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        args_file = tmp / "codex.args"
+        write_executable(
+            bin_dir / "codex",
+            f'''#!/usr/bin/env bash
+            if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
+              printf '%s\n' '{{"models":[{{"slug":"gpt-5.6-luna","supported_reasoning_levels":[{{"effort":"medium"}}]}},{{"slug":"gpt-5.6-sol","supported_reasoning_levels":[{{"effort":"max"}}]}}]}}'
+              exit 0
+            fi
+            printf '%s\\n' "$@" > {args_file}
+            cat >/dev/null
+            echo OK
+            ''',
+        )
+        env = fabric_free_env()
+        env["PATH"] = f"{bin_dir}:{env['PATH']}"
+        result = subprocess.run(
+            [
+                str(SCRIPT),
+                "--tool",
+                "codex",
+                "--orchestrator-family",
+                "anthropic",
+                "--role",
+                "critical-review",
+                "--out",
+                str(tmp / "out.txt"),
+                "--prompt",
+                "Review",
+            ],
+            cwd=td,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        record = json.loads(result.stdout)
+        assert result.returncode == 0, result.stderr
+        assert record["route_alias"] == "flagship"
+        assert record["resolved_model"] == "gpt-5.6-sol"
 
 
 def test_codex_capability_discovery_failure_blocks_execution_with_receipt():
@@ -825,7 +1163,7 @@ def test_duplicate_codex_discovery_member_blocks_execution_with_receipt():
         assert not invoked.exists()
 
 
-def test_codex_explicit_model_rejection_never_reports_it_as_resolved():
+def test_codex_explicit_model_reaches_adapter_and_reports_runtime_failure():
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
         bin_dir = tmp / "bin"
@@ -864,13 +1202,12 @@ def test_codex_explicit_model_rejection_never_reports_it_as_resolved():
         )
         record = json.loads(result.stdout)
         assert result.returncode != 0
-        assert record["status"] == "adapter_account_default_only"
-        assert record["resolved_model"] == ""
+        assert record["status"] == "error"
+        assert record["resolved_model"] == "gpt-5.6-sol"
         assert record["requested_model"] == "gpt-5.6-sol"
-        assert record["catalog_model"] == "gpt-5.6-sol"
-        assert record["model_selection"] == "account-default"
-        assert record["identity_source"] == "account-default"
-        assert not invoked.exists()
+        assert record["catalog_model"] == ""
+        assert record["model_selection"] == ""
+        assert invoked.exists()
 
 
 def test_interrupted_dispatch_cleans_internal_tempfiles():
@@ -1123,7 +1460,10 @@ if __name__ == "__main__":
     test_missing_prompt_file_is_clean_error()
     test_claude_oauth_fallback_after_bare_auth_failure()
     test_claude_oauth_fallback_uses_verifier_system_prompt()
-    test_removed_agy_direct_route_fails_closed_with_schema()
+    test_agy_direct_route_dispatches_json_sandbox_and_file_prompt()
+    test_agy_oversized_prompt_fails_closed_instead_of_truncating()
+    test_agy_success_with_empty_response_is_non_passing()
+    test_agy_permission_denial_overrides_false_success_envelope()
     test_orchestrator_family_is_required()
     test_same_family_cli_is_forbidden_when_family_declared()
     test_invalid_orchestrator_family_fails_closed()

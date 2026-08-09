@@ -134,6 +134,22 @@ never blindly redispatches. Late replies remain evidence but do not silently
 complete superseded work. Claim generation and stable callback IDs make
 provider acceptance and requester consumption idempotent across restart.
 
+Fabric identity follows the working directory, so a linked worktree is a
+different Fabric project from the primary checkout. Measured: the primary
+resolves to `<repo>`, while `<repo>/.worktrees/<name>` resolves to a project of
+its own. Messages, shared tasks and the activity log do not cross that boundary,
+and nothing errors when they fail to: the message simply lands in a project the
+chair never reads. Dispatcher subagents make this worse, because their tool
+grants carry no MCP, so `fabric_*` is unavailable to them entirely and their
+only route is the `fabric` CLI through Bash, which writes to whichever project
+its working directory implies.
+
+So coordinate worktree lanes through brief and report files at explicit absolute
+paths, and keep Fabric for agents operating inside the chair's own project. When
+a lane genuinely must report into the chair's project, run `fabric` with the
+primary checkout as the working directory and say so, rather than assuming the
+worktree's own seat reaches the chair.
+
 If the active integration cannot carry a Fabric request and reply, record
 `FABRIC-ROUNDTRIP-UNAVAILABLE`, use a named artifact plus an explicit bounded
 collection step, and report the degraded manual path. Never describe pane

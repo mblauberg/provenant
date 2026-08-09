@@ -59,6 +59,16 @@ run contract requires them. A removal receipt emits only `status`, `name` and
   a suite failure as a product defect, run the owning repository's declared
   lockfile bootstrap and build commands in that worktree, then record the exact
   commands and results. Do not guess the package manager or install mode.
+- Live tooling can point into the primary checkout, so moving its branch breaks
+  things a clean Git status will not reveal. MCP server registrations and
+  `~/.local/bin` symlinks both name paths inside the checkout, and they follow
+  the working tree rather than a branch. Before moving the primary checkout,
+  check for consumers that resolve into it; if any exist, do the work in a
+  linked worktree, or repoint the consumer first and then invoke the installed
+  command to confirm it still resolves. Editing a template in the repository
+  does not update an already installed copy: rerun the installer and exercise
+  the installed command, because a clean tree is not evidence that anything
+  outside the tree still works.
 - Before removal, confirm a clean status, no live agent/pane and no unconsumed
   handoff. Use `git worktree remove`, never filesystem deletion.
 - Force removal of a dirty worktree, and deletion of an unmerged branch, require

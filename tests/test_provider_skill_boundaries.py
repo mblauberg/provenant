@@ -17,12 +17,17 @@ def test_headless_dispatcher_uses_direct_router_without_daemon_gate():
     dispatcher = read("skills/orchestrate/scripts/cf_dispatch.sh")
     assert not (ROOT / "skills/autopilot/scripts/cross-family.sh").exists()
     assert "--adapter-gate" not in dispatcher
+    # The point of this guard is that agy is reached the same way every other
+    # provider is: one adapter inside the dispatcher, never a parallel
+    # provider skill and never an opt-in gate that would make the only route
+    # to the Gemini family second-class. Agy holds its own Fabric seat, so the
+    # dispatcher branch is the call while Fabric carries the coordination.
     for forbidden in (
         "CF_DISPATCH_ENABLE_AGY",
-        "agy_cmd=(",
         "run-agy-headless",
     ):
         assert forbidden not in dispatcher
+    assert "agy)" in dispatcher, "agy must be dispatchable like every other adapter"
 
 
 def test_autopilot_records_cross_family_work_in_fabric():

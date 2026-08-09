@@ -96,12 +96,41 @@ claim, source, confidence, issues and validation. Certification needs a
 non-authoring reviewer plus verified evidence; best-effort routes only scout,
 they do not certify.
 
-A worker's final act before idling is its report: the digest plus artifact
-path through its return channel or a direct message to the chair, or an
-explicit failure report. Going idle without one is a contract breach, not a
-neutral state. A chair observing idle-without-report verifies the deliverable
-directly from the filesystem, then queries the worker once; completion is
-judged from the verified artifact, never inferred from silence.
+### Worker terminal protocol
+
+The terminal record has one explicit classification: `blocked`, `question`,
+`unavailable`, `failed` or `complete`. A classification is not terminal merely
+because a report was written. The report must carry the run-owned worker PID
+and an exit receipt from the existing wait/provider boundary, bound to that
+PID, with an observed process exit and its exit status. Until that exit is
+observed, the report is progress only and the worker remains the owner of its
+worktree.
+
+The live PID fences terminal reporting, filesystem inspection and worktree
+reuse. A chair must not inspect an artifact, accept a terminal classification
+or hand the worktree to another writer while that PID is live. A timeout,
+unchanged output or an idle-looking provider turn never substitutes for the
+observed exit. Foreground waiting and the provider's existing command remain
+the normal path; a detached wait must still carry the same PID and exit proof.
+
+A worker's final act after exit is its report: the classification, exit status
+and digest plus artifact path through its return channel or a direct message to
+the chair, or an explicit failure report. Going idle without one is a contract
+breach, not a neutral state. A chair observing idle-without-report records the
+missing terminal evidence and queries the worker once; completion is never
+inferred from silence.
+
+### Producer separation default
+
+Distinct artifacts get distinct authors by default. The chair joins the artifacts and decides from
+the evidence, rather than writing the artifacts that support its decision. This is an adjustable
+default for each session and project, not a rigid rule: an explicit local preference may override it,
+and a small or tightly coupled job may not justify splitting production across workers.
+
+The default exists because routing all writing through one agent creates a throughput bottleneck,
+bloats that agent's context window, and makes a cross-check self-referential when the artifact has
+the same author as the claim it corroborates. In that case the cross-check is a field compared against
+itself rather than an independent join.
 
 ## Non-goals
 

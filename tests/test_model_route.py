@@ -24,6 +24,85 @@ NON_OCCUPANT_MODELS = tuple(
 )
 
 
+@pytest.fixture
+def harness_script(tmp_path):
+    script = tmp_path / "run-harness.sh"
+    script.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        f"source {ROOT / 'scripts' / 'lib' / 'harness-python.sh'}\n"
+        '"$HARNESS_RUNNER" -c "import sys; print(sys.version_info[:2])"\n'
+    )
+    script.chmod(0o755)
+    return script
+
+
+def run_harness(harness_script, runner, *, harness_python, pythonpath, optimize):
+    environment = {
+        **os.environ,
+        "HARNESS_PYTHON": harness_python,
+        "HARNESS_RUNNER": runner,
+        "PYTHONPATH": str(pythonpath) if pythonpath is not None else "",
+        "PYTHONOPTIMIZE": optimize,
+    }
+    return subprocess.run(
+        [str(harness_script)],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+
+
+@pytest.mark.parametrize("runner", ["run_stdlib", "run_yaml", "run_test"])
+def test_python_floor_rejects_wrong_version_under_optimization(
+    tmp_path, harness_script, runner,
+):
+    version_shim = tmp_path / "python-version-shim"
+    version_shim.mkdir()
+    (version_shim / "sitecustomize.py").write_text(
+        "import sys\n"
+        "import pytest\n"
+        "import yaml\n"
+        "sys.version_info = (3, 9, 6, 'final', 0)\n"
+    )
+
+    result = run_harness(
+        harness_script,
+        runner,
+        harness_python=sys.executable,
+        pythonpath=version_shim,
+        optimize="1",
+    )
+
+    if result.returncode != 3:
+        pytest.fail(f"expected probe refusal, got exit {result.returncode}: {result.stdout}")
+    if result.stdout:
+        pytest.fail(f"probe refusal wrote stdout: {result.stdout}")
+    if "harness-python: interpreter probe failed" not in result.stderr:
+        pytest.fail(f"missing probe refusal detail: {result.stderr}")
+
+
+@pytest.mark.parametrize("runner", ["run_stdlib", "run_yaml", "run_test"])
+def test_python_floor_rejects_missing_interpreter(harness_script, runner):
+    result = run_harness(
+        harness_script,
+        runner,
+        harness_python="/deliberately/missing/python",
+        pythonpath=None,
+        optimize="1",
+    )
+
+    if result.returncode != 3:
+        pytest.fail(f"expected unusable-interpreter refusal, got exit {result.returncode}")
+    if result.stdout:
+        pytest.fail(f"unusable-interpreter refusal wrote stdout: {result.stdout}")
+    if "harness-python: unusable interpreter" not in result.stderr:
+        pytest.fail(f"missing unusable-interpreter detail: {result.stderr}")
+
+
 def resolve(*args):
     arguments = [str(SCRIPT), "resolve", *args]
     result = subprocess.run(
@@ -98,6 +177,32 @@ def write_codex_capability_snapshot(tmp_path, *, observed_at=None, models=None):
     snapshot = tmp_path / "codex-capabilities.json"
     snapshot.write_text(json.dumps(value))
     return snapshot
+
+
+def write_account_default_catalog(tmp_path):
+    catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    catalog["adapters"]["account-default-fixture"] = {
+        "endpoint_provider": "fixture",
+        "fixed_model_family": "openai",
+        "effort_transport": "flag",
+        "model_selection": "account-default",
+    }
+    path = tmp_path / "account-default-model-routing.json"
+    path.write_text(json.dumps(catalog))
+    return path
+
+
+def write_codex_compatibility(tmp_path, *, requires_explicit_model):
+    text = (ROOT / "config" / "adapter-compatibility.yaml").read_text()
+    start = text.index("  codex-app-server:")
+    end = text.index("\n  herdr:", start)
+    block = text[start:end].replace(
+        "requires_explicit_model: true",
+        f"requires_explicit_model: {str(requires_explicit_model).lower()}",
+    )
+    path = tmp_path / "adapter-compatibility.yaml"
+    path.write_text(text[:start] + block + text[end:])
+    return path
 
 
 def load_router():
@@ -1561,14 +1666,20 @@ def test_unusable_alias_table_rejects_on_an_explicit_model_route(
     """
     router = load_router()
     catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    catalog["adapters"]["account-default-fixture"] = {
+        "endpoint_provider": "fixture",
+        "fixed_model_family": "openai",
+        "effort_transport": "flag",
+        "model_selection": "account-default",
+    }
     catalog["families"]["openai"]["aliases"] = aliases
     catalog_path = tmp_path / "model-routing.json"
     catalog_path.write_text(json.dumps(catalog))
     monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
 
     result = router.main([
-        "resolve", "--adapter", "codex", "--alias", "flagship", "--role", "worker",
-        "--model", "gpt-5.6-sol",
+        "resolve", "--adapter", "account-default-fixture", "--alias", "flagship",
+        "--role", "worker", "--model", "gpt-5.6-sol",
     ])
 
     route = json.loads(capsys.readouterr().out)
@@ -1672,20 +1783,17 @@ def test_malformed_override_fails_closed_without_a_fixed_model_family(
     assert route.get("resolved_model") is None
 
 
-def test_openai_aliases_resolve_to_account_default_dispatch(tmp_path):
-    # The Codex account is a ChatGPT subscription: explicit model ids are
-    # rejected by the runtime (HTTP 400), so codex routes dispatch on the
-    # account default while retaining the catalog id for effort/audit (#190).
+def test_account_default_aliases_resolve_to_account_default_dispatch(tmp_path):
     expected = {
         "flagship": "gpt-5.6-sol",
-        "workhorse": "gpt-5.6-terra",
+        "workhorse": "gpt-5.6-luna",
         "scout": "gpt-5.6-luna",
     }
-    snapshot = write_codex_capability_snapshot(tmp_path)
+    catalog = write_account_default_catalog(tmp_path)
     for alias, model in expected.items():
         result, route = resolve(
-            "--adapter", "codex", "--alias", alias, "--role", "worker",
-            "--capabilities-file", str(snapshot),
+            "--adapter", "account-default-fixture", "--alias", alias,
+            "--role", "worker", "--catalog", str(catalog),
         )
         assert result.returncode == 0
         assert route["resolved_model"] == ""
@@ -1695,12 +1803,12 @@ def test_openai_aliases_resolve_to_account_default_dispatch(tmp_path):
         assert route["model_family"] == "openai"
 
 
-def test_account_default_codex_ignores_runtime_selectable_model_list(tmp_path):
-    snapshot = write_codex_capability_snapshot(tmp_path)
+def test_account_default_adapter_ignores_runtime_selectable_model_list(tmp_path):
+    catalog = write_account_default_catalog(tmp_path)
     result, route = resolve(
-        "--adapter", "codex", "--alias", "flagship", "--role", "worker",
-        "--available-model", "gpt-5.6-terra",
-        "--capabilities-file", str(snapshot),
+        "--adapter", "account-default-fixture", "--alias", "flagship",
+        "--role", "worker", "--available-model", "gpt-5.6-luna",
+        "--catalog", str(catalog),
     )
     assert result.returncode == 0
     assert route["resolved_model"] == ""
@@ -1708,8 +1816,43 @@ def test_account_default_codex_ignores_runtime_selectable_model_list(tmp_path):
     assert route["model_selection"] == "account-default"
 
 
-def test_aliases_supply_proportionate_default_effort(tmp_path):
-    expected = {"flagship": "high", "workhorse": "medium", "scout": "low"}
+@pytest.mark.parametrize(
+    ("catalog_account_default", "requires_explicit_model"),
+    ((True, True), (False, False)),
+)
+def test_catalog_and_compatibility_mismatch_fails_closed(
+    tmp_path, monkeypatch, capsys, catalog_account_default, requires_explicit_model
+):
+    router = load_router()
+    catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    adapter = catalog["adapters"]["codex"]
+    if catalog_account_default:
+        adapter["model_selection"] = "account-default"
+    else:
+        adapter.pop("model_selection", None)
+    catalog_path = tmp_path / "model-routing.json"
+    catalog_path.write_text(json.dumps(catalog))
+    compatibility_path = write_codex_compatibility(
+        tmp_path, requires_explicit_model=requires_explicit_model
+    )
+    monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
+
+    result = router.main([
+        "resolve", "--adapter", "codex", "--alias", "scout", "--role", "worker",
+        "--adapter-compatibility", str(compatibility_path),
+    ])
+
+    route = json.loads(capsys.readouterr().out)
+    assert result == 2
+    assert route["status"] == "account_default_conflicts_with_compatibility"
+
+
+def test_codex_aliases_supply_proportionate_default_effort(tmp_path):
+    # Workhorse is deliberately not proportionate on OpenAI. Luna is cheap enough
+    # that the family raises worker+workhorse to high in role_effort_defaults, so
+    # the tier difference against flagship is the model, not the effort. See
+    # docs/model-preferences.md.
+    expected = {"flagship": "high", "workhorse": "high", "scout": "low"}
     snapshot = write_codex_capability_snapshot(tmp_path)
     for alias, effort in expected.items():
         result, route = resolve(
@@ -1721,21 +1864,24 @@ def test_aliases_supply_proportionate_default_effort(tmp_path):
 
 
 @pytest.mark.parametrize(
-    ("task_class", "alias", "effort", "catalog_model"),
+    ("task_class", "alias", "effort", "resolved_model"),
     (
         ("mechanical", "scout", "low", "gpt-5.6-luna"),
-        ("legwork", "workhorse", "medium", "gpt-5.6-terra"),
+        # Luna at high, not the task class default of medium: the OpenAI family
+        # raises worker+workhorse in role_effort_defaults, the same way
+        # critical-review and orchestration are raised below.
+        ("legwork", "workhorse", "high", "gpt-5.6-luna"),
         ("critical-review", "flagship", "max", "gpt-5.6-sol"),
         ("orchestration", "flagship", "ultra", "gpt-5.6-sol"),
     ),
 )
-def test_task_classes_bind_codex_policy_identity_without_transport_model(
-    tmp_path, task_class, alias, effort, catalog_model
+def test_task_classes_bind_codex_runtime_identity(
+    tmp_path, task_class, alias, effort, resolved_model
 ):
     snapshot = tmp_path / f"{task_class}.json"
     snapshot.write_text(json.dumps(capability_snapshot({
-        catalog_model: {
-            "resolved_model": catalog_model,
+        resolved_model: {
+            "resolved_model": resolved_model,
             "supported_efforts": [effort],
         },
     })))
@@ -1750,10 +1896,10 @@ def test_task_classes_bind_codex_policy_identity_without_transport_model(
     assert route["alias"] == alias
     assert route["requested_effort"] == effort
     assert route["effort"] == effort
-    assert route["resolved_model"] == ""
-    assert route["catalog_model"] == catalog_model
-    assert route["model_selection"] == "account-default"
-    assert route["identity_source"] == "account-default"
+    assert route["resolved_model"] == resolved_model
+    assert route["identity_source"] == "runtime-capability+catalog"
+    assert "catalog_model" not in route
+    assert "model_selection" not in route
 
 
 def test_claude_task_class_rejects_caller_authored_capability_claim(tmp_path):
@@ -2178,6 +2324,7 @@ def test_openai_catalog_declares_effort_policy_only():
         "lead": {"flagship": "ultra"},
         "orchestrator": {"flagship": "ultra"},
         "critical-review": {"flagship": "max"},
+        "worker": {"workhorse": "high"},
     }
     assert family["effort_fallback_order"] == ["max", "xhigh", "high", "medium", "low"]
 
@@ -2296,9 +2443,8 @@ def test_explicit_ultra_fails_for_noneligible_routes(tmp_path):
 
 
 def test_codex_failure_records_never_expose_a_dispatchable_model(tmp_path):
-    # Non-ok records must not present the catalog id as resolved_model:
-    # a consumer keying on resolved_model would dispatch an id the
-    # subscription runtime rejects (#190).
+    # Non-ok records still expose the selected runtime model so the failure
+    # identifies the capability-gated route that was attempted.
     snapshot = write_codex_capability_snapshot(tmp_path)
     result, route = resolve(
         "--adapter", "codex", "--alias", "workhorse", "--role", "worker",
@@ -2306,25 +2452,26 @@ def test_codex_failure_records_never_expose_a_dispatchable_model(tmp_path):
     )
     assert result.returncode == 1
     assert route["status"] == "effort_unsupported"
-    assert route["resolved_model"] == ""
-    assert route["catalog_model"] == "gpt-5.6-terra"
-    assert route["model_selection"] == "account-default"
+    assert route["resolved_model"] == "gpt-5.6-luna"
+    assert route["identity_source"] == "runtime-capability+catalog"
+    assert "catalog_model" not in route
+    assert "model_selection" not in route
 
 
-def test_codex_rejects_explicit_model_for_account_default_adapter():
-    # An explicit id would be sent to the runtime and rejected with HTTP 400,
-    # so the resolver fails closed instead of emitting a doomed route (#190).
+def test_codex_resolves_explicit_runtime_model(tmp_path):
+    snapshot = write_codex_capability_snapshot(tmp_path)
     result, route = resolve(
-        "--adapter", "codex", "--alias", "flagship", "--role", "lead", "--model", "gpt-5.6-sol"
+        "--adapter", "codex", "--alias", "scout", "--role", "worker",
+        "--model", "gpt-5.6-luna", "--effort", "low",
+        "--capabilities-file", str(snapshot),
     )
-    assert result.returncode == 1
-    assert route["status"] == "adapter_account_default_only"
-    assert route["resolved_model"] == ""
-    assert route["requested_model"] == "gpt-5.6-sol"
-    assert route["catalog_model"] == "gpt-5.6-sol"
-    assert route["model_selection"] == "account-default"
-    assert route["identity_source"] == "account-default"
+    assert result.returncode == 0
+    assert route["status"] == "ok"
+    assert route["resolved_model"] == "gpt-5.6-luna"
+    assert route["identity_source"] == "model-pattern"
     assert route["model_family"] == "openai"
+    assert "catalog_model" not in route
+    assert "model_selection" not in route
 
 
 def test_caller_efforts_do_not_replace_openai_capability_snapshot():
@@ -2423,7 +2570,7 @@ def test_task_class_effort_fallback_never_escalates_when_only_higher_effort_is_s
     assert route["effort_substitution"] == ""
 
 
-def test_fresh_openai_snapshot_missing_catalog_model_fails_closed(
+def test_fresh_openai_snapshot_without_alias_candidate_fails_closed(
     tmp_path, monkeypatch, capsys
 ):
     router = load_router()
@@ -2441,12 +2588,10 @@ def test_fresh_openai_snapshot_missing_catalog_model_fails_closed(
     ])
     route = json.loads(capsys.readouterr().out)
     assert result == 1
-    assert route["status"] == "capability_model_unavailable"
-    assert route["catalog_model"] == "gpt-5.6-sol"
-    assert route["resolved_model"] == ""
+    assert route["status"] == "no_candidate_available"
+    assert route["candidates"] == ["gpt-5.6-sol"]
     assert route["requested_effort"] == "ultra"
-    assert route["effort"] == ""
-    assert route["effort_capability_source"] == "runtime-model-catalog"
+    assert route["effort"] == "ultra"
 
 
 def test_explicit_unsupported_effort_fails_against_runtime_snapshot(tmp_path):
@@ -2582,14 +2727,18 @@ def test_model_id_effort_uses_last_token_and_explicit_unresolved_fails():
     assert result.returncode == 0
     assert route["status"] == "ok"
     assert route["effort"] == "low"
+    # Agy used to be a model-id adapter, which made every bare google alias
+    # undispatchable: `agy --model gemini-3.1-pro` exits 1 asking for --effort.
+    # It now carries effort in its own flag, so without a runtime snapshot the
+    # effort resolves but is not capability-evidenced.
     result, route = resolve(
-        "--adapter", "agy", "--model", "Gemini 3.1 Pro (High)", "--alias", "flagship",
+        "--adapter", "agy", "--model", "gemini-3.1-pro", "--alias", "flagship",
         "--role", "reviewer", "--effort", "high", "--lead-family", "openai", "--require-distinct",
     )
     assert result.returncode == 0
     assert route["status"] == "ok"
     assert route["effort"] == "high"
-    assert route["effort_capability_source"] == "model-id"
+    assert route["effort_capability_source"] == "provider-unverified"
     result, route = resolve(
         "--adapter", "cursor", "--model", "composer-2-extra-high", "--alias", "flagship",
         "--role", "reviewer", "--lead-family", "anthropic", "--require-distinct",
@@ -2867,3 +3016,55 @@ def test_catalogue_adapter_without_compatibility_contract_routes_directly():
 
     assert result.returncode == 0
     assert route["status"] == "ok"
+
+
+def write_agy_capability_snapshot(tmp_path, models=None):
+    if models is None:
+        # Measured against agy 1.1.10 and re-verified on 1.1.11: efforts are
+        # per model, and gemini-3.1-pro genuinely has no medium.
+        models = {
+            "gemini-3.1-pro": {
+                "resolved_model": "gemini-3.1-pro",
+                "supported_efforts": ["low", "high"],
+            },
+            "gemini-3.6-flash": {
+                "resolved_model": "gemini-3.6-flash",
+                "supported_efforts": ["low", "medium", "high"],
+            },
+        }
+    snapshot = tmp_path / "agy-caps.json"
+    snapshot.write_text(json.dumps(capability_snapshot(models, source="agy models")))
+    return snapshot
+
+
+def test_agy_effort_is_validated_against_the_runtime_model_catalogue(tmp_path):
+    snapshot = write_agy_capability_snapshot(tmp_path)
+
+    def route_for(model, effort):
+        return resolve(
+            "--adapter", "agy", "--model", model, "--alias", "flagship",
+            "--role", "reviewer", "--effort", effort, "--lead-family", "openai",
+            "--require-distinct", "--capabilities-file", str(snapshot),
+        )
+
+    result, route = route_for("gemini-3.1-pro", "high")
+    assert result.returncode == 0
+    assert route["status"] == "ok"
+    assert route["effort"] == "high"
+    assert route["effort_capability_source"] == "runtime-model-catalog"
+
+    # The catalogue used to offer flagship at medium, which agy cannot serve:
+    # gemini-3.1-pro exposes only low and high. It must fail closed rather than
+    # silently dispatching at some other effort.
+    result, route = route_for("gemini-3.1-pro", "medium")
+    assert result.returncode != 0
+    assert route["status"] == "effort_unsupported"
+
+    result, route = route_for("gemini-3.6-flash", "medium")
+    assert result.returncode == 0
+    assert route["status"] == "ok"
+    assert route["effort"] == "medium"
+
+    result, route = route_for("gemini-9-does-not-exist", "high")
+    assert result.returncode != 0
+    assert route["status"] == "capability_model_unavailable"
