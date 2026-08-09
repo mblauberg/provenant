@@ -314,14 +314,17 @@ function crossFamilyDispatchHint(runDir, gitCwd, kind = 'primary') {
   const cwdClause = gitCwd
     ? `Run the dispatcher with your shell cwd set to the git repo at ${gitCwd} (codex refuses non-git trees).`
     : 'No git repo was found at bootstrap. Set the shell cwd inside a nested git repo before the Codex dispatch; if none exists, record OTHER-PRIMARY-NOT-RUN.'
-  if (kind === 'primary') return (
+  if (kind === 'primary' || kind === 'primary-review') return (
     'Dispatch the load-bearing OpenAI other-primary worker. ' +
     cwdClause +
     ' Write your prompt to a file, then run:\n' +
     '  ~/.agents/skills/orchestrate/scripts/cf_dispatch.sh ' +
     '--orchestrator-family anthropic --tool codex --alias flagship --role other-primary --prompt-file <your-prompt-file> ' +
     `--out ${runDir}/crossfamily/<name>.txt > ${runDir}/crossfamily/<name>.route.json\n` +
-    'The dispatcher prints a normalised JSON record (model_family, endpoint_provider, cross_family, certification_eligible, read_only_guarantee, ' +
+    (kind === 'primary-review'
+      ? 'For this certifying review, the provider output at <your --out path> is the retained terminal result: ask the provider to return exactly one JSON object matching the existing REVIEW_SCHEMA keys angle, verdict, issues, crossFamily and path, with no markdown or prose. If the provider has no verdict, preserve that failure as non-certifying; never manufacture JSON in the wrapper. '
+      : '') +
+    'The dispatcher prints a normalised JSON record (model_family, endpoint_provider, output_digest, cross_family, certification_eligible, read_only_guarantee, ' +
     'status) — preserve that exact route JSON and return its path as routeReceipt. Certified only when cross_family=true and read_only_guarantee ' +
     'is enforced or oauth_safe_mode. On failure, set ran=false and record OTHER-PRIMARY-NOT-RUN: <reason>. ' +
     'Apply the host data policy before dispatch.'
@@ -616,7 +619,7 @@ for (let cycle = 0; cycle <= maxRepairCycles; cycle += 1) {
           'outputPath="", routeReceipt="", notRunReason="targeted-review". For a dispatched review, copy every normalised field ' +
           'from the dispatcher record; do not infer or relabel lineage.\n' +
           `\nWrite full review to ${runDir}/findings/review-${cycle}-${rv.angle}.md and return the structured verdict.` +
-          (rv.cf ? '\n' + crossFamilyDispatchHint(runDir, gitCwd, rv.cf) : ''),
+          (rv.cf ? '\n' + crossFamilyDispatchHint(runDir, gitCwd, rv.cf === 'primary' ? 'primary-review' : rv.cf) : ''),
         { label: `review:${cycle}:${rv.angle}`, phase: 'Review', schema: REVIEW_SCHEMA, model: rv.model },
       ),
     ),
@@ -767,8 +770,15 @@ const apply = await agent(
     `graduation/archive/cleanup actions and retained recovery artifacts. Never remove unknown or pre-existing files. ` +
     `Update ${runDir}/RUN_RECEIPT.json task/owner, artifact retention and owned/handed-off pane fields; leave its ` +
     `status=active while this change awaits human acceptance. Record unresolved blockers and every reviewer lane ` +
-    `including failures. The preserved cross-family dispatch record supplies ` +
-    `adapter/model_family, output_path, dispatch_status, cross_family, certification_eligible and read_only_guarantee; ` +
+    `including failures. Every complete review_plan row must preserve its explicit wrapper verdict and the ` +
+    `exact worker/provider REVIEW_SCHEMA object at the existing dispatcher output_path, retaining its ` +
+    `run-relative path and sha256 digest as terminal_result alongside the dispatcher route receipt's observed exit and ` +
+    `output_path and dispatch-time output_digest. Never inline, synthesise or derive terminal_result or its verdict from the wrapper row, ` +
+    `transcript, findings, or applier analysis. Missing or unparseable worker verdict, transcript, provider availability or ` +
+    `nonzero exit is an explicit non-certifying leg. The preserved cross-family dispatch record supplies ` +
+    `adapter, endpoint_provider, provider_family, model_family, orchestrator_family, output_path, dispatch status ` +
+    `and read_only_guarantee; derive cross-family eligibility from that lineage and the chair family, not from ` +
+    `cross_family or certification_eligible booleans; ` +
     `role=targeted for fresh targeted lenses, role=other-primary only for a certified ` +
     `OpenAI-family reviewer with its exact route_receipt path, output sha256 and reviewed_revision, and role=distinct-family for advisory distinct-family attempts including failed/unavailable ` +
     `status plus reason. For terminal work, apply stronger targeted and adversarial pressure; if a distinct family is skipped, record distinct_family_coverage_reason. ` +
