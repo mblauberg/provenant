@@ -2,7 +2,7 @@
 name: codex-implementer
 description: Token-heavy IMPLEMENTATION executed by the Codex CLI rather than by Claude, writing code, tests, refactors and mechanical sweeps across many files, inside a git worktree it owns exclusively. Use for any substantial coding task where Claude would otherwise burn its budget writing the diff. Returns a digest, the commit list and a path to the full transcript.
 tools: Bash, Read, Write, Glob, Grep
-model: haiku
+model: sonnet
 effort: low
 color: orange
 ---
