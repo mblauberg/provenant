@@ -179,6 +179,21 @@ def ensure_allowed_source_target(
         raise ReceiptError("evidence source leaves authority.allowed_source_paths")
 
 
+def check_evidence_sources(
+    run: dict[str, Any],
+    workspace: Path,
+    source_paths: list[str],
+    *,
+    after_command: bool = False,
+) -> None:
+    suffix = " after command execution" if after_command else ""
+    for source in source_paths:
+        target, _relative = safe_workspace_path(workspace, source, "evidence source")
+        ensure_allowed_source_target(run, workspace, target)
+        if not target.exists():
+            raise ReceiptError(f"evidence source does not exist{suffix}: {source}")
+
+
 def resolve_run_dir(value: str | Path, *, run_id: str | None = None) -> tuple[Path, Path]:
     candidate = Path(value)
     resolved = candidate.resolve()
@@ -761,15 +776,14 @@ def command_evidence_run(args: argparse.Namespace) -> dict[str, Any]:
         ensure_run_open(run)
         ensure_new_evidence_id(run, evidence_id)
         bundle_artifact(run, args.artifact_id, workspace)
-        for source in source_paths:
-            target, _relative = safe_workspace_path(workspace, source, "evidence source"); ensure_allowed_source_target(run, workspace, target)
-            if not target.exists(): raise ReceiptError(f"evidence source does not exist: {source}")
+        check_evidence_sources(run, workspace, source_paths)
         started = utc_now()
         exit_code, stdout, stderr = execute_bounded(command, cwd=workspace)
         ensure_immutable_risk(run, workspace)
-        for source in source_paths:
-            target, _relative = safe_workspace_path(workspace, source, "evidence source"); ensure_allowed_source_target(run, workspace, target)
-            if not target.exists(): raise ReceiptError(f"evidence source does not exist after command execution: {source}")
+        # The measured command runs with write access to the workspace, so the
+        # paths recorded below must be revalidated against what they resolve to
+        # now, not against what they resolved to before it ran.
+        check_evidence_sources(run, workspace, source_paths, after_command=True)
         finished = utc_now()
         if datetime.fromisoformat(finished[:-1]) <= datetime.fromisoformat(started[:-1]):
             raise ReceiptError("evidence timestamps must strictly increase")
