@@ -100,6 +100,19 @@ def write_codex_capability_snapshot(tmp_path, *, observed_at=None, models=None):
     return snapshot
 
 
+def write_account_default_catalog(tmp_path):
+    catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    catalog["adapters"]["account-default-fixture"] = {
+        "endpoint_provider": "fixture",
+        "fixed_model_family": "openai",
+        "effort_transport": "flag",
+        "model_selection": "account-default",
+    }
+    path = tmp_path / "account-default-model-routing.json"
+    path.write_text(json.dumps(catalog))
+    return path
+
+
 def load_router():
     path = ROOT / "scripts" / "model_route.py"
     spec = importlib.util.spec_from_file_location("model_route_under_test", path)
@@ -1561,14 +1574,20 @@ def test_unusable_alias_table_rejects_on_an_explicit_model_route(
     """
     router = load_router()
     catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    catalog["adapters"]["account-default-fixture"] = {
+        "endpoint_provider": "fixture",
+        "fixed_model_family": "openai",
+        "effort_transport": "flag",
+        "model_selection": "account-default",
+    }
     catalog["families"]["openai"]["aliases"] = aliases
     catalog_path = tmp_path / "model-routing.json"
     catalog_path.write_text(json.dumps(catalog))
     monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
 
     result = router.main([
-        "resolve", "--adapter", "codex", "--alias", "flagship", "--role", "worker",
-        "--model", "gpt-5.6-sol",
+        "resolve", "--adapter", "account-default-fixture", "--alias", "flagship",
+        "--role", "worker", "--model", "gpt-5.6-sol",
     ])
 
     route = json.loads(capsys.readouterr().out)
@@ -1672,20 +1691,17 @@ def test_malformed_override_fails_closed_without_a_fixed_model_family(
     assert route.get("resolved_model") is None
 
 
-def test_openai_aliases_resolve_to_account_default_dispatch(tmp_path):
-    # The Codex account is a ChatGPT subscription: explicit model ids are
-    # rejected by the runtime (HTTP 400), so codex routes dispatch on the
-    # account default while retaining the catalog id for effort/audit (#190).
+def test_account_default_aliases_resolve_to_account_default_dispatch(tmp_path):
     expected = {
         "flagship": "gpt-5.6-sol",
-        "workhorse": "gpt-5.6-terra",
+        "workhorse": "gpt-5.6-luna",
         "scout": "gpt-5.6-luna",
     }
-    snapshot = write_codex_capability_snapshot(tmp_path)
+    catalog = write_account_default_catalog(tmp_path)
     for alias, model in expected.items():
         result, route = resolve(
-            "--adapter", "codex", "--alias", alias, "--role", "worker",
-            "--capabilities-file", str(snapshot),
+            "--adapter", "account-default-fixture", "--alias", alias,
+            "--role", "worker", "--catalog", str(catalog),
         )
         assert result.returncode == 0
         assert route["resolved_model"] == ""
@@ -1695,12 +1711,12 @@ def test_openai_aliases_resolve_to_account_default_dispatch(tmp_path):
         assert route["model_family"] == "openai"
 
 
-def test_account_default_codex_ignores_runtime_selectable_model_list(tmp_path):
-    snapshot = write_codex_capability_snapshot(tmp_path)
+def test_account_default_adapter_ignores_runtime_selectable_model_list(tmp_path):
+    catalog = write_account_default_catalog(tmp_path)
     result, route = resolve(
-        "--adapter", "codex", "--alias", "flagship", "--role", "worker",
-        "--available-model", "gpt-5.6-terra",
-        "--capabilities-file", str(snapshot),
+        "--adapter", "account-default-fixture", "--alias", "flagship",
+        "--role", "worker", "--available-model", "gpt-5.6-luna",
+        "--catalog", str(catalog),
     )
     assert result.returncode == 0
     assert route["resolved_model"] == ""
@@ -1708,7 +1724,7 @@ def test_account_default_codex_ignores_runtime_selectable_model_list(tmp_path):
     assert route["model_selection"] == "account-default"
 
 
-def test_aliases_supply_proportionate_default_effort(tmp_path):
+def test_codex_aliases_supply_proportionate_default_effort(tmp_path):
     expected = {"flagship": "high", "workhorse": "medium", "scout": "low"}
     snapshot = write_codex_capability_snapshot(tmp_path)
     for alias, effort in expected.items():
@@ -1721,21 +1737,21 @@ def test_aliases_supply_proportionate_default_effort(tmp_path):
 
 
 @pytest.mark.parametrize(
-    ("task_class", "alias", "effort", "catalog_model"),
+    ("task_class", "alias", "effort", "resolved_model"),
     (
         ("mechanical", "scout", "low", "gpt-5.6-luna"),
-        ("legwork", "workhorse", "medium", "gpt-5.6-terra"),
+        ("legwork", "workhorse", "medium", "gpt-5.6-luna"),
         ("critical-review", "flagship", "max", "gpt-5.6-sol"),
         ("orchestration", "flagship", "ultra", "gpt-5.6-sol"),
     ),
 )
-def test_task_classes_bind_codex_policy_identity_without_transport_model(
-    tmp_path, task_class, alias, effort, catalog_model
+def test_task_classes_bind_codex_runtime_identity(
+    tmp_path, task_class, alias, effort, resolved_model
 ):
     snapshot = tmp_path / f"{task_class}.json"
     snapshot.write_text(json.dumps(capability_snapshot({
-        catalog_model: {
-            "resolved_model": catalog_model,
+        resolved_model: {
+            "resolved_model": resolved_model,
             "supported_efforts": [effort],
         },
     })))
@@ -1750,10 +1766,10 @@ def test_task_classes_bind_codex_policy_identity_without_transport_model(
     assert route["alias"] == alias
     assert route["requested_effort"] == effort
     assert route["effort"] == effort
-    assert route["resolved_model"] == ""
-    assert route["catalog_model"] == catalog_model
-    assert route["model_selection"] == "account-default"
-    assert route["identity_source"] == "account-default"
+    assert route["resolved_model"] == resolved_model
+    assert route["identity_source"] == "runtime-capability+catalog"
+    assert "catalog_model" not in route
+    assert "model_selection" not in route
 
 
 def test_claude_task_class_rejects_caller_authored_capability_claim(tmp_path):
@@ -2296,9 +2312,8 @@ def test_explicit_ultra_fails_for_noneligible_routes(tmp_path):
 
 
 def test_codex_failure_records_never_expose_a_dispatchable_model(tmp_path):
-    # Non-ok records must not present the catalog id as resolved_model:
-    # a consumer keying on resolved_model would dispatch an id the
-    # subscription runtime rejects (#190).
+    # Non-ok records still expose the selected runtime model so the failure
+    # identifies the capability-gated route that was attempted.
     snapshot = write_codex_capability_snapshot(tmp_path)
     result, route = resolve(
         "--adapter", "codex", "--alias", "workhorse", "--role", "worker",
@@ -2306,25 +2321,26 @@ def test_codex_failure_records_never_expose_a_dispatchable_model(tmp_path):
     )
     assert result.returncode == 1
     assert route["status"] == "effort_unsupported"
-    assert route["resolved_model"] == ""
-    assert route["catalog_model"] == "gpt-5.6-terra"
-    assert route["model_selection"] == "account-default"
+    assert route["resolved_model"] == "gpt-5.6-luna"
+    assert route["identity_source"] == "runtime-capability+catalog"
+    assert "catalog_model" not in route
+    assert "model_selection" not in route
 
 
-def test_codex_rejects_explicit_model_for_account_default_adapter():
-    # An explicit id would be sent to the runtime and rejected with HTTP 400,
-    # so the resolver fails closed instead of emitting a doomed route (#190).
+def test_codex_resolves_explicit_runtime_model(tmp_path):
+    snapshot = write_codex_capability_snapshot(tmp_path)
     result, route = resolve(
-        "--adapter", "codex", "--alias", "flagship", "--role", "lead", "--model", "gpt-5.6-sol"
+        "--adapter", "codex", "--alias", "scout", "--role", "worker",
+        "--model", "gpt-5.6-luna", "--effort", "low",
+        "--capabilities-file", str(snapshot),
     )
-    assert result.returncode == 1
-    assert route["status"] == "adapter_account_default_only"
-    assert route["resolved_model"] == ""
-    assert route["requested_model"] == "gpt-5.6-sol"
-    assert route["catalog_model"] == "gpt-5.6-sol"
-    assert route["model_selection"] == "account-default"
-    assert route["identity_source"] == "account-default"
+    assert result.returncode == 0
+    assert route["status"] == "ok"
+    assert route["resolved_model"] == "gpt-5.6-luna"
+    assert route["identity_source"] == "model-pattern"
     assert route["model_family"] == "openai"
+    assert "catalog_model" not in route
+    assert "model_selection" not in route
 
 
 def test_caller_efforts_do_not_replace_openai_capability_snapshot():
@@ -2423,7 +2439,7 @@ def test_task_class_effort_fallback_never_escalates_when_only_higher_effort_is_s
     assert route["effort_substitution"] == ""
 
 
-def test_fresh_openai_snapshot_missing_catalog_model_fails_closed(
+def test_fresh_openai_snapshot_without_alias_candidate_fails_closed(
     tmp_path, monkeypatch, capsys
 ):
     router = load_router()
@@ -2441,12 +2457,10 @@ def test_fresh_openai_snapshot_missing_catalog_model_fails_closed(
     ])
     route = json.loads(capsys.readouterr().out)
     assert result == 1
-    assert route["status"] == "capability_model_unavailable"
-    assert route["catalog_model"] == "gpt-5.6-sol"
-    assert route["resolved_model"] == ""
+    assert route["status"] == "no_candidate_available"
+    assert route["candidates"] == ["gpt-5.6-sol"]
     assert route["requested_effort"] == "ultra"
-    assert route["effort"] == ""
-    assert route["effort_capability_source"] == "runtime-model-catalog"
+    assert route["effort"] == "ultra"
 
 
 def test_explicit_unsupported_effort_fails_against_runtime_snapshot(tmp_path):
