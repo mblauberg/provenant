@@ -821,6 +821,20 @@ def test_review_ladder_accepts_reasoned_distinct_family_skip():
     assert module.lifecycle.review_ladder_error(run) is None
 
 
+def test_lifecycle_transitions_match_checked_contract():
+    module = load_producer()
+    contract = module.lifecycle.LIFECYCLE_CONTRACT
+    expected = {
+        state: {
+            row["to_state"] for row in contract["transitions"]
+            if row["state"] == state
+        }
+        for state in contract["states"]
+    }
+
+    assert module.lifecycle.TRANSITIONS == expected
+
+
 def test_checkpoint_transition_show_and_refusals(tmp_path):
     run_dir = initialise(tmp_path)
     checkpoint = run_cli(

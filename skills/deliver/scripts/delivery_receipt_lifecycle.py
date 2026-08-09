@@ -3,17 +3,33 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import math
 from pathlib import Path
 from typing import Any
 
+LIFECYCLE_CONTRACT_PATH = Path(__file__).resolve().parents[1] / "contract" / "lifecycle.py"
+
+
+def _lifecycle_contract_module():
+    spec = importlib.util.spec_from_file_location(
+        "delivery_receipt_lifecycle_contract", LIFECYCLE_CONTRACT_PATH,
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError("delivery lifecycle contract loader is unavailable")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+LIFECYCLE_CONTRACT = _lifecycle_contract_module().LIFECYCLE_CONTRACT
 TRANSITIONS = {
-    "draft": {"scoped"}, "scoped": {"approved"}, "approved": {"executing"},
-    "executing": {"verifying"}, "verifying": {"reviewing", "executing"},
-    "reviewing": {"repairing", "awaiting_acceptance"}, "repairing": {"verifying"},
-    "awaiting_acceptance": {"accepted", "repairing"}, "accepted": {"awaiting_release"},
-    "awaiting_release": {"observing"}, "observing": {"closed"}, "closed": set(),
+    state: {
+        row["to_state"] for row in LIFECYCLE_CONTRACT["transitions"]
+        if row["state"] == state
+    }
+    for state in LIFECYCLE_CONTRACT["states"]
 }
 
 
