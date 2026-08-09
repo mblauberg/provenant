@@ -20,7 +20,7 @@ COMMIT_SHA = re.compile(r"^[0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?$")
 IGNORE_RULE = "/.worktrees/"
 MAX_DIAGNOSTIC_BYTES = 8192
 AUTHENTICATED_URL = re.compile(r"(?i)(https?://)([^/\s:@]*(?::[^@\s/]*)?@)")
-PARTIAL_CREDENTIAL_URL = re.compile(r"(?i)(https?://)([^/\s:@]*:[^/\s@]*)(?=$|[\s])")
+PARTIAL_CREDENTIAL_URL = re.compile(r"(?i)(https?://)([^/\s:@]*:[^/\s@]*)(?=[/\s]|$)")
 PARTIAL_AUTHENTICATED_URL = re.compile(r"(?i)(https?://)[^/\s]*$")
 PORCELAIN_FLAG_FIELDS = {"bare", "detached"}
 PORCELAIN_REQUIRED_VALUE_FIELDS = {"worktree", "HEAD", "branch"}
@@ -182,7 +182,10 @@ def _capture_text(capture: dict[str, object], *, bounded: bool = True) -> str:
 
 
 def _run_git(
-    repo: Path, *args: str,
+    repo: Path,
+    *args: str,
+    stdout_limit: int | None = MAX_DIAGNOSTIC_BYTES,
+    stderr_limit: int | None = MAX_DIAGNOSTIC_BYTES,
 ) -> tuple[subprocess.CompletedProcess[str], dict[str, dict[str, object]]]:
     command = ["git", "-C", str(repo), *args]
     try:
@@ -195,7 +198,11 @@ def _run_git(
         )
     except OSError as exc:
         raise PolicyError(f"could not launch git: {exc}") from exc
-    captures = _drain_process(process)
+    captures = _drain_process(
+        process,
+        stdout_limit=stdout_limit,
+        stderr_limit=stderr_limit,
+    )
     return subprocess.CompletedProcess(
         command,
         process.returncode,
@@ -210,13 +217,18 @@ def owning_root(repo: Path) -> Path:
 
 
 def worktree_records(repo: Path) -> list[dict[str, object]]:
-    result, captures = _run_git(repo, "worktree", "list", "--porcelain", "-z")
+    result, captures = _run_git(
+        repo,
+        "worktree",
+        "list",
+        "--porcelain",
+        "-z",
+        stdout_limit=None,
+    )
     if result.returncode != 0:
         raise PolicyError(
             _capture_text(captures["stderr"]).strip() or "git worktree list failed"
         )
-    if captures["stdout"]["size"] > MAX_DIAGNOSTIC_BYTES:
-        raise PolicyError("git worktree list output exceeded the diagnostic bound")
     raw = bytes(captures["stdout"]["buffer"])
     if not raw.endswith(b"\0\0"):
         raise PolicyError("git worktree list output was incomplete")
