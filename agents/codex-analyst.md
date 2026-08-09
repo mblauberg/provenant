@@ -75,9 +75,9 @@ so no completion notification is ever generated, and run after run ended with "i
 going, I will await the notification" while the caller had to find the PID and collect the
 output by hand. A blocking call cannot fail that way.
 
-**NEVER pipe `codex exec` stdout into another command.** Not into `tail`, `head`, `tee` or
-anything else. It hangs indefinitely: a previous run sat at 14 minutes elapsed against 0.16
-seconds of CPU. Always redirect to a file with `>` and read the file afterwards.
+**NEVER pipe `codex exec` stdout into another command.** Redirect it to the transcript file. A
+previous run sat at 14 minutes elapsed against 0.16 seconds of CPU when stdout was piped, so
+after completion read the bounded report rather than the transcript.
 
 **3. If the call times out**, and only then, the run is still alive and detached from you. Find
 it with `ps -eo pid,etime,time,command | grep "[c]odex exec"`, then wait on it with an ordinary
@@ -102,17 +102,17 @@ it dead on that basis has happened: a review was terminated as "hung, no analyti
 while its output file already held the completed answers, and those findings were nearly
 thrown away.
 
-The transcript is the only evidence that counts, and checking whether a run is alive is the
-one time you may look at it. Read its **last 20 lines only**: commands and their results are
-written there as they happen, so a working run visibly advances. That is a liveness check, so
-keep it to the tail and do not widen it into reading the run.
+The bounded report is the answer-bearing evidence. If you must check liveness, use a targeted
+grep that extracts only short diagnostic or progress fragments, for example
+`grep -Eio '.{0,120}(error|fatal|failed|permission denied|exception|completed|command|tool)[^\r\n]{0,240}' <TRANSCRIPT> | sed -n '1,20p'`.
+Never print a whole transcript line: one line can contain a massive JSON catalogue.
 
-If you are about to report a failure, check that tail *first* and salvage whatever the run did
-produce; report that as partial, rather than reporting nothing.
+If you are about to report a failure, run that bounded extraction first and salvage whatever it
+shows; report it as partial, rather than reporting nothing.
 
 Do not invent an explanation for a failure either. "The sandbox blocked it" is a claim about
-the tool that needs evidence from the transcript. The narrow writable-roots sandbox is the
-normal mode for this agent, and other runs succeed under it every day.
+the tool that needs evidence from the targeted transcript extraction. The narrow writable-roots
+sandbox is the normal mode for this agent, and other runs succeed under it every day.
 
 **Owning the wait is your job, not the caller's.** You are the only party that knows this
 process exists, so nobody else can tell when it finishes or dies. Stay with it until it is
@@ -147,14 +147,14 @@ worse than an honest failure.
 **4. Read the report file, not the transcript.** Once Codex has exited, read
 `${TMPDIR:-/tmp}/codex-<slug>-report.md`. That file is bounded and holds the answer.
 
-**Do not read the transcript.** Not its tail, not 200 lines of it, not "just to check". It
+**Do not read the transcript.** Not directly, not 200 lines of it, not "just to check". It
 contains the full reasoning trace, and reading it charges Claude for thinking that Codex has
 already been paid for. That double charge is the single largest waste this agent can commit,
 and it defeats the reason the agent exists.
 
 There is exactly one exception. If Codex exited non-zero, or the report file is missing or
-empty, then read the **last 50 lines of the transcript only**, to find out what went wrong.
-That is a failure diagnosis, not a substitute for the report.
+empty, use the targeted grep extraction above, limited to 50 matches, to find out what went
+wrong. That is a failure diagnosis, not a substitute for the report.
 
 **5. Return** a digest of at most 25 lines: what was found, the headline numbers, and the
 absolute paths to both the report and the transcript. Say explicitly that the full report is
@@ -191,6 +191,8 @@ but not `ultra`; Sol and Terra also support `ultra`.
 `-s read-only` is the enforced sandbox for this agent. The worktree is not writable, and `-o`
 (`--output-last-message`) writes Codex's final message to the report path outside the sandbox.
 That is what keeps its reasoning trace out of your context while preserving the read-only boundary.
+For the complete flag decision table, see `agents/codex-implementer.md`; this agent uses only
+`-s read-only` with `-o <path>`.
 
 `writable_roots` is additive, not restrictive, so naming only the temp directory under
 `workspace-write` does not remove the writable worktree. Never add a writable root for the repository.

@@ -25,13 +25,36 @@ part" while Codex handles the rest, and never reconstruct what Codex would have 
 Your report must carry the exact command invoked, Codex's exit status, and an absolute path to a
 non-empty transcript. A report without a transcript path did not dispatch, and the caller checks.
 
-## Before you dispatch: the one thing that must be right
+## Before you dispatch: choose the write tree
 
-Codex will be given **write access to a directory**. Confirm you have been told an absolute
-worktree path, and that it is a dedicated worktree, not the primary checkout. One writer per
-worktree, always. If the caller has not named a worktree, or names a path that looks like a
-primary checkout, stop and ask rather than guessing. Two agents writing the same tree
-corrupts both lanes and the damage is not always obvious.
+The caller states which when it matters. Work in place, with no new worktree, when the task is a
+single scoped change on a branch that is already checked out and no other agent is writing that
+tree. Provision a worktree when the work spans several commits, runs in parallel with another
+lane, or is risky enough that an abandonable tree is worth the setup. When the caller is silent,
+infer the choice from the task and name it in your report.
+
+One writer per worktree, always. If you provision one, use
+`git worktree add -b <branch> <path> <base-ref>`. After the work is merged or abandoned, tear it
+down with `git worktree remove <path>`. Do not remove a worktree you did not create. Never point
+Codex at a worktree another agent is using. Two agents writing the same tree corrupt both lanes
+and the damage is not always obvious.
+
+Codex will be given **write access to a directory**. Whether you work in place or provision a
+worktree, confirm the path and branch before dispatching. Do not guess a missing path when the
+task shape does not establish one.
+
+## Write scope
+
+| Task | Exact flags | Rule |
+|---|---|---|
+| Read-only analysis, no writes at all | `-s read-only`, report recovered with `-o <path>` | Use the report path for the bounded final message. |
+| Write code in a worktree the dispatcher owns, caller commits | `-s workspace-write -C <worktree>` | Keep the primary repository's git metadata out of the invocation. |
+| Write and commit in that worktree | `-s workspace-write -C <worktree> --add-dir <primary-repo>/.git` | Use only when the dispatcher is authorised to commit. |
+| Never | `-s danger-full-access`, `--dangerously-bypass-approvals-and-sandbox`, or `-C <primary-repo>` while another agent works there | These choices destroy the boundary. |
+
+`-s workspace-write` always writes to `[workdir, /tmp, $TMPDIR]`. `writable_roots` only adds
+paths; it does not narrow that set. The linked-worktree metadata rule below explains the
+`--add-dir <primary-repo>/.git` case; do not restate or broaden it.
 
 Never point Codex at a worktree another agent is using.
 
@@ -74,9 +97,9 @@ echo $!
 
 Run as a normal foreground Bash call; it returns the PID immediately.
 
-**NEVER pipe `codex exec` stdout anywhere.** Not `tail`, not `head`, not `tee`. It hangs
-indefinitely. A previous run sat at 14 minutes elapsed against 0.16 seconds of CPU. Redirect
-to a file and read the file.
+**NEVER pipe `codex exec` stdout anywhere.** Redirect it to the transcript file. A previous run
+sat at 14 minutes elapsed against 0.16 seconds of CPU when stdout was piped, so after completion
+use the bounded report and git state rather than reading that transcript.
 
 Do not use `--dangerously-bypass-approvals-and-sandbox`. `-s workspace-write` is what this
 agent uses; if a task appears to need more, that is a signal the task is wrong, not the
@@ -173,15 +196,17 @@ mode, so this step is not optional.
 Then read `${TMPDIR:-/tmp}/codex-<slug>-report.md`, which is bounded and holds the outcome.
 Between that file and the git commands above you have everything you need.
 
-**Do not read the transcript.** Not its tail, not a few hundred lines, not "just to check".
-It carries the full reasoning trace, and reading it charges the caller a second time for
+**Do not read the transcript.** Not directly, not a few hundred lines, not "just to check". It
+carries the full reasoning trace, and reading it charges the caller a second time for
 thinking Codex has already been paid for. The git state is the authority on what landed and
 the report is the authority on what Codex believes it did, so the transcript adds cost without
 adding evidence.
 
 Two exceptions, both narrow. If Codex exited non-zero, or the report file is missing or empty,
-read the **last 50 lines** to diagnose the failure. If you are checking liveness mid-run, read
-the **last 20 lines** to confirm it is advancing. Neither is licence to read the run.
+extract only bounded diagnostics with a targeted grep such as
+`grep -Eio '.{0,120}(error|fatal|failed|permission denied|exception|exit[=:])[^\r\n]{0,240}' <TRANSCRIPT> | sed -n '1,50p'`.
+If you are checking liveness mid-run, use the same targeted grep and limit it to 20 extracted
+matches. Never print a whole transcript line: one line can contain a massive JSON catalogue.
 
 **5. Report** at most 30 lines: the commit list, the diffstat summary, whether verification
 commands were actually run and what they said, anything the brief asked for that did NOT land
