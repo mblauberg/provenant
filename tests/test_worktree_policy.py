@@ -381,7 +381,7 @@ def test_diagnostics_redact_token_only_and_incomplete_credential_urls(monkeypatc
     monkeypatch.setenv("npm_config_proxy", secret)
 
     diagnostic = worktree_policy.redact_diagnostic(
-        "https://:token-only-secret@example.test/ https://review-user:partial-secret"
+        "https://:token-only-secret@example.test/ https://review-user:partial-secret/path"
         f" {secret}"
     )
 
@@ -389,7 +389,7 @@ def test_diagnostics_redact_token_only_and_incomplete_credential_urls(monkeypatc
     assert "partial-secret" not in diagnostic
     assert secret not in diagnostic
     assert "https://[REDACTED]@example.test/" in diagnostic
-    assert "https://[REDACTED]" in diagnostic
+    assert "https://[REDACTED]/path" in diagnostic
 
 
 def test_capture_is_bounded_but_counts_and_digests_all_output():
@@ -442,7 +442,8 @@ def test_worktree_records_rejects_incomplete_or_malformed_porcelain(tmp_path, mo
         "limit": worktree_policy.MAX_DIAGNOSTIC_BYTES,
     }
 
-    def fake_run_git(repo_path, *args):
+    def fake_run_git(repo_path, *args, **kwargs):
+        assert kwargs == {"stdout_limit": None}
         return (
             subprocess.CompletedProcess(
                 ["git", "-C", str(repo_path), *args], 0, "", ""
@@ -461,6 +462,41 @@ def test_worktree_records_rejects_incomplete_or_malformed_porcelain(tmp_path, mo
     monkeypatch.setattr(worktree_policy, "_run_git", fake_run_git)
     with pytest.raises(worktree_policy.PolicyError, match="(?:incomplete|malformed)"):
         worktree_policy.worktree_records(tmp_path)
+
+
+def test_worktree_records_accepts_a_large_complete_porcelain_inventory(tmp_path, monkeypatch):
+    path = "/tmp/" + "a" * (worktree_policy.MAX_DIAGNOSTIC_BYTES + 1)
+    head = "1" * 40
+    payload = f"worktree {path}\0HEAD {head}\0detached\0\0".encode()
+    capture = {
+        "buffer": bytearray(payload),
+        "size": len(payload),
+        "digest": hashlib.sha256(payload),
+        "limit": None,
+    }
+
+    def fake_run_git(repo_path, *args, **kwargs):
+        assert kwargs == {"stdout_limit": None}
+        return (
+            subprocess.CompletedProcess(
+                ["git", "-C", str(repo_path), *args], 0, "", ""
+            ),
+            {
+                "stdout": capture,
+                "stderr": {
+                    "buffer": bytearray(),
+                    "size": 0,
+                    "digest": hashlib.sha256(),
+                    "limit": worktree_policy.MAX_DIAGNOSTIC_BYTES,
+                },
+            },
+        )
+
+    monkeypatch.setattr(worktree_policy, "_run_git", fake_run_git)
+
+    assert worktree_policy.worktree_records(tmp_path) == [
+        {"worktree": path, "HEAD": head, "detached": True}
+    ]
 
 
 def test_git_launcher_oserror_is_reported_as_policy_error(tmp_path, monkeypatch):
