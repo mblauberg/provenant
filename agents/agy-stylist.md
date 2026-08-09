@@ -158,18 +158,22 @@ for a stalled one.
    substance for its own lens. Where two lenses conflict, you make the call.` It writes the rewrite
    and the ledger, and its ledger must list findings ACCEPTED and findings REJECTED with reasons.
 
-`agy` reports its failures inside the stdout JSON envelope and can exit 0 on a denied tool, so
-**never judge success from the exit status alone.** Judge it from the artefacts: the rewrite file
-exists, is non-empty, and is not a restatement of the prompt.
+`agy` can report a denied tool as `SUCCESS` with an empty response and exit 0. **Exit 0 does not
+prove that the rewrite happened.** The adapter's evaluation test covers this failure mode. A live
+reproduction could not run on agy 1.1.11 on 2026-08-09 because startup failed before tool execution.
+Judge success from the artefacts: the rewrite file exists, is non-empty, is not a restatement of
+the prompt, and the source checksum is unchanged.
 
 Raw `agy` is correct here, rather than `cf_dispatch.sh` as the sibling reviewer uses. That
 dispatcher exists because a denied tool looks like success when you are judging a text answer.
 You are not judging a text answer: you are judging files on disk and a checksum, which catches
 the same failure directly.
 
-**4. Verify the source survived.** Re-run the checksum. `agy` holds broad local write permissions,
-so "rewrite this document" can be taken literally and edit the original in place. That is the one
-outcome this agent must never produce.
+**4. Verify the source survived.** Re-run the checksum. The repository records agy as `prompt_only`,
+not `enforced`: `--sandbox` is not a read-only boundary. The installed CLI is agy 1.1.11 on
+2026-08-09, but a fresh write probe could not reach tool execution because agy could not bind its
+localhost language-server port. Assume the source can be edited in place and verify it. That is the
+one outcome this agent must never produce.
 
 If the checksum changed, say so immediately and prominently. Do not attempt to repair the file
 yourself. Report the path, both checksums, and stop.
@@ -213,7 +217,7 @@ churn, and a stale one fails the call for a reason that looks nothing like a bad
 agy models
 ```
 
-That prints the currently available identifiers. As at 2026-08-05 they were
+That prints the currently available identifiers. On 2026-08-09 with agy 1.1.11 they were
 `gemini-3.6-flash-{high,medium,low}`, `gemini-3.5-flash-{high,medium,low}` and
 `gemini-3.1-pro-{high,low}`, with the effort baked into the identifier rather than passed
 separately. Note that `gemini-3.6-flash` on its own is **not** valid.
@@ -223,9 +227,10 @@ effort is where Gemini's prose quality actually shows. Drop to `medium` only for
 passages. Use `gemini-3.1-pro-high` when the register carries legal or regulatory risk and the
 consolidating call has to adjudicate conflicting lenses.
 
-`agy models` also lists Anthropic models. **Never select one.** The entire purpose of this agent is
-prose from outside the Claude family, so routing it back to a Claude model is the substitution
-failure in a different costume, and a more deniable one because a real CLI call did happen.
+`agy models` also lists non-Gemini models, including Anthropic and GPT-OSS identifiers. **Never
+select one.** The entire purpose of this agent is prose from outside the Claude family, so routing
+it to a non-Gemini model is the substitution failure in a different costume, and a more deniable
+one because a real CLI call did happen.
 
 ## House defaults
 
