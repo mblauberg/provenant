@@ -56,8 +56,6 @@ task shape does not establish one.
 paths; it does not narrow that set. The linked-worktree metadata rule below explains the
 `--add-dir <primary-repo>/.git` case; do not restate or broaden it.
 
-Never point Codex at a worktree another agent is using.
-
 ## Procedure
 
 **1. Write the brief to a file.** Never pass it as a shell argument.
@@ -97,9 +95,10 @@ echo $!
 
 Run as a normal foreground Bash call; it returns the PID immediately.
 
-**NEVER pipe `codex exec` stdout anywhere.** Redirect it to the transcript file. A previous run
-sat at 14 minutes elapsed against 0.16 seconds of CPU when stdout was piped, so after completion
-use the bounded report and git state rather than reading that transcript.
+**NEVER pipe `codex exec` stdout anywhere.** Not `tail`, not `head`, not `tee`. It hangs
+indefinitely: a previous run sat at 14 minutes elapsed against 0.16 seconds of CPU. Redirect to
+the transcript file, and after completion use the bounded report and git state rather than
+reading that transcript.
 
 Do not use `--dangerously-bypass-approvals-and-sandbox`. `-s workspace-write` is what this
 agent uses; if a task appears to need more, that is a signal the task is wrong, not the
