@@ -33,6 +33,17 @@ while IFS= read -r -d '' script; do
 done < <(find "$SKILLS_ROOT" -type f -name '*.sh' -print0)
 
 "$SCRIPTS_ROOT/check-skill-javascript" "$SKILLS_ROOT"
+
+# Skill JavaScript tests are discovered rather than listed, so a new one runs
+# in the gate the moment it lands instead of sitting unexecuted.
+skill_node_tests=()
+while IFS= read -r -d '' skill_test; do
+  skill_node_tests+=("$skill_test")
+done < <(find "$SKILLS_ROOT" -type f -name '*.test.mjs' -not -path '*/node_modules/*' -print0)
+if (( ${#skill_node_tests[@]} > 0 )); then
+  node --test "${skill_node_tests[@]}"
+fi
+
 if [[ -d "$HOME/.claude/workflows" ]]; then
   while IFS= read -r -d '' workflow; do
     node --check "$workflow" >/dev/null
