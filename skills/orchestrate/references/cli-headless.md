@@ -1,6 +1,6 @@
 # CLI headless reference (dated layer)
 
-Verified locally on macOS, 2026-06-07. Model IDs, flags, auth, and safety modes drift. Always run
+Verified locally on macOS, 2026-08-05. Model IDs, flags, auth, and safety modes drift. Always run
 `<tool> --help` / model discovery before depending on a chain.
 
 ## Contents
@@ -18,8 +18,9 @@ Verified locally on macOS, 2026-06-07. Model IDs, flags, auth, and safety modes 
 
 Headless CLIs are how external work reaches another provider. Fabric carries
 the request, the reply and the activity record around that call; it does not
-run the provider itself. A verifier that is not certifying must enforce
-read-only or planning mode; advisory claims require independent verification.
+run the provider itself. Certification requires an enforced read-only
+boundary. A prompt-only review can still provide a genuine independent
+opinion, but it is not certification eligible.
 
 ## Harness-conditioned rule
 
@@ -41,15 +42,16 @@ fail closed as `invalid_orchestrator_family`, and missing values fail closed as
 The receipt's resolved `effort` is authoritative for the adapter invocation.
 GPT-5.6 efforts are capability-gated per model. The Codex execution adapter
 captures `codex debug models` through `codex_capabilities.py` and supplies the
-snapshot to the resolver. The ChatGPT-subscription Codex route is
-`account-default`: it selects the dated catalogue candidate for identity and
-audit independently of the runtime-selectable model list, records that ID as
-`catalog_model`, records `model_selection: account-default`, leaves
-`resolved_model` empty and omits `-m` from `codex exec`. Effort support comes
-only from a fresh runtime snapshot entry for that candidate. No snapshot fails
-as `capability_discovery_failed`, a stale snapshot fails as
+snapshot to the resolver. The ChatGPT-subscription Codex route resolves an
+explicit model from runtime capability evidence, uses the dated catalogue for
+candidate order and audit context, records that ID as `resolved_model` and
+passes it with `-m` to `codex exec`. Effort support comes only from a fresh
+runtime snapshot entry for that candidate. No snapshot fails as
+`capability_discovery_failed`, a stale snapshot fails as
 `capability_snapshot_stale`, and a fresh snapshot that omits the candidate fails
-as `capability_model_unavailable`. Explicit unsupported requests fail as
+as `capability_model_unavailable` for an explicit model request; an alias with
+no runtime-capable candidate fails as `no_candidate_available`. Explicit
+unsupported requests fail as
 `effort_unsupported`; a role default may degrade with `effort_substitution`
 using the declared fallback order over runtime-supported efforts at or below
 the request, or fail as `no_effort_available` when none exists.
@@ -76,13 +78,21 @@ or `oauth_safe_mode`.
   see auth and `claude auth status` confirms a logged-in `claude.ai` account, retry with `--safe-mode`,
   `--disable-slash-commands`, `--no-session-persistence`, `--permission-mode plan`, the same safe read tools, and
   the same verifier system prompt.
-- `codex`: `exec -s read-only --ephemeral`; the account-default route omits
-  `-m` and passes only the resolved reasoning-effort control.
+- `codex`: `exec -s read-only --ignore-user-config --ignore-rules --ephemeral`
+  with `-c service_tier="default"` pinned; the route resolves a runtime-capable
+  model and passes it with `-m`, alongside the resolved reasoning-effort
+  control. The tier is pinned explicitly rather than left to
+  `--ignore-user-config`, so the guarantee does not depend on that flag
+  surviving a future edit.
 - `agy`: `--sandbox --output-format json --disable-slash-commands`, with
   `--model`/`--effort` as separate flags and repeatable `--add-dir` for read
   material (also settable as a colon-separated `CF_DISPATCH_AGY_ADD_DIR`).
-  stdout and stderr stay separate so a permission denial cannot masquerade as
-  an empty success. `--dangerously-skip-permissions` is refused.
+  These flags do not enforce read-only access, so the dispatcher reports
+  `prompt_only`: the prompt asks agy not to mutate, but local permissions can
+  still allow writes. A write probe under agy 1.1.10's dispatcher flags
+  succeeded and created the file, and `--mode plan` did the same. stdout and
+  stderr stay separate so a permission denial cannot masquerade as an empty
+  success. `--dangerously-skip-permissions` is refused.
 - `cursor`: `--mode ask --sandbox enabled`; current help documents ask as
   read-only, while current headless plan mode can exit without an answer.
 - `kiro`: disabled by default in the dispatcher. Enable only with `CF_DISPATCH_ENABLE_KIRO=1`; no hard
@@ -91,8 +101,9 @@ or `oauth_safe_mode`.
   disabled (`--available-tools=''`); repo inspection cannot currently be guaranteed read-only from local
   help.
 
-If any adapter cannot enforce the promised safety level, log the failure and fail over. Do not silently
-downgrade certification. For large prompts, prefer `--prompt-file`; enforced adapters use
+If any adapter cannot enforce the promised safety level, record its actual guarantee and keep
+certification ineligible. Do not silently upgrade `prompt_only` to `enforced`. For large
+prompts, prefer `--prompt-file`; enforced adapters use
 stdin/file-backed input where supported to avoid shell argument limits.
 Orchestrated runs always pass `--out <run-dir>/<classified-artifact>` and list it
 in the manifest. Omitting `--out` creates one declared ephemeral output for a
@@ -111,7 +122,7 @@ the result in the run manifest and move to the next tool.
 | Tool | Discovery / smoke check | Common failure |
 |---|---|---|
 | `claude` | `claude --help`; `claude -p --bare --permission-mode plan --tools "Read,Grep,Glob" "OK"`; if using Claude Code OAuth, also test `--safe-mode` with the same read-only tool set | API key / OAuth / quota |
-| `codex` | `codex --version`; `codex exec -s read-only "OK"` | login / usage limit |
+| `codex` | `codex --version`; `codex exec -s read-only --ignore-user-config -c service_tier="default" "OK"` | login / usage limit |
 | `agy` | `agy models`; `agy --model gemini-3.6-flash --effort low --output-format json -p "OK"` | auth / tool permission auto-denied |
 | `cursor-agent` | `cursor-agent --help`; `cursor-agent --list-models` | auth / workspace trust |
 | `kiro-cli` | `kiro-cli chat --list-models` | credits / auth |
@@ -196,12 +207,17 @@ Four failure modes are specific to this lane:
   Judge liveness by [worker-liveness.md](worker-liveness.md), never by output size.
 - **One writer per worktree, and never the primary checkout.** `-C` hands Codex the whole
   tree. Two lanes sharing one worktree corrupt both, not always visibly.
-- **A worker cannot commit inside a linked worktree.** Its `.git` metadata lives in the
-  primary repository's `.git/worktrees/<name>/`, outside the sandbox root, so `git commit`
-  dies on `index.lock: Operation not permitted`. It is intermittent, so neither outcome can
-  be assumed. Instruct the leg to leave the work uncommitted and end by printing
-  `git status --short` and `git diff --stat`; the chair commits. Widening the sandbox to the
-  repository root to work around this hands the worker every sibling worktree at once.
+- **A worker cannot commit inside a linked worktree by default.** Its `.git` metadata lives
+  in the primary repository's `.git/worktrees/<name>/`, outside the sandbox root, so
+  `git commit` dies on `index.lock: Operation not permitted`. This is deterministic, not
+  intermittent: it depends only on whether the primary `.git` falls inside the always-writable
+  set `[workdir, /tmp, $TMPDIR]`. A worktree under `$TMPDIR` therefore commits fine and proves
+  nothing about the normal case. Either instruct the leg to leave the work uncommitted and end
+  by printing `git status --short` and `git diff --stat` so the chair commits, or grant exactly
+  `--add-dir <primary-repo>/.git`, which exposes git metadata without exposing the primary
+  working tree or any sibling worktree. The residual risk of that grant is that the leg can
+  rewrite other branches' refs. Widening the sandbox to the repository root instead hands the
+  worker every sibling worktree at once.
 - **`-s read-only` blocks the worker's own scratch files.** A leg that must run code under
   that sandbox needs forms that write nothing, such as `python3 -c`.
 
@@ -212,8 +228,8 @@ every implementation leg, check `git -C <worktree> log --oneline <base>..HEAD`, 
 A worker has no conversation context, so the brief carries everything: absolute path and
 branch, what has already been verified so it is not redone, ordered parts, out-of-scope
 paths, how to verify, and that it must not push, open a pull request or merge. Always
-include the scepticism clause — *verify every claim in this brief before relying on it; if
-something here is wrong, saying so is more valuable than following it* — which has
+include the scepticism clause: *verify every claim in this brief before relying on it; if
+something here is wrong, saying so is more valuable than following it*, which has
 repeatedly produced the most valuable output of a run.
 
 ## Runtime routing
@@ -251,7 +267,10 @@ auditable close-out unless the attempt records are retained.
 
 Avoid unsafe flags in read-only chains: `--allow-all-tools`, `--allow-all`, `--yolo`, `--force`,
 `--trust-all-tools`, `--dangerously-skip-permissions`, and Codex
-`--dangerously-bypass-approvals-and-sandbox`.
+`--dangerously-bypass-approvals-and-sandbox`. Codex `service_tier=priority` is
+also prohibited: it is a config key, not a flag, and costs about double the
+usage for about 1.5x speed, never justified for an unattended background
+dispatch.
 
 ## Data policy
 

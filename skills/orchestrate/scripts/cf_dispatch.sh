@@ -20,7 +20,9 @@ Options:
   --tool TOOL                  One of claude, codex, cursor, agy, kiro, copilot.
   --chain SPECS                Space-separated fallback chain.
   --orchestrator-family FAMILY Current orchestrator family; same-family routes fail closed.
-  --alias ALIAS                Durable route alias: flagship, workhorse, scout (default: flagship).
+  --alias ALIAS                Durable route alias: flagship, workhorse, scout.
+                               Defaults from --role: flagship for lead,
+                               orchestrator and critical-review, workhorse otherwise.
   --role ROLE                  Route role (default: reviewer).
   --risk-tier TIER             Optional routine, substantial, crucial, or terminal risk tier.
   --reviewer-id ID             Stable worker/reviewer identity for receipt binding.
@@ -37,7 +39,8 @@ Record every dispatch and result in Fabric so the chair can follow the lane.
 EOF
 }
 
-TOOL="" MODEL="" EFFORT="" OUT="" PROMPT="" PROMPT_FILE="" CHAIN="" ORCH_FAMILY="" MODEL_ALIAS="flagship" ROUTE_ROLE="reviewer" RISK_TIER="" REVIEWER_ID="" DOCTOR=0
+TOOL="" MODEL="" EFFORT="" OUT="" PROMPT="" PROMPT_FILE="" CHAIN="" ORCH_FAMILY="" MODEL_ALIAS="" ROUTE_ROLE="reviewer" RISK_TIER="" REVIEWER_ID="" DOCTOR=0
+ALIAS_EXPLICIT=0
 OUT_CREATED=false
 AGY_ADD_DIRS=()
 need_value() {
@@ -56,13 +59,36 @@ while [ $# -gt 0 ]; do
     --prompt-file) need_value "$@"; PROMPT_FILE="$2"; shift 2;;
     --chain) need_value "$@"; CHAIN="$2"; shift 2;;
     --orchestrator-family) need_value "$@"; ORCH_FAMILY="$2"; shift 2;;
-    --alias) need_value "$@"; MODEL_ALIAS="$2"; shift 2;;
+    --alias) need_value "$@"; MODEL_ALIAS="$2"; ALIAS_EXPLICIT=1; shift 2;;
     --role) need_value "$@"; ROUTE_ROLE="$2"; shift 2;;
     --risk-tier) need_value "$@"; RISK_TIER="$2"; shift 2;;
     --reviewer-id) need_value "$@"; REVIEWER_ID="$2"; shift 2;;
     *) echo "unknown arg: $1" >&2; exit 2;;
   esac
 done
+
+# When the caller does not name an alias, derive it from the role rather than
+# defaulting everything to flagship. A bare dispatch is ordinary work and must not
+# silently land on the most expensive model in a family; flagship is for work whose
+# role says it is critical. The flagship roles are the keys of
+# families.*.role_effort_defaults in config/model-routing.json; keep this list in
+# step with that file.
+# A risk tier pins the alias too: every risk_tier_overrides entry in that file
+# declares alias "flagship", and the resolver rejects any other alias with
+# risk_tier_alias_mismatch. Keep both lists in step with the config. The rule only
+# governs the case where the caller named neither an alias nor a model.
+if [ "$ALIAS_EXPLICIT" -eq 0 ]; then
+  if [ -n "$MODEL" ] || [ -n "$RISK_TIER" ]; then
+    # An explicitly named model has already made the cost decision, so leave the
+    # alias at flagship rather than narrowing the candidate list under it.
+    MODEL_ALIAS="flagship"
+  else
+    case "$ROUTE_ROLE" in
+      lead|orchestrator|critical-review) MODEL_ALIAS="flagship";;
+      *) MODEL_ALIAS="workhorse";;
+    esac
+  fi
+fi
 
 append_cli_paths() {
   local dir home_dir
@@ -243,7 +269,19 @@ resolve_routing() {
   # Returns JSON. If neither method is available, returns status="model_routing_unavailable".
   local tool="$1" alias="$2" role="$3" lead_family="$4" diag_file="$5"
   local model="$6" effort="$7" risk_tier="$8" capabilities_file="$9"
+  local product_root=""
   local -a cmd route_args
+
+  # The installed `provenant` resolves config from wherever it was installed from,
+  # which is not this checkout when the dispatcher runs inside a linked worktree.
+  # Pin it to the tree this script actually lives in, so a worktree's config edits
+  # are the ones under test. A caller who has already set the variable knows better
+  # than this derivation, so never override an explicit value.
+  if [ -n "${AGENT_FABRIC_PRODUCT_ROOT:-}" ]; then
+    product_root="$AGENT_FABRIC_PRODUCT_ROOT"
+  else
+    product_root="$(cd "$SCRIPT_DIR" && git rev-parse --show-toplevel 2>/dev/null || true)"
+  fi
 
   route_args=(--adapter "$tool" --alias "$alias" --role "$role" --lead-family "$lead_family" --require-distinct)
   [ -n "$model" ] && route_args+=(--model "$model")
@@ -257,14 +295,17 @@ resolve_routing() {
   # Try provenant first if available
   if command -v provenant >/dev/null 2>&1; then
     cmd=(provenant route resolve "${route_args[@]}")
-    "${cmd[@]}" 2>>"$diag_file"
+    if [ -n "$product_root" ]; then
+      AGENT_FABRIC_PRODUCT_ROOT="$product_root" "${cmd[@]}" 2>>"$diag_file"
+    else
+      "${cmd[@]}" 2>>"$diag_file"
+    fi
     return $?
   fi
 
   # Fall back to scripts/model_route.py from product root
   # Locate product root via git if possible, else try relative to this script
-  local product_root
-  if product_root="$(cd "$SCRIPT_DIR" && git rev-parse --show-toplevel 2>/dev/null)"; then
+  if [ -n "$product_root" ]; then
     if [ -f "$product_root/scripts/model_route.py" ]; then
       cmd=(python3 "$product_root/scripts/model_route.py" "resolve" "${route_args[@]}")
       AGENT_FABRIC_PRODUCT_ROOT="$product_root" "${cmd[@]}" 2>>"$diag_file"
@@ -426,7 +467,7 @@ run_one() {  # $1 tool $2 model $3 effort -> writes clean answer to OUT, echoes 
             status="tool_not_found"
             rc=127
           else
-            codex exec -s read-only --ignore-user-config --ignore-rules --ephemeral ${model:+-m "$model"} \
+            codex exec -s read-only --ignore-user-config --ignore-rules --ephemeral -c service_tier="default" ${model:+-m "$model"} \
               ${effort:+-c model_reasoning_effort="$effort"} \
               - <"$PROMPT_TMP" >"$raw" 2>"$diag"; rc=$?
           fi ;;
@@ -440,7 +481,11 @@ run_one() {  # $1 tool $2 model $3 effort -> writes clean answer to OUT, echoes 
               ${model:+--model "$model"} "$(cat "$PROMPT_TMP")" </dev/null >"$raw" 2>"$diag"; rc=$?
           fi ;;
         agy)
-          guarantee="enforced"
+          # agy --sandbox does not enforce read-only writes. On agy 1.1.10 a
+          # write probe under these dispatcher flags returned SUCCESS and
+          # created the file; --mode plan did the same, so only the prompt
+          # discourages mutation.
+          guarantee="prompt_only"
           if ! require_cmd agy "$diag"; then
             status="tool_not_found"
             rc=127

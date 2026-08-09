@@ -77,17 +77,26 @@ def main(argv: list[str] | None = None) -> int:
             cwd=Path.cwd(),
             timeout_seconds=10,
             output_limit_bytes=1_048_576,
+            merge_stderr=False,
         )
+        stderr = (result.stderr or "").strip()
         if result.timed_out:
-            raise ValueError("codex debug models timed out")
+            detail = f": {stderr}" if stderr else ""
+            raise ValueError(f"codex debug models timed out{detail}")
         if result.returncode != 0:
+            detail = f": {stderr}" if stderr else ""
             raise ValueError(
-                f"codex debug models exited {result.returncode}: {result.output.strip()}"
+                f"codex debug models exited {result.returncode}{detail}"
             )
-        snapshot = normalize(load_json(result.output))
+        snapshot = normalize(load_json(result.stdout))
     except (OSError, json.JSONDecodeError, ValueError) as exc:
         print(f"capability discovery failed: {exc}", file=sys.stderr)
         return 1
+    if stderr:
+        # A successful run that still said something on stderr is not a failure:
+        # rejecting it is what took the adapter offline for one warning line. Keep
+        # it visible so the dispatcher's diagnostics record it rather than losing it.
+        print(f"codex debug models warned: {stderr}", file=sys.stderr)
     encoded = json.dumps(snapshot, indent=2, sort_keys=True) + "\n"
     if args.out:
         args.out.write_text(encoded)

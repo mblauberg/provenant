@@ -44,10 +44,9 @@ adapters:
     model_family_constraints:
       allowed:
         - openai
-      # The installed Codex account is a ChatGPT subscription: the runtime
-      # rejects explicit model ids (HTTP 400) and requires the account's
-      # default model, so Codex dispatch omits the model id (#190).
-      requires_explicit_model: false
+      # codex-cli 0.146.0 accepts explicit model ids on a ChatGPT subscription
+      # account, verified 2026-08-09.
+      requires_explicit_model: true
     official_source_url: "https://github.com/openai/codex"
 
   herdr:

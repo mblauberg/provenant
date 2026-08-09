@@ -230,19 +230,19 @@ def test_review_topology_rejects_invalid_concurrency_ceiling():
     assert any("observed wave" in error for error in run_dir_finalize._validate_review_plan(plan))
 
 
-def test_review_topology_binds_account_default_route_and_review_evidence(tmp_path):
+def test_review_topology_binds_explicit_codex_route_and_review_evidence(tmp_path):
     evidence = tmp_path / "review.md"
     evidence.write_text("review output")
     route = tmp_path / "route.json"
     route.write_text(json.dumps({
         "adapter": "codex", "adapter_gate": "direct-cli",
-        "resolved_model": "", "catalog_model": "gpt-5.6-sol",
-        "model_family": "openai", "model_selection": "account-default",
-        "status": "ok", "route_alias": "flagship", "reviewer_id": "account-default",
+        "resolved_model": "gpt-5.6-sol", "catalog_model": "",
+        "model_family": "openai",
+        "status": "ok", "route_alias": "flagship", "reviewer_id": "codex-primary",
     }))
-    row = review("account-default", "targeted", "correctness", "openai")
+    row = review("codex-primary", "targeted", "correctness", "openai")
     row.update({
-        "model": "", "catalog_model": "gpt-5.6-sol",
+        "model": "gpt-5.6-sol", "catalog_model": "",
         "evidence": {"path": evidence.name, "digest": "sha256:" + __import__("hashlib").sha256(evidence.read_bytes()).hexdigest()},
         "route_receipt": {"path": route.name, "digest": "sha256:" + __import__("hashlib").sha256(route.read_bytes()).hexdigest()},
     })

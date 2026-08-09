@@ -6,10 +6,11 @@ effort already baked into the suffix, for example `gemini-3.1-pro-high`. The
 bare family id is not dispatchable on its own: `agy --model gemini-3.1-pro`
 exits 1 with "requires --effort (available: low, high)".
 
-Efforts are per model rather than global. Measured on agy 1.1.10, gemini-3.1-pro
-offers only low and high, while the flash families offer low, medium and high.
-The CLI's own --help advertises a blanket low|medium|high and is wrong, so the
-runtime list is the only trustworthy source.
+Efforts are per model rather than global. Measured on agy 1.1.10 and re-verified
+on agy 1.1.11 on 2026-08-09, gemini-3.1-pro offers only low and high, while the
+flash families offer low, medium and high. The CLI's own --help still advertises
+a blanket low|medium|high and is wrong, so the runtime list is the only
+trustworthy source.
 
 This snapshot therefore keys on the family id and records the efforts that
 family actually offers, which is the shape the route resolver consumes for
@@ -93,17 +94,25 @@ def main(argv: list[str] | None = None) -> int:
             cwd=Path.cwd(),
             timeout_seconds=60,
             output_limit_bytes=1_048_576,
+            merge_stderr=False,
         )
+        stderr = (result.stderr or "").strip()
         if result.timed_out:
-            raise ValueError("agy models timed out")
+            detail = f": {stderr}" if stderr else ""
+            raise ValueError(f"agy models timed out{detail}")
         if result.returncode != 0:
+            detail = f": {stderr}" if stderr else ""
             raise ValueError(
-                f"agy models exited {result.returncode}: {result.output.strip()}"
+                f"agy models exited {result.returncode}{detail}"
             )
-        snapshot = normalize(result.output)
+        snapshot = normalize(result.stdout)
     except (OSError, ValueError) as exc:
         print(f"capability discovery failed: {exc}", file=sys.stderr)
         return 1
+    if stderr:
+        # Not a failure. Kept visible so a warning that used to be silently parsed
+        # as a phantom model id is still recorded somewhere a caller can read it.
+        print(f"agy models warned: {stderr}", file=sys.stderr)
     encoded = json.dumps(snapshot, indent=2, sort_keys=True) + "\n"
     if args.out:
         args.out.write_text(encoded)

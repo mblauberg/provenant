@@ -19,6 +19,12 @@ WORKFLOW_NAMES = {
     "cross-verify.js",
     "implement-run.js",
 }
+AGENT_NAMES = {
+    "agy-reviewer.md",
+    "agy-stylist.md",
+    "codex-analyst.md",
+    "codex-implementer.md",
+}
 UNMANAGED_WORKFLOW_BYTES = (
     b"export const meta = { name: 'mine' };\r\n"
     b"// User-owned workflow with no trailing newline"
@@ -208,6 +214,18 @@ def test_installs_claude_skills_and_global_instructions_idempotently(tmp_path):
         (config / ".agent-harness-workflows-installation.json").read_text()
     )
     assert set(workflow_manifest["managed"]) == WORKFLOW_NAMES
+    agents = config / "agents"
+    assert {path.name for path in agents.iterdir()} == AGENT_NAMES
+    agent_manifest_path = config / ".agent-harness-agents-installation.json"
+    agent_manifest_before = agent_manifest_path.read_bytes()
+    agent_manifest = json.loads(agent_manifest_before)
+    assert set(agent_manifest["managed"]) == AGENT_NAMES
+    for name in AGENT_NAMES:
+        installed = agents / name
+        source = ROOT / "agents" / name
+        assert installed.is_symlink()
+        assert installed.resolve() == source
+        assert installed.read_bytes() == source.read_bytes()
     instructions = config / "CLAUDE.md"
     content = instructions.read_text()
     # Doctrine is read from the seeded instance copy; the harness constitution
@@ -231,6 +249,11 @@ def test_installs_claude_skills_and_global_instructions_idempotently(tmp_path):
     )
     assert second.returncode == 0, second.stderr
     assert f"instructions existing={instructions}" in second.stdout
+    assert agent_manifest_path.read_bytes() == agent_manifest_before
+    assert all(
+        (agents / name).read_bytes() == (ROOT / "agents" / name).read_bytes()
+        for name in AGENT_NAMES
+    )
 
 
 def test_installs_codex_skills_and_global_instructions(tmp_path):
@@ -262,6 +285,25 @@ def test_installs_codex_skills_and_global_instructions(tmp_path):
     second = run("codex", tmp_path, CODEX_HOME=str(config))
     assert second.returncode == 0, second.stderr
     assert codex_config.read_text() == configured
+
+
+def test_claude_subagent_conflict_fails_before_harness_mutation(tmp_path):
+    config = tmp_path / "claude-config"
+    agents = config / "agents"
+    agents.mkdir(parents=True)
+    unmanaged = agents / "codex-analyst.md"
+    original = b"# User-owned definition\n"
+    unmanaged.write_bytes(original)
+
+    result = run("claude", tmp_path, CLAUDE_CONFIG_DIR=str(config))
+
+    assert result.returncode == 3
+    assert "conflicting agent targets" in result.stderr
+    assert unmanaged.read_bytes() == original
+    assert not unmanaged.is_symlink()
+    assert not (config / "skills").exists()
+    assert not (config / "workflows").exists()
+    assert not (config / ".agent-harness-workflows-installation.json").exists()
 
 
 def test_codex_install_projects_instance_custom_skill_without_managed_ownership(

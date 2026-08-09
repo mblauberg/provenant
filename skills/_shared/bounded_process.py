@@ -1,14 +1,16 @@
-"""Bounded POSIX child-process execution with merged file-backed output.
+"""Bounded POSIX child-process execution with file-backed output in two modes.
 
 The direct child owns a new session and process group. Descendants that leave
 that group with ``setsid()`` are outside this helper's containment contract.
-Output is merged in operating-system write order and spooled to disk before a
-bounded head-and-tail view is retained in memory.
+Merged output is spooled in operating-system write order before a bounded
+head-and-tail view is retained in memory. Separated mode spools stdout and
+stderr independently, so their cross-stream order is not available.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from contextlib import ExitStack
 from dataclasses import dataclass
 import os
 import signal
@@ -32,6 +34,12 @@ class BoundedProcessResult:
     output_truncated: bool
     timed_out: bool
     elapsed_seconds: float
+    stdout: str | None = None
+    stderr: str | None = None
+    stdout_bytes: int | None = None
+    stderr_bytes: int | None = None
+    stdout_truncated: bool | None = None
+    stderr_truncated: bool | None = None
 
     @property
     def terminating_signal(self) -> int | None:
@@ -117,16 +125,31 @@ def run_bounded(
     timeout_seconds: float,
     env: Mapping[str, str] | None = None,
     output_limit_bytes: int = 1_048_576,
+    merge_stderr: bool = True,
 ) -> BoundedProcessResult:
-    """Run one process group and return merged output without pipe deadlocks."""
+    """Run one process group without pipe deadlocks.
+
+    By default, ``output`` is the merged stdout and stderr view in operating-
+    system write order, as captured by the existing file-backed mode. With
+    ``merge_stderr=False``, ``stdout`` and ``stderr`` are independent bounded
+    views, and ``output`` is an alias for ``stdout`` because merge order cannot
+    be reconstructed from the two spools. The separated per-stream byte and
+    truncation fields are populated only in that mode.
+    """
 
     started = time.monotonic()
-    with tempfile.TemporaryFile(mode="w+b") as output_file:
+    with ExitStack() as stack:
+        stdout_file = stack.enter_context(tempfile.TemporaryFile(mode="w+b"))
+        stderr_file = (
+            None
+            if merge_stderr
+            else stack.enter_context(tempfile.TemporaryFile(mode="w+b"))
+        )
         process = subprocess.Popen(
             list(command),
             cwd=cwd,
-            stdout=output_file,
-            stderr=subprocess.STDOUT,
+            stdout=stdout_file,
+            stderr=subprocess.STDOUT if merge_stderr else stderr_file,
             env=dict(env) if env is not None else None,
             start_new_session=True,
         )
@@ -138,9 +161,20 @@ def run_bounded(
                 timed_out = True
         finally:
             _stop_process_group(process)
-        output, output_bytes, truncated = _read_bounded_output(
-            output_file, output_limit_bytes
-        )
+        output, output_bytes, truncated = _read_bounded_output(stdout_file, output_limit_bytes)
+        if merge_stderr:
+            stdout = stderr = None
+            stdout_bytes = stderr_bytes = None
+            stdout_truncated = stderr_truncated = None
+        else:
+            if stderr_file is None:  # pragma: no cover - branch follows merge_stderr
+                raise RuntimeError("separated bounded process has no stderr spool")
+            stdout = output
+            stdout_bytes = output_bytes
+            stdout_truncated = truncated
+            stderr, stderr_bytes, stderr_truncated = _read_bounded_output(
+                stderr_file, output_limit_bytes
+            )
 
     if process.returncode is None:  # pragma: no cover - wait contract guard
         raise RuntimeError("bounded process was not reaped")
@@ -151,4 +185,10 @@ def run_bounded(
         output_truncated=truncated,
         timed_out=timed_out,
         elapsed_seconds=time.monotonic() - started,
+        stdout=stdout,
+        stderr=stderr,
+        stdout_bytes=stdout_bytes,
+        stderr_bytes=stderr_bytes,
+        stdout_truncated=stdout_truncated,
+        stderr_truncated=stderr_truncated,
     )
