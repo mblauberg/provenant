@@ -38,9 +38,12 @@ project uses them. Do not assume a custom agent exists; discover current tools a
 - Use `codex exec -s read-only --ephemeral` as a noninteractive verifier only when the orchestrator is
   another family.
 - Under `-s read-only`, a synthesis written via `apply_patch` is rejected. Analysis and report
-  workers use `-o <path>` to persist the final message directly outside the sandbox. A
-  `codex exec` run that outlives its foreground window is recovered by waiting on the detached
-  PID (`worker-liveness.md`), never by relaunching beside it.
+  workers use `-o <path>` to persist the final message directly outside the sandbox. Because
+  `-o` saves the final message and nothing else, a brief that demotes that message to a
+  pointer or a completion note destroys the work even when no write is rejected. Say both
+  halves: forbid `apply_patch` and any file write, and require the full report in the final
+  message. A `codex exec` run that outlives its foreground window is recovered by waiting on
+  the detached PID (`worker-liveness.md`), never by relaunching beside it.
 - For many slices, dispatch native subagents in adaptive waves and keep full outputs in run-dir files.
   After each reduce step, decide whether to widen, narrow, repair, verify, document, or stop.
 - For orchestrated work, run cross-family reviewers alongside native subagents when data policy and
