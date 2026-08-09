@@ -4,10 +4,12 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
 import re
+import selectors
 import subprocess
 import sys
 from typing import Sequence
@@ -16,6 +18,13 @@ from typing import Sequence
 SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 COMMIT_SHA = re.compile(r"^[0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?$")
 IGNORE_RULE = "/.worktrees/"
+MAX_DIAGNOSTIC_BYTES = 8192
+AUTHENTICATED_URL = re.compile(r"(?i)(https?://)([^/\s:@]*(?::[^@\s/]*)?@)")
+PARTIAL_CREDENTIAL_URL = re.compile(r"(?i)(https?://)([^/\s:@]*:[^/\s@]*)(?=[/\s]|$)")
+PARTIAL_AUTHENTICATED_URL = re.compile(r"(?i)(https?://)[^/\s]*$")
+PORCELAIN_FLAG_FIELDS = {"bare", "detached"}
+PORCELAIN_REQUIRED_VALUE_FIELDS = {"worktree", "HEAD", "branch"}
+PORCELAIN_OPTIONAL_VALUE_FIELDS = {"locked", "prunable"}
 ALLOWED_GENERATED_IGNORED_PREFIXES = (
     ".agent-fabric/",
     ".agent-run/",
@@ -24,6 +33,21 @@ ALLOWED_GENERATED_IGNORED_PREFIXES = (
     ".venv/",
     "node_modules/",
 )
+TRUSTED_TOOL_DIRECTORIES = (
+    "/opt/homebrew/bin", "/opt/homebrew/sbin", "/usr/local/bin",
+    "/usr/local/sbin", "/opt/local/bin", "/usr/bin", "/bin",
+    "/usr/sbin", "/sbin",
+)
+SENSITIVE_ENVIRONMENT_KEYS = (
+    "npm_config_registry",
+    "npm_config_proxy",
+    "npm_config_http_proxy",
+    "npm_config_https_proxy",
+    "NPM_CONFIG_REGISTRY",
+    "NPM_CONFIG_PROXY",
+    "NPM_CONFIG_HTTP_PROXY",
+    "NPM_CONFIG_HTTPS_PROXY",
+)
 
 
 class PolicyError(RuntimeError):
@@ -31,13 +55,160 @@ class PolicyError(RuntimeError):
 
 
 def git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
-    result = subprocess.run(
-        ["git", "-C", str(repo), *args], text=True,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
-    )
+    result, _ = _run_git(repo, *args)
     if check and result.returncode != 0:
         raise PolicyError(result.stderr.strip() or f"git {' '.join(args)} failed")
     return result
+
+
+def trusted_tool_path() -> str:
+    return os.pathsep.join(TRUSTED_TOOL_DIRECTORIES)
+
+
+def git_environment() -> dict[str, str]:
+    return {
+        "PATH": trusted_tool_path(),
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_TERMINAL_PROMPT": "0",
+    }
+
+
+def _drain_process(
+    process: subprocess.Popen[bytes],
+    *,
+    stdout_limit: int = MAX_DIAGNOSTIC_BYTES,
+    stderr_limit: int = MAX_DIAGNOSTIC_BYTES,
+) -> dict[str, dict[str, object]]:
+    selector = selectors.DefaultSelector()
+    captures: dict[str, dict[str, object]] = {}
+    for label, stream, limit in (
+        ("stdout", process.stdout, stdout_limit),
+        ("stderr", process.stderr, stderr_limit),
+    ):
+        assert stream is not None
+        captures[label] = {
+            "buffer": bytearray(),
+            "size": 0,
+            "digest": hashlib.sha256(),
+            "limit": limit,
+        }
+        selector.register(stream, selectors.EVENT_READ, label)
+    while selector.get_map():
+        for key, _ in selector.select():
+            chunk = os.read(key.fd, 8192)
+            if not chunk:
+                selector.unregister(key.fileobj)
+                continue
+            capture = captures[key.data]
+            capture["digest"].update(chunk)
+            capture["size"] += len(chunk)
+            limit = capture["limit"]
+            if limit is None:
+                capture["buffer"].extend(chunk)
+            else:
+                capture["buffer"].extend(chunk[:max(0, limit - len(capture["buffer"]))])
+    selector.close()
+    process.wait()
+    return captures
+
+
+def diagnostic_redaction_values() -> list[str]:
+    return sorted(
+        {
+            value
+            for key in SENSITIVE_ENVIRONMENT_KEYS
+            if (value := os.environ.get(key))
+        },
+        key=len,
+        reverse=True,
+    )
+
+
+def redact_diagnostic(value: object) -> str:
+    message = str(value)
+    secrets = diagnostic_redaction_values()
+    if secrets:
+        pattern = re.compile("|".join(re.escape(secret) for secret in secrets))
+        message = pattern.sub("[REDACTED]", message)
+    message = AUTHENTICATED_URL.sub(r"\1[REDACTED]@", message)
+    return PARTIAL_CREDENTIAL_URL.sub(r"\1[REDACTED]", message)
+
+
+def bounded_diagnostic(value: object) -> str:
+    message = redact_diagnostic(value)
+    encoded = message.encode("utf-8", errors="replace")
+    marker = b"\n[truncated]"
+    if len(encoded) <= MAX_DIAGNOSTIC_BYTES:
+        return message
+    prefix_size = max(0, MAX_DIAGNOSTIC_BYTES - len(marker))
+    prefix = encoded[:prefix_size].decode("utf-8", errors="ignore")
+    return prefix + marker.decode()
+
+
+def _capture_text(capture: dict[str, object], *, bounded: bool = True) -> str:
+    value = bytes(capture["buffer"])
+    raw_truncated = capture["size"] > len(value)
+    capture_limit = capture.get("limit")
+    at_capture_boundary = isinstance(capture_limit, int) and len(value) >= capture_limit
+    if at_capture_boundary:
+        redaction_size = 0
+        for secret in diagnostic_redaction_values():
+            encoded_secret = secret.encode(errors="surrogateescape")
+            for size in range(min(len(encoded_secret), len(value)), 0, -1):
+                if value.endswith(encoded_secret[:size]):
+                    redaction_size = max(redaction_size, size)
+                    break
+        if redaction_size:
+            value = value[:-redaction_size] + b"[REDACTED]"
+    message = "".join(
+        "\ufffd" if 0xDC80 <= ord(character) <= 0xDCFF else character
+        for character in redact_diagnostic(value.decode(errors="surrogateescape"))
+    )
+    if at_capture_boundary:
+        message = PARTIAL_AUTHENTICATED_URL.sub(r"\1[REDACTED]", message)
+    if raw_truncated or len(message.encode("utf-8", errors="replace")) > MAX_DIAGNOSTIC_BYTES:
+        marker = (
+            f"\n[truncated; bytes={capture['size']}; "
+            f"sha256={capture['digest'].hexdigest()}]"
+        )
+        if bounded:
+            marker_size = len(marker.encode("utf-8"))
+            prefix_size = max(0, MAX_DIAGNOSTIC_BYTES - marker_size)
+            prefix = message.encode("utf-8", errors="replace")[:prefix_size]
+            return prefix.decode("utf-8", errors="ignore") + marker
+        message += marker
+    return bounded_diagnostic(message) if bounded else message
+
+
+def _run_git(
+    repo: Path,
+    *args: str,
+    stdout_limit: int | None = MAX_DIAGNOSTIC_BYTES,
+    stderr_limit: int | None = MAX_DIAGNOSTIC_BYTES,
+) -> tuple[subprocess.CompletedProcess[str], dict[str, dict[str, object]]]:
+    command = ["git", "-C", str(repo), *args]
+    try:
+        process = subprocess.Popen(
+            command,
+            env=git_environment(),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except OSError as exc:
+        raise PolicyError(f"could not launch git: {exc}") from exc
+    captures = _drain_process(
+        process,
+        stdout_limit=stdout_limit,
+        stderr_limit=stderr_limit,
+    )
+    return subprocess.CompletedProcess(
+        command,
+        process.returncode,
+        _capture_text(captures["stdout"]),
+        _capture_text(captures["stderr"]),
+    ), captures
 
 
 def owning_root(repo: Path) -> Path:
@@ -46,25 +217,68 @@ def owning_root(repo: Path) -> Path:
 
 
 def worktree_records(repo: Path) -> list[dict[str, object]]:
-    raw = subprocess.run(
-        ["git", "-C", str(repo), "worktree", "list", "--porcelain", "-z"],
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+    result, captures = _run_git(
+        repo,
+        "worktree",
+        "list",
+        "--porcelain",
+        "-z",
+        stdout_limit=None,
     )
-    if raw.returncode != 0:
-        raise PolicyError(raw.stderr.decode(errors="replace").strip() or "git worktree list failed")
+    if result.returncode != 0:
+        raise PolicyError(
+            _capture_text(captures["stderr"]).strip() or "git worktree list failed"
+        )
+    raw = bytes(captures["stdout"]["buffer"])
+    if not raw.endswith(b"\0\0"):
+        raise PolicyError("git worktree list output was incomplete")
+
+    def malformed(reason: str) -> None:
+        raise PolicyError(f"git worktree list output was malformed: {reason}")
+
     records: list[dict[str, object]] = []
     current: dict[str, object] = {}
-    for field in raw.stdout.split(b"\0"):
+    known_fields = (
+        PORCELAIN_FLAG_FIELDS
+        | PORCELAIN_REQUIRED_VALUE_FIELDS
+        | PORCELAIN_OPTIONAL_VALUE_FIELDS
+    )
+
+    def append_record() -> None:
+        nonlocal current
+        if not current:
+            malformed("empty record")
+        if "worktree" not in current:
+            malformed("record has no worktree path")
+        if current.get("bare") is True:
+            if any(field in current for field in ("HEAD", "branch", "detached")):
+                malformed("bare record has checkout state")
+        elif "HEAD" not in current:
+            malformed("record has no HEAD")
+        elif ("branch" in current) == ("detached" in current):
+            malformed("record needs exactly one branch or detached state")
+        records.append(current)
+        current = {}
+
+    for field in raw[:-2].split(b"\0"):
         if not field:
-            if current:
-                records.append(current)
-                current = {}
+            append_record()
             continue
-        key, _, value = field.partition(b" ")
+        key, separator, value = field.partition(b" ")
         name = key.decode(errors="replace")
+        if name not in known_fields:
+            malformed(f"unknown field {name!r}")
+        if name in current:
+            malformed(f"duplicate field {name!r}")
+        if name in PORCELAIN_FLAG_FIELDS and separator:
+            malformed(f"flag field {name!r} has a value")
+        if name in PORCELAIN_REQUIRED_VALUE_FIELDS and (not separator or not value):
+            malformed(f"value field {name!r} has no value")
         current[name] = value.decode(errors="surrogateescape") if value else True
     if current:
-        records.append(current)
+        append_record()
+    if not records:
+        malformed("no worktree records")
     return records
 
 
