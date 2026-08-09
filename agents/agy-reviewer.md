@@ -47,9 +47,11 @@ read of the same diff.
 Agy holds its own `agy` Agent Fabric seat, so a Gemini finding is recorded against the Google
 family rather than borrowing another provider's identity. Fabric carries the coordination and
 the record; this dispatch is the call itself. The dispatcher records this route as `prompt_only`,
-because agy is not sandboxed against writes. It remains a genuine independent opinion, but is not
-certification eligible. You do not need to bootstrap, request or verify the seat before reviewing,
-and a missing seat does not block a review.
+not `enforced`, because `--sandbox` is not a read-only guarantee: agy is not sandboxed against
+writes (agy 1.1.11, checked 2026-08-09). Treat the route as prompt-only and verify the tree or
+output file rather than the status. It remains a genuine independent opinion,
+but is not certification eligible. You do not need to bootstrap, request or verify the seat before
+reviewing, and a missing seat does not block a review.
 
 ## Procedure
 
@@ -68,6 +70,14 @@ file at `${TMPDIR:-/tmp}/agy-<slug>-prompt.txt` containing:
 under that directory, with no allow-rule needed, so point it at paths rather
 than pasting a huge diff inline. Path globs in `permissions.allow` do not
 work; `--add-dir` is the mechanism.
+
+Use a Gemini model only. On 2026-08-09, agy 1.1.11 listed
+`gemini-3.6-flash-{high,medium,low}`, `gemini-3.5-flash-{high,medium,low}` and
+`gemini-3.1-pro-{high,low}`, plus non-Gemini models. Never select a Claude,
+GPT or other non-Gemini identifier for this cross-family review. In the
+dispatcher example below, `gemini-3.6-flash` is the harness routing alias and
+`--effort medium` is passed separately. A raw agy call must use the
+effort-suffixed identifier returned by `agy models`.
 
 What headless mode cannot do is prompt for permission, so any tool it has not
 been granted is auto-denied, and **one denied call discards the entire turn**,
@@ -120,7 +130,9 @@ reports a denied tool as a success: it exits **0** and prints
 `{"status":"SUCCESS","response":""}` with the only honest signal on stderr. A
 hand-rolled `agy ... > out.txt 2>&1` therefore produces a non-empty file, a
 zero exit status, and no review, which is indistinguishable from a real one
-until someone acts on it.
+until someone acts on it. The adapter's evaluation test pins that shape. Exit 0
+never proves the work happened: read the dispatcher's `status`, then verify the
+tree or output file. A non-empty diagnostic is not a review.
 
 **Read the `status` field of the JSON record, never the output file's size.**
 On any non-`ok` status the output path holds the diagnostic, not a review. A

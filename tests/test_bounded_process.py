@@ -18,6 +18,85 @@ from skills._shared.bounded_process import run_bounded
 SPAWN_SAFE_TIMEOUT = 5.0
 
 
+def test_separated_mode_keeps_stdout_and_stderr_apart(tmp_path):
+    code = "import sys; sys.stdout.write('STDOUT'); sys.stderr.write('STDERR')"
+
+    result = run_bounded(
+        [sys.executable, "-c", code],
+        cwd=tmp_path,
+        timeout_seconds=2,
+        merge_stderr=False,
+    )
+
+    assert result.output == "STDOUT"
+    assert result.stdout == "STDOUT"
+    assert result.stderr == "STDERR"
+    assert result.stdout_bytes == len("STDOUT")
+    assert result.stderr_bytes == len("STDERR")
+    assert result.stdout_truncated is False
+    assert result.stderr_truncated is False
+
+
+def test_merged_mode_retains_operating_system_write_order(tmp_path):
+    code = "import os; os.write(1, b'OUT'); os.write(2, b'ERR')"
+
+    result = run_bounded(
+        [sys.executable, "-c", code],
+        cwd=tmp_path,
+        timeout_seconds=2,
+    )
+
+    assert result.output == "OUTERR"
+    assert result.output_bytes == len("OUTERR")
+    assert result.output_truncated is False
+    assert result.stdout is None
+    assert result.stderr is None
+
+
+def test_separated_mode_bounds_each_stream_independently(tmp_path):
+    code = (
+        "import os; "
+        "os.write(1, b'STDOUT-HEAD-' + b'x' * 4096 + b'-STDOUT-TAIL'); "
+        "os.write(2, b'STDERR-HEAD-' + b'y' * 4096 + b'-STDERR-TAIL')"
+    )
+
+    result = run_bounded(
+        [sys.executable, "-c", code],
+        cwd=tmp_path,
+        timeout_seconds=2,
+        output_limit_bytes=128,
+        merge_stderr=False,
+    )
+
+    assert result.stdout_bytes > 128
+    assert result.stderr_bytes > 128
+    assert result.stdout_truncated is True
+    assert result.stderr_truncated is True
+    assert len(result.stdout.encode()) <= 128
+    assert len(result.stderr.encode()) <= 128
+    assert result.stdout.startswith("STDOUT-HEAD-")
+    assert result.stdout.endswith("-STDOUT-TAIL")
+    assert result.stderr.startswith("STDERR-HEAD-")
+    assert result.stderr.endswith("-STDERR-TAIL")
+
+
+def test_separated_mode_handles_child_that_writes_only_stderr(tmp_path):
+    code = "import os; os.write(2, b'STDERR-ONLY')"
+
+    result = run_bounded(
+        [sys.executable, "-c", code],
+        cwd=tmp_path,
+        timeout_seconds=2,
+        merge_stderr=False,
+    )
+
+    assert result.output == ""
+    assert result.stdout == ""
+    assert result.stderr == "STDERR-ONLY"
+    assert result.stdout_bytes == 0
+    assert result.stderr_bytes == len("STDERR-ONLY")
+
+
 def _assert_process_gone(process_id: int) -> None:
     deadline = time.monotonic() + 5
     while time.monotonic() < deadline:

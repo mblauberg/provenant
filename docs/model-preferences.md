@@ -42,13 +42,18 @@ which makes Luna at `high` or `xhigh` the best value in the family for
 high-token work; go to `max` when a leg genuinely deserves it. `gpt-5.6-terra`
 stays admissible but is no longer the preferred default.
 
-That is the old standing wish made real by the price cut, and the mechanical
-caveat that blocked it still holds: effort is fixed per task class, so ordering
-Luna first in the catalogue array would buy Luna at *medium*, a downgrade
-rather than the trade intended. The catalogue order is therefore left alone on
-purpose. Ask for Luna and the raised effort explicitly at dispatch, and record
-the pair in the receipt. A cheap model with the effort dial up beats a dearer
-model at medium.
+That is the old standing wish made real by the price cut. The mechanical caveat
+that used to block it was that effort is fixed per task class, so ordering Luna
+first in the catalogue array on its own would have bought Luna at *medium*, a
+downgrade rather than the trade intended, and the array was left alone for that
+reason. Both halves now move together: `openai.aliases.workhorse` lists Luna
+first, and `openai.role_effort_defaults.worker.workhorse` raises the effort to
+`high`, which outranks the `legwork` task class default of `medium`. The raise
+is scoped to the OpenAI family on purpose, so Anthropic and Google workhorse
+routes stay at `medium` rather than inheriting a cost rise nobody asked for.
+Reach for `xhigh` or `max` explicitly when a leg deserves it, and record the
+model and effort pair in the receipt. A cheap model with the effort dial up
+beats a dearer model at medium.
 
 **`gpt-5.6-sol` stays the OpenAI flagship, reserved for critical and
 high-stakes slices.** Give it the work that is genuinely hard or where a miss
