@@ -30,6 +30,10 @@ under `~/.claude/agents/`.
   `FABRIC-ROUNDTRIP-UNAVAILABLE` and collect an artifact.
 - Record worker cwd; never assume repository.
 - **Workers write full output to files**; return a digest/path.
+- **A worker's report is a claim, not evidence.** Confirm claimed commits in
+  `git log`, claimed counts against its own transcript, and re-run any failure
+  it calls environmental. Lanes routinely report a clean result their own
+  output contradicts.
 - **Liveness: size proves nothing.** Compare CPU and session-log mtime; see
   `worker-liveness.md`. A detached task is not dead: check the PID before
   reusing a worktree.
