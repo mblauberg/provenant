@@ -35,14 +35,18 @@ def run_json(command: list[str], timeout: int) -> Any:
         cwd=Path.cwd(),
         timeout_seconds=timeout,
         output_limit_bytes=1_048_576,
+        merge_stderr=False,
     )
+    stderr = (result.stderr or "").strip()
     if result.timed_out:
-        raise ValueError(f"command timed out after {timeout} seconds")
+        detail = f": {stderr}" if stderr else ""
+        raise ValueError(f"command timed out after {timeout} seconds{detail}")
     if result.returncode != 0:
-        raise ValueError(f"command exited {result.returncode}")
-    if "Warning: Unknown --effort value" in result.output:
+        detail = f": {stderr}" if stderr else ""
+        raise ValueError(f"command exited {result.returncode}{detail}")
+    if "Warning: Unknown --effort value" in stderr:
         raise ValueError("Claude CLI rejected the requested effort")
-    return load_json(result.output)
+    return load_json(result.stdout)
 
 
 def discover(claude_bin: str, alias: str, effort: str) -> dict[str, Any]:
