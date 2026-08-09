@@ -507,3 +507,38 @@ def test_git_launcher_oserror_is_reported_as_policy_error(tmp_path, monkeypatch)
 
     with pytest.raises(worktree_policy.PolicyError, match="could not launch git"):
         worktree_policy.git(tmp_path, "status")
+
+
+def test_git_is_found_outside_the_fallback_install_roots(tmp_path, monkeypatch):
+    """A git installed by nix, asdf or a custom prefix must still be found.
+
+    Pinning lookup to a fixed directory list failed closed on install layouts it
+    did not anticipate, which docs/ASRS.md treats as a reliability regression
+    rather than a safety feature.
+    """
+    custom_root = tmp_path / "nix" / "store" / "git" / "bin"
+    custom_root.mkdir(parents=True)
+    shim = custom_root / "git"
+    shim.write_text("#!/bin/sh\nexit 0\n")
+    shim.chmod(0o755)
+
+    monkeypatch.setenv("PATH", str(custom_root))
+
+    assert worktree_policy.git_executable() == str(shim)
+    assert worktree_policy.git_environment()["PATH"] == str(custom_root)
+
+
+def test_git_falls_back_to_usual_install_roots_when_path_is_empty(monkeypatch):
+    monkeypatch.setenv("PATH", "")
+
+    resolved = worktree_policy.git_executable()
+
+    assert resolved.endswith("/git")
+    assert worktree_policy.git_environment()["PATH"] == worktree_policy.fallback_tool_path()
+
+
+def test_git_environment_keeps_porcelain_parsing_deterministic():
+    environment = worktree_policy.git_environment()
+
+    assert environment["GIT_CONFIG_NOSYSTEM"] == "1"
+    assert environment["GIT_TERMINAL_PROMPT"] == "0"

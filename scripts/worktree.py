@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import re
 import selectors
+import shutil
 import subprocess
 import sys
 from typing import Sequence
@@ -33,7 +34,12 @@ ALLOWED_GENERATED_IGNORED_PREFIXES = (
     ".venv/",
     "node_modules/",
 )
-TRUSTED_TOOL_DIRECTORIES = (
+# Fallback install roots, used only when git is absent from the caller's PATH.
+# This is deliberately not an allowlist: restricting lookup to these directories
+# fails closed on a git installed by nix, asdf or a custom prefix, and the only
+# adversary it could exclude is the operator's own PATH on their own machine
+# (docs/ASRS.md, ADR 0021).
+FALLBACK_TOOL_DIRECTORIES = (
     "/opt/homebrew/bin", "/opt/homebrew/sbin", "/usr/local/bin",
     "/usr/local/sbin", "/opt/local/bin", "/usr/bin", "/bin",
     "/usr/sbin", "/sbin",
@@ -61,13 +67,33 @@ def git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProce
     return result
 
 
-def trusted_tool_path() -> str:
-    return os.pathsep.join(TRUSTED_TOOL_DIRECTORIES)
+def fallback_tool_path() -> str:
+    return os.pathsep.join(FALLBACK_TOOL_DIRECTORIES)
+
+
+def git_executable() -> str:
+    """Resolve git from the caller's PATH, then from the usual install roots.
+
+    Returning the bare name as a last resort keeps the failure inside git's own
+    launch error, which names the missing binary, rather than turning an
+    unrecognised install layout into a policy refusal the caller cannot act on.
+    """
+    return (
+        shutil.which("git")
+        or shutil.which("git", path=fallback_tool_path())
+        or "git"
+    )
 
 
 def git_environment() -> dict[str, str]:
+    """Child environment for git.
+
+    Config suppression keeps porcelain parsing deterministic against whatever
+    aliases and formatting the operator has set. PATH is inherited rather than
+    replaced, so git stays findable wherever it is installed.
+    """
     return {
-        "PATH": trusted_tool_path(),
+        "PATH": os.environ.get("PATH") or fallback_tool_path(),
         "GIT_CONFIG_NOSYSTEM": "1",
         "GIT_CONFIG_GLOBAL": os.devnull,
         "GIT_TERMINAL_PROMPT": "0",
@@ -187,7 +213,7 @@ def _run_git(
     stdout_limit: int | None = MAX_DIAGNOSTIC_BYTES,
     stderr_limit: int | None = MAX_DIAGNOSTIC_BYTES,
 ) -> tuple[subprocess.CompletedProcess[str], dict[str, dict[str, object]]]:
-    command = ["git", "-C", str(repo), *args]
+    command = [git_executable(), "-C", str(repo), *args]
     try:
         process = subprocess.Popen(
             command,
