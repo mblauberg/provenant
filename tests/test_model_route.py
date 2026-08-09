@@ -1769,7 +1769,11 @@ def test_catalog_and_compatibility_mismatch_fails_closed(
 
 
 def test_codex_aliases_supply_proportionate_default_effort(tmp_path):
-    expected = {"flagship": "high", "workhorse": "medium", "scout": "low"}
+    # Workhorse is deliberately not proportionate on OpenAI. Luna is cheap enough
+    # that the family raises worker+workhorse to high in role_effort_defaults, so
+    # the tier difference against flagship is the model, not the effort. See
+    # docs/model-preferences.md.
+    expected = {"flagship": "high", "workhorse": "high", "scout": "low"}
     snapshot = write_codex_capability_snapshot(tmp_path)
     for alias, effort in expected.items():
         result, route = resolve(
@@ -1784,7 +1788,10 @@ def test_codex_aliases_supply_proportionate_default_effort(tmp_path):
     ("task_class", "alias", "effort", "resolved_model"),
     (
         ("mechanical", "scout", "low", "gpt-5.6-luna"),
-        ("legwork", "workhorse", "medium", "gpt-5.6-luna"),
+        # Luna at high, not the task class default of medium: the OpenAI family
+        # raises worker+workhorse in role_effort_defaults, the same way
+        # critical-review and orchestration are raised below.
+        ("legwork", "workhorse", "high", "gpt-5.6-luna"),
         ("critical-review", "flagship", "max", "gpt-5.6-sol"),
         ("orchestration", "flagship", "ultra", "gpt-5.6-sol"),
     ),
@@ -2238,6 +2245,7 @@ def test_openai_catalog_declares_effort_policy_only():
         "lead": {"flagship": "ultra"},
         "orchestrator": {"flagship": "ultra"},
         "critical-review": {"flagship": "max"},
+        "worker": {"workhorse": "high"},
     }
     assert family["effort_fallback_order"] == ["max", "xhigh", "high", "medium", "low"]
 

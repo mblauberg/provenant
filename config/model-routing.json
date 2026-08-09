@@ -49,7 +49,8 @@
       "role_effort_defaults": {
         "lead": {"flagship": "ultra"},
         "orchestrator": {"flagship": "ultra"},
-        "critical-review": {"flagship": "max"}
+        "critical-review": {"flagship": "max"},
+        "worker": {"workhorse": "high"}
       },
       "ultra_eligible_roles": ["lead", "orchestrator"],
       "effort_fallback_order": ["max", "xhigh", "high", "medium", "low"]

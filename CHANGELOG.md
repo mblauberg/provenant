@@ -99,6 +99,16 @@ The current pre-release tree includes:
 
 ### Changed
 
+- Raised the OpenAI worker route from `medium` to `high` effort via
+  `openai.role_effort_defaults.worker.workhorse`, completing the Luna reorder.
+  Moving `gpt-5.6-luna` to the front of `aliases.workhorse` on its own bought
+  Luna at `medium`, which `docs/model-preferences.md` had already identified as
+  a downgrade rather than the intended trade, and was the stated reason the
+  array had been left alone. The raise is scoped to the OpenAI family rather
+  than applied to the `legwork` task class, so Anthropic and Google workhorse
+  routes stay at `medium` instead of inheriting an unasked-for cost rise. This
+  is the same mechanism the catalogue already uses to lift `critical-review` to
+  `max` and `orchestration` to `ultra`.
 - Raised `codex-implementer` from `haiku` to `sonnet`, keeping `effort: low`.
   The dispatcher builds sandbox flag sets, decides write scope, may provision a
   worktree, and must verify what landed in the tree rather than believing the

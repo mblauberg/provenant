@@ -46,9 +46,18 @@ dispatching, confirm the prompt file you just wrote still holds your content.
 its length. Do not ask it to write a report file from inside the sandbox. End the prompt with
 something close to:
 
+> You are in a read-only sandbox. Do NOT use `apply_patch` and do NOT write any file. A
+> rejected patch body is never echoed back, so attempting to write destroys your output.
 > Make your final message the complete report, at most 150 lines. The caller passes
 > `-o <REPORT_PATH>`, which saves that final message outside the sandbox. Put the findings in
 > your final message, not a one-line pointer.
+
+State the prohibition, not just the instruction. Measured on 2026-08-09: a dispatch that said
+only "write your final report to <path>, put the findings there, not in your final message"
+lost a 161k-token analysis. Codex put the report in an `apply_patch` call, the sandbox rejected
+it, and `-o` faithfully captured what was then the only remaining final message, the one-line
+complaint "Unable to write ...: filesystem is read-only". The loss is total rather than
+partial, so the negative half of the instruction is the half that matters.
 
 This split is the whole point of the agent. The transcript file holds Codex's reasoning trace
 and every command it ran, and can run to tens of thousands of tokens. The report file holds
