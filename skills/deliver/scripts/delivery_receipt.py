@@ -762,20 +762,14 @@ def command_evidence_run(args: argparse.Namespace) -> dict[str, Any]:
         ensure_new_evidence_id(run, evidence_id)
         bundle_artifact(run, args.artifact_id, workspace)
         for source in source_paths:
-            target, _relative = safe_workspace_path(workspace, source, "evidence source")
-            ensure_allowed_source_target(run, workspace, target)
-            if not target.exists():
-                raise ReceiptError(f"evidence source does not exist: {source}")
+            target, _relative = safe_workspace_path(workspace, source, "evidence source"); ensure_allowed_source_target(run, workspace, target)
+            if not target.exists(): raise ReceiptError(f"evidence source does not exist: {source}")
         started = utc_now()
         exit_code, stdout, stderr = execute_bounded(command, cwd=workspace)
         ensure_immutable_risk(run, workspace)
         for source in source_paths:
-            target, _relative = safe_workspace_path(workspace, source, "evidence source")
-            ensure_allowed_source_target(run, workspace, target)
-            if not target.exists():
-                raise ReceiptError(
-                    f"evidence source does not exist after command execution: {source}"
-                )
+            target, _relative = safe_workspace_path(workspace, source, "evidence source"); ensure_allowed_source_target(run, workspace, target)
+            if not target.exists(): raise ReceiptError(f"evidence source does not exist after command execution: {source}")
         finished = utc_now()
         if datetime.fromisoformat(finished[:-1]) <= datetime.fromisoformat(started[:-1]):
             raise ReceiptError("evidence timestamps must strictly increase")
