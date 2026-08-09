@@ -1,6 +1,7 @@
 # Maintaining Provenant
 
-Read [`AGENTS.md`](AGENTS.md), [`HARNESS.md`](HARNESS.md) and
+Read [`AGENTS.md`](AGENTS.md), [`HARNESS.md`](HARNESS.md),
+[`docs/ASRS.md`](docs/ASRS.md) and
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) before changing the harness.
 Inspect the live diff and preserve unrelated work. `HARNESS.md` owns lifecycle,
 risk, authority, orchestration and review policy; [`docs/worktrees.md`](docs/worktrees.md)
@@ -18,6 +19,28 @@ platform-specific.
 
 Changes to the ambient `AGENTS.md` or `HARNESS.md` apply from the next session.
 A live session retains the prior constitution until restart.
+
+## Add mechanism only in proportion
+
+[`docs/ASRS.md`](docs/ASRS.md) and
+[ADR 0021](docs/adr/0021-proportionate-mechanism.md) govern every change that
+adds a check, gate, guard, abstraction or configuration surface. Answer its
+four questions in the pull-request description: which failure has actually
+occurred, who the adversary is, what the cheapest thing that detects it is, and
+what the mechanism costs when it is itself wrong. A change that cannot name a
+failure and an adversary other than the operator's own environment does not
+land.
+
+The same document owns the removal test, whose default outcome is deletion.
+Apply it whenever auditing, not only when a file looks suspicious: code with no
+caller outside its own tests, a script no document tells an agent to run, and a
+rule already enforced by a shared helper are all deletion candidates. Preserve
+the tip on an archive branch and say so in the change description.
+
+Two exemptions, both narrow. The guarantees listed under "What is not
+negotiable" are not simplified away; only their mechanism is ever in question.
+Documentation and tests carry no such burden, because a wrong comment is cheap
+and a wrong gate blocks work.
 
 ## Documentation tiers
 

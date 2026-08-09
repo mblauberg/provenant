@@ -13,6 +13,9 @@ retain scarce judgement at consequential gates.
 compact runtime constitution. Skills load procedural depth only when triggered.
 This document preserves the design intent so future maintainers can change the
 harness without rediscovering it from individual skills.
+[`ASRS.md`](ASRS.md) states the quality attributes that intent serves, the
+order they take when they conflict, and the test a change passes before it adds
+mechanism.
 
 ## Lifecycle and user gates
 
@@ -476,3 +479,10 @@ before judgement. A fluent answer without trajectory evidence is not complete.
 - Generalise only proven cross-project patterns; leave project policy local.
 - Test failure modes that were observed in real runs, including Herdr transport,
   provider limits, context churn and partial review artifacts.
+- Let a gate discover its inputs rather than list them, so the next case runs
+  the moment it lands instead of sitting silently unexecuted.
+- Add mechanism only in proportion to a failure that has actually occurred
+  here, per [`ASRS.md`](ASRS.md) and
+  [ADR 0021](adr/0021-proportionate-mechanism.md). This is one user, one uid,
+  one machine; a guard against the operator's own environment costs reliability
+  and buys nothing.

@@ -75,6 +75,30 @@ The current pre-release tree includes:
 - Review panels for `orchestrate`, with council and breadth presets (#485).
 - An advisory model dossier for route selection, `docs/model-dossier.md`, with
   Gemini 3.6 Flash recorded as a reachable google route (#470, #484).
+- `docs/ASRS.md` and [ADR 0021](docs/adr/0021-proportionate-mechanism.md): the
+  harness's quality attributes in priority order, the four-question
+  proportionality test a change passes before it adds mechanism, the matching
+  removal test, and the guarantees that simplification may never weaken.
+  `HARNESS.md` carries the binding form and `MAINTAINING.md` applies it to
+  repository change.
+- `skills/deliver/scripts/delivery_receipt.py`, the sole writer of
+  `.agent-run/<id>/RUN.json`. It refuses at write time what the validator
+  refuses at read time, and the two never import each other: both derive the
+  state table from `skills/deliver/contract/lifecycle.py`, the shared written
+  contract (#550).
+- A derived certification decision at the review-ladder boundary,
+  `skills/_shared/review_terminal.py`. A leg counts as certifying only when the
+  dispatcher's own observed exit, provider lineage and read-only guarantee say
+  so, replacing a flag a worker could set about itself (#668).
+- A terminal-report fence in `orchestrate`: a worker's classification is only
+  accepted after its owned PID is observed to exit, because a wrapper can sit
+  live for hours after its child finished and wrote its report (#664).
+- A `subprocess-pipe-wait-before-drain` rule in `scripts/static-security-check.py`
+  and regression coverage pinning the Python version floor against
+  `PYTHONOPTIMIZE` compiling the probe's assertion away (#667).
+- Startup diagnosis for the `ui-ux-design` live server, plus `*.test.mjs`
+  discovery in `scripts/check-harness` so a skill's JavaScript tests run in the
+  gate the moment they land instead of sitting unexecuted (#666).
 
 ### Removed
 
@@ -187,6 +211,15 @@ The current pre-release tree includes:
 
 ### Fixed
 
+- Hardened `scripts/worktree.py` git invocation: bounded, non-blocking capture
+  of both streams, strict `-z` porcelain parsing that refuses a truncated
+  record, and complete inventory capture (#665).
+- Stopped `scripts/worktree.py` pinning git lookup to a fixed directory list.
+  It failed closed on any git installed by nix, asdf or a custom prefix, and the
+  only adversary it could exclude was the operator's own PATH on their own
+  machine. Lookup now follows the caller's PATH and falls back to the usual
+  install roots; configuration suppression, which is what actually keeps
+  porcelain parsing deterministic, is unchanged (ADR 0021).
 - Stopped a bare cross-family dispatch defaulting to the flagship model.
   `cf_dispatch.sh` hardcoded `--alias flagship`, so any call that named no alias
   ran on `gpt-5.6-sol`, which no reordering of the workhorse alias could reach.

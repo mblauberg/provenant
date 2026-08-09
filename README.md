@@ -279,6 +279,9 @@ The full <!--skills-->33<!--/skills-->-skill catalogue, grouped by area:
 ## Documentation and help
 
 - [`Architecture`](docs/ARCHITECTURE.md): system structure and design rationale.
+- [`Quality attributes`](docs/ASRS.md): what the harness optimises for, in
+  priority order, and the proportionality test a change passes before it adds
+  mechanism.
 - [`Specifications`](docs/specs/README.md): the component contracts.
 - [`Research`](docs/research/README.md): evidence and owners.
 - [`Maintenance`](MAINTAINING.md): how the repository is changed and governed.

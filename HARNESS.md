@@ -12,8 +12,8 @@ Claude Code and Codex are equal primary orchestrators; the harness the user star
 and owns authority, user communication, run state, gates and final synthesis; equal-primary
 is not concurrent bosses. For substantial work use native subagents and the other primary;
 approved authority may permit paired-primary mode, but one chair and one stage owner remain.
-Agent Fabric owns answer-bearing provider execution and durable communication; direct CLIs
-are preflight or degraded fallback, Herdr observes or wakes. Partition concurrent writers or use
+Cross-provider work is dispatched as a direct command-line call; Fabric carries messages,
+shared tasks and the activity log around it, and Herdr observes or wakes (ADR 0020). Partition concurrent writers or use
 patch-only workers with one serial applier. Authors and decision-makers must not certify their own
 surface; receipts declare that independence and enforce family separation, they do not prove it.
 
@@ -53,8 +53,22 @@ confidence; `clean` is valid, fluent unverified output is not. A user correction
 For machine checking, multiple means at least two distinct targeted lenses; terminal raises that minimum to three and requires an adversarial or challenge lens.
 The other-primary leg remains required from substantial upwards; skipped distinct-family legs record a reason. Evidence, never majority voting, decides claims.
 
+## Proportionate mechanism
+
+Optimise, in this order, for reliability in use, low maintenance, simplicity
+proportionate to the risk actually carried, extensibility through discovered
+seams rather than registries or flags, and personal-first product-compatible
+posture. This is one user, one uid, one machine: a mechanism must name a
+failure that has actually occurred and an adversary other than the operator's
+own environment, or it does not go in. Nothing here licenses weakening the
+guarantees that exist for observed agent failure: authors never certify their
+own surface, user gates hold, evidence outranks confidence, one writer owns
+each source surface, published history stays clean. Depth, the removal test and
+worked calibration live in `docs/ASRS.md` (ADR 0021).
+
 ## Load depth only when triggered
 
 - orchestration / routing / Herdr → `orchestrate`; implementation / review → `implement`, `code-review`; lifecycle / profile → `deliver`
 - context hygiene / compaction → `session`; promotion / assurance → `release`, `evaluate`; retrospect → `retrospect`; governance → `MAINTAINING.md`
+- adding a check, gate, hardening or abstraction, or auditing for accretion → `docs/ASRS.md`
 - any reader-facing prose, including correspondence → `natural-writing`, which routes on to its specialists; drafting under another skill's lead does not exempt the prose
