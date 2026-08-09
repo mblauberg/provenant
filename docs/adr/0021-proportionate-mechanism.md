@@ -35,8 +35,8 @@ default to the generic standard, because nothing told it not to.
 Adopt the quality attributes in [`docs/ASRS.md`](../ASRS.md) as the harness's
 architecturally significant requirements, in the stated priority order:
 reliability in use, low maintenance, simplicity proportionate to the risk
-actually carried, flexibility and extensibility through seams, and
-personal-first product-compatible posture.
+actually carried, flexibility and extensibility through seams, parity across
+both primaries, and personal-first product-compatible posture.
 
 Gate new mechanism on the four-question proportionality test in that document.
 A mechanism that cannot name a failure that has actually occurred here, and
@@ -67,7 +67,16 @@ tidy-up an agent performs unasked.
 
 A hard per-module review cap that a module can satisfy by degrading its own
 structure is itself subject to the test. Where a rule is satisfied by a
-construction nobody would choose on its merits, the rule is what changes.
+construction nobody would choose on its merits, the rule is what changes. The
+specific instance is recorded here so it is not rediscovered:
+`tests/test_delivery_validator_structure.py` globs `*.py` across the whole of
+`skills/deliver/scripts/`, so a test named for the validator's structure caps
+the producer as well, and the producer met the cap by passing `globals()` into
+its helper. Two independent reviews reached that conclusion separately.
+
+The removal test needs a diagnosis step before it is acted on, because dead
+code and under-wired code present identically. That correction came out of
+review and is written into `docs/ASRS.md` rather than left implicit.
 
 The cost is that a genuine defence-in-depth measure can now be argued down by
 citing this ADR. The exception list is the guard against that, and the

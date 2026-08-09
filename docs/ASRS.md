@@ -84,7 +84,20 @@ checks.
 Conversely, resist flexibility nobody asked for. A configuration knob with one
 caller and one value is not extensibility, it is an extra state to test.
 
-### 5. Personal-first, product-compatible
+### 5. Parity across both primaries
+
+Claude Code and Codex are equal primaries, and the review ladder depends on
+that: cross-family review is worthless if half the harness only works on one
+side. `MAINTAINING.md` states the consequence, that a convenient Claude-only or
+Codex-only change is a regression unless the approved scope is
+platform-specific.
+
+This ranks below simplicity, not above it, because the cheapest way to hold
+parity is usually to have less machinery to port. But it outranks convenience:
+a mechanism that cannot be expressed on both sides is a design problem, not a
+platform problem.
+
+### 6. Personal-first, product-compatible
 
 Unchanged from [ADR 0001](adr/0001-personal-first-product-compatible.md).
 Optimise for single-operator macOS use. Keep the cheap seams that would survive
@@ -126,9 +139,23 @@ description, not just in your head.
 1. **Which failure?** Name a failure that has actually happened here, or one
    whose first occurrence is unrecoverable. "Could happen" is not an answer,
    and neither is "an attacker might".
-2. **Who is the adversary?** If the answer is the user, their own shell, their
-   own configuration or their own machine, there is no adversary. Defending
-   against yourself costs reliability and buys nothing.
+2. **Who is the adversary?** There is no adversary when the answer is the
+   operator's own shell, their own configuration, their own `PATH` or their own
+   filesystem layout. Defending against those costs reliability and buys
+   nothing, because the daemon that tried it was deleted for exactly that.
+
+   Four adversaries do exist here, and naming one is a valid answer:
+   - **A confused or compromised agent inside the operator's uid.** Agents run
+     shell commands, and they hallucinate. Validation that makes a destructive
+     or irreversible operation refuse a malformed argument is defending against
+     the agent, not the operator.
+   - **Injected content.** Anything an agent reads (a web page, an issue body,
+     a dependency's README, an MCP tool result, another agent's report) can
+     carry instructions. It is untrusted input even though it arrives locally.
+   - **The supply chain.** Dependencies, plugins and MCP servers execute here.
+     `MAINTAINING.md` already treats plugins as supply-chain packages.
+   - **Publication.** This repository is public. Anything reaching committed
+     history or a pushed pack is world-readable and effectively permanent.
 3. **What is the cheapest thing that detects it?** Compare honestly against a
    shared helper every call site uses, a one-line grep, a single test, a
    comment, and doing nothing and fixing it when it bites. Pick the cheapest
@@ -151,9 +178,22 @@ these holds:
 - it has never fired, and the failure it guards has never been observed;
 - it exists to satisfy a rule rather than a requirement.
 
-Deletion is the default outcome. Preserving the tip on an archive branch and
-recording it in the change description costs nothing and makes the deletion
-reversible; that is how the retired subsystems were handled.
+Deletion is the default outcome, but diagnose before you act on it, because two
+different faults produce the same symptom. Code with no caller is sometimes
+dead, and sometimes it is **under-wired**: one half of a pair shipped and the
+other half was never documented. `skills/deliver/scripts/select_security_evidence.py`
+is the live example. It has no caller outside its own test, which reads as dead,
+but `delivery_validation_security.py` will demand exactly the evidence it
+selects. Deleting it would leave the validator asking for something no
+documented path produces. The fix there is a line in the skill, not a deletion.
+
+The test is: if this were deleted, would anything start failing, or would
+something start silently going unchecked? The second answer means wire it, not
+remove it.
+
+Preserving the tip on an archive branch and recording it in the change
+description costs nothing and makes a deletion reversible; that is how the
+retired subsystems were handled.
 
 ## Worked examples
 
@@ -165,7 +205,8 @@ Both directions, all from this repository, so the calibration is real.
 | `scripts/check-harness` discovering `*.test.mjs` instead of listing them | Kept | Closes a failure that had already happened silently, and removes the maintenance step rather than adding one. |
 | The `deliver` producer and validator reading one shared written contract and never importing each other | Kept | Author-cannot-certify, applied to code. The separation is the guarantee. |
 | A 310-line abstract-interpretation visitor enforcing a subprocess drain rule across four call sites | Disproportionate | The invariant is real; the mechanism is not. A shared bounded-process helper enforces it at the source for the cost of one grep. |
-| Pinning git lookup to a fixed directory list and suppressing global git configuration in a local worktree helper | Disproportionate | Fails closed on any git installed elsewhere. Test 2 has no answer: the adversary would be the user's own PATH. |
+| Pinning git lookup to a fixed directory list in a local worktree helper, so a git installed by nix or a custom prefix is invisible | Disproportionate | Fails closed on an install layout it merely did not anticipate. Test 2 has no answer: the adversary would be the operator's own PATH. |
+| Suppressing git configuration in the same helper, and suppressing replace-refs and grafts in `scripts/git_evidence.py` | Kept, and for different reasons | In the helper it buys deterministic porcelain for free. In `git_evidence.py` it is load-bearing: `public-release-check` scans history for secrets before a public push, and a replace ref or graft could hide a commit from the scan while it still ships in the pack. Same mechanism, different proportion. Judge the call site, never the technique. |
 | A hard per-module line cap that a module satisfied by injecting `globals()` into a helper instead of importing it | Rule beat requirement | The requirement was reviewability; the rule delivered a module dictionary passed at runtime, which is strictly harder to review. Fix the rule. |
 
 The last row is the pattern to watch for hardest. When a constraint is

@@ -57,10 +57,12 @@ The other-primary leg remains required from substantial upwards; skipped distinc
 
 Optimise, in this order, for reliability in use, low maintenance, simplicity
 proportionate to the risk actually carried, extensibility through discovered
-seams rather than registries or flags, and personal-first product-compatible
-posture. This is one user, one uid, one machine: a mechanism must name a
-failure that has actually occurred and an adversary other than the operator's
-own environment, or it does not go in. Nothing here licenses weakening the
+seams rather than registries or flags, parity across both primaries, and
+personal-first product-compatible posture. A mechanism must name a failure that
+has actually occurred and a real adversary, or it does not go in. The
+operator's own shell, PATH and configuration are not adversaries. A confused or
+compromised agent, injected content, the supply chain and publication to a
+public repository are. Nothing here licenses weakening the
 guarantees that exist for observed agent failure: authors never certify their
 own surface, user gates hold, evidence outranks confidence, one writer owns
 each source surface, published history stays clean. Depth, the removal test and

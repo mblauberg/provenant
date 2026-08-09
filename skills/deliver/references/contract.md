@@ -9,23 +9,33 @@ reason and recovery instruction and cannot replace a mandatory gate.
 
 ## Producer and validator separation
 
-`scripts/delivery_receipt.py` is the only writer of `RUN.json`;
-`scripts/validate_delivery.py` is the only judge of it. Neither imports the
+`scripts/delivery_receipt.py` is the canonical writer of `RUN.json` and
+`scripts/validate_delivery.py` is the canonical judge of it. Neither imports the
 other. Both read `contract/lifecycle.py`, the shared written contract that owns
-the state table, so the producer refuses an illegal transition at write time
-and the validator rejects it independently at read time. That independence is
-the guarantee: an agreement between two modules that share a checker is not the
-same as one module checking itself.
+the state table, so the producer refuses an illegal transition at write time and
+the validator rejects it independently at read time. That independence is the
+guarantee: an agreement between two modules that share a checker is not the same
+as one module checking itself.
 
-Producer commands, all under `.agent-run/<id>/` and all taking an in-directory
+Two `implement` helpers also write the receipt, each under the same
+in-directory `.RUN.lock` and each confined to one section:
+`skills/implement/scripts/checkpoint_run.py` maintains the `checkpoint` object
+for crash recovery, and `skills/implement/scripts/bind_merged_delivery.py`
+binds merged GitHub and exact-head review evidence. Treat any further writer as
+a defect: [issue #550](https://github.com/mblauberg/provenant/issues/550) set
+sole-writer custody as the goal, and these two are the remaining exceptions, not
+a licence for more. Nothing else may write `RUN.json`, and nothing may edit it
+by hand.
+
+Producer commands, all under `.agent-run/<id>/` and all taking the in-directory
 lock: `init` (profile, tier, chair family, authority, risk assessment, intent),
-`bind` (a section by digest), `artifact add` (hashes the live bytes),
-`evidence run` (executes the command and binds exit code, bundle entry, bundle
-digest and artifact digest in one transaction), `evidence human`,
-`evidence remove` and `evidence rebuild` (the path back to consistency after an
-aborted lane), `review add` (explicit lineage: adapter, provider family, model,
-role, lenses, artifact and route-receipt digests), `checkpoint`, `transition`
-and `show`.
+`bind --section` (a bound section by digest), `artifact add` (hashes the live
+bytes), `evidence run` (executes the command and binds exit code, bundle entry,
+bundle digest and artifact digest in one transaction), `evidence human`,
+`evidence observation`, `evidence remove` and `evidence rebuild` (the path back
+to consistency after an aborted lane), `review add` (explicit lineage: adapter,
+provider family, model, role, lenses, artifact and route-receipt digests),
+`checkpoint set`, `transition --to` and `show`.
 
 Refusals happen at write time, not only at validation: timestamps come from the
 process clock and strictly increase, evidence identifiers are minted against the

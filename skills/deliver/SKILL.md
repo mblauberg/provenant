@@ -24,7 +24,7 @@ inventing.
 ## Lifecycle
 
 1. Create `.agent-run/<id>/RUN.json` with `scripts/delivery_receipt.py init`,
-   the sole writer of the receipt, and bind intent, design and authority by
+   the canonical writer of the receipt, and bind intent, design and authority by
    digest. `templates/RUN.template.json` documents the shape; the producer, not
    a hand edit, applies it. When coordinated, bind `fabric_relationships` to
    project session, coordination run and workstream IDs per
