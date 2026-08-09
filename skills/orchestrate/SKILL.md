@@ -35,8 +35,10 @@ under `~/.claude/agents/`.
   it calls environmental. Lanes routinely report a clean result their own
   output contradicts.
 - **Liveness: size proves nothing.** Compare CPU and session-log mtime; see
-  `worker-liveness.md`. A detached task is not dead: check the PID before
-  reusing a worktree.
+  `worker-liveness.md`. No growth keeps a live worker in the waiting path, but
+  growth is not proof either: a wrapper can sit blocked long after its child
+  exited. A detached task is not dead, and a live wrapper is not working.
+  Observed PID exit is what fences terminal reporting, inspection and reuse.
 - **Cross-family follows the HARNESS risk ladder.** Targeted lenses plus other
   primary; distinct family when available; record terminal skips.
 - **Objective checks outrank opinions. You own the final call.**
