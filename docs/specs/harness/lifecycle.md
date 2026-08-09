@@ -149,9 +149,9 @@ to satisfy ceremony.
 
 The canonical receipt remains `.agent-run/<run-id>/RUN.json`, using the single
 public `delivery-run` schema v1.
-The single location avoids parallel lifecycle truth beside orchestration and
-agent-fabric receipts. JSON is used for
-validation; human-readable artifacts remain Markdown or native documents.
+The single location avoids parallel lifecycle truth beside orchestration state
+and Fabric task records. JSON is used for
+validation; readable artifacts remain Markdown or native documents.
 
 The following excerpt omits unchanged fields from the full template:
 
@@ -187,7 +187,7 @@ evidence:
   - id: citation-coverage
     kind: deterministic
     gate: source-coverage
-    method: scripts/check-claims
+    method: <project-source-coverage-command>
     status: pass
     artifact_id: evidence-bundle
     source_paths: [docs/research/]
@@ -522,7 +522,7 @@ The refactor is complete when:
 | Local history escapes its requested scope | Read in place, never commit raw history and keep sharing/export behind explicit destination and content authority. |
 | Evals optimise to their own fixtures | Held-out cases, repeated trials, mixed graders and user calibration. |
 | Multi-agent cost exceeds value | Decomposability gate, one writer and proportional lanes. |
-| Concurrent agent-fabric work conflicts | Unique files in Phase 1; shared entrypoints deferred until fabric ownership closes. |
+| Concurrent lanes conflict on a shared surface | One writer per source surface; parallel lanes take a linked worktree each and the chair merges serially. |
 | Research becomes stale | Dated evidence cut-off, 90-day decision expiry and retrospective refresh proposal. |
 
 ## User authority boundaries

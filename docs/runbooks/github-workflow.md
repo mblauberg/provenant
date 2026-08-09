@@ -284,16 +284,7 @@ Afterwards:
    reconstructs it.
 2. Confirm the issue closed (`Closes #N`) or close it with its terminal reason
    recorded, and confirm Status is `Done`.
-3. After syncing the main checkout, keep the fabric dist warm so
-   `scripts/agent-fabric` never falls back to the slow tsx loader path
-   (no-op when the dist is fresh; see Keep the CLI dist
-   warm):
-
-   ```sh
-   scripts/agent-fabric-warm
-   ```
-
-4. Prune the merged branch's artefacts. This is the last step of the merge, not
+3. Prune the merged branch's artefacts. This is the last step of the merge, not
    a later sweep — see [Post-merge
    pruning](../worktrees.md#post-merge-pruning) for the standing authority and
    its limits. Run the complete repository, branch and merge gate before
@@ -340,7 +331,7 @@ Afterwards:
    change's canonical `delivery-run` receipt directory must survive the merge
    (see [Merge](#merge)). Satisfy that first.
 
-5. The user-authorised repository setting `delete_branch_on_merge=true`
+4. The user-authorised repository setting `delete_branch_on_merge=true`
    (enabled 2026-07-19) automatically deletes a merged pull request's remote
    head branch, so the remote ref is usually already gone by the time you prune;
    `git remote prune origin` clears the stale remote-tracking ref. This
