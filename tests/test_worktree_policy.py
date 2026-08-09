@@ -1,8 +1,11 @@
 import importlib.util
+import hashlib
 import json
 from pathlib import Path
 import subprocess
 import sys
+
+import pytest
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "worktree.py"
@@ -371,3 +374,100 @@ def test_verify_claim_rejects_a_head_change_during_verification(tmp_path, capsys
     ]) == 2
     receipt = json.loads(capsys.readouterr().out)
     assert "advanced" in receipt["reason"]
+
+
+def test_diagnostics_redact_token_only_and_incomplete_credential_urls(monkeypatch):
+    secret = "proxy-token-for-review"
+    monkeypatch.setenv("npm_config_proxy", secret)
+
+    diagnostic = worktree_policy.redact_diagnostic(
+        "https://:token-only-secret@example.test/ https://review-user:partial-secret"
+        f" {secret}"
+    )
+
+    assert "token-only-secret" not in diagnostic
+    assert "partial-secret" not in diagnostic
+    assert secret not in diagnostic
+    assert "https://[REDACTED]@example.test/" in diagnostic
+    assert "https://[REDACTED]" in diagnostic
+
+
+def test_capture_is_bounded_but_counts_and_digests_all_output():
+    message = b"x" * (worktree_policy.MAX_DIAGNOSTIC_BYTES * 2 + 17)
+    process = subprocess.Popen(
+        [sys.executable, "-c", "import sys; sys.stdout.buffer.write(sys.argv[1].encode())", message.decode()],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+    captures = worktree_policy._drain_process(process)
+    capture = captures["stdout"]
+
+    assert len(capture["buffer"]) <= worktree_policy.MAX_DIAGNOSTIC_BYTES
+    assert capture["size"] == len(message)
+    assert capture["digest"].hexdigest() == hashlib.sha256(message).hexdigest()
+
+
+def test_capture_redacts_secret_prefix_at_exact_capture_boundary(monkeypatch):
+    secret = "boundary-proxy-token-123456789"
+    monkeypatch.setenv("npm_config_proxy", secret)
+    message = b"x" * (worktree_policy.MAX_DIAGNOSTIC_BYTES - len(secret)) + secret.encode() + b"tail"
+    process = subprocess.Popen(
+        [sys.executable, "-c", "import sys; sys.stdout.buffer.write(sys.argv[1].encode())", message.decode()],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+    captures = worktree_policy._drain_process(process)
+    diagnostic = worktree_policy._capture_text(captures["stdout"])
+
+    assert secret not in diagnostic
+    assert secret[:8] not in diagnostic
+    assert f"bytes={len(message)}" in diagnostic
+    assert len(diagnostic.encode()) <= worktree_policy.MAX_DIAGNOSTIC_BYTES
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        b"worktree /tmp/example\0HEAD deadbeef\0branch refs/heads/main\0",
+        b"worktree /tmp/example\0HEAD deadbeef\0branch refs/heads/main\0\0unknown value\0\0",
+    ],
+)
+def test_worktree_records_rejects_incomplete_or_malformed_porcelain(tmp_path, monkeypatch, payload):
+    capture = {
+        "buffer": bytearray(payload),
+        "size": len(payload),
+        "digest": hashlib.sha256(payload),
+        "limit": worktree_policy.MAX_DIAGNOSTIC_BYTES,
+    }
+
+    def fake_run_git(repo_path, *args):
+        return (
+            subprocess.CompletedProcess(
+                ["git", "-C", str(repo_path), *args], 0, "", ""
+            ),
+            {
+                "stdout": capture,
+                "stderr": {
+                    "buffer": bytearray(),
+                    "size": 0,
+                    "digest": hashlib.sha256(),
+                    "limit": worktree_policy.MAX_DIAGNOSTIC_BYTES,
+                },
+            },
+        )
+
+    monkeypatch.setattr(worktree_policy, "_run_git", fake_run_git)
+    with pytest.raises(worktree_policy.PolicyError, match="(?:incomplete|malformed)"):
+        worktree_policy.worktree_records(tmp_path)
+
+
+def test_git_launcher_oserror_is_reported_as_policy_error(tmp_path, monkeypatch):
+    def fail_popen(*args, **kwargs):
+        raise OSError("git launcher unavailable")
+
+    monkeypatch.setattr(worktree_policy.subprocess, "Popen", fail_popen)
+
+    with pytest.raises(worktree_policy.PolicyError, match="could not launch git"):
+        worktree_policy.git(tmp_path, "status")
