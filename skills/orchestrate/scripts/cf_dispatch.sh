@@ -243,7 +243,10 @@ resolve_routing() {
   # Returns JSON. If neither method is available, returns status="model_routing_unavailable".
   local tool="$1" alias="$2" role="$3" lead_family="$4" diag_file="$5"
   local model="$6" effort="$7" risk_tier="$8" capabilities_file="$9"
+  local product_root=""
   local -a cmd route_args
+
+  product_root="$(cd "$SCRIPT_DIR" && git rev-parse --show-toplevel 2>/dev/null || true)"
 
   route_args=(--adapter "$tool" --alias "$alias" --role "$role" --lead-family "$lead_family" --require-distinct)
   [ -n "$model" ] && route_args+=(--model "$model")
@@ -257,14 +260,17 @@ resolve_routing() {
   # Try provenant first if available
   if command -v provenant >/dev/null 2>&1; then
     cmd=(provenant route resolve "${route_args[@]}")
-    "${cmd[@]}" 2>>"$diag_file"
+    if [ -n "$product_root" ]; then
+      AGENT_FABRIC_PRODUCT_ROOT="$product_root" "${cmd[@]}" 2>>"$diag_file"
+    else
+      "${cmd[@]}" 2>>"$diag_file"
+    fi
     return $?
   fi
 
   # Fall back to scripts/model_route.py from product root
   # Locate product root via git if possible, else try relative to this script
-  local product_root
-  if product_root="$(cd "$SCRIPT_DIR" && git rev-parse --show-toplevel 2>/dev/null)"; then
+  if [ -n "$product_root" ]; then
     if [ -f "$product_root/scripts/model_route.py" ]; then
       cmd=(python3 "$product_root/scripts/model_route.py" "resolve" "${route_args[@]}")
       AGENT_FABRIC_PRODUCT_ROOT="$product_root" "${cmd[@]}" 2>>"$diag_file"
@@ -426,7 +432,7 @@ run_one() {  # $1 tool $2 model $3 effort -> writes clean answer to OUT, echoes 
             status="tool_not_found"
             rc=127
           else
-            codex exec -s read-only --ignore-user-config --ignore-rules --ephemeral ${model:+-m "$model"} \
+            codex exec -s read-only --ignore-user-config --ignore-rules --ephemeral -c service_tier="default" ${model:+-m "$model"} \
               ${effort:+-c model_reasoning_effort="$effort"} \
               - <"$PROMPT_TMP" >"$raw" 2>"$diag"; rc=$?
           fi ;;

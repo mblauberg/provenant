@@ -42,13 +42,12 @@ fail closed as `invalid_orchestrator_family`, and missing values fail closed as
 The receipt's resolved `effort` is authoritative for the adapter invocation.
 GPT-5.6 efforts are capability-gated per model. The Codex execution adapter
 captures `codex debug models` through `codex_capabilities.py` and supplies the
-snapshot to the resolver. The ChatGPT-subscription Codex route is
-`account-default`: it selects the dated catalogue candidate for identity and
-audit independently of the runtime-selectable model list, records that ID as
-`catalog_model`, records `model_selection: account-default`, leaves
-`resolved_model` empty and omits `-m` from `codex exec`. Effort support comes
-only from a fresh runtime snapshot entry for that candidate. No snapshot fails
-as `capability_discovery_failed`, a stale snapshot fails as
+snapshot to the resolver. The ChatGPT-subscription Codex route resolves an
+explicit model from runtime capability evidence, uses the dated catalogue for
+candidate order and audit context, records that ID as `resolved_model` and
+passes it with `-m` to `codex exec`. Effort support comes only from a fresh
+runtime snapshot entry for that candidate. No snapshot fails as
+`capability_discovery_failed`, a stale snapshot fails as
 `capability_snapshot_stale`, and a fresh snapshot that omits the candidate fails
 as `capability_model_unavailable`. Explicit unsupported requests fail as
 `effort_unsupported`; a role default may degrade with `effort_substitution`
@@ -77,8 +76,9 @@ or `oauth_safe_mode`.
   see auth and `claude auth status` confirms a logged-in `claude.ai` account, retry with `--safe-mode`,
   `--disable-slash-commands`, `--no-session-persistence`, `--permission-mode plan`, the same safe read tools, and
   the same verifier system prompt.
-- `codex`: `exec -s read-only --ephemeral`; the account-default route omits
-  `-m` and passes only the resolved reasoning-effort control.
+- `codex`: `exec -s read-only --ephemeral`; the route resolves a
+  runtime-capable model and passes it with `-m`, alongside the resolved
+  reasoning-effort control.
 - `agy`: `--sandbox --output-format json --disable-slash-commands`, with
   `--model`/`--effort` as separate flags and repeatable `--add-dir` for read
   material (also settable as a colon-separated `CF_DISPATCH_AGY_ADD_DIR`).
@@ -257,7 +257,10 @@ auditable close-out unless the attempt records are retained.
 
 Avoid unsafe flags in read-only chains: `--allow-all-tools`, `--allow-all`, `--yolo`, `--force`,
 `--trust-all-tools`, `--dangerously-skip-permissions`, and Codex
-`--dangerously-bypass-approvals-and-sandbox`.
+`--dangerously-bypass-approvals-and-sandbox`. Codex `service_tier=priority` is
+also prohibited: it is a config key, not a flag, and costs about double the
+usage for about 1.5x speed, never justified for an unattended background
+dispatch.
 
 ## Data policy
 

@@ -866,11 +866,13 @@ def test_resolved_role_effort_reaches_codex_adapter_and_receipt():
         assert record["requested_effort"] == "max"
         assert record["effort"] == "xhigh"
         assert record["effort_capability_source"] == "runtime-model-catalog"
-        assert record["resolved_model"] == ""
-        assert record["catalog_model"] == "gpt-5.6-sol"
-        assert record["model_selection"] == "account-default"
+        assert record["resolved_model"] == "gpt-5.6-sol"
+        assert record["catalog_model"] == ""
+        assert record["model_selection"] == ""
         args = args_file.read_text(encoding="utf-8").splitlines()
-        assert "-m" not in args
+        assert "-m" in args
+        assert "gpt-5.6-sol" in args
+        assert "service_tier=default" in args
         assert "model_reasoning_effort=xhigh" in args
 
 
@@ -1056,7 +1058,7 @@ def test_duplicate_codex_discovery_member_blocks_execution_with_receipt():
         assert not invoked.exists()
 
 
-def test_codex_explicit_model_rejection_never_reports_it_as_resolved():
+def test_codex_explicit_model_reaches_adapter_and_reports_runtime_failure():
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
         bin_dir = tmp / "bin"
@@ -1095,13 +1097,12 @@ def test_codex_explicit_model_rejection_never_reports_it_as_resolved():
         )
         record = json.loads(result.stdout)
         assert result.returncode != 0
-        assert record["status"] == "adapter_account_default_only"
-        assert record["resolved_model"] == ""
+        assert record["status"] == "error"
+        assert record["resolved_model"] == "gpt-5.6-sol"
         assert record["requested_model"] == "gpt-5.6-sol"
-        assert record["catalog_model"] == "gpt-5.6-sol"
-        assert record["model_selection"] == "account-default"
-        assert record["identity_source"] == "account-default"
-        assert not invoked.exists()
+        assert record["catalog_model"] == ""
+        assert record["model_selection"] == ""
+        assert invoked.exists()
 
 
 def test_interrupted_dispatch_cleans_internal_tempfiles():
