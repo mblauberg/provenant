@@ -366,6 +366,62 @@ def test_repo_scope_defaults_to_current_repository(monkeypatch, tmp_path, capsys
     assert capsys.readouterr().out.startswith("PID")
 
 
+def test_terminal_report_cli_blocks_a_live_worker(monkeypatch, capsys):
+    monkeypatch.setattr(
+        worker_liveness,
+        "live_processes",
+        lambda: [worker_liveness.Process(501, 1, "00:12", "0:01.21", "codex exec task")],
+    )
+
+    result = worker_liveness.main([
+        "terminal-report",
+        "--pid", "501",
+        "--classification", "complete",
+        "--exit-status", "0",
+    ])
+
+    captured = capsys.readouterr()
+    assert result == 2
+    assert captured.out == ""
+    assert "owned worker PID 501 remains live" in captured.err
+
+
+def test_terminal_report_cli_emits_report_after_observed_exit(monkeypatch, capsys):
+    monkeypatch.setattr(worker_liveness, "live_processes", lambda: [])
+
+    result = worker_liveness.main([
+        "terminal-report",
+        "--pid", "502",
+        "--classification", "failed",
+        "--exit-status", "17",
+    ])
+
+    captured = capsys.readouterr()
+    assert result == 0
+    assert captured.err == ""
+    assert json.loads(captured.out) == {
+        "classification": "failed",
+        "exit_status": 17,
+        "observed_exit": True,
+        "pid": 502,
+    }
+
+
+def test_terminal_report_cli_rejects_missing_exit_evidence(monkeypatch, capsys):
+    monkeypatch.setattr(worker_liveness, "live_processes", lambda: [])
+
+    result = worker_liveness.main([
+        "terminal-report",
+        "--pid", "503",
+        "--classification", "blocked",
+    ])
+
+    captured = capsys.readouterr()
+    assert result == 2
+    assert captured.out == ""
+    assert "requires observed process exit" in captured.err
+
+
 def test_process_cwd_uses_lsof_on_darwin_even_if_proc_path_appears_present(
     monkeypatch,
 ):
