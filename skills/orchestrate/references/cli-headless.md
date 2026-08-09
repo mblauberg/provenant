@@ -49,7 +49,9 @@ passes it with `-m` to `codex exec`. Effort support comes only from a fresh
 runtime snapshot entry for that candidate. No snapshot fails as
 `capability_discovery_failed`, a stale snapshot fails as
 `capability_snapshot_stale`, and a fresh snapshot that omits the candidate fails
-as `capability_model_unavailable`. Explicit unsupported requests fail as
+as `capability_model_unavailable` for an explicit model request; an alias with
+no runtime-capable candidate fails as `no_candidate_available`. Explicit
+unsupported requests fail as
 `effort_unsupported`; a role default may degrade with `effort_substitution`
 using the declared fallback order over runtime-supported efforts at or below
 the request, or fail as `no_effort_available` when none exists.

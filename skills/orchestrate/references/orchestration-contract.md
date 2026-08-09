@@ -85,9 +85,9 @@ stop condition and budget. A worker that changes code or other observable
 behaviour also names its governing skill (for example, `tdd` under
 `implement`); the binding is invalid when that field is absent or ambiguous.
 The binding is invalid if any route field is absent;
-validate payloads and never infer permission. Adapters configured for
-account-default transport omit a literal model while their receipts retain
-catalog identity and effective effort. Claude records the runtime-discovered effective model and the admitted
+validate payloads and never infer permission. Codex account-default transport
+omits a literal model while its receipt retains catalog identity and effective
+effort. Claude records the runtime-discovered effective model and the admitted
 probed effort, marked `provider-unverified`; its canary cannot observe effective
 effort.
 Forbid unpartitioned edits and out-of-scope git restore/checkout/stash. Stop

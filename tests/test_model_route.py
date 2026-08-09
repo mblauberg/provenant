@@ -113,6 +113,19 @@ def write_account_default_catalog(tmp_path):
     return path
 
 
+def write_codex_compatibility(tmp_path, *, requires_explicit_model):
+    text = (ROOT / "config" / "adapter-compatibility.yaml").read_text()
+    start = text.index("  codex-app-server:")
+    end = text.index("\n  herdr:", start)
+    block = text[start:end].replace(
+        "requires_explicit_model: true",
+        f"requires_explicit_model: {str(requires_explicit_model).lower()}",
+    )
+    path = tmp_path / "adapter-compatibility.yaml"
+    path.write_text(text[:start] + block + text[end:])
+    return path
+
+
 def load_router():
     path = ROOT / "scripts" / "model_route.py"
     spec = importlib.util.spec_from_file_location("model_route_under_test", path)
@@ -1722,6 +1735,37 @@ def test_account_default_adapter_ignores_runtime_selectable_model_list(tmp_path)
     assert route["resolved_model"] == ""
     assert route["catalog_model"] == "gpt-5.6-sol"
     assert route["model_selection"] == "account-default"
+
+
+@pytest.mark.parametrize(
+    ("catalog_account_default", "requires_explicit_model"),
+    ((True, True), (False, False)),
+)
+def test_catalog_and_compatibility_mismatch_fails_closed(
+    tmp_path, monkeypatch, capsys, catalog_account_default, requires_explicit_model
+):
+    router = load_router()
+    catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    adapter = catalog["adapters"]["codex"]
+    if catalog_account_default:
+        adapter["model_selection"] = "account-default"
+    else:
+        adapter.pop("model_selection", None)
+    catalog_path = tmp_path / "model-routing.json"
+    catalog_path.write_text(json.dumps(catalog))
+    compatibility_path = write_codex_compatibility(
+        tmp_path, requires_explicit_model=requires_explicit_model
+    )
+    monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
+
+    result = router.main([
+        "resolve", "--adapter", "codex", "--alias", "scout", "--role", "worker",
+        "--adapter-compatibility", str(compatibility_path),
+    ])
+
+    route = json.loads(capsys.readouterr().out)
+    assert result == 2
+    assert route["status"] == "account_default_conflicts_with_compatibility"
 
 
 def test_codex_aliases_supply_proportionate_default_effort(tmp_path):
