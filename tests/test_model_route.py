@@ -2933,8 +2933,8 @@ def test_catalogue_adapter_without_compatibility_contract_routes_directly():
 
 def write_agy_capability_snapshot(tmp_path, models=None):
     if models is None:
-        # Measured against agy 1.1.10: efforts are per model, and
-        # gemini-3.1-pro genuinely has no medium.
+        # Measured against agy 1.1.10 and re-verified on 1.1.11: efforts are
+        # per model, and gemini-3.1-pro genuinely has no medium.
         models = {
             "gemini-3.1-pro": {
                 "resolved_model": "gemini-3.1-pro",

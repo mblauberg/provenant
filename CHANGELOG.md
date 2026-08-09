@@ -99,6 +99,18 @@ The current pre-release tree includes:
 
 ### Changed
 
+- Raised `codex-implementer` from `haiku` to `sonnet`, keeping `effort: low`.
+  The dispatcher builds sandbox flag sets, decides write scope, may provision a
+  worktree, and must verify what landed in the tree rather than believing the
+  Codex transcript. That verification step is where too small a dispatcher
+  fails, because the cheap wrong answer is to trust the transcript. The
+  expensive reasoning stays with Codex and is paid for on OpenAI's tokens.
+- Gave the Codex dispatchers a write-scope table mapping the task to exact
+  flags, a conditional rule for when to provision a worktree rather than work in
+  place, and the worktree lifecycle commands. Replaced the instruction to read a
+  transcript's tail with bounded `grep` extraction: one transcript line can be
+  an entire JSON catalogue, so even `tail` can dump hundreds of kilobytes into
+  the dispatcher's context and charge the caller twice for the same reasoning.
 - `AGENTS_HOME` now names only the product root. When it names a non-`~/.agents`
   checkout without an explicit instance root, the next `install-harness` run
   seeds the instance at `~/.agents` and rewrites that instance's machine-local
@@ -165,6 +177,24 @@ The current pre-release tree includes:
 
 ### Fixed
 
+- Stopped a child process's stderr corrupting every capability snapshot.
+  `run_bounded` merged stderr into stdout, and all three capability producers
+  parsed that merged stream as machine-readable data, so a single warning line
+  from a provider CLI broke discovery. It now takes `merge_stderr=False`,
+  spooling and bounding the two streams independently, and the Codex, Claude and
+  Agy producers parse stdout alone while reporting stderr as the diagnostic.
+  The Codex and Claude routes failed closed on this, taking the adapter offline;
+  the Agy route failed silently, recording the stderr text as a phantom
+  effortless model and still exiting 0.
+- Moved the Claude unknown-effort warning check to stderr, where the CLI
+  actually writes it. It had been a stdout string match that only worked because
+  the streams were merged, so parsing stdout alone would have retired it
+  silently and turned a caught error into an accepted wrong answer.
+- Stated the Agy limits the agent files had left implicit: the route is
+  `prompt_only` rather than `enforced` because `--sandbox` is not a read-only
+  boundary, exit 0 does not prove the work happened, and only Gemini identifiers
+  may be selected, since `agy models` also fronts Anthropic and GPT-OSS models
+  and routing to one of those makes a cross-family review circular.
 - Reached explicit Codex models again. codex-cli 0.146.0 accepts an explicit
   `-m` on a ChatGPT subscription account, so the codex adapter no longer
   dispatches `account-default` and `gpt-5.6-luna` is selectable rather than
