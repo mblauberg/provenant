@@ -397,7 +397,40 @@ def main(argv: list[str] | None = None) -> int:
         help="show workers from this repository (default: current repository)",
     )
     parser.add_argument("--json", action="store_true", help="emit machine-readable rows")
+    subparsers = parser.add_subparsers(dest="command")
+    terminal_parser = subparsers.add_parser(
+        "terminal-report",
+        help="report a terminal classification after worker exit",
+    )
+    terminal_parser.add_argument("--pid", type=int, required=True)
+    terminal_parser.add_argument(
+        "--classification",
+        choices=sorted(TERMINAL_CLASSIFICATIONS),
+        required=True,
+    )
+    terminal_parser.add_argument(
+        "--exit-status",
+        type=int,
+        help="exit status observed by the foreground wait/provider boundary",
+    )
     args = parser.parse_args(argv)
+    if args.command == "terminal-report":
+        try:
+            live_pids = {process.pid for process in live_processes()}
+            report = terminal_report(
+                args.classification,
+                pid=args.pid,
+                process_live=args.pid in live_pids,
+                exit_observation=(
+                    WorkerExit(args.pid, args.exit_status)
+                    if args.exit_status is not None else None
+                ),
+            )
+        except (RuntimeError, TerminalReportError) as error:
+            print(f"worker-liveness: {error}", file=sys.stderr)
+            return 2
+        print(json.dumps(asdict(report), sort_keys=True))
+        return 0
     try:
         workers = collect(args.sessions_root, args.repo)
     except RuntimeError as error:

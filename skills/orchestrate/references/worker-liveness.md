@@ -38,6 +38,22 @@ in the same worktree. The existing foreground provider commands remain the
 preferred waiting path; this guidance adds the fence and evidence, not a new
 provider command.
 
+Use the concrete terminal fence after the foreground wait/provider boundary has
+returned an exit status:
+
+```bash
+python3 "${AGENTS_HOME:-$HOME/.agents}/skills/orchestrate/scripts/worker_liveness.py" \
+  terminal-report --pid "$PID" --classification complete --exit-status "$STATUS"
+```
+
+The command takes a fresh `ps` snapshot through the helper's existing
+`live_processes()` detection. It emits a JSON terminal report and exits zero
+only when the PID is no longer live and explicit exit evidence is supplied. A
+live PID or missing exit evidence is reported to stderr and exits non-zero.
+Use one of `blocked`, `question`, `unavailable`, `failed` or `complete` as
+appropriate. This is a one-shot enforcement command, not a
+watcher or supervisor.
+
 ## Waiting from inside a sub-agent
 
 A sub-agent that ends its turn is finished. Its result returns to the caller at
