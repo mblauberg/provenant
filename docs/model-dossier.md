@@ -101,13 +101,13 @@ not read an absent `Watch out for` as an endorsement.
 - **Cost:** workhorse-tier at low/medium; poor value at high.
 - **Reach:** `claude` and `agy` adapters, `anthropic` family.
 
-### Gemini 3.6 Flash (Google)
+### Gemini 3.7 Flash (Google)
 
 - **Good at:** not yet observed. Reach for it where 3.5 Flash is the recorded
   fit — cheap fan-out and a third cheap opinion from a different family — and
   record what you find.
 - **Watch out for:** the entry above is an availability note, not experience.
-  Treat a 3.6 Flash result with the scepticism due an unmeasured model until
+  Treat a 3.7 Flash result with the scepticism due an unmeasured model until
   this line says otherwise.
 - **Cost:** cheap; Flash tier, in `(High)`, `(Medium)` and `(Low)`.
 - **Reach:** `agy` adapter, `google` family. Reached through `agy` only —

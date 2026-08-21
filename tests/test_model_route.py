@@ -2858,6 +2858,19 @@ def test_optional_adapter_preference_policy_is_ordered_and_native_first_for_fall
     }
 
 
+def test_google_flash_defaults_track_the_current_agy_catalogue():
+    catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    google = catalog["families"]["google"]
+
+    assert google["aliases"]["workhorse"] == ["gemini-3.7-flash"]
+    assert google["aliases"]["scout"] == ["gemini-3.7-flash"]
+    assert google["per_model_efforts"]["gemini-3.7-flash"] == [
+        "low",
+        "medium",
+        "high",
+    ]
+
+
 def test_split_root_defaults_use_instance_routing_and_product_compatibility(tmp_path):
     product_root = tmp_path / "product"
     instance_root = tmp_path / "instance"
@@ -3027,8 +3040,8 @@ def write_agy_capability_snapshot(tmp_path, models=None):
                 "resolved_model": "gemini-3.1-pro",
                 "supported_efforts": ["low", "high"],
             },
-            "gemini-3.6-flash": {
-                "resolved_model": "gemini-3.6-flash",
+            "gemini-3.7-flash": {
+                "resolved_model": "gemini-3.7-flash",
                 "supported_efforts": ["low", "medium", "high"],
             },
         }
@@ -3060,7 +3073,7 @@ def test_agy_effort_is_validated_against_the_runtime_model_catalogue(tmp_path):
     assert result.returncode != 0
     assert route["status"] == "effort_unsupported"
 
-    result, route = route_for("gemini-3.6-flash", "medium")
+    result, route = route_for("gemini-3.7-flash", "medium")
     assert result.returncode == 0
     assert route["status"] == "ok"
     assert route["effort"] == "medium"

@@ -405,7 +405,7 @@ def test_agy_direct_route_dispatches_json_sandbox_and_file_prompt():
             [
                 str(SCRIPT),
                 "--tool", "agy",
-                "--model", "gemini-3.6-flash",
+                "--model", "gemini-3.7-flash",
                 "--effort", "medium",
                 "--add-dir", str(allowed_two),
                 "--orchestrator-family", "codex",
@@ -432,7 +432,7 @@ def test_agy_direct_route_dispatches_json_sandbox_and_file_prompt():
         args = args_file.read_text(encoding="utf-8").splitlines()
         assert args[args.index("--output-format") + 1] == "json"
         assert "--sandbox" in args
-        assert args[args.index("--model") + 1] == "gemini-3.6-flash"
+        assert args[args.index("--model") + 1] == "gemini-3.7-flash"
         assert args[args.index("--effort") + 1] == "medium"
         assert args.count("--add-dir") == 2, args
         assert str(allowed_one) in args
@@ -467,7 +467,7 @@ def test_agy_oversized_prompt_fails_closed_instead_of_truncating():
         result = subprocess.run(
             [
                 str(SCRIPT), "--tool", "agy",
-                "--model", "gemini-3.6-flash", "--effort", "low",
+                "--model", "gemini-3.7-flash", "--effort", "low",
                 "--orchestrator-family", "anthropic",
                 "--out", str(out),
                 # Via --prompt-file, not --prompt: Linux caps a single argv

@@ -72,11 +72,12 @@ under that directory, with no allow-rule needed, so point it at paths rather
 than pasting a huge diff inline. Path globs in `permissions.allow` do not
 work; `--add-dir` is the mechanism.
 
-Use a Gemini model only. On 2026-08-09, agy 1.1.11 listed
-`gemini-3.6-flash-{high,medium,low}`, `gemini-3.5-flash-{high,medium,low}` and
-`gemini-3.1-pro-{high,low}`, plus non-Gemini models. Never select a Claude,
+Use a Gemini model only. On 2026-08-22, agy 1.1.17 listed
+`gemini-3.7-flash-{high,medium,low}`, `gemini-3.6-flash-{high,medium,low}`,
+`gemini-3.5-flash-{high,medium,low}` and `gemini-3.1-pro-{high,low}`, plus
+non-Gemini models. Never select a Claude,
 GPT or other non-Gemini identifier for this cross-family review. In the
-dispatcher example below, `gemini-3.6-flash` is the harness routing alias and
+dispatcher example below, `gemini-3.7-flash` is the harness routing alias and
 `--effort medium` is passed separately. A raw agy call must use the
 effort-suffixed identifier returned by `agy models`.
 
@@ -109,7 +110,7 @@ a clipped brief be reviewed as though whole. Large material belongs behind
 
 ```
 ~/.agents/skills/orchestrate/scripts/cf_dispatch.sh --tool agy \
-  --model gemini-3.6-flash --effort medium \
+  --model gemini-3.7-flash --effort medium \
   --orchestrator-family anthropic \
   --add-dir <ABSOLUTE_REPO> \
   --out ${TMPDIR:-/tmp}/agy-<slug>-out.txt \

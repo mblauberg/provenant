@@ -124,7 +124,7 @@ the result in the run manifest and move to the next tool.
 |---|---|---|
 | `claude` | `claude --help`; `claude -p --bare --permission-mode plan --tools "Read,Grep,Glob" "OK"`; if using Claude Code OAuth, also test `--safe-mode` with the same read-only tool set | API key / OAuth / quota |
 | `codex` | `codex --version`; `codex exec -s read-only --ignore-user-config -c service_tier="default" "OK"` | login / usage limit |
-| `agy` | `agy models`; `agy --model gemini-3.6-flash --effort low --output-format json -p "OK"` | auth / tool permission auto-denied |
+| `agy` | `agy models`; `agy --model gemini-3.7-flash --effort low --output-format json -p "OK"` | auth / tool permission auto-denied |
 | `cursor-agent` | `cursor-agent --help`; `cursor-agent --list-models` | auth / workspace trust |
 | `kiro-cli` | `kiro-cli chat --list-models` | credits / auth |
 | `copilot` | `copilot --help`; `copilot -p "OK" --mode plan` | login / permission prompt |

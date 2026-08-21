@@ -72,7 +72,7 @@ The current pre-release tree includes:
   across them (#478).
 - Review panels for `orchestrate`, with council and breadth presets (#485).
 - An advisory model dossier for route selection, `docs/model-dossier.md`, with
-  Gemini 3.6 Flash recorded as a reachable google route (#470, #484).
+  Gemini 3.7 Flash recorded as the current reachable Google Flash route.
 
 ### Removed
 

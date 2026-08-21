@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """Capture a normalized, model-specific Agy runtime capability snapshot.
 
-`agy models` prints one dispatchable model id per line with the reasoning
-effort already baked into the suffix, for example `gemini-3.1-pro-high`. The
+`agy models` prints one dispatchable model id per line, optionally followed by
+a tab-separated display name, with reasoning effort baked into the ID suffix,
+for example `gemini-3.1-pro-high`. The
 bare family id is not dispatchable on its own: `agy --model gemini-3.1-pro`
 exits 1 with "requires --effort (available: low, high)".
 
-Efforts are per model rather than global. Measured on agy 1.1.10 and re-verified
-on agy 1.1.11 on 2026-08-09, gemini-3.1-pro offers only low and high, while the
-flash families offer low, medium and high. The CLI's own --help still advertises
+Efforts are per model rather than global. Re-verified on agy 1.1.17 on
+2026-08-22: gemini-3.1-pro offers only low and high, while the Flash families
+offer low, medium and high. The CLI's own --help still advertises
 a blanket low|medium|high and is wrong, so the runtime list is the only
 trustworthy source.
 
@@ -39,7 +40,11 @@ FOREIGN_FAMILY = re.compile(r"claude|gpt|llama|mistral|qwen|oss", re.IGNORECASE)
 
 
 def normalize(raw: str) -> dict[str, Any]:
-    ids = [line.strip() for line in raw.splitlines() if line.strip()]
+    ids = [
+        line.split("\t", 1)[0].strip()
+        for line in raw.splitlines()
+        if line.strip()
+    ]
     if not ids:
         raise ValueError("agy models returned no model ids")
 

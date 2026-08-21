@@ -57,7 +57,7 @@ Current durable aliases (verify against runtime before execution):
 |---|---|---|---|
 | Claude | Opus | Opus, Sonnet | Haiku |
 | OpenAI GPT-5.6 | Sol | Terra, Luna | Luna |
-| Google Gemini | 3.1 Pro | 3.6 Flash | 3.6 Flash |
+| Google Gemini | 3.1 Pro | 3.7 Flash | 3.7 Flash |
 
 Where an alias lists more than one model the order is the resolution order, so
 the first is the default and the rest stay admissible. That order is the only

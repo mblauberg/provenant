@@ -34,6 +34,26 @@ def test_discovery_ignores_stderr_when_stdout_contains_model_ids(tmp_path):
     assert snapshot["effortless_models"] == []
 
 
+def test_discovery_accepts_current_tab_separated_model_listing():
+    snapshot = MODULE.normalize(
+        "gemini-3.7-flash-high\tGemini 3.7 Flash (High)\n"
+        "gemini-3.7-flash-medium\tGemini 3.7 Flash (Medium)\n"
+        "gemini-3.7-flash-low\tGemini 3.7 Flash (Low)\n"
+        "claude-opus-4-6-thinking\tClaude Opus 4.6 (Thinking)\n"
+    )
+
+    assert snapshot["models"]["gemini-3.7-flash"] == {
+        "resolved_model": "gemini-3.7-flash",
+        "supported_efforts": ["low", "medium", "high"],
+        "dispatchable_ids": [
+            "gemini-3.7-flash-high",
+            "gemini-3.7-flash-low",
+            "gemini-3.7-flash-medium",
+        ],
+    }
+    assert snapshot["effortless_models"] == ["claude-opus-4-6-thinking"]
+
+
 def test_nonzero_exit_reports_stderr(tmp_path, capsys):
     executable = tmp_path / "agy"
     executable.write_text(
