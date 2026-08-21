@@ -123,19 +123,15 @@
   ],
   "current_routing_regression": {
     "attempts_started": 0,
-    "blocked_reason": "FABRIC-ROUNDTRIP-UNAVAILABLE",
     "cases": 18,
     "catalogue_owner_count": 32,
     "dataset": "routing-holdout.yaml",
-    "dependencies": [
-      "https://github.com/mblauberg/provenant/issues/330"
-    ],
-    "evaluation_id": "skill-portfolio-routing-20260719-fabric-v7",
+    "evaluation_id": "skill-portfolio-catalogue-20260821-live",
     "planned_attempts": 6,
     "planned_case_rows": 108,
-    "protocol": "routing-protocol.json",
+    "protocol": "live-catalogue",
     "repetitions": 3,
-    "status": "outstanding"
+    "status": "catalogue-only"
   },
   "predecessor_routing_regression": {
     "attempts": 6,

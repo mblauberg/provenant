@@ -286,7 +286,7 @@ cannot.
 ```mermaid
 flowchart TB
     accTitle: Review topology, blocking and non-blocking legs
-    accDescr: The user starts one client, and that client is the session chair. The chair fans out to native authoring subagents in its own family for parallel depth; because they write the work they may never certify it, and neither may the chair, which decides. Review then runs on targeted lenses and the other primary from the substantial tier upwards. Those legs are drawn solid because they can block the run; the delivery validator rejects a receipt that reaches acceptance missing either requirement. A distinct family attaches through the same fabric as advisory pressure, drawn dashed because availability is risk-scaled and any skip is recorded. Herdr observes and wakes, drawn dotted, and never decides. Only a participant that neither authored nor decided the surface may sign the certificate.
+    accDescr: The user starts one client, and that client is the session chair. The chair fans out to native authoring subagents in its own family for parallel depth; because they write the work they may never certify it, and neither may the chair, which decides. Review then runs on targeted lenses and the other primary from the substantial tier upwards. Those legs are drawn solid because they can block the run; the delivery validator rejects a receipt that reaches acceptance missing either requirement. A distinct family attaches through the same fabric as advisory pressure, drawn dashed because availability is risk-scaled and any skip is recorded. Herdr observes and sends fire-and-forget steering, drawn dotted, and never decides. Only a participant that neither authored nor decided the surface may sign the certificate.
     HU(["user"]) ==> CH
 
     CH["session chair<br/>the client the user started<br/>owns authority, run state, gates, synthesis<br/>it decides, so it never certifies"]
@@ -305,7 +305,7 @@ flowchart TB
     BF -. "advisory only, never blocks<br/>every skipped leg is recorded" .-> CERT
 
     CERT ==> CH
-    HD["Herdr<br/>panes and wake signals"] -. "observes and wakes, never decides" .-> CH
+    HD["Herdr<br/>panes and advisory steering"] -. "observes and steers, never wakes or decides" .-> CH
 
     classDef user fill:#8a6d1f,stroke:#f0c674,color:#ffffff,stroke-width:2px
     classDef actor fill:#1f5f8b,stroke:#7fb3d5,color:#ffffff,stroke-width:2px
@@ -411,7 +411,7 @@ excluded from context scans.
 `scripts/manage_installation.py` plans, checks, installs, reconciles and removes
 only harness-owned skill links. Every normal install repairs missing or stale
 managed links and retires safe managed leftovers. A versioned manifest records
-ownership, source tree digests, the bound target and rename history beside the
+ownership, source tree digests, the bound target and supersession history beside the
 target skills directory. The post-install integrity check verifies catalogue
 presence. Missing or noncanonical required names fail; extra symlinks resolving
 outside the canonical skill tree produce warnings. Unmanaged paths are never

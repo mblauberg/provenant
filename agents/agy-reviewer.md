@@ -40,13 +40,14 @@ non-empty transcript. A report without a transcript path did not dispatch, and t
 
 ## Why this agent exists
 
-The review ladder wants a distinct provider family for cross-family pressure. Gemini reached
-through `agy` is that family. It is also cheap relative to spending Claude tokens on a second
-read of the same diff.
+The review ladder wants a distinct provider family for cross-family pressure.
+Gemini reached through `agy` can provide that family when the dispatch receipt
+records an actual Google model. It is also cheap relative to spending Claude
+tokens on a second read of the same diff.
 
-Agy holds its own `agy` Agent Fabric seat, so a Gemini finding is recorded against the Google
-family rather than borrowing another provider's identity. Fabric carries the coordination and
-the record; this dispatch is the call itself. The dispatcher records this route as `prompt_only`,
+Agy holds its own `agy` Agent Fabric seat for stable addressing, not model-family
+proof. Fabric carries the coordination and the record; this dispatch is the
+call itself. The dispatcher records this route as `prompt_only`,
 not `enforced`, because `--sandbox` is not a read-only guarantee: agy is not sandboxed against
 writes (agy 1.1.11, checked 2026-08-09). Treat the route as prompt-only and verify the tree or
 output file rather than the status. It remains a genuine independent opinion,

@@ -133,9 +133,10 @@ transactional callback, terminal result or automatic wake-up exists.
 Fabric identity follows the working directory, so a linked worktree is a
 different Fabric project from the primary checkout. Measured: the primary
 resolves to `<repo>`, while `<repo>/.worktrees/<name>` resolves to a project of
-its own. Messages, shared tasks and the activity log do not cross that boundary,
-and nothing errors when they fail to: the message simply lands in a project the
-chair never reads. Dispatcher subagents make this worse, because their tool
+its own. Messages, shared tasks and the activity log do not cross that boundary.
+A targeted send normally fails with an unknown-recipient error until that label
+has been announced in the worktree project; it does not silently land in the
+primary project. Dispatcher subagents make this worse, because their tool
 grants carry no MCP, so `fabric_*` is unavailable to them entirely and their
 only route is the `fabric` CLI through Bash, which writes to whichever project
 its working directory implies.

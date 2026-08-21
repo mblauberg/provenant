@@ -108,11 +108,12 @@ Audit usage periodically. Retire zero-use skills that add no durable capability,
 but preserve required third-party notices and use repository history instead of
 live backup folders as the normal safety boundary.
 
-Record a public rename in `config/skill-renames.json`. Test the managed
-reconciliation path; do not rely on users deleting or replacing global links by
-hand. Run `scripts/manage_installation.py plan --target <skills-dir>`, then
-`reconcile --target <skills-dir> --renames config/skill-renames.json`. Ordinary
-installation does not apply the rename registry.
+Record skill ownership and supersession in the managed installation manifest.
+Test the reconciliation path; do not rely on users deleting or replacing
+global links by hand. Run `scripts/manage_installation.py plan --target
+<skills-dir>`, then `reconcile --target <skills-dir>`. Reconciliation retires
+safe managed leftovers and preserves unmanaged paths; the manifest is the
+current ownership record.
 Never claim or overwrite an unmanaged target.
 
 ## Change the delivery kernel

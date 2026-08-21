@@ -7,35 +7,30 @@ Predecessor delivery run: `SKAUD-20260714`
 This appendix is the durable evidence index for the 2026 portfolio refactor.
 Detailed provider events and usage remain local run-owned evidence.
 
-## Current routing evaluation
+## Current catalogue holdout
 
 | Dataset | Planned schedule | Result | Disposition |
 |---|---:|---|---|
-| [Current 32-owner holdout](routing-holdout.yaml) | 18 cases x 2 families x 3 trials | Not run | Outstanding; `FABRIC-ROUNDTRIP-UNAVAILABLE`. |
+| [Current 32-owner holdout](routing-holdout.yaml) | 18 cases x 2 families x 3 trials | Not run | Catalogue holdout only; no current evaluation protocol has been frozen. |
 
-The current holdout names the consolidated owners `ui-ux-design`, `skill-craft`
-and `autopilot`. It also tests the positive `setup-repo` trigger against the
-negative boundary for ordinary mechanics in an already-configured repository.
-The [frozen protocol](routing-protocol.json) inventories all 32 owners and
-predeclares the rubric, models, adapters, three repetitions and no-retry rule.
-It was refrozen as evaluation v7 after the exact admitted Cursor model and
-effort were corrected, before any provider attempt started.
+The current holdout names the live consolidated owners `ui-ux-design`,
+`skill-craft` and `autopilot`. It also tests the positive `setup-repo` trigger
+against the negative boundary for ordinary mechanics in an already-configured
+repository. Its 32-owner count is checked against `skills/*/SKILL.md` by the
+live catalogue tests; it is not a rewrite of the frozen protocol.
 
-No current result file exists because no current model attempt started. The
-Fabric daemon and both requested adapters were healthy, but the worktree's
-supported bootstrap authority projected coordination tools only and did not
-grant provider-action dispatch/read. The standalone Console attach was also
-unavailable with `transport-failure`. Direct provider CLIs were deliberately
-not used for answer-bearing evidence. `FABRIC-ROUNDTRIP-UNAVAILABLE` is an
-infrastructure status, not a semantic routing failure.
+The [frozen protocol](routing-protocol.json) remains evaluation v7's original
+33-owner, 19 July artifact, including its source revision, identity and
+daemon-era route. It is retained as planned-unexecuted historical evidence.
 
-The outstanding refresh is exactly three fresh no-retry trials on exact Fabric
-routes `Gemini 3.1 Pro (High)` through `agy` and `cursor-grok-4.5-high`
-(Grok 4.5, high) through `cursor-agent`. The public provider-action task binding
-landed through [PR #331](https://github.com/mblauberg/provenant/pull/331); a
-rerun still requires a reviewed Fabric run with task-bound provider-action
-authority. Retain every terminal action without retrying or relabelling
-failures.
+No current result file exists because no current model attempt started. A
+future evaluation needs a newly frozen 32-owner protocol with the current
+direct-provider/Fabric-coordination route and a new evaluation identity. Do not
+reuse v7's retired bootstrap-authority or provider-action assumptions.
+
+The holdout therefore records catalogue coverage only. Any future trials must
+record the actual provider/model-family route in a dispatch receipt and retain
+every terminal action without retrying or relabelling failures.
 
 ## Predecessor routing evidence
 

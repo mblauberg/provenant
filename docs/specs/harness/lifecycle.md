@@ -358,10 +358,10 @@ release, evidence window, containment, diagnosis and resulting regression case.
 ## Installation, precedence and portability
 
 Introduce a versioned installation manifest containing skill name, source
-digest, installed target, ownership and rename/supersession history. Installer
+digest, installed target, ownership and supersession history. Installer
 operations support `plan`, `install`, `reconcile` and `uninstall-managed`.
 Unmanaged existing paths are never claimed or overwritten. Broken managed
-links and safe managed renames are repaired with receipts. The target-bound
+links and safe managed retirements are repaired with receipts. The target-bound
 manifest hashes full skill-tree bytes and executable modes; link mutations roll
 back if its atomic commit fails. Conflicts stop for user resolution.
 
@@ -506,7 +506,7 @@ The refactor is complete when:
 | 5 | `skills/retrospect/templates/RETROSPECT.template.json`, `validate_retrospect.py`, adversarial receipt tests |
 | 6 | `config/security-evidence.json`, security selector and crucial-gate tests |
 | 7 | typed observation contract and strengthened `RELEASE.json` observation gate |
-| 8 | `manage_installation.py`, rename registry and managed-install tests |
+| 8 | `manage_installation.py`, the managed manifest and managed-install tests |
 | 9 | balanced core fixtures, held-out dataset and repeated Fable routing receipts |
 | 10 | `scripts/check-harness`, public-release check, clean-install and context-budget suites |
 | 11 | HREF-002 targeted and other-primary review artifacts after the final source freeze |

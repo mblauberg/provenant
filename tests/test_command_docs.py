@@ -37,7 +37,7 @@ def test_managed_reconciliation_stays_documented_for_maintainers():
     # The operator detail the README used to carry. A maintainer reads this with the
     # checkout as cwd, so a relative script path is the correct form here.
     source = read("MAINTAINING.md")
-    assert "`config/skill-renames.json`" in source
+    assert "supersession" in source
     # Not anchored to a closing backtick. `plan` requires `--target`, so pinning
     # the bare command forbade documenting the flag that makes it runnable, and
     # the invariant here is that the command stays documented, not that it stays
@@ -45,4 +45,5 @@ def test_managed_reconciliation_stays_documented_for_maintainers():
     assert "scripts/manage_installation.py plan" in source
     assert "--target" in source
     assert "reconcile" in source
+    assert "current ownership record" in source
     assert "Never claim or overwrite an unmanaged target." in source

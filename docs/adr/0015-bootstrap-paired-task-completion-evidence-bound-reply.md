@@ -1,8 +1,13 @@
 # ADR 0015 — Bootstrap paired-task completion via an evidence-bound reply, not authority widening
 
-**Status:** Accepted 2026-07-21 (user, [issue #336](https://github.com/mblauberg/provenant/issues/336), Gap 3)
+**Status:** Superseded 2026-08-21 by [ADR 0020](0020-retire-the-daemon-fabric.md); retained as daemon-era history.
 
 **Date:** 21 July 2026
+
+> Historical record only. The bootstrap authority, task-claim omission and
+> `task.complete-with-reply` path below belonged to the retired daemon
+> runtime. Current Fabric is daemonless and exposes its coordination contract
+> through `runtime/fabric/README.md` and ADR 0020.
 
 ## Context
 

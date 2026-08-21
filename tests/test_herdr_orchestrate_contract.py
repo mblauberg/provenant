@@ -63,5 +63,20 @@ def test_herdr_reference_and_degradation_doctrines_are_contract_invariants() -> 
         "dispatched-unconfirmed",
         "referenceValidation: verified",
         "FABRIC-ROUNDTRIP-UNAVAILABLE",
-        "Herdr then wakes or focuses the peer; it is not the transport of record",
+        "Herdr only observes or sends fire-and-forget steering",
     } <= invariants
+
+
+def test_worktree_recipient_failure_is_explicit_until_the_label_is_announced() -> None:
+    source = (ROOT / "skills" / "orchestrate" / "references" / "herdr-panes.md").read_text()
+    assert "unknown-recipient error" in source
+    assert "does not silently land in the" in source
+    assert "simply lands in a project the" not in source
+
+
+def test_reader_facing_herdr_descriptions_do_not_promise_wake_or_callback() -> None:
+    for path in (ROOT / "README.md", ROOT / "docs" / "ARCHITECTURE.md"):
+        source = path.read_text()
+        assert "observes and wakes" not in source
+        assert "wake signals" not in source
+    assert "fire-and-forget\nsteering" in (ROOT / "README.md").read_text()

@@ -165,9 +165,9 @@ AGENT_FABRIC_CAPABILITY = "never-print-capability"
         "command": str(shim),
         "env": {**expected_common, "AGENT_FABRIC_SEAT": "codex", "AGENT_FABRIC_CLIENT_LABEL": "codex"},
     }
-    # Brokers share the codex seat; Agy holds its own, because it is the only
-    # route to the Gemini family and its findings must not be attributed to
-    # OpenAI. See CLIENT_SEATS in scripts/configure-fabric-mcp.py.
+    # Brokers share the codex seat; Agy holds its own for stable addressing.
+    # The seat is not model-family proof. See CLIENT_SEATS in
+    # scripts/configure-fabric-mcp.py.
     expected_seats = {"cursor": "codex", "agy": "agy", "kiro": "codex"}
     for client, path in json_configs.items():
         value = json.loads(path.read_text())
@@ -1173,6 +1173,8 @@ def test_registration_runbook_documents_a_project_free_registration_and_its_reco
     assert "cannot preserve" in runbook
     assert "Claude Code and Codex" in runbook
     assert "six clients" in runbook
+    assert "not model-family proof" in runbook
+    assert "exact provider/model" in runbook
     verification = runbook.split("## Verify", 1)[1].split("\n## ", 1)[0]
     assert "opencode mcp list" in verification
     # A part-written set of registries must say so rather than report success.

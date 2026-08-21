@@ -163,7 +163,7 @@ each before dispatching work through that provider.
 |---|---|
 | Claude Code | Primary client and enabled Anthropic provider |
 | Codex | Primary client and enabled OpenAI provider |
-| Agy | Enabled optional Gemini/Claude provider |
+| Agy | Enabled optional provider client; runtime model family comes from the dispatch receipt |
 | Cursor | Enabled optional Composer/Grok and hosted third-party provider |
 | Kiro | Enabled optional open-weight ACP provider |
 | OpenCode | Enabled optional ACP provider for its built-in account models |
@@ -252,7 +252,8 @@ The canonical ladder lives in [`HARNESS.md`](HARNESS.md).
 
 Provider workers are dispatched as direct command-line calls; Fabric carries
 the messages, shared tasks and activity log between them.
-[Herdr](https://herdr.dev) is optional: it observes and wakes, never decides.
+[Herdr](https://herdr.dev) is optional: it observes and sends fire-and-forget
+steering; it does not provide wake, callback or completion delivery.
 
 ## Skill library
 
