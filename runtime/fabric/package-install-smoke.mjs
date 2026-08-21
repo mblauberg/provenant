@@ -67,15 +67,21 @@ try {
   assert.doesNotMatch(cli.stderr, /tsx loader not found/);
 
   const unsupportedNode = join(temporaryDirectory, "node-26");
-  writeFileSync(unsupportedNode, '#!/bin/sh\n[ "$1" = "-p" ] && echo 26.0.0 && exit 0\nexit 99\n');
+  writeFileSync(unsupportedNode, `#!${process.execPath}
+if (process.argv[2] !== "-e" || typeof process.argv[3] !== "string") process.exit(99);
+Object.defineProperty(process.versions, "node", { value: "26.0.0" });
+(0, eval)(process.argv[3]);
+`);
   chmodSync(unsupportedNode, 0o755);
-  const unsupported = spawnSync(join(binDirectory, "fabric"), ["--help"], {
-    cwd: temporaryDirectory,
-    encoding: "utf8",
-    env: { ...env, FABRIC_NODE: unsupportedNode },
-  });
-  assert.equal(unsupported.status, 127);
-  assert.match(unsupported.stderr, /requires Node >=24\.15\.0 and <25/);
+  for (const binary of ["fabric", "fabric-mcp"]) {
+    const unsupported = spawnSync(join(binDirectory, binary), ["--help"], {
+      cwd: temporaryDirectory,
+      encoding: "utf8",
+      env: { ...env, FABRIC_NODE: unsupportedNode },
+    });
+    assert.equal(unsupported.status, 127, `${binary}: ${unsupported.stderr}`);
+    assert.match(unsupported.stderr, /requires Node >=24\.15\.0 and <25/);
+  }
 
   const transport = new StdioClientTransport({
     command: join(binDirectory, "fabric-mcp"),
