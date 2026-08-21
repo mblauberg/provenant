@@ -100,7 +100,9 @@ def test_current_portfolio_routing_plan_matches_the_live_catalogue_and_has_no_re
     holdout = load(root / plan["dataset"]["path"])
 
     assert plan["catalogue"]["owners"] == skills
-    assert plan["catalogue"]["owner_count"] == len(skills) == 33
+    assert plan["catalogue"]["owner_count"] == len(skills) == 32
+    assert "project-activation" not in plan["catalogue"]["owners"]
+    assert summary["catalogue_owner_count"] == plan["catalogue"]["owner_count"]
     assert plan["dataset"]["id"] == holdout["dataset_id"]
     assert plan["dataset"]["cases"] == len(holdout["cases"]) == 18
     assert plan["execution"] == {

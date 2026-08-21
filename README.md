@@ -112,7 +112,7 @@ Re-running the installer repairs recorded links, while unmanaged files remain
 untouched.
 
 `provenant fabric whoami` creates the project-local Fabric identity and shared
-SQLite bus on first use. There is no daemon, trust record, seat bootstrap or
+SQLite bus on first use. There is no daemon, trust record, initial provisioning or
 warm/build step. `provenant check` runs the harness policy gate; `npm run check`
 covers the Fabric typecheck and tests.
 
@@ -256,11 +256,11 @@ the messages, shared tasks and activity log between them.
 
 ## Skill library
 
-The full <!--skills-->33<!--/skills-->-skill catalogue, grouped by area:
+The full <!--skills-->32<!--/skills-->-skill catalogue, grouped by area:
 
 <!-- skill-catalogue:start -->
 <details>
-<summary>All 33 skills</summary>
+<summary>All 32 skills</summary>
 
 | Area | Skills |
 |---|---|
@@ -270,7 +270,6 @@ The full <!--skills-->33<!--/skills-->-skill catalogue, grouped by area:
 | Design and diagrams | [`ui-ux-design`](skills/ui-ux-design/SKILL.md), [`prototype`](skills/prototype/SKILL.md), [`d2-diagrams`](skills/d2-diagrams/SKILL.md), [`uml-diagrams`](skills/uml-diagrams/SKILL.md) |
 | Web engineering | [`playwright`](skills/playwright/SKILL.md), [`react-performance`](skills/react-performance/SKILL.md), [`tanstack-query`](skills/tanstack-query/SKILL.md), [`typescript-clean-code`](skills/typescript-clean-code/SKILL.md), [`web-stack-conventions`](skills/web-stack-conventions/SKILL.md) |
 | Harness development | [`grill-me`](skills/grill-me/SKILL.md), [`skill-craft`](skills/skill-craft/SKILL.md) |
-| Project operations | [`project-activation`](skills/project-activation/SKILL.md) |
 | Presentation | [`caveman`](skills/caveman/SKILL.md) |
 
 </details>
