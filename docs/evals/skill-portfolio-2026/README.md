@@ -11,12 +11,12 @@ Detailed provider events and usage remain local run-owned evidence.
 
 | Dataset | Planned schedule | Result | Disposition |
 |---|---:|---|---|
-| [Current 33-owner holdout](routing-holdout.yaml) | 18 cases x 2 families x 3 trials | Not run | Outstanding; `FABRIC-ROUNDTRIP-UNAVAILABLE`. |
+| [Current 32-owner holdout](routing-holdout.yaml) | 18 cases x 2 families x 3 trials | Not run | Outstanding; `FABRIC-ROUNDTRIP-UNAVAILABLE`. |
 
 The current holdout names the consolidated owners `ui-ux-design`, `skill-craft`
 and `autopilot`. It also tests the positive `setup-repo` trigger against the
 negative boundary for ordinary mechanics in an already-configured repository.
-The [frozen protocol](routing-protocol.json) inventories all 33 owners and
+The [frozen protocol](routing-protocol.json) inventories all 32 owners and
 predeclares the rubric, models, adapters, three repetitions and no-retry rule.
 It was refrozen as evaluation v7 after the exact admitted Cursor model and
 effort were corrected, before any provider attempt started.
@@ -48,7 +48,7 @@ and [predecessor result](predecessor/routing-result-20260714.json) preserve the
 original binding to commit `1ddfe24858b362decb1c507b87a466df26d205eb` at
 `docs/evals/skill-portfolio-2026`. They evaluated retired owner names including
 `frontend-review`, `skill-audit`, `skill-authoring` and `autonomous-lab`; they
-do not establish current 33-owner routing behaviour.
+do not establish current 32-owner routing behaviour.
 Gemini 3.1 Pro High through `agy` and Grok 4.5 XHigh through `cursor-agent`
 each completed three no-retry trials in that predecessor run.
 

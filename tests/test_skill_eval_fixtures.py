@@ -137,10 +137,16 @@ def test_current_portfolio_routing_plan_matches_the_live_catalogue_and_has_no_re
 def test_live_readme_skill_counts_match_the_discovered_catalogue():
     skills = list((ROOT / "skills").glob("*/SKILL.md"))
     readme = (ROOT / "README.md").read_text()
+    owner_readme = (
+        ROOT / "docs" / "evals" / "skill-portfolio-2026" / "README.md"
+    ).read_text()
 
     assert readme.count(f"<!--skills-->{len(skills)}<!--/skills-->") == 2
     assert f"Skills library — {len(skills)} Agent Skills" in readme
     assert f"<summary>All {len(skills)} skills</summary>" in readme
+    assert f"[Current {len(skills)}-owner holdout]" in owner_readme
+    assert f"inventories all {len(skills)} owners" in owner_readme
+    assert f"current {len(skills)}-owner routing behaviour" in owner_readme
 
 
 def test_portfolio_routing_summary_retains_a_self_consistent_predecessor_result():
