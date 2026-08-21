@@ -47,3 +47,9 @@ def test_managed_reconciliation_stays_documented_for_maintainers():
     assert "reconcile" in source
     assert "current ownership record" in source
     assert "Never claim or overwrite an unmanaged target." in source
+
+
+def test_adr_index_marks_daemon_era_task_completion_decision_superseded():
+    source = read("docs/adr/README.md")
+    row = next(line for line in source.splitlines() if "[0015](" in line)
+    assert "Superseded by ADR 0020" in row

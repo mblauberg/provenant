@@ -28,7 +28,7 @@ historical evidence; the current Fabric owner is
 | [0012](0012-defer-bun-node-pinned-runtime.md) | Defer Bun; Node stays the pinned runtime family | Accepted |
 | [0013](0013-thin-provenant-cli.md) | Thin `provenant` CLI for command discovery | Accepted; `doctor` passthrough added 2026-07-27; amended by ADR 0020 |
 | [0014](0014-comparative-skill-evals-on-suspicion.md) | Comparative skill evals run on suspicion, not by default | Accepted |
-| [0015](0015-bootstrap-paired-task-completion-evidence-bound-reply.md) | Bootstrap paired-task completion via an evidence-bound reply, not authority widening | Accepted |
+| [0015](0015-bootstrap-paired-task-completion-evidence-bound-reply.md) | Bootstrap paired-task completion via an evidence-bound reply, not authority widening | Superseded by ADR 0020 |
 | [0016](0016-gate-b-restate-permanent-by-design.md) | Keep GATE-B' skipped by design after the RESTATE decision | Accepted |
 | [0017](0017-specifications-own-non-derivable-intent.md) | Specifications own non-derivable intent only | Accepted |
 | [0018](0018-accept-portal-stdio-v1-launch-custody.md) | Accept `portal-stdio-v1` as review-portal launch custody | Superseded by ADR 0020 |
