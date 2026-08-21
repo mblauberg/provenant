@@ -74,11 +74,11 @@ reject the following:
 - a rewrite of `scripts/check-harness`;
 - replacing existing scripts with symlinks or redirecting their callers.
 
-Agent Fabric remains the owner of answer-bearing provider execution, retained
-sessions, receipts and communication. `scripts/model-route` remains the owner
-of model selection. Herdr and native harnesses retain their existing execution
-and observation roles. A thin front door must not reinterpret an error or turn
-one provider's failure into another provider's action.
+At this decision's date, Agent Fabric was the owner of answer-bearing provider
+execution, retained sessions, receipts and communication. `scripts/model-route`
+was the owner of model selection. Herdr and native harnesses had their existing
+execution and observation roles. A thin front door was not to reinterpret an
+error or turn one provider's failure into another provider's action.
 
 ## Clients and providers
 

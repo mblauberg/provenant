@@ -51,10 +51,11 @@ Evidence rules:
 The source drafts described moving candidate worktrees and an earlier primary
 checkout. Those revisions are historical evidence only. Claims that Specs 01,
 04 and 05 were older, that Fabric was unavailable, or that direct CLI review
-was the active route must not be reused as current state. The accepted lineage
-now owns asynchronous preparation, lifecycle custody/recovery, complete review
-bundles, dynamic terminal resizing and answer-bearing Fabric review. Provider
-CLI output remains a dated degraded-path observation and cannot certify review.
+was the active route must not be reused as current state. At consolidation, the
+accepted lineage was described as owning asynchronous preparation, lifecycle
+custody/recovery, complete review bundles, dynamic terminal resizing and
+answer-bearing Fabric review. Provider CLI output was a dated degraded-path
+observation and could not certify review.
 
 The draft's numeric spec owner map is also historical. Current semantic owners
 for the subjects cited here are:

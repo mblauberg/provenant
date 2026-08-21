@@ -37,8 +37,8 @@ intake and fresh-context continuation
   recovery owner. Lookup precedes any retry; no path blindly replays compact,
   spawn, attach or promotion.
 
-These conclusions are implemented normatively through the existing lifecycle
-state machine and persistence owner. They do not imply an automatic pressure
+At the snapshot date, these conclusions were embodied in the lifecycle state
+machine and persistence owner. They did not imply an automatic pressure
 controller or threshold policy.
 
 ## Evidence

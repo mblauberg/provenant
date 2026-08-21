@@ -17,19 +17,19 @@ daemon and wire hardening
 
 ## Conclusions
 
-- Adapters publish versioned capability snapshots and exact effective
-  configuration. Product names and previous success do not establish current
-  model, effort, context, native-mode or permission capability.
-- Runtime discovery and capability-fixture conformance are distinct evidence
-  sources. Unsupported or unobserved values are unavailable/unknown, never
+- At the snapshot date, adapters published versioned capability snapshots and
+  exact effective configuration. Product names and previous success did not
+  establish model, effort, context, native-mode or permission capability.
+- Runtime discovery and capability-fixture conformance were distinct evidence
+  sources. Unsupported or unobserved values were unavailable/unknown, never
   silently inferred.
-- The provider-neutral route contract is generated and shared across the
-  TypeScript daemon and offline Python resolver. Capability data is explicit
-  resolver input; the resolver does not read daemon activation state behind the
+- The provider-neutral route contract was generated and shared across the
+  TypeScript daemon and offline Python resolver. Capability data was explicit
+  resolver input; the resolver did not read daemon activation state behind the
   caller.
-- Node 24/TypeScript remains the protocol, daemon, adapter and Console stack;
-  SQLite/WAL remains the one-machine transaction store; Python remains useful
-  for offline evaluation. Rust is a narrow process/FD/terminal isolation or
+- Node 24/TypeScript was the protocol, daemon, adapter and Console stack;
+  SQLite/WAL was the one-machine transaction store; Python remained useful for
+  offline evaluation. Rust was a narrow process/FD/terminal isolation or
   measured performance fallback, not an architectural rewrite.
 - Host-global configuration is user-owned. Per-run overlays are minimal,
   recorded and reversible; ignored/unsupported fields stay visible. Persistent
