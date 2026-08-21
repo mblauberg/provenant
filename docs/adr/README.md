@@ -7,7 +7,10 @@ cross-reference dependency. ADRs 0009–0010 were ratified later, on 2026-07-15;
 ADRs 0011–0012 were ratified on 2026-07-16; ADR 0013 was ratified on
 2026-07-18; ADR 0014 was ratified on 2026-07-20; ADRs 0015–0016 were ratified
 on 2026-07-21; ADRs 0017–0018 were ratified on 2026-07-28; ADR 0019 was
-ratified on 2026-07-30 and amended on 2026-07-31.
+ratified on 2026-07-30 and amended on 2026-07-31; ADR 0020 was ratified on
+2026-08-02. Pre-ADR-0020 implementation paths in retained decisions are
+historical evidence; the current Fabric owner is
+[`runtime/fabric/README.md`](../../runtime/fabric/README.md).
 
 | ADR | Title | Status |
 |---|---|---|
@@ -23,11 +26,11 @@ ratified on 2026-07-30 and amended on 2026-07-31.
 | [0010](0010-lifecycle-receipt-authority-distinct-trust-boundary.md) | The lifecycle receipt authority is a trust boundary distinct from provider authority compilation | Accepted |
 | [0011](0011-github-owns-work-state.md) | GitHub owns current work state | Accepted |
 | [0012](0012-defer-bun-node-pinned-runtime.md) | Defer Bun; Node stays the pinned runtime family | Accepted |
-| [0013](0013-thin-provenant-cli.md) | Thin `provenant` CLI for command discovery | Accepted; `doctor` passthrough added 2026-07-27 |
+| [0013](0013-thin-provenant-cli.md) | Thin `provenant` CLI for command discovery | Accepted; `doctor` passthrough added 2026-07-27; amended by ADR 0020 |
 | [0014](0014-comparative-skill-evals-on-suspicion.md) | Comparative skill evals run on suspicion, not by default | Accepted |
 | [0015](0015-bootstrap-paired-task-completion-evidence-bound-reply.md) | Bootstrap paired-task completion via an evidence-bound reply, not authority widening | Accepted |
 | [0016](0016-gate-b-restate-permanent-by-design.md) | Keep GATE-B' skipped by design after the RESTATE decision | Accepted |
 | [0017](0017-specifications-own-non-derivable-intent.md) | Specifications own non-derivable intent only | Accepted |
 | [0018](0018-accept-portal-stdio-v1-launch-custody.md) | Accept `portal-stdio-v1` as review-portal launch custody | Superseded by ADR 0020 |
-| [0019](0019-installed-file-class-ownership.md) | Installed file-class ownership by product, instance, or seeded template | Accepted (amended 2026-07-31) |
+| [0019](0019-installed-file-class-ownership.md) | Installed file-class ownership by product, instance, or seeded template | Accepted (amended 2026-07-31; ADR 0020 cutover note) |
 | [0020](0020-retire-the-daemon-fabric.md) | Retire the daemon fabric for a daemonless SQLite bus | Accepted |

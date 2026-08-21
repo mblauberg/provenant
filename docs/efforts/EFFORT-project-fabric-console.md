@@ -2,9 +2,10 @@
 
 ## Destination
 
-The durable Console requirements are indexed in the [Console
-specifications](../specs/README.md#project-fabric-console). Follow the linked
-GitHub work items and their Project Status fields for all live work state.
+This is a historical pre-ADR-0020 route map. The Console runtime and its
+specifications were retired by [ADR 0020](../adr/0020-retire-the-daemon-fabric.md);
+follow the linked GitHub work items for historical disposition only. Current
+Fabric ownership is [`runtime/fabric/README.md`](../../runtime/fabric/README.md).
 
 ## Route
 

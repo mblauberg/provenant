@@ -1,6 +1,12 @@
 # Agent continuity and checkpointing
 
-Status: Durable research reference
+Status: Historical pre-ADR-0020 research reference; not current implementation
+authority
+
+Current owners: [ADR 0020](../adr/0020-retire-the-daemon-fabric.md),
+[`runtime/fabric/README.md`](../../runtime/fabric/README.md), and
+[`HARNESS.md`](../../HARNESS.md). Daemon, lease and Console claims below are
+retained as dated evidence only.
 
 Evidence snapshot: [July 2026 continuity and routing evidence](evidence-snapshots/agent-continuity-routing-2026-07.md)
 

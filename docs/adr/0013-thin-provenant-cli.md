@@ -1,9 +1,17 @@
 # ADR 0013 — Thin `provenant` CLI for command discovery
 
 **Status:** Accepted 2026-07-18 (user, [issue
-#266](https://github.com/mblauberg/provenant/issues/266))
+#266](https://github.com/mblauberg/provenant/issues/266)); amended by [ADR
+0020](0020-retire-the-daemon-fabric.md) on 2026-08-02
 
 **Date:** 18 July 2026
+
+> **Cutover note (current reader).** This is a pre-ADR-0020 implementation
+> snapshot. Its daemon-era command and provider-execution ownership statements
+> are historical evidence, not current operational guidance. Current Fabric
+> commands and configuration are owned by
+> [`runtime/fabric/README.md`](../../runtime/fabric/README.md); Fabric now
+> coordinates messages, tasks and activity while direct CLIs execute providers.
 
 ## Context
 

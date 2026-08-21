@@ -4,6 +4,13 @@
 issue #561); applies [ADR 0001](0001-personal-first-product-compatible.md) and
 [ADR 0004](0004-per-domain-truth-owners.md)
 
+> **Cutover note (current reader).** This decision's file-class outcome remains
+> current, but its daemon-era paths and command examples are a pre-ADR-0020
+> implementation snapshot. Do not use them as operational guidance. Current
+> Fabric commands and configuration are owned by
+> [`runtime/fabric/README.md`](../../runtime/fabric/README.md); ADR 0020 records
+> the runtime retirement.
+
 ## Context
 
 Every installed file currently lives in one repository. `~/.agents` is at once
@@ -357,7 +364,10 @@ what the older product understands. This generalises: any future class the
 product takes ownership of moves the floor for supported rollback, and the
 floor is not tracked by any automated check.
 
-### Addendum — 2026-08-03
+### Addendum — 2026-08-03 (historical command snapshot)
+
+The command/path detail below predates ADR 0020. It is retained as decision
+evidence; use the current Fabric README named in the cutover note above.
 
 The layering paragraph above names `provenant status`. No such command exists
 and none was ever accepted: `scripts/provenant` delegates `route`, `worktree`,

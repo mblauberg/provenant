@@ -1,6 +1,12 @@
 # Agent continuity and routing: July 2026 evidence snapshot
 
-Status: Dated descriptive evidence; not implementation authority
+Status: Dated pre-ADR-0020 descriptive evidence; not implementation authority
+
+Current owners: [ADR 0020](../../adr/0020-retire-the-daemon-fabric.md),
+[`runtime/fabric/README.md`](../../../runtime/fabric/README.md),
+[`config/adapter-compatibility.yaml`](../../../config/adapter-compatibility.yaml),
+and [`HARNESS.md`](../../../HARNESS.md). Daemon and Console references below
+are retained as evidence, not current paths.
 
 Evidence cut-off: 12 July 2026
 

@@ -1,6 +1,13 @@
 # Provider adapter and runtime boundaries
 
-Status: Durable research reference
+Status: Historical pre-ADR-0020 research reference; not current implementation
+authority
+
+Current owners: [ADR 0020](../adr/0020-retire-the-daemon-fabric.md),
+[`runtime/fabric/README.md`](../../runtime/fabric/README.md),
+[`config/adapter-compatibility.yaml`](../../config/adapter-compatibility.yaml),
+and [`HARNESS.md`](../../HARNESS.md). Daemon and Console claims below are
+retained as dated evidence only.
 
 Evidence snapshot: [July 2026 continuity and routing evidence](evidence-snapshots/agent-continuity-routing-2026-07.md)
 
@@ -30,8 +37,8 @@ daemon and wire hardening
 - Operational spans are content-free and never substitute for authority,
   review, disclosure or artifact receipts.
 - OpenCode is an optional host/adapter, not a model family or load-bearing
-  route. OpenCode's current activation state is owned by
-  `config/agent-fabric.yaml` and `config/adapter-compatibility.yaml`. Login,
+  route. OpenCode's current activation state is owned by the checked-in
+  compatibility policy, `config/adapter-compatibility.yaml`. Login,
   paid/account changes, credentials, region/data policy and any activation or
   deactivation remain explicit human gates.
 

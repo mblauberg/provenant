@@ -8,7 +8,7 @@ Verified locally on macOS, 2026-08-05. Model IDs, flags, auth, and safety modes 
 - [Safety rule](#safety-rule)
 - [Harness-conditioned rule](#harness-conditioned-rule)
 - [Auth preflight](#auth-preflight)
-- [Fabric distinct-family lane](#fabric-distinct-family-lane)
+- [Distinct-family lane](#distinct-family-lane)
 - [Codex worktree implementation lane](#codex-worktree-implementation-lane)
 - [Runtime routing](#runtime-routing)
 - [Output normalisation](#output-normalisation)
@@ -16,11 +16,12 @@ Verified locally on macOS, 2026-08-05. Model IDs, flags, auth, and safety modes 
 
 ## Safety rule
 
-Headless CLIs are how external work reaches another provider. Fabric carries
-the request, the reply and the activity record around that call; it does not
-run the provider itself. Certification requires an enforced read-only
-boundary. A prompt-only review can still provide a genuine independent
-opinion, but it is not certification eligible.
+Headless CLIs are how external work reaches another provider. Fabric does not
+run the provider: where a cooperative round trip is available it records the
+request, explicit reply and activity; otherwise use a named degraded artifact
+and collection step. Certification requires an enforced read-only boundary. A
+prompt-only review can still provide a genuine independent opinion, but it is
+not certification eligible.
 
 ## Harness-conditioned rule
 
