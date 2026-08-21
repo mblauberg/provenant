@@ -41,7 +41,7 @@ flowchart TB
     U(["User request"]) --> LOOP["Delivery loop<br/>scope · implement · verify · review"]
     LOOP --> OUT(["Scoped, verified,<br/>independently reviewed change"])
     H["HARNESS.md — the constitution<br/>authority · lifecycle · review pressure"] -. "sets the rules" .-> LOOP
-    SK["Skills library — 33 Agent Skills<br/>one procedure per task, loaded on match"] -. "supplies the procedure" .-> LOOP
+    SK["Skills library — 32 Agent Skills<br/>one procedure per task, loaded on match"] -. "supplies the procedure" .-> LOOP
     F["Cross-provider dispatch<br/>Claude Code and Codex review each other;<br/>Fabric carries messages, tasks and activity"] -. "runs and reviews the work" .-> LOOP
     classDef out fill:#1f6f43,stroke:#4fd08a,color:#ffffff,stroke-width:2px
     class OUT out
@@ -50,7 +50,7 @@ flowchart TB
 - **Harness:** [`HARNESS.md`](HARNESS.md) is the constitution. It sets
   authority, the delivery lifecycle, and how much review pressure each risk tier
   owes, and stays small so it can be read every session.
-- **Skills:** the <!--skills-->33<!--/skills--> Agent Skills are task-specific
+- **Skills:** the <!--skills-->32<!--/skills--> Agent Skills are task-specific
   procedures, one folder with a `SKILL.md` each. Only the one-line descriptions
   sit in permanent context; a full body loads only when the task matches it.
 - **Fabric:** messages, shared tasks and an activity log between the agents

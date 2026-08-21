@@ -134,6 +134,15 @@ def test_current_portfolio_routing_plan_matches_the_live_catalogue_and_has_no_re
         assert {name for name in names if name is not None} <= valid_skills
 
 
+def test_live_readme_skill_counts_match_the_discovered_catalogue():
+    skills = list((ROOT / "skills").glob("*/SKILL.md"))
+    readme = (ROOT / "README.md").read_text()
+
+    assert readme.count(f"<!--skills-->{len(skills)}<!--/skills-->") == 2
+    assert f"Skills library — {len(skills)} Agent Skills" in readme
+    assert f"<summary>All {len(skills)} skills</summary>" in readme
+
+
 def test_portfolio_routing_summary_retains_a_self_consistent_predecessor_result():
     root = ROOT / "docs" / "evals" / "skill-portfolio-2026"
     archive = root / "predecessor"
