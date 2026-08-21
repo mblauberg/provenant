@@ -100,6 +100,10 @@ The current pre-release tree includes:
 
 ### Changed
 
+- Fabric MCP now publishes concise protocol instructions for clients that
+  materialise tool guidance, and read-only diagnostics reject inaccessible or
+  unstable database snapshots instead of reporting healthy absence or stale
+  counts.
 - Raised the OpenAI worker route from `medium` to `high` effort via
   `openai.role_effort_defaults.worker.workhorse`, completing the Luna reorder.
   Moving `gpt-5.6-luna` to the front of `aliases.workhorse` on its own bought

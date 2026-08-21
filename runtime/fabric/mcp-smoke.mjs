@@ -59,6 +59,8 @@ try {
   const codex = await spawnAgent("codex", "codex-client");
   const agy = await spawnAgent("agy", "agy-client");
 
+  assert.match(claude.getInstructions() ?? "", /project-scoped mailbox/);
+
   const listed = await claude.listTools();
   assert.deepEqual(listed.tools.map((tool) => tool.name).sort(), [
     "fabric_acknowledge",

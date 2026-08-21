@@ -176,6 +176,26 @@ describe("CLI boundaries", () => {
     expect(afterDirectoryStat).toEqual(beforeDirectoryStat);
   });
 
+  it("reports inaccessible diagnostic state as an error rather than healthy absence", () => {
+    const store = openStore();
+    store.close();
+
+    chmodSync(temporaryDirectory, 0o000);
+    let result: ReturnType<typeof runCli>;
+    try {
+      result = runCli(["doctor", "--json"]);
+    } finally {
+      chmodSync(temporaryDirectory, 0o700);
+    }
+
+    expect(result.status).toBe(1);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      status: "error",
+      exists: true,
+      readOnly: true,
+    });
+  });
+
   it("diagnoses an incomplete delivery-claim migration", () => {
     const database = new Database(databasePath);
     database.exec(`

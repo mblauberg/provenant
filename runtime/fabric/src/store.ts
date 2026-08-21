@@ -1,6 +1,6 @@
 import Database from "better-sqlite3";
 import { randomUUID } from "node:crypto";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -564,27 +564,73 @@ export interface DatabaseDiagnostic {
   error?: string;
 }
 
+const fileVersion = (path: string): string | null => {
+  try {
+    const value = statSync(path, { bigint: true });
+    return [value.dev, value.ino, value.size, value.mtimeNs, value.ctimeNs].join(":");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+};
+
+const copyConsistentSnapshot = (path: string, snapshotPath: string): void => {
+  const walPath = `${path}-wal`;
+  const snapshotWalPath = `${snapshotPath}-wal`;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const beforeMain = fileVersion(path);
+    const beforeWal = fileVersion(walPath);
+    try {
+      copyFileSync(path, snapshotPath);
+      if (beforeWal === null) rmSync(snapshotWalPath, { force: true });
+      else copyFileSync(walPath, snapshotWalPath);
+    } catch (error) {
+      rmSync(snapshotPath, { force: true });
+      rmSync(snapshotWalPath, { force: true });
+      if (attempt === 2) throw error;
+      continue;
+    }
+    if (
+      beforeMain === fileVersion(path) &&
+      beforeWal === fileVersion(walPath)
+    ) return;
+    rmSync(snapshotPath, { force: true });
+    rmSync(snapshotWalPath, { force: true });
+  }
+  throw new Error("database changed while creating a diagnostic snapshot");
+};
+
 /** Inspect existing state without creating directories, schema, rows or activity. */
 export function inspectDatabase(
   path: string,
   project: string,
   mode: "status" | "doctor",
 ): DatabaseDiagnostic {
-  if (!existsSync(path)) {
-    return { status: "absent", exists: false, readOnly: true, database: path, project };
+  try {
+    statSync(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return { status: "absent", exists: false, readOnly: true, database: path, project };
+    }
+    return {
+      status: "error",
+      exists: true,
+      readOnly: true,
+      database: path,
+      project,
+      error: error instanceof Error ? error.message : String(error),
+    };
   }
 
   let db: Database.Database | undefined;
   let snapshotDirectory: string | undefined;
   try {
-    // Inspect a private snapshot so SQLite can manage its own journal files
-    // without writing beside caller-owned state. Copy an active WAL when one
-    // exists and let SQLite rebuild its shared-memory index in the snapshot;
-    // a concurrent checkpoint may make the diagnostic fail safely.
+    // Inspect a version-checked private main/WAL pair so a concurrent
+    // checkpoint cannot silently pair files from different database states.
+    // SQLite rebuilds only the private shared-memory index.
     snapshotDirectory = mkdtempSync(resolve(tmpdir(), "fabric-inspect-"));
     const snapshotPath = resolve(snapshotDirectory, "fabric.sqlite3");
-    copyFileSync(path, snapshotPath);
-    if (existsSync(`${path}-wal`)) copyFileSync(`${path}-wal`, `${snapshotPath}-wal`);
+    copyConsistentSnapshot(path, snapshotPath);
     db = new Database(snapshotPath, { fileMustExist: true });
     db.pragma("query_only = ON");
     const tables = new Set(

@@ -43,7 +43,15 @@ const readyStore = (): Store => {
   }
 };
 
-const server = new McpServer({ name: "fabric", version: "2.0.0" });
+const server = new McpServer(
+  { name: "fabric", version: "2.0.0" },
+  {
+    instructions:
+      "Fabric is a project-scoped mailbox, cooperative task ledger, and activity log. " +
+      "Use fabric_inbox to claim requests, persist any response before calling " +
+      "fabric_acknowledge, and correlate replies with reply_to.",
+  },
+);
 server.server.onclose = () => {
   store?.close();
   store = undefined;
