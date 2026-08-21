@@ -1,6 +1,13 @@
 # Provider adapter and runtime boundaries
 
-Status: Durable research reference
+Status: Historical pre-ADR-0020 research reference; not current implementation
+authority
+
+Current owners: [ADR 0020](../adr/0020-retire-the-daemon-fabric.md),
+[`runtime/fabric/README.md`](../../runtime/fabric/README.md),
+[`config/adapter-compatibility.yaml`](../../config/adapter-compatibility.yaml),
+and [`HARNESS.md`](../../HARNESS.md). Daemon and Console claims below are
+retained as dated evidence only.
 
 Evidence snapshot: [July 2026 continuity and routing evidence](evidence-snapshots/agent-continuity-routing-2026-07.md)
 
@@ -10,19 +17,19 @@ daemon and wire hardening
 
 ## Conclusions
 
-- Adapters publish versioned capability snapshots and exact effective
-  configuration. Product names and previous success do not establish current
-  model, effort, context, native-mode or permission capability.
-- Runtime discovery and capability-fixture conformance are distinct evidence
-  sources. Unsupported or unobserved values are unavailable/unknown, never
+- At the snapshot date, adapters published versioned capability snapshots and
+  exact effective configuration. Product names and previous success did not
+  establish model, effort, context, native-mode or permission capability.
+- Runtime discovery and capability-fixture conformance were distinct evidence
+  sources. Unsupported or unobserved values were unavailable/unknown, never
   silently inferred.
-- The provider-neutral route contract is generated and shared across the
-  TypeScript daemon and offline Python resolver. Capability data is explicit
-  resolver input; the resolver does not read daemon activation state behind the
+- The provider-neutral route contract was generated and shared across the
+  TypeScript daemon and offline Python resolver. Capability data was explicit
+  resolver input; the resolver did not read daemon activation state behind the
   caller.
-- Node 24/TypeScript remains the protocol, daemon, adapter and Console stack;
-  SQLite/WAL remains the one-machine transaction store; Python remains useful
-  for offline evaluation. Rust is a narrow process/FD/terminal isolation or
+- Node 24/TypeScript was the protocol, daemon, adapter and Console stack;
+  SQLite/WAL was the one-machine transaction store; Python remained useful for
+  offline evaluation. Rust was a narrow process/FD/terminal isolation or
   measured performance fallback, not an architectural rewrite.
 - Host-global configuration is user-owned. Per-run overlays are minimal,
   recorded and reversible; ignored/unsupported fields stay visible. Persistent
@@ -30,8 +37,8 @@ daemon and wire hardening
 - Operational spans are content-free and never substitute for authority,
   review, disclosure or artifact receipts.
 - OpenCode is an optional host/adapter, not a model family or load-bearing
-  route. OpenCode's current activation state is owned by
-  `config/agent-fabric.yaml` and `config/adapter-compatibility.yaml`. Login,
+  route. OpenCode's current activation state is owned by the checked-in
+  compatibility policy, `config/adapter-compatibility.yaml`. Login,
   paid/account changes, credentials, region/data policy and any activation or
   deactivation remain explicit human gates.
 

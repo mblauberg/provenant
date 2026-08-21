@@ -37,7 +37,11 @@ def test_managed_reconciliation_stays_documented_for_maintainers():
     # The operator detail the README used to carry. A maintainer reads this with the
     # checkout as cwd, so a relative script path is the correct form here.
     source = read("MAINTAINING.md")
-    assert "`config/skill-renames.json`" in source
+    assert (
+        "Record current skill ownership in the managed installation manifest."
+        in source
+    )
+    assert "Record skill ownership and supersession" not in source
     # Not anchored to a closing backtick. `plan` requires `--target`, so pinning
     # the bare command forbade documenting the flag that makes it runnable, and
     # the invariant here is that the command stays documented, not that it stays
@@ -45,4 +49,29 @@ def test_managed_reconciliation_stays_documented_for_maintainers():
     assert "scripts/manage_installation.py plan" in source
     assert "--target" in source
     assert "reconcile" in source
+    assert "current ownership record" in source
     assert "Never claim or overwrite an unmanaged target." in source
+
+
+def test_installer_adr_does_not_advertise_retired_rename_reconciliation():
+    source = read("docs/adr/0019-installed-file-class-ownership.md")
+    assert "Rename reconciliation was retired by #647" in source
+    assert "preserves unmanaged targets" in source
+    assert "applies declared renames" not in source
+
+
+def test_lifecycle_spec_uses_current_manifest_contract():
+    source = read("docs/specs/harness/lifecycle.md")
+    normalised = " ".join(source.split())
+    assert (
+        "Use a versioned installation manifest containing skill name, source "
+        "digest, installed target and current ownership."
+        in normalised
+    )
+    assert "supersession history" not in source
+
+
+def test_adr_index_marks_daemon_era_task_completion_decision_superseded():
+    source = read("docs/adr/README.md")
+    row = next(line for line in source.splitlines() if "[0015](" in line)
+    assert "Superseded by ADR 0020" in row

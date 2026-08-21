@@ -22,7 +22,7 @@ Every entry carries exactly three environment variables:
 | Variable | Purpose |
 | --- | --- |
 | `AGENT_FABRIC_STATE_DIRECTORY` | Where `fabric.sqlite3` lives |
-| `AGENT_FABRIC_SEAT` | Which provider this client is |
+| `AGENT_FABRIC_SEAT` | Client routing metadata recorded with the Fabric identity; not model-family proof |
 | `AGENT_FABRIC_CLIENT_LABEL` | The label the provider is addressed by |
 
 No entry binds a project. The client's working directory decides which project
@@ -52,10 +52,11 @@ messages are addressed separately without inventing a provider identity: they
 are brokers that front whichever model the operator selects, so they have no
 family of their own to record.
 
-Agy holds its own `agy` seat. It is the harness's only route to the Gemini
-family, and the seat is what every Fabric record carries as its provider. Under
-the shared `codex` seat a cross-family Gemini finding was filed as OpenAI, which
-is exactly the attribution the review ladder depends on being true.
+Agy holds its own `agy` seat so its client records remain addressable. The seat
+is routing metadata, not proof that a Gemini or Google model ran. For a
+cross-family review, count the model family only from the exact provider/model
+fields in the direct-dispatch receipt; a non-Google model selected through Agy
+is not a qualifying Gemini leg.
 
     scripts/configure-fabric-mcp.py --platform all
     scripts/configure-fabric-mcp.py --platform codex

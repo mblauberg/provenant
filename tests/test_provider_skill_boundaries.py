@@ -10,7 +10,8 @@ def read(path: str) -> str:
 def test_agy_has_no_parallel_provider_skill():
     assert not (ROOT / "skills/agy-headless").exists()
     orchestrate = read("skills/orchestrate/SKILL.md")
-    assert "Answer-bearing external work uses Fabric request/reply" in orchestrate
+    assert "Answer-bearing external work uses a cooperative Fabric request/reply" in orchestrate
+    assert "Herdr only observes or sends fire-and-forget steering" in orchestrate
 
 
 def test_headless_dispatcher_uses_direct_router_without_daemon_gate():
@@ -20,8 +21,9 @@ def test_headless_dispatcher_uses_direct_router_without_daemon_gate():
     # The point of this guard is that agy is reached the same way every other
     # provider is: one adapter inside the dispatcher, never a parallel
     # provider skill and never an opt-in gate that would make the only route
-    # to the Gemini family second-class. Agy holds its own Fabric seat, so the
-    # dispatcher branch is the call while Fabric carries the coordination.
+    # to the Gemini family second-class. Agy has its own seat for stable
+    # addressing, while the dispatcher branch is the provider call and Fabric
+    # carries coordination.
     for forbidden in (
         "CF_DISPATCH_ENABLE_AGY",
         "run-agy-headless",

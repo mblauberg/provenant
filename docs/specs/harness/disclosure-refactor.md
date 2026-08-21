@@ -16,6 +16,11 @@ Implementation status: completed through PRs #337, #338, #340, #343, #339 and
 #348. The decisions and acceptance criteria below remain the normative record;
 the delivery-train sections record how they landed.
 
+Currentness note: [ADR 0020](../../adr/0020-retire-the-daemon-fabric.md)
+supersedes the Fabric bootstrap, workspace-trust and task-claim wording below.
+The progressive-disclosure decisions remain normative; the superseded Fabric
+text is retained as dated implementation provenance only.
+
 ## Problem
 
 The ambient instruction layer is heavier than its job requires and leaks
@@ -46,7 +51,7 @@ refactor enforces existing doctrine.
 | D1 | Two-file ambient layer, both stripped. `AGENTS.md` ≤ 35 lines. `HARNESS.md` becomes pure constitution ≤ 60 lines: accountable topology, lifecycle + user gates, risk tiers + review-pressure table, standing git envelope, 2-line routing invariant, 1-line memory rule, trigger index. These two caps are hard static gates. |
 | D2 | Strip destinations: compaction/checkpoint cadence → `session`; routing depth/degradation → `orchestrate`; receipt schema detail → `deliver`. Each already owns a landing reference. |
 | D3 | Cross-skill reference rule: nothing outside skill X names a file under `skills/X/references/`. Cross-references use the **skill name only** (e.g. "`implement` skill"), not paths. Enforced by a contract test. Writing-family links to `natural-writing` internals are rewritten to skill-name references; the hub keeps owning shared prose doctrine. |
-| D4 | No repo-relative paths in `AGENTS.md`/`HARNESS.md`. Repo-local process pointers move to repo-scoped surfaces or become skill-name references. Runnable commands are PATH-resolved (`provenant …`), never location-bearing; the Fabric-trust bullet becomes `provenant fabric workspace trust`. |
+| D4 | No repo-relative paths in `AGENTS.md`/`HARNESS.md`. Repo-local process pointers move to repo-scoped surfaces or become skill-name references. Runnable commands are PATH-resolved (`provenant …`), never location-bearing; Fabric identity is derived from the working directory and needs no workspace-trust command. |
 | D5 | Orchestrate stays one skill; per-file verdicts in the table below. No new catalogue entries (see AC-S5 baseline). |
 | D6 | MAINTAINING.md: frozen held-out eval comparisons downgrade to on-suspicion/pre-publication; trigger fixtures + contract tests stay mandatory. Recorded as ADR-0014. |
 | D7 | Content depth: structure + targeted pruning (evidence-backed deletions only; no wholesale prose rewrites). |
@@ -185,14 +190,15 @@ Close-out conditions (satisfied by the landed train):
   record). Required fields: review legs with verdicts, degradations,
   adjudications, model lineage, user gates.
 
-## Fabric custody note
+## Historical Fabric custody note (superseded by ADR 0020)
 
-The bootstrap authority omits `fabric.v1.task.claim` and delegation only
-narrows, so paired tasks remain `ready` by design; the deliverable of record
-is the correlated response message plus the hash-bound artifact (r1 and r2
-precedent; r2 additionally proved the `participantAgentIds` fix for
-task-audience messaging). Agent-facing Fabric usability gaps observed during
-both dispatches were tracked in
+The daemon-era implementation recorded that the bootstrap authority omitted
+`fabric.v1.task.claim` and delegation only narrowed, so paired tasks remained
+`ready` by design. Its deliverable of record was the correlated response
+message plus the hash-bound artifact (r1 and r2 precedent; r2 additionally
+proved the `participantAgentIds` fix for task-audience messaging). This is
+historical evidence, not current operating guidance. Agent-facing Fabric
+usability gaps observed during both dispatches were tracked in
 [#336](https://github.com/mblauberg/provenant/issues/336) and resolved through
 PR #385; they were not part of #335.
 

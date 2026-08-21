@@ -5,6 +5,11 @@
 **Question:** the D2 cutover was recorded blocked on an apparent test-suite
 contradiction. Does the contradiction exist, and what does D2 actually implicate?
 
+> **Historical pre-ADR-0020 evaluation.** The removed daemon paths and test
+> counts below are retained review evidence, not current implementation
+> guidance. See [ADR 0020](../../adr/0020-retire-the-daemon-fabric.md) and
+> [`runtime/fabric/README.md`](../../../runtime/fabric/README.md).
+
 ---
 
 ## 0. Executive summary

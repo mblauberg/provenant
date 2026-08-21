@@ -4,6 +4,13 @@
 issue #561); applies [ADR 0001](0001-personal-first-product-compatible.md) and
 [ADR 0004](0004-per-domain-truth-owners.md)
 
+> **Cutover note (current reader).** This decision's file-class outcome remains
+> current, but its daemon-era paths and command examples are a pre-ADR-0020
+> implementation snapshot. Do not use them as operational guidance. Current
+> Fabric commands and configuration are owned by
+> [`runtime/fabric/README.md`](../../runtime/fabric/README.md); ADR 0020 records
+> the runtime retirement.
+
 ## Context
 
 Every installed file currently lives in one repository. `~/.agents` is at once
@@ -129,29 +136,18 @@ seeder reports `existing` for a path an attacker created in that window. The
 rename cannot be redirected, so the outcome is a skipped seed, not a misdirected
 write.
 
-**On reconcile's two checks and rename rollback.** A `reconcile` first checks
-the plan against the manifest. If accepted, it applies declared renames to the
-target tree and manifest, recomputes the plan against the new manifest, and
-checks again. The first check prevents a rename that the pre-rename plan says
-conflicts. The second check catches a conflict that the rename itself created:
-an item can shift from "missing" or "stale" to "conflicting" or
-"custom-conflicting" because the renames changed what the installer believes
-the tree contains.
+**Current reconcile boundary.** Rename reconciliation was retired by #647 on
+2026-08-03 with the rename registry. `reconcile` repairs managed names, removes
+safe managed leftovers, refuses conflicts, and preserves unmanaged targets.
+The schema-v1
+manifest retains an opaque `history` list for compatibility with existing
+installations; current code preserves it but never appends to or interprets it.
+Repository history, not that field, is the record of earlier names.
 
-If the second check detects a conflict, the installer rolls back: it unlinks
-the new symlinks it created, restores the old symlinks it removed, and removes
-the manifest entries for the new names and restores the entries for the old
-names. The tree is then exactly as it was before the `reconcile` ran. Re-running
-the same command will check the first plan against the original tree. The
-conflict will be caught by the FIRST check on retry, with no partial tree or
-skip-on-retry logic needed.
-
-This does not make reconcile atomic. The residual window after the second check
-passes but before the manifest is written is accepted: the installer has no
-multi-path transaction, and closing that interval would need a locking or
-snapshot design outside issue #561. The checks turn a conflict observed at
-either plan boundary into a loud refusal, but they do not establish a privilege
-boundary or a concurrent-writer guarantee.
+Reconcile is not a multi-path transaction or a concurrent-writer guarantee.
+It stages each replacement beside its destination and writes the manifest only
+after the managed links are reconciled. A later run repairs an interrupted
+installation from the current ownership record.
 
 **Note on the two rows that both involve the installer writing a file.** They
 are not the same mechanism. The desired state is *created* by the installer as
@@ -357,7 +353,10 @@ what the older product understands. This generalises: any future class the
 product takes ownership of moves the floor for supported rollback, and the
 floor is not tracked by any automated check.
 
-### Addendum — 2026-08-03
+### Addendum — 2026-08-03 (historical command snapshot)
+
+The command/path detail below predates ADR 0020. It is retained as decision
+evidence; use the current Fabric README named in the cutover note above.
 
 The layering paragraph above names `provenant status`. No such command exists
 and none was ever accepted: `scripts/provenant` delegates `route`, `worktree`,

@@ -217,12 +217,13 @@ churn, and a stale one fails the call for a reason that looks nothing like a bad
 agy models
 ```
 
-That prints the currently available identifiers. On 2026-08-09 with agy 1.1.11 they were
-`gemini-3.6-flash-{high,medium,low}`, `gemini-3.5-flash-{high,medium,low}` and
+That prints the currently available identifiers. On 2026-08-22 with agy 1.1.17 they were
+`gemini-3.7-flash-{high,medium,low}`, `gemini-3.6-flash-{high,medium,low}`,
+`gemini-3.5-flash-{high,medium,low}` and
 `gemini-3.1-pro-{high,low}`, with the effort baked into the identifier rather than passed
-separately. Note that `gemini-3.6-flash` on its own is **not** valid.
+separately. Note that `gemini-3.7-flash` on its own is **not** valid.
 
-Default to `gemini-3.6-flash-high`. Style work is judgement, not lookup, and the flash tier at high
+Default to `gemini-3.7-flash-high`. Style work is judgement, not lookup, and the flash tier at high
 effort is where Gemini's prose quality actually shows. Drop to `medium` only for short, mechanical
 passages. Use `gemini-3.1-pro-high` when the register carries legal or regulatory risk and the
 consolidating call has to adjudicate conflicting lenses.

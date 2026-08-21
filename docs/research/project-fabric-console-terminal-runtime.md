@@ -1,7 +1,12 @@
 # Project Fabric Console terminal runtime
 
-Status: Historical terminal-runtime decision; implementation evidence cut off
-on 13 July 2026
+Status: Historical pre-ADR-0020 terminal-runtime decision; implementation
+evidence cut off on 13 July 2026
+
+Current owners: [ADR 0020](../adr/0020-retire-the-daemon-fabric.md),
+[`runtime/fabric/README.md`](../../runtime/fabric/README.md), and
+[`HARNESS.md`](../../HARNESS.md). The Console runtime and specifications named
+below were retired; this note preserves decision-time evidence only.
 
 Decision date: 11 July 2026
 
@@ -11,8 +16,8 @@ Evidence snapshot: [July 2026 continuity and routing evidence](evidence-snapshot
 
 The W012/W013 reducer and programme-acceptance work closed through
 [issue #23](https://github.com/mblauberg/provenant/issues/23) on 15 July 2026.
-The linked Console specifications own current implementation and acceptance
-status; this historical research note does not.
+The linked Console specifications owned implementation and acceptance status at
+the time; this historical research note does not.
 
 Normative owners: Console operator views
 and acceptance and usability

@@ -39,7 +39,7 @@ Never make pane scrollback the only record.
 Messages are delta-only and normally under 4 KiB: `stage | revision | artifact
 path | sha256 | requested action | blocker`. Long context belongs in immutable
 namespaced artifacts. Before either primary compacts or hands off, it closes a
-stage checkpoint and the peer acknowledges the exact generation/revision.
+stage checkpoint and records the exact revision in the named artifact.
 
 Before dispatch, the chair records an assignment envelope and correlated
 request through Fabric:
@@ -47,15 +47,21 @@ request through Fabric:
 ```text
 task_id | stage | chair | owner | peer | base_revision
 source_write_scope | artifact_scope | prohibited_actions
-expected_output | objective_checks | human_gates | deadline
+expected_output | objective_checks | human_gates | expected response time
 ```
 
-The peer acknowledges the exact delivery, then returns supported claims,
-challenges, evidence paths, unresolved questions and its artifact path through
-the correlated Fabric reply. The owner returns artifact paths, scoped diff/hash,
-checks and blockers. The chair closes the barrier before rotating ownership.
-Baton transfer requires a completed prior stage, acknowledgement, result
-revision/hash and no unowned in-flight worker.
+The peer explicitly reads its inbox, which atomically claims delivery. The
+claim TTL must cover expected processing and artifact custody; it has no
+renewal. After processing and persisting output, the peer sends supported
+claims, challenges, evidence paths, unresolved questions and its artifact path
+through a correlated Fabric reply, then acknowledges the claim. A crash after
+the reply but before acknowledgement may cause duplicate redelivery; the chair
+dedupes by the request `reply_to` together with the named artifact and digest.
+Claim/ack and a reply prove only that messages were delivered and related; they
+do not prove provider liveness, task completion or result validity. The chair
+verifies the named artifact and objective checks before rotating ownership. An
+expected response time is a chair-owned run-artifact expectation, not a Fabric
+deadline or callback.
 Each stage ledger records writer actors and safe relative paths; overlapping
 cross-family writer scopes fail the machine gate.
 
@@ -73,18 +79,14 @@ needs durable peer exchange. Only the chair mutates shared pair state.
 - Peer unavailable before start: solo mode plus `PAIR-NOT-RUN: <reason>`.
 - Peer lost mid-stage: preserve partials, mark `PAIR-DEGRADED`, and reassign only
   if authority and review independence remain valid.
-- Chair loss: persist a handoff. Takeover needs an explicit lease-generation
-  transition; never silently promote the peer. A retained launched chair uses
-  Fabric's typed live-handoff custody and exact provider/session generations;
-  the local orchestration-lease helper is not a substitute.
+- Chair loss: persist a named handoff. A replacement chair must explicitly
+  assume ownership and verify the referenced artifacts; Fabric does not
+  transfer chair authority or provider custody automatically.
 
-Use `skills/orchestrate/scripts/lease.py` for atomic acquire/renew/transfer/
-release of the chair or autonomous-loop lease. A stale or competing holder fails
-closed, and `--expected-generation` binds any action to an exact generation when
-the caller supplies it. Only its `takeover` action requires that generation, and
-it is deliberately expired-lease-only. Active-chair loss first needs Fabric
-freeze/revocation plus a generation-bound recovery proof; never remove the
-active-lease guard to force promotion.
+Use `skills/orchestrate/scripts/lease.py` only where its local lease mechanism
+is explicitly selected for an autonomous loop. It serialises local ownership;
+it is not Fabric state, provider custody, a liveness signal or an automatic
+takeover mechanism.
 
 Autonomous labs have exactly one active loop driver/orchestrator lease. The
 other primary owns bounded stages, workflows or audits, never a competing loop.

@@ -78,13 +78,13 @@ The pack's competing critique/audit/optimise commands, score storage and
 pinning machinery were removed. Deterministic delivery evidence was also
 hardened so its receipt
 digest must match the declared artifact that `--verify-hashes` checks.
-The standalone `agy-headless` skill and direct Agy helper routes were retired:
-the activated Agent Fabric Agy adapter now owns Gemini execution, authority,
-model lineage, durable actions and recovery.
-The same boundary applies across families: Agent Fabric is the primary
-answer-bearing provider layer; Autonomous Lab's parallel cross-family shell
-wrapper was removed, while `cf_dispatch.sh` remains only a preflight or
-explicitly recorded degraded fallback.
+The standalone `agy-headless` skill and direct Agy helper routes were retired.
+At this evidence cut-off, the planned provider-action route was recorded as
+the intended owner of Gemini execution, authority, model lineage, durable
+actions and recovery; that daemon-era plan is not current runtime truth. The
+current boundary is direct provider CLI execution with Fabric carrying
+coordination, while `cf_dispatch.sh` remains the direct adapter route and any
+missing Fabric roundtrip is recorded explicitly.
 
 ### 11 July historical dispositions, not current work
 

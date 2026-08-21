@@ -24,17 +24,14 @@ CODEX_TABLES = {"mcp_servers.fabric", "mcp_servers.fabric.env"}
 TABLE_HEADER = re.compile(r"^\s*\[([^\[\]]+)]\s*(?:#.*)?$")
 CLIENT_LABELS = {"opencode": "OpenCode"}
 
-# Which provider seat each non-primary client sits in. The seat becomes the
-# provider identity every Fabric record carries, so it decides which family a
-# message is attributed to.
+# Which client seat each non-primary client uses. The seat is routing metadata
+# carried by Fabric records; it is not proof of the provider or model family
+# selected by the external dispatch.
 #
-# Cursor, Kiro and OpenCode share the codex seat: they are brokers that front
-# whichever model the operator picks, so they have no provider identity of
-# their own worth inventing. Agy is different. It is Gemini, a distinct model
-# family, and it is the only route this harness has to that family. Filing its
-# messages under the codex seat would record every cross-family Gemini finding
-# as OpenAI, which is precisely the attribution the review ladder depends on
-# being true.
+# Cursor, Kiro and OpenCode share the codex seat because they are brokers that
+# front whichever model the operator picks. Agy has a separate seat for stable
+# addressing, but a dispatch receipt must establish whether its selected model
+# is Google, Anthropic or another supported family.
 CLIENT_SEATS = {"cursor": "codex", "agy": "agy", "kiro": "codex"}
 
 

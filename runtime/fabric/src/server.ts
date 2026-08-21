@@ -13,10 +13,49 @@ import { Store } from "./store.js";
  * running. If the file cannot be opened the caller is told which file and why.
  */
 const who = identify();
-const store = new Store(databasePath());
-store.announce(who);
+let store: Store | undefined;
+const initialiseStore = (): Store => {
+  const opened = new Store(databasePath());
+  try {
+    opened.announce(who);
+    store = opened;
+    return opened;
+  } catch (error) {
+    opened.close();
+    throw error;
+  }
+};
 
-const server = new McpServer({ name: "fabric", version: "2.0.0" });
+try {
+  initialiseStore();
+} catch {
+  // Keep the transport available. The first tool call retries initialisation,
+  // allowing transient SQLite locks to recover without a background process.
+}
+
+const readyStore = (): Store => {
+  if (store !== undefined) return store;
+  try {
+    return initialiseStore();
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(`fabric startup failed: ${detail}`);
+  }
+};
+
+const server = new McpServer(
+  { name: "fabric", version: "2.0.0" },
+  {
+    instructions:
+      "Fabric is a project-scoped mailbox, cooperative task ledger, and activity log. " +
+      "Use fabric_inbox to claim requests, persist any response before calling " +
+      "fabric_acknowledge, and correlate replies with reply_to.",
+  },
+);
+server.server.onclose = () => {
+  store?.close();
+  store = undefined;
+};
 
 /** Errors reach the caller intact. Nothing is swallowed and relabelled. */
 function reply(payload: unknown): { content: Array<{ type: "text"; text: string }> } {
@@ -29,7 +68,7 @@ server.registerTool(
     description: "Who am I, which project am I in, and who else is here.",
     inputSchema: {},
   },
-  () => reply({ ...who, database: databasePath(), agents: store.agents(who.project) }),
+  () => reply({ ...who, database: databasePath(), agents: readyStore().agents(who.project) }),
 );
 
 server.registerTool(
@@ -45,28 +84,44 @@ server.registerTool(
     },
   },
   ({ to, body, kind, reply_to }) =>
-    reply(store.send(who, to, body, { kind, replyTo: reply_to })),
+    reply(readyStore().send(who, to, body, { kind, replyTo: reply_to })),
 );
 
 server.registerTool(
   "fabric_inbox",
   {
-    description: "Read my unread messages. Marks them read unless peek is true.",
+    description:
+      "Claim my unacknowledged messages. Peek observes without claiming; expired claims redeliver.",
     inputSchema: {
       limit: z.number().int().positive().optional(),
       peek: z.boolean().optional(),
+      claim_seconds: z.number().int().min(1).max(3600).optional(),
     },
   },
-  ({ limit, peek }) => reply(store.inbox(who, { limit, peek })),
+  ({ limit, peek, claim_seconds }) =>
+    reply(readyStore().inbox(who, {
+      limit,
+      peek,
+      claimTtlMs: claim_seconds === undefined ? undefined : claim_seconds * 1000,
+    })),
+);
+
+server.registerTool(
+  "fabric_acknowledge",
+  {
+    description: "Acknowledge one delivery using the claim token returned by fabric_inbox.",
+    inputSchema: { message_id: z.string(), claim_id: z.string() },
+  },
+  ({ message_id, claim_id }) => reply(readyStore().acknowledge(who, message_id, claim_id)),
 );
 
 server.registerTool(
   "fabric_team_create",
   {
-    description: "Group agents under a name so one send reaches all of them.",
+    description: "Create a team or atomically replace all members of an existing team.",
     inputSchema: { team_id: z.string(), members: z.array(z.string()).min(1) },
   },
-  ({ team_id, members }) => reply(store.createTeam(who, team_id, members)),
+  ({ team_id, members }) => reply(readyStore().createTeam(who, team_id, members)),
 );
 
 server.registerTool(
@@ -81,16 +136,26 @@ server.registerTool(
     },
   },
   ({ objective, task_id, owner, depends_on }) =>
-    reply(store.createTask(who, objective, { taskId: task_id, owner, dependsOn: depends_on })),
+    reply(readyStore().createTask(who, objective, { taskId: task_id, owner, dependsOn: depends_on })),
 );
 
 server.registerTool(
   "fabric_task_update",
   {
-    description: "Change a task's state, for example to claimed, blocked or done.",
+    description: "Change a task's cooperative state, for example to blocked or done.",
     inputSchema: { task_id: z.string(), state: z.string(), note: z.string().optional() },
   },
-  ({ task_id, state, note }) => reply(store.updateTask(who, task_id, state, note)),
+  ({ task_id, state, note }) => reply(readyStore().updateTask(who, task_id, state, note)),
+);
+
+server.registerTool(
+  "fabric_task_claim",
+  {
+    description:
+      "Atomically claim an open, unowned task. Retrying as the winning owner is idempotent.",
+    inputSchema: { task_id: z.string() },
+  },
+  ({ task_id }) => reply(readyStore().claimTask(who, task_id)),
 );
 
 server.registerTool(
@@ -99,7 +164,7 @@ server.registerTool(
     description: "List tasks in this project, optionally filtered by state.",
     inputSchema: { state: z.string().optional() },
   },
-  ({ state }) => reply(store.tasks(who.project, state)),
+  ({ state }) => reply(readyStore().tasks(who.project, state)),
 );
 
 server.registerTool(
@@ -109,7 +174,7 @@ server.registerTool(
     inputSchema: { detail: z.string() },
   },
   ({ detail }) => {
-    store.note(who, detail);
+    readyStore().note(who, detail);
     return reply({ noted: detail });
   },
 );
@@ -117,10 +182,16 @@ server.registerTool(
 server.registerTool(
   "fabric_activity",
   {
-    description: "Recent activity across all agents in this project, newest first.",
-    inputSchema: { limit: z.number().int().positive().optional() },
+    description:
+      "Project activity. With after_seq, returns forward cursor order; otherwise newest first.",
+    inputSchema: {
+      limit: z.number().int().positive().optional(),
+      after_seq: z.number().int().nonnegative().optional(),
+    },
   },
-  ({ limit }) => reply(store.activity(who.project, limit)),
+  ({ limit, after_seq }) => reply(after_seq === undefined
+    ? readyStore().activity(who.project, limit)
+    : readyStore().activityAfter(who.project, after_seq, limit)),
 );
 
 await server.connect(new StdioServerTransport());

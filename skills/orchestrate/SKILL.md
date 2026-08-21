@@ -25,9 +25,12 @@ under `~/.claude/agents/`.
   changes.
 - **Keep topology exact.** One chair; leaders settle recursive obligations.
   Handoff is a generation-bound operator action.
-- **Answer-bearing external work uses Fabric request/reply; Herdr only wakes.**
-  Pane injection is fire-and-forget steering. Without callback, record
-  `FABRIC-ROUNDTRIP-UNAVAILABLE` and collect an artifact.
+- **Answer-bearing external work uses a cooperative Fabric request/reply where
+  available; Herdr only observes or sends fire-and-forget steering.** A normal
+  Fabric inbox read claims delivery; acknowledge after durable processing to
+  prevent redelivery. Claim/ack and a correlated reply evidence delivery, not
+  provider liveness or completion. Without a round trip, record
+  `FABRIC-ROUNDTRIP-UNAVAILABLE` and collect a named artifact.
 - Record worker cwd; never assume repository.
 - **Workers write full output to files**; return a digest/path.
 - **A worker's report is a claim, not evidence.** Confirm claimed commits in
@@ -93,7 +96,9 @@ Load relevant [references](references/) only:
 `memory-scratchpad.md`, `evaluation-and-observability.md`, `domain-adaptation.md`,
 `worker-liveness.md`, and `autonomous-implementation.md`. `scripts/` and
 `evals/` hold helpers/guards;
-`cf_dispatch.sh` is degraded fallback/preflight only.
+`cf_dispatch.sh` is the direct provider-execution adapter. When Fabric
+coordination is unavailable, record its result as a named degraded artifact;
+it is not itself a Fabric round trip.
 
 ## Adapter-absent path
 

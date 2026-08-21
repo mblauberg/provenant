@@ -8,7 +8,7 @@ Verified locally on macOS, 2026-08-05. Model IDs, flags, auth, and safety modes 
 - [Safety rule](#safety-rule)
 - [Harness-conditioned rule](#harness-conditioned-rule)
 - [Auth preflight](#auth-preflight)
-- [Fabric distinct-family lane](#fabric-distinct-family-lane)
+- [Distinct-family lane](#distinct-family-lane)
 - [Codex worktree implementation lane](#codex-worktree-implementation-lane)
 - [Runtime routing](#runtime-routing)
 - [Output normalisation](#output-normalisation)
@@ -16,11 +16,12 @@ Verified locally on macOS, 2026-08-05. Model IDs, flags, auth, and safety modes 
 
 ## Safety rule
 
-Headless CLIs are how external work reaches another provider. Fabric carries
-the request, the reply and the activity record around that call; it does not
-run the provider itself. Certification requires an enforced read-only
-boundary. A prompt-only review can still provide a genuine independent
-opinion, but it is not certification eligible.
+Headless CLIs are how external work reaches another provider. Fabric does not
+run the provider: where a cooperative round trip is available it records the
+request, explicit reply and activity; otherwise use a named degraded artifact
+and collection step. Certification requires an enforced read-only boundary. A
+prompt-only review can still provide a genuine independent opinion, but it is
+not certification eligible.
 
 ## Harness-conditioned rule
 
@@ -123,7 +124,7 @@ the result in the run manifest and move to the next tool.
 |---|---|---|
 | `claude` | `claude --help`; `claude -p --bare --permission-mode plan --tools "Read,Grep,Glob" "OK"`; if using Claude Code OAuth, also test `--safe-mode` with the same read-only tool set | API key / OAuth / quota |
 | `codex` | `codex --version`; `codex exec -s read-only --ignore-user-config -c service_tier="default" "OK"` | login / usage limit |
-| `agy` | `agy models`; `agy --model gemini-3.6-flash --effort low --output-format json -p "OK"` | auth / tool permission auto-denied |
+| `agy` | `agy models`; `agy --model gemini-3.7-flash --effort low --output-format json -p "OK"` | auth / tool permission auto-denied |
 | `cursor-agent` | `cursor-agent --help`; `cursor-agent --list-models` | auth / workspace trust |
 | `kiro-cli` | `kiro-cli chat --list-models` | credits / auth |
 | `copilot` | `copilot --help`; `copilot -p "OK" --mode plan` | login / permission prompt |
@@ -135,10 +136,11 @@ supplies the budget and scope, and records the route, the model lineage and the
 result in Fabric so the lane is visible to everyone else on the project. Treat
 the result as advisory until primary-family evidence corroborates it.
 
-Agy holds its own `agy` Fabric seat, so a Gemini finding is recorded against the
-Google family rather than borrowing another provider's identity. Coordination
-goes through Fabric; this adapter is the call itself, and stays the recorded
-degraded fallback when the Fabric roundtrip is unavailable.
+Agy holds its own `agy` Fabric seat for stable addressing, but the seat does
+not prove a Gemini or Google route. Count the model family only from the exact
+provider/model fields in the dispatch receipt. Coordination goes through
+Fabric; this adapter is the direct provider call, and a missing Fabric
+roundtrip is recorded as an explicit degraded path.
 
 `cf_dispatch.sh --tool agy` is the route. Five properties of this CLI are load
 bearing and were measured against agy 1.1.10 on 2026-08-05, not read from help:

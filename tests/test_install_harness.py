@@ -604,8 +604,8 @@ def test_all_mcp_clients_are_an_explicit_subscription_native_opt_in(tmp_path):
     result = run("codex", tmp_path, "--mcp-clients", "all", CODEX_HOME=str(config))
 
     assert result.returncode == 0, result.stderr
-    # Brokers sit in the codex seat; Agy holds the `agy` seat so Gemini
-    # findings are attributed to their own family. See CLIENT_SEATS in
+    # Brokers sit in the codex seat; Agy holds the `agy` seat for stable
+    # addressing, not model-family proof. See CLIENT_SEATS in
     # scripts/configure-fabric-mcp.py.
     for client, path, seat in (
         ("cursor", tmp_path / ".cursor/mcp.json", "codex"),

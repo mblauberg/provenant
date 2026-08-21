@@ -30,7 +30,7 @@ doctrine_invariants:
   - "Final gate"
   - "auth/preflight smoke tests"
   - "Document update wave"
-  - "Answer-bearing external work uses Fabric request/reply"
+  - "Answer-bearing external work uses a cooperative Fabric request/reply"
   - "Pane injection is fire-and-forget steering"
 
 reference_invariants:
@@ -58,4 +58,7 @@ reference_invariants:
   - "HERDR-NOT-USED"
   - "dispatched-unconfirmed"
   - "referenceValidation: verified"
-  - "Herdr then wakes or focuses the peer; it is not the transport of record"
+  - "Herdr only observes or sends fire-and-forget steering"
+  - "send a correlated reply, then explicitly acknowledge"
+  - "claim TTL must cover expected processing and artifact custody"
+  - "dedupes by the request `reply_to` together with the named artifact and digest"

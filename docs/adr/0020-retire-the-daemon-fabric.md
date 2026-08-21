@@ -21,20 +21,22 @@ The trust boundary that justified the daemon does not exist on a single-user
 machine. Every agent runs as the same uid and can read every other agent's
 capability file, so a capability token can only inconvenience an honest caller.
 Once that is accepted, the daemon's remaining technical job is serialising
-writes, and SQLite in WAL mode already does that: measured here at sixteen
-concurrent processes and 3,200 messages with none lost and a 657 ms contention
-window.
+writes. The decision-time measurement recorded sixteen concurrent processes and
+3,200 messages with none lost and a 657 ms contention window; it is not a
+current regression claim.
 
 ## Decision
 
-Delete the five packages. `runtime/fabric` replaces them: one SQLite file, nine
+Delete the five packages. `runtime/fabric` replaces them: one SQLite file, eleven
 MCP tools, a shell CLI, and identity derived from the working directory rather
 than issued to the caller.
 
 Nothing is trusted, bootstrapped, provisioned, renewed or leased. An agent is
 `(project, agent_id)`, where the project is the git toplevel of the working
 directory or the directory itself, and the agent id comes from the environment
-the provider already sets. Nothing expires, so nothing needs renewing.
+the provider already sets. Identity does not expire or need renewal. Delivery
+claims are the narrow exception: an unacknowledged claim expires and redelivers
+the message, without creating a provider lease, liveness proof or renewal flow.
 
 Provider execution leaves Fabric entirely. There are no in-process adapters:
 cross-provider work is dispatched as a direct command-line call, and Fabric

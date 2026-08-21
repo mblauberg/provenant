@@ -153,6 +153,8 @@ jobs:
         uses: ./.github/actions/setup-node-workspace
       - name: Run typecheck and tests
         run: npm run check
+      - name: Verify packed Fabric CLI and MCP bins
+        run: npm run test:package-install --workspace @local/fabric
       - name: Drive the registered MCP launcher end to end
         run: node runtime/fabric/mcp-smoke.mjs
       - name: Audit production dependencies

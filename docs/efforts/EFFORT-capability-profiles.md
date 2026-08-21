@@ -2,9 +2,11 @@
 
 ## Destination
 
-The durable authority decision is [ADR 0002](../adr/0002-capability-compiled-execution-authority.md).
-The linked specifications own requirements; GitHub work items and their Project
-Status fields own all live work state.
+This is a historical route map. [ADR 0002](../adr/0002-capability-compiled-execution-authority.md)
+was superseded by [ADR 0020](../adr/0020-retire-the-daemon-fabric.md); the
+specifications below are not current owners. GitHub work items retain their
+historical disposition. Current Fabric ownership is
+[`runtime/fabric/README.md`](../../runtime/fabric/README.md).
 
 ## Route
 

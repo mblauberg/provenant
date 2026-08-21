@@ -17,7 +17,7 @@ The current pre-release tree includes:
   orchestrators with one session chair, the scope-to-retrospect lifecycle, the
   user gates, and the rule that no two agents write the same source surface at
   once.
-- 33 Agent Skills under `skills/`, covering delivery (`scope`, `deliver`,
+- 32 Agent Skills under `skills/`, covering delivery (`scope`, `deliver`,
   `implement`, `tdd`, `refactor`, `diagnose`, `code-review`, `evaluate`,
   `release`, `retrospect`, `session`, `work-map`), orchestration, writing,
   design and diagrams, web engineering, and harness development.
@@ -25,10 +25,8 @@ The current pre-release tree includes:
   bootstrap into Claude Code and Codex, preserves unmanaged content, and leaves
   portable `skill-craft` canonical over Codex's bundled `skill-creator`.
 - `scripts/manage_installation.py`, giving `plan` and `reconcile` against a
-  managed manifest plus a public rename registry
-  (`config/skill-renames.json`), so a renamed skill migrates without a user
-  deleting global links by hand. It never claims or overwrites an unmanaged
-  target.
+  managed manifest that records current ownership. It retires
+  safe managed leftovers without claiming or overwriting an unmanaged target.
 - The delivery kernel: profiles in `config/delivery-profiles.json` for software,
   research, analysis, document and agent-product work, the neutral
   `delivery-run` schema-v1 receipt owned by `deliver`, and
@@ -74,7 +72,7 @@ The current pre-release tree includes:
   across them (#478).
 - Review panels for `orchestrate`, with council and breadth presets (#485).
 - An advisory model dossier for route selection, `docs/model-dossier.md`, with
-  Gemini 3.6 Flash recorded as a reachable google route (#470, #484).
+  Gemini 3.7 Flash recorded as the current reachable Google Flash route.
 
 ### Removed
 
@@ -96,9 +94,16 @@ The current pre-release tree includes:
   operation enum.
 - `provenant doctor` and `provenant project`, which delegated to the daemon CLI.
   `provenant fabric` now runs the new Fabric CLI.
+- The obsolete `project-activation` skill and its trust/bootstrap front door.
+  Run `provenant fabric whoami` from the working directory instead; there is no
+  separate project activation step.
 
 ### Changed
 
+- Fabric MCP now publishes concise protocol instructions for clients that
+  materialise tool guidance, and read-only diagnostics reject inaccessible or
+  unstable database snapshots instead of reporting healthy absence or stale
+  counts.
 - Raised the OpenAI worker route from `medium` to `high` effort via
   `openai.role_effort_defaults.worker.workhorse`, completing the Luna reorder.
   Moving `gpt-5.6-luna` to the front of `aliases.workhorse` on its own bought
@@ -150,8 +155,9 @@ The current pre-release tree includes:
   `.agent-run/<mission-id>/`), made `natural-writing` the single-owner writing
   hub the domain writing skills link to, and added an autonomous
   ready-issue-implementation mode to `orchestrate` that stops at the user PR
-  gate. The catalogue is now 33 skills; managed renames are recorded in
-  `config/skill-renames.json`.
+  gate. At that earlier consolidation point the catalogue reached 33 skills;
+  the current pre-release tree is 32 and the managed manifest records
+  current ownership.
 - Completed the progressive-disclosure refactor tracked by #335: compact
   ambient instructions, repository-managed Claude workflows, enforced
   cross-skill reference boundaries and conditional comparative evaluations.

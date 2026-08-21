@@ -16,8 +16,7 @@ MANIFEST_NAME = ".agent-harness-installation.json"
 SKILL_NAME = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 # Shared library directories sit beside the skills and carry no SKILL.md. They
-# are never renamed through the skill rename registry, so they keep their own
-# name.
+# are represented directly in the managed manifest under their own names.
 SHARED_NAMES = ("_shared",)
 
 
@@ -93,6 +92,8 @@ def load_manifest(target: Path) -> dict[str, Any]:
     custom = data.setdefault("custom", {})
     if not isinstance(custom, dict):
         raise InstallError("installation manifest custom links are invalid")
+    # `history` is an opaque schema-v1 compatibility field. The retired rename
+    # reconciler used it; current code preserves but never interprets it.
     required_entry = {"owner", "source_target", "source_sha256", "installed_at", "history"}
     for name, item in data["managed"].items():
         if not isinstance(name, str) or not is_managed_name(name):
@@ -164,6 +165,7 @@ def entry(
     source: Path,
     history: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
+    # Preserve existing schema-v1 data without claiming supersession semantics.
     return {
         "owner": "agent-harness",
         "source_target": str(source),

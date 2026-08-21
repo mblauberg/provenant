@@ -290,7 +290,7 @@ resolve_routing() {
 
   route_args=(--adapter "$tool" --alias "$alias" --role "$role" --lead-family "$lead_family" --require-distinct)
   [ -n "$model" ] && route_args+=(--model "$model")
-  # agy 1.1.10 accepts --model and --effort independently. The historical
+  # agy 1.1.17 accepts --model and --effort independently. The historical
   # model-id resolver rejects a bare model plus an explicit effort, so preserve
   # an explicit agy effort for the adapter and resolve model/family here.
   [ -n "$effort" ] && [ "$tool" != "agy" ] && route_args+=(--effort "$effort")

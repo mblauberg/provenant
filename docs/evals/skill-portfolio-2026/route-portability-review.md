@@ -1,5 +1,10 @@
 # Route resolution portability: independent review
 
+> **Historical pre-ADR-0020 evaluation.** The removed daemon paths and review
+> findings below are retained evidence, not current implementation guidance.
+> See [ADR 0020](../../adr/0020-retire-the-daemon-fabric.md) and
+> [`runtime/fabric/README.md`](../../../runtime/fabric/README.md).
+
 **Verdict: MERGE-AFTER-FIX.** The CI defect is genuinely fixed and the new regression test is
 real, but the change quietly swaps a dependency on provider binaries for a dependency on a clean
 Git checkout of the adapter wrapper, and the split-root test was amended in a way that conceals

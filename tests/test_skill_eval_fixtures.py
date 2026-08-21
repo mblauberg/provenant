@@ -10,6 +10,8 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 FROZEN_CURRENT_ROUTING_PROTOCOL = {
+    "owner_count": 33,
+    "source_revision": "fd8b1a5be8adac49168a7ddb28d1e6473a2bd103",
     "evaluation_id": "skill-portfolio-routing-20260719-fabric-v7",
     "frozen_at": "2026-07-19T01:51:57Z",
     "providers": [
@@ -96,30 +98,17 @@ def test_current_portfolio_routing_plan_matches_the_live_catalogue_and_has_no_re
     root = ROOT / "docs" / "evals" / "skill-portfolio-2026"
     skills = sorted(path.parent.name for path in (ROOT / "skills").glob("*/SKILL.md"))
     summary = json.loads((root / "summary.json").read_text())["current_routing_regression"]
-    plan = json.loads((root / "routing-protocol.json").read_text())
-    holdout = load(root / plan["dataset"]["path"])
+    holdout = load(root / "routing-holdout.yaml")
 
-    assert plan["catalogue"]["owners"] == skills
-    assert plan["catalogue"]["owner_count"] == len(skills) == 33
-    assert plan["dataset"]["id"] == holdout["dataset_id"]
-    assert plan["dataset"]["cases"] == len(holdout["cases"]) == 18
-    assert plan["execution"] == {
-        "attempts_started": 0,
-        "blocked_reason": "FABRIC-ROUNDTRIP-UNAVAILABLE",
-        "dependencies": ["https://github.com/mblauberg/provenant/issues/330"],
-        "status": "planned-unexecuted",
-    }
-    assert {
-        "evaluation_id": plan["evaluation_id"],
-        "frozen_at": plan["frozen_at"],
-        "providers": plan["schedule"]["providers"],
-    } == FROZEN_CURRENT_ROUTING_PROTOCOL
-    assert summary["evaluation_id"] == plan["evaluation_id"]
-    assert summary["dependencies"] == plan["execution"]["dependencies"]
+    assert holdout["catalogue_owner_count"] == len(skills) == 32
+    assert "project-activation" not in skills
+    assert summary["catalogue_owner_count"] == len(skills)
+    assert summary["protocol"] == "live-catalogue"
+    assert summary["evaluation_id"] == "skill-portfolio-catalogue-20260821-live"
+    assert holdout["dataset_id"] == "skill-portfolio-routing-holdout-20260719-v6"
+    assert len(holdout["cases"]) == 18
     assert summary["attempts_started"] == 0
-    assert summary["blocked_reason"] == "FABRIC-ROUNDTRIP-UNAVAILABLE"
-    assert summary["status"] == "outstanding"
-    assert not (root / "routing-result.json").exists()
+    assert summary["status"] == "catalogue-only"
 
     valid_skills = set(skills)
     for case in holdout["cases"]:
@@ -130,6 +119,42 @@ def test_current_portfolio_routing_plan_matches_the_live_catalogue_and_has_no_re
             *expected["allowed_companion_skills"],
         ]
         assert {name for name in names if name is not None} <= valid_skills
+
+
+def test_frozen_v7_protocol_retains_original_provenance():
+    root = ROOT / "docs" / "evals" / "skill-portfolio-2026"
+    protocol = json.loads((root / "routing-protocol.json").read_text())
+
+    assert protocol["catalogue"]["owner_count"] == FROZEN_CURRENT_ROUTING_PROTOCOL["owner_count"]
+    assert "project-activation" in protocol["catalogue"]["owners"]
+    assert protocol["catalogue"]["source_revision"] == FROZEN_CURRENT_ROUTING_PROTOCOL["source_revision"]
+    assert {
+        "evaluation_id": protocol["evaluation_id"],
+        "frozen_at": protocol["frozen_at"],
+        "providers": protocol["schedule"]["providers"],
+    } == {
+        "evaluation_id": FROZEN_CURRENT_ROUTING_PROTOCOL["evaluation_id"],
+        "frozen_at": FROZEN_CURRENT_ROUTING_PROTOCOL["frozen_at"],
+        "providers": FROZEN_CURRENT_ROUTING_PROTOCOL["providers"],
+    }
+    assert protocol["route"] == "generated MCP -> daemon -> task-bound ephemeral provider action"
+    assert protocol["execution"]["status"] == "planned-unexecuted"
+    assert not (root / "routing-result.json").exists()
+
+
+def test_live_readme_skill_counts_match_the_discovered_catalogue():
+    skills = list((ROOT / "skills").glob("*/SKILL.md"))
+    readme = (ROOT / "README.md").read_text()
+    owner_readme = (
+        ROOT / "docs" / "evals" / "skill-portfolio-2026" / "README.md"
+    ).read_text()
+
+    assert readme.count(f"<!--skills-->{len(skills)}<!--/skills-->") == 2
+    assert f"Skills library — {len(skills)} Agent Skills" in readme
+    assert f"<summary>All {len(skills)} skills</summary>" in readme
+    assert f"[Current {len(skills)}-owner holdout]" in owner_readme
+    assert f"Its {len(skills)}-owner count is checked" in owner_readme
+    assert "frozen protocol" in owner_readme
 
 
 def test_portfolio_routing_summary_retains_a_self_consistent_predecessor_result():

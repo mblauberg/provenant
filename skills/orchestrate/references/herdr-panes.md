@@ -1,9 +1,9 @@
 # Herdr pane operating contract
 
-Herdr is orchestrate-owned progressive disclosure for observing, waking and
-degraded manual control of substantial interactive, long-running and
-cross-family work. It does not replace native subagents, carry authoritative
-answers or decide model routing.
+Herdr is orchestrate-owned progressive disclosure for observing and manually
+steering substantial interactive, long-running and cross-family work. It does
+not replace native subagents, carry authoritative answers, decide model routing
+or provide a reliable wake/callback path.
 
 ## Source grounding
 
@@ -114,32 +114,33 @@ be aware that a repeated send repeats the pane effect.
 
 ## Send answer-bearing work
 
-Before waking a peer, create a structured Fabric task and request message with
-the owning task/revision, conversation and message IDs, expected output or
-artifact, `reply_to`, acknowledgement requirement, dedupe key and deadline.
-Herdr then wakes or focuses the peer; it is not the transport of record.
+Create a structured Fabric task and request message with the owning
+task/revision, conversation and message IDs, expected output or artifact and
+`reply_to`. A deadline may be recorded in the named run artifact as a
+chair-owned expectation; Fabric does not enforce it. Herdr is not the transport
+of record and cannot reliably wake, interrupt or notify a peer.
 
-The peer consumes and acknowledges the request through Fabric at a safe turn
-boundary. Reply, terminal task result and pending request-result delivery commit
-in one transaction or transactional outbox before completion-ready. The
-requesting chair/lead integration subscribes to the correlated terminal result
-and receives it at its next safe turn boundary. An idle requester is woken; an
-active requester is not interrupted mid-tool or mid-turn. The Console may
-display the committed reply before requester consumption, but does not
-acknowledge it on the requester's behalf.
-
-Response deadlines persist as barrier-blocking obligations. On overdue work,
-the chair may retry the same stable action, reassign or abandon with reason; it
-never blindly redispatches. Late replies remain evidence but do not silently
-complete superseded work. Claim generation and stable callback IDs make
-provider acceptance and requester consumption idempotent across restart.
+The peer explicitly reads its Fabric inbox: a normal read atomically claims
+delivery, while a peek is observation-only. The claim TTL must cover expected
+processing and artifact custody; it has transport-expiry semantics only and
+there is no renewal. After processing and persisting the output, the peer must
+send a correlated reply, then explicitly acknowledge the claim. If it crashes
+after the reply but before acknowledgement, redelivery may duplicate the
+reply; the chair dedupes by the request `reply_to` together with the named
+artifact and digest. Claim/ack and correlation enforce and evidence message
+delivery only: they do not prove that the provider started, stayed live,
+completed, or produced a valid result. The named run artifact remains the
+canonical record of scope, output and verification. The chair explicitly reads
+its inbox and verifies the reply relation; do not assume a subscription,
+transactional callback, terminal result or automatic wake-up exists.
 
 Fabric identity follows the working directory, so a linked worktree is a
 different Fabric project from the primary checkout. Measured: the primary
 resolves to `<repo>`, while `<repo>/.worktrees/<name>` resolves to a project of
-its own. Messages, shared tasks and the activity log do not cross that boundary,
-and nothing errors when they fail to: the message simply lands in a project the
-chair never reads. Dispatcher subagents make this worse, because their tool
+its own. Messages, shared tasks and the activity log do not cross that boundary.
+A targeted send normally fails with an unknown-recipient error until that label
+has been announced in the worktree project; it does not silently land in the
+primary project. Dispatcher subagents make this worse, because their tool
 grants carry no MCP, so `fabric_*` is unavailable to them entirely and their
 only route is the `fabric` CLI through Bash, which writes to whichever project
 its working directory implies.
@@ -176,7 +177,7 @@ compressed return over full output in the lead context. Do not paste secrets or
 uncleared project data into an external provider pane.
 
 For paired-primary work, persist the assignment through Fabric and use Herdr
-only for the bounded wake-up notification. The durable envelope records
+only for bounded fire-and-forget steering. The durable envelope records
 task/stage, chair, owner, peer, base revision, write scopes, prohibited actions,
 expected output, objective checks and user gates. The peer replies through the
 correlated Fabric exchange and writes any named artifact; pane scrollback is
@@ -221,9 +222,10 @@ proof of a correct result: inspect the pane record and bounded output, then use
 the Fabric reply or named artifact. A `blocked` agent needs input; `unknown`
 means integration or detection is not yet reliable.
 
-For answer-bearing Fabric work, await or subscribe to the correlated terminal
-result instead of polling pane state. Delivery to the lead occurs at a safe turn
-boundary and survives lead compaction or restart as unread Fabric state.
+For answer-bearing Fabric work, the chair explicitly reads the correlated reply
+from its inbox and verifies the named artifact. Fabric has no await,
+subscription, terminal callback or automatic lead wake-up; pane state remains
+advisory and never proves completion.
 
 ## Finish
 

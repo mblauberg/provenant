@@ -74,7 +74,7 @@ synthesis and final calls are the chair's job.
 
 **Gemini 3.1 Pro for writing style, naturalisation and polish passes — not for
 core changes.** It is chosen for voice, not for reasoning. Use it to make prose
-read naturally; do not hand it the logic. `gemini-3.6-flash` is the cheap,
+read naturally; do not hand it the logic. `gemini-3.7-flash` is the cheap,
 genuinely different family for cross-family review legs, and is reachable at
 `-high`, `-medium` and `-low`.
 
@@ -85,8 +85,8 @@ and record it.
 
 ## Reaching Gemini
 
-Invoke it as `agy --add-dir DIR --model "Gemini 3.6 Flash (High)" -p PROMPT`.
-The model flag is `--model`, not `-m`, and the value is the display name shown
+Invoke it as `agy --add-dir DIR --model gemini-3.7-flash-high -p PROMPT`.
+The model flag is `--model`, not `-m`, and the value is the identifier shown
 by `agy models`. Never pass `--dangerously-skip-permissions`; `agy` prints that
 suggestion on every denial, and following it hands Gemini every tool at once.
 

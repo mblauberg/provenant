@@ -63,5 +63,37 @@ def test_herdr_reference_and_degradation_doctrines_are_contract_invariants() -> 
         "dispatched-unconfirmed",
         "referenceValidation: verified",
         "FABRIC-ROUNDTRIP-UNAVAILABLE",
-        "Herdr then wakes or focuses the peer; it is not the transport of record",
+        "Herdr only observes or sends fire-and-forget steering",
+        "send a correlated reply, then explicitly acknowledge",
+        "claim TTL must cover expected processing and artifact custody",
+        "dedupes by the request `reply_to` together with the named artifact and digest",
     } <= invariants
+
+
+def test_reply_precedes_ack_and_duplicate_redelivery_is_deduped() -> None:
+    for relative in (
+        "skills/orchestrate/references/herdr-panes.md",
+        "skills/orchestrate/references/paired-primary.md",
+    ):
+        source = (ROOT / relative).read_text()
+        normalized = " ".join(source.split())
+        assert "reply, then" in normalized
+        assert "claim TTL must cover expected processing and artifact custody" in normalized
+        assert "there is no renewal" in normalized or "it has no renewal" in normalized
+        assert "dedupes by the request `reply_to`" in normalized
+        assert "acknowledges the claim after durable processing" not in source
+
+
+def test_worktree_recipient_failure_is_explicit_until_the_label_is_announced() -> None:
+    source = (ROOT / "skills" / "orchestrate" / "references" / "herdr-panes.md").read_text()
+    assert "unknown-recipient error" in source
+    assert "does not silently land in the" in source
+    assert "simply lands in a project the" not in source
+
+
+def test_reader_facing_herdr_descriptions_do_not_promise_wake_or_callback() -> None:
+    for path in (ROOT / "README.md", ROOT / "docs" / "ARCHITECTURE.md"):
+        source = path.read_text()
+        assert "observes and wakes" not in source
+        assert "wake signals" not in source
+    assert "fire-and-forget\nsteering" in (ROOT / "README.md").read_text()
