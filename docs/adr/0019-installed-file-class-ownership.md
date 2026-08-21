@@ -136,9 +136,10 @@ seeder reports `existing` for a path an attacker created in that window. The
 rename cannot be redirected, so the outcome is a skipped seed, not a misdirected
 write.
 
-**Current reconcile boundary.** Rename reconciliation was retired with the
-rename registry. `reconcile` now repairs current managed names, removes safe
-managed leftovers, and refuses conflicts or unmanaged targets. The schema-v1
+**Current reconcile boundary.** Rename reconciliation was retired by #647 on
+2026-08-03 with the rename registry. `reconcile` repairs managed names, removes
+safe managed leftovers, refuses conflicts, and preserves unmanaged targets.
+The schema-v1
 manifest retains an opaque `history` list for compatibility with existing
 installations; current code preserves it but never appends to or interprets it.
 Repository history, not that field, is the record of earlier names.

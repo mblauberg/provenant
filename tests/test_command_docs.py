@@ -55,7 +55,8 @@ def test_managed_reconciliation_stays_documented_for_maintainers():
 
 def test_installer_adr_does_not_advertise_retired_rename_reconciliation():
     source = read("docs/adr/0019-installed-file-class-ownership.md")
-    assert "Rename reconciliation was retired" in source
+    assert "Rename reconciliation was retired by #647" in source
+    assert "preserves unmanaged targets" in source
     assert "applies declared renames" not in source
 
 
