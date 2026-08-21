@@ -62,7 +62,12 @@ def test_installer_adr_does_not_advertise_retired_rename_reconciliation():
 
 def test_lifecycle_spec_uses_current_manifest_contract():
     source = read("docs/specs/harness/lifecycle.md")
-    assert "current ownership" in source
+    normalised = " ".join(source.split())
+    assert (
+        "Use a versioned installation manifest containing skill name, source "
+        "digest, installed target and current ownership."
+        in normalised
+    )
     assert "supersession history" not in source
 
 
