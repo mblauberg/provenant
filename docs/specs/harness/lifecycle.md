@@ -357,13 +357,13 @@ release, evidence window, containment, diagnosis and resulting regression case.
 
 ## Installation, precedence and portability
 
-Introduce a versioned installation manifest containing skill name, source
-digest, installed target, ownership and supersession history. Installer
-operations support `plan`, `install`, `reconcile` and `uninstall-managed`.
-Unmanaged existing paths are never claimed or overwritten. Broken managed
-links and safe managed retirements are repaired with receipts. The target-bound
-manifest hashes full skill-tree bytes and executable modes; link mutations roll
-back if its atomic commit fails. Conflicts stop for user resolution.
+Use a versioned installation manifest containing skill name, source digest,
+installed target and current ownership. Installer operations support `plan`,
+`install`, `reconcile` and `uninstall-managed`. Unmanaged existing paths are
+never claimed or overwritten. Broken managed links and safe managed retirements
+are reconciled. The target-bound manifest hashes full skill-tree bytes and
+executable modes, then is written atomically after link reconciliation.
+Conflicts stop for user resolution.
 
 Instruction precedence is one sentence across all entrypoints:
 

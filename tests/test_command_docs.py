@@ -60,6 +60,12 @@ def test_installer_adr_does_not_advertise_retired_rename_reconciliation():
     assert "applies declared renames" not in source
 
 
+def test_lifecycle_spec_uses_current_manifest_contract():
+    source = read("docs/specs/harness/lifecycle.md")
+    assert "current ownership" in source
+    assert "supersession history" not in source
+
+
 def test_adr_index_marks_daemon_era_task_completion_decision_superseded():
     source = read("docs/adr/README.md")
     row = next(line for line in source.splitlines() if "[0015](" in line)
