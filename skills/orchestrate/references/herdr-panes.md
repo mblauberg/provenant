@@ -121,9 +121,13 @@ chair-owned expectation; Fabric does not enforce it. Herdr is not the transport
 of record and cannot reliably wake, interrupt or notify a peer.
 
 The peer explicitly reads its Fabric inbox: a normal read atomically claims
-delivery, while a peek is observation-only. After durably processing the
-message, it must explicitly acknowledge the claim to prevent redelivery, then
-send a correlated reply. Claim/ack and correlation enforce and evidence message
+delivery, while a peek is observation-only. The claim TTL must cover expected
+processing and artifact custody; it has transport-expiry semantics only and
+there is no renewal. After processing and persisting the output, the peer must
+send a correlated reply, then explicitly acknowledge the claim. If it crashes
+after the reply but before acknowledgement, redelivery may duplicate the
+reply; the chair dedupes by the request `reply_to` together with the named
+artifact and digest. Claim/ack and correlation enforce and evidence message
 delivery only: they do not prove that the provider started, stayed live,
 completed, or produced a valid result. The named run artifact remains the
 canonical record of scope, output and verification. The chair explicitly reads

@@ -50,15 +50,18 @@ source_write_scope | artifact_scope | prohibited_actions
 expected_output | objective_checks | human_gates | expected response time
 ```
 
-The peer explicitly reads its inbox, which atomically claims delivery, then
-acknowledges the claim after durable processing to prevent redelivery. It returns
-supported claims, challenges, evidence paths, unresolved questions and its
-artifact path through a correlated Fabric reply. Claim/ack and a reply prove
-only that messages were delivered and related; they do not prove provider
-liveness, task completion or result validity. The chair verifies the named
-artifact and objective checks before rotating ownership. An expected response
-time is a chair-owned run-artifact expectation, not a Fabric deadline or
-callback.
+The peer explicitly reads its inbox, which atomically claims delivery. The
+claim TTL must cover expected processing and artifact custody; it has no
+renewal. After processing and persisting output, the peer sends supported
+claims, challenges, evidence paths, unresolved questions and its artifact path
+through a correlated Fabric reply, then acknowledges the claim. A crash after
+the reply but before acknowledgement may cause duplicate redelivery; the chair
+dedupes by the request `reply_to` together with the named artifact and digest.
+Claim/ack and a reply prove only that messages were delivered and related; they
+do not prove provider liveness, task completion or result validity. The chair
+verifies the named artifact and objective checks before rotating ownership. An
+expected response time is a chair-owned run-artifact expectation, not a Fabric
+deadline or callback.
 Each stage ledger records writer actors and safe relative paths; overlapping
 cross-family writer scopes fail the machine gate.
 

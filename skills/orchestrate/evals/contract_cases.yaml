@@ -59,3 +59,6 @@ reference_invariants:
   - "dispatched-unconfirmed"
   - "referenceValidation: verified"
   - "Herdr only observes or sends fire-and-forget steering"
+  - "send a correlated reply, then explicitly acknowledge"
+  - "claim TTL must cover expected processing and artifact custody"
+  - "dedupes by the request `reply_to` together with the named artifact and digest"
