@@ -102,11 +102,8 @@ try {
   assert.equal(inbox[0].conversationId, sent.messageId);
   assert.equal(typeof inbox[0].claimId, "string");
   assert.deepEqual(payload(await codex.callTool({ name: "fabric_inbox", arguments: {} })), []);
-  assert.equal(payload(await codex.callTool({
-    name: "fabric_acknowledge",
-    arguments: { message_id: inbox[0].messageId, claim_id: inbox[0].claimId },
-  })).alreadyAcknowledged, false);
 
+  // Persist and send the correlated response before acknowledging the request.
   const replySent = payload(await codex.callTool({
     name: "fabric_send",
     arguments: {
@@ -116,6 +113,11 @@ try {
       reply_to: inbox[0].messageId,
     },
   }));
+  assert.equal(payload(await codex.callTool({
+    name: "fabric_acknowledge",
+    arguments: { message_id: inbox[0].messageId, claim_id: inbox[0].claimId },
+  })).alreadyAcknowledged, false);
+
   const reply = payload(await claude.callTool({ name: "fabric_inbox", arguments: {} }))[0];
   assert.equal(reply.messageId, replySent.messageId);
   assert.equal(reply.replyTo, sent.messageId);
