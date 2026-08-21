@@ -25,7 +25,7 @@ The current pre-release tree includes:
   bootstrap into Claude Code and Codex, preserves unmanaged content, and leaves
   portable `skill-craft` canonical over Codex's bundled `skill-creator`.
 - `scripts/manage_installation.py`, giving `plan` and `reconcile` against a
-  managed manifest that records ownership and supersession history. It retires
+  managed manifest that records current ownership. It retires
   safe managed leftovers without claiming or overwriting an unmanaged target.
 - The delivery kernel: profiles in `config/delivery-profiles.json` for software,
   research, analysis, document and agent-product work, the neutral
@@ -157,7 +157,7 @@ The current pre-release tree includes:
   ready-issue-implementation mode to `orchestrate` that stops at the user PR
   gate. At that earlier consolidation point the catalogue reached 33 skills;
   the current pre-release tree is 32 and the managed manifest records
-  supersession history.
+  current ownership.
 - Completed the progressive-disclosure refactor tracked by #335: compact
   ambient instructions, repository-managed Claude workflows, enforced
   cross-skill reference boundaries and conditional comparative evaluations.

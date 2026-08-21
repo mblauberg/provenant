@@ -108,7 +108,7 @@ Audit usage periodically. Retire zero-use skills that add no durable capability,
 but preserve required third-party notices and use repository history instead of
 live backup folders as the normal safety boundary.
 
-Record skill ownership and supersession in the managed installation manifest.
+Record current skill ownership in the managed installation manifest.
 Test the reconciliation path; do not rely on users deleting or replacing
 global links by hand. Run `scripts/manage_installation.py plan --target
 <skills-dir>`, then `reconcile --target <skills-dir>`. Reconciliation retires

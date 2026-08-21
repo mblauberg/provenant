@@ -411,7 +411,7 @@ excluded from context scans.
 `scripts/manage_installation.py` plans, checks, installs, reconciles and removes
 only harness-owned skill links. Every normal install repairs missing or stale
 managed links and retires safe managed leftovers. A versioned manifest records
-ownership, source tree digests, the bound target and supersession history beside the
+current ownership, source tree digests and the bound target beside the
 target skills directory. The post-install integrity check verifies catalogue
 presence. Missing or noncanonical required names fail; extra symlinks resolving
 outside the canonical skill tree produce warnings. Unmanaged paths are never
