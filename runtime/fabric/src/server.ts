@@ -51,19 +51,35 @@ server.registerTool(
 server.registerTool(
   "fabric_inbox",
   {
-    description: "Read my unread messages. Marks them read unless peek is true.",
+    description:
+      "Claim my unacknowledged messages. Peek observes without claiming; expired claims redeliver.",
     inputSchema: {
       limit: z.number().int().positive().optional(),
       peek: z.boolean().optional(),
+      claim_seconds: z.number().int().min(1).max(3600).optional(),
     },
   },
-  ({ limit, peek }) => reply(store.inbox(who, { limit, peek })),
+  ({ limit, peek, claim_seconds }) =>
+    reply(store.inbox(who, {
+      limit,
+      peek,
+      claimTtlMs: claim_seconds === undefined ? undefined : claim_seconds * 1000,
+    })),
+);
+
+server.registerTool(
+  "fabric_acknowledge",
+  {
+    description: "Acknowledge one delivery using the claim token returned by fabric_inbox.",
+    inputSchema: { message_id: z.string(), claim_id: z.string() },
+  },
+  ({ message_id, claim_id }) => reply(store.acknowledge(who, message_id, claim_id)),
 );
 
 server.registerTool(
   "fabric_team_create",
   {
-    description: "Group agents under a name so one send reaches all of them.",
+    description: "Create a team or atomically replace all members of an existing team.",
     inputSchema: { team_id: z.string(), members: z.array(z.string()).min(1) },
   },
   ({ team_id, members }) => reply(store.createTeam(who, team_id, members)),
@@ -94,6 +110,16 @@ server.registerTool(
 );
 
 server.registerTool(
+  "fabric_task_claim",
+  {
+    description:
+      "Atomically claim an open, unowned task. Retrying as the winning owner is idempotent.",
+    inputSchema: { task_id: z.string() },
+  },
+  ({ task_id }) => reply(store.claimTask(who, task_id)),
+);
+
+server.registerTool(
   "fabric_tasks",
   {
     description: "List tasks in this project, optionally filtered by state.",
@@ -117,10 +143,16 @@ server.registerTool(
 server.registerTool(
   "fabric_activity",
   {
-    description: "Recent activity across all agents in this project, newest first.",
-    inputSchema: { limit: z.number().int().positive().optional() },
+    description:
+      "Project activity. With after_seq, returns forward cursor order; otherwise newest first.",
+    inputSchema: {
+      limit: z.number().int().positive().optional(),
+      after_seq: z.number().int().nonnegative().optional(),
+    },
   },
-  ({ limit }) => reply(store.activity(who.project, limit)),
+  ({ limit, after_seq }) => reply(after_seq === undefined
+    ? store.activity(who.project, limit)
+    : store.activityAfter(who.project, after_seq, limit)),
 );
 
 await server.connect(new StdioServerTransport());

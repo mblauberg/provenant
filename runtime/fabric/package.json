@@ -7,7 +7,10 @@
     "test": "vitest run tests",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
-  "bin": { "fabric-mcp": "./src/server.ts" },
+  "bin": {
+    "fabric": "./bin/fabric",
+    "fabric-mcp": "./bin/fabric-mcp"
+  },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.30.0",
     "better-sqlite3": "13.0.2",

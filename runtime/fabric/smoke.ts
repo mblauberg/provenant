@@ -35,10 +35,12 @@ b.send(codex, "claude", "The session cookie is never cleared on logout.", {
   kind: "response",
   replyTo: received[0]?.messageId,
 });
+b.acknowledge(codex, received[0]!.messageId, received[0]!.claimId!);
 const back = a.inbox(claude);
 console.log("claude inbox:", back.length, "reply");
 console.log("  from", back[0]?.from, ":", back[0]?.body);
 console.log("  same conversation:", back[0]?.conversationId === sent.messageId);
+a.acknowledge(claude, back[0]!.messageId, back[0]!.claimId!);
 
 console.log("inbox is now empty:", a.inbox(claude).length === 0);
 

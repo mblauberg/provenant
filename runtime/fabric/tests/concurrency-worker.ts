@@ -31,11 +31,15 @@ try {
   for (let operation = 0; operation < operations; operation += 1) {
     store.send(who, recipient, `worker-${index}-message-${operation}`);
     sent += 1;
-    delivered += store.inbox(who, { limit: operations }).length;
+    const claims = store.inbox(who, { limit: operations });
+    for (const claim of claims) store.acknowledge(who, claim.messageId, claim.claimId!);
+    delivered += claims.length;
   }
   const deadline = Date.now() + 30_000;
   while (delivered < operations && Date.now() < deadline) {
-    delivered += store.inbox(who, { limit: operations }).length;
+    const claims = store.inbox(who, { limit: operations });
+    for (const claim of claims) store.acknowledge(who, claim.messageId, claim.claimId!);
+    delivered += claims.length;
     if (delivered < operations) await delay(10);
   }
   if (delivered !== operations) {

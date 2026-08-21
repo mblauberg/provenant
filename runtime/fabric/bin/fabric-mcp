@@ -6,7 +6,8 @@
 set -eu
 
 here=$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")
-root=$(cd "$here/../../.." && pwd)
+package_root=$(cd "$here/.." && pwd)
+product_root=${AGENT_FABRIC_PRODUCT_ROOT:-$(cd "$package_root/../.." && pwd)}
 
 # MCP clients do not always pass a login shell's PATH.
 node=${FABRIC_NODE:-$(command -v node 2>/dev/null || true)}
@@ -23,5 +24,20 @@ if [ ! -x "${node:-}" ]; then
   exit 127
 fi
 
-exec "$node" --import "$root/node_modules/tsx/dist/loader.mjs" \
-  "$root/runtime/fabric/src/server.ts" "$@"
+loader=${AGENT_FABRIC_TSX_LOADER:-}
+if [ -z "$loader" ]; then
+  for candidate in \
+    "$package_root/node_modules/tsx/dist/loader.mjs" \
+    "$product_root/node_modules/tsx/dist/loader.mjs"; do
+    if [ -f "$candidate" ]; then
+      loader=$candidate
+      break
+    fi
+  done
+fi
+if [ ! -f "${loader:-}" ]; then
+  echo "fabric: tsx loader not found. Install package dependencies or set AGENT_FABRIC_TSX_LOADER." >&2
+  exit 127
+fi
+
+exec "$node" --import "$loader" "$package_root/src/server.ts" "$@"

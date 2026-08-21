@@ -7,7 +7,7 @@
 --
 -- Identity is derived, never provisioned: an agent is (project, agent_id) where
 -- project is the git toplevel of its cwd and agent_id comes from the environment
--- the provider was launched with. Nothing to bootstrap, nothing to expire.
+-- the provider was launched with. Nothing needs bootstrapping or provisioning.
 
 PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
@@ -35,8 +35,8 @@ CREATE TABLE IF NOT EXISTS messages (
 CREATE INDEX IF NOT EXISTS messages_by_conversation
   ON messages(project, conversation_id, created_at);
 
--- One row per recipient. Read state lives here rather than on the message so a
--- broadcast can be read by one agent without hiding it from the others.
+-- One row per recipient. `read_at` is the explicit acknowledgement timestamp;
+-- old databases retain their already-read deliveries as acknowledged.
 CREATE TABLE IF NOT EXISTS deliveries (
   message_id   TEXT NOT NULL REFERENCES messages(message_id) ON DELETE CASCADE,
   project      TEXT NOT NULL,
@@ -47,6 +47,21 @@ CREATE TABLE IF NOT EXISTS deliveries (
 
 CREATE INDEX IF NOT EXISTS deliveries_unread
   ON deliveries(project, recipient_id, read_at);
+
+-- One durable claim per delivery. An expired claim can be replaced atomically
+-- by a later inbox read, so redelivery needs no daemon or scheduler.
+CREATE TABLE IF NOT EXISTS delivery_claims (
+  message_id   TEXT NOT NULL REFERENCES messages(message_id) ON DELETE CASCADE,
+  project      TEXT NOT NULL,
+  recipient_id TEXT NOT NULL,
+  claim_id     TEXT NOT NULL,
+  claimed_at   INTEGER NOT NULL,
+  expires_at   INTEGER NOT NULL,
+  PRIMARY KEY (message_id, recipient_id)
+);
+
+CREATE INDEX IF NOT EXISTS delivery_claims_expiry
+  ON delivery_claims(project, recipient_id, expires_at);
 
 CREATE TABLE IF NOT EXISTS teams (
   project    TEXT NOT NULL,
