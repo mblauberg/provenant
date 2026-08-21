@@ -73,8 +73,7 @@ if (command === "status" || command === "doctor") {
   console.log(JSON.stringify(result, null, 2));
   process.exit(result.status === "error" ? 1 : 0);
 }
-const store = new Store(databasePath());
-store.announce(who);
+let store: Store | undefined;
 
 const show = (value: unknown): void => {
   console.log(JSON.stringify(value, null, 2));
@@ -100,8 +99,11 @@ const printActivity = (rows: ReturnType<Store["activity"]>): void => {
 };
 
 try {
+  store = new Store(databasePath());
+  store.announce(who);
   switch (command) {
   case "whoami":
+    if (argv.length !== 1) throw new Error("usage: fabric whoami");
     show({ ...who, database: databasePath(), agents: store.agents(who.project) });
     break;
 
@@ -119,7 +121,11 @@ try {
   }
 
   case "inbox": {
-    const claimSeconds = positiveNumber(flag("claim-seconds"), 300, "claim seconds");
+    const claimSecondsText = flag("claim-seconds");
+    const claimSeconds = claimSecondsText === undefined ? 300 : Number(claimSecondsText);
+    if (!Number.isSafeInteger(claimSeconds) || claimSeconds < 1 || claimSeconds > 3600) {
+      throw new Error("claim seconds must be an integer from 1 to 3600");
+    }
     const peekAt = argv.indexOf("--peek");
     const peek = peekAt !== -1;
     if (peek) argv.splice(peekAt, 1);
@@ -147,6 +153,7 @@ try {
   }
 
   case "tasks":
+    if (argv.length > 2) throw new Error("usage: fabric tasks [state]");
     show(store.tasks(who.project, argv[1]));
     break;
 
@@ -166,7 +173,9 @@ try {
 
   case "done": {
     const taskId = argv[1];
-    if (taskId === undefined) throw new Error("usage: fabric done <task-id>");
+    if (taskId === undefined || argv.length !== 2) {
+      throw new Error("usage: fabric done <task-id>");
+    }
     show(store.updateTask(who, taskId, "done"));
     break;
   }
@@ -213,5 +222,5 @@ try {
   console.error(`fabric: ${error instanceof Error ? error.message : String(error)}`);
   process.exitCode = 1;
 } finally {
-  store.close();
+  store?.close();
 }

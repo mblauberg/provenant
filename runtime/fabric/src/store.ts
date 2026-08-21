@@ -12,6 +12,15 @@ const REQUIRED_TABLES = [
   "agents", "messages", "deliveries", "delivery_claims", "teams", "team_members",
   "tasks", "task_dependencies", "activity",
 ];
+const REQUIRED_CLAIM_COLUMNS = [
+  "message_id", "project", "recipient_id", "claim_id", "claimed_at", "expires_at",
+];
+const BOOTSTRAP_WAIT = new Int32Array(new SharedArrayBuffer(4));
+
+const isSQLiteContention = (error: unknown): boolean => {
+  const code = (error as { code?: unknown } | null)?.code;
+  return code === "SQLITE_BUSY" || code === "SQLITE_LOCKED";
+};
 
 export interface Message {
   messageId: string;
@@ -60,10 +69,27 @@ export class Store {
 
   constructor(path: string) {
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-    this.#db = new Database(path);
-    this.#db.exec(readFileSync(SCHEMA, "utf8"));
-    // Wait rather than fail when another agent holds the write lock.
-    this.#db.pragma("busy_timeout = 5000");
+    this.#db = new Database(path, { timeout: 5000 });
+    try {
+      // Migration/schema PRAGMAs also contend on the first simultaneous open.
+      // Install the wait policy before executing any of them, then retry only
+      // the idempotent schema bootstrap on bounded SQLite contention.
+      this.#db.pragma("busy_timeout = 5000");
+      const schema = readFileSync(SCHEMA, "utf8");
+      const deadline = Date.now() + 5000;
+      for (;;) {
+        try {
+          this.#db.exec(schema);
+          break;
+        } catch (error) {
+          if (!isSQLiteContention(error) || Date.now() >= deadline) throw error;
+          Atomics.wait(BOOTSTRAP_WAIT, 0, 0, 25);
+        }
+      }
+    } catch (error) {
+      this.#db.close();
+      throw error;
+    }
   }
 
   close(): void {
@@ -72,8 +98,22 @@ export class Store {
 
   /** Register the caller if this is the first time it has been seen. */
   announce(who: Identity): void {
+    if (who.agentId === "all") throw new Error('recipient id "all" is reserved for broadcast');
     const now = Date.now();
     this.#db.transaction(() => {
+      const existing = this.#db
+        .prepare(`SELECT provider FROM agents WHERE project = ? AND agent_id = ?`)
+        .get(who.project, who.agentId) as { provider: string } | undefined;
+      if (existing === undefined) {
+        const reservedByTeam = this.#db
+          .prepare(`SELECT 1 FROM teams WHERE project = ? AND team_id = ?`)
+          .get(who.project, who.agentId);
+        if (reservedByTeam !== undefined) {
+          throw new Error(
+            `agent label ${who.agentId} collides with an existing team id in ${who.project}`,
+          );
+        }
+      }
       const announced = this.#db
         .prepare(
           `INSERT INTO agents(project, agent_id, provider, first_seen, last_seen)
@@ -83,9 +123,6 @@ export class Store {
         )
         .run(who.project, who.agentId, who.provider, now, now);
       if (announced.changes === 0) {
-        const existing = this.#db
-          .prepare(`SELECT provider FROM agents WHERE project = ? AND agent_id = ?`)
-          .get(who.project, who.agentId) as { provider: string } | undefined;
         throw new Error(
           `agent label ${who.agentId} in ${who.project} already belongs to client seat ` +
             `${existing?.provider ?? "unknown"}; refusing seat ${who.provider}`,
@@ -267,14 +304,22 @@ export class Store {
   }
 
   createTeam(who: Identity, teamId: string, members: string[]): { teamId: string; members: string[] } {
+    if (teamId === "all" || members.includes("all")) {
+      throw new Error('recipient id "all" is reserved for broadcast');
+    }
     const now = Date.now();
     const effectiveMembers = [...new Set(members)];
     this.#db.transaction(() => {
-      const agent = this.#db
-        .prepare(`SELECT 1 FROM agents WHERE project = ? AND agent_id = ?`)
+      const existingTeam = this.#db
+        .prepare(`SELECT 1 FROM teams WHERE project = ? AND team_id = ?`)
         .get(who.project, teamId);
-      if (agent !== undefined) {
-        throw new Error(`team id ${teamId} collides with an agent label in ${who.project}`);
+      if (existingTeam === undefined) {
+        const reservedByAgent = this.#db
+          .prepare(`SELECT 1 FROM agents WHERE project = ? AND agent_id = ?`)
+          .get(who.project, teamId);
+        if (reservedByAgent !== undefined) {
+          throw new Error(`team id ${teamId} collides with an agent label in ${who.project}`);
+        }
       }
       this.#db
         .prepare(`INSERT OR IGNORE INTO teams(project, team_id, created_at) VALUES (?, ?, ?)`)
@@ -321,6 +366,7 @@ export class Store {
   }
 
   updateTask(who: Identity, taskId: string, state: string, note?: string): Task {
+    if (state === "claimed") throw new Error("state claimed is reserved for atomic task claim");
     return this.#db.transaction(() => {
       const changed = this.#db
         .prepare(`UPDATE tasks SET state = ?, updated_at = ? WHERE project = ? AND task_id = ?`)
@@ -564,8 +610,21 @@ export function inspectDatabase(
     }
 
     const missing = REQUIRED_TABLES.filter((table) => !tables.has(table));
+    const claimColumnRows = tables.has("delivery_claims")
+      ? db.pragma("table_info(delivery_claims)") as Array<{ name: string }>
+      : [];
+    const claimColumns = tables.has("delivery_claims")
+      ? new Set(claimColumnRows.map((column) => column.name))
+      : new Set<string>();
+    const missingClaimColumns = REQUIRED_CLAIM_COLUMNS.filter((column) => !claimColumns.has(column));
     const integrityRows = db.pragma("quick_check") as Array<{ quick_check: string }>;
     const integrity = integrityRows.every((row) => row.quick_check === "ok");
+    const foreignKeyViolations = db.pragma("foreign_key_check") as Array<{
+      table: string;
+      rowid: number;
+      parent: string;
+      fkid: number;
+    }>;
     const namespaceCollisions = tables.has("agents") && tables.has("teams")
       ? (db.prepare(
         `SELECT a.agent_id
@@ -585,6 +644,19 @@ export function inspectDatabase(
         name: "integrity",
         ok: integrity,
         detail: integrityRows.map((row) => row.quick_check).join("; "),
+      },
+      {
+        name: "delivery-claim-schema",
+        ok: missingClaimColumns.length === 0,
+        detail: missingClaimColumns.length === 0 ? "delivery claim columns present" :
+          `missing columns: ${missingClaimColumns.join(", ")}`,
+      },
+      {
+        name: "foreign-keys",
+        ok: foreignKeyViolations.length === 0,
+        detail: foreignKeyViolations.length === 0 ? "no foreign-key violations" :
+          foreignKeyViolations.map((violation) =>
+            `${violation.table} row ${violation.rowid} -> ${violation.parent}`).join("; "),
       },
       {
         name: "recipient-namespace",

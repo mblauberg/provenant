@@ -442,6 +442,7 @@ def test_ci_runs_complete_harness_and_fabric_gates() -> None:
     fabric_commands = "\n".join(str(step.get("run", "")) for step in fabric_steps)
     for required in (
         "npm run check",
+        "npm run test:package-install --workspace @local/fabric",
         "node runtime/fabric/mcp-smoke.mjs",
         "npm audit --workspace=@local/fabric --omit=dev --audit-level=high",
     ):
@@ -521,16 +522,19 @@ def test_fabric_workspace_and_ci_share_the_locked_daemonless_check_graph() -> No
 
     package = json.loads(FABRIC_PACKAGE.read_text(encoding="utf-8"))
     assert package.get("name") == "@local/fabric"
+    assert package.get("engines") == {"node": ">=24.15.0 <25"}
     scripts = package.get("scripts")
     assert isinstance(scripts, dict)
     assert scripts == {
         "test": "vitest run tests",
+        "test:package-install": "node package-install-smoke.mjs",
         "typecheck": "tsc --noEmit -p tsconfig.json",
     }
 
     fabric_commands = "\n".join(str(step.get("run", "")) for step in fabric_steps)
     assert (
         fabric_commands.index("npm run check")
+        < fabric_commands.index("npm run test:package-install --workspace @local/fabric")
         < fabric_commands.index("node runtime/fabric/mcp-smoke.mjs")
         < fabric_commands.index("npm audit --workspace=@local/fabric --omit=dev --audit-level=high")
     )

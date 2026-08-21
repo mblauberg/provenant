@@ -15,10 +15,11 @@ runtime/fabric/bin/fabric whoami
 runtime/fabric/bin/fabric-mcp
 ```
 
-The launchers look for `tsx` under the package and then the product root.
+The package carries `tsx` as a runtime dependency. The launchers resolve it
+from an installed package or the product root.
 `AGENT_FABRIC_PRODUCT_ROOT` selects an installed product checkout and
 `AGENT_FABRIC_TSX_LOADER` can name an explicit loader. `FABRIC_NODE` can name
-the Node binary.
+the Node binary. Launchers require Node `>=24.15.0` and `<25`.
 
 Common CLI operations are:
 
@@ -75,6 +76,8 @@ label under another seat is rejected. New team IDs cannot reuse a known agent
 label. A legacy database may already contain an overlapping team and agent ID;
 startup remains compatible, team routing wins deterministically, and `doctor`
 reports the ambiguity so it can be retired deliberately.
+The recipient ID `all` is reserved for broadcast and cannot be announced as an
+agent, created as a team, or used as a team member.
 
 A seat is routing metadata, not model-family proof. In particular,
 `provider: "agy"` proves only that the Agy client used that seat. A separate
@@ -95,7 +98,8 @@ call.
 Tasks keep their existing free-form state. `fabric_task_claim` and CLI `claim`
 add only one concurrency rule: exactly one caller can take an `open`, unowned
 task. Retrying as that owner is idempotent; other callers fail. Generic task
-updates remain cooperative and do not form a state machine.
+updates remain cooperative and do not form a state machine, except that the
+literal state `claimed` is reserved for the atomic ownership operation.
 
 Activity entries expose their monotonic `seq`. `fabric_activity` accepts
 `after_seq` for ascending cursor reads. CLI `watch` uses that cursor and drains
@@ -117,6 +121,9 @@ fabric_note         fabric_activity
 seats. Set `AGENT_FABRIC_MCP_COMMAND` to the managed `provenant` shim to test
 stable installed routing. The smoke forwards an explicit product root and
 loader, so a branch run cannot silently certify another checkout.
+`npm run test:package-install` packs and installs the package in a temporary
+prefix, then asserts its installed CLI and MCP bins without a product checkout
+or loader override.
 
 ## State and security boundary
 

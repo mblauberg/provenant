@@ -5,10 +5,6 @@
 # from the project you care about.
 set -eu
 
-here=$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")
-package_root=$(cd "$here/.." && pwd)
-product_root=${AGENT_FABRIC_PRODUCT_ROOT:-$(cd "$package_root/../.." && pwd)}
-
 node=${FABRIC_NODE:-$(command -v node 2>/dev/null || true)}
 if [ ! -x "${node:-}" ]; then
   for candidate in /opt/homebrew/bin/node /usr/local/bin/node; do
@@ -22,11 +18,24 @@ if [ ! -x "${node:-}" ]; then
   echo "fabric: no node on PATH. Set FABRIC_NODE to a node binary." >&2
   exit 127
 fi
+if ! "$node" -e '
+  const [major, minor] = process.versions.node.split(".").map(Number);
+  process.exit(major === 24 && minor >= 15 ? 0 : 1);
+'; then
+  echo "fabric: requires Node >=24.15.0 and <25. Set FABRIC_NODE to a supported binary." >&2
+  exit 127
+fi
+
+script_path=$("$node" -e 'process.stdout.write(require("node:fs").realpathSync(process.argv[1]))' "$0")
+here=$(dirname "$script_path")
+package_root=$(cd "$here/.." && pwd)
+product_root=${AGENT_FABRIC_PRODUCT_ROOT:-$(cd "$package_root/../.." && pwd)}
 
 loader=${AGENT_FABRIC_TSX_LOADER:-}
 if [ -z "$loader" ]; then
   for candidate in \
     "$package_root/node_modules/tsx/dist/loader.mjs" \
+    "$package_root/../../tsx/dist/loader.mjs" \
     "$product_root/node_modules/tsx/dist/loader.mjs"; do
     if [ -f "$candidate" ]; then
       loader=$candidate

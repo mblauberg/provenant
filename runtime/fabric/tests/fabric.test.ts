@@ -9,6 +9,8 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { identify, projectRoot } from "../src/identity.js";
@@ -53,7 +55,11 @@ function announce(store: Store, ...ids: string[]): void {
   for (const id of ids) store.announce(agent(id));
 }
 
-function runCli(args: string[], stateDirectory = temporaryDirectory) {
+function runCli(
+  args: string[],
+  stateDirectory = temporaryDirectory,
+  identityEnv: Record<string, string> = {},
+) {
   const cliPath = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
   const tsxLoader = createRequire(import.meta.url).resolve("tsx");
   return spawnSync(process.execPath, ["--import", tsxLoader, cliPath, ...args], {
@@ -65,6 +71,7 @@ function runCli(args: string[], stateDirectory = temporaryDirectory) {
       AGENT_FABRIC_SEAT: "codex",
       AGENT_FABRIC_LABEL: "cli-reviewer",
       NODE_NO_WARNINGS: "1",
+      ...identityEnv,
     },
   });
 }
@@ -92,6 +99,26 @@ describe("CLI boundaries", () => {
     expect(result.stderr).toContain('no recipients for "missing-agent"');
     expect(result.stderr).toContain('Use an agent label, team id, or "all"');
     expect(result.stderr).not.toContain("src/store.ts");
+  });
+
+  it("reports a client-seat collision without a startup stack", () => {
+    const store = openStore();
+    store.announce(identify({
+      AGENT_FABRIC_SEAT: "claude",
+      AGENT_FABRIC_LABEL: "shared-label",
+    }, repositoryRoot));
+    store.close();
+
+    const result = runCli(["whoami"], temporaryDirectory, {
+      AGENT_FABRIC_SEAT: "codex",
+      AGENT_FABRIC_LABEL: "shared-label",
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("already belongs to client seat claude; refusing seat codex");
+    expect(result.stderr).not.toContain("src/store.ts");
+    expect(result.stderr).not.toContain("at Store.announce");
+    expect(result.stdout).toBe("");
   });
 
   it("reports status and doctor results without creating or updating the database", () => {
@@ -149,6 +176,73 @@ describe("CLI boundaries", () => {
     expect(afterDirectoryStat).toEqual(beforeDirectoryStat);
   });
 
+  it("diagnoses an incomplete delivery-claim migration", () => {
+    const database = new Database(databasePath);
+    database.exec(`
+      DROP TABLE delivery_claims;
+      CREATE TABLE delivery_claims (
+        message_id TEXT NOT NULL,
+        recipient_id TEXT NOT NULL,
+        claim_id TEXT NOT NULL,
+        PRIMARY KEY (message_id, recipient_id)
+      );
+    `);
+    database.close();
+
+    const diagnostic = inspectDatabase(databasePath, agent("alice").project, "doctor");
+    expect(diagnostic).toMatchObject({
+      status: "error",
+      checks: expect.arrayContaining([expect.objectContaining({
+        name: "delivery-claim-schema",
+        ok: false,
+        detail: expect.stringMatching(/project|claimed_at|expires_at/),
+      })]),
+    });
+  });
+
+  it("diagnoses foreign-key violations", () => {
+    const database = new Database(databasePath);
+    database.pragma("foreign_keys = OFF");
+    database.prepare(
+      `INSERT INTO deliveries(message_id, project, recipient_id, read_at)
+       VALUES ('orphan-message', ?, 'bob', NULL)`,
+    ).run(agent("alice").project);
+    database.close();
+
+    const diagnostic = inspectDatabase(databasePath, agent("alice").project, "doctor");
+    expect(diagnostic).toMatchObject({
+      status: "error",
+      checks: expect.arrayContaining([expect.objectContaining({
+        name: "foreign-keys",
+        ok: false,
+        detail: expect.stringContaining("deliveries"),
+      })]),
+    });
+  });
+
+  it("reads a coherent active-WAL snapshot without mutating source state", () => {
+    const writer = openStore();
+    const alice = agent("alice");
+    writer.announce(alice);
+    writer.note(alice, "committed only through active WAL");
+    const sourcePaths = [databasePath, `${databasePath}-wal`, `${databasePath}-shm`];
+    expect(sourcePaths.every(existsSync)).toBe(true);
+    const before = sourcePaths.map((path) => ({
+      path,
+      bytes: readFileSync(path),
+      stat: statSnapshot(path),
+    }));
+
+    expect(inspectDatabase(databasePath, alice.project, "doctor")).toMatchObject({
+      status: "ok",
+      counts: { agents: 1, activity: 1 },
+    });
+    for (const snapshot of before) {
+      expect(readFileSync(snapshot.path)).toEqual(snapshot.bytes);
+      expect(statSnapshot(snapshot.path)).toEqual(snapshot.stat);
+    }
+  });
+
   it("claims and acknowledges a delivery through the CLI", () => {
     const store = openStore();
     const sender = agent("sender");
@@ -176,6 +270,40 @@ describe("CLI boundaries", () => {
       alreadyAcknowledged: false,
     });
     expect(runCli(["inbox", "--peek"]).stdout.trim()).toBe("[]");
+  });
+
+  it("requires whole claim seconds within the documented CLI range", () => {
+    for (const value of ["0.5", "0", "3601"]) {
+      const result = runCli(["inbox", "--claim-seconds", value]);
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("claim seconds must be an integer from 1 to 3600");
+      expect(result.stderr).not.toContain("src/cli.ts");
+    }
+  });
+
+  it("rejects extra fixed-shape CLI arguments before mutation", () => {
+    const store = openStore();
+    const cliAgent = identify({
+      AGENT_FABRIC_SEAT: "codex",
+      AGENT_FABRIC_LABEL: "cli-reviewer",
+    }, repositoryRoot);
+    store.announce(cliAgent);
+    store.createTask(cliAgent, "must stay open", { taskId: "extra-args" });
+    store.close();
+
+    for (const invocation of [
+      ["whoami", "unexpected"],
+      ["tasks", "open", "unexpected"],
+      ["done", "extra-args", "unexpected"],
+    ]) {
+      const result = runCli(invocation);
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("usage: fabric");
+    }
+    expect(openStore().tasks(cliAgent.project)).toMatchObject([{
+      taskId: "extra-args",
+      state: "open",
+    }]);
   });
 
   it("keeps watch live after its initial 200-row window", async () => {
@@ -234,6 +362,126 @@ describe("CLI boundaries", () => {
   }, 10_000);
 });
 
+describe("MCP startup boundaries", () => {
+  it("keeps the transport open with a stable tool error after a client-seat collision", async () => {
+    const store = openStore();
+    store.announce(identify({
+      AGENT_FABRIC_SEAT: "claude",
+      AGENT_FABRIC_LABEL: "shared-label",
+    }, repositoryRoot));
+    store.close();
+
+    const serverPath = fileURLToPath(new URL("../src/server.ts", import.meta.url));
+    const tsxLoader = createRequire(import.meta.url).resolve("tsx");
+    const transport = new StdioClientTransport({
+      command: process.execPath,
+      args: ["--import", tsxLoader, serverPath],
+      cwd: repositoryRoot,
+      stderr: "pipe",
+      env: {
+        HOME: process.env.HOME ?? temporaryDirectory,
+        PATH: process.env.PATH ?? "/usr/bin:/bin",
+        NODE_NO_WARNINGS: "1",
+        AGENT_FABRIC_STATE_DIRECTORY: temporaryDirectory,
+        AGENT_FABRIC_SEAT: "codex",
+        AGENT_FABRIC_LABEL: "shared-label",
+      },
+    });
+    let stderr = "";
+    transport.stderr?.on("data", (chunk: Buffer | string) => { stderr += chunk.toString(); });
+    const client = new Client({ name: "collision-regression", version: "1" });
+    try {
+      await client.connect(transport);
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const result = await client.callTool({ name: "fabric_whoami", arguments: {} });
+        expect(result.isError).toBe(true);
+        expect(result.content).toMatchObject([{
+          type: "text",
+          text: expect.stringContaining(
+            "already belongs to client seat claude; refusing seat codex",
+          ),
+        }]);
+      }
+      expect(stderr).not.toContain("src/store.ts");
+      expect(stderr).not.toContain("at Store.announce");
+    } finally {
+      await client.close().catch(() => undefined);
+    }
+  });
+
+  it("recovers lazily after a transient startup lock is released", async () => {
+    const seed = openStore();
+    const sender = agent("lock-sender");
+    const recipient = identify({
+      AGENT_FABRIC_SEAT: "codex",
+      AGENT_FABRIC_LABEL: "lock-recovery",
+    }, repositoryRoot);
+    seed.announce(sender);
+    seed.announce(recipient);
+    seed.send(sender, recipient.agentId, "recover claim and acknowledgement");
+    seed.close();
+    const blocker = new Database(databasePath);
+    blocker.exec("BEGIN IMMEDIATE");
+    let lockHeld = true;
+
+    const serverPath = fileURLToPath(new URL("../src/server.ts", import.meta.url));
+    const tsxLoader = createRequire(import.meta.url).resolve("tsx");
+    const transport = new StdioClientTransport({
+      command: process.execPath,
+      args: ["--import", tsxLoader, serverPath],
+      cwd: repositoryRoot,
+      stderr: "pipe",
+      env: {
+        HOME: process.env.HOME ?? temporaryDirectory,
+        PATH: process.env.PATH ?? "/usr/bin:/bin",
+        NODE_NO_WARNINGS: "1",
+        AGENT_FABRIC_STATE_DIRECTORY: temporaryDirectory,
+        AGENT_FABRIC_SEAT: "codex",
+        AGENT_FABRIC_LABEL: "lock-recovery",
+      },
+    });
+    const client = new Client({ name: "lock-recovery", version: "1" });
+    try {
+      await client.connect(transport);
+      const locked = await client.callTool({ name: "fabric_whoami", arguments: {} });
+      expect(locked.isError).toBe(true);
+      expect(locked.content).toMatchObject([{
+        type: "text",
+        text: expect.stringMatching(/fabric startup failed:.*database is locked/),
+      }]);
+
+      blocker.exec("COMMIT");
+      lockHeld = false;
+      const recovered = await client.callTool({ name: "fabric_whoami", arguments: {} });
+      expect(recovered.isError).toBeUndefined();
+      expect(recovered.content).toMatchObject([{
+        type: "text",
+        text: expect.stringContaining('"agentId": "lock-recovery"'),
+      }]);
+      const inbox = await client.callTool({ name: "fabric_inbox", arguments: {} });
+      expect(inbox.isError).toBeUndefined();
+      const inboxContent = inbox.content as Array<{ type: "text"; text: string }>;
+      const messages = JSON.parse(inboxContent[0]!.text) as Message[];
+      expect(messages).toMatchObject([{
+        body: "recover claim and acknowledgement",
+        claimId: expect.any(String),
+      }]);
+      const acknowledgement = await client.callTool({
+        name: "fabric_acknowledge",
+        arguments: {
+          message_id: messages[0]!.messageId,
+          claim_id: messages[0]!.claimId,
+        },
+      });
+      expect(acknowledgement.isError).toBeUndefined();
+    } finally {
+      if (lockHeld) blocker.exec("ROLLBACK");
+      blocker.close();
+      await client.close().catch(() => undefined);
+    }
+  }, 20_000);
+});
+
 describe("identity derivation", () => {
   it("creates a new state directory for its single user only", () => {
     const stateDirectory = join(temporaryDirectory, "new-private-state");
@@ -283,6 +531,22 @@ describe("identity derivation", () => {
       { agentId: "reviewer", provider: "claude" },
     ]);
   });
+
+  it("reserves all for broadcast instead of an agent or team recipient", () => {
+    const store = openStore();
+    const alice = agent("alice");
+    store.announce(alice);
+
+    expect(() => store.announce(agent("all"))).toThrowError(
+      /recipient id "all" is reserved for broadcast/,
+    );
+    expect(() => store.createTeam(alice, "all", ["alice"])).toThrowError(
+      /recipient id "all" is reserved for broadcast/,
+    );
+    expect(() => store.createTeam(alice, "reviewers", ["all"])).toThrowError(
+      /recipient id "all" is reserved for broadcast/,
+    );
+  });
 });
 
 describe("messaging", () => {
@@ -310,7 +574,7 @@ describe("messaging", () => {
 
   it("keeps a legacy team/agent collision usable and diagnoses its routing ambiguity", () => {
     const store = openStore();
-    announce(store, "alice", "bob", "carol");
+    announce(store, "alice", "bob", "carol", "dave");
     const alice = agent("alice");
     store.close();
     const legacy = new Database(databasePath);
@@ -324,7 +588,11 @@ describe("messaging", () => {
 
     const migrated = openStore();
     expect(() => migrated.announce(agent("bob"))).not.toThrow();
-    expect(migrated.send(alice, "bob", "legacy team-first routing").recipients).toEqual(["carol"]);
+    expect(migrated.createTeam(alice, "bob", ["alice", "dave"])).toEqual({
+      teamId: "bob",
+      members: ["alice", "dave"],
+    });
+    expect(migrated.send(alice, "bob", "legacy team-first routing").recipients).toEqual(["dave"]);
 
     const diagnostic = inspectDatabase(databasePath, alice.project, "doctor");
     expect(diagnostic).toMatchObject({
@@ -335,6 +603,20 @@ describe("messaging", () => {
         detail: expect.stringContaining("bob"),
       })]),
     });
+  });
+
+  it("rejects a new agent label already reserved by a team", () => {
+    const store = openStore();
+    announce(store, "alice", "carol");
+    const alice = agent("alice");
+    store.createTeam(alice, "future-agent", ["carol"]);
+
+    expect(() => store.announce(agent("future-agent"))).toThrowError(
+      /agent label future-agent collides with an existing team id/,
+    );
+    expect(store.agents(alice.project).map((entry) => entry.agentId)).not.toContain("future-agent");
+    expect(store.send(alice, "future-agent", "team remains unambiguous").recipients)
+      .toEqual(["carol"]);
   });
 
   it("rejects an unknown recipient and names the known agents", () => {
@@ -536,6 +818,23 @@ describe("tasks", () => {
     expect(store.activity(alice.project).filter((entry) => entry.detail.includes("claimed by")))
       .toHaveLength(1);
   });
+
+  it("reserves claimed state for the atomic ownership operation", () => {
+    const store = openStore();
+    const alice = agent("alice");
+    store.announce(alice);
+    store.createTask(alice, "claim through ownership", { taskId: "reserved-claimed" });
+
+    expect(() => store.updateTask(alice, "reserved-claimed", "claimed")).toThrowError(
+      /state claimed is reserved for atomic task claim/,
+    );
+    expect(store.tasks(alice.project)).toMatchObject([{
+      taskId: "reserved-claimed",
+      state: "open",
+      owner: null,
+    }]);
+    expect(store.claimTask(alice, "reserved-claimed")).toMatchObject({ owner: "alice" });
+  });
 });
 
 describe("activity", () => {
@@ -576,6 +875,84 @@ describe("activity", () => {
 });
 
 describe("multi-process WAL concurrency", () => {
+  it("opens and migrates absent databases across five 16-process cold starts", async () => {
+    const workerPath = fileURLToPath(new URL("./cold-start-worker.ts", import.meta.url));
+    const tsxLoader = createRequire(import.meta.url).resolve("tsx");
+    for (let round = 0; round < 5; round += 1) {
+      const coldDatabasePath = join(temporaryDirectory, `cold-start-${round}.sqlite3`);
+      const startAt = Date.now() + 1_000;
+      const results = await Promise.all(Array.from({ length: 16 }, (_, index) =>
+        new Promise<{ code: number | null; stdout: string; stderr: string }>((done) => {
+          const child = spawn(process.execPath, [
+            "--import", tsxLoader, workerPath, coldDatabasePath, repositoryRoot,
+            String(index), String(startAt),
+          ], {
+            cwd: repositoryRoot,
+            env: { ...process.env, NODE_NO_WARNINGS: "1" },
+            stdio: ["ignore", "pipe", "pipe"],
+          });
+          let stdout = "";
+          let stderr = "";
+          child.stdout.on("data", (chunk: Buffer | string) => { stdout += chunk.toString(); });
+          child.stderr.on("data", (chunk: Buffer | string) => { stderr += chunk.toString(); });
+          child.once("close", (code) => done({ code, stdout, stderr }));
+        }),
+      ));
+      const outcomes = results.map((result) => JSON.parse(result.stdout.trim()) as {
+        index: number;
+        ok: boolean;
+        error?: string;
+      });
+      expect(results.every((result) => result.code === 0), results.map((r) => r.stderr).join("\n"))
+        .toBe(true);
+      expect(outcomes.filter((outcome) => !outcome.ok), JSON.stringify({ round, outcomes }))
+        .toEqual([]);
+
+      const verifier = new Store(coldDatabasePath);
+      expect(verifier.agents(agent("alice").project)).toHaveLength(16);
+      verifier.close();
+    }
+  }, 60_000);
+
+  it("lets exactly one simultaneous agent or team reserve a recipient label", async () => {
+    const bootstrap = openStore();
+    bootstrap.announce(identify({
+      AGENT_FABRIC_SEAT: "codex",
+      AGENT_FABRIC_LABEL: "namespace-creator",
+    }, repositoryRoot));
+    bootstrap.close();
+
+    const workerPath = fileURLToPath(new URL("./namespace-worker.ts", import.meta.url));
+    const tsxLoader = createRequire(import.meta.url).resolve("tsx");
+    const startAt = Date.now() + 1_000;
+    const results = await Promise.all(["team", "agent"].map((role) =>
+      new Promise<{ code: number | null; stdout: string; stderr: string }>((done) => {
+        const child = spawn(process.execPath, [
+          "--import", tsxLoader, workerPath, databasePath, repositoryRoot,
+          role, "contested-recipient", String(startAt),
+        ], {
+          cwd: repositoryRoot,
+          env: { ...process.env, NODE_NO_WARNINGS: "1" },
+          stdio: ["ignore", "pipe", "pipe"],
+        });
+        let stdout = "";
+        let stderr = "";
+        child.stdout.on("data", (chunk: Buffer | string) => { stdout += chunk.toString(); });
+        child.stderr.on("data", (chunk: Buffer | string) => { stderr += chunk.toString(); });
+        child.once("close", (code) => done({ code, stdout, stderr }));
+      }),
+    ));
+    expect(results.every((result) => result.code === 0), results.map((r) => r.stderr).join("\n"))
+      .toBe(true);
+    const outcomes = results.map((result) => JSON.parse(result.stdout.trim()) as {
+      role: string;
+      won: boolean;
+      error?: string;
+    });
+    expect(outcomes.filter((outcome) => outcome.won)).toHaveLength(1);
+    expect(outcomes.filter((outcome) => !outcome.won)[0]?.error).toMatch(/collides/);
+  }, 15_000);
+
   it("starts claim expiry after acquiring the write lock", async () => {
     const bootstrap = openStore();
     const sender = agent("sender");

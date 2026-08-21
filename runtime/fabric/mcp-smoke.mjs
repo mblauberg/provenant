@@ -23,6 +23,7 @@ const spawnAgent = async (seat, clientLabel) => {
     env: {
       HOME: process.env.HOME,
       PATH: process.env.AGENT_FABRIC_MCP_PATH ?? "/usr/bin:/bin",
+      FABRIC_NODE: process.env.FABRIC_NODE ?? process.execPath,
       AGENT_FABRIC_SEAT: seat,
       AGENT_FABRIC_LABEL: clientLabel,
       AGENT_FABRIC_CLIENT_LABEL: clientLabel,
