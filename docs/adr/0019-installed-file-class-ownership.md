@@ -136,29 +136,17 @@ seeder reports `existing` for a path an attacker created in that window. The
 rename cannot be redirected, so the outcome is a skipped seed, not a misdirected
 write.
 
-**On reconcile's two checks and rename rollback.** A `reconcile` first checks
-the plan against the manifest. If accepted, it applies declared renames to the
-target tree and manifest, recomputes the plan against the new manifest, and
-checks again. The first check prevents a rename that the pre-rename plan says
-conflicts. The second check catches a conflict that the rename itself created:
-an item can shift from "missing" or "stale" to "conflicting" or
-"custom-conflicting" because the renames changed what the installer believes
-the tree contains.
+**Current reconcile boundary.** Rename reconciliation was retired with the
+rename registry. `reconcile` now repairs current managed names, removes safe
+managed leftovers, and refuses conflicts or unmanaged targets. The schema-v1
+manifest retains an opaque `history` list for compatibility with existing
+installations; current code preserves it but never appends to or interprets it.
+Repository history, not that field, is the record of earlier names.
 
-If the second check detects a conflict, the installer rolls back: it unlinks
-the new symlinks it created, restores the old symlinks it removed, and removes
-the manifest entries for the new names and restores the entries for the old
-names. The tree is then exactly as it was before the `reconcile` ran. Re-running
-the same command will check the first plan against the original tree. The
-conflict will be caught by the FIRST check on retry, with no partial tree or
-skip-on-retry logic needed.
-
-This does not make reconcile atomic. The residual window after the second check
-passes but before the manifest is written is accepted: the installer has no
-multi-path transaction, and closing that interval would need a locking or
-snapshot design outside issue #561. The checks turn a conflict observed at
-either plan boundary into a loud refusal, but they do not establish a privilege
-boundary or a concurrent-writer guarantee.
+Reconcile is not a multi-path transaction or a concurrent-writer guarantee.
+It stages each replacement beside its destination and writes the manifest only
+after the managed links are reconciled. A later run repairs an interrupted
+installation from the current ownership record.
 
 **Note on the two rows that both involve the installer writing a file.** They
 are not the same mechanism. The desired state is *created* by the installer as

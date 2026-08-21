@@ -37,8 +37,11 @@ def test_managed_reconciliation_stays_documented_for_maintainers():
     # The operator detail the README used to carry. A maintainer reads this with the
     # checkout as cwd, so a relative script path is the correct form here.
     source = read("MAINTAINING.md")
-    assert "current ownership" in source
-    assert "supersession" not in source
+    assert (
+        "Record current skill ownership in the managed installation manifest."
+        in source
+    )
+    assert "Record skill ownership and supersession" not in source
     # Not anchored to a closing backtick. `plan` requires `--target`, so pinning
     # the bare command forbade documenting the flag that makes it runnable, and
     # the invariant here is that the command stays documented, not that it stays
@@ -48,6 +51,12 @@ def test_managed_reconciliation_stays_documented_for_maintainers():
     assert "reconcile" in source
     assert "current ownership record" in source
     assert "Never claim or overwrite an unmanaged target." in source
+
+
+def test_installer_adr_does_not_advertise_retired_rename_reconciliation():
+    source = read("docs/adr/0019-installed-file-class-ownership.md")
+    assert "Rename reconciliation was retired" in source
+    assert "applies declared renames" not in source
 
 
 def test_adr_index_marks_daemon_era_task_completion_decision_superseded():

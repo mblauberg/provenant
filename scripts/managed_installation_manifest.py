@@ -92,6 +92,8 @@ def load_manifest(target: Path) -> dict[str, Any]:
     custom = data.setdefault("custom", {})
     if not isinstance(custom, dict):
         raise InstallError("installation manifest custom links are invalid")
+    # `history` is an opaque schema-v1 compatibility field. The retired rename
+    # reconciler used it; current code preserves but never interprets it.
     required_entry = {"owner", "source_target", "source_sha256", "installed_at", "history"}
     for name, item in data["managed"].items():
         if not isinstance(name, str) or not is_managed_name(name):
@@ -163,6 +165,7 @@ def entry(
     source: Path,
     history: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
+    # Preserve existing schema-v1 data without claiming supersession semantics.
     return {
         "owner": "agent-harness",
         "source_target": str(source),
