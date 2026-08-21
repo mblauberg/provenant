@@ -26,17 +26,9 @@ def test_documented_fresh_checkout_sequence_produces_runnable_fabric(tmp_path):
     shutil.copytree(ROOT / "scripts" / "lib", scripts / "lib")
     shutil.copytree(ROOT / "runtime" / "fabric", checkout / "runtime" / "fabric")
 
-    common_dir = Path(
-        subprocess.run(
-            ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
-            cwd=ROOT,
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
-    )
-    installed_modules = common_dir.parent / "node_modules"
+    installed_modules = ROOT / "node_modules"
     assert (installed_modules / "tsx" / "dist" / "loader.mjs").is_file()
+    assert (installed_modules / "better-sqlite3").is_dir()
     (checkout / "node_modules").symlink_to(installed_modules, target_is_directory=True)
 
     env = {
