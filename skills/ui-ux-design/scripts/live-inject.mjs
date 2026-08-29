@@ -369,8 +369,10 @@ function insertTag(content, config, port, token) {
   if (idx === -1) return content;
   const after = idx + config.insertAfter.length;
   // Preserve a single trailing newline if the anchor didn't end with one
-  const prefix = content[after] === '\n' ? content.slice(0, after + 1) : content.slice(0, after) + '\n';
-  return prefix + block + content.slice(prefix.length);
+  const hasNewline = content[after] === '\n';
+  const prefix = hasNewline ? content.slice(0, after + 1) : content.slice(0, after) + '\n';
+  const suffixStart = hasNewline ? after + 1 : after;
+  return prefix + block + content.slice(suffixStart);
 }
 
 /**

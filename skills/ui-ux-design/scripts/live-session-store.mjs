@@ -1,14 +1,18 @@
 // Modified from Impeccable for this harness; see the repository THIRD_PARTY_NOTICES.md.
 import fs from 'node:fs';
 import path from 'node:path';
-import { getLegacyLiveSessionsDir, getLiveSessionsDir } from './impeccable-paths.mjs';
+import {
+  ensureCanonicalLiveStateRoot,
+  getLegacyLiveSessionsDir,
+  getLiveSessionsDir,
+} from './impeccable-paths.mjs';
 
 const COMPLETED_PHASES = new Set(['completed', 'discarded']);
 
 export function createLiveSessionStore({ cwd = process.cwd(), sessionId } = {}) {
-  const rootDir = getLiveSessionsDir(cwd);
+  ensureCanonicalLiveStateRoot(cwd);
+  const rootDir = ensureCanonicalSessionRoot(cwd);
   const legacyRootDir = getLegacyLiveSessionsDir(cwd);
-  fs.mkdirSync(rootDir, { recursive: true });
   const snapshotCache = new Map();
 
   function loadCachedOrRebuild(id) {
@@ -78,6 +82,27 @@ export function createLiveSessionStore({ cwd = process.cwd(), sessionId } = {}) 
         .filter(Boolean);
     },
   };
+}
+
+function ensureCanonicalSessionRoot(cwd) {
+  const rootDir = getLiveSessionsDir(cwd);
+  try {
+    if (!fs.existsSync(rootDir)) fs.mkdirSync(rootDir);
+    const metadata = fs.lstatSync(rootDir);
+    if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
+      throw new Error('session state path is not a real directory');
+    }
+    if (fs.realpathSync.native(rootDir) !== path.resolve(rootDir)) {
+      throw new Error('session state path is non-canonical');
+    }
+  } catch (cause) {
+    const error = new Error('live_state_root_invalid: session state root must be canonical', {
+      cause,
+    });
+    error.code = 'live_state_root_invalid';
+    throw error;
+  }
+  return rootDir;
 }
 
 function normalizeEvent(event, fallbackId) {

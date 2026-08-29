@@ -36,15 +36,29 @@ function skipHtmlComment(source, start) {
   return end + 3;
 }
 
+const HTML_RAW_TEXT_TAGS = new Set(['script', 'style', 'textarea', 'title']);
+
+function findHtmlRawTextClose(source, tagName, start) {
+  const lower = source.toLowerCase();
+  const needle = `</${tagName.toLowerCase()}`;
+  let index = lower.indexOf(needle, start);
+  while (index !== -1) {
+    const boundary = lower[index + needle.length];
+    if (boundary === '>' || /\s/.test(boundary || '')) return index;
+    index = lower.indexOf(needle, index + needle.length);
+  }
+  throw unbalanced(`Missing closing HTML raw-text tag for ${tagName}`);
+}
+
 function looksLikeTypeScriptGenericCall(source, tag) {
-  let before = tag.start - 1;
-  while (before >= 0 && /\s/.test(source[before])) before -= 1;
-  if (before < 0 || !/[A-Za-z0-9_$.)\]]/.test(source[before])) return false;
+  const immediatelyBefore = source[tag.start - 1];
+  if (immediatelyBefore && /[A-Za-z0-9_$.)\]]/.test(immediatelyBefore)) return true;
 
   let after = tag.end;
   while (source[after] === '>') after += 1;
   while (after < source.length && /\s/.test(source[after])) after += 1;
-  return source[after] === '(';
+  return source[after] === '('
+    && (/,\s*>$/.test(tag.raw) || /\bextends\b/.test(tag.raw));
 }
 
 function scanTag(source, start) {
@@ -119,8 +133,13 @@ function scanTag(source, start) {
 export function scanJsxTags(source, { htmlMode = false, stopAfterTag, stopWhen } = {}) {
   const tags = [];
   let expressionDepth = 0;
+  let htmlRawTextTag = null;
   let index = 0;
   while (index < source.length) {
+    if (htmlMode && htmlRawTextTag) {
+      index = findHtmlRawTextClose(source, htmlRawTextTag, index);
+      htmlRawTextTag = null;
+    }
     const char = source[index];
     if (htmlMode && source.startsWith('<!--', index)) {
       index = skipHtmlComment(source, index);
@@ -155,6 +174,12 @@ export function scanJsxTags(source, { htmlMode = false, stopAfterTag, stopWhen }
       if (tag) {
         tags.push(tag);
         if (stopAfterTag?.(tag, tags, { expressionDepth })) return tags;
+        if (htmlMode
+          && !tag.closing
+          && !tag.selfClosing
+          && HTML_RAW_TEXT_TAGS.has(tag.name.toLowerCase())) {
+          htmlRawTextTag = tag.name;
+        }
         index = tag.end;
         continue;
       }

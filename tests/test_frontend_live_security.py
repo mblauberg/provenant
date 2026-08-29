@@ -46,6 +46,24 @@ def _run_inject(project: Path, *args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
+def _run_completion_type_probe(
+    project: Path, event_type: str, accept_result: dict[str, object]
+) -> subprocess.CompletedProcess[str]:
+    module_url = (SCRIPTS / "live-completion.mjs").as_uri()
+    script = (
+        f"import {{ completionTypeForAcceptResult }} from {json.dumps(module_url)};"
+        f"process.stdout.write(completionTypeForAcceptResult({json.dumps(event_type)},"
+        f"{json.dumps(accept_result)}));"
+    )
+    return subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        cwd=project,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+
 def _run_wrap(project: Path, *args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [
@@ -353,6 +371,40 @@ def test_live_wrap_does_not_execute_shell_syntax_from_project_filenames(
     assert payload["endLine"] >= payload["startLine"]
     assert "impeccable-variants-start security-test" in page.read_text()
     assert not marker.exists()
+
+
+def test_live_inject_insert_after_preserves_the_first_post_anchor_byte(
+    tmp_path: Path,
+) -> None:
+    page = tmp_path / "index.html"
+    page.write_text("<html><head><meta charset=\"utf-8\"></head></html>\n")
+    config_dir = tmp_path / ".impeccable" / "live"
+    config_dir.mkdir(parents=True)
+    (config_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "files": [page.name],
+                "insertAfter": "<head>",
+                "commentSyntax": "html",
+            }
+        )
+    )
+
+    result = _run_inject(tmp_path, "--port", "43117", "--token", TOKEN)
+
+    assert result.returncode == 0, result.stderr
+    assert '<meta charset="utf-8">' in page.read_text()
+
+
+def test_failed_accept_result_remains_recoverable_as_an_error(tmp_path: Path) -> None:
+    result = _run_completion_type_probe(
+        tmp_path,
+        "accept",
+        {"handled": False, "error": "session_structure_invalid"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "error"
 
 
 def test_live_mutation_help_discloses_project_relative_existing_file_boundary(
@@ -758,6 +810,16 @@ def test_live_wrap_scans_nested_multiline_jsx_without_treating_strings_as_tags(
             0,
             0,
         ),
+        (
+            ['<Card className="target">{items.map(<T,>(value: T) => value)}</Card>'],
+            0,
+            0,
+        ),
+        (
+            ['<Card className="target">{value as Array<string>}</Card>'],
+            0,
+            0,
+        ),
     ],
 )
 def test_live_wrap_stops_scanning_after_the_selected_jsx_subtree(
@@ -896,6 +958,10 @@ def test_live_wrap_requires_a_same_line_outer_jsx_expression_to_close(
         '<ul class="target"><li>one<li>two</ul>',
         '<img class="target" src="hero.png">',
         '<section class="target"><!-- <section> placeholder --><p>ok</p></section>',
+        (
+            '<section class="target">\n<script>\nconst x = "</section>";\n'
+            '</script>\n<p>ok</p>\n</section>'
+        ),
     ],
 )
 def test_live_wrap_accepts_valid_html_void_and_optional_end_tags(
@@ -910,20 +976,57 @@ def test_live_wrap_accepts_valid_html_void_and_optional_end_tags(
     assert "data-impeccable-variants" in page.read_text()
 
 
-def test_live_wrap_uses_the_next_html_optional_tag_as_the_selected_boundary(
+def test_live_wrap_ignores_closing_tag_text_inside_html_raw_text_elements(
     tmp_path: Path,
 ) -> None:
-    page = tmp_path / "index.html"
-    page.write_text(
-        '<ul>\n  <li class="target">one\n  <li>two\n</ul>\n'
+    module_url = WRAP.as_uri()
+    lines = [
+        '<section class="target">',
+        '<script>',
+        'const x = "</section>";',
+        '</script>',
+        '<p>inside</p>',
+        '</section>',
+    ]
+    script = (
+        f"import {{ findClosingLine }} from {json.dumps(module_url)};"
+        f"const lines={json.dumps(lines)};"
+        "process.stdout.write(String(findClosingLine(lines,0,{isJsx:false})));"
     )
+
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        cwd=tmp_path,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "5"
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        '<ul>\n  <li class="target">one\n  <li>two\n</ul>\n',
+        (
+            '<ul>\n  <li class="target">outer\n    <ul>\n'
+            '      <li>inner\n    </ul>\n  </li>\n</ul>\n'
+        ),
+    ],
+)
+def test_live_wrap_fails_closed_for_selected_html_optional_end_tags(
+    tmp_path: Path, source: str
+) -> None:
+    page = tmp_path / "index.html"
+    page.write_text(source)
 
     wrapped = _run_wrap(tmp_path, "--file", page.name)
 
-    assert wrapped.returncode == 0, wrapped.stderr
-    result = page.read_text()
-    assert "data-impeccable-variants" in result
-    assert "  <li>two\n</ul>" in result
+    assert wrapped.returncode == 1
+    assert page.read_text() == source
+    assert "html_implicit_end_unsupported" in wrapped.stderr
 
 
 @pytest.mark.parametrize(
@@ -1009,13 +1112,14 @@ def test_live_discard_fails_closed_when_session_structure_is_not_bound(
     assert "ORIGINAL_SECRET" in page.read_text()
 
 
+@pytest.mark.parametrize("opening", ["const fixture = `", "const fixture = html`"])
 def test_live_discard_ignores_exact_session_scaffolds_inside_template_literals(
-    tmp_path: Path,
+    tmp_path: Path, opening: str
 ) -> None:
     page = tmp_path / "component.tsx"
     source = "\n".join(
         [
-            "const fixture = `",
+            opening,
             '<div data-impeccable-variants="security-test">',
             "  {/* impeccable-variants-start security-test */}",
             '  <div data-impeccable-variant="original">',
@@ -1034,6 +1138,24 @@ def test_live_discard_ignores_exact_session_scaffolds_inside_template_literals(
     assert completed.returncode == 0, completed.stderr
     assert json.loads(completed.stdout)["handled"] is False
     assert page.read_text() == source
+
+
+@pytest.mark.parametrize("prefix", ['const tick = "`";\n', '// ` in a comment\n'])
+def test_live_discard_finds_real_sessions_after_non_template_backticks(
+    tmp_path: Path, prefix: str
+) -> None:
+    page = tmp_path / "component.tsx"
+    page.write_text('<Card className="target">original</Card>\n')
+    wrapped = _run_wrap(tmp_path, "--file", page.name)
+    assert wrapped.returncode == 0, wrapped.stderr
+    page.write_text(prefix + page.read_text())
+
+    completed = _run_accept(tmp_path, "--discard")
+
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(completed.stdout)["handled"] is True
+    assert page.read_text().startswith(prefix)
+    assert '<Card className="target">original</Card>' in page.read_text()
 
 
 def test_live_accept_preserves_jsx_that_contains_tag_shaped_string_content(
@@ -1640,7 +1762,7 @@ def test_design_endpoints_allow_an_explicit_external_context_root(tmp_path: Path
         assert payload["sidecar"] == design_json
 
 
-@pytest.mark.parametrize("symlink_part", [".impeccable", "live"])
+@pytest.mark.parametrize("symlink_part", [".impeccable", "live", "sessions"])
 def test_live_server_rejects_a_preexisting_symlinked_state_root(
     tmp_path: Path, symlink_part: str
 ) -> None:
@@ -1650,10 +1772,14 @@ def test_live_server_rejects_a_preexisting_symlinked_state_root(
     outside.mkdir()
     if symlink_part == ".impeccable":
         (project / ".impeccable").symlink_to(outside, target_is_directory=True)
-    else:
+    elif symlink_part == "live":
         impeccable = project / ".impeccable"
         impeccable.mkdir()
         (impeccable / "live").symlink_to(outside, target_is_directory=True)
+    else:
+        live = project / ".impeccable" / "live"
+        live.mkdir(parents=True)
+        (live / "sessions").symlink_to(outside, target_is_directory=True)
 
     result = subprocess.run(
         ["node", str(SERVER), f"--port={_available_port()}"],
@@ -1667,6 +1793,8 @@ def test_live_server_rejects_a_preexisting_symlinked_state_root(
     assert result.returncode != 0
     assert "live_state_root_invalid" in result.stderr
     assert not (outside / "server.json").exists()
+    assert not list(outside.glob("*.jsonl"))
+    assert not list(outside.glob("*.snapshot.json"))
 
 
 def test_live_serves_the_checked_in_detector_and_screenshot_asset_contracts(
