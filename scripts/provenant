@@ -67,7 +67,7 @@ def resolve_product_root(instance_root: Path | None = None) -> Path:
 
 
 def usage() -> None:
-    print("usage: provenant <help|route|worktree|check|fabric|dispatch|batch> [arguments...]", file=sys.stderr)
+    print("usage: provenant <help|route|worktree|check|fabric|dispatch|batch|run> [arguments...]", file=sys.stderr)
 
 
 def help_text() -> None:
@@ -81,6 +81,7 @@ Thin front door; each command delegates to its existing owner:
   fabric ...     runtime/fabric/bin/fabric ...
   dispatch ...   skills/orchestrate/scripts/dispatch_run.py ...
   batch ...      skills/orchestrate/scripts/batch_run.py ...
+  run ...        skills/orchestrate/scripts/run_controls.py ...
 
 Fabric derives who you are from the working directory, so run it from the
 project you mean. `provenant fabric --help` lists its commands."""
@@ -137,6 +138,7 @@ def main(arguments: list[str]) -> int:
         "fabric": FABRIC_CLI,
         "dispatch": "skills/orchestrate/scripts/dispatch_run.py",
         "batch": "skills/orchestrate/scripts/batch_run.py",
+        "run": "skills/orchestrate/scripts/run_controls.py",
     }
     owner = owners.get(command)
     if owner is None:
