@@ -25,18 +25,21 @@ batch execution.
 | Concern | Current or planned owner | Boundary |
 |---|---|---|
 | Model and tier resolution | `scripts/model-route` | Resolves configured routes and records route identity; it does not launch providers. |
-| Assurance dispatch adapter | `skills/orchestrate/scripts/cf_dispatch.sh` | Current provider-invocation adapter for assurance and review paths; its distinct-family requirement is not ordinary execution policy. |
-| Ordinary dispatch and batch execution | Orchestration runner planned by [#518](https://github.com/mblauberg/provenant/issues/518) | Future single owner for attempt/batch lifecycle. It delegates provider invocation to `cf_dispatch.sh` with ordinary or assurance policy modes; it is not implemented by this doctrine change. |
+| Assurance dispatch adapter | `skills/orchestrate/scripts/cf_dispatch.sh` | Current provider-invocation adapter for assurance and review paths; its distinct-family requirement remains assurance policy. |
+| Ordinary dispatch interface and runner | Provider-agnostic orchestration runner planned by [#518](https://github.com/mblauberg/provenant/issues/518) | Owns the ordinary intent/policy interface and attempt lifecycle, and delegates provider invocation to `cf_dispatch.sh`. No ordinary mode exists yet. |
+| Fixed bounded batches | Batch layer planned by [#683](https://github.com/mblauberg/provenant/issues/683) | Builds on the #518 interface for fixed task sets, concurrency, partial results and retry coordination; it does not own provider invocation or workspace policy. |
 | Coordination | `runtime/fabric` | Mailbox, shared tasks and activity only; no provider launch, scheduler or lifecycle owner. |
 | Dispatch evidence | #518 attempt-record schema indexed by existing `MANIFEST.md` and bound into `RUN_RECEIPT.json`/`run_dir_finalize.py` | Records execution attempts, route lineage and observed completion; it is not delivery acceptance and must not create a parallel lifecycle ledger. |
 | Delivery evidence | `deliver` and canonical delivery `RUN.json` | Records artifact verification, review and acceptance; it may reference the orchestration receipt. |
 
-The planned #518 owner and its workspace capability gates are an implementation
-boundary, not a claim that ordinary dispatch or batch runtime already exists.
+The planned #518 runner and #683 batch layer are implementation boundaries, not
+a claim that ordinary dispatch or batch runtime already exists. The #518 runner
+adds the ordinary intent/policy mode; until it is implemented, the existing
+distinct-family behaviour in `cf_dispatch.sh` remains limited to assurance paths.
 Credential/auth-store exclusions, unrelated-path containment, explicit denials,
 write/resource limits and external-action gates remain implementation acceptance
-gates for [#518](https://github.com/mblauberg/provenant/issues/518) and the related
-workspace-boundary work in [#683](https://github.com/mblauberg/provenant/issues/683).
+gates for the [#518](https://github.com/mblauberg/provenant/issues/518) runner and
+the [#683](https://github.com/mblauberg/provenant/issues/683) batch layer.
 
 ### Configured-workspace access
 
@@ -72,10 +75,10 @@ is the stable operator front door and may expose bounded `dispatch`, `batch` and
 `run` inspection commands, but it delegates to that owner. It must not create a
 second adapter parser, scheduler, lifecycle database or delivery receipt.
 
-Batch execution is a first-class bounded capability: fixed task sets,
-concurrency limits, per-task timeout, partial results and explicit retry
-attempts. Adaptive waves and reducers may be layered on the same owner; they do
-not create a new runtime authority.
+Fixed bounded batches are a first-class planned capability under #683: fixed
+task sets, concurrency limits, per-task timeout, partial results and explicit
+retry attempts. Adaptive waves and reducers may be layered on that interface;
+they do not create a new runtime authority.
 
 ### Compact dispatch manifests
 
@@ -138,7 +141,8 @@ boundary and must preserve its ownership and evidence rules.
 3. One dispatch owner produces append-only compact manifests with observed
    process completion and retry lineage.
 4. Batch status preserves partial results and individual failure states.
-5. Delivery `RUN.json` remains distinct and can reference a dispatch manifest.
+5. Delivery `RUN.json` remains distinct and may reference the orchestration
+   receipt that indexes attempt records.
 6. Fabric tests continue to demonstrate coordination-only behaviour.
 7. `provenant` exposes only delegated bounded commands; provider mechanics are
    not duplicated in the front door.

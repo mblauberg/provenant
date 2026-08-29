@@ -27,7 +27,7 @@ historical evidence; the current Fabric owner is
 | [0010](0010-lifecycle-receipt-authority-distinct-trust-boundary.md) | The lifecycle receipt authority is a trust boundary distinct from provider authority compilation | Accepted |
 | [0011](0011-github-owns-work-state.md) | GitHub owns current work state | Accepted |
 | [0012](0012-defer-bun-node-pinned-runtime.md) | Defer Bun; Node stays the pinned runtime family | Accepted |
-| [0013](0013-thin-provenant-cli.md) | Thin `provenant` CLI for command discovery | Accepted; `doctor` passthrough added 2026-07-27; amended by ADR 0020 |
+| [0013](0013-thin-provenant-cli.md) | Thin `provenant` CLI for command discovery | Accepted; `doctor` passthrough added 2026-07-27; amended by ADR 0020; amended by ADR 0021 |
 | [0014](0014-comparative-skill-evals-on-suspicion.md) | Comparative skill evals run on suspicion, not by default | Accepted |
 | [0015](0015-bootstrap-paired-task-completion-evidence-bound-reply.md) | Bootstrap paired-task completion via an evidence-bound reply, not authority widening | Superseded by ADR 0020 |
 | [0016](0016-gate-b-restate-permanent-by-design.md) | Keep GATE-B' skipped by design after the RESTATE decision | Accepted |

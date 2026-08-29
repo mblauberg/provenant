@@ -74,6 +74,8 @@ def test_dispatch_owner_boundaries_distinguish_current_assurance_from_future_exe
     orchestrate = (ROOT / "skills/orchestrate/SKILL.md").read_text()
     thin_cli = (ROOT / "docs/adr/0013-thin-provenant-cli.md").read_text()
     adr = (ROOT / "docs/adr/0021-configured-workspace-dispatch-boundaries.md").read_text()
+    index = (ROOT / "docs/adr/README.md").read_text()
+    harness = (ROOT / "HARNESS.md").read_text()
 
     orchestrate_compact = " ".join(orchestrate.lower().split())
     adr_compact = " ".join(adr.split())
@@ -87,13 +89,21 @@ def test_dispatch_owner_boundaries_distinguish_current_assurance_from_future_exe
     assert "#683" in adr
     assert "does not implement" in adr
     assert "delegates provider invocation to `cf_dispatch.sh`" in adr
-    assert "ordinary or assurance policy modes" in adr
+    assert "ordinary intent/policy interface" in adr
+    assert "no ordinary mode exists yet" in adr_compact.lower()
     assert "MANIFEST.md" in adr
     assert "RUN_RECEIPT.json" in adr
     assert "run_dir_finalize.py" in adr
     assert "parallel lifecycle ledger" in adr
     assert "exact attempt-record filename is a #518 schema decision" in adr
     assert "delivery `RUN.json` may reference the orchestration receipt" in adr_compact
+    assert "amended by ADR 0021" in index
+    assert "provider-agnostic orchestration runner" in adr.lower()
+    assert "fixed bounded batch" in adr.lower()
+    assert "builds on the #518" in adr.lower()
+    assert "remains limited to assurance paths" in adr_compact.lower()
+    assert "#683" in adr and "workspace-boundary work in [#683]" not in adr
+    assert "secrets" in harness.lower()
 
 
 def test_thin_cli_decision_is_amended_by_dispatch_boundary_decision():

@@ -23,7 +23,7 @@ separation is an assurance property, not a restriction on ordinary execution.
 
 An authorised chair over a configured workspace may send ordinary workspace content to any
 configured provider family. This default excludes credential and authentication stores,
-unrelated paths and explicitly denied content. It remains bounded by path and write scopes,
+secrets, unrelated paths and explicitly denied content. It remains bounded by path and write scopes,
 resource limits, platform rules and external-action gates. A separate assurance claim may
 require family separation and stronger evidence; ordinary provider execution does not require it.
 
