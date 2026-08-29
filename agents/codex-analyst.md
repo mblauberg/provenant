@@ -97,15 +97,34 @@ output by hand. A blocking call cannot fail that way.
 previous run sat at 14 minutes elapsed against 0.16 seconds of CPU when stdout was piped, so
 after completion read the bounded report rather than the transcript.
 
-**3. If the call times out**, and only then, the run is still alive and detached from you. Find
-it with `ps -eo pid,etime,time,command | grep "[c]odex exec"`, then wait on it with an ordinary
-**foreground** Bash call at `timeout: 600000`:
+**3. If detachment is unavoidable**, capture and wait on the worker PID directly. Keep a
+durable regular completion file for a caller that must re-enter after its shell or tool window
+is torn down. Write the marker atomically after the command exits:
 
 ```
-while kill -0 <PID> 2>/dev/null; do sleep 20; done; echo CODEX-EXITED
+done_path=${TMPDIR:-/tmp}/codex-<slug>-done
+(
+  <the foreground codex exec command above>
+  status=$?
+  printf 'EXIT=%s\n' "$status" > "$done_path.tmp"
+  mv -f "$done_path.tmp" "$done_path"
+  exit "$status"
+) &
+PID=$!
+wait "$PID"
+STATUS=$?
 ```
 
-If that times out too, reissue it unchanged, as many times as it takes.
+The direct `wait` is the normal completion path. If the original shell is gone, use a
+foreground wait for the regular completion file, then verify the owned PID has exited before
+accepting the report:
+
+```
+while [ ! -s "$done_path" ]; do sleep 1; done
+STATUS="$(sed -n 's/^EXIT=//p' "$done_path")"
+```
+
+Do not replace the direct PID wait with a watcher, notification or side-channel rendezvous.
 
 **Never use `run_in_background: true` for this wait.** You are a sub-agent: your turn ending is
 your result being returned, and no notification reopens you afterwards. A background watcher

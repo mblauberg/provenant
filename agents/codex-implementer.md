@@ -94,53 +94,56 @@ thousands of tokens. The report holds only the outcome. Reading the report inste
 transcript is what stops the caller paying twice for the same thinking, once through Codex and
 again through you.
 
-**2. Launch in the background, capture the PID.**
+**2. Run Codex in the foreground and let the call block.**
 
 ```
-nohup codex exec -s workspace-write -C <ABSOLUTE_WORKTREE> -m gpt-5.6-luna \
+codex exec -s workspace-write -C <ABSOLUTE_WORKTREE> -m gpt-5.6-luna \
   -c service_tier=default -c model_reasoning_effort=xhigh - \
   < ${TMPDIR:-/tmp}/codex-<slug>-brief.txt \
-  > ${TMPDIR:-/tmp}/codex-<slug>-transcript.txt 2>&1 &
-echo $!
+  > ${TMPDIR:-/tmp}/codex-<slug>-transcript.txt 2>&1
+STATUS=$?
 ```
 
-Run as a normal foreground Bash call; it returns the PID immediately.
+This is the normal completion path when the run fits inside one 600000 ms call:
+the shell waits for Codex directly and retains its exit status. **NEVER pipe
+`codex exec` stdout anywhere.** Not `tail`, not `head`, not `tee`. Redirect to
+the transcript file, and after completion use the bounded report and git state
+rather than reading that transcript.
 
-**NEVER pipe `codex exec` stdout anywhere.** Not `tail`, not `head`, not `tee`. It hangs
-indefinitely: a previous run sat at 14 minutes elapsed against 0.16 seconds of CPU. Redirect to
-the transcript file, and after completion use the bounded report and git state rather than
-reading that transcript.
+Do not use `--dangerously-bypass-approvals-and-sandbox`. `-s workspace-write` is
+what this agent uses; if a task appears to need more, that is a signal the task
+is wrong, not the sandbox.
 
-Do not use `--dangerously-bypass-approvals-and-sandbox`. `-s workspace-write` is what this
-agent uses; if a task appears to need more, that is a signal the task is wrong, not the
-sandbox.
-
-Prefer running Codex in the **foreground** when the task plausibly fits inside one 600000 ms
-call: no `nohup`, no `&`, no PID, nothing to wait on. The shell blocks on process exit and you
-have the result when it returns. Detach only when the run may exceed that.
-
-When you do detach, create a FIFO alongside it so the wait is event-driven rather than polled:
+**3. If detachment is unavoidable, capture and wait on the PID directly.** Keep
+a durable regular completion file for a caller that must re-enter after its
+shell or tool window is torn down. Write it atomically after Codex exits:
 
 ```
-mkfifo ${TMPDIR:-/tmp}/codex-<slug>.fifo
-nohup bash -c 'codex exec -s workspace-write -C <ABSOLUTE_WORKTREE> -m gpt-5.6-luna \
-  -c service_tier=default -c model_reasoning_effort=xhigh - \
-  < ${TMPDIR:-/tmp}/codex-<slug>-brief.txt \
-  > ${TMPDIR:-/tmp}/codex-<slug>-transcript.txt 2>&1; echo EXIT=$? > ${TMPDIR:-/tmp}/codex-<slug>.fifo' \
-  >/dev/null 2>&1 &
-echo $!
+done_path=${TMPDIR:-/tmp}/codex-<slug>-done
+transcript_path=${TMPDIR:-/tmp}/codex-<slug>-transcript.txt
+(
+  codex exec -s workspace-write -C <ABSOLUTE_WORKTREE> -m gpt-5.6-luna \
+    -c service_tier=default -c model_reasoning_effort=xhigh - \
+    < ${TMPDIR:-/tmp}/codex-<slug>-brief.txt \
+    > "$transcript_path" 2>&1
+  status=$?
+  printf 'EXIT=%s\n' "$status" > "$done_path.tmp"
+  mv -f "$done_path.tmp" "$done_path"
+  exit "$status"
+) &
+PID=$!
+wait "$PID"
+STATUS=$?
 ```
 
-**3. Wait in the foreground.** A second ordinary foreground Bash call at `timeout: 600000`:
+If the original shell is gone, use a foreground wait for the regular
+completion file, then verify the owned PID has exited before inspection or
+reuse. Do not use a watcher or a side-channel rendezvous:
 
 ```
-cat ${TMPDIR:-/tmp}/codex-<slug>.fifo
+while [ ! -s "$done_path" ]; do sleep 1; done
+STATUS="$(sed -n 's/^EXIT=//p' "$done_path")"
 ```
-
-That blocks with zero polling and returns Codex's exit code. If the tool timeout fires first,
-reissue it unchanged; the FIFO is still unwritten and still there. Where a FIFO is awkward, the
-fallback is a foreground condition loop, `while kill -0 <PID> 2>/dev/null; do sleep 20; done`,
-reissued the same way.
 
 **Never use `run_in_background: true` for this wait, and never end your turn while Codex is
 alive.** Here is the mechanism, because getting it wrong looks identical to getting it right

@@ -80,32 +80,44 @@ codex exec -s <sandbox> -C <ABSOLUTE_DIR> -m <model> - < brief.txt > out.txt 2>&
 Give it the largest timeout the tool accepts. This is the whole procedure when
 the run fits inside one timeout window.
 
-**Second choice, for runs that can exceed that window: detach, then block on a
-FIFO.** Still event-driven and still zero-poll, and it carries the exit status:
+**Second choice, only when detachment is unavoidable: background the worker in the
+same shell, capture its PID, and wait on that PID directly.** Keep the transcript
+and a durable regular completion file. Write the marker through a temporary file
+and rename it so a re-entered caller never sees a partial marker:
 
 ```bash
-mkfifo done.fifo
-nohup bash -c '<worker command> > out.txt 2>&1; echo EXIT=$? > done.fifo' >/dev/null 2>&1 &
+done_path=/tmp/provenant-worker.done
+transcript_path=/tmp/provenant-worker.out
+(
+  <worker command> >"$transcript_path" 2>&1
+  status=$?
+  printf 'EXIT=%s\n' "$status" >"$done_path.tmp"
+  mv -f "$done_path.tmp" "$done_path"
+  exit "$status"
+) &
+PID=$!
+wait "$PID"
+STATUS=$?
 ```
 
-then, as a separate foreground call, `cat done.fifo`. It blocks on the write and
-returns the worker's exit code. If the tool timeout fires first, reissue `cat`
-unchanged; the FIFO is still there and still unwritten.
-
-**Last resort**, where a FIFO is awkward, a foreground condition loop:
+The direct `wait` is the normal completion path and preserves the worker's exit
+status. If the shell or tool window is torn down and the worker must outlive it,
+re-enter with a foreground wait for the regular completion file, then verify the
+owned PID has exited before terminal reporting, inspection or reuse:
 
 ```bash
-while kill -0 <PID> 2>/dev/null; do sleep 20; done; echo WORKER-EXITED
+while [ ! -s "$done_path" ]; do sleep 1; done
+STATUS="$(sed -n 's/^EXIT=//p' "$done_path")"
 ```
 
-Harnesses that block a bare foreground `sleep` still permit this form, because
-the guard targets `sleep N; <command>` poll chains rather than a loop blocking
-on a condition. It polls, so prefer either option above it.
+This fallback polls only a durable marker and is used only after detachment; do
+not substitute short sleeps, liveness probes or a watcher for the direct PID wait.
 
-Whichever form is used, reissue on timeout and do not substitute short sleeps,
-liveness probes or status checks between reissues: each is a turn the worker
-could have finished in, and the temptation to then stop and await a notification
-is exactly the failure above.
+If a foreground wait times out, reissue that same wait while its PID or durable
+completion marker remains available. Do not insert liveness probes or status
+checks between reissues: each is a turn the worker could have finished in, and
+the temptation to then stop and await a notification is exactly the failure
+above.
 
 ## A dispatcher must actually dispatch
 
