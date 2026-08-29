@@ -129,10 +129,10 @@ def reconcile_manifest(run_dir: Path) -> None:
     for attempt_path in sorted((run_dir / "dispatch" / "tasks").glob("*/attempt-*/attempt.json")):
         try:
             record = json.loads(attempt_path.read_text(encoding="utf-8"))
-            if not isinstance(record, dict) or record.get("record_type") != "dispatch-attempt":
-                continue
-        except (OSError, TypeError, ValueError):
-            continue
+        except (OSError, TypeError, ValueError) as exc:
+            raise AttemptEvidenceError(f"attempt record is unreadable: {attempt_path}") from exc
+        if not isinstance(record, dict) or record.get("record_type") != "dispatch-attempt":
+            raise AttemptEvidenceError(f"attempt record has an invalid type: {attempt_path}")
         try:
             sidecar = attempt_path.with_name("attempt.sha256")
             if not sidecar.is_file():
@@ -158,8 +158,8 @@ def reconcile_manifest(run_dir: Path) -> None:
             existing = manifest.read_text(encoding="utf-8", errors="replace")
         except AttemptEvidenceError:
             raise
-        except (KeyError, TypeError, ValueError):
-            continue
+        except (KeyError, TypeError, ValueError) as exc:
+            raise AttemptEvidenceError(f"attempt record is malformed: {attempt_path}") from exc
 
 
 def existing_attempt_number(task_dir: Path) -> int:

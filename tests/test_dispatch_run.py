@@ -567,3 +567,26 @@ def test_reentry_does_not_verify_missing_attempt_evidence(tmp_path: Path, monkey
     assert module.dispatch(blocked) == 2
     assert "dispatch-missing-attempt-001" not in manifest.read_text(encoding="utf-8")
     assert not (run_dir / "dispatch/tasks/next").exists()
+
+
+def test_reentry_fails_closed_for_malformed_attempt_record(tmp_path: Path, monkeypatch) -> None:
+    run_dir = make_run(tmp_path, "malformed-retained")
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("malformed retained\n", encoding="utf-8")
+    attempt_dir = run_dir / "dispatch/tasks/old/attempt-001"
+    attempt_dir.mkdir(parents=True)
+    (attempt_dir / "attempt.json").write_text(
+        '{"record_type":"dispatch-attempt","result":{}}\n', encoding="utf-8"
+    )
+    module = load_dispatch_module()
+    adapter = tmp_path / "adapter-never-run"
+    write_executable(adapter, "#!/usr/bin/env bash\nexit 99\n")
+    module.CF_DISPATCH = adapter
+    args = module.parser().parse_args([
+        "--run-dir", str(run_dir), "--task-id", "next", "--adapter", "codex",
+        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+    ])
+    monkeypatch.chdir(tmp_path)
+
+    assert module.dispatch(args) == 2
+    assert not (run_dir / "dispatch/tasks/next").exists()
