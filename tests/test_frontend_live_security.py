@@ -830,6 +830,28 @@ def test_live_wrap_fails_closed_on_unbalanced_jsx(tmp_path: Path) -> None:
     assert result.stdout == "jsx_scan_unbalanced"
 
 
+def test_live_wrap_does_not_stop_inside_an_unterminated_jsx_expression(
+    tmp_path: Path,
+) -> None:
+    module_url = WRAP.as_uri()
+    script = (
+        f"import {{ findClosingLine }} from {json.dumps(module_url)};"
+        "try{findClosingLine(['<Card>','  {value','</Card>','}'],0)}"
+        "catch(error){process.stdout.write(error.code);process.exit(7)}"
+    )
+
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        cwd=tmp_path,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 7
+    assert result.stdout == "jsx_scan_unbalanced"
+
+
 def test_live_accept_preserves_jsx_that_contains_tag_shaped_string_content(
     tmp_path: Path,
 ) -> None:

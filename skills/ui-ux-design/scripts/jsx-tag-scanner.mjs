@@ -118,7 +118,7 @@ export function scanJsxTags(source, { stopAfterTag } = {}) {
       const tag = scanTag(source, index);
       if (tag) {
         tags.push(tag);
-        if (stopAfterTag?.(tag, tags)) return tags;
+        if (stopAfterTag?.(tag, tags, { expressionDepth })) return tags;
         index = tag.end;
         continue;
       }
@@ -134,7 +134,8 @@ export function findJsxSubtree(source, predicate) {
   let closing = null;
   let depth = 0;
   const tags = scanJsxTags(source, {
-    stopAfterTag(tag) {
+    stopAfterTag(tag, _tags, { expressionDepth }) {
+      if (expressionDepth !== 0) return false;
       if (!opener) {
         if (tag.closing || !predicate(tag)) return false;
         opener = tag;
