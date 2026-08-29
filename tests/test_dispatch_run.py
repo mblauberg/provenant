@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
+import signal
 import stat
 import subprocess
 import textwrap
-import importlib.util
+import time
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -96,6 +99,11 @@ def test_ordinary_single_dispatch_records_one_attempt_and_route_identity(tmp_pat
     assert result_path.read_text(encoding="utf-8") == "OK\n"
     assert record["result"]["digest"] == "sha256:" + hashlib.sha256(result_path.read_bytes()).hexdigest()
     assert "task-1" in (run_dir / "MANIFEST.md").read_text(encoding="utf-8")
+    sidecar = run_dir / "dispatch/tasks/task-1/attempt-001/attempt.sha256"
+    expected_digest = hashlib.sha256(attempt.read_bytes()).hexdigest()
+    assert sidecar.read_text(encoding="utf-8").strip() == f"sha256:{expected_digest}  attempt.json"
+    assert receipt["attempt_digest"] == f"sha256:{expected_digest}"
+    assert receipt["attempt_digest_path"].endswith("attempt.sha256")
     assert (run_dir / "RUN_RECEIPT.json").read_bytes() == receipt_before
 
 
@@ -301,6 +309,52 @@ def test_timeout_records_reaped_exit(tmp_path: Path) -> None:
     assert record["process"]["exit_code"] is not None
 
 
+def test_sigterm_cancels_and_reaps_provider_group(tmp_path: Path) -> None:
+    run_dir = make_run(tmp_path, "cancel")
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("cancel\n", encoding="utf-8")
+    provider_pid_path = tmp_path / "provider.pid"
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    write_executable(
+        bin_dir / "codex",
+        """#!/usr/bin/env bash
+        if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
+          printf '{"models":[{"slug":"gpt-5.6-luna","supported_reasoning_levels":[{"effort":"high"}]}]}'
+          exit 0
+        fi
+        printf '%s\n' "$$" > "$PROBE_PID_PATH"
+        sleep 30
+        """,
+    )
+    env = os.environ.copy()
+    env["PATH"] = f"{bin_dir}:{ROOT / 'scripts'}:{env['PATH']}"
+    env["PROBE_PID_PATH"] = str(provider_pid_path)
+    process = subprocess.Popen(
+        [str(SCRIPT), "--run-dir", str(run_dir), "--task-id", "cancel",
+         "--adapter", "codex", "--prompt-file", str(prompt),
+         "--alias", "workhorse", "--role", "worker", "--timeout", "30"],
+        cwd=tmp_path, env=env, text=True,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    deadline = time.monotonic() + 5
+    while not provider_pid_path.exists() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert provider_pid_path.exists()
+    provider_pid = int(provider_pid_path.read_text().strip())
+
+    process.send_signal(signal.SIGTERM)
+    stdout, stderr = process.communicate(timeout=5)
+
+    assert process.returncode == 1, stderr + stdout
+    record = json.loads(stdout)
+    assert record["status"] == "cancelled"
+    assert record["failure_code"] == "cancelled"
+    assert record["process"]["observed_exit"] is True
+    with pytest.raises(ProcessLookupError):
+        os.kill(provider_pid, 0)
+
+
 def test_attempt_rows_are_accepted_by_existing_finalizer(tmp_path: Path) -> None:
     run_dir = make_run(tmp_path, "finalizer")
     prompt = tmp_path / "prompt.md"
@@ -329,3 +383,140 @@ def test_attempt_rows_are_accepted_by_existing_finalizer(tmp_path: Path) -> None
     )
     assert finalized.returncode == 0, finalized.stderr
     assert json.loads((run_dir / "RUN_RECEIPT.json").read_text())["status"] == "failed"
+
+
+def test_hard_linked_prompt_is_rejected_before_provider_launch(tmp_path: Path, monkeypatch) -> None:
+    run_dir = make_run(tmp_path, "hardlink")
+    source = tmp_path / "prompt.md"
+    source.write_text("secret boundary\n", encoding="utf-8")
+    linked = tmp_path / "linked-prompt.md"
+    linked.hardlink_to(source)
+    module = load_dispatch_module()
+    args = module.parser().parse_args([
+        "--run-dir", str(run_dir), "--task-id", "hardlink", "--adapter", "codex",
+        "--prompt-file", str(linked), "--alias", "workhorse", "--role", "worker",
+    ])
+    monkeypatch.chdir(tmp_path)
+    assert module.dispatch(args) == 2
+
+
+def test_nonfinite_or_nonpositive_timeout_is_rejected() -> None:
+    module = load_dispatch_module()
+    for value in ("0", "-1", "nan", "inf", "-inf"):
+        try:
+            module.parser().parse_args([
+                "--run-dir", "/tmp", "--adapter", "codex", "--prompt-file", "/tmp/prompt",
+                "--alias", "workhorse", "--role", "worker", "--timeout", value,
+            ])
+        except SystemExit as exc:
+            assert exc.code == 2
+        else:
+            raise AssertionError(f"accepted invalid timeout {value}")
+
+
+def test_manifest_appendability_failure_is_typed_before_launch(tmp_path: Path, monkeypatch) -> None:
+    run_dir = make_run(tmp_path, "manifest-readonly")
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("manifest\n", encoding="utf-8")
+    module = load_dispatch_module()
+
+    def refuse(_run_dir):
+        raise OSError("read-only fixture")
+
+    monkeypatch.setattr(module, "ensure_manifest_appendable", refuse)
+    args = module.parser().parse_args([
+        "--run-dir", str(run_dir), "--task-id", "manifest-readonly", "--adapter", "codex",
+        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+    ])
+    monkeypatch.chdir(tmp_path)
+    assert module.dispatch(args) == 2
+
+
+def test_read_only_manifest_is_rejected_before_launch(tmp_path: Path, monkeypatch) -> None:
+    run_dir = make_run(tmp_path, "manifest-mode")
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("manifest mode\n", encoding="utf-8")
+    manifest = run_dir / "MANIFEST.md"
+    original_mode = manifest.stat().st_mode
+    manifest.chmod(0o444)
+    try:
+        try:
+            with manifest.open("a", encoding="utf-8"):
+                pass
+        except OSError:
+            module = load_dispatch_module()
+            args = module.parser().parse_args([
+                "--run-dir", str(run_dir), "--task-id", "manifest-mode", "--adapter", "codex",
+                "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+            ])
+            monkeypatch.chdir(tmp_path)
+            assert module.dispatch(args) == 2
+        else:
+            pytest.skip("test user can append to chmod 0444 files")
+    finally:
+        manifest.chmod(original_mode)
+
+
+def test_manifest_append_failure_retains_terminal_attempt(tmp_path: Path, monkeypatch) -> None:
+    run_dir = make_run(tmp_path, "manifest-write")
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("manifest write\n", encoding="utf-8")
+    adapter = tmp_path / "adapter"
+    write_executable(adapter, """#!/usr/bin/env bash
+        while [ "$#" -gt 0 ]; do
+          case "$1" in --out) out="$2"; shift 2;; *) shift;; esac
+        done
+        printf '{\"status\":\"ok\"}\n'
+        printf 'OK\n' > "$out"
+    """)
+    module = load_dispatch_module()
+    module.CF_DISPATCH = adapter
+    monkeypatch.setattr(module, "append_manifest", lambda *_: (_ for _ in ()).throw(OSError("append failed")))
+    args = module.parser().parse_args([
+        "--run-dir", str(run_dir), "--task-id", "manifest-write", "--adapter", "codex",
+        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+    ])
+    monkeypatch.chdir(tmp_path)
+    assert module.dispatch(args) == 1
+    attempt = run_dir / "dispatch/tasks/manifest-write/attempt-001/attempt.json"
+    record = json.loads(attempt.read_text(encoding="utf-8"))
+    assert record["status"] == "failed"
+    assert record["failure_code"] == "manifest_write_error"
+    assert (attempt.parent / "attempt.sha256").is_file()
+
+
+def test_reentry_reconciles_missing_manifest_rows_and_retry_lineage(tmp_path: Path, monkeypatch) -> None:
+    run_dir = make_run(tmp_path, "reconcile")
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("reconcile\n", encoding="utf-8")
+    adapter = tmp_path / "adapter"
+    write_executable(adapter, """#!/usr/bin/env bash
+        while [ "$#" -gt 0 ]; do
+          case "$1" in --out) out="$2"; shift 2;; *) shift;; esac
+        done
+        printf '{\"status\":\"ok\"}\n'
+        printf 'OK\n' > "$out"
+    """)
+    module = load_dispatch_module()
+    module.CF_DISPATCH = adapter
+    args = module.parser().parse_args([
+        "--run-dir", str(run_dir), "--task-id", "reconcile", "--adapter", "codex",
+        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+    ])
+    monkeypatch.chdir(tmp_path)
+    assert module.dispatch(args) == 0
+    manifest = run_dir / "MANIFEST.md"
+    manifest.write_text("\n".join(
+        line for line in manifest.read_text(encoding="utf-8").splitlines()
+        if "dispatch-reconcile-attempt-001" not in line
+    ) + "\n", encoding="utf-8")
+    retry_args = module.parser().parse_args([
+        "--run-dir", str(run_dir), "--task-id", "reconcile", "--adapter", "codex",
+        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+        "--retry-of", "attempt-001",
+    ])
+    assert module.dispatch(retry_args) == 0
+    text = manifest.read_text(encoding="utf-8")
+    assert "dispatch-reconcile-attempt-001-attempt" in text
+    second = json.loads((run_dir / "dispatch/tasks/reconcile/attempt-002/attempt.json").read_text())
+    assert second["retry_of"] == "attempt-001"

@@ -3,35 +3,39 @@
 
 This is deliberately a one-attempt owner.  Provider command construction stays
 with ``cf_dispatch.sh``; this module owns only the regular-file boundary,
-process wait and attempt custody.
+process wait and attempt custody. Provider execution is bounded to 900 seconds
+by default; callers may provide a smaller or larger finite positive timeout.
 """
 
 from __future__ import annotations
 
 import argparse
-from datetime import datetime, timezone
 import hashlib
 import json
+import math
 import os
-from pathlib import Path
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
 import time
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "skills"))
 CF_DISPATCH = Path(__file__).with_name("cf_dispatch.sh")
 TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+DEFAULT_TIMEOUT_SECONDS = 900.0
 
 from _shared.bounded_process import stop_process_group
 
 
 def now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    return datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 def digest(path: Path) -> str:
@@ -71,25 +75,80 @@ def fail(run_dir: Path | None, status: str, message: str) -> int:
     return 2
 
 
-def append_manifest(run_dir: Path, record: dict[str, Any]) -> None:
-    manifest = run_dir / "MANIFEST.md"
-    date = record["finished_at"][:10]
-    prefix = f"dispatch-{record['task_id']}-{record['attempt_id']}"
+def timeout_value(value: str) -> float:
+    try:
+        timeout = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("timeout must be a finite positive number") from exc
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise argparse.ArgumentTypeError("timeout must be a finite positive number")
+    return timeout
+
+
+def manifest_rows(run_dir: Path, record: dict[str, Any]) -> list[tuple[str, str]]:
     paths = [
         ("attempt", record["attempt_path"]),
         ("prompt", record["prompt"]["path"]),
         ("adapter", record["route"]["adapter_receipt"]["path"]),
         ("stderr", record["stderr"]["path"]),
+        ("attempt-digest", record["attempt_digest_path"]),
     ]
     if record["result"] is not None:
         paths.append(("result", record["result"]["path"]))
-    manifest_rows = "".join(
+    return paths
+
+
+def append_manifest(run_dir: Path, record: dict[str, Any]) -> None:
+    manifest = run_dir / "MANIFEST.md"
+    date = record["finished_at"][:10]
+    prefix = f"dispatch-{record['task_id']}-{record['attempt_id']}"
+    paths = manifest_rows(run_dir, record)
+    rows_text = "".join(
         f"| {prefix}-{kind} | {path} | single dispatch {kind} | dispatch_run | "
         f"{date} | verified | evidence | |\n"
         for kind, path in paths
     )
     with manifest.open("a", encoding="utf-8") as stream:
-        stream.write(manifest_rows)
+        stream.write(rows_text)
+
+
+def ensure_manifest_appendable(run_dir: Path) -> None:
+    """Check append access without changing the manifest."""
+    with (run_dir / "MANIFEST.md").open("a", encoding="utf-8"):
+        pass
+
+
+def reconcile_manifest(run_dir: Path) -> None:
+    """Index complete prior attempts whose manifest rows were lost on re-entry."""
+    manifest = run_dir / "MANIFEST.md"
+    existing = manifest.read_text(encoding="utf-8", errors="replace")
+    for attempt_path in sorted((run_dir / "dispatch" / "tasks").glob("*/attempt-*/attempt.json")):
+        try:
+            record = json.loads(attempt_path.read_text(encoding="utf-8"))
+            if not isinstance(record, dict) or record.get("record_type") != "dispatch-attempt":
+                continue
+        except (OSError, TypeError, ValueError):
+            continue
+        try:
+            sidecar = attempt_path.with_name("attempt.sha256")
+            if not sidecar.is_file():
+                atomic_write(sidecar, f"{digest(attempt_path)}  {attempt_path.name}\n")
+            record["attempt_digest_path"] = relative_path(run_dir, sidecar)
+            rows = manifest_rows(run_dir, record)
+            missing = [(kind, path) for kind, path in rows if f"| {path} |" not in existing]
+            if not missing:
+                continue
+            date = record["finished_at"][:10]
+            prefix = f"dispatch-{record['task_id']}-{record['attempt_id']}"
+            with manifest.open("a", encoding="utf-8") as stream:
+                stream.writelines(
+                    f"| {prefix}-{kind} | {path} | single dispatch {kind} | dispatch_run | "
+                    f"{date} | verified | evidence | |\n"
+                    for kind, path in missing
+                )
+            existing = manifest.read_text(encoding="utf-8", errors="replace")
+        except (KeyError, TypeError, ValueError):
+            continue
 
 
 def existing_attempt_number(task_dir: Path) -> int:
@@ -141,6 +200,11 @@ def dispatch(args: argparse.Namespace) -> int:
         return fail(run_dir, "run_custody_missing", f"missing custody files: {', '.join(missing)}")
     if not TASK_ID_RE.fullmatch(args.task_id):
         return fail(run_dir, "invalid_task_id", "task id must contain only letters, numbers, '.', '_' or '-'")
+    try:
+        reconcile_manifest(run_dir)
+        ensure_manifest_appendable(run_dir)
+    except OSError as exc:
+        return fail(run_dir, "manifest_not_appendable", f"MANIFEST.md is not appendable: {exc}")
 
     prompt_source = args.prompt_file.resolve()
     if not prompt_source.is_file() or not os.access(prompt_source, os.R_OK):
@@ -160,10 +224,21 @@ def dispatch(args: argparse.Namespace) -> int:
     )
     if sensitive_roots.intersection(parts) or prompt_source.name.casefold() in sensitive_files or config_auth:
         return fail(run_dir, "credential_or_auth_store_denied", "prompt path is a credential or authentication store")
+    if prompt_source.stat().st_nlink > 1:
+        return fail(run_dir, "prompt_hard_link_denied", "prompt file has multiple hard links")
     if not CF_DISPATCH.is_file() or not os.access(CF_DISPATCH, os.X_OK):
         return fail(run_dir, "adapter_unavailable", f"provider adapter is missing or not executable: {CF_DISPATCH}")
 
     task_dir = run_dir / "dispatch" / "tasks" / args.task_id
+    retry_of = None
+    if args.retry_of:
+        retry_ref = Path(args.retry_of)
+        if retry_ref.is_absolute() or retry_ref.name != args.retry_of or not re.fullmatch(r"attempt-\d{3}", args.retry_of):
+            return fail(run_dir, "retry_of_invalid", "retry-of must name an attempt under the same task")
+        retry_dir = task_dir / args.retry_of
+        if not (retry_dir.is_dir() and (retry_dir / "attempt.json").is_file()):
+            return fail(run_dir, "retry_of_missing", f"retry attempt does not exist: {args.retry_of}")
+        retry_of = args.retry_of
     attempt_number = existing_attempt_number(task_dir)
     attempt_id = f"attempt-{attempt_number:03d}"
     attempt_dir = task_dir / attempt_id
@@ -189,6 +264,8 @@ def dispatch(args: argparse.Namespace) -> int:
     observed_exit = False
     exit_code: int | None = None
     process_error = ""
+    process = None
+    cancelled = False
     try:
         with adapter_path.open("w", encoding="utf-8") as adapter_stream, stderr_path.open(
             "w", encoding="utf-8"
@@ -201,12 +278,33 @@ def dispatch(args: argparse.Namespace) -> int:
                 env=os.environ.copy(),
                 start_new_session=True,
             )
+            def cancel_handler(_signum: int, _frame: Any) -> None:
+                nonlocal cancelled
+                cancelled = True
+                try:
+                    stop_process_group(process)
+                except OSError:
+                    pass
+
+            old_handlers = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGHUP)}
+            signal.signal(signal.SIGTERM, cancel_handler)
+            signal.signal(signal.SIGHUP, cancel_handler)
             try:
-                exit_code = process.wait(timeout=args.timeout_seconds)
-            except subprocess.TimeoutExpired:
-                stop_process_group(process)
-                exit_code = process.wait()
-                process_error = "timeout"
+                try:
+                    exit_code = process.wait(timeout=args.timeout_seconds)
+                except subprocess.TimeoutExpired:
+                    stop_process_group(process)
+                    exit_code = process.wait()
+                    process_error = "timeout"
+                except KeyboardInterrupt:
+                    cancelled = True
+                    stop_process_group(process)
+                    exit_code = process.wait()
+            finally:
+                for sig, handler in old_handlers.items():
+                    signal.signal(sig, handler)
+            if cancelled:
+                process_error = "cancelled"
             observed_exit = True
     except OSError as exc:
         process_error = str(exc)
@@ -229,6 +327,9 @@ def dispatch(args: argparse.Namespace) -> int:
     if process_error == "timeout":
         status = "timed_out"
         outcome = "timeout"
+    elif process_error == "cancelled":
+        status = "cancelled"
+        outcome = "cancelled"
     elif not observed_exit:
         status = "failed"
         outcome = "process_spawn_error"
@@ -248,7 +349,7 @@ def dispatch(args: argparse.Namespace) -> int:
         "run_id": run_dir.name,
         "task_id": args.task_id,
         "attempt_id": attempt_id,
-        "retry_of": None,
+        "retry_of": retry_of,
         "intent": args.intent,
         "requested_route": requested_route,
         "route": {
@@ -273,7 +374,7 @@ def dispatch(args: argparse.Namespace) -> int:
         ),
         "stderr": {"path": relative_path(run_dir, stderr_path), "digest": digest(stderr_path)},
         "process": {
-            "pid": process.pid if "process" in locals() else None,
+            "pid": process.pid if process is not None else None,
             "started_at": started_at,
             "finished_at": finished_at,
             "exit_code": exit_code,
@@ -281,19 +382,32 @@ def dispatch(args: argparse.Namespace) -> int:
             "terminating_signal": -exit_code if isinstance(exit_code, int) and exit_code < 0 else None,
         },
         "argv_digest": json_digest(command),
-        "retry_lineage": [],
+        "retry_lineage": [retry_of] if retry_of else [],
     }
     if process_error:
         record["process_error"] = process_error
     attempt_path = attempt_dir / "attempt.json"
     record["attempt_path"] = relative_path(run_dir, attempt_path)
+    digest_path = attempt_dir / "attempt.sha256"
+    record["attempt_digest_path"] = relative_path(run_dir, digest_path)
     atomic_write(attempt_path, json.dumps(record, indent=2, sort_keys=True) + "\n")
-    record["attempt_digest"] = digest(attempt_path)
-    # Add the digest only after the immutable attempt file is complete.  The
-    # manifest and existing receipt therefore point at one stable artifact.
-    append_manifest(run_dir, record)
-    print(json.dumps(record, sort_keys=True))
-    return 0 if status == "succeeded" else 1
+    attempt_digest = digest(attempt_path)
+    atomic_write(digest_path, f"{attempt_digest}  {attempt_path.name}\n")
+    manifest_error = False
+    try:
+        append_manifest(run_dir, record)
+    except OSError as exc:
+        manifest_error = True
+        record["status"] = "failed"
+        record["outcome"] = "manifest_write_error"
+        record["failure_code"] = "manifest_write_error"
+        record["manifest_error"] = str(exc)
+        atomic_write(attempt_path, json.dumps(record, indent=2, sort_keys=True) + "\n")
+        attempt_digest = digest(attempt_path)
+        atomic_write(digest_path, f"{attempt_digest}  {attempt_path.name}\n")
+    output_record = {**record, "attempt_digest": attempt_digest}
+    print(json.dumps(output_record, sort_keys=True))
+    return 0 if status == "succeeded" and not manifest_error else 1
 
 
 def parser() -> argparse.ArgumentParser:
@@ -313,7 +427,12 @@ def parser() -> argparse.ArgumentParser:
     root.add_argument("--risk-tier")
     root.add_argument("--reviewer-id")
     root.add_argument("--effort")
-    root.add_argument("--timeout", "--timeout-seconds", dest="timeout_seconds", type=float, default=None)
+    root.add_argument(
+        "--timeout", "--timeout-seconds", dest="timeout_seconds", type=timeout_value,
+        default=DEFAULT_TIMEOUT_SECONDS,
+        help=f"maximum provider runtime in seconds (default: {DEFAULT_TIMEOUT_SECONDS:g})",
+    )
+    root.add_argument("--retry-of", help="existing attempt id under this task, for lineage only")
     return root
 
 

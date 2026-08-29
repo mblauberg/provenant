@@ -690,6 +690,40 @@ def test_ordinary_intent_allows_same_family_without_certification():
     assert output.strip() == "ORDINARY OK"
 
 
+def test_ordinary_cross_family_enforced_route_is_not_certification():
+    stub = """\
+        #!/usr/bin/env bash
+        cat >/dev/null
+        echo "ORDINARY CROSS-FAMILY OK"
+    """
+    result, record, _ = run_dispatch_with_stub(
+        stub,
+        extra_args=["--intent", "ordinary"],
+    )
+    assert result.returncode == 0, result.output
+    assert record["cross_family"] is True
+    assert record["read_only_guarantee"] == "enforced"
+    assert record["certification_eligible"] is False
+
+
+def test_task_class_route_preserves_effective_alias():
+    stub = """\
+        #!/usr/bin/env bash
+        cat >/dev/null
+        echo "TASK CLASS OK"
+    """
+    result, record, _ = run_dispatch_with_stub(
+        stub,
+        role="worker",
+        extra_args=["--intent", "ordinary", "--task-class", "mechanical"],
+        provenant_stub="""#!/usr/bin/env bash
+            printf '{\"status\":\"ok\",\"alias\":\"scout\",\"resolved_model\":\"haiku\",\"model_family\":\"anthropic\",\"endpoint_provider\":\"anthropic\",\"identity_source\":\"test\"}\n'
+        """,
+    )
+    assert result.returncode == 0, result.output
+    assert record["route_alias"] == "scout"
+
+
 def test_cursor_model_provider_prevents_disguised_same_family_review():
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
