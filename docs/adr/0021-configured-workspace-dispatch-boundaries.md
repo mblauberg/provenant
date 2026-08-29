@@ -1,0 +1,148 @@
+# ADR 0021 — Configured-workspace provider access and dispatch boundaries
+
+**Status:** Accepted 2026-08-29 (issue [#682](https://github.com/mblauberg/provenant/issues/682))
+
+**Amends:** [ADR 0013](0013-thin-provenant-cli.md) and the current
+orchestration, routing and workspace-access doctrine.
+
+## Context
+
+Provenant is a personal, single-user harness. The chair is the accountable
+operator for the authorised workspace, and configured provider CLIs are useful
+execution capacity. Requiring model-family separation before ordinary work adds
+friction without providing the assurance that the user is actually asking for.
+It also makes cheap mixed-provider batches unnecessarily difficult.
+
+The repository nevertheless needs an honest boundary between ordinary execution
+and an assurance claim. It also needs one owner for dispatch mechanics, while
+keeping Fabric small and keeping delivery acceptance separate from exploratory or
+batch execution.
+
+## Decision
+
+### Owner map
+
+| Concern | Current or planned owner | Boundary |
+|---|---|---|
+| Model and tier resolution | `scripts/model-route` | Resolves configured routes and records route identity; it does not launch providers. |
+| Assurance dispatch adapter | `skills/orchestrate/scripts/cf_dispatch.sh` | Current provider-invocation adapter for assurance and review paths; its distinct-family requirement remains assurance policy. |
+| Ordinary dispatch interface and runner | Provider-agnostic orchestration runner planned by [#518](https://github.com/mblauberg/provenant/issues/518) | Owns the ordinary intent/policy interface and attempt lifecycle, and delegates provider invocation to `cf_dispatch.sh`. No ordinary mode exists yet. |
+| Fixed bounded batches | Batch layer planned by [#683](https://github.com/mblauberg/provenant/issues/683) | Builds on the #518 interface for fixed task sets, concurrency, partial results and retry coordination; it does not own provider invocation or workspace policy. |
+| Coordination | `runtime/fabric` | Mailbox, shared tasks and activity only; no provider launch, scheduler or lifecycle owner. |
+| Dispatch evidence | #518 attempt-record schema indexed by existing `MANIFEST.md` and bound into `RUN_RECEIPT.json`/`run_dir_finalize.py` | Records execution attempts, route lineage and observed completion; it is not delivery acceptance and must not create a parallel lifecycle ledger. |
+| Delivery evidence | `deliver` and canonical delivery `RUN.json` | Records artifact verification, review and acceptance; it may reference the orchestration receipt. |
+
+The planned #518 runner and #683 batch layer are implementation boundaries, not
+a claim that ordinary dispatch or batch runtime already exists. The #518 runner
+adds the ordinary intent/policy mode; until it is implemented, the existing
+distinct-family behaviour in `cf_dispatch.sh` remains limited to assurance paths.
+Credential/auth-store exclusions, unrelated-path containment, explicit denials,
+write/resource limits and external-action gates remain implementation acceptance
+gates for the [#518](https://github.com/mblauberg/provenant/issues/518) runner and
+the [#683](https://github.com/mblauberg/provenant/issues/683) batch layer.
+
+### Configured-workspace access
+
+An authorised chair may dispatch ordinary workspace work to any configured
+provider family. Model-family separation is not an execution permission gate.
+The selected adapter, provider and model remain visible in the dispatch
+manifest so an assurance claim can distinguish same-family work from genuinely
+independent work.
+
+This broad default still excludes credential and authentication stores, secrets,
+unrelated paths and explicitly denied content. It remains bounded by the
+approved workspace path, write scope, resource limits, platform rules and
+external-action gates. A narrower task or project policy may further restrict
+the default.
+
+### Execution and assurance
+
+Execution asks whether a configured provider may perform the requested work.
+Assurance asks what can be claimed about the resulting work. Ordinary work may
+use one family, several workers from one family, or a mixed provider batch. A
+claim of independent or cross-family verification must record and satisfy its
+own route and evidence requirements; it does not restrict ordinary execution.
+
+Receipts record actual provider/model lineage and capability status. They never
+turn a route record, a worker report or agreement between outputs into proof of
+correctness by itself.
+
+### One dispatch owner
+
+The orchestration adapter layer is the sole behavioural owner for provider
+dispatch, process waiting, cancellation, retry and batch mechanics. `provenant`
+is the stable operator front door and may expose bounded `dispatch`, `batch` and
+`run` inspection commands, but it delegates to that owner. It must not create a
+second adapter parser, scheduler, lifecycle database or delivery receipt.
+
+Fixed bounded batches are a first-class planned capability under #683: fixed
+task sets, concurrency limits, per-task timeout, partial results and explicit
+retry attempts. Adaptive waves and reducers may be layered on that interface;
+they do not create a new runtime authority.
+
+### Compact dispatch manifests
+
+The compact dispatch manifest is the canonical, append-only attempt-record
+schema that #518 must define for ordinary dispatch and batch execution. Existing
+orchestration `MANIFEST.md` indexes the record and `RUN_RECEIPT.json`, finalized
+by `run_dir_finalize.py`, provides its run custody and terminalisation. The
+exact attempt-record filename is a #518 schema decision; it is not an unnamed
+new owner or a parallel lifecycle ledger. Each task attempt records enough to
+reconstruct what happened: task and attempt IDs, requested and resolved route,
+actual provider and model, workspace and base identity when available,
+start/end, status, exit information, prompt/result paths and digests, and retry
+lineage.
+
+This compact dispatch manifest is not a delivery `RUN.json`. It answers “what
+executed?” and may contain partial or failed exploratory work. The canonical
+delivery receipt answers “was the resulting artifact verified and accepted?”
+When a dispatch produces a governed deliverable, the delivery `RUN.json` may
+reference the orchestration receipt; neither record replaces the other.
+
+Exact prompts and results are retained once in the local run directory according
+to the active retention policy. Receipts and Fabric messages carry paths,
+digests and compact status rather than duplicate transcripts.
+
+### Fabric remains coordination-only
+
+Fabric remains the project-scoped mailbox, shared task ledger and activity log.
+It may carry dispatch requests, correlations and status, but it does not launch
+providers, own provider sessions, schedule batches, wait on processes or decide
+delivery acceptance. Direct official provider CLIs remain the execution
+boundary.
+
+## Consequences
+
+- Luna, Gemini Flash and other configured workers can be used freely for cheap
+  swarms and mixed-provider batches.
+- Cross-family evidence remains available when a user or assurance profile needs
+  it, without imposing that cost on every run.
+- A single dispatch owner prevents drift between `provenant`, Fabric and
+  provider-specific scripts.
+- Partial batch completion is useful and inspectable without pretending that a
+  delivery receipt exists.
+- Workspace trust stays simple for the common case, while sensitive stores,
+  unrelated paths, explicit denials and external actions retain their existing
+  gates.
+
+## Non-goals
+
+This decision does not implement a provider adapter, batch runner, scheduler,
+daemon, recursive manager tree, automatic fallback, silent substitution or
+unbounded raw-output retention. Those are implementation decisions under this
+boundary and must preserve its ownership and evidence rules.
+
+## Acceptance criteria for implementation
+
+1. Ordinary configured provider dispatch accepts same-family and mixed-family
+   workers without requiring a family-separation flag.
+2. Credential/auth-store exclusions, unrelated-path containment, explicit
+   denials, write/resource limits and external-action gates remain testable.
+3. One dispatch owner produces append-only compact manifests with observed
+   process completion and retry lineage.
+4. Batch status preserves partial results and individual failure states.
+5. Delivery `RUN.json` remains distinct and may reference the orchestration
+   receipt that indexes attempt records.
+6. Fabric tests continue to demonstrate coordination-only behaviour.
+7. `provenant` exposes only delegated bounded commands; provider mechanics are
+   not duplicated in the front door.

@@ -70,6 +70,21 @@ def test_herdr_reference_and_degradation_doctrines_are_contract_invariants() -> 
     } <= invariants
 
 
+def test_orchestrate_cli_execution_invariant_matches_live_doctrine() -> None:
+    contract = yaml.safe_load((EVALS / "contract_cases.yaml").read_text())
+    invariants = set(contract["doctrine_invariants"])
+    live = " ".join((ROOT / "skills/orchestrate/SKILL.md").read_text().split())
+
+    required = {
+        "Ordinary configured-provider CLI dispatch may use same-family routes",
+        "The current `cf_dispatch.sh` distinct-family requirement belongs to its assurance path",
+    }
+    assert required <= invariants
+    assert all(value.lower() in live.lower() for value in required)
+    assert "Use same-family CLI only for auth/preflight smoke tests" not in invariants
+    assert "same-family CLI only for auth/preflight smoke tests" not in live.lower()
+
+
 def test_reply_precedes_ack_and_duplicate_redelivery_is_deduped() -> None:
     for relative in (
         "skills/orchestrate/references/herdr-panes.md",

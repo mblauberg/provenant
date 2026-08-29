@@ -94,53 +94,70 @@ thousands of tokens. The report holds only the outcome. Reading the report inste
 transcript is what stops the caller paying twice for the same thinking, once through Codex and
 again through you.
 
-**2. Launch in the background, capture the PID.**
+**2. Run Codex in the foreground and let the call block.**
 
 ```
-nohup codex exec -s workspace-write -C <ABSOLUTE_WORKTREE> -m gpt-5.6-luna \
+codex exec -s workspace-write -C <ABSOLUTE_WORKTREE> -m gpt-5.6-luna \
   -c service_tier=default -c model_reasoning_effort=xhigh - \
   < ${TMPDIR:-/tmp}/codex-<slug>-brief.txt \
-  > ${TMPDIR:-/tmp}/codex-<slug>-transcript.txt 2>&1 &
-echo $!
+  > ${TMPDIR:-/tmp}/codex-<slug>-transcript.txt 2>&1
+STATUS=$?
 ```
 
-Run as a normal foreground Bash call; it returns the PID immediately.
+This is the normal completion path when the run fits inside one 600000 ms call:
+the shell waits for Codex directly and retains its exit status. **NEVER pipe
+`codex exec` stdout anywhere.** Not `tail`, not `head`, not `tee`. Redirect to
+the transcript file, and after completion use the bounded report and git state
+rather than reading that transcript.
 
-**NEVER pipe `codex exec` stdout anywhere.** Not `tail`, not `head`, not `tee`. It hangs
-indefinitely: a previous run sat at 14 minutes elapsed against 0.16 seconds of CPU. Redirect to
-the transcript file, and after completion use the bounded report and git state rather than
-reading that transcript.
+Do not use `--dangerously-bypass-approvals-and-sandbox`. `-s workspace-write` is
+what this agent uses; if a task appears to need more, that is a signal the task
+is wrong, not the sandbox.
 
-Do not use `--dangerously-bypass-approvals-and-sandbox`. `-s workspace-write` is what this
-agent uses; if a task appears to need more, that is a signal the task is wrong, not the
-sandbox.
-
-Prefer running Codex in the **foreground** when the task plausibly fits inside one 600000 ms
-call: no `nohup`, no `&`, no PID, nothing to wait on. The shell blocks on process exit and you
-have the result when it returns. Detach only when the run may exceed that.
-
-When you do detach, create a FIFO alongside it so the wait is event-driven rather than polled:
-
-```
-mkfifo ${TMPDIR:-/tmp}/codex-<slug>.fifo
-nohup bash -c 'codex exec -s workspace-write -C <ABSOLUTE_WORKTREE> -m gpt-5.6-luna \
-  -c service_tier=default -c model_reasoning_effort=xhigh - \
-  < ${TMPDIR:-/tmp}/codex-<slug>-brief.txt \
-  > ${TMPDIR:-/tmp}/codex-<slug>-transcript.txt 2>&1; echo EXIT=$? > ${TMPDIR:-/tmp}/codex-<slug>.fifo' \
-  >/dev/null 2>&1 &
-echo $!
-```
-
-**3. Wait in the foreground.** A second ordinary foreground Bash call at `timeout: 600000`:
+**3. If detachment is unavoidable, use the shared detached helper, which captures
+and waits on the actual Codex child PID.** Give each dispatch a unique run
+directory; it records that child in `worker.pid`, its own wrapper in
+`wrapper.pid`, writes output to the owned `run_dir/transcript.txt`, and writes a
+durable completion marker atomically to `run_dir/done`:
 
 ```
-cat ${TMPDIR:-/tmp}/codex-<slug>.fifo
+run_dir=${TMPDIR:-/tmp}/codex-<unique-slug>
+"${AGENTS_HOME:-$HOME/.agents}/skills/orchestrate/scripts/run_worker_detached.sh" \
+  --run-dir "$run_dir" -- \
+  codex exec -s workspace-write -C <ABSOLUTE_WORKTREE> -m gpt-5.6-luna \
+    -c service_tier=default -c model_reasoning_effort=xhigh - \
+    < ${TMPDIR:-/tmp}/codex-<slug>-brief.txt &
+WRAPPER_PID=$!
+wait "$WRAPPER_PID"
+STATUS=$?
+WORKER_PID="$(cat "$run_dir/worker.pid")"
 ```
 
-That blocks with zero polling and returns Codex's exit code. If the tool timeout fires first,
-reissue it unchanged; the FIFO is still unwritten and still there. Where a FIFO is awkward, the
-fallback is a foreground condition loop, `while kill -0 <PID> 2>/dev/null; do sleep 20; done`,
-reissued the same way.
+The helper claims the run directory exclusively and forwards stdin to the direct
+Codex child. If the original shell is gone, observe either the regular completion
+file or the recorded wrapper exit. A wrapper exit without a marker is an evidence
+failure, never a reason to accept or reuse the run. Do not use a watcher or a
+side-channel rendezvous:
+
+```
+helper="${AGENTS_HOME:-$HOME/.agents}/skills/orchestrate/scripts/run_worker_detached.sh"
+while :; do
+  validation="$($helper --validate --run-dir "$run_dir" 2>/dev/null)"
+  validation_status=$?
+  if [ "$validation_status" -eq 0 ]; then
+    break
+  elif [ "$validation_status" -ne 1 ]; then
+    echo "completion evidence missing or invalid; do not accept or reuse the run" >&2
+    exit 1
+  fi
+  sleep 1
+done
+read -r WORKER_PID WRAPPER_PID STATUS <<< "$validation"
+```
+
+The shared validator returns `1` while the wrapper is still running and startup
+or completion evidence is incomplete, `0` only for a valid marker plus an
+observed worker exit, and any other nonzero status is an evidence failure.
 
 **Never use `run_in_background: true` for this wait, and never end your turn while Codex is
 alive.** Here is the mechanism, because getting it wrong looks identical to getting it right
@@ -251,8 +268,11 @@ support `ultra`.
 
 ## Liveness
 
-`ps -o pid,etime,time -p <PID>`. Compare CPU against elapsed; file size proves nothing. Minutes
-elapsed with near-zero CPU means hung, almost always a piped stdout.
+Follow [`worker-liveness.md`](../skills/orchestrate/references/worker-liveness.md). CPU time,
+elapsed time or output file size do not prove exit. Only observed PID exit and its exit status
+control terminality, inspection and reuse. The foreground Codex command supplies that direct
+wait; the detached helper records `worker.pid` and `wrapper.pid` for the regular completion
+file, and both must be fenced before accepting the report.
 
 ## Boundaries
 
