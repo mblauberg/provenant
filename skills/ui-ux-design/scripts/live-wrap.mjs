@@ -1,3 +1,4 @@
+// Modified from Impeccable for this harness; see the repository THIRD_PARTY_NOTICES.md.
 /**
  * CLI helper: find an element in source and wrap it in a variant container.
  *
@@ -14,8 +15,17 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { isGeneratedFile } from './is-generated.mjs';
+import {
+  readContainedSource,
+  replaceContainedSource,
+  resolveContainedSourcePath,
+} from './contained-source.mjs';
 
 const EXTENSIONS = ['.html', '.jsx', '.tsx', '.vue', '.svelte', '.astro'];
+
+function resolveProjectSourceFile(projectRoot, requestedPath) {
+  return resolveContainedSourcePath(projectRoot, requestedPath, { relativeOnly: true });
+}
 
 export async function wrapCli() {
   const args = process.argv.slice(2);
@@ -36,7 +46,8 @@ Element identification (at least one required):
   --query TEXT       Fallback: raw text to search for
 
 Optional:
-  --file PATH        Source file to search in (skips auto-detection)
+  --file PATH        Existing project-relative regular file (skips auto-detection;
+                     symlinks and multiply-linked files are rejected)
   --text TEXT        Picked element's textContent. Used to disambiguate when
                      classes/tag match multiple sibling elements (e.g. a list
                      of <Card>s with the same className). Pass the first ~80
@@ -105,19 +116,32 @@ The agent should insert variant HTML at insertLine.`);
       process.exit(1);
     }
   } else {
-    if (isGeneratedFile(targetFile, genOpts)) {
-      console.error(JSON.stringify({
-        error: 'file_is_generated',
-        fallback: 'agent-driven',
-        file: path.relative(process.cwd(), path.resolve(process.cwd(), targetFile)),
-        hint: 'Explicit --file points at a generated file. Writing here gets wiped by the next build. See "Handle fallback" in live.md.',
-      }));
-      process.exit(1);
-    }
     matchedQuery = queries[0];
   }
 
-  const content = fs.readFileSync(targetFile, 'utf-8');
+  let sourceSnapshot;
+  try {
+    sourceSnapshot = readContainedSource(process.cwd(), targetFile, { relativeOnly: !!filePath });
+    targetFile = sourceSnapshot.path;
+  } catch (error) {
+    console.error(JSON.stringify({
+      error: error.code || 'source_path_invalid',
+      fallback: 'agent-driven',
+      hint: error.message,
+    }));
+    process.exit(1);
+  }
+  if (isGeneratedFile(targetFile, genOpts)) {
+    console.error(JSON.stringify({
+      error: 'file_is_generated',
+      fallback: 'agent-driven',
+      file: path.relative(process.cwd(), targetFile),
+      hint: 'The target is generated. Writing here gets wiped by the next build. See "Handle fallback" in live.md.',
+    }));
+    process.exit(1);
+  }
+
+  const content = sourceSnapshot.bytes.toString('utf-8');
   const lines = content.split('\n');
 
   // Find the element, trying each query in priority order. When `--text` is
@@ -248,7 +272,16 @@ The agent should insert variant HTML at insertLine.`);
     ...wrapperLines,
     ...lines.slice(endLine + 1),
   ];
-  fs.writeFileSync(targetFile, newLines.join('\n'), 'utf-8');
+  try {
+    replaceContainedSource(sourceSnapshot, newLines.join('\n'));
+  } catch (error) {
+    console.error(JSON.stringify({
+      error: error.code || 'source_replace_failed',
+      fallback: 'agent-driven',
+      hint: error.message,
+    }));
+    process.exit(1);
+  }
 
   // Calculate insert line (the "insert below this line" comment).
   // 0-indexed file position. Both HTML and JSX wrappers have 6 lines above
@@ -629,4 +662,10 @@ if (_running?.endsWith('live-wrap.mjs') || _running?.endsWith('live-wrap.mjs/'))
 }
 
 // Test exports (used by tests/live-wrap.test.mjs)
-export { buildSearchQueries, findElement, findClosingLine, detectCommentSyntax };
+export {
+  buildSearchQueries,
+  findElement,
+  findClosingLine,
+  detectCommentSyntax,
+  resolveProjectSourceFile,
+};

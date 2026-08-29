@@ -1,62 +1,64 @@
 ---
 name: ui-ux-design
-description: "Use for frontend UI/UX: read-only review (default — visual, accessibility, responsive, interaction) or authorised design, redesign, and live iteration. Not for source-diff review or React profiling; use code-review or react-performance."
+description: "Use for frontend UI/UX: read-only review of rendered visual, interaction, accessibility, responsive or design-system quality; or requested build, redesign, fix, polish, implementation, and live iteration. Not for source-diff review or React profiling."
 ---
 
 <!-- Modified from Impeccable for this harness; see the repository THIRD_PARTY_NOTICES.md. -->
 
 # UI/UX design
 
-Review or design production-grade frontend interfaces. Two branches share one
-entry point; the model picks the branch from what the request authorises,
-never a slash command.
+Judge or shape frontend experiences against approved product intent, the
+project's real design owners, and observable UI evidence. Infer intent from the
+whole request. Do not make the user select a mode or answer a taste
+questionnaire, name an internal lifecycle skill, or recite an authority phrase.
 
-## Branches
+## Select mode and authority
 
-- **review** (default, read-only). Evidence-bearing critique of the rendered
-  UI: visual hierarchy, accessibility, responsiveness, interaction states,
-  copy and brand fit. No `Write`/`Edit`/`NotebookEdit` calls. Load
-  [review](reference/review.md).
-- **design/make** (write authority required). Design, implement, redesign or
-  polish an interface, including the interactive `live` codegen protocol.
-  Load [setup](reference/setup.md), then [command
-  routing](reference/command-routing.md); for live browser work,
-  [live](reference/live.md).
+- **Review** is the read-only branch for critique, audit, comparison, advice
+  without change intent, and every explicit read-only request. It permits no
+  source or project-state mutation, installs, project-local build/cache output,
+  dev-server injection, browser submission, or external write. Read-only browser
+  navigation, GETs, and screenshots are allowed when output/cache stays outside
+  the protected tree. Write only an assigned outside report. Load
+  [review](references/review.md).
+- **Design** covers advisory directions and requested change. A clear request to
+  build, redesign, fix, polish, or implement routes internally to `implement` as
+  primary with this skill as design companion. Do not ask the user to name that
+  routing. Only genuinely unsettled consequential product choices route to
+  `scope`; `engineering-docs` owns durable document placement. Load
+  [design](references/design.md).
+- **Live** is a write-capable design sub-mode, never review. Route setup,
+  injection, wrapping, selection, and cleanup through the same internal
+  implementation lifecycle and its bounded project paths. Load
+  [live](references/live.md).
 
-A request framed as review stays on the review branch even when a fix looks
-obvious; escalate to design/make only under an explicit authority grant
-naming `implement` (or this skill under `implement`) as action-owner. Never
-infer write authority from review findings alone.
+If one request combines review and source changes, keep implementation primary
+and run a fresh read-only UI review after the changes. An explicit read-only
+constraint wins. Stop only for a real missing path/action authority or a
+material product choice that cannot be discovered or safely inferred.
 
-## Lifecycle boundary
+## Ground the work
 
-This skill supplies the frontend review and design methods; it is not a
-delivery lifecycle. Run every source-changing command inside `implement`.
-Route unsettled design intent through `scope`, design-document placement
-through `engineering-docs`, general source-diff review through `code-review`,
-and measured React performance work through `react-performance`. This skill
-cannot accept, release or certify its own work.
+Load [reference grounding](references/reference-grounding.md). Establish
+approved intent, canonical local owners, actual pixels and states, supported
+users, and viewports. Classify change as preserve, extend, or overhaul;
+preserve is the default for an existing product.
 
-## Detector evidence engine
+## Load only relevant depth
 
-`scripts/detector/` is an antipattern and contrast-ratio engine (static
-HTML/CSS analysis, regex text scanning, full browser rendering) shared by
-both branches:
+Use [surfaces](references/surfaces.md) for context; [visual system](references/visual-system.md)
+for colour, type, space, imagery, and hierarchy; [design systems](references/design-systems.md)
+for shared tokens and components; [interaction and states](references/interaction-states.md);
+[responsive accessibility](references/responsive-accessibility.md); [motion](references/motion.md);
+[content and conversion](references/content-conversion.md); and [visual QA](references/visual-qa.md).
+Load only owners activated by the request.
 
-```bash
-node "${AGENTS_HOME:-$HOME/.agents}/skills/ui-ux-design/scripts/detect.mjs" [file-or-dir-or-url...]
-```
+## Boundaries and completion
 
-Review treats it as one evidence lane among several, never a substitute for
-manual inspection. Design/make may run it after edits to check for
-contrast/antipattern regressions; a clean result is evidence, not proof of
-completion.
-
-## Routing (design/make)
-
-[Command routing](reference/command-routing.md) holds the full command
-catalogue, lookup tables and dispatch rules. No argument shows the grouped
-menu; a known first word follows its reference; an unknown first word is
-general design context. Implement complexity proportional to the chosen
-aesthetic; interpret context creatively and reject category-derived
-defaults.
+`code-review` owns PR/diff review and its finding schema; `playwright` supplies
+browser operation; `web-stack-conventions` supplies current standards deltas;
+`react-performance` owns measured React performance; writing specialists own
+general rewriting. Report evidence as `verified` or `judgement` and every
+selected lane as `tested`, `failed`, `not tested`, or `not applicable`.
+Design cannot certify itself; deterministic checks, fresh review, and user
+acceptance stay with the enclosing lifecycle.

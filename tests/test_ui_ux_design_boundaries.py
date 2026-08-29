@@ -5,31 +5,91 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 UI_UX_DESIGN = ROOT / "skills" / "ui-ux-design"
+FORBIDDEN_MUTATION_TOOLS = {"Write", "Edit", "NotebookEdit", "ApplyPatch", "Delete"}
 
 
-def test_ui_ux_design_composes_with_canonical_lifecycle_owners():
-    skill = (UI_UX_DESIGN / "SKILL.md").read_text()
-    routing = (UI_UX_DESIGN / "reference" / "command-routing.md").read_text()
+def _fixture(name: str) -> dict:
+    return yaml.safe_load((UI_UX_DESIGN / "evals" / name).read_text())
 
-    assert "inside `implement`" in skill
-    assert "`scope` owns" in routing
-    assert "`engineering-docs` owns" in routing
-    assert "review branch](review.md) owns" in routing
-    assert "`code-review` owns" in routing
-    assert "`react-performance` owns" in routing
+
+def _assert_route_fixture_schema(fixture: dict, *, allowed_relations: set[str]) -> None:
+    assert fixture["schema_version"] == 1
+    assert fixture["target_skill"] == "ui-ux-design"
+    ids = []
+    for case in fixture["cases"]:
+        assert set(case) >= {"id", "relation", "prompt", "tags", "expected"}
+        assert case["relation"] in allowed_relations
+        assert isinstance(case["prompt"], str) and case["prompt"].strip()
+        assert isinstance(case["tags"], list)
+        assert set(case["expected"]) >= {"primary_skill", "companion_skills"}
+        assert isinstance(case["expected"]["companion_skills"], list)
+        ids.append(case["id"])
+    assert len(ids) == len(set(ids))
+
+
+def test_ui_ux_entrypoint_routes_by_natural_intent_without_internal_incantations():
+    skill = (UI_UX_DESIGN / "SKILL.md").read_text().lower()
+    sidecar = (UI_UX_DESIGN / "agents" / "openai.yaml").read_text().lower()
+    assert all(word in skill for word in ("build", "redesign", "fix", "polish", "implement"))
+    assert "read-only" in skill and "explicit read-only" in skill
+    assert "consequential" in skill and "scope" in skill
+    assert "write envelope" not in skill
+    assert "write envelope" not in sidecar
 
 
 def test_ui_ux_design_has_no_competing_review_or_performance_commands():
-    routing = (UI_UX_DESIGN / "reference" / "command-routing.md").read_text()
-    for command in ("critique", "audit", "optimize"):
-        assert f"`{command}" not in routing
-        assert not (UI_UX_DESIGN / "reference" / f"{command}.md").exists()
-
-    for retired in ("heuristics-scoring.md", "personas.md"):
-        assert not (UI_UX_DESIGN / "reference" / retired).exists()
+    references = UI_UX_DESIGN / "references"
+    for retired in ("critique.md", "audit.md", "optimize.md", "heuristics-scoring.md", "personas.md"):
+        assert not (references / retired).exists()
 
 
-def test_review_branch_cannot_generate_overlapping_pinned_skills_or_run_legacy_cleanup():
+def test_review_cases_encode_the_complete_zero_mutation_contract():
+    boundary = _fixture("boundary_cases.yaml")
+    review_cases = [case for case in boundary["cases"] if case["branch"] == "review"]
+    assert review_cases
+    for case in review_cases:
+        expected = case["expected"]
+        assert set(expected["tool_calls_forbidden"]) == FORBIDDEN_MUTATION_TOOLS
+        assert expected["shell_mutation_forbidden"] is True
+        assert expected["browser_external_write_forbidden"] is True
+        assert expected["tree_unchanged"] is True
+        assert expected["report_outside_protected_root"] is True
+        assert set(expected["browser_read_effects_permitted"]) == {"navigate", "get", "screenshot"}
+
+
+def test_natural_change_requests_route_to_implementation_without_user_facing_ceremony():
+    boundary = _fixture("boundary_cases.yaml")
+    cases = {case["id"]: case for case in boundary["cases"]}
+
+    for case_id in ("b004", "b005"):
+        case = cases[case_id]
+        assert case["branch"] == "composition"
+        assert case["expected"]["primary_skill"] == "implement"
+        assert case["expected"]["companion_skills"] == ["ui-ux-design"]
+        assert "envelope" not in case["prompt"].lower()
+
+    assert cases["b002"]["branch"] == "review"
+    assert "read-only" in cases["b002"]["prompt"].lower()
+    assert cases["b006"]["branch"] == "scope"
+    assert cases["b006"]["expected"]["primary_skill"] == "scope"
+
+
+def test_trigger_and_regression_routes_are_both_active_structural_contracts():
+    trigger = _fixture("trigger_cases.yaml")
+    regression = _fixture("regression_cases.yaml")
+    _assert_route_fixture_schema(trigger, allowed_relations={"positive", "negative", "boundary"})
+    _assert_route_fixture_schema(regression, allowed_relations={"positive", "negative", "boundary"})
+
+    combined_ids = [case["id"] for fixture in (trigger, regression) for case in fixture["cases"]]
+    assert len(combined_ids) == len(set(combined_ids))
+    assert any(
+        case["expected"]["primary_skill"] == "implement"
+        and "ui-ux-design" in case["expected"]["companion_skills"]
+        for case in trigger["cases"]
+    )
+
+
+def test_review_branch_has_no_legacy_write_or_cleanup_surface():
     for retired in (
         "pin.mjs",
         "command-metadata.json",
@@ -41,32 +101,3 @@ def test_review_branch_cannot_generate_overlapping_pinned_skills_or_run_legacy_c
     paths = (UI_UX_DESIGN / "scripts" / "impeccable-paths.mjs").read_text()
     assert "CRITIQUE_DIR" not in paths
     assert "getCritiqueDir" not in paths
-
-    boundary = yaml.safe_load((UI_UX_DESIGN / "evals" / "boundary_cases.yaml").read_text())
-    review_cases = [case for case in boundary["cases"] if case["branch"] == "review"]
-    assert review_cases, "expected at least one review-branch boundary case"
-    for case in review_cases:
-        forbidden = set(case["expected"].get("tool_calls_forbidden", []))
-        assert {"Write", "Edit", "NotebookEdit"} <= forbidden
-
-
-def test_mutating_design_routes_keep_implement_as_lifecycle_owner():
-    trigger = yaml.safe_load((UI_UX_DESIGN / "evals" / "trigger_cases.yaml").read_text())
-    cases = {case["id"]: case for case in trigger["cases"]}
-
-    composition_implement_cases = [
-        case
-        for case in cases.values()
-        if "composition" in case.get("tags", []) and case["expected"]["primary_skill"] == "implement"
-    ]
-    assert composition_implement_cases, "expected a composition case owned by implement"
-    for case in composition_implement_cases:
-        assert "ui-ux-design" in case["expected"]["companion_skills"]
-
-    boundary = yaml.safe_load((UI_UX_DESIGN / "evals" / "boundary_cases.yaml").read_text())
-    design_make_cases = {case["id"]: case for case in boundary["cases"] if case["branch"] == "design/make"}
-    assert design_make_cases, "expected a design/make boundary case"
-    for case in design_make_cases.values():
-        permitted = set(case["expected"].get("tool_calls_permitted", []))
-        assert {"Write", "Edit"} <= permitted
-        assert "implement" in case["expected"]["behaviour"]

@@ -1,10 +1,9 @@
 # Regression coverage carried over from the deleted `frontend-review` skill's
 # trigger fixtures (see git history for skills/frontend-review/evals/
-# trigger_cases.yaml before the merge into ui-ux-design). This suite is NOT
-# contract-validated: it is not held to the 3 positive / 3 negative /
-# 3 boundary shape, the exact-key schema, or the q710-q719 id block that
-# evals/trigger_cases.yaml must satisfy. It exists purely so this doctrine
-# has a fixture home instead of living only in prose in reference/review.md.
+# trigger_cases.yaml before the merge into ui-ux-design). This suite is
+# structurally validated by tests/test_ui_ux_design_boundaries.py, but it is
+# not a provider-execution result and is not held to the trigger fixture's
+# fixed 3 positive / 3 negative / 3 boundary distribution or q710-q719 block.
 #
 # Do not fold these back into trigger_cases.yaml — doing so would either
 # break its fixed 3/3/3 contract or force dropping another case to make
@@ -20,7 +19,7 @@ cases:
       primary_skill: ui-ux-design
       companion_skills: []
     note: >-
-      Screenshot/untested-state discipline from reference/review.md's
+      Screenshot/untested-state discipline from references/review.md's
       "Record each selected lane as tested, failed, not tested or not
       applicable" requirement. A screenshot alone must not be reported as
       certifying more than what it shows.
@@ -34,7 +33,7 @@ cases:
     note: >-
       Original frontend-review boundary case (WCAG-companion). Companion
       supplies current WCAG 2.2 facts; this skill still owns the review
-      workflow and the finding contract, per reference/review.md.
+      workflow and the finding contract, per references/review.md.
   - id: r003
     relation: boundary
     prompt: "Capture Lighthouse accessibility and performance scores for this page and flag any claim in the report that the scan alone cannot support."
@@ -45,5 +44,5 @@ cases:
     note: >-
       Lighthouse-evidence companion to r002: a Lighthouse run is one
       evidence lane, not a substitute for manual inspection or a standards
-      certification (reference/review.md, "Unknown is not passing;
+      certification (references/review.md, "Unknown is not passing;
       heuristic judgement is not a standards result").

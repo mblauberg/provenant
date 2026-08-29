@@ -1,3 +1,4 @@
+// Modified from Impeccable for this harness; see the repository THIRD_PARTY_NOTICES.md.
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -89,8 +90,14 @@ async function detectUrl(url, options = {}) {
   const settleMs = Number.isFinite(options?.settleMs) ? options.settleMs : 0;
   const viewport = options?.viewport || { width: 1280, height: 800 };
   const externalBrowser = options?.browser || null;
+  const launchBrowser = options?.launchBrowser || null;
   let puppeteer;
-  if (!externalBrowser) {
+  if (!externalBrowser && !launchBrowser) {
+    if (process.env.IMPECCABLE_BROWSER_ENGINE === 'unavailable') {
+      const error = new Error('Browser engine unavailable: install puppeteer to scan URLs');
+      error.code = 'engine_unavailable';
+      throw error;
+    }
     try {
       puppeteer = await profileStepAsync(profile, {
         engine: 'browser',
@@ -99,7 +106,9 @@ async function detectUrl(url, options = {}) {
         target: url,
       }, () => import('puppeteer'));
     } catch {
-      throw new Error('puppeteer is required for URL scanning. Install: npm install puppeteer');
+      const error = new Error('Browser engine unavailable: install puppeteer to scan URLs');
+      error.code = 'engine_unavailable';
+      throw error;
     }
   }
 
@@ -126,20 +135,24 @@ async function detectUrl(url, options = {}) {
   // Chrome can't initialize its sandbox there. Disable the sandbox only when
   // running in CI; local users keep the default hardened launch.
   const launchArgs = process.env.CI ? ['--no-sandbox', '--disable-setuid-sandbox'] : [];
-  const browser = externalBrowser || await profileStepAsync(profile, {
-    engine: 'browser',
-    phase: 'load',
-    ruleId: 'launch-browser',
-    target: url,
-  }, () => puppeteer.default.launch({ headless: true, args: launchArgs }));
-  const page = await profileStepAsync(profile, {
-    engine: 'browser',
-    phase: 'load',
-    ruleId: 'new-page',
-    target: url,
-  }, () => browser.newPage());
+  let browser = null;
+  let page = null;
   let results = [];
   try {
+    browser = externalBrowser || await profileStepAsync(profile, {
+      engine: 'browser',
+      phase: 'load',
+      ruleId: 'launch-browser',
+      target: url,
+    }, () => launchBrowser
+      ? launchBrowser({ headless: true, args: launchArgs })
+      : puppeteer.default.launch({ headless: true, args: launchArgs }));
+    page = await profileStepAsync(profile, {
+      engine: 'browser',
+      phase: 'load',
+      ruleId: 'new-page',
+      target: url,
+    }, () => browser.newPage());
     await profileStepAsync(profile, {
       engine: 'browser',
       phase: 'load',
@@ -197,19 +210,21 @@ async function detectUrl(url, options = {}) {
     const visualFindings = await runVisualContrastFallback(page, serializedGroups, options, profile, url);
     results.push(...visualFindings);
   } finally {
-    await profileStepAsync(profile, {
-      engine: 'browser',
-      phase: 'load',
-      ruleId: 'close-page',
-      target: url,
-    }, () => page.close().catch(() => {}));
-    if (!externalBrowser) {
+    if (page) {
+      await profileStepAsync(profile, {
+        engine: 'browser',
+        phase: 'load',
+        ruleId: 'close-page',
+        target: url,
+      }, () => page.close().catch(() => {}));
+    }
+    if (!externalBrowser && browser) {
       await profileStepAsync(profile, {
         engine: 'browser',
         phase: 'load',
         ruleId: 'close-browser',
         target: url,
-      }, () => browser.close());
+      }, () => browser.close().catch(() => {}));
     }
   }
   return results.map(f => finding(f.id, url, f.snippet));
@@ -217,10 +232,17 @@ async function detectUrl(url, options = {}) {
 
 async function createBrowserDetector(options = {}) {
   let puppeteer;
+  if (process.env.IMPECCABLE_BROWSER_ENGINE === 'unavailable') {
+    const error = new Error('Browser engine unavailable: install puppeteer to scan URLs');
+    error.code = 'engine_unavailable';
+    throw error;
+  }
   try {
     puppeteer = await import('puppeteer');
   } catch {
-    throw new Error('puppeteer is required for URL scanning. Install: npm install puppeteer');
+    const error = new Error('Browser engine unavailable: install puppeteer to scan URLs');
+    error.code = 'engine_unavailable';
+    throw error;
   }
   const launchArgs = options.launchArgs || (process.env.CI ? ['--no-sandbox', '--disable-setuid-sandbox'] : []);
   const browser = options.browser || await puppeteer.default.launch({

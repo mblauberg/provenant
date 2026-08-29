@@ -1,3 +1,4 @@
+// Modified from Impeccable for this harness; see the repository THIRD_PARTY_NOTICES.md.
 /**
  * CLI helper: insert/remove the live variant mode script tag in the project's
  * main HTML entry point.
@@ -17,6 +18,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { resolveLiveConfigPath } from './impeccable-paths.mjs';
+import {
+  readContainedSource,
+  replaceContainedSources,
+} from './contained-source.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CONFIG_PATH = resolveLiveConfigPath({ cwd: process.cwd(), scriptsDir: __dirname });
@@ -41,6 +46,8 @@ export async function injectCli() {
 
 Insert or remove the live mode script tag in the project's HTML entry point.
 Reads configuration from .impeccable/live/config.json.
+Every config.files target must resolve to an existing project-relative regular file;
+symlinks and multiply-linked files are rejected before any source change.
 
 Modes:
   --port PORT   Insert script tag pointing at http://localhost:PORT/live.js
@@ -88,23 +95,24 @@ Output (JSON):
   // later escaping target must not leave earlier project files half-mutated.
   const targets = resolvedFiles.map((relFile) => ({
     relFile,
-    absFile: resolveProjectFileTarget(process.cwd(), relFile),
+    snapshot: readContainedSource(process.cwd(), relFile, { relativeOnly: true }),
   }));
 
   if (args.includes('--remove')) {
-    const results = targets.map(({ relFile, absFile }) => {
-      if (!fs.existsSync(absFile)) return { file: relFile, error: 'file_not_found' };
-      const content = fs.readFileSync(absFile, 'utf-8');
+    const replacements = [];
+    const results = targets.map(({ relFile, snapshot }) => {
+      const content = snapshot.bytes.toString('utf-8');
       const detagged = removeTag(content, config.commentSyntax);
       const updated = revertCspMeta(detagged);
       if (updated === content) return { file: relFile, removed: false, note: 'no tag present' };
-      fs.writeFileSync(absFile, updated, 'utf-8');
+      replacements.push({ snapshot, content: updated });
       return {
         file: relFile,
         removed: detagged !== content,
         cspReverted: updated !== detagged,
       };
     });
+    replaceContainedSources(replacements);
     console.log(JSON.stringify({ ok: true, results }));
     return;
   }
@@ -123,25 +131,29 @@ Output (JSON):
     process.exit(1);
   }
 
-  const results = targets.map(({ relFile, absFile }) => {
-    if (!fs.existsSync(absFile)) return { file: relFile, error: 'file_not_found' };
-    const content = fs.readFileSync(absFile, 'utf-8');
+  const replacements = [];
+  const results = targets.map(({ relFile, snapshot }) => {
+    const content = snapshot.bytes.toString('utf-8');
     const withoutOld = revertCspMeta(removeTag(content, config.commentSyntax));
     const withTag = insertTag(withoutOld, config, port, token);
     if (withTag === withoutOld) {
       return { file: relFile, error: 'insertion_point_not_found', anchor: config.insertBefore || config.insertAfter };
     }
     const updated = patchCspMeta(withTag, port);
-    fs.writeFileSync(absFile, updated, 'utf-8');
+    replacements.push({ snapshot, content: updated });
     return {
       file: relFile,
       inserted: true,
       cspPatched: updated !== withTag,
     };
   });
-  const anyInserted = results.some((r) => r.inserted);
-  console.log(JSON.stringify({ ok: anyInserted, port, results }));
-  if (!anyInserted) process.exit(1);
+  const failures = results.filter((result) => result.error);
+  if (failures.length > 0 || replacements.length !== targets.length) {
+    console.error(JSON.stringify({ ok: false, error: 'mutation_preflight_failed', results }));
+    process.exit(1);
+  }
+  replaceContainedSources(replacements);
+  console.log(JSON.stringify({ ok: true, port, results }));
 }
 
 /**
@@ -510,7 +522,15 @@ export function revertCspMeta(content) {
 
 const _running = process.argv[1];
 if (_running?.endsWith('live-inject.mjs') || _running?.endsWith('live-inject.mjs/')) {
-  injectCli();
+  injectCli().catch((error) => {
+    console.error(JSON.stringify({
+      ok: false,
+      error: error.code || 'inject_failed',
+      message: error.message,
+      ...(error.rollbackErrors ? { rollbackErrors: error.rollbackErrors } : {}),
+    }));
+    process.exit(1);
+  });
 }
 
 export { insertTag, removeTag, validateConfig, buildTagBlock };

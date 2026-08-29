@@ -93,7 +93,7 @@ test('does not classify an unobserved startup as an environmental timeout', () =
   );
 });
 
-test('background launcher reports a successful startup using its compatible JSON payload', () => {
+test('background launcher reports a successful startup without exposing its bearer token', () => {
   const project = newProject();
   try {
     const result = spawnSync(process.execPath, [SERVER, '--background'], {
@@ -106,7 +106,14 @@ test('background launcher reports a successful startup using its compatible JSON
     const info = JSON.parse(result.stdout);
     assert.equal(typeof info.pid, 'number');
     assert.equal(typeof info.port, 'number');
-    assert.equal(typeof info.token, 'string');
+    assert.deepEqual(Object.keys(info).sort(), ['pid', 'port']);
+    const privateInfo = JSON.parse(fs.readFileSync(
+      path.join(project, '.impeccable', 'live', 'server.json'),
+      'utf8',
+    ));
+    assert.equal(typeof privateInfo.token, 'string');
+    assert.equal(result.stdout.includes(privateInfo.token), false);
+    assert.equal(result.stderr.includes(privateInfo.token), false);
     assert.equal(result.stderr, '');
   } finally {
     stopServer(project);
@@ -132,7 +139,14 @@ test('background launcher replaces a stale server record before reporting succes
     assert.equal(result.status, 0, result.stderr);
     const info = JSON.parse(result.stdout);
     assert.notEqual(info.pid, 2_147_483_647);
-    assert.notEqual(info.token, 'stale');
+    assert.deepEqual(Object.keys(info).sort(), ['pid', 'port']);
+    const privateInfo = JSON.parse(fs.readFileSync(
+      path.join(project, '.impeccable', 'live', 'server.json'),
+      'utf8',
+    ));
+    assert.notEqual(privateInfo.token, 'stale');
+    assert.equal(result.stdout.includes(privateInfo.token), false);
+    assert.equal(result.stderr.includes(privateInfo.token), false);
   } finally {
     stopServer(project);
     fs.rmSync(project, { recursive: true, force: true });

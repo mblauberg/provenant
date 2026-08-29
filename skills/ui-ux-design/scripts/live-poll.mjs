@@ -1,3 +1,4 @@
+// Modified from Impeccable for this harness; see the repository THIRD_PARTY_NOTICES.md.
 /**
  * CLI client for the live variant mode poll/reply protocol.
  *
@@ -176,9 +177,9 @@ Options:
 
     // Second signal path: stderr banner in case the agent parses stdout
     // JSON but skips nested fields. One line is enough — the full checklist
-    // is in reference/live.md.
+    // is in references/live.md.
     if (event._acceptResult?.carbonize === true) {
-      process.stderr.write('\n⚠ Carbonize cleanup REQUIRED before next poll. After cleanup, run live-complete.mjs --id ' + event.id + '. See reference/live.md "Required after accept".\n\n');
+      process.stderr.write('\n⚠ Carbonize cleanup REQUIRED before next poll. After cleanup, run live-complete.mjs --id ' + event.id + '. See references/live.md "Required after accept".\n\n');
     }
 
     // Print the event as JSON — the agent reads this from stdout

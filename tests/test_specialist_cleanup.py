@@ -13,7 +13,7 @@ def _text(relative: str) -> str:
 
 
 def test_live_cleanup_requires_exact_run_owned_process_identity() -> None:
-    live = _text("skills/ui-ux-design/reference/live.md")
+    live = _text("skills/ui-ux-design/references/live.md")
     cleanup = " ".join(live[live.index("## Exit"):live.index("## Cleanup")].split())
     assert "exact background-task handle returned by this run" in cleanup
     assert "run-owned PID plus its command and start identity" in cleanup

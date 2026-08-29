@@ -1,3 +1,4 @@
+// Modified from Impeccable for this harness; see the repository THIRD_PARTY_NOTICES.md.
 /**
  * CLI entry point: prepare everything needed to enter the live variant poll loop.
  *
@@ -13,7 +14,7 @@
  *   - Enter the poll loop: `node live-poll.mjs`
  *
  * Usage:
- *   node live.mjs                   # Prepare everything, print JSON, exit
+ *   node live.mjs # Prepare within the active implementation lifecycle
  *   node live.mjs --help
  */
 
@@ -33,21 +34,21 @@ async function liveCli() {
   if (args.includes('--help') || args.includes('-h')) {
     console.log(`Usage: node live.mjs
 
-Prepare everything for live variant mode in a single command:
+Prepare everything for live variant mode within the active implementation lifecycle:
   - Checks .impeccable/live/config.json (required, created once per project)
   - Starts (or reuses) the live server in the background
   - Injects the browser script tag
   - Reads PRODUCT.md / DESIGN.md for project context
 
-On success, prints a JSON blob with:
-  { ok, serverPort, serverToken, pageFile, hasContext, context }
+On success, prints a JSON blob with non-secret server and project context.
+The bearer token remains only in private .impeccable/live/server.json state.
 
 On config_missing, prints:
   { ok: false, error: "config_missing", configPath, hint }
 
 The agent should then:
-  1. If config_missing, create the config and re-run this script
-  2. Optionally open the project's dev/preview URL in the browser (see reference/live.md—not serverPort)
+  1. If config_missing, create the config within the authorised project paths and re-run
+  2. Optionally open the project's dev/preview URL in the browser (see references/live.md—not serverPort)
   3. Enter the poll loop: node live-poll.mjs`);
     process.exit(0);
   }
@@ -79,17 +80,21 @@ The agent should then:
   }
 
   // 3. Inject the script tag at the current port
-  const injectOut = runScript('live-inject.mjs', [
+  const injectExecution = runScriptResult('live-inject.mjs', [
     '--port', String(serverInfo.port),
     '--token', String(serverInfo.token || ''),
   ]);
-  const injectResult = safeParse(injectOut);
+  const injectResult = safeParse(injectExecution.stdout) || safeParse(injectExecution.stderr);
   if (!injectResult || !injectResult.ok) {
+    const serverCleanup = serverInfo.startedByThisInvocation
+      ? await stopOwnedServer(serverInfo)
+      : 'not-owned';
     console.log(JSON.stringify({
       ok: false,
       error: 'inject_failed',
-      detail: injectResult || injectOut,
+      detail: injectResult || 'Live injection failed without a structured result',
       serverPort: serverInfo.port,
+      serverCleanup,
     }));
     process.exit(1);
   }
@@ -107,7 +112,6 @@ The agent should then:
   console.log(JSON.stringify({
     ok: true,
     serverPort: serverInfo.port,
-    serverToken: serverInfo.token,
     pageFiles: resolvedFiles,
     configDrift: drift,
     hasProduct: ctx.hasProduct,
@@ -255,18 +259,49 @@ function ensureServerRunning() {
     if (existing && existing.pid) {
       try {
         process.kill(existing.pid, 0); // throws if dead
-        return existing;
+        return { ...existing, startedByThisInvocation: false };
       } catch { /* stale PID file — the server script will clean it up */ }
     }
   } catch { /* no PID file */ }
 
   // Start a new server
   const result = runScriptResult('live-server.mjs', ['--background']);
-  const info = safeParse(result.stdout);
-  if (info) return info;
+  const publicInfo = safeParse(result.stdout);
+  if (publicInfo?.pid && publicInfo?.port) {
+    const privateInfo = readLiveServerInfo(process.cwd())?.info;
+    if (privateInfo?.pid === publicInfo.pid && privateInfo?.port === publicInfo.port) {
+      return { ...privateInfo, startedByThisInvocation: true };
+    }
+  }
   const failure = safeParse(result.stderr);
   if (failure) return { failure };
   return null;
+}
+
+
+async function stopOwnedServer(serverInfo) {
+  const current = readLiveServerInfo(process.cwd())?.info;
+  if (!current || current.pid !== serverInfo.pid || current.token !== serverInfo.token) {
+    return 'ownership-lost';
+  }
+  try {
+    const response = await fetch(
+      `http://127.0.0.1:${current.port}/stop?token=${encodeURIComponent(current.token)}`,
+    );
+    if (!response.ok) return 'failed';
+  } catch {
+    return 'failed';
+  }
+
+  const deadline = Date.now() + 2_000;
+  while (Date.now() < deadline) {
+    const stillCurrent = readLiveServerInfo(process.cwd())?.info;
+    if (!stillCurrent || stillCurrent.pid !== serverInfo.pid || stillCurrent.token !== serverInfo.token) {
+      return 'stopped';
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  return 'failed';
 }
 
 // ---------------------------------------------------------------------------

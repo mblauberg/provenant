@@ -1,0 +1,48 @@
+schema_version: 1
+target_skill: ui-ux-design
+components:
+  - id: impeccable-modified-distribution
+    origin: third-party
+    exact: [SKILL.md]
+    prefixes: [agents/, references/, scripts/]
+    exclude:
+      - scripts/modern-screenshot.umd.js
+      - scripts/contained-source.mjs
+      - scripts/live-server-startup.mjs
+    marker_required_exact:
+      - SKILL.md
+      - agents/openai.yaml
+      - scripts/live.mjs
+      - scripts/live-poll.mjs
+      - scripts/live-accept.mjs
+      - scripts/live-wrap.mjs
+      - scripts/live-inject.mjs
+      - scripts/live-server.mjs
+      - scripts/live-browser.js
+      - scripts/detector/cli/main.mjs
+      - scripts/detector/engines/browser/detect-url.mjs
+      - scripts/detector/node/file-system.mjs
+    marker_required_prefixes: [references/]
+    source_url: https://github.com/pbakaus/impeccable
+    source_ref: "upstream commit unavailable; first public local import a39c7b7e6db2778467e43f5ed3a05143c05c07dd"
+    licence: Apache-2.0
+    local_licence: LICENSES/impeccable-APACHE-2.0.txt
+    notice: NOTICE
+    modification: Renamed, consolidated, and modified for the Provenant harness; modified files carry a central-notice marker.
+  - id: modern-screenshot-runtime
+    origin: third-party
+    exact: [scripts/modern-screenshot.umd.js]
+    source_url: https://github.com/qq15725/modern-screenshot/tree/792d6db7411839c62940a6e930161f8e376e817f
+    source_ref: "v4.7.0 peeled commit 792d6db7411839c62940a6e930161f8e376e817f"
+    licence: MIT
+    local_licence: LICENSES/modern-screenshot-MIT.txt
+    notice: THIRD_PARTY_NOTICES.md
+    modification: Vendored browser bundle retained unmodified as a live-runtime dependency.
+  - id: harness-evaluation-contracts
+    origin: harness-original
+    prefixes: [evals/]
+    exact:
+      - scripts/contained-source.mjs
+      - scripts/live-server-startup.mjs
+      - tests/live-server-startup.test.mjs
+    description: Local routing, authority, disposition, and provenance fixtures; not upstream Impeccable expression or universal provider enforcement.

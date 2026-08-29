@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+import re
 import subprocess
 
 
@@ -111,14 +112,14 @@ def test_context_loader_matches_unusual_filename_case(tmp_path):
 
 
 def test_frontend_docs_do_not_claim_read_only_loader_mutates_legacy_context():
-    references = ROOT / "skills" / "ui-ux-design" / "reference"
+    references = ROOT / "skills" / "ui-ux-design" / "references"
     corpus = "\n".join(path.read_text() for path in references.glob("*.md")).lower()
     assert "auto-renamed legacy" not in corpus
     assert "loader auto-renamed" not in corpus
 
 
 def test_frontend_guidance_does_not_claim_a_universal_16px_minimum():
-    references = ROOT / "skills" / "ui-ux-design" / "reference"
+    references = ROOT / "skills" / "ui-ux-design" / "references"
     corpus = "\n".join(path.read_text() for path in references.glob("*.md"))
     for false_absolute in (
         "16px minimum",
@@ -131,6 +132,11 @@ def test_frontend_guidance_does_not_claim_a_universal_16px_minimum():
 
 
 def test_read_only_frontend_review_isolates_build_outputs():
-    review = (ROOT / "skills" / "ui-ux-design" / "reference" / "review.md").read_text()
-    assert "assigned isolated output/cache path" in review
-    assert "not tested" in review
+    review = (
+        ROOT / "skills" / "ui-ux-design" / "references" / "review.md"
+    ).read_text().lower()
+    assert "output/cache path" in review
+    assert "outside the protected tree" in review
+    assert {"tested", "failed", "not tested", "not applicable"}.issubset(
+        set(re.findall(r"`([^`]+)`", review))
+    )

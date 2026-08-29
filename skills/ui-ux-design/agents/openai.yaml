@@ -2,4 +2,4 @@
 interface:
   display_name: UI/UX Design
   short_description: Read-only UI/UX review by default; authorised design on request
-  default_prompt: Use $ui-ux-design to review this interface read-only by default and report tested/untested coverage; add explicit write authority (e.g. via $implement) to design, redesign, polish, or run live iteration.
+  default_prompt: Use $ui-ux-design. Infer intent from the whole request. Keep explicit reviews read-only; route a clear request to build, redesign, fix, polish, implement, or iterate live through the internal implementation lifecycle without asking the user for harness terminology.

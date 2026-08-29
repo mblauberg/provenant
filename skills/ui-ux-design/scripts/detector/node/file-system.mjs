@@ -1,3 +1,4 @@
+// Modified from Impeccable for this harness; see the repository THIRD_PARTY_NOTICES.md.
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -52,12 +53,19 @@ function resolveImport(specifier, fromDir, fileSet) {
   return null;
 }
 
-function buildImportGraph(files) {
+function buildImportGraph(files, { onReadError } = {}) {
   const fileSet = new Set(files);
   const graph = new Map();
 
   for (const file of files) {
-    const content = fs.readFileSync(file, 'utf-8');
+    let content;
+    try {
+      content = fs.readFileSync(file, 'utf-8');
+    } catch (error) {
+      graph.set(file, new Set());
+      onReadError?.(file, error);
+      continue;
+    }
     const dir = path.dirname(file);
     const imports = new Set();
 

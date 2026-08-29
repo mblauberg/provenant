@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// Modified from Impeccable for this harness; see the repository THIRD_PARTY_NOTICES.md.
 /**
  * Live variant mode server (self-contained, zero dependencies).
  *
@@ -563,9 +564,10 @@ function createRequestHandler({ detectScript, sessionPath, livePath }) {
         if (aborted) return;
         const absPath = path.join(state.sessionDir, eventId + '.png');
         try {
-          fs.writeFileSync(absPath, Buffer.concat(chunks));
+          fs.writeFileSync(absPath, Buffer.concat(chunks), { flag: 'wx', mode: 0o600 });
+          fs.chmodSync(absPath, 0o600);
         } catch (err) {
-          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.writeHead(err.code === 'EEXIST' ? 409 : 500, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: 'Write failed: ' + err.message }));
           return;
         }
@@ -896,7 +898,7 @@ Commands:
   stop --keep-inject   Stop the server only (leave the script tag in the HTML entry)
 
 Options:
-  --background  Start detached, print connection JSON to stdout, then exit
+  --background  Start detached, print non-secret process/port JSON, then exit
   --port=PORT   Use a specific port (default: auto-detect starting at 8400)
   --keep-inject Only with stop: skip live-inject.mjs --remove
   --help        Show this help
@@ -996,8 +998,9 @@ if (args.includes('--background')) {
         || info.pid !== previousInfo.pid
         || info.token !== previousInfo.token;
       if (info.pid !== process.pid && replacedPreviousRecord) {
-        // Output JSON so the agent can read port + token from stdout.
-        console.log(JSON.stringify(info));
+        // Bearer state stays in private server.json; terminal/transcript output
+        // receives only the non-secret process identity needed for startup.
+        console.log(JSON.stringify({ pid: info.pid, port: info.port }));
         process.exit(0);
       }
     } catch { /* not ready yet */ }
@@ -1049,8 +1052,7 @@ httpServer.listen(state.port, '127.0.0.1', () => {
   writeLiveServerInfo(process.cwd(), { pid: process.pid, port: state.port, token: state.token });
   const url = `http://localhost:${state.port}`;
   console.log(`\nImpeccable live server running on ${url}`);
-  console.log(`Token: ${state.token}\n`);
-  console.log(`Inject: <script src="${url}/live.js?token=${encodeURIComponent(state.token)}"><\/script>`);
+  console.log('Bearer state stored privately in .impeccable/live/server.json.');
   console.log(`Stop:   node ${path.basename(fileURLToPath(import.meta.url))} stop`);
 });
 

@@ -16,6 +16,8 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "skills" / "ui-ux-design" / "scripts"
 INJECT = SCRIPTS / "live-inject.mjs"
 SERVER = SCRIPTS / "live-server.mjs"
+WRAP = SCRIPTS / "live-wrap.mjs"
+ACCEPT = SCRIPTS / "live-accept.mjs"
 TOKEN = "11111111-1111-4111-8111-111111111111"
 
 
@@ -43,6 +45,113 @@ def _run_inject(project: Path, *args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
+def _run_wrap(project: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [
+            "node",
+            str(WRAP),
+            "--id",
+            "security-test",
+            "--count",
+            "1",
+            "--query",
+            "target",
+            *args,
+        ],
+        cwd=project,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+
+def _run_accept(project: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["node", str(ACCEPT), "--id", "security-test", *args],
+        cwd=project,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+
+def _write_wrapped_session(project: Path, *, with_variant: bool) -> Path:
+    page = project / "index.html"
+    page.write_text('<html><body><section class="target">original</section></body></html>\n')
+    wrapped = _run_wrap(project, "--file", "index.html")
+    assert wrapped.returncode == 0, wrapped.stderr
+    if with_variant:
+        marker = "<!-- Variants: insert below this line -->"
+        page.write_text(
+            page.read_text().replace(
+                marker,
+                marker
+                + '\n  <div data-impeccable-variant="1"><section class="target">accepted</section></div>',
+            )
+        )
+    return page
+
+
+def _run_contained_source_probe(project: Path, body: str) -> subprocess.CompletedProcess[str]:
+    module_url = (SCRIPTS / "contained-source.mjs").as_uri()
+    script = (
+        f"import {{ readContainedSource, replaceContainedSources }} from {json.dumps(module_url)};"
+        + body
+    )
+    return subprocess.run(
+        ["node", "--input-type=module", "-e", script, str(project)],
+        cwd=project,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_contained_source_batch_cleans_staged_files_if_later_staging_fails(tmp_path: Path) -> None:
+    first = tmp_path / "first.html"
+    second = tmp_path / "second.html"
+    first.write_text("first")
+    second.write_text("second")
+    result = _run_contained_source_probe(
+        tmp_path,
+        "const root=process.argv[1];"
+        "const first=readContainedSource(root,'first.html',{relativeOnly:true});"
+        "const second=readContainedSource(root,'second.html',{relativeOnly:true});"
+        "const bad={toString(){throw new Error('forced-stage-failure')}};"
+        "try{replaceContainedSources([{snapshot:first,content:'changed'},{snapshot:second,content:bad}]);}"
+        "catch(error){process.stdout.write(JSON.stringify({code:error.code}));process.exit(7)}",
+    )
+
+    assert result.returncode == 7
+    assert json.loads(result.stdout)["code"] == "source_replace_failed"
+    assert first.read_text() == "first"
+    assert second.read_text() == "second"
+    assert not list(tmp_path.glob(".*.tmp"))
+
+
+def test_contained_source_batch_rolls_back_prior_replacements_on_commit_failure(tmp_path: Path) -> None:
+    first = tmp_path / "first.html"
+    second = tmp_path / "second.html"
+    first.write_text("first")
+    second.write_text("second")
+    result = _run_contained_source_probe(
+        tmp_path,
+        "const root=process.argv[1];"
+        "const first=readContainedSource(root,'first.html',{relativeOnly:true});"
+        "const second=readContainedSource(root,'second.html',{relativeOnly:true});"
+        "try{replaceContainedSources([{snapshot:first,content:'changed-first'},"
+        "{snapshot:second,content:'changed-second'}],"
+        "{beforeReplace({index}){if(index===1)throw new Error('forced-commit-failure')}});}"
+        "catch(error){process.stdout.write(JSON.stringify({code:error.code}));process.exit(7)}",
+    )
+
+    assert result.returncode == 7
+    assert json.loads(result.stdout)["code"] == "source_replace_failed"
+    assert first.read_text() == "first"
+    assert second.read_text() == "second"
+    assert not list(tmp_path.glob(".*.tmp"))
+
+
 def test_live_wrap_does_not_execute_shell_syntax_from_project_filenames(
     tmp_path: Path,
 ) -> None:
@@ -68,7 +177,107 @@ def test_live_wrap_does_not_execute_shell_syntax_from_project_filenames(
     )
 
     assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["file"] == page.name
+    assert payload["startLine"] >= 1
+    assert payload["endLine"] >= payload["startLine"]
+    assert "impeccable-variants-start security-test" in page.read_text()
     assert not marker.exists()
+
+
+def test_live_mutation_help_discloses_project_relative_existing_file_boundary(
+    tmp_path: Path,
+) -> None:
+    wrap = _run_wrap(tmp_path, "--help")
+    inject = _run_inject(tmp_path, "--help")
+    assert wrap.returncode == 0
+    assert inject.returncode == 0
+    for output in (wrap.stdout, inject.stdout):
+        lowered = output.lower()
+        assert "project-relative" in lowered
+        assert "existing" in lowered
+        assert "regular file" in lowered
+
+
+@pytest.mark.parametrize("path_kind", ["absolute", "traversal", "symlink"])
+def test_live_wrap_rejects_targets_outside_project_before_any_write(
+    tmp_path: Path, path_kind: str
+) -> None:
+    outside = tmp_path.parent / f"{tmp_path.name}-{path_kind}-outside.html"
+    original = '<html><body><section class="target">outside</section></body></html>\n'
+    outside.write_text(original)
+
+    if path_kind == "absolute":
+        target = str(outside)
+    elif path_kind == "traversal":
+        target = f"../{outside.name}"
+    else:
+        link = tmp_path / "escape.html"
+        link.symlink_to(outside)
+        target = link.name
+
+    result = _run_wrap(tmp_path, "--file", target)
+
+    assert result.returncode != 0
+    assert json.loads(result.stderr)["error"] == "source_path_outside_project"
+    assert outside.read_text() == original
+
+
+@pytest.mark.parametrize("explicit", [True, False])
+def test_live_wrap_rejects_hard_linked_source_before_any_write(
+    tmp_path: Path, explicit: bool
+) -> None:
+    outside = tmp_path.parent / f"{tmp_path.name}-wrap-hardlink.html"
+    original = '<html><body><section class="target">outside</section></body></html>\n'
+    outside.write_text(original)
+    inside = tmp_path / "index.html"
+    os.link(outside, inside)
+
+    result = _run_wrap(tmp_path, *(["--file", "index.html"] if explicit else []))
+
+    assert result.returncode != 0
+    assert outside.read_text() == original
+    assert inside.read_text() == original
+
+
+@pytest.mark.parametrize("mode", ["insert", "remove"])
+def test_live_inject_rejects_hard_linked_source_for_every_mutation_mode(
+    tmp_path: Path, mode: str
+) -> None:
+    page = tmp_path / "index.html"
+    original = "<html><body>safe</body></html>\n"
+    page.write_text(original)
+    _write_config(tmp_path, ["index.html"])
+    if mode == "remove":
+        inserted = _run_inject(tmp_path, "--port", "8400", "--token", TOKEN)
+        assert inserted.returncode == 0, inserted.stderr
+    outside = tmp_path.parent / f"{tmp_path.name}-inject-{mode}-hardlink.html"
+    os.link(page, outside)
+    outside_before = outside.read_bytes()
+
+    args = ["--remove"] if mode == "remove" else ["--port", "8400", "--token", TOKEN]
+    result = _run_inject(tmp_path, *args)
+
+    assert result.returncode != 0
+    assert outside.read_bytes() == outside_before
+    assert page.read_bytes() == outside_before
+
+
+@pytest.mark.parametrize("mode", ["accept", "discard"])
+def test_live_accept_rejects_hard_linked_source_for_every_mutation_mode(
+    tmp_path: Path, mode: str
+) -> None:
+    page = _write_wrapped_session(tmp_path, with_variant=mode == "accept")
+    outside = tmp_path.parent / f"{tmp_path.name}-accept-{mode}-hardlink.html"
+    os.link(page, outside)
+    outside_before = outside.read_bytes()
+
+    args = ["--variant", "1"] if mode == "accept" else ["--discard"]
+    result = _run_accept(tmp_path, *args)
+
+    assert result.returncode != 0
+    assert outside.read_bytes() == outside_before
+    assert page.read_bytes() == outside_before
 
 
 def test_live_entrypoint_does_not_execute_shell_syntax_from_server_state(
@@ -179,7 +388,24 @@ def test_live_inject_preserves_authorised_insert_and_remove_workflow(tmp_path: P
     assert page.read_text() == original
 
 
-def test_live_entrypoint_passes_server_token_into_injected_script(tmp_path: Path) -> None:
+def test_live_inject_preflights_every_anchor_before_changing_any_file(tmp_path: Path) -> None:
+    good = tmp_path / "good.html"
+    bad = tmp_path / "bad.html"
+    good_original = "<html><body>good</body></html>\n"
+    bad_original = "<html><main>no body anchor</main></html>\n"
+    good.write_text(good_original)
+    bad.write_text(bad_original)
+    _write_config(tmp_path, ["good.html", "bad.html"])
+
+    result = _run_inject(tmp_path, "--port", "8400", "--token", TOKEN)
+
+    assert result.returncode != 0
+    assert json.loads(result.stderr)["error"] == "mutation_preflight_failed"
+    assert good.read_text() == good_original
+    assert bad.read_text() == bad_original
+
+
+def test_live_entrypoint_injects_private_server_token_without_logging_it(tmp_path: Path) -> None:
     page = tmp_path / "index.html"
     page.write_text("<html><body>safe</body></html>\n")
     _write_config(tmp_path, ["index.html"])
@@ -195,7 +421,12 @@ def test_live_entrypoint_passes_server_token_into_injected_script(tmp_path: Path
         assert result.returncode == 0, result.stderr
         payload = json.loads(result.stdout)
         assert payload["ok"] is True
-        assert f"/live.js?token={payload['serverToken']}" in page.read_text()
+        assert "serverToken" not in payload
+        private = json.loads((tmp_path / ".impeccable" / "live" / "server.json").read_text())
+        token = private["token"]
+        assert f"/live.js?token={token}" in page.read_text()
+        assert token not in result.stdout
+        assert token not in result.stderr
     finally:
         subprocess.run(
             ["node", str(SERVER), "stop"],
@@ -205,6 +436,69 @@ def test_live_entrypoint_passes_server_token_into_injected_script(tmp_path: Path
             text=True,
             timeout=10,
         )
+
+
+def test_live_entrypoint_stops_only_the_server_it_started_when_injection_fails(
+    tmp_path: Path,
+) -> None:
+    good = tmp_path / "good.html"
+    bad = tmp_path / "bad.html"
+    good.write_text("<html><body>good</body></html>\n")
+    bad.write_text("<html><main>bad anchor</main></html>\n")
+    _write_config(tmp_path, ["good.html", "bad.html"])
+
+    result = subprocess.run(
+        ["node", str(SCRIPTS / "live.mjs")],
+        cwd=tmp_path,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+
+    assert result.returncode != 0
+    payload = json.loads(result.stdout)
+    assert payload["error"] == "inject_failed"
+    assert payload["serverCleanup"] == "stopped"
+    state_path = tmp_path / ".impeccable" / "live" / "server.json"
+    deadline = time.monotonic() + 5
+    while state_path.exists() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert not state_path.exists()
+    assert "impeccable-live-start" not in good.read_text()
+
+
+def test_live_entrypoint_does_not_stop_a_preexisting_server_when_injection_fails(
+    tmp_path: Path,
+) -> None:
+    page = tmp_path / "index.html"
+    page.write_text("<html><main>no body anchor</main></html>\n")
+    _write_config(tmp_path, ["index.html"])
+
+    with LiveServer(tmp_path) as server:
+        result = subprocess.run(
+            ["node", str(SCRIPTS / "live.mjs")],
+            cwd=tmp_path,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        assert result.returncode != 0
+        payload = json.loads(result.stdout)
+        assert payload["serverCleanup"] == "not-owned"
+        assert _request(f"{server.base_url}/health")[0] == 200
+
+
+def test_live_server_foreground_logs_never_expose_its_bearer_token(tmp_path: Path) -> None:
+    server = LiveServer(tmp_path)
+    server.__enter__()
+    token = server.token
+    server.close()
+    assert server.process is not None
+    stdout, stderr = server.process.communicate(timeout=3)
+    assert token not in stdout
+    assert token not in stderr
 
 
 def _available_port() -> int:
@@ -313,6 +607,56 @@ def test_live_script_requires_token_and_never_echoes_it_to_cross_origin_callers(
         assert status == 204
         assert headers.get("Access-Control-Allow-Origin") == "http://localhost:5173"
         assert headers.get("Access-Control-Allow-Origin") != "*"
+
+
+def test_annotation_upload_refuses_an_existing_hard_link_without_changing_outside_bytes(
+    tmp_path: Path,
+) -> None:
+    with LiveServer(tmp_path) as server:
+        session_dirs = list((tmp_path / ".impeccable" / "live" / "annotations").glob("session-*"))
+        assert len(session_dirs) == 1
+        outside = tmp_path.parent / f"{tmp_path.name}-annotation-outside.png"
+        outside.write_bytes(b"outside")
+        os.link(outside, session_dirs[0] / "hard-link.png")
+
+        status, _, body = _request(
+            f"{server.base_url}/annotation?token={quote(server.token)}&eventId=hard-link",
+            method="POST",
+            body=b"replacement",
+            extra_headers={"Content-Type": "image/png"},
+        )
+
+        assert status in {409, 500}
+        assert "error" in json.loads(body)
+        assert outside.read_bytes() == b"outside"
+
+
+def test_live_serves_the_checked_in_detector_and_screenshot_asset_contracts(
+    tmp_path: Path,
+) -> None:
+    detector_path = SCRIPTS / "detector" / "detect-antipatterns-browser.js"
+    screenshot_path = SCRIPTS / "modern-screenshot.umd.js"
+    with LiveServer(tmp_path) as server:
+        status, headers, detector = _request(f"{server.base_url}/detect.js")
+        assert status == 200
+        assert headers.get_content_type() == "application/javascript"
+        assert detector == detector_path.read_text()
+
+        status, headers, screenshot = _request(
+            f"{server.base_url}/modern-screenshot.js"
+        )
+        assert status == 200
+        assert headers.get_content_type() == "application/javascript"
+        assert screenshot == screenshot_path.read_text()
+
+    for asset in (detector_path, screenshot_path):
+        checked = subprocess.run(
+            ["node", "--check", str(asset)],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        assert checked.returncode == 0, checked.stderr
 
 
 def test_source_endpoint_rejects_ancestor_sibling_prefix_and_symlink_escape(

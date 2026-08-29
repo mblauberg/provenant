@@ -1,3 +1,4 @@
+// Modified from Impeccable for this harness; see the repository THIRD_PARTY_NOTICES.md.
 /**
  * CLI helper: deterministic accept/discard of variant sessions.
  *
@@ -16,6 +17,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { isGeneratedFile } from './is-generated.mjs';
+import { readContainedSource, replaceContainedSource } from './contained-source.mjs';
 
 const EXTENSIONS = ['.html', '.jsx', '.tsx', '.vue', '.svelte', '.astro'];
 
@@ -64,7 +66,7 @@ Output (JSON):
     process.exit(0);
   }
 
-  const { file: targetFile, content, lines } = found;
+  const { file: targetFile, lines, snapshot } = found;
   const relFile = path.relative(process.cwd(), targetFile);
 
   // Bail if the session lives in a generated file. The agent manually wrote
@@ -82,15 +84,15 @@ Output (JSON):
   }
 
   if (isDiscard) {
-    const result = handleDiscard(id, lines, targetFile);
+    const result = handleDiscard(id, lines, targetFile, snapshot);
     console.log(JSON.stringify({ handled: true, file: relFile, carbonize: false, ...result }));
   } else {
-    const result = handleAccept(id, variantNum, lines, targetFile, paramValues);
+    const result = handleAccept(id, variantNum, lines, targetFile, paramValues, snapshot);
     // Single-line attention-grabber when cleanup is required. The full
-    // five-step checklist lives in reference/live.md (loaded once per
+    // checklist lives in references/live.md (loaded once per
     // session); repeating it per-event would waste tokens.
     if (result.carbonize) {
-      result.todo = 'REQUIRED before next poll: carbonize cleanup in ' + relFile + '. See reference/live.md "Required after accept".';
+      result.todo = 'REQUIRED before next poll: carbonize cleanup in ' + relFile + '. See references/live.md "Required after accept".';
     }
     console.log(JSON.stringify({ handled: true, file: relFile, ...result }));
   }
@@ -100,7 +102,7 @@ Output (JSON):
 // Discard
 // ---------------------------------------------------------------------------
 
-function handleDiscard(id, lines, targetFile) {
+function handleDiscard(id, lines, targetFile, snapshot) {
   const block = findMarkerBlock(id, lines);
   if (!block) return { handled: false, error: 'Markers not found' };
 
@@ -122,7 +124,7 @@ function handleDiscard(id, lines, targetFile) {
     ...restored,
     ...lines.slice(replaceRange.end + 1),
   ];
-  fs.writeFileSync(targetFile, newLines.join('\n'), 'utf-8');
+  replaceContainedSource(snapshot, newLines.join('\n'));
   return {};
 }
 
@@ -130,7 +132,7 @@ function handleDiscard(id, lines, targetFile) {
 // Accept
 // ---------------------------------------------------------------------------
 
-function handleAccept(id, variantNum, lines, targetFile, paramValues) {
+function handleAccept(id, variantNum, lines, targetFile, paramValues, snapshot) {
   const block = findMarkerBlock(id, lines);
   if (!block) return { handled: false, error: 'Markers not found' };
 
@@ -202,7 +204,7 @@ function handleAccept(id, variantNum, lines, targetFile, paramValues) {
     ...replacement,
     ...lines.slice(replaceRange.end + 1),
   ];
-  fs.writeFileSync(targetFile, newLines.join('\n'), 'utf-8');
+  replaceContainedSource(snapshot, newLines.join('\n'));
 
   return { carbonize: needsCarbonize };
 }
@@ -539,8 +541,9 @@ function findSessionFile(id, cwd) {
     if (!fs.existsSync(absDir)) continue;
     const result = searchDir(absDir, marker, seen, 0);
     if (result) {
-      const content = fs.readFileSync(result, 'utf-8');
-      return { file: result, content, lines: content.split('\n') };
+      const snapshot = readContainedSource(cwd, result);
+      const content = snapshot.bytes.toString('utf-8');
+      return { file: snapshot.path, content, lines: content.split('\n'), snapshot };
     }
   }
   return null;
@@ -589,7 +592,15 @@ function argVal(args, flag) {
 // Auto-execute when run directly
 const _running = process.argv[1];
 if (_running?.endsWith('live-accept.mjs') || _running?.endsWith('live-accept.mjs/')) {
-  acceptCli();
+  acceptCli().catch((error) => {
+    console.error(JSON.stringify({
+      handled: false,
+      error: error.code || 'accept_failed',
+      message: error.message,
+      ...(error.rollbackErrors ? { rollbackErrors: error.rollbackErrors } : {}),
+    }));
+    process.exit(1);
+  });
 }
 
 export { findMarkerBlock, extractOriginal, extractVariant, extractCss, deindentContent, detectCommentSyntax };

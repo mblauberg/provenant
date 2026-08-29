@@ -1,3 +1,4 @@
+// Modified from Impeccable for this harness; see the repository THIRD_PARTY_NOTICES.md.
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -102,7 +103,8 @@ async function detectCli() {
     if (arg === '-fast') return '--fast';
     return arg;
   });
-  if (args[0] === 'detect') args = args.slice(1);
+  const commandIndex = args.indexOf('detect');
+  if (commandIndex !== -1) args.splice(commandIndex, 1);
   const jsonMode = args.includes('--json');
   const helpMode = args.includes('--help');
   const fastMode = args.includes('--fast');
@@ -111,30 +113,58 @@ async function detectCli() {
   if (helpMode) { printUsage(); process.exit(0); }
 
   let allFindings = [];
+  const scanErrors = [];
+
+  const recordError = (target, error, fallbackCode = 'scan_failed') => {
+    const entry = {
+      target,
+      code: error?.code || fallbackCode,
+      message: error?.message || String(error),
+    };
+    scanErrors.push(entry);
+    if (!jsonMode) process.stderr.write(`Error: ${entry.message}\n`);
+  };
 
   if (!process.stdin.isTTY && targets.length === 0) {
     allFindings = await handleStdin();
   } else {
     const paths = targets.length > 0 ? targets : [process.cwd()];
     const urlTargetCount = paths.filter(target => /^https?:\/\//i.test(target)).length;
-    const browserDetector = urlTargetCount > 1 ? await createBrowserDetector() : null;
+    let browserDetector = null;
+    let browserSetupError = null;
+    if (urlTargetCount > 1) {
+      try {
+        browserDetector = await createBrowserDetector();
+      } catch (error) {
+        browserSetupError = error;
+      }
+    }
 
     try {
       for (const target of paths) {
         if (/^https?:\/\//i.test(target)) {
           try {
+            if (browserSetupError) throw browserSetupError;
             const scanner = browserDetector
               ? (url) => browserDetector.detectUrl(url)
               : (url) => detectUrl(url);
             allFindings.push(...await scanner(target));
-          } catch (e) { process.stderr.write(`Error: ${e.message}\n`); }
+          } catch (error) {
+            recordError(target, error);
+          }
           continue;
         }
 
         const resolved = path.resolve(target);
         let stat;
         try { stat = fs.statSync(resolved); }
-        catch { process.stderr.write(`Warning: cannot access ${target}\n`); continue; }
+        catch {
+          recordError(
+            target,
+            Object.assign(new Error(`Cannot access ${target}`), { code: 'target_unavailable' }),
+          );
+          continue;
+        }
 
         if (stat.isDirectory()) {
           // Check for framework dev server config (skip in JSON mode to avoid polluting output)
@@ -178,7 +208,17 @@ async function detectCli() {
           }
 
           // Build import graph for multi-file awareness
-          const graph = buildImportGraph(files);
+          const graphReadFailures = new Set();
+          const graph = buildImportGraph(files, {
+            onReadError(file) {
+              graphReadFailures.add(file);
+              const display = path.relative(resolved, file) || path.basename(file);
+              recordError(
+                display,
+                Object.assign(new Error(`Unable to read ${display}`), { code: 'graph_read_failed' }),
+              );
+            },
+          });
           // Build reverse map: file -> set of files that import it
           const importedByMap = new Map();
           for (const [importer, imports] of graph) {
@@ -189,12 +229,22 @@ async function detectCli() {
           }
 
           for (const file of files) {
+            if (graphReadFailures.has(file)) continue;
             const ext = path.extname(file).toLowerCase();
             let fileFindings;
-            if (!fastMode && HTML_EXTENSIONS.has(ext)) {
-              fileFindings = await detectHtml(file);
-            } else {
-              fileFindings = detectText(fs.readFileSync(file, 'utf-8'), file);
+            try {
+              if (!fastMode && HTML_EXTENSIONS.has(ext)) {
+                fileFindings = await detectHtml(file);
+              } else {
+                fileFindings = detectText(fs.readFileSync(file, 'utf-8'), file);
+              }
+            } catch {
+              const display = path.relative(resolved, file) || path.basename(file);
+              recordError(
+                display,
+                Object.assign(new Error(`Unable to scan ${display}`), { code: 'scan_failed' }),
+              );
+              continue;
             }
             // Annotate findings with import context
             const importers = importedByMap.get(file);
@@ -208,10 +258,17 @@ async function detectCli() {
           }
         } else if (stat.isFile()) {
           const ext = path.extname(resolved).toLowerCase();
-          if (!fastMode && HTML_EXTENSIONS.has(ext)) {
-            allFindings.push(...await detectHtml(resolved));
-          } else {
-            allFindings.push(...detectText(fs.readFileSync(resolved, 'utf-8'), resolved));
+          try {
+            if (!fastMode && HTML_EXTENSIONS.has(ext)) {
+              allFindings.push(...await detectHtml(resolved));
+            } else {
+              allFindings.push(...detectText(fs.readFileSync(resolved, 'utf-8'), resolved));
+            }
+          } catch {
+            recordError(
+              target,
+              Object.assign(new Error(`Unable to scan ${target}`), { code: 'scan_failed' }),
+            );
           }
         }
       }
@@ -220,6 +277,18 @@ async function detectCli() {
     }
   }
 
+  if (scanErrors.length > 0) {
+    if (jsonMode) {
+      process.stdout.write(JSON.stringify({
+        status: 'incomplete',
+        findings: allFindings,
+        errors: scanErrors,
+      }, null, 2) + '\n');
+    } else if (allFindings.length > 0) {
+      process.stderr.write(formatFindings(allFindings, false) + '\n');
+    }
+    process.exit(scanErrors.some(error => error.code === 'engine_unavailable') ? 3 : 1);
+  }
   if (allFindings.length > 0) {
     if (jsonMode) process.stdout.write(formatFindings(allFindings, true) + '\n');
     else process.stderr.write(formatFindings(allFindings, false) + '\n');
