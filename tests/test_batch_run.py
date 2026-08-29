@@ -31,8 +31,9 @@ def make_run(tmp_path: Path, name: str) -> Path:
 
 def attempt_diagnostics(run_dir: Path) -> str:
     evidence = []
-    for path in sorted((run_dir / "dispatch/tasks").glob("*/attempt-*/stderr.log")):
-        evidence.append(f"{path.relative_to(run_dir)}:\n{path.read_text(encoding='utf-8')}")
+    for name in ("adapter-receipt.json", "result.md", "stderr.log"):
+        for path in sorted((run_dir / "dispatch/tasks").glob(f"*/attempt-*/{name}")):
+            evidence.append(f"{path.relative_to(run_dir)}:\n{path.read_text(encoding='utf-8')}")
     return "\n".join(evidence)
 
 
