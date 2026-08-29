@@ -21,6 +21,7 @@ import { readContainedSource, replaceContainedSource } from './contained-source.
 import {
   findJsxSubtree,
   findMatchingJsxTag,
+  isOffsetInsideJavaScriptTemplate,
   scanJsxTags,
 } from './jsx-tag-scanner.mjs';
 
@@ -551,62 +552,6 @@ function findSessionFile(id, cwd) {
   return null;
 }
 
-function canStartJavaScriptLiteral(source, index) {
-  let before = index - 1;
-  while (before >= 0 && /\s/.test(source[before])) before -= 1;
-  if (before < 0 || /[=(:,\[{!&|?;+*%^~<>]/.test(source[before])) return true;
-  return /\b(?:await|case|from|return|throw|yield)\s*$/.test(source.slice(0, index));
-}
-
-function isInsideTemplateLiteral(source, offset) {
-  let mode = 'code';
-  let escaped = false;
-  for (let index = 0; index < offset; index += 1) {
-    const char = source[index];
-    const next = source[index + 1];
-    if (escaped) {
-      escaped = false;
-      continue;
-    }
-    if (mode === 'line-comment') {
-      if (char === '\n') mode = 'code';
-      continue;
-    }
-    if (mode === 'block-comment') {
-      if (char === '*' && next === '/') {
-        mode = 'code';
-        index += 1;
-      }
-      continue;
-    }
-    if (mode === 'single' || mode === 'double' || mode === 'template') {
-      if (char === '\\') {
-        escaped = true;
-      } else if ((mode === 'single' && char === "'")
-        || (mode === 'double' && char === '"')
-        || (mode === 'template' && char === '`')) {
-        mode = 'code';
-      }
-      continue;
-    }
-    if (char === '/' && next === '/') {
-      mode = 'line-comment';
-      index += 1;
-    } else if (char === '/' && next === '*') {
-      mode = 'block-comment';
-      index += 1;
-    } else if (char === '`') {
-      mode = 'template';
-    } else if ((char === "'" || char === '"')
-      && canStartJavaScriptLiteral(source, index)) {
-      mode = char === "'" ? 'single' : 'double';
-    } else if (char === '\\') {
-      escaped = true;
-    }
-  }
-  return mode === 'template';
-}
-
 function hasExecutableStartMarker(content, filePath, id) {
   const syntax = detectCommentSyntax(filePath);
   const marker = markerText('start', id, syntax);
@@ -615,7 +560,7 @@ function hasExecutableStartMarker(content, filePath, id) {
   for (const line of content.split('\n')) {
     const markerColumn = line.indexOf(marker);
     if (line.trim() === marker
-      && (!isJsx || !isInsideTemplateLiteral(content, offset + markerColumn))) {
+      && (!isJsx || !isOffsetInsideJavaScriptTemplate(content, offset + markerColumn))) {
       return true;
     }
     offset += line.length + 1;

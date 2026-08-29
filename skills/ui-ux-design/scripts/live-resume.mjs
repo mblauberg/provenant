@@ -31,8 +31,13 @@ export async function resumeCli() {
   }
 
   const pending = snapshot.pendingEvent || null;
+  const replyType = pending?.type === 'accept'
+    ? 'complete'
+    : pending?.type === 'discard'
+      ? 'discarded'
+      : 'done';
   const nextAction = pending
-    ? `Run live-poll.mjs, handle ${pending.type} ${pending.id}, then acknowledge with live-poll.mjs --reply ${pending.id} done.`
+    ? `Run live-poll.mjs, handle ${pending.type} ${pending.id}, then acknowledge with live-poll.mjs --reply ${pending.id} ${replyType}.`
     : snapshot.phase === 'carbonize_required'
       ? `Finish carbonize cleanup${snapshot.sourceFile ? ` in ${snapshot.sourceFile}` : ''}, then run live-complete.mjs --id ${snapshot.id}.`
       : snapshot.phase === 'accept_requested'

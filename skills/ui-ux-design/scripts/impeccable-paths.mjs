@@ -1,5 +1,6 @@
 // Modified from Impeccable for this harness; see the repository THIRD_PARTY_NOTICES.md.
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 
@@ -121,6 +122,65 @@ export function writeLiveServerInfo(cwd = process.cwd(), info) {
 export function removeLiveServerInfo(cwd = process.cwd()) {
   for (const filePath of [getLiveServerPath(cwd), getLegacyLiveServerPath(cwd)]) {
     try { fs.unlinkSync(filePath); } catch {}
+  }
+}
+
+export function writeLiveAgentServerInfo(directory, info) {
+  const metadata = fs.lstatSync(directory);
+  if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
+    throw new Error('Agent state directory must be a real directory');
+  }
+  const filePath = path.join(directory, 'agent.json');
+  fs.writeFileSync(filePath, JSON.stringify(info), {
+    encoding: 'utf8',
+    flag: 'wx',
+    mode: 0o600,
+  });
+  fs.chmodSync(filePath, 0o600);
+  return filePath;
+}
+
+export function readLiveAgentServerInfo(serverInfo) {
+  const filePath = serverInfo?.agentStatePath;
+  if (!path.isAbsolute(filePath || '') || path.basename(filePath) !== 'agent.json') {
+    throw new Error('Live agent state path is invalid');
+  }
+  const parent = path.dirname(filePath);
+  const parentMetadata = fs.lstatSync(parent);
+  const parentReal = fs.realpathSync.native(parent);
+  const tempReal = fs.realpathSync.native(os.tmpdir());
+  const relative = path.relative(tempReal, parentReal);
+  if (parentMetadata.isSymbolicLink()
+    || !parentMetadata.isDirectory()
+    || !path.basename(parentReal).startsWith('impeccable-live-')
+    || relative === '..'
+    || relative.startsWith(`..${path.sep}`)
+    || (typeof process.getuid === 'function' && parentMetadata.uid !== process.getuid())
+    || (parentMetadata.mode & 0o077) !== 0) {
+    throw new Error('Live agent state directory is unsafe');
+  }
+  if (!Number.isInteger(fs.constants.O_NOFOLLOW)) {
+    throw new Error('Live agent state requires O_NOFOLLOW support');
+  }
+  const descriptor = fs.openSync(filePath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+  try {
+    const metadata = fs.fstatSync(descriptor);
+    if (!metadata.isFile()
+      || metadata.nlink !== 1
+      || (typeof process.getuid === 'function' && metadata.uid !== process.getuid())
+      || (metadata.mode & 0o077) !== 0) {
+      throw new Error('Live agent state file is unsafe');
+    }
+    const info = JSON.parse(fs.readFileSync(descriptor, 'utf8'));
+    if (info?.pid !== serverInfo.pid
+      || info?.port !== serverInfo.port
+      || typeof info?.agentToken !== 'string'
+      || !info.agentToken) {
+      throw new Error('Live agent state does not match the server');
+    }
+    return info;
+  } finally {
+    fs.closeSync(descriptor);
   }
 }
 

@@ -652,6 +652,95 @@ def test_live_inject_preserves_authorised_insert_and_remove_workflow(tmp_path: P
     assert page.read_text() == original
 
 
+def test_live_inject_remove_ignores_template_marker_decoy_before_real_block(
+    tmp_path: Path,
+) -> None:
+    page = tmp_path / "App.tsx"
+    config_dir = tmp_path / ".impeccable" / "live"
+    config_dir.mkdir(parents=True)
+    (config_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "files": [page.name],
+                "insertAfter": "<main>",
+                "commentSyntax": "jsx",
+            }
+        )
+    )
+    block = "\n".join(
+        [
+            "{/* impeccable-live-start */}",
+            f'<script src="http://127.0.0.1:8400/live.js?token={TOKEN}"></script>',
+            "{/* impeccable-live-end */}",
+            "",
+        ]
+    )
+    decoy = "const fixture = `\n" + block + "`;\n"
+    page.write_text(decoy + block + "export const App = () => <main>safe</main>;\n")
+
+    removed = _run_inject(tmp_path, "--remove")
+
+    assert removed.returncode == 0, removed.stderr
+    assert page.read_text().startswith(decoy)
+    assert page.read_text().count("impeccable-live-start") == 1
+    assert "export const App" in page.read_text()
+
+
+def test_live_inject_remove_fails_closed_on_multiple_executable_blocks(
+    tmp_path: Path,
+) -> None:
+    page = tmp_path / "index.html"
+    _write_config(tmp_path, [page.name])
+    block = "\n".join(
+        [
+            "<!-- impeccable-live-start -->",
+            f'<script src="http://127.0.0.1:8400/live.js?token={TOKEN}"></script>',
+            "<!-- impeccable-live-end -->",
+            "",
+        ]
+    )
+    source = block + "<main>safe</main>\n" + block
+    page.write_text(source)
+
+    removed = _run_inject(tmp_path, "--remove")
+
+    assert removed.returncode != 0
+    assert json.loads(removed.stderr)["error"] == "live_marker_ambiguous"
+    assert page.read_text() == source
+
+
+def test_live_inject_remove_handles_stale_syntax_and_html_comment_decoys(
+    tmp_path: Path,
+) -> None:
+    page = tmp_path / "index.html"
+    config_dir = tmp_path / ".impeccable" / "live"
+    config_dir.mkdir(parents=True)
+    (config_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "files": [page.name],
+                "insertBefore": "</body>",
+                "commentSyntax": "jsx",
+            }
+        )
+    )
+    block = "\n".join(
+        [
+            "<!-- impeccable-live-start -->",
+            f'<script src="http://127.0.0.1:8400/live.js?token={TOKEN}"></script>',
+            "<!-- impeccable-live-end -->",
+            "",
+        ]
+    )
+    prefix = "<!-- docs mention <script but do not open raw text -->\n"
+    page.write_text(prefix + block + "<main>safe</main>\n")
+
+    removed = _run_inject(tmp_path, "--remove")
+
+    assert removed.returncode == 0, removed.stderr
+    assert page.read_text() == prefix + "<main>safe</main>\n"
+
+
 def test_live_runtime_http_urls_use_one_ipv4_loopback_origin() -> None:
     runtime_files = [
         path
@@ -791,6 +880,93 @@ def test_live_wrap_scans_nested_multiline_jsx_without_treating_strings_as_tags(
     assert result.stdout == "8"
 
 
+def test_live_wrap_ignores_module_level_jsx_decoys_before_the_real_target(
+    tmp_path: Path,
+) -> None:
+    page = tmp_path / "App.tsx"
+    source = "\n".join(
+        [
+            "const typed = identity<string>(value);",
+            "type Fn = <T>(value: T) => T;",
+            "const quoted = '<Card className=\"target\">quoted</Card>';",
+            "const templated = html`<Card className=\"target\">template</Card>`;",
+            "// <Card className=\"target\">line comment</Card>",
+            "/* <Card className=\"target\">block comment</Card> */",
+            "export const App = () => (",
+            "  <main>",
+            '    <p>It\'s "ready"</p>',
+            "    <Card className=\"target\">Real</Card>",
+            "  </main>",
+            ");",
+            "",
+        ]
+    )
+    page.write_text(source)
+
+    wrapped = _run_wrap(tmp_path, "--file", page.name, "--tag", "Card")
+
+    assert wrapped.returncode == 0, wrapped.stderr
+    result = page.read_text()
+    assert result.startswith(source.splitlines()[0] + "\n" + source.splitlines()[1] + "\n")
+    assert "quoted</Card>';" in result
+    assert "template</Card>`;" in result
+    assert "data-impeccable-variant=\"original\"" in result
+    assert "Real</Card>" in result
+
+
+@pytest.mark.parametrize(
+    ("filename", "prefix"),
+    [
+        (
+            "Component.svelte",
+            "{condition ? '<section class=\"target\">Example</section>' : ''}\n",
+        ),
+        (
+            "Page.astro",
+            "---\nconst docs = '<section class=\"target\">Example</section>';\n---\n",
+        ),
+    ],
+)
+def test_live_wrap_ignores_framework_script_expression_decoys(
+    tmp_path: Path, filename: str, prefix: str
+) -> None:
+    page = tmp_path / filename
+    page.write_text(prefix + '<section class="target">Real</section>\n')
+
+    wrapped = _run_wrap(tmp_path, "--file", page.name, "--tag", "section")
+
+    assert wrapped.returncode == 0, wrapped.stderr
+    result = page.read_text()
+    assert result.startswith(prefix)
+    assert "Example</section>" in result
+    assert "data-impeccable-variant=\"original\"" in result
+    assert "Real</section>" in result
+
+
+def test_live_wrap_ignores_html_raw_text_decoys_before_the_real_target(
+    tmp_path: Path,
+) -> None:
+    page = tmp_path / "index.html"
+    source = "\n".join(
+        [
+            '<script>const docs = \'<section class="target">Example</section>\';</script>',
+            '<!-- <section class="target">comment</section> -->',
+            '<section class="target">Real</section>',
+            "",
+        ]
+    )
+    page.write_text(source)
+
+    wrapped = _run_wrap(tmp_path, "--file", page.name, "--tag", "section")
+
+    assert wrapped.returncode == 0, wrapped.stderr
+    result = page.read_text()
+    assert result.startswith(source.splitlines()[0] + "\n")
+    assert "Example</section>" in result
+    assert "data-impeccable-variant=\"original\"" in result
+    assert "Real</section>" in result
+
+
 @pytest.mark.parametrize(
     ("lines", "start", "closing"),
     [
@@ -878,6 +1054,26 @@ def test_live_wrap_scans_nested_multiline_jsx_without_treating_strings_as_tags(
         ),
         (
             ['<Card>{void /}/.test(value)}</Card>'],
+            0,
+            0,
+        ),
+        (
+            ['<Card>{(() => { if (value) /}/.test(text); return <A/>; })()}</Card>'],
+            0,
+            0,
+        ),
+        (
+            ['<Card>{(() => { while (value) /}/.test(text); return <A/>; })()}</Card>'],
+            0,
+            0,
+        ),
+        (
+            ['<Card>{`outer ${`inner }`}`}</Card>'],
+            0,
+            0,
+        ),
+        (
+            ['<Card>{`outer ${value ? `<A>` : `<B>`}`}</Card>'],
             0,
             0,
         ),
@@ -1193,7 +1389,14 @@ def test_live_discard_fails_closed_when_session_structure_is_not_bound(
     assert "ORIGINAL_SECRET" in page.read_text()
 
 
-@pytest.mark.parametrize("opening", ["const fixture = `", "const fixture = html`"])
+@pytest.mark.parametrize(
+    "opening",
+    [
+        "const fixture = `",
+        "const fixture = html`",
+        "const backtickPattern = /`/;\nconst fixture = `",
+    ],
+)
 def test_live_discard_ignores_exact_session_scaffolds_inside_template_literals(
     tmp_path: Path, opening: str
 ) -> None:
@@ -1209,6 +1412,31 @@ def test_live_discard_ignores_exact_session_scaffolds_inside_template_literals(
             "  {/* impeccable-variants-end security-test */}",
             "</div>",
             "`;",
+            "",
+        ]
+    )
+    page.write_text(source)
+
+    completed = _run_accept(tmp_path, "--discard")
+
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(completed.stdout)["handled"] is False
+    assert page.read_text() == source
+
+
+def test_live_discard_ignores_scaffolds_inside_nested_template_literals(
+    tmp_path: Path,
+) -> None:
+    page = tmp_path / "component.tsx"
+    source = "\n".join(
+        [
+            "const fixture = `outer ${`inner",
+            '<div data-impeccable-variants="security-test">',
+            "  {/* impeccable-variants-start security-test */}",
+            '  <div data-impeccable-variant="original">literal content</div>',
+            "  {/* impeccable-variants-end security-test */}",
+            "</div>",
+            "`}`;",
             "",
         ]
     )
@@ -1354,9 +1582,17 @@ def test_live_entrypoint_injects_private_server_token_without_logging_it(tmp_pat
         assert "serverToken" not in payload
         private = json.loads((tmp_path / ".impeccable" / "live" / "server.json").read_text())
         token = private["token"]
+        project_state = (tmp_path / ".impeccable" / "live" / "server.json").read_text()
+        agent_state = Path(private["agentStatePath"])
+        agent_token = json.loads(agent_state.read_text())["agentToken"]
+        assert "agentToken" not in project_state
+        assert not agent_state.is_relative_to(tmp_path)
         assert f"/live.js?token={token}" in page.read_text()
+        assert agent_token not in page.read_text()
         assert token not in result.stdout
         assert token not in result.stderr
+        assert agent_token not in result.stdout
+        assert agent_token not in result.stderr
     finally:
         subprocess.run(
             ["node", str(SERVER), "stop"],
@@ -1424,11 +1660,14 @@ def test_live_server_foreground_logs_never_expose_its_bearer_token(tmp_path: Pat
     server = LiveServer(tmp_path)
     server.__enter__()
     token = server.token
+    agent_token = server.agent_token
     server.close()
     assert server.process is not None
     stdout, stderr = server.process.communicate(timeout=3)
     assert token not in stdout
     assert token not in stderr
+    assert agent_token not in stdout
+    assert agent_token not in stderr
 
 
 def _available_port() -> int:
@@ -1443,6 +1682,7 @@ class LiveServer:
         self.port = _available_port()
         self.process: subprocess.Popen[str] | None = None
         self.token = ""
+        self.agent_token = ""
         self.env = env
 
     def __enter__(self):
@@ -1463,6 +1703,9 @@ class LiveServer:
             try:
                 info = json.loads(info_path.read_text())
                 self.token = info["token"]
+                self.agent_token = json.loads(
+                    Path(info["agentStatePath"]).read_text()
+                )["agentToken"]
                 if info["port"] == self.port:
                     return self
             except (FileNotFoundError, json.JSONDecodeError, KeyError):
@@ -1680,7 +1923,7 @@ def test_live_event_token_never_reaches_poll_or_durable_journal(tmp_path: Path) 
         assert status == 200, body
 
         status, _, polled = _request(
-            f"{server.base_url}/poll?token={quote(server.token)}&timeout=1000&leaseMs=1000"
+            f"{server.base_url}/poll?token={quote(server.agent_token)}&timeout=1000&leaseMs=1000"
         )
         assert status == 200
         polled_payload = json.loads(polled)
@@ -1692,6 +1935,127 @@ def test_live_event_token_never_reaches_poll_or_durable_journal(tmp_path: Path) 
         assert journal.exists()
         assert server.token not in journal.read_text()
         assert screenshot_path not in journal.read_text()
+
+
+def test_browser_credential_cannot_complete_agent_work_and_errors_requeue(
+    tmp_path: Path,
+) -> None:
+    event_id = "deadbeef"
+    with LiveServer(tmp_path) as server:
+        event = {
+            "token": server.token,
+            "type": "accept",
+            "id": event_id,
+            "variantId": "1",
+        }
+        assert _request(
+            f"{server.base_url}/events",
+            method="POST",
+            body=json.dumps(event).encode(),
+            extra_headers={"Content-Type": "application/json"},
+        )[0] == 200
+
+        def reply(token: str, event_type: str) -> tuple[int, object, str]:
+            return _request(
+                f"{server.base_url}/poll",
+                method="POST",
+                body=json.dumps(
+                    {"token": token, "id": event_id, "type": event_type}
+                ).encode(),
+                extra_headers={"Content-Type": "application/json"},
+            )
+
+        assert reply(server.token, "complete")[0] == 401
+        assert reply(server.agent_token, "complete")[0] == 409
+
+        poll_url = (
+            f"{server.base_url}/poll?token={quote(server.agent_token)}"
+            "&timeout=1000&leaseMs=1000"
+        )
+        assert json.loads(_request(poll_url)[2])["id"] == event_id
+        assert reply(server.agent_token, "erorr")[0] == 400
+        assert reply(server.agent_token, "done")[0] == 409
+        assert reply(server.agent_token, "error")[0] == 200
+        assert json.loads(_request(poll_url)[2])["id"] == event_id
+        assert reply(server.agent_token, "complete")[0] == 200
+
+        status = json.loads(
+            _request(
+                f"{server.base_url}/status?token={quote(server.token)}"
+            )[2]
+        )
+        assert status["pendingEvents"] == []
+
+
+@pytest.mark.parametrize(
+    ("completion_args", "expected_phase"),
+    [([], "completed"), (["--error", "cleanup failed"], "agent_error")],
+)
+def test_carbonized_accept_can_finish_through_the_live_server(
+    tmp_path: Path, completion_args: list[str], expected_phase: str,
+) -> None:
+    event_id = "deadbeef"
+    with LiveServer(tmp_path) as server:
+        event = {
+            "token": server.token,
+            "type": "accept",
+            "id": event_id,
+            "variantId": "1",
+        }
+        assert _request(
+            f"{server.base_url}/events",
+            method="POST",
+            body=json.dumps(event).encode(),
+            extra_headers={"Content-Type": "application/json"},
+        )[0] == 200
+        poll_url = (
+            f"{server.base_url}/poll?token={quote(server.agent_token)}"
+            "&timeout=1000&leaseMs=1000"
+        )
+        assert json.loads(_request(poll_url)[2])["id"] == event_id
+        acknowledged = _request(
+            f"{server.base_url}/poll",
+            method="POST",
+            body=json.dumps(
+                {
+                    "token": server.agent_token,
+                    "id": event_id,
+                    "type": "agent_done",
+                    "data": {"carbonize": True},
+                }
+            ).encode(),
+            extra_headers={"Content-Type": "application/json"},
+        )
+        assert acknowledged[0] == 200, acknowledged[2]
+        status = json.loads(
+            _request(f"{server.base_url}/status?token={quote(server.token)}")[2]
+        )
+        assert status["pendingEvents"] == []
+        assert status["activeSessions"][0]["phase"] == "carbonize_required"
+
+        completed = subprocess.run(
+            [
+                "node",
+                str(SCRIPTS / "live-complete.mjs"),
+                "--id",
+                event_id,
+                *completion_args,
+            ],
+            cwd=tmp_path,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        assert completed.returncode == 0, completed.stderr
+        assert json.loads(completed.stdout)["phase"] == expected_phase
+        status = json.loads(
+            _request(f"{server.base_url}/status?token={quote(server.token)}")[2]
+        )
+        assert status["pendingEvents"] == []
+        if expected_phase == "completed":
+            assert status["activeSessions"] == []
+        else:
+            assert status["activeSessions"][0]["phase"] == "agent_error"
 
 
 def test_session_store_normalization_redacts_token_defensively(tmp_path: Path) -> None:
@@ -1771,7 +2135,7 @@ def test_live_poll_rejects_malformed_timeout_and_lease_values(
         )
         assert status == 200, body
         status, _, body = _request(
-            f"{server.base_url}/poll?token={quote(server.token)}&{query}"
+            f"{server.base_url}/poll?token={quote(server.agent_token)}&{query}"
         )
 
         assert status == 400
@@ -1909,6 +2273,109 @@ def test_live_session_store_rejects_linked_state_files(
 
     assert result.returncode != 0
     assert outside.read_text() == "outside-safe"
+
+
+def test_live_session_store_rejects_a_post_construction_parent_swap(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    outside = tmp_path / "outside-state"
+    project.mkdir()
+    outside.mkdir()
+    module_url = (SCRIPTS / "live-session-store.mjs").as_uri()
+    script = (
+        "import fs from 'node:fs';"
+        f"import {{ createLiveSessionStore }} from {json.dumps(module_url)};"
+        "const store=createLiveSessionStore({cwd:process.argv[1]});"
+        "fs.renameSync(store.rootDir,store.rootDir+'-moved');"
+        "fs.symlinkSync(process.argv[2],store.rootDir,'dir');"
+        "try{store.appendEvent({id:'deadbeef',type:'accept',variantId:'1'})}"
+        "catch(error){process.stdout.write(error.code);process.exit(7)}"
+    )
+
+    result = subprocess.run(
+        [
+            "node",
+            "--input-type=module",
+            "-e",
+            script,
+            str(project),
+            str(outside),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 7
+    assert result.stdout == "live_state_root_invalid"
+    assert not list(outside.iterdir())
+
+
+def test_live_session_store_ignores_a_symlinked_legacy_parent(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    outside = tmp_path / "outside-state"
+    project.mkdir()
+    outside.mkdir()
+    (outside / "deadbeef.jsonl").write_text(
+        json.dumps({"seq": 1, "id": "deadbeef", "type": "accept"}) + "\n"
+    )
+    legacy = project / ".impeccable-live"
+    legacy.mkdir()
+    (legacy / "sessions").symlink_to(outside, target_is_directory=True)
+    module_url = (SCRIPTS / "live-session-store.mjs").as_uri()
+    script = (
+        f"import {{ createLiveSessionStore }} from {json.dumps(module_url)};"
+        "const store=createLiveSessionStore({cwd:process.argv[1]});"
+        "process.stdout.write(JSON.stringify(store.listActiveSessions()));"
+    )
+
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script, str(project)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == []
+    assert not list((project / ".impeccable" / "live" / "sessions").iterdir())
+
+
+def test_live_session_store_rejects_a_post_construction_legacy_parent_swap(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    legacy = project / ".impeccable-live" / "sessions"
+    outside = tmp_path / "outside-state"
+    legacy.mkdir(parents=True)
+    outside.mkdir()
+    (legacy / "deadbeef.jsonl").write_text("")
+    (outside / "deadbeef.jsonl").write_text(
+        json.dumps({"seq": 1, "id": "deadbeef", "type": "accept"}) + "\n"
+    )
+    module_url = (SCRIPTS / "live-session-store.mjs").as_uri()
+    script = (
+        "import fs from 'node:fs';"
+        f"import {{ createLiveSessionStore }} from {json.dumps(module_url)};"
+        "const store=createLiveSessionStore({cwd:process.argv[1]});"
+        "fs.renameSync(store.legacyRootDir,store.legacyRootDir+'-moved');"
+        "fs.symlinkSync(process.argv[2],store.legacyRootDir,'dir');"
+        "try{store.getSnapshot('deadbeef')}"
+        "catch(error){process.stdout.write(error.code);process.exit(7)}"
+    )
+
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script, str(project), str(outside)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 7
+    assert result.stdout == "live_state_root_invalid"
 
 
 def test_live_serves_the_checked_in_detector_and_screenshot_asset_contracts(

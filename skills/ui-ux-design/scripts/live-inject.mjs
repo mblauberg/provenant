@@ -19,6 +19,10 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { resolveLiveConfigPath } from './impeccable-paths.mjs';
 import {
+  hasExecutableJsxMarkerAtOffset,
+  htmlLexicalContextAtOffset,
+} from './jsx-tag-scanner.mjs';
+import {
   readContainedSource,
   replaceContainedSources,
 } from './contained-source.mjs';
@@ -388,14 +392,39 @@ function insertTag(content, config, port, token) {
  */
 function removeTag(content, _syntax) {
   const patterns = [
-    /([ \t]*)<!--\s*impeccable-live-start\s*-->[\s\S]*?<!--\s*impeccable-live-end\s*-->[ \t]*\n/,
-    /([ \t]*)\{\/\*\s*impeccable-live-start\s*\*\/\}[\s\S]*?\{\/\*\s*impeccable-live-end\s*\*\/\}[ \t]*\n/,
+    {
+      syntax: 'jsx',
+      pattern: /([ \t]*)\{\/\* impeccable-live-start \*\/\}\r?\n[ \t]*<script src="http:\/\/127\.0\.0\.1:([0-9]{1,5})\/live\.js\?token=([0-9a-f-]+)"><\/script>\r?\n[ \t]*\{\/\* impeccable-live-end \*\/\}[ \t]*(?:\r?\n|$)/gi,
+    },
+    {
+      syntax: 'html',
+      pattern: /([ \t]*)<!-- impeccable-live-start -->\r?\n[ \t]*<script src="http:\/\/127\.0\.0\.1:([0-9]{1,5})\/live\.js\?token=([0-9a-f-]+)"><\/script>\r?\n[ \t]*<!-- impeccable-live-end -->[ \t]*(?:\r?\n|$)/gi,
+    },
   ];
-  for (const pat of patterns) {
-    const next = content.replace(pat, '$1');
-    if (next !== content) return next;
+  const matches = patterns.flatMap(({ syntax, pattern }) => (
+    [...content.matchAll(pattern)].filter((match) => {
+      const port = Number(match[2]);
+      if (!Number.isInteger(port) || port < 1 || port > 65535 || !isValidServerToken(match[3])) {
+        return false;
+      }
+      const markerOffset = match.index + match[1].length;
+      return syntax === 'jsx'
+        ? hasExecutableJsxMarkerAtOffset(
+          content,
+          markerOffset,
+          '{/* impeccable-live-start */}'.length,
+        )
+        : htmlLexicalContextAtOffset(content, markerOffset) === 'markup';
+    })
+  ));
+  if (matches.length === 0) return content;
+  if (matches.length !== 1) {
+    const error = new Error('Multiple executable live marker blocks found');
+    error.code = 'live_marker_ambiguous';
+    throw error;
   }
-  return content;
+  const [match] = matches;
+  return content.slice(0, match.index) + match[1] + content.slice(match.index + match[0].length);
 }
 
 // ---------------------------------------------------------------------------

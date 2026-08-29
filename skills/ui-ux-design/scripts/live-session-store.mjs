@@ -12,39 +12,53 @@ const COMPLETED_PHASES = new Set(['completed', 'discarded']);
 export function createLiveSessionStore({ cwd = process.cwd(), sessionId } = {}) {
   ensureCanonicalLiveStateRoot(cwd);
   const rootDir = ensureCanonicalSessionRoot(cwd);
+  const rootIdentity = directoryIdentity(rootDir);
   const legacyRootDir = getLegacyLiveSessionsDir(cwd);
+  const legacyIdentity = optionalCanonicalDirectoryIdentity(legacyRootDir);
   const snapshotCache = new Map();
+  const assertRoot = () => assertDirectoryIdentity(rootDir, rootIdentity);
+  const assertLegacy = legacyIdentity
+    ? () => assertDirectoryIdentity(legacyRootDir, legacyIdentity)
+    : null;
 
   function loadCachedOrRebuild(id) {
+    assertRoot();
     const cached = snapshotCache.get(id);
     if (cached) return cached;
-    const journalPath = getReadableJournalPath(id);
-    const rebuilt = rebuildSnapshotFromJournal(journalPath, id);
+    const journal = getReadableJournalPath(id);
+    const rebuilt = rebuildSnapshotFromJournal(journal.path, id, journal.assertParent);
     snapshotCache.set(id, rebuilt);
     return rebuilt;
   }
 
   function getReadableJournalPath(id) {
+    assertRoot();
     const primary = getJournalPath(rootDir, id);
-    if (fs.existsSync(primary)) return primary;
+    if (fs.existsSync(primary)) return { path: primary, assertParent: assertRoot };
     const legacy = getJournalPath(legacyRootDir, id);
-    if (fs.existsSync(legacy)) return legacy;
-    return primary;
+    if (assertLegacy) {
+      assertLegacy();
+      if (fs.existsSync(legacy)) return { path: legacy, assertParent: assertLegacy };
+    }
+    return { path: primary, assertParent: assertRoot };
   }
 
   return {
     rootDir,
     legacyRootDir,
     appendEvent(event) {
+      assertRoot();
       const normalized = normalizeEvent(event, sessionId);
       const journalPath = getJournalPath(rootDir, normalized.id);
       const snapshotPath = getSnapshotPath(rootDir, normalized.id);
       const legacyJournalPath = getJournalPath(legacyRootDir, normalized.id);
-      if (!fs.existsSync(journalPath) && fs.existsSync(legacyJournalPath)) {
+      if (assertLegacy) assertLegacy();
+      if (assertLegacy && !fs.existsSync(journalPath) && fs.existsSync(legacyJournalPath)) {
         writeStateFile(
           journalPath,
-          readStateFile(legacyJournalPath),
+          readStateFile(legacyJournalPath, assertLegacy),
           fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL,
+          assertRoot,
         );
       }
       const prior = loadCachedOrRebuild(normalized.id);
@@ -60,25 +74,30 @@ export function createLiveSessionStore({ cwd = process.cwd(), sessionId } = {}) 
         journalPath,
         JSON.stringify(entry) + '\n',
         fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_APPEND,
+        assertRoot,
       );
       const next = applyEvent(prior.snapshot, entry, prior.diagnostics);
       snapshotCache.set(normalized.id, { snapshot: next, diagnostics: next.diagnostics || [], nextSeq: seq + 1 });
-      writeSnapshot(snapshotPath, next);
+      writeSnapshot(snapshotPath, next, assertRoot);
       return next;
     },
     getSnapshot(id = sessionId, opts = {}) {
       if (!id) throw new Error('session id required');
-      const journalPath = getReadableJournalPath(id);
+      assertRoot();
+      const journal = getReadableJournalPath(id);
       const snapshotPath = getSnapshotPath(rootDir, id);
-      const rebuilt = rebuildSnapshotFromJournal(journalPath, id);
+      const rebuilt = rebuildSnapshotFromJournal(journal.path, id, journal.assertParent);
       snapshotCache.set(id, rebuilt);
-      writeSnapshot(snapshotPath, rebuilt.snapshot);
+      writeSnapshot(snapshotPath, rebuilt.snapshot, assertRoot);
       if (!opts.includeCompleted && COMPLETED_PHASES.has(rebuilt.snapshot.phase)) return null;
       return rebuilt.snapshot;
     },
     listActiveSessions() {
+      assertRoot();
       const ids = new Set();
-      for (const dir of [legacyRootDir, rootDir]) {
+      const directories = assertLegacy ? [legacyRootDir, rootDir] : [rootDir];
+      for (const dir of directories) {
+        if (dir === legacyRootDir) assertLegacy();
         if (!fs.existsSync(dir)) continue;
         for (const name of fs.readdirSync(dir)) {
           if (name.endsWith('.jsonl')) ids.add(name.slice(0, -'.jsonl'.length));
@@ -113,8 +132,46 @@ function ensureCanonicalSessionRoot(cwd) {
   return rootDir;
 }
 
-function readStateFile(filePath) {
-  const descriptor = openStateFile(filePath, fs.constants.O_RDONLY);
+function directoryIdentity(directory) {
+  const metadata = fs.lstatSync(directory);
+  return { dev: metadata.dev, ino: metadata.ino };
+}
+
+function optionalCanonicalDirectoryIdentity(directory) {
+  try {
+    const metadata = fs.lstatSync(directory);
+    if (metadata.isSymbolicLink()
+      || !metadata.isDirectory()
+      || fs.realpathSync.native(directory) !== path.resolve(directory)) {
+      return null;
+    }
+    return { dev: metadata.dev, ino: metadata.ino };
+  } catch {
+    return null;
+  }
+}
+
+function assertDirectoryIdentity(directory, expected) {
+  try {
+    const metadata = fs.lstatSync(directory);
+    if (metadata.isSymbolicLink()
+      || !metadata.isDirectory()
+      || fs.realpathSync.native(directory) !== path.resolve(directory)
+      || metadata.dev !== expected.dev
+      || metadata.ino !== expected.ino) {
+      throw new Error('session state root identity changed');
+    }
+  } catch (cause) {
+    const error = new Error('live_state_root_invalid: session state root identity changed', {
+      cause,
+    });
+    error.code = 'live_state_root_invalid';
+    throw error;
+  }
+}
+
+function readStateFile(filePath, assertParent) {
+  const descriptor = openStateFile(filePath, fs.constants.O_RDONLY, assertParent);
   try {
     return fs.readFileSync(descriptor, 'utf8');
   } finally {
@@ -122,9 +179,9 @@ function readStateFile(filePath) {
   }
 }
 
-function writeStateFile(filePath, content, flags) {
+function writeStateFile(filePath, content, flags, assertParent) {
   const truncate = (flags & fs.constants.O_TRUNC) !== 0;
-  const descriptor = openStateFile(filePath, flags & ~fs.constants.O_TRUNC);
+  const descriptor = openStateFile(filePath, flags & ~fs.constants.O_TRUNC, assertParent);
   try {
     if (truncate) fs.ftruncateSync(descriptor, 0);
     fs.writeFileSync(descriptor, content, 'utf8');
@@ -133,19 +190,23 @@ function writeStateFile(filePath, content, flags) {
   }
 }
 
-function openStateFile(filePath, flags) {
+function openStateFile(filePath, flags, assertParent) {
   if (!Number.isInteger(fs.constants.O_NOFOLLOW)) {
     throw new Error('State-file writes require O_NOFOLLOW support');
   }
+  assertParent?.();
   const descriptor = fs.openSync(filePath, flags | fs.constants.O_NOFOLLOW, 0o600);
-  const metadata = fs.fstatSync(descriptor);
-  if (!metadata.isFile() || metadata.nlink !== 1) {
-    fs.closeSync(descriptor);
+  try {
+    assertParent?.();
+    const metadata = fs.fstatSync(descriptor);
+    if (metadata.isFile() && metadata.nlink === 1) return descriptor;
     const error = new Error('Session state file must be a single-link regular file');
     error.code = 'live_state_file_invalid';
     throw error;
+  } catch (error) {
+    fs.closeSync(descriptor);
+    throw error;
   }
-  return descriptor;
 }
 
 function normalizeEvent(event, fallbackId) {
@@ -197,13 +258,13 @@ function baseSnapshot(id) {
   };
 }
 
-function rebuildSnapshotFromJournal(journalPath, id) {
+function rebuildSnapshotFromJournal(journalPath, id, assertParent) {
   let snapshot = baseSnapshot(id);
   const diagnostics = [];
   let nextSeq = 1;
   if (!fs.existsSync(journalPath)) return { snapshot, diagnostics, nextSeq };
 
-  const lines = readStateFile(journalPath).split('\n');
+  const lines = readStateFile(journalPath, assertParent).split('\n');
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     if (!line.trim()) continue;
@@ -316,10 +377,11 @@ function toPendingEvent(event) {
   return pending;
 }
 
-function writeSnapshot(snapshotPath, snapshot) {
+function writeSnapshot(snapshotPath, snapshot, assertParent) {
   writeStateFile(
     snapshotPath,
     JSON.stringify(snapshot, null, 2) + '\n',
     fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_TRUNC,
+    assertParent,
   );
 }

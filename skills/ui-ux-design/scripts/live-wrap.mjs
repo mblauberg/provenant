@@ -20,7 +20,12 @@ import {
   replaceContainedSource,
   resolveContainedSourcePath,
 } from './contained-source.mjs';
-import { findJsxSubtree } from './jsx-tag-scanner.mjs';
+import {
+  findJsxSubtree,
+  hasExecutableJsxTagAtOffset,
+  htmlLexicalContextAtOffset,
+  javascriptLexicalContextAtOffset,
+} from './jsx-tag-scanner.mjs';
 
 const EXTENSIONS = ['.html', '.jsx', '.tsx', '.vue', '.svelte', '.astro'];
 
@@ -155,7 +160,7 @@ The agent should insert variant HTML at insertLine.`);
   if (text) {
     const candidates = [];
     for (const q of queries) {
-      const all = findAllElements(lines, q, tag, isJsx);
+      const all = findAllElements(lines, q, tag, isJsx, targetFile);
       for (const c of all) {
         if (!candidates.some((x) => x.startLine === c.startLine)) {
           candidates.push(c);
@@ -201,7 +206,7 @@ The agent should insert variant HTML at insertLine.`);
     }
   } else {
     for (const q of queries) {
-      match = findElement(lines, q, tag, isJsx);
+      match = findElement(lines, q, tag, isJsx, targetFile);
       if (match) break;
     }
     if (!match) {
@@ -518,7 +523,37 @@ function minLeadingSpaces(lines) {
   return min === Infinity ? 0 : min;
 }
 
-function findElement(lines, query, tag = null, isJsx = false) {
+function buildLineOffsets(lines) {
+  const offsets = [];
+  let offset = 0;
+  for (const line of lines) {
+    offsets.push(offset);
+    offset += line.length + 1;
+  }
+  return offsets;
+}
+
+function isExecutableOpener(lines, openerLine, source, offsets, isJsx, filePath) {
+  const opener = lines[openerLine].match(OPENER_RE);
+  if (!opener) return false;
+  const offset = offsets[openerLine] + opener.index;
+  if (isJsx) return hasExecutableJsxTagAtOffset(source, offset);
+  if (htmlLexicalContextAtOffset(source, offset) !== 'markup') return false;
+  const extension = path.extname(filePath || '').toLowerCase();
+  if (!['.astro', '.svelte', '.vue'].includes(extension)) return true;
+  try {
+    return javascriptLexicalContextAtOffset(
+      lines[openerLine],
+      opener.index,
+    ) === 'code';
+  } catch {
+    return false;
+  }
+}
+
+function findElement(lines, query, tag = null, isJsx = false, filePath = '') {
+  const source = lines.join('\n');
+  const offsets = buildLineOffsets(lines);
   // Iterate all matches — the first substring hit isn't always the right one.
   for (let i = 0; i < lines.length; i++) {
     if (!lines[i].includes(query)) continue;
@@ -530,6 +565,7 @@ function findElement(lines, query, tag = null, isJsx = false) {
 
     const openerLine = findOpenerLine(lines, i, tag);
     if (openerLine === -1) continue;
+    if (!isExecutableOpener(lines, openerLine, source, offsets, isJsx, filePath)) continue;
 
     const endLine = findClosingLine(lines, openerLine, { isJsx });
     return { startLine: openerLine, endLine };
@@ -545,9 +581,11 @@ function findElement(lines, query, tag = null, isJsx = false) {
  * first-match silently lands on the wrong branch. Returning all matches lets
  * the caller narrow by textContent or fail with a structured ambiguity error.
  */
-function findAllElements(lines, query, tag = null, isJsx = false) {
+function findAllElements(lines, query, tag = null, isJsx = false, filePath = '') {
   const out = [];
   const seen = new Set();
+  const source = lines.join('\n');
+  const offsets = buildLineOffsets(lines);
   for (let i = 0; i < lines.length; i++) {
     if (!lines[i].includes(query)) continue;
     const stripped = lines[i].trim();
@@ -555,6 +593,7 @@ function findAllElements(lines, query, tag = null, isJsx = false) {
     if (lines[i].includes('data-impeccable-variant')) continue;
     const openerLine = findOpenerLine(lines, i, tag);
     if (openerLine === -1) continue;
+    if (!isExecutableOpener(lines, openerLine, source, offsets, isJsx, filePath)) continue;
     if (seen.has(openerLine)) continue; // multiple matches inside the same element
     seen.add(openerLine);
     const endLine = findClosingLine(lines, openerLine, { isJsx });

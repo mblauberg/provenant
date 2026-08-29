@@ -35,6 +35,7 @@ import {
   resolveLiveConfigPath,
   resolveDesignSidecarPath,
   writeLiveServerInfo,
+  writeLiveAgentServerInfo,
 } from './impeccable-paths.mjs';
 import {
   classifyStartupOutcome,
@@ -109,12 +110,14 @@ async function probeServerInfo(info, timeoutMs = 1_000) {
 
 const state = {
   token: null,
+  agentToken: null,
   port: null,
   sseClients: new Set(),   // SSE response objects (server→browser push)
   pendingEvents: [],        // browser events waiting for agent ack ({ event, leaseUntil })
   pendingPolls: [],         // agent poll callbacks waiting for browser events
   exitTimer: null,
   sessionDir: null,         // per-session tmp dir for annotation screenshots
+  agentStatePath: null,
   sessionStore: null,
   leaseTimer: null,
 };
@@ -158,11 +161,38 @@ function leaseEvent(entry, leaseMs) {
   return entry.event;
 }
 
+function findLeasedPendingEventIndex(id) {
+  return state.pendingEvents.findIndex((entry) => (
+    entry.event?.id === id && entry.leaseUntil > 0
+  ));
+}
+
+function isCompatibleAgentReply(event, message) {
+  if (!event) return false;
+  if (message.type === 'error') return true;
+  if (event.type === 'generate') return ['agent_done', 'done'].includes(message.type);
+  if (event.type === 'accept') {
+    return message.type === 'complete'
+      || (message.type === 'agent_done' && message.data?.carbonize === true);
+  }
+  if (event.type === 'discard') return ['discard', 'discarded'].includes(message.type);
+  return false;
+}
+
 function acknowledgePendingEvent(id) {
   if (!id) return false;
-  const idx = state.pendingEvents.findIndex((entry) => entry.event?.id === id);
+  const idx = findLeasedPendingEventIndex(id);
   if (idx === -1) return false;
   state.pendingEvents.splice(idx, 1);
+  scheduleLeaseFlush();
+  return true;
+}
+
+function releasePendingEvent(id) {
+  if (!id) return false;
+  const idx = findLeasedPendingEventIndex(id);
+  if (idx === -1) return false;
+  state.pendingEvents[idx].leaseUntil = 0;
   scheduleLeaseFlush();
   return true;
 }
@@ -878,7 +908,7 @@ function createRequestHandler({ detectScript, sessionPath, livePath }) {
 
 function handlePollGet(req, res, url) {
   const token = url.searchParams.get('token');
-  if (token !== state.token) {
+  if (token !== state.agentToken) {
     res.writeHead(401, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: 'Unauthorized' }));
     return;
@@ -935,12 +965,42 @@ function parseBoundedPositiveInteger(raw, fallback, maximum) {
 
 function handlePollPost(req, res) {
   readBoundedJsonBody(req, res, (msg) => {
-    if (msg.token !== state.token) {
+    if (msg.token !== state.agentToken) {
       res.writeHead(401, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'Unauthorized' }));
       return;
     }
-    acknowledgePendingEvent(msg.id);
+    if (!['agent_done', 'complete', 'discard', 'discarded', 'done', 'error'].includes(msg.type)) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Invalid agent reply type' }));
+      return;
+    }
+    const leasedIndex = findLeasedPendingEventIndex(msg.id);
+    if (leasedIndex !== -1
+      && !isCompatibleAgentReply(state.pendingEvents[leasedIndex].event, msg)) {
+      res.writeHead(409, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Reply type does not match the leased event' }));
+      return;
+    }
+    let matched = leasedIndex !== -1 && (msg.type === 'error'
+      ? releasePendingEvent(msg.id)
+      : acknowledgePendingEvent(msg.id));
+    if (!matched
+      && ['complete', 'error'].includes(msg.type)
+      && state.sessionStore
+      && msg.id) {
+      try {
+        matched = state.sessionStore.getSnapshot(msg.id, { includeCompleted: true })?.phase
+          === 'carbonize_required';
+      } catch {
+        matched = false;
+      }
+    }
+    if (!matched) {
+      res.writeHead(409, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'No matching leased event' }));
+      return;
+    }
     if (state.sessionStore && msg.id) {
       try {
         const eventType = msg.type === 'discard' || msg.type === 'discarded'
@@ -1114,8 +1174,8 @@ if (args.includes('--background')) {
     try {
       const { info } = readLiveServerInfo(process.cwd()) || {};
       if (info?.pid === child.pid && await probeServerInfo(info)) {
-        // Bearer state stays in private server.json; terminal/transcript output
-        // receives only the non-secret process identity needed for startup.
+        // Browser bearer state stays in server.json and the agent credential
+        // stays outside the project tree; stdout receives only process identity.
         console.log(JSON.stringify({ pid: info.pid, port: info.port }));
         process.exit(0);
       }
@@ -1161,6 +1221,7 @@ if (portArg) {
   }
 }
 state.token = randomUUID();
+state.agentToken = randomUUID();
 state.sessionStore = createLiveSessionStore({ cwd: process.cwd() });
 restorePendingEventsFromStore();
 state.port = portArg ? Number(portArg.slice('--port='.length)) : await findOpenPort();
@@ -1168,15 +1229,25 @@ state.port = portArg ? Number(portArg.slice('--port='.length)) : await findOpenP
 // Shutdown removes only this exact directory.
 state.sessionDir = fs.mkdtempSync(path.join(os.tmpdir(), 'impeccable-live-'));
 fs.chmodSync(state.sessionDir, 0o700);
+state.agentStatePath = writeLiveAgentServerInfo(state.sessionDir, {
+  pid: process.pid,
+  port: state.port,
+  agentToken: state.agentToken,
+});
 
 const { detectScript, sessionPath, livePath } = loadBrowserScripts();
 httpServer = http.createServer(createRequestHandler({ detectScript, sessionPath, livePath }));
 
 httpServer.listen(state.port, '127.0.0.1', () => {
-  writeLiveServerInfo(process.cwd(), { pid: process.pid, port: state.port, token: state.token });
+  writeLiveServerInfo(process.cwd(), {
+    pid: process.pid,
+    port: state.port,
+    token: state.token,
+    agentStatePath: state.agentStatePath,
+  });
   const url = `http://127.0.0.1:${state.port}`;
   console.log(`\nImpeccable live server running on ${url}`);
-  console.log('Bearer state stored privately in .impeccable/live/server.json.');
+  console.log('Browser credential stored in .impeccable/live/server.json; agent credential stored outside the project tree.');
   console.log(`Stop:   node ${path.basename(fileURLToPath(import.meta.url))} stop`);
 });
 

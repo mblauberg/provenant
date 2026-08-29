@@ -30,13 +30,46 @@ function skipLineComment(source, start) {
   return end === -1 ? source.length : end + 1;
 }
 
+function findMatchingOpenParen(source, closeIndex) {
+  const stack = [];
+  for (let index = 0; index <= closeIndex; index += 1) {
+    const char = source[index];
+    if (char === '"' || char === "'") {
+      index = skipQuoted(source, index, char) - 1;
+    } else if (char === '`') {
+      index = skipTemplateLiteral(source, index) - 1;
+    } else if (source.startsWith('/*', index)) {
+      index = skipBlockComment(source, index) - 1;
+    } else if (source.startsWith('//', index)) {
+      index = skipLineComment(source, index) - 1;
+    } else if (char === '/' && canStartRegexLiteral(source, index)) {
+      index = skipRegexLiteral(source, index) - 1;
+    } else if (char === '(') {
+      stack.push(index);
+    } else if (char === ')') {
+      const open = stack.pop();
+      if (index === closeIndex) return open ?? -1;
+    }
+  }
+  return -1;
+}
+
+function followsControlHeader(source, closeIndex) {
+  if (source[closeIndex] !== ')') return false;
+  const openIndex = findMatchingOpenParen(source, closeIndex);
+  if (openIndex < 0) return false;
+  const prefix = source.slice(0, openIndex).match(/([A-Za-z_$][A-Za-z0-9_$]*)\s*$/);
+  return ['for', 'if', 'while', 'with'].includes(prefix?.[1]);
+}
+
 function canStartRegexLiteral(source, start) {
   let before = start - 1;
   while (before >= 0 && /\s/.test(source[before])) before -= 1;
   if (before < 0 || /[=(:,\[{!&|?;+*%^~<>]/.test(source[before])) return true;
-  return /\b(?:await|case|delete|in|instanceof|return|throw|typeof|void|yield)\s*$/.test(
-    source.slice(0, start),
-  );
+  return followsControlHeader(source, before)
+    || /\b(?:await|case|delete|do|else|in|instanceof|return|throw|typeof|void|yield)\s*$/.test(
+      source.slice(0, start),
+    );
 }
 
 function skipRegexLiteral(source, start) {
@@ -61,6 +94,50 @@ function skipRegexLiteral(source, start) {
     }
   }
   throw unbalanced('Unterminated JavaScript regular expression');
+}
+
+function skipJavaScriptBracedExpression(source, start) {
+  let depth = 1;
+  for (let index = start; index < source.length;) {
+    const char = source[index];
+    if (char === '"' || char === "'") {
+      index = skipQuoted(source, index, char);
+    } else if (char === '`') {
+      index = skipTemplateLiteral(source, index);
+    } else if (source.startsWith('/*', index)) {
+      index = skipBlockComment(source, index);
+    } else if (source.startsWith('//', index)) {
+      index = skipLineComment(source, index);
+    } else if (char === '/' && canStartRegexLiteral(source, index)) {
+      index = skipRegexLiteral(source, index);
+    } else if (char === '{') {
+      depth += 1;
+      index += 1;
+    } else if (char === '}') {
+      depth -= 1;
+      index += 1;
+      if (depth === 0) return index;
+    } else {
+      index += 1;
+    }
+  }
+  throw unbalanced('Unterminated JavaScript template expression');
+}
+
+function skipTemplateLiteral(source, start) {
+  for (let index = start + 1; index < source.length;) {
+    const char = source[index];
+    if (char === '\\') {
+      index += 2;
+    } else if (char === '`') {
+      return index + 1;
+    } else if (char === '$' && source[index + 1] === '{') {
+      index = skipJavaScriptBracedExpression(source, index + 2);
+    } else {
+      index += 1;
+    }
+  }
+  throw unbalanced('Unterminated JavaScript template literal');
 }
 
 function skipHtmlComment(source, start) {
@@ -92,6 +169,13 @@ function looksLikeTypeScriptGenericCall(source, tag) {
   while (after < source.length && /\s/.test(source[after])) after += 1;
   if (source[after] === '('
     && (/,\s*>$/.test(tag.raw) || /\bextends\b/.test(tag.raw))) {
+    return true;
+  }
+  let before = tag.start - 1;
+  while (before >= 0 && /\s/.test(source[before])) before -= 1;
+  if (source[after] === '('
+    && /^[A-Z][A-Za-z0-9_$]*$/.test(tag.name)
+    && /[=({;,:]/.test(source[before] || '')) {
     return true;
   }
 
@@ -127,8 +211,12 @@ function scanTag(source, start) {
 
   while (index < source.length) {
     const char = source[index];
-    if (char === '"' || char === "'" || char === '`') {
+    if (char === '"' || char === "'") {
       index = skipQuoted(source, index, char);
+      continue;
+    }
+    if (char === '`') {
+      index = skipTemplateLiteral(source, index);
       continue;
     }
     if (braceDepth > 0 && source.startsWith('/*', index)) {
@@ -137,6 +225,13 @@ function scanTag(source, start) {
     }
     if (braceDepth > 0 && source.startsWith('//', index)) {
       index = skipLineComment(source, index);
+      continue;
+    }
+    if (braceDepth > 0
+      && char === '/'
+      && source[index - 1] !== '<'
+      && canStartRegexLiteral(source, index)) {
+      index = skipRegexLiteral(source, index);
       continue;
     }
     if (char === '{') {
@@ -169,6 +264,7 @@ function scanTag(source, start) {
 
 export function scanJsxTags(source, { htmlMode = false, stopAfterTag, stopWhen } = {}) {
   const tags = [];
+  const lexicalJsxStack = [];
   let expressionDepth = 0;
   let htmlRawTextTag = null;
   let index = 0;
@@ -178,23 +274,30 @@ export function scanJsxTags(source, { htmlMode = false, stopAfterTag, stopWhen }
       htmlRawTextTag = null;
     }
     const char = source[index];
+    const inJsxText = lexicalJsxStack.length > 0
+      && lexicalJsxStack.at(-1).expressionDepth === expressionDepth;
+    const inJavaScript = !htmlMode && !inJsxText;
     if (htmlMode && source.startsWith('<!--', index)) {
       index = skipHtmlComment(source, index);
       continue;
     }
-    if (expressionDepth > 0 && (char === '"' || char === "'" || char === '`')) {
+    if (inJavaScript && (char === '"' || char === "'")) {
       index = skipQuoted(source, index, char);
       continue;
     }
-    if (expressionDepth > 0 && source.startsWith('/*', index)) {
+    if (inJavaScript && char === '`') {
+      index = skipTemplateLiteral(source, index);
+      continue;
+    }
+    if (inJavaScript && source.startsWith('/*', index)) {
       index = skipBlockComment(source, index);
       continue;
     }
-    if (expressionDepth > 0 && source.startsWith('//', index)) {
+    if (inJavaScript && source.startsWith('//', index)) {
       index = skipLineComment(source, index);
       continue;
     }
-    if (expressionDepth > 0 && char === '/' && canStartRegexLiteral(source, index)) {
+    if (inJavaScript && char === '/' && canStartRegexLiteral(source, index)) {
       index = skipRegexLiteral(source, index);
       continue;
     }
@@ -213,8 +316,20 @@ export function scanJsxTags(source, { htmlMode = false, stopAfterTag, stopWhen }
     if (char === '<') {
       const tag = scanTag(source, index);
       if (tag) {
+        const sameDepthParent = lexicalJsxStack.at(-1)?.expressionDepth === expressionDepth;
+        const generic = !htmlMode
+          && !tag.closing
+          && !sameDepthParent
+          && looksLikeTypeScriptGenericCall(source, tag);
         tags.push(tag);
         if (stopAfterTag?.(tag, tags, { expressionDepth })) return tags;
+        if (!generic && !tag.selfClosing) {
+          if (tag.closing) {
+            if (lexicalJsxStack.at(-1)?.name === tag.name) lexicalJsxStack.pop();
+          } else {
+            lexicalJsxStack.push({ name: tag.name, expressionDepth });
+          }
+        }
         if (htmlMode
           && !tag.closing
           && !tag.selfClosing
@@ -229,6 +344,126 @@ export function scanJsxTags(source, { htmlMode = false, stopAfterTag, stopWhen }
   }
   if (expressionDepth !== 0) throw unbalanced('Unterminated JSX expression');
   return tags;
+}
+
+function scanTemplateForOffset(source, start, offset) {
+  for (let index = start + 1; index < source.length;) {
+    if (index >= offset) return { index, context: 'template', reachedOffset: true };
+    const char = source[index];
+    if (char === '\\') {
+      if (index + 1 >= offset) return { index: offset, context: 'template', reachedOffset: true };
+      index += 2;
+    } else if (char === '`') {
+      return { index: index + 1, context: 'code', reachedOffset: false };
+    } else if (char === '$' && source[index + 1] === '{') {
+      if (index + 2 > offset) return { index: offset, context: 'template', reachedOffset: true };
+      const nested = scanCodeForTemplateOffset(source, index + 2, offset, true);
+      if (nested.reachedOffset) return nested;
+      index = nested.index;
+    } else {
+      index += 1;
+    }
+  }
+  return { index: source.length, context: 'template', reachedOffset: offset <= source.length };
+}
+
+function scanCodeForTemplateOffset(source, start, offset, braced = false) {
+  let depth = braced ? 1 : 0;
+  for (let index = start; index < source.length;) {
+    if (index >= offset) return { index, context: 'code', reachedOffset: true };
+    const char = source[index];
+    let next = index + 1;
+    let skippedContext = 'code';
+    if (char === '"' || char === "'") {
+      next = skipQuoted(source, index, char);
+      skippedContext = 'string';
+    } else if (char === '`') {
+      const template = scanTemplateForOffset(source, index, offset);
+      if (template.reachedOffset) return template;
+      next = template.index;
+    } else if (source.startsWith('/*', index)) {
+      next = skipBlockComment(source, index);
+      skippedContext = 'comment';
+    } else if (source.startsWith('//', index)) {
+      next = skipLineComment(source, index);
+      skippedContext = 'comment';
+    } else if (char === '/' && canStartRegexLiteral(source, index)) {
+      next = skipRegexLiteral(source, index);
+      skippedContext = 'regex';
+    } else if (braced && char === '{') {
+      depth += 1;
+    } else if (braced && char === '}') {
+      depth -= 1;
+      if (depth === 0) return { index: index + 1, context: 'code', reachedOffset: false };
+    }
+    if (next > offset) return { index: offset, context: skippedContext, reachedOffset: true };
+    index = next;
+  }
+  return { index: source.length, context: 'code', reachedOffset: offset <= source.length };
+}
+
+export function isOffsetInsideJavaScriptTemplate(source, offset) {
+  if (!Number.isInteger(offset) || offset < 0 || offset > source.length) return false;
+  return scanCodeForTemplateOffset(source, 0, offset).context === 'template';
+}
+
+export function javascriptLexicalContextAtOffset(source, offset) {
+  if (!Number.isInteger(offset) || offset < 0 || offset > source.length) return 'invalid';
+  return scanCodeForTemplateOffset(source, 0, offset).context;
+}
+
+export function htmlLexicalContextAtOffset(source, offset) {
+  if (!Number.isInteger(offset) || offset < 0 || offset > source.length) return 'invalid';
+  let rawTextTag = null;
+  for (let index = 0; index < source.length && index < offset;) {
+    if (rawTextTag) {
+      const close = findHtmlRawTextClose(source, rawTextTag, index);
+      if (close >= offset) return 'raw-text';
+      index = close;
+      rawTextTag = null;
+      continue;
+    }
+    if (source.startsWith('<!--', index)) {
+      const end = skipHtmlComment(source, index);
+      if (end > offset) return 'comment';
+      index = end;
+      continue;
+    }
+    if (source[index] === '<') {
+      const tag = scanTag(source, index);
+      if (tag) {
+        if (!tag.closing
+          && !tag.selfClosing
+          && HTML_RAW_TEXT_TAGS.has(tag.name.toLowerCase())) {
+          rawTextTag = tag.name;
+        }
+        index = tag.end;
+        continue;
+      }
+    }
+    index += 1;
+  }
+  return rawTextTag ? 'raw-text' : 'markup';
+}
+
+export function hasExecutableJsxTagAtOffset(source, offset) {
+  if (!Number.isInteger(offset) || offset < 0 || offset >= source.length) return false;
+  let found = false;
+  scanJsxTags(source, {
+    stopAfterTag(tag) {
+      if (tag.start < offset) return false;
+      found = tag.start === offset;
+      return true;
+    },
+  });
+  return found;
+}
+
+export function hasExecutableJsxMarkerAtOffset(source, offset, markerLength) {
+  if (!Number.isInteger(markerLength) || markerLength < 1) return false;
+  const sentinel = '<ImpeccableLiveMarker />';
+  const probe = source.slice(0, offset) + sentinel + source.slice(offset + markerLength);
+  return hasExecutableJsxTagAtOffset(probe, offset);
 }
 
 export function findJsxSubtree(source, predicate, { strictNesting = true } = {}) {

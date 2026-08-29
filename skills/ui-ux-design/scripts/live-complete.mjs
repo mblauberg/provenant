@@ -5,7 +5,10 @@
  */
 
 import { createLiveSessionStore } from './live-session-store.mjs';
-import { readLiveServerInfo } from './impeccable-paths.mjs';
+import {
+  readLiveAgentServerInfo,
+  readLiveServerInfo,
+} from './impeccable-paths.mjs';
 
 function parseArgs(argv) {
   const out = { status: 'complete' };
@@ -36,6 +39,15 @@ export async function completeCli() {
     console.log(JSON.stringify({ ok: true, id: args.id, phase: snapshot?.phase || args.status, snapshot }, null, 2));
     return;
   }
+  if (serverResult && !serverResult.unavailable) {
+    console.error(JSON.stringify({
+      ok: false,
+      error: 'live_completion_rejected',
+      status: serverResult.status,
+      message: serverResult.message,
+    }));
+    process.exit(1);
+  }
 
   const store = createLiveSessionStore({ cwd: process.cwd(), sessionId: args.id });
   const event = args.status === 'discarded'
@@ -58,19 +70,27 @@ async function completeThroughServer(info, args) {
       ? 'error'
       : 'complete';
   try {
+    const agentToken = readLiveAgentServerInfo(info).agentToken;
     const res = await fetch(`http://127.0.0.1:${info.port}/poll`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token: info.token, id: args.id, type, message: args.message }),
+      body: JSON.stringify({ token: agentToken, id: args.id, type, message: args.message }),
     });
-    if (!res.ok) return null;
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      return { ok: false, status: res.status, message: body.error || res.statusText };
+    }
     return await res.json();
-  } catch {
-    return null;
+  } catch (error) {
+    if (error?.cause?.code === 'ECONNREFUSED') return { unavailable: true };
+    return { ok: false, message: error.message };
   }
 }
 
 const _running = process.argv[1];
 if (_running?.endsWith('live-complete.mjs') || _running?.endsWith('live-complete.mjs/')) {
-  completeCli();
+  completeCli().catch((error) => {
+    console.error(JSON.stringify({ ok: false, error: 'live_completion_failed', message: error.message }));
+    process.exit(1);
+  });
 }

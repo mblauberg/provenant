@@ -13,7 +13,10 @@ import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { completionAckForAcceptResult, completionTypeForAcceptResult } from './live-completion.mjs';
-import { readLiveServerInfo } from './impeccable-paths.mjs';
+import {
+  readLiveAgentServerInfo,
+  readLiveServerInfo,
+} from './impeccable-paths.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const POLL_COMMAND = `node ${JSON.stringify(fileURLToPath(import.meta.url))}`;
@@ -71,6 +74,13 @@ Options:
 
   const info = readServerInfo();
   const base = `http://127.0.0.1:${info.port}`;
+  let agentToken;
+  try {
+    agentToken = readLiveAgentServerInfo(info).agentToken;
+  } catch {
+    console.error(`The running live server lacks an agent credential. Restart it with: ${LIVE_COMMAND}`);
+    process.exit(1);
+  }
 
   // Reply mode: live-poll.mjs --reply <id> <status> [--file path] [message]
   const replyIdx = args.indexOf('--reply');
@@ -88,7 +98,7 @@ Options:
     }
 
     try {
-      await postReply(base, info.token, { id, type: status, message, file: filePath });
+      await postReply(base, agentToken, { id, type: status, message, file: filePath });
 
       // Success — silent exit (agent doesn't need output for replies)
     } catch (err) {
@@ -119,7 +129,7 @@ Options:
         break;
       }
       const slice = Math.min(remaining, PER_REQUEST_TIMEOUT_MS);
-      const res = await fetch(`${base}/poll?token=${info.token}&timeout=${slice}`);
+      const res = await fetch(`${base}/poll?token=${agentToken}&timeout=${slice}`);
 
       if (res.status === 401) {
         console.error('Authentication failed. The server token may have changed.');
@@ -163,7 +173,7 @@ Options:
 
       const completionType = completionTypeForAcceptResult(event.type, event._acceptResult);
       try {
-        await postReply(base, info.token, {
+        await postReply(base, agentToken, {
           id: event.id,
           type: completionType,
           message: event._acceptResult?.error,
