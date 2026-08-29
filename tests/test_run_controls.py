@@ -312,6 +312,36 @@ def test_evidence_reader_rejects_intermediate_directory_symlink(tmp_path: Path) 
         module._read_regular(run_dir, "dispatch/link/evidence.txt", "evidence")
 
 
+def test_prompt_file_rejects_intermediate_parent_swap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    prompt_dir = tmp_path / "prompts"
+    prompt_dir.mkdir()
+    prompt_path = prompt_dir / "operator.md"
+    prompt_path.write_text("safe\n", encoding="utf-8")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "operator.md").write_text("outside\n", encoding="utf-8")
+    spec = importlib.util.spec_from_file_location("run_controls_prompt_reader", SCRIPT)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    original_open = module.os.open
+    swapped = False
+
+    def swap_parent(path, flags, mode=0o777, *, dir_fd=None):
+        nonlocal swapped
+        if dir_fd is not None and path == "prompts" and not swapped:
+            prompt_dir.rename(tmp_path / "prompts-original")
+            (tmp_path / "prompts").symlink_to(outside, target_is_directory=True)
+            swapped = True
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(module.os, "open", swap_parent)
+    with pytest.raises(module.ControlError):
+        module._prompt_file(prompt_path)
+    assert swapped
+
+
 def test_reduce_requires_explicit_successes_and_names_batch_omissions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     run_dir = make_run(tmp_path)
     selected = write_attempt(run_dir, task_id="one")

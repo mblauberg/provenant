@@ -455,17 +455,15 @@ def _prompt_file(value: Path) -> tuple[Path, bytes]:
     supplied = value.expanduser()
     if supplied.is_symlink():
         raise ControlError("prompt file must not be a symlink")
-    path = supplied.resolve()
     workspace = Path.cwd().resolve()
-    if path != workspace and workspace not in path.parents:
-        raise ControlError("prompt file must be inside the workspace")
+    lexical = Path(os.path.abspath(supplied))
     try:
-        metadata = path.lstat()
-    except OSError as exc:
-        raise ControlError(f"prompt file is unavailable: {path}") from exc
-    if path.is_symlink() or not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+        relative = lexical.relative_to(workspace).as_posix()
+    except ValueError:
+        raise ControlError("prompt file must be inside the workspace")
+    if not relative or relative == ".":
         raise ControlError("prompt file must be a regular single-link file")
-    parts = [part.casefold() for part in path.parts]
+    parts = [part.casefold() for part in lexical.parts]
     sensitive_roots = {".ssh", ".aws", ".azure", ".gnupg"}
     sensitive_files = {
         ".env", ".env.local", ".env.production", "credentials.json",
@@ -476,27 +474,13 @@ def _prompt_file(value: Path) -> tuple[Path, bytes]:
         part == ".config" and index + 1 < len(parts) and parts[index + 1] in config_auth_dirs
         for index, part in enumerate(parts)
     )
-    if sensitive_roots.intersection(parts) or path.name.casefold() in sensitive_files or config_auth:
+    if sensitive_roots.intersection(parts) or lexical.name.casefold() in sensitive_files or config_auth:
         raise ControlError("prompt file is a credential or authentication store")
     try:
-        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-        try:
-            current = os.fstat(fd)
-            if not stat.S_ISREG(current.st_mode) or current.st_nlink != 1:
-                raise ControlError("prompt file must be a regular single-link file")
-            chunks: list[bytes] = []
-            while True:
-                chunk = os.read(fd, 1024 * 1024)
-                if not chunk:
-                    break
-                chunks.append(chunk)
-            return path, b"".join(chunks)
-        finally:
-            os.close(fd)
-    except ControlError:
-        raise
-    except OSError as exc:
-        raise ControlError(f"prompt file is unavailable: {path}") from exc
+        _, _, prompt_bytes = _read_regular(workspace, relative, "prompt")
+    except ControlError as exc:
+        raise ControlError(f"prompt file is unavailable: {lexical}") from exc
+    return lexical, prompt_bytes
 
 
 def _reduce(args: argparse.Namespace) -> int:
