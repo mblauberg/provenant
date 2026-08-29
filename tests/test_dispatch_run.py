@@ -191,6 +191,8 @@ def test_valid_worker_question_envelope_is_retained_as_blocked_attempt(tmp_path:
         ('{"schema_version":1,"record_type":"provenant-worker-terminal","classification":"complete","question":{"code":"needs_input","prompt":"x"}}\n', "failed", "terminal_envelope_invalid"),
         ('{"schema_version":1,"record_type":"provenant-worker-terminal","classification":"question","question":{"code":"needs_input","prompt":"x","extra":true}}\n', "failed", "terminal_envelope_invalid"),
         ('{"schema_version":true,"record_type":"provenant-worker-terminal","classification":"question","question":{"code":"needs_input","prompt":"x"}}\n', "failed", "terminal_envelope_invalid"),
+        ('{"schema_version":1.0,"record_type":"provenant-worker-terminal","classification":"question","question":{"code":"needs_input","prompt":"x"}}\n', "failed", "terminal_envelope_invalid"),
+        ('{"schema_version":1,"record_type":"provenant-worker-terminal","record_type":"other","classification":"question","question":{"code":"needs_input","prompt":"x"}}\n', "failed", "terminal_envelope_invalid"),
         ('{"record_type":"provenant-worker-terminal","classification":"question","question":{"code":"needs_input","prompt":""}}\n', "failed", "terminal_envelope_invalid"),
         ('{"record_type":"provenant-worker-terminal","classification":"question","question":{"code":"needs_input","prompt":null}}\n', "failed", "terminal_envelope_invalid"),
         ('{"record_type":"provenant-worker-terminal","classification":"question","question":{"code":"needs_input","prompt":"a\\u0000b"}}\n', "failed", "terminal_envelope_invalid"),
@@ -264,6 +266,25 @@ def test_worker_question_prompt_size_is_bounded(tmp_path: Path, monkeypatch) -> 
     assert module.dispatch(args) == 1
     attempt = json.loads((run_dir / "dispatch/tasks/case/attempt-001/attempt.json").read_text())
     assert attempt["outcome"] == "terminal_envelope_invalid"
+
+
+def test_worker_question_candidate_is_bounded_and_digest_bound(tmp_path: Path) -> None:
+    module = load_dispatch_module()
+    result = tmp_path / "result.md"
+    envelope = json.dumps({
+        "schema_version": 1,
+        "record_type": "provenant-worker-terminal",
+        "classification": "question",
+        "question": {"code": "needs_input", "prompt": "Which source?"},
+    }).encode() + b"\n"
+    result.write_bytes(envelope)
+
+    assert module.worker_question_envelope(result, "sha256:not-the-result") is None
+    assert module.worker_question_envelope(result, module.digest(result)) == {
+        "code": "needs_input", "prompt": "Which source?"
+    }
+    result.write_bytes(envelope + b"x" * (module.MAX_WORKER_TERMINAL_ENVELOPE_BYTES + 1))
+    assert module.worker_question_envelope(result, module.digest(result)) is None
 
 
 def test_ordinary_dispatch_without_lead_family_is_not_certification(tmp_path: Path) -> None:

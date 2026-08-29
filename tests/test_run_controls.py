@@ -345,6 +345,105 @@ def test_blocked_retry_without_response_is_rejected(tmp_path: Path, monkeypatch:
     assert module.run(args) == 2
 
 
+@pytest.mark.parametrize("response", [b"\xff\n", b"\x00answer\n", b" \t\n"])
+def test_blocked_retry_rejects_invalid_response_file_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, response: bytes
+) -> None:
+    run_dir = make_run(tmp_path)
+    write_attempt(run_dir, status="blocked", result="question\n",
+                  question={"code": "needs_input", "prompt": "Which source?"})
+    response_file = tmp_path / "response"
+    response_file.write_bytes(response)
+    module_spec = importlib.util.spec_from_file_location("run_controls_bad_response", SCRIPT)
+    assert module_spec and module_spec.loader
+    module = importlib.util.module_from_spec(module_spec)
+    module_spec.loader.exec_module(module)
+    monkeypatch.chdir(tmp_path)
+    args = module.parser().parse_args([
+        "retry", "--run-dir", str(run_dir), "--task-id", "task-1", "--attempt-id", "attempt-001",
+        "--same-route", "--response-file", str(response_file),
+    ])
+
+    assert module.run(args) == 2
+
+
+def test_blocked_retry_rejects_oversized_response_before_dispatch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    run_dir = make_run(tmp_path)
+    write_attempt(run_dir, status="blocked", result="question\n",
+                  question={"code": "needs_input", "prompt": "Which source?"})
+    response_file = tmp_path / "response"
+    response_file.write_bytes(b"x" * (64 * 1024 + 1))
+    invoked = tmp_path / "invoked"
+    fake = tmp_path / "dispatch-run"
+    fake.write_text(f"#!/bin/sh\ntouch {invoked}\n", encoding="utf-8")
+    fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
+    module_spec = importlib.util.spec_from_file_location("run_controls_large_response", SCRIPT)
+    assert module_spec and module_spec.loader
+    module = importlib.util.module_from_spec(module_spec)
+    module_spec.loader.exec_module(module)
+    monkeypatch.setattr(module, "DISPATCH_RUN", fake)
+    monkeypatch.chdir(tmp_path)
+    args = module.parser().parse_args([
+        "retry", "--run-dir", str(run_dir), "--task-id", "task-1", "--attempt-id", "attempt-001",
+        "--same-route", "--response-file", str(response_file),
+    ])
+
+    assert module.run(args) == 2
+    assert not invoked.exists()
+
+
+def test_blocked_retry_rejects_oversized_response_stdin_before_dispatch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    run_dir = make_run(tmp_path)
+    write_attempt(run_dir, status="blocked", result="question\n",
+                  question={"code": "needs_input", "prompt": "Which source?"})
+    invoked = tmp_path / "invoked"
+    fake = tmp_path / "dispatch-run"
+    fake.write_text(f"#!/bin/sh\ntouch {invoked}\n", encoding="utf-8")
+    fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
+    module_spec = importlib.util.spec_from_file_location("run_controls_large_stdin", SCRIPT)
+    assert module_spec and module_spec.loader
+    module = importlib.util.module_from_spec(module_spec)
+    module_spec.loader.exec_module(module)
+    monkeypatch.setattr(module, "DISPATCH_RUN", fake)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(module.sys, "stdin", io.TextIOWrapper(io.BytesIO(b"x" * (64 * 1024 + 1))))
+    args = module.parser().parse_args([
+        "retry", "--run-dir", str(run_dir), "--task-id", "task-1", "--attempt-id", "attempt-001",
+        "--same-route", "--response-stdin",
+    ])
+
+    assert module.run(args) == 2
+    assert not invoked.exists()
+
+
+def test_blocked_retry_escapes_lone_surrogate_in_question_prompt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    run_dir = make_run(tmp_path)
+    write_attempt(run_dir, status="blocked", result="question\n",
+                  question={"code": "needs_input", "prompt": "bad\ud800"})
+    fake = tmp_path / "dispatch-run"
+    captured = tmp_path / "captured-prompt"
+    fake.write_text(
+        f"#!/usr/bin/env python3\nimport sys\nopen({str(captured)!r}, 'wb').write(sys.stdin.buffer.read())\n",
+        encoding="utf-8",
+    )
+    fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
+    response = tmp_path / "response"
+    response.write_text("answer\n", encoding="utf-8")
+    module_spec = importlib.util.spec_from_file_location("run_controls_surrogate", SCRIPT)
+    assert module_spec and module_spec.loader
+    module = importlib.util.module_from_spec(module_spec)
+    module_spec.loader.exec_module(module)
+    monkeypatch.setattr(module, "DISPATCH_RUN", fake)
+    monkeypatch.chdir(tmp_path)
+    args = module.parser().parse_args([
+        "retry", "--run-dir", str(run_dir), "--task-id", "task-1", "--attempt-id", "attempt-001",
+        "--same-route", "--response-file", str(response),
+    ])
+
+    assert module.run(args) == 0
+    assert b"\\ud800" in captured.read_bytes()
+
+
 def test_inspect_keeps_preterminal_batch_task_conservative_when_receipt_is_absent(tmp_path: Path) -> None:
     run_dir = make_run(tmp_path)
     summary = run_dir / "dispatch/batches/batch-001/summary.json"

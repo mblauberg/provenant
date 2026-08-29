@@ -34,6 +34,7 @@ TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 ATTEMPT_ID_RE = re.compile(r"^attempt-(?P<number>\d{3}|[1-9]\d{3,})$")
 DEFAULT_TIMEOUT_SECONDS = 900.0
 MAX_WORKER_QUESTION_PROMPT = 4096
+MAX_WORKER_TERMINAL_ENVELOPE_BYTES = 16 * 1024
 WORKER_TERMINAL_RECORD_TYPE = "provenant-worker-terminal"
 
 from _shared.bounded_process import stop_process_group
@@ -238,28 +239,61 @@ class _JSONObject(dict[str, Any]):
 
     def __init__(self, pairs: list[tuple[str, Any]]) -> None:
         super().__init__()
-        self.duplicate_keys = False
+        self.duplicate_keys: set[str] = set()
+        self.values_by_key: dict[str, list[Any]] = {}
         for key, value in pairs:
             if key in self:
-                self.duplicate_keys = True
+                self.duplicate_keys.add(key)
+            self.values_by_key.setdefault(key, []).append(value)
             self[key] = value
 
 
-def worker_question_envelope(result_path: Path) -> dict[str, Any] | None:
+def worker_question_envelope(result_path: Path, expected_digest: str) -> dict[str, Any] | None:
     """Return a validated worker question, or fail closed for a reserved record."""
     try:
-        value = json.loads(
-            result_path.read_text(encoding="utf-8"), object_pairs_hook=_JSONObject
-        )
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(result_path, flags)
+        try:
+            metadata = os.fstat(fd)
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+                return None
+            chunks: list[bytes] = []
+            total = 0
+            while total <= MAX_WORKER_TERMINAL_ENVELOPE_BYTES:
+                chunk = os.read(
+                    fd, min(1024 * 1024, MAX_WORKER_TERMINAL_ENVELOPE_BYTES + 1 - total)
+                )
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                total += len(chunk)
+            candidate = b"".join(chunks)
+        finally:
+            os.close(fd)
+    except OSError:
+        return None
+    if len(candidate) > MAX_WORKER_TERMINAL_ENVELOPE_BYTES:
+        return None
+    candidate_hash = hashlib.sha256(candidate).hexdigest()
+    if expected_digest != f"sha256:{candidate_hash}":
+        return None
+    try:
+        value = json.loads(candidate.decode("utf-8"), object_pairs_hook=_JSONObject)
+    except (UnicodeDecodeError, json.JSONDecodeError):
         return None
     if not isinstance(value, _JSONObject) or value.get("record_type") != WORKER_TERMINAL_RECORD_TYPE:
+        if (
+            isinstance(value, _JSONObject)
+            and "record_type" in value.duplicate_keys
+            and WORKER_TERMINAL_RECORD_TYPE in value.values_by_key.get("record_type", [])
+        ):
+            raise ValueError("terminal worker envelope has a duplicate record_type")
         return None
     if value.duplicate_keys or set(value) != {
         "schema_version", "record_type", "classification", "question"
     }:
         raise ValueError("terminal worker envelope has an invalid root")
-    if value.get("schema_version") != 1 or isinstance(value.get("schema_version"), bool):
+    if type(value.get("schema_version")) is not int or value.get("schema_version") != 1:
         raise ValueError("terminal worker envelope schema_version must be 1")
     if value.get("classification") != "question":
         raise ValueError("terminal worker envelope classification must be question")
@@ -671,7 +705,7 @@ def _dispatch(args: argparse.Namespace) -> int:
     terminal_envelope_error = False
     if observed_exit and exit_code == 0 and adapter_status == "ok" and not receipt_error and result_nonempty:
         try:
-            question = worker_question_envelope(result_path)
+            question = worker_question_envelope(result_path, result_digest)
         except ValueError:
             terminal_envelope_error = True
     if process_error == "timeout":

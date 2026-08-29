@@ -20,6 +20,7 @@ BATCH_ID_RE = re.compile(r"^batch-(?:\d{3}|[1-9]\d{3,})$")
 TERMINAL_STATUSES = {"blocked", "succeeded", "failed", "timed_out", "cancelled"}
 DISPATCH_RUN = Path(__file__).with_name("dispatch_run.py")
 MAX_WORKER_QUESTION_PROMPT = 4096
+MAX_OPERATOR_RESPONSE_BYTES = 64 * 1024
 
 
 class ControlError(ValueError):
@@ -82,7 +83,13 @@ def _relative(run_dir: Path, value: Any, label: str) -> str:
     return path.as_posix()
 
 
-def _read_regular(run_dir: Path, value: Any, label: str, expected: str | None = None) -> tuple[str, Path, bytes]:
+def _read_regular(
+    run_dir: Path,
+    value: Any,
+    label: str,
+    expected: str | None = None,
+    max_bytes: int | None = None,
+) -> tuple[str, Path, bytes]:
     relative = _relative(run_dir, value, label)
     if expected is not None and relative != expected:
         raise ControlError(f"{label} path does not match its attempt: {relative}")
@@ -112,11 +119,20 @@ def _read_regular(run_dir: Path, value: Any, label: str, expected: str | None = 
         if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
             raise ControlError(f"{label} path is not a regular single-link file: {relative}")
         chunks: list[bytes] = []
+        total = 0
         while True:
-            chunk = os.read(fd, 1024 * 1024)
+            read_size = 1024 * 1024
+            if max_bytes is not None:
+                read_size = min(read_size, max_bytes + 1 - total)
+                if read_size <= 0:
+                    raise ControlError(f"{label} exceeds the {max_bytes}-byte limit: {relative}")
+            chunk = os.read(fd, read_size)
             if not chunk:
                 break
             chunks.append(chunk)
+            total += len(chunk)
+            if max_bytes is not None and total > max_bytes:
+                raise ControlError(f"{label} exceeds the {max_bytes}-byte limit: {relative}")
         return relative, path, b"".join(chunks)
     except ControlError:
         raise
@@ -389,19 +405,27 @@ def _run_child(command: list[str], input_bytes: bytes | None = None) -> int:
 
 def _operator_response(args: argparse.Namespace) -> bytes:
     if args.response_file is not None:
-        _, response = _prompt_file(args.response_file)
+        _, response = _prompt_file(args.response_file, max_bytes=MAX_OPERATOR_RESPONSE_BYTES)
     else:
         try:
-            response = sys.stdin.buffer.read()
+            response = sys.stdin.buffer.read(MAX_OPERATOR_RESPONSE_BYTES + 1)
         except OSError as exc:
             raise ControlError(f"operator response is unavailable: {exc}") from exc
-    if not response:
-        raise ControlError("operator response must not be empty")
+    if len(response) > MAX_OPERATOR_RESPONSE_BYTES:
+        raise ControlError(f"operator response exceeds the {MAX_OPERATOR_RESPONSE_BYTES}-byte limit")
+    try:
+        response_text = response.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ControlError("operator response must be valid UTF-8") from exc
+    if not response_text or not response_text.strip():
+        raise ControlError("operator response must not be empty or whitespace-only")
+    if "\x00" in response_text:
+        raise ControlError("operator response must not contain NUL")
     return response
 
 
 def _continuation_prompt(original: bytes, question: dict[str, Any], response: bytes) -> bytes:
-    question_bytes = json.dumps(question, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    question_bytes = json.dumps(question, ensure_ascii=True, sort_keys=True).encode("utf-8")
     original_prefix = original if original.endswith(b"\n") else original + b"\n"
     return original_prefix + b"\n".join((
         b"## Provenant blocked question",
@@ -503,7 +527,7 @@ def _input_ref(value: str) -> tuple[str, str]:
     return task_id, attempt_id
 
 
-def _prompt_file(value: Path) -> tuple[Path, bytes]:
+def _prompt_file(value: Path, max_bytes: int | None = None) -> tuple[Path, bytes]:
     supplied = value.expanduser()
     if supplied.is_symlink():
         raise ControlError("prompt file must not be a symlink")
@@ -529,7 +553,7 @@ def _prompt_file(value: Path) -> tuple[Path, bytes]:
     if sensitive_roots.intersection(parts) or lexical.name.casefold() in sensitive_files or config_auth:
         raise ControlError("prompt file is a credential or authentication store")
     try:
-        _, _, prompt_bytes = _read_regular(workspace, relative, "prompt")
+        _, _, prompt_bytes = _read_regular(workspace, relative, "prompt", max_bytes=max_bytes)
     except ControlError as exc:
         raise ControlError(f"prompt file is unavailable: {lexical}") from exc
     return lexical, prompt_bytes
