@@ -775,3 +775,32 @@ def test_attempt_records_available_git_base_identity(tmp_path: Path, monkeypatch
     assert subprocess.check_output(
         ["git", "rev-parse", "HEAD"], cwd=workspace, text=True
     ).strip() != expected_head
+
+
+@pytest.mark.parametrize("link_level", ["tasks", "task"])
+def test_new_attempt_rejects_preexisting_directory_symlink(
+    tmp_path: Path, monkeypatch, link_level: str
+) -> None:
+    run_dir = make_run(tmp_path, f"directory-symlink-{link_level}")
+    outside = tmp_path / f"outside-{link_level}"
+    outside.mkdir()
+    if link_level == "tasks":
+        (run_dir / "dispatch").mkdir()
+        (run_dir / "dispatch/tasks").symlink_to(outside, target_is_directory=True)
+    else:
+        (run_dir / "dispatch/tasks").mkdir(parents=True)
+        (run_dir / "dispatch/tasks/escaped").symlink_to(outside, target_is_directory=True)
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("contained\n", encoding="utf-8")
+    adapter = tmp_path / f"adapter-never-run-{link_level}"
+    write_executable(adapter, "#!/usr/bin/env bash\nexit 99\n")
+    module = load_dispatch_module()
+    monkeypatch.setattr(module, "CF_DISPATCH", adapter)
+    args = module.parser().parse_args([
+        "--run-dir", str(run_dir), "--task-id", "escaped", "--adapter", "codex",
+        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+    ])
+    monkeypatch.chdir(tmp_path)
+
+    assert module.dispatch(args) == 2
+    assert list(outside.iterdir()) == []

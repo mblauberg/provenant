@@ -87,6 +87,30 @@ def retained_path(run_dir: Path, value: Any) -> str:
     return relative.as_posix()
 
 
+def ensure_owned_directory(run_dir: Path, path: Path) -> None:
+    try:
+        parts = path.relative_to(run_dir).parts
+    except ValueError as exc:
+        raise AttemptEvidenceError(f"attempt directory escapes the run: {path}") from exc
+    current = run_dir
+    for part in parts:
+        current /= part
+        if current.is_symlink():
+            raise AttemptEvidenceError(f"attempt directory is a symlink: {current}")
+        try:
+            current.mkdir()
+        except FileExistsError:
+            pass
+        except OSError as exc:
+            raise AttemptEvidenceError(f"attempt directory cannot be created: {current}") from exc
+        try:
+            current.resolve().relative_to(run_dir.resolve())
+        except ValueError as exc:
+            raise AttemptEvidenceError(f"attempt directory escapes the run: {current}") from exc
+        if not current.is_dir():
+            raise AttemptEvidenceError(f"attempt directory is invalid: {current}")
+
+
 def active_receipt_error(receipt: Any) -> str | None:
     if not isinstance(receipt, dict):
         return "RUN_RECEIPT.json root must be an object"
@@ -377,6 +401,7 @@ def dispatch(args: argparse.Namespace) -> int:
     if not TASK_ID_RE.fullmatch(args.task_id):
         return fail(run_dir, "invalid_task_id", "task id must contain only letters, numbers, '.', '_' or '-'")
     try:
+        ensure_owned_directory(run_dir, run_dir / "dispatch" / "tasks")
         reconcile_manifest(run_dir)
         ensure_manifest_appendable(run_dir)
     except AttemptEvidenceError as exc:
@@ -408,6 +433,10 @@ def dispatch(args: argparse.Namespace) -> int:
         return fail(run_dir, "adapter_unavailable", f"provider adapter is missing or not executable: {CF_DISPATCH}")
 
     task_dir = run_dir / "dispatch" / "tasks" / args.task_id
+    try:
+        ensure_owned_directory(run_dir, task_dir)
+    except AttemptEvidenceError as exc:
+        return fail(run_dir, "attempt_path_invalid", str(exc))
     retry_of = None
     if args.retry_of:
         retry_ref = Path(args.retry_of)
