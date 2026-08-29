@@ -42,6 +42,9 @@ raise SystemExit(int(os.environ.get("PROVENANT_TEST_EXIT", "0")))
     dispatch_owner.parent.mkdir(parents=True)
     dispatch_owner.write_text(recorder)
     dispatch_owner.chmod(0o755)
+    run_owner = checkout / "skills/orchestrate/scripts/run_controls.py"
+    run_owner.write_text(recorder)
+    run_owner.chmod(0o755)
     batch_owner = checkout / "skills/orchestrate/scripts/batch_run.py"
     batch_owner.write_text(recorder)
     batch_owner.chmod(0o755)
@@ -352,6 +355,7 @@ def test_owner_exec_failure_reports_command_context_without_traceback(tmp_path):
         ("check", ["--doctor"]),
         ("fabric", ["tasks"]),
         ("batch", ["--manifest", "tasks.json"]),
+        ("run", ["inspect"]),
     ],
 )
 @pytest.mark.parametrize("cwd_kind", ["provenant-root", "unrelated-git", "nonrepo"])
