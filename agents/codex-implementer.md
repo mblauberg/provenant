@@ -114,35 +114,34 @@ Do not use `--dangerously-bypass-approvals-and-sandbox`. `-s workspace-write` is
 what this agent uses; if a task appears to need more, that is a signal the task
 is wrong, not the sandbox.
 
-**3. If detachment is unavoidable, capture and wait on the PID directly.** Keep
-a durable regular completion file for a caller that must re-enter after its
-shell or tool window is torn down. Write it atomically after Codex exits:
+**3. If detachment is unavoidable, use the shared detached helper, which captures
+and waits on the actual Codex child PID.** Give each dispatch a unique run
+directory; it records that child in `worker.pid`, its own wrapper in
+`wrapper.pid`, and writes a durable regular completion file atomically:
 
 ```
-done_path=${TMPDIR:-/tmp}/codex-<slug>-done
-transcript_path=${TMPDIR:-/tmp}/codex-<slug>-transcript.txt
-(
+run_dir=${TMPDIR:-/tmp}/codex-<unique-slug>
+transcript_path="$run_dir/transcript.txt"
+"${AGENTS_HOME:-$HOME/.agents}/skills/orchestrate/scripts/run_worker_detached.sh" \
+  --run-dir "$run_dir" --transcript "$transcript_path" -- \
   codex exec -s workspace-write -C <ABSOLUTE_WORKTREE> -m gpt-5.6-luna \
     -c service_tier=default -c model_reasoning_effort=xhigh - \
-    < ${TMPDIR:-/tmp}/codex-<slug>-brief.txt \
-    > "$transcript_path" 2>&1
-  status=$?
-  printf 'EXIT=%s\n' "$status" > "$done_path.tmp"
-  mv -f "$done_path.tmp" "$done_path"
-  exit "$status"
-) &
-PID=$!
-wait "$PID"
+    < ${TMPDIR:-/tmp}/codex-<slug>-brief.txt &
+WRAPPER_PID=$!
+wait "$WRAPPER_PID"
 STATUS=$?
+WORKER_PID="$(cat "$run_dir/worker.pid")"
 ```
 
-If the original shell is gone, use a foreground wait for the regular
-completion file, then verify the owned PID has exited before inspection or
-reuse. Do not use a watcher or a side-channel rendezvous:
+If the original shell is gone, use a foreground wait for the regular completion
+file, then verify both recorded PIDs have exited before inspection or reuse. Do
+not use a watcher or a side-channel rendezvous:
 
 ```
-while [ ! -s "$done_path" ]; do sleep 1; done
-STATUS="$(sed -n 's/^EXIT=//p' "$done_path")"
+while [ ! -s "$run_dir/done" ]; do sleep 1; done
+WORKER_PID="$(sed -n 's/^worker_pid=//p' "$run_dir/done")"
+WRAPPER_PID="$(sed -n 's/^wrapper_pid=//p' "$run_dir/done")"
+STATUS="$(sed -n 's/^exit=//p' "$run_dir/done")"
 ```
 
 **Never use `run_in_background: true` for this wait, and never end your turn while Codex is
@@ -254,8 +253,11 @@ support `ultra`.
 
 ## Liveness
 
-`ps -o pid,etime,time -p <PID>`. Compare CPU against elapsed; file size proves nothing. Minutes
-elapsed with near-zero CPU means hung, almost always a piped stdout.
+Follow [`worker-liveness.md`](../skills/orchestrate/references/worker-liveness.md). CPU time,
+elapsed time or output file size do not prove exit. Only observed PID exit and its exit status
+control terminality, inspection and reuse. The foreground Codex command supplies that direct
+wait; the detached helper records `worker.pid` and `wrapper.pid` for the regular completion
+file, and both must be fenced before accepting the report.
 
 ## Boundaries
 

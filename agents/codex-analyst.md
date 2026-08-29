@@ -97,31 +97,35 @@ output by hand. A blocking call cannot fail that way.
 previous run sat at 14 minutes elapsed against 0.16 seconds of CPU when stdout was piped, so
 after completion read the bounded report rather than the transcript.
 
-**3. If detachment is unavoidable**, capture and wait on the worker PID directly. Keep a
-durable regular completion file for a caller that must re-enter after its shell or tool window
-is torn down. Write the marker atomically after the command exits:
+**3. If detachment is unavoidable**, use the shared detached helper, which captures and waits on
+the actual provider child PID. Give each dispatch a unique run directory; it records that child
+in `worker.pid`, its own wrapper in `wrapper.pid`, and writes a durable regular completion file
+atomically:
 
 ```
-done_path=${TMPDIR:-/tmp}/codex-<slug>-done
-(
-  <the foreground codex exec command above>
-  status=$?
-  printf 'EXIT=%s\n' "$status" > "$done_path.tmp"
-  mv -f "$done_path.tmp" "$done_path"
-  exit "$status"
-) &
-PID=$!
-wait "$PID"
+run_dir=${TMPDIR:-/tmp}/codex-<unique-slug>
+transcript_path="$run_dir/transcript.txt"
+"${AGENTS_HOME:-$HOME/.agents}/skills/orchestrate/scripts/run_worker_detached.sh" \
+  --run-dir "$run_dir" --transcript "$transcript_path" -- \
+  codex exec -s read-only -C <ABSOLUTE_DIR> \
+    -o ${TMPDIR:-/tmp}/codex-<slug>-report.md -m gpt-5.6-luna \
+    -c 'service_tier="default"' -c 'model_reasoning_effort="high"' - \
+    < ${TMPDIR:-/tmp}/codex-<slug>-prompt.txt &
+WRAPPER_PID=$!
+wait "$WRAPPER_PID"
 STATUS=$?
+WORKER_PID="$(cat "$run_dir/worker.pid")"
 ```
 
-The direct `wait` is the normal completion path. If the original shell is gone, use a
-foreground wait for the regular completion file, then verify the owned PID has exited before
+The helper's direct wait is the normal completion path. If the original shell is gone, use a
+foreground wait for the regular completion file, then verify both recorded PIDs have exited before
 accepting the report:
 
 ```
-while [ ! -s "$done_path" ]; do sleep 1; done
-STATUS="$(sed -n 's/^EXIT=//p' "$done_path")"
+while [ ! -s "$run_dir/done" ]; do sleep 1; done
+WORKER_PID="$(sed -n 's/^worker_pid=//p' "$run_dir/done")"
+WRAPPER_PID="$(sed -n 's/^wrapper_pid=//p' "$run_dir/done")"
+STATUS="$(sed -n 's/^exit=//p' "$run_dir/done")"
 ```
 
 Do not replace the direct PID wait with a watcher, notification or side-channel rendezvous.
@@ -245,10 +249,11 @@ heredoc to a temp file, so it fails for the very reason just given.
 
 ## Liveness
 
-If asked whether it is still running: `ps -o pid,etime,time -p <PID>`. Compare CPU time against
-elapsed. Output file size proves nothing. A hung run still holds a large file. A run with
-minutes of elapsed time and near-zero CPU is hung, almost always because something piped its
-stdout.
+Follow [`worker-liveness.md`](../skills/orchestrate/references/worker-liveness.md). CPU time,
+elapsed time or output file size do not prove exit. Only observed PID exit and its exit status
+control terminality, inspection and reuse. The foreground Codex command supplies that direct
+wait; the detached helper records `worker.pid` and `wrapper.pid` for the regular completion
+file, and both must be fenced before accepting the report.
 
 ## Failure
 

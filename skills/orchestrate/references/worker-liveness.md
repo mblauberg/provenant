@@ -38,12 +38,16 @@ in the same worktree. The existing foreground provider commands remain the
 preferred waiting path; this guidance adds the fence and evidence, not a new
 provider command.
 
-Use the concrete terminal fence after the foreground wait/provider boundary has
-returned an exit status:
+The concrete terminal fence below is currently **Codex-only**: the helper's
+`live_processes()` detector enumerates `codex exec` children. Use the provider's
+own process boundary for agy, cursor, kiro or other adapters unless their
+detector is extended. For a simple foreground call, the provider wait and its
+returned status are the completion evidence; use this command only for a
+detached protocol that captured `WORKER_PID` and `STATUS`:
 
 ```bash
 python3 "${AGENTS_HOME:-$HOME/.agents}/skills/orchestrate/scripts/worker_liveness.py" \
-  terminal-report --pid "$PID" --classification complete --exit-status "$STATUS"
+  terminal-report --pid "$WORKER_PID" --classification complete --exit-status "$STATUS"
 ```
 
 The command takes a fresh `ps` snapshot through the helper's existing
@@ -80,38 +84,39 @@ codex exec -s <sandbox> -C <ABSOLUTE_DIR> -m <model> - < brief.txt > out.txt 2>&
 Give it the largest timeout the tool accepts. This is the whole procedure when
 the run fits inside one timeout window.
 
-**Second choice, only when detachment is unavoidable: background the worker in the
-same shell, capture its PID, and wait on that PID directly.** Keep the transcript
-and a durable regular completion file. Write the marker through a temporary file
-and rename it so a re-entered caller never sees a partial marker:
+**Second choice, only when detachment is unavoidable: use the shared detached
+helper.** Give each dispatch a unique run directory. The helper captures the
+actual provider child PID in `worker.pid`, records its own wrapper PID in
+`wrapper.pid`, waits on the child directly, and atomically writes a durable
+regular completion file. The caller captures the wrapper PID separately:
 
 ```bash
-done_path=/tmp/provenant-worker.done
-transcript_path=/tmp/provenant-worker.out
-(
-  <worker command> >"$transcript_path" 2>&1
-  status=$?
-  printf 'EXIT=%s\n' "$status" >"$done_path.tmp"
-  mv -f "$done_path.tmp" "$done_path"
-  exit "$status"
-) &
-PID=$!
-wait "$PID"
+run_dir=${TMPDIR:-/tmp}/provenant-worker-<unique-slug>
+transcript_path="$run_dir/transcript.txt"
+"${AGENTS_HOME:-$HOME/.agents}/skills/orchestrate/scripts/run_worker_detached.sh" \
+  --run-dir "$run_dir" --transcript "$transcript_path" -- <worker command> &
+WRAPPER_PID=$!
+wait "$WRAPPER_PID"
 STATUS=$?
+WORKER_PID="$(cat "$run_dir/worker.pid")"
 ```
 
-The direct `wait` is the normal completion path and preserves the worker's exit
-status. If the shell or tool window is torn down and the worker must outlive it,
-re-enter with a foreground wait for the regular completion file, then verify the
-owned PID has exited before terminal reporting, inspection or reuse:
+The helper's direct wait preserves the provider exit status. If the original
+shell is gone, re-enter with a foreground wait for the regular completion file,
+then confirm both the recorded `WORKER_PID` and `WRAPPER_PID` have exited before
+terminal reporting, inspection or reuse:
 
 ```bash
-while [ ! -s "$done_path" ]; do sleep 1; done
-STATUS="$(sed -n 's/^EXIT=//p' "$done_path")"
+while [ ! -s "$run_dir/done" ]; do sleep 1; done
+WORKER_PID="$(sed -n 's/^worker_pid=//p' "$run_dir/done")"
+WRAPPER_PID="$(sed -n 's/^wrapper_pid=//p' "$run_dir/done")"
+STATUS="$(sed -n 's/^exit=//p' "$run_dir/done")"
 ```
 
 This fallback polls only a durable marker and is used only after detachment; do
-not substitute short sleeps, liveness probes or a watcher for the direct PID wait.
+not substitute a watcher or notification for the direct PID wait. The marker is
+bound to the unique run directory and both recorded PIDs; a stale or concurrent
+marker must never satisfy another dispatch.
 
 If a foreground wait times out, reissue that same wait while its PID or durable
 completion marker remains available. Do not insert liveness probes or status
