@@ -19,10 +19,24 @@ TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 BATCH_ID_RE = re.compile(r"^batch-(?:\d{3}|[1-9]\d{3,})$")
 TERMINAL_STATUSES = {"blocked", "succeeded", "failed", "timed_out", "cancelled"}
 DISPATCH_RUN = Path(__file__).with_name("dispatch_run.py")
+MAX_WORKER_QUESTION_PROMPT = 4096
+MAX_OPERATOR_RESPONSE_BYTES = 64 * 1024
 
 
 class ControlError(ValueError):
     """A run-control request cannot be answered from safe retained evidence."""
+
+
+def _valid_worker_question(value: Any) -> bool:
+    return (
+        isinstance(value, dict)
+        and set(value) == {"code", "prompt"}
+        and value.get("code") == "needs_input"
+        and isinstance(value.get("prompt"), str)
+        and bool(value["prompt"])
+        and len(value["prompt"]) <= MAX_WORKER_QUESTION_PROMPT
+        and "\x00" not in value["prompt"]
+    )
 
 
 def digest(path: Path) -> str:
@@ -69,7 +83,13 @@ def _relative(run_dir: Path, value: Any, label: str) -> str:
     return path.as_posix()
 
 
-def _read_regular(run_dir: Path, value: Any, label: str, expected: str | None = None) -> tuple[str, Path, bytes]:
+def _read_regular(
+    run_dir: Path,
+    value: Any,
+    label: str,
+    expected: str | None = None,
+    max_bytes: int | None = None,
+) -> tuple[str, Path, bytes]:
     relative = _relative(run_dir, value, label)
     if expected is not None and relative != expected:
         raise ControlError(f"{label} path does not match its attempt: {relative}")
@@ -99,11 +119,20 @@ def _read_regular(run_dir: Path, value: Any, label: str, expected: str | None = 
         if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
             raise ControlError(f"{label} path is not a regular single-link file: {relative}")
         chunks: list[bytes] = []
+        total = 0
         while True:
-            chunk = os.read(fd, 1024 * 1024)
+            read_size = 1024 * 1024
+            if max_bytes is not None:
+                read_size = min(read_size, max_bytes + 1 - total)
+                if read_size <= 0:
+                    raise ControlError(f"{label} exceeds the {max_bytes}-byte limit: {relative}")
+            chunk = os.read(fd, read_size)
             if not chunk:
                 break
             chunks.append(chunk)
+            total += len(chunk)
+            if max_bytes is not None and total > max_bytes:
+                raise ControlError(f"{label} exceeds the {max_bytes}-byte limit: {relative}")
         return relative, path, b"".join(chunks)
     except ControlError:
         raise
@@ -180,7 +209,7 @@ def _attempt(run_dir: Path, task_id: str, attempt_id: str) -> tuple[dict[str, An
         raise ControlError(f"successful attempt has no result evidence: {attempt_rel}")
     if record.get("status") == "blocked":
         question = record.get("question")
-        if not isinstance(question, dict) or not isinstance(question.get("prompt"), str) or not question["prompt"]:
+        if not _valid_worker_question(question):
             raise ControlError(f"blocked attempt has no question: {attempt_rel}")
     return record, artifacts, attempt_path, payloads
 
@@ -374,11 +403,55 @@ def _run_child(command: list[str], input_bytes: bytes | None = None) -> int:
     return completed.returncode
 
 
+def _operator_response(args: argparse.Namespace) -> bytes:
+    if args.response_file is not None:
+        _, response = _prompt_file(args.response_file, max_bytes=MAX_OPERATOR_RESPONSE_BYTES)
+    else:
+        try:
+            response = sys.stdin.buffer.read(MAX_OPERATOR_RESPONSE_BYTES + 1)
+        except OSError as exc:
+            raise ControlError(f"operator response is unavailable: {exc}") from exc
+    if len(response) > MAX_OPERATOR_RESPONSE_BYTES:
+        raise ControlError(f"operator response exceeds the {MAX_OPERATOR_RESPONSE_BYTES}-byte limit")
+    try:
+        response_text = response.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ControlError("operator response must be valid UTF-8") from exc
+    if not response_text or not response_text.strip():
+        raise ControlError("operator response must not be empty or whitespace-only")
+    if "\x00" in response_text:
+        raise ControlError("operator response must not contain NUL")
+    return response
+
+
+def _continuation_prompt(original: bytes, question: dict[str, Any], response: bytes) -> bytes:
+    question_bytes = json.dumps(question, ensure_ascii=True, sort_keys=True).encode("utf-8")
+    original_prefix = original if original.endswith(b"\n") else original + b"\n"
+    return original_prefix + b"\n".join((
+        b"## Provenant blocked question",
+        question_bytes,
+        b"## Operator response",
+        response,
+    )) + b"\n"
+
+
 def _retry(args: argparse.Namespace) -> int:
     run_dir = _run_dir(args.run_dir)
     parent, artifacts, _, payloads = _attempt(run_dir, args.task_id, args.attempt_id)
     if parent["status"] == "succeeded":
         raise ControlError("successful attempts cannot be retried")
+    has_response_source = args.response_file is not None or args.response_stdin
+    if parent["status"] == "blocked":
+        if not has_response_source:
+            raise ControlError("blocked retries require exactly one operator response source")
+        question = parent.get("question")
+        if not _valid_worker_question(question):
+            raise ControlError("blocked attempt has an invalid question")
+        prompt_bytes = _continuation_prompt(payloads["prompt"], question, _operator_response(args))
+    else:
+        if has_response_source:
+            raise ControlError("operator response is only valid for blocked retries")
+        prompt_bytes = payloads["prompt"]
     if args.same_route == args.reroute:
         raise ControlError("retry requires exactly one of --same-route or --reroute")
     if args.same_route:
@@ -398,7 +471,10 @@ def _retry(args: argparse.Namespace) -> int:
             if value:
                 route[key] = value
         _route_selector(route)
-    return _run_child(_dispatch_command(run_dir, args.task_id, None, route, args.attempt_id, prompt_stdin=True), payloads["prompt"])
+    return _run_child(
+        _dispatch_command(run_dir, args.task_id, None, route, args.attempt_id, prompt_stdin=True),
+        prompt_bytes,
+    )
 
 
 def _load_summary(run_dir: Path, batch_id: str) -> dict[str, Any]:
@@ -451,7 +527,7 @@ def _input_ref(value: str) -> tuple[str, str]:
     return task_id, attempt_id
 
 
-def _prompt_file(value: Path) -> tuple[Path, bytes]:
+def _prompt_file(value: Path, max_bytes: int | None = None) -> tuple[Path, bytes]:
     supplied = value.expanduser()
     if supplied.is_symlink():
         raise ControlError("prompt file must not be a symlink")
@@ -477,7 +553,7 @@ def _prompt_file(value: Path) -> tuple[Path, bytes]:
     if sensitive_roots.intersection(parts) or lexical.name.casefold() in sensitive_files or config_auth:
         raise ControlError("prompt file is a credential or authentication store")
     try:
-        _, _, prompt_bytes = _read_regular(workspace, relative, "prompt")
+        _, _, prompt_bytes = _read_regular(workspace, relative, "prompt", max_bytes=max_bytes)
     except ControlError as exc:
         raise ControlError(f"prompt file is unavailable: {lexical}") from exc
     return lexical, prompt_bytes
@@ -571,6 +647,9 @@ def parser() -> argparse.ArgumentParser:
     route.add_argument("--task-class")
     route.add_argument("--model")
     retry.add_argument("--orchestrator-family")
+    response = retry.add_mutually_exclusive_group()
+    response.add_argument("--response-file", type=Path)
+    response.add_argument("--response-stdin", action="store_true")
 
     reduce = commands.add_parser("reduce", help="reduce explicit successful retained results")
     reduce.add_argument("--run-dir", type=Path, required=True)

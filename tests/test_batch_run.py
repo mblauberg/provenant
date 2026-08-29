@@ -485,6 +485,35 @@ def test_batch_preserves_blocked_question_for_later_continuation(tmp_path, monke
     }
 
 
+def test_real_dispatch_child_propagates_worker_question_envelope(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    run_dir = make_run(tmp_path, 'real-blocked-question')
+    bin_dir = tmp_path / 'bin'
+    bin_dir.mkdir()
+    write_executable(bin_dir / 'codex', """
+        #!/usr/bin/env bash
+        if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
+          printf '{"models":[{"slug":"gpt-5.6-luna","supported_reasoning_levels":[{"effort":"low"}]}]}'
+          exit 0
+        fi
+        printf '{"schema_version":1,"record_type":"provenant-worker-terminal","classification":"question","question":{"code":"needs_input","prompt":"Which source should I use?"}}\\n'
+        """)
+    monkeypatch.setenv('PATH', f"{bin_dir}:{ROOT / 'scripts'}:{os.environ['PATH']}")
+    module = load_module()
+    module.DISPATCH_RUN = BATCH.parent / 'dispatch_run.py'
+    manifest = task_manifest(tmp_path, [task(tmp_path, 'blocked-real', model='gpt-5.6-luna')])
+
+    assert module.batch(args(module, run_dir, manifest, 1)) == 1, attempt_diagnostics(run_dir)
+    summary = json.loads((run_dir / 'dispatch/batches/batch-001/summary.json').read_text())
+    item = summary['tasks'][0]
+    assert item['status'] == 'blocked'
+    assert item['question'] == {
+        'code': 'needs_input', 'prompt': 'Which source should I use?'
+    }
+    attempt = json.loads((run_dir / item['attempt_path']).read_text())
+    assert attempt['status'] == 'blocked' and attempt['process']['observed_exit'] is True
+
+
 @pytest.mark.parametrize('bad_tasks', [
     [{'id': 'same', 'prompt_file': 'a', 'adapter': 'codex', 'alias': 'scout', 'role': 'worker'},
      {'id': 'same', 'prompt_file': 'b', 'adapter': 'gemini', 'alias': 'scout', 'role': 'worker'}],
