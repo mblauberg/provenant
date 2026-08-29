@@ -38,12 +38,16 @@ in the same worktree. The existing foreground provider commands remain the
 preferred waiting path; this guidance adds the fence and evidence, not a new
 provider command.
 
-Use the concrete terminal fence after the foreground wait/provider boundary has
-returned an exit status:
+The concrete terminal fence below is currently **Codex-only**: the helper's
+`live_processes()` detector enumerates `codex exec` children. Use the provider's
+own process boundary for agy, cursor, kiro or other adapters unless their
+detector is extended. For a simple foreground call, the provider wait and its
+returned status are the completion evidence; use this command only for a
+detached protocol that captured `WORKER_PID` and `STATUS`:
 
 ```bash
 python3 "${AGENTS_HOME:-$HOME/.agents}/skills/orchestrate/scripts/worker_liveness.py" \
-  terminal-report --pid "$PID" --classification complete --exit-status "$STATUS"
+  terminal-report --pid "$WORKER_PID" --classification complete --exit-status "$STATUS"
 ```
 
 The command takes a fresh `ps` snapshot through the helper's existing
@@ -80,32 +84,60 @@ codex exec -s <sandbox> -C <ABSOLUTE_DIR> -m <model> - < brief.txt > out.txt 2>&
 Give it the largest timeout the tool accepts. This is the whole procedure when
 the run fits inside one timeout window.
 
-**Second choice, for runs that can exceed that window: detach, then block on a
-FIFO.** Still event-driven and still zero-poll, and it carries the exit status:
+**Second choice, only when detachment is unavoidable: use the shared detached
+helper.** Give each dispatch a unique run directory. The helper captures the
+actual provider child PID in `worker.pid`, records its own wrapper PID in
+`wrapper.pid`, waits on the child directly, writes output to
+`run_dir/transcript.txt`, and atomically writes the durable completion marker
+to `run_dir/done`. The caller captures the wrapper PID separately:
 
 ```bash
-mkfifo done.fifo
-nohup bash -c '<worker command> > out.txt 2>&1; echo EXIT=$? > done.fifo' >/dev/null 2>&1 &
+run_dir=${TMPDIR:-/tmp}/provenant-worker-<unique-slug>
+"${AGENTS_HOME:-$HOME/.agents}/skills/orchestrate/scripts/run_worker_detached.sh" \
+  --run-dir "$run_dir" -- <worker command> &
+WRAPPER_PID=$!
+wait "$WRAPPER_PID"
+STATUS=$?
+WORKER_PID="$(cat "$run_dir/worker.pid")"
 ```
 
-then, as a separate foreground call, `cat done.fifo`. It blocks on the write and
-returns the worker's exit code. If the tool timeout fires first, reissue `cat`
-unchanged; the FIFO is still there and still unwritten.
-
-**Last resort**, where a FIFO is awkward, a foreground condition loop:
+The helper claims `run_dir` exclusively, forwards its stdin to the direct
+provider child, and its direct wait preserves the provider exit status. If the
+original shell is gone, observe either the regular completion file or the
+recorded wrapper exit. A wrapper exit without a marker is an evidence failure,
+never a reason to accept or reuse the run:
 
 ```bash
-while kill -0 <PID> 2>/dev/null; do sleep 20; done; echo WORKER-EXITED
+helper="${AGENTS_HOME:-$HOME/.agents}/skills/orchestrate/scripts/run_worker_detached.sh"
+while :; do
+  validation="$($helper --validate --run-dir "$run_dir" 2>/dev/null)"
+  validation_status=$?
+  if [ "$validation_status" -eq 0 ]; then
+    break
+  elif [ "$validation_status" -ne 1 ]; then
+    echo "completion evidence missing or invalid; do not accept or reuse the run" >&2
+    exit 1
+  fi
+  sleep 1
+done
+read -r WORKER_PID WRAPPER_PID STATUS <<< "$validation"
 ```
 
-Harnesses that block a bare foreground `sleep` still permit this form, because
-the guard targets `sleep N; <command>` poll chains rather than a loop blocking
-on a condition. It polls, so prefer either option above it.
+This fallback waits only on the claimed run directory's durable marker and the
+recorded wrapper PID, and is used only after detachment; do not substitute a
+watcher or notification for the direct PID wait. The marker is bound to the
+claimed run directory and both recorded PIDs; a stale or concurrent marker must
+never satisfy another dispatch. Confirm the worker PID is no longer live before
+terminal reporting, inspection or reuse. The shared validator returns `1` while
+the wrapper is still running and startup or completion evidence is incomplete,
+`0` only for a structurally valid marker plus an observed worker exit, and any
+other nonzero status is an evidence failure.
 
-Whichever form is used, reissue on timeout and do not substitute short sleeps,
-liveness probes or status checks between reissues: each is a turn the worker
-could have finished in, and the temptation to then stop and await a notification
-is exactly the failure above.
+If a foreground wait times out, reissue that same wait while its PID or durable
+completion marker remains available. Do not insert liveness probes or status
+checks between reissues: each is a turn the worker could have finished in, and
+the temptation to then stop and await a notification is exactly the failure
+above.
 
 ## A dispatcher must actually dispatch
 

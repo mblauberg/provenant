@@ -97,15 +97,52 @@ output by hand. A blocking call cannot fail that way.
 previous run sat at 14 minutes elapsed against 0.16 seconds of CPU when stdout was piped, so
 after completion read the bounded report rather than the transcript.
 
-**3. If the call times out**, and only then, the run is still alive and detached from you. Find
-it with `ps -eo pid,etime,time,command | grep "[c]odex exec"`, then wait on it with an ordinary
-**foreground** Bash call at `timeout: 600000`:
+**3. If detachment is unavoidable**, use the shared detached helper, which captures and waits on
+the actual provider child PID. Give each dispatch a unique run directory; it records that child
+in `worker.pid`, its own wrapper in `wrapper.pid`, writes output to the owned
+`run_dir/transcript.txt`, and atomically writes the durable completion marker to
+`run_dir/done`:
 
 ```
-while kill -0 <PID> 2>/dev/null; do sleep 20; done; echo CODEX-EXITED
+run_dir=${TMPDIR:-/tmp}/codex-<unique-slug>
+"${AGENTS_HOME:-$HOME/.agents}/skills/orchestrate/scripts/run_worker_detached.sh" \
+  --run-dir "$run_dir" -- \
+  codex exec -s read-only -C <ABSOLUTE_DIR> \
+    -o ${TMPDIR:-/tmp}/codex-<slug>-report.md -m gpt-5.6-luna \
+    -c 'service_tier="default"' -c 'model_reasoning_effort="high"' - \
+    < ${TMPDIR:-/tmp}/codex-<slug>-prompt.txt &
+WRAPPER_PID=$!
+wait "$WRAPPER_PID"
+STATUS=$?
+WORKER_PID="$(cat "$run_dir/worker.pid")"
 ```
 
-If that times out too, reissue it unchanged, as many times as it takes.
+The helper claims the run directory exclusively, forwards stdin to the direct Codex child, and its
+direct wait is the normal completion path. If the original shell is gone, observe either the regular
+completion file or the recorded wrapper exit. A wrapper exit without a marker is an evidence failure,
+never a reason to accept or reuse the run:
+
+```
+helper="${AGENTS_HOME:-$HOME/.agents}/skills/orchestrate/scripts/run_worker_detached.sh"
+while :; do
+  validation="$($helper --validate --run-dir "$run_dir" 2>/dev/null)"
+  validation_status=$?
+  if [ "$validation_status" -eq 0 ]; then
+    break
+  elif [ "$validation_status" -ne 1 ]; then
+    echo "completion evidence missing or invalid; do not accept or reuse the run" >&2
+    exit 1
+  fi
+  sleep 1
+done
+read -r WORKER_PID WRAPPER_PID STATUS <<< "$validation"
+```
+
+The shared validator returns `1` while the wrapper is still running and startup
+or completion evidence is incomplete, `0` only for a valid marker plus an
+observed worker exit, and any other nonzero status is an evidence failure.
+
+Do not replace the direct PID wait with a watcher, notification or side-channel rendezvous.
 
 **Never use `run_in_background: true` for this wait.** You are a sub-agent: your turn ending is
 your result being returned, and no notification reopens you afterwards. A background watcher
@@ -226,10 +263,11 @@ heredoc to a temp file, so it fails for the very reason just given.
 
 ## Liveness
 
-If asked whether it is still running: `ps -o pid,etime,time -p <PID>`. Compare CPU time against
-elapsed. Output file size proves nothing. A hung run still holds a large file. A run with
-minutes of elapsed time and near-zero CPU is hung, almost always because something piped its
-stdout.
+Follow [`worker-liveness.md`](../skills/orchestrate/references/worker-liveness.md). CPU time,
+elapsed time or output file size do not prove exit. Only observed PID exit and its exit status
+control terminality, inspection and reuse. The foreground Codex command supplies that direct
+wait; the detached helper records `worker.pid` and `wrapper.pid` for the regular completion
+file, and both must be fenced before accepting the report.
 
 ## Failure
 
