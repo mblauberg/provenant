@@ -4,6 +4,7 @@ set -u
 
 RUN_DIR=""
 VALIDATE=0
+STARTUP_GRACE_SECONDS=2
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --validate)
@@ -35,12 +36,30 @@ read_single_value() {
   printf '%s' "$value"
 }
 
+directory_mtime() {
+  case "$(uname -s)" in
+    Darwin) stat -f '%m' -- "$1" 2>/dev/null ;;
+    *) stat -c '%Y' -- "$1" 2>/dev/null ;;
+  esac
+}
+
+within_startup_grace() {
+  startup_mtime=$(directory_mtime "$1") || return 1
+  startup_now=$(date +%s)
+  case "$startup_mtime" in ''|*[!0-9]*) return 1 ;; esac
+  startup_age=$((startup_now - startup_mtime))
+  [ "$startup_age" -ge 0 ] && [ "$startup_age" -le "$STARTUP_GRACE_SECONDS" ]
+}
+
 validate_run() {
   validate_dir=$1
   validate_done="$validate_dir/done"
   validate_worker_pid_path="$validate_dir/worker.pid"
   validate_wrapper_pid_path="$validate_dir/wrapper.pid"
   validate_wrapper_pid=$(read_single_value "$validate_wrapper_pid_path") || {
+    if [ ! -e "$validate_done" ] && within_startup_grace "$validate_dir"; then
+      return 1
+    fi
     echo "completion evidence missing wrapper PID" >&2
     return 2
   }

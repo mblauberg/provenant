@@ -3,6 +3,7 @@ import re
 import signal
 import subprocess
 import sys
+import time
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -208,6 +209,25 @@ def test_detached_helper_validation_reports_startup(tmp_path):
         capture_output=True,
         text=True,
     )
+    assert stale.returncode == 2
+
+
+def test_detached_helper_validation_graces_fresh_claim_without_wrapper_pid(tmp_path):
+    run_dir = tmp_path / "claimed"
+    run_dir.mkdir()
+    fresh = subprocess.run(
+        [str(DETACHED_HELPER), "--validate", "--run-dir", str(run_dir)],
+        capture_output=True,
+        text=True,
+    )
+    time.sleep(3)
+    stale = subprocess.run(
+        [str(DETACHED_HELPER), "--validate", "--run-dir", str(run_dir)],
+        capture_output=True,
+        text=True,
+    )
+
+    assert fresh.returncode == 1
     assert stale.returncode == 2
 
 
