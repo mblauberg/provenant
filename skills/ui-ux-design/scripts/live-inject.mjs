@@ -20,7 +20,9 @@ import { fileURLToPath } from 'node:url';
 import { resolveLiveConfigPath } from './impeccable-paths.mjs';
 import {
   hasExecutableJsxMarkerAtOffset,
+  frameworkTemplateContextAtOffset,
   htmlLexicalContextAtOffset,
+  isOffsetInsideAstroFrontmatter,
 } from './jsx-tag-scanner.mjs';
 import {
   readContainedSource,
@@ -106,7 +108,7 @@ Output (JSON):
     const replacements = [];
     const results = targets.map(({ relFile, snapshot }) => {
       const content = snapshot.bytes.toString('utf-8');
-      const detagged = removeTag(content, config.commentSyntax);
+      const detagged = removeTag(content, config.commentSyntax, relFile);
       const updated = revertCspMeta(detagged);
       if (updated === content) return { file: relFile, removed: false, note: 'no tag present' };
       replacements.push({ snapshot, content: updated });
@@ -138,7 +140,7 @@ Output (JSON):
   const replacements = [];
   const results = targets.map(({ relFile, snapshot }) => {
     const content = snapshot.bytes.toString('utf-8');
-    const withoutOld = revertCspMeta(removeTag(content, config.commentSyntax));
+    const withoutOld = revertCspMeta(removeTag(content, config.commentSyntax, relFile));
     const withTag = insertTag(withoutOld, config, port, token);
     if (withTag === withoutOld) {
       return { file: relFile, error: 'insertion_point_not_found', anchor: config.insertBefore || config.insertAfter };
@@ -390,7 +392,9 @@ function insertTag(content, config, port, token) {
  * unindented. Replacing the whole block (plus its trailing newline) with just
  * the captured indent hands the indent back to the anchor that follows.
  */
-function removeTag(content, _syntax) {
+function removeTag(content, _syntax, filePath = '') {
+  const extension = path.extname(filePath).toLowerCase();
+  const isFramework = ['.astro', '.svelte', '.vue'].includes(extension);
   const patterns = [
     {
       syntax: 'jsx',
@@ -408,13 +412,18 @@ function removeTag(content, _syntax) {
         return false;
       }
       const markerOffset = match.index + match[1].length;
-      return syntax === 'jsx'
-        ? hasExecutableJsxMarkerAtOffset(
+      if (syntax === 'jsx') {
+        return hasExecutableJsxMarkerAtOffset(
           content,
           markerOffset,
           '{/* impeccable-live-start */}'.length,
-        )
-        : htmlLexicalContextAtOffset(content, markerOffset) === 'markup';
+        );
+      }
+      if (isFramework) {
+        return !isOffsetInsideAstroFrontmatter(content, markerOffset)
+          && frameworkTemplateContextAtOffset(content, markerOffset) === 'markup';
+      }
+      return htmlLexicalContextAtOffset(content, markerOffset) === 'markup';
     })
   ));
   if (matches.length === 0) return content;

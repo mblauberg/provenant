@@ -25,6 +25,7 @@ import {
   frameworkTemplateContextAtOffset,
   hasExecutableJsxTagAtOffset,
   htmlLexicalContextAtOffset,
+  isOffsetInsideAstroFrontmatter,
 } from './jsx-tag-scanner.mjs';
 
 const EXTENSIONS = ['.html', '.jsx', '.tsx', '.vue', '.svelte', '.astro'];
@@ -541,21 +542,12 @@ function isExecutableOpener(lines, openerLine, source, offsets, isJsx, filePath)
   if (htmlLexicalContextAtOffset(source, offset) !== 'markup') return false;
   const extension = path.extname(filePath || '').toLowerCase();
   if (!['.astro', '.svelte', '.vue'].includes(extension)) return true;
-  if (extension === '.astro' && isInsideAstroFrontmatter(source, offset)) return false;
+  if (extension === '.astro' && isOffsetInsideAstroFrontmatter(source, offset)) return false;
   try {
     return frameworkTemplateContextAtOffset(source, offset) === 'markup';
   } catch {
     return false;
   }
-}
-
-function isInsideAstroFrontmatter(source, offset) {
-  const opening = source.match(/^(?:\uFEFF)?---[ \t]*\r?\n/);
-  if (!opening) return false;
-  const closingPattern = /^---[ \t]*(?:\r?\n|$)/gm;
-  closingPattern.lastIndex = opening[0].length;
-  const closing = closingPattern.exec(source);
-  return !closing || offset < closing.index + closing[0].length;
 }
 
 function findElement(lines, query, tag = null, isJsx = false, filePath = '') {

@@ -21,7 +21,10 @@ import { readContainedSource, replaceContainedSource } from './contained-source.
 import {
   findJsxSubtree,
   findMatchingJsxTag,
-  isOffsetInsideJavaScriptTemplate,
+  frameworkTemplateContextAtOffset,
+  hasExecutableJsxMarkerAtOffset,
+  htmlLexicalContextAtOffset,
+  isOffsetInsideAstroFrontmatter,
   scanJsxTags,
 } from './jsx-tag-scanner.mjs';
 
@@ -556,11 +559,19 @@ function hasExecutableStartMarker(content, filePath, id) {
   const syntax = detectCommentSyntax(filePath);
   const marker = markerText('start', id, syntax);
   const isJsx = syntax.open === '{/*';
+  const extension = path.extname(filePath).toLowerCase();
+  const isFramework = ['.astro', '.svelte', '.vue'].includes(extension);
   let offset = 0;
   for (const line of content.split('\n')) {
     const markerColumn = line.indexOf(marker);
-    if (line.trim() === marker
-      && (!isJsx || !isOffsetInsideJavaScriptTemplate(content, offset + markerColumn))) {
+    const markerOffset = offset + markerColumn;
+    const executable = isJsx
+      ? hasExecutableJsxMarkerAtOffset(content, markerOffset, marker.length)
+      : isFramework
+        ? !isOffsetInsideAstroFrontmatter(content, markerOffset)
+          && frameworkTemplateContextAtOffset(content, markerOffset) === 'markup'
+        : htmlLexicalContextAtOffset(content, markerOffset) === 'markup';
+    if (line.trim() === marker && executable) {
       return true;
     }
     offset += line.length + 1;

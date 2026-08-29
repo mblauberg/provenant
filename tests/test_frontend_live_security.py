@@ -741,6 +741,28 @@ def test_live_inject_remove_handles_stale_syntax_and_html_comment_decoys(
     assert page.read_text() == prefix + "<main>safe</main>\n"
 
 
+def test_live_inject_remove_ignores_framework_expression_template_decoy(
+    tmp_path: Path,
+) -> None:
+    page = tmp_path / "Component.svelte"
+    _write_config(tmp_path, [page.name])
+    block = "\n".join(
+        [
+            "<!-- impeccable-live-start -->",
+            f'<script src="http://127.0.0.1:8400/live.js?token={TOKEN}"></script>',
+            "<!-- impeccable-live-end -->",
+            "",
+        ]
+    )
+    source = "{condition ? `\n" + block + "` : ''}\n<section>Real</section>\n"
+    page.write_text(source)
+
+    removed = _run_inject(tmp_path, "--remove")
+
+    assert removed.returncode == 0, removed.stderr
+    assert page.read_text() == source
+
+
 def test_live_runtime_http_urls_use_one_ipv4_loopback_origin() -> None:
     runtime_files = [
         path
@@ -1454,6 +1476,36 @@ def test_live_discard_ignores_scaffolds_inside_nested_template_literals(
             "  {/* impeccable-variants-end security-test */}",
             "</div>",
             "`}`;",
+            "",
+        ]
+    )
+    page.write_text(source)
+
+    completed = _run_accept(tmp_path, "--discard")
+
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(completed.stdout)["handled"] is False
+    assert page.read_text() == source
+
+
+def test_live_discard_ignores_html_scaffold_inside_framework_script_template(
+    tmp_path: Path,
+) -> None:
+    page = tmp_path / "Component.svelte"
+    source = "\n".join(
+        [
+            "<script>",
+            "const fixture = `",
+            '<div data-impeccable-variants="security-test">',
+            "  <!-- impeccable-variants-start security-test -->",
+            '  <div data-impeccable-variant="original">',
+            "    <span>literal content</span>",
+            "  </div>",
+            "  <!-- impeccable-variants-end security-test -->",
+            "</div>",
+            "`;",
+            "</script>",
+            '<section class="target">Real</section>',
             "",
         ]
     )

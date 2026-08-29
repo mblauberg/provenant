@@ -460,6 +460,15 @@ export function frameworkTemplateContextAtOffset(source, offset) {
   return htmlContextAtOffset(source, offset, true);
 }
 
+export function isOffsetInsideAstroFrontmatter(source, offset) {
+  const opening = source.match(/^(?:\uFEFF)?---[ \t]*\r?\n/);
+  if (!opening) return false;
+  const closingPattern = /^---[ \t]*(?:\r?\n|$)/gm;
+  closingPattern.lastIndex = opening[0].length;
+  const closing = closingPattern.exec(source);
+  return !closing || offset < closing.index + closing[0].length;
+}
+
 export function hasExecutableJsxTagAtOffset(source, offset) {
   if (!Number.isInteger(offset) || offset < 0 || offset >= source.length) return false;
   let found = false;
