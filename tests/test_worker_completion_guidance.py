@@ -44,7 +44,7 @@ def test_codex_agent_definitions_use_foreground_or_durable_pid_completion():
         for pattern in _active_fifo_completion_patterns():
             assert not pattern.search(source), f"{path}: {pattern.pattern}"
         assert "foreground" in source.lower(), path
-        assert 'wait "$PID"' in source or "regular completion file" in source, path
+        assert 'wait "$PID"' in source or "durable completion marker" in source, path
 
 
 def test_codex_liveness_does_not_infer_exit_from_resource_signals():
@@ -68,6 +68,8 @@ def test_detached_protocol_uses_owned_run_and_pids():
     assert "--transcript" not in source
     assert "worker.pid" in source
     assert "wrapper.pid" in source
+    assert "run_dir/transcript.txt" in source
+    assert "run_dir/done" in source
     assert 'terminal-report --pid "$WORKER_PID"' in source
     assert 'terminal-report --pid "$PID"' not in source
 
@@ -77,6 +79,8 @@ def test_detached_protocol_uses_owned_run_and_pids():
         assert "--transcript" not in agent_source, path
         assert "worker.pid" in agent_source, path
         assert "wrapper.pid" in agent_source, path
+        assert "run_dir/transcript.txt" in agent_source, path
+        assert "run_dir/done" in agent_source, path
 
 
 def _helper_command(run_dir, worker_code):

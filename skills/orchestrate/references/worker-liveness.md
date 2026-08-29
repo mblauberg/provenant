@@ -87,9 +87,9 @@ the run fits inside one timeout window.
 **Second choice, only when detachment is unavoidable: use the shared detached
 helper.** Give each dispatch a unique run directory. The helper captures the
 actual provider child PID in `worker.pid`, records its own wrapper PID in
-`wrapper.pid`, waits on the child directly, and atomically writes a durable
-regular completion file in `run_dir/transcript.txt`. The caller captures the
-wrapper PID separately:
+`wrapper.pid`, waits on the child directly, writes output to
+`run_dir/transcript.txt`, and atomically writes the durable completion marker
+to `run_dir/done`. The caller captures the wrapper PID separately:
 
 ```bash
 run_dir=${TMPDIR:-/tmp}/provenant-worker-<unique-slug>

@@ -118,7 +118,7 @@ is wrong, not the sandbox.
 and waits on the actual Codex child PID.** Give each dispatch a unique run
 directory; it records that child in `worker.pid`, its own wrapper in
 `wrapper.pid`, writes output to the owned `run_dir/transcript.txt`, and writes a
-durable regular completion file atomically:
+durable completion marker atomically to `run_dir/done`:
 
 ```
 run_dir=${TMPDIR:-/tmp}/codex-<unique-slug>

@@ -100,7 +100,8 @@ after completion read the bounded report rather than the transcript.
 **3. If detachment is unavoidable**, use the shared detached helper, which captures and waits on
 the actual provider child PID. Give each dispatch a unique run directory; it records that child
 in `worker.pid`, its own wrapper in `wrapper.pid`, writes output to the owned
-`run_dir/transcript.txt`, and atomically writes a durable regular completion file:
+`run_dir/transcript.txt`, and atomically writes the durable completion marker to
+`run_dir/done`:
 
 ```
 run_dir=${TMPDIR:-/tmp}/codex-<unique-slug>
