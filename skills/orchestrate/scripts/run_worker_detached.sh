@@ -119,12 +119,6 @@ if [ ! -w "$RUN_DIR" ]; then
   exit 2
 fi
 
-transcript="$RUN_DIR/transcript.txt"
-if ! : >"$transcript"; then
-  echo "run transcript is not writable: $transcript" >&2
-  exit 2
-fi
-
 done_path="$RUN_DIR/done"
 worker_pid_path="$RUN_DIR/worker.pid"
 wrapper_pid_path="$RUN_DIR/wrapper.pid"
@@ -145,6 +139,12 @@ write_atomic() {
 
 if ! write_atomic "$wrapper_pid_path" "$$"; then
   echo "cannot persist wrapper PID before launch" >&2
+  exit 2
+fi
+
+transcript="$RUN_DIR/transcript.txt"
+if ! : >"$transcript"; then
+  echo "run transcript is not writable: $transcript" >&2
   exit 2
 fi
 

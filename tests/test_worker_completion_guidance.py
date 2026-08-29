@@ -203,6 +203,12 @@ def test_detached_helper_validation_reports_startup(tmp_path):
     wrapper.wait(timeout=5)
 
     assert result.returncode == 1
+    stale = subprocess.run(
+        [str(DETACHED_HELPER), "--validate", "--run-dir", str(run_dir)],
+        capture_output=True,
+        text=True,
+    )
+    assert stale.returncode == 2
 
 
 def test_detached_helper_validation_rejects_malformed_marker(tmp_path):
