@@ -210,7 +210,7 @@ def test_detached_helper_validation_rejects_malformed_marker(tmp_path):
     run_dir.mkdir()
     (run_dir / "wrapper.pid").write_text("999999\n")
     (run_dir / "worker.pid").write_text("888888\n")
-    (run_dir / "done").write_text("wrapper_pid=not-numeric\nworker_pid=888888\nexit=wat\n")
+    (run_dir / "done").write_text("wrapper_pid=999999\nworker_pid=888888\nexit=wat\n")
     validation = subprocess.run(
         [str(DETACHED_HELPER), "--validate", "--run-dir", str(run_dir)],
         capture_output=True,

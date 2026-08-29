@@ -71,6 +71,12 @@ validate_run() {
   validate_done_wrapper=$(sed -n 's/^wrapper_pid=\([0-9][0-9]*\)$/\1/p' "$validate_done")
   validate_done_worker=$(sed -n 's/^worker_pid=\([0-9][0-9]*\)$/\1/p' "$validate_done")
   validate_done_exit=$(sed -n 's/^exit=\([0-9][0-9]*\)$/\1/p' "$validate_done")
+  case "$validate_done_exit" in
+    ''|*[!0-9]*)
+      echo "completion evidence marker has invalid exit status" >&2
+      return 2
+      ;;
+  esac
   if [ "$validate_done_lines" -ne 3 ] || [ "$(printf '%s\n' "$validate_done_wrapper" | wc -l | tr -d ' ')" -ne 1 ] ||
     [ "$(printf '%s\n' "$validate_done_worker" | wc -l | tr -d ' ')" -ne 1 ] ||
     [ "$(printf '%s\n' "$validate_done_exit" | wc -l | tr -d ' ')" -ne 1 ] ||
