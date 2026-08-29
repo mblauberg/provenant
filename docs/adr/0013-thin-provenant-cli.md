@@ -2,7 +2,8 @@
 
 **Status:** Accepted 2026-07-18 (user, [issue
 #266](https://github.com/mblauberg/provenant/issues/266)); amended by [ADR
-0020](0020-retire-the-daemon-fabric.md) on 2026-08-02
+0020](0020-retire-the-daemon-fabric.md) on 2026-08-02; amended by [ADR
+0021](0021-configured-workspace-dispatch-boundaries.md) on 2026-08-29
 
 **Date:** 18 July 2026
 
@@ -64,21 +65,25 @@ stable for automation and direct use.
 
 ## Boundary
 
-The front door must not become another orchestration or provider layer. Defer or
-reject the following:
+The front door must not duplicate orchestration or provider-adapter mechanics.
+ADR 0021 amends this boundary to permit bounded dispatch and batch commands
+whose behavioural owner is the orchestration adapter layer. Defer or reject the
+following:
 
-- direct provider execution or normalised provider flags;
-- provider fallback, substitution or retry;
+- a second provider execution implementation or normalised flags that bypass
+  the existing adapter owner;
+- implicit provider fallback, substitution or retry;
 - cron, scheduling or a second daemon;
-- `run`, `wait`, pane capture or lifecycle state;
+- an independent lifecycle database or competing delivery receipt;
 - a rewrite of `scripts/check-harness`;
 - replacing existing scripts with symlinks or redirecting their callers.
 
-At this decision's date, Agent Fabric was the owner of answer-bearing provider
-execution, retained sessions, receipts and communication. `scripts/model-route`
-was the owner of model selection. Herdr and native harnesses had their existing
-execution and observation roles. A thin front door was not to reinterpret an
-error or turn one provider's failure into another provider's action.
+The front door may expose bounded `dispatch`, `batch` and `run` inspection
+commands, but those commands delegate to the one orchestration dispatch owner.
+They must not reinterpret an error or turn one provider's failure into another
+provider's action without an explicit retry or routing decision. See ADR 0021
+for the configured-workspace access, compact dispatch-manifest and assurance
+boundaries.
 
 ## Clients and providers
 
@@ -131,6 +136,6 @@ and waiting look convenient, but duplicate Fabric, routing and Herdr semantics.
 They also create a second place for authority, receipts, provider differences
 and failure handling. The reviewed proposal rejects this option.
 
-The thin front door is worthwhile only while it remains a discovery layer with
-mechanically verifiable passthrough behaviour. Any new behaviour belongs with
-the existing owner or requires a separate design decision.
+The thin front door remains worthwhile as a discovery layer and operator entry
+point. New bounded behaviour belongs with the existing dispatch owner and must
+be mechanically verifiable; it must not create a second owner.

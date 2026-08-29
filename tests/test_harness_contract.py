@@ -43,6 +43,42 @@ def test_default_agent_run_directory_is_ignored_in_the_harness_repo():
     assert ".agent-run/" in (ROOT / ".gitignore").read_text().splitlines()
 
 
+def test_configured_workspace_execution_is_family_agnostic_but_assurance_is_explicit():
+    harness = (ROOT / "HARNESS.md").read_text()
+    scope = (ROOT / "skills/scope/SKILL.md").read_text()
+    routing = (ROOT / "skills/orchestrate/references/routing-and-tiers.md").read_text()
+    orchestrate = (ROOT / "skills/orchestrate/SKILL.md").read_text()
+
+    assert "ordinary workspace content" in harness
+    assert "ordinary authorised workspace content" in scope.lower()
+    assert "family separation" in harness
+    assert "family-separation" in scope
+    assert "family separation" in routing
+    assert "family separation" in orchestrate
+    assert "family separation is an assurance property" in " ".join(harness.split())
+    assert "without a family-separation gate" in scope
+    assert "assurance claim" in routing
+    assert "execution freedom" in orchestrate
+
+
+def test_dispatch_manifest_and_delivery_run_have_distinct_owners():
+    adr = (ROOT / "docs/adr/0021-configured-workspace-dispatch-boundaries.md").read_text()
+
+    assert "compact dispatch manifest" in adr
+    assert "is not a delivery `RUN.json`" in adr
+    assert "one dispatch owner" in adr.lower()
+    assert "Fabric remains coordination-only" in adr
+
+
+def test_thin_cli_decision_is_amended_by_dispatch_boundary_decision():
+    index = (ROOT / "docs/adr/README.md").read_text()
+    thin_cli = (ROOT / "docs/adr/0013-thin-provenant-cli.md").read_text()
+
+    assert "0021" in index
+    assert "0021-configured-workspace-dispatch-boundaries.md" in thin_cli
+    assert "bounded dispatch and batch commands" in thin_cli
+
+
 @pytest.mark.skipif(shutil.which("mmdc") is None, reason="optional local Mermaid CLI is absent")
 def test_readme_mermaid_parses_with_available_local_renderer(tmp_path):
     readme = (ROOT / "README.md").read_text()

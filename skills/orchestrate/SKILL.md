@@ -43,7 +43,13 @@ under `~/.claude/agents/`.
   exited. A detached task is not dead, and a live wrapper is not working.
   Observed PID exit is what fences terminal reporting, inspection and reuse.
 - **Cross-family follows the HARNESS risk ladder.** Targeted lenses plus other
-  primary; distinct family when available; record terminal skips.
+  primary; family separation is required only for the assurance claim being
+  made, not for ordinary execution. Record terminal skips.
+- **Configured workspace execution has broad provider choice.** An authorised
+  chair may dispatch ordinary workspace work to any configured provider family;
+  execution freedom is bounded by credential/auth-store exclusions, unrelated
+  path containment, explicit denials, write/resource limits and external-action
+  gates.
 - **Objective checks outrank opinions. You own the final call.**
 - Discover current model/tool options at runtime.
 
