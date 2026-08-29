@@ -19,10 +19,23 @@ TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 BATCH_ID_RE = re.compile(r"^batch-(?:\d{3}|[1-9]\d{3,})$")
 TERMINAL_STATUSES = {"blocked", "succeeded", "failed", "timed_out", "cancelled"}
 DISPATCH_RUN = Path(__file__).with_name("dispatch_run.py")
+MAX_WORKER_QUESTION_PROMPT = 4096
 
 
 class ControlError(ValueError):
     """A run-control request cannot be answered from safe retained evidence."""
+
+
+def _valid_worker_question(value: Any) -> bool:
+    return (
+        isinstance(value, dict)
+        and set(value) == {"code", "prompt"}
+        and value.get("code") == "needs_input"
+        and isinstance(value.get("prompt"), str)
+        and bool(value["prompt"])
+        and len(value["prompt"]) <= MAX_WORKER_QUESTION_PROMPT
+        and "\x00" not in value["prompt"]
+    )
 
 
 def digest(path: Path) -> str:
@@ -180,7 +193,7 @@ def _attempt(run_dir: Path, task_id: str, attempt_id: str) -> tuple[dict[str, An
         raise ControlError(f"successful attempt has no result evidence: {attempt_rel}")
     if record.get("status") == "blocked":
         question = record.get("question")
-        if not isinstance(question, dict) or not isinstance(question.get("prompt"), str) or not question["prompt"]:
+        if not _valid_worker_question(question):
             raise ControlError(f"blocked attempt has no question: {attempt_rel}")
     return record, artifacts, attempt_path, payloads
 
@@ -374,11 +387,47 @@ def _run_child(command: list[str], input_bytes: bytes | None = None) -> int:
     return completed.returncode
 
 
+def _operator_response(args: argparse.Namespace) -> bytes:
+    if args.response_file is not None:
+        _, response = _prompt_file(args.response_file)
+    else:
+        try:
+            response = sys.stdin.buffer.read()
+        except OSError as exc:
+            raise ControlError(f"operator response is unavailable: {exc}") from exc
+    if not response:
+        raise ControlError("operator response must not be empty")
+    return response
+
+
+def _continuation_prompt(original: bytes, question: dict[str, Any], response: bytes) -> bytes:
+    question_bytes = json.dumps(question, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    original_prefix = original if original.endswith(b"\n") else original + b"\n"
+    return original_prefix + b"\n".join((
+        b"## Provenant blocked question",
+        question_bytes,
+        b"## Operator response",
+        response,
+    )) + b"\n"
+
+
 def _retry(args: argparse.Namespace) -> int:
     run_dir = _run_dir(args.run_dir)
     parent, artifacts, _, payloads = _attempt(run_dir, args.task_id, args.attempt_id)
     if parent["status"] == "succeeded":
         raise ControlError("successful attempts cannot be retried")
+    has_response_source = args.response_file is not None or args.response_stdin
+    if parent["status"] == "blocked":
+        if not has_response_source:
+            raise ControlError("blocked retries require exactly one operator response source")
+        question = parent.get("question")
+        if not _valid_worker_question(question):
+            raise ControlError("blocked attempt has an invalid question")
+        prompt_bytes = _continuation_prompt(payloads["prompt"], question, _operator_response(args))
+    else:
+        if has_response_source:
+            raise ControlError("operator response is only valid for blocked retries")
+        prompt_bytes = payloads["prompt"]
     if args.same_route == args.reroute:
         raise ControlError("retry requires exactly one of --same-route or --reroute")
     if args.same_route:
@@ -398,7 +447,10 @@ def _retry(args: argparse.Namespace) -> int:
             if value:
                 route[key] = value
         _route_selector(route)
-    return _run_child(_dispatch_command(run_dir, args.task_id, None, route, args.attempt_id, prompt_stdin=True), payloads["prompt"])
+    return _run_child(
+        _dispatch_command(run_dir, args.task_id, None, route, args.attempt_id, prompt_stdin=True),
+        prompt_bytes,
+    )
 
 
 def _load_summary(run_dir: Path, batch_id: str) -> dict[str, Any]:
@@ -571,6 +623,9 @@ def parser() -> argparse.ArgumentParser:
     route.add_argument("--task-class")
     route.add_argument("--model")
     retry.add_argument("--orchestrator-family")
+    response = retry.add_mutually_exclusive_group()
+    response.add_argument("--response-file", type=Path)
+    response.add_argument("--response-stdin", action="store_true")
 
     reduce = commands.add_parser("reduce", help="reduce explicit successful retained results")
     reduce.add_argument("--run-dir", type=Path, required=True)

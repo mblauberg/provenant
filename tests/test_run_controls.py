@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import importlib.util
 import json
 import os
@@ -94,6 +95,22 @@ def write_success_adapter(path: Path) -> None:
         printf 'provider result\\n' > "$out"
         digest="sha256:$(shasum -a 256 "$out" | awk '{print $1}')"
         printf '{"tool":"%s","adapter":"%s","execution_intent":"%s","resolved_model":"test-model","provider_family":"test-family","model_family":"test-family","endpoint_provider":"test-provider","identity_source":"test-fixture","status":"ok","exit":0,"output_path":"%s","output_digest":"%s","read_only_guarantee":"none","cross_family":false,"certification_eligible":false}\\n' "$tool" "$tool" "$intent" "$out" "$digest"
+    """).strip() + "\n", encoding="utf-8")
+    path.chmod(path.stat().st_mode | stat.S_IXUSR)
+
+
+def write_question_adapter(path: Path) -> None:
+    path.write_text(textwrap.dedent("""
+        #!/usr/bin/env bash
+        while [ "$#" -gt 0 ]; do
+          case "$1" in
+            --out) out="$2"; shift 2;;
+            *) shift;;
+          esac
+        done
+        printf '%s\\n' '{"schema_version":1,"record_type":"provenant-worker-terminal","classification":"question","question":{"code":"needs_input","prompt":"Which source should I use?"}}' > "$out"
+        digest="sha256:$(shasum -a 256 "$out" | awk '{print $1}')"
+        printf '{"tool":"codex","adapter":"codex","execution_intent":"ordinary","resolved_model":"test-model","provider_family":"test-family","model_family":"test-family","endpoint_provider":"test-provider","identity_source":"test-fixture","status":"ok","exit":0,"output_path":"%s","output_digest":"%s","read_only_guarantee":"none","cross_family":false,"certification_eligible":false}\\n' "$out" "$digest"
     """).strip() + "\n", encoding="utf-8")
     path.chmod(path.stat().st_mode | stat.S_IXUSR)
 
@@ -216,6 +233,116 @@ def test_blocked_inspection_exposes_question_and_continuation_reference(tmp_path
     attempt = json.loads(result.stdout)["tasks"][0]["attempts"][0]
     assert attempt["question"]["prompt"] == "Which source?"
     assert attempt["continuation_ref"] == "dispatch/tasks/task-1/attempt-001/attempt.json"
+
+
+def test_blocked_retry_requires_response_and_retains_new_attempt_prompt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    run_dir = make_run(tmp_path)
+    question = {"code": "needs_input", "prompt": "Which source should I use?"}
+    envelope = json.dumps({
+        "schema_version": 1, "record_type": "provenant-worker-terminal",
+        "classification": "question", "question": question,
+    }) + "\n"
+    parent = write_attempt(run_dir, status="blocked", result=envelope, question=question)
+    parent_before = parent.read_bytes()
+    fake = tmp_path / "dispatch-run"
+    captured = tmp_path / "captured-prompt"
+    fake.write_text(
+        f"#!/usr/bin/env python3\nimport sys\nopen({str(captured)!r}, 'wb').write(sys.stdin.buffer.read())\n",
+        encoding="utf-8",
+    )
+    fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
+    module_spec = importlib.util.spec_from_file_location("run_controls_blocked_retry", SCRIPT)
+    assert module_spec and module_spec.loader
+    module = importlib.util.module_from_spec(module_spec)
+    module_spec.loader.exec_module(module)
+    monkeypatch.setattr(module, "DISPATCH_RUN", fake)
+    response = tmp_path / "response.md"
+    response.write_text("Use the primary archive.\n", encoding="utf-8")
+    args = module.parser().parse_args([
+        "retry", "--run-dir", str(run_dir), "--task-id", "task-1", "--attempt-id", "attempt-001",
+        "--same-route", "--response-file", str(response),
+    ])
+    monkeypatch.chdir(tmp_path)
+
+    assert module.run(args) == 0
+    assert parent.read_bytes() == parent_before
+    prompt = captured.read_text(encoding="utf-8")
+    assert prompt.startswith("prompt\n")
+    assert "prompt" in prompt and "Which source should I use?" in prompt
+    assert "Use the primary archive." in prompt
+
+
+def test_inspect_displays_real_worker_question_and_canonical_continuation(tmp_path: Path) -> None:
+    run_dir = make_run(tmp_path)
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("Need a source choice\n", encoding="utf-8")
+    adapter = tmp_path / "question-adapter"
+    dispatch = tmp_path / "dispatch-wrapper"
+    write_question_adapter(adapter)
+    write_dispatch_wrapper(dispatch, adapter)
+    result = subprocess.run([
+        str(dispatch), "--run-dir", str(run_dir), "--task-id", "question", "--adapter", "codex",
+        "--prompt-file", str(prompt), "--alias", "scout", "--role", "worker",
+    ], cwd=tmp_path, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    assert result.returncode == 1, result.stderr + result.stdout
+
+    inspected = invoke("run", "inspect", "--run-dir", str(run_dir), cwd=tmp_path)
+    assert inspected.returncode == 0, inspected.stderr + inspected.stdout
+    attempt = json.loads(inspected.stdout)["tasks"][0]["attempts"][0]
+    assert attempt["question"] == {"code": "needs_input", "prompt": "Which source should I use?"}
+    assert attempt["continuation_ref"] == "dispatch/tasks/question/attempt-001/attempt.json"
+
+
+def test_blocked_retry_accepts_response_stdin_and_nonblocked_rejects_response(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    run_dir = make_run(tmp_path)
+    question = {"code": "needs_input", "prompt": "Which source?"}
+    parent = write_attempt(run_dir, status="blocked", result="question\n", question=question)
+    fake = tmp_path / "dispatch-run"
+    captured = tmp_path / "captured-prompt"
+    fake.write_text(
+        f"#!/usr/bin/env python3\nimport sys\nopen({str(captured)!r}, 'wb').write(sys.stdin.buffer.read())\n",
+        encoding="utf-8",
+    )
+    fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
+    module_spec = importlib.util.spec_from_file_location("run_controls_stdin_retry", SCRIPT)
+    assert module_spec and module_spec.loader
+    module = importlib.util.module_from_spec(module_spec)
+    module_spec.loader.exec_module(module)
+    monkeypatch.setattr(module, "DISPATCH_RUN", fake)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(module.sys, "stdin", io.TextIOWrapper(io.BytesIO(b"stdin response\n")))
+    args = module.parser().parse_args([
+        "retry", "--run-dir", str(run_dir), "--task-id", "task-1", "--attempt-id", "attempt-001",
+        "--same-route", "--response-stdin",
+    ])
+    assert module.run(args) == 0
+    assert "stdin response" in captured.read_text(encoding="utf-8")
+    assert parent.exists()
+
+    nonblocked = make_run(tmp_path / "nonblocked")
+    write_attempt(nonblocked, status="failed", result=None)
+    rejected = module.parser().parse_args([
+        "retry", "--run-dir", str(nonblocked), "--task-id", "task-1", "--attempt-id", "attempt-001",
+        "--same-route", "--response-stdin",
+    ])
+    assert module.run(rejected) == 2
+
+
+def test_blocked_retry_without_response_is_rejected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    run_dir = make_run(tmp_path)
+    write_attempt(run_dir, status="blocked", result="question\n",
+                  question={"code": "needs_input", "prompt": "Which source?"})
+    module_spec = importlib.util.spec_from_file_location("run_controls_missing_response", SCRIPT)
+    assert module_spec and module_spec.loader
+    module = importlib.util.module_from_spec(module_spec)
+    module_spec.loader.exec_module(module)
+    monkeypatch.chdir(tmp_path)
+    args = module.parser().parse_args([
+        "retry", "--run-dir", str(run_dir), "--task-id", "task-1", "--attempt-id", "attempt-001",
+        "--same-route",
+    ])
+
+    assert module.run(args) == 2
 
 
 def test_inspect_keeps_preterminal_batch_task_conservative_when_receipt_is_absent(tmp_path: Path) -> None:

@@ -47,6 +47,30 @@ def write_success_adapter(path: Path) -> None:
     )
 
 
+def write_question_adapter(path: Path, *, exit_code: int = 0, result: str | None = None) -> None:
+    output = (result or json.dumps({
+        "schema_version": 1,
+        "record_type": "provenant-worker-terminal",
+        "classification": "question",
+        "question": {"code": "needs_input", "prompt": "Which source should I use?"},
+    })).rstrip("\n")
+    write_executable(
+        path,
+        f"""#!/usr/bin/env bash
+        while [ "$#" -gt 0 ]; do
+          case "$1" in
+            --out) out="$2"; shift 2;;
+            *) shift;;
+          esac
+        done
+        printf '%s\\n' '{output}' > "$out"
+        digest="sha256:$(shasum -a 256 "$out" | awk '{{print $1}}')"
+        printf '{{"tool":"codex","adapter":"codex","execution_intent":"ordinary","resolved_model":"test-model","provider_family":"test-family","model_family":"test-family","endpoint_provider":"test-provider","identity_source":"test-fixture","status":"ok","exit":0,"output_path":"%s","output_digest":"%s","read_only_guarantee":"none","cross_family":false,"certification_eligible":false}}\\n' "$out" "$digest"
+        exit {exit_code}
+        """,
+    )
+
+
 def make_run(tmp_path: Path, name: str) -> Path:
     return Path(
         subprocess.check_output([str(INIT), str(tmp_path / ".agent-run" / name)], text=True).strip()
@@ -129,6 +153,117 @@ def test_ordinary_single_dispatch_records_one_attempt_and_route_identity(tmp_pat
     assert receipt["attempt_digest"] == f"sha256:{expected_digest}"
     assert receipt["attempt_digest_path"].endswith("attempt.sha256")
     assert (run_dir / "RUN_RECEIPT.json").read_bytes() == receipt_before
+
+
+def test_valid_worker_question_envelope_is_retained_as_blocked_attempt(tmp_path: Path, monkeypatch) -> None:
+    run_dir = make_run(tmp_path, "question-envelope")
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("Need a source choice\n", encoding="utf-8")
+    adapter = tmp_path / "question-adapter"
+    write_question_adapter(adapter)
+    module = load_dispatch_module()
+    monkeypatch.setattr(module, "CF_DISPATCH", adapter)
+    args = module.parser().parse_args([
+        "--run-dir", str(run_dir), "--task-id", "question", "--adapter", "codex",
+        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+    ])
+    monkeypatch.chdir(tmp_path)
+
+    assert module.dispatch(args) == 1
+    attempt = json.loads(
+        (run_dir / "dispatch/tasks/question/attempt-001/attempt.json").read_text(encoding="utf-8")
+    )
+    assert attempt["status"] == "blocked"
+    assert attempt["outcome"] == "question"
+    assert attempt["failure_code"] == "needs_input"
+    assert attempt["question"] == {"code": "needs_input", "prompt": "Which source should I use?"}
+    assert attempt["process"]["observed_exit"] is True
+    assert attempt["process"]["exit_code"] == 0
+
+
+@pytest.mark.parametrize(
+    ("result", "status", "outcome"),
+    [
+        ("Do you agree?\n", "succeeded", "ok"),
+        ("```json\n{\"schema_version\":1,\"record_type\":\"provenant-worker-terminal\",\"classification\":\"question\",\"question\":{\"code\":\"needs_input\",\"prompt\":\"x\"}}\n```\n", "succeeded", "ok"),
+        ('{"record_type":"other","question":"quoted?"}\n', "succeeded", "ok"),
+        ('{"record_type":"provenant-worker-terminal","classification":"question","question":{"code":"needs_input","prompt":"x"},"extra":true}\n', "failed", "terminal_envelope_invalid"),
+        ('{"schema_version":1,"record_type":"provenant-worker-terminal","classification":"complete","question":{"code":"needs_input","prompt":"x"}}\n', "failed", "terminal_envelope_invalid"),
+        ('{"schema_version":1,"record_type":"provenant-worker-terminal","classification":"question","question":{"code":"needs_input","prompt":"x","extra":true}}\n', "failed", "terminal_envelope_invalid"),
+        ('{"schema_version":true,"record_type":"provenant-worker-terminal","classification":"question","question":{"code":"needs_input","prompt":"x"}}\n', "failed", "terminal_envelope_invalid"),
+        ('{"record_type":"provenant-worker-terminal","classification":"question","question":{"code":"needs_input","prompt":""}}\n', "failed", "terminal_envelope_invalid"),
+        ('{"record_type":"provenant-worker-terminal","classification":"question","question":{"code":"needs_input","prompt":null}}\n', "failed", "terminal_envelope_invalid"),
+        ('{"record_type":"provenant-worker-terminal","classification":"question","question":{"code":"needs_input","prompt":"a\\u0000b"}}\n', "failed", "terminal_envelope_invalid"),
+    ],
+)
+def test_worker_question_detection_is_exact_and_fail_closed(
+    tmp_path: Path, monkeypatch, result: str, status: str, outcome: str
+) -> None:
+    run_dir = make_run(tmp_path, "envelope-case")
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("prompt\n", encoding="utf-8")
+    adapter = tmp_path / "adapter"
+    write_question_adapter(adapter, result=result)
+    module = load_dispatch_module()
+    monkeypatch.setattr(module, "CF_DISPATCH", adapter)
+    args = module.parser().parse_args([
+        "--run-dir", str(run_dir), "--task-id", "case", "--adapter", "codex",
+        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+    ])
+    monkeypatch.chdir(tmp_path)
+
+    assert module.dispatch(args) == (0 if status == "succeeded" else 1)
+    attempt = json.loads((run_dir / "dispatch/tasks/case/attempt-001/attempt.json").read_text())
+    assert attempt["status"] == status
+    assert attempt["outcome"] == outcome
+    if status == "succeeded":
+        assert "question" not in attempt
+
+
+def test_valid_worker_question_cannot_override_nonzero_provider_exit(tmp_path: Path, monkeypatch) -> None:
+    run_dir = make_run(tmp_path, "question-nonzero")
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("prompt\n", encoding="utf-8")
+    adapter = tmp_path / "adapter"
+    write_question_adapter(adapter, exit_code=7)
+    module = load_dispatch_module()
+    monkeypatch.setattr(module, "CF_DISPATCH", adapter)
+    args = module.parser().parse_args([
+        "--run-dir", str(run_dir), "--task-id", "case", "--adapter", "codex",
+        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+    ])
+    monkeypatch.chdir(tmp_path)
+
+    assert module.dispatch(args) == 1
+    attempt = json.loads((run_dir / "dispatch/tasks/case/attempt-001/attempt.json").read_text())
+    assert attempt["status"] == "failed"
+    assert attempt["process"]["exit_code"] == 7
+    assert "question" not in attempt
+
+
+def test_worker_question_prompt_size_is_bounded(tmp_path: Path, monkeypatch) -> None:
+    run_dir = make_run(tmp_path, "question-too-large")
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("prompt\n", encoding="utf-8")
+    result = json.dumps({
+        "schema_version": 1,
+        "record_type": "provenant-worker-terminal",
+        "classification": "question",
+        "question": {"code": "needs_input", "prompt": "x" * 4097},
+    })
+    adapter = tmp_path / "adapter"
+    write_question_adapter(adapter, result=result)
+    module = load_dispatch_module()
+    monkeypatch.setattr(module, "CF_DISPATCH", adapter)
+    args = module.parser().parse_args([
+        "--run-dir", str(run_dir), "--task-id", "case", "--adapter", "codex",
+        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+    ])
+    monkeypatch.chdir(tmp_path)
+
+    assert module.dispatch(args) == 1
+    attempt = json.loads((run_dir / "dispatch/tasks/case/attempt-001/attempt.json").read_text())
+    assert attempt["outcome"] == "terminal_envelope_invalid"
 
 
 def test_ordinary_dispatch_without_lead_family_is_not_certification(tmp_path: Path) -> None:

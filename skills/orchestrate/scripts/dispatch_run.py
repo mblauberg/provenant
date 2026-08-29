@@ -33,6 +33,8 @@ CF_DISPATCH = Path(__file__).with_name("cf_dispatch.sh")
 TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 ATTEMPT_ID_RE = re.compile(r"^attempt-(?P<number>\d{3}|[1-9]\d{3,})$")
 DEFAULT_TIMEOUT_SECONDS = 900.0
+MAX_WORKER_QUESTION_PROMPT = 4096
+WORKER_TERMINAL_RECORD_TYPE = "provenant-worker-terminal"
 
 from _shared.bounded_process import stop_process_group
 
@@ -229,6 +231,51 @@ def success_receipt_error(
     if args.intent == "ordinary" and adapter["certification_eligible"]:
         return "ordinary execution cannot be certification eligible"
     return None
+
+
+class _JSONObject(dict[str, Any]):
+    """JSON object retaining whether a duplicate key was supplied."""
+
+    def __init__(self, pairs: list[tuple[str, Any]]) -> None:
+        super().__init__()
+        self.duplicate_keys = False
+        for key, value in pairs:
+            if key in self:
+                self.duplicate_keys = True
+            self[key] = value
+
+
+def worker_question_envelope(result_path: Path) -> dict[str, Any] | None:
+    """Return a validated worker question, or fail closed for a reserved record."""
+    try:
+        value = json.loads(
+            result_path.read_text(encoding="utf-8"), object_pairs_hook=_JSONObject
+        )
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(value, _JSONObject) or value.get("record_type") != WORKER_TERMINAL_RECORD_TYPE:
+        return None
+    if value.duplicate_keys or set(value) != {
+        "schema_version", "record_type", "classification", "question"
+    }:
+        raise ValueError("terminal worker envelope has an invalid root")
+    if value.get("schema_version") != 1 or isinstance(value.get("schema_version"), bool):
+        raise ValueError("terminal worker envelope schema_version must be 1")
+    if value.get("classification") != "question":
+        raise ValueError("terminal worker envelope classification must be question")
+    question = value.get("question")
+    if not isinstance(question, _JSONObject) or question.duplicate_keys or set(question) != {"code", "prompt"}:
+        raise ValueError("terminal worker envelope question is invalid")
+    prompt = question.get("prompt")
+    if (
+        question.get("code") != "needs_input"
+        or not isinstance(prompt, str)
+        or not prompt
+        or len(prompt) > MAX_WORKER_QUESTION_PROMPT
+        or "\x00" in prompt
+    ):
+        raise ValueError("terminal worker envelope prompt is invalid")
+    return {"code": "needs_input", "prompt": prompt}
 
 
 def fail(run_dir: Path | None, status: str, message: str) -> int:
@@ -620,6 +667,13 @@ def _dispatch(args: argparse.Namespace) -> int:
         if adapter_status == "ok" and result_exists
         else None
     )
+    question: dict[str, Any] | None = None
+    terminal_envelope_error = False
+    if observed_exit and exit_code == 0 and adapter_status == "ok" and not receipt_error and result_nonempty:
+        try:
+            question = worker_question_envelope(result_path)
+        except ValueError:
+            terminal_envelope_error = True
     if process_error == "timeout":
         status = "timed_out"
         outcome = "timeout"
@@ -635,6 +689,12 @@ def _dispatch(args: argparse.Namespace) -> int:
     elif adapter_status == "ok" and receipt_error:
         status = "failed"
         outcome = "adapter_receipt_invalid"
+    elif terminal_envelope_error:
+        status = "failed"
+        outcome = "terminal_envelope_invalid"
+    elif question is not None:
+        status = "blocked"
+        outcome = "question"
     elif exit_code == 0 and adapter_status == "ok" and result_nonempty:
         status = "succeeded"
         outcome = "ok"
@@ -662,7 +722,9 @@ def _dispatch(args: argparse.Namespace) -> int:
             },
         },
         "outcome": outcome,
-        "failure_code": None if status == "succeeded" else outcome,
+        "failure_code": (
+            None if status == "succeeded" else (question["code"] if question is not None else outcome)
+        ),
         "status": status,
         "started_at": started_at,
         "finished_at": finished_at,
@@ -686,6 +748,8 @@ def _dispatch(args: argparse.Namespace) -> int:
         "argv_digest": json_digest(command),
         "retry_lineage": [retry_of] if retry_of else [],
     }
+    if question is not None:
+        record["question"] = question
     if process_error:
         record["process_error"] = process_error
     attempt_path = attempt_dir / "attempt.json"

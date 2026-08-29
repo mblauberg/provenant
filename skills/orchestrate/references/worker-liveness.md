@@ -58,6 +58,16 @@ Use one of `blocked`, `question`, `unavailable`, `failed` or `complete` as
 appropriate. This is a one-shot enforcement command, not a
 watcher or supervisor.
 
+The dispatch owner recognises a question only after observed provider exit,
+adapter receipt validation and adapter exit `0`. The retained result must be
+one exact JSON object: `{"schema_version":1,"record_type":"provenant-worker-terminal","classification":"question","question":{"code":"needs_input","prompt":"..."}}`,
+with a non-empty prompt of at most 4096 characters and no NUL. Never scan
+prose, question marks or Markdown fences. A malformed object using the
+reserved record type fails closed as `terminal_envelope_invalid`; other prose
+or JSON is ordinary output, and non-zero provider exit is never blocked.
+Responding to a blocked attempt starts a new invocation and attempt, retaining
+the original question and attempt unchanged.
+
 ## Waiting from inside a sub-agent
 
 A sub-agent that ends its turn is finished. Its result returns to the caller at
