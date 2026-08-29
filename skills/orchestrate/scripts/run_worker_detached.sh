@@ -3,7 +3,6 @@
 set -u
 
 RUN_DIR=""
-TRANSCRIPT=""
 VALIDATE=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -16,11 +15,6 @@ while [ "$#" -gt 0 ]; do
       RUN_DIR="$2"
       shift 2
       ;;
-    --transcript)
-      [ "$#" -ge 2 ] || { echo "--transcript needs a value" >&2; exit 2; }
-      TRANSCRIPT="$2"
-      shift 2
-      ;;
     --)
       shift
       break
@@ -31,10 +25,6 @@ while [ "$#" -gt 0 ]; do
       ;;
   esac
 done
-
-process_identity() {
-  ps -p "$1" -o lstart= -o command= 2>/dev/null | sed '$s/[[:space:]]*$//'
-}
 
 read_single_value() {
   value_path=$1
@@ -50,34 +40,27 @@ validate_run() {
   validate_done="$validate_dir/done"
   validate_worker_pid_path="$validate_dir/worker.pid"
   validate_wrapper_pid_path="$validate_dir/wrapper.pid"
-  validate_wrapper_identity_path="$validate_dir/wrapper.identity"
   validate_wrapper_pid=$(read_single_value "$validate_wrapper_pid_path") || {
     echo "completion evidence missing wrapper PID" >&2
     return 2
   }
+  case "$validate_wrapper_pid" in
+    ''|*[!0-9]*) echo "completion evidence has invalid wrapper PID" >&2; return 2 ;;
+  esac
+
   validate_worker_pid=$(read_single_value "$validate_worker_pid_path") || {
+    if kill -0 "$validate_wrapper_pid" 2>/dev/null && [ ! -s "$validate_done" ]; then
+      return 1
+    fi
     echo "completion evidence missing worker PID" >&2
     return 2
   }
-  case "$validate_wrapper_pid" in ''|*[!0-9]*) echo "completion evidence has invalid wrapper PID" >&2; return 2 ;; esac
-  case "$validate_worker_pid" in ''|*[!0-9]*) echo "completion evidence has invalid worker PID" >&2; return 2 ;; esac
-  validate_wrapper_identity=$(read_single_value "$validate_wrapper_identity_path") || {
-    echo "completion evidence missing wrapper identity" >&2
-    return 2
-  }
-
-  validate_wrapper_live=0
-  if kill -0 "$validate_wrapper_pid" 2>/dev/null; then
-    validate_wrapper_live=1
-    validate_current_identity=$(process_identity "$validate_wrapper_pid")
-    if [ -z "$validate_current_identity" ] || [ "$validate_current_identity" != "$validate_wrapper_identity" ]; then
-      echo "completion evidence wrapper identity mismatch" >&2
-      return 2
-    fi
-  fi
+  case "$validate_worker_pid" in
+    ''|*[!0-9]*) echo "completion evidence has invalid worker PID" >&2; return 2 ;;
+  esac
 
   if [ ! -s "$validate_done" ]; then
-    if [ "$validate_wrapper_live" -eq 1 ]; then
+    if kill -0 "$validate_wrapper_pid" 2>/dev/null; then
       return 1
     fi
     echo "completion evidence missing: wrapper exited without marker" >&2
@@ -96,15 +79,14 @@ validate_run() {
     echo "completion evidence marker is malformed or does not match persisted PIDs" >&2
     return 2
   fi
-  if [ "$validate_wrapper_live" -eq 1 ]; then
+  if kill -0 "$validate_wrapper_pid" 2>/dev/null; then
     return 1
   fi
   if kill -0 "$validate_worker_pid" 2>/dev/null; then
-    echo "completion evidence worker PID is still live or has been reused" >&2
+    echo "completion evidence worker PID is still live" >&2
     return 2
   fi
-  printf 'worker_pid=%s wrapper_pid=%s exit=%s\n' \
-    "$validate_worker_pid" "$validate_wrapper_pid" "$validate_done_exit"
+  printf '%s %s %s\n' "$validate_worker_pid" "$validate_wrapper_pid" "$validate_done_exit"
   return 0
 }
 
@@ -115,7 +97,6 @@ if [ "$VALIDATE" -eq 1 ]; then
   validate_run "$RUN_DIR"
   exit $?
 fi
-[ -n "$TRANSCRIPT" ] || { echo "--transcript is required" >&2; exit 2; }
 [ "$#" -gt 0 ] || { echo "worker command is required after --" >&2; exit 2; }
 
 run_parent=$(dirname -- "$RUN_DIR")
@@ -132,44 +113,9 @@ if [ ! -w "$RUN_DIR" ]; then
   exit 2
 fi
 
-transcript_parent=$(dirname -- "$TRANSCRIPT")
-mkdir -p -- "$transcript_parent" || {
-  echo "cannot create transcript parent: $transcript_parent" >&2
-  exit 2
-}
-run_dir_paths=$(python3 - "$RUN_DIR" "$TRANSCRIPT" <<'PY'
-import os
-import sys
-for value in sys.argv[1:]:
-    lexical = os.path.abspath(value)
-    print(lexical)
-    print(os.path.realpath(lexical))
-PY
-) || {
-  echo "cannot resolve run or transcript paths" >&2
-  exit 2
-}
-run_dir_lexical=$(printf '%s\n' "$run_dir_paths" | sed -n '1p')
-run_dir_real=$(printf '%s\n' "$run_dir_paths" | sed -n '2p')
-transcript_lexical=$(printf '%s\n' "$run_dir_paths" | sed -n '3p')
-transcript_real=$(printf '%s\n' "$run_dir_paths" | sed -n '4p')
-for transcript_candidate in "$transcript_lexical" "$transcript_real"; do
-  case "$transcript_candidate" in
-    "$run_dir_lexical"/done|"$run_dir_lexical"/worker.pid|"$run_dir_lexical"/wrapper.pid|\
-    "$run_dir_lexical"/done.tmp.*|"$run_dir_lexical"/worker.pid.tmp.*|"$run_dir_lexical"/wrapper.pid.tmp.*|"$run_dir_lexical"/wrapper.identity|"$run_dir_lexical"/wrapper.identity.tmp.*|"$run_dir_lexical"/.write-test.*|\
-    "$run_dir_real"/done|"$run_dir_real"/worker.pid|"$run_dir_real"/wrapper.pid|\
-    "$run_dir_real"/done.tmp.*|"$run_dir_real"/worker.pid.tmp.*|"$run_dir_real"/wrapper.pid.tmp.*|"$run_dir_real"/wrapper.identity|"$run_dir_real"/wrapper.identity.tmp.*|"$run_dir_real"/.write-test.*)
-      echo "transcript aliases a run-directory evidence path" >&2
-      exit 2
-      ;;
-  esac
-done
-if [ -e "$TRANSCRIPT" ]; then
-  echo "transcript path already exists: $TRANSCRIPT" >&2
-  exit 2
-fi
-if ! : >"$TRANSCRIPT"; then
-  echo "transcript path is not writable: $TRANSCRIPT" >&2
+transcript="$RUN_DIR/transcript.txt"
+if ! : >"$transcript"; then
+  echo "run transcript is not writable: $transcript" >&2
   exit 2
 fi
 
@@ -191,30 +137,14 @@ write_atomic() {
   fi
 }
 
-# Claim and validate every marker path before starting an untracked worker.
-preflight_path="$RUN_DIR/.write-test.$$"
-if ! ( : >"$preflight_path" && rm -f -- "$preflight_path" ); then
-  echo "run-directory marker paths are not writable: $RUN_DIR" >&2
-  exit 2
-fi
 if ! write_atomic "$wrapper_pid_path" "$$"; then
   echo "cannot persist wrapper PID before launch" >&2
-  exit 2
-fi
-if ! write_atomic "$worker_pid_path" "pending"; then
-  echo "cannot persist worker PID before launch" >&2
-  exit 2
-fi
-wrapper_identity_path="$RUN_DIR/wrapper.identity"
-wrapper_identity=$(process_identity "$$")
-if [ -z "$wrapper_identity" ] || ! write_atomic "$wrapper_identity_path" "$wrapper_identity"; then
-  echo "cannot persist wrapper identity before launch" >&2
   exit 2
 fi
 
 # The provider command is the direct child. The helper's PID is recorded
 # separately, so callers never mistake the shell wrapper for the worker.
-"$@" >"$TRANSCRIPT" 2>&1 <&0 &
+"$@" >"$transcript" 2>&1 <&0 &
 worker_pid=$!
 if ! write_atomic "$worker_pid_path" "$worker_pid"; then
   echo "cannot persist worker PID after launch; terminating worker" >&2

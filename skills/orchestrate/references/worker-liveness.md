@@ -88,13 +88,13 @@ the run fits inside one timeout window.
 helper.** Give each dispatch a unique run directory. The helper captures the
 actual provider child PID in `worker.pid`, records its own wrapper PID in
 `wrapper.pid`, waits on the child directly, and atomically writes a durable
-regular completion file. The caller captures the wrapper PID separately:
+regular completion file in `run_dir/transcript.txt`. The caller captures the
+wrapper PID separately:
 
 ```bash
 run_dir=${TMPDIR:-/tmp}/provenant-worker-<unique-slug>
-transcript_path="$run_dir/transcript.txt"
 "${AGENTS_HOME:-$HOME/.agents}/skills/orchestrate/scripts/run_worker_detached.sh" \
-  --run-dir "$run_dir" --transcript "$transcript_path" -- <worker command> &
+  --run-dir "$run_dir" -- <worker command> &
 WRAPPER_PID=$!
 wait "$WRAPPER_PID"
 STATUS=$?
@@ -121,9 +121,6 @@ while :; do
   sleep 1
 done
 read -r WORKER_PID WRAPPER_PID STATUS <<< "$validation"
-WORKER_PID="${WORKER_PID#worker_pid=}"
-WRAPPER_PID="${WRAPPER_PID#wrapper_pid=}"
-STATUS="${STATUS#exit=}"
 ```
 
 This fallback waits only on the claimed run directory's durable marker and the
@@ -131,7 +128,10 @@ recorded wrapper PID, and is used only after detachment; do not substitute a
 watcher or notification for the direct PID wait. The marker is bound to the
 claimed run directory and both recorded PIDs; a stale or concurrent marker must
 never satisfy another dispatch. Confirm the worker PID is no longer live before
-terminal reporting, inspection or reuse.
+terminal reporting, inspection or reuse. The shared validator returns `1` while
+the wrapper is still running and startup or completion evidence is incomplete,
+`0` only for a structurally valid marker plus an observed worker exit, and any
+other nonzero status is an evidence failure.
 
 If a foreground wait times out, reissue that same wait while its PID or durable
 completion marker remains available. Do not insert liveness probes or status

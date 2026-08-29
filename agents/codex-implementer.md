@@ -117,13 +117,13 @@ is wrong, not the sandbox.
 **3. If detachment is unavoidable, use the shared detached helper, which captures
 and waits on the actual Codex child PID.** Give each dispatch a unique run
 directory; it records that child in `worker.pid`, its own wrapper in
-`wrapper.pid`, and writes a durable regular completion file atomically:
+`wrapper.pid`, writes output to the owned `run_dir/transcript.txt`, and writes a
+durable regular completion file atomically:
 
 ```
 run_dir=${TMPDIR:-/tmp}/codex-<unique-slug>
-transcript_path="$run_dir/transcript.txt"
 "${AGENTS_HOME:-$HOME/.agents}/skills/orchestrate/scripts/run_worker_detached.sh" \
-  --run-dir "$run_dir" --transcript "$transcript_path" -- \
+  --run-dir "$run_dir" -- \
   codex exec -s workspace-write -C <ABSOLUTE_WORKTREE> -m gpt-5.6-luna \
     -c service_tier=default -c model_reasoning_effort=xhigh - \
     < ${TMPDIR:-/tmp}/codex-<slug>-brief.txt &
@@ -153,10 +153,11 @@ while :; do
   sleep 1
 done
 read -r WORKER_PID WRAPPER_PID STATUS <<< "$validation"
-WORKER_PID="${WORKER_PID#worker_pid=}"
-WRAPPER_PID="${WRAPPER_PID#wrapper_pid=}"
-STATUS="${STATUS#exit=}"
 ```
+
+The shared validator returns `1` while the wrapper is still running and startup
+or completion evidence is incomplete, `0` only for a valid marker plus an
+observed worker exit, and any other nonzero status is an evidence failure.
 
 **Never use `run_in_background: true` for this wait, and never end your turn while Codex is
 alive.** Here is the mechanism, because getting it wrong looks identical to getting it right

@@ -99,14 +99,13 @@ after completion read the bounded report rather than the transcript.
 
 **3. If detachment is unavoidable**, use the shared detached helper, which captures and waits on
 the actual provider child PID. Give each dispatch a unique run directory; it records that child
-in `worker.pid`, its own wrapper in `wrapper.pid`, and writes a durable regular completion file
-atomically:
+in `worker.pid`, its own wrapper in `wrapper.pid`, writes output to the owned
+`run_dir/transcript.txt`, and atomically writes a durable regular completion file:
 
 ```
 run_dir=${TMPDIR:-/tmp}/codex-<unique-slug>
-transcript_path="$run_dir/transcript.txt"
 "${AGENTS_HOME:-$HOME/.agents}/skills/orchestrate/scripts/run_worker_detached.sh" \
-  --run-dir "$run_dir" --transcript "$transcript_path" -- \
+  --run-dir "$run_dir" -- \
   codex exec -s read-only -C <ABSOLUTE_DIR> \
     -o ${TMPDIR:-/tmp}/codex-<slug>-report.md -m gpt-5.6-luna \
     -c 'service_tier="default"' -c 'model_reasoning_effort="high"' - \
@@ -136,10 +135,11 @@ while :; do
   sleep 1
 done
 read -r WORKER_PID WRAPPER_PID STATUS <<< "$validation"
-WORKER_PID="${WORKER_PID#worker_pid=}"
-WRAPPER_PID="${WRAPPER_PID#wrapper_pid=}"
-STATUS="${STATUS#exit=}"
 ```
+
+The shared validator returns `1` while the wrapper is still running and startup
+or completion evidence is incomplete, `0` only for a valid marker plus an
+observed worker exit, and any other nonzero status is an evidence failure.
 
 Do not replace the direct PID wait with a watcher, notification or side-channel rendezvous.
 

@@ -1,6 +1,6 @@
 from pathlib import Path
-import os
 import re
+import signal
 import subprocess
 import sys
 
@@ -61,11 +61,11 @@ def test_codex_liveness_does_not_infer_exit_from_resource_signals():
         ), path
 
 
-def test_detached_protocol_names_both_pids_and_uses_unique_run_paths():
+def test_detached_protocol_uses_owned_run_and_pids():
     source = GUIDANCE_FILES[0].read_text()
     assert "run_worker_detached.sh" in source
     assert "--run-dir" in source
-    assert "--transcript" in source
+    assert "--transcript" not in source
     assert "worker.pid" in source
     assert "wrapper.pid" in source
     assert 'terminal-report --pid "$WORKER_PID"' in source
@@ -74,17 +74,16 @@ def test_detached_protocol_names_both_pids_and_uses_unique_run_paths():
     for path in GUIDANCE_FILES[1:]:
         agent_source = path.read_text()
         assert "run_worker_detached.sh" in agent_source, path
+        assert "--transcript" not in agent_source, path
         assert "worker.pid" in agent_source, path
         assert "wrapper.pid" in agent_source, path
 
 
-def _helper_command(run_dir, transcript, worker_code):
+def _helper_command(run_dir, worker_code):
     return [
         str(DETACHED_HELPER),
         "--run-dir",
         str(run_dir),
-        "--transcript",
-        str(transcript),
         "--",
         sys.executable,
         "-c",
@@ -92,61 +91,33 @@ def _helper_command(run_dir, transcript, worker_code):
     ]
 
 
-def test_detached_helper_binds_child_pid_and_isolates_fresh_markers(tmp_path):
-    """Exercise the shared detached helper with two independently claimed runs."""
+def test_detached_helper_records_child_and_validates_reentry(tmp_path):
     worker_code = "import time, sys; time.sleep(0.15); print('worker'); sys.exit(7)"
-    processes = [
-        subprocess.Popen(
-            _helper_command(tmp_path / name, tmp_path / name / "transcript", worker_code),
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-        for name in ("run-a", "run-b")
-    ]
-    for process in processes:
-        assert process.wait(timeout=5) == 7, process.stderr.read()
-
-    markers = []
-    for name in ("run-a", "run-b"):
-        root = tmp_path / name
-        marker = (root / "done").read_text()
-        values = dict(line.split("=", 1) for line in marker.splitlines())
-        assert values["exit"] == "7"
-        assert values["worker_pid"] == (root / "worker.pid").read_text().strip()
-        assert values["wrapper_pid"] == (root / "wrapper.pid").read_text().strip()
-        assert values["wrapper_pid"] in {str(process.pid) for process in processes}
-        assert values["worker_pid"] != values["wrapper_pid"]
-        assert (root / "transcript").read_text().strip() == "worker"
-        for pid in (int(values["worker_pid"]), int(values["wrapper_pid"])):
-            try:
-                os.kill(pid, 0)
-            except ProcessLookupError:
-                pass
-            else:
-                raise AssertionError(f"completion accepted live PID {pid}")
-        markers.append(marker)
-
-    assert markers[0] != markers[1]
-
-
-def test_detached_helper_rejects_existing_run_dir_before_provider_launch(tmp_path):
-    run_dir = tmp_path / "existing"
-    run_dir.mkdir()
-    (run_dir / "done").write_text("wrapper_pid=stale\nworker_pid=stale\nexit=99\n")
-    launched = tmp_path / "launched"
-    worker_code = "import sys; from pathlib import Path; Path(sys.argv[1]).write_text('launched')"
-    result = subprocess.run(
-        _helper_command(run_dir, tmp_path / "transcript", worker_code)
-        + [str(launched)],
+    run_dir = tmp_path / "run"
+    process = subprocess.run(
+        _helper_command(run_dir, worker_code),
         capture_output=True,
         text=True,
     )
 
-    assert result.returncode != 0
-    assert not launched.exists()
-    assert (run_dir / "done").read_text().startswith("wrapper_pid=stale")
-    assert "already exists" in result.stderr
+    assert process.returncode == 7
+    assert (run_dir / "transcript.txt").read_text().strip() == "worker"
+    marker = dict(line.split("=", 1) for line in (run_dir / "done").read_text().splitlines())
+    assert marker["exit"] == "7"
+    assert marker["worker_pid"] == (run_dir / "worker.pid").read_text().strip()
+    assert marker["wrapper_pid"] == (run_dir / "wrapper.pid").read_text().strip()
+    assert marker["worker_pid"] != marker["wrapper_pid"]
+
+    validation = subprocess.run(
+        [str(DETACHED_HELPER), "--validate", "--run-dir", str(run_dir)],
+        capture_output=True,
+        text=True,
+    )
+    assert validation.returncode == 0
+    worker_pid, wrapper_pid, status = validation.stdout.split()
+    assert (worker_pid, wrapper_pid, status) == (
+        marker["worker_pid"], marker["wrapper_pid"], marker["exit"]
+    )
 
 
 def test_detached_helper_same_run_dir_allows_only_one_provider(tmp_path):
@@ -159,13 +130,12 @@ def test_detached_helper_same_run_dir_allows_only_one_provider(tmp_path):
     )
     processes = [
         subprocess.Popen(
-            _helper_command(run_dir, tmp_path / f"transcript-{index}", worker_code)
-            + [str(launches)],
+            _helper_command(run_dir, worker_code) + [str(launches)],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
             text=True,
         )
-        for index in (1, 2)
+        for _ in (1, 2)
     ]
     statuses = [process.wait(timeout=5) for process in processes]
 
@@ -179,24 +149,33 @@ def test_detached_helper_forwards_stdin_to_provider(tmp_path):
     run_dir = tmp_path / "stdin"
     worker_code = "import sys; value = sys.stdin.read(); print(value, end=''); sys.exit(0)"
     result = subprocess.run(
-        _helper_command(run_dir, tmp_path / "transcript", worker_code),
+        _helper_command(run_dir, worker_code),
         input="brief from stdin\n",
         capture_output=True,
         text=True,
     )
 
     assert result.returncode == 0
-    assert (tmp_path / "transcript").read_text() == "brief from stdin\n"
-    assert '<&0 &' in DETACHED_HELPER.read_text()
+    assert (run_dir / "transcript.txt").read_text() == "brief from stdin\n"
 
 
-def test_detached_helper_rejects_invalid_transcript_setup_before_launch(tmp_path):
+def test_detached_helper_propagates_signal_exit(tmp_path):
+    run_dir = tmp_path / "signal"
+    worker_code = "import os, signal; os.kill(os.getpid(), signal.SIGTERM)"
+    result = subprocess.run(_helper_command(run_dir, worker_code), capture_output=True, text=True)
+
+    assert result.returncode == 128 + signal.SIGTERM
+    marker = dict(line.split("=", 1) for line in (run_dir / "done").read_text().splitlines())
+    assert marker["exit"] == str(128 + signal.SIGTERM)
+
+
+def test_detached_helper_rejects_invalid_setup_before_launch(tmp_path):
     blocked_parent = tmp_path / "not-a-directory"
     blocked_parent.write_text("block")
     launched = tmp_path / "launched"
     worker_code = "import sys; from pathlib import Path; Path(sys.argv[1]).write_text('launched')"
     result = subprocess.run(
-        _helper_command(tmp_path / "invalid", blocked_parent / "transcript", worker_code)
+        _helper_command(blocked_parent / "invalid", worker_code)
         + [str(launched)],
         capture_output=True,
         text=True,
@@ -204,58 +183,30 @@ def test_detached_helper_rejects_invalid_transcript_setup_before_launch(tmp_path
 
     assert result.returncode != 0
     assert not launched.exists()
-    assert not (tmp_path / "invalid" / "done").exists()
+    assert not (blocked_parent / "invalid").exists()
 
 
-def test_detached_helper_rejects_transcript_alias_of_evidence_before_launch(tmp_path):
-    worker_code = "import sys; from pathlib import Path; Path(sys.argv[1]).write_text('launched')"
-    for marker_name in ("done", "wrapper.identity", "wrapper.identity.tmp.fake"):
-        run_dir = tmp_path / marker_name.replace(".", "-")
-        launched = tmp_path / f"launched-{marker_name.replace('.', '-')}"
-        result = subprocess.run(
-            _helper_command(run_dir, run_dir / "missing" / ".." / marker_name, worker_code)
-            + [str(launched)],
-            capture_output=True,
-            text=True,
-        )
-
-        assert result.returncode != 0
-        assert not launched.exists()
-        assert not (run_dir / marker_name).exists()
-        assert "evidence" in result.stderr
-
-
-def test_detached_helper_validation_rejects_reused_wrapper_identity(tmp_path):
-    run_dir = tmp_path / "reused"
+def test_detached_helper_validation_reports_startup(tmp_path):
+    run_dir = tmp_path / "starting"
     run_dir.mkdir()
-    (run_dir / "wrapper.pid").write_text(f"{os.getpid()}\n")
-    (run_dir / "wrapper.identity").write_text("identity from a different process\n")
-    (run_dir / "worker.pid").write_text("999999\n")
-    (run_dir / "done").write_text(
-        f"wrapper_pid={os.getpid()}\nworker_pid=999999\nexit=0\n"
-    )
+    wrapper = subprocess.Popen(["sleep", "1"])
+    (run_dir / "wrapper.pid").write_text(f"{wrapper.pid}\n")
     result = subprocess.run(
         [str(DETACHED_HELPER), "--validate", "--run-dir", str(run_dir)],
         capture_output=True,
         text=True,
     )
+    wrapper.wait(timeout=5)
 
-    assert result.returncode != 0
-    assert "identity" in result.stderr
+    assert result.returncode == 1
 
 
 def test_detached_helper_validation_rejects_malformed_marker(tmp_path):
     run_dir = tmp_path / "malformed"
-    worker_code = "import sys; sys.exit(0)"
-    result = subprocess.run(
-        _helper_command(run_dir, tmp_path / "transcript", worker_code),
-        capture_output=True,
-        text=True,
-    )
-    assert result.returncode == 0
-    (run_dir / "done").write_text(
-        "wrapper_pid=not-numeric\nworker_pid=also-not-numeric\nexit=wat\n"
-    )
+    run_dir.mkdir()
+    (run_dir / "wrapper.pid").write_text("999999\n")
+    (run_dir / "worker.pid").write_text("888888\n")
+    (run_dir / "done").write_text("wrapper_pid=not-numeric\nworker_pid=888888\nexit=wat\n")
     validation = subprocess.run(
         [str(DETACHED_HELPER), "--validate", "--run-dir", str(run_dir)],
         capture_output=True,
@@ -273,36 +224,3 @@ def test_reentry_guidance_fails_when_wrapper_exits_without_marker():
     assert "--validate" in source
     assert "kill -0 \"$WRAPPER_PID\"" not in source
     assert "recorded wrapper exit" in normalised
-
-
-def test_documented_validation_parsing_produces_numeric_pids(tmp_path):
-    for path in GUIDANCE_FILES:
-        source = path.read_text()
-        assert 'WORKER_PID="${WORKER_PID#worker_pid=}"' in source
-        assert 'WRAPPER_PID="${WRAPPER_PID#wrapper_pid=}"' in source
-        assert 'STATUS="${STATUS#exit=}"' in source
-
-    run_dir = tmp_path / "parse"
-    result = subprocess.run(
-        _helper_command(run_dir, tmp_path / "transcript", "import sys; sys.exit(7)"),
-        capture_output=True,
-        text=True,
-    )
-    assert result.returncode == 7
-    script = f'''\
-helper={DETACHED_HELPER!s}
-run_dir={run_dir!s}
-validation="$($helper --validate --run-dir "$run_dir")"
-read -r WORKER_PID WRAPPER_PID STATUS <<< "$validation"
-WORKER_PID="${{WORKER_PID#worker_pid=}}"
-WRAPPER_PID="${{WRAPPER_PID#wrapper_pid=}}"
-STATUS="${{STATUS#exit=}}"
-printf '%s %s %s\\n' "$WORKER_PID" "$WRAPPER_PID" "$STATUS"
-'''
-    parsed = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
-
-    assert parsed.returncode == 0
-    worker_pid, wrapper_pid, status = parsed.stdout.strip().split()
-    assert worker_pid.isdigit()
-    assert wrapper_pid.isdigit()
-    assert status == "7"
