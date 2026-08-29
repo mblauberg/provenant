@@ -214,6 +214,18 @@ endpoint_provider() {
     *) echo "";;
   esac
 }
+install_output() {
+  local source="$1" destination="$2" directory temporary
+  directory="$(dirname -- "$destination")"
+  [ -d "$directory" ] || return 1
+  [ ! -d "$destination" ] || [ -L "$destination" ] || return 1
+  temporary="$(mktemp "$directory/.cf-dispatch-output.XXXXXX")" || return 1
+  if cp "$source" "$temporary" && mv -f "$temporary" "$destination"; then
+    return 0
+  fi
+  rm -f "$temporary"
+  return 1
+}
 emit_record() {
   local tool="$1" model="$2" effort="$3" status="$4" rc="$5" path="$6" guarantee="$7"
   local family="${8:-}" endpoint="${9:-}" identity="${10:-}" effort_substitution="${11:-}"
@@ -709,7 +721,7 @@ PY
   [ "$status" = "tool_not_found" ] && guarantee="none"
 
   if [ "$status" = "ok" ]; then
-    if cp "$clean" "$OUT"; then
+    if install_output "$clean" "$OUT"; then
       opath="$OUT"
     else
       status="output_write_error"
@@ -718,7 +730,7 @@ PY
       opath=""
     fi
   else
-    if cp "$combined" "$OUT"; then
+    if install_output "$combined" "$OUT"; then
       opath="$OUT"
     else
       status="output_write_error"

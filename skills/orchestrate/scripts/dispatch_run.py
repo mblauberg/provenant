@@ -17,6 +17,7 @@ import os
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -86,6 +87,124 @@ def retained_path(run_dir: Path, value: Any) -> str:
     return relative.as_posix()
 
 
+def active_receipt_error(receipt: Any) -> str | None:
+    if not isinstance(receipt, dict):
+        return "RUN_RECEIPT.json root must be an object"
+    if receipt.get("status") != "active" or receipt.get("closed_at") is not None:
+        return "dispatch requires an active orchestration run"
+    if receipt.get("schema_version") != 1:
+        return "RUN_RECEIPT.json schema_version must be 1"
+    try:
+        created_at = receipt["created_at"]
+        parsed = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+        if (
+            not isinstance(created_at, str)
+            or not created_at.endswith("Z")
+            or parsed.tzinfo is None
+            or parsed.utcoffset() != UTC.utcoffset(parsed)
+        ):
+            raise ValueError
+    except (KeyError, AttributeError, TypeError, ValueError):
+        return "RUN_RECEIPT.json created_at must be a UTC timestamp"
+    if not isinstance(receipt.get("owner"), str) or not receipt["owner"]:
+        return "RUN_RECEIPT.json owner is required"
+    if not isinstance(receipt.get("retention_policy"), str) or not receipt["retention_policy"]:
+        return "RUN_RECEIPT.json retention_policy is required"
+    for field in (
+        "owned_panes", "closed_panes", "handed_off_panes", "unclassified_paths", "pruned_paths"
+    ):
+        if not isinstance(receipt.get(field), list):
+            return f"RUN_RECEIPT.json {field} must be a list"
+    pair = receipt.get("pair")
+    if not isinstance(pair, dict) or pair.get("mode") not in {"solo", "paired-primary"}:
+        return "RUN_RECEIPT.json pair must declare solo or paired-primary mode"
+    if not isinstance(pair.get("status"), str) or not pair["status"]:
+        return "RUN_RECEIPT.json pair status is required"
+    return None
+
+
+def workspace_identity(workspace: Path) -> dict[str, Any]:
+    identity: dict[str, Any] = {
+        "cwd": str(workspace),
+        "root": str(workspace),
+        "base_revision": None,
+        "working_tree": "unavailable",
+    }
+    try:
+        base = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel", "HEAD"],
+            cwd=workspace,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=3,
+            check=True,
+        ).stdout.splitlines()
+        if len(base) != 2 or not re.fullmatch(r"[0-9a-fA-F]{40,64}", base[1]):
+            return identity
+        dirty = subprocess.run(
+            ["git", "status", "--porcelain=v1", "--untracked-files=normal"],
+            cwd=workspace,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=3,
+            check=True,
+        ).stdout
+        identity.update(
+            root=str(Path(base[0]).resolve()),
+            base_revision=base[1].lower(),
+            working_tree="dirty" if dirty else "clean",
+        )
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return identity
+
+
+def valid_regular_result(run_dir: Path, path: Path) -> bool:
+    try:
+        metadata = path.lstat()
+        path.resolve().relative_to(run_dir.resolve())
+    except (OSError, ValueError):
+        return False
+    return stat.S_ISREG(metadata.st_mode) and metadata.st_nlink == 1
+
+
+def success_receipt_error(
+    adapter: dict[str, Any], args: argparse.Namespace, result_path: Path, result_digest: str
+) -> str | None:
+    required = (
+        "tool", "adapter", "execution_intent", "resolved_model", "provider_family",
+        "model_family", "endpoint_provider", "identity_source", "output_path", "output_digest",
+        "read_only_guarantee",
+    )
+    if any(not isinstance(adapter.get(field), str) or not adapter[field] for field in required):
+        return "successful adapter receipt is missing route identity"
+    if adapter["tool"] != args.tool or adapter["adapter"] != args.tool:
+        return "successful adapter receipt does not match the requested adapter"
+    if adapter["execution_intent"] != args.intent:
+        return "successful adapter receipt does not match the requested intent"
+    try:
+        output_matches = Path(adapter["output_path"]).resolve() == result_path.resolve()
+    except (OSError, ValueError):
+        output_matches = False
+    if not output_matches or adapter["output_digest"] != result_digest:
+        return "successful adapter receipt does not match the retained output"
+    if (
+        not isinstance(adapter.get("exit"), int)
+        or isinstance(adapter["exit"], bool)
+        or adapter["exit"] != 0
+    ):
+        return "successful adapter receipt must record exit 0"
+    if not isinstance(adapter.get("cross_family"), bool) or not isinstance(
+        adapter.get("certification_eligible"), bool
+    ):
+        return "successful adapter receipt is missing assurance flags"
+    if args.intent == "ordinary" and adapter["certification_eligible"]:
+        return "ordinary execution cannot be certification eligible"
+    return None
+
+
 def fail(run_dir: Path | None, status: str, message: str) -> int:
     record = {"schema_version": 1, "status": status, "message": message}
     print(json.dumps(record, sort_keys=True))
@@ -139,7 +258,21 @@ def reconcile_manifest(run_dir: Path) -> None:
     """Index complete prior attempts whose manifest rows were lost on re-entry."""
     manifest = run_dir / "MANIFEST.md"
     existing = manifest.read_text(encoding="utf-8", errors="replace")
-    for attempt_path in sorted((run_dir / "dispatch" / "tasks").glob("*/attempt-*/attempt.json")):
+    attempt_dirs = sorted((run_dir / "dispatch" / "tasks").glob("*/attempt-*"))
+    for attempt_dir in attempt_dirs:
+        try:
+            relative_path(run_dir, attempt_dir)
+        except ValueError as exc:
+            raise AttemptEvidenceError(f"attempt directory escapes the run: {attempt_dir}") from exc
+        if (
+            attempt_dir.is_symlink()
+            or not attempt_dir.is_dir()
+            or not re.fullmatch(r"attempt-\d{3}", attempt_dir.name)
+            or not (attempt_dir / "attempt.json").is_file()
+            or (attempt_dir / "attempt.json").is_symlink()
+        ):
+            raise AttemptEvidenceError(f"attempt directory is incomplete: {attempt_dir}")
+    for attempt_path in (attempt_dir / "attempt.json" for attempt_dir in attempt_dirs):
         try:
             discovered_attempt_path = relative_path(run_dir, attempt_path)
         except ValueError as exc:
@@ -237,12 +370,10 @@ def dispatch(args: argparse.Namespace) -> int:
         run_receipt = json.loads((run_dir / "RUN_RECEIPT.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return fail(run_dir, "run_custody_invalid", "RUN_RECEIPT.json is not valid JSON")
-    if (
-        not isinstance(run_receipt, dict)
-        or run_receipt.get("status") != "active"
-        or run_receipt.get("closed_at") is not None
-    ):
-        return fail(run_dir, "run_custody_closed", "dispatch requires an active orchestration run")
+    receipt_error = active_receipt_error(run_receipt)
+    if receipt_error:
+        status = "run_custody_closed" if "active orchestration run" in receipt_error else "run_custody_invalid"
+        return fail(run_dir, status, receipt_error)
     if not TASK_ID_RE.fullmatch(args.task_id):
         return fail(run_dir, "invalid_task_id", "task id must contain only letters, numbers, '.', '_' or '-'")
     try:
@@ -368,9 +499,22 @@ def dispatch(args: argparse.Namespace) -> int:
     except (ValueError, json.JSONDecodeError):
         pass
 
-    result_exists = result_path.is_file()
+    try:
+        result_metadata = result_path.lstat()
+    except OSError:
+        result_metadata = None
+    result_invalid = result_metadata is not None and not valid_regular_result(run_dir, result_path)
+    if result_invalid and result_metadata is not None and not stat.S_ISDIR(result_metadata.st_mode):
+        result_path.unlink(missing_ok=True)
+    result_exists = valid_regular_result(run_dir, result_path)
     result_nonempty = result_exists and result_path.stat().st_size > 0
+    result_digest = digest(result_path) if result_exists else ""
     adapter_status = str(adapter.get("status", "")) if adapter else "adapter_receipt_invalid"
+    receipt_error = (
+        success_receipt_error(adapter, args, result_path, result_digest)
+        if adapter_status == "ok" and result_exists
+        else None
+    )
     if process_error == "timeout":
         status = "timed_out"
         outcome = "timeout"
@@ -380,6 +524,12 @@ def dispatch(args: argparse.Namespace) -> int:
     elif not observed_exit:
         status = "failed"
         outcome = "process_spawn_error"
+    elif result_invalid:
+        status = "failed"
+        outcome = "result_invalid_path"
+    elif adapter_status == "ok" and receipt_error:
+        status = "failed"
+        outcome = "adapter_receipt_invalid"
     elif exit_code == 0 and adapter_status == "ok" and result_nonempty:
         status = "succeeded"
         outcome = "ok"
@@ -412,10 +562,10 @@ def dispatch(args: argparse.Namespace) -> int:
         "started_at": started_at,
         "finished_at": finished_at,
         "duration_seconds": round(time.monotonic() - started, 6),
-        "workspace": {"cwd": str(workspace), "root": str(workspace)},
+        "workspace": workspace_identity(workspace),
         "prompt": {"path": relative_path(run_dir, prompt_path), "digest": digest(prompt_path)},
         "result": (
-            {"path": relative_path(run_dir, result_path), "digest": digest(result_path)}
+            {"path": relative_path(run_dir, result_path), "digest": result_digest}
             if result_exists
             else None
         ),

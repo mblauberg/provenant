@@ -26,6 +26,25 @@ def write_executable(path: Path, body: str) -> None:
     path.chmod(path.stat().st_mode | stat.S_IXUSR)
 
 
+def write_success_adapter(path: Path) -> None:
+    write_executable(
+        path,
+        """#!/usr/bin/env bash
+        while [ "$#" -gt 0 ]; do
+          case "$1" in
+            --out) out="$2"; shift 2;;
+            --intent) intent="$2"; shift 2;;
+            --tool) tool="$2"; shift 2;;
+            *) shift;;
+          esac
+        done
+        printf 'OK\n' > "$out"
+        digest="sha256:$(shasum -a 256 "$out" | awk '{print $1}')"
+        printf '{"tool":"%s","adapter":"%s","execution_intent":"%s","resolved_model":"test-model","provider_family":"test-family","model_family":"test-family","endpoint_provider":"test-provider","identity_source":"test-fixture","status":"ok","exit":0,"output_path":"%s","output_digest":"%s","read_only_guarantee":"none","cross_family":false,"certification_eligible":false}\n' "$tool" "$tool" "$intent" "$out" "$digest"
+        """,
+    )
+
+
 def make_run(tmp_path: Path, name: str) -> Path:
     return Path(
         subprocess.check_output([str(INIT), str(tmp_path / ".agent-run" / name)], text=True).strip()
@@ -248,6 +267,36 @@ def test_malformed_adapter_receipt_is_fail_closed(tmp_path: Path, monkeypatch) -
     assert record["process"]["observed_exit"] is True
 
 
+def test_incomplete_success_receipt_is_fail_closed(tmp_path: Path, monkeypatch) -> None:
+    run_dir = make_run(tmp_path, "incomplete-success")
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("incomplete success\n", encoding="utf-8")
+    adapter = tmp_path / "fake-incomplete-success"
+    write_executable(
+        adapter,
+        """#!/usr/bin/env bash
+        while [ "$#" -gt 0 ]; do
+          case "$1" in --out) out="$2"; shift 2;; *) shift;; esac
+        done
+        printf 'result\n' > "$out"
+        printf '{"status":"ok"}\n'
+        """,
+    )
+    module = load_dispatch_module()
+    monkeypatch.setattr(module, "CF_DISPATCH", adapter)
+    args = module.parser().parse_args([
+        "--run-dir", str(run_dir), "--task-id", "incomplete-success", "--adapter", "codex",
+        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+    ])
+    monkeypatch.chdir(tmp_path)
+
+    assert module.dispatch(args) == 1
+    record = json.loads(
+        (run_dir / "dispatch/tasks/incomplete-success/attempt-001/attempt.json").read_text()
+    )
+    assert record["failure_code"] == "adapter_receipt_invalid"
+
+
 def test_typed_adapter_auth_and_missing_tool_outcomes_are_preserved(tmp_path: Path, monkeypatch) -> None:
     module = load_dispatch_module()
     prompt = tmp_path / "prompt.md"
@@ -395,6 +444,27 @@ def test_attempt_rows_are_accepted_by_existing_finalizer(tmp_path: Path) -> None
     assert not (run_dir / "dispatch/tasks/after-close").exists()
 
 
+def test_counterfeit_active_receipt_is_rejected_before_launch(tmp_path: Path, monkeypatch) -> None:
+    run_dir = make_run(tmp_path, "counterfeit-receipt")
+    (run_dir / "RUN_RECEIPT.json").write_text(
+        '{"status":"active","closed_at":null}\n', encoding="utf-8"
+    )
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("counterfeit\n", encoding="utf-8")
+    adapter = tmp_path / "adapter-never-run-receipt"
+    write_executable(adapter, "#!/usr/bin/env bash\nexit 99\n")
+    module = load_dispatch_module()
+    monkeypatch.setattr(module, "CF_DISPATCH", adapter)
+    args = module.parser().parse_args([
+        "--run-dir", str(run_dir), "--task-id", "blocked", "--adapter", "codex",
+        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+    ])
+    monkeypatch.chdir(tmp_path)
+
+    assert module.dispatch(args) == 2
+    assert not (run_dir / "dispatch/tasks/blocked").exists()
+
+
 def test_hard_linked_prompt_is_rejected_before_provider_launch(tmp_path: Path, monkeypatch) -> None:
     run_dir = make_run(tmp_path, "hardlink")
     source = tmp_path / "prompt.md"
@@ -472,13 +542,7 @@ def test_manifest_append_failure_retains_terminal_attempt(tmp_path: Path, monkey
     prompt = tmp_path / "prompt.md"
     prompt.write_text("manifest write\n", encoding="utf-8")
     adapter = tmp_path / "adapter"
-    write_executable(adapter, """#!/usr/bin/env bash
-        while [ "$#" -gt 0 ]; do
-          case "$1" in --out) out="$2"; shift 2;; *) shift;; esac
-        done
-        printf '{\"status\":\"ok\"}\n'
-        printf 'OK\n' > "$out"
-    """)
+    write_success_adapter(adapter)
     module = load_dispatch_module()
     module.CF_DISPATCH = adapter
     monkeypatch.setattr(module, "append_manifest", lambda *_: (_ for _ in ()).throw(OSError("append failed")))
@@ -500,13 +564,7 @@ def test_reentry_reconciles_missing_manifest_rows_and_retry_lineage(tmp_path: Pa
     prompt = tmp_path / "prompt.md"
     prompt.write_text("reconcile\n", encoding="utf-8")
     adapter = tmp_path / "adapter"
-    write_executable(adapter, """#!/usr/bin/env bash
-        while [ "$#" -gt 0 ]; do
-          case "$1" in --out) out="$2"; shift 2;; *) shift;; esac
-        done
-        printf '{\"status\":\"ok\"}\n'
-        printf 'OK\n' > "$out"
-    """)
+    write_success_adapter(adapter)
     module = load_dispatch_module()
     module.CF_DISPATCH = adapter
     args = module.parser().parse_args([
@@ -537,13 +595,7 @@ def test_reentry_does_not_verify_missing_attempt_evidence(tmp_path: Path, monkey
     prompt = tmp_path / "prompt.md"
     prompt.write_text("missing evidence\n", encoding="utf-8")
     adapter = tmp_path / "adapter-missing-evidence"
-    write_executable(adapter, """#!/usr/bin/env bash
-        while [ "$#" -gt 0 ]; do
-          case "$1" in --out) out="$2"; shift 2;; *) shift;; esac
-        done
-        printf '{"status":"ok"}\n'
-        printf 'OK\n' > "$out"
-    """)
+    write_success_adapter(adapter)
     module = load_dispatch_module()
     module.CF_DISPATCH = adapter
     args = module.parser().parse_args([
@@ -624,3 +676,91 @@ def test_reentry_rejects_retained_paths_that_escape_the_run(tmp_path: Path, monk
     assert module.dispatch(args) == 2
     assert "../../outside" not in (run_dir / "MANIFEST.md").read_text(encoding="utf-8")
     assert not (run_dir / "dispatch/tasks/next").exists()
+
+
+def test_reentry_rejects_orphan_attempt_directory(tmp_path: Path, monkeypatch) -> None:
+    run_dir = make_run(tmp_path, "orphan-attempt")
+    orphan = run_dir / "dispatch/tasks/old/attempt-001"
+    orphan.mkdir(parents=True)
+    (orphan / "prompt.md").write_text("partial\n", encoding="utf-8")
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("next\n", encoding="utf-8")
+    adapter = tmp_path / "adapter-never-run-orphan"
+    write_executable(adapter, "#!/usr/bin/env bash\nexit 99\n")
+    module = load_dispatch_module()
+    monkeypatch.setattr(module, "CF_DISPATCH", adapter)
+    args = module.parser().parse_args([
+        "--run-dir", str(run_dir), "--task-id", "next", "--adapter", "codex",
+        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+    ])
+    monkeypatch.chdir(tmp_path)
+
+    assert module.dispatch(args) == 2
+    assert not (run_dir / "dispatch/tasks/next").exists()
+
+
+def test_result_symlink_is_rejected_without_hashing_target(tmp_path: Path, monkeypatch) -> None:
+    run_dir = make_run(tmp_path, "result-symlink")
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("symlink\n", encoding="utf-8")
+    outside = tmp_path / "outside-result"
+    outside.write_text("unchanged\n", encoding="utf-8")
+    adapter = tmp_path / "fake-symlink-adapter"
+    write_executable(
+        adapter,
+        f"""#!/usr/bin/env bash
+        while [ "$#" -gt 0 ]; do
+          case "$1" in --out) out="$2"; shift 2;; *) shift;; esac
+        done
+        ln -s {outside} "$out"
+        printf '{{"status":"ok"}}\n'
+        """,
+    )
+    module = load_dispatch_module()
+    monkeypatch.setattr(module, "CF_DISPATCH", adapter)
+    args = module.parser().parse_args([
+        "--run-dir", str(run_dir), "--task-id", "symlink", "--adapter", "codex",
+        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+    ])
+    monkeypatch.chdir(tmp_path)
+
+    assert module.dispatch(args) == 1
+    assert outside.read_text(encoding="utf-8") == "unchanged\n"
+    record = json.loads(
+        (run_dir / "dispatch/tasks/symlink/attempt-001/attempt.json").read_text()
+    )
+    assert record["failure_code"] == "result_invalid_path"
+    assert record["result"] is None
+
+
+def test_attempt_records_available_git_base_identity(tmp_path: Path, monkeypatch) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=workspace, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=workspace, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=workspace, check=True)
+    (workspace / "tracked.txt").write_text("base\n", encoding="utf-8")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=workspace, check=True)
+    subprocess.run(["git", "commit", "-qm", "base"], cwd=workspace, check=True)
+    expected_head = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=workspace, text=True
+    ).strip()
+    run_dir = make_run(workspace, "git-identity")
+    prompt = workspace / "prompt.md"
+    prompt.write_text("identity\n", encoding="utf-8")
+    adapter = workspace / "success-adapter"
+    write_success_adapter(adapter)
+    module = load_dispatch_module()
+    monkeypatch.setattr(module, "CF_DISPATCH", adapter)
+    args = module.parser().parse_args([
+        "--run-dir", str(run_dir), "--task-id", "identity", "--adapter", "codex",
+        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+    ])
+    monkeypatch.chdir(workspace)
+
+    assert module.dispatch(args) == 0
+    record = json.loads(
+        (run_dir / "dispatch/tasks/identity/attempt-001/attempt.json").read_text()
+    )
+    assert record["workspace"]["base_revision"] == expected_head
+    assert record["workspace"]["working_tree"] == "dirty"

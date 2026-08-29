@@ -67,6 +67,44 @@ def write_executable(path, body):
     path.chmod(path.stat().st_mode | stat.S_IXUSR)
 
 
+def test_output_install_replaces_symlink_without_overwriting_target():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        bin_dir = root / "bin"
+        bin_dir.mkdir()
+        write_executable(
+            bin_dir / "codex",
+            """#!/usr/bin/env bash
+            if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
+              printf '{"models":[{"slug":"gpt-5.6-luna","supported_reasoning_levels":[{"effort":"high"}]}]}'
+              exit 0
+            fi
+            cat >/dev/null
+            printf 'safe output\n'
+            """,
+        )
+        prompt = root / "prompt.md"
+        prompt.write_text("test\n", encoding="utf-8")
+        outside = root / "outside"
+        outside.write_text("unchanged\n", encoding="utf-8")
+        out = root / "result.md"
+        out.symlink_to(outside)
+        env = fabric_free_env()
+        env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
+
+        result = subprocess.run(
+            [str(SCRIPT), "--intent", "ordinary", "--tool", "codex",
+             "--prompt-file", str(prompt), "--out", str(out),
+             "--alias", "workhorse", "--role", "worker"],
+            cwd=root, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+
+        assert result.returncode == 0, result.stderr + result.stdout
+        assert outside.read_text(encoding="utf-8") == "unchanged\n"
+        assert not out.is_symlink()
+        assert out.read_text(encoding="utf-8") == "safe output\n"
+
+
 def fabric_free_env():
     # Stripping the fabric variables stops an inherited developer instance
     # from steering these evals through an installed provenant command.
