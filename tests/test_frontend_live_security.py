@@ -753,6 +753,11 @@ def test_live_wrap_scans_nested_multiline_jsx_without_treating_strings_as_tags(
             0,
             0,
         ),
+        (
+            ['<Card className="target">{identity<string>(value)}</Card>'],
+            0,
+            0,
+        ),
     ],
 )
 def test_live_wrap_stops_scanning_after_the_selected_jsx_subtree(
@@ -860,6 +865,48 @@ def test_live_wrap_does_not_stop_inside_an_unterminated_jsx_expression(
 
     assert result.returncode == 7
     assert result.stdout == "jsx_scan_unbalanced"
+
+
+def test_live_wrap_requires_a_same_line_outer_jsx_expression_to_close(
+    tmp_path: Path,
+) -> None:
+    module_url = WRAP.as_uri()
+    script = (
+        f"import {{ findClosingLine }} from {json.dumps(module_url)};"
+        "try{findClosingLine(['{condition && <Card className=\"target\" />'],0)}"
+        "catch(error){process.stdout.write(error.code);process.exit(7)}"
+    )
+
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        cwd=tmp_path,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 7
+    assert result.stdout == "jsx_scan_unbalanced"
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        '<section class="target"><img src="hero.png"><br><input></section>',
+        '<ul class="target"><li>one<li>two</ul>',
+        '<img class="target" src="hero.png">',
+    ],
+)
+def test_live_wrap_accepts_valid_html_void_and_optional_end_tags(
+    tmp_path: Path, source: str
+) -> None:
+    page = tmp_path / "index.html"
+    page.write_text(source + "\n")
+
+    wrapped = _run_wrap(tmp_path, "--file", page.name)
+
+    assert wrapped.returncode == 0, wrapped.stderr
+    assert "data-impeccable-variants" in page.read_text()
 
 
 @pytest.mark.parametrize(

@@ -144,6 +144,8 @@ The agent should insert variant HTML at insertLine.`);
 
   const content = sourceSnapshot.bytes.toString('utf-8');
   const lines = content.split('\n');
+  const commentSyntax = detectCommentSyntax(targetFile);
+  const isJsx = commentSyntax.open === '{/*';
 
   // Find the element, trying each query in priority order. When `--text` is
   // supplied, collect every candidate the queries surface and disambiguate
@@ -153,7 +155,7 @@ The agent should insert variant HTML at insertLine.`);
   if (text) {
     const candidates = [];
     for (const q of queries) {
-      const all = findAllElements(lines, q, tag);
+      const all = findAllElements(lines, q, tag, isJsx);
       for (const c of all) {
         if (!candidates.some((x) => x.startLine === c.startLine)) {
           candidates.push(c);
@@ -199,7 +201,7 @@ The agent should insert variant HTML at insertLine.`);
     }
   } else {
     for (const q of queries) {
-      match = findElement(lines, q, tag);
+      match = findElement(lines, q, tag, isJsx);
       if (match) break;
     }
     if (!match) {
@@ -209,9 +211,7 @@ The agent should insert variant HTML at insertLine.`);
   }
 
   const { startLine, endLine } = match;
-  const commentSyntax = detectCommentSyntax(targetFile);
   const styleMode = detectStyleMode(targetFile);
-  const isJsx = commentSyntax.open === '{/*';
   const indent = lines[startLine].match(/^(\s*)/)[1];
 
   // Extract the original element. Reindent under the wrapper while preserving
@@ -518,7 +518,7 @@ function minLeadingSpaces(lines) {
   return min === Infinity ? 0 : min;
 }
 
-function findElement(lines, query, tag = null) {
+function findElement(lines, query, tag = null, isJsx = false) {
   // Iterate all matches — the first substring hit isn't always the right one.
   for (let i = 0; i < lines.length; i++) {
     if (!lines[i].includes(query)) continue;
@@ -531,7 +531,7 @@ function findElement(lines, query, tag = null) {
     const openerLine = findOpenerLine(lines, i, tag);
     if (openerLine === -1) continue;
 
-    const endLine = findClosingLine(lines, openerLine);
+    const endLine = findClosingLine(lines, openerLine, { isJsx });
     return { startLine: openerLine, endLine };
   }
 
@@ -545,7 +545,7 @@ function findElement(lines, query, tag = null) {
  * first-match silently lands on the wrong branch. Returning all matches lets
  * the caller narrow by textContent or fail with a structured ambiguity error.
  */
-function findAllElements(lines, query, tag = null) {
+function findAllElements(lines, query, tag = null, isJsx = false) {
   const out = [];
   const seen = new Set();
   for (let i = 0; i < lines.length; i++) {
@@ -557,7 +557,7 @@ function findAllElements(lines, query, tag = null) {
     if (openerLine === -1) continue;
     if (seen.has(openerLine)) continue; // multiple matches inside the same element
     seen.add(openerLine);
-    const endLine = findClosingLine(lines, openerLine);
+    const endLine = findClosingLine(lines, openerLine, { isJsx });
     out.push({ startLine: openerLine, endLine });
   }
   return out;
@@ -631,13 +631,23 @@ function findOpenerLine(lines, matchLine, tag) {
  * Starting from a line with an opening tag, find the line with the matching
  * closing tag by counting tag nesting depth.
  */
-function findClosingLine(lines, start) {
+const HTML_VOID_TAGS = new Set([
+  'area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input',
+  'link', 'meta', 'param', 'source', 'track', 'wbr',
+]);
+
+function findClosingLine(lines, start, { isJsx = true } = {}) {
   const openMatch = lines[start].match(OPENER_RE);
   if (!openMatch) return start; // caller passed a non-opener; nothing to span
 
   const tagName = openMatch[1];
+  if (!isJsx && HTML_VOID_TAGS.has(tagName.toLowerCase())) return start;
   const joined = lines.slice(start).join('\n');
-  const { closing } = findJsxSubtree(joined, (tag) => tag.name === tagName);
+  const { closing } = findJsxSubtree(
+    joined,
+    (tag) => tag.name === tagName,
+    { strictNesting: isJsx },
+  );
   return start + joined.slice(0, closing.end).split('\n').length - 1;
 }
 

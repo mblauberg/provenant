@@ -99,7 +99,7 @@ function scanTag(source, start) {
   throw unbalanced('Unterminated JSX tag');
 }
 
-export function scanJsxTags(source, { stopAfterTag } = {}) {
+export function scanJsxTags(source, { stopAfterTag, stopWhen } = {}) {
   const tags = [];
   let expressionDepth = 0;
   let index = 0;
@@ -126,6 +126,7 @@ export function scanJsxTags(source, { stopAfterTag } = {}) {
       if (expressionDepth === 0) throw unbalanced('Unexpected JSX expression brace');
       expressionDepth -= 1;
       index += 1;
+      if (stopWhen?.({ expressionDepth, index, tags })) return tags;
       continue;
     }
     if (char === '<') {
@@ -143,39 +144,55 @@ export function scanJsxTags(source, { stopAfterTag } = {}) {
   return tags;
 }
 
-export function findJsxSubtree(source, predicate) {
+export function findJsxSubtree(source, predicate, { strictNesting = true } = {}) {
   let opener = null;
+  let openerExpressionDepth = null;
   let closing = null;
   const stack = [];
+  let sameNameDepth = 0;
   const tags = scanJsxTags(source, {
     stopAfterTag(tag, _tags, { expressionDepth }) {
       if (!opener) {
         if (tag.closing || !predicate(tag)) return false;
         opener = tag;
+        openerExpressionDepth = expressionDepth;
         if (tag.selfClosing) {
           closing = tag;
-          return true;
+          return openerExpressionDepth === 0;
         }
-        stack.push({ name: tag.name, expressionDepth });
+        if (strictNesting) stack.push(tag.name);
+        else sameNameDepth = 1;
+        return false;
+      }
+      if (closing || expressionDepth !== openerExpressionDepth) return false;
+      if (!strictNesting) {
+        if (tag.name !== opener.name || tag.selfClosing) return false;
+        if (tag.closing) sameNameDepth -= 1;
+        else sameNameDepth += 1;
+        if (sameNameDepth === 0) {
+          closing = tag;
+          return openerExpressionDepth === 0;
+        }
         return false;
       }
       if (tag.selfClosing) return false;
       if (!tag.closing) {
-        stack.push({ name: tag.name, expressionDepth });
+        stack.push(tag.name);
         return false;
       }
       const expected = stack.at(-1);
-      if (!expected
-        || expected.name !== tag.name
-        || expected.expressionDepth !== expressionDepth) {
+      if (!expected || expected !== tag.name) {
         throw unbalanced('Mismatched JSX closing tag');
       }
       stack.pop();
       if (stack.length === 0) {
         closing = tag;
-        return true;
+        return openerExpressionDepth === 0;
       }
       return false;
+    },
+    stopWhen({ expressionDepth }) {
+      return closing !== null && openerExpressionDepth > 0 && expressionDepth === 0;
     },
   });
   if (!opener) throw unbalanced('Missing JSX opener');
