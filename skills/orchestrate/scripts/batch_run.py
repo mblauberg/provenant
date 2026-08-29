@@ -31,6 +31,7 @@ sys.path.insert(0, str(REPO_ROOT / "skills"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _shared.bounded_process import stop_process_group
 from dispatch_run import (
+    ATTEMPT_ID_RE,
     AttemptEvidenceError,
     digest,
     ensure_manifest_appendable,
@@ -335,7 +336,7 @@ def _validate_child_record(task: dict[str, Any], record: dict[str, Any], run_dir
         expected_attempt_path = (attempt_root / "attempt.json").as_posix()
         if (
             not isinstance(attempt_id, str)
-            or not re.fullmatch(r"attempt-\d{3}", attempt_id)
+            or not ATTEMPT_ID_RE.fullmatch(attempt_id)
             or attempt_path != expected_attempt_path
             or record.get("attempt_id") != attempt_id
         ):

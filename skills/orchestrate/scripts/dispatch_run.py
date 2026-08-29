@@ -31,6 +31,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "skills"))
 CF_DISPATCH = Path(__file__).with_name("cf_dispatch.sh")
 TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+ATTEMPT_ID_RE = re.compile(r"^attempt-(?P<number>\d{3}|[1-9]\d{3,})$")
 DEFAULT_TIMEOUT_SECONDS = 900.0
 
 from _shared.bounded_process import stop_process_group
@@ -304,7 +305,7 @@ def reconcile_manifest(run_dir: Path) -> None:
         if (
             attempt_dir.is_symlink()
             or not attempt_dir.is_dir()
-            or not re.fullmatch(r"attempt-\d{3}", attempt_dir.name)
+            or not ATTEMPT_ID_RE.fullmatch(attempt_dir.name)
             or not (attempt_dir / "attempt.json").is_file()
             or (attempt_dir / "attempt.json").is_symlink()
         ):
@@ -404,9 +405,9 @@ def reconcile_manifest(run_dir: Path) -> None:
 def existing_attempt_number(task_dir: Path) -> int:
     numbers = []
     for candidate in task_dir.glob("attempt-*"):
-        match = re.fullmatch(r"attempt-(\d{3})", candidate.name)
+        match = ATTEMPT_ID_RE.fullmatch(candidate.name)
         if match and candidate.is_dir():
-            numbers.append(int(match.group(1)))
+            numbers.append(int(match.group("number")))
     return max(numbers, default=0) + 1
 
 
@@ -499,7 +500,7 @@ def _dispatch(args: argparse.Namespace) -> int:
     retry_of = None
     if args.retry_of:
         retry_ref = Path(args.retry_of)
-        if retry_ref.is_absolute() or retry_ref.name != args.retry_of or not re.fullmatch(r"attempt-\d{3}", args.retry_of):
+        if retry_ref.is_absolute() or retry_ref.name != args.retry_of or not ATTEMPT_ID_RE.fullmatch(args.retry_of):
             return fail(run_dir, "retry_of_invalid", "retry-of must name an attempt under the same task")
         retry_dir = task_dir / args.retry_of
         if not (retry_dir.is_dir() and (retry_dir / "attempt.json").is_file()):

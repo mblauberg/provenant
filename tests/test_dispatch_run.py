@@ -6,14 +6,14 @@ import hashlib
 import importlib.util
 import json
 import os
-from pathlib import Path
 import signal
 import stat
 import subprocess
 import textwrap
 import time
-import pytest
+from pathlib import Path
 
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "skills/orchestrate/scripts/dispatch_run.py"
@@ -610,6 +610,32 @@ def test_reentry_reconciles_missing_manifest_rows_and_retry_lineage(tmp_path: Pa
     assert "dispatch-reconcile-attempt-001-attempt" in text
     second = json.loads((run_dir / "dispatch/tasks/reconcile/attempt-002/attempt.json").read_text())
     assert second["retry_of"] == "attempt-001"
+
+
+def test_attempt_number_and_retry_lineage_continue_past_999(tmp_path: Path, monkeypatch) -> None:
+    run_dir = make_run(tmp_path, "long-retry")
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("long retry\n", encoding="utf-8")
+    adapter = tmp_path / "adapter"
+    write_success_adapter(adapter)
+    module = load_dispatch_module()
+    module.CF_DISPATCH = adapter
+    task_dir = run_dir / "dispatch/tasks/long-retry"
+    task_dir.mkdir(parents=True)
+    for number in range(1, 1001):
+        (task_dir / f"attempt-{number:03d}").mkdir()
+    (task_dir / "attempt-1000/attempt.json").write_text("{}\n", encoding="utf-8")
+    retry_args = module.parser().parse_args([
+        "--run-dir", str(run_dir), "--task-id", "long-retry", "--adapter", "codex",
+        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+        "--retry-of", "attempt-1000", "--batch-child",
+    ])
+    monkeypatch.chdir(tmp_path)
+
+    assert module.dispatch(retry_args) == 0
+    record = json.loads((task_dir / "attempt-1001/attempt.json").read_text())
+    assert record["attempt_id"] == "attempt-1001"
+    assert record["retry_of"] == "attempt-1000"
 
 
 def test_reentry_does_not_verify_missing_attempt_evidence(tmp_path: Path, monkeypatch) -> None:
