@@ -671,6 +671,25 @@ def test_same_family_cli_is_forbidden_when_family_declared():
         assert record["cross_family"] is False
 
 
+def test_ordinary_intent_allows_same_family_without_certification():
+    stub = """\
+        #!/usr/bin/env bash
+        cat >/dev/null
+        echo "ORDINARY OK"
+    """
+    result, record, output = run_dispatch_with_stub(
+        stub,
+        extra_args=["--intent", "ordinary", "--orchestrator-family", "anthropic"],
+    )
+    assert result.returncode == 0, result.output
+    assert record["status"] == "ok"
+    assert record["execution_intent"] == "ordinary"
+    assert record["provider_family"] == "anthropic"
+    assert record["cross_family"] is False
+    assert record["certification_eligible"] is False
+    assert output.strip() == "ORDINARY OK"
+
+
 def test_cursor_model_provider_prevents_disguised_same_family_review():
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
