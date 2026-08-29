@@ -38,9 +38,11 @@ Extract incrementally only when repeated use with the same intent justifies a
 shared token or component; name the consumer migration and no-overwrite
 boundary before editing.
 
-### Minimum machine contract
+### Optional machine contract
 
-For a machine-readable `DESIGN.md`, frontmatter may contain `name`,
+Use this only when the project already owns this format or explicitly needs a
+machine-readable `DESIGN.md`; ordinary design-system work may stay in existing
+project-native files. Frontmatter may contain `name`,
 `description`, `colors`, `typography`, `rounded`, `spacing`, and `components`.
 Token references use `{path.to.token}`; component entries may reference
 primitives and are limited to `backgroundColor`, `textColor`, `typography`,
@@ -48,13 +50,15 @@ primitives and are limited to `backgroundColor`, `textColor`, `typography`,
 these exact H2s in order: Overview, Colors, Typography, Elevation, Components,
 and Do's and Don'ts.
 
-Put only non-duplicating extensions in `.impeccable/design.json` with
-`schemaVersion: 2`: `extensions` for metadata the frontmatter cannot express,
-`components` for self-contained renderable examples, and `narrative` derived
-from the six sections. Regenerate the sidecar with the document, resolve its
-references, parse both artefacts, and round-trip representative tokens and
-components before handoff. Preserve a strict no-overwrite boundary for an
-existing document or sidecar, and keep frontmatter values normative.
+When existing project tooling owns `.impeccable/design.json`, put only
+non-duplicating extensions there with `schemaVersion: 2`: `extensions` for
+metadata the frontmatter cannot express, `components` for self-contained
+renderable examples, and `narrative` derived from the six sections. When both
+document and sidecar change, regenerate them together, resolve references,
+parse both artefacts, and round-trip representative tokens and components
+before handoff. Never create this sidecar merely to satisfy this reference.
+Preserve a strict no-overwrite boundary and keep project-native values
+normative.
 
 Consolidation removes duplicate concepts after consumer evidence identifies a
 canonical owner. Extension adds the smallest reusable capability and migrates

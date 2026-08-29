@@ -85,7 +85,7 @@ function scanTag(source, start) {
   throw unbalanced('Unterminated JSX tag');
 }
 
-export function scanJsxTags(source) {
+export function scanJsxTags(source, { stopAfterTag } = {}) {
   const tags = [];
   let expressionDepth = 0;
   let index = 0;
@@ -118,6 +118,7 @@ export function scanJsxTags(source) {
       const tag = scanTag(source, index);
       if (tag) {
         tags.push(tag);
+        if (stopAfterTag?.(tag, tags)) return tags;
         index = tag.end;
         continue;
       }
@@ -126,6 +127,37 @@ export function scanJsxTags(source) {
   }
   if (expressionDepth !== 0) throw unbalanced('Unterminated JSX expression');
   return tags;
+}
+
+export function findJsxSubtree(source, predicate) {
+  let opener = null;
+  let closing = null;
+  let depth = 0;
+  const tags = scanJsxTags(source, {
+    stopAfterTag(tag) {
+      if (!opener) {
+        if (tag.closing || !predicate(tag)) return false;
+        opener = tag;
+        if (tag.selfClosing) {
+          closing = tag;
+          return true;
+        }
+        depth = 1;
+        return false;
+      }
+      if (tag.name !== opener.name) return false;
+      if (tag.closing) depth -= 1;
+      else if (!tag.selfClosing) depth += 1;
+      if (depth === 0) {
+        closing = tag;
+        return true;
+      }
+      return false;
+    },
+  });
+  if (!opener) throw unbalanced('Missing JSX opener');
+  if (!closing) throw unbalanced(`Missing closing JSX tag for ${opener.name}`);
+  return { opener, closing, tags };
 }
 
 export function findMatchingJsxTag(tags, openerIndex) {

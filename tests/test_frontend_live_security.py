@@ -716,6 +716,100 @@ def test_live_wrap_scans_nested_multiline_jsx_without_treating_strings_as_tags(
     assert result.stdout == "8"
 
 
+@pytest.mark.parametrize(
+    ("lines", "start", "closing"),
+    [
+        (
+            [
+                "function Cards() {",
+                "  return (",
+                "    <section>",
+                '      <div className="target">Target</div>',
+                "    </section>",
+                "  );",
+                "}",
+            ],
+            3,
+            3,
+        ),
+        (
+            [
+                "{items.map((item) => (",
+                '  <div className="target">',
+                "    {item.label}",
+                "  </div>",
+                "))}",
+            ],
+            1,
+            3,
+        ),
+    ],
+)
+def test_live_wrap_stops_scanning_after_the_selected_jsx_subtree(
+    tmp_path: Path, lines: list[str], start: int, closing: int
+) -> None:
+    module_url = WRAP.as_uri()
+    script = (
+        f"import {{ findClosingLine }} from {json.dumps(module_url)};"
+        f"const lines={json.dumps(lines)};"
+        f"process.stdout.write(String(findClosingLine(lines,{start})));"
+    )
+
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        cwd=tmp_path,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == str(closing)
+
+
+@pytest.mark.parametrize("mode", ["accept", "discard"])
+def test_live_wrap_and_completion_handle_a_target_inside_a_function_component(
+    tmp_path: Path, mode: str
+) -> None:
+    page = tmp_path / "component.tsx"
+    original = "\n".join(
+        [
+            "export function Cards() {",
+            "  return (",
+            "    <section>",
+            '      <div className="target">original</div>',
+            "    </section>",
+            "  );",
+            "}",
+            "",
+        ]
+    )
+    page.write_text(original)
+
+    wrapped = _run_wrap(tmp_path, "--file", page.name)
+    assert wrapped.returncode == 0, wrapped.stderr
+    if mode == "accept":
+        marker = "Variants: insert below this line"
+        marker_line = next(line for line in page.read_text().splitlines() if marker in line)
+        variant = (
+            '\n      <div data-impeccable-variant="1">'
+            '<div className="target">accepted</div></div>'
+        )
+        page.write_text(page.read_text().replace(marker_line, marker_line + variant))
+        completed = _run_accept(tmp_path, "--variant", "1")
+    else:
+        completed = _run_accept(tmp_path, "--discard")
+
+    assert completed.returncode == 0, completed.stderr
+    result = page.read_text()
+    assert "data-impeccable-variants" not in result
+    assert result.endswith("  );\n}\n")
+    if mode == "accept":
+        assert "accepted" in result
+    else:
+        assert '<div className="target">original</div>' in result
+
+
 def test_live_wrap_fails_closed_on_unbalanced_jsx(tmp_path: Path) -> None:
     module_url = WRAP.as_uri()
     script = (

@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// Modified from Impeccable for this harness; see the repository THIRD_PARTY_NOTICES.md.
 /**
  * Canonical durable completion acknowledgement for Impeccable live sessions.
  */

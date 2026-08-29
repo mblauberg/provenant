@@ -20,7 +20,7 @@ import {
   replaceContainedSource,
   resolveContainedSourcePath,
 } from './contained-source.mjs';
-import { findMatchingJsxTag, scanJsxTags } from './jsx-tag-scanner.mjs';
+import { findJsxSubtree } from './jsx-tag-scanner.mjs';
 
 const EXTENSIONS = ['.html', '.jsx', '.tsx', '.vue', '.svelte', '.astro'];
 
@@ -637,14 +637,7 @@ function findClosingLine(lines, start) {
 
   const tagName = openMatch[1];
   const joined = lines.slice(start).join('\n');
-  const tags = scanJsxTags(joined);
-  const openerIndex = tags.findIndex((tag) => !tag.closing && tag.name === tagName);
-  if (openerIndex === -1) {
-    const error = new Error(`Missing JSX opener for ${tagName}`);
-    error.code = 'jsx_scan_unbalanced';
-    throw error;
-  }
-  const closing = findMatchingJsxTag(tags, openerIndex);
+  const { closing } = findJsxSubtree(joined, (tag) => tag.name === tagName);
   return start + joined.slice(0, closing.end).split('\n').length - 1;
 }
 

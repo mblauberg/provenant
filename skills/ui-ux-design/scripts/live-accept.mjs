@@ -18,7 +18,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { isGeneratedFile } from './is-generated.mjs';
 import { readContainedSource, replaceContainedSource } from './contained-source.mjs';
-import { findMatchingJsxTag, scanJsxTags } from './jsx-tag-scanner.mjs';
+import {
+  findJsxSubtree,
+  findMatchingJsxTag,
+  scanJsxTags,
+} from './jsx-tag-scanner.mjs';
 
 const EXTENSIONS = ['.html', '.jsx', '.tsx', '.vue', '.svelte', '.astro'];
 
@@ -272,16 +276,8 @@ function expandReplaceRange(block, lines, isJsx) {
   // It treats quotes and expression braces as syntax, so `>` and tag-shaped
   // strings inside props cannot redirect the structural match.
   const joined = lines.slice(start).join('\n');
-  const tags = scanJsxTags(joined);
-  const openerIndex = tags.findIndex((tag) => !tag.closing
-    && tag.name === 'div'
+  const { closing } = findJsxSubtree(joined, (tag) => tag.name === 'div'
     && tag.raw.includes('data-impeccable-variants='));
-  if (openerIndex === -1) {
-    const error = new Error('Missing JSX variant wrapper opener');
-    error.code = 'jsx_scan_unbalanced';
-    throw error;
-  }
-  const closing = findMatchingJsxTag(tags, openerIndex);
   const linesBefore = joined.slice(0, closing.end).split('\n').length - 1;
   const candidateEnd = start + linesBefore;
   if (candidateEnd < end) {
