@@ -355,6 +355,20 @@ function validateEvent(msg) {
   }
 }
 
+function bindUploadedScreenshot(msg) {
+  if (msg.type !== 'generate' || msg.screenshotPath === undefined) return msg;
+  if (!state.sessionDir) throw new Error('Session dir unavailable');
+  const expected = path.join(state.sessionDir, `${msg.id}.png`);
+  if (path.resolve(msg.screenshotPath) !== path.resolve(expected)) {
+    throw new Error('generate: screenshotPath is not bound to this event upload');
+  }
+  const stat = fs.lstatSync(expected);
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1) {
+    throw new Error('generate: screenshot upload is not a private regular file');
+  }
+  return { ...msg, screenshotPath: expected };
+}
+
 function readBoundedJsonBody(req, res, onMessage) {
   const declaredLength = req.headers['content-length'];
   if (declaredLength !== undefined) {
@@ -862,7 +876,15 @@ function createRequestHandler({ detectScript, sessionPath, livePath }) {
           res.end(JSON.stringify({ error }));
           return;
         }
-        const safeMessage = redactBearer(msg);
+        let boundMessage;
+        try {
+          boundMessage = bindUploadedScreenshot(msg);
+        } catch (err) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: err.message }));
+          return;
+        }
+        const safeMessage = redactBearer(boundMessage);
         if (state.sessionStore && safeMessage.id) {
           try {
             state.sessionStore.appendEvent(safeMessage);

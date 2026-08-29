@@ -262,6 +262,11 @@ function scanTag(source, start) {
   throw unbalanced('Unterminated JSX tag');
 }
 
+export function scanJsxTagAtOffset(source, offset) {
+  if (!Number.isInteger(offset) || offset < 0 || offset >= source.length) return null;
+  return source[offset] === '<' ? scanTag(source, offset) : null;
+}
+
 export function scanJsxTags(source, { htmlMode = false, stopAfterTag, stopWhen } = {}) {
   const tags = [];
   const lexicalJsxStack = [];
@@ -463,9 +468,17 @@ export function frameworkTemplateContextAtOffset(source, offset) {
 export function isOffsetInsideAstroFrontmatter(source, offset) {
   const opening = source.match(/^(?:\uFEFF)?---[ \t]*\r?\n/);
   if (!opening) return false;
+  const bodyStart = opening[0].length;
+  const body = source.slice(bodyStart);
   const closingPattern = /^---[ \t]*(?:\r?\n|$)/gm;
-  closingPattern.lastIndex = opening[0].length;
-  const closing = closingPattern.exec(source);
+  closingPattern.lastIndex = bodyStart;
+  let closing = null;
+  for (let candidate = closingPattern.exec(source); candidate; candidate = closingPattern.exec(source)) {
+    if (javascriptLexicalContextAtOffset(body, candidate.index - bodyStart) === 'code') {
+      closing = candidate;
+      break;
+    }
+  }
   return !closing || offset < closing.index + closing[0].length;
 }
 

@@ -113,10 +113,10 @@ Output (JSON):
 
 function handleDiscard(id, lines, targetFile, snapshot) {
   const commentSyntax = detectCommentSyntax(targetFile);
-  const block = findMarkerBlock(id, lines, commentSyntax);
+  const block = findMarkerBlock(id, lines, commentSyntax, targetFile);
   if (!block) return { handled: false, error: 'Session markers are missing or ambiguous' };
 
-  const original = extractOriginal(lines, block);
+  const original = extractOriginal(lines, block, id);
   if (original === null) return { handled: false, error: 'Original session content is missing' };
   const isJsx = commentSyntax.open === '{/*';
   let replaceRange;
@@ -134,13 +134,12 @@ function handleDiscard(id, lines, targetFile, snapshot) {
   // line, which is at the original element's indent for both HTML and JSX.
   const indent = lines[replaceRange.start].match(/^(\s*)/)[1];
   const restored = deindentContent(original, indent);
-
-  const newLines = [
-    ...lines.slice(0, replaceRange.start),
-    ...restored,
-    ...lines.slice(replaceRange.end + 1),
-  ];
-  replaceContainedSource(snapshot, newLines.join('\n'));
+  const source = lines.join('\n');
+  const replacement = joinReplacementLines(restored, source);
+  replaceContainedSource(
+    snapshot,
+    source.slice(0, replaceRange.startOffset) + replacement + source.slice(replaceRange.endOffset),
+  );
   return {};
 }
 
@@ -150,9 +149,9 @@ function handleDiscard(id, lines, targetFile, snapshot) {
 
 function handleAccept(id, variantNum, lines, targetFile, paramValues, snapshot) {
   const commentSyntax = detectCommentSyntax(targetFile);
-  const block = findMarkerBlock(id, lines, commentSyntax);
+  const block = findMarkerBlock(id, lines, commentSyntax, targetFile);
   if (!block) return { handled: false, error: 'Session markers are missing or ambiguous' };
-  if (extractOriginal(lines, block) === null) {
+  if (extractOriginal(lines, block, id) === null) {
     return { handled: false, error: 'Original session content is missing' };
   }
   const isJsx = commentSyntax.open === '{/*';
@@ -169,7 +168,7 @@ function handleAccept(id, variantNum, lines, targetFile, paramValues, snapshot) 
   const indent = lines[replaceRange.start].match(/^(\s*)/)[1];
 
   // Extract the chosen variant's inner content
-  const variantContent = extractVariant(lines, block, variantNum);
+  const variantContent = extractVariant(lines, block, variantNum, id);
   if (!variantContent) return { handled: false, error: 'Variant ' + variantNum + ' not found' };
 
   // Extract CSS block if present
@@ -225,12 +224,13 @@ function handleAccept(id, variantNum, lines, targetFile, paramValues, snapshot) 
     replacement.push(...restored);
   }
 
-  const newLines = [
-    ...lines.slice(0, replaceRange.start),
-    ...replacement,
-    ...lines.slice(replaceRange.end + 1),
-  ];
-  replaceContainedSource(snapshot, newLines.join('\n'));
+  const source = lines.join('\n');
+  replaceContainedSource(
+    snapshot,
+    source.slice(0, replaceRange.startOffset)
+      + joinReplacementLines(replacement, source)
+      + source.slice(replaceRange.endOffset),
+  );
 
   return { carbonize: needsCarbonize };
 }
@@ -247,18 +247,45 @@ function markerText(kind, id, commentSyntax) {
   return `${commentSyntax.open} impeccable-variants-${kind} ${id} ${commentSyntax.close}`;
 }
 
-function findMarkerBlock(id, lines, commentSyntax = { open: '<!--', close: '-->' }) {
+function findMarkerBlock(
+  id,
+  lines,
+  commentSyntax = { open: '<!--', close: '-->' },
+  filePath = '',
+) {
   const startText = markerText('start', id, commentSyntax);
   const endText = markerText('end', id, commentSyntax);
   const starts = [];
   const ends = [];
+  const source = lines.join('\n');
+  const offsets = buildLineOffsets(lines);
   for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index].trim();
-    if (line === startText) starts.push(index);
-    if (line === endText) ends.push(index);
+    for (const [marker, found] of [
+      [startText, starts],
+      [endText, ends],
+    ]) {
+      let column = lines[index].indexOf(marker);
+      while (column !== -1) {
+        const offset = offsets[index] + column;
+        if (isExecutableMarker(source, offset, marker.length, filePath, commentSyntax)) {
+          found.push(index);
+        }
+        column = lines[index].indexOf(marker, column + marker.length);
+      }
+    }
   }
   if (starts.length !== 1 || ends.length !== 1 || starts[0] >= ends[0]) return null;
   return { start: starts[0], end: ends[0] };
+}
+
+function isExecutableMarker(source, offset, length, filePath, syntax) {
+  if (syntax.open === '{/*') return hasExecutableJsxMarkerAtOffset(source, offset, length);
+  const extension = path.extname(filePath).toLowerCase();
+  if (['.astro', '.svelte', '.vue'].includes(extension)) {
+    return !isOffsetInsideAstroFrontmatter(source, offset)
+      && frameworkTemplateContextAtOffset(source, offset) === 'markup';
+  }
+  return htmlLexicalContextAtOffset(source, offset) === 'markup';
 }
 
 /**
@@ -279,6 +306,8 @@ function findMarkerBlock(id, lines, commentSyntax = { open: '<!--', close: '-->'
  */
 function expandReplaceRange(id, block, lines, isJsx) {
   const wrapperNeedle = `data-impeccable-variants="${id}"`;
+  const source = lines.join('\n');
+  const offsets = buildLineOffsets(lines);
   if (!isJsx) {
     const blockText = lines.slice(block.start, block.end + 1).join('\n');
     if (blockText.split(wrapperNeedle).length !== 2) {
@@ -286,39 +315,60 @@ function expandReplaceRange(id, block, lines, isJsx) {
       error.code = 'session_structure_invalid';
       throw error;
     }
-    return { start: block.start, end: block.end };
-  }
-
-  let { start, end } = block;
-
-  // Walk back for the wrapper `<div data-impeccable-variants="..."` opener.
-  // The attr may sit on a continuation line of a multi-line opening tag, so
-  // also walk to the line that actually contains `<div`.
-  for (let i = start - 1; i >= Math.max(0, start - 12); i--) {
-    if (lines[i].includes(wrapperNeedle)) {
-      let opener = i;
-      while (opener > 0 && !/<div\b/.test(lines[opener])) opener--;
-      start = opener;
-      break;
+    const openMarker = `<!-- impeccable-variants-start ${id} -->`;
+    const closeMarker = `<!-- impeccable-variants-end ${id} -->`;
+    const openIndex = lines[block.start].indexOf(openMarker);
+    const closeIndex = lines[block.end].indexOf(closeMarker);
+    if (openIndex === -1 || closeIndex === -1) {
+      const error = new Error('Session marker offsets are invalid');
+      error.code = 'session_structure_invalid';
+      throw error;
     }
+    const exactStart = offsets[block.start] + openIndex;
+    return {
+      start: block.start,
+      end: block.end,
+      startOffset: includeLeadingLineIndent(source, exactStart),
+      endOffset: offsets[block.end] + closeIndex + closeMarker.length,
+    };
   }
-
-  // Walk forward to the matching wrapper close with the shared JSX scanner.
-  // It treats quotes and expression braces as syntax, so `>` and tag-shaped
-  // strings inside props cannot redirect the structural match.
-  const joined = lines.slice(start).join('\n');
-  const { closing } = findJsxSubtree(joined, (tag) => tag.name === 'div'
+  const { opener, closing } = findJsxSubtree(source, (tag) => tag.name === 'div'
     && tag.raw.includes(wrapperNeedle));
-  const linesBefore = joined.slice(0, closing.end).split('\n').length - 1;
-  const candidateEnd = start + linesBefore;
-  if (candidateEnd < end) {
+  const start = source.slice(0, opener.start).split('\n').length - 1;
+  const end = source.slice(0, closing.end).split('\n').length - 1;
+  if (end < block.end) {
     const error = new Error('JSX variant wrapper closes before its marker block');
     error.code = 'jsx_scan_unbalanced';
     throw error;
   }
-  end = candidateEnd;
+  return {
+    start,
+    end,
+    startOffset: includeLeadingLineIndent(source, opener.start),
+    endOffset: closing.end,
+  };
+}
 
-  return { start, end };
+function buildLineOffsets(lines) {
+  const offsets = [];
+  let offset = 0;
+  for (const line of lines) {
+    offsets.push(offset);
+    offset += line.length + 1;
+  }
+  return offsets;
+}
+
+function includeLeadingLineIndent(source, offset) {
+  const lineStart = source.lastIndexOf('\n', offset - 1) + 1;
+  return /^\s*$/.test(source.slice(lineStart, offset)) ? lineStart : offset;
+}
+
+function joinReplacementLines(lines, source) {
+  const newline = source.includes('\r\n') ? '\r\n' : '\n';
+  return lines
+    .map((line) => (newline === '\r\n' && line.endsWith('\r') ? line.slice(0, -1) : line))
+    .join(newline);
 }
 
 /**
@@ -330,9 +380,10 @@ function expandReplaceRange(id, block, lines, isJsx) {
  *   - Same-line `<style>…</style>` blocks
  *   - Multi-line `<style>\n…\n</style>` blocks
  */
-function stripStyleAndJoin(lines, block) {
+function stripStyleAndJoin(lines, block, id) {
   const out = [];
   let inStyle = false;
+  const styleAttr = `data-impeccable-css="${id}"`;
   for (let i = block.start; i <= block.end; i++) {
     let line = lines[i];
 
@@ -340,14 +391,19 @@ function stripStyleAndJoin(lines, block) {
       // Strip any complete <style> elements on this line (self-closed or
       // same-line-closed), including their body content.
       line = line
-        .replace(/<style\b[^>]*>[\s\S]*?<\/style\s*>/g, '')
-        .replace(/<style\b[^>]*\/\s*>/g, '');
+        .replace(/<style\b[^>]*>[\s\S]*?<\/style\s*>/g, (match) => (
+          match.includes(styleAttr) ? '' : match
+        ))
+        .replace(/<style\b[^>]*\/\s*>/g, (match) => (
+          match.includes(styleAttr) ? '' : match
+        ));
 
       // If a <style> opener remains (multi-line body starts here), strip from
       // the opener to end-of-line and flip into skip mode.
-      const openerIdx = line.search(/<style\b/);
-      if (openerIdx !== -1) {
-        line = line.slice(0, openerIdx);
+      const opener = [...line.matchAll(/<style\b[^>]*>/g)]
+        .find((match) => match[0].includes(styleAttr));
+      if (opener) {
+        line = line.slice(0, opener.index);
         inStyle = true;
       }
       out.push(line);
@@ -385,19 +441,22 @@ function extractInnerByAttr(text, attrMatch) {
  * Extract the original element content from within the variant wrapper.
  * Returns an array of lines.
  */
-function extractOriginal(lines, block) {
-  const text = stripStyleAndJoin(lines, block);
+function extractOriginal(lines, block, id) {
+  const text = stripStyleAndJoin(lines, block, id);
   const inner = extractInnerByAttr(text, 'data-impeccable-variant="original"');
   if (inner === null) return null;
-  return inner.split('\n');
+  const result = inner.split('\n');
+  while (result.length > 1 && result[0].trim() === '') result.shift();
+  while (result.length > 1 && result[result.length - 1].trim() === '') result.pop();
+  return result;
 }
 
 /**
  * Extract a specific variant's inner content (stripping the wrapper div).
  * Returns an array of lines, or null if not found.
  */
-function extractVariant(lines, block, variantNum) {
-  const text = stripStyleAndJoin(lines, block);
+function extractVariant(lines, block, variantNum, id) {
+  const text = stripStyleAndJoin(lines, block, id);
   const inner = extractInnerByAttr(text, 'data-impeccable-variant="' + variantNum + '"');
   if (inner === null) return null;
   const result = inner.split('\n');
@@ -558,20 +617,15 @@ function findSessionFile(id, cwd) {
 function hasExecutableStartMarker(content, filePath, id) {
   const syntax = detectCommentSyntax(filePath);
   const marker = markerText('start', id, syntax);
-  const isJsx = syntax.open === '{/*';
-  const extension = path.extname(filePath).toLowerCase();
-  const isFramework = ['.astro', '.svelte', '.vue'].includes(extension);
   let offset = 0;
   for (const line of content.split('\n')) {
     const markerColumn = line.indexOf(marker);
+    if (markerColumn === -1) {
+      offset += line.length + 1;
+      continue;
+    }
     const markerOffset = offset + markerColumn;
-    const executable = isJsx
-      ? hasExecutableJsxMarkerAtOffset(content, markerOffset, marker.length)
-      : isFramework
-        ? !isOffsetInsideAstroFrontmatter(content, markerOffset)
-          && frameworkTemplateContextAtOffset(content, markerOffset) === 'markup'
-        : htmlLexicalContextAtOffset(content, markerOffset) === 'markup';
-    if (line.trim() === marker && executable) {
+    if (isExecutableMarker(content, markerOffset, marker.length, filePath, syntax)) {
       return true;
     }
     offset += line.length + 1;

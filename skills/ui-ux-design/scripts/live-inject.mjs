@@ -97,6 +97,10 @@ Output (JSON):
   validateConfig(config);
 
   const resolvedFiles = resolveFiles(process.cwd(), config);
+  if (resolvedFiles.length === 0) {
+    console.error(JSON.stringify({ ok: false, error: 'config_no_targets' }));
+    process.exit(1);
+  }
   // Resolve and validate the complete target set before changing any file. A
   // later escaping target must not leave earlier project files half-mutated.
   const targets = resolvedFiles.map((relFile) => ({

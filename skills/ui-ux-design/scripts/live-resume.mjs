@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// Modified from Impeccable for this harness; see the repository THIRD_PARTY_NOTICES.md.
 /**
  * Recover the next agent action from the durable live-session journal.
  */

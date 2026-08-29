@@ -22,10 +22,16 @@ components:
       - scripts/live-browser.js
       - scripts/live-session-store.mjs
       - scripts/live-status.mjs
+      - scripts/live-completion.mjs
+      - scripts/live-resume.mjs
+      - scripts/live-complete.mjs
+      - scripts/impeccable-paths.mjs
       - scripts/detector/cli/main.mjs
       - scripts/detector/engines/browser/detect-url.mjs
+      - scripts/detector/engines/static-html/detect-html.mjs
       - scripts/detector/node/file-system.mjs
     marker_required_prefixes: [references/]
+    modification_baseline: 160d110443677984fe033c32dd944d0fad0d4937
     source_url: https://github.com/pbakaus/impeccable
     source_ref: "upstream commit unavailable; first public local import a39c7b7e6db2778467e43f5ed3a05143c05c07dd"
     licence: Apache-2.0

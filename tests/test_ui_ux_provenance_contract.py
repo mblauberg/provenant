@@ -1,4 +1,5 @@
 from pathlib import Path
+import subprocess
 
 import yaml
 
@@ -79,13 +80,41 @@ def test_modified_impeccable_sources_have_local_markers():
     marker = "Modified from Impeccable for this harness"
     ledger = yaml.safe_load((SKILL / "evals" / "provenance_components.yaml").read_text())
     component = next(item for item in ledger["components"] if item["id"] == "impeccable-modified-distribution")
-    assert {
-        "scripts/live-session-store.mjs",
-        "scripts/live-status.mjs",
-    } <= set(component["marker_required_exact"])
-    paths = [SKILL / relative for relative in component["marker_required_exact"]]
-    for prefix in component["marker_required_prefixes"]:
-        paths.extend(path for path in (SKILL / prefix).rglob("*") if path.is_file())
+    modified = subprocess.run(
+        [
+            "git",
+            "diff",
+            "--name-only",
+            component["modification_baseline"],
+            "--",
+            "skills/ui-ux-design",
+        ],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.splitlines()
+    modified = {
+        Path(relative).relative_to("skills/ui-ux-design").as_posix()
+        for relative in modified
+        if (ROOT / relative).is_file()
+    }
+    derived_modified = {
+        relative
+        for relative in modified
+        if _component_for(relative, ledger["components"])
+        == ["impeccable-modified-distribution"]
+    }
+    marker_exact = set(component["marker_required_exact"])
+    marker_prefixes = tuple(component["marker_required_prefixes"])
+    uncovered = {
+        relative
+        for relative in derived_modified
+        if relative not in marker_exact and not relative.startswith(marker_prefixes)
+    }
+    assert not uncovered, uncovered
+
+    paths = [SKILL / relative for relative in derived_modified]
     for path in paths:
         assert marker in path.read_text()[:500], path
 

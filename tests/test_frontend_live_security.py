@@ -797,6 +797,32 @@ def test_live_inject_hard_excludes_explicit_dependency_and_git_targets(
     assert "impeccable-live-start" not in git_page.read_text()
 
 
+@pytest.mark.parametrize(
+    "files",
+    [
+        ["src/**/*.html"],
+        ["node_modules/pkg/index.html", ".git/index.html"],
+    ],
+)
+def test_live_inject_fails_when_config_resolves_to_no_targets(
+    tmp_path: Path, files: list[str]
+) -> None:
+    dependency = tmp_path / "node_modules" / "pkg" / "index.html"
+    git_page = tmp_path / ".git" / "index.html"
+    dependency.parent.mkdir(parents=True)
+    git_page.parent.mkdir(parents=True)
+    dependency.write_text("<html><body>dependency</body></html>\n")
+    git_page.write_text("<html><body>git</body></html>\n")
+    _write_config(tmp_path, files)
+
+    result = _run_inject(tmp_path, "--port", "8400", "--token", TOKEN)
+
+    assert result.returncode != 0
+    assert json.loads(result.stderr)["error"] == "config_no_targets"
+    assert "impeccable-live-start" not in dependency.read_text()
+    assert "impeccable-live-start" not in git_page.read_text()
+
+
 def test_csp_revert_treats_the_generated_marker_as_literal_text(tmp_path: Path) -> None:
     module_url = INJECT.as_uri()
     # This exact policy encodes to base64 containing '+', which is a regexp
@@ -1397,6 +1423,254 @@ def test_live_discard_ignores_marker_shaped_text_outside_the_session(
     assert '<p class="target">original</p>' in result
 
 
+def test_live_wrap_and_discard_preserve_inline_jsx_prefix_and_suffix(
+    tmp_path: Path,
+) -> None:
+    page = tmp_path / "Component.tsx"
+    source = 'export const A = () => <Card className="target">Alpha</Card>;\n'
+    page.write_text(source)
+
+    wrapped = _run_wrap(
+        tmp_path,
+        "--file",
+        page.name,
+        "--classes",
+        "target",
+        "--tag",
+        "Card",
+    )
+
+    assert wrapped.returncode == 0, wrapped.stderr
+    assert page.read_text().startswith("export const A = () => <div")
+    assert page.read_text().rstrip().endswith("</div>;")
+
+    discarded = _run_accept(tmp_path, "--discard")
+
+    assert discarded.returncode == 0, discarded.stderr
+    assert json.loads(discarded.stdout)["handled"] is True
+    assert page.read_text() == source
+
+
+def test_live_wrap_uses_text_to_select_one_target_across_files(tmp_path: Path) -> None:
+    source_dir = tmp_path / "src"
+    source_dir.mkdir()
+    first = source_dir / "A.tsx"
+    second = source_dir / "B.tsx"
+    first_source = '<Card className="target">Alpha unique</Card>\n'
+    second_source = '<Card className="target">Beta unique</Card>\n'
+    first.write_text(first_source)
+    second.write_text(second_source)
+
+    wrapped = _run_wrap(
+        tmp_path,
+        "--classes",
+        "target",
+        "--tag",
+        "Card",
+        "--text",
+        "Beta unique",
+    )
+
+    assert wrapped.returncode == 0, wrapped.stderr
+    assert first.read_text() == first_source
+    assert 'data-impeccable-variants="security-test"' in second.read_text()
+
+
+def test_live_wrap_uses_short_visible_text_without_extra_ceremony(tmp_path: Path) -> None:
+    source_dir = tmp_path / "src"
+    source_dir.mkdir()
+    save = source_dir / "Save.tsx"
+    next_page = source_dir / "Next.tsx"
+    save_source = '<Button className="target">Save</Button>\n'
+    next_source = '<Button className="target">Next</Button>\n'
+    save.write_text(save_source)
+    next_page.write_text(next_source)
+
+    wrapped = _run_wrap(
+        tmp_path,
+        "--classes",
+        "target",
+        "--tag",
+        "Button",
+        "--text",
+        "Save",
+    )
+
+    assert wrapped.returncode == 0, wrapped.stderr
+    assert 'data-impeccable-variants="security-test"' in save.read_text()
+    assert next_page.read_text() == next_source
+
+
+def test_live_wrap_fails_closed_for_multiple_same_line_targets_without_text(
+    tmp_path: Path,
+) -> None:
+    page = tmp_path / "Component.tsx"
+    source = (
+        '<><Card className="target">Alpha</Card>'
+        '<Card className="target">Beta</Card></>\n'
+    )
+    page.write_text(source)
+
+    wrapped = _run_wrap(
+        tmp_path,
+        "--file",
+        page.name,
+        "--classes",
+        "target",
+        "--tag",
+        "Card",
+    )
+
+    assert wrapped.returncode != 0
+    assert page.read_text() == source
+
+
+def test_live_wrap_selects_exact_same_line_opener_and_preserves_siblings(
+    tmp_path: Path,
+) -> None:
+    page = tmp_path / "Component.tsx"
+    source = (
+        'export const App = () => <section><Card className="target">A</Card>'
+        '<span>keep</span></section>;\n'
+    )
+    page.write_text(source)
+
+    wrapped = _run_wrap(
+        tmp_path,
+        "--file",
+        page.name,
+        "--classes",
+        "target",
+        "--tag",
+        "Card",
+    )
+
+    assert wrapped.returncode == 0, wrapped.stderr
+    assert "<section><div" in page.read_text()
+    assert "<span>keep</span></section>;" in page.read_text()
+    discarded = _run_accept(tmp_path, "--discard")
+    assert discarded.returncode == 0, discarded.stderr
+    assert page.read_text() == source
+
+
+def test_live_wrap_skips_malformed_cross_file_candidate(tmp_path: Path) -> None:
+    source_dir = tmp_path / "src"
+    source_dir.mkdir()
+    malformed = source_dir / "A.tsx"
+    valid = source_dir / "B.tsx"
+    malformed_source = '<Card className="target">Broken\n'
+    valid_source = '<Card className="target">Valid destination</Card>\n'
+    malformed.write_text(malformed_source)
+    valid.write_text(valid_source)
+
+    wrapped = _run_wrap(
+        tmp_path,
+        "--classes",
+        "target",
+        "--tag",
+        "Card",
+        "--text",
+        "Valid destination",
+    )
+
+    assert wrapped.returncode == 0, wrapped.stderr
+    assert malformed.read_text() == malformed_source
+    assert 'data-impeccable-variants="security-test"' in valid.read_text()
+
+
+def test_live_wrap_preserves_unique_id_query_priority(tmp_path: Path) -> None:
+    source_dir = tmp_path / "src"
+    source_dir.mkdir()
+    target = source_dir / "Target.tsx"
+    sibling = source_dir / "Sibling.tsx"
+    target.write_text('<Card id="hero" className="target">Same text words</Card>\n')
+    sibling_source = '<Card className="target">Same text words</Card>\n'
+    sibling.write_text(sibling_source)
+
+    wrapped = _run_wrap(
+        tmp_path,
+        "--element-id",
+        "hero",
+        "--classes",
+        "target",
+        "--tag",
+        "Card",
+        "--text",
+        "Same text words",
+    )
+
+    assert wrapped.returncode == 0, wrapped.stderr
+    assert 'data-impeccable-variants="security-test"' in target.read_text()
+    assert sibling.read_text() == sibling_source
+
+
+def test_live_wrap_and_discard_preserve_crlf_bytes(tmp_path: Path) -> None:
+    page = tmp_path / "Component.tsx"
+    source = (
+        b"export const App = () => (\r\n"
+        b"  <Card className=\"target\">Alpha</Card>\r\n"
+        b");\r\n"
+    )
+    page.write_bytes(source)
+
+    wrapped = _run_wrap(tmp_path, "--file", page.name)
+
+    assert wrapped.returncode == 0, wrapped.stderr
+    wrapped_bytes = page.read_bytes()
+    assert b"\n" not in wrapped_bytes.replace(b"\r\n", b"")
+    discarded = _run_accept(tmp_path, "--discard")
+    assert discarded.returncode == 0, discarded.stderr
+    assert page.read_bytes() == source
+
+
+def test_live_accept_preserves_inline_jsx_prefix_and_suffix(tmp_path: Path) -> None:
+    page = tmp_path / "Component.tsx"
+    page.write_text('export const A = () => <Card className="target">Alpha</Card>;\n')
+    wrapped = _run_wrap(tmp_path, "--file", page.name)
+    assert wrapped.returncode == 0, wrapped.stderr
+    marker_line = next(
+        line for line in page.read_text().splitlines()
+        if "Variants: insert below this line" in line
+    )
+    variant = (
+        marker_line
+        + '\n  <div data-impeccable-variant="1">'
+        + '<Card className="target">Beta</Card></div>'
+    )
+    page.write_text(page.read_text().replace(marker_line, variant))
+
+    accepted = _run_accept(tmp_path, "--variant", "1")
+
+    assert accepted.returncode == 0, accepted.stderr
+    assert json.loads(accepted.stdout)["handled"] is True
+    assert page.read_text() == 'export const A = () => <Card className="target">Beta</Card>;\n'
+
+
+@pytest.mark.parametrize("filename", ["index.html", "Component.tsx"])
+def test_live_discard_preserves_legitimate_nested_style_element(
+    tmp_path: Path, filename: str
+) -> None:
+    page = tmp_path / filename
+    source = "\n".join(
+        [
+            '<section class="target">',
+            "  <style>.target { color:red; }</style>",
+            "  <p>Original</p>",
+            "</section>",
+            "",
+        ]
+    )
+    page.write_text(source)
+    wrapped = _run_wrap(tmp_path, "--file", filename)
+    assert wrapped.returncode == 0, wrapped.stderr
+
+    discarded = _run_accept(tmp_path, "--discard")
+
+    assert discarded.returncode == 0, discarded.stderr
+    assert json.loads(discarded.stdout)["handled"] is True
+    assert page.read_text() == source
+
+
 @pytest.mark.parametrize(
     ("old", "new"),
     [
@@ -1505,6 +1779,35 @@ def test_live_discard_ignores_html_scaffold_inside_framework_script_template(
             "</div>",
             "`;",
             "</script>",
+            '<section class="target">Real</section>',
+            "",
+        ]
+    )
+    page.write_text(source)
+
+    completed = _run_accept(tmp_path, "--discard")
+
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(completed.stdout)["handled"] is False
+    assert page.read_text() == source
+
+
+def test_live_discard_ignores_astro_frontmatter_template_delimiter_decoy(
+    tmp_path: Path,
+) -> None:
+    page = tmp_path / "Page.astro"
+    source = "\n".join(
+        [
+            "---",
+            "const fixture = `",
+            "---",
+            '<div data-impeccable-variants="security-test">',
+            "  <!-- impeccable-variants-start security-test -->",
+            '  <div data-impeccable-variant="original"><span>literal</span></div>',
+            "  <!-- impeccable-variants-end security-test -->",
+            "</div>",
+            "`;",
+            "---",
             '<section class="target">Real</section>',
             "",
         ]
@@ -1972,8 +2275,15 @@ def test_live_status_identifies_the_authenticated_server_process(tmp_path: Path)
 
 def test_live_event_token_never_reaches_poll_or_durable_journal(tmp_path: Path) -> None:
     event_id = "deadbeef"
-    screenshot_path = "/tmp/transient-annotation.png"
     with LiveServer(tmp_path) as server:
+        status, _, uploaded = _request(
+            f"{server.base_url}/annotation?token={quote(server.token)}&eventId={event_id}",
+            method="POST",
+            body=b"\x89PNG\r\n\x1a\nprivate",
+            extra_headers={"Content-Type": "image/png"},
+        )
+        assert status == 200, uploaded
+        screenshot_path = json.loads(uploaded)["path"]
         event = {
             "token": server.token,
             "type": "generate",
@@ -2004,6 +2314,37 @@ def test_live_event_token_never_reaches_poll_or_durable_journal(tmp_path: Path) 
         assert journal.exists()
         assert server.token not in journal.read_text()
         assert screenshot_path not in journal.read_text()
+
+
+def test_live_generate_rejects_unbound_browser_supplied_screenshot_path(
+    tmp_path: Path,
+) -> None:
+    outside = tmp_path / "unrelated.png"
+    outside.write_bytes(b"\x89PNG\r\n\x1a\nsecret")
+    with LiveServer(tmp_path) as server:
+        event = {
+            "token": server.token,
+            "type": "generate",
+            "id": "deadbeef",
+            "action": "polish",
+            "count": 1,
+            "element": {"outerHTML": "<main>safe</main>"},
+            "screenshotPath": str(outside),
+        }
+        status, _, body = _request(
+            f"{server.base_url}/events",
+            method="POST",
+            body=json.dumps(event).encode(),
+            extra_headers={"Content-Type": "application/json"},
+        )
+
+        assert status == 400
+        assert "not bound" in json.loads(body)["error"]
+        status, _, polled = _request(
+            f"{server.base_url}/poll?token={quote(server.agent_token)}&timeout=1&leaseMs=1000"
+        )
+        assert status == 200
+        assert json.loads(polled)["type"] == "timeout"
 
 
 def test_browser_credential_cannot_complete_agent_work_and_errors_requeue(
