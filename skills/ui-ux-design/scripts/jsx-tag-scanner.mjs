@@ -412,7 +412,7 @@ export function javascriptLexicalContextAtOffset(source, offset) {
   return scanCodeForTemplateOffset(source, 0, offset).context;
 }
 
-export function htmlLexicalContextAtOffset(source, offset) {
+function htmlContextAtOffset(source, offset, includeExpressions) {
   if (!Number.isInteger(offset) || offset < 0 || offset > source.length) return 'invalid';
   let rawTextTag = null;
   for (let index = 0; index < source.length && index < offset;) {
@@ -426,6 +426,12 @@ export function htmlLexicalContextAtOffset(source, offset) {
     if (source.startsWith('<!--', index)) {
       const end = skipHtmlComment(source, index);
       if (end > offset) return 'comment';
+      index = end;
+      continue;
+    }
+    if (includeExpressions && source[index] === '{') {
+      const end = skipJavaScriptBracedExpression(source, index + 1);
+      if (end > offset) return 'expression';
       index = end;
       continue;
     }
@@ -444,6 +450,14 @@ export function htmlLexicalContextAtOffset(source, offset) {
     index += 1;
   }
   return rawTextTag ? 'raw-text' : 'markup';
+}
+
+export function htmlLexicalContextAtOffset(source, offset) {
+  return htmlContextAtOffset(source, offset, false);
+}
+
+export function frameworkTemplateContextAtOffset(source, offset) {
+  return htmlContextAtOffset(source, offset, true);
 }
 
 export function hasExecutableJsxTagAtOffset(source, offset) {

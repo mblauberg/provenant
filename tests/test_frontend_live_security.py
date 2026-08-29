@@ -933,6 +933,14 @@ def test_live_wrap_ignores_module_level_jsx_decoys_before_the_real_target(
             "Multiline.astro",
             "---\nconst docs = `\n<section class=\"target\">Example</section>\n`;\n---\n",
         ),
+        (
+            "Shift.svelte",
+            "<p>It's ready</p>\n{condition ? `'\n<section class=\"target\">Example</section>\n` : ''}\n",
+        ),
+        (
+            "Contraction.svelte",
+            "<p>It's ready</p>\n",
+        ),
     ],
 )
 def test_live_wrap_ignores_framework_script_expression_decoys(
@@ -946,7 +954,8 @@ def test_live_wrap_ignores_framework_script_expression_decoys(
     assert wrapped.returncode == 0, wrapped.stderr
     result = page.read_text()
     assert result.startswith(prefix)
-    assert "Example</section>" in result
+    if "Example</section>" in prefix:
+        assert "Example</section>" in result
     assert "data-impeccable-variant=\"original\"" in result
     assert "Real</section>" in result
 
