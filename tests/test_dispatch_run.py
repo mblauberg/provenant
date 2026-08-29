@@ -663,6 +663,113 @@ def test_sigterm_cancels_and_reaps_provider_group(tmp_path: Path) -> None:
         os.kill(provider_pid, 0)
 
 
+def test_external_task_cancel_reaps_only_owned_provider_group(tmp_path: Path) -> None:
+    run_dir = make_run(tmp_path, "external-cancel")
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("cancel\n", encoding="utf-8")
+    provider_pid_path = tmp_path / "provider.pid"
+    unrelated = subprocess.Popen(["sleep", "30"])
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    write_executable(
+        bin_dir / "codex",
+        f"""#!/usr/bin/env bash
+        if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
+          printf '{{"models":[{{"slug":"gpt-5.6-luna","supported_reasoning_levels":[{{"effort":"high"}}]}}]}}'
+          exit 0
+        fi
+        printf '%s' "$$" > "{provider_pid_path}"
+        sleep 30
+        """,
+    )
+    env = os.environ.copy()
+    env["PATH"] = f"{bin_dir}:{ROOT / 'scripts'}:{env['PATH']}"
+    dispatch = subprocess.Popen(
+        [str(SCRIPT), "--run-dir", str(run_dir), "--task-id", "cancel-me", "--adapter", "codex",
+         "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker", "--timeout", "30"],
+        cwd=tmp_path, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    deadline = time.monotonic() + 5
+    attempt_dir = run_dir / "dispatch/tasks/cancel-me/attempt-001"
+    while not attempt_dir.is_dir() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert attempt_dir.is_dir()
+    while not provider_pid_path.exists() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert provider_pid_path.exists()
+
+    cancelled = subprocess.run(
+        [str(ROOT / "scripts/provenant"), "run", "cancel", "--run-dir", str(run_dir),
+         "--task-id", "cancel-me", "--attempt-id", "attempt-001", "--wait-seconds", "5"],
+        cwd=tmp_path, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    stdout, stderr = dispatch.communicate(timeout=5)
+    unrelated_status = unrelated.poll()
+    unrelated.terminate()
+    unrelated.wait(timeout=5)
+
+    assert cancelled.returncode == 0, cancelled.stderr + cancelled.stdout
+    assert json.loads(cancelled.stdout)["status"] == "cancelled"
+    assert dispatch.returncode == 1, stderr + stdout
+    record = json.loads(stdout)
+    assert record["status"] == "cancelled"
+    assert record["process"]["observed_exit"] is True
+    with pytest.raises(ProcessLookupError):
+        os.kill(int(provider_pid_path.read_text()), 0)
+    assert unrelated_status is None
+    assert not (attempt_dir / "cancel.request").exists()
+
+
+def test_batch_marker_prelaunch_cancellation_has_no_provider_pid(tmp_path: Path, monkeypatch) -> None:
+    run_dir = make_run(tmp_path, "batch-prelaunch")
+    batch_dir = run_dir / "dispatch/batches/batch-001"
+    batch_dir.mkdir(parents=True)
+    (batch_dir / "cancel.request").touch()
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("prelaunch\n", encoding="utf-8")
+    launched = tmp_path / "launched"
+    adapter = tmp_path / "adapter"
+    write_executable(adapter, f"#!/usr/bin/env bash\ntouch '{launched}'\nexit 99\n")
+    module = load_dispatch_module()
+    monkeypatch.setattr(module, "CF_DISPATCH", adapter)
+    args = module.parser().parse_args([
+        "--run-dir", str(run_dir), "--task-id", "prelaunch", "--adapter", "codex",
+        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+        "--batch-child", "--batch-id", "batch-001",
+    ])
+    monkeypatch.chdir(tmp_path)
+
+    assert module.dispatch(args) == 1
+    record = json.loads((run_dir / "dispatch/tasks/prelaunch/attempt-001/attempt.json").read_text())
+    assert record["status"] == "cancelled"
+    assert record["process"]["pid"] is None
+    assert record["process"]["observed_exit"] is True
+    assert not launched.exists()
+    assert (batch_dir / "cancel.request").exists()
+
+
+def test_stale_marker_on_prior_attempt_does_not_cancel_next_attempt(tmp_path: Path, monkeypatch) -> None:
+    run_dir = make_run(tmp_path, "stale-marker")
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("stale\n", encoding="utf-8")
+    adapter = tmp_path / "adapter"
+    write_success_adapter(adapter)
+    module = load_dispatch_module()
+    monkeypatch.setattr(module, "CF_DISPATCH", adapter)
+    monkeypatch.chdir(tmp_path)
+    args = module.parser().parse_args([
+        "--run-dir", str(run_dir), "--task-id", "stale", "--adapter", "codex",
+        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+    ])
+    assert module.dispatch(args) == 0
+    stale = run_dir / "dispatch/tasks/stale/attempt-001/cancel.request"
+    stale.touch()
+
+    assert module.dispatch(args) == 0
+    next_record = json.loads((run_dir / "dispatch/tasks/stale/attempt-002/attempt.json").read_text())
+    assert next_record["status"] == "succeeded"
+
+
 def test_attempt_rows_are_accepted_by_existing_finalizer(tmp_path: Path) -> None:
     run_dir = make_run(tmp_path, "finalizer")
     prompt = tmp_path / "prompt.md"

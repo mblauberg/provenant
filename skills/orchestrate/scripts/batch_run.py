@@ -38,6 +38,8 @@ from dispatch_run import (
     ensure_owned_directory,
     reconcile_manifest,
     retained_path,
+    cancellation_marker_present,
+    remove_cancellation_marker,
 )
 
 DISPATCH_RUN = Path(__file__).with_name("dispatch_run.py")
@@ -269,10 +271,13 @@ def _index_batch_files(run_dir: Path, batch_id: str, source_path: Path, summary_
 
 
 def _command(task: dict[str, Any], run_dir: Path) -> list[str]:
+    batch_id = task.get("_batch_id")
     command = [str(DISPATCH_RUN), "--run-dir", str(run_dir), "--task-id", task["id"],
                "--adapter", task["adapter"], "--prompt-file", task["prompt_file"],
                "--role", task["role"], "--intent", task.get("intent", "ordinary"),
                "--timeout", str(task["timeout"]), "--batch-child"]
+    if batch_id:
+        command.extend(("--batch-id", str(batch_id)))
     selector = next(name for name in ("alias", "task_class", "model") if task.get(name))
     command.extend((f"--{selector.replace('_', '-')}", str(task[selector])))
     for name, flag in (("orchestrator_family", "--orchestrator-family"),
@@ -435,14 +440,14 @@ def _validate_child_record(task: dict[str, Any], record: dict[str, Any], run_dir
 
 def _run_task(task: dict[str, Any], run_dir: Path, batch_dir: Path) -> dict[str, Any]:
     task_id = task["id"]
-    if _cancel_event.is_set():
+    if _cancel_event.is_set() or cancellation_marker_present(run_dir, batch_dir):
         return {"task_id": task_id, "status": "cancelled", "outcome": "batch_cancelled"}
     temporary_prompt: Path | None = None
-    dispatch_task = task
+    dispatch_task = {**task, "_batch_id": batch_dir.name}
     if "_inline_prompt" in task:
         temporary_prompt = batch_dir / "prompts" / f"{task_id}.md"
         atomic_write(temporary_prompt, task["_inline_prompt"])
-        dispatch_task = {**task, "prompt_file": str(temporary_prompt)}
+        dispatch_task = {**task, "prompt_file": str(temporary_prompt), "_batch_id": batch_dir.name}
     process: subprocess.Popen[str] | None = None
     started = time.monotonic()
     timed_out = False
@@ -519,7 +524,8 @@ def _execute_batch(args: argparse.Namespace, tasks: list[dict[str, Any]], run_di
         reconcile_manifest(run_dir)
     except (AttemptEvidenceError, OSError) as exc:
         reconciliation_error = str(exc)
-    status = "cancelled" if _cancel_event.is_set() else ("failed" if reconciliation_error else "completed")
+    batch_cancelled = _cancel_event.is_set() or any(item["status"] == "cancelled" for item in ordered)
+    status = "cancelled" if batch_cancelled else ("failed" if reconciliation_error else "completed")
     counts = dict(sorted(Counter(item["status"] for item in ordered).items()))
     summary_path = batch_dir / "summary.json"
     summary = {
@@ -537,6 +543,7 @@ def _execute_batch(args: argparse.Namespace, tasks: list[dict[str, Any]], run_di
     if reconciliation_error:
         summary["reconciliation_error"] = reconciliation_error
     atomic_write(summary_path, json.dumps(summary, indent=2, sort_keys=True) + "\n")
+    remove_cancellation_marker(run_dir, batch_dir)
     index_error = None
     try:
         _index_batch_files(run_dir, batch_id, source_copy, summary_path)
