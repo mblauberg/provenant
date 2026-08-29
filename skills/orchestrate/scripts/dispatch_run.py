@@ -10,6 +10,7 @@ by default; callers may provide a smaller or larger finite positive timeout.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import json
 import math
@@ -278,6 +279,18 @@ def ensure_manifest_appendable(run_dir: Path) -> None:
         pass
 
 
+def acquire_run_custody(run_dir: Path):
+    """Acquire the shared manifest lock without creating a new run artifact."""
+    flags = os.O_RDWR | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)
+    stream = os.fdopen(os.open(run_dir / "MANIFEST.md", flags), "a+", encoding="utf-8")
+    try:
+        fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        stream.close()
+        raise
+    return stream
+
+
 def reconcile_manifest(run_dir: Path) -> None:
     """Index complete prior attempts whose manifest rows were lost on re-entry."""
     manifest = run_dir / "MANIFEST.md"
@@ -380,7 +393,7 @@ def build_command(args: argparse.Namespace, prompt_path: Path, result_path: Path
     return command
 
 
-def dispatch(args: argparse.Namespace) -> int:
+def _dispatch(args: argparse.Namespace) -> int:
     run_dir = args.run_dir.resolve()
     workspace = Path.cwd().resolve()
     if run_dir != workspace and workspace not in run_dir.parents:
@@ -639,6 +652,28 @@ def dispatch(args: argparse.Namespace) -> int:
     output_record = {**record, "attempt_digest": attempt_digest}
     print(json.dumps(output_record, sort_keys=True))
     return 0 if status == "succeeded" and not manifest_error else 1
+
+
+def dispatch(args: argparse.Namespace) -> int:
+    """Run one attempt while serialising standalone run-ledger mutation."""
+    run_dir = args.run_dir.resolve()
+    workspace = Path.cwd().resolve()
+    if (
+        args.batch_child
+        or (run_dir != workspace and workspace not in run_dir.parents)
+        or not run_dir.is_dir()
+        or not (run_dir / "MANIFEST.md").is_file()
+    ):
+        return _dispatch(args)
+    try:
+        custody = acquire_run_custody(run_dir)
+    except OSError:
+        return fail(run_dir, "run_custody_busy", "another dispatch, batch or finalizer owns the run")
+    try:
+        return _dispatch(args)
+    finally:
+        fcntl.flock(custody.fileno(), fcntl.LOCK_UN)
+        custody.close()
 
 
 def parser() -> argparse.ArgumentParser:

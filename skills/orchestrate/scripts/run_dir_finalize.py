@@ -4,12 +4,13 @@
 from __future__ import annotations
 
 import argparse
-from datetime import datetime, timezone
+import fcntl
 import hashlib
 import json
-from pathlib import Path
+import os
 import sys
-
+from datetime import datetime, timezone
+from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from _shared.review_ladder import (
@@ -19,7 +20,6 @@ from _shared.review_ladder import (
 )
 from _shared.review_panel import PANEL_RECORD_KEYS, validate_panel_result
 from _shared.review_terminal import REVIEW_RESULT_KEYS, normalise_dispatch_review
-
 
 TERMINAL = {"succeeded", "failed", "cancelled"}
 STATUSES = {"draft", "verified", "superseded", "retired"}
@@ -59,6 +59,38 @@ def _inside(root: Path, candidate: Path) -> bool:
         return True
     except ValueError:
         return False
+
+
+def _batch_lock_held(run_dir: Path) -> bool:
+    """Return true only while the fixed-batch owner holds run custody."""
+    lock_path = run_dir / "MANIFEST.md"
+    if not lock_path.exists():
+        return False
+    try:
+        flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+        stream = os.fdopen(os.open(lock_path, flags), "a+", encoding="utf-8")
+        try:
+            fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        finally:
+            fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+            stream.close()
+        return False
+    except OSError:
+        return True
+
+
+def _acquire_run_custody(run_dir: Path):
+    """Hold the shared manifest lock through terminal receipt mutation."""
+    flags = os.O_RDWR | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)
+    stream = os.fdopen(os.open(run_dir / "MANIFEST.md", flags), "a+", encoding="utf-8")
+    try:
+        fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        stream.close()
+        raise
+    return stream
 
 
 def _utc_timestamp(value: object) -> bool:
@@ -448,7 +480,8 @@ def _validate_review_plan(raw: object, run_dir: Path | None = None) -> list[str]
     return errors
 
 
-def validate(run_dir: Path, terminal_status: str, reason: str | None) -> tuple[list[str], list[dict[str, str]]]:
+def validate(run_dir: Path, terminal_status: str, reason: str | None,
+             custody_held: bool = False) -> tuple[list[str], list[dict[str, str]]]:
     errors: list[str] = []
     run_dir = run_dir.resolve()
     if terminal_status not in TERMINAL:
@@ -458,6 +491,8 @@ def validate(run_dir: Path, terminal_status: str, reason: str | None) -> tuple[l
     for name in ("MANIFEST.md", "RUN_RECEIPT.json", "SYNTHESIS.md", "FINAL_GATE.md"):
         if not (run_dir / name).is_file():
             errors.append(f"missing {name}")
+    if not custody_held and _batch_lock_held(run_dir):
+        errors.append("batch custody is active")
     if errors:
         return errors, []
 
@@ -754,41 +789,53 @@ def main(argv: list[str] | None = None) -> int:
     if args.apply and not args.prune_ephemeral:
         print("--apply requires --prune-ephemeral", file=sys.stderr)
         return 2
-    errors, rows = validate(args.run_dir, args.status, args.reason)
-    if errors:
-        for error in errors:
-            print(f"FAIL: {error}", file=sys.stderr)
-        return 1
-    candidates = prune_candidates(args.run_dir, rows) if args.prune_ephemeral else []
-    pruned: list[str] = []
-    for path in candidates:
-        rel = path.resolve().relative_to(args.run_dir.resolve()).as_posix()
-        print(("PRUNE" if args.apply else "WOULD-PRUNE") + f": {rel}")
-        if args.apply:
-            path.unlink()
-            pruned.append(rel)
-    receipt_path = args.run_dir / "RUN_RECEIPT.json"
-    receipt = json.loads(receipt_path.read_text())
-    listed = {row["path"] for row in rows}
-    unclassified = sorted(
-        path.relative_to(args.run_dir).as_posix()
-        for path in args.run_dir.rglob("*")
-        if path.is_file()
-        and path.relative_to(args.run_dir).as_posix() not in SCAFFOLD
-        and path.relative_to(args.run_dir).as_posix() not in listed
-    )
-    for rel in unclassified:
-        print(f"RETAIN-UNCLASSIFIED: {rel}")
-    receipt.update({
-        "status": args.status,
-        "closed_at": receipt.get("closed_at") or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "terminal_reason": args.reason,
-        "unclassified_paths": unclassified,
-        "pruned_paths": sorted(set(receipt.get("pruned_paths", [])) | set(pruned)),
-    })
-    receipt_path.write_text(json.dumps(receipt, indent=2) + "\n")
-    print(f"PASS: run terminalised as {args.status}")
-    return 0
+    custody = None
+    if (args.run_dir / "MANIFEST.md").is_file():
+        try:
+            custody = _acquire_run_custody(args.run_dir)
+        except OSError:
+            print("FAIL: batch custody is active or unavailable", file=sys.stderr)
+            return 1
+    try:
+        errors, rows = validate(args.run_dir, args.status, args.reason, custody_held=custody is not None)
+        if errors:
+            for error in errors:
+                print(f"FAIL: {error}", file=sys.stderr)
+            return 1
+        candidates = prune_candidates(args.run_dir, rows) if args.prune_ephemeral else []
+        pruned: list[str] = []
+        for path in candidates:
+            rel = path.resolve().relative_to(args.run_dir.resolve()).as_posix()
+            print(("PRUNE" if args.apply else "WOULD-PRUNE") + f": {rel}")
+            if args.apply:
+                path.unlink()
+                pruned.append(rel)
+        receipt_path = args.run_dir / "RUN_RECEIPT.json"
+        receipt = json.loads(receipt_path.read_text())
+        listed = {row["path"] for row in rows}
+        unclassified = sorted(
+            path.relative_to(args.run_dir).as_posix()
+            for path in args.run_dir.rglob("*")
+            if path.is_file()
+            and path.relative_to(args.run_dir).as_posix() not in SCAFFOLD
+            and path.relative_to(args.run_dir).as_posix() not in listed
+        )
+        for rel in unclassified:
+            print(f"RETAIN-UNCLASSIFIED: {rel}")
+        receipt.update({
+            "status": args.status,
+            "closed_at": receipt.get("closed_at") or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "terminal_reason": args.reason,
+            "unclassified_paths": unclassified,
+            "pruned_paths": sorted(set(receipt.get("pruned_paths", [])) | set(pruned)),
+        })
+        receipt_path.write_text(json.dumps(receipt, indent=2) + "\n")
+        print(f"PASS: run terminalised as {args.status}")
+        return 0
+    finally:
+        if custody is not None:
+            fcntl.flock(custody.fileno(), fcntl.LOCK_UN)
+            custody.close()
 
 
 if __name__ == "__main__":

@@ -9,29 +9,35 @@ not schedule future work or create a second lifecycle ledger.
 from __future__ import annotations
 
 import argparse
-from collections import Counter
-from concurrent.futures import ThreadPoolExecutor, as_completed
 import fcntl
 import json
 import os
-from pathlib import Path
 import re
-import signal
 import shutil
+import signal
 import stat
 import subprocess
 import sys
 import tempfile
 import threading
 import time
+from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "skills"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _shared.bounded_process import stop_process_group
-from dispatch_run import AttemptEvidenceError, digest, ensure_owned_directory, reconcile_manifest, retained_path
-
+from dispatch_run import (
+    AttemptEvidenceError,
+    digest,
+    ensure_manifest_appendable,
+    ensure_owned_directory,
+    reconcile_manifest,
+    retained_path,
+)
 
 DISPATCH_RUN = Path(__file__).with_name("dispatch_run.py")
 TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
@@ -39,6 +45,7 @@ MAX_TASKS = 64
 MAX_CONCURRENCY = 8
 DEFAULT_CONCURRENCY = 4
 DEFAULT_TIMEOUT_SECONDS = 900.0
+TERMINAL_TASK_STATUSES = {"blocked", "succeeded", "failed", "timed_out", "cancelled"}
 
 
 class BatchInputError(ValueError):
@@ -56,6 +63,20 @@ def atomic_write(path: Path, content: str) -> None:
     temporary_path = Path(temporary)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary_path, path)
+    finally:
+        temporary_path.unlink(missing_ok=True)
+
+
+def atomic_write_bytes(path: Path, content: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temporary_path = Path(temporary)
+    try:
+        with os.fdopen(fd, "wb") as stream:
             stream.write(content)
             stream.flush()
             os.fsync(stream.fileno())
@@ -124,11 +145,12 @@ def _validate_run_dir(run_dir: Path) -> Path:
     return run_dir
 
 
-def load_manifest(path: Path, concurrency: int | None = None) -> list[dict[str, Any]]:
+def _load_manifest(path: Path, concurrency: int | None = None) -> tuple[list[dict[str, Any]], Path, bytes]:
     """Load and validate the fixed task list before launching any child."""
     manifest_path = _local_regular(path, "task manifest")
     try:
-        value = json.loads(manifest_path.read_text(encoding="utf-8"))
+        source_bytes = manifest_path.read_bytes()
+        value = json.loads(source_bytes.decode("utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise BatchInputError(f"task manifest is not valid UTF-8 JSON: {manifest_path}") from exc
     if not isinstance(value, dict) or value.get("schema_version") != 1:
@@ -186,8 +208,8 @@ def load_manifest(path: Path, concurrency: int | None = None) -> list[dict[str, 
             raise BatchInputError(f"task {task_id} supports only read_only access_mode")
         if "non_overlapping" in task or "worktree_isolated" in task:
             raise BatchInputError(f"task {task_id} writer isolation declarations are unsupported")
-        if source_writing and concurrency != 1:
-            raise BatchInputError("source_writing tasks require serialized concurrency=1")
+        if source_writing:
+            raise BatchInputError("source_writing tasks are unsupported in this read-only release")
         timeout = _finite_timeout(task.get("timeout"))
         normalized = dict(task)
         normalized.update({"id": task_id, "adapter": adapter, "role": role, "timeout": timeout})
@@ -196,14 +218,19 @@ def load_manifest(path: Path, concurrency: int | None = None) -> list[dict[str, 
         else:
             normalized["_inline_prompt"] = inline_prompt
         loaded.append(normalized)
-    return loaded
+    return loaded, manifest_path, source_bytes
+
+
+def load_manifest(path: Path, concurrency: int | None = None) -> list[dict[str, Any]]:
+    """Load and validate a manifest, retaining the historical list API."""
+    return _load_manifest(path, concurrency)[0]
 
 
 def _batch_number(run_dir: Path) -> int:
     root = run_dir / "dispatch" / "batches"
     numbers = []
     for path in root.glob("batch-*"):
-        match = re.fullmatch(r"batch-(\d{3})", path.name)
+        match = re.fullmatch(r"batch-(\d+)", path.name)
         if match and path.is_dir():
             numbers.append(int(match.group(1)))
     return max(numbers, default=0) + 1
@@ -215,8 +242,8 @@ def _acquire_batch_lock(run_dir: Path):
     try:
         ensure_owned_directory(run_dir, dispatch_dir)
         ensure_owned_directory(run_dir, dispatch_dir / "batches")
-        lock_path = dispatch_dir / ".batch.lock"
-        flags = os.O_RDWR | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)
+        lock_path = run_dir / "MANIFEST.md"
+        flags = os.O_RDWR | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)
         stream = os.fdopen(os.open(lock_path, flags, 0o600), "a+", encoding="utf-8")
         fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         return stream
@@ -282,9 +309,12 @@ def _contained_file(run_dir: Path, value: Any, label: str) -> tuple[str, Path]:
 def _validate_child_record(task: dict[str, Any], record: dict[str, Any], run_dir: Path,
                            process_exit: int | None) -> dict[str, Any]:
     task_id = task["id"]
-    if record.get("task_id") != task_id:
+    if (
+        record.get("schema_version") != 1
+        or record.get("record_type") != "dispatch-attempt"
+        or record.get("task_id") != task_id
+    ):
         raise BatchInputError(f"child receipt task_id does not match {task_id}")
-    status = record.get("status") if isinstance(record.get("status"), str) else "failed"
     attempt = None
     attempt_path = result_path = None
     if record.get("attempt_path") is not None:
@@ -293,29 +323,66 @@ def _validate_child_record(task: dict[str, Any], record: dict[str, Any], run_dir
             attempt = json.loads(attempt_file.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise BatchInputError(f"child attempt receipt is not valid JSON: {attempt_path}") from exc
-        if not isinstance(attempt, dict) or attempt.get("task_id") != task_id:
+        if (
+            not isinstance(attempt, dict)
+            or attempt.get("schema_version") != 1
+            or attempt.get("record_type") != "dispatch-attempt"
+            or attempt.get("task_id") != task_id
+        ):
             raise BatchInputError(f"child attempt receipt task_id does not match {task_id}")
+        attempt_id = attempt.get("attempt_id")
+        if (
+            not isinstance(attempt_id, str)
+            or not re.fullmatch(r"attempt-\d{3}", attempt_id)
+            or Path(attempt_path).parent.name != attempt_id
+            or record.get("attempt_id") != attempt_id
+        ):
+            raise BatchInputError(f"child attempt identity does not match retained path: {task_id}")
         if attempt.get("attempt_path") != attempt_path:
             raise BatchInputError(f"child attempt path does not match its receipt: {attempt_path}")
         if record.get("attempt_digest") != digest(attempt_file):
             raise BatchInputError(f"child attempt digest does not match: {task_id}")
-        if attempt.get("status") != status:
+        status = attempt.get("status") if isinstance(attempt.get("status"), str) else "failed"
+        if status not in TERMINAL_TASK_STATUSES:
+            raise BatchInputError(f"child status is unsupported: {task_id}")
+        if isinstance(record.get("status"), str) and record["status"] != status:
             raise BatchInputError(f"child status does not match retained attempt: {task_id}")
+        outcome = attempt.get("outcome", status)
+        if "outcome" in record and record["outcome"] != outcome:
+            raise BatchInputError(f"child outcome does not match retained attempt: {task_id}")
+        if "question" in record and record["question"] != attempt.get("question"):
+            raise BatchInputError(f"child question does not match retained attempt: {task_id}")
         route = attempt.get("route")
         requested = attempt.get("requested_route")
-        required_route = ("adapter", "provider_family", "resolved_model", "execution_intent")
-        if not isinstance(route, dict) or any(not isinstance(route.get(field), str) or not route[field]
-                                               for field in required_route):
-            raise BatchInputError(f"child route identity is incomplete: {task_id}")
-        adapter_receipt = route.get("adapter_receipt")
-        if not isinstance(adapter_receipt, dict):
-            raise BatchInputError(f"child adapter receipt is missing: {task_id}")
-        _, adapter_file = _contained_file(run_dir, adapter_receipt.get("path"), "adapter receipt")
-        if adapter_receipt.get("digest") != digest(adapter_file):
-            raise BatchInputError(f"child adapter receipt digest does not match: {task_id}")
         if not isinstance(requested, dict) or not isinstance(requested.get("role"), str):
             raise BatchInputError(f"child requested route is incomplete: {task_id}")
-        if process_exit != 0 and status == "succeeded":
+        selector = next(name for name in ("alias", "task_class", "model") if task.get(name))
+        if requested.get("adapter") != task["adapter"] or requested.get("role") != task["role"]:
+            raise BatchInputError(f"child requested route does not match task: {task_id}")
+        if requested.get(selector) != task[selector]:
+            raise BatchInputError(f"child requested selector does not match task: {task_id}")
+        if requested.get("intent") != "ordinary":
+            raise BatchInputError(f"child requested intent does not match task: {task_id}")
+        if requested.get("orchestrator_family", "") != task.get("orchestrator_family", ""):
+            raise BatchInputError(f"child requested provider family does not match task: {task_id}")
+        route = route if isinstance(route, dict) else {}
+        if status == "succeeded" and any(not isinstance(route.get(field), str) or not route[field]
+                                         for field in ("adapter", "provider_family", "resolved_model", "execution_intent")):
+            raise BatchInputError(f"successful child route identity is incomplete: {task_id}")
+        if status == "succeeded" and route.get("execution_intent") != "ordinary":
+            raise BatchInputError(f"successful child intent is not ordinary: {task_id}")
+        if status == "succeeded" and route.get("adapter") != task["adapter"]:
+            raise BatchInputError(f"successful child adapter does not match task: {task_id}")
+        adapter_receipt = route.get("adapter_receipt")
+        if status == "succeeded" and not isinstance(adapter_receipt, dict):
+            raise BatchInputError(f"successful child adapter receipt is missing: {task_id}")
+        if adapter_receipt is not None:
+            if not isinstance(adapter_receipt, dict):
+                raise BatchInputError(f"child adapter receipt is malformed: {task_id}")
+            _, adapter_file = _contained_file(run_dir, adapter_receipt.get("path"), "adapter receipt")
+            if adapter_receipt.get("digest") != digest(adapter_file):
+                raise BatchInputError(f"child adapter receipt digest does not match: {task_id}")
+        if status == "succeeded" and process_exit != 0:
             raise BatchInputError(f"succeeded child exited non-zero: {task_id}")
         retained_result = attempt.get("result")
         if retained_result is not None:
@@ -325,19 +392,29 @@ def _validate_child_record(task: dict[str, Any], record: dict[str, Any], run_dir
             expected_digest = retained_result.get("digest")
             if not isinstance(expected_digest, str) or expected_digest != digest(result_file):
                 raise BatchInputError(f"child result digest does not match: {task_id}")
+            if status == "succeeded" and result_file.stat().st_size == 0:
+                raise BatchInputError(f"successful child result is empty: {task_id}")
             child_result = record.get("result")
-            if not isinstance(child_result, dict) or child_result.get("path") != result_path:
+            if (
+                not isinstance(child_result, dict)
+                or child_result.get("path") != result_path
+                or child_result.get("digest") != expected_digest
+            ):
                 raise BatchInputError(f"child result path does not match retained attempt: {task_id}")
         elif record.get("result") is not None:
             raise BatchInputError(f"child result receipt does not match retained attempt: {task_id}")
         return {
-            "task_id": task_id, "status": status, "outcome": record.get("outcome", status),
+            "task_id": task_id, "status": status, "outcome": outcome,
             "dispatch_exit": process_exit, "attempt_path": attempt_path,
             "attempt_digest": record.get("attempt_digest"), "result_path": result_path,
             "requested_route": requested, "route": {
-                field: route[field] for field in required_route
-            }, "question": record.get("question"),
+                field: route[field] for field in ("adapter", "provider_family", "resolved_model", "execution_intent")
+                if isinstance(route.get(field), str)
+            }, "question": attempt.get("question", record.get("question")),
         }
+    status = record.get("status") if isinstance(record.get("status"), str) else "failed"
+    if status not in TERMINAL_TASK_STATUSES:
+        raise BatchInputError(f"child status is unsupported: {task_id}")
     if status == "succeeded":
         raise BatchInputError(f"successful child has no retained attempt: {task_id}")
     compact = {"task_id": task_id, "status": status, "outcome": record.get("outcome", status),
@@ -359,6 +436,7 @@ def _run_task(task: dict[str, Any], run_dir: Path, batch_dir: Path) -> dict[str,
         dispatch_task = {**task, "prompt_file": str(temporary_prompt)}
     process: subprocess.Popen[str] | None = None
     started = time.monotonic()
+    timed_out = False
     try:
         process = subprocess.Popen(_command(dispatch_task, run_dir), cwd=Path.cwd(), text=True,
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -372,8 +450,7 @@ def _run_task(task: dict[str, Any], run_dir: Path, batch_dir: Path) -> dict[str,
         except subprocess.TimeoutExpired:
             stop_process_group(process)
             stdout, stderr = process.communicate()
-            return {"task_id": task_id, "status": "timed_out", "outcome": "batch_timeout",
-                    "dispatch_exit": process.returncode, "stderr": stderr[-1000:]}
+            timed_out = True
     except (OSError, subprocess.SubprocessError) as exc:
         return {"task_id": task_id, "status": "failed", "outcome": "dispatch_spawn_error",
                 "message": str(exc)}
@@ -388,6 +465,9 @@ def _run_task(task: dict[str, Any], run_dir: Path, batch_dir: Path) -> dict[str,
         if _cancel_event.is_set():
             return {"task_id": task_id, "status": "cancelled", "outcome": "batch_cancelled",
                     "dispatch_exit": process.returncode, "stderr": stderr[-1000:]}
+        if timed_out:
+            return {"task_id": task_id, "status": "timed_out", "outcome": "batch_timeout",
+                    "dispatch_exit": process.returncode, "stderr": stderr[-1000:]}
         return {"task_id": task_id, "status": "failed", "outcome": "dispatch_output_invalid",
                 "dispatch_exit": process.returncode, "stderr": stderr[-1000:]}
     try:
@@ -400,33 +480,29 @@ def _run_task(task: dict[str, Any], run_dir: Path, batch_dir: Path) -> dict[str,
     return compact
 
 
-def _execute_batch(args: argparse.Namespace, tasks: list[dict[str, Any]], run_dir: Path) -> int:
+def _execute_batch(args: argparse.Namespace, tasks: list[dict[str, Any]], run_dir: Path,
+                   source_bytes: bytes) -> int:
     batch_id = f"batch-{_batch_number(run_dir):03d}"
     batch_dir = run_dir / "dispatch" / "batches" / batch_id
-    batch_dir.mkdir()
-    source_copy = batch_dir / "task-manifest.json"
-    shutil.copyfile(Path(args.manifest).resolve(), source_copy)
-    source_digest = digest(source_copy)
-    old_handlers = {}
-    if threading.current_thread() is threading.main_thread():
-        old_handlers = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)}
-        for sig in old_handlers:
-            signal.signal(sig, _signal_handler)
-    results: dict[str, dict[str, Any]] = {}
     try:
-        with ThreadPoolExecutor(max_workers=args.concurrency, thread_name_prefix="provenant-batch") as pool:
-            futures = {pool.submit(_run_task, task, run_dir, batch_dir): task["id"] for task in tasks}
-            for future in as_completed(futures):
-                task_id = futures[future]
-                try:
-                    results[task_id] = future.result()
-                except Exception as exc:  # preserve partial batch visibility
-                    results[task_id] = {"task_id": task_id, "status": "failed",
-                                        "outcome": "batch_worker_error", "message": str(exc)}
-    finally:
-        if old_handlers:
-            for sig, handler in old_handlers.items():
-                signal.signal(sig, handler)
+        ensure_owned_directory(run_dir, batch_dir)
+        source_copy = batch_dir / "task-manifest.json"
+        atomic_write_bytes(source_copy, source_bytes)
+    except BaseException:
+        if batch_dir.is_dir() and not batch_dir.is_symlink():
+            shutil.rmtree(batch_dir)
+        raise
+    source_digest = digest(source_copy)
+    results: dict[str, dict[str, Any]] = {}
+    with ThreadPoolExecutor(max_workers=args.concurrency, thread_name_prefix="provenant-batch") as pool:
+        futures = {pool.submit(_run_task, task, run_dir, batch_dir): task["id"] for task in tasks}
+        for future in as_completed(futures):
+            task_id = futures[future]
+            try:
+                results[task_id] = future.result()
+            except Exception as exc:  # preserve partial batch visibility
+                results[task_id] = {"task_id": task_id, "status": "failed",
+                                    "outcome": "batch_worker_error", "message": str(exc)}
     ordered = [results.get(task["id"], {"task_id": task["id"], "status": "cancelled",
                                          "outcome": "batch_cancelled"}) for task in tasks]
     reconciliation_error = None
@@ -466,9 +542,10 @@ def _execute_batch(args: argparse.Namespace, tasks: list[dict[str, Any]], run_di
 
 def batch(args: argparse.Namespace) -> int:
     try:
-        tasks = load_manifest(args.manifest, args.concurrency)
-        if not 1 <= args.concurrency <= min(MAX_CONCURRENCY, len(tasks)):
-            raise BatchInputError(f"concurrency must be between 1 and {min(MAX_CONCURRENCY, len(tasks))}")
+        tasks, _source_manifest, source_bytes = _load_manifest(args.manifest, args.concurrency)
+        if not 1 <= args.concurrency <= MAX_CONCURRENCY:
+            raise BatchInputError(f"concurrency must be between 1 and {MAX_CONCURRENCY}")
+        args.concurrency = min(args.concurrency, len(tasks))
         run_dir = _validate_run_dir(args.run_dir)
         if not DISPATCH_RUN.is_file() or not os.access(DISPATCH_RUN, os.X_OK):
             raise BatchInputError(f"dispatch owner is unavailable: {DISPATCH_RUN}")
@@ -482,15 +559,38 @@ def batch(args: argparse.Namespace) -> int:
         print(json.dumps({"schema_version": 1, "status": "batch_busy", "message": str(exc)}, sort_keys=True))
         return 2
     _cancel_event.clear()
+    old_handlers = {}
+    if threading.current_thread() is threading.main_thread():
+        old_handlers = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)}
+        for sig in old_handlers:
+            signal.signal(sig, _signal_handler)
     try:
-        return _execute_batch(args, tasks, run_dir)
+        try:
+            run_dir = _validate_run_dir(args.run_dir)
+            reconcile_manifest(run_dir)
+            ensure_manifest_appendable(run_dir)
+        except (BatchInputError, AttemptEvidenceError, OSError) as exc:
+            print(json.dumps({"schema_version": 1, "status": "custody_preflight_failed",
+                              "message": str(exc)}, sort_keys=True))
+            return 2
+        return _execute_batch(args, tasks, run_dir, source_bytes)
     finally:
+        if old_handlers:
+            for sig, handler in old_handlers.items():
+                signal.signal(sig, handler)
         fcntl.flock(batch_lock.fileno(), fcntl.LOCK_UN)
         batch_lock.close()
 
 
 def parser() -> argparse.ArgumentParser:
-    root = argparse.ArgumentParser(description=__doc__)
+    root = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""Manifest schema v1: {\"schema_version\":1,\"tasks\":[{\"id\":\"task-1\",\"prompt_file\":\"prompt.md\",\"adapter\":\"codex\",\"alias\":\"scout\",\"role\":\"worker\"}]}.
+Each task uses ordinary intent and exactly one of prompt_file/prompt plus one
+route selector (alias, task_class or model). Read-only tasks may run together;
+source_writing is rejected in this read-only release; partitioned/worktree-isolated
+writers are deferred.""",
+    )
     root.add_argument("--run-dir", type=Path, required=True)
     root.add_argument("--manifest", type=Path, required=True)
     root.add_argument("--concurrency", type=int, default=DEFAULT_CONCURRENCY)
