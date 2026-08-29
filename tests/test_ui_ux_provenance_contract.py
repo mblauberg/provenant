@@ -7,6 +7,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 SKILL = ROOT / "skills" / "ui-ux-design"
+UI_EVIDENCE = ROOT / "runtime" / "ui-evidence"
 
 
 def _component_for(relative: str, components: list[dict]) -> list[str]:
@@ -69,6 +70,29 @@ def test_third_party_components_resolve_to_notices_and_local_licences():
             if len(word.strip('".,;()')) == 40
         ]
         assert not revisions or all(revision in notices for revision in revisions)
+
+
+def test_every_ui_evidence_runtime_file_has_exactly_one_provenance_component():
+    ledger = yaml.safe_load((UI_EVIDENCE / "provenance_components.yaml").read_text())
+    components = ledger["components"]
+    files = [
+        path.relative_to(UI_EVIDENCE).as_posix()
+        for path in UI_EVIDENCE.rglob("*")
+        if path.is_file() and "__pycache__" not in path.parts and path.suffix != ".pyc"
+    ]
+
+    for relative in files:
+        assert len(_component_for(relative, components)) == 1, relative
+
+    third_party = next(
+        component
+        for component in components
+        if component["id"] == "impeccable-ui-evidence-runtime"
+    )
+    for key in ("source_url", "source_ref", "licence", "local_licence", "modification"):
+        assert third_party[key]
+    for relative in third_party["marker_required_exact"]:
+        assert "Modified for Provenant" in (UI_EVIDENCE / relative).read_text()[:500], relative
 
 
 def test_modified_impeccable_sources_have_local_modification_notices():

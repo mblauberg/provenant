@@ -433,6 +433,15 @@ root directly. A product and instance skill with the same name fails before
 the target directory or installation receipt is mutated.
 Provider bootstraps remain small and share the same precedence sentence.
 
+`runtime/ui-evidence/` holds the deterministic detector used by
+`ui-ux-design`; it is private product infrastructure, not another skill, npm
+package, workspace, service, or install lifecycle. The skill keeps the stable
+`scripts/detect.mjs` command and resolves the runtime from an explicit product
+root or its physical source checkout. Target-project current directories,
+`node_modules`, Fabric registration, seats, and state are never discovery
+inputs. This one-way dependency keeps the detector independently checkable
+without adding user-facing setup or a competing lifecycle owner.
+
 Every installed file class has one owner: a product-shipped projection, an
 instance-owned file, or a product template seeded once and instance-owned
 thereafter ([ADR 0019](adr/0019-installed-file-class-ownership.md)).

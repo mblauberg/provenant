@@ -1,21 +1,14 @@
 #!/usr/bin/env node
+// Modified for Provenant.
 
-import fs from 'node:fs';
-import path from 'node:path';
-import { pathToFileURL, fileURLToPath } from 'node:url';
+import { pathToFileURL } from 'node:url';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const candidates = [
-  path.join(__dirname, 'detector', 'detect-antipatterns.mjs'),
-  path.join(__dirname, '..', '..', 'cli', 'engine', 'detect-antipatterns.mjs'),
-];
-const detectorPath = candidates.find(p => fs.existsSync(p));
+import { resolveUiEvidenceEntry } from './ui-evidence-paths.mjs';
 
-if (!detectorPath) {
-  process.stderr.write('Error: bundled detector not found.\n');
-  process.exit(1);
+try {
+  const { detectCli } = await import(pathToFileURL(resolveUiEvidenceEntry()));
+  await detectCli();
+} catch (error) {
+  process.stderr.write(`Error: ${error.message}\n`);
+  process.exitCode = 1;
 }
-
-const { detectCli } = await import(pathToFileURL(detectorPath));
-
-await detectCli();

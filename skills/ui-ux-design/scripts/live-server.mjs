@@ -42,6 +42,7 @@ import {
   LIVE_SERVER_STARTUP_TIMEOUT_MS,
   observeStartup,
 } from './live-server-startup.mjs';
+import { resolveUiEvidenceBrowserBundle } from './ui-evidence-paths.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // PRODUCT.md / DESIGN.md live wherever load-context.mjs resolves. The generated
@@ -348,19 +349,9 @@ function parseLastSseEventId(req) {
 // ---------------------------------------------------------------------------
 
 function loadBrowserScripts() {
-  // Detection script: prefer the skill-bundled detector, then fall back to
-  // source/npm package locations for local development and older installs.
-  // This one IS cached — detect.js rarely changes during a session.
-  const detectPaths = [
-    path.join(__dirname, 'detector', 'detect-antipatterns-browser.js'),
-    path.join(__dirname, '..', '..', 'cli', 'engine', 'detect-antipatterns-browser.js'),
-    path.join(__dirname, '..', '..', '..', '..', 'cli', 'engine', 'detect-antipatterns-browser.js'),
-    path.join(process.cwd(), 'node_modules', 'impeccable', 'cli', 'engine', 'detect-antipatterns-browser.js'),
-  ];
-  let detectScript = '';
-  for (const p of detectPaths) {
-    try { detectScript = fs.readFileSync(p, 'utf-8'); break; } catch { /* try next */ }
-  }
+  // The detector is product runtime, not target-project state. This one is
+  // cached because detect.js rarely changes during a session.
+  const detectScript = fs.readFileSync(resolveUiEvidenceBrowserBundle(), 'utf-8');
 
   // live-browser.js: DO NOT cache. Return the path so the /live.js handler
   // can re-read on every request. Editing the browser script during iteration

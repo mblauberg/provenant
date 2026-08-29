@@ -1,11 +1,13 @@
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 
 
 ROOT = Path(__file__).resolve().parents[1]
 DETECT = ROOT / "skills" / "ui-ux-design" / "scripts" / "detect.mjs"
+DETECTOR = ROOT / "runtime" / "ui-evidence" / "detector"
 
 
 def _run_detect(
@@ -81,6 +83,170 @@ def test_detector_help_is_stable_and_side_effect_free() -> None:
     assert "--fast" in result.stdout
     assert "--json" in result.stdout
     assert "URLs" in result.stdout
+    assert result.stderr == ""
+
+
+def test_detector_explicit_product_root_is_authoritative(tmp_path: Path) -> None:
+    env = {
+        **os.environ,
+        "AGENT_FABRIC_PRODUCT_ROOT": str(tmp_path / "missing-product"),
+    }
+    env.pop("AGENTS_HOME", None)
+
+    result = _run_detect("--help", env=env)
+
+    assert result.returncode == 1
+    assert result.stdout == ""
+    assert "runtime/ui-evidence" in result.stderr
+    assert str(tmp_path / "missing-product") in result.stderr
+
+
+def _write_stub_runtime(product_root: Path, label: str) -> None:
+    runtime = product_root / "runtime" / "ui-evidence"
+    runtime.mkdir(parents=True)
+    (runtime / "detect.mjs").write_text(
+        "export async function detectCli() {"
+        f"process.stdout.write({json.dumps(label)});"
+        "}\n"
+    )
+
+
+def test_detector_product_root_precedes_agents_home(tmp_path: Path) -> None:
+    selected = tmp_path / "selected"
+    ignored = tmp_path / "ignored"
+    _write_stub_runtime(selected, "selected")
+    _write_stub_runtime(ignored, "ignored")
+    env = {
+        **os.environ,
+        "AGENT_FABRIC_PRODUCT_ROOT": str(selected),
+        "AGENTS_HOME": str(ignored),
+    }
+
+    result = _run_detect("--help", env=env)
+
+    assert result.returncode == 0
+    assert result.stdout == "selected"
+    assert result.stderr == ""
+
+
+def test_detector_accepts_agents_home_as_product_root(tmp_path: Path) -> None:
+    product = tmp_path / "product"
+    _write_stub_runtime(product, "agents-home")
+    env = {**os.environ, "AGENTS_HOME": str(product)}
+    env.pop("AGENT_FABRIC_PRODUCT_ROOT", None)
+
+    result = _run_detect("--help", env=env)
+
+    assert result.returncode == 0
+    assert result.stdout == "agents-home"
+    assert result.stderr == ""
+
+
+def test_detector_rejects_relative_configured_product_root() -> None:
+    env = {**os.environ, "AGENT_FABRIC_PRODUCT_ROOT": "relative-product"}
+    env.pop("AGENTS_HOME", None)
+
+    result = _run_detect("--help", env=env)
+
+    assert result.returncode == 1
+    assert result.stdout == ""
+    assert "must be an absolute product root" in result.stderr
+
+
+def test_detector_source_checkout_fallback_works_from_unrelated_cwd(
+    tmp_path: Path,
+) -> None:
+    env = dict(os.environ)
+    env.pop("AGENT_FABRIC_PRODUCT_ROOT", None)
+    env.pop("AGENTS_HOME", None)
+
+    result = _run_detect("--help", env=env, cwd=tmp_path)
+
+    assert result.returncode == 0
+    assert result.stdout.startswith(f'Usage: node "{DETECT}"')
+    assert result.stderr == ""
+
+
+def test_detector_source_checkout_fallback_works_through_installed_skill_symlink(
+    tmp_path: Path,
+) -> None:
+    linked_skill = tmp_path / "skills" / "ui-ux-design"
+    linked_skill.parent.mkdir(parents=True)
+    linked_skill.symlink_to(DETECT.parent.parent, target_is_directory=True)
+    linked_detect = linked_skill / "scripts" / "detect.mjs"
+    env = dict(os.environ)
+    env.pop("AGENT_FABRIC_PRODUCT_ROOT", None)
+    env.pop("AGENTS_HOME", None)
+
+    result = subprocess.run(
+        ["node", str(linked_detect), "--help"],
+        check=False,
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+        env=env,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout.startswith(f'Usage: node "{linked_detect}"')
+    assert result.stderr == ""
+
+
+def test_detector_does_not_resolve_runtime_from_target_cwd(tmp_path: Path) -> None:
+    installed_root = tmp_path / "installed"
+    installed_scripts = installed_root / "skills" / "ui-ux-design" / "scripts"
+    installed_scripts.mkdir(parents=True)
+    shutil.copy2(DETECT, installed_scripts / "detect.mjs")
+    shutil.copy2(
+        DETECT.parent / "ui-evidence-paths.mjs",
+        installed_scripts / "ui-evidence-paths.mjs",
+    )
+    target = tmp_path / "target"
+    old_runtime = target / "node_modules" / "impeccable" / "cli" / "engine"
+    old_runtime.mkdir(parents=True)
+    (old_runtime / "detect-antipatterns.mjs").write_text(
+        "export async function detectCli() { process.stdout.write('cwd-runtime'); }\n"
+    )
+    env = dict(os.environ)
+    env.pop("AGENT_FABRIC_PRODUCT_ROOT", None)
+    env.pop("AGENTS_HOME", None)
+
+    result = subprocess.run(
+        ["node", str(installed_scripts / "detect.mjs"), "--help"],
+        check=False,
+        capture_output=True,
+        text=True,
+        cwd=target,
+        env=env,
+    )
+
+    assert result.returncode == 1
+    assert result.stdout == ""
+    assert "runtime/ui-evidence" in result.stderr
+    assert "cwd-runtime" not in result.stdout
+
+
+def test_detector_runtime_is_not_duplicated_in_the_skill() -> None:
+    skill_detector = DETECT.parent / "detector"
+
+    assert not skill_detector.exists()
+    assert (DETECTOR / "detect-antipatterns-browser.js").is_file()
+    assert len(DETECT.read_text().splitlines()) <= 16
+    assert "ui-evidence-paths.mjs" in DETECT.read_text()
+
+
+def test_detector_runtime_entry_is_directly_runnable() -> None:
+    runtime_entry = ROOT / "runtime" / "ui-evidence" / "detect.mjs"
+
+    result = subprocess.run(
+        ["node", str(runtime_entry), "--help"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout.startswith(f'Usage: node "{runtime_entry}"')
     assert result.stderr == ""
 
 
@@ -279,11 +445,7 @@ def test_detector_json_structures_stdin_wrapper_scan_failures(tmp_path: Path) ->
 def test_detector_closes_an_owned_browser_when_new_page_fails(tmp_path: Path) -> None:
     marker = tmp_path / "closed"
     module_url = (
-        ROOT
-        / "skills"
-        / "ui-ux-design"
-        / "scripts"
-        / "detector"
+        DETECTOR
         / "engines"
         / "browser"
         / "detect-url.mjs"
@@ -309,11 +471,7 @@ def test_detector_closes_an_owned_browser_when_new_page_fails(tmp_path: Path) ->
 
 def test_browser_detector_accepts_injected_browser_or_launcher_without_puppeteer() -> None:
     module_url = (
-        ROOT
-        / "skills"
-        / "ui-ux-design"
-        / "scripts"
-        / "detector"
+        DETECTOR
         / "engines"
         / "browser"
         / "detect-url.mjs"
@@ -425,11 +583,7 @@ def test_url_detection_waits_for_delayed_client_render_before_scanning() -> None
 
 def test_framework_probe_does_not_follow_redirects_off_origin() -> None:
     module_url = (
-        ROOT
-        / "skills"
-        / "ui-ux-design"
-        / "scripts"
-        / "detector"
+        DETECTOR
         / "node"
         / "file-system.mjs"
     ).as_uri()
@@ -464,11 +618,7 @@ def test_framework_probe_does_not_follow_redirects_off_origin() -> None:
 
 def test_framework_probe_follows_bounded_same_origin_redirects() -> None:
     module_url = (
-        ROOT
-        / "skills"
-        / "ui-ux-design"
-        / "scripts"
-        / "detector"
+        DETECTOR
         / "node"
         / "file-system.mjs"
     ).as_uri()
