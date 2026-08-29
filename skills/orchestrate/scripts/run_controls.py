@@ -99,6 +99,9 @@ def _attempt_terminal(run_dir: Path, task_id: str, attempt_id: str) -> dict[str,
         record, _, _, _ = _attempt(run_dir, task_id, attempt_id)
     except ControlError as exc:
         raise ControlError("attempt evidence is invalid") from exc
+    process = record.get("process")
+    if not isinstance(process, dict) or process.get("observed_exit") is not True:
+        raise ControlError("attempt evidence does not prove observed completion")
     return record
 
 
@@ -115,7 +118,7 @@ def _wait_for_attempt_terminal(run_dir: Path, task_id: str, attempt_id: str, wai
 
 
 def _cancel(args: argparse.Namespace) -> int:
-    run_dir = _run_dir(args.run_dir)
+    run_dir = _run_dir(args.run_dir, require_active=True)
     wait_seconds = _cancel_wait_seconds(args.wait_seconds)
     task_target = args.task_id is not None or args.attempt_id is not None
     batch_target = args.batch_id is not None
@@ -155,13 +158,13 @@ def _cancel(args: argparse.Namespace) -> int:
     if summary_present:
         if summary_path.is_symlink() or not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
             raise ControlError("batch summary evidence is invalid")
-        _load_summary(run_dir, args.batch_id)
+        _load_summary(run_dir, args.batch_id, require_complete=True)
         return _cancel_result("already_terminal", "batch already has validated terminal summary evidence")
     _create_cancel_marker(run_dir, target)
     deadline = time.monotonic() + wait_seconds
     while True:
         try:
-            summary = _load_summary(run_dir, args.batch_id)
+            summary = _load_summary(run_dir, args.batch_id, require_complete=True)
         except ControlError:
             try:
                 summary_path.lstat()
@@ -180,7 +183,7 @@ def _cancel(args: argparse.Namespace) -> int:
         time.sleep(min(0.05, remaining))
 
 
-def _run_dir(value: Path) -> Path:
+def _run_dir(value: Path, *, require_active: bool = False) -> Path:
     run_dir = value.resolve()
     workspace = Path.cwd().resolve()
     if not run_dir.is_dir() or (run_dir != workspace and workspace not in run_dir.parents):
@@ -195,6 +198,8 @@ def _run_dir(value: Path) -> Path:
         raise ControlError("RUN_RECEIPT.json is not valid JSON") from exc
     if not isinstance(receipt, dict) or receipt.get("schema_version") != 1:
         raise ControlError("RUN_RECEIPT.json schema_version must be 1")
+    if require_active and (receipt.get("status") != "active" or receipt.get("closed_at") is not None):
+        raise ControlError("cancellation requires an active orchestration run")
     return run_dir
 
 
@@ -601,7 +606,7 @@ def _retry(args: argparse.Namespace) -> int:
     )
 
 
-def _load_summary(run_dir: Path, batch_id: str) -> dict[str, Any]:
+def _load_summary(run_dir: Path, batch_id: str, *, require_complete: bool = False) -> dict[str, Any]:
     if not BATCH_ID_RE.fullmatch(batch_id):
         raise ControlError("batch id is invalid")
     summary_path = run_dir / "dispatch/batches" / batch_id / "summary.json"
@@ -614,7 +619,14 @@ def _load_summary(run_dir: Path, batch_id: str) -> dict[str, Any]:
             or summary.get("record_type") != "dispatch-batch"
             or summary.get("batch_id") != batch_id or not isinstance(summary.get("tasks"), list)):
         raise ControlError(f"batch summary has invalid schema or identity: {summary_path}")
+    if require_complete:
+        if summary.get("status") not in {"completed", "cancelled", "failed"}:
+            raise ControlError(f"batch summary has invalid terminal status: {summary_path}")
+        task_count = summary.get("task_count")
+        if type(task_count) is not int or task_count < 1 or task_count != len(summary["tasks"]):
+            raise ControlError(f"batch summary has invalid task count: {summary_path}")
     seen: set[str] = set()
+    actual_counts: dict[str, int] = {}
     for item in summary["tasks"]:
         if (not isinstance(item, dict) or not isinstance(item.get("task_id"), str)
                 or not TASK_ID_RE.fullmatch(item["task_id"]) or item["task_id"] in seen):
@@ -623,6 +635,7 @@ def _load_summary(run_dir: Path, batch_id: str) -> dict[str, Any]:
         status = item.get("status")
         if status not in TERMINAL_STATUSES:
             raise ControlError(f"batch summary has invalid task status: {summary_path}")
+        actual_counts[status] = actual_counts.get(status, 0) + 1
         attempt_path = item.get("attempt_path")
         if attempt_path is None:
             if status == "succeeded":
@@ -636,11 +649,19 @@ def _load_summary(run_dir: Path, batch_id: str) -> dict[str, Any]:
         record, artifacts, _, _ = _attempt(run_dir, item["task_id"], attempt_id)
         if record["status"] != status:
             raise ControlError(f"batch summary status disagrees with attempt: {item['task_id']}")
+        process = record.get("process")
+        if not isinstance(process, dict) or process.get("observed_exit") is not True:
+            raise ControlError(f"batch attempt lacks observed completion: {item['task_id']}")
         result_path = item.get("result_path")
         if result_path is not None and result_path != artifacts.get("result"):
             raise ControlError(f"batch summary result identity disagrees with attempt: {item['task_id']}")
         if status == "succeeded" and result_path is None:
             raise ControlError(f"successful batch task has no result path: {summary_path}")
+    if require_complete:
+        if summary.get("counts") != dict(sorted(actual_counts.items())):
+            raise ControlError(f"batch summary counts disagree with its tasks: {summary_path}")
+        if (summary["status"] == "cancelled") != (actual_counts.get("cancelled", 0) > 0):
+            raise ControlError(f"batch summary cancellation status disagrees with its tasks: {summary_path}")
     return summary
 
 

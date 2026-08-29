@@ -32,6 +32,7 @@ def write_attempt(
     status: str = "succeeded",
     result: str | None = "result\n",
     question: dict[str, str] | None = None,
+    observed_exit: bool = True,
 ) -> Path:
     attempt_dir = run_dir / "dispatch/tasks" / task_id / attempt_id
     attempt_dir.mkdir(parents=True)
@@ -63,7 +64,7 @@ def write_attempt(
         "prompt": {"path": str(prompt_path.relative_to(run_dir)), "digest": file_digest(prompt_path)},
         "stderr": {"path": str(stderr_path.relative_to(run_dir)), "digest": file_digest(stderr_path)},
         "result": result_ref,
-        "process": {"observed_exit": True, "exit_code": 0},
+        "process": {"observed_exit": observed_exit, "exit_code": 0},
         "started_at": "2026-08-29T00:00:00.000Z",
         "finished_at": "2026-08-29T00:00:01.000Z",
     }
@@ -198,6 +199,63 @@ def test_cancel_after_natural_completion_reports_already_terminal(tmp_path: Path
     assert result.returncode == 0
     assert json.loads(result.stdout)["status"] == "already_terminal"
     assert not (run_dir / "dispatch/tasks/natural/attempt-001/cancel.request").exists()
+
+
+def test_cancel_rejects_unobserved_terminal_attempt_evidence(tmp_path: Path) -> None:
+    run_dir = make_run(tmp_path)
+    write_attempt(run_dir, status="cancelled", observed_exit=False)
+
+    result = invoke(
+        "run", "cancel", "--run-dir", str(run_dir), "--task-id", "task-1",
+        "--attempt-id", "attempt-001", "--wait-seconds", "0", cwd=tmp_path,
+    )
+
+    assert result.returncode == 2
+    assert json.loads(result.stdout)["status"] == "invalid_target"
+    assert not (run_dir / "dispatch/tasks/task-1/attempt-001/cancel.request").exists()
+
+
+def test_cancel_rejects_closed_run_without_writing_marker(tmp_path: Path) -> None:
+    run_dir = make_run(tmp_path)
+    attempt_dir = run_dir / "dispatch/tasks/task-1/attempt-001"
+    attempt_dir.mkdir(parents=True)
+    receipt_path = run_dir / "RUN_RECEIPT.json"
+    receipt = json.loads(receipt_path.read_text())
+    receipt.update({"status": "completed", "closed_at": "2026-08-29T00:00:00Z"})
+    receipt_path.write_text(json.dumps(receipt) + "\n", encoding="utf-8")
+
+    result = invoke(
+        "run", "cancel", "--run-dir", str(run_dir), "--task-id", "task-1",
+        "--attempt-id", "attempt-001", "--wait-seconds", "0", cwd=tmp_path,
+    )
+
+    assert result.returncode == 2
+    assert json.loads(result.stdout)["status"] == "invalid_target"
+    assert not (attempt_dir / "cancel.request").exists()
+
+
+def test_cancel_rejects_internally_incomplete_batch_summary(tmp_path: Path) -> None:
+    run_dir = make_run(tmp_path)
+    batch_dir = run_dir / "dispatch/batches/batch-001"
+    batch_dir.mkdir(parents=True)
+    (batch_dir / "summary.json").write_text(json.dumps({
+        "schema_version": 1,
+        "record_type": "dispatch-batch",
+        "batch_id": "batch-001",
+        "status": "cancelled",
+        "task_count": 0,
+        "counts": {},
+        "tasks": [],
+    }) + "\n", encoding="utf-8")
+
+    result = invoke(
+        "run", "cancel", "--run-dir", str(run_dir), "--batch-id", "batch-001",
+        "--wait-seconds", "0", cwd=tmp_path,
+    )
+
+    assert result.returncode == 2
+    assert json.loads(result.stdout)["status"] == "invalid_target"
+    assert not (batch_dir / "cancel.request").exists()
 
 
 def test_artifact_command_rejects_tampered_retained_digest(tmp_path: Path) -> None:
