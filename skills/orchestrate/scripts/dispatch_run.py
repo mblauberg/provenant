@@ -34,6 +34,10 @@ DEFAULT_TIMEOUT_SECONDS = 900.0
 from _shared.bounded_process import stop_process_group
 
 
+class AttemptEvidenceError(ValueError):
+    """A retained attempt cannot be reconciled without inventing evidence."""
+
+
 def now() -> str:
     return datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
@@ -135,6 +139,11 @@ def reconcile_manifest(run_dir: Path) -> None:
                 atomic_write(sidecar, f"{digest(attempt_path)}  {attempt_path.name}\n")
             record["attempt_digest_path"] = relative_path(run_dir, sidecar)
             rows = manifest_rows(run_dir, record)
+            absent = [path for _, path in rows if not (run_dir / path).is_file()]
+            if absent:
+                raise AttemptEvidenceError(
+                    f"attempt evidence is missing for {attempt_path}: {', '.join(absent)}"
+                )
             missing = [(kind, path) for kind, path in rows if f"| {path} |" not in existing]
             if not missing:
                 continue
@@ -147,6 +156,8 @@ def reconcile_manifest(run_dir: Path) -> None:
                     for kind, path in missing
                 )
             existing = manifest.read_text(encoding="utf-8", errors="replace")
+        except AttemptEvidenceError:
+            raise
         except (KeyError, TypeError, ValueError):
             continue
 
@@ -198,11 +209,23 @@ def dispatch(args: argparse.Namespace) -> int:
     missing = [name for name in ("MANIFEST.md", "RUN_RECEIPT.json") if not (run_dir / name).is_file()]
     if missing:
         return fail(run_dir, "run_custody_missing", f"missing custody files: {', '.join(missing)}")
+    try:
+        run_receipt = json.loads((run_dir / "RUN_RECEIPT.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return fail(run_dir, "run_custody_invalid", "RUN_RECEIPT.json is not valid JSON")
+    if (
+        not isinstance(run_receipt, dict)
+        or run_receipt.get("status") != "active"
+        or run_receipt.get("closed_at") is not None
+    ):
+        return fail(run_dir, "run_custody_closed", "dispatch requires an active orchestration run")
     if not TASK_ID_RE.fullmatch(args.task_id):
         return fail(run_dir, "invalid_task_id", "task id must contain only letters, numbers, '.', '_' or '-'")
     try:
         reconcile_manifest(run_dir)
         ensure_manifest_appendable(run_dir)
+    except AttemptEvidenceError as exc:
+        return fail(run_dir, "attempt_evidence_incomplete", str(exc))
     except OSError as exc:
         return fail(run_dir, "manifest_not_appendable", f"MANIFEST.md is not appendable: {exc}")
 

@@ -384,6 +384,16 @@ def test_attempt_rows_are_accepted_by_existing_finalizer(tmp_path: Path) -> None
     assert finalized.returncode == 0, finalized.stderr
     assert json.loads((run_dir / "RUN_RECEIPT.json").read_text())["status"] == "failed"
 
+    rejected = subprocess.run(
+        [str(SCRIPT), "--run-dir", str(run_dir), "--task-id", "after-close",
+         "--adapter", "codex", "--prompt-file", str(prompt),
+         "--alias", "workhorse", "--role", "worker"],
+        cwd=tmp_path, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    assert rejected.returncode == 2
+    assert json.loads(rejected.stdout)["status"] == "run_custody_closed"
+    assert not (run_dir / "dispatch/tasks/after-close").exists()
+
 
 def test_hard_linked_prompt_is_rejected_before_provider_launch(tmp_path: Path, monkeypatch) -> None:
     run_dir = make_run(tmp_path, "hardlink")
@@ -520,3 +530,40 @@ def test_reentry_reconciles_missing_manifest_rows_and_retry_lineage(tmp_path: Pa
     assert "dispatch-reconcile-attempt-001-attempt" in text
     second = json.loads((run_dir / "dispatch/tasks/reconcile/attempt-002/attempt.json").read_text())
     assert second["retry_of"] == "attempt-001"
+
+
+def test_reentry_does_not_verify_missing_attempt_evidence(tmp_path: Path, monkeypatch) -> None:
+    run_dir = make_run(tmp_path, "missing-evidence")
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("missing evidence\n", encoding="utf-8")
+    adapter = tmp_path / "adapter-missing-evidence"
+    write_executable(adapter, """#!/usr/bin/env bash
+        while [ "$#" -gt 0 ]; do
+          case "$1" in --out) out="$2"; shift 2;; *) shift;; esac
+        done
+        printf '{"status":"ok"}\n'
+        printf 'OK\n' > "$out"
+    """)
+    module = load_dispatch_module()
+    module.CF_DISPATCH = adapter
+    args = module.parser().parse_args([
+        "--run-dir", str(run_dir), "--task-id", "missing", "--adapter", "codex",
+        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+    ])
+    monkeypatch.chdir(tmp_path)
+    assert module.dispatch(args) == 0
+    attempt_dir = run_dir / "dispatch/tasks/missing/attempt-001"
+    (attempt_dir / "result.md").unlink()
+    manifest = run_dir / "MANIFEST.md"
+    manifest.write_text("\n".join(
+        line for line in manifest.read_text(encoding="utf-8").splitlines()
+        if "dispatch-missing-attempt-001" not in line
+    ) + "\n", encoding="utf-8")
+
+    blocked = module.parser().parse_args([
+        "--run-dir", str(run_dir), "--task-id", "next", "--adapter", "codex",
+        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+    ])
+    assert module.dispatch(blocked) == 2
+    assert "dispatch-missing-attempt-001" not in manifest.read_text(encoding="utf-8")
+    assert not (run_dir / "dispatch/tasks/next").exists()
