@@ -10,6 +10,7 @@ by default; callers may provide a smaller or larger finite positive timeout.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import json
 import math
@@ -30,6 +31,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "skills"))
 CF_DISPATCH = Path(__file__).with_name("cf_dispatch.sh")
 TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+ATTEMPT_ID_RE = re.compile(r"^attempt-(?P<number>\d{3}|[1-9]\d{3,})$")
 DEFAULT_TIMEOUT_SECONDS = 900.0
 
 from _shared.bounded_process import stop_process_group
@@ -278,6 +280,18 @@ def ensure_manifest_appendable(run_dir: Path) -> None:
         pass
 
 
+def acquire_run_custody(run_dir: Path):
+    """Acquire the shared manifest lock without creating a new run artifact."""
+    flags = os.O_RDWR | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)
+    stream = os.fdopen(os.open(run_dir / "MANIFEST.md", flags), "a+", encoding="utf-8")
+    try:
+        fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        stream.close()
+        raise
+    return stream
+
+
 def reconcile_manifest(run_dir: Path) -> None:
     """Index complete prior attempts whose manifest rows were lost on re-entry."""
     manifest = run_dir / "MANIFEST.md"
@@ -291,7 +305,7 @@ def reconcile_manifest(run_dir: Path) -> None:
         if (
             attempt_dir.is_symlink()
             or not attempt_dir.is_dir()
-            or not re.fullmatch(r"attempt-\d{3}", attempt_dir.name)
+            or not ATTEMPT_ID_RE.fullmatch(attempt_dir.name)
             or not (attempt_dir / "attempt.json").is_file()
             or (attempt_dir / "attempt.json").is_symlink()
         ):
@@ -305,8 +319,17 @@ def reconcile_manifest(run_dir: Path) -> None:
             record = json.loads(attempt_path.read_text(encoding="utf-8"))
         except (OSError, TypeError, ValueError) as exc:
             raise AttemptEvidenceError(f"attempt record is unreadable: {attempt_path}") from exc
-        if not isinstance(record, dict) or record.get("record_type") != "dispatch-attempt":
-            raise AttemptEvidenceError(f"attempt record has an invalid type: {attempt_path}")
+        task_id = attempt_path.parent.parent.name
+        attempt_id = attempt_path.parent.name
+        if (
+            not isinstance(record, dict)
+            or record.get("schema_version") != 1
+            or record.get("record_type") != "dispatch-attempt"
+            or record.get("task_id") != task_id
+            or record.get("attempt_id") != attempt_id
+            or not TASK_ID_RE.fullmatch(task_id)
+        ):
+            raise AttemptEvidenceError(f"attempt record has invalid schema or identity: {attempt_path}")
         try:
             if retained_path(run_dir, record["attempt_path"]) != discovered_attempt_path:
                 raise AttemptEvidenceError(
@@ -315,15 +338,51 @@ def reconcile_manifest(run_dir: Path) -> None:
             sidecar = attempt_path.with_name("attempt.sha256")
             if not sidecar.is_file():
                 atomic_write(sidecar, f"{digest(attempt_path)}  {attempt_path.name}\n")
+            if not valid_regular_result(run_dir, sidecar):
+                raise AttemptEvidenceError(f"attempt digest is not a regular retained file: {sidecar}")
+            expected_sidecar = f"{digest(attempt_path)}  {attempt_path.name}\n"
+            if sidecar.read_text(encoding="utf-8") != expected_sidecar:
+                raise AttemptEvidenceError(f"attempt digest does not match retained record: {attempt_path}")
             record["attempt_digest_path"] = relative_path(run_dir, sidecar)
             rows = [
                 (kind, retained_path(run_dir, path))
                 for kind, path in manifest_rows(run_dir, record)
             ]
-            absent = [path for _, path in rows if not (run_dir / path).is_file()]
+            attempt_root = Path("dispatch") / "tasks" / task_id / attempt_id
+            expected = {
+                "attempt": (attempt_root / "attempt.json").as_posix(),
+                "prompt": (attempt_root / "prompt.md").as_posix(),
+                "adapter": (attempt_root / "adapter-receipt.json").as_posix(),
+                "stderr": (attempt_root / "stderr.log").as_posix(),
+                "attempt-digest": (attempt_root / "attempt.sha256").as_posix(),
+                "result": (attempt_root / "result.md").as_posix(),
+            }
+            mismatched = [kind for kind, path in rows if path != expected[kind]]
+            if mismatched:
+                raise AttemptEvidenceError(
+                    f"attempt evidence path is not canonical for {attempt_path}: {', '.join(mismatched)}"
+                )
+            absent = [path for _, path in rows if not valid_regular_result(run_dir, run_dir / path)]
             if absent:
                 raise AttemptEvidenceError(
                     f"attempt evidence is missing for {attempt_path}: {', '.join(absent)}"
+                )
+            claimed_digests = {
+                "prompt": record["prompt"]["digest"],
+                "adapter": record["route"]["adapter_receipt"]["digest"],
+                "stderr": record["stderr"]["digest"],
+            }
+            if record["result"] is not None:
+                claimed_digests["result"] = record["result"]["digest"]
+            mismatched_digests = [
+                kind
+                for kind, path in rows
+                if kind in claimed_digests and claimed_digests[kind] != digest(run_dir / path)
+            ]
+            if mismatched_digests:
+                raise AttemptEvidenceError(
+                    f"attempt evidence digest does not match {attempt_path}: "
+                    + ", ".join(mismatched_digests)
                 )
             missing = [(kind, path) for kind, path in rows if f"| {path} |" not in existing]
             if not missing:
@@ -346,9 +405,9 @@ def reconcile_manifest(run_dir: Path) -> None:
 def existing_attempt_number(task_dir: Path) -> int:
     numbers = []
     for candidate in task_dir.glob("attempt-*"):
-        match = re.fullmatch(r"attempt-(\d{3})", candidate.name)
+        match = ATTEMPT_ID_RE.fullmatch(candidate.name)
         if match and candidate.is_dir():
-            numbers.append(int(match.group(1)))
+            numbers.append(int(match.group("number")))
     return max(numbers, default=0) + 1
 
 
@@ -380,7 +439,7 @@ def build_command(args: argparse.Namespace, prompt_path: Path, result_path: Path
     return command
 
 
-def dispatch(args: argparse.Namespace) -> int:
+def _dispatch(args: argparse.Namespace) -> int:
     run_dir = args.run_dir.resolve()
     workspace = Path.cwd().resolve()
     if run_dir != workspace and workspace not in run_dir.parents:
@@ -402,8 +461,9 @@ def dispatch(args: argparse.Namespace) -> int:
         return fail(run_dir, "invalid_task_id", "task id must contain only letters, numbers, '.', '_' or '-'")
     try:
         ensure_owned_directory(run_dir, run_dir / "dispatch" / "tasks")
-        reconcile_manifest(run_dir)
-        ensure_manifest_appendable(run_dir)
+        if not args.batch_child:
+            reconcile_manifest(run_dir)
+            ensure_manifest_appendable(run_dir)
     except AttemptEvidenceError as exc:
         return fail(run_dir, "attempt_evidence_incomplete", str(exc))
     except OSError as exc:
@@ -440,7 +500,7 @@ def dispatch(args: argparse.Namespace) -> int:
     retry_of = None
     if args.retry_of:
         retry_ref = Path(args.retry_of)
-        if retry_ref.is_absolute() or retry_ref.name != args.retry_of or not re.fullmatch(r"attempt-\d{3}", args.retry_of):
+        if retry_ref.is_absolute() or retry_ref.name != args.retry_of or not ATTEMPT_ID_RE.fullmatch(args.retry_of):
             return fail(run_dir, "retry_of_invalid", "retry-of must name an attempt under the same task")
         retry_dir = task_dir / args.retry_of
         if not (retry_dir.is_dir() and (retry_dir / "attempt.json").is_file()):
@@ -622,7 +682,10 @@ def dispatch(args: argparse.Namespace) -> int:
     atomic_write(digest_path, f"{attempt_digest}  {attempt_path.name}\n")
     manifest_error = False
     try:
-        append_manifest(run_dir, record)
+        if args.batch_child:
+            manifest_error = False
+        else:
+            append_manifest(run_dir, record)
     except OSError as exc:
         manifest_error = True
         record["status"] = "failed"
@@ -635,6 +698,28 @@ def dispatch(args: argparse.Namespace) -> int:
     output_record = {**record, "attempt_digest": attempt_digest}
     print(json.dumps(output_record, sort_keys=True))
     return 0 if status == "succeeded" and not manifest_error else 1
+
+
+def dispatch(args: argparse.Namespace) -> int:
+    """Run one attempt while serialising standalone run-ledger mutation."""
+    run_dir = args.run_dir.resolve()
+    workspace = Path.cwd().resolve()
+    if (
+        args.batch_child
+        or (run_dir != workspace and workspace not in run_dir.parents)
+        or not run_dir.is_dir()
+        or not (run_dir / "MANIFEST.md").is_file()
+    ):
+        return _dispatch(args)
+    try:
+        custody = acquire_run_custody(run_dir)
+    except OSError:
+        return fail(run_dir, "run_custody_busy", "another dispatch, batch or finalizer owns the run")
+    try:
+        return _dispatch(args)
+    finally:
+        fcntl.flock(custody.fileno(), fcntl.LOCK_UN)
+        custody.close()
 
 
 def parser() -> argparse.ArgumentParser:
@@ -660,6 +745,7 @@ def parser() -> argparse.ArgumentParser:
         help=f"maximum provider runtime in seconds (default: {DEFAULT_TIMEOUT_SECONDS:g})",
     )
     root.add_argument("--retry-of", help="existing attempt id under this task, for lineage only")
+    root.add_argument("--batch-child", action="store_true", help=argparse.SUPPRESS)
     return root
 
 

@@ -42,6 +42,9 @@ raise SystemExit(int(os.environ.get("PROVENANT_TEST_EXIT", "0")))
     dispatch_owner.parent.mkdir(parents=True)
     dispatch_owner.write_text(recorder)
     dispatch_owner.chmod(0o755)
+    batch_owner = checkout / "skills/orchestrate/scripts/batch_run.py"
+    batch_owner.write_text(recorder)
+    batch_owner.chmod(0o755)
     fabric_bin = checkout / "runtime" / "fabric" / "bin"
     fabric_bin.mkdir(parents=True)
     for owner in ("fabric", "fabric-mcp"):
@@ -348,6 +351,7 @@ def test_owner_exec_failure_reports_command_context_without_traceback(tmp_path):
         ("worktree", ["check"]),
         ("check", ["--doctor"]),
         ("fabric", ["tasks"]),
+        ("batch", ["--manifest", "tasks.json"]),
     ],
 )
 @pytest.mark.parametrize("cwd_kind", ["provenant-root", "unrelated-git", "nonrepo"])
@@ -413,6 +417,7 @@ def test_help_is_concise_and_names_existing_command_owners(tmp_path):
     assert result.stderr == ""
     assert "route" in result.stdout and "scripts/model-route" in result.stdout
     assert "fabric ...     runtime/fabric/bin/fabric ..." in result.stdout
+    assert "batch ...      skills/orchestrate/scripts/batch_run.py ..." in result.stdout
     assert "doctor" not in result.stdout
     assert "project ..." not in result.stdout
     assert "Fabric derives who you are from the working directory" in result.stdout
