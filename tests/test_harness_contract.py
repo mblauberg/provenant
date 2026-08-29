@@ -76,6 +76,7 @@ def test_dispatch_owner_boundaries_distinguish_current_assurance_from_future_exe
     adr = (ROOT / "docs/adr/0021-configured-workspace-dispatch-boundaries.md").read_text()
 
     orchestrate_compact = " ".join(orchestrate.lower().split())
+    adr_compact = " ".join(adr.split())
     assert "ordinary configured-provider cli dispatch may use same-family routes" in orchestrate_compact
     assert "same-family cli only for auth/preflight smoke tests" not in orchestrate_compact
     assert "orchestration adapter" in thin_cli
@@ -85,6 +86,14 @@ def test_dispatch_owner_boundaries_distinguish_current_assurance_from_future_exe
     assert "#518" in adr
     assert "#683" in adr
     assert "does not implement" in adr
+    assert "delegates provider invocation to `cf_dispatch.sh`" in adr
+    assert "ordinary or assurance policy modes" in adr
+    assert "MANIFEST.md" in adr
+    assert "RUN_RECEIPT.json" in adr
+    assert "run_dir_finalize.py" in adr
+    assert "parallel lifecycle ledger" in adr
+    assert "exact attempt-record filename is a #518 schema decision" in adr
+    assert "delivery `RUN.json` may reference the orchestration receipt" in adr_compact
 
 
 def test_thin_cli_decision_is_amended_by_dispatch_boundary_decision():

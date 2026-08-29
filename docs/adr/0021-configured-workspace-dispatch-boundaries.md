@@ -25,11 +25,11 @@ batch execution.
 | Concern | Current or planned owner | Boundary |
 |---|---|---|
 | Model and tier resolution | `scripts/model-route` | Resolves configured routes and records route identity; it does not launch providers. |
-| Assurance dispatch adapter | `skills/orchestrate/scripts/cf_dispatch.sh` | Current direct adapter for assurance and review paths; its distinct-family requirement is not ordinary execution policy. |
-| Ordinary dispatch and batch execution | Orchestration dispatch owner planned by [#518](https://github.com/mblauberg/provenant/issues/518) | Future single owner for provider launch, waiting, cancellation, retry and bounded batches. It is not implemented by this doctrine change. |
+| Assurance dispatch adapter | `skills/orchestrate/scripts/cf_dispatch.sh` | Current provider-invocation adapter for assurance and review paths; its distinct-family requirement is not ordinary execution policy. |
+| Ordinary dispatch and batch execution | Orchestration runner planned by [#518](https://github.com/mblauberg/provenant/issues/518) | Future single owner for attempt/batch lifecycle. It delegates provider invocation to `cf_dispatch.sh` with ordinary or assurance policy modes; it is not implemented by this doctrine change. |
 | Coordination | `runtime/fabric` | Mailbox, shared tasks and activity only; no provider launch, scheduler or lifecycle owner. |
-| Dispatch evidence | Compact manifest under the orchestration run directory | Records execution attempts, route lineage and observed completion; it is not delivery acceptance. |
-| Delivery evidence | `deliver` and canonical delivery `RUN.json` | Records artifact verification, review and acceptance; it may reference dispatch evidence. |
+| Dispatch evidence | #518 attempt-record schema indexed by existing `MANIFEST.md` and bound into `RUN_RECEIPT.json`/`run_dir_finalize.py` | Records execution attempts, route lineage and observed completion; it is not delivery acceptance and must not create a parallel lifecycle ledger. |
+| Delivery evidence | `deliver` and canonical delivery `RUN.json` | Records artifact verification, review and acceptance; it may reference the orchestration receipt. |
 
 The planned #518 owner and its workspace capability gates are an implementation
 boundary, not a claim that ordinary dispatch or batch runtime already exists.
@@ -79,17 +79,22 @@ not create a new runtime authority.
 
 ### Compact dispatch manifests
 
-Ordinary dispatch and batch execution use a compact, append-only manifest under
-the run directory. Each task attempt records enough to reconstruct what
-happened: task and attempt IDs, requested and resolved route, actual provider
-and model, workspace and base identity when available, start/end, status, exit
-information, prompt/result paths and digests, and retry lineage.
+The compact dispatch manifest is the canonical, append-only attempt-record
+schema that #518 must define for ordinary dispatch and batch execution. Existing
+orchestration `MANIFEST.md` indexes the record and `RUN_RECEIPT.json`, finalized
+by `run_dir_finalize.py`, provides its run custody and terminalisation. The
+exact attempt-record filename is a #518 schema decision; it is not an unnamed
+new owner or a parallel lifecycle ledger. Each task attempt records enough to
+reconstruct what happened: task and attempt IDs, requested and resolved route,
+actual provider and model, workspace and base identity when available,
+start/end, status, exit information, prompt/result paths and digests, and retry
+lineage.
 
 This compact dispatch manifest is not a delivery `RUN.json`. It answers “what
 executed?” and may contain partial or failed exploratory work. The canonical
 delivery receipt answers “was the resulting artifact verified and accepted?”
 When a dispatch produces a governed deliverable, the delivery `RUN.json` may
-reference the dispatch manifest; neither record replaces the other.
+reference the orchestration receipt; neither record replaces the other.
 
 Exact prompts and results are retained once in the local run directory according
 to the active retention policy. Receipts and Fabric messages carry paths,
