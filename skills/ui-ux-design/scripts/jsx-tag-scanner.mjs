@@ -34,7 +34,9 @@ function canStartRegexLiteral(source, start) {
   let before = start - 1;
   while (before >= 0 && /\s/.test(source[before])) before -= 1;
   if (before < 0 || /[=(:,\[{!&|?;+*%^~<>]/.test(source[before])) return true;
-  return /\b(?:case|return|throw|yield)\s*$/.test(source.slice(0, start));
+  return /\b(?:await|case|delete|in|instanceof|return|throw|typeof|void|yield)\s*$/.test(
+    source.slice(0, start),
+  );
 }
 
 function skipRegexLiteral(source, start) {
@@ -82,19 +84,18 @@ function findHtmlRawTextClose(source, tagName, start) {
 }
 
 function looksLikeTypeScriptGenericCall(source, tag) {
-  const closingStart = source.indexOf(`</${tag.name}`, tag.end);
-  if (closingStart !== -1) {
-    const boundary = source[closingStart + tag.name.length + 2];
-    if (boundary === '>' || /\s/.test(boundary || '')) return false;
-  }
   const immediatelyBefore = source[tag.start - 1];
   if (immediatelyBefore && /[A-Za-z0-9_$.)\]]/.test(immediatelyBefore)) return true;
 
   let after = tag.end;
   while (source[after] === '>') after += 1;
   while (after < source.length && /\s/.test(source[after])) after += 1;
-  return source[after] === '('
-    && (/,\s*>$/.test(tag.raw) || /\bextends\b/.test(tag.raw));
+  if (source[after] === '('
+    && (/,\s*>$/.test(tag.raw) || /\bextends\b/.test(tag.raw))) {
+    return true;
+  }
+
+  return false;
 }
 
 function scanTag(source, start) {
@@ -263,6 +264,7 @@ export function findJsxSubtree(source, predicate, { strictNesting = true } = {})
       }
       if (expressionDepth > openerExpressionDepth
         && !tag.closing
+        && stack.at(-1)?.expressionDepth !== expressionDepth
         && looksLikeTypeScriptGenericCall(source, tag)) {
         return false;
       }

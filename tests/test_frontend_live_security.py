@@ -834,6 +834,14 @@ def test_live_wrap_scans_nested_multiline_jsx_without_treating_strings_as_tags(
             0,
         ),
         (
+            [
+                '<Card className="target">{render<Button>(value)}'
+                '<Button>Save</Button></Card>'
+            ],
+            0,
+            0,
+        ),
+        (
             ['<Card className="target">{items.map(<T,>(value: T) => value)}</Card>'],
             0,
             0,
@@ -855,6 +863,21 @@ def test_live_wrap_scans_nested_multiline_jsx_without_treating_strings_as_tags(
         ),
         (
             ['<Card>{/<Broken>/.test(value) ? <A/> : <B/>}</Card>'],
+            0,
+            0,
+        ),
+        (
+            ['<Card>{await /}/.test(value) ? <A/> : <B/>}</Card>'],
+            0,
+            0,
+        ),
+        (
+            ['<Card>{typeof /}/ === "object" ? <A/> : <B/>}</Card>'],
+            0,
+            0,
+        ),
+        (
+            ['<Card>{void /}/.test(value)}</Card>'],
             0,
             0,
         ),
