@@ -29,6 +29,13 @@ def make_run(tmp_path: Path, name: str) -> Path:
     return Path(subprocess.check_output([str(INIT), str(tmp_path / ".agent-run" / name)], text=True).strip())
 
 
+def attempt_diagnostics(run_dir: Path) -> str:
+    evidence = []
+    for path in sorted((run_dir / "dispatch/tasks").glob("*/attempt-*/stderr.log")):
+        evidence.append(f"{path.relative_to(run_dir)}:\n{path.read_text(encoding='utf-8')}")
+    return "\n".join(evidence)
+
+
 def load_module():
     spec = importlib.util.spec_from_file_location("batch_run_under_test", BATCH)
     assert spec and spec.loader
@@ -230,7 +237,7 @@ def test_real_dispatch_children_defer_manifest_race_and_preserve_route_identity(
     module.DISPATCH_RUN = BATCH.parent / 'dispatch_run.py'
     manifest = task_manifest(tmp_path, [task(tmp_path, f'task-{i}', sleep='0') for i in range(8)])
 
-    assert module.batch(args(module, run_dir, manifest, 4)) == 0
+    assert module.batch(args(module, run_dir, manifest, 4)) == 0, attempt_diagnostics(run_dir)
     summary = json.loads((run_dir / 'dispatch/batches/batch-001/summary.json').read_text())
     assert {entry['status'] for entry in summary['tasks']} == {'succeeded'}
     assert all(entry['route']['provider_family'] for entry in summary['tasks'])
@@ -420,7 +427,7 @@ def test_retry_creates_new_attempt_without_replacing_attempt_one(tmp_path, monke
     prompt.write_text('retry\n', encoding='utf-8')
     first_manifest = task_manifest(tmp_path, [{'id': 'retry', 'prompt_file': str(prompt),
         'adapter': 'codex', 'alias': 'workhorse', 'role': 'worker'}])
-    assert module.batch(args(module, run_dir, first_manifest, 1)) == 0
+    assert module.batch(args(module, run_dir, first_manifest, 1)) == 0, attempt_diagnostics(run_dir)
     second_manifest = task_manifest(tmp_path, [{'id': 'retry', 'prompt_file': str(prompt),
         'adapter': 'codex', 'alias': 'workhorse', 'role': 'worker', 'retry_of': 'attempt-001'}])
     assert module.batch(args(module, run_dir, second_manifest, 1)) == 0
