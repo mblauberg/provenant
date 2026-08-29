@@ -123,7 +123,9 @@ def test_frontend_live_state_and_playwright_lineage_contracts_are_honest():
 
     assert "loader already renamed it" not in grounding
     assert "server.json` is transient bearer-token state" in live
-    assert "exclude `server.json`, `sessions/`, and `annotations/` from version control" in live.lower()
+    assert "exclude `server.json` and `sessions/` from version control" in live.lower()
+    assert "fresh private os temporary run directory" in live.lower()
+    assert "legacy `annotations/` path ignored" in live.lower()
     assert "existing PATH binary is used as installed" in playwright
     assert "does not attest its version" in playwright
 

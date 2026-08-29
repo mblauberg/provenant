@@ -29,6 +29,7 @@ export async function statusCli() {
   const payload = {
     liveServer: server ? {
       status: server.status,
+      pid: server.pid,
       port: server.port,
       connectedClients: server.connectedClients,
       pendingEvents: server.pendingEvents,

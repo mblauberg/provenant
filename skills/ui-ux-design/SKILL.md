@@ -1,6 +1,6 @@
 ---
 name: ui-ux-design
-description: "Use for frontend UI/UX: read-only review of rendered visual, interaction, accessibility, responsive or design-system quality; or requested build, redesign, fix, polish, implementation, and live iteration. Not for source-diff review or React profiling."
+description: "Use for frontend UI/UX: read-only visual, accessibility, responsive or design-system review; or as `implement` companion for UI changes/live iteration. Source diffs: `code-review`; React metrics: `react-performance`; browser control: `playwright`."
 ---
 
 <!-- Modified from Impeccable for this harness; see the repository THIRD_PARTY_NOTICES.md. -->

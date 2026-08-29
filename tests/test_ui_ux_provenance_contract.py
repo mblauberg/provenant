@@ -69,6 +69,11 @@ def test_ui_ux_notices_are_exact_and_removed_data_stays_historical_only():
     assert not list(SKILL.rglob("*three*.js"))
     assert not list(SKILL.rglob("*gsap*.js"))
 
+    acknowledgements = (ROOT / "ACKNOWLEDGEMENTS.md").read_text()
+    assert "historical" in acknowledgements.lower()
+    assert "539d52c424c18a14626601a0494ff70561b86d8b" in acknowledgements
+    assert "also includes" not in acknowledgements
+
 
 def test_modified_impeccable_sources_have_local_markers():
     marker = "Modified from Impeccable for this harness"

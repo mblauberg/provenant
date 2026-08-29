@@ -1,3 +1,4 @@
+import base64
 import json
 import http.client
 import os
@@ -152,6 +153,123 @@ def test_contained_source_batch_rolls_back_prior_replacements_on_commit_failure(
     assert not list(tmp_path.glob(".*.tmp"))
 
 
+def test_contained_source_rejects_same_inode_content_change_after_snapshot(tmp_path: Path) -> None:
+    source = tmp_path / "page.html"
+    source.write_text("first")
+    inode = source.stat().st_ino
+    result = _run_contained_source_probe(
+        tmp_path,
+        "const fs=(await import('node:fs')).default;"
+        "const root=process.argv[1];"
+        "const snapshot=readContainedSource(root,'page.html',{relativeOnly:true});"
+        "fs.writeFileSync(snapshot.path,'other');"
+        "try{replaceContainedSources([{snapshot,content:'replacement'}]);}"
+        "catch(error){process.stdout.write(JSON.stringify({code:error.code}));process.exit(7)}",
+    )
+
+    assert result.returncode == 7
+    assert json.loads(result.stdout)["code"] == "source_path_changed"
+    assert source.stat().st_ino == inode
+    assert source.read_text() == "other"
+
+
+def test_contained_source_parent_swap_after_open_never_redirects_write(tmp_path: Path) -> None:
+    parent = tmp_path / "components"
+    parent.mkdir()
+    source = parent / "page.html"
+    source.write_text("original")
+    result = _run_contained_source_probe(
+        tmp_path,
+        "const fs=(await import('node:fs')).default;"
+        "const path=(await import('node:path')).default;"
+        "const root=process.argv[1];"
+        "const snapshot=readContainedSource(root,'components/page.html',{relativeOnly:true});"
+        "try{replaceContainedSources([{snapshot,content:'replacement'}],{afterOpen(){"
+        "fs.renameSync(path.join(root,'components'),path.join(root,'parked'));"
+        "fs.mkdirSync(path.join(root,'components'));"
+        "fs.writeFileSync(path.join(root,'components/page.html'),'attacker');"
+        "}});}catch(error){process.stdout.write(JSON.stringify({code:error.code}));process.exit(7)}",
+    )
+
+    assert result.returncode == 7
+    assert json.loads(result.stdout)["code"] == "source_replace_failed"
+    assert (tmp_path / "parked" / "page.html").read_text() == "original"
+    assert (tmp_path / "components" / "page.html").read_text() == "attacker"
+
+
+def test_contained_source_rejects_a_file_with_no_write_bits(tmp_path: Path) -> None:
+    source = tmp_path / "page.html"
+    source.write_text("original")
+    source.chmod(0o444)
+    result = _run_contained_source_probe(
+        tmp_path,
+        "const root=process.argv[1];"
+        "const snapshot=readContainedSource(root,'page.html',{relativeOnly:true});"
+        "try{replaceContainedSources([{snapshot,content:'replacement'}]);}"
+        "catch(error){process.stdout.write(JSON.stringify({code:error.code}));process.exit(7)}",
+    )
+
+    assert result.returncode == 7
+    assert json.loads(result.stdout)["code"] == "source_not_writable"
+    assert source.read_text() == "original"
+    assert source.stat().st_mode & 0o777 == 0o444
+
+
+def test_contained_source_rolls_back_the_current_descriptor_after_write_failure(
+    tmp_path: Path,
+) -> None:
+    first = tmp_path / "first.html"
+    second = tmp_path / "second.html"
+    first.write_text("first")
+    second.write_text("second")
+    result = _run_contained_source_probe(
+        tmp_path,
+        "const root=process.argv[1];"
+        "const first=readContainedSource(root,'first.html',{relativeOnly:true});"
+        "const second=readContainedSource(root,'second.html',{relativeOnly:true});"
+        "try{replaceContainedSources([{snapshot:first,content:'changed-first'},"
+        "{snapshot:second,content:'changed-second'}],"
+        "{afterWrite({index}){if(index===1)throw new Error('forced-after-write-failure')}});}"
+        "catch(error){process.stdout.write(JSON.stringify({code:error.code}));process.exit(7)}",
+    )
+
+    assert result.returncode == 7
+    assert json.loads(result.stdout)["code"] == "source_replace_failed"
+    assert first.read_text() == "first"
+    assert second.read_text() == "second"
+
+
+def test_contained_source_success_preserves_inode_owner_mode_and_xattrs(tmp_path: Path) -> None:
+    source = tmp_path / "page.html"
+    source.write_text("original")
+    source.chmod(0o664)
+    xattr_name = "user.impeccable-test"
+    xattr_supported = False
+    if hasattr(os, "setxattr"):
+        try:
+            os.setxattr(source, xattr_name, b"kept")
+            xattr_supported = True
+        except OSError:
+            pass
+    before = source.stat()
+    result = _run_contained_source_probe(
+        tmp_path,
+        "const root=process.argv[1];"
+        "const snapshot=readContainedSource(root,'page.html',{relativeOnly:true});"
+        "replaceContainedSources([{snapshot,content:'replacement'}]);",
+    )
+
+    assert result.returncode == 0, result.stderr
+    after = source.stat()
+    assert source.read_text() == "replacement"
+    assert after.st_ino == before.st_ino
+    assert after.st_uid == before.st_uid
+    assert after.st_gid == before.st_gid
+    assert after.st_mode & 0o7777 == before.st_mode & 0o7777
+    if xattr_supported:
+        assert os.getxattr(source, xattr_name) == b"kept"
+
+
 def test_live_wrap_does_not_execute_shell_syntax_from_project_filenames(
     tmp_path: Path,
 ) -> None:
@@ -197,6 +315,22 @@ def test_live_mutation_help_discloses_project_relative_existing_file_boundary(
         assert "project-relative" in lowered
         assert "existing" in lowered
         assert "regular file" in lowered
+    assert wrap.stdout.startswith("Usage: node live-wrap.mjs")
+
+    live_help = subprocess.run(
+        ["node", str(SCRIPTS / "live.mjs"), "--help"],
+        cwd=tmp_path,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert live_help.returncode == 0
+    config_contract = live_help.stdout.split("On config_missing, prints:", 1)[1].split(
+        "The agent should then:", 1
+    )[0]
+    assert "path" in config_contract
+    assert "configPath" not in config_contract
+    assert "hint" not in config_contract
 
 
 @pytest.mark.parametrize("path_kind", ["absolute", "traversal", "symlink"])
@@ -307,7 +441,10 @@ def test_live_entrypoint_does_not_execute_shell_syntax_from_server_state(
     )
 
     assert result.returncode != 0
-    assert json.loads(result.stdout)["error"] == "inject_failed"
+    payload = json.loads(result.stdout)
+    assert payload["error"] == "server_start_failed"
+    assert payload["diagnostic"]["classification"] == "unrelated_pid_record"
+    assert json.loads(server_path.read_text())["pid"] == os.getpid()
     assert not marker.exists()
 
 
@@ -386,6 +523,122 @@ def test_live_inject_preserves_authorised_insert_and_remove_workflow(tmp_path: P
     removed = _run_inject(tmp_path, "--remove")
     assert removed.returncode == 0, removed.stderr
     assert page.read_text() == original
+
+
+def test_live_inject_hard_excludes_explicit_dependency_and_git_targets(
+    tmp_path: Path,
+) -> None:
+    safe = tmp_path / "index.html"
+    dependency = tmp_path / "node_modules" / "pkg" / "index.html"
+    git_page = tmp_path / ".git" / "index.html"
+    dependency.parent.mkdir(parents=True)
+    git_page.parent.mkdir(parents=True)
+    for page in (safe, dependency, git_page):
+        page.write_text("<html><body>safe</body></html>\n")
+    _write_config(
+        tmp_path,
+        ["index.html", "node_modules/pkg/index.html", ".git/index.html"],
+    )
+
+    result = _run_inject(tmp_path, "--port", "8400", "--token", TOKEN)
+
+    assert result.returncode == 0, result.stderr
+    assert "impeccable-live-start" in safe.read_text()
+    assert "impeccable-live-start" not in dependency.read_text()
+    assert "impeccable-live-start" not in git_page.read_text()
+
+
+def test_csp_revert_treats_the_generated_marker_as_literal_text(tmp_path: Path) -> None:
+    module_url = INJECT.as_uri()
+    # This exact policy encodes to base64 containing '+', which is a regexp
+    # quantifier and exposed the old dynamic-RegExp removal path.
+    policy = "default-src 'self'; report-uri /?x=~"
+    assert "+" in base64.b64encode(policy.encode()).decode()
+    source = f'<meta http-equiv="Content-Security-Policy" content="{policy}">'
+    script = (
+        f"import {{ patchCspMeta, revertCspMeta }} from {json.dumps(module_url)};"
+        f"const source={json.dumps(source)};"
+        "const patched=patchCspMeta(source,8400);"
+        "const reverted=revertCspMeta(patched);"
+        "process.stdout.write(JSON.stringify({patched,reverted}));"
+    )
+
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        cwd=tmp_path,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert "data-impeccable-csp-original" in payload["patched"]
+    assert payload["reverted"] == source
+
+
+def test_live_wrap_detects_a_multiline_self_closing_jsx_opener(tmp_path: Path) -> None:
+    module_url = WRAP.as_uri()
+    script = (
+        f"import {{ findClosingLine }} from {json.dumps(module_url)};"
+        "const lines=['<Card','  className=\"target\"','/>','<p>after</p>'];"
+        "process.stdout.write(String(findClosingLine(lines,0)));"
+    )
+
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        cwd=tmp_path,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "2"
+
+
+@pytest.mark.parametrize(
+    ("filename", "source", "terminator"),
+    [
+        ("index.html", '<section class="target">original</section>', "-->"),
+        ("component.tsx", '<section className="target">original</section>', "*/}"),
+    ],
+)
+def test_live_accept_base64_encodes_param_values_inside_source_comments(
+    tmp_path: Path, filename: str, source: str, terminator: str
+) -> None:
+    page = tmp_path / filename
+    page.write_text(source + "\n")
+    wrapped = _run_wrap(tmp_path, "--file", filename)
+    assert wrapped.returncode == 0, wrapped.stderr
+    text = page.read_text()
+    marker = "Variants: insert below this line"
+    marker_line = next(line for line in text.splitlines() if marker in line)
+    indent = marker_line[: len(marker_line) - len(marker_line.lstrip())]
+    style = (
+        f'{indent}<style data-impeccable-css="security-test">\n'
+        f"{indent}.target {{ color: red; }}\n"
+        f"{indent}</style>\n"
+        f'{indent}<div data-impeccable-variant="1">{source}</div>'
+    )
+    page.write_text(text.replace(marker_line, marker_line + "\n" + style))
+    param_values = {"unsafe": terminator, "script": "</script>"}
+
+    accepted = _run_accept(
+        tmp_path,
+        "--variant",
+        "1",
+        "--param-values",
+        json.dumps(param_values),
+    )
+
+    assert accepted.returncode == 0, accepted.stderr
+    param_line = next(
+        line for line in page.read_text().splitlines() if "impeccable-param-values" in line
+    )
+    assert terminator not in param_line.removesuffix(terminator)
+    encoded = param_line.split("base64:", 1)[1].split()[0]
+    assert json.loads(base64.b64decode(encoded)) == param_values
 
 
 def test_live_inject_preflights_every_anchor_before_changing_any_file(tmp_path: Path) -> None:
@@ -560,6 +813,79 @@ class LiveServer:
         self.close()
 
 
+@pytest.mark.parametrize("port", ["0", "65536"])
+def test_live_server_rejects_unusable_explicit_ports(
+    tmp_path: Path, port: str
+) -> None:
+    process = subprocess.Popen(
+        ["node", str(SERVER), f"--port={port}"],
+        cwd=tmp_path,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        deadline = time.monotonic() + 2
+        while process.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.025)
+        assert process.poll() is not None
+        _, stderr = process.communicate(timeout=1)
+        assert process.returncode != 0
+        assert "invalid_port" in stderr
+        assert not (tmp_path / ".impeccable" / "live" / "server.json").exists()
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            process.wait(timeout=3)
+
+
+def test_concurrent_background_launchers_only_claim_their_own_child(
+    tmp_path: Path,
+) -> None:
+    launchers = [
+        subprocess.Popen(
+            ["node", str(SERVER), "--background"],
+            cwd=tmp_path,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        for _ in range(2)
+    ]
+    results: list[tuple[int, str, str]] = []
+    try:
+        for launcher in launchers:
+            stdout, stderr = launcher.communicate(timeout=15)
+            results.append((launcher.returncode, stdout, stderr))
+        successes = [result for result in results if result[0] == 0]
+        failures = [result for result in results if result[0] != 0]
+        assert len(successes) == 1, results
+        assert len(failures) == 1, results
+        public = json.loads(successes[0][1])
+        private = json.loads(
+            (tmp_path / ".impeccable" / "live" / "server.json").read_text()
+        )
+        assert private["pid"] == public["pid"]
+        status, _, body = _request(
+            f"http://127.0.0.1:{private['port']}/status?token={quote(private['token'])}"
+        )
+        assert status == 200
+        assert json.loads(body)["pid"] == public["pid"]
+    finally:
+        subprocess.run(
+            ["node", str(SERVER), "stop", "--keep-inject"],
+            cwd=tmp_path,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        for launcher in launchers:
+            if launcher.poll() is None:
+                launcher.terminate()
+                launcher.wait(timeout=3)
+
+
 def _request(
     url: str,
     *,
@@ -613,11 +939,21 @@ def test_annotation_upload_refuses_an_existing_hard_link_without_changing_outsid
     tmp_path: Path,
 ) -> None:
     with LiveServer(tmp_path) as server:
-        session_dirs = list((tmp_path / ".impeccable" / "live" / "annotations").glob("session-*"))
-        assert len(session_dirs) == 1
+        status, _, body = _request(
+            f"{server.base_url}/annotation?token={quote(server.token)}&eventId=first",
+            method="POST",
+            body=b"first",
+            extra_headers={"Content-Type": "image/png"},
+        )
+        assert status == 200
+        first_path = Path(json.loads(body)["path"])
+        session_dir = first_path.parent
+        assert not session_dir.is_relative_to(tmp_path)
+        assert session_dir.stat().st_mode & 0o777 == 0o700
+        assert not (tmp_path / ".impeccable" / "live" / "annotations").exists()
         outside = tmp_path.parent / f"{tmp_path.name}-annotation-outside.png"
         outside.write_bytes(b"outside")
-        os.link(outside, session_dirs[0] / "hard-link.png")
+        os.link(outside, session_dir / "hard-link.png")
 
         status, _, body = _request(
             f"{server.base_url}/annotation?token={quote(server.token)}&eventId=hard-link",
@@ -629,6 +965,126 @@ def test_annotation_upload_refuses_an_existing_hard_link_without_changing_outsid
         assert status in {409, 500}
         assert "error" in json.loads(body)
         assert outside.read_bytes() == b"outside"
+
+
+def test_live_status_identifies_the_authenticated_server_process(tmp_path: Path) -> None:
+    with LiveServer(tmp_path) as server:
+        status, _, body = _request(
+            f"{server.base_url}/status?token={quote(server.token)}"
+        )
+
+        assert status == 200
+        payload = json.loads(body)
+        assert payload["pid"] == server.process.pid
+        assert payload["port"] == server.port
+
+
+def test_live_event_token_never_reaches_poll_or_durable_journal(tmp_path: Path) -> None:
+    event_id = "deadbeef"
+    with LiveServer(tmp_path) as server:
+        event = {
+            "token": server.token,
+            "type": "generate",
+            "id": event_id,
+            "action": "polish",
+            "count": 1,
+            "element": {"outerHTML": "<main>safe</main>"},
+        }
+        status, _, body = _request(
+            f"{server.base_url}/events",
+            method="POST",
+            body=json.dumps(event).encode(),
+            extra_headers={"Content-Type": "application/json"},
+        )
+        assert status == 200, body
+
+        status, _, polled = _request(
+            f"{server.base_url}/poll?token={quote(server.token)}&timeout=1000&leaseMs=1000"
+        )
+        assert status == 200
+        assert json.loads(polled)["id"] == event_id
+        assert server.token not in polled
+
+        journal = tmp_path / ".impeccable" / "live" / "sessions" / f"{event_id}.jsonl"
+        assert journal.exists()
+        assert server.token not in journal.read_text()
+
+
+def test_session_store_normalization_redacts_token_defensively(tmp_path: Path) -> None:
+    module_url = (SCRIPTS / "live-session-store.mjs").as_uri()
+    script = (
+        f"import {{ createLiveSessionStore }} from {json.dumps(module_url)};"
+        "const store=createLiveSessionStore({cwd:process.argv[1],sessionId:'deadbeef'});"
+        "store.appendEvent({id:'deadbeef',type:'generate',token:'journal-secret'});"
+    )
+
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script, str(tmp_path)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    journal = tmp_path / ".impeccable" / "live" / "sessions" / "deadbeef.jsonl"
+    assert "journal-secret" not in journal.read_text()
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "timeout=0",
+        "timeout=-1",
+        "timeout=NaN",
+        "timeout=1.5",
+        "timeout=600001",
+        "leaseMs=0",
+        "leaseMs=-1",
+        "leaseMs=NaN",
+        "leaseMs=1.5",
+        "leaseMs=600001",
+    ],
+)
+def test_live_poll_rejects_malformed_timeout_and_lease_values(
+    tmp_path: Path, query: str
+) -> None:
+    with LiveServer(tmp_path) as server:
+        status, _, body = _request(
+            f"{server.base_url}/events",
+            method="POST",
+            body=json.dumps(
+                {"token": server.token, "type": "discard", "id": "deadbeef"}
+            ).encode(),
+            extra_headers={"Content-Type": "application/json"},
+        )
+        assert status == 200, body
+        status, _, body = _request(
+            f"{server.base_url}/poll?token={quote(server.token)}&{query}"
+        )
+
+        assert status == 400
+        assert json.loads(body)["error"] == "Invalid poll bounds"
+
+
+def test_design_sidecar_endpoint_rejects_a_symlink_instead_of_serving_it(
+    tmp_path: Path,
+) -> None:
+    outside = tmp_path.parent / f"{tmp_path.name}-design-secret.json"
+    outside.write_text(json.dumps({"schemaVersion": 2, "secret": "do-not-serve"}))
+    sidecar = tmp_path / ".impeccable" / "design.json"
+    sidecar.parent.mkdir(parents=True)
+    sidecar.symlink_to(outside)
+
+    with LiveServer(tmp_path) as server:
+        status, _, body = _request(
+            f"{server.base_url}/design-system.json?token={quote(server.token)}"
+        )
+
+        assert status == 200
+        assert "do-not-serve" not in body
+        payload = json.loads(body)
+        assert payload["hasSidecar"] is False
+        assert "sidecarError" in payload
 
 
 def test_live_serves_the_checked_in_detector_and_screenshot_asset_contracts(

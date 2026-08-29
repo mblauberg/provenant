@@ -168,8 +168,10 @@ export function resolveFiles(rootDir, config) {
   const userExcludes = Array.isArray(config.exclude) ? config.exclude : [];
   const allExcludes = [...HARD_EXCLUDES, ...userExcludes];
   const excludeRegexes = allExcludes.map(globToRegex);
+  const hardExcludeRegexes = HARD_EXCLUDES.map(globToRegex);
 
   const isExcluded = (relPath) => excludeRegexes.some((re) => re.test(relPath));
+  const isHardExcluded = (relPath) => hardExcludeRegexes.some((re) => re.test(relPath));
   const isGlob = (s) => /[*?[]/.test(s);
 
   const seen = new Set();
@@ -178,8 +180,10 @@ export function resolveFiles(rootDir, config) {
     validateProjectRelativePath(pat, 'config.files');
     if (!isGlob(pat)) {
       // Literal path — include even if it doesn't exist yet; the caller
-      // reports file_not_found per-entry. Exclude list doesn't apply to
-      // explicit literal entries (user named it on purpose).
+      // reports file_not_found per-entry. User excludes do not override an
+      // explicit target, but dependency metadata is a hard boundary even
+      // when named literally.
+      if (isHardExcluded(pat.split(path.sep).join('/'))) continue;
       if (!seen.has(pat)) {
         seen.add(pat);
         out.push(pat);
@@ -507,8 +511,14 @@ export function revertCspMeta(content) {
 
     const newContentAttr = `content=${contentAttr.quote}${originalValue}${contentAttr.quote}`;
     let newAttrs = tag.attrs.replace(contentAttr.full, newContentAttr);
-    // Drop the marker attribute and any single space immediately preceding it.
-    newAttrs = newAttrs.replace(new RegExp(`\\s*${origAttr.full}`), '');
+    // Drop the exact marker text and its generated separator. Base64 can
+    // contain regexp metacharacters, so this must remain a literal splice.
+    const markerIndex = newAttrs.indexOf(origAttr.full);
+    if (markerIndex === -1) continue;
+    const markerStart = markerIndex > 0 && newAttrs[markerIndex - 1] === ' '
+      ? markerIndex - 1
+      : markerIndex;
+    newAttrs = newAttrs.slice(0, markerStart) + newAttrs.slice(markerIndex + origAttr.full.length);
     const newTag = tag.full.replace(tag.attrs, newAttrs);
 
     result = result.slice(0, tag.start) + newTag + result.slice(tag.end);

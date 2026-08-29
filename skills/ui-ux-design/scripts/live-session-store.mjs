@@ -84,7 +84,8 @@ function normalizeEvent(event, fallbackId) {
   const id = event.id || fallbackId;
   if (!id || typeof id !== 'string') throw new Error('event id required');
   if (!event.type || typeof event.type !== 'string') throw new Error('event type required');
-  return { ...event, id };
+  const { token: _bearerToken, ...safeEvent } = event;
+  return { ...safeEvent, id };
 }
 
 function getJournalPath(rootDir, id) {

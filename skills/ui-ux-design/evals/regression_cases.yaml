@@ -46,3 +46,44 @@ cases:
       evidence lane, not a substitute for manual inspection or a standards
       certification (references/review.md, "Unknown is not passing;
       heuristic judgement is not a standards result").
+  - id: r004
+    relation: boundary
+    prompt: "Review this interface and then fix what you find."
+    tags: [composition]
+    expected:
+      primary_skill: implement
+      companion_skills: [ui-ux-design]
+    note: >-
+      A clear review-and-fix request contains change intent. Implement owns
+      the approved change lifecycle and UI/UX supplies design judgement plus
+      the fresh read-only review after the repair.
+  - id: r005
+    relation: positive
+    prompt: "Audit this product's design system for token and component drift; report only and make no edits."
+    tags: [direct]
+    expected:
+      primary_skill: ui-ux-design
+      companion_skills: []
+    note: >-
+      Design-system audit remains a read-only focus inside UI/UX design rather
+      than becoming a competing top-level skill.
+  - id: r006
+    relation: boundary
+    prompt: "Consolidate the approved design-system tokens and migrate the existing UI consumers."
+    tags: [composition]
+    expected:
+      primary_skill: implement
+      companion_skills: [ui-ux-design]
+    note: >-
+      A design-system change stays a UI/UX focus, while implementation owns
+      source mutation, migration, verification and handoff.
+  - id: r007
+    relation: boundary
+    prompt: "Try the live variant workflow to review this page, but keep the entire attempt read-only and do not edit source."
+    tags: [composition]
+    expected:
+      primary_skill: ui-ux-design
+      companion_skills: []
+    note: >-
+      The explicit read-only constraint prevents live setup, injection,
+      wrapping and acceptance; gather non-mutating rendered evidence instead.

@@ -19,6 +19,11 @@ detector output are supporting evidence, not render proof. A quick review may
 sample the critical path. A full review expands the state and viewport matrix,
 but neither implies exhaustive coverage.
 
+For deterministic leads, run `node <skill-root>/scripts/detect.mjs --help`,
+then scan the relevant file, directory, or URL. Treat every structured
+`incomplete` target or engine failure as missing coverage, not a clean result.
+A clean scan remains supporting evidence and never certifies the rendered UI.
+
 For each selected lane, report one status: `tested`, `failed`, `not tested`, or
 `not applicable`. Mark each claim `verified` when tied to an observed artefact
 or reproducible check, otherwise `judgement`. Name the observed artefact: page,

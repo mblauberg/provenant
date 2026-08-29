@@ -18,6 +18,7 @@ import http from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { spawn, execFileSync } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import net from 'node:net';
 import { fileURLToPath } from 'node:url';
@@ -25,9 +26,9 @@ import { parseDesignMd } from './design-parser.mjs';
 import { loadContext, resolveContextDir } from './load-context.mjs';
 import { resolveFiles } from './live-inject.mjs';
 import { createLiveSessionStore } from './live-session-store.mjs';
+import { readContainedSource } from './contained-source.mjs';
 import {
   getDesignSidecarPath,
-  getLiveAnnotationsDir,
   readLiveServerInfo,
   removeLiveServerInfo,
   resolveLiveConfigPath,
@@ -46,6 +47,9 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // DESIGN.json fallback for existing projects.
 const CONTEXT_DIR = resolveContextDir(process.cwd());
 const DEFAULT_POLL_TIMEOUT = 600_000;   // 10 min — agent re-polls on timeout anyway
+const DEFAULT_LEASE_MS = 30_000;
+const MAX_POLL_TIMEOUT = 600_000;
+const MAX_LEASE_MS = 600_000;
 const SSE_HEARTBEAT_INTERVAL = 30_000;  // keepalive ping every 30s
 const SAFE_SOURCE_EXTENSIONS = new Set([
   '.astro', '.htm', '.html', '.jsx', '.svelte', '.tsx', '.vue',
@@ -56,14 +60,46 @@ const SAFE_SOURCE_EXTENSIONS = new Set([
 // ---------------------------------------------------------------------------
 
 async function findOpenPort(start = 8400) {
-  return new Promise((resolve) => {
+  if (!Number.isInteger(start) || start < 1 || start > 65535) {
+    throw new Error('No usable live server port remains');
+  }
+  return new Promise((resolve, reject) => {
     const srv = net.createServer();
     srv.listen(start, '127.0.0.1', () => {
       const port = srv.address().port;
       srv.close(() => resolve(port));
     });
-    srv.on('error', () => resolve(findOpenPort(start + 1)));
+    srv.on('error', (error) => {
+      if (error?.code === 'EADDRINUSE' && start < 65535) {
+        resolve(findOpenPort(start + 1));
+      } else {
+        reject(error);
+      }
+    });
   });
+}
+
+async function probeServerInfo(info, timeoutMs = 1_000) {
+  if (!info
+      || !Number.isInteger(info.pid)
+      || !Number.isInteger(info.port)
+      || info.port < 1
+      || info.port > 65535
+      || typeof info.token !== 'string'
+      || !info.token) return false;
+  try {
+    const response = await fetch(
+      `http://127.0.0.1:${info.port}/status?token=${encodeURIComponent(info.token)}`,
+      { signal: AbortSignal.timeout(timeoutMs) },
+    );
+    if (!response.ok) return false;
+    const status = await response.json();
+    return status?.status === 'ok'
+      && status.pid === info.pid
+      && status.port === info.port;
+  } catch {
+    return false;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -87,9 +123,16 @@ const state = {
 const MAX_ANNOTATION_BYTES = 10 * 1024 * 1024;
 const MAX_JSON_BODY_BYTES = 256 * 1024;
 
+function redactBearer(event) {
+  if (!event || typeof event !== 'object') return event;
+  const { token: _bearerToken, ...safeEvent } = event;
+  return safeEvent;
+}
+
 function enqueueEvent(event) {
-  if (!event || (event.id && state.pendingEvents.some((entry) => entry.event?.id === event.id && entry.event?.type === event.type))) return;
-  state.pendingEvents.push({ event, leaseUntil: 0 });
+  const safeEvent = redactBearer(event);
+  if (!safeEvent || (safeEvent.id && state.pendingEvents.some((entry) => entry.event?.id === safeEvent.id && entry.event?.type === safeEvent.type))) return;
+  state.pendingEvents.push({ event: safeEvent, leaseUntil: 0 });
   flushPendingPolls();
 }
 
@@ -449,7 +492,9 @@ function resolveConfiguredProjectSource(rootDir, requestedPath) {
     error.code = 'NOT_CONFIGURED_SOURCE';
     throw error;
   }
-  return sourceReal;
+  // Bind the response bytes to a no-follow descriptor after every allowlist
+  // check. Later pathname or parent swaps cannot redirect this read.
+  return readContainedSource(rootDir, requestedPath, { relativeOnly: true });
 }
 
 function createRequestHandler({ detectScript, sessionPath, livePath }) {
@@ -590,6 +635,7 @@ function createRequestHandler({ detectScript, sessionPath, livePath }) {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({
         status: 'ok',
+        pid: process.pid,
         port: state.port,
         connectedClients: state.sseClients.size,
         pendingEvents: state.pendingEvents.map((entry) => ({
@@ -606,7 +652,7 @@ function createRequestHandler({ detectScript, sessionPath, livePath }) {
     if (p === '/health') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({
-        status: 'ok', port: state.port, mode: 'variant',
+        status: 'ok', pid: process.pid, port: state.port, mode: 'variant',
         hasProjectContext: hasProjectContext(),
         connectedClients: state.sseClients.size,
       }));
@@ -628,9 +674,19 @@ function createRequestHandler({ detectScript, sessionPath, livePath }) {
       if (!authenticateQuery(req, res, url)) return;
 
       const mdPath = path.join(CONTEXT_DIR, 'DESIGN.md');
-      const jsonPath = resolveDesignSidecarPath(process.cwd(), CONTEXT_DIR) || getDesignSidecarPath(process.cwd());
+      const existingJsonPath = resolveDesignSidecarPath(process.cwd(), CONTEXT_DIR);
+      const jsonPath = existingJsonPath || getDesignSidecarPath(process.cwd());
       const mdStat = statOrNull(mdPath);
-      const jsonStat = statOrNull(jsonPath);
+      let jsonSnapshot = null;
+      let jsonReadError = null;
+      if (existingJsonPath) {
+        try {
+          jsonSnapshot = readContainedSource(process.cwd(), jsonPath);
+        } catch (error) {
+          jsonReadError = error;
+        }
+      }
+      const jsonMtimeMs = jsonSnapshot ? Number(jsonSnapshot.mtimeNs) / 1_000_000 : null;
 
       if (p === '/design-system/raw') {
         if (!mdStat) { res.writeHead(404); res.end('Not found'); return; }
@@ -639,7 +695,7 @@ function createRequestHandler({ detectScript, sessionPath, livePath }) {
         return;
       }
 
-      if (!mdStat && !jsonStat) {
+      if (!mdStat && !jsonSnapshot && !jsonReadError) {
         res.writeHead(404, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ present: false }));
         return;
@@ -648,8 +704,8 @@ function createRequestHandler({ detectScript, sessionPath, livePath }) {
       const response = {
         present: true,
         hasMd: !!mdStat,
-        hasSidecar: !!jsonStat,
-        mdNewerThanJson: !!(mdStat && jsonStat && mdStat.mtimeMs > jsonStat.mtimeMs + 1000),
+        hasSidecar: !!jsonSnapshot,
+        mdNewerThanJson: !!(mdStat && jsonSnapshot && mdStat.mtimeMs > jsonMtimeMs + 1000),
       };
 
       if (mdStat) {
@@ -660,12 +716,14 @@ function createRequestHandler({ detectScript, sessionPath, livePath }) {
         }
       }
 
-      if (jsonStat) {
+      if (jsonSnapshot) {
         try {
-          response.sidecar = JSON.parse(fs.readFileSync(jsonPath, 'utf-8'));
+          response.sidecar = JSON.parse(jsonSnapshot.bytes.toString('utf-8'));
         } catch (err) {
           response.sidecarError = 'Failed to parse .impeccable/design.json: ' + err.message;
         }
+      } else if (jsonReadError) {
+        response.sidecarError = 'Refused unsafe design sidecar: ' + (jsonReadError.code || 'read_failed');
       }
 
       res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -677,9 +735,9 @@ function createRequestHandler({ detectScript, sessionPath, livePath }) {
     if (p === '/source') {
       if (!authenticateQuery(req, res, url)) return;
       const filePath = url.searchParams.get('path');
-      let absPath;
+      let sourceSnapshot;
       try {
-        absPath = resolveConfiguredProjectSource(process.cwd(), filePath);
+        sourceSnapshot = resolveConfiguredProjectSource(process.cwd(), filePath);
       } catch (err) {
         const status = err.code === 'BAD_PATH'
           ? 400
@@ -692,9 +750,8 @@ function createRequestHandler({ detectScript, sessionPath, livePath }) {
         res.end(err.message);
         return;
       }
-      const content = fs.readFileSync(absPath, 'utf-8');
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-      res.end(content);
+      res.end(sourceSnapshot.bytes.toString('utf-8'));
       return;
     }
 
@@ -747,16 +804,17 @@ function createRequestHandler({ detectScript, sessionPath, livePath }) {
           res.end(JSON.stringify({ error }));
           return;
         }
-        if (state.sessionStore && msg.id) {
+        const safeMessage = redactBearer(msg);
+        if (state.sessionStore && safeMessage.id) {
           try {
-            state.sessionStore.appendEvent(msg);
+            state.sessionStore.appendEvent(safeMessage);
           } catch (err) {
             res.writeHead(500, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ error: 'session_store_append_failed', message: err.message }));
             return;
           }
         }
-        if (msg.type !== 'checkpoint') enqueueEvent(msg);
+        if (safeMessage.type !== 'checkpoint') enqueueEvent(safeMessage);
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: true }));
       });
@@ -797,8 +855,21 @@ function handlePollGet(req, res, url) {
     res.end(JSON.stringify({ error: 'Unauthorized' }));
     return;
   }
-  const timeout = parseInt(url.searchParams.get('timeout') || DEFAULT_POLL_TIMEOUT, 10);
-  const leaseMs = parseInt(url.searchParams.get('leaseMs') || '30000', 10);
+  const timeout = parseBoundedPositiveInteger(
+    url.searchParams.get('timeout'),
+    DEFAULT_POLL_TIMEOUT,
+    MAX_POLL_TIMEOUT,
+  );
+  const leaseMs = parseBoundedPositiveInteger(
+    url.searchParams.get('leaseMs'),
+    DEFAULT_LEASE_MS,
+    MAX_LEASE_MS,
+  );
+  if (timeout === null || leaseMs === null) {
+    res.writeHead(400, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Invalid poll bounds' }));
+    return;
+  }
   const available = findAvailablePendingEvent();
   if (available) {
     res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -824,6 +895,14 @@ function handlePollGet(req, res, url) {
     const idx = state.pendingPolls.indexOf(poll);
     if (idx !== -1) state.pendingPolls.splice(idx, 1);
   });
+}
+
+function parseBoundedPositiveInteger(raw, fallback, maximum) {
+  if (raw === null) return fallback;
+  if (!/^[1-9][0-9]*$/.test(raw)) return null;
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value > maximum) return null;
+  return value;
 }
 
 function handlePollPost(req, res) {
@@ -867,7 +946,10 @@ function handlePollPost(req, res) {
 let httpServer = null;
 
 function shutdown() {
-  removeLiveServerInfo(process.cwd());
+  const current = readLiveServerInfo(process.cwd())?.info;
+  if (current?.pid === process.pid && current?.token === state.token) {
+    removeLiveServerInfo(process.cwd());
+  }
   if (state.leaseTimer) clearTimeout(state.leaseTimer);
   state.leaseTimer = null;
   if (state.sessionDir) {
@@ -960,7 +1042,6 @@ if (args.includes('stop')) {
 if (args.includes('--background')) {
   const childArgs = args.filter(a => a !== '--background');
   const startedAt = Date.now();
-  const previousInfo = readLiveServerInfo(process.cwd())?.info || null;
   const child = spawn(process.execPath, [fileURLToPath(import.meta.url), ...childArgs], {
     detached: true,
     stdio: 'ignore',
@@ -994,10 +1075,7 @@ if (args.includes('--background')) {
     }
     try {
       const { info } = readLiveServerInfo(process.cwd()) || {};
-      const replacedPreviousRecord = !previousInfo
-        || info.pid !== previousInfo.pid
-        || info.token !== previousInfo.token;
-      if (info.pid !== process.pid && replacedPreviousRecord) {
+      if (info?.pid === child.pid && await probeServerInfo(info)) {
         // Bearer state stays in private server.json; terminal/transcript output
         // receives only the non-secret process identity needed for startup.
         console.log(JSON.stringify({ pid: info.pid, port: info.port }));
@@ -1016,6 +1094,7 @@ if (args.includes('--background')) {
     ...outcome,
     message: 'Timed out waiting for live server to start.',
   }));
+  try { process.kill(child.pid, 'SIGTERM'); } catch {}
   process.exit(1);
 }
 
@@ -1033,17 +1112,24 @@ if (existingRecord?.info) {
   }
 }
 
+const portArg = args.find(a => a.startsWith('--port='));
+if (portArg) {
+  const rawPort = portArg.slice('--port='.length);
+  if (!/^[1-9][0-9]*$/.test(rawPort)
+      || !Number.isSafeInteger(Number(rawPort))
+      || Number(rawPort) > 65535) {
+    console.error(JSON.stringify({ error: 'invalid_port', value: rawPort }));
+    process.exit(1);
+  }
+}
 state.token = randomUUID();
 state.sessionStore = createLiveSessionStore({ cwd: process.cwd() });
 restorePendingEventsFromStore();
-const portArg = args.find(a => a.startsWith('--port='));
-state.port = portArg ? parseInt(portArg.split('=')[1], 10) : await findOpenPort();
-// Annotation screenshots live in the project root so the agent's Read tool
-// doesn't trip a per-file permission prompt. Sessioned by token so concurrent
-// projects (or quick restarts) don't collide.
-const annotRoot = getLiveAnnotationsDir(process.cwd());
-fs.mkdirSync(annotRoot, { recursive: true });
-state.sessionDir = fs.mkdtempSync(path.join(annotRoot, 'session-'));
+state.port = portArg ? Number(portArg.slice('--port='.length)) : await findOpenPort();
+// Keep annotation output in one fresh, private OS-temporary run directory.
+// Shutdown removes only this exact directory.
+state.sessionDir = fs.mkdtempSync(path.join(os.tmpdir(), 'impeccable-live-'));
+fs.chmodSync(state.sessionDir, 0o700);
 
 const { detectScript, sessionPath, livePath } = loadBrowserScripts();
 httpServer = http.createServer(createRequestHandler({ detectScript, sessionPath, livePath }));

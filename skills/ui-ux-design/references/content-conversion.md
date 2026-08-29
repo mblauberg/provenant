@@ -22,6 +22,14 @@ an explicit metadata decision for title/description, canonical and social
 cards, structured or answer-oriented content, and SEO indexing versus noindex.
 Do not invent customers, metrics, guarantees, urgency, or legal claims.
 
+Before coding a landing surface, produce a compact pre-code handoff when it
+will reduce rework: audience and promise; chosen section order; hero copy and
+primary CTA; benefit and how-it-works scaffolds; proof and objection placement;
+the chosen layout rationale; final CTA continuity; and the metadata/SEO
+decision. Build section by section from that argument arc. When the request
+already settles these choices, record them and proceed without an approval
+round-trip.
+
 Empty and first-run states should orient, explain value, and offer an honest
 next action. Loading, error, permission, offline, and destructive states need
 specific, actionable content consistent with the interaction contract. Tone

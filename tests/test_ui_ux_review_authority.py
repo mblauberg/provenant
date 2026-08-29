@@ -97,7 +97,7 @@ def test_review_fixture_fails_closed_for_malformed_or_unknown_events(tmp_path, e
     source.mkdir()
     manifest = runner.tree_manifest(source)
     with pytest.raises(runner.ReviewBoundaryViolation):
-        runner.assert_review_boundary(manifest, manifest, [event])
+        runner.assert_review_boundary(manifest, source, [event])
 
 
 def test_review_fixture_rejects_an_empty_trace(tmp_path):
@@ -106,7 +106,7 @@ def test_review_fixture_rejects_an_empty_trace(tmp_path):
     source.mkdir()
     manifest = runner.tree_manifest(source)
     with pytest.raises(runner.ReviewBoundaryViolation, match="trace_empty"):
-        runner.assert_review_boundary(manifest, manifest, [])
+        runner.assert_review_boundary(manifest, source, [])
 
 
 @pytest.mark.parametrize("mutation", ["bytes", "mode", "symlink"])
@@ -130,9 +130,8 @@ def test_review_fixture_detects_source_tree_mutation(tmp_path, mutation):
         link.unlink()
         link.symlink_to("screen.html")
 
-    after = runner.tree_manifest(source)
     with pytest.raises(runner.ReviewBoundaryViolation, match="tree_changed"):
-        runner.assert_review_boundary(before, after, [_read_event()])
+        runner.assert_review_boundary(before, source, [_read_event()])
 
 
 def test_review_report_must_resolve_outside_the_protected_root(tmp_path):
@@ -145,7 +144,7 @@ def test_review_report_must_resolve_outside_the_protected_root(tmp_path):
     with pytest.raises(runner.ReviewBoundaryViolation, match="report_inside_protected_root"):
         runner.assert_review_boundary(
             manifest,
-            manifest,
+            source,
             [{"schema_version": 1, "channel": "output", "effect": "report-write", "path": str(inside)}],
             report_path=inside,
         )
@@ -160,7 +159,7 @@ def test_review_report_write_is_bound_to_one_outside_path(tmp_path):
 
     runner.assert_review_boundary(
         manifest,
-        manifest,
+        source,
         [{"schema_version": 1, "channel": "output", "effect": "report-write", "path": str(report)}],
         report_path=report,
     )
@@ -168,7 +167,7 @@ def test_review_report_write_is_bound_to_one_outside_path(tmp_path):
     with pytest.raises(runner.ReviewBoundaryViolation, match="report_path_mismatch"):
         runner.assert_review_boundary(
             manifest,
-            manifest,
+            source,
             [{"schema_version": 1, "channel": "output", "effect": "report-write", "path": str(tmp_path / "other.json")}],
             report_path=report,
         )
@@ -183,14 +182,12 @@ def test_review_boundary_cli_manifest_and_verify_contract(tmp_path):
     manifest = json.loads(manifest_result.stdout)
 
     before_path = tmp_path / "before.json"
-    after_path = tmp_path / "after.json"
     trace_path = tmp_path / "trace.json"
     _write_json(before_path, manifest)
-    _write_json(after_path, manifest)
     _write_json(trace_path, [_read_event()])
 
     verified = _run_boundary(
-        "verify", "--before", str(before_path), "--after", str(after_path), "--trace", str(trace_path)
+        "verify", "--before", str(before_path), "--root", str(source), "--trace", str(trace_path)
     )
     assert verified.returncode == 0, verified.stderr
     assert json.loads(verified.stdout) == {"schema_version": 1, "status": "pass"}
@@ -211,14 +208,12 @@ def test_review_boundary_cli_rejects_empty_malformed_and_forbidden_traces(tmp_pa
     runner = _runner()
     manifest = runner.tree_manifest(source)
     before_path = tmp_path / "before.json"
-    after_path = tmp_path / "after.json"
     trace_path = tmp_path / "trace.json"
     _write_json(before_path, manifest)
-    _write_json(after_path, manifest)
     _write_json(trace_path, trace)
 
     result = _run_boundary(
-        "verify", "--before", str(before_path), "--after", str(after_path), "--trace", str(trace_path)
+        "verify", "--before", str(before_path), "--root", str(source), "--trace", str(trace_path)
     )
 
     assert result.returncode == 1
@@ -234,3 +229,91 @@ def test_review_boundary_cli_has_no_protected_tree_exclusion_option(tmp_path):
     )
     assert result.returncode != 0
     assert "--exclude" in result.stderr
+
+
+@pytest.mark.parametrize(
+    "entries",
+    [
+        [{"path": "component.tsx", "kind": "file", "mode": "0644"}],
+        [{"path": "component.tsx", "kind": "file", "mode": "0644", "sha256": "not-a-digest"}],
+        [{"path": "../outside", "kind": "file", "mode": "0644", "sha256": "0" * 64}],
+        [{"path": "component.tsx", "kind": "directory", "mode": "0644", "extra": True}],
+        [
+            {"path": "same", "kind": "directory", "mode": "0755"},
+            {"path": "same", "kind": "directory", "mode": "0755"},
+        ],
+    ],
+)
+def test_review_boundary_rejects_malformed_manifest_entries(tmp_path, entries):
+    runner = _runner()
+    source = tmp_path / "source"
+    source.mkdir()
+    manifest = runner.tree_manifest(source)
+    manifest["entries"] = entries
+
+    with pytest.raises(runner.ReviewBoundaryViolation, match="before_manifest_malformed"):
+        runner.assert_review_boundary(manifest, source, [_read_event()])
+
+
+def test_review_boundary_rejects_a_forged_empty_manifest_for_a_nonempty_tree(tmp_path):
+    runner = _runner()
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "component.tsx").write_text("export const Component = () => null;\n")
+    forged = runner.tree_manifest(source)
+    forged["entries"] = []
+
+    with pytest.raises(runner.ReviewBoundaryViolation, match="tree_changed"):
+        runner.assert_review_boundary(forged, source, [_read_event()])
+
+
+def test_review_boundary_requires_before_root_to_match_the_canonical_live_root(tmp_path):
+    runner = _runner()
+    source = tmp_path / "source"
+    other = tmp_path / "other"
+    source.mkdir()
+    other.mkdir()
+    before = runner.tree_manifest(other)
+
+    with pytest.raises(runner.ReviewBoundaryViolation, match="before_root_mismatch"):
+        runner.assert_review_boundary(before, source, [_read_event()])
+
+
+def test_review_boundary_cli_recomputes_after_and_rejects_forged_empty_before(tmp_path):
+    runner = _runner()
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "component.tsx").write_text("export const Component = () => null;\n")
+    forged = runner.tree_manifest(source)
+    forged["entries"] = []
+    before_path = tmp_path / "before.json"
+    trace_path = tmp_path / "trace.json"
+    _write_json(before_path, forged)
+    _write_json(trace_path, [_read_event()])
+
+    result = _run_boundary(
+        "verify", "--before", str(before_path), "--root", str(source), "--trace", str(trace_path)
+    )
+
+    assert result.returncode == 1
+    assert json.loads(result.stdout)["error"] == "tree_changed"
+    assert result.stderr == ""
+
+
+def test_review_boundary_cli_rejects_the_retired_caller_supplied_after_option(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    result = _run_boundary(
+        "verify",
+        "--before",
+        str(tmp_path / "before.json"),
+        "--root",
+        str(source),
+        "--after",
+        str(tmp_path / "after.json"),
+        "--trace",
+        str(tmp_path / "trace.json"),
+    )
+
+    assert result.returncode != 0
+    assert "--after" in result.stderr

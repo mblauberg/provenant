@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 
 import yaml
 
@@ -37,6 +38,23 @@ def test_ui_ux_entrypoint_routes_by_natural_intent_without_internal_incantations
     assert "write envelope" not in sidecar
 
 
+def test_always_loaded_description_names_composition_and_adjacent_owners():
+    entry = (UI_UX_DESIGN / "SKILL.md").read_text()
+    frontmatter = yaml.safe_load(re.split(r"^---\s*$", entry, maxsplit=2, flags=re.MULTILINE)[1])
+    description = frontmatter["description"]
+    assert len(description) <= 250
+    for owner in ("implement", "code-review", "react-performance", "playwright"):
+        assert owner in description
+
+    prompt = yaml.safe_load((UI_UX_DESIGN / "agents" / "openai.yaml").read_text())[
+        "interface"
+    ]["default_prompt"].lower()
+    for review_intent in ("review", "audit", "comparison", "advice without change intent"):
+        assert review_intent in prompt
+    assert "review-and-fix" in prompt
+    assert "implement" in prompt
+
+
 def test_ui_ux_design_has_no_competing_review_or_performance_commands():
     references = UI_UX_DESIGN / "references"
     for retired in ("critique.md", "audit.md", "optimize.md", "heuristics-scoring.md", "personas.md"):
@@ -61,7 +79,7 @@ def test_natural_change_requests_route_to_implementation_without_user_facing_cer
     boundary = _fixture("boundary_cases.yaml")
     cases = {case["id"]: case for case in boundary["cases"]}
 
-    for case_id in ("b004", "b005"):
+    for case_id in ("b004", "b005", "b007", "b009"):
         case = cases[case_id]
         assert case["branch"] == "composition"
         assert case["expected"]["primary_skill"] == "implement"
@@ -70,6 +88,10 @@ def test_natural_change_requests_route_to_implementation_without_user_facing_cer
 
     assert cases["b002"]["branch"] == "review"
     assert "read-only" in cases["b002"]["prompt"].lower()
+    assert cases["b008"]["branch"] == "review"
+    assert "live" in cases["b008"]["prompt"].lower()
+    assert "read-only" in cases["b008"]["prompt"].lower()
+    assert "live setup" in cases["b008"]["expected"]["behaviour"].lower()
     assert cases["b006"]["branch"] == "scope"
     assert cases["b006"]["expected"]["primary_skill"] == "scope"
 
@@ -87,6 +109,23 @@ def test_trigger_and_regression_routes_are_both_active_structural_contracts():
         and "ui-ux-design" in case["expected"]["companion_skills"]
         for case in trigger["cases"]
     )
+
+    regressions = {case["id"]: case for case in regression["cases"]}
+    assert regressions["r004"]["expected"] == {
+        "primary_skill": "implement",
+        "companion_skills": ["ui-ux-design"],
+    }
+    assert regressions["r005"]["expected"]["primary_skill"] == "ui-ux-design"
+    assert regressions["r006"]["expected"] == {
+        "primary_skill": "implement",
+        "companion_skills": ["ui-ux-design"],
+    }
+    assert regressions["r007"]["expected"] == {
+        "primary_skill": "ui-ux-design",
+        "companion_skills": [],
+    }
+    assert "read-only" in regressions["r007"]["prompt"].lower()
+    assert "live" in regressions["r007"]["prompt"].lower()
 
 
 def test_review_branch_has_no_legacy_write_or_cleanup_surface():

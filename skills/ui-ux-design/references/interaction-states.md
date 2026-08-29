@@ -12,8 +12,10 @@ conflict, and stale data only where the control or flow can reach them.
 Use semantic controls and preserve keyboard, pointer, touch, and assistive
 technology paths. Focus must remain visible and ordered. Overlays require a
 verified accessible name, dismissal policy, background interaction policy,
-focus entry, containment when modal, and restoration target. Native popover is not accessible by default;
-verify browser support and behaviour. Modal focus
+focus entry, containment when modal, and restoration target. Native popover
+provides useful built-in invoker, focus, and dismissal semantics, but still
+verify the accessible name, chosen type, focus entry and restoration,
+background behaviour, browser support, and pattern-specific keyboard model. Modal focus
 containment must be proven, not assumed from the element name.
 
 Async feedback should identify what is happening without blocking unrelated

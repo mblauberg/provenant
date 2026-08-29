@@ -46,14 +46,30 @@ async function handleStdin() {
   const chunks = [];
   for await (const chunk of process.stdin) chunks.push(chunk);
   const input = Buffer.concat(chunks).toString('utf-8');
-  try {
-    const parsed = JSON.parse(input);
-    const fp = parsed?.tool_input?.file_path;
-    if (fp && fs.existsSync(fp)) {
+  let parsed;
+  try { parsed = JSON.parse(input); } catch { return detectText(input, '<stdin>'); }
+  const fp = parsed?.tool_input?.file_path;
+  if (fp) {
+    try {
+      if (!fs.existsSync(fp)) {
+        const error = new Error(`Cannot access ${fp}`);
+        error.code = 'target_unavailable';
+        throw error;
+      }
       return HTML_EXTENSIONS.has(path.extname(fp).toLowerCase())
-        ? detectHtml(fp) : detectText(fs.readFileSync(fp, 'utf-8'), fp);
+        ? await detectHtml(fp)
+        : detectText(fs.readFileSync(fp, 'utf-8'), fp);
+    } catch (cause) {
+      if (cause?.code === 'target_unavailable') {
+        cause.target = fp;
+        throw cause;
+      }
+      const error = new Error(`Unable to scan stdin wrapper file ${fp}`, { cause });
+      error.code = 'scan_failed';
+      error.target = fp;
+      throw error;
     }
-  } catch { /* not JSON */ }
+  }
   return detectText(input, '<stdin>');
 }
 
@@ -103,8 +119,17 @@ async function detectCli() {
     if (arg === '-fast') return '--fast';
     return arg;
   });
-  const commandIndex = args.indexOf('detect');
-  if (commandIndex !== -1) args.splice(commandIndex, 1);
+  if (args[0] === 'detect') {
+    args.shift();
+  } else {
+    const commandIndex = args.findIndex(arg => !arg.startsWith('-'));
+    const laterTarget = commandIndex !== -1 && args
+      .slice(commandIndex + 1)
+      .some(arg => !arg.startsWith('-'));
+    if (commandIndex !== -1 && args[commandIndex] === 'detect' && laterTarget) {
+      args.splice(commandIndex, 1);
+    }
+  }
   const jsonMode = args.includes('--json');
   const helpMode = args.includes('--help');
   const fastMode = args.includes('--fast');
@@ -126,7 +151,11 @@ async function detectCli() {
   };
 
   if (!process.stdin.isTTY && targets.length === 0) {
-    allFindings = await handleStdin();
+    try {
+      allFindings = await handleStdin();
+    } catch (error) {
+      recordError(error?.target || '<stdin>', error);
+    }
   } else {
     const paths = targets.length > 0 ? targets : [process.cwd()];
     const urlTargetCount = paths.filter(target => /^https?:\/\//i.test(target)).length;
@@ -193,7 +222,19 @@ async function detectCli() {
             }
           }
 
-          const files = walkDir(resolved);
+          const files = walkDir(resolved, {
+            onReadError(directory) {
+              const relative = path.relative(resolved, directory);
+              const display = relative || target;
+              recordError(
+                display,
+                Object.assign(
+                  new Error(`Unable to read directory ${display}`),
+                  { code: 'directory_read_failed' },
+                ),
+              );
+            },
+          });
           const htmlCount = files.filter(f => HTML_EXTENSIONS.has(path.extname(f).toLowerCase())).length;
 
           // Warn and confirm if scanning many files (static HTML/CSS processes each HTML file)

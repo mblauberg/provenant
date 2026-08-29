@@ -3,7 +3,7 @@
  * CLI helper: find an element in source and wrap it in a variant container.
  *
  * Usage:
- *   npx impeccable wrap --id SESSION_ID --count N --query "hero-combined-left" [--file path]
+ *   node live-wrap.mjs --id SESSION_ID --count N --query "hero-combined-left" [--file path]
  *
  * Searches project files for the element matching the query (class name, ID, or
  * text snippet), wraps it with the variant scaffolding, and prints the file path
@@ -31,7 +31,7 @@ export async function wrapCli() {
   const args = process.argv.slice(2);
 
   if (args.includes('--help') || args.includes('-h')) {
-    console.log(`Usage: impeccable wrap [options]
+    console.log(`Usage: node live-wrap.mjs [options]
 
 Find an element in source and wrap it in a variant container.
 
@@ -635,20 +635,20 @@ function findClosingLine(lines, start) {
   if (!openMatch) return start; // caller passed a non-opener; nothing to span
 
   const tagName = openMatch[1];
+  const joined = lines.slice(start).join('\n');
+  const tagRe = new RegExp('<(?:/)?' + tagName + '\\b[^>]*>', 'g');
   let depth = 0;
-  const openRe = new RegExp('<' + tagName + '(?=[\\s/>]|$)', 'g');
-  const selfCloseRe = new RegExp('<' + tagName + '[^>]*/>', 'g');
-  const closeRe = new RegExp('</' + tagName + '\\s*>', 'g');
-
-  for (let i = start; i < lines.length; i++) {
-    const line = lines[i];
-    const opens = (line.match(openRe) || []).length;
-    const selfCloses = (line.match(selfCloseRe) || []).length;
-    const closes = (line.match(closeRe) || []).length;
-
-    depth += opens - selfCloses - closes;
-
-    if (depth <= 0) return i;
+  let match;
+  while ((match = tagRe.exec(joined)) !== null) {
+    const token = match[0];
+    const isClose = token.startsWith('</');
+    const isSelfClose = !isClose && /\/\s*>$/.test(token);
+    if (isClose) depth--;
+    else if (!isSelfClose) depth++;
+    if (depth <= 0) {
+      const endOffset = match.index + token.length;
+      return start + joined.slice(0, endOffset).split('\n').length - 1;
+    }
   }
 
   // If we can't find the close, return a reasonable guess

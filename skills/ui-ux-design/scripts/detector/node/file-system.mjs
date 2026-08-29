@@ -19,14 +19,19 @@ const SCANNABLE_EXTENSIONS = new Set([
 
 const HTML_EXTENSIONS = new Set(['.html', '.htm']);
 
-function walkDir(dir) {
+function walkDir(dir, { onReadError } = {}) {
   const files = [];
   let entries;
-  try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return files; }
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch (error) {
+    onReadError?.(dir, error);
+    return files;
+  }
   for (const entry of entries) {
     if (SKIP_DIRS.has(entry.name)) continue;
     const full = path.join(dir, entry.name);
-    if (entry.isDirectory()) files.push(...walkDir(full));
+    if (entry.isDirectory()) files.push(...walkDir(full, { onReadError }));
     else if (SCANNABLE_EXTENSIONS.has(path.extname(entry.name).toLowerCase())) files.push(full);
   }
   return files;
@@ -167,7 +172,7 @@ async function isPortListening(port, fingerprint = null) {
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 2000);
-    const res = await fetch(`http://localhost:${port}/`, { signal: controller.signal, redirect: 'follow' });
+    const res = await fetch(`http://localhost:${port}/`, { signal: controller.signal, redirect: 'manual' });
     clearTimeout(timeout);
 
     // Check header fingerprint

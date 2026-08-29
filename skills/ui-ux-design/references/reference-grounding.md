@@ -33,6 +33,14 @@ stops on an otherwise clear request. Without that capability or authority, use
 an honest placeholder or continue without the asset. Do not scrape or import an
 asset library opportunistically.
 
+An optional image-dependent flow applies only when the request authorises image generation
+and material visual unknowns remain. Use a cheap palette or one to
+three structural mocks to settle colour, hierarchy, density, and composition
+before expensive raster production. Record the chosen or delegated direction,
+inventory which ingredients stay semantic HTML/CSS/SVG and which are genuinely
+image-native, then preserve image-native fidelity through the implementation.
+This adds no mandatory approval or questionnaire when intent is sufficient.
+
 If local owners conflict, identify the canonical owner and actual consumer
 behaviour. If no owner exists and choosing one would establish a durable
 system, return to `scope`; document placement belongs to `engineering-docs`.

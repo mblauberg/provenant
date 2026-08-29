@@ -12,6 +12,8 @@ import hashlib
 import json
 import os
 from pathlib import Path
+from pathlib import PurePosixPath
+import re
 import stat
 import sys
 from typing import Iterable
@@ -120,8 +122,52 @@ def _validate_manifest(value: object, label: str) -> dict:
         raise ReviewBoundaryViolation(f"{label}_manifest_malformed")
     if value.get("schema_version") != MANIFEST_SCHEMA_VERSION:
         raise ReviewBoundaryViolation(f"{label}_manifest_version")
-    if not isinstance(value.get("root"), str) or not isinstance(value.get("entries"), list):
+    root = value.get("root")
+    root_mode = value.get("root_mode")
+    entries = value.get("entries")
+    if (
+        not isinstance(root, str)
+        or not root
+        or not Path(root).is_absolute()
+        or str(Path(root)) != root
+        or not isinstance(root_mode, str)
+        or re.fullmatch(r"[0-7]{4}", root_mode) is None
+        or not isinstance(entries, list)
+    ):
         raise ReviewBoundaryViolation(f"{label}_manifest_malformed")
+    seen_paths: set[str] = set()
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise ReviewBoundaryViolation(f"{label}_manifest_malformed")
+        kind = entry.get("kind")
+        expected_keys = {"path", "kind", "mode"}
+        if kind == "file":
+            expected_keys.add("sha256")
+        elif kind == "symlink":
+            expected_keys.add("target")
+        elif kind not in {"directory", "other"}:
+            raise ReviewBoundaryViolation(f"{label}_manifest_malformed")
+        entry_path = entry.get("path")
+        if (
+            set(entry) != expected_keys
+            or not isinstance(entry_path, str)
+            or not entry_path
+            or PurePosixPath(entry_path).is_absolute()
+            or PurePosixPath(entry_path).as_posix() != entry_path
+            or any(part in {"", ".", ".."} for part in PurePosixPath(entry_path).parts)
+            or entry_path in seen_paths
+            or not isinstance(entry.get("mode"), str)
+            or re.fullmatch(r"[0-7]{4}", entry["mode"]) is None
+        ):
+            raise ReviewBoundaryViolation(f"{label}_manifest_malformed")
+        if kind == "file" and (
+            not isinstance(entry.get("sha256"), str)
+            or re.fullmatch(r"[0-9a-f]{64}", entry["sha256"]) is None
+        ):
+            raise ReviewBoundaryViolation(f"{label}_manifest_malformed")
+        if kind == "symlink" and not isinstance(entry.get("target"), str):
+            raise ReviewBoundaryViolation(f"{label}_manifest_malformed")
+        seen_paths.add(entry_path)
     return value
 
 
@@ -150,7 +196,7 @@ def _validate_event(event: object, index: int, report_path: Path | None) -> None
 
 def assert_review_boundary(
     before: dict,
-    after: dict,
+    root: Path | str,
     trace: Iterable[dict],
     *,
     report_path: Path | str | None = None,
@@ -158,7 +204,13 @@ def assert_review_boundary(
     """Validate a complete normalized trace and byte-sensitive manifests."""
 
     before_manifest = _validate_manifest(before, "before")
-    after_manifest = _validate_manifest(after, "after")
+    try:
+        protected_root = Path(root).resolve(strict=True)
+    except OSError as error:
+        raise ReviewBoundaryViolation("live_root_unavailable") from error
+    if before_manifest["root"] != str(protected_root):
+        raise ReviewBoundaryViolation("before_root_mismatch")
+    after_manifest = _validate_manifest(tree_manifest(protected_root), "after")
     if before_manifest != after_manifest:
         raise ReviewBoundaryViolation("tree_changed")
 
@@ -166,7 +218,6 @@ def assert_review_boundary(
     if not events:
         raise ReviewBoundaryViolation("trace_empty")
 
-    protected_root = Path(before_manifest["root"]).resolve(strict=False)
     bound_report = (
         _canonical_report_path(report_path, protected_root) if report_path is not None else None
     )
@@ -186,7 +237,7 @@ def main(argv: list[str] | None = None) -> int:
     manifest.add_argument("--root", required=True)
     verify = commands.add_parser("verify")
     verify.add_argument("--before", required=True)
-    verify.add_argument("--after", required=True)
+    verify.add_argument("--root", required=True)
     verify.add_argument("--trace", required=True)
     verify.add_argument("--report")
     args = parser.parse_args(argv)
@@ -196,11 +247,10 @@ def main(argv: list[str] | None = None) -> int:
             result = tree_manifest(args.root)
         else:
             before = _read_json(args.before)
-            after = _read_json(args.after)
             trace = _read_json(args.trace)
             if not isinstance(trace, list):
                 raise ValueError("trace must be a JSON array")
-            assert_review_boundary(before, after, trace, report_path=args.report)
+            assert_review_boundary(before, args.root, trace, report_path=args.report)
             result = {"schema_version": 1, "status": "pass"}
         print(json.dumps(result, sort_keys=True))
         return 0

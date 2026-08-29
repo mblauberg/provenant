@@ -232,23 +232,29 @@ async function detectUrl(url, options = {}) {
 
 async function createBrowserDetector(options = {}) {
   let puppeteer;
-  if (process.env.IMPECCABLE_BROWSER_ENGINE === 'unavailable') {
-    const error = new Error('Browser engine unavailable: install puppeteer to scan URLs');
-    error.code = 'engine_unavailable';
-    throw error;
-  }
-  try {
-    puppeteer = await import('puppeteer');
-  } catch {
-    const error = new Error('Browser engine unavailable: install puppeteer to scan URLs');
-    error.code = 'engine_unavailable';
-    throw error;
-  }
   const launchArgs = options.launchArgs || (process.env.CI ? ['--no-sandbox', '--disable-setuid-sandbox'] : []);
-  const browser = options.browser || await puppeteer.default.launch({
-    headless: options.headless ?? true,
-    args: launchArgs,
-  });
+  let browser = options.browser || null;
+  if (!browser && !options.launchBrowser) {
+    if (process.env.IMPECCABLE_BROWSER_ENGINE === 'unavailable') {
+      const error = new Error('Browser engine unavailable: install puppeteer to scan URLs');
+      error.code = 'engine_unavailable';
+      throw error;
+    }
+    try {
+      puppeteer = await import('puppeteer');
+    } catch {
+      const error = new Error('Browser engine unavailable: install puppeteer to scan URLs');
+      error.code = 'engine_unavailable';
+      throw error;
+    }
+  }
+  if (!browser) {
+    const launch = options.launchBrowser || ((launchOptions) => puppeteer.default.launch(launchOptions));
+    browser = await launch({
+      headless: options.headless ?? true,
+      args: launchArgs,
+    });
+  }
   const ownsBrowser = !options.browser;
   const defaults = {
     waitUntil: options.waitUntil || 'load',

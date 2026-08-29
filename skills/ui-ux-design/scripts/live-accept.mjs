@@ -175,8 +175,11 @@ function handleAccept(id, variantNum, lines, targetFile, paramValues, snapshot) 
     replacement.push(indent + (isJsx ? '`}</style>' : '</style>'));
     if (paramValues && Object.keys(paramValues).length > 0) {
       // Preserve the user's knob positions for the carbonize-cleanup agent
-      // to bake into the final CSS when it collapses scoped rules.
-      replacement.push(indent + commentSyntax.open + ' impeccable-param-values ' + id + ': ' + JSON.stringify(paramValues) + ' ' + commentSyntax.close);
+      // to bake into the final CSS when it collapses scoped rules. Keep the
+      // JSON out of comment syntax: values may contain HTML or JSX comment
+      // terminators, so the payload is encoded as UTF-8 base64.
+      const encodedParamValues = Buffer.from(JSON.stringify(paramValues), 'utf8').toString('base64');
+      replacement.push(indent + commentSyntax.open + ' impeccable-param-values ' + id + ': base64:' + encodedParamValues + ' ' + commentSyntax.close);
     }
     replacement.push(indent + commentSyntax.open + ' impeccable-carbonize-end ' + id + ' ' + commentSyntax.close);
   }

@@ -2,4 +2,4 @@
 interface:
   display_name: UI/UX Design
   short_description: Read-only UI/UX review by default; authorised design on request
-  default_prompt: Use $ui-ux-design. Infer intent from the whole request. Keep explicit reviews read-only; route a clear request to build, redesign, fix, polish, implement, or iterate live through the internal implementation lifecycle without asking the user for harness terminology.
+  default_prompt: Use $ui-ux-design. Infer intent from the whole request. Review, audit, comparison, and advice without change intent are read-only. A clear review-and-fix, build, redesign, polish, implementation, or live-iteration request routes to `implement` as primary with UI/UX as companion. Never require harness terminology from the user.

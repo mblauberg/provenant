@@ -44,7 +44,7 @@ On success, prints a JSON blob with non-secret server and project context.
 The bearer token remains only in private .impeccable/live/server.json state.
 
 On config_missing, prints:
-  { ok: false, error: "config_missing", configPath, hint }
+  { ok: false, error: "config_missing", path }
 
 The agent should then:
   1. If config_missing, create the config within the authorised project paths and re-run
@@ -62,7 +62,7 @@ The agent should then:
   }
 
   // 2. Start server (or reuse existing)
-  const serverInfo = ensureServerRunning();
+  const serverInfo = await ensureServerRunning();
   if (!serverInfo || serverInfo.failure) {
     const failure = serverInfo?.failure;
     const reason = failure?.status === 'timeout'
@@ -252,14 +252,47 @@ function safeParse(out) {
 /**
  * Return { pid, port, token } for the running live server, starting one if needed.
  */
-function ensureServerRunning() {
+async function probeServerInfo(info, timeoutMs = 1_000) {
+  if (!info
+      || !Number.isInteger(info.pid)
+      || !Number.isInteger(info.port)
+      || info.port < 1
+      || info.port > 65535
+      || typeof info.token !== 'string'
+      || !info.token) return false;
+  try {
+    const response = await fetch(
+      `http://127.0.0.1:${info.port}/status?token=${encodeURIComponent(info.token)}`,
+      { signal: AbortSignal.timeout(timeoutMs) },
+    );
+    if (!response.ok) return false;
+    const status = await response.json();
+    return status?.status === 'ok'
+      && status.pid === info.pid
+      && status.port === info.port;
+  } catch {
+    return false;
+  }
+}
+
+async function ensureServerRunning() {
   // Try to reuse an existing server
   try {
     const existing = readLiveServerInfo(process.cwd())?.info;
     if (existing && existing.pid) {
       try {
         process.kill(existing.pid, 0); // throws if dead
-        return { ...existing, startedByThisInvocation: false };
+        if (await probeServerInfo(existing)) {
+          return { ...existing, startedByThisInvocation: false };
+        }
+        return {
+          failure: {
+            status: 'refused',
+            classification: 'unrelated_pid_record',
+            pid: existing.pid,
+            port: existing.port,
+          },
+        };
       } catch { /* stale PID file — the server script will clean it up */ }
     }
   } catch { /* no PID file */ }
@@ -269,7 +302,9 @@ function ensureServerRunning() {
   const publicInfo = safeParse(result.stdout);
   if (publicInfo?.pid && publicInfo?.port) {
     const privateInfo = readLiveServerInfo(process.cwd())?.info;
-    if (privateInfo?.pid === publicInfo.pid && privateInfo?.port === publicInfo.port) {
+    if (privateInfo?.pid === publicInfo.pid
+        && privateInfo?.port === publicInfo.port
+        && await probeServerInfo(privateInfo)) {
       return { ...privateInfo, startedByThisInvocation: true };
     }
   }

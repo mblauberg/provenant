@@ -11,10 +11,28 @@ use read-only rendered evidence or an authorised isolated prototype instead.
 Start the skill-local runtime with `node <skill-root>/scripts/live.mjs` and use
 its help and JSON event contract as the operational procedure. Keep internal
 focus keys as protocol data, not a user interaction model. Validate every
-project-relative source target, including realpath containment, before setup,
-injection, wrapping, acceptance, carbonisation, or cleanup. Stop on ambiguity,
-server loss, stale session identity, malformed events, or an expanded write
-set.
+project-relative source target with descriptor-bound, no-follow containment
+before setup, injection, wrapping, acceptance, carbonisation, or cleanup. Stop
+on ambiguity, server loss, stale session identity, malformed events, or an
+expanded write set.
+
+## First run
+
+If boot returns `{ "ok": false, "error": "config_missing", "path": "..." }`,
+create only that project-local config path. Its minimum schema is:
+
+```json
+{
+  "files": ["index.html"],
+  "insertBefore": "</body>",
+  "commentSyntax": "html"
+}
+```
+
+`files` accepts project-relative files or globs; optional `exclude` applies to
+glob matches. Use either `insertBefore` or `insertAfter`, and choose
+`commentSyntax` as `html` or `jsx`. Hard exclusions always remove `.git` and
+`node_modules` targets. Re-run `live.mjs`; do not invent alternate config keys.
 
 Record the session ID, project root, source baseline, server identity, event
 revision, selected variant, and every changed path. Poll monotonically; on
@@ -23,9 +41,21 @@ session. Preview selection is not lifecycle acceptance. Preserve the action
 protocol and use its accept/discard/completion paths rather than editing around
 them.
 
-`server.json` is transient bearer-token state. Exclude `server.json`,
-`sessions/`, and `annotations/` from version control. Do not expose tokens in
-logs or screenshots.
+`server.json` is transient bearer-token state. Exclude `server.json` and
+`sessions/` from version control. Annotation output uses a fresh private OS
+temporary run directory and is removed with that run; keep any legacy
+`annotations/` path ignored. Do not expose tokens in logs or screenshots.
+
+## Handle fallback
+
+On `element_not_in_source`, `element_not_found`, `file_is_generated`, or
+`element_ambiguous`, the wrapper returns `fallback: "agent-driven"` without a
+source write. Read the candidate ranges and rendered context, then use a more
+specific element id/classes/tag/text or an explicit source `--file`. If the
+element is runtime-generated, persist the selected result in its canonical
+source owner rather than editing generated output. Manually place the exact
+session wrapper only inside the already bounded source path; if identity or
+ownership remains ambiguous, stop and report it.
 
 ## Required after accept
 

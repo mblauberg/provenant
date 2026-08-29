@@ -33,6 +33,15 @@ def test_review_contract_keeps_evidence_coverage_and_certification_boundaries():
     _has_all(review, "observation", "divergence", "remedy", "pass", "minor", "major")
     _has_all(review, "navigation", "get", "screenshot", "submission", "outside the protected")
     _has_all(qa, "field performance", "screenshot", "does not prove")
+    _has_all(
+        review,
+        "node <skill-root>/scripts/detect.mjs",
+        "file",
+        "directory",
+        "url",
+        "incomplete",
+        "supporting evidence",
+    )
 
 
 def test_design_and_system_contracts_are_actionable_without_questionnaire_ceremony():
@@ -44,6 +53,21 @@ def test_design_and_system_contracts_are_actionable_without_questionnaire_ceremo
     _has_all(systems, "primitive", "semantic", "component")
     _has_all(systems, "document", "extract", "frontmatter", "tokens", "components", "do not overwrite")
     _has_all(systems, "sidecar", "scan", "seed", "incremental")
+    _has_all(
+        systems,
+        "overview",
+        "colors",
+        "typography",
+        "elevation",
+        "do's and don'ts",
+        "token references",
+        "{path.to.token}",
+        "schemaVersion",
+        "extensions",
+        "narrative",
+        "round-trip",
+        "no-overwrite",
+    )
 
 
 def test_interaction_and_motion_contracts_cover_recovery_and_high_frequency_use():
@@ -63,6 +87,16 @@ def test_interaction_and_motion_contracts_cover_recovery_and_high_frequency_use(
         "layout shift",
     )
     _has_all(states, "retention", "expiry", "restoration", "concurrent", "failure")
+    _has_all(
+        states,
+        "built-in invoker",
+        "focus",
+        "dismissal",
+        "accessible name",
+        "chosen type",
+        "background",
+    )
+    assert "not accessible by default" not in states
     _has_all(motion, "high-frequency", "keyboard", "retarget", "tooltip", "stagger", "reduced-motion")
     assert "no universal duration" in motion
 
@@ -86,6 +120,16 @@ def test_content_responsive_data_and_visual_qa_contracts_keep_load_bearing_depth
         "noindex",
     )
     _has_all(
+        content,
+        "pre-code handoff",
+        "section order",
+        "hero copy",
+        "benefit",
+        "how-it-works",
+        "layout rationale",
+        "final cta",
+    )
+    _has_all(
         responsive,
         "srcset",
         "picture",
@@ -106,3 +150,36 @@ def test_conditional_doctrine_replaces_conflicting_absolutes_and_aliases_jargon(
 
     _has_all(visual, "pure black", "neither required nor forbidden", "actual face", "dark mode")
     _has_all(live, "variant promotion", "carbonisation")
+
+
+def test_optional_image_dependent_flow_is_low_ceremony_and_fidelity_preserving():
+    grounding = _text("reference-grounding.md")
+    _has_all(
+        grounding,
+        "authorises image generation",
+        "material visual unknowns",
+        "palette",
+        "structural mock",
+        "cheap",
+        "expensive raster",
+        "image-native fidelity",
+        "optional",
+    )
+    _has_all(grounding, "no mandatory approval", "questionnaire")
+
+
+def test_live_reference_has_first_run_schema_fallback_and_real_command_contracts():
+    live = _text("live.md")
+    _has_all(
+        live,
+        "first run",
+        '"files"',
+        '"insertbefore"',
+        '"commentsyntax"',
+        "config_missing",
+        '"path"',
+        "handle fallback",
+        "element_ambiguous",
+        "agent-driven",
+        "live-complete.mjs",
+    )

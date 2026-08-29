@@ -12,6 +12,7 @@ def _run_detect(
     *args: str,
     input_text: str | None = None,
     env: dict[str, str] | None = None,
+    cwd: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["node", str(DETECT), *args],
@@ -20,6 +21,7 @@ def _run_detect(
         text=True,
         input=input_text,
         env=env,
+        cwd=cwd,
     )
 
 
@@ -75,6 +77,18 @@ def test_detector_accepts_flags_before_or_after_detect_subcommand(tmp_path: Path
         assert result.returncode == 0, result.stderr
         assert json.loads(result.stdout) == []
         assert result.stderr == ""
+
+
+def test_detector_preserves_a_single_positional_target_named_detect(tmp_path: Path) -> None:
+    source = tmp_path / "detect"
+    source.write_text('<h1 class="bg-clip-text bg-gradient-to-r">Hello</h1>\n')
+
+    result = _run_detect("--json", "detect", cwd=tmp_path)
+
+    assert result.returncode == 2
+    findings = json.loads(result.stdout)
+    assert any(finding["antipattern"] == "gradient-text" for finding in findings)
+    assert result.stderr == ""
 
 
 def test_detector_json_all_target_failure_is_not_a_clean_result(tmp_path: Path) -> None:
@@ -164,6 +178,77 @@ def test_detector_json_turns_graph_and_file_read_errors_into_one_incomplete_resu
     assert result.stderr == ""
 
 
+def test_detector_json_reports_an_unreadable_root_directory(tmp_path: Path) -> None:
+    source = tmp_path / "locked"
+    source.mkdir()
+    (source / "hidden.tsx").write_text("export const Hidden = () => <div />;\n")
+    source.chmod(0)
+    try:
+        result = _run_detect("--json", str(source))
+    finally:
+        source.chmod(0o700)
+
+    assert result.returncode == 1
+    assert json.loads(result.stdout) == {
+        "status": "incomplete",
+        "findings": [],
+        "errors": [
+            {
+                "target": str(source),
+                "code": "directory_read_failed",
+                "message": f"Unable to read directory {source}",
+            }
+        ],
+    }
+    assert result.stderr == ""
+
+
+def test_detector_json_reports_an_unreadable_nested_directory(tmp_path: Path) -> None:
+    source = tmp_path / "project"
+    locked = source / "nested"
+    locked.mkdir(parents=True)
+    (locked / "hidden.tsx").write_text("export const Hidden = () => <div />;\n")
+    locked.chmod(0)
+    try:
+        result = _run_detect("--json", str(source))
+    finally:
+        locked.chmod(0o700)
+
+    assert result.returncode == 1
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "incomplete"
+    assert payload["findings"] == []
+    assert payload["errors"] == [
+        {
+            "target": "nested",
+            "code": "directory_read_failed",
+            "message": "Unable to read directory nested",
+        }
+    ]
+    assert result.stderr == ""
+
+
+def test_detector_json_structures_stdin_wrapper_scan_failures(tmp_path: Path) -> None:
+    source = tmp_path / "broken.html"
+    source.mkdir()
+    wrapper = json.dumps({"tool_input": {"file_path": str(source)}})
+
+    result = _run_detect("--json", input_text=wrapper)
+
+    assert result.returncode == 1
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "incomplete"
+    assert payload["findings"] == []
+    assert payload["errors"] == [
+        {
+            "target": str(source),
+            "code": "scan_failed",
+            "message": f"Unable to scan stdin wrapper file {source}",
+        }
+    ]
+    assert result.stderr == ""
+
+
 def test_detector_closes_an_owned_browser_when_new_page_fails(tmp_path: Path) -> None:
     marker = tmp_path / "closed"
     module_url = (
@@ -193,3 +278,77 @@ def test_detector_closes_an_owned_browser_when_new_page_fails(tmp_path: Path) ->
 
     assert result.returncode == 0, result.stderr
     assert marker.read_text() == "closed"
+
+
+def test_browser_detector_accepts_injected_browser_or_launcher_without_puppeteer() -> None:
+    module_url = (
+        ROOT
+        / "skills"
+        / "ui-ux-design"
+        / "scripts"
+        / "detector"
+        / "engines"
+        / "browser"
+        / "detect-url.mjs"
+    ).as_uri()
+    script = (
+        f"import {{ createBrowserDetector }} from {json.dumps(module_url)};"
+        "const external={close:async()=>{throw new Error('must-not-close')}};"
+        "const supplied=await createBrowserDetector({browser:external});"
+        "await supplied.close();"
+        "let launched=0;let closed=0;"
+        "const owned=await createBrowserDetector({launchBrowser:async()=>{launched++;return {close:async()=>{closed++}}}});"
+        "await owned.close();"
+        "process.stdout.write(JSON.stringify({same:supplied.browser===external,launched,closed}));"
+    )
+    env = {**os.environ, "IMPECCABLE_BROWSER_ENGINE": "unavailable"}
+
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {"same": True, "launched": 1, "closed": 1}
+
+
+def test_framework_probe_does_not_follow_redirects_off_origin() -> None:
+    module_url = (
+        ROOT
+        / "skills"
+        / "ui-ux-design"
+        / "scripts"
+        / "detector"
+        / "node"
+        / "file-system.mjs"
+    ).as_uri()
+    script = (
+        "import http from 'node:http';"
+        f"import {{ isPortListening }} from {json.dumps(module_url)};"
+        "let offOriginHits=0;"
+        "const destination=http.createServer((req,res)=>{offOriginHits++;res.end('OFF_ORIGIN')});"
+        "await new Promise(resolve=>destination.listen(0,'127.0.0.1',resolve));"
+        "const destinationPort=destination.address().port;"
+        "const origin=http.createServer((req,res)=>{res.writeHead(302,{location:`http://127.0.0.1:${destinationPort}/elsewhere`});res.end()});"
+        "await new Promise(resolve=>origin.listen(0,'127.0.0.1',resolve));"
+        "const result=await isPortListening(origin.address().port,{body:/OFF_ORIGIN/});"
+        "await new Promise(resolve=>origin.close(resolve));"
+        "await new Promise(resolve=>destination.close(resolve));"
+        "process.stdout.write(JSON.stringify({result,offOriginHits}));"
+    )
+
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {
+        "result": {"listening": True, "matched": False},
+        "offOriginHits": 0,
+    }

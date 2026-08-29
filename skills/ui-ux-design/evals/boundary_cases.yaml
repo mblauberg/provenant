@@ -81,3 +81,31 @@ cases:
       primary_skill: scope
       companion_skills: [ui-ux-design]
       behaviour: Resolve the consequential product choices before implementation; ask only the material questions in one batch.
+  - id: b007
+    relation: boundary
+    branch: composition
+    prompt: "Review this interface and fix what you find."
+    expected:
+      primary_skill: implement
+      companion_skills: [ui-ux-design]
+      behaviour: Clear review-and-fix change intent routes through implement; UI/UX supplies design judgement and a fresh read-only review after the repair.
+  - id: b008
+    relation: boundary
+    branch: review
+    prompt: "Use live variants to review this page, but keep the attempt read-only and do not edit source."
+    expected:
+      tool_calls_forbidden: [Write, Edit, NotebookEdit, ApplyPatch, Delete]
+      shell_mutation_forbidden: true
+      browser_external_write_forbidden: true
+      browser_read_effects_permitted: [navigate, get, screenshot]
+      tree_unchanged: true
+      report_outside_protected_root: true
+      behaviour: Explicit read-only authority prevents live setup, injection, wrapping and acceptance; use non-mutating rendered evidence.
+  - id: b009
+    relation: boundary
+    branch: composition
+    prompt: "Consolidate the approved design-system tokens and migrate their current UI consumers."
+    expected:
+      primary_skill: implement
+      companion_skills: [ui-ux-design]
+      behaviour: Design systems remain a UI/UX focus while implement owns the source-changing migration lifecycle.
