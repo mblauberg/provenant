@@ -18,8 +18,14 @@ available, otherwise a named degraded artifact records the direct result and col
 Fabric claim/ack records enforce message-delivery ownership and redelivery, not provider liveness
 or completion. Herdr observes and sends fire-and-forget steering only. Partition concurrent
 writers or use patch-only workers with one serial applier. Authors and decision-makers must not
-certify their own surface; receipts declare that independence and enforce family separation, they
-do not prove it.
+certify their own surface. Receipts declare independence and record provider family; family
+separation is an assurance property, not a restriction on ordinary execution.
+
+An authorised chair over a configured workspace may send ordinary workspace content to any
+configured provider family. This default excludes credential and authentication stores,
+secrets, unrelated paths and explicitly denied content. It remains bounded by path and write scopes,
+resource limits, platform rules and external-action gates. A separate assurance claim may
+require family separation and stronger evidence; ordinary provider execution does not require it.
 
 ## Lifecycle and user gates
 

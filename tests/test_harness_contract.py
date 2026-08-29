@@ -43,6 +43,78 @@ def test_default_agent_run_directory_is_ignored_in_the_harness_repo():
     assert ".agent-run/" in (ROOT / ".gitignore").read_text().splitlines()
 
 
+def test_configured_workspace_execution_is_family_agnostic_but_assurance_is_explicit():
+    harness = (ROOT / "HARNESS.md").read_text()
+    scope = (ROOT / "skills/scope/SKILL.md").read_text()
+    routing = (ROOT / "skills/orchestrate/references/routing-and-tiers.md").read_text()
+    orchestrate = (ROOT / "skills/orchestrate/SKILL.md").read_text()
+
+    assert "ordinary workspace content" in harness
+    assert "ordinary authorised workspace content" in scope.lower()
+    assert "family separation" in harness
+    assert "family-separation" in scope
+    assert "family separation" in routing
+    assert "family separation" in orchestrate
+    assert "family separation is an assurance property" in " ".join(harness.split())
+    assert "without a family-separation gate" in scope
+    assert "assurance claim" in routing
+    assert "execution freedom" in orchestrate
+
+
+def test_dispatch_manifest_and_delivery_run_have_distinct_owners():
+    adr = (ROOT / "docs/adr/0021-configured-workspace-dispatch-boundaries.md").read_text()
+
+    assert "compact dispatch manifest" in adr
+    assert "is not a delivery `RUN.json`" in adr
+    assert "one dispatch owner" in adr.lower()
+    assert "Fabric remains coordination-only" in adr
+
+
+def test_dispatch_owner_boundaries_distinguish_current_assurance_from_future_execution():
+    orchestrate = (ROOT / "skills/orchestrate/SKILL.md").read_text()
+    thin_cli = (ROOT / "docs/adr/0013-thin-provenant-cli.md").read_text()
+    adr = (ROOT / "docs/adr/0021-configured-workspace-dispatch-boundaries.md").read_text()
+    index = (ROOT / "docs/adr/README.md").read_text()
+    harness = (ROOT / "HARNESS.md").read_text()
+
+    orchestrate_compact = " ".join(orchestrate.lower().split())
+    adr_compact = " ".join(adr.split())
+    assert "ordinary configured-provider cli dispatch may use same-family routes" in orchestrate_compact
+    assert "same-family cli only for auth/preflight smoke tests" not in orchestrate_compact
+    assert "orchestration adapter" in thin_cli
+    assert "direct official provider CLIs" in thin_cli
+    assert "scripts/model-route" in adr
+    assert "cf_dispatch" in adr
+    assert "#518" in adr
+    assert "#683" in adr
+    assert "does not implement" in adr
+    assert "delegates provider invocation to `cf_dispatch.sh`" in adr
+    assert "ordinary intent/policy interface" in adr
+    assert "no ordinary mode exists yet" in adr_compact.lower()
+    assert "MANIFEST.md" in adr
+    assert "RUN_RECEIPT.json" in adr
+    assert "run_dir_finalize.py" in adr
+    assert "parallel lifecycle ledger" in adr
+    assert "exact attempt-record filename is a #518 schema decision" in adr
+    assert "delivery `RUN.json` may reference the orchestration receipt" in adr_compact
+    assert "amended by ADR 0021" in index
+    assert "provider-agnostic orchestration runner" in adr.lower()
+    assert "fixed bounded batch" in adr.lower()
+    assert "builds on the #518" in adr.lower()
+    assert "remains limited to assurance paths" in adr_compact.lower()
+    assert "#683" in adr and "workspace-boundary work in [#683]" not in adr
+    assert "secrets" in harness.lower()
+
+
+def test_thin_cli_decision_is_amended_by_dispatch_boundary_decision():
+    index = (ROOT / "docs/adr/README.md").read_text()
+    thin_cli = (ROOT / "docs/adr/0013-thin-provenant-cli.md").read_text()
+
+    assert "0021" in index
+    assert "0021-configured-workspace-dispatch-boundaries.md" in thin_cli
+    assert "bounded dispatch and batch commands" in thin_cli
+
+
 @pytest.mark.skipif(shutil.which("mmdc") is None, reason="optional local Mermaid CLI is absent")
 def test_readme_mermaid_parses_with_available_local_renderer(tmp_path):
     readme = (ROOT / "README.md").read_text()

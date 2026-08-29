@@ -12,8 +12,15 @@ The resolver's default `--adapter-gate fabric` fails closed when the selected
 fabric adapter is disabled or inactive. Runtime Fabric composition separately
 requires current provider identity and interface conformance. A direct CLI
 executor that owns its own safety and activation gates must opt in explicitly
-with `--adapter-gate direct-cli`; this never bypasses family or model-pattern
-constraints.
+with `--adapter-gate direct-cli`; this never bypasses explicit denials, adapter
+capability, path/write/resource limits or external-action gates. It does not
+impose family separation on ordinary execution.
+
+Configured workspace execution is family-agnostic: any configured adapter and
+provider family may perform ordinary authorised work when its capability and
+scope permit it. Family separation is recorded and enforced only when an
+assurance claim requires it. Route receipts retain actual provider/model
+lineage so an assurance claim can be checked rather than inferred.
 
 Route every dispatch by **task class, role, evidence surface, safety requirement,
 and capability tier**. Never route by a memorised model name. Discover current
