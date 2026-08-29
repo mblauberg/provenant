@@ -750,6 +750,14 @@ def test_attempt_records_available_git_base_identity(tmp_path: Path, monkeypatch
     prompt.write_text("identity\n", encoding="utf-8")
     adapter = workspace / "success-adapter"
     write_success_adapter(adapter)
+    write_executable(
+        adapter,
+        adapter.read_text(encoding="utf-8").replace(
+            "#!/usr/bin/env bash\n",
+            "#!/usr/bin/env bash\ngit commit --allow-empty -qm provider-change\n",
+            1,
+        ),
+    )
     module = load_dispatch_module()
     monkeypatch.setattr(module, "CF_DISPATCH", adapter)
     args = module.parser().parse_args([
@@ -764,3 +772,6 @@ def test_attempt_records_available_git_base_identity(tmp_path: Path, monkeypatch
     )
     assert record["workspace"]["base_revision"] == expected_head
     assert record["workspace"]["working_tree"] == "dirty"
+    assert subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=workspace, text=True
+    ).strip() != expected_head

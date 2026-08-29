@@ -437,6 +437,7 @@ def dispatch(args: argparse.Namespace) -> int:
         "effort": args.effort or "",
         "orchestrator_family": args.orchestrator_family or "",
     }
+    workspace_observation = workspace_identity(workspace)
     started_at = now()
     started = time.monotonic()
     observed_exit = False
@@ -562,7 +563,7 @@ def dispatch(args: argparse.Namespace) -> int:
         "started_at": started_at,
         "finished_at": finished_at,
         "duration_seconds": round(time.monotonic() - started, 6),
-        "workspace": workspace_identity(workspace),
+        "workspace": workspace_observation,
         "prompt": {"path": relative_path(run_dir, prompt_path), "digest": digest(prompt_path)},
         "result": (
             {"path": relative_path(run_dir, result_path), "digest": result_digest}
