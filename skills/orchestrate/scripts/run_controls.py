@@ -17,6 +17,7 @@ from typing import Any
 
 ATTEMPT_ID_RE = re.compile(r"^attempt-(?:\d{3}|[1-9]\d{3,})$")
 TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+BATCH_ID_RE = re.compile(r"^batch-(?:\d{3}|[1-9]\d{3,})$")
 TERMINAL_STATUSES = {"blocked", "succeeded", "failed", "timed_out", "cancelled"}
 DISPATCH_RUN = Path(__file__).with_name("dispatch_run.py")
 
@@ -31,6 +32,10 @@ def digest(path: Path) -> str:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             hasher.update(chunk)
     return f"sha256:{hasher.hexdigest()}"
+
+
+def _digest_bytes(value: bytes) -> str:
+    return f"sha256:{hashlib.sha256(value).hexdigest()}"
 
 
 def _fail(message: str, status: str = "invalid_request") -> int:
@@ -65,53 +70,68 @@ def _relative(run_dir: Path, value: Any, label: str) -> str:
     return path.as_posix()
 
 
-def _regular(run_dir: Path, value: Any, label: str, expected: str | None = None) -> tuple[str, Path]:
+def _read_regular(run_dir: Path, value: Any, label: str, expected: str | None = None) -> tuple[str, Path, bytes]:
     relative = _relative(run_dir, value, label)
     if expected is not None and relative != expected:
         raise ControlError(f"{label} path does not match its attempt: {relative}")
     path = run_dir / relative
-    current = run_dir
     try:
+        current = run_dir
         for part in Path(relative).parts:
             current /= part
             if current.is_symlink():
                 raise ControlError(f"{label} path contains a symlink: {relative}")
         path.resolve().relative_to(run_dir.resolve())
-        metadata = path.lstat()
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(path, flags)
+        try:
+            metadata = os.fstat(fd)
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+                raise ControlError(f"{label} path is not a regular single-link file: {relative}")
+            chunks: list[bytes] = []
+            while True:
+                chunk = os.read(fd, 1024 * 1024)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            return relative, path, b"".join(chunks)
+        finally:
+            os.close(fd)
+    except ControlError:
+        raise
     except (OSError, ValueError) as exc:
         raise ControlError(f"{label} path is outside or unavailable: {relative}") from exc
-    if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
-        raise ControlError(f"{label} path is not a regular single-link file: {relative}")
-    return relative, path
 
 
-def _attempt(run_dir: Path, task_id: str, attempt_id: str) -> tuple[dict[str, Any], dict[str, str], Path]:
+def _attempt(run_dir: Path, task_id: str, attempt_id: str) -> tuple[dict[str, Any], dict[str, str], Path, dict[str, bytes]]:
     if not TASK_ID_RE.fullmatch(task_id):
         raise ControlError("task id is invalid")
     if not ATTEMPT_ID_RE.fullmatch(attempt_id):
         raise ControlError("attempt id is invalid")
     root = Path("dispatch") / "tasks" / task_id / attempt_id
     attempt_rel = (root / "attempt.json").as_posix()
-    _, attempt_path = _regular(run_dir, attempt_rel, "attempt", attempt_rel)
+    _, attempt_path, attempt_bytes = _read_regular(run_dir, attempt_rel, "attempt", attempt_rel)
     try:
-        record = json.loads(attempt_path.read_text(encoding="utf-8"))
+        record = json.loads(attempt_bytes.decode("utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ControlError(f"attempt receipt is not valid JSON: {attempt_rel}") from exc
     if (
         not isinstance(record, dict)
         or record.get("schema_version") != 1
         or record.get("record_type") != "dispatch-attempt"
+        or record.get("run_id") != run_dir.name
         or record.get("task_id") != task_id
         or record.get("attempt_id") != attempt_id
         or record.get("attempt_path") != attempt_rel
         or record.get("status") not in TERMINAL_STATUSES
     ):
         raise ControlError(f"attempt receipt has invalid identity or status: {attempt_rel}")
-    sidecar_rel, sidecar = _regular(run_dir, (root / "attempt.sha256").as_posix(), "attempt digest", (root / "attempt.sha256").as_posix())
-    expected_sidecar = f"{digest(attempt_path)}  attempt.json\n"
-    if sidecar.read_text(encoding="utf-8") != expected_sidecar:
+    sidecar_rel, _, sidecar_bytes = _read_regular(run_dir, (root / "attempt.sha256").as_posix(), "attempt digest", (root / "attempt.sha256").as_posix())
+    expected_sidecar = f"{_digest_bytes(attempt_bytes)}  attempt.json\n"
+    if sidecar_bytes.decode("utf-8") != expected_sidecar:
         raise ControlError(f"attempt digest does not match retained receipt: {attempt_rel}")
     artifacts: dict[str, str] = {"attempt": attempt_rel, "attempt_digest": sidecar_rel}
+    payloads: dict[str, bytes] = {}
     expected = {
         "prompt": root / "prompt.md",
         "diagnostic_log": root / "stderr.log",
@@ -127,29 +147,91 @@ def _attempt(run_dir: Path, task_id: str, attempt_id: str) -> tuple[dict[str, An
     for name, claim, label in claims:
         if not isinstance(claim, dict):
             raise ControlError(f"{label} evidence is missing: {attempt_rel}")
-        rel, path = _regular(run_dir, claim.get("path"), label, expected[name].as_posix())
-        if claim.get("digest") != digest(path):
+        rel, path, data = _read_regular(run_dir, claim.get("path"), label, expected[name].as_posix())
+        if claim.get("digest") != _digest_bytes(data):
             raise ControlError(f"{label} digest does not match retained evidence: {rel}")
         artifacts[name] = rel
+        payloads[name] = data
     result_claim = record.get("result")
     if result_claim is not None:
         if not isinstance(result_claim, dict):
             raise ControlError(f"result evidence is malformed: {attempt_rel}")
-        rel, path = _regular(run_dir, result_claim.get("path"), "result", (root / "result.md").as_posix())
-        if result_claim.get("digest") != digest(path):
+        rel, path, data = _read_regular(run_dir, result_claim.get("path"), "result", (root / "result.md").as_posix())
+        if result_claim.get("digest") != _digest_bytes(data):
             raise ControlError(f"result digest does not match retained evidence: {rel}")
         artifacts["result"] = rel
+        payloads["result"] = data
     elif record.get("status") == "succeeded":
         raise ControlError(f"successful attempt has no result evidence: {attempt_rel}")
     if record.get("status") == "blocked":
         question = record.get("question")
         if not isinstance(question, dict) or not isinstance(question.get("prompt"), str) or not question["prompt"]:
             raise ControlError(f"blocked attempt has no question: {attempt_rel}")
-    return record, artifacts, attempt_path
+    return record, artifacts, attempt_path, payloads
 
 
 def _continuation(record: dict[str, Any]) -> str:
     return f"dispatch/tasks/{record['task_id']}/{record['attempt_id']}/attempt.json"
+
+
+def _inspect_batches(run_dir: Path) -> list[dict[str, Any]]:
+    root = run_dir / "dispatch/batches"
+    if root.is_symlink() or (root.exists() and not root.is_dir()):
+        raise ControlError("batch directory is invalid")
+    batches: list[dict[str, Any]] = []
+    for batch_dir in sorted(root.iterdir()) if root.is_dir() else []:
+        if batch_dir.is_symlink() or not batch_dir.is_dir():
+            continue
+        summary_path = batch_dir / "summary.json"
+        if not summary_path.exists():
+            continue
+        summary_rel, summary_file, summary_bytes = _read_regular(run_dir, summary_path.relative_to(run_dir).as_posix(), "batch summary")
+        try:
+            summary = json.loads(summary_bytes.decode("utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ControlError(f"batch summary is not valid JSON: {summary_path}") from exc
+        if (not isinstance(summary, dict) or summary.get("schema_version") != 1
+                or summary.get("record_type") != "dispatch-batch"
+                or summary.get("batch_id") != batch_dir.name or not isinstance(summary.get("tasks"), list)):
+            raise ControlError(f"batch summary has invalid schema or identity: {summary_path}")
+        tasks: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for item in summary["tasks"]:
+            if not isinstance(item, dict) or not isinstance(item.get("task_id"), str) or item["task_id"] in seen:
+                raise ControlError(f"batch summary has invalid task universe: {summary_path}")
+            seen.add(item["task_id"])
+            task = {"task_id": item["task_id"], "status": item.get("status"),
+                    "receipt_status": "unavailable"}
+            if task["status"] not in TERMINAL_STATUSES:
+                raise ControlError(f"batch summary has invalid task status: {summary_path}")
+            attempt_path = item.get("attempt_path")
+            if attempt_path is None and item["status"] == "succeeded":
+                raise ControlError(f"successful batch task has no attempt path: {summary_path}")
+            if isinstance(attempt_path, str):
+                try:
+                    attempt_rel = _relative(run_dir, attempt_path, "batch attempt")
+                    expected_prefix = f"dispatch/tasks/{item['task_id']}/"
+                    if not attempt_rel.startswith(expected_prefix) or not attempt_rel.endswith("/attempt.json"):
+                        raise ControlError("batch summary attempt identity is invalid")
+                    attempt_id = attempt_rel[len(expected_prefix):-len("/attempt.json")]
+                    attempt_file = run_dir / attempt_rel
+                    if not attempt_file.exists():
+                        task["attempt_path"] = attempt_rel
+                        task["receipt_status"] = "receipt_unavailable"
+                    else:
+                        record, artifacts, _, _ = _attempt(run_dir, item["task_id"], attempt_id)
+                        if record["status"] != item["status"]:
+                            raise ControlError(f"batch summary status disagrees with attempt: {item['task_id']}")
+                        if item["status"] == "succeeded" and item.get("result_path") != artifacts.get("result"):
+                            raise ControlError(f"batch summary result identity disagrees with attempt: {item['task_id']}")
+                        task.update({"attempt_id": record["attempt_id"], "attempt_path": artifacts["attempt"],
+                                     "receipt_status": "validated"})
+                except ControlError:
+                    raise
+            tasks.append(task)
+        batches.append({"batch_id": batch_dir.name, "status": summary.get("status"),
+                        "summary_path": summary_rel, "tasks": tasks})
+    return batches
 
 
 def _inspect(args: argparse.Namespace) -> int:
@@ -157,19 +239,37 @@ def _inspect(args: argparse.Namespace) -> int:
     if args.attempt_id and not args.task_id:
         raise ControlError("--attempt-id requires --task-id")
     selected: list[tuple[dict[str, Any], dict[str, str]]] = []
+    incomplete: dict[str, list[dict[str, Any]]] = {}
+
+    def collect(task_id: str, path: Path) -> None:
+        if not path.is_dir() or path.is_symlink():
+            return
+        attempt_file = path / "attempt.json"
+        if not attempt_file.exists():
+            incomplete.setdefault(task_id, []).append({
+                "attempt_id": path.name, "status": "incomplete",
+                "receipt_status": "unavailable",
+                "artifacts": {"attempt": f"dispatch/tasks/{task_id}/{path.name}/attempt.json"},
+            })
+            return
+        record, artifacts, _, _ = _attempt(run_dir, task_id, path.name)
+        selected.append((record, artifacts))
+
     if args.task_id:
         task_dir = run_dir / "dispatch/tasks" / args.task_id
         if args.attempt_id:
-            record, artifacts, _ = _attempt(run_dir, args.task_id, args.attempt_id)
-            selected.append((record, artifacts))
+            attempt_dir = task_dir / args.attempt_id
+            if attempt_dir.is_dir() and not attempt_dir.is_symlink() and not (attempt_dir / "attempt.json").exists():
+                collect(args.task_id, attempt_dir)
+            else:
+                record, artifacts, _, _ = _attempt(run_dir, args.task_id, args.attempt_id)
+                selected.append((record, artifacts))
         else:
             if task_dir.is_symlink() or not task_dir.is_dir():
                 raise ControlError(f"task does not exist: {args.task_id}")
             for path in sorted(task_dir.glob("attempt-*")):
-                if path.is_dir():
-                    record, artifacts, _ = _attempt(run_dir, args.task_id, path.name)
-                    selected.append((record, artifacts))
-            if not selected:
+                collect(args.task_id, path)
+            if not selected and not incomplete.get(args.task_id):
                 raise ControlError(f"task has no retained attempts: {args.task_id}")
     else:
         tasks_root = run_dir / "dispatch/tasks"
@@ -178,9 +278,7 @@ def _inspect(args: argparse.Namespace) -> int:
         for task_dir in sorted(tasks_root.iterdir()) if tasks_root.is_dir() else []:
             if task_dir.is_dir() and not task_dir.is_symlink() and TASK_ID_RE.fullmatch(task_dir.name):
                 for path in sorted(task_dir.glob("attempt-*")):
-                    if path.is_dir():
-                        record, artifacts, _ = _attempt(run_dir, task_dir.name, path.name)
-                        selected.append((record, artifacts))
+                    collect(task_dir.name, path)
     by_task: dict[str, list[dict[str, Any]]] = {}
     for record, artifacts in selected:
         item: dict[str, Any] = {
@@ -191,21 +289,24 @@ def _inspect(args: argparse.Namespace) -> int:
             item["question"] = record["question"]
             item["continuation_ref"] = _continuation(record)
         by_task.setdefault(record["task_id"], []).append(item)
+    for task_id, items in incomplete.items():
+        by_task.setdefault(task_id, []).extend(items)
     tasks = [{"task_id": task_id, "attempts": attempts} for task_id, attempts in sorted(by_task.items())]
     receipt = json.loads((run_dir / "RUN_RECEIPT.json").read_text(encoding="utf-8"))
     print(json.dumps({"schema_version": 1, "run_id": run_dir.name,
-                      "run_status": receipt.get("status"), "tasks": tasks}, sort_keys=True))
+                      "run_status": receipt.get("status"), "tasks": tasks,
+                      "batches": _inspect_batches(run_dir)}, sort_keys=True))
     return 0
 
 
 def _artifact(args: argparse.Namespace) -> int:
     run_dir = _run_dir(args.run_dir)
-    record, artifacts, _ = _attempt(run_dir, args.task_id, args.attempt_id)
+    _, artifacts, _, payloads = _attempt(run_dir, args.task_id, args.attempt_id)
     key = {"prompt": "prompt", "result": "result", "diagnostic-log": "diagnostic_log"}[args.command]
     relative = artifacts.get(key)
     if relative is None:
         raise ControlError(f"{args.command} evidence is unavailable for {args.task_id}/{args.attempt_id}")
-    sys.stdout.buffer.write((run_dir / relative).read_bytes())
+    sys.stdout.buffer.write(payloads[key])
     return 0
 
 
@@ -241,9 +342,23 @@ def _run_child(command: list[str]) -> int:
     return completed.returncode
 
 
+def _temporary_prompt(workspace: Path, content: bytes) -> Path:
+    fd, temporary = tempfile.mkstemp(prefix=".provenant-reducer-", suffix=".md", dir=workspace)
+    path = Path(temporary)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+    except BaseException:
+        path.unlink(missing_ok=True)
+        raise
+    return path
+
+
 def _retry(args: argparse.Namespace) -> int:
     run_dir = _run_dir(args.run_dir)
-    parent, artifacts, _ = _attempt(run_dir, args.task_id, args.attempt_id)
+    parent, artifacts, _, payloads = _attempt(run_dir, args.task_id, args.attempt_id)
     if parent["status"] == "succeeded":
         raise ControlError("successful attempts cannot be retried")
     if args.same_route == args.reroute:
@@ -265,46 +380,57 @@ def _retry(args: argparse.Namespace) -> int:
             if value:
                 route[key] = value
         _route_selector(route)
-    prompt = run_dir / artifacts["prompt"]
-    return _run_child(_dispatch_command(run_dir, args.task_id, prompt, route, args.attempt_id))
+    workspace = Path.cwd().resolve()
+    if workspace == run_dir:
+        raise ControlError("retry needs a workspace parent for its temporary prompt")
+    prompt = _temporary_prompt(workspace, payloads["prompt"])
+    try:
+        return _run_child(_dispatch_command(run_dir, args.task_id, prompt, route, args.attempt_id))
+    finally:
+        prompt.unlink(missing_ok=True)
 
 
-def _load_summaries(run_dir: Path) -> list[dict[str, Any]]:
-    root = run_dir / "dispatch/batches"
-    if root.is_symlink() or (root.exists() and not root.is_dir()):
-        raise ControlError("batch directory is invalid")
-    summaries: list[dict[str, Any]] = []
-    for batch_dir in sorted(root.iterdir()) if root.is_dir() else []:
-        if batch_dir.is_symlink() or not batch_dir.is_dir():
-            continue
-        summary_path = batch_dir / "summary.json"
-        if not summary_path.exists():
-            continue
-        _, summary_file = _regular(run_dir, summary_path.relative_to(run_dir).as_posix(), "batch summary")
-        try:
-            summary = json.loads(summary_file.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise ControlError(f"batch summary is not valid JSON: {summary_path}") from exc
-        if not isinstance(summary, dict) or summary.get("schema_version") != 1 or not isinstance(summary.get("tasks"), list):
-            raise ControlError(f"batch summary has invalid schema: {summary_path}")
-        seen: set[str] = set()
-        for item in summary["tasks"]:
-            if not isinstance(item, dict) or not isinstance(item.get("task_id"), str) or item["task_id"] in seen:
-                raise ControlError(f"batch summary has invalid task universe: {summary_path}")
-            seen.add(item["task_id"])
-            if item.get("status") not in TERMINAL_STATUSES:
-                raise ControlError(f"batch summary has invalid task status: {summary_path}")
-            if item.get("attempt_path") is not None:
-                attempt_rel, _ = _regular(run_dir, item["attempt_path"], "batch attempt")
-                expected_prefix = f"dispatch/tasks/{item['task_id']}/"
-                if not attempt_rel.startswith(expected_prefix) or not attempt_rel.endswith("/attempt.json"):
-                    raise ControlError(f"batch summary attempt identity is invalid: {summary_path}")
-                attempt_id = attempt_rel[len(expected_prefix):-len("/attempt.json")]
-                _attempt(run_dir, item["task_id"], attempt_id)
-            elif item.get("status") == "succeeded":
+def _load_summary(run_dir: Path, batch_id: str) -> dict[str, Any]:
+    if not BATCH_ID_RE.fullmatch(batch_id):
+        raise ControlError("batch id is invalid")
+    summary_path = run_dir / "dispatch/batches" / batch_id / "summary.json"
+    _, _, summary_bytes = _read_regular(run_dir, summary_path.relative_to(run_dir).as_posix(), "batch summary")
+    try:
+        summary = json.loads(summary_bytes.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ControlError(f"batch summary is not valid JSON: {summary_path}") from exc
+    if (not isinstance(summary, dict) or summary.get("schema_version") != 1
+            or summary.get("record_type") != "dispatch-batch"
+            or summary.get("batch_id") != batch_id or not isinstance(summary.get("tasks"), list)):
+        raise ControlError(f"batch summary has invalid schema or identity: {summary_path}")
+    seen: set[str] = set()
+    for item in summary["tasks"]:
+        if (not isinstance(item, dict) or not isinstance(item.get("task_id"), str)
+                or not TASK_ID_RE.fullmatch(item["task_id"]) or item["task_id"] in seen):
+            raise ControlError(f"batch summary has invalid task universe: {summary_path}")
+        seen.add(item["task_id"])
+        status = item.get("status")
+        if status not in TERMINAL_STATUSES:
+            raise ControlError(f"batch summary has invalid task status: {summary_path}")
+        attempt_path = item.get("attempt_path")
+        if attempt_path is None:
+            if status == "succeeded":
                 raise ControlError(f"successful batch task has no attempt path: {summary_path}")
-        summaries.append(summary)
-    return summaries
+            continue
+        attempt_rel = _relative(run_dir, attempt_path, "batch attempt")
+        expected_prefix = f"dispatch/tasks/{item['task_id']}/"
+        if not attempt_rel.startswith(expected_prefix) or not attempt_rel.endswith("/attempt.json"):
+            raise ControlError(f"batch summary attempt identity is invalid: {summary_path}")
+        attempt_id = attempt_rel[len(expected_prefix):-len("/attempt.json")]
+        record, artifacts, _, _ = _attempt(run_dir, item["task_id"], attempt_id)
+        if record["status"] != status:
+            raise ControlError(f"batch summary status disagrees with attempt: {item['task_id']}")
+        result_path = item.get("result_path")
+        if result_path is not None and result_path != artifacts.get("result"):
+            raise ControlError(f"batch summary result identity disagrees with attempt: {item['task_id']}")
+        if status == "succeeded" and result_path is None:
+            raise ControlError(f"successful batch task has no result path: {summary_path}")
+    return summary
 
 
 def _input_ref(value: str) -> tuple[str, str]:
@@ -314,7 +440,7 @@ def _input_ref(value: str) -> tuple[str, str]:
     return task_id, attempt_id
 
 
-def _prompt_file(value: Path) -> Path:
+def _prompt_file(value: Path) -> tuple[Path, bytes]:
     path = value.expanduser().resolve()
     workspace = Path.cwd().resolve()
     if path != workspace and workspace not in path.parents:
@@ -325,55 +451,94 @@ def _prompt_file(value: Path) -> Path:
         raise ControlError(f"prompt file is unavailable: {path}") from exc
     if path.is_symlink() or not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
         raise ControlError("prompt file must be a regular single-link file")
-    return path
+    parts = [part.casefold() for part in path.parts]
+    sensitive_roots = {".ssh", ".aws", ".azure", ".gnupg"}
+    sensitive_files = {
+        ".env", ".env.local", ".env.production", "credentials.json",
+        "application_default_credentials.json", "token.json",
+    }
+    config_auth_dirs = {"gcloud", "gh", "claude", "codex", "openai"}
+    config_auth = any(
+        part == ".config" and index + 1 < len(parts) and parts[index + 1] in config_auth_dirs
+        for index, part in enumerate(parts)
+    )
+    if sensitive_roots.intersection(parts) or path.name.casefold() in sensitive_files or config_auth:
+        raise ControlError("prompt file is a credential or authentication store")
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            current = os.fstat(fd)
+            if not stat.S_ISREG(current.st_mode) or current.st_nlink != 1:
+                raise ControlError("prompt file must be a regular single-link file")
+            chunks: list[bytes] = []
+            while True:
+                chunk = os.read(fd, 1024 * 1024)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            return path, b"".join(chunks)
+        finally:
+            os.close(fd)
+    except ControlError:
+        raise
+    except OSError as exc:
+        raise ControlError(f"prompt file is unavailable: {path}") from exc
 
 
 def _reduce(args: argparse.Namespace) -> int:
     run_dir = _run_dir(args.run_dir)
-    prompt_file = _prompt_file(args.prompt_file)
+    _, prompt_bytes = _prompt_file(args.prompt_file)
     if not args.inputs:
         raise ControlError("reduce requires at least one --input")
-    selected: list[tuple[dict[str, Any], dict[str, str]]] = []
+    selected: list[tuple[dict[str, Any], dict[str, str], bytes]] = []
     seen: set[tuple[str, str]] = set()
     for value in args.inputs:
         task_id, attempt_id = _input_ref(value)
         if (task_id, attempt_id) in seen:
             raise ControlError(f"duplicate reduction input: {value}")
         seen.add((task_id, attempt_id))
-        record, artifacts, _ = _attempt(run_dir, task_id, attempt_id)
+        record, artifacts, _, payloads = _attempt(run_dir, task_id, attempt_id)
         if record["status"] != "succeeded" or "result" not in artifacts:
             raise ControlError(f"reduction input is not a successful retained result: {value}")
-        selected.append((record, artifacts))
-    summaries = _load_summaries(run_dir)
-    selected_paths = {(record["task_id"], artifacts["attempt"]) for record, artifacts in selected}
+        selected.append((record, artifacts, payloads["result"]))
+    summary = _load_summary(run_dir, args.batch_id)
+    selected_paths = {(record["task_id"], artifacts["attempt"]) for record, artifacts, _ in selected}
     omitted: set[str] = set()
     unsuccessful: dict[str, str] = {}
-    for summary in summaries:
-        for item in summary["tasks"]:
-            task_id = item["task_id"]
-            attempt_path = item.get("attempt_path")
-            if item.get("status") == "succeeded":
-                if (task_id, attempt_path) not in selected_paths:
-                    omitted.add(task_id)
-            elif isinstance(item.get("status"), str):
-                unsuccessful[task_id] = item["status"]
-            if (task_id, attempt_path) in selected_paths and item.get("status") != "succeeded":
-                raise ControlError(f"batch summary contradicts successful reduction input: {task_id}")
+    universe: set[tuple[str, str]] = set()
+    for item in summary["tasks"]:
+        task_id = item["task_id"]
+        attempt_path = item.get("attempt_path")
+        label = task_id
+        if isinstance(attempt_path, str):
+            prefix = f"dispatch/tasks/{task_id}/"
+            if attempt_path.startswith(prefix) and attempt_path.endswith("/attempt.json"):
+                label = f"{task_id}/{attempt_path[len(prefix):-len('/attempt.json')]}"
+        if attempt_path is not None:
+            universe.add((task_id, attempt_path))
+        if item.get("status") == "succeeded":
+            if (task_id, attempt_path) not in selected_paths:
+                omitted.add(label)
+        elif isinstance(item.get("status"), str):
+            unsuccessful[label] = item["status"]
+    absent = [record["task_id"] for record, artifacts, _ in selected if (record["task_id"], artifacts["attempt"]) not in universe]
+    if absent:
+        raise ControlError("reduction input is not an exact attempt in the selected batch: " + ", ".join(absent))
     lines = ["# Provenant reduction inputs", "", "The following exact retained successful attempts are supplied to the reducer:", ""]
-    for record, artifacts in selected:
+    for record, artifacts, result_bytes in selected:
         lines.extend([f"## {record['task_id']} / {record['attempt_id']}",
                       f"Result path: {artifacts['result']}",
-                      f"Result digest: {record['result']['digest']}", "", (run_dir / artifacts["result"]).read_text(encoding="utf-8", errors="replace"), ""])
+                      f"Result digest: {record['result']['digest']}", "", result_bytes.decode("utf-8", errors="replace"), ""])
     omitted_lines = [f"- {task_id}" for task_id in sorted(omitted)] or ["- none"]
     unsuccessful_lines = [f"- {task_id}: {status}" for task_id, status in sorted(unsuccessful.items())] or ["- none"]
     lines.extend(["## Omitted successful batch tasks", "", *omitted_lines,
                   "", "## Non-successful batch tasks", "", *unsuccessful_lines,
-                  "", "## Operator prompt", "", prompt_file.read_text(encoding="utf-8")])
-    fd, temporary = tempfile.mkstemp(prefix=".provenant-reducer-", suffix=".md", dir=run_dir)
-    prompt = Path(temporary)
+                  "", "## Operator prompt", "", prompt_bytes.decode("utf-8", errors="replace")])
+    workspace = Path.cwd().resolve()
+    if workspace == run_dir:
+        raise ControlError("reduce needs a workspace parent for its temporary prompt")
+    prompt = _temporary_prompt(workspace, "\n".join(lines).encode())
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as stream:
-            stream.write("\n".join(lines))
         route = {"adapter": args.adapter, "role": args.role, "intent": "ordinary",
                  "orchestrator_family": args.orchestrator_family or ""}
         for key in ("alias", "task_class", "model"):
@@ -420,6 +585,7 @@ def parser() -> argparse.ArgumentParser:
     reduce.add_argument("--run-dir", type=Path, required=True)
     reduce.add_argument("--task-id", required=True)
     reduce.add_argument("--prompt-file", type=Path, required=True)
+    reduce.add_argument("--batch-id", required=True)
     reduce.add_argument("--input", dest="inputs", action="append", required=True)
     reduce.add_argument("--adapter", required=True)
     selector = reduce.add_mutually_exclusive_group(required=True)

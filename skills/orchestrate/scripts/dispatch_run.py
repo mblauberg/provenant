@@ -525,6 +525,8 @@ def _dispatch(args: argparse.Namespace) -> int:
         "model": args.model or "",
         "effort": args.effort or "",
         "orchestrator_family": args.orchestrator_family or "",
+        "risk_tier": args.risk_tier or "",
+        "reviewer_id": args.reviewer_id or "",
     }
     workspace_observation = workspace_identity(workspace)
     started_at = now()

@@ -56,6 +56,7 @@ def write_attempt(
         "requested_route": {
             "intent": "ordinary", "adapter": "codex", "alias": "scout",
             "task_class": "", "model": "", "role": "worker", "orchestrator_family": "openai",
+            "risk_tier": "substantial", "reviewer_id": "reviewer-1", "effort": "high",
         },
         "route": {"adapter_receipt": {"path": str(adapter_path.relative_to(run_dir)), "digest": file_digest(adapter_path)}},
         "prompt": {"path": str(prompt_path.relative_to(run_dir)), "digest": file_digest(prompt_path)},
@@ -77,6 +78,32 @@ def write_attempt(
 
 def file_digest(path: Path) -> str:
     return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def write_success_adapter(path: Path) -> None:
+    path.write_text(textwrap.dedent("""
+        #!/usr/bin/env bash
+        while [ "$#" -gt 0 ]; do
+          case "$1" in
+            --out) out="$2"; shift 2;;
+            --intent) intent="$2"; shift 2;;
+            --tool) tool="$2"; shift 2;;
+            *) shift;;
+          esac
+        done
+        printf 'provider result\\n' > "$out"
+        digest="sha256:$(shasum -a 256 "$out" | awk '{print $1}')"
+        printf '{"tool":"%s","adapter":"%s","execution_intent":"%s","resolved_model":"test-model","provider_family":"test-family","model_family":"test-family","endpoint_provider":"test-provider","identity_source":"test-fixture","status":"ok","exit":0,"output_path":"%s","output_digest":"%s","read_only_guarantee":"none","cross_family":false,"certification_eligible":false}\\n' "$tool" "$tool" "$intent" "$out" "$digest"
+    """).strip() + "\n", encoding="utf-8")
+    path.chmod(path.stat().st_mode | stat.S_IXUSR)
+
+
+def write_dispatch_wrapper(path: Path, adapter: Path) -> None:
+    path.write_text(
+        f"#!/usr/bin/env python3\nimport sys\nfrom pathlib import Path\nsys.path.insert(0, {str(ROOT / 'skills/orchestrate/scripts')!r})\nimport dispatch_run\ndispatch_run.CF_DISPATCH = Path({str(adapter)!r})\nsys.argv = [{str(ROOT / 'skills/orchestrate/scripts/dispatch_run.py')!r}, *sys.argv[1:]]\nraise SystemExit(dispatch_run.dispatch(dispatch_run.parser().parse_args()))\n",
+        encoding="utf-8",
+    )
+    path.chmod(path.stat().st_mode | stat.S_IXUSR)
 
 
 def invoke(*args: str, cwd: Path, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
@@ -122,6 +149,20 @@ def test_artifact_command_rejects_tampered_retained_digest(tmp_path: Path) -> No
     assert "digest does not match" in json.loads(result.stdout)["message"]
 
 
+def test_artifact_command_rejects_attempt_copied_from_another_run(tmp_path: Path) -> None:
+    run_dir = make_run(tmp_path)
+    attempt = write_attempt(run_dir)
+    record = json.loads(attempt.read_text(encoding="utf-8"))
+    record["run_id"] = "different-run"
+    attempt.write_text(json.dumps(record, sort_keys=True) + "\n", encoding="utf-8")
+    (attempt.parent / "attempt.sha256").write_text(f"{file_digest(attempt)}  attempt.json\n", encoding="utf-8")
+
+    result = invoke("run", "result", "--run-dir", str(run_dir), "--task-id", "task-1", "--attempt-id", "attempt-001", cwd=tmp_path)
+
+    assert result.returncode == 2
+    assert "invalid identity" in json.loads(result.stdout)["message"]
+
+
 def test_retry_requires_one_route_choice_and_delegates_parent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     run_dir = make_run(tmp_path)
     write_attempt(run_dir, status="failed", result=None)
@@ -146,7 +187,12 @@ def test_retry_requires_one_route_choice_and_delegates_parent(tmp_path: Path, mo
     delegated = json.loads(invoked.read_text(encoding="utf-8"))
     assert "--retry-of" in delegated
     assert delegated[delegated.index("--retry-of") + 1] == "attempt-001"
-    assert delegated[delegated.index("--prompt-file") + 1].endswith("prompt.md")
+    delegated_prompt = Path(delegated[delegated.index("--prompt-file") + 1])
+    assert delegated_prompt.parent == tmp_path and delegated_prompt.name.startswith(".provenant-reducer-")
+    assert not delegated_prompt.exists()
+    assert delegated[delegated.index("--risk-tier") + 1] == "substantial"
+    assert delegated[delegated.index("--reviewer-id") + 1] == "reviewer-1"
+    assert delegated[delegated.index("--effort") + 1] == "high"
 
 
 def test_retry_reroute_requires_a_complete_new_route(tmp_path: Path) -> None:
@@ -174,6 +220,36 @@ def test_blocked_inspection_exposes_question_and_continuation_reference(tmp_path
     assert attempt["continuation_ref"] == "dispatch/tasks/task-1/attempt-001/attempt.json"
 
 
+def test_inspect_keeps_preterminal_batch_task_conservative_when_receipt_is_absent(tmp_path: Path) -> None:
+    run_dir = make_run(tmp_path)
+    summary = run_dir / "dispatch/batches/batch-001/summary.json"
+    summary.parent.mkdir(parents=True)
+    summary.write_text(json.dumps({
+        "schema_version": 1, "record_type": "dispatch-batch", "batch_id": "batch-001",
+        "status": "cancelled", "tasks": [{"task_id": "not-started", "status": "cancelled"}],
+    }) + "\n", encoding="utf-8")
+
+    result = invoke("run", "inspect", "--run-dir", str(run_dir), cwd=tmp_path)
+
+    assert result.returncode == 0
+    batch_task = json.loads(result.stdout)["batches"][0]["tasks"][0]
+    assert batch_task == {"task_id": "not-started", "status": "cancelled", "receipt_status": "unavailable"}
+
+
+def test_inspect_reports_incomplete_attempt_directory_without_inventing_liveness(tmp_path: Path) -> None:
+    run_dir = make_run(tmp_path)
+    (run_dir / "dispatch/tasks/task-1/attempt-001").mkdir(parents=True)
+
+    result = invoke("run", "inspect", "--run-dir", str(run_dir), cwd=tmp_path)
+
+    assert result.returncode == 0
+    attempt = json.loads(result.stdout)["tasks"][0]["attempts"][0]
+    assert attempt == {
+        "attempt_id": "attempt-001", "status": "incomplete", "receipt_status": "unavailable",
+        "artifacts": {"attempt": "dispatch/tasks/task-1/attempt-001/attempt.json"},
+    }
+
+
 def test_reduce_requires_explicit_successes_and_names_batch_omissions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     run_dir = make_run(tmp_path)
     selected = write_attempt(run_dir, task_id="one")
@@ -184,9 +260,12 @@ def test_reduce_requires_explicit_successes_and_names_batch_omissions(tmp_path: 
     summary.write_text(json.dumps({
         "schema_version": 1,
         "record_type": "dispatch-batch",
+        "batch_id": "batch-001",
         "tasks": [
-            {"task_id": "one", "status": "succeeded", "attempt_path": str(selected.relative_to(run_dir))},
-            {"task_id": "two", "status": "succeeded", "attempt_path": str(omitted.relative_to(run_dir))},
+            {"task_id": "one", "status": "succeeded", "attempt_path": str(selected.relative_to(run_dir)),
+             "result_path": "dispatch/tasks/one/attempt-001/result.md"},
+            {"task_id": "two", "status": "succeeded", "attempt_path": str(omitted.relative_to(run_dir)),
+             "result_path": "dispatch/tasks/two/attempt-001/result.md"},
             {"task_id": "three", "status": "failed", "attempt_path": str(failed.relative_to(run_dir))},
         ],
     }, sort_keys=True) + "\n", encoding="utf-8")
@@ -208,7 +287,7 @@ def test_reduce_requires_explicit_successes_and_names_batch_omissions(tmp_path: 
     monkeypatch.chdir(tmp_path)
     args = module.parser().parse_args([
         "reduce", "--run-dir", str(run_dir), "--task-id", "reducer", "--prompt-file", str(prompt),
-        "--input", "one/attempt-001", "--adapter", "codex", "--alias", "scout",
+        "--batch-id", "batch-001", "--input", "one/attempt-001", "--adapter", "codex", "--alias", "scout",
     ])
 
     assert module.run(args) == 0
@@ -216,6 +295,96 @@ def test_reduce_requires_explicit_successes_and_names_batch_omissions(tmp_path: 
     reducer_prompt = captured_prompt
     assert reducer_prompt.exists()
     reducer_text = reducer_prompt.read_text(encoding="utf-8")
-    assert "- two" in reducer_text and "- three: failed" in reducer_text
+    assert "- two/attempt-001" in reducer_text and "- three/attempt-001: failed" in reducer_text
     assert "Summarise the evidence." in reducer_text
+    delegated_prompt = Path(delegated[delegated.index("--prompt-file") + 1])
+    assert delegated_prompt.parent == tmp_path and not delegated_prompt.exists()
+    assert not list(run_dir.glob(".provenant-reducer-*.md"))
     assert "--task-id" in delegated and delegated[delegated.index("--task-id") + 1] == "reducer"
+
+
+def test_reduce_does_not_conflate_repeated_task_across_batch_summaries(tmp_path: Path) -> None:
+    run_dir = make_run(tmp_path)
+    first = write_attempt(run_dir, task_id="same", attempt_id="attempt-001")
+    second = write_attempt(run_dir, task_id="same", attempt_id="attempt-002")
+    for batch_id, attempt in (("batch-001", first), ("batch-002", second)):
+        summary = run_dir / "dispatch/batches" / batch_id / "summary.json"
+        summary.parent.mkdir(parents=True, exist_ok=True)
+        summary.write_text(json.dumps({
+            "schema_version": 1, "record_type": "dispatch-batch", "batch_id": batch_id,
+            "tasks": [{"task_id": "same", "status": "succeeded",
+                       "attempt_path": str(attempt.relative_to(run_dir)),
+                       "result_path": str(attempt.parent / "result.md").replace(str(run_dir) + "/", "")}],
+        }) + "\n", encoding="utf-8")
+    prompt = tmp_path / "reduce.md"
+    prompt.write_text("reduce", encoding="utf-8")
+
+    result = invoke("run", "reduce", "--run-dir", str(run_dir), "--task-id", "reducer",
+                    "--prompt-file", str(prompt), "--batch-id", "batch-001",
+                    "--input", "same/attempt-002", "--adapter", "codex", "--alias", "scout", cwd=tmp_path)
+
+    assert result.returncode == 2
+    assert "selected batch" in json.loads(result.stdout)["message"]
+
+
+def test_retry_and_reduce_use_real_dispatch_owner_and_retain_new_attempts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    adapter = tmp_path / "adapter"
+    dispatch = tmp_path / "dispatch-wrapper"
+    write_success_adapter(adapter)
+    write_dispatch_wrapper(dispatch, adapter)
+    module_spec = importlib.util.spec_from_file_location("run_controls_e2e", SCRIPT)
+    assert module_spec and module_spec.loader
+    module = importlib.util.module_from_spec(module_spec)
+    module_spec.loader.exec_module(module)
+    monkeypatch.setattr(module, "DISPATCH_RUN", dispatch)
+
+    retry_run = make_run(tmp_path / "retry")
+    parent = write_attempt(retry_run, status="failed", result=None)
+    parent_before = parent.read_bytes()
+    monkeypatch.chdir(tmp_path / "retry")
+    retry_args = module.parser().parse_args([
+        "retry", "--run-dir", str(retry_run), "--task-id", "task-1", "--attempt-id", "attempt-001", "--same-route",
+    ])
+    assert module.run(retry_args) == 0
+    assert parent.read_bytes() == parent_before
+    retry_record = json.loads((retry_run / "dispatch/tasks/task-1/attempt-002/attempt.json").read_text(encoding="utf-8"))
+    assert retry_record["retry_of"] == "attempt-001" and retry_record["status"] == "succeeded"
+
+    reduce_root = tmp_path / "reduce"
+    reduce_run = make_run(reduce_root)
+    selected = write_attempt(reduce_run, task_id="source")
+    summary = reduce_run / "dispatch/batches/batch-001/summary.json"
+    summary.parent.mkdir(parents=True)
+    summary.write_text(json.dumps({
+        "schema_version": 1, "record_type": "dispatch-batch", "batch_id": "batch-001",
+        "tasks": [{"task_id": "source", "status": "succeeded",
+                   "attempt_path": str(selected.relative_to(reduce_run)),
+                   "result_path": "dispatch/tasks/source/attempt-001/result.md"}],
+    }) + "\n", encoding="utf-8")
+    prompt = reduce_root / "reduce.md"
+    prompt.write_text("Reduce these results.", encoding="utf-8")
+    monkeypatch.chdir(reduce_root)
+    reduce_args = module.parser().parse_args([
+        "reduce", "--run-dir", str(reduce_run), "--task-id", "reducer", "--prompt-file", str(prompt),
+        "--batch-id", "batch-001", "--input", "source/attempt-001", "--adapter", "codex", "--alias", "scout",
+    ])
+    assert module.run(reduce_args) == 0
+    reducer_attempt = reduce_run / "dispatch/tasks/reducer/attempt-001"
+    assert "result" in (reducer_attempt / "prompt.md").read_text(encoding="utf-8")
+    assert not list(reduce_root.glob(".provenant-reducer-*.md"))
+
+
+@pytest.mark.parametrize("name", [".env", ".ssh/known_hosts"])
+def test_reduce_rejects_credential_or_auth_prompt_before_read(tmp_path: Path, name: str) -> None:
+    run_dir = make_run(tmp_path)
+    write_attempt(run_dir, task_id="one")
+    prompt = tmp_path / name
+    prompt.parent.mkdir(parents=True, exist_ok=True)
+    prompt.write_text("secret prompt", encoding="utf-8")
+
+    result = invoke("run", "reduce", "--run-dir", str(run_dir), "--task-id", "reducer",
+                    "--prompt-file", str(prompt), "--batch-id", "batch-001",
+                    "--input", "one/attempt-001", "--adapter", "codex", "--alias", "scout", cwd=tmp_path)
+
+    assert result.returncode == 2
+    assert "credential or authentication" in json.loads(result.stdout)["message"]

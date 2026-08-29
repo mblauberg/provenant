@@ -167,13 +167,17 @@ def test_batch_child_defers_shared_manifest_append(tmp_path: Path, monkeypatch) 
     monkeypatch.setattr(module, "CF_DISPATCH", adapter)
     args = module.parser().parse_args([
         "--run-dir", str(run_dir), "--task-id", "deferred", "--adapter", "codex",
-        "--prompt-file", str(prompt), "--alias", "scout", "--role", "worker", "--batch-child",
+        "--prompt-file", str(prompt), "--alias", "scout", "--role", "worker",
+        "--risk-tier", "substantial", "--reviewer-id", "reviewer-1", "--effort", "high", "--batch-child",
     ])
     monkeypatch.chdir(tmp_path)
 
     assert module.dispatch(args) == 0
     assert "dispatch-deferred" not in (run_dir / "MANIFEST.md").read_text(encoding="utf-8")
-    assert (run_dir / "dispatch/tasks/deferred/attempt-001/attempt.json").is_file()
+    attempt = json.loads((run_dir / "dispatch/tasks/deferred/attempt-001/attempt.json").read_text(encoding="utf-8"))
+    assert attempt["requested_route"]["risk_tier"] == "substantial"
+    assert attempt["requested_route"]["reviewer_id"] == "reviewer-1"
+    assert attempt["requested_route"]["effort"] == "high"
 
 
 def test_route_failure_is_typed_and_provider_is_not_invoked(tmp_path: Path) -> None:
