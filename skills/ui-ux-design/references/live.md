@@ -64,6 +64,11 @@ task, replace run-owned variant scaffolding with project-native source while pre
 verify the preview, then record completion with `live-complete.mjs`. Do not poll
 again until that task succeeds or is explicitly abandoned.
 
+Source mutation uses descriptor-bound, no-follow in-place writes with
+verification and process-level rollback. It is not crash-atomic: completed
+edits are verified, but partial bytes can be briefly visible during a write or
+remain after a process or power crash.
+
 ## Exit
 
 Stop only the exact background-task handle returned by this run, or a run-owned

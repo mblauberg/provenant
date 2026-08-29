@@ -28,6 +28,7 @@ import { resolveFiles } from './live-inject.mjs';
 import { createLiveSessionStore } from './live-session-store.mjs';
 import { readContainedSource } from './contained-source.mjs';
 import {
+  ensureCanonicalLiveStateRoot,
   getDesignSidecarPath,
   readLiveServerInfo,
   removeLiveServerInfo,
@@ -245,8 +246,23 @@ function hasProjectContext() {
   return loadContext(process.cwd()).hasProduct;
 }
 
-function statOrNull(filePath) {
-  try { return fs.statSync(filePath); } catch { return null; }
+function pathExistsWithoutFollowing(filePath) {
+  try { fs.lstatSync(filePath); return true; } catch { return false; }
+}
+
+function readAuthorisedDesignSidecar(filePath) {
+  const candidate = path.resolve(filePath);
+  const projectRoot = path.resolve(process.cwd());
+  const contextRoot = path.resolve(CONTEXT_DIR);
+  if (isContainedPath(projectRoot, candidate)) {
+    return readContainedSource(projectRoot, candidate);
+  }
+  if (isContainedPath(contextRoot, candidate)) {
+    return readContainedSource(contextRoot, candidate);
+  }
+  const error = new Error('Design sidecar is outside authorised roots');
+  error.code = 'source_path_outside_project';
+  throw error;
 }
 
 // ---------------------------------------------------------------------------
@@ -499,7 +515,7 @@ function resolveConfiguredProjectSource(rootDir, requestedPath) {
 
 function createRequestHandler({ detectScript, sessionPath, livePath }) {
   return (req, res) => {
-    const url = new URL(req.url, `http://localhost:${state.port}`);
+    const url = new URL(req.url, `http://127.0.0.1:${state.port}`);
     const p = url.pathname;
     if (req.method === 'OPTIONS') {
       applyCors(req, res);
@@ -676,12 +692,20 @@ function createRequestHandler({ detectScript, sessionPath, livePath }) {
       const mdPath = path.join(CONTEXT_DIR, 'DESIGN.md');
       const existingJsonPath = resolveDesignSidecarPath(process.cwd(), CONTEXT_DIR);
       const jsonPath = existingJsonPath || getDesignSidecarPath(process.cwd());
-      const mdStat = statOrNull(mdPath);
+      let mdSnapshot = null;
+      let mdReadError = null;
+      if (pathExistsWithoutFollowing(mdPath)) {
+        try {
+          mdSnapshot = readContainedSource(CONTEXT_DIR, mdPath);
+        } catch (error) {
+          mdReadError = error;
+        }
+      }
       let jsonSnapshot = null;
       let jsonReadError = null;
       if (existingJsonPath) {
         try {
-          jsonSnapshot = readContainedSource(process.cwd(), jsonPath);
+          jsonSnapshot = readAuthorisedDesignSidecar(jsonPath);
         } catch (error) {
           jsonReadError = error;
         }
@@ -689,13 +713,14 @@ function createRequestHandler({ detectScript, sessionPath, livePath }) {
       const jsonMtimeMs = jsonSnapshot ? Number(jsonSnapshot.mtimeNs) / 1_000_000 : null;
 
       if (p === '/design-system/raw') {
-        if (!mdStat) { res.writeHead(404); res.end('Not found'); return; }
+        if (mdReadError) { res.writeHead(403); res.end('Refused unsafe design markdown'); return; }
+        if (!mdSnapshot) { res.writeHead(404); res.end('Not found'); return; }
         res.writeHead(200, { 'Content-Type': 'text/markdown; charset=utf-8' });
-        res.end(fs.readFileSync(mdPath, 'utf-8'));
+        res.end(mdSnapshot.bytes.toString('utf-8'));
         return;
       }
 
-      if (!mdStat && !jsonSnapshot && !jsonReadError) {
+      if (!mdSnapshot && !mdReadError && !jsonSnapshot && !jsonReadError) {
         res.writeHead(404, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ present: false }));
         return;
@@ -703,17 +728,20 @@ function createRequestHandler({ detectScript, sessionPath, livePath }) {
 
       const response = {
         present: true,
-        hasMd: !!mdStat,
+        hasMd: !!mdSnapshot,
         hasSidecar: !!jsonSnapshot,
-        mdNewerThanJson: !!(mdStat && jsonSnapshot && mdStat.mtimeMs > jsonMtimeMs + 1000),
+        mdNewerThanJson: !!(mdSnapshot && jsonSnapshot
+          && Number(mdSnapshot.mtimeNs) / 1_000_000 > jsonMtimeMs + 1000),
       };
 
-      if (mdStat) {
+      if (mdSnapshot) {
         try {
-          response.parsed = parseDesignMd(fs.readFileSync(mdPath, 'utf-8'));
+          response.parsed = parseDesignMd(mdSnapshot.bytes.toString('utf-8'));
         } catch (err) {
           response.parseError = err.message;
         }
+      } else if (mdReadError) {
+        response.parseError = 'Refused unsafe design markdown: ' + (mdReadError.code || 'read_failed');
       }
 
       if (jsonSnapshot) {
@@ -1002,7 +1030,7 @@ if (args.includes('stop')) {
   const keepInject = args.includes('--keep-inject');
   try {
     const { info } = readLiveServerInfo(process.cwd()) || {};
-    const res = await fetch(`http://localhost:${info.port}/stop?token=${info.token}`);
+    const res = await fetch(`http://127.0.0.1:${info.port}/stop?token=${info.token}`);
     if (res.ok) console.log(`Stopped live server on port ${info.port}.`);
   } catch {
     console.log('No running live server found.');
@@ -1034,6 +1062,16 @@ if (args.includes('stop')) {
     }
   }
   process.exit(0);
+}
+
+try {
+  ensureCanonicalLiveStateRoot(process.cwd());
+} catch (error) {
+  console.error(JSON.stringify({
+    error: error.code || 'live_state_root_invalid',
+    message: error.message,
+  }));
+  process.exit(1);
 }
 
 // --background: spawn a detached child server, wait for it to be ready,
@@ -1136,7 +1174,7 @@ httpServer = http.createServer(createRequestHandler({ detectScript, sessionPath,
 
 httpServer.listen(state.port, '127.0.0.1', () => {
   writeLiveServerInfo(process.cwd(), { pid: process.pid, port: state.port, token: state.token });
-  const url = `http://localhost:${state.port}`;
+  const url = `http://127.0.0.1:${state.port}`;
   console.log(`\nImpeccable live server running on ${url}`);
   console.log('Bearer state stored privately in .impeccable/live/server.json.');
   console.log(`Stop:   node ${path.basename(fileURLToPath(import.meta.url))} stop`);

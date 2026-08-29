@@ -1,3 +1,4 @@
+// Modified from Impeccable for this harness; see the repository THIRD_PARTY_NOTICES.md.
 import fs from 'node:fs';
 import path from 'node:path';
 import { getLegacyLiveSessionsDir, getLiveSessionsDir } from './impeccable-paths.mjs';
@@ -84,7 +85,11 @@ function normalizeEvent(event, fallbackId) {
   const id = event.id || fallbackId;
   if (!id || typeof id !== 'string') throw new Error('event id required');
   if (!event.type || typeof event.type !== 'string') throw new Error('event type required');
-  const { token: _bearerToken, ...safeEvent } = event;
+  const {
+    token: _bearerToken,
+    screenshotPath: _transientScreenshotPath,
+    ...safeEvent
+  } = event;
   return { ...safeEvent, id };
 }
 
@@ -152,7 +157,8 @@ function rebuildSnapshotFromJournal(journalPath, id) {
 }
 
 function applyEvent(snapshot, entry, inheritedDiagnostics = []) {
-  const event = entry.event || entry;
+  const rawEvent = entry.event || entry;
+  const { screenshotPath: _transientScreenshotPath, ...event } = rawEvent;
   const next = {
     ...snapshot,
     paramValues: { ...(snapshot.paramValues || {}) },
@@ -173,7 +179,6 @@ function applyEvent(snapshot, entry, inheritedDiagnostics = []) {
       next.expectedVariants = event.count ?? next.expectedVariants;
       next.pendingEventSeq = entry.seq ?? next.pendingEventSeq;
       next.pendingEvent = toPendingEvent(event);
-      if (event.screenshotPath) upsertArtifact(next.annotationArtifacts, { type: 'screenshot', path: event.screenshotPath });
       break;
     case 'variants_ready':
     case 'agent_done':
@@ -241,13 +246,8 @@ function applyEvent(snapshot, entry, inheritedDiagnostics = []) {
 function toPendingEvent(event) {
   const pending = { ...event };
   delete pending.token;
+  delete pending.screenshotPath;
   return pending;
-}
-
-function upsertArtifact(artifacts, artifact) {
-  if (!artifacts.some((existing) => existing.path === artifact.path && existing.type === artifact.type)) {
-    artifacts.push(artifact);
-  }
 }
 
 function writeSnapshot(snapshotPath, snapshot) {

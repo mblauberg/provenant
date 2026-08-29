@@ -20,6 +20,7 @@ import {
   replaceContainedSource,
   resolveContainedSourcePath,
 } from './contained-source.mjs';
+import { findMatchingJsxTag, scanJsxTags } from './jsx-tag-scanner.mjs';
 
 const EXTENSIONS = ['.html', '.jsx', '.tsx', '.vue', '.svelte', '.astro'];
 
@@ -636,23 +637,15 @@ function findClosingLine(lines, start) {
 
   const tagName = openMatch[1];
   const joined = lines.slice(start).join('\n');
-  const tagRe = new RegExp('<(?:/)?' + tagName + '\\b[^>]*>', 'g');
-  let depth = 0;
-  let match;
-  while ((match = tagRe.exec(joined)) !== null) {
-    const token = match[0];
-    const isClose = token.startsWith('</');
-    const isSelfClose = !isClose && /\/\s*>$/.test(token);
-    if (isClose) depth--;
-    else if (!isSelfClose) depth++;
-    if (depth <= 0) {
-      const endOffset = match.index + token.length;
-      return start + joined.slice(0, endOffset).split('\n').length - 1;
-    }
+  const tags = scanJsxTags(joined);
+  const openerIndex = tags.findIndex((tag) => !tag.closing && tag.name === tagName);
+  if (openerIndex === -1) {
+    const error = new Error(`Missing JSX opener for ${tagName}`);
+    error.code = 'jsx_scan_unbalanced';
+    throw error;
   }
-
-  // If we can't find the close, return a reasonable guess
-  return Math.min(start + 50, lines.length - 1);
+  const closing = findMatchingJsxTag(tags, openerIndex);
+  return start + joined.slice(0, closing.end).split('\n').length - 1;
 }
 
 // Auto-execute when run directly (node live-wrap.mjs ...)

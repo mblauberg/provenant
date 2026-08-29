@@ -79,6 +79,10 @@ def test_modified_impeccable_sources_have_local_markers():
     marker = "Modified from Impeccable for this harness"
     ledger = yaml.safe_load((SKILL / "evals" / "provenance_components.yaml").read_text())
     component = next(item for item in ledger["components"] if item["id"] == "impeccable-modified-distribution")
+    assert {
+        "scripts/live-session-store.mjs",
+        "scripts/live-status.mjs",
+    } <= set(component["marker_required_exact"])
     paths = [SKILL / relative for relative in component["marker_required_exact"]]
     for prefix in component["marker_required_prefixes"]:
         paths.extend(path for path in (SKILL / prefix).rglob("*") if path.is_file())
@@ -91,6 +95,7 @@ def test_harness_original_runtime_and_test_files_are_not_overattributed_to_impec
     components = ledger["components"]
     for relative in (
         "scripts/contained-source.mjs",
+        "scripts/jsx-tag-scanner.mjs",
         "scripts/live-server-startup.mjs",
         "tests/live-server-startup.test.mjs",
     ):

@@ -8,6 +8,7 @@ components:
     exclude:
       - scripts/modern-screenshot.umd.js
       - scripts/contained-source.mjs
+      - scripts/jsx-tag-scanner.mjs
       - scripts/live-server-startup.mjs
     marker_required_exact:
       - SKILL.md
@@ -19,6 +20,8 @@ components:
       - scripts/live-inject.mjs
       - scripts/live-server.mjs
       - scripts/live-browser.js
+      - scripts/live-session-store.mjs
+      - scripts/live-status.mjs
       - scripts/detector/cli/main.mjs
       - scripts/detector/engines/browser/detect-url.mjs
       - scripts/detector/node/file-system.mjs
@@ -43,6 +46,7 @@ components:
     prefixes: [evals/]
     exact:
       - scripts/contained-source.mjs
+      - scripts/jsx-tag-scanner.mjs
       - scripts/live-server-startup.mjs
       - tests/live-server-startup.test.mjs
     description: Local routing, authority, disposition, and provenance fixtures; not upstream Impeccable expression or universal provider enforcement.

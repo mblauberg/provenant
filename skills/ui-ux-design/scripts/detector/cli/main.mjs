@@ -60,7 +60,7 @@ async function handleStdin() {
         ? await detectHtml(fp)
         : detectText(fs.readFileSync(fp, 'utf-8'), fp);
     } catch (cause) {
-      if (cause?.code === 'target_unavailable') {
+      if (cause?.code === 'target_unavailable' || cause?.code === 'engine_unavailable') {
         cause.target = fp;
         throw cause;
       }
@@ -90,8 +90,13 @@ async function confirm(question) {
   });
 }
 
+function detectorCommand() {
+  return `node ${JSON.stringify(path.resolve(process.argv[1]))}`;
+}
+
 function printUsage() {
-  console.log(`Usage: impeccable detect [options] [file-or-dir-or-url...]
+  const command = detectorCommand();
+  console.log(`Usage: ${command} [options] [file-or-dir-or-url...]
 
 Scan files or URLs for UI anti-patterns and design quality issues.
 
@@ -107,10 +112,10 @@ Detection modes:
   --fast         Forces regex for all files
 
 Examples:
-  impeccable detect src/
-  impeccable detect index.html
-  impeccable detect https://example.com
-  impeccable detect --fast --json .`);
+  ${command} src/
+  ${command} index.html
+  ${command} https://example.com
+  ${command} --fast --json .`);
 }
 
 async function detectCli() {
@@ -202,10 +207,11 @@ async function detectCli() {
             if (fwConfig) {
               const probe = await isPortListening(fwConfig.port, fwConfig.fingerprint);
               if (probe.listening && probe.matched) {
+                const command = detectorCommand();
                 process.stderr.write(
-                  `\n${fwConfig.name} dev server detected on localhost:${fwConfig.port}.\n` +
+                  `\n${fwConfig.name} dev server detected on 127.0.0.1:${fwConfig.port}.\n` +
                   `For more accurate results, scan the running site:\n` +
-                  `  npx impeccable detect http://localhost:${fwConfig.port}\n\n`
+                  `  ${command} http://127.0.0.1:${fwConfig.port}\n\n`
                 );
               } else if (probe.listening && !probe.matched) {
                 process.stderr.write(
@@ -213,10 +219,11 @@ async function detectCli() {
                   `Port ${fwConfig.port} is in use by another service. Start the ${fwConfig.name} dev server and scan via URL for best results.\n\n`
                 );
               } else {
+                const command = detectorCommand();
                 process.stderr.write(
                   `\n${fwConfig.name} project detected (${path.basename(fwConfig.configPath)}).\n` +
                   `Start the dev server and scan via URL for best results:\n` +
-                  `  npx impeccable detect http://localhost:${fwConfig.port}\n\n`
+                  `  ${command} http://127.0.0.1:${fwConfig.port}\n\n`
                 );
               }
             }
@@ -279,12 +286,11 @@ async function detectCli() {
               } else {
                 fileFindings = detectText(fs.readFileSync(file, 'utf-8'), file);
               }
-            } catch {
+            } catch (error) {
               const display = path.relative(resolved, file) || path.basename(file);
-              recordError(
-                display,
-                Object.assign(new Error(`Unable to scan ${display}`), { code: 'scan_failed' }),
-              );
+              recordError(display, error?.code === 'engine_unavailable'
+                ? error
+                : Object.assign(new Error(`Unable to scan ${display}`), { code: 'scan_failed' }));
               continue;
             }
             // Annotate findings with import context
@@ -305,11 +311,10 @@ async function detectCli() {
             } else {
               allFindings.push(...detectText(fs.readFileSync(resolved, 'utf-8'), resolved));
             }
-          } catch {
-            recordError(
-              target,
-              Object.assign(new Error(`Unable to scan ${target}`), { code: 'scan_failed' }),
-            );
+          } catch (error) {
+            recordError(target, error?.code === 'engine_unavailable'
+              ? error
+              : Object.assign(new Error(`Unable to scan ${target}`), { code: 'scan_failed' }));
           }
         }
       }

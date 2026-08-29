@@ -62,10 +62,43 @@ def test_detector_help_is_stable_and_side_effect_free() -> None:
     result = _run_detect("--help")
 
     assert result.returncode == 0
+    assert result.stdout.startswith(f'Usage: node "{DETECT}"')
+    assert "impeccable detect" not in result.stdout
     assert "--fast" in result.stdout
     assert "--json" in result.stdout
     assert "URLs" in result.stdout
     assert result.stderr == ""
+
+
+def test_detector_html_requires_the_static_engine_unless_fast_is_explicit(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "clean.html"
+    source.write_text("<main><h1>Account</h1></main>\n")
+
+    result = _run_detect("--json", str(source))
+
+    assert result.returncode == 3
+    assert json.loads(result.stdout) == {
+        "status": "incomplete",
+        "findings": [],
+        "errors": [
+            {
+                "target": str(source),
+                "code": "engine_unavailable",
+                "message": (
+                    "Static HTML engine unavailable: parser modules are missing; "
+                    "rerun with --fast for regex-only scanning"
+                ),
+            }
+        ],
+    }
+    assert result.stderr == ""
+
+    fast = _run_detect("--json", "--fast", str(source))
+    assert fast.returncode == 0
+    assert json.loads(fast.stdout) == []
+    assert fast.stderr == ""
 
 
 def test_detector_accepts_flags_before_or_after_detect_subcommand(tmp_path: Path) -> None:
@@ -351,4 +384,44 @@ def test_framework_probe_does_not_follow_redirects_off_origin() -> None:
     assert json.loads(result.stdout) == {
         "result": {"listening": True, "matched": False},
         "offOriginHits": 0,
+    }
+
+
+def test_framework_probe_follows_bounded_same_origin_redirects() -> None:
+    module_url = (
+        ROOT
+        / "skills"
+        / "ui-ux-design"
+        / "scripts"
+        / "detector"
+        / "node"
+        / "file-system.mjs"
+    ).as_uri()
+    script = (
+        "import http from 'node:http';"
+        f"import {{ isPortListening }} from {json.dumps(module_url)};"
+        "const paths=[];"
+        "const origin=http.createServer((req,res)=>{"
+        "paths.push(req.url);"
+        "if(req.url==='/'){res.writeHead(302,{location:'/app'});res.end();return;}"
+        "if(req.url==='/app'){res.writeHead(307,{location:'/ready'});res.end();return;}"
+        "res.end('<script type=module src=\"/@vite/client\"></script>');"
+        "});"
+        "await new Promise(resolve=>origin.listen(0,'127.0.0.1',resolve));"
+        "const result=await isPortListening(origin.address().port,{body:/@vite\\/client/});"
+        "await new Promise(resolve=>origin.close(resolve));"
+        "process.stdout.write(JSON.stringify({result,paths}));"
+    )
+
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {
+        "result": {"listening": True, "matched": True},
+        "paths": ["/", "/app", "/ready"],
     }

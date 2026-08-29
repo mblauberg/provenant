@@ -239,6 +239,58 @@ def test_contained_source_rolls_back_the_current_descriptor_after_write_failure(
     assert second.read_text() == "second"
 
 
+def test_contained_source_rechecks_later_descriptor_immediately_before_write(
+    tmp_path: Path,
+) -> None:
+    first = tmp_path / "first.html"
+    second = tmp_path / "second.html"
+    first.write_text("first")
+    second.write_text("second")
+    result = _run_contained_source_probe(
+        tmp_path,
+        "const fs=(await import('node:fs')).default;"
+        "const root=process.argv[1];"
+        "const first=readContainedSource(root,'first.html',{relativeOnly:true});"
+        "const second=readContainedSource(root,'second.html',{relativeOnly:true});"
+        "try{replaceContainedSources([{snapshot:first,content:'changed-first'},"
+        "{snapshot:second,content:'changed-second'}],"
+        "{beforeReplace({index}){if(index===1)fs.writeFileSync(second.path,'concurrent')}});}"
+        "catch(error){process.stdout.write(JSON.stringify({code:error.code}));process.exit(7)}",
+    )
+
+    assert result.returncode == 7
+    assert json.loads(result.stdout)["code"] == "source_replace_failed"
+    assert first.read_text() == "first"
+    assert second.read_text() == "concurrent"
+
+
+def test_contained_source_rechecks_hard_links_immediately_before_write(
+    tmp_path: Path,
+) -> None:
+    first = tmp_path / "first.html"
+    second = tmp_path / "second.html"
+    first.write_text("first")
+    second.write_text("second")
+    result = _run_contained_source_probe(
+        tmp_path,
+        "const fs=(await import('node:fs')).default;"
+        "const path=(await import('node:path')).default;"
+        "const root=process.argv[1];"
+        "const first=readContainedSource(root,'first.html',{relativeOnly:true});"
+        "const second=readContainedSource(root,'second.html',{relativeOnly:true});"
+        "try{replaceContainedSources([{snapshot:first,content:'changed-first'},"
+        "{snapshot:second,content:'changed-second'}],"
+        "{beforeReplace({index}){if(index===1)fs.linkSync(second.path,path.join(root,'late-link.html'))}});}"
+        "catch(error){process.stdout.write(JSON.stringify({code:error.code}));process.exit(7)}",
+    )
+
+    assert result.returncode == 7
+    assert json.loads(result.stdout)["code"] == "source_replace_failed"
+    assert first.read_text() == "first"
+    assert second.read_text() == "second"
+    assert (tmp_path / "late-link.html").read_text() == "second"
+
+
 def test_contained_source_success_preserves_inode_owner_mode_and_xattrs(tmp_path: Path) -> None:
     source = tmp_path / "page.html"
     source.write_text("original")
@@ -518,11 +570,22 @@ def test_live_inject_preserves_authorised_insert_and_remove_workflow(tmp_path: P
 
     inserted = _run_inject(tmp_path, "--port", "8400", "--token", TOKEN)
     assert inserted.returncode == 0, inserted.stderr
-    assert f"/live.js?token={TOKEN}" in page.read_text()
+    assert f'http://127.0.0.1:8400/live.js?token={TOKEN}' in page.read_text()
 
     removed = _run_inject(tmp_path, "--remove")
     assert removed.returncode == 0, removed.stderr
     assert page.read_text() == original
+
+
+def test_live_runtime_http_urls_use_one_ipv4_loopback_origin() -> None:
+    runtime_files = [
+        path
+        for path in SCRIPTS.glob("live*")
+        if path.is_file() and path.suffix in {".js", ".mjs"}
+    ]
+    for runtime_file in runtime_files:
+        text = runtime_file.read_text()
+        assert "http://localhost" not in text, runtime_file.name
 
 
 def test_live_inject_hard_excludes_explicit_dependency_and_git_targets(
@@ -577,6 +640,28 @@ def test_csp_revert_treats_the_generated_marker_as_literal_text(tmp_path: Path) 
     assert payload["reverted"] == source
 
 
+@pytest.mark.parametrize("marker", ["%%%", "YQ", "/w=="])
+def test_live_inject_rejects_malformed_csp_markers_before_any_write(
+    tmp_path: Path, marker: str
+) -> None:
+    good = tmp_path / "good.html"
+    bad = tmp_path / "bad.html"
+    good.write_text("<html><body>good</body></html>\n")
+    bad.write_text(
+        '<html><head><meta http-equiv="Content-Security-Policy" '
+        f'content="default-src patched" data-impeccable-csp-original="{marker}">'
+        "</head><body>bad</body></html>\n"
+    )
+    _write_config(tmp_path, ["good.html", "bad.html"])
+    before = {path: path.read_bytes() for path in (good, bad)}
+
+    result = _run_inject(tmp_path, "--port", "8400", "--token", TOKEN)
+
+    assert result.returncode != 0
+    assert json.loads(result.stderr)["error"] == "csp_marker_invalid"
+    assert {path: path.read_bytes() for path in (good, bad)} == before
+
+
 def test_live_wrap_detects_a_multiline_self_closing_jsx_opener(tmp_path: Path) -> None:
     module_url = WRAP.as_uri()
     script = (
@@ -595,6 +680,95 @@ def test_live_wrap_detects_a_multiline_self_closing_jsx_opener(tmp_path: Path) -
 
     assert result.returncode == 0, result.stderr
     assert result.stdout == "2"
+
+
+def test_live_wrap_scans_nested_multiline_jsx_without_treating_strings_as_tags(
+    tmp_path: Path,
+) -> None:
+    module_url = WRAP.as_uri()
+    lines = [
+        "<Card",
+        '  render={() => ({ label: ">" })}',
+        '  preview={<Preview title={"prop > value"} />}',
+        ">",
+        '  {"</Card>"}',
+        "  <Card",
+        '    title="nested > value"',
+        "  >nested</Card>",
+        "</Card>",
+        "<p>after</p>",
+    ]
+    script = (
+        f"import {{ findClosingLine }} from {json.dumps(module_url)};"
+        f"const lines={json.dumps(lines)};"
+        "process.stdout.write(String(findClosingLine(lines,0)));"
+    )
+
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        cwd=tmp_path,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "8"
+
+
+def test_live_wrap_fails_closed_on_unbalanced_jsx(tmp_path: Path) -> None:
+    module_url = WRAP.as_uri()
+    script = (
+        f"import {{ findClosingLine }} from {json.dumps(module_url)};"
+        "try{findClosingLine(['<Card','  title={\"broken\"','>','</Card>'],0)}"
+        "catch(error){process.stdout.write(error.code);process.exit(7)}"
+    )
+
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        cwd=tmp_path,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 7
+    assert result.stdout == "jsx_scan_unbalanced"
+
+
+def test_live_accept_preserves_jsx_that_contains_tag_shaped_string_content(
+    tmp_path: Path,
+) -> None:
+    page = tmp_path / "component.tsx"
+    page.write_text('<Card className="target">original</Card>\n<p>after</p>\n')
+    wrapped = _run_wrap(tmp_path, "--file", page.name)
+    assert wrapped.returncode == 0, wrapped.stderr
+    text = page.read_text()
+    marker_line = next(
+        line for line in text.splitlines() if "Variants: insert below this line" in line
+    )
+    variant = "\n".join(
+        [
+            '  <div data-impeccable-variant="1">',
+            "    <Card",
+            '      preview={<div title=\"prop > value\">preview</div>}',
+            "    >",
+            '      {"</div>"}',
+            '      <div title="nested > value">nested</div>',
+            "    </Card>",
+            "  </div>",
+        ]
+    )
+    page.write_text(text.replace(marker_line, marker_line + "\n" + variant))
+
+    accepted = _run_accept(tmp_path, "--variant", "1")
+
+    assert accepted.returncode == 0, accepted.stderr
+    result = page.read_text()
+    assert '{"</div>"}' in result
+    assert 'title="nested > value"' in result
+    assert "<p>after</p>" in result
+    assert "data-impeccable-variants" not in result
 
 
 @pytest.mark.parametrize(
@@ -761,11 +935,12 @@ def _available_port() -> int:
 
 
 class LiveServer:
-    def __init__(self, project: Path):
+    def __init__(self, project: Path, *, env: dict[str, str] | None = None):
         self.project = project
         self.port = _available_port()
         self.process: subprocess.Popen[str] | None = None
         self.token = ""
+        self.env = env
 
     def __enter__(self):
         self.process = subprocess.Popen(
@@ -774,6 +949,7 @@ class LiveServer:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            env=self.env,
         )
         info_path = self.project / ".impeccable" / "live" / "server.json"
         deadline = time.monotonic() + 10
@@ -981,6 +1157,7 @@ def test_live_status_identifies_the_authenticated_server_process(tmp_path: Path)
 
 def test_live_event_token_never_reaches_poll_or_durable_journal(tmp_path: Path) -> None:
     event_id = "deadbeef"
+    screenshot_path = "/tmp/transient-annotation.png"
     with LiveServer(tmp_path) as server:
         event = {
             "token": server.token,
@@ -989,6 +1166,7 @@ def test_live_event_token_never_reaches_poll_or_durable_journal(tmp_path: Path) 
             "action": "polish",
             "count": 1,
             "element": {"outerHTML": "<main>safe</main>"},
+            "screenshotPath": screenshot_path,
         }
         status, _, body = _request(
             f"{server.base_url}/events",
@@ -1002,12 +1180,15 @@ def test_live_event_token_never_reaches_poll_or_durable_journal(tmp_path: Path) 
             f"{server.base_url}/poll?token={quote(server.token)}&timeout=1000&leaseMs=1000"
         )
         assert status == 200
-        assert json.loads(polled)["id"] == event_id
+        polled_payload = json.loads(polled)
+        assert polled_payload["id"] == event_id
+        assert polled_payload["screenshotPath"] == screenshot_path
         assert server.token not in polled
 
         journal = tmp_path / ".impeccable" / "live" / "sessions" / f"{event_id}.jsonl"
         assert journal.exists()
         assert server.token not in journal.read_text()
+        assert screenshot_path not in journal.read_text()
 
 
 def test_session_store_normalization_redacts_token_defensively(tmp_path: Path) -> None:
@@ -1015,7 +1196,8 @@ def test_session_store_normalization_redacts_token_defensively(tmp_path: Path) -
     script = (
         f"import {{ createLiveSessionStore }} from {json.dumps(module_url)};"
         "const store=createLiveSessionStore({cwd:process.argv[1],sessionId:'deadbeef'});"
-        "store.appendEvent({id:'deadbeef',type:'generate',token:'journal-secret'});"
+        "store.appendEvent({id:'deadbeef',type:'generate',token:'journal-secret',"
+        "screenshotPath:'/tmp/transient.png'});"
     )
 
     result = subprocess.run(
@@ -1028,6 +1210,33 @@ def test_session_store_normalization_redacts_token_defensively(tmp_path: Path) -
     assert result.returncode == 0, result.stderr
     journal = tmp_path / ".impeccable" / "live" / "sessions" / "deadbeef.jsonl"
     assert "journal-secret" not in journal.read_text()
+    assert "/tmp/transient.png" not in journal.read_text()
+
+
+def test_session_store_recovery_never_restores_a_transient_screenshot_path(
+    tmp_path: Path,
+) -> None:
+    module_url = (SCRIPTS / "live-session-store.mjs").as_uri()
+    script = (
+        f"import {{ createLiveSessionStore }} from {json.dumps(module_url)};"
+        "const cwd=process.argv[1];"
+        "createLiveSessionStore({cwd}).appendEvent({id:'deadbeef',type:'generate',"
+        "action:'polish',count:1,screenshotPath:'/tmp/transient.png'});"
+        "const recovered=createLiveSessionStore({cwd}).getSnapshot('deadbeef');"
+        "process.stdout.write(JSON.stringify(recovered));"
+    )
+
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script, str(tmp_path)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    recovered = json.loads(result.stdout)
+    assert "screenshotPath" not in recovered["pendingEvent"]
+    assert recovered["annotationArtifacts"] == []
 
 
 @pytest.mark.parametrize(
@@ -1085,6 +1294,79 @@ def test_design_sidecar_endpoint_rejects_a_symlink_instead_of_serving_it(
         payload = json.loads(body)
         assert payload["hasSidecar"] is False
         assert "sidecarError" in payload
+
+
+def test_design_markdown_endpoint_rejects_a_project_symlink(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    secret = tmp_path / "outside-design.md"
+    secret.write_text("# do-not-serve\n")
+    (project / "DESIGN.md").symlink_to(secret)
+
+    with LiveServer(project) as server:
+        status, _, body = _request(
+            f"{server.base_url}/design-system/raw?token={quote(server.token)}"
+        )
+
+        assert status == 403
+        assert "do-not-serve" not in body
+
+
+def test_design_endpoints_allow_an_explicit_external_context_root(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    context = tmp_path / "authorised-context"
+    project.mkdir()
+    context.mkdir()
+    design_md = "# Design system\n\n## Direction\nQuiet and useful.\n"
+    design_json = {"schemaVersion": 2, "narrative": {"direction": "quiet"}}
+    (context / "DESIGN.md").write_text(design_md)
+    (context / "DESIGN.json").write_text(json.dumps(design_json))
+    env = {**os.environ, "IMPECCABLE_CONTEXT_DIR": str(context)}
+
+    with LiveServer(project, env=env) as server:
+        raw_status, _, raw = _request(
+            f"{server.base_url}/design-system/raw?token={quote(server.token)}"
+        )
+        json_status, _, body = _request(
+            f"{server.base_url}/design-system.json?token={quote(server.token)}"
+        )
+
+        assert raw_status == 200
+        assert raw == design_md
+        assert json_status == 200
+        payload = json.loads(body)
+        assert payload["hasMd"] is True
+        assert payload["hasSidecar"] is True
+        assert payload["sidecar"] == design_json
+
+
+@pytest.mark.parametrize("symlink_part", [".impeccable", "live"])
+def test_live_server_rejects_a_preexisting_symlinked_state_root(
+    tmp_path: Path, symlink_part: str
+) -> None:
+    project = tmp_path / "project"
+    outside = tmp_path / "outside-state"
+    project.mkdir()
+    outside.mkdir()
+    if symlink_part == ".impeccable":
+        (project / ".impeccable").symlink_to(outside, target_is_directory=True)
+    else:
+        impeccable = project / ".impeccable"
+        impeccable.mkdir()
+        (impeccable / "live").symlink_to(outside, target_is_directory=True)
+
+    result = subprocess.run(
+        ["node", str(SERVER), f"--port={_available_port()}"],
+        cwd=project,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+
+    assert result.returncode != 0
+    assert "live_state_root_invalid" in result.stderr
+    assert not (outside / "server.json").exists()
 
 
 def test_live_serves_the_checked_in_detector_and_screenshot_asset_contracts(

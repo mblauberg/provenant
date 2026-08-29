@@ -168,31 +168,48 @@ async function isPortListening(port, fingerprint = null) {
     });
   }
 
-  // HTTP probe with fingerprint matching
+  // HTTP probe with fingerprint matching. Follow only a few same-origin hops.
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 2000);
-    const res = await fetch(`http://localhost:${port}/`, { signal: controller.signal, redirect: 'manual' });
-    clearTimeout(timeout);
+    const origin = new URL(`http://127.0.0.1:${port}/`);
+    let current = origin;
+    const maxRedirects = 3;
+    try {
+      for (let redirectCount = 0; ; redirectCount += 1) {
+        const res = await fetch(current, { signal: controller.signal, redirect: 'manual' });
+        if (res.status >= 300 && res.status < 400) {
+          const location = res.headers.get('location');
+          if (!location || redirectCount >= maxRedirects) {
+            return { listening: true, matched: false };
+          }
+          const next = new URL(location, current);
+          if (next.origin !== origin.origin) {
+            return { listening: true, matched: false };
+          }
+          current = next;
+          continue;
+        }
 
-    // Check header fingerprint
-    if (fingerprint.header) {
-      const val = res.headers.get(fingerprint.header);
-      if (val && (!fingerprint.value || fingerprint.value.test(val))) {
-        return { listening: true, matched: true };
+        if (fingerprint.header) {
+          const val = res.headers.get(fingerprint.header);
+          if (val && (!fingerprint.value || fingerprint.value.test(val))) {
+            return { listening: true, matched: true };
+          }
+        }
+
+        if (fingerprint.body) {
+          const body = await res.text();
+          if (fingerprint.body.test(body)) {
+            return { listening: true, matched: true };
+          }
+        }
+
+        return { listening: true, matched: false };
       }
+    } finally {
+      clearTimeout(timeout);
     }
-
-    // Check body fingerprint
-    if (fingerprint.body) {
-      const body = await res.text();
-      if (fingerprint.body.test(body)) {
-        return { listening: true, matched: true };
-      }
-    }
-
-    // Port is listening but doesn't match the expected framework
-    return { listening: true, matched: false };
   } catch {
     return { listening: false };
   }

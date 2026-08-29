@@ -31,6 +31,32 @@ export function getLiveDir(cwd = process.cwd()) {
   return path.join(getImpeccableDir(cwd), LIVE_DIR);
 }
 
+export function ensureCanonicalLiveStateRoot(cwd = process.cwd()) {
+  const root = path.resolve(cwd);
+  const impeccableDir = getImpeccableDir(root);
+  const liveDir = getLiveDir(root);
+  try {
+    for (const directory of [impeccableDir, liveDir]) {
+      if (!fs.existsSync(directory)) fs.mkdirSync(directory);
+      const metadata = fs.lstatSync(directory);
+      if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
+        throw new Error('state path is not a real directory');
+      }
+      if (fs.realpathSync.native(directory) !== path.resolve(directory)) {
+        throw new Error('state path is non-canonical');
+      }
+    }
+  } catch (cause) {
+    const error = new Error(
+      'Live state root must be a canonical non-symlinked directory',
+      { cause },
+    );
+    error.code = 'live_state_root_invalid';
+    throw error;
+  }
+  return liveDir;
+}
+
 export function getLiveConfigPath(cwd = process.cwd()) {
   return path.join(getLiveDir(cwd), 'config.json');
 }

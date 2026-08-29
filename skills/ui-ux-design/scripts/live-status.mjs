@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// Modified from Impeccable for this harness; see the repository THIRD_PARTY_NOTICES.md.
 /**
  * Print durable recovery status for Impeccable live sessions.
  */
@@ -13,7 +14,7 @@ function readServerInfo() {
 async function fetchServerStatus(info) {
   if (!info) return null;
   try {
-    const res = await fetch(`http://localhost:${info.port}/status?token=${info.token}`);
+    const res = await fetch(`http://127.0.0.1:${info.port}/status?token=${info.token}`);
     if (!res.ok) return null;
     return await res.json();
   } catch {

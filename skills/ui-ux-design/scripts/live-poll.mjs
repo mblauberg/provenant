@@ -3,10 +3,10 @@
  * CLI client for the live variant mode poll/reply protocol.
  *
  * Usage:
- *   npx impeccable poll                         # Block until browser event, print JSON
- *   npx impeccable poll --timeout=600000        # Custom timeout (ms); default is long-poll friendly
- *   npx impeccable poll --reply <id> done       # Reply "done" to event <id>
- *   npx impeccable poll --reply <id> error "msg" # Reply with error
+ *   node live-poll.mjs                         # Block until browser event, print JSON
+ *   node live-poll.mjs --timeout=600000        # Custom timeout (ms); default is long-poll friendly
+ *   node live-poll.mjs --reply <id> done       # Reply "done" to event <id>
+ *   node live-poll.mjs --reply <id> error "msg" # Reply with error
  */
 
 import { execFileSync } from 'node:child_process';
@@ -14,6 +14,10 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { completionAckForAcceptResult, completionTypeForAcceptResult } from './live-completion.mjs';
 import { readLiveServerInfo } from './impeccable-paths.mjs';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const POLL_COMMAND = `node ${JSON.stringify(fileURLToPath(import.meta.url))}`;
+const LIVE_COMMAND = `node ${JSON.stringify(path.join(__dirname, 'live.mjs'))}`;
 
 // Node's built-in fetch (undici under the hood) enforces a 300s headers
 // timeout that can't be lowered per-request. We cap each request below
@@ -24,7 +28,7 @@ const PER_REQUEST_TIMEOUT_MS = 270_000;
 function readServerInfo() {
   const record = readLiveServerInfo(process.cwd());
   if (!record) {
-    console.error('No running live server found. Start one with: npx impeccable live');
+    console.error(`No running live server found. Start one with: ${LIVE_COMMAND}`);
     process.exit(1);
   }
   return record.info;
@@ -50,7 +54,7 @@ export async function pollCli() {
   const args = process.argv.slice(2);
 
   if (args.includes('--help') || args.includes('-h')) {
-    console.log(`Usage: impeccable poll [options]
+    console.log(`Usage: ${POLL_COMMAND} [options]
 
 Wait for a browser event from the live variant server, or reply to one.
 
@@ -66,9 +70,9 @@ Options:
   }
 
   const info = readServerInfo();
-  const base = `http://localhost:${info.port}`;
+  const base = `http://127.0.0.1:${info.port}`;
 
-  // Reply mode: npx impeccable poll --reply <id> <status> [--file path] [message]
+  // Reply mode: live-poll.mjs --reply <id> <status> [--file path] [message]
   const replyIdx = args.indexOf('--reply');
   if (replyIdx !== -1) {
     const id = args[replyIdx + 1];
@@ -79,7 +83,7 @@ Options:
     const message = args.find((a, i) => i > replyIdx + 2 && !a.startsWith('--') && i !== fileIdx + 1) || undefined;
 
     if (!id) {
-      console.error('Usage: npx impeccable poll --reply <id> <status> [--file path] [message]');
+      console.error(`Usage: ${POLL_COMMAND} --reply <id> <status> [--file path] [message]`);
       process.exit(1);
     }
 
@@ -89,7 +93,7 @@ Options:
       // Success — silent exit (agent doesn't need output for replies)
     } catch (err) {
       if (err.cause?.code === 'ECONNREFUSED') {
-        console.error('Live server not running. Start one with: npx impeccable live');
+        console.error(`Live server not running. Start one with: ${LIVE_COMMAND}`);
       } else {
         console.error('Reply failed:', err.message);
       }
@@ -119,7 +123,7 @@ Options:
 
       if (res.status === 401) {
         console.error('Authentication failed. The server token may have changed.');
-        console.error('Try restarting: npx impeccable live stop && npx impeccable live');
+        console.error(`Restart with ${LIVE_COMMAND} after stopping the current server through its exact run handle.`);
         process.exit(1);
       }
 
@@ -139,7 +143,6 @@ Options:
 
     // Auto-handle accept/discard via deterministic script
     if (event.type === 'accept' || event.type === 'discard') {
-      const __dirname = path.dirname(fileURLToPath(import.meta.url));
       const acceptScript = path.join(__dirname, 'live-accept.mjs');
       const scriptArgs = event.type === 'discard'
         ? ['--id', event.id, '--discard']
@@ -186,7 +189,7 @@ Options:
     console.log(JSON.stringify(event));
   } catch (err) {
     if (err.cause?.code === 'ECONNREFUSED') {
-      console.error('Live server not running. Start one with: npx impeccable live');
+      console.error(`Live server not running. Start one with: ${LIVE_COMMAND}`);
     } else {
       console.error('Poll failed:', err.message);
     }

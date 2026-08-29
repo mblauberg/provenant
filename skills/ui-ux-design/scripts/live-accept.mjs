@@ -18,6 +18,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { isGeneratedFile } from './is-generated.mjs';
 import { readContainedSource, replaceContainedSource } from './contained-source.mjs';
+import { findMatchingJsxTag, scanJsxTags } from './jsx-tag-scanner.mjs';
 
 const EXTENSIONS = ['.html', '.jsx', '.tsx', '.vue', '.svelte', '.astro'];
 
@@ -267,35 +268,28 @@ function expandReplaceRange(block, lines, isJsx) {
     }
   }
 
-  // Walk forward to the matching `</div>` by div-depth tracking from the
-  // wrapper opener. Operate on JOINED text instead of per-line: a
-  // multi-line self-closing JSX `<div\n  className="spacer"\n/>` would
-  // fool per-line regex tracking (the `<div` line matches openRe but the
-  // `/>` line never matches selfCloseRe since it needs `<div` on the same
-  // line). That left depth permanently over-counted and the wrapper's
-  // outer `</div>` orphaned after accept/discard. Single regex with
-  // `[^>]*?` (which spans newlines in JS) handles either form correctly.
+  // Walk forward to the matching wrapper close with the shared JSX scanner.
+  // It treats quotes and expression braces as syntax, so `>` and tag-shaped
+  // strings inside props cannot redirect the structural match.
   const joined = lines.slice(start).join('\n');
-  // Match either `<div … />` (self-close, group 1 is `/`), `<div … >`
-  // (open, group 1 is empty), or `</div>`.
-  const tagRe = /<div\b[^>]*?(\/?)>|<\/div\s*>/g;
-  let depth = 0;
-  let m;
-  while ((m = tagRe.exec(joined)) !== null) {
-    const isClose = m[0].startsWith('</');
-    const isSelfClose = !isClose && m[1] === '/';
-    if (isClose) depth--;
-    else if (!isSelfClose) depth++;
-    if (depth <= 0) {
-      // m.index is offset within `joined`; convert back to a file line.
-      const linesBefore = joined.slice(0, m.index + m[0].length).split('\n').length - 1;
-      const candidateEnd = start + linesBefore;
-      if (candidateEnd >= end) {
-        end = candidateEnd;
-        break;
-      }
-    }
+  const tags = scanJsxTags(joined);
+  const openerIndex = tags.findIndex((tag) => !tag.closing
+    && tag.name === 'div'
+    && tag.raw.includes('data-impeccable-variants='));
+  if (openerIndex === -1) {
+    const error = new Error('Missing JSX variant wrapper opener');
+    error.code = 'jsx_scan_unbalanced';
+    throw error;
   }
+  const closing = findMatchingJsxTag(tags, openerIndex);
+  const linesBefore = joined.slice(0, closing.end).split('\n').length - 1;
+  const candidateEnd = start + linesBefore;
+  if (candidateEnd < end) {
+    const error = new Error('JSX variant wrapper closes before its marker block');
+    error.code = 'jsx_scan_unbalanced';
+    throw error;
+  }
+  end = candidateEnd;
 
   return { start, end };
 }
@@ -346,35 +340,18 @@ function stripStyleAndJoin(lines, block) {
 /**
  * Find the inner content of `<TAG ...attrMatch...>…</TAG>` inside `text`,
  * handling nested same-tag elements via depth counting. `attrMatch` is a
- * regex source fragment that must appear inside the opener tag.
+ * literal attribute fragment that must appear inside the opener tag.
  * Returns the inner string (may be empty), or null if not found.
  */
 function extractInnerByAttr(text, attrMatch) {
-  const openerRe = new RegExp('<([A-Za-z][A-Za-z0-9]*)\\b[^>]*' + attrMatch + '[^>]*>');
-  const openMatch = text.match(openerRe);
-  if (!openMatch) return null;
-
-  const tagName = openMatch[1];
-  const innerStart = openMatch.index + openMatch[0].length;
-
-  // Match any opener or closer of this tag name after innerStart.
-  // (Does not match self-closing <TAG … />, which doesn't contribute to depth.)
-  const tagRe = new RegExp('<(?:/)?' + tagName + '\\b[^>]*>', 'g');
-  tagRe.lastIndex = innerStart;
-
-  let depth = 1;
-  let m;
-  while ((m = tagRe.exec(text))) {
-    const isClose = m[0].startsWith('</');
-    const isSelfClose = !isClose && /\/\s*>$/.test(m[0]);
-    if (isClose) {
-      depth--;
-      if (depth === 0) return text.slice(innerStart, m.index);
-    } else if (!isSelfClose) {
-      depth++;
-    }
-  }
-  return null;
+  const tags = scanJsxTags(text);
+  const openerIndex = tags.findIndex((tag) => !tag.closing
+    && !tag.selfClosing
+    && tag.raw.includes(attrMatch));
+  if (openerIndex === -1) return null;
+  const opener = tags[openerIndex];
+  const closing = findMatchingJsxTag(tags, openerIndex);
+  return text.slice(opener.end, closing.start);
 }
 
 /**

@@ -57,7 +57,7 @@ async function completeThroughServer(info, args) {
       ? 'error'
       : 'complete';
   try {
-    const res = await fetch(`http://localhost:${info.port}/poll`, {
+    const res = await fetch(`http://127.0.0.1:${info.port}/poll`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ token: info.token, id: args.id, type, message: args.message }),

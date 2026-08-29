@@ -183,3 +183,22 @@ def test_live_reference_has_first_run_schema_fallback_and_real_command_contracts
         "agent-driven",
         "live-complete.mjs",
     )
+
+
+def test_live_source_write_contract_does_not_claim_pathname_or_crash_atomicity():
+    live = _text("live.md")
+    browser = (SKILL / "scripts" / "live-browser.js").read_text().lower()
+    _has_all(live, "descriptor-bound", "in-place", "not crash-atomic", "briefly visible")
+    assert "arrive atomically" not in browser
+    assert "completed source edit" in browser
+
+
+def test_runtime_help_does_not_advertise_uninstalled_impeccable_commands():
+    scripts = "\n".join(
+        path.read_text()
+        for path in (SKILL / "scripts").rglob("*")
+        if path.is_file() and path.suffix in {".js", ".mjs"}
+        and path.name != "modern-screenshot.umd.js"
+    ).lower()
+    assert "npx impeccable" not in scripts
+    assert "usage: impeccable " not in scripts

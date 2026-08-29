@@ -286,6 +286,18 @@ function writeDescriptor(entry, bytes) {
 }
 
 
+function validateReplacementPreflight(entry) {
+  const read = readStableDescriptor(entry.descriptor);
+  if (!snapshotStillMatches(read.before, entry.snapshot)) {
+    throw sourceError('source_path_changed', 'Source file changed immediately before replacement');
+  }
+  if (read.digest !== entry.snapshot.digest || !read.bytes.equals(entry.snapshot.bytes)) {
+    throw sourceError('source_path_changed', 'Source contents changed immediately before replacement');
+  }
+  validateParentBinding(entry.snapshot);
+}
+
+
 export function replaceContainedSources(replacements, options = {}) {
   if (!Array.isArray(replacements)) {
     throw sourceError('source_replace_invalid', 'Replacements must be an array');
@@ -315,6 +327,9 @@ export function replaceContainedSources(replacements, options = {}) {
     for (let index = 0; index < opened.length; index += 1) {
       const entry = opened[index];
       options.beforeReplace?.({ index, path: entry.snapshot.path });
+      // Recheck the original bytes and parent after the last caller hook and
+      // immediately before truncating this already-open descriptor.
+      validateReplacementPreflight(entry);
       applied.push(entry);
       writeDescriptor(entry, entry.replacement);
       options.afterWrite?.({ index, path: entry.snapshot.path });

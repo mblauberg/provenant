@@ -2,7 +2,7 @@
 /**
  * Impeccable Live Variant Mode — Browser Script
  *
- * Injected into the user's page via <script src="http://localhost:PORT/live.js">.
+ * Injected into the user's page via <script src="http://127.0.0.1:PORT/live.js">.
  * The server prepends window.__IMPECCABLE_TOKEN__ and window.__IMPECCABLE_PORT__
  * before this code.
  *
@@ -1057,8 +1057,9 @@
       fontSize: '11px', color: BP.textDim, whiteSpace: 'nowrap',
       marginLeft: 'auto',
     });
-    // Variants currently arrive atomically in a single file edit, so a
-    // per-variant counter would lie. Say what's true.
+    // The UI advances only after one completed source edit is reported, so a
+    // per-variant counter would lie. This is a completion boundary, not a
+    // claim that the underlying in-place filesystem write is atomic.
     status.textContent = arrivedVariants < expectedVariants
       ? 'Generating ' + expectedVariants + ' variants...'
       : 'Done';
@@ -1838,7 +1839,7 @@
    * This works even when the dev server caches HTML (Bun, static servers).
    */
   function injectVariantsFromSource(filePath, sessionId) {
-    const url = 'http://localhost:' + PORT + '/source?token=' + TOKEN + '&path=' + encodeURIComponent(filePath);
+    const url = 'http://127.0.0.1:' + PORT + '/source?token=' + TOKEN + '&path=' + encodeURIComponent(filePath);
     fetch(url)
       .then(r => { if (!r.ok) throw new Error(r.status); return r.text(); })
       .then(html => {
@@ -2196,7 +2197,7 @@
   const SSE_MAX_RETRIES = 20;  // generous: heartbeats keep the connection alive, so retries mean real trouble
 
   function connectSSE() {
-    evtSource = new EventSource('http://localhost:' + PORT + '/events?token=' + TOKEN);
+    evtSource = new EventSource('http://127.0.0.1:' + PORT + '/events?token=' + TOKEN);
 
     evtSource.onopen = () => {
       sseRetries = 0; // reset on successful (re)connect
@@ -2291,7 +2292,7 @@
       if (opts && opts.throwOnError) throw err;
       return null;
     }
-    return fetch('http://localhost:' + PORT + '/events', {
+    return fetch('http://127.0.0.1:' + PORT + '/events', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(msg),
@@ -2584,7 +2585,7 @@
     if (msLoadPromise) return msLoadPromise;
     msLoadPromise = new Promise((resolve, reject) => {
       const s = document.createElement('script');
-      s.src = 'http://localhost:' + PORT + '/modern-screenshot.js';
+      s.src = 'http://127.0.0.1:' + PORT + '/modern-screenshot.js';
       s.onload = () => resolve(window.modernScreenshot);
       s.onerror = () => { msLoadPromise = null; reject(new Error('modern-screenshot failed to load')); };
       document.head.appendChild(s);
@@ -2755,7 +2756,7 @@
     if (blob && hasAnnotations) {
       try {
         const uploadRes = await fetch(
-          'http://localhost:' + PORT + '/annotation?token=' + encodeURIComponent(TOKEN) +
+          'http://127.0.0.1:' + PORT + '/annotation?token=' + encodeURIComponent(TOKEN) +
           '&eventId=' + encodeURIComponent(basePayload.id),
           { method: 'POST', headers: { 'Content-Type': 'image/png' }, body: blob },
         );
@@ -3649,7 +3650,7 @@ void main() {
     if (detectScriptLoaded) return;
     detectScriptLoaded = true;
     const s = document.createElement('script');
-    s.src = 'http://localhost:' + PORT + '/detect.js';
+    s.src = 'http://127.0.0.1:' + PORT + '/detect.js';
     s.dataset.impeccableExtension = 'true';
     document.head.appendChild(s);
   }
@@ -4144,8 +4145,8 @@ void main() {
     renderDesignBody();
     try {
       const [jsonRes, rawRes] = await Promise.all([
-        fetch(`http://localhost:${PORT}/design-system.json?token=${TOKEN}`, { cache: 'no-store' }),
-        fetch(`http://localhost:${PORT}/design-system/raw?token=${TOKEN}`, { cache: 'no-store' }),
+        fetch(`http://127.0.0.1:${PORT}/design-system.json?token=${TOKEN}`, { cache: 'no-store' }),
+        fetch(`http://127.0.0.1:${PORT}/design-system/raw?token=${TOKEN}`, { cache: 'no-store' }),
       ]);
       const jsonData = await jsonRes.json();
       designState.present = jsonData.present === true;

@@ -50,7 +50,7 @@ Every config.files target must resolve to an existing project-relative regular f
 symlinks and multiply-linked files are rejected before any source change.
 
 Modes:
-  --port PORT   Insert script tag pointing at http://localhost:PORT/live.js
+  --port PORT   Insert script tag pointing at http://127.0.0.1:PORT/live.js
   --token TOKEN Authenticate the injected script with the current live server
   --remove      Remove the script tag (if present)
   --check       Print whether .impeccable/live/config.json exists and its content
@@ -348,7 +348,7 @@ function buildTagBlock(syntax, port, token) {
   const close = commentClose(syntax);
   return (
     open + ' ' + MARKER_OPEN_TEXT + ' ' + close + '\n' +
-    '<script src="http://localhost:' + port + '/live.js?token=' + encodeURIComponent(token) + '"></script>\n' +
+    '<script src="http://127.0.0.1:' + port + '/live.js?token=' + encodeURIComponent(token) + '"></script>\n' +
     open + ' ' + MARKER_CLOSE_TEXT + ' ' + close + '\n'
   );
 }
@@ -401,9 +401,9 @@ function removeTag(content, _syntax) {
 //
 // When the user's HTML carries `<meta http-equiv="Content-Security-Policy">`,
 // the cross-origin load of /live.js (and the SSE/POST connection back to
-// localhost:PORT) is blocked unless the CSP explicitly allows that origin.
+// 127.0.0.1:PORT) is blocked unless the CSP explicitly allows that origin.
 //
-// On insert: append `http://localhost:PORT` to `script-src` and `connect-src`,
+// On insert: append `http://127.0.0.1:PORT` to `script-src` and `connect-src`,
 // and stash the original `content` value in a `data-impeccable-csp-original`
 // attribute (base64) so revert is exact.
 //
@@ -417,6 +417,22 @@ function removeTag(content, _syntax) {
 // ---------------------------------------------------------------------------
 
 const CSP_MARKER_ATTR = 'data-impeccable-csp-original';
+
+function decodeCanonicalUtf8Base64(value) {
+  const canonicalBase64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
+  try {
+    if (!canonicalBase64.test(value)) throw new Error('non-canonical base64');
+    const bytes = Buffer.from(value, 'base64');
+    if (bytes.toString('base64') !== value) throw new Error('non-canonical base64');
+    const decoded = bytes.toString('utf8');
+    if (!Buffer.from(decoded, 'utf8').equals(bytes)) throw new Error('invalid UTF-8');
+    return decoded;
+  } catch (cause) {
+    const error = new Error('Malformed Impeccable CSP restoration marker', { cause });
+    error.code = 'csp_marker_invalid';
+    throw error;
+  }
+}
 
 function findCspMetaTags(content) {
   const out = [];
@@ -453,7 +469,7 @@ function appendOriginToDirective(csp, directive, origin) {
 export function patchCspMeta(content, port) {
   const tags = findCspMetaTags(content);
   if (tags.length === 0) return content;
-  const origin = `http://localhost:${port}`;
+  const origin = `http://127.0.0.1:${port}`;
 
   // Walk last-to-first so prior splices don't invalidate later indices.
   let result = content;
@@ -505,9 +521,7 @@ export function revertCspMeta(content) {
     const contentAttr = getAttr(tag.attrs, 'content');
     if (!contentAttr) continue;
 
-    let originalValue;
-    try { originalValue = Buffer.from(origAttr.value, 'base64').toString('utf-8'); }
-    catch { continue; }
+    const originalValue = decodeCanonicalUtf8Base64(origAttr.value);
 
     const newContentAttr = `content=${contentAttr.quote}${originalValue}${contentAttr.quote}`;
     let newAttrs = tag.attrs.replace(contentAttr.full, newContentAttr);

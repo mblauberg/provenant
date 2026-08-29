@@ -24,7 +24,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadContext } from './load-context.mjs';
 import { resolveFiles } from './live-inject.mjs';
-import { readLiveServerInfo } from './impeccable-paths.mjs';
+import { ensureCanonicalLiveStateRoot, readLiveServerInfo } from './impeccable-paths.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -51,6 +51,17 @@ The agent should then:
   2. Optionally open the project's dev/preview URL in the browser (see references/live.md—not serverPort)
   3. Enter the poll loop: node live-poll.mjs`);
     process.exit(0);
+  }
+
+  try {
+    ensureCanonicalLiveStateRoot(process.cwd());
+  } catch (error) {
+    console.log(JSON.stringify({
+      ok: false,
+      error: error.code || 'live_state_root_invalid',
+      message: error.message,
+    }));
+    process.exit(1);
   }
 
   // 1. Check config (fail fast if missing — no point starting anything else)
