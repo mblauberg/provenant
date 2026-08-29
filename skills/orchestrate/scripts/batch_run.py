@@ -331,10 +331,12 @@ def _validate_child_record(task: dict[str, Any], record: dict[str, Any], run_dir
         ):
             raise BatchInputError(f"child attempt receipt task_id does not match {task_id}")
         attempt_id = attempt.get("attempt_id")
+        attempt_root = Path("dispatch") / "tasks" / task_id / str(attempt_id)
+        expected_attempt_path = (attempt_root / "attempt.json").as_posix()
         if (
             not isinstance(attempt_id, str)
             or not re.fullmatch(r"attempt-\d{3}", attempt_id)
-            or Path(attempt_path).parent.name != attempt_id
+            or attempt_path != expected_attempt_path
             or record.get("attempt_id") != attempt_id
         ):
             raise BatchInputError(f"child attempt identity does not match retained path: {task_id}")
@@ -379,7 +381,11 @@ def _validate_child_record(task: dict[str, Any], record: dict[str, Any], run_dir
         if adapter_receipt is not None:
             if not isinstance(adapter_receipt, dict):
                 raise BatchInputError(f"child adapter receipt is malformed: {task_id}")
-            _, adapter_file = _contained_file(run_dir, adapter_receipt.get("path"), "adapter receipt")
+            adapter_path, adapter_file = _contained_file(
+                run_dir, adapter_receipt.get("path"), "adapter receipt"
+            )
+            if adapter_path != (attempt_root / "adapter-receipt.json").as_posix():
+                raise BatchInputError(f"child adapter receipt path does not match attempt: {task_id}")
             if adapter_receipt.get("digest") != digest(adapter_file):
                 raise BatchInputError(f"child adapter receipt digest does not match: {task_id}")
         if status == "succeeded" and process_exit != 0:
@@ -389,6 +395,8 @@ def _validate_child_record(task: dict[str, Any], record: dict[str, Any], run_dir
             if not isinstance(retained_result, dict):
                 raise BatchInputError(f"child result receipt is malformed: {task_id}")
             result_path, result_file = _contained_file(run_dir, retained_result.get("path"), "result")
+            if result_path != (attempt_root / "result.md").as_posix():
+                raise BatchInputError(f"child result path does not match attempt: {task_id}")
             expected_digest = retained_result.get("digest")
             if not isinstance(expected_digest, str) or expected_digest != digest(result_file):
                 raise BatchInputError(f"child result digest does not match: {task_id}")

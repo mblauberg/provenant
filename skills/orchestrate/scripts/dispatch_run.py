@@ -318,8 +318,17 @@ def reconcile_manifest(run_dir: Path) -> None:
             record = json.loads(attempt_path.read_text(encoding="utf-8"))
         except (OSError, TypeError, ValueError) as exc:
             raise AttemptEvidenceError(f"attempt record is unreadable: {attempt_path}") from exc
-        if not isinstance(record, dict) or record.get("record_type") != "dispatch-attempt":
-            raise AttemptEvidenceError(f"attempt record has an invalid type: {attempt_path}")
+        task_id = attempt_path.parent.parent.name
+        attempt_id = attempt_path.parent.name
+        if (
+            not isinstance(record, dict)
+            or record.get("schema_version") != 1
+            or record.get("record_type") != "dispatch-attempt"
+            or record.get("task_id") != task_id
+            or record.get("attempt_id") != attempt_id
+            or not TASK_ID_RE.fullmatch(task_id)
+        ):
+            raise AttemptEvidenceError(f"attempt record has invalid schema or identity: {attempt_path}")
         try:
             if retained_path(run_dir, record["attempt_path"]) != discovered_attempt_path:
                 raise AttemptEvidenceError(
@@ -328,12 +337,28 @@ def reconcile_manifest(run_dir: Path) -> None:
             sidecar = attempt_path.with_name("attempt.sha256")
             if not sidecar.is_file():
                 atomic_write(sidecar, f"{digest(attempt_path)}  {attempt_path.name}\n")
+            if not valid_regular_result(run_dir, sidecar):
+                raise AttemptEvidenceError(f"attempt digest is not a regular retained file: {sidecar}")
             record["attempt_digest_path"] = relative_path(run_dir, sidecar)
             rows = [
                 (kind, retained_path(run_dir, path))
                 for kind, path in manifest_rows(run_dir, record)
             ]
-            absent = [path for _, path in rows if not (run_dir / path).is_file()]
+            attempt_root = Path("dispatch") / "tasks" / task_id / attempt_id
+            expected = {
+                "attempt": (attempt_root / "attempt.json").as_posix(),
+                "prompt": (attempt_root / "prompt.md").as_posix(),
+                "adapter": (attempt_root / "adapter-receipt.json").as_posix(),
+                "stderr": (attempt_root / "stderr.log").as_posix(),
+                "attempt-digest": (attempt_root / "attempt.sha256").as_posix(),
+                "result": (attempt_root / "result.md").as_posix(),
+            }
+            mismatched = [kind for kind, path in rows if path != expected[kind]]
+            if mismatched:
+                raise AttemptEvidenceError(
+                    f"attempt evidence path is not canonical for {attempt_path}: {', '.join(mismatched)}"
+                )
+            absent = [path for _, path in rows if not valid_regular_result(run_dir, run_dir / path)]
             if absent:
                 raise AttemptEvidenceError(
                     f"attempt evidence is missing for {attempt_path}: {', '.join(absent)}"

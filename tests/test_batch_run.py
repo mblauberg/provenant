@@ -291,6 +291,17 @@ def test_retained_non_success_attempt_allows_partial_route_and_question(tmp_path
     with pytest.raises(module.BatchInputError, match='attempt receipt'):
         module._validate_child_record(current, record, run_dir, -15)
 
+    wrong_dir = run_dir / 'dispatch/tasks/other/attempt-001'
+    wrong_dir.mkdir(parents=True)
+    wrong_rel = 'dispatch/tasks/other/attempt-001/attempt.json'
+    attempt['record_type'] = 'dispatch-attempt'
+    attempt['attempt_path'] = wrong_rel
+    wrong_path = run_dir / wrong_rel
+    wrong_path.write_text(json.dumps(attempt, sort_keys=True) + '\n', encoding='utf-8')
+    wrong_record = {**record, 'attempt_path': wrong_rel, 'attempt_digest': module.digest(wrong_path)}
+    with pytest.raises(module.BatchInputError, match='identity'):
+        module._validate_child_record(current, wrong_record, run_dir, -15)
+
 
 def test_real_dispatch_timeout_retains_typed_non_success_attempt(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
@@ -560,6 +571,30 @@ def test_malformed_prior_attempt_blocks_all_batch_launches(tmp_path, monkeypatch
     assert module.batch(args(module, run_dir, manifest, 1)) == 2
     assert not (tmp_path / 'active').exists()
     assert not list((run_dir / 'dispatch/batches').glob('batch-*'))
+
+
+def test_non_v1_prior_attempt_blocks_reentry_before_launch(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    run_dir = make_run(tmp_path, 'non-v1-prior')
+    dispatch = tmp_path / 'fake-dispatch'
+    fake_dispatch(dispatch)
+    module = load_module()
+    module.DISPATCH_RUN = dispatch
+    counter = tmp_path / 'counter'
+    counter.write_text('0')
+    monkeypatch.setenv('BATCH_COUNTER', str(counter))
+
+    first_manifest = task_manifest(tmp_path, [task(tmp_path, 'prior')])
+    assert module.batch(args(module, run_dir, first_manifest, 1)) == 0
+    prior_path = run_dir / 'dispatch/tasks/prior/attempt-001/attempt.json'
+    prior = json.loads(prior_path.read_text())
+    prior['schema_version'] = 2
+    prior_path.write_text(json.dumps(prior, sort_keys=True) + '\n', encoding='utf-8')
+
+    second_manifest = task_manifest(tmp_path, [task(tmp_path, 'next')])
+    assert module.batch(args(module, run_dir, second_manifest, 1)) == 2
+    assert not (run_dir / 'dispatch/tasks/next').exists()
+    assert not (run_dir / 'dispatch/batches/batch-002').exists()
 
 
 def test_standalone_dispatch_is_blocked_by_batch_custody(tmp_path, monkeypatch):
