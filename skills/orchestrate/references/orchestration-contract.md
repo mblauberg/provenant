@@ -125,7 +125,9 @@ receipt is valid, records exit `0`, and the provider process exit has been
 observed. The whole result must be one JSON object with exactly this shape:
 `{"schema_version":1,"record_type":"provenant-worker-terminal","classification":"question","question":{"code":"needs_input","prompt":"..."}}`.
 The prompt is a non-empty string of at most 4096 characters and contains no
-NUL. Do not scan prose, question marks or Markdown fences. A malformed object
+NUL. Candidate parsing is bounded to a 64 KiB whole-result read, so only a
+bounded exact document can be an envelope; larger results remain ordinary.
+Do not scan prose, question marks or Markdown fences. A malformed object
 that declares the reserved `record_type` is `terminal_envelope_invalid`;
 ordinary prose, fenced JSON and JSON with another record type remain ordinary
 results. A non-zero provider exit can never become `blocked`.

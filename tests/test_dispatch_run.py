@@ -279,12 +279,69 @@ def test_worker_question_candidate_is_bounded_and_digest_bound(tmp_path: Path) -
     }).encode() + b"\n"
     result.write_bytes(envelope)
 
-    assert module.worker_question_envelope(result, "sha256:not-the-result") is None
+    with pytest.raises(module.TerminalEnvelopeIntegrityError):
+        module.worker_question_envelope(result, "sha256:not-the-result")
     assert module.worker_question_envelope(result, module.digest(result)) == {
         "code": "needs_input", "prompt": "Which source?"
     }
     result.write_bytes(envelope + b"x" * (module.MAX_WORKER_TERMINAL_ENVELOPE_BYTES + 1))
     assert module.worker_question_envelope(result, module.digest(result)) is None
+
+
+def test_valid_maximum_astral_worker_question_envelope_is_blocked(tmp_path: Path, monkeypatch) -> None:
+    run_dir = make_run(tmp_path, "question-astral")
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("prompt\n", encoding="utf-8")
+    result = json.dumps({
+        "schema_version": 1,
+        "record_type": "provenant-worker-terminal",
+        "classification": "question",
+        "question": {"code": "needs_input", "prompt": "😀" * 4096},
+    }, ensure_ascii=False)
+    adapter = tmp_path / "adapter"
+    write_question_adapter(adapter, result=result)
+    module = load_dispatch_module()
+    monkeypatch.setattr(module, "CF_DISPATCH", adapter)
+    args = module.parser().parse_args([
+        "--run-dir", str(run_dir), "--task-id", "case", "--adapter", "codex",
+        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+    ])
+    monkeypatch.chdir(tmp_path)
+
+    assert module.dispatch(args) == 1
+    attempt = json.loads((run_dir / "dispatch/tasks/case/attempt-001/attempt.json").read_text())
+    assert attempt["status"] == "blocked"
+    assert len(attempt["question"]["prompt"]) == 4096
+
+
+def test_dispatch_fails_when_terminal_candidate_cannot_be_safely_reopened(
+    tmp_path: Path, monkeypatch
+) -> None:
+    run_dir = make_run(tmp_path, "question-reread-failure")
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("prompt\n", encoding="utf-8")
+    adapter = tmp_path / "adapter"
+    write_question_adapter(adapter)
+    module = load_dispatch_module()
+    monkeypatch.setattr(module, "CF_DISPATCH", adapter)
+    real_open = module.os.open
+
+    def refuse_result_open(path, flags, *args, **kwargs):
+        if Path(path).name == "result.md" and flags & getattr(module.os, "O_NOFOLLOW", 0):
+            raise OSError("result replaced during terminal validation")
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(module.os, "open", refuse_result_open)
+    args = module.parser().parse_args([
+        "--run-dir", str(run_dir), "--task-id", "case", "--adapter", "codex",
+        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+    ])
+    monkeypatch.chdir(tmp_path)
+
+    assert module.dispatch(args) == 1
+    attempt = json.loads((run_dir / "dispatch/tasks/case/attempt-001/attempt.json").read_text())
+    assert attempt["status"] == "failed"
+    assert attempt["outcome"] == "result_integrity_error"
 
 
 def test_ordinary_dispatch_without_lead_family_is_not_certification(tmp_path: Path) -> None:

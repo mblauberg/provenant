@@ -34,7 +34,7 @@ TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 ATTEMPT_ID_RE = re.compile(r"^attempt-(?P<number>\d{3}|[1-9]\d{3,})$")
 DEFAULT_TIMEOUT_SECONDS = 900.0
 MAX_WORKER_QUESTION_PROMPT = 4096
-MAX_WORKER_TERMINAL_ENVELOPE_BYTES = 16 * 1024
+MAX_WORKER_TERMINAL_ENVELOPE_BYTES = 64 * 1024
 WORKER_TERMINAL_RECORD_TYPE = "provenant-worker-terminal"
 
 from _shared.bounded_process import stop_process_group
@@ -42,6 +42,10 @@ from _shared.bounded_process import stop_process_group
 
 class AttemptEvidenceError(ValueError):
     """A retained attempt cannot be reconciled without inventing evidence."""
+
+
+class TerminalEnvelopeIntegrityError(ValueError):
+    """A bounded terminal candidate changed or became unsafe to reread."""
 
 
 def now() -> str:
@@ -253,30 +257,32 @@ def worker_question_envelope(result_path: Path, expected_digest: str) -> dict[st
     try:
         flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
         fd = os.open(result_path, flags)
-        try:
-            metadata = os.fstat(fd)
-            if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
-                return None
-            chunks: list[bytes] = []
-            total = 0
-            while total <= MAX_WORKER_TERMINAL_ENVELOPE_BYTES:
-                chunk = os.read(
-                    fd, min(1024 * 1024, MAX_WORKER_TERMINAL_ENVELOPE_BYTES + 1 - total)
-                )
-                if not chunk:
-                    break
-                chunks.append(chunk)
-                total += len(chunk)
-            candidate = b"".join(chunks)
-        finally:
-            os.close(fd)
-    except OSError:
-        return None
+    except OSError as exc:
+        raise TerminalEnvelopeIntegrityError("terminal candidate cannot be safely reopened") from exc
+    try:
+        metadata = os.fstat(fd)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            raise TerminalEnvelopeIntegrityError("terminal candidate is not a regular single-link file")
+        chunks: list[bytes] = []
+        total = 0
+        while total <= MAX_WORKER_TERMINAL_ENVELOPE_BYTES:
+            chunk = os.read(
+                fd, min(1024 * 1024, MAX_WORKER_TERMINAL_ENVELOPE_BYTES + 1 - total)
+            )
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+        candidate = b"".join(chunks)
+    except OSError as exc:
+        raise TerminalEnvelopeIntegrityError("terminal candidate cannot be safely read") from exc
+    finally:
+        os.close(fd)
     if len(candidate) > MAX_WORKER_TERMINAL_ENVELOPE_BYTES:
         return None
     candidate_hash = hashlib.sha256(candidate).hexdigest()
     if expected_digest != f"sha256:{candidate_hash}":
-        return None
+        raise TerminalEnvelopeIntegrityError("terminal candidate digest does not match retained result")
     try:
         value = json.loads(candidate.decode("utf-8"), object_pairs_hook=_JSONObject)
     except (UnicodeDecodeError, json.JSONDecodeError):
@@ -703,9 +709,12 @@ def _dispatch(args: argparse.Namespace) -> int:
     )
     question: dict[str, Any] | None = None
     terminal_envelope_error = False
+    result_integrity_error = False
     if observed_exit and exit_code == 0 and adapter_status == "ok" and not receipt_error and result_nonempty:
         try:
             question = worker_question_envelope(result_path, result_digest)
+        except TerminalEnvelopeIntegrityError:
+            result_integrity_error = True
         except ValueError:
             terminal_envelope_error = True
     if process_error == "timeout":
@@ -723,6 +732,9 @@ def _dispatch(args: argparse.Namespace) -> int:
     elif adapter_status == "ok" and receipt_error:
         status = "failed"
         outcome = "adapter_receipt_invalid"
+    elif result_integrity_error:
+        status = "failed"
+        outcome = "result_integrity_error"
     elif terminal_envelope_error:
         status = "failed"
         outcome = "terminal_envelope_invalid"

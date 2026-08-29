@@ -62,7 +62,8 @@ The dispatch owner recognises a question only after observed provider exit,
 adapter receipt validation and adapter exit `0`. The retained result must be
 one exact JSON object: `{"schema_version":1,"record_type":"provenant-worker-terminal","classification":"question","question":{"code":"needs_input","prompt":"..."}}`,
 with a non-empty prompt of at most 4096 characters and no NUL. Never scan
-prose, question marks or Markdown fences. A malformed object using the
+Candidate parsing is bounded to a 64 KiB whole-result read, so larger results
+remain ordinary. Never scan prose, question marks or Markdown fences. A malformed object using the
 reserved record type fails closed as `terminal_envelope_invalid`; other prose
 or JSON is ordinary output, and non-zero provider exit is never blocked.
 Responding to a blocked attempt starts a new invocation and attempt, retaining
