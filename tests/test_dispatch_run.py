@@ -70,6 +70,10 @@ def test_ordinary_single_dispatch_records_one_attempt_and_route_identity(tmp_pat
         bin_dir / "codex",
         """
         #!/usr/bin/env bash
+        if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
+          printf '{"models":[{"slug":"gpt-5.6-luna","supported_reasoning_levels":[{"effort":"high"}]}]}'
+          exit 0
+        fi
         cat >/dev/null
         printf 'OK\\n'
         """,
