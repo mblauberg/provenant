@@ -118,6 +118,11 @@ def _stop_process_group(process: subprocess.Popen[bytes]) -> None:
         process.wait(timeout=_TERMINATION_GRACE_SECONDS)
 
 
+def stop_process_group(process: subprocess.Popen[bytes]) -> None:
+    """Stop and reap a process group using the bounded runner's semantics."""
+    _stop_process_group(process)
+
+
 def run_bounded(
     command: Sequence[str],
     *,

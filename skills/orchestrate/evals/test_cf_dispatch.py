@@ -67,6 +67,44 @@ def write_executable(path, body):
     path.chmod(path.stat().st_mode | stat.S_IXUSR)
 
 
+def test_output_install_replaces_symlink_without_overwriting_target():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        bin_dir = root / "bin"
+        bin_dir.mkdir()
+        write_executable(
+            bin_dir / "codex",
+            """#!/usr/bin/env bash
+            if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
+              printf '{"models":[{"slug":"gpt-5.6-luna","supported_reasoning_levels":[{"effort":"high"}]}]}'
+              exit 0
+            fi
+            cat >/dev/null
+            printf 'safe output\n'
+            """,
+        )
+        prompt = root / "prompt.md"
+        prompt.write_text("test\n", encoding="utf-8")
+        outside = root / "outside"
+        outside.write_text("unchanged\n", encoding="utf-8")
+        out = root / "result.md"
+        out.symlink_to(outside)
+        env = fabric_free_env()
+        env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
+
+        result = subprocess.run(
+            [str(SCRIPT), "--intent", "ordinary", "--tool", "codex",
+             "--prompt-file", str(prompt), "--out", str(out),
+             "--alias", "workhorse", "--role", "worker"],
+            cwd=root, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+
+        assert result.returncode == 0, result.stderr + result.stdout
+        assert outside.read_text(encoding="utf-8") == "unchanged\n"
+        assert not out.is_symlink()
+        assert out.read_text(encoding="utf-8") == "safe output\n"
+
+
 def fabric_free_env():
     # Stripping the fabric variables stops an inherited developer instance
     # from steering these evals through an installed provenant command.
@@ -669,6 +707,59 @@ def test_same_family_cli_is_forbidden_when_family_declared():
         assert record["status"] == "same_family_forbidden"
         assert record["read_only_guarantee"] == "none"
         assert record["cross_family"] is False
+
+
+def test_ordinary_intent_allows_same_family_without_certification():
+    stub = """\
+        #!/usr/bin/env bash
+        cat >/dev/null
+        echo "ORDINARY OK"
+    """
+    result, record, output = run_dispatch_with_stub(
+        stub,
+        extra_args=["--intent", "ordinary", "--orchestrator-family", "anthropic"],
+    )
+    assert result.returncode == 0, result.output
+    assert record["status"] == "ok"
+    assert record["execution_intent"] == "ordinary"
+    assert record["provider_family"] == "anthropic"
+    assert record["cross_family"] is False
+    assert record["certification_eligible"] is False
+    assert output.strip() == "ORDINARY OK"
+
+
+def test_ordinary_cross_family_enforced_route_is_not_certification():
+    stub = """\
+        #!/usr/bin/env bash
+        cat >/dev/null
+        echo "ORDINARY CROSS-FAMILY OK"
+    """
+    result, record, _ = run_dispatch_with_stub(
+        stub,
+        extra_args=["--intent", "ordinary"],
+    )
+    assert result.returncode == 0, result.output
+    assert record["cross_family"] is True
+    assert record["read_only_guarantee"] == "enforced"
+    assert record["certification_eligible"] is False
+
+
+def test_task_class_route_preserves_effective_alias():
+    stub = """\
+        #!/usr/bin/env bash
+        cat >/dev/null
+        echo "TASK CLASS OK"
+    """
+    result, record, _ = run_dispatch_with_stub(
+        stub,
+        role="worker",
+        extra_args=["--intent", "ordinary", "--task-class", "mechanical"],
+        provenant_stub="""#!/usr/bin/env bash
+            printf '{\"status\":\"ok\",\"alias\":\"scout\",\"resolved_model\":\"haiku\",\"model_family\":\"anthropic\",\"endpoint_provider\":\"anthropic\",\"identity_source\":\"test\"}\n'
+        """,
+    )
+    assert result.returncode == 0, result.output
+    assert record["route_alias"] == "scout"
 
 
 def test_cursor_model_provider_prevents_disguised_same_family_review():

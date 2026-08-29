@@ -38,6 +38,10 @@ raise SystemExit(int(os.environ.get("PROVENANT_TEST_EXIT", "0")))
         path = scripts / owner
         path.write_text(recorder)
         path.chmod(0o755)
+    dispatch_owner = checkout / "skills/orchestrate/scripts/dispatch_run.py"
+    dispatch_owner.parent.mkdir(parents=True)
+    dispatch_owner.write_text(recorder)
+    dispatch_owner.chmod(0o755)
     fabric_bin = checkout / "runtime" / "fabric" / "bin"
     fabric_bin.mkdir(parents=True)
     for owner in ("fabric", "fabric-mcp"):
@@ -377,6 +381,17 @@ def test_check_and_fabric_delegate_without_reinterpreting_arguments(tmp_path):
 
     assert json.loads(check.stdout)["argv"][1:] == ["--doctor"]
     assert json.loads(fabric.stdout)["argv"][1:] == ["send", "reviewer", "x y"]
+
+
+def test_dispatch_delegates_without_reinterpreting_arguments(tmp_path):
+    _, command = make_checkout(tmp_path)
+
+    result = invoke(command, "dispatch", "--tool", "codex", "--task-id", "x y", cwd=tmp_path)
+
+    payload = json.loads(result.stdout)
+    assert result.returncode == 0
+    assert payload["argv"][1:] == ["--tool", "codex", "--task-id", "x y"]
+    assert payload["cwd"] == str(tmp_path)
 
 
 def test_missing_or_unknown_command_prints_usage_to_stderr_and_exits_2(tmp_path):
