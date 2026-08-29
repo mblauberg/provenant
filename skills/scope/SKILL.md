@@ -12,8 +12,11 @@ Turn an idea into decided, testable scope under project constraints.
 Define the decision, users and done. Search specs and registers. Emit the minimum
 `config/risk-policy.json` tier plus allowed
 source/artifact paths, prohibited actions, external effects, expiry and approver.
-Ordinary authorised workspace content may cross approved provider families;
-credentials, secrets, platform rules and narrower task/project bans control.
+Ordinary authorised workspace content may cross configured provider families
+without a family-separation gate. This is execution permission, not assurance:
+credentials and authentication stores, secrets, unrelated paths, explicit
+denials, platform rules and narrower task/project bans still control. Path and
+write scopes, resource limits and external-action gates remain explicit.
 Only a user may downgrade risk. Judgement-bearing AI,
 ranking or heuristics require `evaluate`.
 
