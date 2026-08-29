@@ -590,3 +590,37 @@ def test_reentry_fails_closed_for_malformed_attempt_record(tmp_path: Path, monke
 
     assert module.dispatch(args) == 2
     assert not (run_dir / "dispatch/tasks/next").exists()
+
+
+def test_reentry_rejects_retained_paths_that_escape_the_run(tmp_path: Path, monkeypatch) -> None:
+    run_dir = make_run(tmp_path, "escaping-retained")
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("escaping retained\n", encoding="utf-8")
+    attempt_dir = run_dir / "dispatch/tasks/old/attempt-001"
+    attempt_dir.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.write_text("outside\n", encoding="utf-8")
+    (attempt_dir / "attempt.json").write_text(json.dumps({
+        "record_type": "dispatch-attempt",
+        "attempt_path": "../../outside",
+        "task_id": "old",
+        "attempt_id": "attempt-001",
+        "finished_at": "2026-08-29T00:00:00Z",
+        "prompt": {"path": "../../outside"},
+        "result": None,
+        "route": {"adapter_receipt": {"path": "../../outside"}},
+        "stderr": {"path": "../../outside"},
+    }) + "\n", encoding="utf-8")
+    module = load_dispatch_module()
+    adapter = tmp_path / "adapter-never-run-escape"
+    write_executable(adapter, "#!/usr/bin/env bash\nexit 99\n")
+    module.CF_DISPATCH = adapter
+    args = module.parser().parse_args([
+        "--run-dir", str(run_dir), "--task-id", "next", "--adapter", "codex",
+        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+    ])
+    monkeypatch.chdir(tmp_path)
+
+    assert module.dispatch(args) == 2
+    assert "../../outside" not in (run_dir / "MANIFEST.md").read_text(encoding="utf-8")
+    assert not (run_dir / "dispatch/tasks/next").exists()

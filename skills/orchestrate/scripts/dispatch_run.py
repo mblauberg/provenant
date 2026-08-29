@@ -73,6 +73,19 @@ def relative_path(run_dir: Path, path: Path) -> str:
     return path.resolve().relative_to(run_dir.resolve()).as_posix()
 
 
+def retained_path(run_dir: Path, value: Any) -> str:
+    if not isinstance(value, str) or not value:
+        raise AttemptEvidenceError("attempt evidence path is missing or invalid")
+    relative = Path(value)
+    if relative.is_absolute() or ".." in relative.parts:
+        raise AttemptEvidenceError(f"attempt evidence path escapes the run: {value}")
+    try:
+        (run_dir / relative).resolve().relative_to(run_dir.resolve())
+    except ValueError as exc:
+        raise AttemptEvidenceError(f"attempt evidence path escapes the run: {value}") from exc
+    return relative.as_posix()
+
+
 def fail(run_dir: Path | None, status: str, message: str) -> int:
     record = {"schema_version": 1, "status": status, "message": message}
     print(json.dumps(record, sort_keys=True))
@@ -128,17 +141,28 @@ def reconcile_manifest(run_dir: Path) -> None:
     existing = manifest.read_text(encoding="utf-8", errors="replace")
     for attempt_path in sorted((run_dir / "dispatch" / "tasks").glob("*/attempt-*/attempt.json")):
         try:
+            discovered_attempt_path = relative_path(run_dir, attempt_path)
+        except ValueError as exc:
+            raise AttemptEvidenceError(f"attempt record path escapes the run: {attempt_path}") from exc
+        try:
             record = json.loads(attempt_path.read_text(encoding="utf-8"))
         except (OSError, TypeError, ValueError) as exc:
             raise AttemptEvidenceError(f"attempt record is unreadable: {attempt_path}") from exc
         if not isinstance(record, dict) or record.get("record_type") != "dispatch-attempt":
             raise AttemptEvidenceError(f"attempt record has an invalid type: {attempt_path}")
         try:
+            if retained_path(run_dir, record["attempt_path"]) != discovered_attempt_path:
+                raise AttemptEvidenceError(
+                    f"attempt record path does not match its retained file: {attempt_path}"
+                )
             sidecar = attempt_path.with_name("attempt.sha256")
             if not sidecar.is_file():
                 atomic_write(sidecar, f"{digest(attempt_path)}  {attempt_path.name}\n")
             record["attempt_digest_path"] = relative_path(run_dir, sidecar)
-            rows = manifest_rows(run_dir, record)
+            rows = [
+                (kind, retained_path(run_dir, path))
+                for kind, path in manifest_rows(run_dir, record)
+            ]
             absent = [path for _, path in rows if not (run_dir / path).is_file()]
             if absent:
                 raise AttemptEvidenceError(
