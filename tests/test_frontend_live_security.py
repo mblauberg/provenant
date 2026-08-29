@@ -925,6 +925,14 @@ def test_live_wrap_ignores_module_level_jsx_decoys_before_the_real_target(
             "Page.astro",
             "---\nconst docs = '<section class=\"target\">Example</section>';\n---\n",
         ),
+        (
+            "Multiline.svelte",
+            "{condition ? `\n<section class=\"target\">Example</section>\n` : ''}\n",
+        ),
+        (
+            "Multiline.astro",
+            "---\nconst docs = `\n<section class=\"target\">Example</section>\n`;\n---\n",
+        ),
     ],
 )
 def test_live_wrap_ignores_framework_script_expression_decoys(

@@ -543,8 +543,8 @@ function isExecutableOpener(lines, openerLine, source, offsets, isJsx, filePath)
   if (!['.astro', '.svelte', '.vue'].includes(extension)) return true;
   try {
     return javascriptLexicalContextAtOffset(
-      lines[openerLine],
-      opener.index,
+      source,
+      offset,
     ) === 'code';
   } catch {
     return false;
