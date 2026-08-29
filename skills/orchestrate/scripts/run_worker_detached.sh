@@ -156,9 +156,9 @@ transcript_real=$(printf '%s\n' "$run_dir_paths" | sed -n '4p')
 for transcript_candidate in "$transcript_lexical" "$transcript_real"; do
   case "$transcript_candidate" in
     "$run_dir_lexical"/done|"$run_dir_lexical"/worker.pid|"$run_dir_lexical"/wrapper.pid|\
-    "$run_dir_lexical"/done.tmp.*|"$run_dir_lexical"/worker.pid.tmp.*|"$run_dir_lexical"/wrapper.pid.tmp.*|"$run_dir_lexical"/.write-test.*|\
+    "$run_dir_lexical"/done.tmp.*|"$run_dir_lexical"/worker.pid.tmp.*|"$run_dir_lexical"/wrapper.pid.tmp.*|"$run_dir_lexical"/wrapper.identity|"$run_dir_lexical"/wrapper.identity.tmp.*|"$run_dir_lexical"/.write-test.*|\
     "$run_dir_real"/done|"$run_dir_real"/worker.pid|"$run_dir_real"/wrapper.pid|\
-    "$run_dir_real"/done.tmp.*|"$run_dir_real"/worker.pid.tmp.*|"$run_dir_real"/wrapper.pid.tmp.*|"$run_dir_real"/.write-test.*)
+    "$run_dir_real"/done.tmp.*|"$run_dir_real"/worker.pid.tmp.*|"$run_dir_real"/wrapper.pid.tmp.*|"$run_dir_real"/wrapper.identity|"$run_dir_real"/wrapper.identity.tmp.*|"$run_dir_real"/.write-test.*)
       echo "transcript aliases a run-directory evidence path" >&2
       exit 2
       ;;

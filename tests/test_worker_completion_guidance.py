@@ -208,20 +208,21 @@ def test_detached_helper_rejects_invalid_transcript_setup_before_launch(tmp_path
 
 
 def test_detached_helper_rejects_transcript_alias_of_evidence_before_launch(tmp_path):
-    run_dir = tmp_path / "alias"
-    launched = tmp_path / "launched"
     worker_code = "import sys; from pathlib import Path; Path(sys.argv[1]).write_text('launched')"
-    result = subprocess.run(
-        _helper_command(run_dir, run_dir / "missing" / ".." / "done", worker_code)
-        + [str(launched)],
-        capture_output=True,
-        text=True,
-    )
+    for marker_name in ("done", "wrapper.identity", "wrapper.identity.tmp.fake"):
+        run_dir = tmp_path / marker_name.replace(".", "-")
+        launched = tmp_path / f"launched-{marker_name.replace('.', '-')}"
+        result = subprocess.run(
+            _helper_command(run_dir, run_dir / "missing" / ".." / marker_name, worker_code)
+            + [str(launched)],
+            capture_output=True,
+            text=True,
+        )
 
-    assert result.returncode != 0
-    assert not launched.exists()
-    assert not (run_dir / "done").exists()
-    assert "evidence" in result.stderr
+        assert result.returncode != 0
+        assert not launched.exists()
+        assert not (run_dir / marker_name).exists()
+        assert "evidence" in result.stderr
 
 
 def test_detached_helper_validation_rejects_reused_wrapper_identity(tmp_path):
@@ -272,3 +273,36 @@ def test_reentry_guidance_fails_when_wrapper_exits_without_marker():
     assert "--validate" in source
     assert "kill -0 \"$WRAPPER_PID\"" not in source
     assert "recorded wrapper exit" in normalised
+
+
+def test_documented_validation_parsing_produces_numeric_pids(tmp_path):
+    for path in GUIDANCE_FILES:
+        source = path.read_text()
+        assert 'WORKER_PID="${WORKER_PID#worker_pid=}"' in source
+        assert 'WRAPPER_PID="${WRAPPER_PID#wrapper_pid=}"' in source
+        assert 'STATUS="${STATUS#exit=}"' in source
+
+    run_dir = tmp_path / "parse"
+    result = subprocess.run(
+        _helper_command(run_dir, tmp_path / "transcript", "import sys; sys.exit(7)"),
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 7
+    script = f'''\
+helper={DETACHED_HELPER!s}
+run_dir={run_dir!s}
+validation="$($helper --validate --run-dir "$run_dir")"
+read -r WORKER_PID WRAPPER_PID STATUS <<< "$validation"
+WORKER_PID="${{WORKER_PID#worker_pid=}}"
+WRAPPER_PID="${{WRAPPER_PID#wrapper_pid=}}"
+STATUS="${{STATUS#exit=}}"
+printf '%s %s %s\\n' "$WORKER_PID" "$WRAPPER_PID" "$STATUS"
+'''
+    parsed = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+
+    assert parsed.returncode == 0
+    worker_pid, wrapper_pid, status = parsed.stdout.strip().split()
+    assert worker_pid.isdigit()
+    assert wrapper_pid.isdigit()
+    assert status == "7"

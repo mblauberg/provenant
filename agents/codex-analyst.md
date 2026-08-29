@@ -136,6 +136,8 @@ while :; do
   sleep 1
 done
 read -r WORKER_PID WRAPPER_PID STATUS <<< "$validation"
+WORKER_PID="${WORKER_PID#worker_pid=}"
+WRAPPER_PID="${WRAPPER_PID#wrapper_pid=}"
 STATUS="${STATUS#exit=}"
 ```
 
