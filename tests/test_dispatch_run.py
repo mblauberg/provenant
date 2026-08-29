@@ -157,6 +157,25 @@ def test_ordinary_dispatch_without_lead_family_is_not_certification(tmp_path: Pa
     assert record["route"]["certification_eligible"] is False
 
 
+def test_batch_child_defers_shared_manifest_append(tmp_path: Path, monkeypatch) -> None:
+    run_dir = make_run(tmp_path, "batch-child")
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("batch child\n", encoding="utf-8")
+    adapter = tmp_path / "adapter"
+    write_success_adapter(adapter)
+    module = load_dispatch_module()
+    monkeypatch.setattr(module, "CF_DISPATCH", adapter)
+    args = module.parser().parse_args([
+        "--run-dir", str(run_dir), "--task-id", "deferred", "--adapter", "codex",
+        "--prompt-file", str(prompt), "--alias", "scout", "--role", "worker", "--batch-child",
+    ])
+    monkeypatch.chdir(tmp_path)
+
+    assert module.dispatch(args) == 0
+    assert "dispatch-deferred" not in (run_dir / "MANIFEST.md").read_text(encoding="utf-8")
+    assert (run_dir / "dispatch/tasks/deferred/attempt-001/attempt.json").is_file()
+
+
 def test_route_failure_is_typed_and_provider_is_not_invoked(tmp_path: Path) -> None:
     run_dir = Path(
         subprocess.check_output([str(INIT), str(tmp_path / ".agent-run" / "route")], text=True).strip()

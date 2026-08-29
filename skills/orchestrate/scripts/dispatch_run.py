@@ -402,8 +402,9 @@ def dispatch(args: argparse.Namespace) -> int:
         return fail(run_dir, "invalid_task_id", "task id must contain only letters, numbers, '.', '_' or '-'")
     try:
         ensure_owned_directory(run_dir, run_dir / "dispatch" / "tasks")
-        reconcile_manifest(run_dir)
-        ensure_manifest_appendable(run_dir)
+        if not args.batch_child:
+            reconcile_manifest(run_dir)
+            ensure_manifest_appendable(run_dir)
     except AttemptEvidenceError as exc:
         return fail(run_dir, "attempt_evidence_incomplete", str(exc))
     except OSError as exc:
@@ -622,7 +623,10 @@ def dispatch(args: argparse.Namespace) -> int:
     atomic_write(digest_path, f"{attempt_digest}  {attempt_path.name}\n")
     manifest_error = False
     try:
-        append_manifest(run_dir, record)
+        if args.batch_child:
+            manifest_error = False
+        else:
+            append_manifest(run_dir, record)
     except OSError as exc:
         manifest_error = True
         record["status"] = "failed"
@@ -660,6 +664,7 @@ def parser() -> argparse.ArgumentParser:
         help=f"maximum provider runtime in seconds (default: {DEFAULT_TIMEOUT_SECONDS:g})",
     )
     root.add_argument("--retry-of", help="existing attempt id under this task, for lineage only")
+    root.add_argument("--batch-child", action="store_true", help=argparse.SUPPRESS)
     return root
 
 
