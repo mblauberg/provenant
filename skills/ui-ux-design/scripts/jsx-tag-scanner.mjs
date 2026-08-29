@@ -41,6 +41,20 @@ function scanTag(source, start) {
   if (!nameMatch) return null;
   const name = nameMatch[0];
   index += name.length;
+
+  if (closing) {
+    while (index < source.length && /\s/.test(source[index])) index += 1;
+    if (source[index] !== '>') throw unbalanced('Malformed JSX closing tag');
+    return {
+      start,
+      end: index + 1,
+      name,
+      closing: true,
+      selfClosing: false,
+      raw: source.slice(start, index + 1),
+    };
+  }
+
   let braceDepth = 0;
 
   while (index < source.length) {
@@ -132,10 +146,9 @@ export function scanJsxTags(source, { stopAfterTag } = {}) {
 export function findJsxSubtree(source, predicate) {
   let opener = null;
   let closing = null;
-  let depth = 0;
+  const stack = [];
   const tags = scanJsxTags(source, {
     stopAfterTag(tag, _tags, { expressionDepth }) {
-      if (expressionDepth !== 0) return false;
       if (!opener) {
         if (tag.closing || !predicate(tag)) return false;
         opener = tag;
@@ -143,13 +156,22 @@ export function findJsxSubtree(source, predicate) {
           closing = tag;
           return true;
         }
-        depth = 1;
+        stack.push({ name: tag.name, expressionDepth });
         return false;
       }
-      if (tag.name !== opener.name) return false;
-      if (tag.closing) depth -= 1;
-      else if (!tag.selfClosing) depth += 1;
-      if (depth === 0) {
+      if (tag.selfClosing) return false;
+      if (!tag.closing) {
+        stack.push({ name: tag.name, expressionDepth });
+        return false;
+      }
+      const expected = stack.at(-1);
+      if (!expected
+        || expected.name !== tag.name
+        || expected.expressionDepth !== expressionDepth) {
+        throw unbalanced('Mismatched JSX closing tag');
+      }
+      stack.pop();
+      if (stack.length === 0) {
         closing = tag;
         return true;
       }

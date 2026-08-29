@@ -108,12 +108,19 @@ Output (JSON):
 // ---------------------------------------------------------------------------
 
 function handleDiscard(id, lines, targetFile, snapshot) {
-  const block = findMarkerBlock(id, lines);
-  if (!block) return { handled: false, error: 'Markers not found' };
+  const commentSyntax = detectCommentSyntax(targetFile);
+  const block = findMarkerBlock(id, lines, commentSyntax);
+  if (!block) return { handled: false, error: 'Session markers are missing or ambiguous' };
 
   const original = extractOriginal(lines, block);
-  const isJsx = detectCommentSyntax(targetFile).open === '{/*';
-  const replaceRange = expandReplaceRange(block, lines, isJsx);
+  if (original === null) return { handled: false, error: 'Original session content is missing' };
+  const isJsx = commentSyntax.open === '{/*';
+  let replaceRange;
+  try {
+    replaceRange = expandReplaceRange(id, block, lines, isJsx);
+  } catch (error) {
+    return { handled: false, error: error.code || 'Session wrapper is invalid' };
+  }
 
   // Restore at the line we're actually replacing FROM, not the marker line.
   // For JSX wrappers the marker comments live INSIDE the outer `<div>`, so
@@ -138,16 +145,23 @@ function handleDiscard(id, lines, targetFile, snapshot) {
 // ---------------------------------------------------------------------------
 
 function handleAccept(id, variantNum, lines, targetFile, paramValues, snapshot) {
-  const block = findMarkerBlock(id, lines);
-  if (!block) return { handled: false, error: 'Markers not found' };
-
   const commentSyntax = detectCommentSyntax(targetFile);
+  const block = findMarkerBlock(id, lines, commentSyntax);
+  if (!block) return { handled: false, error: 'Session markers are missing or ambiguous' };
+  if (extractOriginal(lines, block) === null) {
+    return { handled: false, error: 'Original session content is missing' };
+  }
   const isJsx = commentSyntax.open === '{/*';
   // Anchor indent on the line we're replacing FROM (the outer wrapper),
   // not on `block.start` — for JSX that's the marker comment 2 spaces
   // deeper than the original element. See handleDiscard for the full
   // rationale.
-  const replaceRange = expandReplaceRange(block, lines, isJsx);
+  let replaceRange;
+  try {
+    replaceRange = expandReplaceRange(id, block, lines, isJsx);
+  } catch (error) {
+    return { handled: false, error: error.code || 'Session wrapper is invalid' };
+  }
   const indent = lines[replaceRange.start].match(/^(\s*)/)[1];
 
   // Extract the chosen variant's inner content
@@ -225,18 +239,22 @@ function handleAccept(id, variantNum, lines, targetFile, paramValues, snapshot) 
  * Find the start/end marker lines for a session.
  * Returns { start, end } (0-indexed line numbers) or null.
  */
-function findMarkerBlock(id, lines) {
-  let start = -1;
-  let end = -1;
-  const startPattern = 'impeccable-variants-start ' + id;
-  const endPattern = 'impeccable-variants-end ' + id;
+function markerText(kind, id, commentSyntax) {
+  return `${commentSyntax.open} impeccable-variants-${kind} ${id} ${commentSyntax.close}`;
+}
 
-  for (let i = 0; i < lines.length; i++) {
-    if (start === -1 && lines[i].includes(startPattern)) start = i;
-    if (lines[i].includes(endPattern)) { end = i; break; }
+function findMarkerBlock(id, lines, commentSyntax = { open: '<!--', close: '-->' }) {
+  const startText = markerText('start', id, commentSyntax);
+  const endText = markerText('end', id, commentSyntax);
+  const starts = [];
+  const ends = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index].trim();
+    if (line === startText) starts.push(index);
+    if (line === endText) ends.push(index);
   }
-
-  return (start !== -1 && end !== -1) ? { start, end } : null;
+  if (starts.length !== 1 || ends.length !== 1 || starts[0] >= ends[0]) return null;
+  return { start: starts[0], end: ends[0] };
 }
 
 /**
@@ -255,8 +273,17 @@ function findMarkerBlock(id, lines) {
  * Marker lines themselves stay where they were so extractOriginal /
  * extractVariant / extractCss continue to walk the same range.
  */
-function expandReplaceRange(block, lines, isJsx) {
-  if (!isJsx) return { start: block.start, end: block.end };
+function expandReplaceRange(id, block, lines, isJsx) {
+  const wrapperNeedle = `data-impeccable-variants="${id}"`;
+  if (!isJsx) {
+    const blockText = lines.slice(block.start, block.end + 1).join('\n');
+    if (blockText.split(wrapperNeedle).length !== 2) {
+      const error = new Error('Session wrapper does not match its requested id');
+      error.code = 'session_structure_invalid';
+      throw error;
+    }
+    return { start: block.start, end: block.end };
+  }
 
   let { start, end } = block;
 
@@ -264,7 +291,7 @@ function expandReplaceRange(block, lines, isJsx) {
   // The attr may sit on a continuation line of a multi-line opening tag, so
   // also walk to the line that actually contains `<div`.
   for (let i = start - 1; i >= Math.max(0, start - 12); i--) {
-    if (/data-impeccable-variants=/.test(lines[i])) {
+    if (lines[i].includes(wrapperNeedle)) {
       let opener = i;
       while (opener > 0 && !/<div\b/.test(lines[opener])) opener--;
       start = opener;
@@ -277,7 +304,7 @@ function expandReplaceRange(block, lines, isJsx) {
   // strings inside props cannot redirect the structural match.
   const joined = lines.slice(start).join('\n');
   const { closing } = findJsxSubtree(joined, (tag) => tag.name === 'div'
-    && tag.raw.includes('data-impeccable-variants='));
+    && tag.raw.includes(wrapperNeedle));
   const linesBefore = joined.slice(0, closing.end).split('\n').length - 1;
   const candidateEnd = start + linesBefore;
   if (candidateEnd < end) {
@@ -357,7 +384,7 @@ function extractInnerByAttr(text, attrMatch) {
 function extractOriginal(lines, block) {
   const text = stripStyleAndJoin(lines, block);
   const inner = extractInnerByAttr(text, 'data-impeccable-variant="original"');
-  if (inner === null) return [];
+  if (inner === null) return null;
   return inner.split('\n');
 }
 
@@ -508,14 +535,13 @@ function detectCommentSyntax(filePath) {
 // ---------------------------------------------------------------------------
 
 function findSessionFile(id, cwd) {
-  const marker = 'impeccable-variants-start ' + id;
   const searchDirs = ['src', 'app', 'pages', 'components', 'public', 'views', 'templates', '.'];
   const seen = new Set();
 
   for (const dir of searchDirs) {
     const absDir = path.join(cwd, dir);
     if (!fs.existsSync(absDir)) continue;
-    const result = searchDir(absDir, marker, seen, 0);
+    const result = searchDir(absDir, id, seen, 0);
     if (result) {
       const snapshot = readContainedSource(cwd, result);
       const content = snapshot.bytes.toString('utf-8');
@@ -525,7 +551,7 @@ function findSessionFile(id, cwd) {
   return null;
 }
 
-function searchDir(dir, query, seen, depth) {
+function searchDir(dir, id, seen, depth) {
   if (depth > 5) return null;
   let realDir;
   try { realDir = fs.realpathSync(dir); } catch { return null; }
@@ -542,14 +568,16 @@ function searchDir(dir, query, seen, depth) {
     const filePath = path.join(dir, entry.name);
     try {
       const content = fs.readFileSync(filePath, 'utf-8');
-      if (content.includes(query)) return filePath;
+      const syntax = detectCommentSyntax(filePath);
+      const marker = markerText('start', id, syntax);
+      if (content.split('\n').some((line) => line.trim() === marker)) return filePath;
     } catch { /* skip */ }
   }
 
   for (const entry of entries) {
     if (!entry.isDirectory()) continue;
     if (['node_modules', '.git', 'dist', 'build'].includes(entry.name)) continue;
-    const result = searchDir(path.join(dir, entry.name), query, seen, depth + 1);
+    const result = searchDir(path.join(dir, entry.name), id, seen, depth + 1);
     if (result) return result;
   }
 

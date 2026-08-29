@@ -743,6 +743,16 @@ def test_live_wrap_scans_nested_multiline_jsx_without_treating_strings_as_tags(
             1,
             3,
         ),
+        (
+            ['{condition && <Card className="target" />}'],
+            0,
+            0,
+        ),
+        (
+            ['{items.map((item) => <Card className="target">{item.label}</Card>)}'],
+            0,
+            0,
+        ),
     ],
 )
 def test_live_wrap_stops_scanning_after_the_selected_jsx_subtree(
@@ -850,6 +860,87 @@ def test_live_wrap_does_not_stop_inside_an_unterminated_jsx_expression(
 
     assert result.returncode == 7
     assert result.stdout == "jsx_scan_unbalanced"
+
+
+@pytest.mark.parametrize(
+    "lines",
+    [
+        ['<div className="target"><span>broken</div></span>'],
+        ['<div className="target">broken</div foo>'],
+    ],
+)
+def test_live_wrap_fails_closed_on_malformed_jsx_tag_structure(
+    tmp_path: Path, lines: list[str]
+) -> None:
+    module_url = WRAP.as_uri()
+    script = (
+        f"import {{ findClosingLine }} from {json.dumps(module_url)};"
+        f"const lines={json.dumps(lines)};"
+        "try{findClosingLine(lines,0)}"
+        "catch(error){process.stdout.write(error.code);process.exit(7)}"
+    )
+
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        cwd=tmp_path,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 7
+    assert result.stdout == "jsx_scan_unbalanced"
+
+
+def test_live_discard_ignores_marker_shaped_text_outside_the_session(
+    tmp_path: Path,
+) -> None:
+    page = tmp_path / "index.html"
+    page.write_text('<main><p class="target">original</p></main>\n')
+    wrapped = _run_wrap(tmp_path, "--file", page.name)
+    assert wrapped.returncode == 0, wrapped.stderr
+    marker = "<!-- impeccable-variants-start security-test -->"
+    decoy = "<p>impeccable-variants-start security-test</p>"
+    page.write_text(page.read_text().replace(marker, decoy + "\n" + marker))
+
+    completed = _run_accept(tmp_path, "--discard")
+
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(completed.stdout)["handled"] is True
+    result = page.read_text()
+    assert decoy in result
+    assert '<p class="target">original</p>' in result
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        (
+            'data-impeccable-variants="security-test"',
+            'data-impeccable-variants="different-session"',
+        ),
+        (
+            'data-impeccable-variant="original"',
+            'data-impeccable-variant="missing-original"',
+        ),
+    ],
+)
+def test_live_discard_fails_closed_when_session_structure_is_not_bound(
+    tmp_path: Path, old: str, new: str
+) -> None:
+    page = tmp_path / "component.tsx"
+    page.write_text('<Card className="target">ORIGINAL_SECRET</Card>\n')
+    wrapped = _run_wrap(tmp_path, "--file", page.name)
+    assert wrapped.returncode == 0, wrapped.stderr
+    malformed = page.read_text().replace(old, new, 1)
+    page.write_text(malformed)
+
+    completed = _run_accept(tmp_path, "--discard")
+
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(completed.stdout)["handled"] is False
+    assert page.read_text() == malformed
+    assert "ORIGINAL_SECRET" in page.read_text()
 
 
 def test_live_accept_preserves_jsx_that_contains_tag_shaped_string_content(
