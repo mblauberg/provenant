@@ -982,9 +982,7 @@ function handlePollPost(req, res) {
       res.end(JSON.stringify({ error: 'Reply type does not match the leased event' }));
       return;
     }
-    let matched = leasedIndex !== -1 && (msg.type === 'error'
-      ? releasePendingEvent(msg.id)
-      : acknowledgePendingEvent(msg.id));
+    let matched = leasedIndex !== -1;
     if (!matched
       && ['complete', 'error'].includes(msg.type)
       && state.sessionStore
@@ -1001,15 +999,15 @@ function handlePollPost(req, res) {
       res.end(JSON.stringify({ error: 'No matching leased event' }));
       return;
     }
+    const eventType = msg.type === 'discard' || msg.type === 'discarded'
+      ? 'discarded'
+      : msg.type === 'complete'
+        ? 'complete'
+        : msg.type === 'error'
+          ? 'agent_error'
+          : 'agent_done';
     if (state.sessionStore && msg.id) {
       try {
-        const eventType = msg.type === 'discard' || msg.type === 'discarded'
-          ? 'discarded'
-          : msg.type === 'complete'
-            ? 'complete'
-            : msg.type === 'error'
-              ? 'agent_error'
-              : 'agent_done';
         state.sessionStore.appendEvent({
           type: eventType,
           id: msg.id,
@@ -1017,7 +1015,21 @@ function handlePollPost(req, res) {
           message: msg.message,
           carbonize: msg.data?.carbonize === true,
         });
-      } catch { /* keep reply path best-effort; browser still needs SSE */ }
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'session_store_append_failed', message: error.message }));
+        return;
+      }
+    }
+    if (leasedIndex !== -1) {
+      const updated = msg.type === 'error'
+        ? releasePendingEvent(msg.id)
+        : acknowledgePendingEvent(msg.id);
+      if (!updated) {
+        res.writeHead(409, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Leased event changed before acknowledgement' }));
+        return;
+      }
     }
     flushPendingPolls();
     // Forward the reply to the browser via SSE

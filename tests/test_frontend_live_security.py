@@ -1987,6 +1987,72 @@ def test_browser_credential_cannot_complete_agent_work_and_errors_requeue(
         assert status["pendingEvents"] == []
 
 
+def test_live_reply_persists_before_removing_the_leased_event(tmp_path: Path) -> None:
+    event_id = "deadbeef"
+    with LiveServer(tmp_path) as server:
+        event = {
+            "token": server.token,
+            "type": "accept",
+            "id": event_id,
+            "variantId": "1",
+        }
+        assert _request(
+            f"{server.base_url}/events",
+            method="POST",
+            body=json.dumps(event).encode(),
+            extra_headers={"Content-Type": "application/json"},
+        )[0] == 200
+        poll_url = (
+            f"{server.base_url}/poll?token={quote(server.agent_token)}"
+            "&timeout=1000&leaseMs=1000"
+        )
+        assert json.loads(_request(poll_url)[2])["id"] == event_id
+
+        sessions = tmp_path / ".impeccable" / "live" / "sessions"
+        moved = sessions.with_name("sessions-moved")
+        outside = tmp_path / "outside-state"
+        outside.mkdir()
+        sessions.rename(moved)
+        sessions.symlink_to(outside, target_is_directory=True)
+        try:
+            rejected = _request(
+                f"{server.base_url}/poll",
+                method="POST",
+                body=json.dumps(
+                    {
+                        "token": server.agent_token,
+                        "id": event_id,
+                        "type": "complete",
+                    }
+                ).encode(),
+                extra_headers={"Content-Type": "application/json"},
+            )
+            assert rejected[0] == 500
+            assert json.loads(rejected[2])["error"] == "session_store_append_failed"
+            assert not list(outside.iterdir())
+        finally:
+            sessions.unlink()
+            moved.rename(sessions)
+
+        status = json.loads(
+            _request(f"{server.base_url}/status?token={quote(server.token)}")[2]
+        )
+        assert status["pendingEvents"][0]["id"] == event_id
+        completed = _request(
+            f"{server.base_url}/poll",
+            method="POST",
+            body=json.dumps(
+                {
+                    "token": server.agent_token,
+                    "id": event_id,
+                    "type": "complete",
+                }
+            ).encode(),
+            extra_headers={"Content-Type": "application/json"},
+        )
+        assert completed[0] == 200, completed[2]
+
+
 @pytest.mark.parametrize(
     ("completion_args", "expected_phase"),
     [([], "completed"), (["--error", "cleanup failed"], "agent_error")],
