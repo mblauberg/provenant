@@ -19,6 +19,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { resolveLiveConfigPath } from './impeccable-paths.mjs';
 import {
+  hasExecutableJsxTagAtOffset,
   hasExecutableJsxMarkerAtOffset,
   frameworkTemplateContextAtOffset,
   htmlLexicalContextAtOffset,
@@ -113,7 +114,7 @@ Output (JSON):
     const results = targets.map(({ relFile, snapshot }) => {
       const content = snapshot.bytes.toString('utf-8');
       const detagged = removeTag(content, config.commentSyntax, relFile);
-      const updated = revertCspMeta(detagged);
+      const updated = revertCspMeta(detagged, relFile);
       if (updated === content) return { file: relFile, removed: false, note: 'no tag present' };
       replacements.push({ snapshot, content: updated });
       return {
@@ -144,12 +145,12 @@ Output (JSON):
   const replacements = [];
   const results = targets.map(({ relFile, snapshot }) => {
     const content = snapshot.bytes.toString('utf-8');
-    const withoutOld = revertCspMeta(removeTag(content, config.commentSyntax, relFile));
-    const withTag = insertTag(withoutOld, config, port, token);
+    const withoutOld = revertCspMeta(removeTag(content, config.commentSyntax, relFile), relFile);
+    const withTag = insertTag(withoutOld, config, port, token, relFile);
     if (withTag === withoutOld) {
       return { file: relFile, error: 'insertion_point_not_found', anchor: config.insertBefore || config.insertAfter };
     }
-    const updated = patchCspMeta(withTag, port);
+    const updated = patchCspMeta(withTag, port, relFile);
     replacements.push({ snapshot, content: updated });
     return {
       file: relFile,
@@ -363,26 +364,68 @@ function buildTagBlock(syntax, port, token) {
   );
 }
 
-function insertTag(content, config, port, token) {
+function insertTag(content, config, port, token, filePath = '') {
   const block = buildTagBlock(config.commentSyntax, port, token);
   // insertBefore: match the LAST occurrence. Anchors like `</body>` naturally
   // belong at the end, and the same literal can appear earlier in code blocks
   // within rendered documentation pages.
   if (config.insertBefore) {
-    const idx = content.lastIndexOf(config.insertBefore);
-    if (idx === -1) return content;
+    const matches = findExecutableAnchorOffsets(
+      content,
+      config.insertBefore,
+      filePath,
+      config.commentSyntax,
+    );
+    if (matches.length === 0) return content;
+    if (matches.length > 1) throw ambiguousAnchor();
+    const [idx] = matches;
     return content.slice(0, idx) + block + content.slice(idx);
   }
   // insertAfter: match the FIRST occurrence — typical anchors like `<head>` or
   // `<body>` open near the top of the document.
-  const idx = content.indexOf(config.insertAfter);
-  if (idx === -1) return content;
+  const matches = findExecutableAnchorOffsets(
+    content,
+    config.insertAfter,
+    filePath,
+    config.commentSyntax,
+  );
+  if (matches.length === 0) return content;
+  if (matches.length > 1) throw ambiguousAnchor();
+  const [idx] = matches;
   const after = idx + config.insertAfter.length;
   // Preserve a single trailing newline if the anchor didn't end with one
   const hasNewline = content[after] === '\n';
   const prefix = hasNewline ? content.slice(0, after + 1) : content.slice(0, after) + '\n';
   const suffixStart = hasNewline ? after + 1 : after;
   return prefix + block + content.slice(suffixStart);
+}
+
+function ambiguousAnchor() {
+  const error = new Error('Insertion anchor is ambiguous in executable markup');
+  error.code = 'insertion_anchor_ambiguous';
+  return error;
+}
+
+function isExecutableMarkupAtOffset(content, offset, filePath, syntax) {
+  if (syntax === 'jsx') return hasExecutableJsxTagAtOffset(content, offset);
+  const extension = path.extname(filePath).toLowerCase();
+  if (['.astro', '.svelte', '.vue'].includes(extension)) {
+    return !isOffsetInsideAstroFrontmatter(content, offset)
+      && frameworkTemplateContextAtOffset(content, offset) === 'markup';
+  }
+  return htmlLexicalContextAtOffset(content, offset) === 'markup';
+}
+
+function findExecutableAnchorOffsets(content, anchor, filePath, syntax) {
+  const matches = [];
+  for (let offset = content.indexOf(anchor); offset !== -1; offset = content.indexOf(anchor, offset + 1)) {
+    try {
+      if (isExecutableMarkupAtOffset(content, offset, filePath, syntax)) matches.push(offset);
+    } catch {
+      // Malformed source cannot prove this occurrence is executable markup.
+    }
+  }
+  return matches;
 }
 
 /**
@@ -478,13 +521,21 @@ function decodeCanonicalUtf8Base64(value) {
   }
 }
 
-function findCspMetaTags(content) {
+function findCspMetaTags(content, filePath = '') {
   const out = [];
   const tagRe = /<meta\s+([^>]*?)\/?>/gis;
   let m;
   while ((m = tagRe.exec(content)) !== null) {
     const attrs = m[1];
     if (!/(http-equiv|httpEquiv)\s*=\s*(['"])Content-Security-Policy\2/i.test(attrs)) continue;
+    const syntax = ['.jsx', '.tsx'].includes(path.extname(filePath).toLowerCase())
+      ? 'jsx'
+      : 'html';
+    try {
+      if (!isExecutableMarkupAtOffset(content, m.index, filePath, syntax)) continue;
+    } catch {
+      continue;
+    }
     out.push({ start: m.index, end: m.index + m[0].length, full: m[0], attrs });
   }
   return out;
@@ -510,8 +561,8 @@ function appendOriginToDirective(csp, directive, origin) {
   return csp.trim().replace(/;?\s*$/, '') + `; ${directive} 'self' ${origin}`;
 }
 
-export function patchCspMeta(content, port) {
-  const tags = findCspMetaTags(content);
+export function patchCspMeta(content, port, filePath = '') {
+  const tags = findCspMetaTags(content, filePath);
   if (tags.length === 0) return content;
   const origin = `http://127.0.0.1:${port}`;
 
@@ -553,8 +604,8 @@ export function patchCspMeta(content, port) {
   return result;
 }
 
-export function revertCspMeta(content) {
-  const tags = findCspMetaTags(content);
+export function revertCspMeta(content, filePath = '') {
+  const tags = findCspMetaTags(content, filePath);
   if (tags.length === 0) return content;
 
   let result = content;

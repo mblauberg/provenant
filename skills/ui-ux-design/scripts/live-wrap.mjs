@@ -94,29 +94,23 @@ The agent should insert variant HTML at insertLine.`);
   let targetFile = filePath;
   let matchedQuery = null;
   if (!targetFile) {
-    if (text) {
-      const candidates = findProjectCandidates(queries, text, process.cwd(), genOpts, tag);
-      if (candidates.length !== 1) {
+    const candidates = findProjectCandidates(queries, text, process.cwd(), genOpts, tag);
+    if (candidates.length > 1) {
         console.error(JSON.stringify({
-          error: candidates.length === 0 ? 'element_not_found' : 'element_ambiguous',
+          error: 'element_ambiguous',
           fallback: 'agent-driven',
           candidates: candidates.map((candidate) => ({
             file: path.relative(process.cwd(), candidate.file),
             startLine: candidate.startLine + 1,
             endLine: candidate.endLine + 1,
           })),
-          hint: candidates.length === 0
-            ? 'No source element matched both the source identity and --text. Use --file or fall back to agent-driven wrapping.'
-            : 'Multiple source elements match both the source identity and --text. Pass --file or --element-id, or fall back to agent-driven wrapping.',
+          hint: 'Multiple source elements match this identity. Pass --file, --element-id, or --text, or fall back to agent-driven wrapping.',
         }));
         process.exit(1);
-      }
+    }
+    if (candidates.length === 1) {
       targetFile = candidates[0].file;
       matchedQuery = candidates[0].query;
-    }
-    for (const q of targetFile ? [] : queries) {
-      targetFile = findFileWithQuery(q, process.cwd(), genOpts);
-      if (targetFile) { matchedQuery = q; break; }
     }
     if (!targetFile) {
       // Nothing in source. Did the element show up in a generated file? That
@@ -181,25 +175,22 @@ The agent should insert variant HTML at insertLine.`);
   // the legacy first-match behavior for callers that did not provide the
   // stronger browser identity signal.
   let match = null;
-  if (text) {
+  let selectionError = null;
+  for (const q of queries) {
     let candidates = [];
-    for (const q of queries) {
-      let all = [];
-      try { all = findAllElements(lines, q, tag, isJsx, targetFile); }
-      catch { continue; }
-      const filtered = all.length === 1 ? all : filterByText(all, content, text);
-      if (filtered.length > 0) {
-        candidates = filtered.map((candidate) => ({ ...candidate, query: q }));
-        break;
-      }
+    try { candidates = findAllElements(lines, q, tag, isJsx, targetFile); }
+    catch (error) {
+      selectionError ??= error;
+      continue;
     }
-    if (candidates.length === 0) {
-      console.error(JSON.stringify({ error: 'Found file but could not locate element in ' + targetFile + '. Searched for: ' + queries.join(', ') }));
-      process.exit(1);
+    if (candidates.length > 1 && text) {
+      candidates = filterByText(candidates, content, text);
     }
     if (candidates.length === 1) {
       match = candidates[0];
-    } else {
+      break;
+    }
+    if (candidates.length > 1) {
       console.error(JSON.stringify({
         error: 'element_ambiguous',
         fallback: 'agent-driven',
@@ -212,15 +203,11 @@ The agent should insert variant HTML at insertLine.`);
       }));
       process.exit(1);
     }
-  } else {
-    for (const q of queries) {
-      match = findElement(lines, q, tag, isJsx, targetFile);
-      if (match) break;
-    }
-    if (!match) {
-      console.error(JSON.stringify({ error: 'Found file but could not locate element in ' + targetFile + '. Searched for: ' + queries.join(', ') }));
-      process.exit(1);
-    }
+  }
+  if (!match) {
+    if (selectionError) throw selectionError;
+    console.error(JSON.stringify({ error: 'Found file but could not locate element in ' + targetFile + '. Searched for: ' + queries.join(', ') }));
+    process.exit(1);
   }
 
   const { startLine, endLine, startOffset, endOffset } = match;
@@ -523,10 +510,13 @@ function findProjectCandidates(queries, text, cwd, genOpts, tag) {
       }
     }
     if (candidates.length === 1) return candidates;
-    const filtered = candidates.filter(
-      (candidate) => filterByText([candidate], candidate.source, text).length === 1,
-    );
-    if (filtered.length > 0) return filtered;
+    if (candidates.length > 1) {
+      if (!text) return candidates;
+      const filtered = candidates.filter(
+        (candidate) => filterByText([candidate], candidate.source, text).length === 1,
+      );
+      if (filtered.length > 0) return filtered;
+    }
   }
   return [];
 }
@@ -681,15 +671,38 @@ function findAllElements(lines, query, tag = null, isJsx = false, filePath = '')
     const stripped = lines[i].trim();
     if (stripped.startsWith('<!--') || stripped.startsWith('{/*') || stripped.startsWith('//')) continue;
     if (lines[i].includes('data-impeccable-variant')) continue;
-    const opener = findOpener(lines, i, query, tag);
-    if (!opener) continue;
-    if (!isExecutableOpener(lines, opener.line, source, offsets, isJsx, filePath, opener.index)) continue;
-    const openerOffset = offsets[opener.line] + opener.index;
-    if (seen.has(openerOffset)) continue;
-    seen.add(openerOffset);
-    out.push(findElementRange(source, lines, offsets, opener.line, { isJsx, openerIndex: opener.index }));
+    for (const opener of findCandidateOpeners(lines, i, query, tag)) {
+      if (!isExecutableOpener(lines, opener.line, source, offsets, isJsx, filePath, opener.index)) continue;
+      const openerOffset = offsets[opener.line] + opener.index;
+      if (seen.has(openerOffset)) continue;
+      const range = findElementRange(source, lines, offsets, opener.line, {
+        isJsx,
+        openerIndex: opener.index,
+      });
+      if (!source.slice(range.startOffset, range.endOffset).includes(query)) continue;
+      seen.add(openerOffset);
+      out.push(range);
+    }
   }
   return out;
+}
+
+function findCandidateOpeners(lines, matchLine, query, tag) {
+  const line = lines[matchLine];
+  const sameLine = [...line.matchAll(/<([A-Za-z][A-Za-z0-9]*)(?=[\s/>]|$)/g)]
+    .filter((candidate) => !tag || candidate[1] === tag)
+    .map((candidate) => ({ line: matchLine, index: candidate.index, name: candidate[1] }));
+  const containing = sameLine.filter((candidate) => {
+    try { return scanJsxTagAtOffset(line, candidate.index)?.raw.includes(query); }
+    catch { return false; }
+  });
+  if (containing.length > 0) return containing;
+  if (sameLine.some((candidate) => ['script', 'style'].includes(candidate.name.toLowerCase()))) {
+    return [];
+  }
+  if (sameLine.length > 0) return sameLine;
+  const fallback = findOpener(lines, matchLine, query, tag);
+  return fallback ? [fallback] : [];
 }
 
 function findElementRange(source, lines, offsets, startLine, { isJsx, openerIndex = null }) {

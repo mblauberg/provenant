@@ -652,6 +652,119 @@ def test_live_inject_preserves_authorised_insert_and_remove_workflow(tmp_path: P
     assert page.read_text() == original
 
 
+@pytest.mark.parametrize(
+    ("filename", "source", "anchor"),
+    [
+        (
+            "App.tsx",
+            "const demo = '<head>';\nexport default () => <html><head><title>Real</title></head></html>;\n",
+            "<head>",
+        ),
+        (
+            "Component.svelte",
+            "{condition ? `<main>` : ''}\n<main>Real</main>\n",
+            "<main>",
+        ),
+        (
+            "Page.astro",
+            "---\nconst demo = `<head>`;\n---\n<html><head><title>Real</title></head></html>\n",
+            "<head>",
+        ),
+    ],
+)
+def test_live_inject_ignores_framework_anchor_decoys(
+    tmp_path: Path, filename: str, source: str, anchor: str
+) -> None:
+    page = tmp_path / filename
+    page.write_text(source)
+    config_dir = tmp_path / ".impeccable" / "live"
+    config_dir.mkdir(parents=True)
+    (config_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "files": [filename],
+                "insertAfter": anchor,
+                "commentSyntax": "jsx" if filename.endswith(".tsx") else "html",
+            }
+        )
+    )
+
+    inserted = _run_inject(tmp_path, "--port", "8400", "--token", TOKEN)
+
+    assert inserted.returncode == 0, inserted.stderr
+    result = page.read_text()
+    assert result.count("impeccable-live-start") == 1
+    assert source.splitlines()[0] in result
+    if filename.endswith(".astro"):
+        assert "const demo = `<head>`;" in result
+
+
+def test_live_inject_rejects_anchor_found_only_in_jsx_string(tmp_path: Path) -> None:
+    page = tmp_path / "App.tsx"
+    source = "const demo = '<head>';\nexport default () => <main>Real</main>;\n"
+    page.write_text(source)
+    config_dir = tmp_path / ".impeccable" / "live"
+    config_dir.mkdir(parents=True)
+    (config_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "files": [page.name],
+                "insertAfter": "<head>",
+                "commentSyntax": "jsx",
+            }
+        )
+    )
+
+    inserted = _run_inject(tmp_path, "--port", "8400", "--token", TOKEN)
+
+    assert inserted.returncode != 0
+    assert json.loads(inserted.stderr)["error"] == "mutation_preflight_failed"
+    assert page.read_text() == source
+
+
+@pytest.mark.parametrize(
+    ("filename", "source", "decoy"),
+    [
+        (
+            "App.tsx",
+            "const demo = '<meta http-equiv=\"Content-Security-Policy\" content=\"default-src none\">';\n"
+            "export default () => <html><head><meta httpEquiv=\"Content-Security-Policy\" content=\"default-src self\" /></head></html>;\n",
+            "default-src none",
+        ),
+        (
+            "index.html",
+            "<html><head><script>const demo = '<meta http-equiv=\"Content-Security-Policy\" content=\"default-src none\">';</script>"
+            "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src self\"></head><body></body></html>\n",
+            "default-src none",
+        ),
+    ],
+)
+def test_live_inject_patches_only_executable_csp_meta(
+    tmp_path: Path, filename: str, source: str, decoy: str
+) -> None:
+    page = tmp_path / filename
+    page.write_text(source)
+    config_dir = tmp_path / ".impeccable" / "live"
+    config_dir.mkdir(parents=True)
+    (config_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "files": [filename],
+                "insertAfter": "<head>",
+                "commentSyntax": "jsx" if filename.endswith(".tsx") else "html",
+            }
+        )
+    )
+
+    inserted = _run_inject(tmp_path, "--port", "8400", "--token", TOKEN)
+
+    assert inserted.returncode == 0, inserted.stderr
+    result = page.read_text()
+    decoy_fragment = result.split(decoy, 1)[0]
+    assert "data-impeccable-csp-original" not in decoy_fragment
+    assert result.count("data-impeccable-csp-original") == 1
+
+
 def test_live_inject_remove_ignores_template_marker_decoy_before_real_block(
     tmp_path: Path,
 ) -> None:
@@ -1501,6 +1614,40 @@ def test_live_wrap_uses_short_visible_text_without_extra_ceremony(tmp_path: Path
     assert next_page.read_text() == next_source
 
 
+@pytest.mark.parametrize("cross_file", [False, True])
+def test_live_wrap_text_disambiguates_same_line_targets(
+    tmp_path: Path, cross_file: bool
+) -> None:
+    source_dir = tmp_path / "src"
+    source_dir.mkdir()
+    page = source_dir / "Buttons.tsx"
+    source = (
+        '<Button className="target">Cancel</Button>'
+        '<Button className="target">Save</Button>\n'
+    )
+    page.write_text(source)
+    args = [
+        "--classes",
+        "target",
+        "--tag",
+        "Button",
+        "--text",
+        "Save",
+    ]
+    if not cross_file:
+        args.extend(["--file", "src/Buttons.tsx"])
+    else:
+        other = source_dir / "Other.tsx"
+        other.write_text('<Button className="target">Delete</Button>\n')
+
+    wrapped = _run_wrap(tmp_path, *args)
+
+    assert wrapped.returncode == 0, wrapped.stderr
+    result = page.read_text()
+    assert '<Button className="target">Cancel</Button><div' in result
+    assert '<Button className="target">Save</Button>' in result
+
+
 def test_live_wrap_fails_closed_for_multiple_same_line_targets_without_text(
     tmp_path: Path,
 ) -> None:
@@ -1523,6 +1670,37 @@ def test_live_wrap_fails_closed_for_multiple_same_line_targets_without_text(
 
     assert wrapped.returncode != 0
     assert page.read_text() == source
+
+
+@pytest.mark.parametrize("cross_file", [False, True])
+def test_live_wrap_fails_closed_for_ambiguous_no_text_targets(
+    tmp_path: Path, cross_file: bool
+) -> None:
+    source_dir = tmp_path / "src"
+    source_dir.mkdir()
+    first = source_dir / "A.tsx"
+    second = source_dir / "B.tsx"
+    if cross_file:
+        first_source = '<Card className="target">Alpha</Card>\n'
+        second_source = '<Card className="target">Beta</Card>\n'
+        first.write_text(first_source)
+        second.write_text(second_source)
+        args = ["--classes", "target", "--tag", "Card"]
+    else:
+        first_source = (
+            '<Card className="target">Alpha</Card>\n'
+            '<Card className="target">Beta</Card>\n'
+        )
+        second_source = ""
+        first.write_text(first_source)
+        args = ["--file", "src/A.tsx", "--classes", "target", "--tag", "Card"]
+
+    wrapped = _run_wrap(tmp_path, *args)
+
+    assert wrapped.returncode != 0
+    assert first.read_text() == first_source
+    if cross_file:
+        assert second.read_text() == second_source
 
 
 def test_live_wrap_selects_exact_same_line_opener_and_preserves_siblings(
