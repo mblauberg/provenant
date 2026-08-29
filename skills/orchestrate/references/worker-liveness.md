@@ -101,22 +101,34 @@ STATUS=$?
 WORKER_PID="$(cat "$run_dir/worker.pid")"
 ```
 
-The helper's direct wait preserves the provider exit status. If the original
-shell is gone, re-enter with a foreground wait for the regular completion file,
-then confirm both the recorded `WORKER_PID` and `WRAPPER_PID` have exited before
-terminal reporting, inspection or reuse:
+The helper claims `run_dir` exclusively, forwards its stdin to the direct
+provider child, and its direct wait preserves the provider exit status. If the
+original shell is gone, observe either the regular completion file or the
+recorded wrapper exit. A wrapper exit without a marker is an evidence failure,
+never a reason to accept or reuse the run:
 
 ```bash
-while [ ! -s "$run_dir/done" ]; do sleep 1; done
+WRAPPER_PID="$(cat "$run_dir/wrapper.pid")"
+while :; do
+  if [ -s "$run_dir/done" ]; then
+    if ! kill -0 "$WRAPPER_PID" 2>/dev/null; then break; fi
+  elif ! kill -0 "$WRAPPER_PID" 2>/dev/null; then
+    echo "completion evidence missing: wrapper $WRAPPER_PID exited" >&2
+    exit 1
+  fi
+  sleep 1
+done
 WORKER_PID="$(sed -n 's/^worker_pid=//p' "$run_dir/done")"
 WRAPPER_PID="$(sed -n 's/^wrapper_pid=//p' "$run_dir/done")"
 STATUS="$(sed -n 's/^exit=//p' "$run_dir/done")"
 ```
 
-This fallback polls only a durable marker and is used only after detachment; do
-not substitute a watcher or notification for the direct PID wait. The marker is
-bound to the unique run directory and both recorded PIDs; a stale or concurrent
-marker must never satisfy another dispatch.
+This fallback waits only on the claimed run directory's durable marker and the
+recorded wrapper PID, and is used only after detachment; do not substitute a
+watcher or notification for the direct PID wait. The marker is bound to the
+claimed run directory and both recorded PIDs; a stale or concurrent marker must
+never satisfy another dispatch. Confirm the worker PID is no longer live before
+terminal reporting, inspection or reuse.
 
 If a foreground wait times out, reissue that same wait while its PID or durable
 completion marker remains available. Do not insert liveness probes or status
