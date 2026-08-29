@@ -207,9 +207,68 @@ def test_detached_helper_rejects_invalid_transcript_setup_before_launch(tmp_path
     assert not (tmp_path / "invalid" / "done").exists()
 
 
+def test_detached_helper_rejects_transcript_alias_of_evidence_before_launch(tmp_path):
+    run_dir = tmp_path / "alias"
+    launched = tmp_path / "launched"
+    worker_code = "import sys; from pathlib import Path; Path(sys.argv[1]).write_text('launched')"
+    result = subprocess.run(
+        _helper_command(run_dir, run_dir / "missing" / ".." / "done", worker_code)
+        + [str(launched)],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert not launched.exists()
+    assert not (run_dir / "done").exists()
+    assert "evidence" in result.stderr
+
+
+def test_detached_helper_validation_rejects_reused_wrapper_identity(tmp_path):
+    run_dir = tmp_path / "reused"
+    run_dir.mkdir()
+    (run_dir / "wrapper.pid").write_text(f"{os.getpid()}\n")
+    (run_dir / "wrapper.identity").write_text("identity from a different process\n")
+    (run_dir / "worker.pid").write_text("999999\n")
+    (run_dir / "done").write_text(
+        f"wrapper_pid={os.getpid()}\nworker_pid=999999\nexit=0\n"
+    )
+    result = subprocess.run(
+        [str(DETACHED_HELPER), "--validate", "--run-dir", str(run_dir)],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert "identity" in result.stderr
+
+
+def test_detached_helper_validation_rejects_malformed_marker(tmp_path):
+    run_dir = tmp_path / "malformed"
+    worker_code = "import sys; sys.exit(0)"
+    result = subprocess.run(
+        _helper_command(run_dir, tmp_path / "transcript", worker_code),
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    (run_dir / "done").write_text(
+        "wrapper_pid=not-numeric\nworker_pid=also-not-numeric\nexit=wat\n"
+    )
+    validation = subprocess.run(
+        [str(DETACHED_HELPER), "--validate", "--run-dir", str(run_dir)],
+        capture_output=True,
+        text=True,
+    )
+
+    assert validation.returncode != 0
+    assert "marker" in validation.stderr
+
+
 def test_reentry_guidance_fails_when_wrapper_exits_without_marker():
     source = GUIDANCE_FILES[0].read_text()
     normalised = " ".join(source.split())
     assert "completion evidence missing" in normalised
-    assert "kill -0 \"$WRAPPER_PID\"" in source
+    assert "--validate" in source
+    assert "kill -0 \"$WRAPPER_PID\"" not in source
     assert "recorded wrapper exit" in normalised

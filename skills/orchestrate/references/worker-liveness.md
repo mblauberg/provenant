@@ -108,19 +108,20 @@ recorded wrapper exit. A wrapper exit without a marker is an evidence failure,
 never a reason to accept or reuse the run:
 
 ```bash
-WRAPPER_PID="$(cat "$run_dir/wrapper.pid")"
+helper="${AGENTS_HOME:-$HOME/.agents}/skills/orchestrate/scripts/run_worker_detached.sh"
 while :; do
-  if [ -s "$run_dir/done" ]; then
-    if ! kill -0 "$WRAPPER_PID" 2>/dev/null; then break; fi
-  elif ! kill -0 "$WRAPPER_PID" 2>/dev/null; then
-    echo "completion evidence missing: wrapper $WRAPPER_PID exited" >&2
+  validation="$($helper --validate --run-dir "$run_dir" 2>/dev/null)"
+  validation_status=$?
+  if [ "$validation_status" -eq 0 ]; then
+    break
+  elif [ "$validation_status" -ne 1 ]; then
+    echo "completion evidence missing or invalid; do not accept or reuse the run" >&2
     exit 1
   fi
   sleep 1
 done
-WORKER_PID="$(sed -n 's/^worker_pid=//p' "$run_dir/done")"
-WRAPPER_PID="$(sed -n 's/^wrapper_pid=//p' "$run_dir/done")"
-STATUS="$(sed -n 's/^exit=//p' "$run_dir/done")"
+read -r WORKER_PID WRAPPER_PID STATUS <<< "$validation"
+STATUS="${STATUS#exit=}"
 ```
 
 This fallback waits only on the claimed run directory's durable marker and the
