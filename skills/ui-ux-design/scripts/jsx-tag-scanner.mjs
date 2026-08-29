@@ -30,6 +30,23 @@ function skipLineComment(source, start) {
   return end === -1 ? source.length : end + 1;
 }
 
+function skipHtmlComment(source, start) {
+  const end = source.indexOf('-->', start + 4);
+  if (end === -1) throw unbalanced('Unterminated HTML comment');
+  return end + 3;
+}
+
+function looksLikeTypeScriptGenericCall(source, tag) {
+  let before = tag.start - 1;
+  while (before >= 0 && /\s/.test(source[before])) before -= 1;
+  if (before < 0 || !/[A-Za-z0-9_$.)\]]/.test(source[before])) return false;
+
+  let after = tag.end;
+  while (source[after] === '>') after += 1;
+  while (after < source.length && /\s/.test(source[after])) after += 1;
+  return source[after] === '(';
+}
+
 function scanTag(source, start) {
   let index = start + 1;
   let closing = false;
@@ -99,12 +116,16 @@ function scanTag(source, start) {
   throw unbalanced('Unterminated JSX tag');
 }
 
-export function scanJsxTags(source, { stopAfterTag, stopWhen } = {}) {
+export function scanJsxTags(source, { htmlMode = false, stopAfterTag, stopWhen } = {}) {
   const tags = [];
   let expressionDepth = 0;
   let index = 0;
   while (index < source.length) {
     const char = source[index];
+    if (htmlMode && source.startsWith('<!--', index)) {
+      index = skipHtmlComment(source, index);
+      continue;
+    }
     if (expressionDepth > 0 && (char === '"' || char === "'" || char === '`')) {
       index = skipQuoted(source, index, char);
       continue;
@@ -160,11 +181,11 @@ export function findJsxSubtree(source, predicate, { strictNesting = true } = {})
           closing = tag;
           return openerExpressionDepth === 0;
         }
-        if (strictNesting) stack.push(tag.name);
+        if (strictNesting) stack.push({ name: tag.name, expressionDepth });
         else sameNameDepth = 1;
         return false;
       }
-      if (closing || expressionDepth !== openerExpressionDepth) return false;
+      if (closing) return false;
       if (!strictNesting) {
         if (tag.name !== opener.name || tag.selfClosing) return false;
         if (tag.closing) sameNameDepth -= 1;
@@ -175,13 +196,20 @@ export function findJsxSubtree(source, predicate, { strictNesting = true } = {})
         }
         return false;
       }
+      if (expressionDepth > openerExpressionDepth
+        && !tag.closing
+        && looksLikeTypeScriptGenericCall(source, tag)) {
+        return false;
+      }
       if (tag.selfClosing) return false;
       if (!tag.closing) {
-        stack.push(tag.name);
+        stack.push({ name: tag.name, expressionDepth });
         return false;
       }
       const expected = stack.at(-1);
-      if (!expected || expected !== tag.name) {
+      if (!expected
+        || expected.name !== tag.name
+        || expected.expressionDepth !== expressionDepth) {
         throw unbalanced('Mismatched JSX closing tag');
       }
       stack.pop();
@@ -194,6 +222,7 @@ export function findJsxSubtree(source, predicate, { strictNesting = true } = {})
     stopWhen({ expressionDepth }) {
       return closing !== null && openerExpressionDepth > 0 && expressionDepth === 0;
     },
+    htmlMode: !strictNesting,
   });
   if (!opener) throw unbalanced('Missing JSX opener');
   if (!closing) throw unbalanced(`Missing closing JSX tag for ${opener.name}`);

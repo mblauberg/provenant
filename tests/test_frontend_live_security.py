@@ -895,6 +895,7 @@ def test_live_wrap_requires_a_same_line_outer_jsx_expression_to_close(
         '<section class="target"><img src="hero.png"><br><input></section>',
         '<ul class="target"><li>one<li>two</ul>',
         '<img class="target" src="hero.png">',
+        '<section class="target"><!-- <section> placeholder --><p>ok</p></section>',
     ],
 )
 def test_live_wrap_accepts_valid_html_void_and_optional_end_tags(
@@ -909,11 +910,29 @@ def test_live_wrap_accepts_valid_html_void_and_optional_end_tags(
     assert "data-impeccable-variants" in page.read_text()
 
 
+def test_live_wrap_uses_the_next_html_optional_tag_as_the_selected_boundary(
+    tmp_path: Path,
+) -> None:
+    page = tmp_path / "index.html"
+    page.write_text(
+        '<ul>\n  <li class="target">one\n  <li>two\n</ul>\n'
+    )
+
+    wrapped = _run_wrap(tmp_path, "--file", page.name)
+
+    assert wrapped.returncode == 0, wrapped.stderr
+    result = page.read_text()
+    assert "data-impeccable-variants" in result
+    assert "  <li>two\n</ul>" in result
+
+
 @pytest.mark.parametrize(
     "lines",
     [
         ['<div className="target"><span>broken</div></span>'],
         ['<div className="target">broken</div foo>'],
+        ['<Card>{condition && <Span></Broken>}</Card>'],
+        ['<Card>{condition && <Span>}</Card>'],
     ],
 )
 def test_live_wrap_fails_closed_on_malformed_jsx_tag_structure(
@@ -988,6 +1007,33 @@ def test_live_discard_fails_closed_when_session_structure_is_not_bound(
     assert json.loads(completed.stdout)["handled"] is False
     assert page.read_text() == malformed
     assert "ORIGINAL_SECRET" in page.read_text()
+
+
+def test_live_discard_ignores_exact_session_scaffolds_inside_template_literals(
+    tmp_path: Path,
+) -> None:
+    page = tmp_path / "component.tsx"
+    source = "\n".join(
+        [
+            "const fixture = `",
+            '<div data-impeccable-variants="security-test">',
+            "  {/* impeccable-variants-start security-test */}",
+            '  <div data-impeccable-variant="original">',
+            "    <span>literal content</span>",
+            "  </div>",
+            "  {/* impeccable-variants-end security-test */}",
+            "</div>",
+            "`;",
+            "",
+        ]
+    )
+    page.write_text(source)
+
+    completed = _run_accept(tmp_path, "--discard")
+
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(completed.stdout)["handled"] is False
+    assert page.read_text() == source
 
 
 def test_live_accept_preserves_jsx_that_contains_tag_shaped_string_content(

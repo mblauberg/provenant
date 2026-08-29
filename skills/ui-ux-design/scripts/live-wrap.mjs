@@ -20,7 +20,7 @@ import {
   replaceContainedSource,
   resolveContainedSourcePath,
 } from './contained-source.mjs';
-import { findJsxSubtree } from './jsx-tag-scanner.mjs';
+import { findJsxSubtree, scanJsxTags } from './jsx-tag-scanner.mjs';
 
 const EXTENSIONS = ['.html', '.jsx', '.tsx', '.vue', '.svelte', '.astro'];
 
@@ -636,6 +636,42 @@ const HTML_VOID_TAGS = new Set([
   'link', 'meta', 'param', 'source', 'track', 'wbr',
 ]);
 
+const HTML_IMPLICIT_END_RULES = new Map([
+  ['li', { open: ['li'], close: ['menu', 'ol', 'ul'] }],
+  ['dt', { open: ['dd', 'dt'], close: ['dl'] }],
+  ['dd', { open: ['dd', 'dt'], close: ['dl'] }],
+  ['rt', { open: ['rp', 'rt'], close: ['ruby'] }],
+  ['rp', { open: ['rp', 'rt'], close: ['ruby'] }],
+  ['option', { open: ['optgroup', 'option'], close: ['datalist', 'select'] }],
+  ['optgroup', { open: ['optgroup'], close: ['select'] }],
+  ['tr', { open: ['tr'], close: ['table', 'tbody', 'tfoot', 'thead'] }],
+  ['td', { open: ['td', 'th'], close: ['table', 'tbody', 'tfoot', 'thead', 'tr'] }],
+  ['th', { open: ['td', 'th'], close: ['table', 'tbody', 'tfoot', 'thead', 'tr'] }],
+]);
+
+function findHtmlImplicitClosingLine(joined, start, tagName) {
+  const rule = HTML_IMPLICIT_END_RULES.get(tagName.toLowerCase());
+  if (!rule) return null;
+  const tags = scanJsxTags(joined, { htmlMode: true });
+  const openerIndex = tags.findIndex((tag) => !tag.closing && tag.name === tagName);
+  if (openerIndex === -1) return null;
+  for (const tag of tags.slice(openerIndex + 1)) {
+    if (tag.closing && tag.name === tagName) {
+      return start + joined.slice(0, tag.end).split('\n').length - 1;
+    }
+    const names = tag.closing ? rule.close : rule.open;
+    if (!names.includes(tag.name.toLowerCase())) continue;
+    const boundaryLine = start + joined.slice(0, tag.start).split('\n').length - 1;
+    if (boundaryLine === start) {
+      const error = new Error('Inline implicit HTML boundaries require manual wrapping');
+      error.code = 'html_implicit_boundary_inline';
+      throw error;
+    }
+    return boundaryLine - 1;
+  }
+  return null;
+}
+
 function findClosingLine(lines, start, { isJsx = true } = {}) {
   const openMatch = lines[start].match(OPENER_RE);
   if (!openMatch) return start; // caller passed a non-opener; nothing to span
@@ -643,6 +679,10 @@ function findClosingLine(lines, start, { isJsx = true } = {}) {
   const tagName = openMatch[1];
   if (!isJsx && HTML_VOID_TAGS.has(tagName.toLowerCase())) return start;
   const joined = lines.slice(start).join('\n');
+  if (!isJsx) {
+    const implicitLine = findHtmlImplicitClosingLine(joined, start, tagName);
+    if (implicitLine !== null) return implicitLine;
+  }
   const { closing } = findJsxSubtree(
     joined,
     (tag) => tag.name === tagName,

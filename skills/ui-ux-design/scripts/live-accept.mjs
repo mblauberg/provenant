@@ -551,6 +551,38 @@ function findSessionFile(id, cwd) {
   return null;
 }
 
+function isInsideTemplateLiteral(source, offset) {
+  let inside = false;
+  let escaped = false;
+  for (let index = 0; index < offset; index += 1) {
+    const char = source[index];
+    if (escaped) {
+      escaped = false;
+    } else if (char === '\\') {
+      escaped = true;
+    } else if (char === '`') {
+      inside = !inside;
+    }
+  }
+  return inside;
+}
+
+function hasExecutableStartMarker(content, filePath, id) {
+  const syntax = detectCommentSyntax(filePath);
+  const marker = markerText('start', id, syntax);
+  const isJsx = syntax.open === '{/*';
+  let offset = 0;
+  for (const line of content.split('\n')) {
+    const markerColumn = line.indexOf(marker);
+    if (line.trim() === marker
+      && (!isJsx || !isInsideTemplateLiteral(content, offset + markerColumn))) {
+      return true;
+    }
+    offset += line.length + 1;
+  }
+  return false;
+}
+
 function searchDir(dir, id, seen, depth) {
   if (depth > 5) return null;
   let realDir;
@@ -568,9 +600,7 @@ function searchDir(dir, id, seen, depth) {
     const filePath = path.join(dir, entry.name);
     try {
       const content = fs.readFileSync(filePath, 'utf-8');
-      const syntax = detectCommentSyntax(filePath);
-      const marker = markerText('start', id, syntax);
-      if (content.split('\n').some((line) => line.trim() === marker)) return filePath;
+      if (hasExecutableStartMarker(content, filePath, id)) return filePath;
     } catch { /* skip */ }
   }
 
