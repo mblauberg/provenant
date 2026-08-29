@@ -20,6 +20,24 @@ batch execution.
 
 ## Decision
 
+### Owner map
+
+| Concern | Current or planned owner | Boundary |
+|---|---|---|
+| Model and tier resolution | `scripts/model-route` | Resolves configured routes and records route identity; it does not launch providers. |
+| Assurance dispatch adapter | `skills/orchestrate/scripts/cf_dispatch.sh` | Current direct adapter for assurance and review paths; its distinct-family requirement is not ordinary execution policy. |
+| Ordinary dispatch and batch execution | Orchestration dispatch owner planned by [#518](https://github.com/mblauberg/provenant/issues/518) | Future single owner for provider launch, waiting, cancellation, retry and bounded batches. It is not implemented by this doctrine change. |
+| Coordination | `runtime/fabric` | Mailbox, shared tasks and activity only; no provider launch, scheduler or lifecycle owner. |
+| Dispatch evidence | Compact manifest under the orchestration run directory | Records execution attempts, route lineage and observed completion; it is not delivery acceptance. |
+| Delivery evidence | `deliver` and canonical delivery `RUN.json` | Records artifact verification, review and acceptance; it may reference dispatch evidence. |
+
+The planned #518 owner and its workspace capability gates are an implementation
+boundary, not a claim that ordinary dispatch or batch runtime already exists.
+Credential/auth-store exclusions, unrelated-path containment, explicit denials,
+write/resource limits and external-action gates remain implementation acceptance
+gates for [#518](https://github.com/mblauberg/provenant/issues/518) and the related
+workspace-boundary work in [#683](https://github.com/mblauberg/provenant/issues/683).
+
 ### Configured-workspace access
 
 An authorised chair may dispatch ordinary workspace work to any configured

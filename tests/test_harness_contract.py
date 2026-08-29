@@ -70,6 +70,23 @@ def test_dispatch_manifest_and_delivery_run_have_distinct_owners():
     assert "Fabric remains coordination-only" in adr
 
 
+def test_dispatch_owner_boundaries_distinguish_current_assurance_from_future_execution():
+    orchestrate = (ROOT / "skills/orchestrate/SKILL.md").read_text()
+    thin_cli = (ROOT / "docs/adr/0013-thin-provenant-cli.md").read_text()
+    adr = (ROOT / "docs/adr/0021-configured-workspace-dispatch-boundaries.md").read_text()
+
+    orchestrate_compact = " ".join(orchestrate.lower().split())
+    assert "ordinary configured-provider cli dispatch may use same-family routes" in orchestrate_compact
+    assert "same-family cli only for auth/preflight smoke tests" not in orchestrate_compact
+    assert "orchestration adapter" in thin_cli
+    assert "direct official provider CLIs" in thin_cli
+    assert "scripts/model-route" in adr
+    assert "cf_dispatch" in adr
+    assert "#518" in adr
+    assert "#683" in adr
+    assert "does not implement" in adr
+
+
 def test_thin_cli_decision_is_amended_by_dispatch_boundary_decision():
     index = (ROOT / "docs/adr/README.md").read_text()
     thin_cli = (ROOT / "docs/adr/0013-thin-provenant-cli.md").read_text()

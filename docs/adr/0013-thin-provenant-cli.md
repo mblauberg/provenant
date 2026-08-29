@@ -88,9 +88,12 @@ boundaries.
 ## Clients and providers
 
 A harness can be a **Fabric client** without being a **Fabric provider**. A
-client connects to Fabric's MCP surface to coordinate work. A provider is an
-execution adapter that Fabric can select for an answer-bearing action. Global
-instructions or an installed CLI establish neither role on their own.
+client connects to Fabric's MCP surface to coordinate work. The orchestration
+adapter layer and direct official provider CLIs own answer-bearing execution;
+Fabric is coordination-only and does not select or run providers. Any retained
+pre-ADR-0020 statement that Fabric owned provider execution is historical
+context, not current operational guidance. Global instructions or an installed
+CLI establish neither role on their own.
 
 [Issue #264](https://github.com/mblauberg/provenant/issues/264) established
 update-tolerant provider admission by identity and interface contract rather

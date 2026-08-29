@@ -67,8 +67,11 @@ passing topology.
 ## Adaptive Loop
 
 1. Preflight authority/isolation/disclosure/receipts.
-2. Use **native same-session subagents** first. **Use same-family CLI only for
-   auth/preflight smoke tests**.
+2. **Use native same-session subagents first.** Ordinary configured-provider
+   CLI dispatch may use same-family routes. The current `cf_dispatch.sh`
+   distinct-family requirement belongs to its assurance path; it is not a
+   general execution restriction or the future ordinary-dispatch owner from
+   [#518](https://github.com/mblauberg/provenant/issues/518).
 3. Dispatch parallel read/partitioned-write and serial shared-state waves;
    adapt leaders on evidence and keep one chair/stage owner.
 4. Reduce to a claim/conflict map; verify the live tree before repair.
