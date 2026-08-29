@@ -11,6 +11,7 @@ import re
 import stat
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +22,10 @@ TERMINAL_STATUSES = {"blocked", "succeeded", "failed", "timed_out", "cancelled"}
 DISPATCH_RUN = Path(__file__).with_name("dispatch_run.py")
 MAX_WORKER_QUESTION_PROMPT = 4096
 MAX_OPERATOR_RESPONSE_BYTES = 64 * 1024
+MAX_CANCEL_WAIT_SECONDS = 60.0
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from dispatch_run import create_cancellation_marker
 
 
 class ControlError(ValueError):
@@ -54,6 +59,125 @@ def _digest_bytes(value: bytes) -> str:
 def _fail(message: str, status: str = "invalid_request") -> int:
     print(json.dumps({"schema_version": 1, "status": status, "message": message}, sort_keys=True))
     return 2
+
+
+def _cancel_result(status: str, message: str, *, code: int = 0) -> int:
+    print(json.dumps({"status": status, "message": message}, sort_keys=True))
+    return code
+
+
+def _cancel_wait_seconds(value: Any) -> float:
+    if isinstance(value, bool):
+        raise ControlError("wait-seconds must be a finite number between 0 and 60")
+    try:
+        result = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ControlError("wait-seconds must be a finite number between 0 and 60") from exc
+    if result < 0 or result != result or result == float("inf") or result > MAX_CANCEL_WAIT_SECONDS:
+        raise ControlError("wait-seconds must be a finite number between 0 and 60")
+    return result
+
+
+def _create_cancel_marker(run_dir: Path, directory: Path) -> None:
+    try:
+        create_cancellation_marker(run_dir, directory)
+    except ValueError as exc:
+        raise ControlError(str(exc)) from exc
+
+
+def _attempt_terminal(run_dir: Path, task_id: str, attempt_id: str) -> dict[str, Any] | None:
+    attempt_path = run_dir / "dispatch" / "tasks" / task_id / attempt_id / "attempt.json"
+    try:
+        metadata = attempt_path.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise ControlError("attempt evidence is unavailable") from exc
+    if attempt_path.is_symlink() or not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+        raise ControlError("attempt evidence is invalid")
+    try:
+        record, _, _, _ = _attempt(run_dir, task_id, attempt_id)
+    except ControlError as exc:
+        raise ControlError("attempt evidence is invalid") from exc
+    return record
+
+
+def _wait_for_attempt_terminal(run_dir: Path, task_id: str, attempt_id: str, wait_seconds: float) -> dict[str, Any] | None:
+    deadline = time.monotonic() + wait_seconds
+    while True:
+        record = _attempt_terminal(run_dir, task_id, attempt_id)
+        if record is not None:
+            return record
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return None
+        time.sleep(min(0.05, remaining))
+
+
+def _cancel(args: argparse.Namespace) -> int:
+    run_dir = _run_dir(args.run_dir)
+    wait_seconds = _cancel_wait_seconds(args.wait_seconds)
+    task_target = args.task_id is not None or args.attempt_id is not None
+    batch_target = args.batch_id is not None
+    if task_target == batch_target or (args.task_id is None) != (args.attempt_id is None):
+        raise ControlError("cancel requires exactly one of --task-id with --attempt-id or --batch-id")
+
+    if task_target:
+        if (not isinstance(args.task_id, str) or not TASK_ID_RE.fullmatch(args.task_id)
+                or not isinstance(args.attempt_id, str) or not ATTEMPT_ID_RE.fullmatch(args.attempt_id)):
+            raise ControlError("cancel target identity is invalid")
+        target = run_dir / "dispatch" / "tasks" / args.task_id / args.attempt_id
+        if target.is_symlink() or not target.is_dir():
+            raise ControlError("cancel target attempt directory does not exist")
+        existing = _attempt_terminal(run_dir, args.task_id, args.attempt_id)
+        if existing is not None:
+            return _cancel_result("already_terminal", "attempt already has validated terminal evidence")
+        _create_cancel_marker(run_dir, target)
+        existing = _wait_for_attempt_terminal(run_dir, args.task_id, args.attempt_id, wait_seconds)
+        if existing is None:
+            return _cancel_result("completion_evidence_missing", "owner did not produce validated terminal attempt evidence", code=1)
+        status = "cancelled" if existing.get("status") == "cancelled" else "already_terminal"
+        return _cancel_result(status, "validated terminal attempt evidence is durable")
+
+    if not isinstance(args.batch_id, str) or not BATCH_ID_RE.fullmatch(args.batch_id):
+        raise ControlError("cancel target identity is invalid")
+    target = run_dir / "dispatch" / "batches" / args.batch_id
+    if target.is_symlink() or not target.is_dir():
+        raise ControlError("cancel target batch directory does not exist")
+    summary_path = target / "summary.json"
+    try:
+        metadata = summary_path.lstat()
+        summary_present = True
+    except FileNotFoundError:
+        summary_present = False
+    except OSError as exc:
+        raise ControlError("batch summary evidence is unavailable") from exc
+    if summary_present:
+        if summary_path.is_symlink() or not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            raise ControlError("batch summary evidence is invalid")
+        _load_summary(run_dir, args.batch_id)
+        return _cancel_result("already_terminal", "batch already has validated terminal summary evidence")
+    _create_cancel_marker(run_dir, target)
+    deadline = time.monotonic() + wait_seconds
+    while True:
+        try:
+            summary = _load_summary(run_dir, args.batch_id)
+        except ControlError:
+            try:
+                summary_path.lstat()
+                summary_present = True
+            except FileNotFoundError:
+                summary_present = False
+            if summary_present:
+                raise ControlError("batch summary evidence is invalid")
+            summary = None
+        if summary is not None:
+            status = "cancelled" if summary.get("status") == "cancelled" else "already_terminal"
+            return _cancel_result(status, "validated terminal batch summary evidence is durable")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return _cancel_result("completion_evidence_missing", "owner did not produce validated terminal batch summary evidence", code=1)
+        time.sleep(min(0.05, remaining))
 
 
 def _run_dir(value: Path) -> Path:
@@ -651,6 +775,13 @@ def parser() -> argparse.ArgumentParser:
     response.add_argument("--response-file", type=Path)
     response.add_argument("--response-stdin", action="store_true")
 
+    cancel = commands.add_parser("cancel", help="request cooperative cancellation of one attempt or batch")
+    cancel.add_argument("--run-dir", type=Path, required=True)
+    cancel.add_argument("--task-id")
+    cancel.add_argument("--attempt-id")
+    cancel.add_argument("--batch-id")
+    cancel.add_argument("--wait-seconds", type=float, default=5.0)
+
     reduce = commands.add_parser("reduce", help="reduce explicit successful retained results")
     reduce.add_argument("--run-dir", type=Path, required=True)
     reduce.add_argument("--task-id", required=True)
@@ -675,11 +806,13 @@ def run(args: argparse.Namespace) -> int:
             return _artifact(args)
         if args.command == "retry":
             return _retry(args)
+        if args.command == "cancel":
+            return _cancel(args)
         if args.command == "reduce":
             return _reduce(args)
         raise ControlError(f"unsupported run command: {args.command}")
     except ControlError as exc:
-        return _fail(str(exc))
+        return _fail(str(exc), "invalid_target" if args.command == "cancel" else "invalid_request")
 
 
 if __name__ == "__main__":

@@ -388,6 +388,66 @@ def test_real_dispatch_cancellation_reaps_provider_process(tmp_path, monkeypatch
         os.kill(provider, 0)
 
 
+def test_external_batch_marker_cancels_active_child_and_skips_queued_provider(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    run_dir = make_run(tmp_path, 'external-batch-cancel')
+    bin_dir = tmp_path / 'bin'
+    bin_dir.mkdir()
+    provider_pid = tmp_path / 'provider.pid'
+    launches = tmp_path / 'launches'
+    write_executable(bin_dir / 'codex', f"""
+        #!/usr/bin/env bash
+        if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
+          printf '{{"models":[{{"slug":"gpt-5.6-luna","supported_reasoning_levels":[{{"effort":"low"}}]}}]}}'
+          exit 0
+        fi
+        printf '%s\\n' "$1" >> "{launches}"
+        printf '%s' "$$" > "{provider_pid}"
+        sleep 30
+    """)
+    monkeypatch.setenv('PATH', f"{bin_dir}:{ROOT / 'scripts'}:{os.environ['PATH']}")
+    module = load_module()
+    module.DISPATCH_RUN = BATCH.parent / 'dispatch_run.py'
+    first_prompt = tmp_path / 'first.md'
+    second_prompt = tmp_path / 'second.md'
+    first_prompt.write_text('first\n', encoding='utf-8')
+    second_prompt.write_text('second\n', encoding='utf-8')
+    manifest = task_manifest(tmp_path, [
+        {'id': 'first', 'prompt_file': str(first_prompt), 'adapter': 'codex', 'model': 'gpt-5.6-luna', 'role': 'worker', 'timeout': 10},
+        {'id': 'second', 'prompt_file': str(second_prompt), 'adapter': 'codex', 'model': 'gpt-5.6-luna', 'role': 'worker', 'timeout': 10},
+    ])
+    result = []
+    import threading
+    worker = threading.Thread(target=lambda: result.append(module.batch(args(module, run_dir, manifest, 1))))
+    worker.start()
+    batch_dir = run_dir / 'dispatch/batches/batch-001'
+    deadline = time.monotonic() + 5
+    while not provider_pid.exists() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert provider_pid.exists()
+
+    cancelled = subprocess.run([
+        str(ROOT / 'scripts/provenant'), 'run', 'cancel', '--run-dir', str(run_dir),
+        '--batch-id', 'batch-001', '--wait-seconds', '5',
+    ], cwd=tmp_path, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    worker.join(8)
+    assert not worker.is_alive()
+    assert result == [1]
+    assert cancelled.returncode == 0, cancelled.stderr + cancelled.stdout
+    assert json.loads(cancelled.stdout)['status'] == 'cancelled'
+    summary = json.loads((batch_dir / 'summary.json').read_text())
+    assert summary['status'] == 'cancelled'
+    assert {item['task_id']: item['status'] for item in summary['tasks']} == {
+        'first': 'cancelled', 'second': 'cancelled',
+    }
+    assert (run_dir / 'dispatch/tasks/first/attempt-001/attempt.json').is_file()
+    assert not (run_dir / 'dispatch/tasks/second').exists()
+    assert launches.read_text().splitlines().count('exec') == 1
+    with pytest.raises(ProcessLookupError):
+        os.kill(int(provider_pid.read_text()), 0)
+    assert not (batch_dir / 'cancel.request').exists()
+
+
 def test_inline_prompt_is_temporary_but_attempt_prompt_is_retained(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     run_dir = make_run(tmp_path, 'inline')

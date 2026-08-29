@@ -137,6 +137,15 @@ The valid envelope is retained as `status=blocked`, `outcome=question` and
 response continues it through a new provider invocation and new attempt; it
 never mutates or resumes the blocked attempt in place.
 
+Cross-terminal cancellation is cooperative. `provenant run cancel` creates one
+empty `cancel.request` in the exact attempt or batch directory and waits
+boundedly for the existing owner to write terminal evidence. The command never
+selects or signals a PID and never writes an attempt or batch result. The owner
+that already holds the live process handle checks the marker during its bounded
+wait, terminates and reaps its own process group, and then removes the marker
+after terminal evidence is durable. Natural completion may win the race. Do not
+add a PID registry, lease, heartbeat, marker hash or second lifecycle record.
+
 ### Producer separation default
 
 Distinct artifacts get distinct authors by default. The chair joins the artifacts and decides from

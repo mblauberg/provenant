@@ -155,6 +155,51 @@ def test_artifact_commands_require_exact_attempt_and_emit_raw_content(tmp_path: 
     assert result.stdout == "result\n"
 
 
+def test_cancel_writes_one_empty_attempt_marker_without_terminal_evidence(tmp_path: Path) -> None:
+    run_dir = make_run(tmp_path)
+    attempt_dir = run_dir / "dispatch/tasks/task-1/attempt-001"
+    attempt_dir.mkdir(parents=True)
+
+    result = invoke(
+        "run", "cancel", "--run-dir", str(run_dir), "--task-id", "task-1",
+        "--attempt-id", "attempt-001", "--wait-seconds", "0", cwd=tmp_path,
+    )
+
+    assert result.returncode == 1
+    assert json.loads(result.stdout)["status"] == "completion_evidence_missing"
+    marker = attempt_dir / "cancel.request"
+    assert marker.read_bytes() == b""
+    assert marker.stat().st_nlink == 1
+
+
+def test_cancel_after_natural_completion_reports_already_terminal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    run_dir = make_run(tmp_path)
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("natural\n", encoding="utf-8")
+    adapter = tmp_path / "adapter"
+    write_success_adapter(adapter)
+    module_spec = importlib.util.spec_from_file_location("dispatch_for_cancel_natural", ROOT / "skills/orchestrate/scripts/dispatch_run.py")
+    assert module_spec and module_spec.loader
+    dispatch = importlib.util.module_from_spec(module_spec)
+    module_spec.loader.exec_module(dispatch)
+    monkeypatch.setattr(dispatch, "CF_DISPATCH", adapter)
+    monkeypatch.chdir(tmp_path)
+    args = dispatch.parser().parse_args([
+        "--run-dir", str(run_dir), "--task-id", "natural", "--adapter", "codex",
+        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+    ])
+    assert dispatch.dispatch(args) == 0
+
+    result = invoke(
+        "run", "cancel", "--run-dir", str(run_dir), "--task-id", "natural",
+        "--attempt-id", "attempt-001", "--wait-seconds", "0", cwd=tmp_path,
+    )
+
+    assert result.returncode == 0
+    assert json.loads(result.stdout)["status"] == "already_terminal"
+    assert not (run_dir / "dispatch/tasks/natural/attempt-001/cancel.request").exists()
+
+
 def test_artifact_command_rejects_tampered_retained_digest(tmp_path: Path) -> None:
     run_dir = make_run(tmp_path)
     write_attempt(run_dir)

@@ -32,10 +32,12 @@ sys.path.insert(0, str(REPO_ROOT / "skills"))
 CF_DISPATCH = Path(__file__).with_name("cf_dispatch.sh")
 TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 ATTEMPT_ID_RE = re.compile(r"^attempt-(?P<number>\d{3}|[1-9]\d{3,})$")
+BATCH_ID_RE = re.compile(r"^batch-(?:\d{3}|[1-9]\d{3,})$")
 DEFAULT_TIMEOUT_SECONDS = 900.0
 MAX_WORKER_QUESTION_PROMPT = 4096
 MAX_WORKER_TERMINAL_ENVELOPE_BYTES = 64 * 1024
 WORKER_TERMINAL_RECORD_TYPE = "provenant-worker-terminal"
+CANCEL_MARKER_NAME = "cancel.request"
 
 from _shared.bounded_process import stop_process_group
 
@@ -77,6 +79,60 @@ def atomic_write(path: Path, content: str) -> None:
         os.replace(temporary_path, path)
     finally:
         temporary_path.unlink(missing_ok=True)
+
+
+def _valid_cancel_directory(run_dir: Path, directory: Path) -> bool:
+    try:
+        relative = directory.relative_to(run_dir)
+    except ValueError:
+        return False
+    current = run_dir
+    for part in relative.parts:
+        current /= part
+        try:
+            metadata = current.lstat()
+        except OSError:
+            return False
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+            return False
+    return True
+
+
+def cancellation_marker_present(run_dir: Path, directory: Path) -> bool:
+    """Return true only for the exact empty regular single-link marker."""
+    if not _valid_cancel_directory(run_dir, directory):
+        return False
+    marker = directory / CANCEL_MARKER_NAME
+    try:
+        metadata = marker.lstat()
+    except OSError:
+        return False
+    return stat.S_ISREG(metadata.st_mode) and metadata.st_nlink == 1 and metadata.st_size == 0
+
+
+def create_cancellation_marker(run_dir: Path, directory: Path) -> None:
+    """Create the exact marker atomically and idempotently."""
+    if not _valid_cancel_directory(run_dir, directory):
+        raise ValueError("cancellation target directory is unavailable or unsafe")
+    marker = directory / CANCEL_MARKER_NAME
+    try:
+        fd = os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    except FileExistsError:
+        if not cancellation_marker_present(run_dir, directory):
+            raise ValueError("cancellation marker is invalid")
+        return
+    except OSError as exc:
+        raise ValueError("cancellation marker cannot be created") from exc
+    os.close(fd)
+
+
+def remove_cancellation_marker(run_dir: Path, directory: Path) -> None:
+    """Remove only the exact valid marker after owner evidence is durable."""
+    if cancellation_marker_present(run_dir, directory):
+        try:
+            (directory / CANCEL_MARKER_NAME).unlink()
+        except FileNotFoundError:
+            pass
 
 
 def relative_path(run_dir: Path, path: Path) -> str:
@@ -546,6 +602,13 @@ def _dispatch(args: argparse.Namespace) -> int:
         return fail(run_dir, status, receipt_error)
     if not TASK_ID_RE.fullmatch(args.task_id):
         return fail(run_dir, "invalid_task_id", "task id must contain only letters, numbers, '.', '_' or '-'")
+    batch_dir = None
+    if args.batch_id is not None:
+        if not BATCH_ID_RE.fullmatch(args.batch_id):
+            return fail(run_dir, "invalid_batch_id", "batch id is invalid")
+        batch_dir = run_dir / "dispatch" / "batches" / args.batch_id
+        if batch_dir.is_symlink() or not batch_dir.is_dir():
+            return fail(run_dir, "batch_path_invalid", "batch directory does not exist")
     try:
         ensure_owned_directory(run_dir, run_dir / "dispatch" / "tasks")
         if not args.batch_child:
@@ -640,42 +703,82 @@ def _dispatch(args: argparse.Namespace) -> int:
         with adapter_path.open("w", encoding="utf-8") as adapter_stream, stderr_path.open(
             "w", encoding="utf-8"
         ) as stderr_stream:
-            process = subprocess.Popen(
-                command,
-                cwd=workspace,
-                stdout=adapter_stream,
-                stderr=stderr_stream,
-                env=os.environ.copy(),
-                start_new_session=True,
-            )
-            def cancel_handler(_signum: int, _frame: Any) -> None:
-                nonlocal cancelled
-                cancelled = True
-                try:
-                    stop_process_group(process)
-                except OSError:
-                    pass
-
-            old_handlers = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGHUP)}
-            signal.signal(signal.SIGTERM, cancel_handler)
-            signal.signal(signal.SIGHUP, cancel_handler)
-            try:
-                try:
-                    exit_code = process.wait(timeout=args.timeout_seconds)
-                except subprocess.TimeoutExpired:
-                    stop_process_group(process)
-                    exit_code = process.wait()
-                    process_error = "timeout"
-                except KeyboardInterrupt:
-                    cancelled = True
-                    stop_process_group(process)
-                    exit_code = process.wait()
-            finally:
-                for sig, handler in old_handlers.items():
-                    signal.signal(sig, handler)
-            if cancelled:
+            attempt_cancelled = cancellation_marker_present(run_dir, attempt_dir)
+            batch_cancelled = batch_dir is not None and cancellation_marker_present(run_dir, batch_dir)
+            if attempt_cancelled or batch_cancelled:
+                # The owner still writes the ordinary attempt evidence, but no
+                # provider process is created for a pre-launch request.
                 process_error = "cancelled"
-            observed_exit = True
+                observed_exit = True
+            else:
+                process = subprocess.Popen(
+                    command,
+                    cwd=workspace,
+                    stdout=adapter_stream,
+                    stderr=stderr_stream,
+                    env=os.environ.copy(),
+                    start_new_session=True,
+                )
+
+                def cancel_handler(_signum: int, _frame: Any) -> None:
+                    nonlocal cancelled
+                    cancelled = True
+                    try:
+                        stop_process_group(process)
+                    except OSError:
+                        pass
+
+                old_handlers = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGHUP)}
+                signal.signal(signal.SIGTERM, cancel_handler)
+                signal.signal(signal.SIGHUP, cancel_handler)
+                try:
+                    deadline = time.monotonic() + args.timeout_seconds
+                    while True:
+                        # Poll first so an already-observed natural exit wins a
+                        # marker race.
+                        exit_code = process.poll()
+                        if exit_code is not None:
+                            observed_exit = True
+                            break
+                        marker_seen = cancellation_marker_present(run_dir, attempt_dir)
+                        if batch_dir is not None:
+                            marker_seen = marker_seen or cancellation_marker_present(run_dir, batch_dir)
+                        if marker_seen:
+                            # Re-check before stopping to preserve a natural
+                            # exit that became observable at the boundary.
+                            exit_code = process.poll()
+                            if exit_code is not None:
+                                observed_exit = True
+                                break
+                            stop_process_group(process)
+                            exit_code = process.wait()
+                            process_error = "cancelled"
+                            observed_exit = True
+                            break
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            stop_process_group(process)
+                            exit_code = process.wait()
+                            process_error = "timeout"
+                            observed_exit = True
+                            break
+                        try:
+                            exit_code = process.wait(timeout=min(0.1, remaining))
+                            observed_exit = True
+                            break
+                        except subprocess.TimeoutExpired:
+                            continue
+                        except KeyboardInterrupt:
+                            cancelled = True
+                            stop_process_group(process)
+                            exit_code = process.wait()
+                            observed_exit = True
+                            break
+                finally:
+                    for sig, handler in old_handlers.items():
+                        signal.signal(sig, handler)
+                if cancelled:
+                    process_error = "cancelled"
     except OSError as exc:
         process_error = str(exc)
 
@@ -820,6 +923,7 @@ def _dispatch(args: argparse.Namespace) -> int:
         atomic_write(attempt_path, json.dumps(record, indent=2, sort_keys=True) + "\n")
         attempt_digest = digest(attempt_path)
         atomic_write(digest_path, f"{attempt_digest}  {attempt_path.name}\n")
+    remove_cancellation_marker(run_dir, attempt_dir)
     output_record = {**record, "attempt_digest": attempt_digest}
     print(json.dumps(output_record, sort_keys=True))
     return 0 if status == "succeeded" and not manifest_error else 1
@@ -873,6 +977,7 @@ def parser() -> argparse.ArgumentParser:
     )
     root.add_argument("--retry-of", help="existing attempt id under this task, for lineage only")
     root.add_argument("--batch-child", action="store_true", help=argparse.SUPPRESS)
+    root.add_argument("--batch-id", help=argparse.SUPPRESS)
     return root
 
 
