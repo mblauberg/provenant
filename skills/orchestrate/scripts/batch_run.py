@@ -252,6 +252,9 @@ def _run_task(task: dict[str, Any], run_dir: Path) -> dict[str, Any]:
                 _active_processes.pop(task_id, None)
     record = _parse_record(stdout)
     if record is None:
+        if _cancel_event.is_set():
+            return {"task_id": task_id, "status": "cancelled", "outcome": "batch_cancelled",
+                    "dispatch_exit": process.returncode, "stderr": stderr[-1000:]}
         return {"task_id": task_id, "status": "failed", "outcome": "dispatch_output_invalid",
                 "dispatch_exit": process.returncode, "stderr": stderr[-1000:]}
     status = record.get("status") if isinstance(record.get("status"), str) else "failed"
