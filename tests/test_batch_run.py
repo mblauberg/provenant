@@ -21,6 +21,8 @@ FINALIZE = ROOT / "skills/orchestrate/scripts/run_dir_finalize.py"
 
 def write_executable(path: Path, body: str) -> None:
     normalized = inspect.cleandoc(body)
+    if normalized.lstrip().startswith("#!"):
+        assert normalized.startswith("#!"), "executable fixture shebang must start at byte zero"
     path.write_text(normalized, encoding="utf-8")
     path.chmod(path.stat().st_mode | stat.S_IXUSR)
 
@@ -231,7 +233,7 @@ def test_real_dispatch_children_defer_manifest_race_and_preserve_route_identity(
           exit 0
         fi
         cat >/dev/null
-        printf 'OK\n'
+        printf 'OK\\n'
         """)
     monkeypatch.setenv('PATH', f"{bin_dir}:{ROOT / 'scripts'}:{os.environ['PATH']}")
     module = load_module()
@@ -419,7 +421,7 @@ def test_retry_creates_new_attempt_without_replacing_attempt_one(tmp_path, monke
           exit 0
         fi
         cat >/dev/null
-        printf 'OK\n'
+        printf 'OK\\n'
         """)
     monkeypatch.setenv('PATH', f"{bin_dir}:{ROOT / 'scripts'}:{os.environ['PATH']}")
     module = load_module()
