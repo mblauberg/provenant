@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import importlib.util
 import json
 import os
 import signal
 import stat
 import subprocess
+import sys
 import textwrap
 import time
 from pathlib import Path
@@ -178,6 +180,24 @@ def test_batch_child_defers_shared_manifest_append(tmp_path: Path, monkeypatch) 
     assert attempt["requested_route"]["risk_tier"] == "substantial"
     assert attempt["requested_route"]["reviewer_id"] == "reviewer-1"
     assert attempt["requested_route"]["effort"] == "high"
+
+
+def test_prompt_stdin_is_retained_by_dispatch_owner(tmp_path: Path, monkeypatch) -> None:
+    run_dir = make_run(tmp_path, "stdin")
+    adapter = tmp_path / "adapter"
+    write_success_adapter(adapter)
+    module = load_dispatch_module()
+    monkeypatch.setattr(module, "CF_DISPATCH", adapter)
+    args = module.parser().parse_args([
+        "--run-dir", str(run_dir), "--task-id", "stdin-task", "--adapter", "codex",
+        "--prompt-stdin", "--alias", "scout", "--role", "worker",
+    ])
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys, "stdin", io.TextIOWrapper(io.BytesIO(b"stdin prompt\n")))
+
+    assert module.dispatch(args) == 0
+    attempt = run_dir / "dispatch/tasks/stdin-task/attempt-001"
+    assert (attempt / "prompt.md").read_bytes() == b"stdin prompt\n"
 
 
 def test_route_failure_is_typed_and_provider_is_not_invoked(tmp_path: Path) -> None:

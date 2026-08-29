@@ -11,7 +11,6 @@ import re
 import stat
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -65,7 +64,7 @@ def _relative(run_dir: Path, value: Any, label: str) -> str:
     if not isinstance(value, str) or not value:
         raise ControlError(f"{label} path is missing")
     path = Path(value)
-    if path.is_absolute() or ".." in path.parts:
+    if path.is_absolute() or not path.parts or path == Path(".") or ".." in path.parts:
         raise ControlError(f"{label} path escapes the run: {value}")
     return path.as_posix()
 
@@ -75,32 +74,48 @@ def _read_regular(run_dir: Path, value: Any, label: str, expected: str | None = 
     if expected is not None and relative != expected:
         raise ControlError(f"{label} path does not match its attempt: {relative}")
     path = run_dir / relative
+    parts = Path(relative).parts
+    root_fd: int | None = None
+    directory_fd: int | None = None
+    fd: int | None = None
     try:
-        current = run_dir
-        for part in Path(relative).parts:
-            current /= part
-            if current.is_symlink():
-                raise ControlError(f"{label} path contains a symlink: {relative}")
-        path.resolve().relative_to(run_dir.resolve())
-        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-        fd = os.open(path, flags)
-        try:
-            metadata = os.fstat(fd)
-            if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
-                raise ControlError(f"{label} path is not a regular single-link file: {relative}")
-            chunks: list[bytes] = []
-            while True:
-                chunk = os.read(fd, 1024 * 1024)
-                if not chunk:
-                    break
-                chunks.append(chunk)
-            return relative, path, b"".join(chunks)
-        finally:
-            os.close(fd)
+        nofollow = getattr(os, "O_NOFOLLOW", 0)
+        directory = getattr(os, "O_DIRECTORY", 0)
+        root_fd = os.open(run_dir, os.O_RDONLY | nofollow | directory)
+        directory_fd = root_fd
+        for part in parts[:-1]:
+            next_fd = os.open(part, os.O_RDONLY | nofollow | directory, dir_fd=directory_fd)
+            try:
+                if not stat.S_ISDIR(os.fstat(next_fd).st_mode):
+                    raise ControlError(f"{label} path contains a non-directory component: {relative}")
+            except BaseException:
+                os.close(next_fd)
+                raise
+            if directory_fd != root_fd:
+                os.close(directory_fd)
+            directory_fd = next_fd
+        fd = os.open(parts[-1], os.O_RDONLY | nofollow, dir_fd=directory_fd)
+        metadata = os.fstat(fd)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            raise ControlError(f"{label} path is not a regular single-link file: {relative}")
+        chunks: list[bytes] = []
+        while True:
+            chunk = os.read(fd, 1024 * 1024)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        return relative, path, b"".join(chunks)
     except ControlError:
         raise
     except (OSError, ValueError) as exc:
         raise ControlError(f"{label} path is outside or unavailable: {relative}") from exc
+    finally:
+        if fd is not None:
+            os.close(fd)
+        if directory_fd is not None and directory_fd != root_fd:
+            os.close(directory_fd)
+        if root_fd is not None:
+            os.close(root_fd)
 
 
 def _attempt(run_dir: Path, task_id: str, attempt_id: str) -> tuple[dict[str, Any], dict[str, str], Path, dict[str, bytes]]:
@@ -197,7 +212,8 @@ def _inspect_batches(run_dir: Path) -> list[dict[str, Any]]:
         tasks: list[dict[str, Any]] = []
         seen: set[str] = set()
         for item in summary["tasks"]:
-            if not isinstance(item, dict) or not isinstance(item.get("task_id"), str) or item["task_id"] in seen:
+            if (not isinstance(item, dict) or not isinstance(item.get("task_id"), str)
+                    or not TASK_ID_RE.fullmatch(item["task_id"]) or item["task_id"] in seen):
                 raise ControlError(f"batch summary has invalid task universe: {summary_path}")
             seen.add(item["task_id"])
             task = {"task_id": item["task_id"], "status": item.get("status"),
@@ -205,8 +221,12 @@ def _inspect_batches(run_dir: Path) -> list[dict[str, Any]]:
             if task["status"] not in TERMINAL_STATUSES:
                 raise ControlError(f"batch summary has invalid task status: {summary_path}")
             attempt_path = item.get("attempt_path")
-            if attempt_path is None and item["status"] == "succeeded":
-                raise ControlError(f"successful batch task has no attempt path: {summary_path}")
+            if attempt_path is None:
+                task["claimed_status"] = task["status"]
+                task["status"] = "incomplete"
+                task["receipt_status"] = "receipt_unavailable"
+            if attempt_path is not None and not isinstance(attempt_path, str):
+                raise ControlError(f"batch summary attempt path is not a string: {summary_path}")
             if isinstance(attempt_path, str):
                 try:
                     attempt_rel = _relative(run_dir, attempt_path, "batch attempt")
@@ -217,6 +237,8 @@ def _inspect_batches(run_dir: Path) -> list[dict[str, Any]]:
                     attempt_file = run_dir / attempt_rel
                     if not attempt_file.exists():
                         task["attempt_path"] = attempt_rel
+                        task["claimed_status"] = task["status"]
+                        task["status"] = "incomplete"
                         task["receipt_status"] = "receipt_unavailable"
                     else:
                         record, artifacts, _, _ = _attempt(run_dir, item["task_id"], attempt_id)
@@ -236,6 +258,10 @@ def _inspect_batches(run_dir: Path) -> list[dict[str, Any]]:
 
 def _inspect(args: argparse.Namespace) -> int:
     run_dir = _run_dir(args.run_dir)
+    if args.task_id and not TASK_ID_RE.fullmatch(args.task_id):
+        raise ControlError("task id is invalid")
+    if args.attempt_id and not ATTEMPT_ID_RE.fullmatch(args.attempt_id):
+        raise ControlError("attempt id is invalid")
     if args.attempt_id and not args.task_id:
         raise ControlError("--attempt-id requires --task-id")
     selected: list[tuple[dict[str, Any], dict[str, str]]] = []
@@ -317,12 +343,18 @@ def _route_selector(values: dict[str, Any]) -> tuple[str, str]:
     return selectors[0]
 
 
-def _dispatch_command(run_dir: Path, task_id: str, prompt: Path, route: dict[str, Any], retry_of: str | None = None) -> list[str]:
+def _dispatch_command(run_dir: Path, task_id: str, prompt: Path | None, route: dict[str, Any], retry_of: str | None = None, *, prompt_stdin: bool = False) -> list[str]:
     if not isinstance(route.get("adapter"), str) or not route["adapter"]:
         raise ControlError("adapter is required")
     command = [str(DISPATCH_RUN), "--run-dir", str(run_dir), "--task-id", task_id,
-               "--adapter", str(route["adapter"]), "--prompt-file", str(prompt),
+               "--adapter", str(route["adapter"]),
                "--role", str(route.get("role", "worker")), "--intent", str(route.get("intent", "ordinary"))]
+    if prompt_stdin:
+        command.append("--prompt-stdin")
+    elif prompt is not None:
+        command.extend(("--prompt-file", str(prompt)))
+    else:
+        raise ControlError("dispatch prompt source is required")
     selector, value = _route_selector(route)
     command.extend((f"--{selector.replace('_', '-')}", value))
     for key, flag in (("orchestrator_family", "--orchestrator-family"), ("risk_tier", "--risk-tier"),
@@ -334,26 +366,12 @@ def _dispatch_command(run_dir: Path, task_id: str, prompt: Path, route: dict[str
     return command
 
 
-def _run_child(command: list[str]) -> int:
+def _run_child(command: list[str], input_bytes: bytes | None = None) -> int:
     try:
-        completed = subprocess.run(command, cwd=Path.cwd(), text=False, check=False)
+        completed = subprocess.run(command, cwd=Path.cwd(), input=input_bytes, text=False, check=False)
     except OSError as exc:
         raise ControlError(f"dispatch owner cannot be executed: {exc}") from exc
     return completed.returncode
-
-
-def _temporary_prompt(workspace: Path, content: bytes) -> Path:
-    fd, temporary = tempfile.mkstemp(prefix=".provenant-reducer-", suffix=".md", dir=workspace)
-    path = Path(temporary)
-    try:
-        with os.fdopen(fd, "wb") as stream:
-            stream.write(content)
-            stream.flush()
-            os.fsync(stream.fileno())
-    except BaseException:
-        path.unlink(missing_ok=True)
-        raise
-    return path
 
 
 def _retry(args: argparse.Namespace) -> int:
@@ -380,14 +398,7 @@ def _retry(args: argparse.Namespace) -> int:
             if value:
                 route[key] = value
         _route_selector(route)
-    workspace = Path.cwd().resolve()
-    if workspace == run_dir:
-        raise ControlError("retry needs a workspace parent for its temporary prompt")
-    prompt = _temporary_prompt(workspace, payloads["prompt"])
-    try:
-        return _run_child(_dispatch_command(run_dir, args.task_id, prompt, route, args.attempt_id))
-    finally:
-        prompt.unlink(missing_ok=True)
+    return _run_child(_dispatch_command(run_dir, args.task_id, None, route, args.attempt_id, prompt_stdin=True), payloads["prompt"])
 
 
 def _load_summary(run_dir: Path, batch_id: str) -> dict[str, Any]:
@@ -441,7 +452,10 @@ def _input_ref(value: str) -> tuple[str, str]:
 
 
 def _prompt_file(value: Path) -> tuple[Path, bytes]:
-    path = value.expanduser().resolve()
+    supplied = value.expanduser()
+    if supplied.is_symlink():
+        raise ControlError("prompt file must not be a symlink")
+    path = supplied.resolve()
     workspace = Path.cwd().resolve()
     if path != workspace and workspace not in path.parents:
         raise ControlError("prompt file must be inside the workspace")
@@ -534,22 +548,15 @@ def _reduce(args: argparse.Namespace) -> int:
     lines.extend(["## Omitted successful batch tasks", "", *omitted_lines,
                   "", "## Non-successful batch tasks", "", *unsuccessful_lines,
                   "", "## Operator prompt", "", prompt_bytes.decode("utf-8", errors="replace")])
-    workspace = Path.cwd().resolve()
-    if workspace == run_dir:
-        raise ControlError("reduce needs a workspace parent for its temporary prompt")
-    prompt = _temporary_prompt(workspace, "\n".join(lines).encode())
-    try:
-        route = {"adapter": args.adapter, "role": args.role, "intent": "ordinary",
-                 "orchestrator_family": args.orchestrator_family or ""}
-        for key in ("alias", "task_class", "model"):
-            value = getattr(args, key)
-            if value:
-                route[key] = value
-        _route_selector(route)
-        command = _dispatch_command(run_dir, args.task_id, prompt, route)
-        return _run_child(command)
-    finally:
-        prompt.unlink(missing_ok=True)
+    route = {"adapter": args.adapter, "role": args.role, "intent": "ordinary",
+             "orchestrator_family": args.orchestrator_family or ""}
+    for key in ("alias", "task_class", "model"):
+        value = getattr(args, key)
+        if value:
+            route[key] = value
+    _route_selector(route)
+    command = _dispatch_command(run_dir, args.task_id, None, route, prompt_stdin=True)
+    return _run_child(command, "\n".join(lines).encode())
 
 
 def parser() -> argparse.ArgumentParser:

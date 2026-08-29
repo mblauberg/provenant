@@ -187,9 +187,7 @@ def test_retry_requires_one_route_choice_and_delegates_parent(tmp_path: Path, mo
     delegated = json.loads(invoked.read_text(encoding="utf-8"))
     assert "--retry-of" in delegated
     assert delegated[delegated.index("--retry-of") + 1] == "attempt-001"
-    delegated_prompt = Path(delegated[delegated.index("--prompt-file") + 1])
-    assert delegated_prompt.parent == tmp_path and delegated_prompt.name.startswith(".provenant-reducer-")
-    assert not delegated_prompt.exists()
+    assert "--prompt-stdin" in delegated
     assert delegated[delegated.index("--risk-tier") + 1] == "substantial"
     assert delegated[delegated.index("--reviewer-id") + 1] == "reviewer-1"
     assert delegated[delegated.index("--effort") + 1] == "high"
@@ -233,7 +231,55 @@ def test_inspect_keeps_preterminal_batch_task_conservative_when_receipt_is_absen
 
     assert result.returncode == 0
     batch_task = json.loads(result.stdout)["batches"][0]["tasks"][0]
-    assert batch_task == {"task_id": "not-started", "status": "cancelled", "receipt_status": "unavailable"}
+    assert batch_task == {"task_id": "not-started", "status": "incomplete", "claimed_status": "cancelled",
+                          "receipt_status": "receipt_unavailable"}
+
+
+def test_inspect_does_not_publish_terminal_batch_claim_without_valid_attempt(tmp_path: Path) -> None:
+    run_dir = make_run(tmp_path)
+    summary = run_dir / "dispatch/batches/batch-001/summary.json"
+    summary.parent.mkdir(parents=True)
+    summary.write_text(json.dumps({
+        "schema_version": 1, "record_type": "dispatch-batch", "batch_id": "batch-001",
+        "status": "failed", "tasks": [{"task_id": "missing", "status": "failed",
+                                           "attempt_path": "dispatch/tasks/missing/attempt-001/attempt.json"}],
+    }) + "\n", encoding="utf-8")
+
+    result = invoke("run", "inspect", "--run-dir", str(run_dir), cwd=tmp_path)
+
+    assert result.returncode == 0
+    task = json.loads(result.stdout)["batches"][0]["tasks"][0]
+    assert task["status"] == "incomplete" and task["claimed_status"] == "failed"
+
+
+def test_inspect_rejects_non_string_batch_attempt_path(tmp_path: Path) -> None:
+    run_dir = make_run(tmp_path)
+    summary = run_dir / "dispatch/batches/batch-001/summary.json"
+    summary.parent.mkdir(parents=True)
+    summary.write_text(json.dumps({
+        "schema_version": 1, "record_type": "dispatch-batch", "batch_id": "batch-001",
+        "status": "failed", "tasks": [{"task_id": "missing", "status": "failed", "attempt_path": 7}],
+    }) + "\n", encoding="utf-8")
+
+    result = invoke("run", "inspect", "--run-dir", str(run_dir), cwd=tmp_path)
+
+    assert result.returncode == 2
+    assert "attempt path is not a string" in json.loads(result.stdout)["message"]
+
+
+def test_inspect_rejects_invalid_batch_task_id(tmp_path: Path) -> None:
+    run_dir = make_run(tmp_path)
+    summary = run_dir / "dispatch/batches/batch-001/summary.json"
+    summary.parent.mkdir(parents=True)
+    summary.write_text(json.dumps({
+        "schema_version": 1, "record_type": "dispatch-batch", "batch_id": "batch-001",
+        "status": "failed", "tasks": [{"task_id": "../outside", "status": "failed"}],
+    }) + "\n", encoding="utf-8")
+
+    result = invoke("run", "inspect", "--run-dir", str(run_dir), cwd=tmp_path)
+
+    assert result.returncode == 2
+    assert "task universe" in json.loads(result.stdout)["message"]
 
 
 def test_inspect_reports_incomplete_attempt_directory_without_inventing_liveness(tmp_path: Path) -> None:
@@ -248,6 +294,22 @@ def test_inspect_reports_incomplete_attempt_directory_without_inventing_liveness
         "attempt_id": "attempt-001", "status": "incomplete", "receipt_status": "unavailable",
         "artifacts": {"attempt": "dispatch/tasks/task-1/attempt-001/attempt.json"},
     }
+
+
+def test_evidence_reader_rejects_intermediate_directory_symlink(tmp_path: Path) -> None:
+    run_dir = make_run(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "evidence.txt").write_text("secret", encoding="utf-8")
+    (run_dir / "dispatch").mkdir()
+    (run_dir / "dispatch/link").symlink_to(outside, target_is_directory=True)
+    spec = importlib.util.spec_from_file_location("run_controls_reader", SCRIPT)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    with pytest.raises(module.ControlError):
+        module._read_regular(run_dir, "dispatch/link/evidence.txt", "evidence")
 
 
 def test_reduce_requires_explicit_successes_and_names_batch_omissions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -275,7 +337,7 @@ def test_reduce_requires_explicit_successes_and_names_batch_omissions(tmp_path: 
     captured = tmp_path / "captured.json"
     captured_prompt = tmp_path / "captured-prompt.md"
     fake.write_text(
-        f"#!/usr/bin/env python3\nimport json,sys,shutil\njson.dump(sys.argv[1:],open({str(captured)!r},'w'))\nshutil.copyfile(sys.argv[sys.argv.index('--prompt-file')+1], {str(captured_prompt)!r})\n",
+        f"#!/usr/bin/env python3\nimport json,sys\njson.dump(sys.argv[1:],open({str(captured)!r},'w'))\nopen({str(captured_prompt)!r},'wb').write(sys.stdin.buffer.read())\n",
         encoding="utf-8",
     )
     fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
@@ -297,9 +359,7 @@ def test_reduce_requires_explicit_successes_and_names_batch_omissions(tmp_path: 
     reducer_text = reducer_prompt.read_text(encoding="utf-8")
     assert "- two/attempt-001" in reducer_text and "- three/attempt-001: failed" in reducer_text
     assert "Summarise the evidence." in reducer_text
-    delegated_prompt = Path(delegated[delegated.index("--prompt-file") + 1])
-    assert delegated_prompt.parent == tmp_path and not delegated_prompt.exists()
-    assert not list(run_dir.glob(".provenant-reducer-*.md"))
+    assert "--prompt-stdin" in delegated
     assert "--task-id" in delegated and delegated[delegated.index("--task-id") + 1] == "reducer"
 
 
@@ -373,6 +433,17 @@ def test_retry_and_reduce_use_real_dispatch_owner_and_retain_new_attempts(tmp_pa
     assert "result" in (reducer_attempt / "prompt.md").read_text(encoding="utf-8")
     assert not list(reduce_root.glob(".provenant-reducer-*.md"))
 
+    operator_prompt = reduce_run / "operator.md"
+    operator_prompt.write_text("Reduce from the run directory.", encoding="utf-8")
+    monkeypatch.chdir(reduce_run)
+    same_dir_args = module.parser().parse_args([
+        "reduce", "--run-dir", str(reduce_run), "--task-id", "reducer2", "--prompt-file", str(operator_prompt),
+        "--batch-id", "batch-001", "--input", "source/attempt-001", "--adapter", "codex", "--alias", "scout",
+    ])
+    assert module.run(same_dir_args) == 0
+    assert (reduce_run / "dispatch/tasks/reducer2/attempt-001/prompt.md").is_file()
+    assert not list(reduce_run.glob(".provenant-reducer-*.md"))
+
 
 @pytest.mark.parametrize("name", [".env", ".ssh/known_hosts"])
 def test_reduce_rejects_credential_or_auth_prompt_before_read(tmp_path: Path, name: str) -> None:
@@ -388,3 +459,19 @@ def test_reduce_rejects_credential_or_auth_prompt_before_read(tmp_path: Path, na
 
     assert result.returncode == 2
     assert "credential or authentication" in json.loads(result.stdout)["message"]
+
+
+def test_reduce_rejects_original_prompt_symlink_before_resolving(tmp_path: Path) -> None:
+    run_dir = make_run(tmp_path)
+    write_attempt(run_dir, task_id="one")
+    target = tmp_path / "ordinary-prompt.md"
+    target.write_text("prompt", encoding="utf-8")
+    supplied = tmp_path / "prompt-link.md"
+    supplied.symlink_to(target)
+
+    result = invoke("run", "reduce", "--run-dir", str(run_dir), "--task-id", "reducer",
+                    "--prompt-file", str(supplied), "--batch-id", "batch-001",
+                    "--input", "one/attempt-001", "--adapter", "codex", "--alias", "scout", cwd=tmp_path)
+
+    assert result.returncode == 2
+    assert "must not be a symlink" in json.loads(result.stdout)["message"]

@@ -469,26 +469,33 @@ def _dispatch(args: argparse.Namespace) -> int:
     except OSError as exc:
         return fail(run_dir, "manifest_not_appendable", f"MANIFEST.md is not appendable: {exc}")
 
-    prompt_source = args.prompt_file.resolve()
-    if not prompt_source.is_file() or not os.access(prompt_source, os.R_OK):
-        return fail(run_dir, "prompt_unavailable", f"cannot read prompt file: {prompt_source}")
-    if not (prompt_source == run_dir or run_dir in prompt_source.parents or workspace in prompt_source.parents):
-        return fail(run_dir, "prompt_path_forbidden", "prompt file must be inside the run directory or current workspace")
-    sensitive_roots = {".ssh", ".aws", ".azure", ".gnupg"}
-    sensitive_files = {
-        ".env", ".env.local", ".env.production", "credentials.json",
-        "application_default_credentials.json", "token.json",
-    }
-    parts = [part.casefold() for part in prompt_source.parts]
-    config_auth_dirs = {"gcloud", "gh", "claude", "codex", "openai"}
-    config_auth = any(
-        part == ".config" and index + 1 < len(parts) and parts[index + 1] in config_auth_dirs
-        for index, part in enumerate(parts)
-    )
-    if sensitive_roots.intersection(parts) or prompt_source.name.casefold() in sensitive_files or config_auth:
-        return fail(run_dir, "credential_or_auth_store_denied", "prompt path is a credential or authentication store")
-    if prompt_source.stat().st_nlink > 1:
-        return fail(run_dir, "prompt_hard_link_denied", "prompt file has multiple hard links")
+    prompt_source = args.prompt_file.resolve() if args.prompt_file is not None else None
+    prompt_bytes: bytes | None = None
+    if prompt_source is not None:
+        if not prompt_source.is_file() or not os.access(prompt_source, os.R_OK):
+            return fail(run_dir, "prompt_unavailable", f"cannot read prompt file: {prompt_source}")
+        if not (prompt_source == run_dir or run_dir in prompt_source.parents or workspace in prompt_source.parents):
+            return fail(run_dir, "prompt_path_forbidden", "prompt file must be inside the run directory or current workspace")
+        sensitive_roots = {".ssh", ".aws", ".azure", ".gnupg"}
+        sensitive_files = {
+            ".env", ".env.local", ".env.production", "credentials.json",
+            "application_default_credentials.json", "token.json",
+        }
+        parts = [part.casefold() for part in prompt_source.parts]
+        config_auth_dirs = {"gcloud", "gh", "claude", "codex", "openai"}
+        config_auth = any(
+            part == ".config" and index + 1 < len(parts) and parts[index + 1] in config_auth_dirs
+            for index, part in enumerate(parts)
+        )
+        if sensitive_roots.intersection(parts) or prompt_source.name.casefold() in sensitive_files or config_auth:
+            return fail(run_dir, "credential_or_auth_store_denied", "prompt path is a credential or authentication store")
+        if prompt_source.stat().st_nlink > 1:
+            return fail(run_dir, "prompt_hard_link_denied", "prompt file has multiple hard links")
+    else:
+        try:
+            prompt_bytes = sys.stdin.buffer.read()
+        except OSError as exc:
+            return fail(run_dir, "prompt_unavailable", f"cannot read prompt stdin: {exc}")
     if not CF_DISPATCH.is_file() or not os.access(CF_DISPATCH, os.X_OK):
         return fail(run_dir, "adapter_unavailable", f"provider adapter is missing or not executable: {CF_DISPATCH}")
 
@@ -514,7 +521,13 @@ def _dispatch(args: argparse.Namespace) -> int:
     result_path = attempt_dir / "result.md"
     adapter_path = attempt_dir / "adapter-receipt.json"
     stderr_path = attempt_dir / "stderr.log"
-    shutil.copyfile(prompt_source, prompt_path)
+    if prompt_bytes is None:
+        shutil.copyfile(prompt_source, prompt_path)
+    else:
+        with prompt_path.open("wb") as stream:
+            stream.write(prompt_bytes)
+            stream.flush()
+            os.fsync(stream.fileno())
     command = build_command(args, prompt_path, result_path)
     requested_route = {
         "intent": args.intent,
@@ -730,7 +743,9 @@ def parser() -> argparse.ArgumentParser:
     root.add_argument("--task-id", default="dispatch-001")
     adapter = root.add_mutually_exclusive_group(required=True)
     adapter.add_argument("--adapter", "--tool", dest="tool")
-    root.add_argument("--prompt-file", type=Path, required=True)
+    prompt = root.add_mutually_exclusive_group(required=True)
+    prompt.add_argument("--prompt-file", type=Path)
+    prompt.add_argument("--prompt-stdin", action="store_true", help="read the prompt bytes from stdin")
     root.add_argument("--intent", choices=("ordinary", "assurance"), default="ordinary")
     root.add_argument("--orchestrator-family")
     selector = root.add_mutually_exclusive_group(required=True)
