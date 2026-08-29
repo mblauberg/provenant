@@ -41,7 +41,11 @@ export function createLiveSessionStore({ cwd = process.cwd(), sessionId } = {}) 
       const snapshotPath = getSnapshotPath(rootDir, normalized.id);
       const legacyJournalPath = getJournalPath(legacyRootDir, normalized.id);
       if (!fs.existsSync(journalPath) && fs.existsSync(legacyJournalPath)) {
-        fs.copyFileSync(legacyJournalPath, journalPath);
+        writeStateFile(
+          journalPath,
+          readStateFile(legacyJournalPath),
+          fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL,
+        );
       }
       const prior = loadCachedOrRebuild(normalized.id);
       const seq = prior.nextSeq;
@@ -52,7 +56,11 @@ export function createLiveSessionStore({ cwd = process.cwd(), sessionId } = {}) 
         ts: new Date().toISOString(),
         event: normalized,
       };
-      fs.appendFileSync(journalPath, JSON.stringify(entry) + '\n');
+      writeStateFile(
+        journalPath,
+        JSON.stringify(entry) + '\n',
+        fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_APPEND,
+      );
       const next = applyEvent(prior.snapshot, entry, prior.diagnostics);
       snapshotCache.set(normalized.id, { snapshot: next, diagnostics: next.diagnostics || [], nextSeq: seq + 1 });
       writeSnapshot(snapshotPath, next);
@@ -103,6 +111,41 @@ function ensureCanonicalSessionRoot(cwd) {
     throw error;
   }
   return rootDir;
+}
+
+function readStateFile(filePath) {
+  const descriptor = openStateFile(filePath, fs.constants.O_RDONLY);
+  try {
+    return fs.readFileSync(descriptor, 'utf8');
+  } finally {
+    fs.closeSync(descriptor);
+  }
+}
+
+function writeStateFile(filePath, content, flags) {
+  const truncate = (flags & fs.constants.O_TRUNC) !== 0;
+  const descriptor = openStateFile(filePath, flags & ~fs.constants.O_TRUNC);
+  try {
+    if (truncate) fs.ftruncateSync(descriptor, 0);
+    fs.writeFileSync(descriptor, content, 'utf8');
+  } finally {
+    fs.closeSync(descriptor);
+  }
+}
+
+function openStateFile(filePath, flags) {
+  if (!Number.isInteger(fs.constants.O_NOFOLLOW)) {
+    throw new Error('State-file writes require O_NOFOLLOW support');
+  }
+  const descriptor = fs.openSync(filePath, flags | fs.constants.O_NOFOLLOW, 0o600);
+  const metadata = fs.fstatSync(descriptor);
+  if (!metadata.isFile() || metadata.nlink !== 1) {
+    fs.closeSync(descriptor);
+    const error = new Error('Session state file must be a single-link regular file');
+    error.code = 'live_state_file_invalid';
+    throw error;
+  }
+  return descriptor;
 }
 
 function normalizeEvent(event, fallbackId) {
@@ -160,7 +203,7 @@ function rebuildSnapshotFromJournal(journalPath, id) {
   let nextSeq = 1;
   if (!fs.existsSync(journalPath)) return { snapshot, diagnostics, nextSeq };
 
-  const lines = fs.readFileSync(journalPath, 'utf-8').split('\n');
+  const lines = readStateFile(journalPath).split('\n');
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     if (!line.trim()) continue;
@@ -257,8 +300,6 @@ function applyEvent(snapshot, entry, inheritedDiagnostics = []) {
       break;
     case 'agent_error':
       next.phase = 'agent_error';
-      next.pendingEventSeq = null;
-      next.pendingEvent = null;
       next.diagnostics.push({ error: 'agent_error', message: event.message || 'unknown agent error' });
       break;
     default:
@@ -276,5 +317,9 @@ function toPendingEvent(event) {
 }
 
 function writeSnapshot(snapshotPath, snapshot) {
-  fs.writeFileSync(snapshotPath, JSON.stringify(snapshot, null, 2) + '\n');
+  writeStateFile(
+    snapshotPath,
+    JSON.stringify(snapshot, null, 2) + '\n',
+    fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_TRUNC,
+  );
 }

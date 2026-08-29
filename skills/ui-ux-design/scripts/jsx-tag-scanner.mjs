@@ -30,6 +30,37 @@ function skipLineComment(source, start) {
   return end === -1 ? source.length : end + 1;
 }
 
+function canStartRegexLiteral(source, start) {
+  let before = start - 1;
+  while (before >= 0 && /\s/.test(source[before])) before -= 1;
+  if (before < 0 || /[=(:,\[{!&|?;+*%^~<>]/.test(source[before])) return true;
+  return /\b(?:case|return|throw|yield)\s*$/.test(source.slice(0, start));
+}
+
+function skipRegexLiteral(source, start) {
+  let escaped = false;
+  let inClass = false;
+  for (let index = start + 1; index < source.length; index += 1) {
+    const char = source[index];
+    if (escaped) {
+      escaped = false;
+    } else if (char === '\\') {
+      escaped = true;
+    } else if (char === '[') {
+      inClass = true;
+    } else if (char === ']') {
+      inClass = false;
+    } else if (char === '/' && !inClass) {
+      index += 1;
+      while (index < source.length && /[A-Za-z]/.test(source[index])) index += 1;
+      return index;
+    } else if (char === '\n') {
+      throw unbalanced('Unterminated JavaScript regular expression');
+    }
+  }
+  throw unbalanced('Unterminated JavaScript regular expression');
+}
+
 function skipHtmlComment(source, start) {
   const end = source.indexOf('-->', start + 4);
   if (end === -1) throw unbalanced('Unterminated HTML comment');
@@ -51,6 +82,11 @@ function findHtmlRawTextClose(source, tagName, start) {
 }
 
 function looksLikeTypeScriptGenericCall(source, tag) {
+  const closingStart = source.indexOf(`</${tag.name}`, tag.end);
+  if (closingStart !== -1) {
+    const boundary = source[closingStart + tag.name.length + 2];
+    if (boundary === '>' || /\s/.test(boundary || '')) return false;
+  }
   const immediatelyBefore = source[tag.start - 1];
   if (immediatelyBefore && /[A-Za-z0-9_$.)\]]/.test(immediatelyBefore)) return true;
 
@@ -155,6 +191,10 @@ export function scanJsxTags(source, { htmlMode = false, stopAfterTag, stopWhen }
     }
     if (expressionDepth > 0 && source.startsWith('//', index)) {
       index = skipLineComment(source, index);
+      continue;
+    }
+    if (expressionDepth > 0 && char === '/' && canStartRegexLiteral(source, index)) {
+      index = skipRegexLiteral(source, index);
       continue;
     }
     if (char === '{') {

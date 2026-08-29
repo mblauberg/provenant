@@ -407,6 +407,29 @@ def test_failed_accept_result_remains_recoverable_as_an_error(tmp_path: Path) ->
     assert result.stdout == "error"
 
 
+def test_agent_error_keeps_the_pending_accept_event_recoverable(tmp_path: Path) -> None:
+    module_url = (SCRIPTS / "live-session-store.mjs").as_uri()
+    script = (
+        f"import {{ createLiveSessionStore }} from {json.dumps(module_url)};"
+        "const store=createLiveSessionStore({cwd:process.argv[1]});"
+        "store.appendEvent({id:'security-test',type:'accept',variantId:'1'});"
+        "store.appendEvent({id:'security-test',type:'agent_error',message:'not handled'});"
+        "process.stdout.write(JSON.stringify(store.getSnapshot('security-test')));"
+    )
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script, str(tmp_path)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    snapshot = json.loads(result.stdout)
+    assert snapshot["phase"] == "agent_error"
+    assert snapshot["pendingEvent"]["type"] == "accept"
+    assert snapshot["pendingEvent"]["variantId"] == "1"
+
+
 def test_live_mutation_help_discloses_project_relative_existing_file_boundary(
     tmp_path: Path,
 ) -> None:
@@ -820,6 +843,21 @@ def test_live_wrap_scans_nested_multiline_jsx_without_treating_strings_as_tags(
             0,
             0,
         ),
+        (
+            ['<Card>{condition && <Span>foo<Bar>bar</Bar></Span>}</Card>'],
+            0,
+            0,
+        ),
+        (
+            ['<Card>{/}/.test(value) ? <A/> : <B/>}</Card>'],
+            0,
+            0,
+        ),
+        (
+            ['<Card>{/<Broken>/.test(value) ? <A/> : <B/>}</Card>'],
+            0,
+            0,
+        ),
     ],
 )
 def test_live_wrap_stops_scanning_after_the_selected_jsx_subtree(
@@ -1026,7 +1064,27 @@ def test_live_wrap_fails_closed_for_selected_html_optional_end_tags(
 
     assert wrapped.returncode == 1
     assert page.read_text() == source
-    assert "html_implicit_end_unsupported" in wrapped.stderr
+    assert json.loads(wrapped.stderr)["error"] == "html_implicit_end_unsupported"
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        '<ul>\n<li class="target">one</li>\n</ul>\n',
+        '<div>\n<p class="target">text</p>\n</div>\n',
+        '<table><tr>\n<td class="target">cell</td>\n</tr></table>\n',
+    ],
+)
+def test_live_wrap_accepts_explicitly_closed_html_optional_end_tags(
+    tmp_path: Path, source: str
+) -> None:
+    page = tmp_path / "index.html"
+    page.write_text(source)
+
+    wrapped = _run_wrap(tmp_path, "--file", page.name)
+
+    assert wrapped.returncode == 0, wrapped.stderr
+    assert "data-impeccable-variants" in page.read_text()
 
 
 @pytest.mark.parametrize(
@@ -1795,6 +1853,39 @@ def test_live_server_rejects_a_preexisting_symlinked_state_root(
     assert not (outside / "server.json").exists()
     assert not list(outside.glob("*.jsonl"))
     assert not list(outside.glob("*.snapshot.json"))
+
+
+@pytest.mark.parametrize("link_kind", ["symlink", "hardlink"])
+@pytest.mark.parametrize("suffix", [".jsonl", ".snapshot.json"])
+def test_live_session_store_rejects_linked_state_files(
+    tmp_path: Path, suffix: str, link_kind: str
+) -> None:
+    project = tmp_path / "project"
+    sessions = project / ".impeccable" / "live" / "sessions"
+    sessions.mkdir(parents=True)
+    outside = tmp_path / "outside.txt"
+    outside.write_text("outside-safe")
+    state_file = sessions / f"security-test{suffix}"
+    if link_kind == "symlink":
+        state_file.symlink_to(outside)
+    else:
+        os.link(outside, state_file)
+    module_url = (SCRIPTS / "live-session-store.mjs").as_uri()
+    script = (
+        f"import {{ createLiveSessionStore }} from {json.dumps(module_url)};"
+        "const store=createLiveSessionStore({cwd:process.argv[1]});"
+        "store.appendEvent({id:'security-test',type:'generate'});"
+    )
+
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script, str(project)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert outside.read_text() == "outside-safe"
 
 
 def test_live_serves_the_checked_in_detector_and_screenshot_asset_contracts(

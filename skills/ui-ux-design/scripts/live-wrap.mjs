@@ -647,33 +647,40 @@ function findClosingLine(lines, start, { isJsx = true } = {}) {
 
   const tagName = openMatch[1];
   if (!isJsx && HTML_VOID_TAGS.has(tagName.toLowerCase())) return start;
-  if (!isJsx && HTML_OPTIONAL_END_TAGS.has(tagName.toLowerCase())) {
-    const error = new Error('Selected HTML elements with optional end tags require manual wrapping');
-    error.code = 'html_implicit_end_unsupported';
+  const joined = lines.slice(start).join('\n');
+  let closing;
+  try {
+    ({ closing } = findJsxSubtree(
+      joined,
+      (tag) => tag.name === tagName,
+      { strictNesting: isJsx },
+    ));
+  } catch (error) {
+    if (!isJsx
+      && HTML_OPTIONAL_END_TAGS.has(tagName.toLowerCase())
+      && error.message.startsWith('Missing closing JSX tag')) {
+      const fallback = new Error(
+        'Selected HTML elements with implicit end tags require manual wrapping',
+      );
+      fallback.code = 'html_implicit_end_unsupported';
+      throw fallback;
+    }
     throw error;
   }
-  const joined = lines.slice(start).join('\n');
-  const { closing } = findJsxSubtree(
-    joined,
-    (tag) => tag.name === tagName,
-    { strictNesting: isJsx },
-  );
   return start + joined.slice(0, closing.end).split('\n').length - 1;
 }
 
 // Auto-execute when run directly (node live-wrap.mjs ...)
 const _running = process.argv[1];
 if (_running?.endsWith('live-wrap.mjs') || _running?.endsWith('live-wrap.mjs/')) {
-  try {
-    wrapCli();
-  } catch (error) {
+  wrapCli().catch((error) => {
     console.error(JSON.stringify({
       error: error.code || 'wrap_failed',
       fallback: 'agent-driven',
       hint: error.message,
     }));
     process.exit(1);
-  }
+  });
 }
 
 // Test exports (used by tests/live-wrap.test.mjs)
