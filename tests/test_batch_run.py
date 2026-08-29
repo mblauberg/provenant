@@ -219,7 +219,7 @@ def test_real_dispatch_children_defer_manifest_race_and_preserve_route_identity(
     write_executable(bin_dir / 'codex', """
         #!/usr/bin/env bash
         if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
-          printf '{"models":[{"slug":"gpt-5.6-luna","supported_reasoning_levels":[{"effort":"high"}]}]}'
+          printf '{"models":[{"slug":"gpt-5.6-luna","supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"},{"effort":"high"}]}]}'
           exit 0
         fi
         cat >/dev/null
@@ -314,7 +314,7 @@ def test_real_dispatch_timeout_retains_typed_non_success_attempt(tmp_path, monke
     write_executable(bin_dir / 'codex', """
         #!/usr/bin/env bash
         if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
-          printf '{"models":[{"slug":"gpt-5.6-luna","supported_reasoning_levels":[{"effort":"high"}]}]}'
+          printf '{"models":[{"slug":"gpt-5.6-luna","supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"},{"effort":"high"}]}]}'
           exit 0
         fi
         sleep 10
@@ -344,7 +344,7 @@ def test_real_dispatch_cancellation_reaps_provider_process(tmp_path, monkeypatch
     write_executable(bin_dir / 'codex', f"""
         #!/usr/bin/env bash
         if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
-          printf '{{"models":[{{"slug":"gpt-5.6-luna","supported_reasoning_levels":[{{"effort":"high"}}]}}]}}'
+          printf '{{"models":[{{"slug":"gpt-5.6-luna","supported_reasoning_levels":[{{"effort":"low"}},{{"effort":"medium"}},{{"effort":"high"}}]}}]}}'
           exit 0
         fi
         printf '%s' "$$" > "{provider_pid}"
@@ -407,7 +407,7 @@ def test_retry_creates_new_attempt_without_replacing_attempt_one(tmp_path, monke
     write_executable(bin_dir / 'codex', """
         #!/usr/bin/env bash
         if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
-          printf '{"models":[{"slug":"gpt-5.6-luna","supported_reasoning_levels":[{"effort":"high"}]}]}'
+          printf '{"models":[{"slug":"gpt-5.6-luna","supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"},{"effort":"high"}]}]}'
           exit 0
         fi
         cat >/dev/null
