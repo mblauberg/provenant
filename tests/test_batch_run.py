@@ -111,8 +111,11 @@ def fake_dispatch(path: Path) -> None:
                        'role': ns.role, 'model': ns.model or '', 'effort': '',
                        'orchestrator_family': ns.orchestrator_family or ''},
                    'route': route,
-                   'prompt': {'path': str(prompt_path.relative_to(ns.run_dir))}, 'result': result,
-                   'stderr': {'path': str(stderr_path.relative_to(ns.run_dir))},
+                   'prompt': {'path': str(prompt_path.relative_to(ns.run_dir)),
+                              'digest': 'sha256:' + hashlib.sha256(prompt_path.read_bytes()).hexdigest()},
+                   'result': result,
+                   'stderr': {'path': str(stderr_path.relative_to(ns.run_dir)),
+                              'digest': 'sha256:' + hashlib.sha256(stderr_path.read_bytes()).hexdigest()},
                    'attempt_digest_path': str((attempt_dir / 'attempt.sha256').relative_to(ns.run_dir))}
         if question is not None:
             attempt['question'] = question
@@ -595,6 +598,53 @@ def test_non_v1_prior_attempt_blocks_reentry_before_launch(tmp_path, monkeypatch
     assert module.batch(args(module, run_dir, second_manifest, 1)) == 2
     assert not (run_dir / 'dispatch/tasks/next').exists()
     assert not (run_dir / 'dispatch/batches/batch-002').exists()
+
+
+def test_tampered_prior_evidence_digest_blocks_reentry_before_launch(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    run_dir = make_run(tmp_path, 'tampered-prior')
+    dispatch = tmp_path / 'fake-dispatch'
+    fake_dispatch(dispatch)
+    module = load_module()
+    module.DISPATCH_RUN = dispatch
+    counter = tmp_path / 'counter'
+    counter.write_text('0')
+    monkeypatch.setenv('BATCH_COUNTER', str(counter))
+
+    first_manifest = task_manifest(tmp_path, [task(tmp_path, 'prior')])
+    assert module.batch(args(module, run_dir, first_manifest, 1)) == 0
+    prior_path = run_dir / 'dispatch/tasks/prior/attempt-001/attempt.json'
+    prior = json.loads(prior_path.read_text())
+    prior['prompt']['digest'] = 'sha256:' + '0' * 64
+    prior_path.write_text(json.dumps(prior, sort_keys=True) + '\n', encoding='utf-8')
+    sidecar = prior_path.with_name('attempt.sha256')
+    sidecar.write_text(f"{module.digest(prior_path)}  attempt.json\n", encoding='utf-8')
+
+    second_manifest = task_manifest(tmp_path, [task(tmp_path, 'next')])
+    assert module.batch(args(module, run_dir, second_manifest, 1)) == 2
+    assert not (run_dir / 'dispatch/tasks/next').exists()
+    assert not (run_dir / 'dispatch/batches/batch-002').exists()
+
+
+def test_tampered_attempt_sidecar_blocks_reentry_before_launch(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    run_dir = make_run(tmp_path, 'tampered-sidecar')
+    dispatch = tmp_path / 'fake-dispatch'
+    fake_dispatch(dispatch)
+    module = load_module()
+    module.DISPATCH_RUN = dispatch
+    counter = tmp_path / 'counter'
+    counter.write_text('0')
+    monkeypatch.setenv('BATCH_COUNTER', str(counter))
+
+    first_manifest = task_manifest(tmp_path, [task(tmp_path, 'prior')])
+    assert module.batch(args(module, run_dir, first_manifest, 1)) == 0
+    sidecar = run_dir / 'dispatch/tasks/prior/attempt-001/attempt.sha256'
+    sidecar.write_text('sha256:' + '0' * 64 + '  attempt.json\n', encoding='utf-8')
+
+    second_manifest = task_manifest(tmp_path, [task(tmp_path, 'next')])
+    assert module.batch(args(module, run_dir, second_manifest, 1)) == 2
+    assert not (run_dir / 'dispatch/tasks/next').exists()
 
 
 def test_standalone_dispatch_is_blocked_by_batch_custody(tmp_path, monkeypatch):

@@ -339,6 +339,9 @@ def reconcile_manifest(run_dir: Path) -> None:
                 atomic_write(sidecar, f"{digest(attempt_path)}  {attempt_path.name}\n")
             if not valid_regular_result(run_dir, sidecar):
                 raise AttemptEvidenceError(f"attempt digest is not a regular retained file: {sidecar}")
+            expected_sidecar = f"{digest(attempt_path)}  {attempt_path.name}\n"
+            if sidecar.read_text(encoding="utf-8") != expected_sidecar:
+                raise AttemptEvidenceError(f"attempt digest does not match retained record: {attempt_path}")
             record["attempt_digest_path"] = relative_path(run_dir, sidecar)
             rows = [
                 (kind, retained_path(run_dir, path))
@@ -362,6 +365,23 @@ def reconcile_manifest(run_dir: Path) -> None:
             if absent:
                 raise AttemptEvidenceError(
                     f"attempt evidence is missing for {attempt_path}: {', '.join(absent)}"
+                )
+            claimed_digests = {
+                "prompt": record["prompt"]["digest"],
+                "adapter": record["route"]["adapter_receipt"]["digest"],
+                "stderr": record["stderr"]["digest"],
+            }
+            if record["result"] is not None:
+                claimed_digests["result"] = record["result"]["digest"]
+            mismatched_digests = [
+                kind
+                for kind, path in rows
+                if kind in claimed_digests and claimed_digests[kind] != digest(run_dir / path)
+            ]
+            if mismatched_digests:
+                raise AttemptEvidenceError(
+                    f"attempt evidence digest does not match {attempt_path}: "
+                    + ", ".join(mismatched_digests)
                 )
             missing = [(kind, path) for kind, path in rows if f"| {path} |" not in existing]
             if not missing:
