@@ -141,16 +141,18 @@ the result in the run manifest and move to the next tool.
 
 Gemini/Agy work is dispatched like any other headless CLI route. The chair
 supplies the budget and scope. The dispatch receipt and output record the route,
-model lineage and result. When Fabric is in use, correlate its task or message
-so the lane is visible to everyone else on the project. Treat the result as
-advisory until primary-family evidence corroborates it.
+model lineage and result. When Fabric is available, correlate its task or
+message so the lane is visible to everyone else on the project. Treat the
+result as advisory until primary-family evidence corroborates it.
 
 Agy may hold its own `agy` Fabric seat for stable addressing, but the seat does
 not prove a Gemini or Google route. Count the model family only from the exact
 provider/model fields in the dispatch receipt. When available, Fabric is the
 required coordination path; this adapter is the direct provider call and its
 receipt and output remain the execution evidence. If Fabric is unavailable,
-record the missing roundtrip as degraded; it does not block direct review.
+record `FABRIC-ROUNDTRIP-UNAVAILABLE`, retain a named artifact and use an
+explicit bounded collection step. That degraded coordination path does not
+block direct review.
 
 `cf_dispatch.sh --tool agy` is the route. Five properties of this CLI are load
 bearing and were measured against agy 1.1.10 on 2026-08-05, not read from help:
@@ -208,9 +210,10 @@ cross-family verifiers for source/test/schema confirmation.
 ## Codex worktree implementation lane
 
 `codex exec -s workspace-write -C <absolute-worktree>` is the one headless lane that writes.
-It stays a recorded degraded fallback under the safety rule above, not a substitute for
-Fabric: take it when the Fabric roundtrip is unavailable, and record why. Soft family
-affinity for who gets token-heavy legwork belongs in the preference catalogue named by
+Direct provider invocation is ordinary execution, not a degraded fallback.
+Coordinate through Fabric when available; otherwise record the degraded
+coordination path under the safety rule above. Soft family affinity for who
+gets token-heavy legwork belongs in the preference catalogue named by
 [routing-and-tiers.md](routing-and-tiers.md), never in a remembered model name here.
 
 Four failure modes are specific to this lane:
