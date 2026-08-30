@@ -57,6 +57,7 @@ OBSERVATION_PLAN_FIELDS = (
 )
 MAX_LOG_BYTES = 64 * 1024
 EVIDENCE_TIMEOUT_SECONDS = 30 * 60
+CANONICAL_FULL_TEST_COMMAND = ("scripts/check-harness",)
 DEFAULT_ARTIFACT_TYPES = dict(
     software="documentation", research="report", analysis="report",
     document="markdown", **{"agent-product": "policy"},
@@ -733,6 +734,16 @@ def command_evidence_run(args: argparse.Namespace) -> dict[str, Any]:
         ensure_new_evidence_id(run, evidence_id)
         bundle_artifact(run, args.artifact_id, workspace)
         check_evidence_sources(run, workspace, source_paths)
+        canonical_harness = workspace / CANONICAL_FULL_TEST_COMMAND[0]
+        if (
+            args.gate == "tests"
+            and canonical_harness.is_file()
+            and tuple(command) != CANONICAL_FULL_TEST_COMMAND
+        ):
+            raise ReceiptError(
+                "tests gate requires the canonical scripts/check-harness method; "
+                "use a narrower gate for focused commands"
+            )
         started = utc_now()
         exit_code, stdout, stderr = execute_bounded(command, cwd=workspace)
         ensure_immutable_risk(run, workspace)

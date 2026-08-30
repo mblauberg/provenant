@@ -38,7 +38,7 @@ def make_reference_run(profile_name: str, root: Path = ROOT, *, high_stakes: boo
                     "kind": kind,
                     "gate": gate,
                     "status": "pass",
-                    "method": f"reference-{gate}",
+                    "method": "scripts/check-harness" if gate == "tests" else f"reference-{gate}",
                     "artifact_id": "evidence-bundle",
                     "source_paths": ["input"],
                 }
@@ -46,6 +46,10 @@ def make_reference_run(profile_name: str, root: Path = ROOT, *, high_stakes: boo
                     item["result"] = {"exit_code": 0, "receipt_digest": digest_b}
                 if family:
                     item["model_lineage"] = {"adapter": "native-subagent" if family == "openai" else "claude-code", "provider_family": family, "model": "runtime-resolved"}
+                    item["route_receipt"] = {
+                        "path": f"review-route-{family}.json", "digest": digest_b,
+                    }
+                    item["source_paths"].append(f"review-route-{family}.json")
                     judgement_by_family[family].append(evidence_id)
                 evidence.append(item)
     evidence.extend([
@@ -142,7 +146,7 @@ def make_reference_run(profile_name: str, root: Path = ROOT, *, high_stakes: boo
             "evidence_digest": digest_b,
             "workspace_roots": ["."],
             "expires_at": "2027-07-10T00:00:00Z",
-            "allowed_source_paths": ["input"],
+            "allowed_source_paths": ["input", "review-route-openai.json", "review-route-anthropic.json"],
             "allowed_artifact_paths": ["."],
             "denied_paths": [],
             "prohibited_actions": ["external-release", "deployment", "irreversible-action"],
@@ -160,6 +164,12 @@ def make_reference_run(profile_name: str, root: Path = ROOT, *, high_stakes: boo
         "artifacts": [
             {"id": "intent", "path": "intent.md", "media_type": "text/markdown", "artifact_type": profile["artifact_types"][0], "digest": digest_a, "class": "canonical", "owner": "human-maintainer", "retention": "project-policy"},
             {"id": "evidence-bundle", "path": "evidence.json", "media_type": "application/json", "artifact_type": "evidence", "digest": digest_b, "class": "evidence", "owner": "delivery-chair", "retention": "risk-policy"},
+            *[{
+                "id": f"review-route-{family}", "path": f"review-route-{family}.json",
+                "media_type": "application/json", "artifact_type": "evidence",
+                "digest": digest_b, "class": "evidence", "owner": "delivery-chair",
+                "retention": "risk-policy",
+            } for family in ("openai", "anthropic")],
             *([{"id": "evaluation-receipt", "path": "evaluation/EVALUATION.json", "media_type": "application/json", "artifact_type": "evidence", "digest": digest_b, "class": "evidence", "owner": "evaluation-chair", "retention": "risk-policy"}] if profile_name == "agent-product" else []),
         ],
         "design": {
@@ -204,8 +214,8 @@ def make_reference_run(profile_name: str, root: Path = ROOT, *, high_stakes: boo
             }] if profile_name == "agent-product" else []),
         },
         "reviews": [
-            {"role": "targeted", "provider_family": "openai", "adapter": "native-subagent", "model": "runtime-resolved", "independent_of_authorship": True, "lenses": ["correctness-spec", "tests"], "status": "pass", "evidence_id": judgement_by_family["openai"][0], "reason": ""},
-            {"role": "other-primary", "provider_family": "anthropic", "adapter": "claude-code", "model": "runtime-resolved", "independent_of_authorship": True, "lenses": ["architecture-evidence"], "status": "pass", "evidence_id": judgement_by_family["anthropic"][0], "reason": ""},
+            {"role": "targeted", "provider_family": "openai", "adapter": "native-subagent", "model": "runtime-resolved", "reviewer_id": "reference-openai-reviewer", "independent_of_authorship": True, "lenses": ["correctness-spec", "tests"], "status": "pass", "evidence_id": judgement_by_family["openai"][0], "reason": "", "route_receipt_digest": digest_b},
+            {"role": "other-primary", "provider_family": "anthropic", "adapter": "claude-code", "model": "runtime-resolved", "reviewer_id": "reference-anthropic-reviewer", "independent_of_authorship": True, "lenses": ["architecture-evidence"], "status": "pass", "evidence_id": judgement_by_family["anthropic"][0], "reason": "", "route_receipt_digest": digest_b},
             {"role": "distinct-family", "provider_family": "google", "adapter": "gemini", "model": "", "independent_of_authorship": True, "lenses": ["blind-spots"], "status": "unavailable", "evidence_id": "", "reason": "reference run does not invoke optional providers"},
         ],
         "security": {
