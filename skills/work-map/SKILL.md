@@ -6,16 +6,17 @@ description: "Use when a multi-session effort needs one durable, curated route l
 # work-map: the map for multi-session efforts
 
 A `session` handoff carries one session's baton. Across many sessions or agents,
-the work map preserves the stable route: one file per effort, read for durable
-orientation and changed only when that route changes.
+the work map preserves one canonical route per effort. The route is the parent
+issue when it is sufficient, otherwise a declared project-docs file or a
+link-only fallback carries it.
 
-Read the repository's `Repository process` declaration first. If the declared
-issue tracker has a parent issue with enough destination, route and invariant
-detail, the parent tracker issue is the work map: link to it and do not create
-a duplicate file. If the declaration selects `project-docs`, use its named map
-or story home. A link-only file is allowed only as a fallback for an unavailable
-tracker or a cross-tracker route. It links owners and never restates current
-status, owner, dependencies or user gates.
+Read the repository's `Repository process` declaration first. In `issue-tracker`
+mode, if the parent issue has enough destination, route and invariant detail,
+the parent tracker issue is the work map: link to it and do not create a
+duplicate file. In
+`project-docs` mode, use its named map or story home. A link-only file is only
+an unavailable-tracker or cross-tracker fallback. It links owners and never
+restates current status, owner, dependencies or user gates.
 
 ## Optional link-only map
 

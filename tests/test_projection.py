@@ -119,11 +119,27 @@ def test_architecture_lifecycle_projection_contains_the_runtime_state_graph():
     )
     _, region, _ = split_marked_region(architecture, "delivery-state-machine")
 
-    for state in (*contract["states"], *contract["side_states"]):
-        assert state in region
-    for transition in contract["transitions"]:
-        source, target = transition["state"], transition["to_state"]
-        assert f"{source} --> {target}" in region
+    normal_edges = set()
+    for line in region.splitlines():
+        if " --> " not in line:
+            continue
+        source, target = (part.strip() for part in line.split(" --> ", 1))
+        target = target.split(":", 1)[0].strip()
+        if source == "[*]" or target == "[*]":
+            continue
+        normal_edges.add((source, target))
+
+    expected_edges = {
+        (transition["state"], transition["to_state"])
+        for transition in contract["transitions"]
+    }
+    assert normal_edges == expected_edges
+    assert {node for edge in normal_edges for node in edge} == set(contract["states"])
+    assert {
+        line.strip()
+        for line in region.splitlines()
+        if line.strip() in contract["side_states"]
+    } == set(contract["side_states"])
     assert contract["source"]["state_graph"].endswith("#state-graph")
 
 

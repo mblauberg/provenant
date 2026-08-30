@@ -67,7 +67,7 @@ project files. In project-write mode, land only approved artifacts:
 
 Write clear, observable acceptance criteria. Preserve project schemas; pin only
 decision-critical interfaces with native locks/constraints. Link or cache
-authority with source, version/date and digest; never vendor without a licence.
+authority with its source and relevant date/version; never vendor without a licence.
 
 Before handoff, record decided/parked branches, exclusions, machine-readable
 risk/authority and anchored evidence, with user approval of the spec and
