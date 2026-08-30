@@ -17,7 +17,7 @@ Usage: cf_dispatch.sh --tool TOOL --orchestrator-family FAMILY --prompt TEXT [op
        cf_dispatch.sh --doctor
 
 Options:
-  --tool TOOL                  One of claude, codex, cursor, agy, kiro, copilot.
+  --tool TOOL                  One of claude, codex, cursor, agy, copilot.
   --task-class CLASS           Route task class through model_route.py.
   --chain SPECS                Space-separated fallback chain.
   --orchestrator-family FAMILY Current orchestrator family; same-family routes fail closed.
@@ -26,7 +26,8 @@ Options:
                                Defaults from --role: flagship for lead,
                                orchestrator and critical-review, workhorse otherwise.
   --role ROLE                  Route role (default: reviewer).
-  --risk-tier TIER             Optional routine, substantial, crucial, or terminal risk tier.
+  --risk-tier TIER             Lifecycle/receipt risk metadata; never selects a model.
+  --model-override-tier TIER   Explicit special-model override tier.
   --reviewer-id ID             Stable worker/reviewer identity for receipt binding.
   --model MODEL                Optional model passed to adapter.
   --effort EFFORT              Optional effort passed to adapter.
@@ -41,9 +42,13 @@ Record every dispatch and result in Fabric so the chair can follow the lane.
 EOF
 }
 
-TOOL="" MODEL="" EFFORT="" OUT="" PROMPT="" PROMPT_FILE="" CHAIN="" ORCH_FAMILY="" MODEL_ALIAS="" TASK_CLASS="" ROUTE_ROLE="reviewer" RISK_TIER="" REVIEWER_ID="" INTENT="assurance" DOCTOR=0
+TOOL="" MODEL="" EFFORT="" OUT="" PROMPT="" PROMPT_FILE="" CHAIN="" ORCH_FAMILY="" MODEL_ALIAS="" TASK_CLASS="" ROUTE_ROLE="reviewer" RISK_TIER="" MODEL_OVERRIDE_TIER="" REVIEWER_ID="" INTENT="assurance" DOCTOR=0
 ALIAS_EXPLICIT=0
 OUT_CREATED=false
+ACTIVE_RUN_TMPDIR=""
+INSTALLED_OUTPUT_DIGEST=""
+INSTALLED_OUTPUT_DEVICE=""
+INSTALLED_OUTPUT_INODE=""
 AGY_ADD_DIRS=()
 need_value() {
   [ $# -ge 2 ] || { echo "missing value for $1" >&2; exit 2; }
@@ -66,6 +71,7 @@ while [ $# -gt 0 ]; do
     --alias) need_value "$@"; MODEL_ALIAS="$2"; ALIAS_EXPLICIT=1; shift 2;;
     --role) need_value "$@"; ROUTE_ROLE="$2"; shift 2;;
     --risk-tier) need_value "$@"; RISK_TIER="$2"; shift 2;;
+    --model-override-tier) need_value "$@"; MODEL_OVERRIDE_TIER="$2"; shift 2;;
     --reviewer-id) need_value "$@"; REVIEWER_ID="$2"; shift 2;;
     *) echo "unknown arg: $1" >&2; exit 2;;
   esac
@@ -82,12 +88,13 @@ esac
 # role says it is critical. The flagship roles are the keys of
 # families.*.role_effort_defaults in config/model-routing.json; keep this list in
 # step with that file.
-# A risk tier pins the alias too: every risk_tier_overrides entry in that file
+# An explicit special-model override pins the alias too: every
+# risk_tier_overrides entry in that file
 # declares alias "flagship", and the resolver rejects any other alias with
 # risk_tier_alias_mismatch. Keep both lists in step with the config. The rule only
 # governs the case where the caller named neither an alias nor a model.
 if [ "$ALIAS_EXPLICIT" -eq 0 ] && [ -z "$TASK_CLASS" ]; then
-  if [ -n "$MODEL" ] || [ -n "$RISK_TIER" ]; then
+  if [ -n "$MODEL" ] || [ -n "$MODEL_OVERRIDE_TIER" ]; then
     # An explicitly named model has already made the cost decision, so leave the
     # alias at flagship rather than narrowing the candidate list under it.
     MODEL_ALIAS="flagship"
@@ -152,9 +159,10 @@ fi
 
 if [ -n "$PROMPT_FILE" ]; then
   [ -r "$PROMPT_FILE" ] || { echo "cannot read prompt file: $PROMPT_FILE" >&2; exit 2; }
-  PROMPT="$(cat "$PROMPT_FILE")"
+elif [ -z "$PROMPT" ]; then
+  echo "need --prompt or --prompt-file" >&2
+  exit 2
 fi
-[ -z "$PROMPT" ] && { echo "need --prompt or --prompt-file" >&2; exit 2; }
 make_tmp() {
   local root="${TMPDIR:-/tmp}"
   [ -d "$root" ] || { echo "temporary directory does not exist: $root" >&2; return 1; }
@@ -170,9 +178,44 @@ if [ -z "$OUT" ]; then
   OUT_CREATED=true
 fi
 PROMPT_TMP="$(make_tmp)"
-printf '%s' "$PROMPT" >"$PROMPT_TMP"
-trap 'rm -f "$PROMPT_TMP"' EXIT
-trap 'rm -f "$PROMPT_TMP"; [ "$OUT_CREATED" = true ] && rm -f "$OUT"; exit 143' INT TERM HUP
+if [ -n "$PROMPT_FILE" ]; then
+  if ! cp -- "$PROMPT_FILE" "$PROMPT_TMP"; then
+    echo "cannot retain prompt file: $PROMPT_FILE" >&2
+    [ "$OUT_CREATED" = true ] && rm -f "$OUT"
+    exit 2
+  fi
+else
+  printf '%s' "$PROMPT" >"$PROMPT_TMP"
+fi
+cleanup_dispatch() {
+  rm -f "$PROMPT_TMP"
+  [ -n "$ACTIVE_RUN_TMPDIR" ] && rm -rf -- "$ACTIVE_RUN_TMPDIR"
+}
+abort_dispatch() {
+  cleanup_dispatch
+  [ "$OUT_CREATED" = true ] && rm -f "$OUT"
+  exit 143
+}
+trap cleanup_dispatch EXIT
+trap abort_dispatch INT TERM HUP
+[ -s "$PROMPT_TMP" ] || {
+  echo "need --prompt or --prompt-file" >&2
+  [ "$OUT_CREATED" = true ] && rm -f "$OUT"
+  exit 2
+}
+if ! python3 - "$PROMPT_TMP" <<'PY'
+import sys
+from pathlib import Path
+
+raise SystemExit(1 if b"\0" in Path(sys.argv[1]).read_bytes() else 0)
+PY
+then
+  echo "prompt contains unsupported NUL bytes" >&2
+  [ "$OUT_CREATED" = true ] && rm -f "$OUT"
+  exit 2
+fi
+PROMPT_ARG=""
+IFS= read -r -d '' PROMPT_ARG <"$PROMPT_TMP" || true
 
 strip_ansi() { sed $'s/\x1b\\[[0-9;?]*[A-Za-z]//g'; }
 json_escape() {
@@ -215,16 +258,27 @@ endpoint_provider() {
   esac
 }
 install_output() {
-  local source="$1" destination="$2" directory temporary
-  directory="$(dirname -- "$destination")"
-  [ -d "$directory" ] || return 1
-  [ ! -d "$destination" ] || [ -L "$destination" ] || return 1
-  temporary="$(mktemp "$directory/.cf-dispatch-output.XXXXXX")" || return 1
-  if cp "$source" "$temporary" && mv -f "$temporary" "$destination"; then
-    return 0
-  fi
-  rm -f "$temporary"
-  return 1
+  local source="$1" destination="$2" installed_identity extra
+  INSTALLED_OUTPUT_DIGEST=""
+  INSTALLED_OUTPUT_DEVICE=""
+  INSTALLED_OUTPUT_INODE=""
+  installed_identity="$("$SCRIPT_DIR/output_custody.py" install \
+    --source "$source" --destination "$destination")" || return 1
+  read -r INSTALLED_OUTPUT_DIGEST INSTALLED_OUTPUT_DEVICE INSTALLED_OUTPUT_INODE extra \
+    <<<"$installed_identity"
+  [[ "$INSTALLED_OUTPUT_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] \
+    && [[ "$INSTALLED_OUTPUT_DEVICE" =~ ^[0-9]+$ ]] \
+    && [[ "$INSTALLED_OUTPUT_INODE" =~ ^[0-9]+$ ]] \
+    && [ -z "${extra:-}" ]
+}
+verify_installed_output() {
+  local destination="$1"
+  [ -n "$INSTALLED_OUTPUT_DIGEST" ] \
+    && "$SCRIPT_DIR/output_custody.py" verify \
+      --destination "$destination" \
+      --digest "$INSTALLED_OUTPUT_DIGEST" \
+      --device "$INSTALLED_OUTPUT_DEVICE" \
+      --inode "$INSTALLED_OUTPUT_INODE"
 }
 emit_record() {
   local tool="$1" model="$2" effort="$3" status="$4" rc="$5" path="$6" guarantee="$7"
@@ -233,18 +287,31 @@ emit_record() {
   local substitution="${15:-}" requested_model="${16:-$model}" fallback_model="${17:-}"
   local catalog_model="${18:-}" model_selection="${19:-}"
   local risk_tier="${20:-$RISK_TIER}" policy_override="${21:-}"
+  local model_override_tier="${22:-$MODEL_OVERRIDE_TIER}"
+  local reason="${23:-}"
   local output_digest=""
   model="$(resolve_model "$tool" "$model")"
   [ -n "$endpoint" ] || endpoint="$(endpoint_provider "$tool")"
   [ -n "$identity" ] || identity="unresolved"
-  if [ -n "$path" ] && [ -f "$path" ]; then
-    output_digest="sha256:$(shasum -a 256 "$path" | awk '{print $1}')"
+  if [ -n "$path" ]; then
+    if verify_installed_output "$path"; then
+      output_digest="$INSTALLED_OUTPUT_DIGEST"
+    else
+      path=""
+      guarantee="none"
+    fi
+  fi
+  if [ "$status" = "ok" ] && [ -z "$output_digest" ]; then
+    status="output_identity_invalid"
+    rc=1
+    path=""
+    guarantee="none"
   fi
   cross="false"
   [ -n "$ORCH_FAMILY" ] && valid_family "$ORCH_FAMILY" && [ -n "$family" ] && [ "$ORCH_FAMILY" != "$family" ] && cross="true"
   cert="false"
-  [ "$INTENT" = "assurance" ] && [ "$status" = "ok" ] && [ "$cross" = "true" ] && { [ "$guarantee" = "enforced" ] || [ "$guarantee" = "oauth_safe_mode" ]; } && cert="true"
-  printf '{"tool":"%s","adapter":"%s","adapter_gate":"direct-cli","execution_intent":"%s","model":"%s","requested_model":"%s","resolved_model":"%s","fallback_model":"%s","requested_effort":"%s","effort":"%s","effort_source":"%s","effort_capability_source":"%s","effort_substitution":"%s","substitution":"%s","status":"%s","exit":%s,"output_path":"%s","output_digest":"%s","read_only_guarantee":"%s","orchestrator_family":"%s","provider_family":"%s","model_family":"%s","endpoint_provider":"%s","identity_source":"%s","catalog_model":"%s","model_selection":"%s","route_alias":"%s","reviewer_id":"%s","risk_tier":"%s","policy_override":"%s","cross_family":%s,"certification_eligible":%s}\n' \
+  [ "$INTENT" = "assurance" ] && [ "$status" = "ok" ] && [ -n "$output_digest" ] && [ "$cross" = "true" ] && { [ "$guarantee" = "enforced" ] || [ "$guarantee" = "oauth_safe_mode" ]; } && cert="true"
+  printf '{"tool":"%s","adapter":"%s","adapter_gate":"direct-cli","execution_intent":"%s","model":"%s","requested_model":"%s","resolved_model":"%s","fallback_model":"%s","requested_effort":"%s","effort":"%s","effort_source":"%s","effort_capability_source":"%s","effort_substitution":"%s","substitution":"%s","status":"%s","reason":"%s","exit":%s,"output_path":"%s","output_digest":"%s","read_only_guarantee":"%s","orchestrator_family":"%s","provider_family":"%s","model_family":"%s","endpoint_provider":"%s","identity_source":"%s","catalog_model":"%s","model_selection":"%s","route_alias":"%s","reviewer_id":"%s","risk_tier":"%s","model_override_tier":"%s","policy_override":"%s","cross_family":%s,"certification_eligible":%s}\n' \
     "$(printf '%s' "$tool" | json_escape)" \
     "$(printf '%s' "$tool" | json_escape)" \
     "$(printf '%s' "$INTENT" | json_escape)" \
@@ -259,6 +326,7 @@ emit_record() {
     "$(printf '%s' "$effort_substitution" | json_escape)" \
     "$(printf '%s' "$substitution" | json_escape)" \
     "$(printf '%s' "$status" | json_escape)" \
+    "$(printf '%s' "$reason" | json_escape)" \
     "$rc" \
     "$(printf '%s' "$path" | json_escape)" \
     "$(printf '%s' "$output_digest" | json_escape)" \
@@ -273,9 +341,11 @@ emit_record() {
     "$(printf '%s' "$MODEL_ALIAS" | json_escape)" \
     "$(printf '%s' "$REVIEWER_ID" | json_escape)" \
     "$(printf '%s' "$risk_tier" | json_escape)" \
+    "$(printf '%s' "$model_override_tier" | json_escape)" \
     "$(printf '%s' "$policy_override" | json_escape)" \
     "$cross" \
     "$cert"
+  [ "$status" = "ok" ]
 }
 
 ORCH_FAMILY="$(normalise_family "$ORCH_FAMILY")"
@@ -295,7 +365,7 @@ resolve_routing() {
   # Resolve model routing via provenant if available, else via scripts/model_route.py from product root.
   # Returns JSON. If neither method is available, returns status="model_routing_unavailable".
   local tool="$1" alias="$2" role="$3" lead_family="$4" diag_file="$5"
-  local model="$6" effort="$7" risk_tier="$8" capabilities_file="$9"
+  local model="$6" effort="$7" model_override_tier="$8" capabilities_file="$9"
   local task_class="${10:-}"
   local product_root=""
   local -a cmd route_args
@@ -319,11 +389,8 @@ resolve_routing() {
   fi
   [ "$INTENT" = "assurance" ] && route_args+=(--require-distinct)
   [ -n "$model" ] && route_args+=(--model "$model")
-  # agy 1.1.17 accepts --model and --effort independently. The historical
-  # model-id resolver rejects a bare model plus an explicit effort, so preserve
-  # an explicit agy effort for the adapter and resolve model/family here.
-  [ -n "$effort" ] && [ "$tool" != "agy" ] && route_args+=(--effort "$effort")
-  [ -n "$risk_tier" ] && route_args+=(--risk-tier "$risk_tier")
+  [ -n "$effort" ] && route_args+=(--effort "$effort")
+  [ -n "$model_override_tier" ] && route_args+=(--model-override-tier "$model_override_tier")
   [ -n "$capabilities_file" ] && [ -f "$capabilities_file" ] && route_args+=(--capabilities-file "$capabilities_file")
 
   # Try provenant first if available
@@ -360,6 +427,78 @@ resolve_routing() {
   return 127
 }
 
+parse_route_json() {
+  local route_json="$1" route_dir="$2" route_path fields_path key value
+  route_path="$route_dir/route.json"
+  fields_path="$route_dir/route-fields"
+  printf '%s' "$route_json" >"$route_path"
+  if ! python3 - "$route_path" "$fields_path" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+route_path, fields_path = map(Path, sys.argv[1:3])
+
+def reject_duplicate_members(pairs):
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError(f"duplicate route member: {key}")
+        value[key] = item
+    return value
+
+route = json.loads(
+    route_path.read_text(encoding="utf-8"),
+    object_pairs_hook=reject_duplicate_members,
+)
+if not isinstance(route, dict):
+    raise ValueError("route must be a JSON object")
+keys = (
+    "status", "resolved_model", "model_family", "endpoint_provider",
+    "identity_source", "requested_effort", "effort", "effort_source",
+    "effort_capability_source", "effort_substitution", "substitution",
+    "fallback_model", "catalog_model", "model_selection",
+    "model_override_tier", "policy_override", "alias", "reason",
+)
+with fields_path.open("wb") as handle:
+    for key in keys:
+        value = route.get(key, "")
+        if value is None:
+            value = ""
+        if not isinstance(value, str) or "\0" in value:
+            raise ValueError(f"route field {key} must be a NUL-free string")
+        handle.write(key.encode("ascii") + b"\0")
+        handle.write(value.encode("utf-8") + b"\0")
+PY
+  then
+    return 1
+  fi
+  while IFS= read -r -d '' key && IFS= read -r -d '' value; do
+    case "$key" in
+      status) status="$value";;
+      resolved_model) model="$value";;
+      model_family) family="$value";;
+      endpoint_provider) endpoint="$value";;
+      identity_source) identity="$value";;
+      requested_effort) requested_effort="$value";;
+      effort) effort="$value";;
+      effort_source) effort_source="$value";;
+      effort_capability_source) effort_capability_source="$value";;
+      effort_substitution) effort_substitution="$value";;
+      substitution) substitution="$value";;
+      fallback_model) fallback_model="$value";;
+      catalog_model) catalog_model="$value";;
+      model_selection) model_selection="$value";;
+      model_override_tier) route_model_override_tier="$value";;
+      policy_override) policy_override="$value";;
+      alias) route_alias="$value";;
+      reason) route_reason="$value";;
+      *) return 1;;
+    esac
+  done <"$fields_path"
+  [ -n "$status" ]
+}
+
 agy_has_unsafe_arg() {
   case "$1 $2 ${CF_DISPATCH_AGY_ADD_DIR:-}" in
     *--dangerously-skip-permissions*) return 0;;
@@ -367,11 +506,9 @@ agy_has_unsafe_arg() {
   esac
 }
 
-run_one() {  # $1 tool $2 model $3 effort -> writes clean answer to OUT, echoes JSON, returns 0/1
-  local tool="$1" model="$2" effort="$3" tmpdir raw diag combined clean rc status opath guarantee family endpoint identity effort_substitution substitution requested_model requested_effort effort_source effort_capability_source route_json route_rc route_fields capabilities_file fallback_model primary_model catalog_model model_selection policy_override route_risk_tier route_alias agy_status agy_requested_effort agy_dir agy_prompt_bytes
+run_one() {  # $1 tool $2 model $3 effort $4 private tempdir -> JSON, returns 0/1
+  local tool="$1" model="$2" effort="$3" route_effort_input="$3" tmpdir="$4" raw diag combined clean rc status opath guarantee family endpoint identity effort_substitution substitution requested_model requested_effort effort_source effort_capability_source route_json route_rc capabilities_file fallback_model primary_model catalog_model model_selection policy_override route_risk_tier route_model_override_tier route_alias route_reason agy_status agy_dir agy_prompt_bytes
   model="$(resolve_model "$tool" "$model")"
-  agy_requested_effort="$effort"
-  tmpdir="$(make_tmp_dir)"
   raw="$tmpdir/raw"
   diag="$tmpdir/diag"
   clean="$tmpdir/clean"
@@ -390,6 +527,8 @@ run_one() {  # $1 tool $2 model $3 effort -> writes clean answer to OUT, echoes 
   model_selection=""
   policy_override=""
   route_risk_tier="$RISK_TIER"
+  route_model_override_tier="$MODEL_OVERRIDE_TIER"
+  route_reason=""
   requested_effort="$effort"
   effort_source=""
   effort_capability_source=""
@@ -413,26 +552,59 @@ run_one() {  # $1 tool $2 model $3 effort -> writes clean answer to OUT, echoes 
     echo "$tool disabled: pass --orchestrator-family so cross-family status can be proven" >"$diag"
     rc=1
   else
-    if [ "$tool" = "codex" ]; then
-      capabilities_file="$tmpdir/codex-capabilities.json"
-      if ! "$SCRIPT_DIR/codex_capabilities.py" \
-        --out "$capabilities_file" >>"$diag" 2>&1; then
-        rm -f "$capabilities_file"
-      fi
-    fi
-    route_json="$(resolve_routing "$tool" "$MODEL_ALIAS" "$ROUTE_ROLE" "$ORCH_FAMILY" "$diag" "$model" "$effort" "$RISK_TIER" "$capabilities_file" "$TASK_CLASS")"
+    # Resolve configuration before any provider-backed capability probe. This
+    # makes disabled or malformed adapter policy a non-executing rejection.
+    route_json="$(resolve_routing "$tool" "$MODEL_ALIAS" "$ROUTE_ROLE" "$ORCH_FAMILY" "$diag" "$requested_model" "$route_effort_input" "$MODEL_OVERRIDE_TIER" "" "$TASK_CLASS")"
     route_rc=$?
-    if route_fields="$(printf '%s' "$route_json" | python3 -c 'import json,sys; r=json.load(sys.stdin); print("|".join(str(r.get(k,"")) for k in ("status","resolved_model","model_family","endpoint_provider","identity_source","requested_effort","effort","effort_source","effort_capability_source","effort_substitution","substitution","fallback_model","catalog_model","model_selection","risk_tier","policy_override","alias")))' 2>>"$diag")"; then
-      IFS='|' read -r status model family endpoint identity requested_effort effort effort_source effort_capability_source effort_substitution substitution fallback_model catalog_model model_selection route_risk_tier policy_override route_alias <<<"$route_fields"
+    if parse_route_json "$route_json" "$tmpdir" 2>>"$diag"; then
+      case "$tool:$status" in
+        codex:capability_discovery_failed)
+          capabilities_file="$tmpdir/codex-capabilities.json"
+          if "$SCRIPT_DIR/codex_capabilities.py" \
+            --out "$capabilities_file" >>"$diag" 2>&1; then
+            route_json="$(resolve_routing "$tool" "$MODEL_ALIAS" "$ROUTE_ROLE" "$ORCH_FAMILY" "$diag" "$requested_model" "$route_effort_input" "$MODEL_OVERRIDE_TIER" "$capabilities_file" "$TASK_CLASS")"
+            route_rc=$?
+            if ! parse_route_json "$route_json" "$tmpdir" 2>>"$diag"; then
+              status="routing_record_invalid"
+              route_rc=1
+            fi
+          else
+            rm -f "$capabilities_file"
+          fi
+          ;;
+        agy:ok|agy:model_required_for_broker)
+          capabilities_file="$tmpdir/agy-capabilities.json"
+          if "$SCRIPT_DIR/agy_capabilities.py" \
+            --out "$capabilities_file" >>"$diag" 2>&1; then
+            route_json="$(resolve_routing "$tool" "$MODEL_ALIAS" "$ROUTE_ROLE" "$ORCH_FAMILY" "$diag" "$requested_model" "$route_effort_input" "$MODEL_OVERRIDE_TIER" "$capabilities_file" "$TASK_CLASS")"
+            route_rc=$?
+            if ! parse_route_json "$route_json" "$tmpdir" 2>>"$diag"; then
+              status="routing_record_invalid"
+              route_rc=1
+            fi
+          else
+            rm -f "$capabilities_file"
+          fi
+          ;;
+      esac
+      if [ "$tool" = "claude" ] && [ -n "$TASK_CLASS" ] \
+        && [ "$status" = "task_class_capability_unverified" ] \
+        && [ -n "$model" ] && [ -n "$requested_effort" ]; then
+        capabilities_file="$tmpdir/claude-capabilities.json"
+        if "$SCRIPT_DIR/claude_capabilities.py" --out "$capabilities_file" \
+          --alias "$model" --effort "$requested_effort" >>"$diag" 2>&1; then
+          route_json="$(resolve_routing "$tool" "$MODEL_ALIAS" "$ROUTE_ROLE" "$ORCH_FAMILY" "$diag" "$requested_model" "$route_effort_input" "$MODEL_OVERRIDE_TIER" "$capabilities_file" "$TASK_CLASS")"
+          route_rc=$?
+          if ! parse_route_json "$route_json" "$tmpdir" 2>>"$diag"; then
+            status="routing_record_invalid"
+            route_rc=1
+          fi
+        else
+          rm -f "$capabilities_file"
+        fi
+      fi
       [ -n "$route_alias" ] && MODEL_ALIAS="$route_alias"
       [ -n "$requested_model" ] || requested_model="$model"
-      if [ "$tool" = "agy" ] && [ -n "$agy_requested_effort" ]; then
-        requested_effort="$agy_requested_effort"
-        effort="$agy_requested_effort"
-        effort_source="explicit"
-        effort_capability_source="agy-cli"
-        effort_substitution=""
-      fi
       if [ "$route_rc" -ne 0 ]; then
         guarantee="none"
         printf '%s\n' "$route_json" >>"$diag"
@@ -513,7 +685,7 @@ run_one() {  # $1 tool $2 model $3 effort -> writes clean answer to OUT, echoes 
             rc=127
           else
             cursor-agent -p --trust --mode ask --sandbox enabled --output-format text \
-              ${model:+--model "$model"} "$(cat "$PROMPT_TMP")" </dev/null >"$raw" 2>"$diag"; rc=$?
+              ${model:+--model "$model"} "$PROMPT_ARG" </dev/null >"$raw" 2>"$diag"; rc=$?
           fi ;;
         agy)
           # agy --sandbox does not enforce read-only writes. On agy 1.1.10 a
@@ -573,7 +745,7 @@ run_one() {  # $1 tool $2 model $3 effort -> writes clean answer to OUT, echoes 
                 echo "agy prompt is ${agy_prompt_bytes} bytes, over the 124 KiB single-argument ceiling; pass the material with --add-dir instead" >"$diag"
                 rc=1
               else
-                agy_cmd+=(--print "$(cat "$PROMPT_TMP")")
+                agy_cmd+=(--print "$PROMPT_ARG")
                 "${agy_cmd[@]}" >"$raw" 2>"$diag"; rc=$?
               fi
             fi
@@ -587,23 +759,38 @@ from pathlib import Path
 
 raw_path, diag_path, clean_path = map(Path, sys.argv[1:4])
 exit_code = int(sys.argv[4])
-stdout = raw_path.read_text(encoding="utf-8", errors="replace")
+try:
+    stdout = raw_path.read_bytes().decode("utf-8")
+    stdout_valid = True
+except UnicodeDecodeError:
+    stdout = ""
+    stdout_valid = False
 stderr = diag_path.read_text(encoding="utf-8", errors="replace")
 denial = re.compile(r'no output produced.*?a tool required the "[^"]+" permission', re.I | re.S)
 auth = re.compile(r"unauthenticated|not logged in|sign in|quota|rate.?limit|401|403", re.I)
 envelope = None
 
+def reject_duplicate_members(pairs):
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError("duplicate JSON member: %s" % key)
+        value[key] = item
+    return value
+
 if denial.search(stderr):
     status = "permission_denied"
     response = ""
+elif not stdout_valid:
+    status = "invalid_envelope"
+    response = ""
 else:
-    for line in stdout.splitlines():
-        line = line.strip()
-        if line.startswith("{"):
-            try:
-                envelope = json.loads(line)
-            except json.JSONDecodeError:
-                continue
+    try:
+        candidate = json.loads(stdout, object_pairs_hook=reject_duplicate_members)
+        if isinstance(candidate, dict):
+            envelope = candidate
+    except (json.JSONDecodeError, ValueError):
+        envelope = None
     if envelope is None:
         if auth.search(stderr) or auth.search(stdout):
             status = "auth_or_quota_error"
@@ -613,13 +800,17 @@ else:
             status = "error"
         response = ""
     else:
-        provider_status = str(envelope.get("status", "")).upper()
-        response = envelope.get("response") or ""
-        if not isinstance(response, str):
-            response = str(response)
-        if provider_status == "SUCCESS" and response.strip():
+        provider_status = envelope.get("status")
+        response = envelope.get("response")
+        if not isinstance(provider_status, str) or not isinstance(response, str):
+            status = "invalid_envelope"
+            response = ""
+        elif provider_status.upper() == "SUCCESS" and exit_code != 0:
+            status = "error"
+            response = ""
+        elif provider_status.upper() == "SUCCESS" and response.strip():
             status = "ok"
-        elif provider_status == "SUCCESS":
+        elif provider_status.upper() == "SUCCESS":
             status = "empty_output"
             response = ""
         else:
@@ -654,7 +845,9 @@ print(status)
 PY
             )"
             status="$agy_status"
-            [ "$status" = "ok" ] || rc=1
+            if [ "$status" != "ok" ] && [ "$rc" -eq 0 ]; then
+              rc=1
+            fi
           fi
           ;;
         kiro)
@@ -670,7 +863,7 @@ PY
               rc=127
             else
               kiro-cli chat --no-interactive ${model:+--model "$model"} ${effort:+--effort "$effort"} \
-                "$(cat "$PROMPT_TMP")" </dev/null >"$raw" 2>"$diag"; rc=$?
+                "$PROMPT_ARG" </dev/null >"$raw" 2>"$diag"; rc=$?
             fi
           fi ;;
         copilot)
@@ -685,7 +878,7 @@ PY
               status="tool_not_found"
               rc=127
             else
-              copilot -p "$PROMPT" --mode plan --silent --disable-builtin-mcps \
+              copilot -p "$PROMPT_ARG" --mode plan --silent --disable-builtin-mcps \
                 --available-tools='' --disallow-temp-dir ${model:+--model "$model"} ${effort:+--effort "$effort"} \
                 </dev/null >"$raw" 2>"$diag"; rc=$?
             fi
@@ -739,8 +932,7 @@ PY
       opath=""
     fi
   fi
-  emit_record "$tool" "$model" "$effort" "$status" "$rc" "$opath" "$guarantee" "$family" "$endpoint" "$identity" "$effort_substitution" "$requested_effort" "$effort_source" "$effort_capability_source" "$substitution" "$requested_model" "$fallback_model" "$catalog_model" "$model_selection" "$route_risk_tier" "$policy_override"
-  [ "$status" = "ok" ]
+  emit_record "$tool" "$model" "$effort" "$status" "$rc" "$opath" "$guarantee" "$family" "$endpoint" "$identity" "$effort_substitution" "$requested_effort" "$effort_source" "$effort_capability_source" "$substitution" "$requested_model" "$fallback_model" "$catalog_model" "$model_selection" "$route_risk_tier" "$policy_override" "$route_model_override_tier" "$route_reason"
 }
 
 if [ -n "$CHAIN" ]; then
@@ -751,7 +943,10 @@ if [ -n "$CHAIN" ]; then
     e="${rest#*:}"
     [ "$rest" = "$spec" ] && { m=""; e=""; }
     [ "$e" = "$m" ] && e=""
-    rec="$(run_one "$t" "$m" "$e")"; rc=$?
+    ACTIVE_RUN_TMPDIR="$(make_tmp_dir)" || exit 1
+    rec="$(run_one "$t" "$m" "$e" "$ACTIVE_RUN_TMPDIR")"; rc=$?
+    rm -rf -- "$ACTIVE_RUN_TMPDIR"
+    ACTIVE_RUN_TMPDIR=""
     echo "$rec" >&2
     if [ $rc -eq 0 ]; then echo "$rec"; exit 0; fi
   done
@@ -760,7 +955,10 @@ if [ -n "$CHAIN" ]; then
   exit 1
 else
   [ -z "$TOOL" ] && { echo "need --tool or --chain" >&2; exit 2; }
-  rec="$(run_one "$TOOL" "$MODEL" "$EFFORT")"; rc=$?
+  ACTIVE_RUN_TMPDIR="$(make_tmp_dir)" || exit 1
+  rec="$(run_one "$TOOL" "$MODEL" "$EFFORT" "$ACTIVE_RUN_TMPDIR")"; rc=$?
+  rm -rf -- "$ACTIVE_RUN_TMPDIR"
+  ACTIVE_RUN_TMPDIR=""
   echo "$rec"
   exit $rc
 fi

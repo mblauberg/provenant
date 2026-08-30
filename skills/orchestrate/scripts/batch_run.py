@@ -281,7 +281,9 @@ def _command(task: dict[str, Any], run_dir: Path) -> list[str]:
     selector = next(name for name in ("alias", "task_class", "model") if task.get(name))
     command.extend((f"--{selector.replace('_', '-')}", str(task[selector])))
     for name, flag in (("orchestrator_family", "--orchestrator-family"),
-                       ("risk_tier", "--risk-tier"), ("reviewer_id", "--reviewer-id"),
+                       ("risk_tier", "--risk-tier"),
+                       ("model_override_tier", "--model-override-tier"),
+                       ("reviewer_id", "--reviewer-id"),
                        ("effort", "--effort"), ("retry_of", "--retry-of")):
         if task.get(name):
             command.extend((flag, str(task[name])))

@@ -7,6 +7,7 @@ import argparse
 from datetime import datetime, timezone
 import json
 from pathlib import Path
+import re
 import sys
 from typing import Any
 
@@ -15,6 +16,22 @@ from _shared.bounded_process import run_bounded
 
 
 EFFORTS = {"low", "medium", "high", "xhigh", "max"}
+
+
+def scrubbed_failure_detail(stdout: str, stderr: str) -> str:
+    combined = "\n".join(part for part in (stderr.strip(), stdout.strip()) if part)
+    if re.search(
+        r"organi[sz]ation.*disabled.*subscription access|subscription access.*disabled",
+        combined,
+        re.IGNORECASE | re.DOTALL,
+    ):
+        return "provider access denied; subscription access disabled by organisation policy"
+    if stderr.strip():
+        return stderr.strip()
+    status = re.search(r"\b(?:HTTP\s*)?(401|403|429)\b", stdout, re.IGNORECASE)
+    if status:
+        return f"provider returned HTTP {status.group(1)}"
+    return ""
 
 
 def load_json(raw: str) -> Any:
@@ -42,7 +59,8 @@ def run_json(command: list[str], timeout: int) -> Any:
         detail = f": {stderr}" if stderr else ""
         raise ValueError(f"command timed out after {timeout} seconds{detail}")
     if result.returncode != 0:
-        detail = f": {stderr}" if stderr else ""
+        reason = scrubbed_failure_detail(result.stdout or "", stderr)
+        detail = f": {reason}" if reason else ""
         raise ValueError(f"command exited {result.returncode}{detail}")
     if "Warning: Unknown --effort value" in stderr:
         raise ValueError("Claude CLI rejected the requested effort")

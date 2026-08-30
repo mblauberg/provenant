@@ -58,7 +58,8 @@ def write_attempt(
         "requested_route": {
             "intent": "ordinary", "adapter": "codex", "alias": "scout",
             "task_class": "", "model": "", "role": "worker", "orchestrator_family": "openai",
-            "risk_tier": "substantial", "reviewer_id": "reviewer-1", "effort": "high",
+            "risk_tier": "substantial", "model_override_tier": "",
+            "reviewer_id": "reviewer-1", "effort": "high",
         },
         "route": {"adapter_receipt": {"path": str(adapter_path.relative_to(run_dir)), "digest": file_digest(adapter_path)}},
         "prompt": {"path": str(prompt_path.relative_to(run_dir)), "digest": file_digest(prompt_path)},
@@ -80,6 +81,11 @@ def write_attempt(
 
 def file_digest(path: Path) -> str:
     return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def write_executable(path: Path, body: str) -> None:
+    path.write_text(textwrap.dedent(body), encoding="utf-8")
+    path.chmod(path.stat().st_mode | stat.S_IXUSR)
 
 
 def write_success_adapter(path: Path) -> None:
@@ -311,6 +317,63 @@ def test_retry_requires_one_route_choice_and_delegates_parent(tmp_path: Path, mo
     assert delegated[delegated.index("--risk-tier") + 1] == "substantial"
     assert delegated[delegated.index("--reviewer-id") + 1] == "reviewer-1"
     assert delegated[delegated.index("--effort") + 1] == "high"
+
+
+def test_same_route_retry_runs_full_provider_free_chain_and_retains_risk_and_prompt(tmp_path: Path) -> None:
+    run_dir = make_run(tmp_path)
+    prompt = tmp_path / "prompt.md"
+    prompt.write_bytes(b"retry these exact bytes\n\n")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    provider_count = tmp_path / "provider.count"
+    received = tmp_path / "received.bin"
+    write_executable(
+        bin_dir / "codex",
+        f"""#!/usr/bin/env bash
+        if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
+          printf '%s\n' '{{"models":[{{"slug":"gpt-5.6-luna","supported_reasoning_levels":[{{"effort":"high"}}]}}]}}'
+          exit 0
+        fi
+        if [ ! -f {provider_count} ]; then
+          printf '1\n' > {provider_count}
+          cat >/dev/null
+          echo 'first attempt fails' >&2
+          exit 7
+        fi
+        cat > {received}
+        printf 'RETRY OK\n'
+        """,
+    )
+    env = {**os.environ, "PATH": f"{bin_dir}:{ROOT / 'scripts'}:{os.environ['PATH']}"}
+    first = subprocess.run(
+        [
+            str(ROOT / "skills/orchestrate/scripts/dispatch_run.py"),
+            "--run-dir", str(run_dir), "--task-id", "retry-chain",
+            "--adapter", "codex", "--prompt-file", str(prompt),
+            "--alias", "workhorse", "--role", "worker",
+            "--risk-tier", "substantial",
+        ],
+        cwd=tmp_path, env=env, text=True,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    assert first.returncode == 1, first.stderr + first.stdout
+
+    retry = invoke(
+        "run", "retry", "--run-dir", str(run_dir), "--task-id", "retry-chain",
+        "--attempt-id", "attempt-001", "--same-route", cwd=tmp_path, env=env,
+    )
+
+    assert retry.returncode == 0, retry.stderr + retry.stdout
+    attempt = json.loads(
+        (run_dir / "dispatch/tasks/retry-chain/attempt-002/attempt.json").read_text(encoding="utf-8")
+    )
+    assert attempt["status"] == "succeeded"
+    assert attempt["retry_of"] == "attempt-001"
+    assert attempt["requested_route"]["alias"] == "workhorse"
+    assert attempt["requested_route"]["risk_tier"] == "substantial"
+    assert attempt["route"]["risk_tier"] == "substantial"
+    assert attempt["route"]["model_override_tier"] == ""
+    assert received.read_bytes() == prompt.read_bytes()
 
 
 def test_retry_reroute_requires_a_complete_new_route(tmp_path: Path) -> None:

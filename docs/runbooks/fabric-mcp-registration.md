@@ -37,6 +37,11 @@ controls and should be absent from every global client registration.
 
 ## The six clients
 
+Registration is coordination plumbing, not permission to execute a provider.
+Kiro and OpenCode remain registered here while direct execution is disabled by
+[adapter compatibility](../../config/adapter-compatibility.yaml); changing an
+MCP registry never overrides that activation decision.
+
 | Client | Global registry |
 | --- | --- |
 | Agy | `~/.gemini/config/mcp_config.json` |

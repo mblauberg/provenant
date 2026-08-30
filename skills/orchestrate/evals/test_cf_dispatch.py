@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import threading
 import time
 from pathlib import Path
 
@@ -33,6 +34,7 @@ DISPATCH_SCHEMA = {
     "effort_substitution",
     "substitution",
     "status",
+    "reason",
     "exit",
     "output_path",
     "output_digest",
@@ -48,6 +50,7 @@ DISPATCH_SCHEMA = {
     "route_alias",
     "reviewer_id",
     "risk_tier",
+    "model_override_tier",
     "policy_override",
     "certification_eligible",
     "cross_family",
@@ -103,6 +106,169 @@ def test_output_install_replaces_symlink_without_overwriting_target():
         assert outside.read_text(encoding="utf-8") == "unchanged\n"
         assert not out.is_symlink()
         assert out.read_text(encoding="utf-8") == "safe output\n"
+        record = json.loads(result.stdout)
+        assert record["output_digest"] == "sha256:" + __import__("hashlib").sha256(
+            out.read_bytes()
+        ).hexdigest()
+
+
+def test_directory_symlink_output_is_rejected_without_escaping():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        bin_dir = root / "bin"
+        bin_dir.mkdir()
+        write_executable(
+            bin_dir / "codex",
+            """#!/usr/bin/env bash
+            if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
+              printf '%s\n' '{"models":[{"slug":"gpt-5.6-luna","supported_reasoning_levels":[{"effort":"high"}]}]}'
+              exit 0
+            fi
+            cat >/dev/null
+            printf 'safe output\n'
+            """,
+        )
+        prompt = root / "prompt.md"
+        prompt.write_text("test\n", encoding="utf-8")
+        outside = root / "outside"
+        outside.mkdir()
+        out = root / "result.md"
+        out.symlink_to(outside, target_is_directory=True)
+        env = fabric_free_env()
+        env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
+
+        result = subprocess.run(
+            [
+                str(SCRIPT), "--intent", "ordinary", "--tool", "codex",
+                "--prompt-file", str(prompt), "--out", str(out),
+                "--alias", "workhorse", "--role", "worker",
+            ],
+            cwd=root, env=env, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+
+        record = json.loads(result.stdout)
+        assert result.returncode != 0
+        assert record["status"] == "output_write_error"
+        assert record["output_path"] == ""
+        assert record["output_digest"] == ""
+        assert record["certification_eligible"] is False
+        assert list(outside.iterdir()) == []
+
+
+def test_symlinked_output_parent_is_rejected_without_escaping():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        bin_dir = root / "bin"
+        bin_dir.mkdir()
+        write_executable(
+            bin_dir / "codex",
+            """#!/usr/bin/env bash
+            if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
+              printf '%s\n' '{"models":[{"slug":"gpt-5.6-luna","supported_reasoning_levels":[{"effort":"high"}]}]}'
+              exit 0
+            fi
+            cat >/dev/null
+            printf 'MUST STAY INSIDE\n'
+            """,
+        )
+        prompt = root / "prompt.md"
+        prompt.write_text("test\n", encoding="utf-8")
+        outside = root / "outside"
+        outside.mkdir()
+        linked = root / "linked"
+        linked.symlink_to(outside, target_is_directory=True)
+        out = linked / "result.md"
+        env = fabric_free_env()
+        env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
+
+        result = subprocess.run(
+            [
+                str(SCRIPT), "--intent", "ordinary", "--tool", "codex",
+                "--prompt-file", str(prompt), "--out", str(out),
+                "--alias", "workhorse", "--role", "worker",
+            ],
+            cwd=root, env=env, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+
+        record = json.loads(result.stdout)
+        assert result.returncode != 0
+        assert record["status"] == "output_write_error"
+        assert record["output_path"] == ""
+        assert record["output_digest"] == ""
+        assert record["certification_eligible"] is False
+        assert list(outside.iterdir()) == []
+
+
+def test_output_parent_swap_cannot_certify_an_identical_outside_file():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        bin_dir = root / "bin"
+        bin_dir.mkdir()
+        payload = root / "payload"
+        payload.write_bytes(b"A" * (32 * 1024 * 1024))
+        write_executable(
+            bin_dir / "codex",
+            """#!/usr/bin/env bash
+            if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
+              printf '%s\n' '{"models":[{"slug":"gpt-5.6-luna","supported_reasoning_levels":[{"effort":"high"}]}]}'
+              exit 0
+            fi
+            cat >/dev/null
+            cat "$CF_DISPATCH_TEST_PAYLOAD"
+            """,
+        )
+        prompt = root / "prompt.md"
+        prompt.write_text("test\n", encoding="utf-8")
+        safe_parent = root / "safe"
+        safe_parent.mkdir()
+        detached_parent = root / "detached"
+        outside_parent = root / "outside"
+        outside_parent.mkdir()
+        outside_output = outside_parent / "result.md"
+        outside_output.write_bytes(payload.read_bytes())
+        out = safe_parent / "result.md"
+        swapped = threading.Event()
+
+        def swap_parent_after_install():
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline:
+                try:
+                    if out.is_file() and out.stat().st_size == payload.stat().st_size:
+                        safe_parent.rename(detached_parent)
+                        safe_parent.symlink_to(outside_parent, target_is_directory=True)
+                        swapped.set()
+                        return
+                except FileNotFoundError:
+                    pass
+                time.sleep(0.001)
+
+        watcher = threading.Thread(target=swap_parent_after_install)
+        watcher.start()
+        env = fabric_free_env()
+        env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
+        env["CF_DISPATCH_TEST_PAYLOAD"] = str(payload)
+        result = subprocess.run(
+            [
+                str(SCRIPT), "--intent", "assurance", "--tool", "codex",
+                "--orchestrator-family", "anthropic",
+                "--prompt-file", str(prompt), "--out", str(out),
+                "--alias", "workhorse", "--role", "worker",
+            ],
+            cwd=root, env=env, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        watcher.join(timeout=16)
+
+        assert swapped.is_set(), "watcher did not replace the installed output parent"
+        record = json.loads(result.stdout)
+        assert result.returncode != 0
+        assert record["status"] == "output_identity_invalid"
+        assert record["output_path"] == ""
+        assert record["output_digest"] == ""
+        assert record["certification_eligible"] is False
+        assert out.resolve() == outside_output.resolve()
 
 
 def fabric_free_env():
@@ -214,13 +380,57 @@ def test_claude_crucial_synthesis_dispatches_explicit_fable_override():
     result, record, output = run_dispatch_with_stub(
         stub,
         role="synthesis",
-        extra_args=["--risk-tier", "crucial", "--model", "fable", "--effort", "medium"],
+        extra_args=[
+            "--risk-tier", "crucial", "--model-override-tier", "crucial",
+            "--model", "fable", "--effort", "medium",
+        ],
     )
     assert result.returncode == 0, result.output
     assert record["resolved_model"] == "fable"
     assert record["risk_tier"] == "crucial"
+    assert record["model_override_tier"] == "crucial"
     assert record["policy_override"] == "crucial-fable-synthesis-adjudication"
     assert output.strip() == "FABLE OK"
+
+
+def test_task_class_route_accepts_lifecycle_risk_without_model_override():
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        write_executable(
+            bin_dir / "codex",
+            """#!/usr/bin/env bash
+            if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
+              printf '%s\n' '{"models":[{"slug":"gpt-5.6-luna","supported_reasoning_levels":[{"effort":"low"}]}]}'
+              exit 0
+            fi
+            cat >/dev/null
+            printf 'TASK RISK OK\n'
+            """,
+        )
+        out = tmp / "out.txt"
+        env = fabric_free_env()
+        env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
+
+        result = subprocess.run(
+            [
+                str(SCRIPT), "--intent", "ordinary", "--tool", "codex",
+                "--orchestrator-family", "anthropic", "--task-class", "mechanical",
+                "--role", "worker", "--risk-tier", "routine",
+                "--prompt", "Review", "--out", str(out),
+            ],
+            cwd=tmp, env=env, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+
+        record = json.loads(result.stdout)
+        assert result.returncode == 0, result.stderr + result.stdout
+        assert record["status"] == "ok"
+        assert record["route_alias"] == "scout"
+        assert record["risk_tier"] == "routine"
+        assert record["model_override_tier"] == ""
+        assert out.read_text(encoding="utf-8") == "TASK RISK OK\n"
 
 
 def test_reviewer_id_round_trips_into_dispatch_receipt():
@@ -479,6 +689,138 @@ def test_agy_direct_route_dispatches_json_sandbox_and_file_prompt():
         assert args[args.index("--print") + 1] == "Reply exactly AGY OK"
 
 
+def test_agy_task_class_uses_its_runtime_capability_producer():
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        args_file = tmp / "agy.args"
+        write_executable(
+            bin_dir / "agy",
+            f"""#!/usr/bin/env bash
+            if [ "$1" = "models" ]; then
+              printf 'gemini-3.7-flash-high\ngemini-3.7-flash-medium\ngemini-3.7-flash-low\n'
+              exit 0
+            fi
+            printf '%s\n' "$@" > {args_file}
+            printf '%s\n' '{{"status":"SUCCESS","response":"AGY TASK OK"}}'
+            """,
+        )
+        out = tmp / "out.txt"
+        env = fabric_free_env()
+        env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
+
+        result = subprocess.run(
+            [
+                str(SCRIPT), "--intent", "ordinary", "--tool", "agy",
+                "--orchestrator-family", "openai", "--task-class", "mechanical",
+                "--role", "worker", "--risk-tier", "substantial",
+                "--prompt", "Review", "--out", str(out),
+            ],
+            cwd=tmp, env=env, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+
+        record = json.loads(result.stdout)
+        assert result.returncode == 0, result.stderr + result.stdout
+        assert record["status"] == "ok"
+        assert record["route_alias"] == "scout"
+        assert record["resolved_model"] == "gemini-3.7-flash"
+        assert record["provider_family"] == "google"
+        assert record["effort"] == "low"
+        assert record["effort_capability_source"] == "runtime-model-catalog"
+        assert record["risk_tier"] == "substantial"
+        assert out.read_text(encoding="utf-8") == "AGY TASK OK"
+
+
+def test_agy_explicit_effort_never_claims_an_unavailable_probe():
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        write_executable(
+            bin_dir / "agy",
+            """#!/usr/bin/env bash
+            if [ "$1" = "models" ]; then
+              echo 'capability source unavailable' >&2
+              exit 7
+            fi
+            printf '%s\n' '{"status":"SUCCESS","response":"EXPLICIT OK"}'
+            """,
+        )
+        out = tmp / "out.txt"
+        env = fabric_free_env()
+        env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
+
+        result = subprocess.run(
+            [
+                str(SCRIPT), "--intent", "ordinary", "--tool", "agy",
+                "--orchestrator-family", "openai", "--model", "gemini-3.7-flash",
+                "--effort", "medium", "--prompt", "Review", "--out", str(out),
+            ],
+            cwd=tmp, env=env, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+
+        record = json.loads(result.stdout)
+        assert result.returncode == 0, result.stderr + result.stdout
+        assert record["status"] == "ok"
+        assert record["effort"] == "medium"
+        assert record["effort_capability_source"] == "provider-unverified"
+
+
+def test_claude_task_class_runs_the_subscription_capability_canary():
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        calls = tmp / "claude.calls"
+        write_executable(
+            bin_dir / "claude",
+            f"""#!/usr/bin/env bash
+            printf '%s\n' "$*" >> {calls}
+            if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
+              printf '%s\n' '{{"loggedIn":true,"authMethod":"claude.ai","subscriptionType":"pro"}}'
+              exit 0
+            fi
+            for arg in "$@"; do
+              if [ "$arg" = "--output-format" ]; then
+                printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"result":"OK","modelUsage":{{"claude-opus-4-8":{{"inputTokens":1}}}}}}'
+                exit 0
+              fi
+            done
+            cat >/dev/null
+            printf 'CLAUDE TASK OK\n'
+            """,
+        )
+        out = tmp / "out.txt"
+        env = fabric_free_env()
+        env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
+
+        result = subprocess.run(
+            [
+                str(SCRIPT), "--intent", "ordinary", "--tool", "claude",
+                "--orchestrator-family", "openai", "--task-class", "critical-review",
+                "--role", "critical-review", "--risk-tier", "crucial",
+                "--prompt", "Review", "--out", str(out),
+            ],
+            cwd=tmp, env=env, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+
+        record = json.loads(result.stdout)
+        assert result.returncode == 0, result.stderr + result.stdout
+        assert record["status"] == "ok"
+        assert record["route_alias"] == "flagship"
+        assert record["resolved_model"] == "claude-opus-4-8"
+        assert record["provider_family"] == "anthropic"
+        assert record["effort"] == "high"
+        assert record["effort_capability_source"] == "provider-unverified"
+        assert record["risk_tier"] == "crucial"
+        assert "--output-format json" in calls.read_text(encoding="utf-8")
+        assert out.read_text(encoding="utf-8") == "CLAUDE TASK OK\n"
+
+
 def test_agy_oversized_prompt_fails_closed_instead_of_truncating():
     """agy takes the prompt as one argv value, so ARG_MAX is a real ceiling.
 
@@ -561,6 +903,326 @@ def test_agy_success_with_empty_response_is_non_passing():
         # dispatch that has not run.
         written = out.read_text(encoding="utf-8")
         assert "status=empty_output" in written
+
+
+def test_agy_success_envelope_with_nonzero_process_exit_is_failure():
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        write_executable(
+            bin_dir / "agy",
+            """#!/usr/bin/env bash
+            if [ "$1" = "models" ]; then
+              printf 'gemini-3.7-flash-medium\n'
+              exit 0
+            fi
+            printf '%s\n' '{"status":"SUCCESS","response":"MUST NOT PASS"}'
+            exit 7
+            """,
+        )
+        out = tmp / "out.txt"
+        env = fabric_free_env()
+        env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
+
+        result = subprocess.run(
+            [
+                str(SCRIPT), "--intent", "ordinary", "--tool", "agy",
+                "--model", "gemini-3.7-flash", "--effort", "medium",
+                "--orchestrator-family", "openai", "--out", str(out),
+                "--prompt", "Review",
+            ],
+            cwd=tmp, env=env, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+
+        record = json.loads(result.stdout)
+        assert result.returncode != 0
+        assert record["status"] == "error"
+        assert record["exit"] == 7
+        assert record["certification_eligible"] is False
+        assert "MUST NOT PASS" not in out.read_text(encoding="utf-8")
+        assert "status=error exit=7" in out.read_text(encoding="utf-8")
+
+
+def test_agy_requires_one_well_typed_json_envelope():
+    invalid_envelopes = (
+        '{"status":"SUCCESS","response":"MUST NOT PASS","response":"duplicate"}',
+        'provider noise\n{"status":"SUCCESS","response":"MUST NOT PASS"}\n',
+        '{"status":"SUCCESS","response":7}',
+    )
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        write_executable(
+            bin_dir / "agy",
+            """#!/usr/bin/env bash
+            if [ "$1" = "models" ]; then
+              printf 'gemini-3.7-flash-medium\n'
+              exit 0
+            fi
+            printf '%s' "$AGY_TEST_ENVELOPE"
+            """,
+        )
+        env = fabric_free_env()
+        env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
+
+        for index, envelope in enumerate(invalid_envelopes):
+            out = tmp / f"out-{index}.txt"
+            env["AGY_TEST_ENVELOPE"] = envelope
+            result = subprocess.run(
+                [
+                    str(SCRIPT), "--intent", "ordinary", "--tool", "agy",
+                    "--model", "gemini-3.7-flash", "--effort", "medium",
+                    "--orchestrator-family", "openai", "--out", str(out),
+                    "--prompt", "Review",
+                ],
+                cwd=tmp, env=env, text=True,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+
+            record = json.loads(result.stdout)
+            assert result.returncode != 0
+            assert record["status"] in {"empty_output", "invalid_envelope"}
+            assert record["certification_eligible"] is False
+            assert out.read_text(encoding="utf-8").startswith("agy dispatch failed:")
+
+
+def test_agy_rejects_non_utf8_success_envelope():
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        write_executable(
+            bin_dir / "agy",
+            """#!/usr/bin/env bash
+            if [ "$1" = "models" ]; then
+              printf 'gemini-3.7-flash-medium\n'
+              exit 0
+            fi
+            printf '{"status":"SUCCESS","response":"A'
+            printf '\\377'
+            printf 'B"}'
+            """,
+        )
+        out = tmp / "out.txt"
+        env = fabric_free_env()
+        env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
+
+        result = subprocess.run(
+            [
+                str(SCRIPT), "--intent", "ordinary", "--tool", "agy",
+                "--model", "gemini-3.7-flash", "--effort", "medium",
+                "--orchestrator-family", "openai", "--out", str(out),
+                "--prompt", "Review",
+            ],
+            cwd=tmp, env=env, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+
+        record = json.loads(result.stdout)
+        assert result.returncode != 0
+        assert record["status"] == "invalid_envelope"
+        assert record["certification_eligible"] is False
+        assert out.read_text(encoding="utf-8").startswith(
+            "agy dispatch failed: status=invalid_envelope"
+        )
+
+
+def test_disabled_execution_routes_keep_configured_reason_and_never_launch_provider():
+    cases = (
+        (
+            "kiro", "deepseek-v3.2", "kiro-cli", "CF_DISPATCH_ENABLE_KIRO",
+            "Provider execution is dormant until one bounded ordinary Kiro "
+            "invocation and safety boundary are verified.",
+        ),
+        (
+            "opencode", "opencode/deepseek-v4-flash-free", "opencode", "",
+            "Provider execution is unavailable because the direct dispatch owner "
+            "has no verified OpenCode invocation or receipt contract.",
+        ),
+    )
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        env = fabric_free_env()
+        env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
+
+        for tool, model, executable, escape_flag, expected_reason in cases:
+            invoked = tmp / f"{tool}.invoked"
+            write_executable(
+                bin_dir / executable,
+                f"#!/usr/bin/env bash\ntouch {invoked}\nexit 99\n",
+            )
+            if escape_flag:
+                env[escape_flag] = "1"
+            out = tmp / f"{tool}.txt"
+            result = subprocess.run(
+                [
+                    str(SCRIPT), "--intent", "ordinary", "--tool", tool,
+                    "--model", model, "--alias", "scout", "--role", "worker",
+                    "--prompt", "Review", "--out", str(out),
+                ],
+                cwd=tmp, env=env, text=True,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+
+            record = json.loads(result.stdout)
+            assert result.returncode != 0
+            assert record["status"] == "adapter_disabled"
+            assert record["reason"] == expected_reason
+            assert record["exit"] == 1
+            assert record["read_only_guarantee"] == "none"
+            assert record["certification_eligible"] is False
+            assert not invoked.exists()
+
+
+def test_disabled_capability_adapters_are_rejected_before_their_probe_runs():
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        write_executable(
+            bin_dir / "provenant",
+            """#!/usr/bin/env bash
+            printf '%s\n' '{"schema_version":1,"status":"adapter_disabled","reason":"configured off","adapter_enabled":false,"endpoint_provider":"disabled"}'
+            exit 1
+            """,
+        )
+        env = fabric_free_env()
+        env["PATH"] = f"{bin_dir}:{env['PATH']}"
+
+        for tool, model in (("codex", "gpt-5.6-luna"), ("agy", "gemini-3.7-flash")):
+            invoked = tmp / f"{tool}.invoked"
+            write_executable(
+                bin_dir / tool,
+                f"#!/usr/bin/env bash\ntouch {invoked}\nexit 99\n",
+            )
+            out = tmp / f"{tool}.txt"
+            result = subprocess.run(
+                [
+                    str(SCRIPT), "--intent", "ordinary", "--tool", tool,
+                    "--model", model, "--alias", "workhorse", "--role", "worker",
+                    "--prompt", "Review", "--out", str(out),
+                ],
+                cwd=tmp, env=env, text=True,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+
+            record = json.loads(result.stdout)
+            assert result.returncode != 0
+            assert record["status"] == "adapter_disabled"
+            assert record["reason"] == "configured off"
+            assert not invoked.exists()
+
+
+def test_prompt_file_trailing_newlines_reach_stdin_adapter_byte_for_byte():
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        received = tmp / "received.bin"
+        write_executable(
+            bin_dir / "codex",
+            f"""#!/usr/bin/env bash
+            if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
+              printf '%s\n' '{{"models":[{{"slug":"gpt-5.6-luna","supported_reasoning_levels":[{{"effort":"high"}}]}}]}}'
+              exit 0
+            fi
+            cat > {received}
+            printf 'OK\n'
+            """,
+        )
+        prompt = tmp / "prompt.bin"
+        prompt.write_bytes(b"Review exactly\n\n")
+        out = tmp / "out.txt"
+        env = fabric_free_env()
+        env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
+
+        result = subprocess.run(
+            [
+                str(SCRIPT), "--intent", "ordinary", "--tool", "codex",
+                "--orchestrator-family", "anthropic", "--alias", "workhorse",
+                "--role", "worker", "--prompt-file", str(prompt), "--out", str(out),
+            ],
+            cwd=tmp, env=env, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+
+        assert result.returncode == 0, result.stderr + result.stdout
+        assert received.read_bytes() == prompt.read_bytes()
+
+
+def test_prompt_file_trailing_newlines_reach_argv_adapter_byte_for_byte():
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        received = tmp / "received.bin"
+        write_executable(
+            bin_dir / "agy",
+            f"""#!/usr/bin/env bash
+            if [ "$1" = "models" ]; then
+              printf 'gemini-3.7-flash-medium\n'
+              exit 0
+            fi
+            previous=""
+            for argument in "$@"; do
+              if [ "$previous" = "--print" ]; then
+                printf '%s' "$argument" > {received}
+              fi
+              previous="$argument"
+            done
+            printf '%s\n' '{{"status":"SUCCESS","response":"OK"}}'
+            """,
+        )
+        prompt = tmp / "prompt.bin"
+        prompt.write_bytes(b"Review exactly\n\n")
+        out = tmp / "out.txt"
+        env = fabric_free_env()
+        env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
+
+        result = subprocess.run(
+            [
+                str(SCRIPT), "--intent", "ordinary", "--tool", "agy",
+                "--orchestrator-family", "openai", "--model", "gemini-3.7-flash",
+                "--effort", "medium", "--prompt-file", str(prompt), "--out", str(out),
+            ],
+            cwd=tmp, env=env, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+
+        assert result.returncode == 0, result.stderr + result.stdout
+        assert received.read_bytes() == prompt.read_bytes()
+
+
+def test_nul_prompt_file_is_rejected_before_provider_execution():
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        invoked = tmp / "invoked"
+        write_executable(bin_dir / "codex", f"#!/usr/bin/env bash\ntouch {invoked}\n")
+        prompt = tmp / "prompt.bin"
+        prompt.write_bytes(b"A\0B\n")
+        env = fabric_free_env()
+        env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
+
+        result = subprocess.run(
+            [
+                str(SCRIPT), "--intent", "ordinary", "--tool", "codex",
+                "--orchestrator-family", "anthropic", "--prompt-file", str(prompt),
+            ],
+            cwd=tmp, env=env, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+
+        assert result.returncode == 2
+        assert "prompt contains unsupported NUL bytes" in result.stderr
+        assert result.stdout == ""
+        assert not invoked.exists()
 
 
 def test_agy_failure_preserves_the_provider_reason_in_the_output():
@@ -760,6 +1422,34 @@ def test_task_class_route_preserves_effective_alias():
     )
     assert result.returncode == 0, result.output
     assert record["route_alias"] == "scout"
+
+
+def test_route_json_fields_are_read_by_key_without_delimiter_shifting():
+    stub = """\
+        #!/usr/bin/env bash
+        model=""
+        while [ $# -gt 0 ]; do
+          if [ "$1" = "--model" ]; then model="$2"; shift 2; else shift; fi
+        done
+        cat >/dev/null
+        [ "$model" = "opus|candidate" ] || exit 9
+        echo "STRUCTURED ROUTE OK"
+    """
+    result, record, output = run_dispatch_with_stub(
+        stub,
+        extra_args=["--intent", "ordinary"],
+        provenant_stub="""#!/usr/bin/env bash
+            printf '%s\n' '{"status":"ok","alias":"flagship","resolved_model":"opus|candidate","model_family":"anthropic","endpoint_provider":"anthropic","identity_source":"test-route","requested_effort":"high","effort":"high","effort_source":"test","effort_capability_source":"test-capability"}'
+        """,
+    )
+
+    assert result.returncode == 0, result.output
+    assert record["resolved_model"] == "opus|candidate"
+    assert record["provider_family"] == "anthropic"
+    assert record["endpoint_provider"] == "anthropic"
+    assert record["identity_source"] == "test-route"
+    assert record["effort"] == "high"
+    assert output.strip() == "STRUCTURED ROUTE OK"
 
 
 def test_cursor_model_provider_prevents_disguised_same_family_review():

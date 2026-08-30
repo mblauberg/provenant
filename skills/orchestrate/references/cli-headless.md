@@ -41,6 +41,9 @@ fail closed as `invalid_orchestrator_family`, and missing values fail closed as
 `orchestrator_family_required`. The dispatcher delegates model/lineage resolution to the global
 `scripts/model-route` policy resolver and records model family separately from endpoint provider.
 The receipt's resolved `effort` is authoritative for the adapter invocation.
+`--risk-tier` is lifecycle metadata retained in the dispatch receipt; it never
+selects a model. The rare configured special-model route uses the independent
+`--model-override-tier` option and records that value separately.
 GPT-5.6 efforts are capability-gated per model. The Codex execution adapter
 captures `codex debug models` through `codex_capabilities.py` and supplies the
 snapshot to the resolver. The ChatGPT-subscription Codex route resolves an
@@ -63,8 +66,11 @@ no-session-persistence canary. It retains only scrubbed auth class, requested
 alias/effort and the matching runtime model; helper-model usage and account
 identifiers are not retained. The canary has a small provider cost, so callers
 may reuse its file only inside the resolver's five-minute freshness window.
-Broker adapters require a model (`--model` or `CF_DISPATCH_CURSOR_MODEL`,
-`CF_DISPATCH_KIRO_MODEL`, or `CF_DISPATCH_COPILOT_MODEL`); an unprovable provider fails closed as
+For Agy, the dispatcher runs `agy_capabilities.py` before routing. Task-class
+selection chooses from the adapter's configured preferred families and fresh
+runtime list inside the resolver; a failed probe cannot be labelled as Agy
+capability evidence. Broker adapters otherwise require a model (`--model` or
+`CF_DISPATCH_CURSOR_MODEL` or `CF_DISPATCH_COPILOT_MODEL`); an unprovable provider fails closed as
 `model_required_for_broker` or `model_family_unknown`. Matching provider routes
 fail closed as `same_family_forbidden`. Successful
 cross-family certification requires `status=ok`, `cross_family=true`, and `read_only_guarantee=enforced`
@@ -96,8 +102,9 @@ or `oauth_safe_mode`.
   success. `--dangerously-skip-permissions` is refused.
 - `cursor`: `--mode ask --sandbox enabled`; current help documents ask as
   read-only, while current headless plan mode can exit without an answer.
-- `kiro`: disabled by default in the dispatcher. Enable only with `CF_DISPATCH_ENABLE_KIRO=1`; no hard
-  read-only mode was verified in current local help.
+- `kiro`: execution is disabled by checked-in compatibility policy. The legacy
+  `CF_DISPATCH_ENABLE_KIRO` switch cannot override that gate. Fabric MCP client
+  registration remains supported.
 - `copilot`: disabled by default in the dispatcher. Guaranteed prompt-only review requires all tools
   disabled (`--available-tools=''`); repo inspection cannot currently be guaranteed read-only from local
   help.
@@ -126,7 +133,7 @@ the result in the run manifest and move to the next tool.
 | `codex` | `codex --version`; `codex exec -s read-only --ignore-user-config -c service_tier="default" "OK"` | login / usage limit |
 | `agy` | `agy models`; `agy --model gemini-3.7-flash --effort low --output-format json -p "OK"` | auth / tool permission auto-denied |
 | `cursor-agent` | `cursor-agent --help`; `cursor-agent --list-models` | auth / workspace trust |
-| `kiro-cli` | `kiro-cli chat --list-models` | credits / auth |
+| `kiro-cli` | Execution dormant; MCP registration may still be checked | reactivation evidence incomplete |
 | `copilot` | `copilot --help`; `copilot -p "OK" --mode plan` | login / permission prompt |
 
 ## Distinct-family lane
@@ -149,7 +156,8 @@ bearing and were measured against agy 1.1.10 on 2026-08-05, not read from help:
   auto-denies, then exits **0** and prints `{"status":"SUCCESS","response":""}`
   with the real reason on **stderr** only. Exit status, the JSON status field
   and the absence of an error key all say the run worked. `ok` therefore
-  requires SUCCESS *and* a non-empty `response`; a stderr `jetski: no output
+  requires one well-typed JSON envelope, process exit 0, SUCCESS and a
+  non-empty `response`; a stderr `jetski: no output
   produced ... permission` match is `permission_denied`. Never merge stderr into
   stdout: `2>&1` destroys the only truthful signal.
 - **Denial is all-or-nothing and retroactive.** One denied call discards the
@@ -249,7 +257,7 @@ Each CLI emits different wrappers: banners, JSONL, token footers, ANSI, stats, o
 dispatcher should produce:
 
 ```
-{"tool":"...","adapter":"...","model":"...","resolved_model":"...","catalog_model":"...","model_selection":"...","requested_effort":"...","effort":"...","effort_source":"...","effort_capability_source":"...","effort_substitution":"...","substitution":"...","status":"...","exit":0,"output_path":"...","output_digest":"sha256:...","read_only_guarantee":"enforced|oauth_safe_mode|best_effort|prompt_only|none","orchestrator_family":"...","provider_family":"...","model_family":"...","endpoint_provider":"...","identity_source":"...","cross_family":true,"certification_eligible":true}
+{"tool":"...","adapter":"...","model":"...","resolved_model":"...","catalog_model":"...","model_selection":"...","requested_effort":"...","effort":"...","effort_source":"...","effort_capability_source":"...","effort_substitution":"...","substitution":"...","status":"...","reason":"...","exit":0,"output_path":"...","output_digest":"sha256:...","read_only_guarantee":"enforced|oauth_safe_mode|best_effort|prompt_only|none","orchestrator_family":"...","provider_family":"...","model_family":"...","endpoint_provider":"...","identity_source":"...","risk_tier":"...","model_override_tier":"...","cross_family":true,"certification_eligible":true}
 ```
 
 `status` is the resolver/dispatcher vocabulary, not a hand-maintained subset:
@@ -260,8 +268,13 @@ effort unsupported/mismatch/unresolved errors, `same_family_forbidden`, and
 `all_failed`. Consumers must tolerate a new fail-closed status as non-passing.
 
 The clean answer lives in `output_path`; stderr/stdout noise is diagnostic only. Do not parse one tool's
-footer with another tool's regex. Output files require scratch/report write permission; that is separate
-from permission to edit source or evidence files.
+footer with another tool's regex. A passing receipt requires a retained regular
+output file and its matching digest; directory destinations are rejected.
+Prompt-file bytes, including trailing newlines, reach the provider unchanged
+when its transport can represent them. NUL-containing prompts are rejected
+before provider launch because shell argv transports cannot represent them.
+Output files require scratch/report write permission; that is separate from
+permission to edit source or evidence files.
 
 When a chain fully fails, preserve every attempt record in stderr or a trace file and record
 `CROSS-FAMILY-NOT-RUN: <reason>` in the run manifest. A final `all_failed` JSON line is not enough for

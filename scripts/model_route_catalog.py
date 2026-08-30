@@ -68,7 +68,7 @@ def risk_tier_override_is_well_formed(override: Any) -> bool:
     """Structural validity of one risk-tier override block, independent of catalogue context.
 
     The single source of the shape rules. Both the catalogue-wide validation pass and
-    the ``--risk-tier`` selection branch consult this, so a block can never be usable
+    the ``--model-override-tier`` selection branch consult this, so a block can never be usable
     in one and malformed in the other.
     """
     if not isinstance(override, dict):

@@ -63,6 +63,8 @@ def fake_dispatch(path: Path) -> None:
         p.add_argument('--task-class')
         p.add_argument('--model')
         p.add_argument('--orchestrator-family')
+        p.add_argument('--risk-tier')
+        p.add_argument('--model-override-tier')
         p.add_argument('--intent')
         ns, _ = p.parse_known_args()
         prompt = pathlib.Path(ns.prompt_file).read_text()
@@ -119,7 +121,9 @@ def fake_dispatch(path: Path) -> None:
                    'requested_route': {'intent': ns.intent, 'adapter': ns.adapter,
                        'alias': ns.alias or '', 'task_class': ns.task_class or '',
                        'role': ns.role, 'model': ns.model or '', 'effort': '',
-                       'orchestrator_family': ns.orchestrator_family or ''},
+                       'orchestrator_family': ns.orchestrator_family or '',
+                       'risk_tier': ns.risk_tier or '',
+                       'model_override_tier': ns.model_override_tier or ''},
                    'route': route,
                    'prompt': {'path': str(prompt_path.relative_to(ns.run_dir)),
                               'digest': 'sha256:' + hashlib.sha256(prompt_path.read_bytes()).hexdigest()},
@@ -219,6 +223,84 @@ def test_batch_help_states_read_only_writer_boundary(tmp_path, monkeypatch):
     assert 'source_writing is rejected' in help_text
     assert 'partitioned/worktree-isolated' in help_text
     assert 'writers are deferred' in help_text
+
+
+def test_batch_forwards_lifecycle_risk_and_model_override_separately(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    run_dir = make_run(tmp_path, 'route-metadata')
+    prompt = tmp_path / 'prompt.md'
+    prompt.write_text('synthesise\n', encoding='utf-8')
+    manifest = task_manifest(tmp_path, [{
+        'id': 'fable', 'prompt_file': str(prompt), 'adapter': 'claude',
+        'model': 'fable', 'role': 'synthesis', 'risk_tier': 'routine',
+        'model_override_tier': 'crucial',
+    }])
+    module = load_module()
+    dispatch = tmp_path / 'fake-dispatch'
+    fake_dispatch(dispatch)
+    module.DISPATCH_RUN = dispatch
+    counter = tmp_path / 'counter'
+    counter.write_text('0', encoding='utf-8')
+    monkeypatch.setenv('BATCH_COUNTER', str(counter))
+
+    loaded = module.load_manifest(manifest)
+    command = module._command(loaded[0], run_dir)
+
+    assert command[command.index('--risk-tier') + 1] == 'routine'
+    assert command[command.index('--model-override-tier') + 1] == 'crucial'
+    assert module.batch(args(module, run_dir, manifest, 1)) == 0
+    attempt = json.loads(
+        (run_dir / 'dispatch/tasks/fable/attempt-001/attempt.json').read_text(encoding='utf-8')
+    )
+    assert attempt['requested_route']['risk_tier'] == 'routine'
+    assert attempt['requested_route']['model_override_tier'] == 'crucial'
+
+
+def test_real_full_chain_keeps_lifecycle_risk_separate_from_model_override(
+    tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    run_dir = make_run(tmp_path, 'real-route-metadata')
+    bin_dir = tmp_path / 'bin'
+    bin_dir.mkdir()
+    claude_args = tmp_path / 'claude.args'
+    write_executable(bin_dir / 'claude', f"""
+        #!/usr/bin/env bash
+        printf '%s\\n' "$@" > {claude_args}
+        cat >/dev/null
+        printf 'FULL CHAIN OK\\n'
+        """)
+    monkeypatch.setenv('PATH', f"{bin_dir}:{ROOT / 'scripts'}:{os.environ['PATH']}")
+    prompt = tmp_path / 'prompt.md'
+    prompt.write_text('synthesise exactly\n', encoding='utf-8')
+    manifest = task_manifest(tmp_path, [{
+        'id': 'full-chain',
+        'prompt_file': str(prompt),
+        'adapter': 'claude',
+        'model': 'fable',
+        'role': 'synthesis',
+        'risk_tier': 'routine',
+        'model_override_tier': 'crucial',
+    }])
+    module = load_module()
+    module.DISPATCH_RUN = BATCH.parent / 'dispatch_run.py'
+
+    assert module.batch(args(module, run_dir, manifest, 1)) == 0, attempt_diagnostics(run_dir)
+    attempt = json.loads(
+        (run_dir / 'dispatch/tasks/full-chain/attempt-001/attempt.json').read_text(
+            encoding='utf-8'
+        )
+    )
+
+    assert attempt['requested_route']['risk_tier'] == 'routine'
+    assert attempt['requested_route']['model_override_tier'] == 'crucial'
+    assert attempt['route']['risk_tier'] == 'routine'
+    assert attempt['route']['model_override_tier'] == 'crucial'
+    assert attempt['route']['resolved_model'] == 'fable'
+    assert attempt['route']['route_alias'] == 'flagship'
+    assert attempt['route']['policy_override'] == 'crucial-fable-synthesis-adjudication'
+    assert '--model\nfable\n' in claude_args.read_text(encoding='utf-8')
+    assert '--effort\nmedium\n' in claude_args.read_text(encoding='utf-8')
 
 
 def test_real_dispatch_children_defer_manifest_race_and_preserve_route_identity(tmp_path, monkeypatch):

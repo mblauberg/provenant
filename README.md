@@ -156,22 +156,23 @@ database and registers the caller without a separate activation step.
 
 ## Providers
 
-The checked-in profile enables all six clients below. Install and authenticate
-each before dispatching work through that provider.
+The [Fabric MCP installer](docs/runbooks/fabric-mcp-registration.md) can
+register all six clients below. Direct provider execution is separately owned
+by [adapter compatibility](config/adapter-compatibility.yaml).
 
-| Client or provider | Current integration |
-|---|---|
-| Claude Code | Primary client and enabled Anthropic provider |
-| Codex | Primary client and enabled OpenAI provider |
-| Agy | Enabled optional provider client; runtime model family comes from the dispatch receipt |
-| Cursor | Enabled optional Composer/Grok and hosted third-party provider |
-| Kiro | Enabled optional open-weight ACP provider |
-| OpenCode | Enabled optional ACP provider for its built-in account models |
+| Client or provider | Fabric MCP registration | Direct provider execution |
+|---|---|---|
+| Claude Code | Supported | Enabled Anthropic primary |
+| Codex | Supported | Enabled OpenAI primary |
+| Agy | Supported | Enabled optional broker; the receipt records the runtime model family |
+| Cursor | Supported | Enabled optional Composer/Grok and hosted third-party broker |
+| Kiro | Supported | Dormant until one bounded ordinary invocation and safety boundary are verified |
+| OpenCode | Supported | Unavailable until the dispatch owner has a verified invocation and receipt contract |
 
 Provider CLI versions and digests are diagnostic observations, not admission
-locks. Provenant revalidates vendor identity, wrapper provenance and each
-bounded provider interface at point of use, so a signed CLI update needs no
-compatibility-table edit.
+locks. Direct dispatch enforces the checked-in activation decision and uses
+fresh adapter capability evidence where the route requires it; a CLI update
+does not by itself require a compatibility-table edit.
 
 ## Core workflows
 
