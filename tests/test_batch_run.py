@@ -18,6 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 BATCH = ROOT / "skills/orchestrate/scripts/batch_run.py"
 INIT = ROOT / "skills/orchestrate/scripts/run_dir_init.sh"
 FINALIZE = ROOT / "skills/orchestrate/scripts/run_dir_finalize.py"
+CURRENT_ROUTING_FIXTURE = ROOT / "tests/fixtures/current-routing-eval/dispatch_fixture.py"
 
 
 def write_executable(path: Path, body: str) -> None:
@@ -73,22 +74,34 @@ def fake_dispatch(path: Path) -> None:
         counter = pathlib.Path(os.environ['BATCH_COUNTER'])
         active = counter.with_name('active')
         maximum = counter.with_name('maximum')
-        with counter.with_name('lock').open('w') as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
-            current = int(active.read_text()) if active.exists() else 0
-            active.write_text(str(current + 1))
-            maximum.write_text(str(max(int(maximum.read_text()) if maximum.exists() else 0, current + 1)))
+        def write_counter(path, value):
+            # These counters stay below ten; pwrite publishes the single byte
+            # without a truncate-before-write window for a re-entrant signal.
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT, 0o600)
+            try:
+                os.pwrite(fd, str(value).encode(), 0)
+                os.fsync(fd)
+            finally:
+                os.close(fd)
         def leave(*_):
-            with counter.with_name('lock').open('w') as lock:
-                fcntl.flock(lock, fcntl.LOCK_EX)
-                active.write_text(str(max(0, int(active.read_text()) - 1)))
+            signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM, signal.SIGHUP})
             raise SystemExit(143)
         signal.signal(signal.SIGTERM, leave)
         signal.signal(signal.SIGHUP, leave)
-        time.sleep(float(values.get('sleep', '0.01')))
-        with counter.with_name('lock').open('w') as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
-            active.write_text(str(max(0, int(active.read_text()) - 1)))
+        counted = False
+        try:
+            with counter.with_name('lock').open('w') as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                current = int(active.read_text()) if active.exists() else 0
+                counted = True
+                write_counter(active, current + 1)
+                write_counter(maximum, max(int(maximum.read_text()) if maximum.exists() else 0, current + 1))
+            time.sleep(float(values.get('sleep', '0.01')))
+        finally:
+            if counted:
+                with counter.with_name('lock').open('w') as lock:
+                    fcntl.flock(lock, fcntl.LOCK_EX)
+                    write_counter(active, max(0, int(active.read_text()) - 1))
         requested_status = values.get('status', 'succeeded')
         status = 'failed' if requested_status == 'empty' else requested_status
         outcome = 'result_missing_or_empty' if requested_status == 'empty' else status
@@ -194,6 +207,58 @@ def test_fixed_batch_caps_eight_tasks_and_produces_reducer_inputs(tmp_path, monk
     assert int((tmp_path / 'maximum').read_text()) <= 3
     assert {entry['task_id'] for entry in summary['reducer_inputs']} == {f'task-{i}' for i in range(8)}
     assert {entry['route']['provider_family'] for entry in summary['tasks']} == {'codex', 'gemini'}
+
+
+def test_current_routing_fixture_runs_real_dispatch_and_retains_partial_batch(tmp_path, monkeypatch):
+    """The current seam proves batch custody, route identity, and reduction inputs without a provider."""
+    monkeypatch.chdir(tmp_path)
+    run_dir = make_run(tmp_path, 'current-routing-fixture')
+    state_dir = tmp_path / 'fixture-state'
+    state_dir.mkdir()
+    monkeypatch.setenv('CURRENT_ROUTING_FIXTURE_STATE', str(state_dir))
+    task_specs = (
+        ('openai-one', 'openai', 'succeeded'),
+        ('openai-two', 'openai', 'succeeded'),
+        ('anthropic-one', 'anthropic', 'succeeded'),
+        ('intentional-failure', 'openai', 'failed'),
+    )
+    prompts = {}
+    for task_id, family, status in task_specs:
+        prompt = tmp_path / f'{task_id}.md'
+        prompt.write_text(
+            f'fixture_family={family}\nfixture_status={status}\nfixture_sleep=0.03\n',
+            encoding='utf-8',
+        )
+        prompts[task_id] = prompt
+    manifest = task_manifest(tmp_path, [
+        {'id': task_id, 'prompt_file': str(prompts[task_id]), 'adapter': f'fixture-{family}',
+         'alias': 'scout', 'role': 'worker'}
+        for task_id, family, _status in task_specs
+    ])
+
+    module = load_module()
+    module.DISPATCH_RUN = CURRENT_ROUTING_FIXTURE
+    assert module.batch(args(module, run_dir, manifest, 2)) == 1
+
+    summary = json.loads((run_dir / 'dispatch/batches/batch-001/summary.json').read_text())
+    assert summary['status'] == 'completed'
+    assert summary['task_count'] == 4
+    assert summary['concurrency'] == 2
+    by_id = {item['task_id']: item for item in summary['tasks']}
+    assert {by_id['openai-one']['route']['provider_family'],
+            by_id['openai-two']['route']['provider_family']} == {'openai'}
+    assert {item['route']['provider_family'] for item in summary['tasks']
+            if item['status'] == 'succeeded'} == {'openai', 'anthropic'}
+    assert by_id['intentional-failure']['status'] == 'failed'
+    assert by_id['intentional-failure']['attempt_path']
+    assert {item['task_id'] for item in summary['reducer_inputs']} == set(prompts)
+    assert {item['status'] for item in summary['reducer_inputs']} == {'succeeded', 'failed'}
+    assert int((state_dir / 'maximum').read_text()) == 2
+    for task_id, family, _status in task_specs[:3]:
+        attempt = json.loads((run_dir / by_id[task_id]['attempt_path']).read_text())
+        assert attempt['route']['model_family'] == family
+        assert attempt['route']['endpoint_provider'] == f'fixture-{family}'
+        assert attempt['route']['identity_source'] == 'deterministic-fixture'
 
 
 def test_default_concurrency_scales_down_for_small_manifest(tmp_path, monkeypatch):
@@ -890,7 +955,8 @@ def test_standalone_dispatch_is_blocked_by_batch_custody(tmp_path, monkeypatch):
         lock.close()
 
 
-def test_batch_cancellation_reaps_active_dispatches(tmp_path, monkeypatch):
+@pytest.mark.parametrize('_run', range(3))
+def test_batch_cancellation_reaps_active_dispatches(tmp_path, monkeypatch, _run):
     monkeypatch.chdir(tmp_path)
     run_dir = make_run(tmp_path, 'cancel')
     dispatch = tmp_path / 'fake-dispatch'

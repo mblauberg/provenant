@@ -809,7 +809,8 @@ else:
     else:
         provider_status = envelope.get("status")
         response = envelope.get("response")
-        error = str(envelope.get("error", "")).strip()
+        error_value = envelope.get("error")
+        error = "" if error_value is None else str(error_value).strip()
         if not isinstance(provider_status, str) or not isinstance(response, str):
             status = "invalid_envelope"
             response = ""
@@ -843,9 +844,17 @@ clean_path.write_text(response if status == "ok" else "", encoding="utf-8")
 # non-ok status, so a failed run still cannot be mistaken for a review.
 if status != "ok":
     notes = ["agy dispatch failed: status=%s exit=%d" % (status, exit_code)]
-    detail = str(envelope.get("error", "")).strip() if envelope else ""
+    detail = error if envelope else ""
     if detail:
         notes.append("provider error: %s" % detail)
+    elif (
+        envelope
+        and isinstance(provider_status, str)
+        and provider_status.upper() != "SUCCESS"
+    ):
+        notes.append(
+            "provider error: provider returned a non-success status without an error message"
+        )
     elif envelope is None and not stderr.strip() and stdout.strip():
         notes.append("unparsed agy stdout: %s" % stdout.strip()[:2000])
     with diag_path.open("a", encoding="utf-8") as handle:

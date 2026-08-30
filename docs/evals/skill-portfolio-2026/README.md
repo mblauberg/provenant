@@ -1,7 +1,7 @@
 # Skill portfolio evaluation appendix
 
 Evaluation evidence cut-off: 19 July 2026
-Current-state note refreshed: 23 July 2026
+Current-state note refreshed: 30 August 2026
 Predecessor delivery run: `SKAUD-20260714`
 
 This appendix is the durable evidence index for the 2026 portfolio refactor.
@@ -23,14 +23,25 @@ The [frozen protocol](routing-protocol.json) remains evaluation v7's original
 33-owner, 19 July artifact, including its source revision, identity and
 daemon-era route. It is retained as planned-unexecuted historical evidence.
 
-No current result file exists because no current model attempt started. A
-future evaluation needs a newly frozen 32-owner protocol with the current
-direct-provider/Fabric-coordination route and a new evaluation identity. Do not
-reuse v7's retired bootstrap-authority or provider-action assumptions.
+No semantic result file exists because no provider-backed model attempt started.
+The semantic holdout remains provider-dependent and not run. A deliberate
+current run must freeze a 32-owner protocol for the direct-provider batch path
+and retain the actual route metadata. Do not reuse v7's retired
+bootstrap-authority or provider-action assumptions.
 
 The holdout therefore records catalogue coverage only. Any future trials must
 record the actual provider/model-family route in a dispatch receipt and retain
 every terminal action without retrying or relabelling failures.
+
+## Current dispatch infrastructure fixture
+
+The provider-free [dispatch fixture](../../../tests/fixtures/current-routing-eval/dispatch_fixture.py)
+is exercised by the batch contract tests. It proves the current `batch_run.py`
+and `dispatch_run.py` path retains a fixed bounded task set, fixture-emitted
+route metadata for same- and mixed-family cases, an intentional partial
+failure, and reducer inputs.
+This is an infrastructure contract pass, not a semantic routing result: the
+18-case holdout above remains unrun.
 
 ## Predecessor routing evidence
 
@@ -99,8 +110,10 @@ blind judge scored 256 items after deterministic checks.
   plugin overlays. The selected host probe contains 16 hand-selected entries.
 - Model aliases, discovery behaviour, caching and pricing can change. Re-run
   after a material model, host or catalogue change.
-- The current routing protocol is unexecuted. It establishes no behavioural
-  result until the full frozen schedule completes through Agent Fabric.
+- The current semantic holdout is unexecuted and provider-dependent. The
+  provider-free infrastructure fixture establishes only the dispatch/batch
+  contract, not behavioural routing quality; a deliberate direct-provider
+  batch run is required for the semantic result.
 - A completed routing regression establishes only its frozen synthetic cases.
   The enclosing delivery receipt and human retain acceptance and release
   authority.

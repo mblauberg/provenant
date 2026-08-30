@@ -2861,6 +2861,30 @@ def test_agy_task_class_uses_fresh_preferred_family_capabilities(tmp_path):
     assert route["effort_capability_source"] == "runtime-model-catalog"
 
 
+def test_agy_broker_records_google_to_anthropic_substitution(tmp_path):
+    snapshot = write_agy_capability_snapshot(
+        tmp_path,
+        models={
+            "haiku": {
+                "resolved_model": "haiku",
+                "supported_efforts": ["low"],
+            },
+        },
+    )
+
+    result, route = resolve(
+        "--adapter", "agy", "--task-class", "mechanical", "--role", "worker",
+        "--lead-family", "openai", "--require-distinct",
+        "--capabilities-file", str(snapshot),
+    )
+
+    assert result.returncode == 0
+    assert route["status"] == "ok"
+    assert route["resolved_model"] == "haiku"
+    assert route["model_family"] == "anthropic"
+    assert route["substitution"] == "gemini-3.7-flash unavailable; used haiku"
+
+
 def test_disabled_opencode_route_fails_closed_with_configured_reason():
     result, route = resolve(
         "--adapter", "opencode", "--model", "opencode/deepseek-v4-flash-free",

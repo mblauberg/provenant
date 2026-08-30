@@ -604,7 +604,8 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
                     1,
                 )
             model, identity_source = available[chosen.lower()]
-            substitution = ""
+            if chosen != candidates[0]:
+                substitution = f"{candidates[0]} unavailable; used {chosen}"
         else:
             family = fixed_family
             candidates = args.model_override.get("models")
