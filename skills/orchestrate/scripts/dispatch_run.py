@@ -602,6 +602,7 @@ def build_command(args: argparse.Namespace, prompt_path: Path, result_path: Path
         ("--alias", args.alias),
         ("--task-class", args.task_class),
         ("--risk-tier", args.risk_tier),
+        ("--model-override-tier", args.model_override_tier),
         ("--reviewer-id", args.reviewer_id),
         ("--model", args.model),
         ("--effort", args.effort),
@@ -762,6 +763,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
         "effort": args.effort or "",
         "orchestrator_family": args.orchestrator_family or "",
         "risk_tier": args.risk_tier or "",
+        "model_override_tier": args.model_override_tier or "",
         "reviewer_id": args.reviewer_id or "",
     }
     workspace_observation = workspace_identity(workspace)
@@ -1067,6 +1069,11 @@ def parser() -> argparse.ArgumentParser:
     selector.add_argument("--model")
     root.add_argument("--role", required=True)
     root.add_argument("--risk-tier")
+    root.add_argument(
+        "--model-override-tier",
+        choices=("routine", "substantial", "crucial", "terminal"),
+        help="explicit special-model selection; independent of lifecycle risk metadata",
+    )
     root.add_argument("--reviewer-id")
     root.add_argument("--effort")
     root.add_argument(

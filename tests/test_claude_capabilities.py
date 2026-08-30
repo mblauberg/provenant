@@ -157,6 +157,30 @@ def test_nonzero_exit_reports_stderr(monkeypatch):
         module.run_json(["claude"], 2)
 
 
+def test_nonzero_provider_stdout_keeps_only_scrubbed_policy_reason(monkeypatch):
+    module = load_module()
+    result = SimpleNamespace(
+        returncode=1,
+        output="",
+        stdout=(
+            "Your organization has disabled Claude subscription access for "
+            "Claude Code; contact secret@example.com in org secret-org"
+        ),
+        stderr="",
+        timed_out=False,
+    )
+    monkeypatch.setattr(module, "run_bounded", lambda *args, **kwargs: result)
+
+    with pytest.raises(
+        ValueError,
+        match="command exited 1: provider access denied; subscription access disabled by organisation policy",
+    ) as error:
+        module.run_json(["claude"], 2)
+
+    assert "secret@example.com" not in str(error.value)
+    assert "secret-org" not in str(error.value)
+
+
 def test_ultra_effort_is_rejected_before_claude_subprocess(monkeypatch, tmp_path):
     module = load_module()
 

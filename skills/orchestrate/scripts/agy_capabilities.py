@@ -7,15 +7,12 @@ for example `gemini-3.1-pro-high`. The
 bare family id is not dispatchable on its own: `agy --model gemini-3.1-pro`
 exits 1 with "requires --effort (available: low, high)".
 
-Efforts are per model rather than global. Re-verified on agy 1.1.17 on
-2026-08-22: gemini-3.1-pro offers only low and high, while the Flash families
-offer low, medium and high. The CLI's own --help still advertises
-a blanket low|medium|high and is wrong, so the runtime list is the only
-trustworthy source.
+Efforts are per model rather than global. The CLI's static help can describe a
+broader effort set than an individual model actually exposes, so the runtime
+list is the authoritative capability source.
 
 This snapshot therefore keys on the family id and records the efforts that
-family actually offers, which is the shape the route resolver consumes for
-Codex.
+family actually offers, which is the shape the route resolver consumes.
 """
 
 from __future__ import annotations

@@ -359,8 +359,14 @@ reserved for that tier's roles, alias and effort ceiling; Fable currently
 occupies both configured tiers. GPT-5.6 supports
 `ultra` where runtime discovery proves it. Model catalogues are dated caches,
 not assertions about current availability.
-The Claude capability probe derives its model from the adapter family's catalogue
-aliases; a task class may override it with a valid `capability_probe_alias`.
+Lifecycle risk stays in delivery and dispatch receipts. Selecting a configured
+override occupant requires the separate explicit model-override input; ordinary
+risk metadata cannot change a route.
+
+Task-class routes use the resolver's policy-owned alias and effort. Codex and
+Agy produce fresh model snapshots before final resolution. Claude first
+resolves that alias and effort, runs its bounded canary, then resolves with the
+snapshot. The shell does not duplicate the model or task-class catalogue.
 
 ## Review as a council, not a vote
 

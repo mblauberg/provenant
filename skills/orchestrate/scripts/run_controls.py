@@ -618,6 +618,7 @@ def _dispatch_command(run_dir: Path, task_id: str, prompt: Path | None, route: d
     selector, value = _route_selector(route)
     command.extend((f"--{selector.replace('_', '-')}", value))
     for key, flag in (("orchestrator_family", "--orchestrator-family"), ("risk_tier", "--risk-tier"),
+                      ("model_override_tier", "--model-override-tier"),
                       ("reviewer_id", "--reviewer-id"), ("effort", "--effort")):
         if route.get(key):
             command.extend((flag, str(route[key])))

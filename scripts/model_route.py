@@ -108,8 +108,11 @@ def load_adapter_compatibility(
     constraints = entry.get("model_family_constraints")
     allowed = constraints.get("allowed") if isinstance(constraints, dict) else None
     patterns = constraints.get("allowed_model_patterns", []) if isinstance(constraints, dict) else None
+    enabled = entry.get("enabled")
+    disabled_reason = entry.get("disabled_reason", "")
     if (
-        not isinstance(entry.get("enabled"), bool)
+        not isinstance(enabled, bool)
+        or (not enabled and (not isinstance(disabled_reason, str) or not disabled_reason.strip()))
         or not isinstance(allowed, list)
         or any(not isinstance(item, str) for item in allowed)
         or not isinstance(patterns, list)
@@ -118,7 +121,8 @@ def load_adapter_compatibility(
         return None, "adapter_compatibility_invalid"
     return {
         "compatibility_adapter": compatibility_id,
-        "enabled": entry["enabled"],
+        "enabled": enabled,
+        "disabled_reason": disabled_reason.strip() if isinstance(disabled_reason, str) else "",
         "allowed_families": allowed,
         "allowed_model_patterns": patterns,
         # Fail closed on omission: only an explicit `false` opts an adapter
@@ -381,19 +385,19 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
         if args.task_class:
             record.update({"task_class": args.task_class, "route_source": "task-class"})
         return emit(record, 2)
-    risk_tier_effort = args.risk_override.get("default_effort", "")
+    model_override_effort = args.model_override.get("default_effort", "")
     if task_class_effort:
         if role_effort and EFFORT_ORDER[role_effort] > EFFORT_ORDER[task_class_effort]:
             requested_effort, effort_source = role_effort, "role-default"
         else:
             requested_effort, effort_source = task_class_effort, "task-class"
     else:
-        requested_effort = args.effort or risk_tier_effort or role_effort or {
+        requested_effort = args.effort or model_override_effort or role_effort or {
             "flagship": "high", "workhorse": "medium", "scout": "low"
         }[args.alias]
         effort_source = (
             "explicit" if args.effort else
-            "risk-tier-override" if risk_tier_effort else
+            "model-override" if model_override_effort else
             "role-default" if role_effort else "alias-default"
         )
     base = {
@@ -409,14 +413,14 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
     }
     if args.task_class:
         base.update({"task_class": args.task_class, "route_source": "task-class"})
-    elif args.risk_tier:
-        override_models = args.risk_override.get("models", [])
-        override_roles = args.risk_override.get("roles", [])
+    elif args.model_override_tier:
+        override_models = args.model_override.get("models", [])
+        override_roles = args.model_override.get("roles", [])
         base.update({
-            "risk_tier": args.risk_tier,
-            "route_source": "risk-tier-override",
+            "model_override_tier": args.model_override_tier,
+            "route_source": "model-override",
             "policy_override": (
-                f"{args.risk_tier}-{override_models[0]}-{'-'.join(override_roles)}"
+                f"{args.model_override_tier}-{override_models[0]}-{'-'.join(override_roles)}"
             ),
         })
     if not adapter:
@@ -459,6 +463,17 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
             "compatibility_adapter": compatibility["compatibility_adapter"],
             "adapter_enabled": compatibility["enabled"],
         }
+        if not compatibility["enabled"]:
+            return emit_route(
+                {
+                    **base,
+                    "status": "adapter_disabled",
+                    "reason": compatibility["disabled_reason"],
+                    "endpoint_provider": endpoint,
+                    **compatibility_metadata,
+                },
+                1,
+            )
         if account_default != (not compatibility["requires_explicit_model"]):
             # The routing catalogue and adapter policy must agree on
             # account-default dispatch in both directions (#190).
@@ -508,9 +523,9 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
                 1,
             )
         selected_override_model = (
-            args.risk_override.get("models", [""])[0] if args.risk_override else ""
+            args.model_override.get("models", [""])[0] if args.model_override else ""
         )
-        if args.risk_override and not model_has_alias(model, selected_override_model):
+        if args.model_override and not model_has_alias(model, selected_override_model):
             return emit_route({**base, "status": "risk_tier_model_mismatch"}, 1)
         if fixed_family and family != fixed_family:
             return emit_route(
@@ -534,17 +549,72 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
             family_aliases.get("aliases") if isinstance(family_aliases, dict) else None
         )
         if not fixed_family or not isinstance(family_aliases, dict):
-            return emit_route(
-                {**base, "status": "model_required_for_broker", "endpoint_provider": endpoint},
-                2,
-            )
-        family = fixed_family
-        candidates = args.risk_override.get("models")
-        candidates = candidates or family_config.get("role_overrides", {}).get(args.role, {}).get(args.alias)
-        candidates = candidates or family_config["aliases"].get(args.alias)
+            if args.adapter != "agy" or not args.task_class or not capability_models:
+                return emit_route(
+                    {**base, "status": "model_required_for_broker", "endpoint_provider": endpoint},
+                    2,
+                )
+            preferences = adapter.get("model_family_preferences", {}).get("preferred")
+            if (
+                not isinstance(preferences, list)
+                or not preferences
+                or any(not isinstance(item, str) or not item for item in preferences)
+            ):
+                return emit_route(
+                    {**base, "status": "broker_preference_config_invalid", "endpoint_provider": endpoint},
+                    2,
+                )
+            available = {
+                key.lower(): (item["resolved_model"], "runtime-capability+catalog")
+                for key, item in capability_models.items()
+            }
+            candidates = []
+            chosen = None
+            for preferred_family in preferences:
+                preferred_config = catalog["families"].get(preferred_family)
+                if not isinstance(preferred_config, dict):
+                    continue
+                aliases = preferred_config.get("aliases")
+                if not isinstance(aliases, dict):
+                    continue
+                preferred_candidates = aliases.get(args.alias)
+                if not isinstance(preferred_candidates, list):
+                    continue
+                candidates.extend(preferred_candidates)
+                selected = next(
+                    (
+                        candidate for candidate in preferred_candidates
+                        if isinstance(candidate, str) and candidate.lower() in available
+                    ),
+                    None,
+                )
+                if selected is not None:
+                    family = preferred_family
+                    family_config = preferred_config
+                    chosen = selected
+                    break
+            if chosen is None:
+                return emit_route(
+                    {
+                        **base,
+                        "status": "no_candidate_available",
+                        "endpoint_provider": endpoint,
+                        "candidates": candidates,
+                    },
+                    1,
+                )
+            model, identity_source = available[chosen.lower()]
+            substitution = ""
+        else:
+            family = fixed_family
+            candidates = args.model_override.get("models")
+            candidates = candidates or family_config.get("role_overrides", {}).get(args.role, {}).get(args.alias)
+            candidates = candidates or family_config["aliases"].get(args.alias)
         if not candidates:
             return emit_route({**base, "status": "alias_unavailable", "model_family": family}, 1)
-        if account_default:
+        if not fixed_family:
+            pass
+        elif account_default:
             model = candidates[0]
             fallback_model = candidates[1] if len(candidates) > 1 else ""
             identity_source = "account-default"
@@ -592,7 +662,7 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
     is_risk_override_model = any(
         model_has_alias(model, candidate) for candidate in configured_override_models
     )
-    if is_risk_override_model and not args.risk_override:
+    if is_risk_override_model and not args.model_override:
         return emit_route({**base, "status": "risk_tier_override_required"}, 1)
     compatibility_family = ""
     distinct = bool(args.lead_family and family != args.lead_family)
@@ -753,7 +823,7 @@ def parser() -> argparse.ArgumentParser:
     command.add_argument("--adapter", required=True)
     command.add_argument("--alias")
     command.add_argument("--task-class")
-    command.add_argument("--risk-tier", choices=("routine", "substantial", "crucial", "terminal"))
+    command.add_argument("--model-override-tier", choices=("routine", "substantial", "crucial", "terminal"))
     command.add_argument("--role", required=True)
     command.add_argument("--effort")
     command.add_argument("--model")
@@ -785,7 +855,15 @@ def main(argv: list[str] | None = None) -> int:
         return _preferences.select(args, TASK_CLASS_POLICY, ALIAS_ORDER, EFFORT_ORDER)
     catalog = load_catalog(Path(args.catalog))
     if args.command == "resolve":
-        def reject(status: str, *, alias: str = "", effort: str = "", message: str = "") -> int:
+        def reject(
+            status: str,
+            *,
+            alias: str = "",
+            effort: str = "",
+            message: str = "",
+            code: int = 2,
+            **metadata: Any,
+        ) -> int:
             record = {
                 "schema_version": 1,
                 "catalog_date": catalog.get("catalog_date", ""),
@@ -801,14 +879,13 @@ def main(argv: list[str] | None = None) -> int:
                 record.update({"task_class": args.task_class, "route_source": "task-class"})
             if message:
                 record["message"] = message
-            return emit(record, 2)
+            record.update(metadata)
+            return emit(record, code)
 
         args.task_class_effort = ""
-        args.risk_override = {}
-        if args.task_class and args.risk_tier:
-            return reject("route_input_conflict")
-        if bool(args.alias) == bool(args.task_class):
-            return reject("route_input_conflict" if args.alias else "route_input_missing")
+        args.model_override = {}
+        if not args.alias and not args.task_class:
+            return reject("route_input_missing")
         # A families table that is not a mapping reserves nothing, so a reservation
         # scan finds no occupant and would route a reserved model. It is also the
         # first thing every family lookup below dereferences. Reject it here, ahead
@@ -850,6 +927,35 @@ def main(argv: list[str] | None = None) -> int:
                     scanned_family, scanned_config, catalog
                 ):
                     return reject("risk_tier_config_invalid", alias=args.alias)
+        # Once catalogue integrity is known, a configured execution gate is the
+        # first route fact for a known adapter. Invalid selectors must not hide
+        # `enabled: false` or its typed reason, and this preflight never invokes a
+        # provider capability source.
+        if args.adapter in COMPATIBILITY_ADAPTER_IDS:
+            compatibility, compatibility_status = load_adapter_compatibility(
+                args.adapter, Path(args.adapter_compatibility),
+            )
+            if compatibility_status:
+                return reject(compatibility_status)
+            assert compatibility is not None
+            if not compatibility["enabled"]:
+                endpoint = (
+                    adapter_config.get("endpoint_provider", "")
+                    if isinstance(adapter_config, dict)
+                    else ""
+                )
+                return reject(
+                    "adapter_disabled",
+                    code=1,
+                    reason=compatibility["disabled_reason"],
+                    endpoint_provider=endpoint,
+                    compatibility_adapter=compatibility["compatibility_adapter"],
+                    adapter_enabled=False,
+                )
+        if args.task_class and args.model_override_tier:
+            return reject("route_input_conflict")
+        if bool(args.alias) == bool(args.task_class):
+            return reject("route_input_conflict" if args.alias else "route_input_missing")
         if args.task_class:
             policy = TASK_CLASS_POLICY.get(args.task_class)
             route = catalog.get("task_class_routes", {}).get(args.task_class)
@@ -895,11 +1001,11 @@ def main(argv: list[str] | None = None) -> int:
             return reject("unknown_alias")
         if args.effort and args.effort not in EFFORT_ORDER:
             return reject("invalid_effort", alias=args.alias)
-        if args.risk_tier:
+        if args.model_override_tier:
             adapter = catalog.get("adapters", {}).get(args.adapter, {})
             family = adapter.get("fixed_model_family")
             family_config = catalog.get("families", {}).get(family, {})
-            override = family_config.get("risk_tier_overrides", {}).get(args.risk_tier)
+            override = family_config.get("risk_tier_overrides", {}).get(args.model_override_tier)
             if not isinstance(override, dict):
                 return reject("risk_tier_override_unavailable", alias=args.alias)
             if not risk_tier_override_is_well_formed(override):
@@ -912,7 +1018,7 @@ def main(argv: list[str] | None = None) -> int:
                 return reject("risk_tier_alias_mismatch", alias=args.alias)
             if args.effort and EFFORT_ORDER[args.effort] > EFFORT_ORDER[maximum_effort]:
                 return reject("risk_tier_effort_above_ceiling", alias=args.alias, effort=args.effort)
-            args.risk_override = override
+            args.model_override = override
         return resolve(args, catalog)
     return 2
 
