@@ -1,4 +1,4 @@
-// Modified from Impeccable for this harness; see the repository THIRD_PARTY_NOTICES.md.
+// Modified for Provenant.
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';

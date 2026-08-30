@@ -107,12 +107,7 @@ def test_modified_impeccable_sources_have_local_modification_notices():
     }
     assert covered == derived_modified
     for relative in derived_modified:
-        marker = (
-            "Modified for Provenant"
-            if relative.startswith(marker_prefixes)
-            else "Modified from Impeccable for this harness"
-        )
-        assert marker in (SKILL / relative).read_text()[:500], relative
+        assert "Modified for Provenant" in (SKILL / relative).read_text()[:500], relative
 
 
 def test_harness_original_runtime_and_test_files_are_not_overattributed_to_impeccable():

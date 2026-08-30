@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Modified from Impeccable for this harness; see the repository THIRD_PARTY_NOTICES.md.
+// Modified for Provenant.
 /**
  * Print current server status and inert retained-session metadata.
  */

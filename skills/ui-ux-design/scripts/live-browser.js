@@ -1,4 +1,4 @@
-// Modified from Impeccable for this harness; see the repository THIRD_PARTY_NOTICES.md.
+// Modified for Provenant.
 /**
  * Impeccable Live Variant Mode — Browser Script
  *

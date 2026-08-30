@@ -1,4 +1,4 @@
-// Modified from Impeccable for this harness; see the repository THIRD_PARTY_NOTICES.md.
+// Modified for Provenant.
 /**
  * CLI helper: insert/remove the live variant mode script tag in the project's
  * main HTML entry point.

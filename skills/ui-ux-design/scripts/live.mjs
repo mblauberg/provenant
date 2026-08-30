@@ -1,4 +1,4 @@
-// Modified from Impeccable for this harness; see the repository THIRD_PARTY_NOTICES.md.
+// Modified for Provenant.
 /**
  * CLI entry point: prepare everything needed to enter the live variant poll loop.
  *

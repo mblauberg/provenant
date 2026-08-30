@@ -22,8 +22,8 @@ commit `a39c7b7e6db2778467e43f5ed3a05143c05c07dd` (10 July 2026), but does not
 retain a recoverable upstream Impeccable commit. No upstream head is inferred.
 The component ledger at `skills/ui-ux-design/evals/provenance_components.yaml`
 records the exact harness-original exceptions. Attribution is centralised here
-and in that ledger. Derived references carry only a neutral modification
-notice; selected runtime sources also carry a local source notice.
+and in that ledger. Modified derived files carry only a neutral local
+modification notice.
 `skills/ui-ux-design/SKILL.md`, `skills/ui-ux-design/evals/`,
 `skills/ui-ux-design/scripts/contained-source.mjs`,
 `skills/ui-ux-design/scripts/jsx-tag-scanner.mjs`,

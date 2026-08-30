@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Modified from Impeccable for this harness; see the repository THIRD_PARTY_NOTICES.md.
+// Modified for Provenant.
 /**
  * Inspect inert metadata from the advisory live-session journal.
  */

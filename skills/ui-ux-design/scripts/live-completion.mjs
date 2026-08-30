@@ -1,4 +1,4 @@
-// Modified from Impeccable for this harness; see the repository THIRD_PARTY_NOTICES.md.
+// Modified for Provenant.
 export function completionTypeForAcceptResult(eventType, acceptResult) {
   if (eventType === 'discard') return acceptResult?.handled === true ? 'discarded' : 'error';
   if (acceptResult?.handled === true && acceptResult?.carbonize === true) return 'agent_done';
