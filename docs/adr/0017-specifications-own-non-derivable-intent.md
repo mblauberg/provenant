@@ -95,8 +95,9 @@ relations, and build reduced support schemas around the objects under test.
 Replaying their inserts against the baseline fails at 98%, and two negative
 assertions were shown to pass against the baseline for the wrong reason, on an
 unrelated foreign key. Repointing them would destroy a working oracle and
-manufacture false confidence rather than remove it. The drift gate gives the
-protection the repoint was meant to give, without that cost.
+manufacture false confidence rather than remove it. At adoption, the now-retired
+legacy drift gate supplied that protection without that cost; current Fabric
+structure is code- and test-owned under ADR 0020.
 
 Deleting a restatement therefore requires knowing that it *is* one. Identifier
 absence alone does not establish that a specification describes something

@@ -27,9 +27,9 @@ Documentation claims sit in three tiers, and the third is deliberate:
    `docs/ARCHITECTURE.md` remain maintained documentation, with their source
    constants and prose reviewed together. Do not hand-edit generated-looking
    content without checking the corresponding source.
-2. **Review-checked.** The spec schema baseline and migration assertions have
-   retained machine checks. Table prose, fenced commands, placeholders,
-   relative links and document projections remain review-owned.
+2. **Review-checked.** Runtime schema and migration structure is owned by code
+   and tests. Specification prose, fenced commands, placeholders, relative
+   links and document projections remain review-owned.
    `HARNESS.md` stays compact because it is an always-loaded constitution.
 3. **Unchecked prose.** Design intent and rationale carry no machine gate,
    on purpose; review keeps them honest, not tooling.

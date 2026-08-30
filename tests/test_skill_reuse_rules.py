@@ -48,20 +48,19 @@ def test_writing_and_documentation_rules_encode_the_reusable_boundaries():
     assert "contributing services or components" in engineering
 
 
-def test_skill_craft_uses_reusable_boundaries_and_semantic_correction_mining():
-    skill = compact("skills/skill-craft/SKILL.md")
-    audit = compact("skills/skill-craft/references/audit.md")
+def test_skill_promotion_uses_structural_form_and_routing_fixture():
     proposal = yaml.safe_load(read(".github/ISSUE_TEMPLATE/skill-proposal.yml"))
     proposal_fields = {
         field["id"]: field for field in proposal["body"] if "id" in field
     }
+    cases = yaml.safe_load(read("skills/skill-craft/evals/trigger_cases.yaml"))["cases"]
+    promotion = next(case for case in cases if case["id"] == "q708")
 
-    assert "cross-project triggers, procedures and gates" in skill
-    assert "contextual values into parameters" in skill
-    assert "cluster corrections by meaning" in audit
-    assert "Literal search can confirm known residue" in audit
-    assert "reusable trigger, artifact, fixture and ownership boundary" in skill
-    assert "opt-in and provisional" in skill
+    assert promotion["relation"] == "boundary"
+    assert promotion["expected"] == {
+        "primary_skill": "skill-craft",
+        "companion_skills": ["evaluate"],
+    }
     status = proposal_fields["promotion-status"]
     rationale = proposal_fields["promotion-rationale"]
     assert status["attributes"]["options"] == [
@@ -70,9 +69,8 @@ def test_skill_craft_uses_reusable_boundaries_and_semantic_correction_mining():
         "Global-ready",
     ]
     assert status["validations"]["required"] is True
-    assert "reusable artifact and ownership boundary" in rationale["attributes"]["description"]
+    assert rationale["type"] == "textarea"
     assert rationale["validations"]["required"] is True
-    assert "[MAINTAINING.md](../../MAINTAINING.md)" in skill
     assert not (ROOT / "skills/skill-craft/scripts/promotion_readiness.py").exists()
 
 
