@@ -397,70 +397,22 @@ rules remain early in the entrypoint.
 
 ## Evaluation strategy
 
-Maintain three suites:
+Use the least costly evidence that answers the question:
 
-1. contract tests for deterministic invariants;
-2. balanced routing/discipline evals with positive, negative and boundary cases
-   for every lifecycle/core skill; and
-3. independently authored held-out positive, negative and boundary scenarios
-   across software, research, analysis, documents, agent products and the
-   high-stakes overlay.
+- deterministic contract and fixture tests own lifecycle and machine invariants;
+- balanced positive, negative and boundary fixtures remain required for core
+  skills; and
+- live/provider semantic held-outs run only when ADR 0014 or `MAINTAINING.md`
+  triggers them: a suspected or observed routing regression, a multi-skill
+  trigger rewrite at maintainer discretion, or preparation for publication or
+  another operator.
 
-Stochastic routing evals run multiple blind batch invocations on declared
-model/harness versions. Each invocation retains its input digest, actual model
-lineage and hash-bound parsed output; case selections reference that invocation.
-Report confidence intervals or raw numerator/denominator, not a single opaque
-score. Production/session examples enter a shared or exported dataset only
-after disclosure review and explicit approval. Capability cases and regression
-cases are labelled separately.
-
-## Required delivery sequence
-
-| Phase | Required outcome |
-|---|---|
-| 1 — evidence foundations | Evidence contracts and tests |
-| 2 — neutral kernel | One public v1 contract for every profile |
-| 3 — bound gates | Digest-bound authority, security and observation gates |
-| 4 — managed evolution | Reconciled installation and routing evidence |
-| 5 — prove and accept | Deterministic proof, independent review and explicit user acceptance |
-
-### Phase 1 — evidence foundations
-
-- Make `skill-craft`'s audit branch static-first with separate local and shared/export evidence
-  modes. Use a deterministic contract and routing fixture; do not claim native
-  provider telemetry without real adapters and producers.
-- Add `skills/retrospect/templates/RETROSPECT.template.json`, a validator and pass/fail fixtures.
-- Record the research baseline and this specification.
-
-### Phase 2 — neutral kernel
-
-- Add the neutral run schema, profile registry and kernel validator.
-- Add software, research, analysis, document and agent-product profiles plus
-  orthogonal high-stakes safeguards.
-- Make `implement` emit the canonical software-profile receipt and remove its
-  superseded receipt shape and validator.
-- Establish the routing baseline before deciding whether to expose `deliver`
-  as a new entry skill.
-
-### Phase 3 — bound gates
-
-- Add design artifact/digest/approver validation.
-- Add security evidence selection and observation contracts.
-- Connect incident and recurrence evidence.
-
-### Phase 4 — managed evolution
-
-- Add installation ownership/reconciliation.
-- Unify precedence wording.
-- Add trigger fixtures and cross-domain held-out evals.
-- Compact oversized skills and implement manifest-led run cleanup.
-
-### Phase 5 — prove and accept
-
-- Run regression and public-safety checks.
-- Exercise all profiles with reference runs and negative cases.
-- Obtain independent targeted, other-primary and available distinct-family review.
-- Repair, record remaining degradation and request final user acceptance.
+When an evaluation runs, record the actual route and model, plus raw
+numerator/denominator for each result. No universal hash or version-lock
+protocol is required; use existing receipt digests and revisions only where
+their owning contract requires them. Production or session examples enter
+shared/exported datasets only after disclosure review and explicit approval.
+Label capability and regression cases separately.
 
 ## Stability and rollback
 
@@ -468,14 +420,14 @@ cases are labelled separately.
   profile receipt.
 - `delivery-run` has one schema. Breaking changes require an explicit design
   decision; the harness does not carry unused compatibility adapters.
-- Each phase is independently revertible; no migration deletes existing run
-  evidence or installed skills.
+- Each contract change is independently revertible; no migration deletes
+  existing run evidence or installed skills.
 - If a profile cannot prove its gates, it falls back to the existing specialised
   skill and records `kernel_degraded`, never fabricates completion.
 
 ## Acceptance criteria
 
-The refactor is complete when:
+The lifecycle requirements remain satisfied when:
 
 1. Reference runs for all five profiles pass the neutral validator and preserve
    outcome/trajectory evidence.
@@ -492,226 +444,42 @@ The refactor is complete when:
 7. Observation has a window, signals, thresholds, owner and containment path.
 8. Installer dry-run distinguishes managed, unmanaged, stale and conflicting
    targets and never overwrites unmanaged content.
-9. All core skills have balanced trigger fixtures; held-out profile runs meet
-   declared thresholds across repeated trials.
+9. Core skills have balanced trigger fixtures; conditional held-out evaluations
+   record the actual route/model and raw numerator/denominator.
 10. Public-safety, deterministic harness tests, clean-install tests and context
     budgets pass.
 11. The other-primary reviewer and fresh targeted reviewers independently report
     no unresolved blocking findings.
-12. The user accepts the completed lifecycle; release remains a separate gate.
-
-### Implementation evidence
-
-| Criterion | Evidence |
-|---|---|
-| 1–3 | `config/delivery-profiles.json`, `skills/deliver/`, `tests/test_delivery_contract.py` |
-| 4 | `skills/skill-craft/SKILL.md`, `skills/skill-craft/references/audit.md`, `skills/skill-craft/references/method.md`, local-history routing fixture and `test_skill_audit_contract.py` |
-| 5 | `skills/retrospect/templates/RETROSPECT.template.json`, `validate_retrospect.py`, adversarial receipt tests |
-| 6 | `config/security-evidence.json`, security selector and crucial-gate tests |
-| 7 | typed observation contract and strengthened `RELEASE.json` observation gate |
-| 8 | `manage_installation.py`, the managed manifest and managed-install tests |
-| 9 | balanced core fixtures, held-out dataset and repeated Fable routing receipts |
-| 10 | `scripts/check-harness`, public-release check, clean-install and context-budget suites |
-| 11 | HREF-002 targeted and other-primary review artifacts after the final source freeze |
-| 12 | Explicit user acceptance evidence; no release or push authority is implied |
+12. The user accepts the lifecycle outcome; release remains a separate gate.
 
 ## Known risks and controls
 
 | Risk | Control |
 |---|---|
-| Kernel becomes a bloated mega-skill | Stable state machine only; profiles and references hold depth; word-budget test. |
+| Kernel becomes a bloated mega-skill | Stable state machine only; profiles and references hold depth. |
 | Generic gates weaken domain requirements | Profiles may strengthen only; high-stakes release is always user action. |
 | Receipt ceremony overwhelms small tasks | Risk threshold; routine one-shot work may use an ephemeral receipt or none. |
 | Local history escapes its requested scope | Read in place, never commit raw history and keep sharing/export behind explicit destination and content authority. |
-| Evals optimise to their own fixtures | Held-out cases, repeated trials, mixed graders and user calibration. |
+| Evals optimise to their own fixtures | Conditional held-outs, repeated trials, mixed graders and user calibration. |
 | Multi-agent cost exceeds value | Decomposability gate, one writer and proportional lanes. |
-| Concurrent agent-fabric work conflicts | Unique files in Phase 1; shared entrypoints deferred until fabric ownership closes. |
+| Concurrent agent-fabric work conflicts | Fabric coordinates; one writer and explicit write partitions protect shared surfaces. |
 | Research becomes stale | Dated evidence cut-off, 90-day decision expiry and retrospective refresh proposal. |
 
 ## User authority boundaries
 
-The held-out baseline justifies `deliver`; the instruction to implement this
-approved specification entirely selects that named entrypoint. Non-trivial
-neutral runs persist receipts; tiny routine one-shot work remains exempt.
-Requested local history is read in place and not retained as project truth.
-Sharing or exporting derived evidence requires a separate user decision.
-Lifecycle acceptance, runtime activation, live installation, provider login,
-push and release each require separate user authority.
+An issue or receipt records scope or evidence; it is not approval. Current user
+and project instructions control. External release, promotion, activation,
+sharing/export, provider login, live installation, push and destructive action
+remain separately gated by current authority.
 
-## Route and topology evaluation evidence
+## Route and topology evidence boundary
 
-The mature route-evaluation findings from the
-[July 2026 continuity and routing snapshot](../../research/evidence-snapshots/agent-continuity-routing-2026-07.md)
-extend the neutral delivery evidence contract. They do not authorise a learned
-router, a global model leaderboard or automatic preference mutation.
+Dispatch and batch receipts own the actual resolved route, provider/model and
+attempt facts. Delivery may reference those receipts for evidence; Fabric only
+coordinates and does not own provider execution or lifecycle acceptance.
+Assurance labels reflect the evidence that exists and do not infer coverage.
 
-When a model route or multi-agent topology materially affects an outcome or
-review gate, the run registers one or more closed
-`routeEvaluationEvidenceV1` JSON artifacts. `RUN.json.artifacts[]` contains the
-ordinary delivery artifact row for each payload. `RUN.json.evidence[]` contains
-only an ordinary base evidence row—never the payload object itself:
-
-```yaml
-id: stable-evidence-id
-kind: deterministic
-gate: route-evaluation-contract
-method: adaptive-harness-route-evaluation.v1
-status: pass | fail | unavailable | not_applicable
-artifact_id: exact-RUN-artifact-id-for-route-evaluation-payload
-source_paths: [authority-scoped-input-paths]
-result:
-  exit_code: integer
-  receipt_digest: exact-payload-artifact-digest
-```
-
-The base row retains its existing required field set and validation semantics;
-no route-specific sibling or nested extension is added to `delivery-run`.
-Judgement aggregate rows remain ordinary judgement evidence with their existing
-`model_lineage`. The registered payload carries the route-specific contract.
-All payload fields are required; nullable values represent unavailable
-measurements rather than omitted truth.
-
-```yaml
-evaluatedRouteIdentityV1:
-  schemaVersion: 1
-  hostId: exact-host
-  hostVersion: exact-host-version
-  adapterId: exact-adapter
-  adapterContractDigest: sha256-prefixed-digest
-  endpointProvider: exact-provider
-  family: canonical-family
-  model: exact-model
-  resolvedEffort: resolvedEffortV1
-  normalizedReasoningEffort: none | low | medium | high | xhigh | max | null
-  rawNativeMode: exact-provider-value | null
-  orchestrationMode: single | native-subagents | dynamic-workflow | provider-multi-agent
-  capabilityBodyDigest: sha256-prefixed-digest
-  requestedConfigurationDigest: sha256-prefixed-digest
-  effectiveConfigurationDigest: sha256-prefixed-digest
-  permissionProfileDigest: sha256-prefixed-digest
-  discoverySurfaceRef: discoverySurfaceRefV1
-  routePolicyRevision: exact-revision
-  harnessRevision: exact-revision
-  harnessDigest: sha256-prefixed-digest
-  contextPolicyRevision: exact-revision
-  contextPolicyDigest: sha256-prefixed-digest
-  topologyWavePlanRef: topologyWavePlanRefV1
-
-routeEvaluationEvidenceV1:
-  schemaVersion: 1
-  taskClass: stable-task-class
-  evaluatedRouteIdentity: evaluatedRouteIdentityV1
-  evaluatedRouteIdentityDigest: sha256-prefixed-digest
-  evaluationPlanRef: registeredEvidenceRefV1
-  plannedTrialCount: positive-integer-at-most-256
-  trialRoutes:
-    - ordinal: contiguous-positive-integer
-      actionRef: ProviderActionRefV1
-      deployedRouteAdmissionDigest: sha256-prefixed-digest
-      deployedRouteObservationDigest: sha256-prefixed-digest | null
-  topologyWavePlanRef: topologyWavePlanRefV1
-  harnessRevision: exact-revision
-  harnessDigest: sha256-prefixed-digest
-  discoverySurfaceRef: discoverySurfaceRefV1
-  routePolicyRevision: exact-revision
-  contextPolicyRevision: exact-revision
-  contextPolicyDigest: sha256-prefixed-digest
-  datasetDigest: sha256-prefixed-digest
-  trialCount: positive-integer
-  objectivePassCount: nonnegative-integer | null
-  objectiveTrialCount: positive-integer | null
-  judgementAggregateRef: registeredEvidenceRefV1 | null
-  reliabilityAggregateRef: registeredEvidenceRefV1 | null
-  efficiencyAggregateRef: registeredEvidenceRefV1 | null
-  baseline:
-    kind: best-single | cheapest-acceptable | prior-policy | simple-single-owner | none
-    evidenceRef: registeredEvidenceRefV1 | null
-    absenceReason: exact-safe-reason | null
-  observedAt: timestamp
-  expiresAt: timestamp
-  promotionState: bootstrap | shadow | advisory | canary | task-class-active | expired
-  evidenceDigest: sha256-prefixed-digest
-```
-
-`registeredEvidenceRefV1` is not a new artifact-reference type. It is schema
-shorthand for the exact existing the Agent Fabric contract `EvidenceArtifactRegistration` tuple:
-`{evidenceId, evidenceRevision, artifactRef:{path,digest}}`, equality-bound to
-the same current run/session and immutable registration revision. The generated
-schema expands that tuple directly.
-
-The payload, `evaluatedRouteIdentityV1`, nested baseline and every registration
-reference are closed.
-`objectivePassCount` and
-`objectiveTrialCount` are both null or both non-null, and the count cannot
-exceed the denominator. A non-null denominator cannot exceed the number of
-distinct trial rows with a non-null, parent-bound proved observation. Baseline
-`none` requires a non-null reason and null reference; every other baseline
-requires a reference and null reason.
-`evidenceDigest` is SHA-256 of RFC 8785 JCS over the complete record with only
-that field omitted.
-
-`evaluatedRouteIdentityDigest` is SHA-256 of RFC 8785 JCS of exactly the closed
-`evaluatedRouteIdentityV1` object as displayed, with no omitted or added field.
-The identity is action-free: it excludes action IDs, snapshot instance/clocks,
-trial ordinals and observations while retaining the stable capability body,
-effective configuration, permission, discovery, route/harness/context policy
-and exact topology-wave
-row identity. The payload's top-level harness, route-policy,
-context-policy, discovery-surface and topology-wave refs equality-copy that
-preimage; a mismatch rejects.
-
-`evaluationPlanRef` names the current immutable run-owned evaluation plan and
-its exact revision/digest; that plan declares this task class, route-evaluation
-kind, dataset, baseline and `plannedTrialCount`; those values must equal this
-record. The protocol safety maximum is
-256; it is not a recommendation for policy volume. `trialRoutes` is nonempty;
-ordinals are contiguous, canonical `(adapterId,actionId)` pairs are distinct,
-admission digests are distinct
-and array length equals both `trialCount` and `plannedTrialCount`. Each
-action/admission/optional-observation tuple equality-resolves through the
-current Fabric receipt/evidence registration. After removing action and
-snapshot-instance identity, every admission must reproduce the route-owned
-fields of the displayed `evaluatedRouteIdentityV1`; its capability-body digest
-permits instance refresh without conflating different capability content. The
-evaluation plan supplies and equality-binds the topology-wave ref. The top-level discovery-surface registration
-must equal every admission's `discoverySurfaceRefV1` evidence ID/revision/path/
-digest. Top-level harness, route-policy and context-policy revisions/digests
-must likewise equal every admission; the topology wave must equal the plan. A
-different value rejects. A non-null observation digest
-must parent-bind its trial admission. Null means the trial has no proved
-terminal observation and cannot contribute an objective pass.
-
-Evidence is scoped to the deployed unit—host, adapter/contract, model, raw
-effort, native mode, harness revision, discovery surface, topology and context
-policy—not to a model name alone. Stochastic comparisons use repeated trials;
-deterministic cases retain exact numerator/denominator. A changed harness,
-adapter contract, route policy, discovery surface, dataset or expired record is
-not current route evidence. Capability and safety constraints remain hard gates
-regardless of an evaluation result.
-
-Every topology-bearing evaluation references the exact Agent Fabric contract
-`topologyWavePlanV1` row through the closed the Agent Fabric contract
-`topologyWavePlanRefV1`; the ref equality-binds session/run/task/wave/revision/
-digest to the current or historical plan row. That plan already owns
-dependency/decomposability, topology, contention, one accountable chair, stage
-owners, write partitions, budget, stop conditions, authority/policy lineage and
-append-only rationale. The evaluation cannot restate or broaden them.
-Parallelism is evidence-driven and bounded; agent count is not a quality
-measure.
-
-Promotion is task-local. A new deployed route moves through bootstrap,
-shadow/advisory and canary evidence before `task-class-active`; expiry returns
-it to explicit stale/bootstrap handling. This contract records the evidence
-and promotion state only. Candidate-pool construction, Pareto elimination,
-quality-floor values, trial volumes, expiry intervals and any learned selector
-remain future policy decisions.
-
-Portable aggregates may include counts, latency buckets, token/cost values and
-classified failure codes. They exclude prompts, answers, tool arguments,
-artifact content, private messages, secrets, project names and absolute paths.
-Rich local evidence stays run-owned and is referenced by digest. Validation
-fixtures cover the conforming base evidence row/artifact join, exact identity
-preimage and digest, distinct action pairs/admission digests, planned/effective
-trial equality and numerator/denominator bounds, baseline nullability, expiry
-and revision drift, task-class isolation, topology-wave currency, content-free
-export and the absence of any automatic promotion side effect.
+This specification defines no learned router, global leaderboard, automatic
+promotion, or universal digest/version protocol. Route or topology comparison
+is task-local and opt-in under the evaluation triggers above; the owning
+dispatch or batch receipt remains the source for what actually ran.

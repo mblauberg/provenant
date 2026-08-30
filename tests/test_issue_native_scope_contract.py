@@ -64,5 +64,19 @@ def test_issue_native_decision_and_spec_reconciliation_are_recorded():
     assert "## Historical Fabric custody note" not in disclosure
     assert "Issue #23" not in lifecycle
     assert "current issue" in lifecycle.lower()
+    for stale in (
+        "routeEvaluationEvidenceV1",
+        "evaluatedRouteIdentityV1",
+        "topologyWavePlanV1",
+        "repeated Fable routing receipts",
+        "## Required delivery sequence",
+        "### Implementation evidence",
+    ):
+        assert stale not in lifecycle
+    assert "live/provider semantic held-outs" in lifecycle
+    assert "deterministic contract and fixture tests" in lifecycle
+    assert "dispatch and batch receipts own" in lifecycle.lower()
+    assert "fabric only" in lifecycle.lower()
+    assert "issue or receipt records scope or evidence; it is not approval" in lifecycle.lower()
     assert "#" in contract["source"]["state_graph"]
     assert ":91-95" not in contract["source"]["state_graph"]
