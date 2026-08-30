@@ -24,10 +24,9 @@ reconciliation run.
 
 ## Loop
 
-1. For substantial+ work, run
-   `"${AGENTS_HOME:-$HOME/.agents}/skills/deliver/scripts/delivery_receipt.py" init`
-   with profile `software` to create the canonical `delivery-run`, then follow
-   [run-contract.md](references/run-contract.md). Routine minor work may proceed
+1. For substantial+ work, create the canonical `delivery-run` with profile
+   `software` through the complete installed-producer command in `deliver`,
+   then follow [run-contract.md](references/run-contract.md). Routine minor work may proceed
    without `RUN.json` unless the user or project policy requests one.
 2. Keep an adaptive plan. Name the governing skill in the worker contract
    before changing code. Invoke `tdd` for every new or changed observable

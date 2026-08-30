@@ -6,6 +6,15 @@ ROOT = Path(__file__).resolve().parents[1]
 VALIDATE = '"${AGENTS_HOME:-$HOME/.agents}/skills/deliver/scripts/validate_delivery.py"'
 RECEIPT_AND_ARGS = '.agent-run/<id>/RUN.json --workspace-root "$PWD" --verify-hashes'
 RECEIPT_INIT = '"${AGENTS_HOME:-$HOME/.agents}/skills/deliver/scripts/delivery_receipt.py" init'
+REQUIRED_INIT_FLAGS = {
+    "--run-dir",
+    "--run-id",
+    "--profile",
+    "--chair-family",
+    "--risk-assessment",
+    "--intent",
+    "--authority",
+}
 
 
 def read(path: str) -> str:
@@ -23,12 +32,12 @@ def test_delivery_and_implementation_guidance_names_receipt_and_safe_root():
         assert VALIDATE in source, path
         assert RECEIPT_AND_ARGS in source, path
 
-    for path in (
-        "skills/deliver/SKILL.md",
-        "skills/implement/SKILL.md",
-        "skills/implement/references/run-contract.md",
-    ):
-        assert RECEIPT_INIT in read(path), path
+    deliver = read("skills/deliver/SKILL.md")
+    assert RECEIPT_INIT in deliver
+    assert REQUIRED_INIT_FLAGS <= set(re.findall(r"--[a-z-]+", deliver))
+    implement_contract = read("skills/implement/references/run-contract.md")
+    assert "complete `init` command in `deliver`" in implement_contract
+    assert "../../deliver/references/" not in implement_contract
 
 
 def test_readme_product_commands_follow_the_explicit_checkout():

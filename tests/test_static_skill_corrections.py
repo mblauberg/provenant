@@ -33,7 +33,7 @@ def test_implement_receipt_rule_scales_once_with_risk():
     skill = compact("skills/implement/SKILL.md")
 
     assert "For substantial+ work" in skill
-    assert '"${AGENTS_HOME:-$HOME/.agents}/skills/deliver/scripts/delivery_receipt.py" init' in skill
+    assert "complete installed-producer command" in skill
     assert "canonical `delivery-run`" in skill
     assert "Routine minor work may proceed without `RUN.json`" in skill
     assert skill.count("Routine minor work may") == 1
