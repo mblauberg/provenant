@@ -2764,7 +2764,7 @@
     startScrollLock(currentSessionId, readScrollY());
     captureAndEmit(
       target,
-      event,
+      { ...event, retry: true },
       snapshot,
       target.getBoundingClientRect(),
       { throwOnError: true },
@@ -3500,18 +3500,23 @@ void main() {
     toastEl.setAttribute('aria-live', 'polite');
     toastEl.setAttribute('aria-atomic', 'true');
     toastEl.id = PREFIX + '-toast';
-    toastEl.textContent = message;
     document.body.appendChild(toastEl);
+    const renderedToast = toastEl;
     requestAnimationFrame(() => {
-      toastEl.style.opacity = '1';
-      toastEl.style.transform = 'translateX(-50%) translateY(0)';
+      if (toastEl !== renderedToast) return;
+      renderedToast.textContent = message;
+      renderedToast.style.opacity = '1';
+      renderedToast.style.transform = 'translateX(-50%) translateY(0)';
     });
     setTimeout(() => {
-      if (toastEl) {
-        toastEl.style.opacity = '0';
-        toastEl.style.transform = 'translateX(-50%) translateY(8px)';
-        setTimeout(() => { if (toastEl) { toastEl.remove(); toastEl = null; } }, 250);
-      }
+      if (toastEl !== renderedToast) return;
+      renderedToast.style.opacity = '0';
+      renderedToast.style.transform = 'translateX(-50%) translateY(8px)';
+      setTimeout(() => {
+        if (toastEl !== renderedToast) return;
+        renderedToast.remove();
+        toastEl = null;
+      }, 250);
     }, duration);
   }
 

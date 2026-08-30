@@ -1,3 +1,4 @@
+<!-- Modified for Provenant. -->
 
 # Live iteration
 
@@ -69,6 +70,8 @@ When acceptance emits a carbonisation (variant promotion and consolidation)
 task, replace run-owned variant scaffolding with project-native source while preserving the selected result,
 verify the preview, then record completion with `live-complete.mjs`. Do not poll
 again until that task succeeds or is explicitly abandoned.
+Reporting a carbonisation error is explicit abandonment: the accepted change
+remains saved while the browser closes that session.
 
 Source mutation uses descriptor-bound, no-follow in-place writes with
 verification and process-level rollback. It is not crash-atomic: completed
@@ -86,3 +89,4 @@ needed for honest recovery.
 
 Remove only run-owned transient output after source and server state are
 verified. If cleanup ownership is uncertain, report the residual path and stop.
+<!-- Modified for Provenant. -->

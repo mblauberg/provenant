@@ -1093,7 +1093,8 @@ function createRequestHandler({ detectScript, sessionPath, livePath }) {
         const browserEventKey = safeInput.id && ['generate', 'accept', 'discard'].includes(safeInput.type)
           ? `${safeInput.id}:${safeInput.type}`
           : null;
-        if (browserEventKey && state.seenBrowserEvents.has(browserEventKey)) {
+        if (browserEventKey && safeInput.retry !== true
+          && state.seenBrowserEvents.has(browserEventKey)) {
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: true, duplicate: true }));
           return;
@@ -1139,7 +1140,12 @@ function createRequestHandler({ detectScript, sessionPath, livePath }) {
         }
         if (!duplicate && safeMessage.type !== 'checkpoint') enqueueEvent(safeMessage);
         if (!duplicate) markUploadedScreenshotBound(safeMessage);
-        if (browserEventKey) state.seenBrowserEvents.add(browserEventKey);
+        if (browserEventKey) {
+          state.seenBrowserEvents.add(browserEventKey);
+          if (state.seenBrowserEvents.size > MAX_RECENT_TERMINAL_OUTCOMES) {
+            state.seenBrowserEvents.delete(state.seenBrowserEvents.values().next().value);
+          }
+        }
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: true }));
       });

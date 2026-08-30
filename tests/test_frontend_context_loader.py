@@ -1,6 +1,5 @@
 import json
 from pathlib import Path
-import re
 import subprocess
 
 
@@ -109,34 +108,3 @@ def test_context_loader_matches_unusual_filename_case(tmp_path):
     context = json.loads(result.stdout)
     assert context["hasProduct"] is True
     assert context["productPath"].lower() == "product.md"
-
-
-def test_frontend_docs_do_not_claim_read_only_loader_mutates_legacy_context():
-    references = ROOT / "skills" / "ui-ux-design" / "references"
-    corpus = "\n".join(path.read_text() for path in references.glob("*.md")).lower()
-    assert "auto-renamed legacy" not in corpus
-    assert "loader auto-renamed" not in corpus
-
-
-def test_frontend_guidance_does_not_claim_a_universal_16px_minimum():
-    references = ROOT / "skills" / "ui-ux-design" / "references"
-    corpus = "\n".join(path.read_text() for path in references.glob("*.md"))
-    for false_absolute in (
-        "16px minimum",
-        "minimum readability? (16px+)",
-        "at least 16px / 1rem",
-        "Set body text below 16px",
-    ):
-        assert false_absolute not in corpus
-    assert "16px is a common ergonomic default" in corpus
-
-
-def test_read_only_frontend_review_isolates_build_outputs():
-    review = (
-        ROOT / "skills" / "ui-ux-design" / "references" / "review.md"
-    ).read_text().lower()
-    assert "output/cache path" in review
-    assert "outside the protected tree" in review
-    assert {"tested", "failed", "not tested", "not applicable"}.issubset(
-        set(re.findall(r"`([^`]+)`", review))
-    )

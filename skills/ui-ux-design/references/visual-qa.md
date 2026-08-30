@@ -1,3 +1,4 @@
+<!-- Modified for Provenant. -->
 
 # Visual QA
 
@@ -28,3 +29,4 @@ preserve evidence paths. Browser automation results do not establish WCAG
 certification, real assistive-technology compatibility, cross-browser
 completeness, or field performance. Final acceptance belongs to the enclosing
 lifecycle and user, not this design method.
+<!-- Modified for Provenant. -->

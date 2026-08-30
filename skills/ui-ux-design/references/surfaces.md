@@ -1,3 +1,4 @@
+<!-- Modified for Provenant. -->
 
 # Surfaces
 
@@ -30,3 +31,4 @@ encoding rather than choosing a chart by appearance. Use honest scales, units,
 direct labels and context; stress with empty, sparse, dense, extreme, and real
 data. Preserve keyboard interaction for filters and marks, and provide an
 equivalent text summary or data table when the visual encoding is not enough.
+<!-- Modified for Provenant. -->

@@ -1,3 +1,4 @@
+<!-- Modified for Provenant. -->
 
 # Review
 
@@ -56,3 +57,4 @@ Do not claim WCAG certification, cross-browser completeness, field
 performance, or assistive-technology compatibility from screenshots, static
 analysis, Lighthouse, or one browser run. A clean verdict means no supported
 finding within stated coverage, not universal correctness.
+<!-- Modified for Provenant. -->

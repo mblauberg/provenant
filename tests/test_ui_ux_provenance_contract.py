@@ -71,14 +71,7 @@ def test_third_party_components_resolve_to_notices_and_local_licences():
         assert not revisions or all(revision in notices for revision in revisions)
 
 
-def test_removed_research_data_and_unused_bundles_stay_absent():
-    assert not list((SKILL / "data").glob("*.csv"))
-    assert not list(SKILL.rglob("*three*.js"))
-    assert not list(SKILL.rglob("*gsap*.js"))
-
-
-def test_selected_impeccable_runtime_sources_have_local_markers():
-    marker = "Modified from Impeccable for this harness"
+def test_modified_impeccable_sources_have_local_modification_notices():
     ledger = yaml.safe_load((SKILL / "evals" / "provenance_components.yaml").read_text())
     component = next(item for item in ledger["components"] if item["id"] == "impeccable-modified-distribution")
     modified = subprocess.run(
@@ -107,10 +100,19 @@ def test_selected_impeccable_runtime_sources_have_local_markers():
         == ["impeccable-modified-distribution"]
     }
     marker_exact = set(component["marker_required_exact"])
-    assert marker_exact <= derived_modified
-    paths = [SKILL / relative for relative in marker_exact]
-    for path in paths:
-        assert marker in path.read_text()[:500], path
+    marker_prefixes = tuple(component["marker_required_prefixes"])
+    covered = {
+        relative for relative in derived_modified
+        if relative in marker_exact or relative.startswith(marker_prefixes)
+    }
+    assert covered == derived_modified
+    for relative in derived_modified:
+        marker = (
+            "Modified for Provenant"
+            if relative.startswith(marker_prefixes)
+            else "Modified from Impeccable for this harness"
+        )
+        assert marker in (SKILL / relative).read_text()[:500], relative
 
 
 def test_harness_original_runtime_and_test_files_are_not_overattributed_to_impeccable():

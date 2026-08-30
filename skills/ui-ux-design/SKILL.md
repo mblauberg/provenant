@@ -27,10 +27,11 @@ review.
 
 ## Ground and complete the work
 
-Start with the approved outcome, canonical local components and tokens,
-rendered pixels and states, supported users, and viewports. Classify the work as
-preserve, extend, or overhaul; preserve is the default for an existing product.
-Load [reference grounding](references/reference-grounding.md) and
+For design or changes, start with the approved outcome, canonical local
+components and tokens, rendered pixels and states, supported users, and
+viewports. Classify the work as preserve, extend, or overhaul; preserve is the
+default for an existing product. Load
+[reference grounding](references/reference-grounding.md) and
 [design](references/design.md), including its reuse and composition guidance.
 
 Load only the depth the request needs: [surfaces](references/surfaces.md),

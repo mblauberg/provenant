@@ -1,3 +1,4 @@
+<!-- Modified for Provenant. -->
 
 # Interaction and states
 
@@ -29,3 +30,4 @@ form a tested transaction. Otherwise use proportionate
 confirmation for irreversible or high-cost actions. Test rapid repeat,
 cancellation, navigation, retry, optimistic reconciliation, rollback, and
 stale-response races where applicable.
+<!-- Modified for Provenant. -->

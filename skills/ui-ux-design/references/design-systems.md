@@ -1,3 +1,4 @@
+<!-- Modified for Provenant. -->
 
 # Design systems
 
@@ -43,23 +44,11 @@ boundary before editing.
 
 Use this only when the project already owns this format or explicitly needs a
 machine-readable `DESIGN.md`; ordinary design-system work may stay in existing
-project-native files. Frontmatter may contain `name`,
-`description`, `colors`, `typography`, `rounded`, `spacing`, and `components`.
-Token references use `{path.to.token}`; component entries may reference
-primitives and are limited to `backgroundColor`, `textColor`, `typography`,
-`rounded`, `padding`, `size`, `height`, and `width`. The Markdown body uses
-these exact H2s in order: Overview, Colors, Typography, Elevation, Components,
-and Do's and Don'ts.
-
-When existing project tooling owns `.impeccable/design.json`, put only
-non-duplicating extensions there with `schemaVersion: 2`: `extensions` for
-metadata the frontmatter cannot express, `components` for self-contained
-renderable examples, and `narrative` derived from the six sections. When both
-document and sidecar change, regenerate them together, resolve references,
-parse both artefacts, and round-trip representative tokens and components
-before handoff. Never create this sidecar merely to satisfy this reference.
-Preserve a strict no-overwrite boundary and keep project-native values
-normative.
+project-native files. Preserve the existing schema and read its exact keys from
+the project-owned artefact or parser. If tooling already owns
+`.impeccable/design.json`, keep its `schemaVersion: 2` sidecar derived,
+non-duplicating, and in sync with `DESIGN.md`. Never create either format merely
+to satisfy this reference, and keep project-native values normative.
 
 Consolidation removes duplicate concepts after consumer evidence identifies a
 canonical owner. Extension adds the smallest reusable capability and migrates
@@ -71,3 +60,4 @@ component file alone is not a system change.
 `engineering-docs` owns the durable location and lifecycle of design-system
 documentation. Keep
 this as a focused reference within UI/UX design, not a competing global skill.
+<!-- Modified for Provenant. -->

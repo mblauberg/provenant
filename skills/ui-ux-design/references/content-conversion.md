@@ -1,3 +1,4 @@
+<!-- Modified for Provenant. -->
 
 # Content and conversion
 
@@ -39,3 +40,4 @@ keywords.
 This owner sets UI content hierarchy and constraints. Route substantial copy
 rewriting to `engineering-writing` or `natural-writing`, and preserve approved
 product, legal, localisation, and brand owners.
+<!-- Modified for Provenant. -->

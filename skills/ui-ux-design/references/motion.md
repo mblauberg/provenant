@@ -1,3 +1,4 @@
+<!-- Modified for Provenant. -->
 
 # Motion
 
@@ -28,3 +29,4 @@ diagnostic, not the shipped speed.
 not just shorter animation. Remove non-essential motion, avoid parallax or
 continuous movement where it impairs use, and keep focus and content changes
 legible without animation. Field performance claims require field evidence.
+<!-- Modified for Provenant. -->
