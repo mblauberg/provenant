@@ -558,6 +558,9 @@ def test_restored_generation_requires_an_explicit_browser_retry_event(
     discard_body = browser.split("function handleDiscard()", 1)[1].split(
         "// Session persistence", 1
     )[0]
+    accept_body = browser.split("function handleAccept()", 1)[1].split(
+        "function handleDiscard()", 1
+    )[0]
     assert "sendEvent(" not in resume_body
     assert "generatingNeedsRestart = state === 'GENERATING'" in resume_body
     assert "retry.textContent = 'Retry'" in browser
@@ -589,6 +592,16 @@ def test_restored_generation_requires_an_explicit_browser_retry_event(
     assert "markSessionHandled()" not in discard_body
     assert "cleanup()" not in discard_body
     assert "restorePendingDiscard(" in discard_body
+    assert "pendingAccept" in accept_body
+    assert "restorePendingAccept(" in accept_body
+    assert "markSessionHandled()" not in accept_body
+    assert "confirmAcceptedVariant(" not in accept_body
+    assert "case 'complete':" in browser
+    complete_case = browser.split("case 'complete':", 1)[1].split(
+        "case 'discard':", 1
+    )[0]
+    assert "markSessionHandled()" in complete_case
+    assert "confirmAcceptedVariant(" in complete_case
     assert "case 'discarded':" in browser
     assert "case 'discard':" in browser
     discarded_case = browser.split("case 'discarded':", 1)[1].split(
@@ -597,6 +610,7 @@ def test_restored_generation_requires_an_explicit_browser_retry_event(
     assert "markSessionHandled()" in discarded_case
     assert "cleanup()" in discarded_case
     assert "discardWasUnconfirmed" in server_lost_body
+    assert "acceptWasUnconfirmed" in server_lost_body
     assert "generatingNeedsRetry = !!generationIntent" in server_lost_body
     assert (
         "if (!interruptedGeneration && !recoverableCycling) selectedElement = null"

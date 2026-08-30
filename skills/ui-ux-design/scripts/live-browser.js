@@ -129,6 +129,7 @@
   // localStorage or recovered from the project journal.
   let generationIntent = null;
   let pendingDiscard = null;
+  let pendingAccept = null;
   const browserOwner = sessionState.owner;
   let checkpointTimer = null;
 
@@ -1244,7 +1245,9 @@
     const label = el('span', {
       fontSize: '12px', color: BP.textDim, fontWeight: '500',
     });
-    label.textContent = pendingDiscard
+    label.textContent = pendingAccept
+      ? 'Applying accepted variant...'
+      : pendingDiscard
       ? pendingDiscard.restart
         ? 'Clearing interrupted session...'
         : 'Discarding session...'
@@ -2296,6 +2299,14 @@
             );
           }, 2000);
           break;
+        case 'complete': {
+          if (msg.id !== currentSessionId || !pendingAccept) break;
+          const accepted = pendingAccept;
+          pendingAccept = null;
+          markSessionHandled();
+          confirmAcceptedVariant(accepted.sessionId, accepted.variant);
+          break;
+        }
         case 'discard':
         case 'discarded': {
           if (msg.id !== currentSessionId || !pendingDiscard) break;
@@ -2312,6 +2323,10 @@
           break;
         }
         case 'error':
+          if (msg.id === currentSessionId && pendingAccept) {
+            restorePendingAccept('Accept failed. The session is still available; try again.');
+            break;
+          }
           if (msg.id === currentSessionId && pendingDiscard) {
             restorePendingDiscard('Discard failed. The session is still available; try again.');
             break;
@@ -2340,6 +2355,11 @@
 
   /** Server died or became unreachable. Keep any explicit recovery action visible. */
   function handleServerLost() {
+    const acceptWasUnconfirmed = !!pendingAccept;
+    if (pendingAccept) {
+      pendingAccept = null;
+      state = 'CYCLING';
+    }
     const discardWasUnconfirmed = !!pendingDiscard;
     if (pendingDiscard) {
       const interrupted = pendingDiscard;
@@ -2366,7 +2386,9 @@
       );
     } else if (recoverableCycling) {
       showToast(
-        discardWasUnconfirmed
+        acceptWasUnconfirmed
+          ? 'Accept was not confirmed. Reconnect live mode, then try again.'
+          : discardWasUnconfirmed
           ? 'Discard was not confirmed. Reconnect live mode, then try again.'
           : 'Live server disconnected. Reconnect live mode to Accept or Discard.',
         7000,
@@ -3202,45 +3224,10 @@ void main() {
     frame();
   }
 
-  function handleAccept() {
-    if (!currentSessionId || arrivedVariants === 0) return;
-    const domVisibleVariant = readVisibleVariantFromDOM(currentSessionId);
-    if (domVisibleVariant > 0) visibleVariant = domVisibleVariant;
-    const acceptPayload = { type: 'accept', id: currentSessionId, variantId: String(visibleVariant) };
-    if (Object.keys(paramsCurrentValues).length > 0) {
-      acceptPayload.paramValues = { ...paramsCurrentValues };
-    }
-    // The accepted variant is already the only visible child of the wrapper
-    // (all other variants are display:none). HMR from the source rewrite will
-    // replace the wrapper imminently. Don't eagerly replaceChild here — React
-    // reconciliation races with our mutation and throws NotFoundError in Next
-    // 16 / Turbopack. Schedule a fallback that runs the manual swap only if
-    // HMR hasn't cleaned up by then (keeps static-server flows working).
-    const acceptedSessionId = currentSessionId;
-    const acceptedVariant = visibleVariant;
-
-    state = 'SAVING';
-    updateBarContent('saving');
-
-    sendEvent(acceptPayload, { throwOnError: true })
-      .then(() => {
-        markSessionHandled();
-        confirmAcceptAfterReceipt();
-      })
-      .catch(() => {
-        state = 'CYCLING';
-        updateBarContent('cycling');
-        showToast('Could not confirm accept with the live server. Session kept for recovery; try Accept again.', 5000);
-      });
-
-    function confirmAcceptAfterReceipt() {
-      state = 'CONFIRMED';
-      updateBarContent('confirmed');
-      scheduleAcceptCleanup();
-    }
-
-    function scheduleAcceptCleanup() {
-      setTimeout(function() {
+  function confirmAcceptedVariant(acceptedSessionId, acceptedVariant) {
+    state = 'CONFIRMED';
+    updateBarContent('confirmed');
+    setTimeout(function() {
       hideBar();
       hideHighlight();
       stopScrollTracking();
@@ -3255,7 +3242,7 @@ void main() {
     }, 1800);
 
     // Static-server / no-HMR fallback: if the wrapper is still around 2s after
-    // the cleanup above, swap it out manually. By now React has either moved
+    // acknowledgement, swap it out manually. By now React has either moved
     // on or the app isn't React at all. Preserve the `data-impeccable-variant="N"`
     // div (with display:contents) so @scope rules anchored to the variant
     // attribute keep matching until reload replaces it with the carbonize block.
@@ -3269,8 +3256,41 @@ void main() {
         accepted.style.display = 'contents';
         parent.replaceChild(accepted, wrapper);
       }
-      }, 2000);
+    }, 2000);
+  }
+
+  function restorePendingAccept(message) {
+    if (!pendingAccept) return;
+    pendingAccept = null;
+    state = 'CYCLING';
+    updateBarContent('cycling');
+    showToast(message, 5000);
+  }
+
+  function handleAccept() {
+    if (!currentSessionId || arrivedVariants === 0 || pendingAccept) return;
+    const domVisibleVariant = readVisibleVariantFromDOM(currentSessionId);
+    if (domVisibleVariant > 0) visibleVariant = domVisibleVariant;
+    const acceptPayload = { type: 'accept', id: currentSessionId, variantId: String(visibleVariant) };
+    if (Object.keys(paramsCurrentValues).length > 0) {
+      acceptPayload.paramValues = { ...paramsCurrentValues };
     }
+    pendingAccept = { sessionId: currentSessionId, variant: visibleVariant };
+    state = 'SAVING';
+    updateBarContent('saving');
+    if (!evtSource) {
+      sseRetries = 0;
+      connectSSE();
+    }
+    sendEvent(acceptPayload, { throwOnError: true })
+      .then(() => {
+        if (!pendingAccept) return;
+        saveSession();
+        showToast('Accept requested. Waiting for agent confirmation.', 5000);
+      })
+      .catch(() => restorePendingAccept(
+        'Could not request accept. The session is still available; try again.',
+      ));
   }
 
   function handleDiscard() {
@@ -3377,6 +3397,7 @@ void main() {
     generatingNeedsRestart = false;
     generationIntent = null;
     pendingDiscard = null;
+    pendingAccept = null;
     state = 'PICKING';
   }
 

@@ -44,7 +44,8 @@ session, wait for the agent's discard confirmation, then reselect the element;
 the browser never reconstructs a partial request from the journal. Preview
 selection is not lifecycle acceptance.
 Preserve the action protocol and use its accept/discard/completion paths rather
-than editing around them.
+than editing around them. An Accept or Discard HTTP receipt means queued only;
+the browser keeps the session recoverable until the agent acknowledgement.
 
 `server.json` is transient bearer-token state. Exclude `server.json` and
 `sessions/` from version control. Annotation output uses a fresh private OS
