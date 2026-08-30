@@ -63,22 +63,12 @@ export function getLiveConfigPath(cwd = process.cwd()) {
   return path.join(getLiveDir(cwd), 'config.json');
 }
 
-export function getLegacyLiveConfigPath(scriptsDir) {
-  return path.join(scriptsDir, 'config.json');
-}
-
-export function resolveLiveConfigPath({ cwd = process.cwd(), scriptsDir, env = process.env } = {}) {
+export function resolveLiveConfigPath({ cwd = process.cwd(), env = process.env } = {}) {
   if (env.IMPECCABLE_LIVE_CONFIG && env.IMPECCABLE_LIVE_CONFIG.trim()) {
     const configured = env.IMPECCABLE_LIVE_CONFIG.trim();
     return path.isAbsolute(configured) ? configured : path.resolve(cwd, configured);
   }
-  const primary = getLiveConfigPath(cwd);
-  if (fs.existsSync(primary)) return primary;
-  if (scriptsDir) {
-    const legacy = getLegacyLiveConfigPath(scriptsDir);
-    if (fs.existsSync(legacy)) return legacy;
-  }
-  return primary;
+  return getLiveConfigPath(cwd);
 }
 
 export function getLiveServerPath(cwd = process.cwd()) {

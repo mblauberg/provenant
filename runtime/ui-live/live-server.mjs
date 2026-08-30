@@ -617,7 +617,7 @@ function resolveConfiguredProjectSource(rootDir, requestedPath) {
     throw error;
   }
 
-  const configPath = resolveLiveConfigPath({ cwd: rootDir, scriptsDir: __dirname });
+  const configPath = resolveLiveConfigPath({ cwd: rootDir });
   let config;
   try {
     config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));

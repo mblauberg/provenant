@@ -44,7 +44,7 @@ components:
     licence: Apache-2.0
     local_licence: LICENSES/impeccable-APACHE-2.0.txt
     notice: NOTICE
-    modification: Moved into a private product runtime without changing live behaviour; modified derived files carry neutral local modification notices.
+    modification: Moved into a private product runtime; project-local and explicit live configuration paths remain supported, and modified derived files carry neutral local modification notices.
   - id: modern-screenshot-runtime
     origin: third-party
     exact: [modern-screenshot.umd.js]

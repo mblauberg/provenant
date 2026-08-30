@@ -16,7 +16,6 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { resolveLiveConfigPath } from './impeccable-paths.mjs';
 import {
   hasExecutableJsxTagAtOffset,
@@ -30,8 +29,7 @@ import {
   replaceContainedSources,
 } from './contained-source.mjs';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const CONFIG_PATH = resolveLiveConfigPath({ cwd: process.cwd(), scriptsDir: __dirname });
+const CONFIG_PATH = resolveLiveConfigPath();
 const MARKER_OPEN_TEXT = 'impeccable-live-start';
 const MARKER_CLOSE_TEXT = 'impeccable-live-end';
 
