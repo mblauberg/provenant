@@ -66,8 +66,9 @@ no-session-persistence canary. It retains only scrubbed auth class, requested
 alias/effort and the matching runtime model; helper-model usage and account
 identifiers are not retained. The canary has a small provider cost, so callers
 may reuse its file only inside the resolver's five-minute freshness window.
-For Agy, the dispatcher runs `agy_capabilities.py` before routing. Task-class
-selection chooses from the adapter's configured preferred families and fresh
+For Agy, the dispatcher performs an initial route check, runs `agy_capabilities.py`
+when required, then resolves the final route. Task-class selection chooses from
+the adapter's configured preferred families and fresh
 runtime list inside the resolver; a failed probe cannot be labelled as Agy
 capability evidence. Broker adapters otherwise require a model (`--model` or
 `CF_DISPATCH_CURSOR_MODEL` or `CF_DISPATCH_COPILOT_MODEL`); an unprovable provider fails closed as

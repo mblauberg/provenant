@@ -970,6 +970,7 @@ def test_agy_success_with_empty_response_is_non_passing():
         # dispatch that has not run.
         written = out.read_text(encoding="utf-8")
         assert "status=empty_output" in written
+        assert "provider error:" not in written
 
 
 def test_agy_success_envelope_with_nonzero_process_exit_is_failure():
@@ -1009,7 +1010,9 @@ def test_agy_success_envelope_with_nonzero_process_exit_is_failure():
         assert record["exit"] == 7
         assert record["certification_eligible"] is False
         assert "MUST NOT PASS" not in out.read_text(encoding="utf-8")
-        assert "status=error exit=7" in out.read_text(encoding="utf-8")
+        written = out.read_text(encoding="utf-8")
+        assert "status=error exit=7" in written
+        assert "provider error:" not in written
 
 
 def test_agy_success_envelope_with_error_never_publishes_response():
@@ -1049,6 +1052,42 @@ def test_agy_success_envelope_with_error_never_publishes_response():
         written = out.read_text(encoding="utf-8")
         assert "MUST NOT PASS" not in written
         assert "provider error: quota exceeded" in written
+
+
+def test_agy_success_envelope_with_null_error_publishes_response():
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        write_executable(
+            bin_dir / "agy",
+            """#!/usr/bin/env bash
+            if [ "$1" = "models" ]; then
+              printf 'gemini-3.7-flash-medium\\n'
+              exit 0
+            fi
+            printf '%s\\n' '{"status":"SUCCESS","response":"AGY NULL OK","error":null}'
+            """,
+        )
+        out = tmp / "out.txt"
+        env = fabric_free_env()
+        env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
+
+        result = subprocess.run(
+            [
+                str(SCRIPT), "--intent", "ordinary", "--tool", "agy",
+                "--model", "gemini-3.7-flash", "--effort", "medium",
+                "--orchestrator-family", "openai", "--out", str(out),
+                "--prompt", "Review",
+            ],
+            cwd=tmp, env=env, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+
+        record = json.loads(result.stdout)
+        assert result.returncode == 0, result.stderr + result.stdout
+        assert record["status"] == "ok"
+        assert out.read_text(encoding="utf-8") == "AGY NULL OK"
 
 
 def test_agy_requires_one_well_typed_json_envelope():
@@ -1374,6 +1413,46 @@ def test_agy_failure_preserves_the_provider_reason_in_the_output():
         written = out.read_text(encoding="utf-8")
         assert "Individual quota reached" in written
         assert "Resets in 55m39s" in written
+
+
+def test_agy_failure_with_null_error_uses_generic_reason_and_never_publishes_response():
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        write_executable(
+            bin_dir / "agy",
+            """#!/usr/bin/env bash
+            cat >/dev/null
+            printf '%s\\n' '{"status":"ERROR","response":"SHOULD NOT PASS","error":null}'
+            exit 1
+            """,
+        )
+        out = tmp / "out.txt"
+        env = fabric_free_env()
+        env["PATH"] = f"{bin_dir}:{env['PATH']}"
+
+        result = subprocess.run(
+            [
+                str(SCRIPT), "--tool", "agy",
+                "--model", "gemini-3.1-pro-high",
+                "--orchestrator-family", "codex",
+                "--out", str(out), "--prompt", "Reply",
+            ],
+            cwd=td, env=env, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+
+        record = json.loads(result.stdout)
+        assert result.returncode != 0
+        assert record["status"] == "error"
+        written = out.read_text(encoding="utf-8")
+        assert "SHOULD NOT PASS" not in written
+        assert (
+            "provider error: provider returned a non-success status without an error message"
+            in written
+        )
+        assert "provider error: None" not in written
 
 
 def test_agy_permission_denial_overrides_false_success_envelope():
