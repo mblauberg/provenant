@@ -4,7 +4,7 @@
  *
  *   fabric whoami
  *   fabric send <to> <body...>
- *   fabric inbox [--peek]
+ *   fabric inbox [--peek] [--limit N]
  *   fabric ack <message-id> <claim-id>
  *   fabric tasks [state]
  *   fabric watch [--interval 2]
@@ -19,6 +19,7 @@ const USAGE = `fabric <command>
        [--reply-to <id>]      thread this onto an existing message
        [--kind <kind>]        note (default), request, response
   inbox [--peek]              claim unacknowledged messages; --peek does not claim
+        [--limit N]           return at most N deliveries (default 20)
         [--claim-seconds N]   claim lifetime, 1 to 3600 seconds (default 300)
   ack <message-id> <claim-id> acknowledge one claimed delivery
   note <text...>              record something in the activity log
@@ -121,6 +122,11 @@ try {
   }
 
   case "inbox": {
+    const limitText = flag("limit");
+    const limit = limitText === undefined ? 20 : Number(limitText);
+    if (!Number.isSafeInteger(limit) || limit <= 0) {
+      throw new Error("inbox limit must be a positive integer");
+    }
     const claimSecondsText = flag("claim-seconds");
     const claimSeconds = claimSecondsText === undefined ? 300 : Number(claimSecondsText);
     if (!Number.isSafeInteger(claimSeconds) || claimSeconds < 1 || claimSeconds > 3600) {
@@ -129,8 +135,10 @@ try {
     const peekAt = argv.indexOf("--peek");
     const peek = peekAt !== -1;
     if (peek) argv.splice(peekAt, 1);
-    if (argv.length !== 1) throw new Error("usage: fabric inbox [--peek] [--claim-seconds N]");
-    show(store.inbox(who, { peek, claimTtlMs: claimSeconds * 1000 }));
+    if (argv.length !== 1) {
+      throw new Error("usage: fabric inbox [--peek] [--limit N] [--claim-seconds N]");
+    }
+    show(store.inbox(who, { limit, peek, claimTtlMs: claimSeconds * 1000 }));
     break;
   }
 
