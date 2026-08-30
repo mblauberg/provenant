@@ -82,9 +82,9 @@ The standalone `agy-headless` skill and direct Agy helper routes were retired.
 At this evidence cut-off, the planned provider-action route was recorded as
 the intended owner of Gemini execution, authority, model lineage, durable
 actions and recovery; that daemon-era plan is not current runtime truth. The
-current boundary is direct provider CLI execution with Fabric carrying
-coordination, while `cf_dispatch.sh` remains the direct adapter route and any
-missing Fabric roundtrip is recorded explicitly.
+current boundary is direct provider CLI execution, while `cf_dispatch.sh`
+remains the direct adapter route. Fabric may carry coordination; when a run
+requires that correlation, a missing roundtrip is recorded explicitly.
 
 ### 11 July historical dispositions, not current work
 

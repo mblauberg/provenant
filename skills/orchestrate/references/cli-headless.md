@@ -140,15 +140,16 @@ the result in the run manifest and move to the next tool.
 ## Distinct-family lane
 
 Gemini/Agy work is dispatched like any other headless CLI route. The chair
-supplies the budget and scope, and records the route, the model lineage and the
-result in Fabric so the lane is visible to everyone else on the project. Treat
-the result as advisory until primary-family evidence corroborates it.
+supplies the budget and scope. The dispatch receipt and output record the route,
+model lineage and result. When Fabric is in use, correlate its task or message
+so the lane is visible to everyone else on the project. Treat the result as
+advisory until primary-family evidence corroborates it.
 
-Agy holds its own `agy` Fabric seat for stable addressing, but the seat does
+Agy may hold its own `agy` Fabric seat for stable addressing, but the seat does
 not prove a Gemini or Google route. Count the model family only from the exact
-provider/model fields in the dispatch receipt. Coordination goes through
-Fabric; this adapter is the direct provider call, and a missing Fabric
-roundtrip is recorded as an explicit degraded path.
+provider/model fields in the dispatch receipt. Fabric is optional coordination;
+this adapter is the direct provider call. A missing Fabric roundtrip is degraded
+only when the run contract required one, and it does not block direct review.
 
 `cf_dispatch.sh --tool agy` is the route. Five properties of this CLI are load
 bearing and were measured against agy 1.1.10 on 2026-08-05, not read from help:
