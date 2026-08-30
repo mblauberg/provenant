@@ -390,7 +390,43 @@ def test_direct_and_pooled_url_detection_share_readiness_defaults_and_overrides(
         "domcontentloaded",
         "networkidle2",
     ]
-    assert [item["ms"] for item in observations if item["kind"] == "settle"] == [100, 100]
+    assert [item["ms"] for item in observations if item["kind"] == "settle"] == [250, 250]
+
+
+def test_url_detection_waits_for_delayed_client_render_before_scanning() -> None:
+    module_url = (
+        ROOT
+        / "skills"
+        / "ui-ux-design"
+        / "scripts"
+        / "detector"
+        / "engines"
+        / "browser"
+        / "detect-url.mjs"
+    ).as_uri()
+    script = (
+        f"import {{ detectUrl }} from {json.dumps(module_url)};"
+        "let ready=false;let functionCalls=0;"
+        "globalThis.setTimeout=(resolve,ms)=>{if(ms>=175)ready=true;resolve()};"
+        "const page={setViewport:async()=>{},goto:async()=>{},close:async()=>{},"
+        "evaluate:async(input)=>{"
+        "if(typeof input==='string')return;"
+        "functionCalls++;if(functionCalls===1)return;"
+        "return ready?[{selector:'main',findings:[{type:'nested-cards',detail:'late UI'}]}]:[];}};"
+        "const browser={newPage:async()=>page,close:async()=>{}};"
+        "const findings=await detectUrl('http://example.invalid',{browser,visualContrast:false});"
+        "process.stdout.write(JSON.stringify(findings));"
+    )
+
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)[0]["antipattern"] == "nested-cards"
 
 
 def test_framework_probe_does_not_follow_redirects_off_origin() -> None:

@@ -106,6 +106,7 @@ export function createLiveSessionStore({ cwd = process.cwd(), sessionId } = {}) 
       if (!id) throw new Error('session id required');
       assertRoot();
       const journal = getReadableJournalPath(id);
+      if (opts.requireExisting && !fs.existsSync(journal.path)) return null;
       const snapshotPath = getSnapshotPath(rootDir, id);
       const rebuilt = rebuildSnapshotFromJournal(journal.path, id, journal.assertParent);
       snapshotCache.set(id, rebuilt);

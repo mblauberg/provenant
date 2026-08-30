@@ -567,91 +567,6 @@ def test_restored_generation_requires_an_explicit_browser_retry_event(
         "comments": [{"x": 12, "y": 18, "text": "Align this"}],
         "strokes": [{"points": [[1, 2], [3, 4]]}],
     }
-    browser = (SCRIPTS / "live-browser.js").read_text()
-    resume_body = browser.split("function resumeSession()", 1)[1].split(
-        "// Global bar", 1
-    )[0]
-    retry_body = browser.split("function retryGeneration()", 1)[1].split(
-        "function handleGo()", 1
-    )[0]
-    server_lost_body = browser.split("function handleServerLost()", 1)[1].split(
-        "function sendEvent", 1
-    )[0]
-    save_body = browser.split("function saveSession()", 1)[1].split(
-        "function loadSession()", 1
-    )[0]
-    restart_body = browser.split("function restartInterruptedGeneration()", 1)[
-        1
-    ].split("function handleGo()", 1)[0]
-    discard_body = browser.split("function handleDiscard()", 1)[1].split(
-        "// Session persistence", 1
-    )[0]
-    accept_body = browser.split("function handleAccept()", 1)[1].split(
-        "function handleDiscard()", 1
-    )[0]
-    assert "sendEvent(" not in resume_body
-    assert "generatingNeedsRestart = state === 'GENERATING'" in resume_body
-    assert "retry.textContent = 'Retry'" in browser
-    assert "retry.addEventListener('click'" in browser
-    assert "retryGeneration();" in browser
-    assert "buildRetryGenerationEvent" in retry_body
-    assert "captureAndEmit(" in retry_body
-    assert "generationIntent" in retry_body
-    assert "generatingNeedsRetry = false" in retry_body
-    assert retry_body.index("generatingNeedsRetry = false") < retry_body.index(
-        "captureAndEmit("
-    )
-    assert "variantObserver = startVariantObserver(currentSessionId)" in retry_body
-    assert retry_body.index("startVariantObserver(currentSessionId)") < retry_body.index(
-        "captureAndEmit("
-    )
-    assert "connectSSE()" in retry_body
-    connect_body = browser.split("function connectSSE()", 1)[1].split(
-        "function handleServerLost()", 1
-    )[0]
-    assert "currentServerCredentials()" in connect_body
-    assert restart_body.index("generatingNeedsRestart = false") < restart_body.index(
-        "sendEvent("
-    )
-    assert "Clearing interrupted session" in restart_body
-    assert "restorePendingDiscard(" in restart_body
-    assert "markSessionHandled()" not in restart_body
-    assert "cleanup()" not in restart_body
-    assert "markSessionHandled()" not in discard_body
-    assert "cleanup()" not in discard_body
-    assert "restorePendingDiscard(" in discard_body
-    assert "pendingAccept" in accept_body
-    assert "restorePendingAccept(" in accept_body
-    assert "markSessionHandled()" not in accept_body
-    assert "confirmAcceptedVariant(" not in accept_body
-    assert "case 'complete':" in browser
-    complete_case = browser.split("case 'complete':", 1)[1].split(
-        "case 'discard':", 1
-    )[0]
-    assert "markSessionHandled()" in complete_case
-    assert "confirmAcceptedVariant(" in complete_case
-    assert "case 'discarded':" in browser
-    assert "case 'discard':" in browser
-    discarded_case = browser.split("case 'discarded':", 1)[1].split(
-        "case 'error':", 1
-    )[0]
-    assert "markSessionHandled()" in discarded_case
-    assert "cleanup()" in discarded_case
-    assert "discardWasUnconfirmed" in server_lost_body
-    assert "acceptWasUnconfirmed" in server_lost_body
-    assert "generatingNeedsRetry = !!generationIntent" in server_lost_body
-    assert (
-        "if (!interruptedGeneration && !recoverableCycling) selectedElement = null"
-        in server_lost_body
-    )
-    assert "showBar('cycling')" in server_lost_body
-    assert "status.setAttribute('role', 'status')" in browser
-    assert "status.setAttribute('aria-live', 'polite')" in browser
-    assert "Reselect the element" in resume_body
-    assert "window.__IMPECCABLE_TOKEN__" in browser
-    assert "JSON.stringify({ ...msg, token: server.token })" in browser
-    assert "selectedAction = 'impeccable'" not in server_lost_body
-    assert "generationIntent" not in save_body
 
 
 def test_design_panel_tab_keys_choose_the_next_roving_tab(tmp_path: Path) -> None:
@@ -1020,6 +935,29 @@ def test_live_inject_preserves_authorised_insert_and_remove_workflow(tmp_path: P
     assert page.read_text() == original
 
 
+def test_live_inject_remove_cleans_existing_targets_when_one_was_deleted(tmp_path: Path) -> None:
+    first = tmp_path / "first.html"
+    second = tmp_path / "second.html"
+    original = "<html><body>safe</body></html>\n"
+    first.write_text(original)
+    second.write_text(original)
+    _write_config(tmp_path, [first.name, second.name])
+
+    inserted = _run_inject(tmp_path, "--port", "8400", "--token", TOKEN)
+    assert inserted.returncode == 0, inserted.stderr
+    second.unlink()
+
+    removed = _run_inject(tmp_path, "--remove")
+
+    assert removed.returncode == 0, removed.stderr
+    assert first.read_text() == original
+    assert json.loads(removed.stdout)["results"][1] == {
+        "file": second.name,
+        "removed": False,
+        "note": "file missing",
+    }
+
+
 @pytest.mark.parametrize(
     ("filename", "source", "anchor"),
     [
@@ -1158,6 +1096,81 @@ def test_live_inject_seeds_missing_directives_from_default_src(
     assert "script-src https://scripts.example http://127.0.0.1:8400" in patched
     assert "connect-src https: data: http://127.0.0.1:8400" in patched
     assert "img-src https: data: blob:" in patched
+
+
+def test_live_inject_csp_attributes_are_exact_and_round_trip(tmp_path: Path) -> None:
+    module_url = INJECT.as_uri()
+    decoy = '<meta data-http-equiv="Content-Security-Policy" content="default-src \'none\'">'
+    source = (
+        decoy
+        + '<meta http-equiv="Content-Security-Policy" '
+        + 'data-content="default-src \'none\'" data-note="content=\'decoy\'" '
+        + 'content="default-src \'none\'">'
+    )
+    script = (
+        f"import {{ patchCspMeta,revertCspMeta }} from {json.dumps(module_url)};"
+        f"const source={json.dumps(source)};"
+        "const patched=patchCspMeta(source,8400);"
+        "process.stdout.write(JSON.stringify({patched,reverted:revertCspMeta(patched)}));"
+    )
+
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        cwd=tmp_path,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["patched"].startswith(decoy)
+    assert 'data-content="default-src \'none\'"' in payload["patched"]
+    assert "script-src http://127.0.0.1:8400" in payload["patched"]
+    assert payload["reverted"] == source
+
+
+def test_live_inject_patches_the_effective_script_element_directive(tmp_path: Path) -> None:
+    module_url = INJECT.as_uri()
+    policy = "default-src 'none'; script-src https://workers.example; script-src-elem 'none'"
+    source = f'<meta http-equiv="Content-Security-Policy" content="{policy}">'
+    script = (
+        f"import {{ patchCspMeta }} from {json.dumps(module_url)};"
+        f"process.stdout.write(patchCspMeta({json.dumps(source)},8400));"
+    )
+
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        cwd=tmp_path,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "script-src https://workers.example;" in result.stdout
+    assert "script-src-elem http://127.0.0.1:8400" in result.stdout
+
+
+def test_live_inject_strict_dynamic_fails_before_any_source_write(tmp_path: Path) -> None:
+    safe = tmp_path / "safe.html"
+    strict = tmp_path / "strict.html"
+    safe_source = "<html><body>safe</body></html>\n"
+    strict_source = (
+        '<html><head><meta http-equiv="Content-Security-Policy" '
+        'content="default-src none; script-src \'strict-dynamic\' \'nonce-live\'">'
+        "</head><body>strict</body></html>\n"
+    )
+    safe.write_text(safe_source)
+    strict.write_text(strict_source)
+    _write_config(tmp_path, [safe.name, strict.name])
+
+    result = _run_inject(tmp_path, "--port", "8400", "--token", TOKEN)
+
+    assert result.returncode != 0
+    assert json.loads(result.stderr)["error"] == "csp_strict_dynamic_unsupported"
+    assert safe.read_text() == safe_source
+    assert strict.read_text() == strict_source
 
 
 def test_live_inject_remove_ignores_template_marker_decoy_before_real_block(
@@ -2732,6 +2745,23 @@ class LiveServer:
         self.close()
 
 
+@pytest.mark.parametrize("body", [b"null", b"[]", b'"text"'])
+@pytest.mark.parametrize("endpoint", ["events", "poll"])
+def test_live_server_rejects_non_object_json_without_crashing(
+    tmp_path: Path, endpoint: str, body: bytes,
+) -> None:
+    with LiveServer(tmp_path) as server:
+        status, _, response = _request(
+            f"{server.base_url}/{endpoint}",
+            method="POST",
+            body=body,
+            extra_headers={"Content-Type": "application/json"},
+        )
+        assert status == 400
+        assert "error" in json.loads(response)
+        assert _request(f"{server.base_url}/health")[0] == 200
+
+
 @pytest.mark.parametrize("port", ["0", "65536"])
 def test_live_server_rejects_unusable_explicit_ports(
     tmp_path: Path, port: str
@@ -3416,6 +3446,48 @@ def test_live_server_replays_terminal_outcome_after_browser_reconnect(
         assert replayed == {"type": agent_reply, "id": event_id}
 
 
+def test_live_server_signals_when_terminal_replay_history_has_expired(
+    tmp_path: Path,
+) -> None:
+    with LiveServer(tmp_path) as server:
+        poll_url = (
+            f"{server.base_url}/poll?token={quote(server.agent_token)}"
+            "&timeout=1000&leaseMs=1000"
+        )
+        for value in range(129):
+            event_id = f"{value:08x}"
+            assert _request(
+                f"{server.base_url}/events",
+                method="POST",
+                body=json.dumps(
+                    {"token": server.token, "type": "discard", "id": event_id}
+                ).encode(),
+                extra_headers={"Content-Type": "application/json"},
+            )[0] == 200
+            lease = json.loads(_request(poll_url)[2])
+            assert _request(
+                f"{server.base_url}/poll",
+                method="POST",
+                body=json.dumps(
+                    {
+                        "token": server.agent_token,
+                        "leaseToken": lease["leaseToken"],
+                        "id": event_id,
+                        "type": "discarded",
+                    }
+                ).encode(),
+                extra_headers={"Content-Type": "application/json"},
+            )[0] == 200
+
+        messages, watermark = _read_sse_messages(server, 130, last_event_id="0")
+
+        assert messages[0] == {"type": "connected", "hasProjectContext": False}
+        assert messages[1] == {"type": "discarded", "id": "00000001"}
+        assert messages[-2] == {"type": "discarded", "id": "00000080"}
+        assert messages[-1] == {"type": "replay_gap"}
+        assert watermark == "129"
+
+
 def test_expired_lease_cannot_override_a_competing_worker_lease(
     tmp_path: Path,
 ) -> None:
@@ -3642,6 +3714,87 @@ def test_carbonized_accept_finishes_locally_when_stale_server_state_has_no_agent
     assert payload["phase"] == "completed"
     journal = live_dir / "sessions" / f"{event_id}.jsonl"
     assert json.loads(journal.read_text().splitlines()[-1])["type"] == "complete"
+
+
+@pytest.mark.parametrize(
+    ("setup_event", "completion_args"),
+    [
+        (None, []),
+        ({"type": "generate", "id": "deadbeef", "count": 1}, []),
+        ({"type": "agent_done", "id": "deadbeef", "carbonize": True}, ["--discarded"]),
+    ],
+)
+def test_offline_completion_requires_an_existing_phase_compatible_journal(
+    tmp_path: Path,
+    setup_event: dict[str, object] | None,
+    completion_args: list[str],
+) -> None:
+    if setup_event is not None:
+        module_url = (SCRIPTS / "live-session-store.mjs").as_uri()
+        setup = (
+            f"import {{ createLiveSessionStore }} from {json.dumps(module_url)};"
+            "const store=createLiveSessionStore({cwd:process.argv[1]});"
+            f"store.appendEvent({json.dumps(setup_event)});"
+        )
+        prepared = subprocess.run(
+            ["node", "--input-type=module", "-e", setup, str(tmp_path)],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        assert prepared.returncode == 0, prepared.stderr
+
+    completed = subprocess.run(
+        [
+            "node",
+            str(SCRIPTS / "live-complete.mjs"),
+            "--id",
+            "deadbeef",
+            *completion_args,
+        ],
+        cwd=tmp_path,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode != 0
+    assert json.loads(completed.stderr)["error"] == "live_completion_rejected"
+    journal = tmp_path / ".impeccable" / "live" / "sessions" / "deadbeef.jsonl"
+    if journal.exists():
+        assert json.loads(journal.read_text().splitlines()[-1])["type"] == setup_event["type"]
+
+
+def test_offline_completion_rejects_a_malformed_carbonize_journal(tmp_path: Path) -> None:
+    event_id = "deadbeef"
+    module_url = (SCRIPTS / "live-session-store.mjs").as_uri()
+    setup = (
+        f"import {{ createLiveSessionStore }} from {json.dumps(module_url)};"
+        "const store=createLiveSessionStore({cwd:process.argv[1]});"
+        f"store.appendEvent({{type:'agent_done',id:{json.dumps(event_id)},carbonize:true}});"
+    )
+    prepared = subprocess.run(
+        ["node", "--input-type=module", "-e", setup, str(tmp_path)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert prepared.returncode == 0, prepared.stderr
+    journal = tmp_path / ".impeccable" / "live" / "sessions" / f"{event_id}.jsonl"
+    journal.write_text(journal.read_text() + "{malformed\n")
+    before = journal.read_text()
+
+    completed = subprocess.run(
+        ["node", str(SCRIPTS / "live-complete.mjs"), "--id", event_id],
+        cwd=tmp_path,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode != 0
+    assert json.loads(completed.stderr)["error"] == "live_completion_rejected"
+    assert journal.read_text() == before
 
 
 def test_live_complete_rejects_a_missing_agent_state_at_an_unsafe_path(

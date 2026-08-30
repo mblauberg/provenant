@@ -102,27 +102,41 @@ Output (JSON):
     console.error(JSON.stringify({ ok: false, error: 'config_no_targets' }));
     process.exit(1);
   }
-  // Resolve and validate the complete target set before changing any file. A
-  // later escaping target must not leave earlier project files half-mutated.
-  const targets = resolvedFiles.map((relFile) => ({
-    relFile,
-    snapshot: readContainedSource(process.cwd(), relFile, { relativeOnly: true }),
-  }));
-
   if (args.includes('--remove')) {
     const replacements = [];
-    const results = targets.map(({ relFile, snapshot }) => {
+    const results = [];
+    for (const relFile of resolvedFiles) {
+      let snapshot;
+      try {
+        snapshot = readContainedSource(process.cwd(), relFile, { relativeOnly: true });
+      } catch (error) {
+        // A deleted literal target must not strand live markup in the other
+        // configured pages. Only a genuinely absent path is skippable;
+        // dangling symlinks and unreadable or malformed targets still fail.
+        try {
+          fs.lstatSync(path.resolve(process.cwd(), relFile));
+        } catch (statError) {
+          if (error?.code === 'source_path_invalid' && statError?.code === 'ENOENT') {
+            results.push({ file: relFile, removed: false, note: 'file missing' });
+            continue;
+          }
+        }
+        throw error;
+      }
       const content = snapshot.bytes.toString('utf-8');
       const detagged = removeTag(content, config.commentSyntax, relFile);
       const updated = revertCspMeta(detagged, relFile);
-      if (updated === content) return { file: relFile, removed: false, note: 'no tag present' };
+      if (updated === content) {
+        results.push({ file: relFile, removed: false, note: 'no tag present' });
+        continue;
+      }
       replacements.push({ snapshot, content: updated });
-      return {
+      results.push({
         file: relFile,
         removed: detagged !== content,
         cspReverted: updated !== detagged,
-      };
-    });
+      });
+    }
     replaceContainedSources(replacements);
     console.log(JSON.stringify({ ok: true, results }));
     return;
@@ -142,6 +156,12 @@ Output (JSON):
     process.exit(1);
   }
 
+  // Insert remains all-or-nothing: validate every target before changing any
+  // source so a missing or unsafe later entry cannot leave partial markup.
+  const targets = resolvedFiles.map((relFile) => ({
+    relFile,
+    snapshot: readContainedSource(process.cwd(), relFile, { relativeOnly: true }),
+  }));
   const replacements = [];
   const results = targets.map(({ relFile, snapshot }) => {
     const content = snapshot.bytes.toString('utf-8');
@@ -527,7 +547,8 @@ function findCspMetaTags(content, filePath = '') {
   let m;
   while ((m = tagRe.exec(content)) !== null) {
     const attrs = m[1];
-    if (!/(http-equiv|httpEquiv)\s*=\s*(['"])Content-Security-Policy\2/i.test(attrs)) continue;
+    const httpEquiv = getAttr(attrs, 'http-equiv') || getAttr(attrs, 'httpEquiv');
+    if (httpEquiv?.value.toLowerCase() !== 'content-security-policy') continue;
     const syntax = ['.jsx', '.tsx'].includes(path.extname(filePath).toLowerCase())
       ? 'jsx'
       : 'html';
@@ -542,19 +563,42 @@ function findCspMetaTags(content, filePath = '') {
 }
 
 function getAttr(attrs, name) {
-  const re = new RegExp(`\\b${name}\\s*=\\s*(['"])([\\s\\S]*?)\\1`, 'i');
-  const m = attrs.match(re);
-  return m ? { quote: m[1], value: m[2], full: m[0] } : null;
+  const re = /([^\s=/>]+)\s*=\s*(['"])([\s\S]*?)\2/g;
+  let match;
+  while ((match = re.exec(attrs)) !== null) {
+    if (match[1].toLowerCase() !== name.toLowerCase()) continue;
+    return {
+      start: match.index,
+      end: match.index + match[0].length,
+      name: match[1],
+      quote: match[2],
+      value: match[3],
+      full: match[0],
+    };
+  }
+  return null;
+}
+
+function findDirective(csp, directive) {
+  const re = new RegExp(`(^|;)(\\s*)(${directive})(?:\\s+([^;]*))?(?=;|$)`, 'i');
+  const m = csp.match(re);
+  return m ? {
+    match: m,
+    start: m.index,
+    end: m.index + m[0].length,
+    tokens: (m[4] || '').trim().split(/\s+/).filter(Boolean),
+  } : null;
 }
 
 function appendOriginToDirective(csp, directive, origin) {
-  const re = new RegExp(`(^|;)(\\s*)(${directive})\\s+([^;]*)`, 'i');
-  const m = csp.match(re);
+  const found = findDirective(csp, directive);
+  const m = found?.match;
   if (m) {
-    const tokens = m[4].trim().split(/\s+/).filter(Boolean);
+    const tokens = found.tokens;
     if (tokens.includes(origin)) return csp;
     const expanded = tokens.filter((token) => token.toLowerCase() !== "'none'");
-    return csp.replace(re, `${m[1]}${m[2]}${m[3]} ${[...expanded, origin].join(' ')}`);
+    const replacement = `${m[1]}${m[2]}${m[3]} ${[...expanded, origin].join(' ')}`;
+    return csp.slice(0, found.start) + replacement + csp.slice(found.end);
   }
   const defaultMatch = csp.match(/(^|;)\s*default-src\s+([^;]*)/i);
   // With no default-src, a missing fetch directive is already unrestricted,
@@ -567,6 +611,18 @@ function appendOriginToDirective(csp, directive, origin) {
   if (!inherited.includes(origin)) inherited.push(origin);
   return csp.trim().replace(/;?\s*$/, '')
     + `; ${directive} ${inherited.join(' ')}`;
+}
+
+function effectiveScriptDirective(csp) {
+  for (const directive of ['script-src-elem', 'script-src', 'default-src']) {
+    const found = findDirective(csp, directive);
+    if (found) return { directive, tokens: found.tokens };
+  }
+  return null;
+}
+
+function replaceAttr(attrs, attr, replacement) {
+  return attrs.slice(0, attr.start) + replacement + attrs.slice(attr.end);
 }
 
 export function patchCspMeta(content, port, filePath = '') {
@@ -584,8 +640,18 @@ export function patchCspMeta(content, port, filePath = '') {
     if (!contentAttr) continue;
 
     const original = contentAttr.value;
+    const effectiveScript = effectiveScriptDirective(original);
+    if (effectiveScript?.tokens.some((token) => token.toLowerCase() === "'strict-dynamic'")) {
+      const error = new Error('CSP strict-dynamic requires a nonce-aware live script');
+      error.code = 'csp_strict_dynamic_unsupported';
+      throw error;
+    }
     let patched = original;
-    patched = appendOriginToDirective(patched, 'script-src', origin);
+    patched = appendOriginToDirective(
+      patched,
+      effectiveScript?.directive === 'script-src-elem' ? 'script-src-elem' : 'script-src',
+      origin,
+    );
     patched = appendOriginToDirective(patched, 'connect-src', origin);
     // The shader overlay during 'generating' creates a screenshot via
     // URL.createObjectURL, producing a `blob:` URL — img-src 'self' rejects
@@ -604,7 +670,7 @@ export function patchCspMeta(content, port, filePath = '') {
     // `<meta … />` round-trips byte-for-byte.
     const trailingWs = (attrs.match(/[ \t]*$/) || [''])[0];
     const attrsBody = attrs.slice(0, attrs.length - trailingWs.length);
-    const newAttrs = attrsBody.replace(contentAttr.full, newContentAttr) + ' ' + marker + trailingWs;
+    const newAttrs = replaceAttr(attrsBody, contentAttr, newContentAttr) + ' ' + marker + trailingWs;
     const newTag = tag.full.replace(attrs, newAttrs);
 
     result = result.slice(0, tag.start) + newTag + result.slice(tag.end);
@@ -627,15 +693,17 @@ export function revertCspMeta(content, filePath = '') {
     const originalValue = decodeCanonicalUtf8Base64(origAttr.value);
 
     const newContentAttr = `content=${contentAttr.quote}${originalValue}${contentAttr.quote}`;
-    let newAttrs = tag.attrs.replace(contentAttr.full, newContentAttr);
-    // Drop the exact marker text and its generated separator. Base64 can
-    // contain regexp metacharacters, so this must remain a literal splice.
-    const markerIndex = newAttrs.indexOf(origAttr.full);
-    if (markerIndex === -1) continue;
-    const markerStart = markerIndex > 0 && newAttrs[markerIndex - 1] === ' '
-      ? markerIndex - 1
-      : markerIndex;
-    newAttrs = newAttrs.slice(0, markerStart) + newAttrs.slice(markerIndex + origAttr.full.length);
+    const markerStart = origAttr.start > 0 && tag.attrs[origAttr.start - 1] === ' '
+      ? origAttr.start - 1
+      : origAttr.start;
+    const edits = [
+      { start: contentAttr.start, end: contentAttr.end, replacement: newContentAttr },
+      { start: markerStart, end: origAttr.end, replacement: '' },
+    ].sort((left, right) => right.start - left.start);
+    let newAttrs = tag.attrs;
+    for (const edit of edits) {
+      newAttrs = newAttrs.slice(0, edit.start) + edit.replacement + newAttrs.slice(edit.end);
+    }
     const newTag = tag.full.replace(tag.attrs, newAttrs);
 
     result = result.slice(0, tag.start) + newTag + result.slice(tag.end);

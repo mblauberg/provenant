@@ -1128,7 +1128,11 @@
     const prev = navBtn('\u2190');
     prev.setAttribute('aria-label', 'Previous variant');
     prev.addEventListener('click', (e) => { e.stopPropagation(); cycleVariant(-1); });
-    if (visibleVariant <= 1) prev.style.opacity = '0.3';
+    if (visibleVariant <= 1) {
+      prev.disabled = true;
+      prev.setAttribute('aria-disabled', 'true');
+      prev.style.opacity = '0.3';
+    }
     row.appendChild(prev);
 
     // Dots (clickable)
@@ -1146,7 +1150,11 @@
     const next = navBtn('\u2192');
     next.setAttribute('aria-label', 'Next variant');
     next.addEventListener('click', (e) => { e.stopPropagation(); cycleVariant(1); });
-    if (visibleVariant >= arrivedVariants) next.style.opacity = '0.3';
+    if (visibleVariant >= arrivedVariants) {
+      next.disabled = true;
+      next.setAttribute('aria-disabled', 'true');
+      next.style.opacity = '0.3';
+    }
     row.appendChild(next);
 
     // Tune chip — only when the visible variant exposes params
@@ -2316,6 +2324,13 @@
           if (!hasProjectContext) showToast('No PRODUCT.md found. Variants will use only the available project evidence.', 7000);
           console.log('[impeccable] Live mode connected.');
           if (state === 'IDLE') state = 'PICKING';
+          break;
+        case 'replay_gap':
+          if (pendingAccept) {
+            restorePendingAccept('The completion outcome could not be confirmed; inspect the result before trying again.');
+          } else if (pendingDiscard) {
+            restorePendingDiscard('The discard outcome could not be confirmed; inspect the session before trying again.');
+          }
           break;
         case 'done':
           // Variants already arrived via HMR → normal transition.

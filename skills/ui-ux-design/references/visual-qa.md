@@ -18,8 +18,9 @@ correctness, or responsive behaviour beyond the captured state.
 Use rendered inspection, screenshots, accessibility tree, keyboard path,
 console, and network evidence as distinct lanes. Check hierarchy, alignment,
 clipping, layering, focus, overflow, state continuity, assets, errors, and
-unexpected requests. A detector or build stamp is not evidence that the page
-rendered as claimed; verify the shipped artefact.
+unexpected requests. For a quick anti-pattern and contrast lead, run
+`node <skill-root>/scripts/detect.mjs --help`; its output or a build stamp is
+not evidence that the page rendered as claimed, so verify the shipped artefact.
 
 Translate subjective goals into binary conditions tied to the approved intent.
 Record each matrix cell as tested, failed, not tested, or not applicable and

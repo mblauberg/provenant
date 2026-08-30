@@ -9,7 +9,10 @@ import { captureVisualContrastCandidate } from '../visual/screenshot-contrast.mj
 
 const URL_READINESS_DEFAULTS = Object.freeze({
   waitUntil: 'load',
-  settleMs: 100,
+  // Client-rendered UI commonly appears just after the load event. Keep this
+  // bounded and overridable rather than relying on network-idle, which never
+  // arrives for apps with persistent connections.
+  settleMs: 250,
 });
 
 async function runVisualContrastFallback(page, serializedGroups, options, profile, target) {

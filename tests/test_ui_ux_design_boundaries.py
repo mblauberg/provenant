@@ -44,3 +44,24 @@ def test_review_branch_has_no_legacy_write_or_cleanup_surface():
     paths = (UI_UX_DESIGN / "scripts" / "impeccable-paths.mjs").read_text()
     assert "CRITIQUE_DIR" not in paths
     assert "getCritiqueDir" not in paths
+
+
+def test_implementation_requests_keep_implement_as_owner_with_ui_companion():
+    cases = {case["id"]: case for case in _fixture("trigger_cases.yaml")["cases"]}
+    assert cases["q716"]["expected"] == {
+        "primary_skill": "implement",
+        "companion_skills": ["ui-ux-design"],
+    }
+    compositions = [
+        case for case in _fixture("boundary_cases.yaml")["cases"]
+        if case["branch"] == "composition"
+    ]
+    assert compositions
+    for case in compositions:
+        assert case["expected"]["primary_skill"] == "implement"
+        assert case["expected"]["companion_skills"] == ["ui-ux-design"]
+
+
+def test_review_contract_keeps_the_wcag_claim_limit():
+    review = (UI_UX_DESIGN / "references" / "review.md").read_text().lower()
+    assert "do not claim wcag certification" in review

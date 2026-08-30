@@ -326,6 +326,9 @@ const VARIANT_ID_PATTERN = /^[1-8]$/;
 
 function isValidId(v) { return typeof v === 'string' && ID_PATTERN.test(v); }
 function isValidVariantId(v) { return typeof v === 'string' && VARIANT_ID_PATTERN.test(v); }
+function isJsonObject(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
 
 function validateEvent(msg) {
   if (!msg || typeof msg !== 'object' || !msg.type) return 'Missing or invalid message';
@@ -855,6 +858,10 @@ function createRequestHandler({ detectScript, sessionPath, livePath }) {
         hasProjectContext: hasProjectContext(),
       };
       const lastEventId = parseLastSseEventId(req);
+      const replayFloor = state.terminalOutcomes[0]?.eventId ?? null;
+      const replayGap = lastEventId !== null
+        && replayFloor !== null
+        && lastEventId < replayFloor - 1;
       res.write(formatSseMessage(
         connected,
         lastEventId === null ? state.sseEventSequence : null,
@@ -866,6 +873,7 @@ function createRequestHandler({ detectScript, sessionPath, livePath }) {
           }
         }
       }
+      if (replayGap) res.write(formatSseMessage({ type: 'replay_gap' }));
 
       state.sseClients.add(res);
       clearTimeout(state.exitTimer);
@@ -891,6 +899,11 @@ function createRequestHandler({ detectScript, sessionPath, livePath }) {
     // --- Browser→server events (replaces WebSocket messages) ---
     if (p === '/events' && req.method === 'POST') {
       readBoundedJsonBody(req, res, (msg) => {
+        if (!isJsonObject(msg)) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Invalid message' }));
+          return;
+        }
         if (msg.token !== state.token) {
           res.writeHead(401, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: 'Unauthorized' }));
@@ -1014,6 +1027,11 @@ function parseBoundedPositiveInteger(raw, fallback, maximum) {
 
 function handlePollPost(req, res) {
   readBoundedJsonBody(req, res, (msg) => {
+    if (!isJsonObject(msg)) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Invalid agent reply' }));
+      return;
+    }
     if (msg.token !== state.agentToken) {
       res.writeHead(401, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'Unauthorized' }));
