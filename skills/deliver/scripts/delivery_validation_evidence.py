@@ -7,6 +7,7 @@ import math
 from pathlib import Path
 from typing import Any
 
+from delivery_receipt_paths import ensure_within_scope, safe_workspace_path
 from delivery_validation_common import (
     Invalid, _digest, _inside, _list, _mapping, _policy_validation_module,
     _safe_path, _utc, fail, _load_bound_json,
@@ -29,7 +30,14 @@ def _validate_evidence(
         source_paths = [_safe_path(path, f"evidence {evidence_id}.source_paths") for path in _list(item.get("source_paths"), f"evidence {evidence_id}.source_paths")]
         if item.get("kind") != "human":
             fail(not source_paths, f"evidence {evidence_id} requires source_paths")
-        fail(any(not any(_inside(path, scope) for scope in allowed_source_paths) for path in source_paths), f"evidence {evidence_id} reads outside authority.allowed_source_paths")
+        if artifact_root is None:
+            fail(any(not any(_inside(path, scope) for scope in allowed_source_paths) for path in source_paths), f"evidence {evidence_id} reads outside authority.allowed_source_paths")
+        else:
+            for path in source_paths:
+                target, _relative = safe_workspace_path(
+                    artifact_root, path, f"evidence {evidence_id}.source_paths", Invalid,
+                )
+                ensure_within_scope(run, artifact_root, target, "source", Invalid)
         if item.get("kind") == "judgement":
             lineage = _mapping(item.get("model_lineage"), f"evidence {evidence_id}.model_lineage")
             fail(not lineage.get("adapter") or not lineage.get("provider_family") or not lineage.get("model"), f"judgement evidence {evidence_id} requires model lineage")
@@ -44,6 +52,12 @@ def _validate_evidence(
                 f"deterministic evidence {evidence_id} receipt digest must bind its declared artifact",
             )
             fail((item.get("status") == "pass") != (exit_code == 0), f"deterministic evidence {evidence_id} status disagrees with its result")
+            if (
+                item.get("gate") == "tests"
+                and artifact_root is not None
+                and (artifact_root / "scripts" / "check-harness").is_file()
+            ):
+                fail(item.get("method") != "scripts/check-harness", "tests gate requires the canonical scripts/check-harness method")
         if item.get("kind") == "observation":
             _utc(item.get("observed_at"), f"evidence {evidence_id}.observed_at")
             measured = item.get("measured_value")

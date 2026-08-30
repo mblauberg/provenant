@@ -32,9 +32,21 @@ def make_run(tmp_path):
     receipt["run_id"] = "CLEAN-1"
     receipt["fabric_relationships"]["delivery_run_id"] = "CLEAN-1"
     receipt["authority"]["allowed_artifact_paths"] = ["run"]
+    receipt["authority"]["allowed_source_paths"] = ["input", "run"]
     receipt["intent"]["artifact"] = "run/intent.md"
     receipt["artifacts"][0]["path"] = "run/intent.md"
     receipt["artifacts"][1]["path"] = "run/evidence.json"
+    for artifact in receipt["artifacts"]:
+        if artifact["id"].startswith("review-route-"):
+            route_path = f"run/{artifact['path']}"
+            artifact["path"] = route_path
+            for evidence in receipt["evidence"]:
+                route_receipt = evidence.get("route_receipt")
+                if route_receipt and route_receipt.get("path") == route_path.removeprefix("run/"):
+                    route_receipt["path"] = route_path
+                if route_path.removeprefix("run/") in evidence.get("source_paths", []):
+                    evidence["source_paths"].remove(route_path.removeprefix("run/"))
+                    evidence["source_paths"].append(route_path)
     receipt["status"] = "closed"
     receipt["checkpoint"].update({"current_slice": "closed", "next_action": "authorised cleanup", "in_flight": []})
     receipt["human_gates"]["acceptance"] = {"status": "approved", "approver": "human", "evidence": "acceptance-approval"}

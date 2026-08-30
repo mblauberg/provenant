@@ -394,4 +394,25 @@ def materialise_reference_run(
     _materialise_deterministic_evidence_bundle(
         run, by_id["evidence-bundle"], workspace_root,
     )
+    for family, reviewer_id in (
+        ("openai", "reference-openai-reviewer"),
+        ("anthropic", "reference-anthropic-reviewer"),
+    ):
+        artifact = by_id[f"review-route-{family}"]
+        payload = (json.dumps({
+            "status": "ok",
+            "adapter": "native-subagent" if family == "openai" else "claude-code",
+            "reviewer_id": reviewer_id,
+            "resolved_model": "runtime-resolved",
+            "model_family": family,
+            "cross_family": family == "anthropic",
+            "certification_eligible": True,
+        }, sort_keys=True) + "\n").encode()
+        _write_delivery_artifact(artifact, workspace_root, payload)
+        for item in run["evidence"]:
+            if item.get("route_receipt", {}).get("path") == artifact["path"]:
+                item["route_receipt"]["digest"] = artifact["digest"]
+        for item in run["reviews"]:
+            if item.get("provider_family") == family and item.get("status") == "pass":
+                item["route_receipt_digest"] = artifact["digest"]
     return run
