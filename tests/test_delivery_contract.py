@@ -798,13 +798,51 @@ def test_validator_rechecks_live_risk_override_artifact_digest(tmp_path):
         module.validate(candidate, ROOT, workspace_root=tmp_path, verify_hashes=True)
 
 
-def test_validator_requires_canonical_method_for_full_tests_gate():
+def test_validator_requires_canonical_method_for_full_tests_gate(tmp_path):
     module = load_validator()
-    candidate = fixture()
+    candidate = fixture(workspace_root=tmp_path)
+    harness = tmp_path / "scripts" / "check-harness"
+    harness.parent.mkdir()
+    harness.write_text("#!/bin/sh\nexit 0\n")
     tests_evidence = next(item for item in candidate["evidence"] if item["gate"] == "tests")
     tests_evidence["method"] = "python -m pytest tests/test_delivery_contract.py -q"
 
     with pytest.raises(module.Invalid, match="scripts/check-harness"):
+        module.validate(candidate, ROOT, workspace_root=tmp_path)
+
+
+def test_validator_allows_custom_method_for_generic_tests_gate(tmp_path):
+    module = load_validator()
+    candidate = fixture(workspace_root=tmp_path)
+    tests_evidence = next(item for item in candidate["evidence"] if item["gate"] == "tests")
+    tests_evidence["method"] = "python -m pytest tests/test_delivery_contract.py -q"
+
+    module.validate(candidate, ROOT, workspace_root=tmp_path)
+
+
+def test_validator_rejects_source_symlink_that_leaves_declared_scope(tmp_path):
+    module = load_validator()
+    candidate = fixture(workspace_root=tmp_path)
+    candidate["authority"]["allowed_source_paths"].append("allowed")
+    outside = tmp_path / "outside.txt"
+    outside.write_text("outside\n")
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+    (allowed / "source").symlink_to(outside)
+    tests_evidence = next(item for item in candidate["evidence"] if item["gate"] == "tests")
+    tests_evidence["source_paths"] = ["allowed/source"]
+
+    with pytest.raises(module.Invalid, match="leaves authority.allowed_source_paths"):
+        module.validate(candidate, ROOT, workspace_root=tmp_path)
+
+
+def test_validator_requires_bounded_reviewer_id_for_passing_review():
+    module = load_validator()
+    candidate = fixture()
+    review = next(item for item in candidate["reviews"] if item["status"] == "pass")
+    review.pop("reviewer_id")
+
+    with pytest.raises(module.Invalid, match=r"review 0\.reviewer_id"):
         module.validate(candidate, ROOT)
 
 

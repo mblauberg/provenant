@@ -827,6 +827,7 @@ def test_review_add_refuses_other_primary_without_cross_family_dispatch(tmp_path
 def test_evidence_run_refuses_custom_command_for_full_tests_gate(tmp_path):
     support = helpers()
     run_dir = support.initialise(tmp_path)
+    support.install_canonical_check_harness(tmp_path)
     bundle_path = run_dir / "evidence.json"
     bundle_path.write_text(
         '{"schema_version":1,"contract":"deterministic-evidence-bundle","checks":[]}\n'
@@ -844,6 +845,33 @@ def test_evidence_run_refuses_custom_command_for_full_tests_gate(tmp_path):
 
     assert result.returncode == 1
     assert "scripts/check-harness" in result.stderr
+
+
+def test_evidence_run_allows_custom_command_for_generic_tests_gate(tmp_path):
+    support = helpers()
+    run_dir = support.initialise(tmp_path)
+    bundle_path = run_dir / "evidence.json"
+    bundle_path.write_text(
+        '{"schema_version":1,"contract":"deterministic-evidence-bundle","checks":[]}\n'
+    )
+    assert support.add_artifact(
+        tmp_path, run_dir, "evidence-bundle", ".agent-run/DEL-TEST/evidence.json"
+    ).returncode == 0
+
+    result = run_cli(
+        tmp_path,
+        "evidence", "run", "--run-dir", str(run_dir), "--id", "tests",
+        "--gate", "tests", "--artifact-id", "evidence-bundle",
+        "--source", "intent.md", "--", sys.executable, "-c", "print('green')",
+    )
+
+    assert result.returncode == 0, result.stderr
+    receipt = json.loads((run_dir / "RUN.json").read_text())
+    row = next(item for item in receipt["evidence"] if item["id"] == "tests")
+    assert row["method"] == f"{sys.executable} -c 'print('\"'\"'green'\"'\"')'"
+    assert row["stdout"] == "green\n"
+    assert row["stderr"] == ""
+    assert row["result"]["exit_code"] == 0
 
 
 def test_validator_rechecks_other_primary_route_receipt_cross_family(tmp_path):

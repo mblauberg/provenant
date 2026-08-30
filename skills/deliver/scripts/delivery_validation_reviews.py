@@ -10,6 +10,7 @@ from typing import Any
 from delivery_validation_common import (
     REVIEW_ROLES,
     Invalid,
+    _identifier,
     _list,
     _mapping,
     _safe_path,
@@ -83,6 +84,7 @@ def _validate_reviews(
         fail(not item.get("lenses"), f"review {index} requires lenses")
         if item.get("status") == "pass":
             fail(not item.get("model"), f"passing review {index} requires actual model identity")
+            _identifier(item.get("reviewer_id"), f"review {index}.reviewer_id")
             fail(item.get("evidence_id") not in evidence, f"review {index} must link evidence")
             linked = evidence[item["evidence_id"]]
             fail(linked.get("status") != "pass" or linked.get("kind") != "judgement", f"passing review {index} must link passing judgement evidence")

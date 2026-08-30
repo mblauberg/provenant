@@ -734,7 +734,12 @@ def command_evidence_run(args: argparse.Namespace) -> dict[str, Any]:
         ensure_new_evidence_id(run, evidence_id)
         bundle_artifact(run, args.artifact_id, workspace)
         check_evidence_sources(run, workspace, source_paths)
-        if args.gate == "tests" and tuple(command) != CANONICAL_FULL_TEST_COMMAND:
+        canonical_harness = workspace / CANONICAL_FULL_TEST_COMMAND[0]
+        if (
+            args.gate == "tests"
+            and canonical_harness.is_file()
+            and tuple(command) != CANONICAL_FULL_TEST_COMMAND
+        ):
             raise ReceiptError(
                 "tests gate requires the canonical scripts/check-harness method; "
                 "use a narrower gate for focused commands"
