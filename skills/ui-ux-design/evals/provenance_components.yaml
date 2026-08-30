@@ -49,7 +49,7 @@ components:
     local_licence: LICENSES/modern-screenshot-MIT.txt
     notice: THIRD_PARTY_NOTICES.md
     modification: Vendored browser bundle retained unmodified as a live-runtime dependency.
-  - id: harness-evaluation-contracts
+  - id: harness-original-material
     origin: harness-original
     prefixes: [evals/]
     exact:
@@ -58,4 +58,4 @@ components:
       - scripts/jsx-tag-scanner.mjs
       - scripts/live-server-startup.mjs
       - tests/live-server-startup.test.mjs
-    description: Local routing, authority, disposition, and provenance fixtures; not upstream Impeccable expression or universal provider enforcement.
+    description: Local skill entrypoint, runtime safeguards, tests, routing, authority, disposition, and provenance fixtures; not upstream Impeccable expression.

@@ -8,7 +8,8 @@ configuration changes, and output/cache locations. This is internal routing,
 not wording the user must supply. A read-only request never enters live setup;
 use read-only rendered evidence or an authorised isolated prototype instead.
 
-Start the skill-local runtime with `node <skill-root>/scripts/live.mjs` and use
+Start the skill-local runtime with
+`node "${AGENTS_HOME:-$HOME/.agents}/skills/ui-ux-design/scripts/live.mjs"` and use
 its help and JSON event contract as the operational procedure. Keep internal
 focus keys as protocol data, not a user interaction model. Validate every
 project-relative source target with descriptor-bound, no-follow containment

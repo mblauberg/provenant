@@ -31,7 +31,7 @@ then add.
 
 Inspect existing components, tokens, patterns, registries, and real consumers
 before creating anything. Prefer modifying or composing the canonical owner for
-the same UI role. In a compatible shadcn/ui project, start from a suitable
+the same UI role. In a shadcn/ui project identified by its `components.json`, start from a suitable
 project component, shadcn component, block, template, or reviewed registry item,
 then customise the project-owned source to its content, states, tokens, and
 accessibility contract. For new shadcn work without an established primitive

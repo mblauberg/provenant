@@ -130,4 +130,4 @@ def test_harness_original_runtime_and_test_files_are_not_overattributed_to_impec
         "scripts/live-server-startup.mjs",
         "tests/live-server-startup.test.mjs",
     ):
-        assert _component_for(relative, components) == ["harness-evaluation-contracts"]
+        assert _component_for(relative, components) == ["harness-original-material"]

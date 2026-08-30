@@ -1,5 +1,5 @@
 # Modified from Impeccable for this harness; see the repository THIRD_PARTY_NOTICES.md.
 interface:
   display_name: UI/UX Design
-  short_description: Read-only UI/UX review by default; authorised design on request
+  short_description: Read-only UI/UX review by default; changes pair with implement
   default_prompt: Use $ui-ux-design. Infer intent from the whole request. Review, audit, comparison, and advice without change intent are read-only. A clear review-and-fix, build, redesign, polish, implementation, or live-iteration request routes to `implement` as primary with UI/UX as companion. Never require harness terminology from the user.

@@ -11,6 +11,8 @@ a build or capture, use an assigned output/cache path outside the protected
 tree. An assigned report is the only permitted write and must also resolve
 outside the protected tree.
 
+Here, the protected tree is the reviewed project tree.
+
 ## Establish coverage
 
 State the surface, representative viewport and input modes, applicable states,
@@ -19,7 +21,8 @@ detector output are supporting evidence, not render proof. A quick review may
 sample the critical path. A full review expands the state and viewport matrix,
 but neither implies exhaustive coverage.
 
-For deterministic leads, run `node <skill-root>/scripts/detect.mjs --help`,
+For deterministic leads, run
+`node "${AGENTS_HOME:-$HOME/.agents}/skills/ui-ux-design/scripts/detect.mjs" --help`,
 then scan the relevant file, directory, or URL. Treat every structured
 `incomplete` target or engine failure as missing coverage, not a clean result.
 A clean scan remains supporting evidence and never certifies the rendered UI.

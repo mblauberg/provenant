@@ -24,7 +24,8 @@ The component ledger at `skills/ui-ux-design/evals/provenance_components.yaml`
 records the exact harness-original exceptions. Impeccable-derived source files
 modified by this consolidation carry a local marker pointing back to this
 index; this is not a claim that every historical file has a marker.
-`skills/ui-ux-design/evals/`, `scripts/contained-source.mjs`,
+`skills/ui-ux-design/SKILL.md`, `skills/ui-ux-design/evals/`,
+`scripts/contained-source.mjs`,
 `scripts/jsx-tag-scanner.mjs`, `scripts/live-server-startup.mjs`, and
 `tests/live-server-startup.test.mjs` are harness-original rather than upstream
 Impeccable expression.

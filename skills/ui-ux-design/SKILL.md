@@ -13,8 +13,8 @@ project's current design owners, and observable UI evidence.
 **Review** covers critique, audit, comparison, and advice without requested
 source changes. It is read-only. Inspect source and rendered state using
 non-mutating navigation, GETs, and screenshots, with any output or cache outside
-the protected tree. Do not change project or external state. Write only an
-assigned report outside the protected tree. Load [review](references/review.md).
+the reviewed project tree. Do not change project or external state. Write only
+an assigned report outside that tree. Load [review](references/review.md).
 
 **Design** covers directions and requested UI changes. Advice without source
 changes remains read-only. A request to build, redesign, fix, polish, or
