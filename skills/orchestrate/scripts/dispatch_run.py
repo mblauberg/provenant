@@ -76,7 +76,7 @@ def write_owned(run_dir: Path, path: Path, content: str) -> None:
 
 @contextmanager
 def owned_text_file(run_dir: Path, path: Path, mode: str):
-    flags = os.O_WRONLY | os.O_CREAT | (os.O_APPEND if "a" in mode else os.O_TRUNC)
+    flags = os.O_WRONLY | os.O_CREAT | (os.O_APPEND if "a" in mode else os.O_EXCL)
     fd, _relative, _target = open_contained_regular(
         run_dir, path.relative_to(run_dir), flags, label=str(path.name)
     )
@@ -740,13 +740,12 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
     result_path = attempt_dir / "result.md"
     adapter_path = attempt_dir / "adapter-receipt.json"
     stderr_path = attempt_dir / "stderr.log"
-    fd, _relative, _target = open_contained_regular(
-        run_dir, prompt_path.relative_to(run_dir), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, label="prompt"
-    )
-    with os.fdopen(fd, "wb") as stream:
-        stream.write(prompt_bytes or b"")
-        stream.flush()
-        os.fsync(stream.fileno())
+    try:
+        atomic_write_contained(
+            run_dir, prompt_path.relative_to(run_dir), prompt_bytes or b"", label="prompt"
+        )
+    except OwnedFileError as exc:
+        return fail(run_dir, "attempt_path_invalid", str(exc))
     command = build_command(args, prompt_path, result_path)
     requested_route = {
         "intent": args.intent,

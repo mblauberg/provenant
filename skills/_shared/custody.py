@@ -53,6 +53,8 @@ def open_contained_regular(
     root: Path, value: str | Path, flags: int, *, mode: int = 0o600, label: str = "file"
 ) -> tuple[int, str, Path]:
     """Open an owned file once and bind the returned descriptor to its inode."""
+    if flags & getattr(os, "O_TRUNC", 0):
+        raise OwnedFileError(f"{label} cannot be opened destructively")
     root = root.resolve()
     raw = Path(value)
     if raw.is_absolute() or ".." in raw.parts or not raw.parts:

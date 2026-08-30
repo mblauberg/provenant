@@ -493,3 +493,19 @@ def test_dispatch_classifies_missing_manifest_as_missing_custody(tmp_path: Path)
     )
     assert result.returncode == 2
     assert json.loads(result.stdout)["status"] == "run_custody_missing"
+
+
+@pytest.mark.parametrize("name", ["prompt.md", "adapter-receipt.json", "stderr.log"])
+def test_destructive_custody_open_rejects_hardlink_before_truncation(tmp_path: Path, name: str) -> None:
+    custody = load(ROOT / "skills/_shared/custody.py", f"custody_hardlink_{name}")
+    run = tmp_path / "run"
+    run.mkdir()
+    outside = tmp_path / f"outside-{name}"
+    outside.write_bytes(b"must survive\n")
+    target = run / name
+    target.hardlink_to(outside)
+    with pytest.raises(custody.OwnedFileError):
+        custody.open_contained_regular(
+            run, name, custody.os.O_WRONLY | custody.os.O_CREAT | custody.os.O_TRUNC, label=name
+        )
+    assert outside.read_bytes() == b"must survive\n"
