@@ -67,13 +67,18 @@ def validate(
     policy_validation.validate_authority(authority, run, root, invalid_type=Invalid)
     allowed_artifact_paths = [_safe_path(item, "authority.allowed_artifact_paths") for item in authority["allowed_artifact_paths"]]
     allowed_source_paths = [_safe_path(item, "authority.allowed_source_paths") for item in authority["allowed_source_paths"]]
+    override_evidence_id = _mapping(run.get("risk_override"), "risk_override").get("evidence")
+    override_artifact_ids = {
+        item.get("artifact_id") for item in _list(run.get("evidence"), "evidence")
+        if isinstance(item, dict) and item.get("id") == override_evidence_id and item.get("artifact_id")
+    }
     artifacts = _validate_artifacts(
         _list(run.get("artifacts"), "artifacts"),
         workspace_root=workspace_root or receipt_dir,
         verify_hashes=verify_hashes,
         allowed_artifact_paths=allowed_artifact_paths,
         allowed_source_paths=allowed_source_paths,
-        profile=profile,
+        profile=profile, override_artifact_ids=override_artifact_ids,
     )
     _validate_history(run)
     _validate_checkpoint(run, artifacts, receipt_dir=receipt_dir, workspace_root=workspace_root)
@@ -118,7 +123,10 @@ def validate(
         }
         first_review = next(item for item in run["state_history"] if item["state"] == "reviewing")
         fail(not deterministic_ids <= set(first_review["evidence_ids"]), "reviewing transition lacks deterministic gate evidence")
-    _validate_reviews(run, evidence, required=acceptance_reached)
+    _validate_reviews(
+        run, evidence, required=acceptance_reached, artifacts=artifacts,
+        artifact_root=workspace_root or receipt_dir, verify_hashes=verify_hashes,
+    )
     _software_delivery_validator().validate_if_software(
         run, artifacts, workspace_root or receipt_dir, verify_hashes, Invalid,
     )

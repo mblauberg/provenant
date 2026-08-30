@@ -14,7 +14,7 @@ from delivery_validation_common import (
 def _validate_artifacts(
     artifacts: list[Any], *, workspace_root: Path | None, verify_hashes: bool,
     allowed_artifact_paths: list[str], allowed_source_paths: list[str],
-    profile: dict[str, Any],
+    profile: dict[str, Any], override_artifact_ids: set[str] | None = None,
 ) -> dict[str, dict[str, Any]]:
     by_id: dict[str, dict[str, Any]] = {}
     for index, raw in enumerate(artifacts):
@@ -47,18 +47,27 @@ def _validate_artifacts(
         digest = item.get("digest")
         _software_delivery_validator().validate_integrity_shape(
             item, artifact_id, revision_present, path_present, _digest, fail)
-        if path_present and verify_hashes:
-            fail(workspace_root is None, "verify_hashes requires workspace_root")
-            target = workspace_root / path
+        target = None
+        if path_present and workspace_root is not None:
+            target = (workspace_root / clean_path).resolve()
             try:
                 target.resolve().relative_to(workspace_root.resolve())
             except ValueError as exc:
                 raise Invalid(f"artifact {artifact_id} resolves outside workspace_root") from exc
+            scopes = [(workspace_root / scope).resolve() for scope in allowed_artifact_paths]
+            fail(
+                not any(target == scope or target.is_relative_to(scope) for scope in scopes),
+                f"artifact {artifact_id} resolves outside authority.allowed_artifact_paths",
+            )
+        if path_present and verify_hashes:
+            fail(workspace_root is None, "verify_hashes requires workspace_root")
+            assert target is not None
             fail(not target.is_file(), f"artifact {artifact_id} path does not exist")
             actual = "sha256:" + hashlib.sha256(target.read_bytes()).hexdigest()
+            if actual != digest and artifact_id in (override_artifact_ids or set()):
+                raise Invalid("risk override artifact digest does not match live bytes")
             fail(actual != digest, f"artifact {artifact_id} digest does not match live bytes")
         by_id[artifact_id] = item
     fail(not by_id, "at least one artifact is required")
     fail(not any(item.get("class") == "canonical" for item in by_id.values()), "profile requires a canonical outcome artifact")
     return by_id
-

@@ -44,6 +44,8 @@ def _validate_evidence(
                 f"deterministic evidence {evidence_id} receipt digest must bind its declared artifact",
             )
             fail((item.get("status") == "pass") != (exit_code == 0), f"deterministic evidence {evidence_id} status disagrees with its result")
+            if item.get("gate") == "tests":
+                fail(item.get("method") != "scripts/check-harness", "tests gate requires the canonical scripts/check-harness method")
         if item.get("kind") == "observation":
             _utc(item.get("observed_at"), f"evidence {evidence_id}.observed_at")
             measured = item.get("measured_value")

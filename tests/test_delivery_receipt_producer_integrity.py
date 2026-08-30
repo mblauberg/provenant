@@ -167,6 +167,10 @@ def test_bind_refuses_to_replace_observation_after_its_lifecycle_gate(tmp_path):
 def test_rebuild_refuses_to_mutate_a_referenced_sibling_digest(tmp_path):
     support = helpers()
     run_dir = support.initialise(tmp_path)
+    (tmp_path / "scripts").mkdir()
+    check = tmp_path / "scripts" / "check-harness"
+    check.write_text("#!/bin/sh\nexit 0\n")
+    check.chmod(0o755)
     bundle_path = run_dir / "evidence.json"
     bundle_path.write_text(
         '{"schema_version":1,"contract":"deterministic-evidence-bundle","checks":[]}\n'
@@ -189,9 +193,7 @@ def test_rebuild_refuses_to_mutate_a_referenced_sibling_digest(tmp_path):
         "--source",
         "intent.md",
         "--",
-        sys.executable,
-        "-c",
-        "pass",
+        "scripts/check-harness",
     ).returncode == 0
     receipt_path = run_dir / "RUN.json"
     receipt = json.loads(receipt_path.read_text())
@@ -329,7 +331,7 @@ def test_evidence_run_rechecks_source_scope_after_command_execution(
     args = module.build_parser().parse_args([
         "evidence", "run", "--run-dir", str(run_dir), "--id", "tests",
         "--gate", "tests", "--artifact-id", "evidence-bundle",
-        "--source", "allowed/source", "--", sys.executable, "-c", "pass",
+        "--source", "allowed/source", "--", "scripts/check-harness",
     ])
 
     with pytest.raises(module.ReceiptError, match="allowed_source_paths"):
@@ -390,6 +392,12 @@ def test_mutation_refuses_changed_live_risk_override_artifact(tmp_path):
 def test_mutation_rechecks_risk_override_after_evidence_command(tmp_path):
     support = helpers()
     run_dir, approval = initialise_downgraded_run(tmp_path)
+    (tmp_path / "scripts").mkdir()
+    check = tmp_path / "scripts" / "check-harness"
+    check.write_text(
+        f"#!/bin/sh\nprintf changed > {str(approval)!r}\n"
+    )
+    check.chmod(0o755)
     bundle_path = run_dir / "evidence.json"
     bundle_path.write_text(
         '{"schema_version":1,"contract":"deterministic-evidence-bundle","checks":[]}\n'
@@ -414,9 +422,7 @@ def test_mutation_rechecks_risk_override_after_evidence_command(tmp_path):
         "--source",
         "intent.md",
         "--",
-        sys.executable,
-        "-c",
-        f"from pathlib import Path; Path({str(approval)!r}).write_text('changed')",
+        "scripts/check-harness",
     )
 
     assert result.returncode == 1
@@ -553,6 +559,10 @@ def test_closed_run_refuses_artifact_and_checkpoint_mutations(tmp_path):
 def test_closed_run_refuses_manual_evidence_mutations(tmp_path):
     support = helpers()
     run_dir = support.initialise(tmp_path)
+    (tmp_path / "scripts").mkdir()
+    check = tmp_path / "scripts" / "check-harness"
+    check.write_text("#!/bin/sh\nexit 0\n")
+    check.chmod(0o755)
     bundle_path = run_dir / "evidence.json"
     bundle_path.write_text(
         '{"schema_version":1,"contract":"deterministic-evidence-bundle","checks":[]}\n'
@@ -576,9 +586,7 @@ def test_closed_run_refuses_manual_evidence_mutations(tmp_path):
         "--source",
         "intent.md",
         "--",
-        sys.executable,
-        "-c",
-        "pass",
+        "scripts/check-harness",
     )
     assert executed.returncode == 0, executed.stderr
     receipt_path = run_dir / "RUN.json"
@@ -814,6 +822,67 @@ def test_review_add_refuses_other_primary_without_cross_family_dispatch(tmp_path
 
     assert result.returncode == 1
     assert "other-primary review requires a cross-family route receipt" in result.stderr
+
+
+def test_evidence_run_refuses_custom_command_for_full_tests_gate(tmp_path):
+    support = helpers()
+    run_dir = support.initialise(tmp_path)
+    bundle_path = run_dir / "evidence.json"
+    bundle_path.write_text(
+        '{"schema_version":1,"contract":"deterministic-evidence-bundle","checks":[]}\n'
+    )
+    assert support.add_artifact(
+        tmp_path, run_dir, "evidence-bundle", ".agent-run/DEL-TEST/evidence.json"
+    ).returncode == 0
+
+    result = run_cli(
+        tmp_path,
+        "evidence", "run", "--run-dir", str(run_dir), "--id", "tests",
+        "--gate", "tests", "--artifact-id", "evidence-bundle",
+        "--source", "intent.md", "--", sys.executable, "-c", "print('green')",
+    )
+
+    assert result.returncode == 1
+    assert "scripts/check-harness" in result.stderr
+
+
+def test_validator_rechecks_other_primary_route_receipt_cross_family(tmp_path):
+    support = helpers()
+    run_dir = support.initialise(tmp_path)
+    (tmp_path / "approval.json").write_text(
+        '{"approved":true,"approver":"human-owner"}\n'
+    )
+    assert support.add_artifact(tmp_path, run_dir, "approval", "approval.json").returncode == 0
+    assert run_cli(
+        tmp_path, "evidence", "human", "--run-dir", str(run_dir),
+        "--id", "authority-approval", "--gate", "authority-approval",
+        "--artifact-id", "approval", "--approver", "human-owner",
+    ).returncode == 0
+    (tmp_path / "review.md").write_text("# Review\n\nClean.\n")
+    route = support.route_receipt(family="anthropic")
+    route["cross_family"] = True
+    (tmp_path / "route.json").write_text(json.dumps(route))
+    added = run_cli(tmp_path, *review_args(run_dir, role="other-primary", family="anthropic"))
+    assert added.returncode == 0, added.stderr
+
+    validator = load(helpers().ROOT / "skills" / "deliver" / "scripts" / "validate_delivery.py", "route_receipt_validator")
+    receipt_path = run_dir / "RUN.json"
+    receipt = json.loads(receipt_path.read_text())
+    validator.validate(receipt, helpers().ROOT, workspace_root=tmp_path, verify_hashes=True)
+
+    route["cross_family"] = False
+    raw = json.dumps(route).encode()
+    (tmp_path / "route.json").write_bytes(raw)
+    digest = "sha256:" + __import__("hashlib").sha256(raw).hexdigest()
+    route_artifact = next(item for item in receipt["artifacts"] if item["id"] == "review-1.route")
+    route_artifact["digest"] = digest
+    evidence = next(item for item in receipt["evidence"] if item["id"] == "review-1")
+    evidence["route_receipt"]["digest"] = digest
+    next(item for item in receipt["reviews"] if item["id"] == "review-1")["route_receipt_digest"] = digest
+    receipt_path.write_text(json.dumps(receipt))
+
+    with pytest.raises(validator.Invalid, match="cross-family route receipt"):
+        validator.validate(receipt, helpers().ROOT, workspace_root=tmp_path, verify_hashes=True)
 
 
 def test_bounded_execution_kills_descendants_after_successful_leader_exit(tmp_path):

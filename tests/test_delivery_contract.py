@@ -751,6 +751,74 @@ def test_risk_tier_cannot_be_downgraded_without_human_evidence():
         module.validate(candidate, ROOT)
 
 
+def test_validator_rejects_artifact_symlink_that_leaves_declared_scope(tmp_path):
+    module = load_validator()
+    candidate = fixture()
+    candidate["authority"]["allowed_artifact_paths"] = ["allowed"]
+    candidate["intent"]["artifact"] = "allowed/intent.md"
+    candidate["artifacts"][0]["path"] = "allowed/intent.md"
+    candidate["artifacts"][1]["path"] = "allowed/evidence.json"
+    (tmp_path / "allowed").mkdir()
+    (tmp_path / "outside").mkdir()
+    (tmp_path / "outside" / "intent.md").write_text("outside\n")
+    (tmp_path / "allowed" / "intent.md").symlink_to("../outside/intent.md")
+
+    with pytest.raises(module.Invalid, match="resolves outside authority.allowed_artifact_paths"):
+        module.validate(candidate, ROOT, workspace_root=tmp_path)
+
+
+def test_validator_rechecks_live_risk_override_artifact_digest(tmp_path):
+    module = load_validator()
+    candidate = fixture(workspace_root=tmp_path)
+    approval = tmp_path / "risk-approval.json"
+    approval.write_text('{"approved":true}\n')
+    approval_digest = "sha256:" + hashlib.sha256(approval.read_bytes()).hexdigest()
+    candidate["artifacts"].append({
+        "id": "risk-override-artifact",
+        "path": "risk-approval.json",
+        "media_type": "application/json",
+        "artifact_type": "evidence",
+        "digest": approval_digest,
+        "class": "evidence",
+        "owner": "delivery-chair",
+        "retention": "risk-policy",
+    })
+    next(item for item in candidate["evidence"] if item["id"] == "risk-override-approval")["artifact_id"] = "risk-override-artifact"
+    candidate["risk_tier"] = "routine"
+    candidate["risk_override"] = {
+        "status": "approved",
+        "approved_by": "human",
+        "evidence": "risk-override-approval",
+        "reason": "bounded reference run",
+    }
+    module.validate(candidate, ROOT, workspace_root=tmp_path, verify_hashes=True)
+
+    approval.write_text('{"approved":false}\n')
+    with pytest.raises(module.Invalid, match="risk override artifact digest"):
+        module.validate(candidate, ROOT, workspace_root=tmp_path, verify_hashes=True)
+
+
+def test_validator_requires_canonical_method_for_full_tests_gate():
+    module = load_validator()
+    candidate = fixture()
+    tests_evidence = next(item for item in candidate["evidence"] if item["gate"] == "tests")
+    tests_evidence["method"] = "python -m pytest tests/test_delivery_contract.py -q"
+
+    with pytest.raises(module.Invalid, match="scripts/check-harness"):
+        module.validate(candidate, ROOT)
+
+
+def test_validator_requires_route_receipt_for_passing_review():
+    module = load_validator()
+    candidate = fixture()
+    review = next(item for item in candidate["reviews"] if item["status"] == "pass")
+    linked = next(item for item in candidate["evidence"] if item["id"] == review["evidence_id"])
+    del linked["route_receipt"]
+
+    with pytest.raises(module.Invalid, match="route_receipt"):
+        module.validate(candidate, ROOT)
+
+
 def test_substantial_run_requires_design_and_targeted_other_primary_review_lanes():
     module = load_validator()
     candidate = fixture("research")

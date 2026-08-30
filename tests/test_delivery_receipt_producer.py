@@ -125,6 +125,13 @@ def initialise(workspace: Path, run_id: str = "DEL-TEST") -> Path:
     return workspace / ".agent-run" / run_id
 
 
+def install_canonical_check_harness(workspace: Path, body: str = "printf 'pass\\n'") -> None:
+    script = workspace / "scripts" / "check-harness"
+    script.parent.mkdir(exist_ok=True)
+    script.write_text(f"#!/bin/sh\n{body}\n")
+    script.chmod(0o755)
+
+
 def add_artifact(
     workspace: Path,
     run_dir: Path,
@@ -297,6 +304,7 @@ def test_artifact_add_refuses_invalid_id_and_escaping_path(tmp_path):
 
 def test_evidence_run_executes_command_and_rebuilds_deterministic_bundle(tmp_path):
     run_dir = initialise(tmp_path)
+    install_canonical_check_harness(tmp_path, "printf 'green\\n'")
     bundle_path = tmp_path / ".agent-run" / "DEL-TEST" / "evidence.json"
     bundle_path.write_text(json.dumps({
         "schema_version": 1,
@@ -322,9 +330,7 @@ def test_evidence_run_executes_command_and_rebuilds_deterministic_bundle(tmp_pat
         "--source",
         "intent.md",
         "--",
-        sys.executable,
-        "-c",
-        "print('green')",
+        "scripts/check-harness",
     )
 
     assert result.returncode == 0, result.stderr
@@ -340,7 +346,7 @@ def test_evidence_run_executes_command_and_rebuilds_deterministic_bundle(tmp_pat
         "id": "tests",
         "gate": "tests",
         "status": "pass",
-        "method": f"{sys.executable} -c 'print('\"'\"'green'\"'\"')'",
+        "method": "scripts/check-harness",
         "source_paths": ["intent.md"],
         "exit_code": 0,
     }]
@@ -391,6 +397,7 @@ def test_evidence_bundle_publication_keeps_old_receipt_valid_on_run_write_failur
     tmp_path, monkeypatch,
 ):
     run_dir = initialise(tmp_path)
+    install_canonical_check_harness(tmp_path)
     original_bundle = b'{"schema_version":1,"contract":"deterministic-evidence-bundle","checks":[]}\n'
     bundle_path = run_dir / "evidence.json"
     bundle_path.write_bytes(original_bundle)
@@ -407,7 +414,7 @@ def test_evidence_bundle_publication_keeps_old_receipt_valid_on_run_write_failur
     args = module.build_parser().parse_args([
         "evidence", "run", "--run-dir", str(run_dir), "--id", "tests",
         "--gate", "tests", "--artifact-id", "evidence-bundle",
-        "--source", "intent.md", "--", sys.executable, "-c", "pass",
+        "--source", "intent.md", "--", "scripts/check-harness",
     ])
     with pytest.raises(module.ReceiptError, match="injected RUN write failure"):
         module.command_evidence_run(args)
@@ -484,6 +491,7 @@ def test_bounded_execution_kills_descendants_on_timeout(tmp_path):
 
 def test_evidence_run_executes_from_receipt_workspace(tmp_path):
     run_dir = initialise(tmp_path)
+    install_canonical_check_harness(tmp_path, "printf 'ok' > workspace-marker")
     bundle_path = run_dir / "evidence.json"
     bundle_path.write_text(
         '{"schema_version":1,"contract":"deterministic-evidence-bundle","checks":[]}\n'
@@ -499,8 +507,7 @@ def test_evidence_run_executes_from_receipt_workspace(tmp_path):
             sys.executable, str(PRODUCER), "evidence", "run",
             "--run-dir", str(run_dir), "--id", "tests", "--gate", "tests",
             "--artifact-id", "evidence-bundle", "--source", "intent.md", "--",
-            sys.executable, "-c",
-            "from pathlib import Path; Path('workspace-marker').write_text('ok')",
+            "scripts/check-harness",
         ],
         cwd=outside,
         text=True,
@@ -606,6 +613,7 @@ def test_authority_approval_refuses_blank_approver(tmp_path):
 
 def test_evidence_remove_refuses_referenced_id_and_rebuild_updates_digest(tmp_path):
     run_dir = initialise(tmp_path)
+    install_canonical_check_harness(tmp_path)
     bundle_path = tmp_path / ".agent-run" / "DEL-TEST" / "evidence.json"
     bundle_path.write_text('{"schema_version":1,"contract":"deterministic-evidence-bundle","checks":[]}\n')
     assert add_artifact(
@@ -614,7 +622,7 @@ def test_evidence_remove_refuses_referenced_id_and_rebuild_updates_digest(tmp_pa
     assert run_cli(
         tmp_path, "evidence", "run", "--run-dir", str(run_dir), "--id", "tests",
         "--gate", "tests", "--artifact-id", "evidence-bundle",
-        "--source", "intent.md", "--", sys.executable, "-c", "pass",
+        "--source", "intent.md", "--", "scripts/check-harness",
     ).returncode == 0
     receipt_path = run_dir / "RUN.json"
     receipt = json.loads(receipt_path.read_text())
@@ -970,6 +978,7 @@ def test_init_accepts_structurally_approved_human_risk_override(tmp_path):
 
 
 def test_end_to_end_producer_receipt_passes_independent_validator(tmp_path):
+    install_canonical_check_harness(tmp_path)
     approval_raw = (
         b'{"approved":true,"approver":"human-owner","gate":"task-success",'
         b'"measured_value":1}\n'
@@ -1018,7 +1027,7 @@ def test_end_to_end_producer_receipt_passes_independent_validator(tmp_path):
     executed = run_cli(
         tmp_path, "evidence", "run", "--run-dir", str(run_dir), "--id", "tests",
         "--gate", "tests", "--artifact-id", "evidence-bundle",
-        "--source", "intent.md", "--", sys.executable, "-c", "print('pass')",
+        "--source", "intent.md", "--", "scripts/check-harness",
     )
     assert executed.returncode == 0, executed.stderr
     (tmp_path / "review.md").write_text("# Review\n\nClean.\n")
@@ -1113,7 +1122,7 @@ def test_reviewing_accepts_evidence_after_repair(tmp_path):
         tmp_path, "evidence", "run", "--run-dir", str(run_dir),
         "--id", "tests-after-repair", "--gate", "tests",
         "--artifact-id", "evidence-after-repair", "--source", "intent.md",
-        "--", sys.executable, "-c", "print('pass')",
+        "--", "scripts/check-harness",
     )
     assert executed.returncode == 0, executed.stderr
 
