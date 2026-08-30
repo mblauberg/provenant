@@ -12,10 +12,6 @@ all convergent findings folded here); fresh targeted review at implementation;
 held-out evals waived per
 [ADR 0014](../../adr/0014-comparative-skill-evals-on-suspicion.md).
 
-Implementation status: completed through PRs #337, #338, #340, #343, #339 and
-#348. The decisions and acceptance criteria below remain the normative record;
-the delivery-train sections record how they landed.
-
 Currentness note: [ADR 0020](../../adr/0020-retire-the-daemon-fabric.md)
 supersedes the Fabric bootstrap, workspace-trust and task-claim wording below.
 The progressive-disclosure decisions remain normative; the superseded Fabric
@@ -58,7 +54,7 @@ refactor enforces existing doctrine.
 | D8 | Orchestrate verdict table approved (r1, 2026-07-20; F2 evidence amendment folded). Removed files archive to `docs/research/` (with index entry) rather than delete; `debate-and-panels.md` is the one approved merge-then-delete because its rules survive verbatim inside `verification.md`. |
 | D9 | The "GitHub (this repo only)" bullet moves out of global `AGENTS.md`; its authority clause ("agent merges authorised") lands in `MAINTAINING.md`, mechanics stay in the github-workflow runbook. |
 | D10 | `AGENTS.md` and `HARNESS.md` carry no dates; revision provenance lives in git history. |
-| D11 | **PR drift.** This spec binds decisions, not file states. Implementation begins with a re-validation sweep of all line-cited evidence against then-current `main`; the execution handoff carries the exact `baseRevision` SHA it validated, and the sweep result is recorded as a comment on #335. A landed PR contradicting a verdict row re-opens that row only, not the interview. |
+| D11 | **Source drift.** This spec binds decisions, not file states. Implementation re-validates source-owned evidence at the accepted issue's head; Git history preserves provenance. A source change that contradicts a decision re-opens that decision, not the interview. |
 | D12 | **Skill-name resolution contract.** Each ambient file carries one resolver line: skills live at `$HOME/.agents/skills/<name>/` and a named skill means read its `SKILL.md`, which discloses its own references. Claude resolves via its Skill tool; Codex resolves via the resolver line + installed `~/.codex/skills/` mirror. The resolver line is the sole location-bearing statement in the ambient files. Skill names are binding, not advisory. |
 | D13 | **Acceptance structure.** Acceptance splits into (a) static gates — machine-checkable on the final tree; (b) per-PR checks — run in each PR's CI; (c) release conditions — history/process states confirmed at close-out. The two ambient line caps (D1) are hard maxima; reference-file budgets are advisory targets paired with named retained-content invariants (r3 amendment: line counts alone invite formatting games and fail legitimate edits). |
 | D14 | **Accelerator custody (r3, user-approved).** Canonical sources for `cross-verify.js`, `codebase-polish.js`, `implement-run.js` move into the repository under `workflows/`; `install-harness` manages `~/.claude/workflows/` from them like it manages skills. They are a Claude-only surface (they drive Claude Code's Workflow tool); Codex does not consume them and reaches equivalent orchestration through the `orchestrate` skill. Once in-tree they fall under the D3 reference rule and AC-S2 scan. Includes a bounded alignment refresh: re-validate their doctrine citations against post-prune reality; behavioural redesign stays out of scope. |
@@ -177,54 +173,10 @@ Per-PR checks:
   model-routing behaviour is explicitly out of scope (ADR-0014
   detection-in-use applies).
 
-Close-out conditions (satisfied by the landed train):
+## Current ownership
 
-- AC-R1: PR0 (docs custody, D15) merged: spec, handoff, ADR-0014, both index
-  entries.
-- AC-R2: MAINTAINING.md amended: conditional-eval rule citing ADR-0014; the
-  skill-name reference rule; the repo-scoped GitHub authority clause (D9);
-  the stale-session note — ambient-file changes apply from the next session;
-  live sessions retain the prior constitution until restart.
-- AC-R3: chair receipt closed and its substance durably recorded as a comment
-  on #335 (run directories are retention-cleaned; the issue is the durable
-  record). Required fields: review legs with verdicts, degradations,
-  adjudications, model lineage, user gates.
-
-## Historical Fabric custody note (superseded by ADR 0020)
-
-The daemon-era implementation recorded that the bootstrap authority omitted
-`fabric.v1.task.claim` and delegation only narrowed, so paired tasks remained
-`ready` by design. Its deliverable of record was the correlated response
-message plus the hash-bound artifact (r1 and r2 precedent; r2 additionally
-proved the `participantAgentIds` fix for task-audience messaging). This is
-historical evidence, not current operating guidance. Agent-facing Fabric
-usability gaps observed during both dispatches were tracked in
-[#336](https://github.com/mblauberg/provenant/issues/336) and resolved through
-PR #385; they were not part of #335.
-
-## Landed implementation train (6 PRs)
-
-- PR0 / #337 landed docs custody (D15): spec r3, handoff, ADR-0014,
-  `docs/specs/README.md` and `docs/handoffs/README.md` index entries. It
-  included amending
-  `test_harness_contract.py::test_current_docs_use_live_issue_and_durable_decision_owners`,
-  which asserts the literal `"No active handoffs."` and so forbids ever
-  committing an active handoff entry — assert structure (Active section
-  present), not the transient empty state.
-- PR1 / #338 stripped the constitution (D1–D4, D9, D10), added installer
-  fixtures (AC-P2) and updated `install-harness` bootstrap text.
-- PR2 / #340 landed the reference rule, migration-manifest contract
-  (AC-S2/S3), resolver fixture (AC-P3) and writing-family pointer rewrites.
-- PR3 / #343 pruned `orchestrate` per the manifest (migration steps 1–5,
-  AC-S4).
-- PR4 / #339 landed the MAINTAINING.md governance amendments (AC-R2).
-- PR5 / #348 brought accelerator custody under `workflows/`, with installer
-  management, private-path repoints and a bounded alignment refresh (D14).
-
-## Gate close-out
-
-- OD1–OD4 closed on 2026-07-20 (D8–D10 and ADR-0014 wording approved).
-- OD5 closed through the implementation re-validation and landed PR train. The
-  2026-07-20 chaired three-leg review surfaced the amendment set folded into
-  this r3; the user approved the amendments, D14/D15 additions and D13 budget
-  change the same day.
+The repository's declared issue tracker owns change scope and stories. This
+specification retains progressive-disclosure invariants and acceptance
+requirements; it does not report delivery status, implementation history or
+current work state. Durable decisions remain in ADRs and runtime structure
+remains owned by code and tests.

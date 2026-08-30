@@ -1,18 +1,18 @@
 # Adaptive agent harness lifecycle
 
-[Issue #23](https://github.com/mblauberg/provenant/issues/23) records the
-completed delivery that established these requirements. A change to them
-requires a current linked GitHub issue and Project Status.
+The repository's `Repository process` declaration names the canonical
+scope/story home. In this repository, changes to this contract are scoped by
+the current issue and its Project Status; this specification retains
+the durable lifecycle requirements.
 
 The current contract permits direct read-only analysis of local session history, keeps sharing and export separately gated, and treats unsupported or unattributable evidence as `N/A`, never zero. It does not retain the synthetic collector, which had no provider-native adapter or producer. Route evaluation remains task-local, receipt-bound and content-free; it does not approve a learned or Pareto router.
 
 ## Authority and decision
 
-The user instruction on 10 July 2026 approved this specification, authorised
-the complete harness refactor and authorised a repository commit. It permits
-reversible repository changes, tests and documentation within the existing
-harness. It does not authorise provider login, external communications,
-deployment, live installation, destructive migration, Git push or release.
+The lifecycle contract permits reversible repository changes, tests and
+documentation within the existing harness. It does not authorise provider
+login, external communications, deployment, live installation, destructive
+migration, Git push or release.
 
 This specification is grounded in
 [`docs/research/agentic-sdlc-harness-2026.md`](../../research/agentic-sdlc-harness-2026.md).
@@ -86,7 +86,10 @@ delivery cycle. No status may jump a missing gate.
 
 The delivery kernel is a domain-neutral contract, validator and stable state
 machine. It orchestrates existing capabilities; it does not contain domain
-expertise:
+expertise. The state graph below is the human-readable projection of the
+runtime-owned delivery contract:
+
+#### State graph
 
 ```text
 draft -> scoped -> approved -> executing -> verifying -> reviewing

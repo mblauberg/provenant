@@ -2,7 +2,8 @@
 
 **Status:** Accepted 2026-07-16 (user, [issue
 #156](https://github.com/mblauberg/provenant/issues/156)); supersedes [ADR
-0006](0006-defer-backlog-contract.md)
+0006](0006-defer-backlog-contract.md); consistent with the issue-native scope
+amendment in [ADR 0017](0017-specifications-own-non-derivable-intent.md)
 
 ## Context
 
@@ -18,9 +19,13 @@ Provenant decisions and specifications own Provenant requirements;
 `docs/efforts/` and `docs/handoffs/` are Provenant-meta navigation and temporary
 continuity, not globally applied doctrine or current-work authority.
 
+The repository declaration makes the current change scope/story home explicit.
+For this repository it is the GitHub issue, so this decision remains the sole
+current-work owner; project docs retain durable requirements and decisions.
+
 ## Decision
 
-For Provenant work, GitHub issues and the Project Status field are the exclusive
+For Provenant work, the declared issue tracker and its workflow state are the exclusive
 owners of current work state:
 
 - Project Status owns workflow state.

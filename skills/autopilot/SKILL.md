@@ -41,7 +41,7 @@ clean exit; otherwise use a lighter-weight skill.
    `QUEUE.md`'s head. Keep one conductor lease.
 4. Interactive missions use Herdr and record owned panes. External-driver-only
    missions record `HERDR-NOT-USED: external driver; filesystem state is
-   authoritative` in `STATE.md`.
+   authoritative` in the run-local `STATE.md`.
 
 Bootstrap authorises only mission-declared isolation. Source-repository
 implementation branches and linked worktrees are covered by standing authority
@@ -61,7 +61,7 @@ only user STOP closes the mission. See
 
 ## Evidence and closure
 
-`STATE.md` holds current recovery truth; `QUEUE.md` is the durable work queue
+The run-local `STATE.md` holds current recovery truth; `QUEUE.md` is the durable work queue
 and item-lease ledger. Durable decisions are delegated, not forked here; see
 [state-contract.md](references/state-contract.md).
 

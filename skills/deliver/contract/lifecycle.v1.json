@@ -3,7 +3,7 @@
   "contract": "delivery-lifecycle",
   "version": "v1",
   "source": {
-    "state_graph": "docs/specs/harness/lifecycle.md:91-95",
+    "state_graph": "docs/specs/harness/lifecycle.md#state-graph",
     "state_graph_status": "pinned"
   },
   "states": [

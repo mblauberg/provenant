@@ -70,6 +70,7 @@ def test_lifecycle_contract_rejects_nested_evidence_list_mutation():
 
 def test_lifecycle_contract_preserves_the_pinned_state_graph_and_five_invariants():
     contract = load(LOADER_PATH, "lifecycle_contract_shape").LIFECYCLE_CONTRACT
+    assert contract["source"]["state_graph"] == "docs/specs/harness/lifecycle.md#state-graph"
     assert list(contract["states"]) == [
         "draft", "scoped", "approved", "executing", "verifying", "reviewing",
         "repairing", "awaiting_acceptance", "accepted", "awaiting_release",

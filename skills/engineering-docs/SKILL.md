@@ -9,6 +9,13 @@ Treat docs as durable, audited deliverables. Cite decisions, archive retired
 docs, use Australian English and load `engineering-writing` for substantial
 prose.
 
+Read the repository's `Repository process` declaration before choosing a home.
+When it declares `issue-tracker`, the parent issue owns the canonical scope and
+stories; project docs own durable intent, decisions and invariants. With
+`project-docs`, use its named scope/story home. Do not create a second story or
+status projection. A link-only file is only a fallback for an unavailable or
+cross-tracker route.
+
 ## Default homes
 
 Resolve project instructions and existing canonical owners first. The table is
@@ -17,13 +24,13 @@ advisory mode, propose paths without creating them.
 
 | Type | Home | Convention |
 |---|---|---|
-| Stories / specs | `docs/stories/` or `docs/specs/` | `NN-slug.md`, indexed |
+| Durable intent / specifications | `docs/specs/` | semantic path, indexed |
 | Architecture map | `docs/ARCHITECTURE.md` | current state; links to ADRs |
 | Diagrams | owning document or `docs/diagrams/` | colocate by default; separate when independently owned, reused or generated |
 | Runbooks | `docs/runbooks/` | numbered steps and verification |
 | Open-decision register | `docs/OPEN_DECISIONS.md` | one row per user/owner gate; never auto-answered |
 | Threat models | `docs/threat-models/` | STRIDE/LINDDUN structure |
-| Rolling state | `docs/STATE.md` | rules embedded in the file (`session` skill) |
+| Session or run continuity | declared owner; explicit run state only | `session` handoff; autopilot run state remains run-local |
 | Archive | `docs/archive/` | indexed by its README |
 
 ## Binding rules

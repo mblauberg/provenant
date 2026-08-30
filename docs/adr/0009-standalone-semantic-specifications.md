@@ -5,6 +5,10 @@ family-manifest form of this ADR); amended 2026-07-28 by [ADR
 0017](0017-specifications-own-non-derivable-intent.md), which narrows what these
 specifications may contain and adds a permanent gate over the same corpus
 
+ADR 0017's 2026-08-31 issue-native scope amendment is consistent with this
+decision: tracker issues or the declared project-docs home carry change scope
+and stories, while these semantic files retain durable non-derivable intent.
+
 ## Context
 
 The large specification monoliths needed to be split by durable ownership.

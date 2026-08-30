@@ -9,9 +9,12 @@ A `session` handoff carries one session's baton. Across many sessions or agents,
 the work map preserves the stable route: one file per effort, read for durable
 orientation and changed only when that route changes.
 
-The project's work tracker owns live work state. In Provenant, GitHub issues
-own the current owner, dependencies and user gates, while Project Status owns
-workflow state. An effort map links those owners and never restates current
+Read the repository's `Repository process` declaration first. If the declared
+issue tracker has a parent issue with enough destination, route and invariant
+detail, the parent tracker issue is the work map: link to it and do not create
+a duplicate file. If the declaration selects `project-docs`, use its named map
+or story home. A link-only file is allowed only as a fallback for an unavailable
+tracker or a cross-tracker route. It links owners and never restates current
 status, owner, dependencies or user gates.
 
 ## The map file
@@ -41,9 +44,9 @@ What the route is intended to deliver. Link the owning specification.
   gates. Readers follow the linked issue and its Project Status field.
 - **Route entries are links, not task summaries.** Stable grouping and ordering
   are allowed; issue and pull-request prose carries changing detail.
-- **Resume order:** project state file → issue and Project Status → this map for
-  route context → the claimed session handoff only. Never reconstruct the route
-  from transcripts or piled-up handoffs.
+- **Resume order:** declared scope/story owner → this map when it exists for
+  fallback or cross-tracker route context → the claimed session handoff only.
+  Never reconstruct the route from transcripts or piled-up handoffs.
 - **Handoffs stay temporary.** They carry continuity for an active session or
   run, are not linked as route state, and are removed or archived when consumed.
 - **One map writer.** Parallel workers write namespaced continuity artifacts;
@@ -64,11 +67,10 @@ What the route is intended to deliver. Link the owning specification.
 
 ## Adapter-absent path
 
-When GitHub is unavailable, use the project's designated canonical work
-tracker; a project with no tracker names one canonical work-state owner in
-its state file before any route map links it. Console and Herdr remain
-optional. The portable [effort-map artifact](portable-workflow.v1.json) proves
-only that a context object existed. Retain and identify the canonical context
-separately; this output is not itself curated route state or a resumable
-handoff. The runner validates the contract's declared context fields, including
-`accepted_artifact_identity`, before emission.
+When the declared tracker is unavailable, use the named project-docs home or a
+link-only fallback; do not invent a rolling project state owner. Console and
+Herdr remain optional. The portable [effort-map artifact](portable-workflow.v1.json)
+proves only that a context object existed. Retain and identify the canonical
+context separately; this output is not itself curated route state or a
+resumable handoff. The runner validates the contract's declared context fields,
+including `accepted_artifact_identity`, before emission.

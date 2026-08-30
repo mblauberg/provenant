@@ -9,7 +9,11 @@ Turn an idea into decided, testable scope under project constraints.
 
 ## Frame
 
-Define the decision, users and done. Search specs and registers. Emit the minimum
+Read the target repository's `Repository process` declaration before framing.
+Define the decision, users and done. Search specs and registers. Put the
+change scope and story in the declared canonical home: the parent tracker
+issue for `issue-tracker`, or the named project-docs home for `project-docs`.
+Emit the minimum
 `config/risk-policy.json` tier plus allowed
 source/artifact paths, prohibited actions, external effects, expiry and approver.
 Ordinary authorised workspace content may cross configured provider families
@@ -58,11 +62,12 @@ project files. In project-write mode, land only approved artifacts:
 
 | Output | Owner |
 |---|---|
-| Spec, stories, acceptance criteria | project docs via `engineering-docs` |
+| Durable specifications and acceptance criteria | project docs via `engineering-docs` |
 | One-way decisions | project ADR process |
 | User gates | existing register or `docs/OPEN_DECISIONS.md` |
-| Work items | project tracker |
-| Durable context | project context/state owners |
+| Change scope and stories | declared issue tracker or project-docs home |
+| Work items | declared project tracker |
+| Durable context | declared project-docs owner; run state stays run-local |
 
 Write clear, observable, verifiable acceptance criteria. Given/When/Then helps
 behavioural cases but is not mandatory for research, documents or operations.

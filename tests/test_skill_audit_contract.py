@@ -96,7 +96,7 @@ def test_normative_docs_match_the_local_first_contract():
     compact_adr = " ".join(adr.split())
     compact_spec = " ".join(spec.split())
 
-    assert "Issue #23" in spec
+    assert "current issue" in compact_spec.lower()
     assert "Status: Base implementation machine verified" not in spec
     assert "current contract permits direct read-only analysis" in compact_spec
     assert "## Local skill evidence and shared exports" in spec

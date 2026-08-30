@@ -5,6 +5,11 @@
 - Choice: `<github-issues|tracker-name|none>`
 - Pointer: `<tracker-url-or-none>`
 
+### Scope and stories
+
+- Canonical home: `<issue-tracker|project-docs>`
+- Pointer: `<canonical-scope-or-story-home>`
+
 ### Docs layout
 
 - Pointer: `<docs-index-or-home-list>`

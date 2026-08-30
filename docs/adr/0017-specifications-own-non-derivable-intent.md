@@ -3,7 +3,8 @@
 **Status:** Accepted 2026-07-28 (user); amends [ADR
 0009](0009-standalone-semantic-specifications.md); applies [ADR
 0011](0011-github-owns-work-state.md) and [ADR
-0004](0004-per-domain-truth-owners.md)
+0004](0004-per-domain-truth-owners.md); amended 2026-08-31 for
+[issue-native change scope](https://github.com/mblauberg/provenant/issues/711)
 
 > **Current-reader note.** The SQL and `runtime/agent-fabric` inventory below is
 > historical after ADR 0020; the current Fabric schema owner is
@@ -46,6 +47,12 @@ What neither decision states is the positive rule about specification *content*:
 that restating a structure the code already owns is itself the defect, however
 accurate the restatement is on the day it is written.
 
+Issue #711 exposes the adjacent ownership gap: a change scope or story needs
+one declared home, but it must not displace durable requirements or decisions.
+This repository declares its issue tracker as that home; repositories without
+one may declare project docs instead. Git retains durable invariants and
+history; the issue only carries current change scope and story.
+
 ## Decision
 
 A specification owns only what code cannot express and tests cannot prove.
@@ -56,7 +63,8 @@ Ownership across the tree is:
 |---|---|
 | What exists | code, schemas, registries, `0001-current-baseline.sql` |
 | That it behaves | the behavioural test suites |
-| What is delivered, and by whom | GitHub issues and the Project Status field |
+| What is delivered, and by whom | the declared issue tracker and its workflow state |
+| What change scope and story are current | the repository's declared canonical home |
 | Why the architecture is this way | ADRs |
 | What was required, and what must never happen | specifications |
 
@@ -71,8 +79,8 @@ Concretely:
 - Any structure a specification still restates must be gated against its live
   owner. ADR 0020 retired this ADR's legacy schema-drift checker with the old
   Fabric runtime; current structure is owned and tested under `runtime/fabric`.
-- A requirement that is normative but unimplemented is an open GitHub issue, not
-  a present-tense sentence in a specification.
+- A requirement that is normative but unimplemented is an open work item in the
+  declared tracker, not a present-tense sentence in a specification.
 - `docs/invariants/agent-fabric.md` is the retention pattern: a durable claim, the
   mechanism that enforces it, and the test that evidences it.
 
@@ -112,12 +120,12 @@ consequence that behavioural fixtures read their owning specifications. This ADR
 narrows what those specifications may contain; it does not move where the
 fixtures read from.
 
-ADR 0011 is unchanged and unsuperseded. Removing delivery narration from
-specifications is compliance with it rather than a new decision.
+ADR 0011 remains the current-work-state decision for this repository. Issue #711
+adds the repository declaration that makes its issue-native scope/story route
+explicit; it does not make project docs a second current-work owner.
 
-The alternative of moving the whole corpus into GitHub issues was rejected. It
+The alternative of moving the whole corpus into tracker issues was rejected. It
 would relocate the duplication rather than remove it, and it would contradict
-both ADR 0009's independent subject files and ADR 0011's assignment of
-requirements ownership to specifications. Negative security requirements,
-ordering constraints and digest preimages need a durable requirements owner that
-a closed issue does not provide.
+ADR 0009's independent subject files. Issue-native change scope is limited to
+the work item and story; negative security requirements, ordering constraints
+and digest preimages retain durable specification ownership.

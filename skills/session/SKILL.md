@@ -5,18 +5,20 @@ description: "Use for start, checkpoint, handoff, compaction, or end-of-session 
 
 # Session
 
-Store continuity in the project owner; without write authority, propose a chat
-delta. Project instructions may override continuity paths.
-Fallbacks:
-state `docs/STATE.md` (about 120 lines), handoffs `docs/handoffs/`, archive
-`docs/archive/`. Instructions may override `STATE_FILE`, `HANDOFF_DIR` and
-`ARCHIVE_DIR`.
+Read the repository's `Repository process` declaration first. Store continuity
+in the declared scope/story owner and temporary handoffs; without write
+authority, propose a chat delta. There is no default rolling project state
+file. Explicit run state, such as autopilot's `.agent-run/<mission-id>/STATE.md`,
+remains run-local and is not project-wide truth. Project instructions may
+override continuity paths. Fallbacks: handoffs `docs/handoffs/`, archive
+`docs/archive/`.
 
 ## Start
 
 For substantial work, start at the approved phase/slice and reopen disk state;
-never trust injected state. Resume from the digest-bound handoff, reading only
-relevant docs/open decisions. User gates stay unanswered until decided.
+never trust injected state. Resume from the declared scope/story owner and the
+digest-bound handoff, reading only relevant docs/open decisions. User gates stay
+unanswered until decided.
 Routine bounded work may continue with context inside authority.
 
 ## Checkpoint
@@ -47,7 +49,8 @@ expiry and ownership before reuse.
 
 1. **Graduate:** merge surviving behaviour-changing knowledge into its owner:
    decision -> spec/ADR; domain fact -> context/README; convention -> project
-   `AGENTS.md`; moving status -> state. Reconcile contradictions, mark
+   `AGENTS.md`; moving status -> declared tracker or explicit run state.
+   Reconcile contradictions, mark
    supersession, refresh timestamps, archive over-cap history; never duplicate.
 2. **Close context:** retain minimal manifest, synthesis, verification and
    failure receipts; archive consumed records. Remove only run-owned,
