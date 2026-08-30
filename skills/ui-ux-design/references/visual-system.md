@@ -28,4 +28,3 @@ resolution, contrast, alternative treatment, loading, and small-screen
 behaviour. Apply expressive colour, scale, asymmetry, or texture only when it
 supports the approved identity and surface job. When changing intensity, name
 one axis, preserve meaning, and verify the result in context.
-<!-- Modified for Provenant. -->

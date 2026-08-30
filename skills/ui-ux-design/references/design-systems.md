@@ -60,4 +60,3 @@ component file alone is not a system change.
 `engineering-docs` owns the durable location and lifecycle of design-system
 documentation. Keep
 this as a focused reference within UI/UX design, not a competing global skill.
-<!-- Modified for Provenant. -->

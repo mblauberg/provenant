@@ -89,4 +89,3 @@ needed for honest recovery.
 
 Remove only run-owned transient output after source and server state are
 verified. If cleanup ownership is uncertain, report the residual path and stop.
-<!-- Modified for Provenant. -->

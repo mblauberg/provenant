@@ -44,4 +44,3 @@ This adds no mandatory approval or questionnaire when intent is sufficient.
 If local owners conflict, identify the canonical owner and actual consumer
 behaviour. If no owner exists and choosing one would establish a durable
 system, return to `scope`; document placement belongs to `engineering-docs`.
-<!-- Modified for Provenant. -->

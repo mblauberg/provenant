@@ -56,4 +56,3 @@ states, and interaction feedback. Distillation removes non-serving complexity
 without deleting capability, meaning, accessibility, or identity. Completion
 requires fresh UI review and the enclosing lifecycle's tests; author confidence
 is not evidence.
-<!-- Modified for Provenant. -->

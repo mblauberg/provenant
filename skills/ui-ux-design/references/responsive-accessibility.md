@@ -32,4 +32,3 @@ Emulation is useful evidence but does not reproduce every browser chrome,
 device pixel, input, performance, safe-area, or accessibility setting. Record
 which real devices and technologies were tested, failed, not tested, or not
 applicable.
-<!-- Modified for Provenant. -->
