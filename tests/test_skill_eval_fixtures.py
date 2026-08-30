@@ -155,9 +155,8 @@ def test_current_portfolio_routing_plan_matches_the_live_catalogue_and_has_no_re
     assert summary["evaluation_id"] == "skill-portfolio-catalogue-20260821-live"
     assert summary_doc["availability"] == {
         "current_evaluation": "provider-dependent/not-run",
-        "fabric_daemon": "not required for the provider-free infrastructure fixture",
-        "provider_action_authority": "required for the semantic holdout; not used by the infrastructure fixture",
-        "requested_adapters": ["agy", "cursor-agent"],
+        "fabric_daemon": "not required for the direct-provider semantic holdout or provider-free infrastructure fixture",
+        "provider_action_authority": "not required for the direct-provider semantic holdout or provider-free infrastructure fixture",
     }
     assert summary["infrastructure_fixture"] == {
         "path": "tests/fixtures/current-routing-eval/dispatch_fixture.py",

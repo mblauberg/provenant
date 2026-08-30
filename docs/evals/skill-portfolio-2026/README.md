@@ -1,7 +1,7 @@
 # Skill portfolio evaluation appendix
 
 Evaluation evidence cut-off: 19 July 2026
-Current-state note refreshed: 23 July 2026
+Current-state note refreshed: 30 August 2026
 Predecessor delivery run: `SKAUD-20260714`
 
 This appendix is the durable evidence index for the 2026 portfolio refactor.
@@ -37,8 +37,9 @@ every terminal action without retrying or relabelling failures.
 
 The provider-free [dispatch fixture](../../../tests/fixtures/current-routing-eval/dispatch_fixture.py)
 is exercised by the batch contract tests. It proves the current `batch_run.py`
-and `dispatch_run.py` path retains a fixed bounded task set, actual same- and
-mixed-family route metadata, an intentional partial failure, and reducer inputs.
+and `dispatch_run.py` path retains a fixed bounded task set, fixture-emitted
+route metadata for same- and mixed-family cases, an intentional partial
+failure, and reducer inputs.
 This is an infrastructure contract pass, not a semantic routing result: the
 18-case holdout above remains unrun.
 
@@ -109,8 +110,10 @@ blind judge scored 256 items after deterministic checks.
   plugin overlays. The selected host probe contains 16 hand-selected entries.
 - Model aliases, discovery behaviour, caching and pricing can change. Re-run
   after a material model, host or catalogue change.
-- The current routing protocol is unexecuted. It establishes no behavioural
-  result until the full frozen schedule completes through Agent Fabric.
+- The current semantic holdout is unexecuted and provider-dependent. The
+  provider-free infrastructure fixture establishes only the dispatch/batch
+  contract, not behavioural routing quality; a deliberate direct-provider
+  batch run is required for the semantic result.
 - A completed routing regression establishes only its frozen synthetic cases.
   The enclosing delivery receipt and human retain acceptance and release
   authority.

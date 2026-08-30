@@ -13,5 +13,4 @@ import dispatch_run
 
 
 dispatch_run.CF_DISPATCH = Path(__file__).with_name("provider_fixture.py")
-sys.argv = [str(ROOT / "skills" / "orchestrate" / "scripts" / "dispatch_run.py"), *sys.argv[1:]]
 raise SystemExit(dispatch_run.dispatch(dispatch_run.parser().parse_args()))

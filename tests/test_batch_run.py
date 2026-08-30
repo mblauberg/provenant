@@ -241,7 +241,7 @@ def test_current_routing_fixture_runs_real_dispatch_and_retains_partial_batch(tm
     assert by_id['intentional-failure']['attempt_path']
     assert {item['task_id'] for item in summary['reducer_inputs']} == set(prompts)
     assert {item['status'] for item in summary['reducer_inputs']} == {'succeeded', 'failed'}
-    assert int((state_dir / 'maximum').read_text()) <= 2
+    assert int((state_dir / 'maximum').read_text()) == 2
     for task_id, family, _status in task_specs[:3]:
         attempt = json.loads((run_dir / by_id[task_id]['attempt_path']).read_text())
         assert attempt['route']['model_family'] == family

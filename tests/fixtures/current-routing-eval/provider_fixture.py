@@ -12,7 +12,7 @@ import time
 from pathlib import Path
 
 
-def _counter(state: Path, delta: int) -> int:
+def _counter(state: Path, delta: int) -> None:
     state.mkdir(parents=True, exist_ok=True)
     with (state / "lock").open("a+") as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)

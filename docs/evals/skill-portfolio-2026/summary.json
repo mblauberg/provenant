@@ -1,12 +1,8 @@
 {
   "availability": {
     "current_evaluation": "provider-dependent/not-run",
-    "fabric_daemon": "not required for the provider-free infrastructure fixture",
-    "provider_action_authority": "required for the semantic holdout; not used by the infrastructure fixture",
-    "requested_adapters": [
-      "agy",
-      "cursor-agent"
-    ]
+    "fabric_daemon": "not required for the direct-provider semantic holdout or provider-free infrastructure fixture",
+    "provider_action_authority": "not required for the direct-provider semantic holdout or provider-free infrastructure fixture"
   },
   "evidence_cutoff": "2026-07-19",
   "predecessor_delivery_run_id": "SKAUD-20260714",
