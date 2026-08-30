@@ -297,13 +297,18 @@ class _JSONObject(dict[str, Any]):
             self[key] = value
 
 
-def worker_question_envelope_bytes(candidate: bytes, expected_digest: str) -> dict[str, Any] | None:
+def worker_question_envelope_bytes(
+    candidate: bytes, expected_digest: str | None = None
+) -> dict[str, Any] | None:
     """Validate one already-bound worker terminal result envelope."""
     if len(candidate) > MAX_WORKER_TERMINAL_ENVELOPE_BYTES:
         return None
-    candidate_hash = hashlib.sha256(candidate).hexdigest()
-    if expected_digest != f"sha256:{candidate_hash}":
-        raise TerminalEnvelopeIntegrityError("terminal candidate digest does not match retained result")
+    if expected_digest is not None:
+        candidate_hash = hashlib.sha256(candidate).hexdigest()
+        if expected_digest != f"sha256:{candidate_hash}":
+            raise TerminalEnvelopeIntegrityError(
+                "terminal candidate digest does not match retained result"
+            )
     try:
         value = json.loads(candidate.decode("utf-8"), object_pairs_hook=_JSONObject)
     except (UnicodeDecodeError, json.JSONDecodeError):
@@ -767,6 +772,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
     process_error = ""
     process = None
     cancelled = False
+    old_handlers: dict[int, Any] = {}
     try:
         with owned_text_file(run_dir, adapter_path, "w") as adapter_stream, owned_text_file(
             run_dir, stderr_path, "w"
@@ -779,6 +785,18 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                 process_error = "cancelled"
                 observed_exit = True
             else:
+                cancel_pending = False
+
+                def cancel_handler(_signum: int, _frame: Any) -> None:
+                    nonlocal cancel_pending
+                    # Popen can have spawned the provider before returning.
+                    # Keep the handler signal-safe: normal control flow
+                    # reconciles the intent and owns process-group cleanup.
+                    cancel_pending = True
+
+                old_handlers = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGHUP)}
+                signal.signal(signal.SIGTERM, cancel_handler)
+                signal.signal(signal.SIGHUP, cancel_handler)
                 process = subprocess.Popen(
                     command,
                     cwd=workspace,
@@ -788,24 +806,34 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                     start_new_session=True,
                 )
 
-                def cancel_handler(_signum: int, _frame: Any) -> None:
-                    nonlocal cancelled
-                    cancelled = True
-                    try:
+                # A request can arrive after the provider is spawned but
+                # before Popen returns. Reconcile it before entering the
+                # normal wait loop, preserving natural exit at the boundary.
+                marker_seen = cancellation_marker_present(run_dir, attempt_dir)
+                if batch_dir is not None:
+                    marker_seen = marker_seen or cancellation_marker_present(run_dir, batch_dir)
+                if cancel_pending or marker_seen:
+                    exit_code = process.poll()
+                    if exit_code is None:
+                        cancelled = True
                         stop_process_group(process)
-                    except OSError:
-                        pass
-
-                old_handlers = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGHUP)}
-                signal.signal(signal.SIGTERM, cancel_handler)
-                signal.signal(signal.SIGHUP, cancel_handler)
+                        exit_code = process.wait()
+                        process_error = "cancelled"
+                        observed_exit = True
                 try:
-                    deadline = time.monotonic() + args.timeout_seconds
-                    while True:
+                    if not observed_exit:
+                        deadline = time.monotonic() + args.timeout_seconds
+                    while not observed_exit:
                         # Poll first so an already-observed natural exit wins a
                         # marker race.
                         exit_code = process.poll()
                         if exit_code is not None:
+                            observed_exit = True
+                            break
+                        if cancel_pending:
+                            stop_process_group(process)
+                            exit_code = process.wait()
+                            process_error = "cancelled"
                             observed_exit = True
                             break
                         marker_seen = cancellation_marker_present(run_dir, attempt_dir)
@@ -843,8 +871,9 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                             observed_exit = True
                             break
                 finally:
-                    for sig, handler in old_handlers.items():
-                        signal.signal(sig, handler)
+                    # Signal ownership deliberately remains with this
+                    # dispatch owner through evidence publication below.
+                    pass
                 if cancelled:
                     process_error = "cancelled"
     except OSError as exc:
@@ -992,6 +1021,8 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
         attempt_digest = digest(attempt_path)
         write_owned(run_dir, digest_path, f"{attempt_digest}  {attempt_path.name}\n")
     remove_cancellation_marker(run_dir, attempt_dir)
+    for sig, handler in old_handlers.items():
+        signal.signal(sig, handler)
     output_record = {**record, "attempt_digest": attempt_digest}
     print(json.dumps(output_record, sort_keys=True))
     return 0 if status == "succeeded" and not manifest_error else 1
