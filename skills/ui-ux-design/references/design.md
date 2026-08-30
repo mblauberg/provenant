@@ -31,8 +31,9 @@ then add.
 
 Inspect existing components, tokens, patterns, registries, and real consumers
 before creating anything. Prefer modifying or composing the canonical owner for
-the same UI role. In a shadcn/ui project identified by its `components.json`, start from a suitable
-project component, shadcn component, block, template, or reviewed registry item,
+the same UI role. In a shadcn/ui project, use `components.json` when present and
+otherwise confirm the local component structure. Start from a suitable project
+component, shadcn component, block, template, or reviewed registry item,
 then customise the project-owned source to its content, states, tokens, and
 accessibility contract. For new shadcn work without an established primitive
 backend, choose Base UI; preserve a working Radix or other backend rather than
