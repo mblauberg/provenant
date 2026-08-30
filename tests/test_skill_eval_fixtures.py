@@ -144,7 +144,8 @@ def test_code_review_discipline_cases_have_prompt_and_expected_behaviour():
 def test_current_portfolio_routing_plan_matches_the_live_catalogue_and_has_no_result():
     root = ROOT / "docs" / "evals" / "skill-portfolio-2026"
     skills = sorted(path.parent.name for path in (ROOT / "skills").glob("*/SKILL.md"))
-    summary = json.loads((root / "summary.json").read_text())["current_routing_regression"]
+    summary_doc = json.loads((root / "summary.json").read_text())
+    summary = summary_doc["current_routing_regression"]
     holdout = load(root / "routing-holdout.yaml")
 
     assert holdout["catalogue_owner_count"] == len(skills) == 32
@@ -152,10 +153,22 @@ def test_current_portfolio_routing_plan_matches_the_live_catalogue_and_has_no_re
     assert summary["catalogue_owner_count"] == len(skills)
     assert summary["protocol"] == "live-catalogue"
     assert summary["evaluation_id"] == "skill-portfolio-catalogue-20260821-live"
+    assert summary_doc["availability"] == {
+        "current_evaluation": "provider-dependent/not-run",
+        "fabric_daemon": "not required for the provider-free infrastructure fixture",
+        "provider_action_authority": "required for the semantic holdout; not used by the infrastructure fixture",
+        "requested_adapters": ["agy", "cursor-agent"],
+    }
+    assert summary["infrastructure_fixture"] == {
+        "path": "tests/fixtures/current-routing-eval/dispatch_fixture.py",
+        "route": "provider-free",
+        "semantic_holdout": "unrun",
+        "status": "contract-pass",
+    }
     assert holdout["dataset_id"] == "skill-portfolio-routing-holdout-20260719-v6"
     assert len(holdout["cases"]) == 18
     assert summary["attempts_started"] == 0
-    assert summary["status"] == "catalogue-only"
+    assert summary["status"] == "provider-dependent/not-run"
 
     valid_skills = set(skills)
     for case in holdout["cases"]:

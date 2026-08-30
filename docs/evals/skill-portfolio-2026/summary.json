@@ -1,8 +1,8 @@
 {
   "availability": {
-    "current_evaluation": "FABRIC-ROUNDTRIP-UNAVAILABLE",
-    "fabric_daemon": "healthy",
-    "provider_action_authority": "not projected to the supported worktree bootstrap",
+    "current_evaluation": "provider-dependent/not-run",
+    "fabric_daemon": "not required for the provider-free infrastructure fixture",
+    "provider_action_authority": "required for the semantic holdout; not used by the infrastructure fixture",
     "requested_adapters": [
       "agy",
       "cursor-agent"
@@ -127,11 +127,17 @@
     "catalogue_owner_count": 32,
     "dataset": "routing-holdout.yaml",
     "evaluation_id": "skill-portfolio-catalogue-20260821-live",
+    "infrastructure_fixture": {
+      "path": "tests/fixtures/current-routing-eval/dispatch_fixture.py",
+      "route": "provider-free",
+      "semantic_holdout": "unrun",
+      "status": "contract-pass"
+    },
     "planned_attempts": 6,
     "planned_case_rows": 108,
     "protocol": "live-catalogue",
     "repetitions": 3,
-    "status": "catalogue-only"
+    "status": "provider-dependent/not-run"
   },
   "predecessor_routing_regression": {
     "attempts": 6,
