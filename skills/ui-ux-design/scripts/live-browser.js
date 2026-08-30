@@ -123,6 +123,12 @@
   let hasProjectContext = false;
   let selectedAction = 'impeccable';
   let selectedCount = 3;
+  let generatingNeedsRetry = false;
+  let generatingNeedsRestart = false;
+  // Complete generation intent is browser-memory only. It is never written to
+  // localStorage or recovered from the project journal.
+  let generationIntent = null;
+  let pendingDiscard = null;
   const browserOwner = sessionState.owner;
   let checkpointTimer = null;
 
@@ -1057,13 +1063,48 @@
       fontSize: '11px', color: BP.textDim, whiteSpace: 'nowrap',
       marginLeft: 'auto',
     });
+    status.setAttribute('role', 'status');
+    status.setAttribute('aria-live', 'polite');
+    status.setAttribute('aria-atomic', 'true');
     // The UI advances only after one completed source edit is reported, so a
     // per-variant counter would lie. This is a completion boundary, not a
     // claim that the underlying in-place filesystem write is atomic.
     status.textContent = arrivedVariants < expectedVariants
-      ? 'Generating ' + expectedVariants + ' variants...'
+      ? generatingNeedsRetry || generatingNeedsRestart
+        ? 'Generation interrupted'
+        : 'Generating ' + expectedVariants + ' variants...'
       : 'Done';
     row.appendChild(status);
+
+    if (generatingNeedsRetry) {
+      const retry = el('button', {
+        padding: '5px 10px', borderRadius: '6px',
+        border: 'none', background: BP.accent, color: BP.mark,
+        fontFamily: FONT, fontSize: '11px', fontWeight: '600',
+        cursor: 'pointer', whiteSpace: 'nowrap',
+      });
+      retry.textContent = 'Retry';
+      retry.title = 'Reissue this generation request to the current live server';
+      retry.addEventListener('click', (event) => {
+        event.stopPropagation();
+        retryGeneration();
+      });
+      row.appendChild(retry);
+    } else if (generatingNeedsRestart) {
+      const restart = el('button', {
+        padding: '5px 10px', borderRadius: '6px',
+        border: 'none', background: BP.accent, color: BP.mark,
+        fontFamily: FONT, fontSize: '11px', fontWeight: '600',
+        cursor: 'pointer', whiteSpace: 'nowrap',
+      });
+      restart.textContent = 'Restart';
+      restart.title = 'End this incomplete session, then reselect the element';
+      restart.addEventListener('click', (event) => {
+        event.stopPropagation();
+        restartInterruptedGeneration();
+      });
+      row.appendChild(restart);
+    }
 
     return row;
   }
@@ -1203,7 +1244,13 @@
     const label = el('span', {
       fontSize: '12px', color: BP.textDim, fontWeight: '500',
     });
-    label.textContent = 'Applying variant...';
+    label.textContent = pendingDiscard
+      ? pendingDiscard.restart
+        ? 'Clearing interrupted session...'
+        : 'Discarding session...'
+      : 'Applying variant...';
+    label.setAttribute('role', 'status');
+    label.setAttribute('aria-live', 'polite');
     row.appendChild(label);
 
     // Inject the keyframes if not already present
@@ -1899,6 +1946,9 @@
         selectedElement = pickVariantContent(wrapper, visibleVariant) || wrapper.parentElement;
 
         state = 'CYCLING';
+        generatingNeedsRetry = false;
+        generatingNeedsRestart = false;
+        generationIntent = null;
         hideShaderOverlay();
         updateBarContent('cycling');
         refreshParamsPanel();
@@ -2147,6 +2197,9 @@
       if (expected > 0) expectedVariants = expected;
 
       if (arrivedVariants >= expectedVariants && expectedVariants > 0) {
+        generatingNeedsRetry = false;
+        generatingNeedsRestart = false;
+        generationIntent = null;
         state = 'CYCLING';
         hideShaderOverlay();
         updateBarContent('cycling');
@@ -2197,7 +2250,11 @@
   const SSE_MAX_RETRIES = 20;  // generous: heartbeats keep the connection alive, so retries mean real trouble
 
   function connectSSE() {
-    evtSource = new EventSource('http://127.0.0.1:' + PORT + '/events?token=' + TOKEN);
+    const server = currentServerCredentials();
+    if (!server) return;
+    evtSource = new EventSource(
+      'http://127.0.0.1:' + server.port + '/events?token=' + encodeURIComponent(server.token),
+    );
 
     evtSource.onopen = () => {
       sseRetries = 0; // reset on successful (re)connect
@@ -2239,7 +2296,26 @@
             );
           }, 2000);
           break;
+        case 'discard':
+        case 'discarded': {
+          if (msg.id !== currentSessionId || !pendingDiscard) break;
+          const wasRestart = pendingDiscard.restart;
+          pendingDiscard = null;
+          markSessionHandled();
+          cleanup();
+          showToast(
+            wasRestart
+              ? 'Interrupted session cleared. Reselect the element to restart.'
+              : 'Session discarded.',
+            5000,
+          );
+          break;
+        }
         case 'error':
+          if (msg.id === currentSessionId && pendingDiscard) {
+            restorePendingDiscard('Discard failed. The session is still available; try again.');
+            break;
+          }
           console.error('[impeccable] Error:', msg.message);
           showToast('Error: ' + msg.message, 5000);
           hideBar();
@@ -2262,40 +2338,81 @@
     };
   }
 
-  /** Server died or became unreachable. Reset UI to a clean state. */
+  /** Server died or became unreachable. Keep any explicit recovery action visible. */
   function handleServerLost() {
+    const discardWasUnconfirmed = !!pendingDiscard;
+    if (pendingDiscard) {
+      const interrupted = pendingDiscard;
+      pendingDiscard = null;
+      state = interrupted.returnState;
+      if (interrupted.restart) {
+        generatingNeedsRetry = false;
+        generatingNeedsRestart = true;
+      }
+    }
     const recoveryState = currentSessionId ? state : 'IDLE';
-    if (state === 'GENERATING' || state === 'CYCLING' || state === 'SAVING') {
+    const interruptedGeneration = state === 'GENERATING' && !!currentSessionId;
+    const recoverableCycling = state === 'CYCLING' && !!currentSessionId;
+    if (interruptedGeneration) {
+      generatingNeedsRetry = !!generationIntent;
+      generatingNeedsRestart = !generationIntent;
+      showToast(
+        discardWasUnconfirmed
+          ? 'Discard was not confirmed. Reconnect live mode, then try again.'
+          : generationIntent
+          ? 'Live server disconnected. Reconnect live mode, then retry explicitly.'
+          : 'Live server disconnected. Restart this session, then reselect the element.',
+        7000,
+      );
+    } else if (recoverableCycling) {
+      showToast(
+        discardWasUnconfirmed
+          ? 'Discard was not confirmed. Reconnect live mode, then try again.'
+          : 'Live server disconnected. Reconnect live mode to Accept or Discard.',
+        7000,
+      );
+    } else if (state === 'SAVING') {
       showToast('Live server disconnected. Session ended.', 5000);
     }
-    hideBar();
+    if (!interruptedGeneration && !recoverableCycling) hideBar();
     hideHighlight();
     hideShaderOverlay();
     hideAnnotOverlay();
     stopScrollTracking();
     if (variantObserver) { variantObserver.disconnect(); variantObserver = null; }
     stopScrollLock();
-    // Preserve local session state on server loss. The durable journal is the
-    // source of truth, but localStorage plus the variant wrapper lets the UI
-    // resume after a helper restart or page reload instead of treating a
-    // transient disconnect as an explicit discard.
-    selectedElement = null;
-    selectedAction = 'impeccable';
+    // Project journals are advisory only. A same-page generating session keeps
+    // its complete browser-memory intent for one explicit retry; a reload can
+    // only offer a discard-and-reselect restart.
+    if (!interruptedGeneration && !recoverableCycling) selectedElement = null;
     state = recoveryState;
-    if (currentSessionId) saveSession();
+    if (currentSessionId) {
+      saveSession();
+      if (interruptedGeneration) showBar('generating');
+      else if (recoverableCycling) showBar('cycling');
+    }
+  }
+
+  function currentServerCredentials() {
+    const token = window.__IMPECCABLE_TOKEN__;
+    const port = Number(window.__IMPECCABLE_PORT__);
+    if (typeof token !== 'string' || !token
+      || !Number.isInteger(port) || port < 1 || port > 65535) return null;
+    return { token, port };
   }
 
   function sendEvent(msg, opts) {
-    msg.token = TOKEN;
     function handleFailure(err) {
       console.error('[impeccable] Failed to send event:', err);
       if (opts && opts.throwOnError) throw err;
       return null;
     }
-    return fetch('http://127.0.0.1:' + PORT + '/events', {
+    const server = currentServerCredentials();
+    if (!server) return Promise.resolve().then(() => handleFailure(new Error('Live server unavailable')));
+    return fetch('http://127.0.0.1:' + server.port + '/events', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(msg),
+      body: JSON.stringify({ ...msg, token: server.token }),
     }).then(res => {
       if (res.ok) return res;
       return handleFailure(new Error('HTTP ' + res.status + ' ' + res.statusText));
@@ -2524,6 +2641,88 @@
     }
   }
 
+  function retryGeneration() {
+    if (!generatingNeedsRetry || state !== 'GENERATING'
+      || !currentSessionId || !generationIntent) return;
+    const wrapper = document.querySelector('[data-impeccable-variants="' + currentSessionId + '"]');
+    const original = wrapper ? pickVariantContent(wrapper, 'original') : null;
+    const target = original || selectedElement;
+    const event = target && sessionState.buildRetryGenerationEvent({
+      id: currentSessionId,
+      intent: generationIntent,
+    });
+    if (!event) {
+      showToast('This session can no longer be retried safely. Pick the element again.', 5000);
+      return;
+    }
+    const snapshot = {
+      comments: event.comments || [],
+      strokes: event.strokes || [],
+    };
+    generatingNeedsRetry = false;
+    updateBarContent('generating');
+    if (!evtSource) {
+      sseRetries = 0;
+      connectSSE();
+    }
+    if (!scrollRaf) startScrollTracking();
+    if (variantObserver) variantObserver.disconnect();
+    variantObserver = startVariantObserver(currentSessionId);
+    startScrollLock(currentSessionId, readScrollY());
+    captureAndEmit(
+      target,
+      event,
+      snapshot,
+      target.getBoundingClientRect(),
+      { throwOnError: true },
+    )
+      .then(() => {
+        saveSession();
+        queueCheckpoint('generation_reissued');
+        showToast('Generation request reissued.', 2500);
+      })
+      .catch(() => {
+        generatingNeedsRetry = true;
+        updateBarContent('generating');
+        showToast('Retry could not reach the live server.', 5000);
+      });
+  }
+
+  function restartInterruptedGeneration() {
+    if (!generatingNeedsRestart || state !== 'GENERATING'
+      || !currentSessionId || pendingDiscard) return;
+    pendingDiscard = { returnState: 'GENERATING', restart: true };
+    generatingNeedsRestart = false;
+    state = 'SAVING';
+    updateBarContent('saving');
+    if (!evtSource) {
+      sseRetries = 0;
+      connectSSE();
+    }
+    sendEvent({ type: 'discard', id: currentSessionId }, { throwOnError: true })
+      .then(() => {
+        if (!pendingDiscard) return;
+        saveSession();
+        showToast('Clearing interrupted session. Waiting for agent confirmation.', 5000);
+      })
+      .catch(() => restorePendingDiscard(
+        'Restart could not reach the live server. The session is still available.',
+      ));
+  }
+
+  function restorePendingDiscard(message) {
+    if (!pendingDiscard) return;
+    const pending = pendingDiscard;
+    pendingDiscard = null;
+    state = pending.returnState;
+    if (pending.restart) {
+      generatingNeedsRetry = false;
+      generatingNeedsRestart = true;
+    }
+    updateBarContent(state === 'GENERATING' ? 'generating' : 'cycling');
+    showToast(message, 5000);
+  }
+
   function handleGo() {
     if (!selectedElement || state !== 'CONFIGURING') return;
     const input = document.getElementById(PREFIX + '-input');
@@ -2533,6 +2732,8 @@
     if (annotEditing) finalizeEditingPin();
 
     currentSessionId = id8();
+    generatingNeedsRetry = false;
+    generatingNeedsRestart = false;
     expectedVariants = selectedCount;
     arrivedVariants = 0;
     visibleVariant = 0;
@@ -2557,6 +2758,17 @@
     };
     if (snapshot.comments.length > 0) basePayload.comments = snapshot.comments;
     if (snapshot.strokes.length > 0) basePayload.strokes = snapshot.strokes;
+    generationIntent = {
+      action: basePayload.action,
+      count: basePayload.count,
+      pageUrl: basePayload.pageUrl,
+      element: basePayload.element,
+      ...(basePayload.freeformPrompt !== undefined
+        ? { freeformPrompt: basePayload.freeformPrompt }
+        : {}),
+      ...(basePayload.comments ? { comments: basePayload.comments } : {}),
+      ...(basePayload.strokes ? { strokes: basePayload.strokes } : {}),
+    };
 
     // Hide the interactive overlay so it doesn't linger during generation.
     hideAnnotOverlay();
@@ -2580,12 +2792,12 @@
   // ---------------------------------------------------------------------------
 
   let msLoadPromise = null;
-  function loadModernScreenshot() {
+  function loadModernScreenshot(port = PORT) {
     if (window.modernScreenshot) return Promise.resolve(window.modernScreenshot);
     if (msLoadPromise) return msLoadPromise;
     msLoadPromise = new Promise((resolve, reject) => {
       const s = document.createElement('script');
-      s.src = 'http://127.0.0.1:' + PORT + '/modern-screenshot.js';
+      s.src = 'http://127.0.0.1:' + port + '/modern-screenshot.js';
       s.onload = () => resolve(window.modernScreenshot);
       s.onerror = () => { msLoadPromise = null; reject(new Error('modern-screenshot failed to load')); };
       document.head.appendChild(s);
@@ -2706,7 +2918,7 @@
   // Capture the element (with current annotations baked in) and return a PNG
   // Blob. Shared between the Go flow (uploads it to the server) and the
   // debug toggle (displays it as an overlay for side-by-side comparison).
-  async function captureElementToBlob(el, snapshot, rect) {
+  async function captureElementToBlob(el, snapshot, rect, port = PORT) {
     try { if (document.fonts?.ready) await document.fonts.ready; } catch {}
     const hasAnnotations = snapshot && (snapshot.comments.length > 0 || snapshot.strokes.length > 0);
     let annotNode = null;
@@ -2721,7 +2933,7 @@
       el.appendChild(annotNode);
     }
     try {
-      const ms = await loadModernScreenshot();
+      const ms = await loadModernScreenshot(port);
       const fontCssText = await collectFontCssText();
       const backgroundColor = resolveCanvasBackground(el);
       return await ms.domToBlob(el, {
@@ -2735,11 +2947,13 @@
     }
   }
 
-  async function captureAndEmit(el, basePayload, snapshot, rect) {
+  async function captureAndEmit(el, basePayload, snapshot, rect, sendOpts) {
     let screenshotPath;
     let blob;
+    const server = currentServerCredentials();
     try {
-      blob = await captureElementToBlob(el, snapshot, rect);
+      if (!server) throw new Error('Live server unavailable');
+      blob = await captureElementToBlob(el, snapshot, rect, server.port);
     } catch (err) {
       console.warn('[impeccable] capture failed, proceeding without screenshot:', err);
     }
@@ -2756,7 +2970,7 @@
     if (blob && hasAnnotations) {
       try {
         const uploadRes = await fetch(
-          'http://127.0.0.1:' + PORT + '/annotation?token=' + encodeURIComponent(TOKEN) +
+          'http://127.0.0.1:' + server.port + '/annotation?token=' + encodeURIComponent(server.token) +
           '&eventId=' + encodeURIComponent(basePayload.id),
           { method: 'POST', headers: { 'Content-Type': 'image/png' }, body: blob },
         );
@@ -2770,7 +2984,7 @@
         console.warn('[impeccable] annotation upload failed:', err);
       }
     }
-    sendEvent(screenshotPath ? { ...basePayload, screenshotPath } : basePayload);
+    return sendEvent(screenshotPath ? { ...basePayload, screenshotPath } : basePayload, sendOpts);
   }
 
   // ---------------------------------------------------------------------------
@@ -3060,13 +3274,23 @@ void main() {
   }
 
   function handleDiscard() {
-    if (!currentSessionId) return;
+    if (!currentSessionId || pendingDiscard) return;
+    pendingDiscard = { returnState: state, restart: false };
+    state = 'SAVING';
+    updateBarContent('saving');
+    if (!evtSource) {
+      sseRetries = 0;
+      connectSSE();
+    }
     sendEvent({ type: 'discard', id: currentSessionId }, { throwOnError: true })
       .then(() => {
-        markSessionHandled();
-        cleanup();
+        if (!pendingDiscard) return;
+        saveSession();
+        showToast('Discard requested. Waiting for agent confirmation.', 5000);
       })
-      .catch(() => showToast('Could not confirm discard with the live server. Session kept for recovery.', 5000));
+      .catch(() => restorePendingDiscard(
+        'Could not request discard. The session is still available.',
+      ));
   }
 
   // ---------------------------------------------------------------------------
@@ -3149,6 +3373,10 @@ void main() {
     selectedElement = null;
     currentSessionId = null;
     selectedAction = 'impeccable';
+    generatingNeedsRetry = false;
+    generatingNeedsRestart = false;
+    generationIntent = null;
+    pendingDiscard = null;
     state = 'PICKING';
   }
 
@@ -3176,6 +3404,9 @@ void main() {
       transition: 'opacity 0.25s ' + EASE + ', transform 0.25s ' + EASE,
       pointerEvents: 'none', maxWidth: '420px', textAlign: 'center',
     });
+    toastEl.setAttribute('role', 'status');
+    toastEl.setAttribute('aria-live', 'polite');
+    toastEl.setAttribute('aria-atomic', 'true');
     toastEl.id = PREFIX + '-toast';
     toastEl.textContent = message;
     document.body.appendChild(toastEl);
@@ -3200,8 +3431,18 @@ void main() {
   // If a [data-impeccable-variants] wrapper exists in the DOM, the agent wrote
   // variants before HMR fired. Pick up where we left off.
   function resumeSession() {
+    const saved = loadSession();
     const wrapper = document.querySelector('[data-impeccable-variants]');
-    if (!wrapper) { clearSession(); clearHandled(); return false; }
+    if (!wrapper) {
+      const interruptedGeneration = saved?.state === 'GENERATING';
+      clearSession();
+      clearHandled();
+      if (interruptedGeneration) {
+        state = 'PICKING';
+        showToast('Interrupted session could not be restored. Reselect the element to restart.', 7000);
+      }
+      return false;
+    }
 
     const sessionId = wrapper.dataset.impeccableVariants;
 
@@ -3214,7 +3455,6 @@ void main() {
     arrivedVariants = variants.length;
 
     // Restore state from localStorage if available
-    const saved = loadSession();
     if (saved && saved.id === sessionId) {
       visibleVariant = (saved.visible > 0 && saved.visible <= arrivedVariants) ? saved.visible : (arrivedVariants > 0 ? 1 : 0);
       if (saved.action) selectedAction = saved.action;
@@ -3233,6 +3473,8 @@ void main() {
     if (visibleVariant > 0) showVariantInDOM(currentSessionId, visibleVariant);
 
     state = arrivedVariants >= expectedVariants ? 'CYCLING' : 'GENERATING';
+    generatingNeedsRetry = false;
+    generatingNeedsRestart = state === 'GENERATING' && !generationIntent;
     showBar(state === 'CYCLING' ? 'cycling' : 'generating');
     startScrollTracking();
     // Build the params panel for the restored visible variant. Previously

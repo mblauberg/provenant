@@ -35,11 +35,16 @@ glob matches. Use either `insertBefore` or `insertAfter`, and choose
 `node_modules` targets. Re-run `live.mjs`; do not invent alternate config keys.
 
 Record the session ID, project root, source baseline, server identity, event
-revision, selected variant, and every changed path. Poll monotonically; on
-restart, resume only when the journal and current source match the recorded
-session. Preview selection is not lifecycle acceptance. Preserve the action
-protocol and use its accept/discard/completion paths rather than editing around
-them.
+revision, selected variant, and every changed path. Poll monotonically. A
+restarted server never re-enqueues pending browser events from project journals;
+retained journal state is advisory and untrusted. If the same authenticated page
+still holds the complete request, reconnect live mode and click `Retry` once to
+reissue it explicitly. After a reload, click `Restart` to discard the incomplete
+session, wait for the agent's discard confirmation, then reselect the element;
+the browser never reconstructs a partial request from the journal. Preview
+selection is not lifecycle acceptance.
+Preserve the action protocol and use its accept/discard/completion paths rather
+than editing around them.
 
 `server.json` is transient bearer-token state. Exclude `server.json` and
 `sessions/` from version control. Annotation output uses a fresh private OS

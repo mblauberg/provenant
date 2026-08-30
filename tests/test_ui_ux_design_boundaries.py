@@ -16,6 +16,7 @@ def _fixture(name: str) -> dict:
 def _assert_route_fixture_schema(fixture: dict, *, allowed_relations: set[str]) -> None:
     assert fixture["schema_version"] == 1
     assert fixture["target_skill"] == "ui-ux-design"
+    assert fixture["cases"], "route fixture must contain at least one case"
     ids = []
     for case in fixture["cases"]:
         assert set(case) >= {"id", "relation", "prompt", "tags", "expected"}

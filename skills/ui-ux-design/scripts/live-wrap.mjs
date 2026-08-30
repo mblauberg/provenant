@@ -30,6 +30,7 @@ import {
 } from './jsx-tag-scanner.mjs';
 
 const EXTENSIONS = ['.html', '.jsx', '.tsx', '.vue', '.svelte', '.astro'];
+const SESSION_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 
 function resolveProjectSourceFile(projectRoot, requestedPath) {
   return resolveContainedSourcePath(projectRoot, requestedPath, { relativeOnly: true });
@@ -70,7 +71,8 @@ The agent should insert variant HTML at insertLine.`);
   }
 
   const id = argVal(args, '--id');
-  const count = parseInt(argVal(args, '--count') || '3');
+  const countRaw = argVal(args, '--count') || '3';
+  const count = Number(countRaw);
   const elementId = argVal(args, '--element-id');
   const classes = argVal(args, '--classes');
   const tag = argVal(args, '--tag');
@@ -79,6 +81,14 @@ The agent should insert variant HTML at insertLine.`);
   const text = argVal(args, '--text');
 
   if (!id) { console.error('Missing --id'); process.exit(1); }
+  if (!SESSION_ID_PATTERN.test(id)) {
+    console.error(JSON.stringify({ error: 'invalid_session_id' }));
+    process.exit(1);
+  }
+  if (!/^[1-8]$/.test(countRaw) || !Number.isInteger(count)) {
+    console.error(JSON.stringify({ error: 'invalid_variant_count' }));
+    process.exit(1);
+  }
   if (!elementId && !classes && !query) {
     console.error('Need at least one of: --element-id, --classes, --query');
     process.exit(1);

@@ -25,7 +25,7 @@ import { fileURLToPath } from 'node:url';
 import { parseDesignMd } from './design-parser.mjs';
 import { loadContext, resolveContextDir } from './load-context.mjs';
 import { resolveFiles } from './live-inject.mjs';
-import { createLiveSessionStore } from './live-session-store.mjs';
+import { createLiveSessionStore, summarizeLiveSession } from './live-session-store.mjs';
 import { readContainedSource } from './contained-source.mjs';
 import {
   ensureCanonicalLiveStateRoot,
@@ -138,13 +138,6 @@ function enqueueEvent(event) {
   if (!safeEvent || (safeEvent.id && state.pendingEvents.some((entry) => entry.event?.id === safeEvent.id && entry.event?.type === safeEvent.type))) return;
   state.pendingEvents.push({ event: safeEvent, leaseUntil: 0 });
   flushPendingPolls();
-}
-
-function restorePendingEventsFromStore() {
-  if (!state.sessionStore) return;
-  for (const snapshot of state.sessionStore.listActiveSessions()) {
-    if (snapshot.pendingEvent) enqueueEvent(snapshot.pendingEvent);
-  }
 }
 
 function findAvailablePendingEvent(now = Date.now()) {
@@ -309,7 +302,7 @@ const VISUAL_ACTIONS = [
 // any value that reaches a downstream child_process or DOM selector is
 // inert by construction.
 const ID_PATTERN = /^[0-9a-f]{8}$/;
-const VARIANT_ID_PATTERN = /^[0-9]{1,3}$/;
+const VARIANT_ID_PATTERN = /^[1-8]$/;
 
 function isValidId(v) { return typeof v === 'string' && ID_PATTERN.test(v); }
 function isValidVariantId(v) { return typeof v === 'string' && VARIANT_ID_PATTERN.test(v); }
@@ -691,7 +684,9 @@ function createRequestHandler({ detectScript, sessionPath, livePath }) {
     // --- Health ---
     if (p === '/status') {
       if (!authenticateQuery(req, res, url)) return;
-      const sessions = state.sessionStore ? state.sessionStore.listActiveSessions() : [];
+      const sessions = state.sessionStore
+        ? state.sessionStore.listActiveSessions().map(summarizeLiveSession)
+        : [];
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({
         status: 'ok',
@@ -1115,7 +1110,7 @@ Endpoints:
   /events              SSE stream (server→browser) + POST (browser→server)
   /poll                Long-poll for agent CLI
   /source              Raw source file reader (no-HMR fallback)
-  /status              Durable recovery status (token-protected)
+  /status              Durable session status (token-protected)
   /health              Health check`);
   process.exit(0);
 }
@@ -1257,7 +1252,9 @@ if (portArg) {
 state.token = randomUUID();
 state.agentToken = randomUUID();
 state.sessionStore = createLiveSessionStore({ cwd: process.cwd() });
-restorePendingEventsFromStore();
+// Durable journals remain available to explicit inspection through
+// live-resume.mjs, but they are project-controlled inputs and never establish
+// authority to enqueue work in a new server process.
 state.port = portArg ? Number(portArg.slice('--port='.length)) : await findOpenPort();
 // Keep annotation output in one fresh, private OS-temporary run directory.
 // Shutdown removes only this exact directory.

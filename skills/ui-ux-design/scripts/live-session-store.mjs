@@ -8,6 +8,27 @@ import {
 } from './impeccable-paths.mjs';
 
 const COMPLETED_PHASES = new Set(['completed', 'discarded']);
+const INERT_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
+const INERT_PHASES = new Set([
+  'new', 'idle', 'picking', 'configuring', 'generating', 'cycling', 'saving',
+  'confirmed', 'generate_requested', 'variants_ready', 'carbonize_required',
+  'accept_requested', 'discard_requested', 'discarded', 'completed', 'agent_error',
+]);
+const INERT_PENDING_TYPES = new Set(['generate', 'accept', 'discard']);
+
+export function summarizeLiveSession(snapshot) {
+  const pendingType = snapshot?.pendingEvent?.type;
+  return {
+    id: INERT_ID_PATTERN.test(snapshot?.id || '') ? snapshot.id : null,
+    phase: INERT_PHASES.has(snapshot?.phase) ? snapshot.phase : 'unknown',
+    revision: Number.isSafeInteger(snapshot?.checkpointRevision)
+      && snapshot.checkpointRevision >= 0
+      ? snapshot.checkpointRevision
+      : 0,
+    hasPendingEvent: !!snapshot?.pendingEvent,
+    pendingEventType: INERT_PENDING_TYPES.has(pendingType) ? pendingType : null,
+  };
+}
 
 export function createLiveSessionStore({ cwd = process.cwd(), sessionId } = {}) {
   ensureCanonicalLiveStateRoot(cwd);
@@ -100,12 +121,24 @@ export function createLiveSessionStore({ cwd = process.cwd(), sessionId } = {}) 
         if (dir === legacyRootDir) assertLegacy();
         if (!fs.existsSync(dir)) continue;
         for (const name of fs.readdirSync(dir)) {
-          if (name.endsWith('.jsonl')) ids.add(name.slice(0, -'.jsonl'.length));
+          if (!name.endsWith('.jsonl')) continue;
+          const id = name.slice(0, -'.jsonl'.length);
+          if (isSafeSessionId(id)) ids.add(id);
         }
       }
       return [...ids]
         .sort()
-        .map((id) => this.getSnapshot(id))
+        .map((id) => {
+          try {
+            const snapshot = this.getSnapshot(id);
+            if (snapshot?.diagnostics?.some((item) => item.error === 'journal_parse_failed')) {
+              return null;
+            }
+            return snapshot;
+          } catch {
+            return null;
+          }
+        })
         .filter(Boolean);
     },
   };
@@ -231,8 +264,12 @@ function getSnapshotPath(rootDir, id) {
 }
 
 function safeSessionId(id) {
-  if (!/^[A-Za-z0-9_-]{1,128}$/.test(id)) throw new Error('invalid session id: ' + id);
+  if (!isSafeSessionId(id)) throw new Error('invalid session id: ' + id);
   return id;
+}
+
+function isSafeSessionId(id) {
+  return typeof id === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(id);
 }
 
 function baseSnapshot(id) {

@@ -29,6 +29,8 @@ import {
 } from './jsx-tag-scanner.mjs';
 
 const EXTENSIONS = ['.html', '.jsx', '.tsx', '.vue', '.svelte', '.astro'];
+const SESSION_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
+const VARIANT_ID_PATTERN = /^[1-8]$/;
 
 // ---------------------------------------------------------------------------
 // CLI
@@ -61,6 +63,14 @@ Output (JSON):
 
   if (!id) { console.error('Missing --id'); process.exit(1); }
   if (!isDiscard && !variantNum) { console.error('Need --discard or --variant N'); process.exit(1); }
+  if (!SESSION_ID_PATTERN.test(id)) {
+    console.error(JSON.stringify({ error: 'invalid_session_id' }));
+    process.exit(1);
+  }
+  if (!isDiscard && !VARIANT_ID_PATTERN.test(variantNum)) {
+    console.error(JSON.stringify({ error: 'invalid_variant_id' }));
+    process.exit(1);
+  }
 
   let paramValues = null;
   if (paramValuesRaw) {

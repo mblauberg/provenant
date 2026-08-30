@@ -20,6 +20,7 @@ components:
       - scripts/live-inject.mjs
       - scripts/live-server.mjs
       - scripts/live-browser.js
+      - scripts/live-browser-session.js
       - scripts/live-session-store.mjs
       - scripts/live-status.mjs
       - scripts/live-completion.mjs

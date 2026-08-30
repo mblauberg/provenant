@@ -1,3 +1,4 @@
+// Modified from Impeccable for this harness; see the repository THIRD_PARTY_NOTICES.md.
 /**
  * Browser-side durable session helpers for Impeccable live mode.
  *
@@ -7,6 +8,49 @@
  */
 (function (root) {
   'use strict';
+
+  const RETRY_ACTIONS = new Set([
+    'impeccable', 'bolder', 'quieter', 'distill', 'polish', 'typeset',
+    'colorize', 'layout', 'adapt', 'animate', 'delight', 'overdrive',
+  ]);
+
+  function cloneJson(value) {
+    try { return JSON.parse(JSON.stringify(value)); } catch { return null; }
+  }
+
+  function buildRetryGenerationEvent({ id, intent } = {}) {
+    if (!/^[0-9a-f]{8}$/.test(id || '')
+      || !intent
+      || !RETRY_ACTIONS.has(intent.action)
+      || !Number.isInteger(intent.count)
+      || intent.count < 1
+      || intent.count > 8
+      || typeof intent.pageUrl !== 'string'
+      || !intent.element
+      || typeof intent.element.outerHTML !== 'string'
+      || !intent.element.outerHTML
+      || (intent.freeformPrompt !== undefined && typeof intent.freeformPrompt !== 'string')
+      || (intent.comments !== undefined && !Array.isArray(intent.comments))
+      || (intent.strokes !== undefined && !Array.isArray(intent.strokes))) return null;
+    const clonedElement = cloneJson(intent.element);
+    const clonedComments = intent.comments === undefined ? undefined : cloneJson(intent.comments);
+    const clonedStrokes = intent.strokes === undefined ? undefined : cloneJson(intent.strokes);
+    if (!clonedElement
+      || (intent.comments !== undefined && !clonedComments)
+      || (intent.strokes !== undefined && !clonedStrokes)) return null;
+    const event = {
+      type: 'generate',
+      id,
+      action: intent.action,
+      count: intent.count,
+      pageUrl: intent.pageUrl,
+      element: clonedElement,
+    };
+    if (intent.freeformPrompt !== undefined) event.freeformPrompt = intent.freeformPrompt;
+    if (clonedComments !== undefined) event.comments = clonedComments;
+    if (clonedStrokes !== undefined) event.strokes = clonedStrokes;
+    return event;
+  }
 
   function createLiveBrowserSessionState({ prefix, storage, idFactory }) {
     if (!prefix) throw new Error('prefix required');
@@ -116,8 +160,12 @@
       writeScrollY,
       readScrollY,
       clearScrollY,
+      buildRetryGenerationEvent,
     };
   }
 
-  root.__IMPECCABLE_LIVE_SESSION__ = { createLiveBrowserSessionState };
+  root.__IMPECCABLE_LIVE_SESSION__ = {
+    createLiveBrowserSessionState,
+    buildRetryGenerationEvent,
+  };
 })(typeof window !== 'undefined' ? window : globalThis);

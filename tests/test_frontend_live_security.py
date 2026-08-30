@@ -19,6 +19,8 @@ INJECT = SCRIPTS / "live-inject.mjs"
 SERVER = SCRIPTS / "live-server.mjs"
 WRAP = SCRIPTS / "live-wrap.mjs"
 ACCEPT = SCRIPTS / "live-accept.mjs"
+RESUME = SCRIPTS / "live-resume.mjs"
+STATUS = SCRIPTS / "live-status.mjs"
 TOKEN = "11111111-1111-4111-8111-111111111111"
 
 
@@ -92,6 +94,76 @@ def _run_accept(project: Path, *args: str) -> subprocess.CompletedProcess[str]:
         capture_output=True,
         text=True,
     )
+
+
+@pytest.mark.parametrize(
+    ("extra_args", "expected_error"),
+    [
+        (["--id", "../escape", "--count", "3"], "invalid_session_id"),
+        (["--id", "a" * 129, "--count", "3"], "invalid_session_id"),
+        (["--id", "security-test", "--count", "0"], "invalid_variant_count"),
+        (["--id", "security-test", "--count", "9"], "invalid_variant_count"),
+        (["--id", "security-test", "--count", "2junk"], "invalid_variant_count"),
+    ],
+)
+def test_live_wrap_rejects_malformed_identity_or_count_before_writing(
+    tmp_path: Path, extra_args: list[str], expected_error: str,
+) -> None:
+    page = tmp_path / "index.html"
+    original = b'<section class="target">original</section>\n'
+    page.write_bytes(original)
+
+    result = subprocess.run(
+        [
+            "node",
+            str(WRAP),
+            *extra_args,
+            "--classes",
+            "target",
+            "--file",
+            "index.html",
+        ],
+        cwd=tmp_path,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert json.loads(result.stderr)["error"] == expected_error
+    assert page.read_bytes() == original
+
+
+@pytest.mark.parametrize(
+    ("args", "expected_error"),
+    [
+        (["--id", "../escape", "--discard"], "invalid_session_id"),
+        (["--id", "a" * 129, "--discard"], "invalid_session_id"),
+        (["--id", "security-test", "--variant", "0"], "invalid_variant_id"),
+        (["--id", "security-test", "--variant", "9"], "invalid_variant_id"),
+        (["--id", "security-test", "--variant", "1junk"], "invalid_variant_id"),
+    ],
+)
+def test_live_accept_rejects_malformed_identity_or_variant_before_writing(
+    tmp_path: Path, args: list[str], expected_error: str,
+) -> None:
+    page = tmp_path / "index.html"
+    page.write_text('<section class="target">original</section>\n')
+    wrapped = _run_wrap(tmp_path, "--file", "index.html")
+    assert wrapped.returncode == 0, wrapped.stderr
+    original = page.read_bytes()
+
+    result = subprocess.run(
+        ["node", str(ACCEPT), *args],
+        cwd=tmp_path,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert json.loads(result.stderr)["error"] == expected_error
+    assert page.read_bytes() == original
 
 
 def _write_wrapped_session(project: Path, *, with_variant: bool) -> Path:
@@ -428,6 +500,189 @@ def test_agent_error_keeps_the_pending_accept_event_recoverable(tmp_path: Path) 
     assert snapshot["phase"] == "agent_error"
     assert snapshot["pendingEvent"]["type"] == "accept"
     assert snapshot["pendingEvent"]["variantId"] == "1"
+
+
+def test_restored_generation_requires_an_explicit_browser_retry_event(
+    tmp_path: Path,
+) -> None:
+    session_url = (SCRIPTS / "live-browser-session.js").as_uri()
+    script = (
+        f"await import({json.dumps(session_url)});"
+        "const api=globalThis.__IMPECCABLE_LIVE_SESSION__;"
+        "const event=api.buildRetryGenerationEvent({"
+        "id:'deadbeef',"
+        "intent:{action:'polish',count:3,pageUrl:'/work',"
+        "element:{outerHTML:'<main>safe</main>'},"
+        "freeformPrompt:'Keep the hierarchy',"
+        "comments:[{x:12,y:18,text:'Align this'}],"
+        "strokes:[{points:[[1,2],[3,4]]}],screenshotPath:'/tmp/stale.png'}});"
+        "process.stdout.write(JSON.stringify(event));"
+    )
+
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        cwd=tmp_path,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {
+        "type": "generate",
+        "id": "deadbeef",
+        "action": "polish",
+        "freeformPrompt": "Keep the hierarchy",
+        "count": 3,
+        "pageUrl": "/work",
+        "element": {"outerHTML": "<main>safe</main>"},
+        "comments": [{"x": 12, "y": 18, "text": "Align this"}],
+        "strokes": [{"points": [[1, 2], [3, 4]]}],
+    }
+    browser = (SCRIPTS / "live-browser.js").read_text()
+    resume_body = browser.split("function resumeSession()", 1)[1].split(
+        "// Global bar", 1
+    )[0]
+    retry_body = browser.split("function retryGeneration()", 1)[1].split(
+        "function handleGo()", 1
+    )[0]
+    server_lost_body = browser.split("function handleServerLost()", 1)[1].split(
+        "function sendEvent", 1
+    )[0]
+    save_body = browser.split("function saveSession()", 1)[1].split(
+        "function loadSession()", 1
+    )[0]
+    restart_body = browser.split("function restartInterruptedGeneration()", 1)[
+        1
+    ].split("function handleGo()", 1)[0]
+    discard_body = browser.split("function handleDiscard()", 1)[1].split(
+        "// Session persistence", 1
+    )[0]
+    assert "sendEvent(" not in resume_body
+    assert "generatingNeedsRestart = state === 'GENERATING'" in resume_body
+    assert "retry.textContent = 'Retry'" in browser
+    assert "retry.addEventListener('click'" in browser
+    assert "retryGeneration();" in browser
+    assert "buildRetryGenerationEvent" in retry_body
+    assert "captureAndEmit(" in retry_body
+    assert "generationIntent" in retry_body
+    assert "generatingNeedsRetry = false" in retry_body
+    assert retry_body.index("generatingNeedsRetry = false") < retry_body.index(
+        "captureAndEmit("
+    )
+    assert "variantObserver = startVariantObserver(currentSessionId)" in retry_body
+    assert retry_body.index("startVariantObserver(currentSessionId)") < retry_body.index(
+        "captureAndEmit("
+    )
+    assert "connectSSE()" in retry_body
+    connect_body = browser.split("function connectSSE()", 1)[1].split(
+        "function handleServerLost()", 1
+    )[0]
+    assert "currentServerCredentials()" in connect_body
+    assert restart_body.index("generatingNeedsRestart = false") < restart_body.index(
+        "sendEvent("
+    )
+    assert "Clearing interrupted session" in restart_body
+    assert "restorePendingDiscard(" in restart_body
+    assert "markSessionHandled()" not in restart_body
+    assert "cleanup()" not in restart_body
+    assert "markSessionHandled()" not in discard_body
+    assert "cleanup()" not in discard_body
+    assert "restorePendingDiscard(" in discard_body
+    assert "case 'discarded':" in browser
+    assert "case 'discard':" in browser
+    discarded_case = browser.split("case 'discarded':", 1)[1].split(
+        "case 'error':", 1
+    )[0]
+    assert "markSessionHandled()" in discarded_case
+    assert "cleanup()" in discarded_case
+    assert "discardWasUnconfirmed" in server_lost_body
+    assert "generatingNeedsRetry = !!generationIntent" in server_lost_body
+    assert (
+        "if (!interruptedGeneration && !recoverableCycling) selectedElement = null"
+        in server_lost_body
+    )
+    assert "showBar('cycling')" in server_lost_body
+    assert "status.setAttribute('role', 'status')" in browser
+    assert "status.setAttribute('aria-live', 'polite')" in browser
+    assert "Reselect the element" in resume_body
+    assert "window.__IMPECCABLE_TOKEN__" in browser
+    assert "JSON.stringify({ ...msg, token: server.token })" in browser
+    assert "selectedAction = 'impeccable'" not in server_lost_body
+    assert "generationIntent" not in save_body
+
+
+def test_status_summarises_retained_project_journals_at_the_server_boundary(
+    tmp_path: Path,
+) -> None:
+    module_url = (SCRIPTS / "live-session-store.mjs").as_uri()
+    seeded_prompt = "PROJECT_JOURNAL_PROMPT_MUST_NOT_ESCAPE"
+    seeded_markup = "<main>PROJECT_JOURNAL_MARKUP_MUST_NOT_ESCAPE</main>"
+    script = (
+        f"import {{ createLiveSessionStore }} from {json.dumps(module_url)};"
+        "createLiveSessionStore({cwd:process.argv[1]}).appendEvent({"
+        "id:'deadbeef',type:'generate',action:'polish',count:1,"
+        f"freeformPrompt:{json.dumps(seeded_prompt)},"
+        f"element:{{outerHTML:{json.dumps(seeded_markup)}}}}});"
+    )
+    seeded = subprocess.run(
+        ["node", "--input-type=module", "-e", script, str(tmp_path)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert seeded.returncode == 0, seeded.stderr
+
+    with LiveServer(tmp_path) as server:
+        status, _, body = _request(
+            f"{server.base_url}/status?token={quote(server.token)}"
+        )
+
+    assert status == 200
+    assert seeded_prompt not in body
+    assert seeded_markup not in body
+    payload = json.loads(body)
+    assert payload["activeSessions"] == [
+        {
+            "id": "deadbeef",
+            "phase": "generate_requested",
+            "revision": 0,
+            "hasPendingEvent": True,
+            "pendingEventType": "generate",
+        }
+    ]
+
+
+@pytest.mark.parametrize("variant_id", ["0", "9", "999"])
+def test_live_server_rejects_out_of_range_accept_before_journal_or_queue(
+    tmp_path: Path, variant_id: str,
+) -> None:
+    with LiveServer(tmp_path) as server:
+        status, _, body = _request(
+            f"{server.base_url}/events",
+            method="POST",
+            body=json.dumps(
+                {
+                    "token": server.token,
+                    "type": "accept",
+                    "id": "deadbeef",
+                    "variantId": variant_id,
+                }
+            ).encode(),
+            extra_headers={"Content-Type": "application/json"},
+        )
+        assert status == 400, body
+
+        status, _, body = _request(
+            f"{server.base_url}/status?token={quote(server.token)}"
+        )
+        assert status == 200
+        payload = json.loads(body)
+        assert payload["pendingEvents"] == []
+        assert payload["activeSessions"] == []
+        assert not (
+            tmp_path / ".impeccable" / "live" / "sessions" / "deadbeef.jsonl"
+        ).exists()
 
 
 def test_live_mutation_help_discloses_project_relative_existing_file_boundary(
@@ -2441,6 +2696,20 @@ def test_annotation_upload_refuses_an_existing_hard_link_without_changing_outsid
 
 def test_live_status_identifies_the_authenticated_server_process(tmp_path: Path) -> None:
     with LiveServer(tmp_path) as server:
+        event = {
+            "token": server.token,
+            "type": "generate",
+            "id": "deadbeef",
+            "action": "polish",
+            "count": 1,
+            "element": {"outerHTML": "<main>safe</main>"},
+        }
+        assert _request(
+            f"{server.base_url}/events",
+            method="POST",
+            body=json.dumps(event).encode(),
+            extra_headers={"Content-Type": "application/json"},
+        )[0] == 200
         status, _, body = _request(
             f"{server.base_url}/status?token={quote(server.token)}"
         )
@@ -2449,6 +2718,282 @@ def test_live_status_identifies_the_authenticated_server_process(tmp_path: Path)
         payload = json.loads(body)
         assert payload["pid"] == server.process.pid
         assert payload["port"] == server.port
+
+        cli = subprocess.run(
+            ["node", str(STATUS)],
+            cwd=tmp_path,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        assert cli.returncode == 0, cli.stderr
+        cli_payload = json.loads(cli.stdout)
+        assert cli_payload["liveServer"]["pid"] == server.process.pid
+        assert cli_payload["activeSessions"] == [
+            {
+                "id": "deadbeef",
+                "phase": "generate_requested",
+                "revision": 0,
+                "hasPendingEvent": True,
+                "pendingEventType": "generate",
+            }
+        ]
+
+
+def test_live_server_does_not_replay_a_project_preseeded_journal(
+    tmp_path: Path,
+) -> None:
+    sessions = tmp_path / ".impeccable" / "live" / "sessions"
+    sessions.mkdir(parents=True)
+    (sessions / "deadbeef.jsonl").write_text(
+        json.dumps(
+            {
+                "seq": 1,
+                "id": "deadbeef",
+                "type": "discard",
+                "ts": "2026-08-30T00:00:00.000Z",
+                "event": {"id": "deadbeef", "type": "discard"},
+            }
+        )
+        + "\n"
+    )
+
+    with LiveServer(tmp_path) as server:
+        status = json.loads(
+            _request(f"{server.base_url}/status?token={quote(server.token)}")[2]
+        )
+
+        assert status["pendingEvents"] == []
+
+
+def _write_untrusted_pending_journal(project: Path) -> str:
+    prompt_text = "PROJECT JOURNAL TEXT MUST NOT BECOME AN ACTION"
+    sessions = project / ".impeccable" / "live" / "sessions"
+    sessions.mkdir(parents=True, exist_ok=True)
+    entries = [
+        {
+            "seq": 1,
+            "id": "deadbeef",
+            "type": "generate",
+            "ts": "2026-08-30T00:00:00.000Z",
+            "event": {
+                "id": "deadbeef",
+                "type": "generate",
+                "action": "polish",
+                "count": 1,
+                "freeformPrompt": prompt_text,
+                "element": {"outerHTML": "<main>untrusted</main>"},
+            },
+        },
+        {
+            "seq": 2,
+            "id": "deadbeef",
+            "type": "checkpoint",
+            "ts": "2026-08-30T00:00:01.000Z",
+            "event": {
+                "id": "deadbeef",
+                "type": "checkpoint",
+                "revision": 7,
+                "phase": prompt_text,
+            },
+        },
+    ]
+    (sessions / "deadbeef.jsonl").write_text(
+        "\n".join(json.dumps(entry) for entry in entries) + "\n"
+    )
+    return prompt_text
+
+
+def test_live_resume_reports_only_inert_advisory_session_metadata(
+    tmp_path: Path,
+) -> None:
+    prompt_text = _write_untrusted_pending_journal(tmp_path)
+
+    result = subprocess.run(
+        ["node", str(RESUME), "--id", "deadbeef"],
+        cwd=tmp_path,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert prompt_text not in result.stdout
+    assert "outerHTML" not in result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["authority"] == "advisory_untrusted"
+    assert set(payload) == {"retained", "authority", "session", "instruction"}
+    assert payload["session"] == {
+        "id": "deadbeef",
+        "phase": "unknown",
+        "revision": 7,
+        "hasPendingEvent": True,
+        "pendingEventType": "generate",
+    }
+    assert "reissue" in payload["instruction"].lower()
+    assert "authenticated browser" in payload["instruction"].lower()
+
+
+def test_live_status_labels_retained_journals_untrusted_without_requeue_advice(
+    tmp_path: Path,
+) -> None:
+    prompt_text = _write_untrusted_pending_journal(tmp_path)
+
+    result = subprocess.run(
+        ["node", str(STATUS)],
+        cwd=tmp_path,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert prompt_text not in result.stdout
+    assert "outerHTML" not in result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["retainedSessionsAuthority"] == "advisory_untrusted"
+    assert payload["activeSessions"] == [
+        {
+            "id": "deadbeef",
+            "phase": "unknown",
+            "revision": 7,
+            "hasPendingEvent": True,
+            "pendingEventType": "generate",
+        }
+    ]
+    assert "requeue" not in payload["recoveryHint"].lower()
+    assert "reissue" in payload["recoveryHint"].lower()
+    assert "authenticated browser" in payload["recoveryHint"].lower()
+
+
+def test_live_status_sanitises_a_spoofed_loopback_status_response(
+    tmp_path: Path,
+) -> None:
+    live_dir = tmp_path / ".impeccable" / "live"
+    live_dir.mkdir(parents=True)
+    (live_dir / "server.json").write_text(
+        json.dumps({"pid": 42, "port": 8400, "token": TOKEN})
+    )
+    sentinel = "SPOOFED_STATUS_TEXT_MUST_NOT_ESCAPE"
+    status_url = STATUS.as_uri()
+    script = (
+        "globalThis.fetch=async()=>({ok:true,json:async()=>({"
+        "status:{freeformPrompt:'" + sentinel + "'},"
+        "pid:'" + sentinel + "',port:8400,"
+        "connectedClients:{outerHTML:'" + sentinel + "'},"
+        "pendingEvents:["
+        "{id:'deadbeef',type:'generate',leased:true,leaseUntil:123,"
+        "freeformPrompt:'" + sentinel + "'},"
+        "{id:'bad id',type:'" + sentinel + "',nested:{outerHTML:'" + sentinel + "'}}],"
+        "activeSessions:[{id:'deadbeef',phase:'generate_requested',"
+        "pendingEvent:{freeformPrompt:'" + sentinel + "',"
+        "element:{outerHTML:'" + sentinel + "'}}}]})});"
+        f"const module=await import({json.dumps(status_url)});"
+        "await module.statusCli();"
+    )
+
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        cwd=tmp_path,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert sentinel not in result.stdout
+    assert "outerHTML" not in result.stdout
+    assert "freeformPrompt" not in result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["activeSessions"] == []
+    assert payload["liveServer"] == {
+        "status": "unknown",
+        "pid": None,
+        "port": 8400,
+        "connectedClients": None,
+        "pendingEvents": [
+            {
+                "id": "deadbeef",
+                "type": "generate",
+                "leased": True,
+                "leaseUntil": 123,
+            }
+        ],
+    }
+
+
+def _write_invalid_advisory_session_files(project: Path) -> None:
+    sessions = project / ".impeccable" / "live" / "sessions"
+    sessions.mkdir(parents=True, exist_ok=True)
+    (sessions / "bad!.jsonl").write_text("{}\n")
+    (sessions / "deadbeef.jsonl").write_text("{not-json}\n")
+
+
+def test_live_status_skips_unsafe_and_malformed_advisory_session_files(
+    tmp_path: Path,
+) -> None:
+    _write_invalid_advisory_session_files(tmp_path)
+
+    result = subprocess.run(
+        ["node", str(STATUS)],
+        cwd=tmp_path,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["activeSessions"] == []
+
+
+def test_server_status_skips_unsafe_and_malformed_advisory_session_files(
+    tmp_path: Path,
+) -> None:
+    _write_invalid_advisory_session_files(tmp_path)
+
+    with LiveServer(tmp_path) as server:
+        status, _, body = _request(
+            f"{server.base_url}/status?token={quote(server.token)}"
+        )
+
+    assert status == 200
+    assert json.loads(body)["activeSessions"] == []
+
+
+@pytest.mark.parametrize("change_unconfigured_source", [False, True])
+def test_live_server_does_not_replay_pending_events_after_a_crash(
+    tmp_path: Path, change_unconfigured_source: bool,
+) -> None:
+    page = tmp_path / "index.html"
+    page.write_text("<html><body>safe</body></html>\n")
+    component = tmp_path / "component.tsx"
+    component.write_text("export const Card = () => <article>before</article>;\n")
+    _write_config(tmp_path, ["index.html"])
+    first = LiveServer(tmp_path)
+    first.__enter__()
+    try:
+        event = {"token": first.token, "type": "discard", "id": "deadbeef"}
+        assert _request(
+            f"{first.base_url}/events",
+            method="POST",
+            body=json.dumps(event).encode(),
+            extra_headers={"Content-Type": "application/json"},
+        )[0] == 200
+        assert first.process is not None
+        first.process.kill()
+        first.process.wait(timeout=3)
+        if change_unconfigured_source:
+            component.write_text("export const Card = () => <article>changed</article>;\n")
+
+        with LiveServer(tmp_path) as recovered:
+            status, _, body = _request(
+                f"{recovered.base_url}/poll?token={quote(recovered.agent_token)}"
+                "&timeout=1&leaseMs=1000"
+            )
+            assert status == 200
+            assert json.loads(body)["type"] == "timeout"
+    finally:
+        first.close()
 
 
 def test_live_event_token_never_reaches_poll_or_durable_journal(tmp_path: Path) -> None:
