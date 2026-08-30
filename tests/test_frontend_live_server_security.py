@@ -12,7 +12,16 @@ from urllib.request import Request, urlopen
 
 import pytest
 
-from ui_ux_live_test_support import ROOT, RESUME, SERVER, SCRIPTS, STATUS, TOKEN, write_live_config
+from ui_ux_live_test_support import (
+    ROOT,
+    RESUME,
+    SERVER,
+    SERVER_WRAPPER,
+    SCRIPTS,
+    STATUS,
+    TOKEN,
+    write_live_config,
+)
 
 
 _write_config = write_live_config
@@ -1671,7 +1680,7 @@ def test_live_serves_the_checked_in_detector_and_screenshot_asset_contracts(
         assert checked.returncode == 0, checked.stderr
 
 
-def test_live_server_fails_before_creating_private_state_when_runtime_is_missing(
+def test_live_wrapper_fails_before_creating_private_state_when_runtime_is_missing(
     tmp_path: Path,
 ) -> None:
     runtime_tmp = tmp_path / "runtime-tmp"
@@ -1682,7 +1691,7 @@ def test_live_server_fails_before_creating_private_state_when_runtime_is_missing
     env["TMPDIR"] = str(runtime_tmp)
 
     result = subprocess.run(
-        ["node", str(SERVER), f"--port={_available_port()}"],
+        ["node", str(SERVER_WRAPPER), f"--port={_available_port()}"],
         cwd=tmp_path,
         check=False,
         capture_output=True,
@@ -1692,7 +1701,7 @@ def test_live_server_fails_before_creating_private_state_when_runtime_is_missing
     )
 
     assert result.returncode != 0
-    assert json.loads(result.stderr)["error"] == "ui_evidence_runtime_unavailable"
+    assert "ui-live runtime not found" in result.stderr
     assert list(runtime_tmp.iterdir()) == []
 
 

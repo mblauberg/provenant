@@ -10,10 +10,10 @@ import assert from 'node:assert/strict';
 import {
   classifyStartupOutcome,
   observeStartup,
-} from '../scripts/live-server-startup.mjs';
+} from '../live-server-startup.mjs';
 
-const SERVER = fileURLToPath(new URL('../scripts/live-server.mjs', import.meta.url));
-const PRODUCT_ROOT = path.resolve(path.dirname(SERVER), '..', '..', '..');
+const SERVER = fileURLToPath(new URL('../live-server.mjs', import.meta.url));
+const PRODUCT_ROOT = path.resolve(path.dirname(SERVER), '..', '..');
 
 function serverEnv() {
   const env = { ...process.env, AGENT_FABRIC_PRODUCT_ROOT: PRODUCT_ROOT };

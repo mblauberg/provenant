@@ -6,27 +6,20 @@ components:
     exact: []
     prefixes: [agents/, references/, scripts/]
     exclude:
-      - scripts/modern-screenshot.umd.js
-      - scripts/contained-source.mjs
-      - scripts/jsx-tag-scanner.mjs
-      - scripts/live-server-startup.mjs
       - scripts/ui-evidence-paths.mjs
+      - scripts/ui-live-paths.mjs
+      - scripts/ui-runtime-paths.mjs
     marker_required_exact:
+      - scripts/detect-csp.mjs
       - scripts/live.mjs
       - scripts/live-poll.mjs
       - scripts/live-accept.mjs
       - scripts/live-wrap.mjs
       - scripts/live-inject.mjs
       - scripts/live-server.mjs
-      - scripts/live-browser.js
-      - scripts/live-browser-session.js
-      - scripts/live-session-store.mjs
       - scripts/live-status.mjs
-      - scripts/live-completion.mjs
       - scripts/live-resume.mjs
       - scripts/live-complete.mjs
-      - scripts/load-context.mjs
-      - scripts/impeccable-paths.mjs
       - scripts/detect.mjs
     marker_required_prefixes: [agents/, references/]
     modification_baseline: 160d110443677984fe033c32dd944d0fad0d4937
@@ -36,24 +29,12 @@ components:
     local_licence: LICENSES/impeccable-APACHE-2.0.txt
     notice: NOTICE
     modification: Renamed, consolidated, and modified for the Provenant harness; provenance is centralised and modified derived files carry a neutral modification notice.
-  - id: modern-screenshot-runtime
-    origin: third-party
-    exact: [scripts/modern-screenshot.umd.js]
-    sha256: bb36665889124a0b6e15f16045265737449c3bdcf2712cdb08af3cfa01563e2b
-    source_url: https://github.com/qq15725/modern-screenshot/tree/792d6db7411839c62940a6e930161f8e376e817f
-    source_ref: "v4.7.0 peeled commit 792d6db7411839c62940a6e930161f8e376e817f"
-    licence: MIT
-    local_licence: LICENSES/modern-screenshot-MIT.txt
-    notice: THIRD_PARTY_NOTICES.md
-    modification: Vendored browser bundle retained unmodified as a live-runtime dependency.
   - id: harness-original-material
     origin: harness-original
     prefixes: [evals/]
     exact:
       - SKILL.md
-      - scripts/contained-source.mjs
-      - scripts/jsx-tag-scanner.mjs
-      - scripts/live-server-startup.mjs
       - scripts/ui-evidence-paths.mjs
-      - tests/live-server-startup.test.mjs
+      - scripts/ui-live-paths.mjs
+      - scripts/ui-runtime-paths.mjs
     description: Local skill entrypoint, runtime safeguards, tests, routing, authority, disposition, and provenance fixtures; not upstream Impeccable expression.

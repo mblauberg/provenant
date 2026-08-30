@@ -41,7 +41,7 @@ def test_review_branch_has_no_legacy_write_or_cleanup_surface():
     ):
         assert not (UI_UX_DESIGN / "scripts" / retired).exists()
 
-    paths = (UI_UX_DESIGN / "scripts" / "impeccable-paths.mjs").read_text()
+    paths = (ROOT / "runtime" / "ui-live" / "impeccable-paths.mjs").read_text()
     assert "CRITIQUE_DIR" not in paths
     assert "getCritiqueDir" not in paths
 

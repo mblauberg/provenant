@@ -210,6 +210,10 @@ def test_detector_does_not_resolve_runtime_from_target_cwd(tmp_path: Path) -> No
         DETECT.parent / "ui-evidence-paths.mjs",
         installed_scripts / "ui-evidence-paths.mjs",
     )
+    shutil.copy2(
+        DETECT.parent / "ui-runtime-paths.mjs",
+        installed_scripts / "ui-runtime-paths.mjs",
+    )
     target = tmp_path / "target"
     old_runtime = target / "node_modules" / "impeccable" / "cli" / "engine"
     old_runtime.mkdir(parents=True)
