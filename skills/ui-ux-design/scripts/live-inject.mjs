@@ -563,7 +563,7 @@ function findCspMetaTags(content, filePath = '') {
 }
 
 function getAttr(attrs, name) {
-  const re = /([^\s=/>]+)\s*=\s*(['"])([\s\S]*?)\2/g;
+  const re = /([^\s=/>]+)\s*=\s*(?:(['"])([\s\S]*?)\2|([^\s"'=<>`]+))/g;
   let match;
   while ((match = re.exec(attrs)) !== null) {
     if (match[1].toLowerCase() !== name.toLowerCase()) continue;
@@ -571,8 +571,8 @@ function getAttr(attrs, name) {
       start: match.index,
       end: match.index + match[0].length,
       name: match[1],
-      quote: match[2],
-      value: match[3],
+      quote: match[2] || '',
+      value: match[2] ? match[3] : match[4],
       full: match[0],
     };
   }
@@ -659,7 +659,8 @@ export function patchCspMeta(content, port, filePath = '') {
     patched = appendOriginToDirective(patched, 'img-src', 'blob:');
     if (patched === original) continue;
 
-    const newContentAttr = `content=${contentAttr.quote}${patched}${contentAttr.quote}`;
+    const outputQuote = contentAttr.quote || '"';
+    const newContentAttr = `content=${outputQuote}${patched}${outputQuote}`;
     const marker = `${CSP_MARKER_ATTR}="${Buffer.from(original, 'utf-8').toString('base64')}"`;
     // The tagRe captures any whitespace between the last attribute and the
     // closing `/>` as part of `attrs`. Naively appending ` ${marker}` after
@@ -692,7 +693,8 @@ export function revertCspMeta(content, filePath = '') {
 
     const originalValue = decodeCanonicalUtf8Base64(origAttr.value);
 
-    const newContentAttr = `content=${contentAttr.quote}${originalValue}${contentAttr.quote}`;
+    const outputQuote = contentAttr.quote || '"';
+    const newContentAttr = `content=${outputQuote}${originalValue}${outputQuote}`;
     const markerStart = origAttr.start > 0 && tag.attrs[origAttr.start - 1] === ' '
       ? origAttr.start - 1
       : origAttr.start;

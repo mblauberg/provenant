@@ -51,14 +51,18 @@ export async function completeCli() {
 
   const store = createLiveSessionStore({ cwd: process.cwd(), sessionId: args.id });
   const prior = store.getSnapshot(args.id, { includeCompleted: true, requireExisting: true });
-  const requiredPhase = args.status === 'discarded' ? 'discard_requested' : 'carbonize_required';
+  const allowedPhases = args.status === 'discarded'
+    ? ['discard_requested']
+    : args.status === 'agent_error'
+      ? ['carbonize_required', 'discard_requested']
+      : ['carbonize_required'];
   if (!prior
-    || prior.phase !== requiredPhase
+    || !allowedPhases.includes(prior.phase)
     || prior.diagnostics?.some((item) => item.error === 'journal_parse_failed')) {
     console.error(JSON.stringify({
       ok: false,
       error: 'live_completion_rejected',
-      message: `Session must have a parse-clean ${requiredPhase} journal before offline completion`,
+      message: `Session must have a parse-clean ${allowedPhases.join(' or ')} journal before offline completion`,
     }));
     process.exit(1);
   }

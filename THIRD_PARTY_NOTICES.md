@@ -51,6 +51,8 @@ redistributed components: no source expression, code, prompt pack, catalogue,
 demo, runtime, or asset was copied, so their MIT texts are not carried as
 component licences.
 
+All seven sources in this section were retrieved on 2026-08-29.
+
 - [Designer Skills](https://github.com/Owl-Listener/designer-skills/tree/20e34c4a587e5eb09fcdf8351fa97b3ad761b31e),
   commit `20e34c4a587e5eb09fcdf8351fa97b3ad761b31e`: knowledge-owner and workflow
   boundary taxonomy.
