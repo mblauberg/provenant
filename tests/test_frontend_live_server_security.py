@@ -848,7 +848,11 @@ def test_expired_lease_cannot_override_a_competing_worker_lease(
         assert first_lease["leaseToken"]
 
         time.sleep(0.06)
-        second_lease = json.loads(_request(poll_url)[2])
+        second_lease_url = (
+            f"{server.base_url}/poll?token={quote(server.agent_token)}"
+            "&timeout=1000&leaseMs=10000"
+        )
+        second_lease = json.loads(_request(second_lease_url)[2])
         assert second_lease["id"] == event_id
         assert second_lease["leaseToken"] != first_lease["leaseToken"]
 
