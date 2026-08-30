@@ -64,7 +64,7 @@ class BatchInputError(ValueError):
 
 
 _state_lock = threading.Lock()
-_cancel_event = threading.Event()
+_cancel_requested = False
 _active_processes: dict[str, subprocess.Popen[str]] = {}
 _active_batch_dirs: set[Path] = set()
 
@@ -90,7 +90,8 @@ def _digest_bytes(value: bytes) -> str:
 
 def request_cancel() -> None:
     """Request cooperative cancellation, then bound the owner fallback."""
-    _cancel_event.set()
+    global _cancel_requested
+    _cancel_requested = True
     with _state_lock:
         processes = list(_active_processes.values())
         batch_dirs = list(_active_batch_dirs)
@@ -123,10 +124,11 @@ def request_cancel() -> None:
 
 
 def _signal_handler(_signum: int, _frame: Any) -> None:
+    global _cancel_requested
     # Signal handlers must only record intent.  Process snapshots and group
     # signalling run in ordinary control flow, outside the non-reentrant
     # custody lock this owner uses for its active-child map.
-    _cancel_event.set()
+    _cancel_requested = True
 
 
 def _finite_timeout(value: Any, default: float = DEFAULT_TIMEOUT_SECONDS) -> float:
@@ -474,7 +476,7 @@ def _validate_child_record(task: dict[str, Any], record: dict[str, Any], run_dir
 
 def _run_task(task: dict[str, Any], run_dir: Path, batch_dir: Path) -> dict[str, Any]:
     task_id = task["id"]
-    if _cancel_event.is_set() or cancellation_marker_present(run_dir, batch_dir):
+    if _cancel_requested or cancellation_marker_present(run_dir, batch_dir):
         return {"task_id": task_id, "status": "cancelled", "outcome": "batch_cancelled"}
     temporary_prompt: Path | None = None
     dispatch_task = {**task, "_batch_id": batch_dir.name}
@@ -509,7 +511,7 @@ def _run_task(task: dict[str, Any], run_dir: Path, batch_dir: Path) -> dict[str,
             temporary_prompt.unlink(missing_ok=True)
     record = _parse_record(stdout)
     if record is None:
-        if _cancel_event.is_set():
+        if _cancel_requested:
             return {"task_id": task_id, "status": "cancelled", "outcome": "batch_cancelled",
                     "dispatch_exit": process.returncode, "stderr": stderr[-1000:]}
         if timed_out:
@@ -549,7 +551,7 @@ def _execute_batch(args: argparse.Namespace, tasks: list[dict[str, Any]], run_di
             pending = set(futures)
             cancellation_handled = False
             while pending:
-                if _cancel_event.is_set() and not cancellation_handled:
+                if _cancel_requested and not cancellation_handled:
                     request_cancel()
                     cancellation_handled = True
                 done, pending = wait(pending, timeout=0.05)
@@ -623,7 +625,8 @@ def batch(args: argparse.Namespace) -> int:
     except BatchInputError as exc:
         print(json.dumps({"schema_version": 1, "status": "batch_busy", "message": str(exc)}, sort_keys=True))
         return 2
-    _cancel_event.clear()
+    global _cancel_requested
+    _cancel_requested = False
     old_handlers = {}
     if threading.current_thread() is threading.main_thread():
         old_handlers = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)}
