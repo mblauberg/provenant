@@ -401,9 +401,6 @@ def append_manifest(run_dir: Path, record: dict[str, Any], custody=None) -> None
     append_manifest_to(run_dir, record, custody)
 
 
-_DEFAULT_APPEND_MANIFEST = append_manifest
-
-
 def append_manifest_to(run_dir: Path, record: dict[str, Any], custody=None) -> None:
     manifest = run_dir / "MANIFEST.md"
     date = record["finished_at"][:10]
@@ -642,6 +639,12 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
         return fail(run_dir, "run_custody_missing", "RUN_RECEIPT.json does not exist")
     except OSError:
         return fail(run_dir, "run_custody_invalid", "RUN_RECEIPT.json is unavailable")
+    try:
+        (run_dir / "MANIFEST.md").lstat()
+    except FileNotFoundError:
+        return fail(run_dir, "run_custody_missing", "MANIFEST.md does not exist")
+    except OSError:
+        return fail(run_dir, "run_custody_invalid", "MANIFEST.md is unavailable")
     try:
         contained_regular_path(run_dir, "MANIFEST.md", "MANIFEST.md")
         run_receipt = json.loads(
@@ -979,10 +982,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
         if args.batch_child:
             manifest_error = False
         else:
-            if append_manifest is _DEFAULT_APPEND_MANIFEST:
-                append_manifest(run_dir, record, custody)
-            else:
-                append_manifest(run_dir, record)
+            append_manifest(run_dir, record, custody)
     except OSError as exc:
         manifest_error = True
         record["status"] = "failed"

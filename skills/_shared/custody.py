@@ -164,9 +164,9 @@ def atomic_write_contained(
     *,
     mode: int = 0o600,
     label: str = "file",
+    expected_root: os.stat_result | None = None,
 ) -> None:
     """Atomically replace one contained file using a descriptor-bound parent."""
-    root = root.resolve()
     raw = Path(value)
     if raw.is_absolute() or ".." in raw.parts or not raw.parts:
         raise OwnedFileError(f"{label} must be a run-relative path")
@@ -176,6 +176,10 @@ def atomic_write_contained(
     temp_name: str | None = None
     try:
         root_fd = os.open(root, os.O_RDONLY | nofollow | directory)
+        if expected_root is not None:
+            actual_root = os.fstat(root_fd)
+            if (actual_root.st_dev, actual_root.st_ino) != (expected_root.st_dev, expected_root.st_ino):
+                raise OwnedFileError(f"{label} run root changed while being written")
         parent_fd = root_fd
         for part in raw.parts[:-1]:
             next_fd = os.open(part, os.O_RDONLY | nofollow | directory, dir_fd=parent_fd)
@@ -221,6 +225,49 @@ def atomic_write_contained(
                 os.unlink(temp_name, dir_fd=parent_fd)
             except FileNotFoundError:
                 pass
+        if parent_fd >= 0 and parent_fd != root_fd:
+            os.close(parent_fd)
+        if root_fd >= 0:
+            os.close(root_fd)
+
+
+def unlink_contained_regular(root: Path, value: str | Path, *, label: str = "file") -> None:
+    """Unlink one contained regular file after binding its inode and parent fd."""
+    raw = Path(value)
+    if raw.is_absolute() or ".." in raw.parts or not raw.parts:
+        raise OwnedFileError(f"{label} must be a run-relative path")
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    directory = getattr(os, "O_DIRECTORY", 0)
+    root_fd = parent_fd = file_fd = -1
+    try:
+        root_fd = os.open(root, os.O_RDONLY | nofollow | directory)
+        parent_fd = root_fd
+        for part in raw.parts[:-1]:
+            next_fd = os.open(part, os.O_RDONLY | nofollow | directory, dir_fd=parent_fd)
+            if not stat.S_ISDIR(os.fstat(next_fd).st_mode):
+                os.close(next_fd)
+                raise OwnedFileError(f"{label} path contains a non-directory component: {raw.as_posix()}")
+            if parent_fd != root_fd:
+                os.close(parent_fd)
+            parent_fd = next_fd
+        file_fd = os.open(raw.parts[-1], os.O_RDONLY | nofollow, dir_fd=parent_fd)
+        bound = os.fstat(file_fd)
+        visible = os.stat(raw.parts[-1], dir_fd=parent_fd, follow_symlinks=False)
+        if (
+            not stat.S_ISREG(bound.st_mode)
+            or bound.st_nlink != 1
+            or (bound.st_dev, bound.st_ino) != (visible.st_dev, visible.st_ino)
+        ):
+            raise OwnedFileError(f"{label} changed while being removed: {raw.as_posix()}")
+        os.unlink(raw.parts[-1], dir_fd=parent_fd)
+        os.fsync(parent_fd)
+    except (OSError, OwnedFileError) as exc:
+        if isinstance(exc, OwnedFileError):
+            raise
+        raise OwnedFileError(f"{label} cannot be removed safely: {raw.as_posix()}") from exc
+    finally:
+        if file_fd >= 0:
+            os.close(file_fd)
         if parent_fd >= 0 and parent_fd != root_fd:
             os.close(parent_fd)
         if root_fd >= 0:

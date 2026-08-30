@@ -386,3 +386,82 @@ def test_atomic_owned_write_preserves_old_bytes_on_interruption_and_replaces(tmp
     monkeypatch.setattr(custody.os, "write", real_write)
     custody.atomic_write_contained(run, "evidence.txt", b"new\n", label="evidence")
     assert target.read_bytes() == b"new\n"
+
+
+def test_finalizer_atomic_receipt_interruption_preserves_old_bytes_and_retries(tmp_path: Path, monkeypatch) -> None:
+    run = make_run(tmp_path)
+    write_valid_attempt(run)
+    close_successful_run(run)
+    finalizer = load(FINALIZE, "finalize_atomic_receipt_issue_697")
+    custody = load(ROOT / "skills/_shared/custody.py", "custody_atomic_receipt_issue_697")
+    real_write = custody.os.write
+    interrupted = False
+
+    def interrupt_once(fd, data):
+        nonlocal interrupted
+        if not interrupted:
+            interrupted = True
+            real_write(fd, data[:1])
+            raise OSError("injected receipt interruption")
+        return real_write(fd, data)
+
+    monkeypatch.setattr(custody.os, "write", interrupt_once)
+    assert finalizer.main([str(run), "--status", "succeeded"]) == 1
+    assert json.loads((run / "RUN_RECEIPT.json").read_text())["status"] == "active"
+    monkeypatch.setattr(custody.os, "write", real_write)
+    assert finalizer.main([str(run), "--status", "succeeded"]) == 0
+    assert json.loads((run / "RUN_RECEIPT.json").read_text())["status"] == "succeeded"
+
+
+def test_finalizer_prune_symlink_swap_fails_closed(tmp_path: Path, monkeypatch) -> None:
+    run = make_run(tmp_path)
+    write_valid_attempt(run)
+    close_successful_run(run)
+    candidate = run / "ephemeral.txt"
+    candidate.write_text("temporary\n")
+    outside = tmp_path / "outside.txt"
+    outside.write_text("must survive\n")
+    finalizer = load(FINALIZE, "finalize_prune_swap_issue_697")
+
+    def swap_candidate(*_args):
+        candidate.unlink()
+        candidate.symlink_to(outside)
+        return [candidate]
+
+    monkeypatch.setattr(finalizer, "prune_candidates", swap_candidate)
+    assert finalizer.main([str(run), "--status", "succeeded", "--prune-ephemeral", "--apply"]) == 1
+    assert outside.read_text() == "must survive\n"
+    assert json.loads((run / "RUN_RECEIPT.json").read_text())["status"] == "active"
+
+
+def test_finalizer_atomic_commit_rejects_root_swap_after_binding_check(tmp_path: Path, monkeypatch) -> None:
+    run = make_run(tmp_path)
+    write_valid_attempt(run)
+    close_successful_run(run)
+    finalizer = load(FINALIZE, "finalize_atomic_root_swap_issue_697")
+    real_atomic = finalizer.atomic_write_contained
+    old_root = tmp_path / "run-old"
+
+    def swap_before_atomic(root, value, content, **kwargs):
+        run.rename(old_root)
+        shutil.copytree(old_root, run)
+        return real_atomic(root, value, content, **kwargs)
+
+    monkeypatch.setattr(finalizer, "atomic_write_contained", swap_before_atomic)
+    assert finalizer.main([str(run), "--status", "succeeded"]) == 1
+    assert json.loads((old_root / "RUN_RECEIPT.json").read_text())["status"] == "active"
+    assert json.loads((run / "RUN_RECEIPT.json").read_text())["status"] == "active"
+
+
+def test_dispatch_classifies_missing_manifest_as_missing_custody(tmp_path: Path) -> None:
+    run = make_run(tmp_path)
+    (run / "MANIFEST.md").unlink()
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("prompt\n")
+    result = subprocess.run(
+        [str(DISPATCH), "--run-dir", str(run), "--task-id", "missing-manifest", "--adapter", "none",
+         "--prompt-file", str(prompt), "--alias", "scout", "--role", "worker"],
+        cwd=tmp_path, text=True, capture_output=True,
+    )
+    assert result.returncode == 2
+    assert json.loads(result.stdout)["status"] == "run_custody_missing"

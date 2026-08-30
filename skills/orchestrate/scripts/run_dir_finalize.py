@@ -22,7 +22,10 @@ from _shared.review_ladder import (
 )
 from _shared.review_panel import PANEL_RECORD_KEYS, validate_panel_result
 from _shared.review_terminal import REVIEW_RESULT_KEYS, normalise_dispatch_review
-from _shared.custody import OwnedFileError, contained_regular_path, open_contained_regular, read_contained_regular
+from _shared.custody import (
+    OwnedFileError, atomic_write_contained, contained_regular_path, open_contained_regular,
+    read_contained_regular, unlink_contained_regular,
+)
 
 SCRIPTS_ROOT = Path(__file__).resolve().parent
 if str(SCRIPTS_ROOT) not in sys.path:
@@ -955,14 +958,6 @@ def main(argv: list[str] | None = None) -> int:
             for error in errors:
                 print(f"FAIL: {error}", file=sys.stderr)
             return 1
-        candidates = prune_candidates(args.run_dir, rows) if args.prune_ephemeral else []
-        pruned: list[str] = []
-        for path in candidates:
-            rel = path.resolve().relative_to(args.run_dir.resolve()).as_posix()
-            print(("PRUNE" if args.apply else "WOULD-PRUNE") + f": {rel}")
-            if args.apply:
-                path.unlink()
-                pruned.append(rel)
         receipt_path = args.run_dir / "RUN_RECEIPT.json"
         assert receipt_stream is not None
         receipt_stream.seek(0)
@@ -980,6 +975,18 @@ def main(argv: list[str] | None = None) -> int:
         if reread_receipt != bound_receipt:
             print("FAIL: RUN_RECEIPT.json changed while finalising", file=sys.stderr)
             return 1
+        candidates = prune_candidates(args.run_dir, rows) if args.prune_ephemeral else []
+        pruned: list[str] = []
+        for path in candidates:
+            rel = path.relative_to(args.run_dir).as_posix()
+            print(("PRUNE" if args.apply else "WOULD-PRUNE") + f": {rel}")
+            if args.apply:
+                try:
+                    unlink_contained_regular(args.run_dir, rel, label="prune candidate")
+                except OwnedFileError as exc:
+                    print(f"FAIL: prune candidate changed while finalising: {exc}", file=sys.stderr)
+                    return 1
+                pruned.append(rel)
         receipt = dict(bound_receipt)
         listed = {row["path"] for row in rows}
         unclassified = sorted(
@@ -998,11 +1005,19 @@ def main(argv: list[str] | None = None) -> int:
             "unclassified_paths": unclassified,
             "pruned_paths": sorted(set(receipt.get("pruned_paths", [])) | set(pruned)),
         })
-        receipt_stream.seek(0)
-        receipt_stream.truncate()
-        receipt_stream.write(json.dumps(receipt, indent=2) + "\n")
-        receipt_stream.flush()
-        os.fsync(receipt_stream.fileno())
+        receipt_stream.close()
+        receipt_stream = None
+        try:
+            atomic_write_contained(
+                args.run_dir,
+                "RUN_RECEIPT.json",
+                (json.dumps(receipt, indent=2) + "\n").encode(),
+                label="RUN_RECEIPT.json",
+                expected_root=root_metadata,
+            )
+        except OwnedFileError as exc:
+            print(f"FAIL: RUN_RECEIPT.json could not be committed: {exc}", file=sys.stderr)
+            return 1
         print(f"PASS: run terminalised as {args.status}")
         return 0
     finally:
