@@ -389,6 +389,9 @@ export class Store {
       if (claimed.changes !== 1) {
         const current = this.#task(who.project, taskId);
         if (current.state === "open" && current.owner === who.agentId) return current;
+        if (current.state === "open" && current.owner !== null) {
+          throw new Error(`task ${taskId} is already assigned to ${current.owner}`);
+        }
         throw new Error(`task ${taskId} is not open and unowned in ${who.project}`);
       }
       this.#log(who, "task", `${taskId} claimed by ${who.agentId}`);

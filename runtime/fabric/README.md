@@ -25,7 +25,8 @@ Common CLI operations are:
 
 ```sh
 fabric send codex "review auth.ts" --kind request
-fabric inbox                         # claim available deliveries
+fabric inbox                         # claim available deliveries (default: 20)
+fabric inbox --limit 5               # claim at most five deliveries
 fabric ack <message-id> <claim-id>   # acknowledge after receipt succeeds
 fabric task "review the change"
 fabric claim <task-id>
@@ -100,6 +101,16 @@ add only one concurrency rule: exactly one caller can take an `open`, unowned
 task. Retrying as that owner is idempotent; other callers fail. Generic task
 updates remain cooperative and do not form a state machine, except that the
 literal state `claimed` is reserved for the atomic ownership operation.
+Create targeted tasks with the MCP `owner` field. An owner-bound task is already
+assigned and is not available to unowned-task claiming; retrying as that owner
+is idempotent. Task ownership is cooperative routing metadata, not an
+access-control boundary, and does not grant or restrict tool or filesystem
+access.
+
+Fabric identity follows the process working directory. Start the coordinating
+provider process from the intended project root so its messages and tasks use
+the same project scope. A provider may inspect code in a linked worktree, but a
+coordination process started there belongs to that worktree's project identity.
 
 Activity entries expose their monotonic `seq`. `fabric_activity` accepts
 `after_seq` for ascending cursor reads. CLI `watch` uses that cursor and drains

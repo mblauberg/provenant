@@ -75,6 +75,10 @@ try {
     "fabric_team_create",
     "fabric_whoami",
   ]);
+  const taskCreateTool = listed.tools.find((tool) => tool.name === "fabric_task_create");
+  const taskClaimTool = listed.tools.find((tool) => tool.name === "fabric_task_claim");
+  assert.match(taskCreateTool?.description ?? "", /owner-bound task is already assigned/);
+  assert.match(taskClaimTool?.description ?? "", /Owner-bound tasks are already assigned/);
 
   for (const [client, seat, label] of [
     [claude, "claude", "claude-client"],
@@ -141,6 +145,16 @@ try {
   await expectToolError(codex.callTool({
     name: "fabric_task_claim",
     arguments: { task_id: task.taskId },
+  }));
+
+  const targetedTask = payload(await claude.callTool({
+    name: "fabric_task_create",
+    arguments: { task_id: "mcp-targeted", objective: "Review once", owner: "agy-client" },
+  }));
+  assert.equal(targetedTask.owner, "agy-client");
+  await expectToolError(codex.callTool({
+    name: "fabric_task_claim",
+    arguments: { task_id: targetedTask.taskId },
   }));
 
   payload(await claude.callTool({
