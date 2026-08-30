@@ -147,9 +147,10 @@ advisory until primary-family evidence corroborates it.
 
 Agy may hold its own `agy` Fabric seat for stable addressing, but the seat does
 not prove a Gemini or Google route. Count the model family only from the exact
-provider/model fields in the dispatch receipt. Fabric is optional coordination;
-this adapter is the direct provider call. A missing Fabric roundtrip is degraded
-only when the run contract required one, and it does not block direct review.
+provider/model fields in the dispatch receipt. When available, Fabric is the
+required coordination path; this adapter is the direct provider call and its
+receipt and output remain the execution evidence. If Fabric is unavailable,
+record the missing roundtrip as degraded; it does not block direct review.
 
 `cf_dispatch.sh --tool agy` is the route. Five properties of this CLI are load
 bearing and were measured against agy 1.1.10 on 2026-08-05, not read from help:
