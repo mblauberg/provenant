@@ -3,7 +3,10 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SCRIPTS = ROOT / "skills" / "ui-ux-design" / "scripts"
+SKILL_SCRIPTS = ROOT / "skills" / "ui-ux-design" / "scripts"
+SCRIPTS = ROOT / "runtime" / "ui-live"
+LIVE = SKILL_SCRIPTS / "live.mjs"
+SERVER_WRAPPER = SKILL_SCRIPTS / "live-server.mjs"
 INJECT = SCRIPTS / "live-inject.mjs"
 SERVER = SCRIPTS / "live-server.mjs"
 WRAP = SCRIPTS / "live-wrap.mjs"

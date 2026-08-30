@@ -1,14 +1,22 @@
 import json
+import os
 from pathlib import Path
 import subprocess
 import time
 
 from test_frontend_live_server_security import LiveServer, _request
 from test_frontend_source_security import _run_inject
-from ui_ux_live_test_support import SERVER, SCRIPTS, TOKEN, write_live_config
+from ui_ux_live_test_support import LIVE, ROOT, SERVER, SCRIPTS, TOKEN, write_live_config
 
 
 _write_config = write_live_config
+
+
+def _runtime_env() -> dict[str, str]:
+    env = dict(os.environ)
+    env["AGENT_FABRIC_PRODUCT_ROOT"] = str(ROOT)
+    env.pop("AGENTS_HOME", None)
+    return env
 
 
 def test_live_inject_preflights_every_anchor_before_changing_any_file(tmp_path: Path) -> None:
@@ -34,12 +42,13 @@ def test_live_entrypoint_injects_private_server_token_without_logging_it(tmp_pat
     _write_config(tmp_path, ["index.html"])
     try:
         result = subprocess.run(
-            ["node", str(SCRIPTS / "live.mjs")],
+            ["node", str(LIVE)],
             cwd=tmp_path,
             check=False,
             capture_output=True,
             text=True,
             timeout=15,
+            env=_runtime_env(),
         )
         assert result.returncode == 0, result.stderr
         payload = json.loads(result.stdout)
@@ -66,6 +75,7 @@ def test_live_entrypoint_injects_private_server_token_without_logging_it(tmp_pat
             capture_output=True,
             text=True,
             timeout=10,
+            env=_runtime_env(),
         )
 
 
@@ -81,12 +91,13 @@ def test_live_entrypoint_emits_bounded_context_metadata_without_document_bodies(
     (tmp_path / "DESIGN.md").write_text(f"# Design\n\n{design_sentinel}\n## Components\n")
     try:
         result = subprocess.run(
-            ["node", str(SCRIPTS / "live.mjs")],
+            ["node", str(LIVE)],
             cwd=tmp_path,
             check=False,
             capture_output=True,
             text=True,
             timeout=15,
+            env=_runtime_env(),
         )
 
         assert result.returncode == 0, result.stderr
@@ -118,6 +129,7 @@ def test_live_entrypoint_emits_bounded_context_metadata_without_document_bodies(
             capture_output=True,
             text=True,
             timeout=10,
+            env=_runtime_env(),
         )
 
 
@@ -131,12 +143,13 @@ def test_live_entrypoint_stops_only_the_server_it_started_when_injection_fails(
     _write_config(tmp_path, ["good.html", "bad.html"])
 
     result = subprocess.run(
-        ["node", str(SCRIPTS / "live.mjs")],
+        ["node", str(LIVE)],
         cwd=tmp_path,
         check=False,
         capture_output=True,
         text=True,
         timeout=15,
+        env=_runtime_env(),
     )
 
     assert result.returncode != 0
@@ -160,12 +173,13 @@ def test_live_entrypoint_does_not_stop_a_preexisting_server_when_injection_fails
 
     with LiveServer(tmp_path) as server:
         result = subprocess.run(
-            ["node", str(SCRIPTS / "live.mjs")],
+            ["node", str(LIVE)],
             cwd=tmp_path,
             check=False,
             capture_output=True,
             text=True,
             timeout=15,
+            env=_runtime_env(),
         )
         assert result.returncode != 0
         payload = json.loads(result.stdout)

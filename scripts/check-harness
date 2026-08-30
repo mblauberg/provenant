@@ -33,13 +33,18 @@ while IFS= read -r -d '' script; do
 done < <(find "$SKILLS_ROOT" -type f -name '*.sh' -print0)
 
 "$SCRIPTS_ROOT/check-skill-javascript" "$SKILLS_ROOT"
+"$SCRIPTS_ROOT/check-skill-javascript" "$PRODUCT_ROOT/runtime/ui-evidence" "UI evidence runtime"
+"$SCRIPTS_ROOT/check-skill-javascript" "$PRODUCT_ROOT/runtime/ui-live" "UI live runtime"
 
-# Skill JavaScript tests are discovered rather than listed, so a new one runs
-# in the gate the moment it lands instead of sitting unexecuted.
+# Skill and runtime JavaScript tests are discovered rather than listed, so a
+# new one runs in the gate the moment it lands instead of sitting unexecuted.
 skill_node_tests=()
 while IFS= read -r -d '' skill_test; do
   skill_node_tests+=("$skill_test")
 done < <(find "$SKILLS_ROOT" -type f -name '*.test.mjs' -not -path '*/node_modules/*' -print0)
+while IFS= read -r -d '' runtime_test; do
+  skill_node_tests+=("$runtime_test")
+done < <(find "$PRODUCT_ROOT/runtime" -type f -name '*.test.mjs' -not -path '*/node_modules/*' -print0)
 if (( ${#skill_node_tests[@]} > 0 )); then
   node --test "${skill_node_tests[@]}"
 fi

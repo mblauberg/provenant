@@ -4,7 +4,7 @@ import subprocess
 
 
 ROOT = Path(__file__).resolve().parents[1]
-LOADER = ROOT / "skills" / "ui-ux-design" / "scripts" / "load-context.mjs"
+LOADER = ROOT / "runtime" / "ui-live" / "load-context.mjs"
 
 
 def test_context_loader_reads_legacy_file_without_renaming_it(tmp_path):

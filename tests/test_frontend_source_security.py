@@ -16,6 +16,7 @@ from ui_ux_live_test_support import (
     ACCEPT,
     INJECT,
     ROOT,
+    LIVE,
     SCRIPTS,
     STATUS,
     TOKEN,
@@ -785,7 +786,7 @@ def test_live_mutation_help_discloses_project_relative_existing_file_boundary(
     assert wrap.stdout.startswith("Usage: node live-wrap.mjs")
 
     live_help = subprocess.run(
-        ["node", str(SCRIPTS / "live.mjs"), "--help"],
+        ["node", str(LIVE), "--help"],
         cwd=tmp_path,
         check=False,
         capture_output=True,
@@ -900,7 +901,7 @@ def test_live_entrypoint_does_not_execute_shell_syntax_from_server_state(
     )
 
     result = subprocess.run(
-        ["node", str(SCRIPTS / "live.mjs")],
+        ["node", str(LIVE)],
         cwd=tmp_path,
         check=False,
         capture_output=True,

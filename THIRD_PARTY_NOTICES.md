@@ -13,25 +13,29 @@ redistributed component to its licence text and records how it was adapted.
 ## Impeccable
 
 `skills/ui-ux-design/` (formerly `frontend-design`, now merged with
-`frontend-review`) is a renamed and modified distribution of
+`frontend-review`) and its private runtimes at `runtime/ui-evidence/` and
+`runtime/ui-live/` are a
+renamed and modified distribution of
 [Impeccable](https://github.com/pbakaus/impeccable), copyright 2025 Paul
 Bakaus, under Apache License 2.0. Its licence text is
 `LICENSES/impeccable-APACHE-2.0.txt` and its §4(d) attribution notice is in the
 top-level `NOTICE`. Repository history proves the first public local import at
 commit `a39c7b7e6db2778467e43f5ed3a05143c05c07dd` (10 July 2026), but does not
 retain a recoverable upstream Impeccable commit. No upstream head is inferred.
-The component ledger at `skills/ui-ux-design/evals/provenance_components.yaml`
-records the exact harness-original exceptions. Attribution is centralised here
-and in that ledger. Modified derived files carry only a neutral local
-modification notice.
-`skills/ui-ux-design/SKILL.md`, `skills/ui-ux-design/evals/`,
-`skills/ui-ux-design/scripts/contained-source.mjs`,
-`skills/ui-ux-design/scripts/jsx-tag-scanner.mjs`,
-`skills/ui-ux-design/scripts/live-server-startup.mjs`, and
-`skills/ui-ux-design/tests/live-server-startup.test.mjs` are harness-original
-rather than upstream Impeccable expression.
+The component ledgers at `skills/ui-ux-design/evals/provenance_components.yaml`
+`runtime/ui-evidence/provenance_components.yaml`, and
+`runtime/ui-live/provenance_components.yaml` record the exact
+harness-original exceptions and ownership boundary. Attribution is centralised
+here and in those ledgers; modified derived files carry only a neutral local
+modification notice. `skills/ui-ux-design/SKILL.md`, its `evals/`,
+`scripts/ui-evidence-paths.mjs`, `scripts/ui-live-paths.mjs`, and
+`scripts/ui-runtime-paths.mjs` are
+harness-original rather than upstream Impeccable expression. The detector and
+live runtimes are private product infrastructure, not separate skills or
+separately installed packages. The live runtime ledger records its additional
+harness-original containment, scanner, startup, and test files.
 
-The bundled `skills/ui-ux-design/scripts/modern-screenshot.umd.js` is
+The bundled `runtime/ui-live/modern-screenshot.umd.js` is
 modern-screenshot 4.7.0 at peeled commit
 [`792d6db7411839c62940a6e930161f8e376e817f`](https://github.com/qq15725/modern-screenshot/tree/792d6db7411839c62940a6e930161f8e376e817f),
 copyright 2021-present wxm, under the MIT License. Its terms are in
