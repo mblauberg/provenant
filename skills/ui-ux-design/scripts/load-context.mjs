@@ -1,3 +1,4 @@
+// Modified from Impeccable for this harness; see the repository THIRD_PARTY_NOTICES.md.
 /**
  * Shared context loader for every impeccable command that needs to know
  * "who is this for" and "what does this look like".

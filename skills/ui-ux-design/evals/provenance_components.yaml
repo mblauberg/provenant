@@ -25,6 +25,7 @@ components:
       - scripts/live-completion.mjs
       - scripts/live-resume.mjs
       - scripts/live-complete.mjs
+      - scripts/load-context.mjs
       - scripts/impeccable-paths.mjs
       - scripts/detector/cli/main.mjs
       - scripts/detector/engines/browser/detect-url.mjs
