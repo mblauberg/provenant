@@ -34,7 +34,13 @@ def test_delivery_and_implementation_guidance_names_receipt_and_safe_root():
 
     deliver = read("skills/deliver/SKILL.md")
     assert RECEIPT_INIT in deliver
-    assert REQUIRED_INIT_FLAGS <= set(re.findall(r"--[a-z-]+", deliver))
+    init_blocks = [
+        block
+        for block in re.findall(r"```sh\n(.*?)```", deliver, re.DOTALL)
+        if RECEIPT_INIT in block
+    ]
+    assert len(init_blocks) == 1
+    assert REQUIRED_INIT_FLAGS <= set(re.findall(r"--[a-z-]+", init_blocks[0]))
     implement_contract = read("skills/implement/references/run-contract.md")
     assert "complete `init` command in `deliver`" in implement_contract
     assert "../../deliver/references/" not in implement_contract

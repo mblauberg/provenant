@@ -29,9 +29,10 @@ inventing.
      --chair-family "<family>" --risk-assessment "<risk-assessment.json>" \
      --intent "<approved-intent-file>" --authority "<authority.json>"
    ```
-   The intent file must be non-empty; the other inputs are JSON files or JSON
-   arguments. Add `--fabric-relationships` only for coordinated work, then bind
-   other required artifacts through the same producer and follow
+   The intent file must be non-empty; `--risk-assessment` and `--authority`
+   accept a JSON file path or inline JSON. Add `--fabric-relationships` only
+   for coordinated work, then bind other required artifacts through the same
+   producer and follow
    [the receipt contract](references/contract.md).
 2. Record each state transition. No state may jump an approval, evidence,
    review, acceptance or release gate.
