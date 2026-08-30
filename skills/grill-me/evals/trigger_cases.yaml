@@ -3,7 +3,7 @@ target_skill: grill-me
 cases:
   - {id: q118, relation: positive, prompt: "Grill me on this architecture one decision at a time and recommend an answer to each question.", tags: [direct], expected: {primary_skill: grill-me, companion_skills: []}}
   - {id: q119, relation: positive, prompt: "Stress-test my rollout plan by walking the decision tree one branch per turn.", tags: [direct], expected: {primary_skill: grill-me, companion_skills: []}}
-  - {id: q120, relation: positive, prompt: "Interview me until the design trade-offs are resolved; answer anything discoverable from the repository yourself.", tags: [direct], expected: {primary_skill: grill-me, companion_skills: []}}
+  - {id: q120, relation: positive, prompt: "Read the repository process declaration, then interview me until the design trade-offs are resolved.", tags: [direct], expected: {primary_skill: grill-me, companion_skills: []}}
   - {id: q121, relation: negative, prompt: "Turn these already decided requirements into a final approved specification.", tags: [adjacent], expected: {primary_skill: scope, companion_skills: []}}
   - {id: q122, relation: negative, prompt: "Implement the approved design and verify it end-to-end.", tags: [adjacent], expected: {primary_skill: implement, companion_skills: []}}
   - {id: q123, relation: negative, prompt: "Review this completed pull request read-only for defects.", tags: [adjacent], expected: {primary_skill: code-review, companion_skills: []}}

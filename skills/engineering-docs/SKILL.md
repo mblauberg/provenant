@@ -9,18 +9,17 @@ Treat docs as durable, audited deliverables. Cite decisions, archive retired
 docs, use Australian English and load `engineering-writing` for substantial
 prose.
 
-Read the repository's `Repository process` declaration before choosing a home.
-When it declares `issue-tracker`, the parent issue owns the canonical scope and
-stories; project docs own durable intent, decisions and invariants. With
-`project-docs`, use its named scope/story home. Do not create a second story or
-status projection. A link-only file is only a fallback for an unavailable or
-cross-tracker route.
+Read the repository's `Repository process` declaration first. With
+`issue-tracker`, the parent issue owns canonical scope and stories; docs own
+durable intent, decisions and invariants. With `project-docs`, use its named
+home. Do not create a second story or status projection. A link-only file is
+only an unavailable or cross-tracker fallback.
 
 ## Default homes
 
-Resolve project instructions and existing canonical owners first. The table is
-a fallback only when project-write authority includes documentation setup. In
-advisory mode, propose paths without creating them.
+Resolve project instructions and existing owners first. The table is a fallback
+when project-write authority includes documentation setup; in advisory mode,
+propose paths without creating them.
 
 | Type | Home | Convention |
 |---|---|---|
@@ -49,13 +48,11 @@ advisory mode, propose paths without creating them.
 
 ## Diagrams
 
-Default to **Mermaid in markdown** for GitHub and operational docs. Use
+Default to **Mermaid in markdown** for GitHub and operational docs: use
 `flowchart` for routing, `sequenceDiagram` for calls, `stateDiagram-v2` for
-lifecycles, `erDiagram` for schemas and a C4-style flowchart for context.
-
-Place a load-bearing diagram in the document whose explanation it supports
-when both have the same audience, owner and lifecycle. Use a separate diagram
-file when it is reused, generated, or maintained as an independent artifact.
+lifecycles and `erDiagram` for schemas. Colocate a load-bearing diagram with
+its owner when both have the same audience, owner and lifecycle; use a separate
+file only when reused, generated or independently maintained.
 
 **Render and visually inspect before commit.** Parser success proves syntax,
 not layout quality:
@@ -66,11 +63,10 @@ out="$(mktemp -d)"
 (cd "$out" && mmdc -i "$src" -o check.md)
 ```
 
-Keep one conceptual level per diagram. Split overview from detail when return
-edges distort the main path. Check normal and narrow widths for overlap,
-clipping, crossings, blank space and unreadable scaling. Apply
-[diagram-quality.md](references/diagram-quality.md). Use `d2-diagrams` only
-when fixed layout or publication quality justifies a rendered asset.
+Keep one conceptual level per diagram; check normal and narrow widths for
+overlap, clipping, crossings, blank space and unreadable scaling. Apply
+[diagram-quality.md](references/diagram-quality.md); use `d2-diagrams` only
+when fixed layout or publication quality justifies it.
 
 ## Retirement and archiving
 

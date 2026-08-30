@@ -9,24 +9,21 @@ Turn an idea into decided, testable scope under project constraints.
 
 ## Frame
 
-Read the target repository's `Repository process` declaration before framing.
-Define the decision, users and done. Search specs and registers. Put the
-change scope and story in the declared canonical home: the parent tracker
-issue for `issue-tracker`, or the named project-docs home for `project-docs`.
-Emit the minimum
-`config/risk-policy.json` tier plus allowed
-source/artifact paths, prohibited actions, external effects, expiry and approver.
-Ordinary authorised workspace content may cross configured provider families
-without a family-separation gate. This is execution permission, not assurance:
-credentials and authentication stores, secrets, unrelated paths, explicit
-denials, platform rules and narrower task/project bans still control. Path and
-write scopes, resource limits and external-action gates remain explicit.
+Read the target repository's `Repository process` declaration. Define the
+decision, users and done; put change scope and story in its declared home: the
+parent tracker issue for `issue-tracker`, or named project docs for
+`project-docs`. Emit the minimum `config/risk-policy.json` tier, path bounds,
+prohibited actions, external effects, expiry and approver. Credentials,
+secrets, unrelated paths, denials and project bans remain outside authority;
+path, write and resource limits stay explicit. Ordinary authorised workspace content
+is ordinary execution without a family-separation gate; this is execution
+permission, not assurance.
 Only a user may downgrade risk. Judgement-bearing AI,
 ranking or heuristics require `evaluate`.
 
-Preserve decision context: intake/revision, goals, constraints, alternatives, evidence and
-decided/parked branches. Revise it; never fork competing scope. Record
-disclosure in the authority envelope, never private memory.
+Scope owns accepted content and the decision register: retain intake, goals,
+constraints, alternatives and decided/parked branches without forking scope.
+Record disclosure in the authority envelope, never private memory.
 
 ## Grill
 
@@ -42,15 +39,14 @@ the spec.
 
 ## Resolve uncertainty
 
-Research surviving questions; use `orchestrate` for fan-out and source retained
-claims. Use `prototype` when a timeboxed
-throwaway answers feasibility; harvest its result and delete/quarantine only
-manifest-owned scratch under its authority. Neither lane exists for curiosity.
+Research surviving questions through `orchestrate`; use `prototype` only for a
+timeboxed feasibility answer, then harvest it and clean only manifest-owned
+scratch. Neither lane exists for curiosity.
 
-For viable options, compare cost, reversibility, risk and prior
-decision fit through correctness/cost/operations lenses. Use independent
-reviewers when available; recommend one. Put costly-to-reverse choices and
-rejected alternatives in an ADR, reversible detail in the spec/story.
+For viable options, compare cost, reversibility, risk and prior fit through
+correctness, cost and operations lenses. Use independent reviewers when
+available. Put costly-to-reverse choices and rejected alternatives in an ADR;
+keep reversible detail in the spec/story.
 Paired-primary mode has one chair ask while the peer audits evidence; record
 authorship for later independence.
 
@@ -69,17 +65,14 @@ project files. In project-write mode, land only approved artifacts:
 | Work items | declared project tracker |
 | Durable context | declared project-docs owner; run state stays run-local |
 
-Write clear, observable, verifiable acceptance criteria. Given/When/Then helps
-behavioural cases but is not mandatory for research, documents or operations.
-Preserve project Markdown/YAML/JSON schema. Pin only decision-critical external
-interfaces through project-native locks/constraints. Link or cache permitted
-authoritative material with source, version/date and digest; never vendor
-without licence and redistribution authority.
+Write clear, observable acceptance criteria. Preserve project schemas; pin only
+decision-critical interfaces with native locks/constraints. Link or cache
+authority with source, version/date and digest; never vendor without a licence.
 
-Before handoff: branches decided/parked; exclusions/failure modes;
-machine-readable authority/risk; anchored evidence; user approval of spec and
-one-way doors. Execution handoff is digest-bound to approved scope,
-decisions and authority; change creates a new revision and gate.
+Before handoff, record decided/parked branches, exclusions, machine-readable
+risk/authority and anchored evidence, with user approval of the spec and
+one-way doors. The execution handoff is digest-bound; any change creates a new
+revision and gate.
 
 ## Adapter-absent path
 

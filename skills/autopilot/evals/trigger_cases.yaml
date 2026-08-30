@@ -2,7 +2,7 @@ schema_version: 1
 target_skill: autopilot
 cases:
   - {id: q720, relation: positive, prompt: "Spin up an autonomous mission for this open-ended migration and keep going until I write STOP.", tags: [direct], expected: {primary_skill: autopilot, companion_skills: []}}
-  - {id: q721, relation: positive, prompt: "Run a crash-safe multi-session literature review whose driver may pause on a dry frontier but whose mission closes only on human STOP.", tags: [direct], expected: {primary_skill: autopilot, companion_skills: []}}
+  - {id: q721, relation: positive, prompt: "Run a crash-safe multi-session literature review with explicit run-local STATE.md; close only on human STOP.", tags: [direct], expected: {primary_skill: autopilot, companion_skills: []}}
   - {id: q722, relation: positive, prompt: "Explore the whole architecture space autonomously across compactions with a durable recovery state.", tags: [direct], expected: {primary_skill: autopilot, companion_skills: []}}
   - {id: q723, relation: negative, prompt: "Implement this approved two-file bug fix and verify it.", tags: [adjacent], expected: {primary_skill: implement, companion_skills: []}}
   - {id: q724, relation: negative, prompt: "Reproduce this crash and tell me its root cause without changing source.", tags: [adjacent], expected: {primary_skill: diagnose, companion_skills: []}}

@@ -1,7 +1,7 @@
 schema_version: 1
 target_skill: session
 cases:
-  - {id: q226, relation: positive, prompt: "Resume this substantial task from the live project state and current handoff.", tags: [direct], expected: {primary_skill: session, companion_skills: []}}
+  - {id: q226, relation: positive, prompt: "Resume this substantial task from its declared scope/story owner and current handoff, not a rolling project state file.", tags: [direct], expected: {primary_skill: session, companion_skills: []}}
   - {id: q227, relation: positive, prompt: "Checkpoint the current session before compaction with exact progress, remainder, and verification commands.", tags: [direct], expected: {primary_skill: session, companion_skills: []}}
   - {id: q228, relation: positive, prompt: "End this changed session by graduating durable findings and classifying retained versus scratch artifacts.", tags: [direct], expected: {primary_skill: session, companion_skills: []}}
   - {id: q229, relation: negative, prompt: "Create a persistent route for this six-session migration with legs, blockers, and dependencies.", tags: [adjacent], expected: {primary_skill: work-map, companion_skills: []}}

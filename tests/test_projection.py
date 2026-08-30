@@ -8,9 +8,14 @@ drift gate, which is the failure the gate exists to stop.
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 
 from scripts.lib.projection import ProjectionError, project, split_marked_region
+
+ROOT = Path(__file__).resolve().parents[1]
 
 MARKER = "sample-region"
 DOC = (
@@ -105,3 +110,45 @@ def test_project_refuses_a_rendering_that_lost_the_region(tmp_path):
     with pytest.raises(ProjectionError, match="rendered doc.md"):
         project(path, MARKER, "no markers survived rendering\n", check=False)
     assert path.read_text() == DOC
+
+
+def test_architecture_lifecycle_projection_contains_the_runtime_state_graph():
+    architecture = (ROOT / "docs" / "ARCHITECTURE.md").read_text()
+    contract = json.loads(
+        (ROOT / "skills" / "deliver" / "contract" / "lifecycle.v1.json").read_text()
+    )
+    _, region, _ = split_marked_region(architecture, "delivery-state-machine")
+
+    for state in (*contract["states"], *contract["side_states"]):
+        assert state in region
+    for transition in contract["transitions"]:
+        source, target = transition["state"], transition["to_state"]
+        assert f"{source} --> {target}" in region
+    assert contract["source"]["state_graph"].endswith("#state-graph")
+
+
+def test_architecture_risk_projection_matches_the_runtime_policy():
+    architecture = (ROOT / "docs" / "ARCHITECTURE.md").read_text()
+    policy = json.loads((ROOT / "config" / "risk-policy.json").read_text())
+    _, region, _ = split_marked_region(architecture, "risk-factor-table")
+    rows = {}
+    for line in region.splitlines():
+        if not line.startswith("|") or line.startswith("|---"):
+            continue
+        cells = [cell.strip() for cell in line.strip("|").split("|")]
+        factor = cells[0].replace(" ", "_") if cells else ""
+        if factor in policy["factors"]:
+            rows[factor] = cells[1:]
+
+    tiers = policy["tier_order"]
+    assert set(rows) == set(policy["factors"])
+    for factor, mapping in policy["factors"].items():
+        expected = [
+            {value for value, tier in mapping.items() if tier == level}
+            for level in tiers
+        ]
+        actual = [
+            {value.strip() for value in cell.replace("`", "").split(",") if value.strip()}
+            for cell in rows[factor]
+        ]
+        assert actual == expected

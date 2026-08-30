@@ -17,11 +17,12 @@ or story home. A link-only file is allowed only as a fallback for an unavailable
 tracker or a cross-tracker route. It links owners and never restates current
 status, owner, dependencies or user gates.
 
-## The map file
+## Optional link-only map
 
-Use the project's canonical effort file. If no owner exists, propose
-`docs/efforts/EFFORT-<slug>.md` only when project-write authority allows it;
-otherwise return the map without writing. Structure:
+Create a file only for declared `project-docs`, or an unavailable/cross-tracker
+fallback. If the parent issue has enough route detail, it is the canonical map
+and no file is created. A docs fallback may use `docs/efforts/EFFORT-<slug>.md`
+when authorised; otherwise return the route without writing.
 
 ```markdown
 # EFFORT: <name>
@@ -42,8 +43,8 @@ What the route is intended to deliver. Link the owning specification.
 - **Link, never restate live work state.** Do not add status fields, task
   checkboxes, completion claims, owner names, dependencies, blockers or user
   gates. Readers follow the linked issue and its Project Status field.
-- **Route entries are links, not task summaries.** Stable grouping and ordering
-  are allowed; issue and pull-request prose carries changing detail.
+- **Route entries are links, not task summaries.** Stable grouping/order is
+  allowed; issue and pull-request prose carries changing detail.
 - **Resume order:** declared scope/story owner → this map when it exists for
   fallback or cross-tracker route context → the claimed session handoff only.
   Never reconstruct the route from transcripts or piled-up handoffs.
@@ -68,9 +69,8 @@ What the route is intended to deliver. Link the owning specification.
 ## Adapter-absent path
 
 When the declared tracker is unavailable, use the named project-docs home or a
-link-only fallback; do not invent a rolling project state owner. Console and
-Herdr remain optional. The portable [effort-map artifact](portable-workflow.v1.json)
-proves only that a context object existed. Retain and identify the canonical
-context separately; this output is not itself curated route state or a
-resumable handoff. The runner validates the contract's declared context fields,
-including `accepted_artifact_identity`, before emission.
+link-only fallback; never invent rolling project state. Console and Herdr remain
+optional. The portable [effort-map artifact](portable-workflow.v1.json) proves
+only that a context object existed, not curated route state or a resumable
+handoff. Retain canonical context separately; the runner validates its declared
+fields, including `accepted_artifact_identity`.

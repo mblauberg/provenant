@@ -1,7 +1,7 @@
 schema_version: 1
 target_skill: scope
 cases:
-  - {id: q217, relation: positive, prompt: "Using the complete decision context already supplied, turn this feature into a decided spec with acceptance criteria and non-goals; no interview is needed.", tags: [direct, sufficient-context], expected: {primary_skill: scope, companion_skills: []}}
+  - {id: q217, relation: positive, prompt: "Read the repository process declaration and put this feature's change scope in its issue-native parent before writing accepted content.", tags: [direct, sufficient-context], expected: {primary_skill: scope, companion_skills: []}}
   - {id: q218, relation: positive, prompt: "Compare the architecture options, record the one-way decision, and park unresolved owner calls.", tags: [direct], expected: {primary_skill: scope, companion_skills: []}}
   - {id: q219, relation: positive, prompt: "Define the risk tier, authority bounds, failure modes, and observable done state before execution.", tags: [direct], expected: {primary_skill: scope, companion_skills: []}}
   - {id: q220, relation: negative, prompt: "The spec is approved; implement it through verification and human acceptance.", tags: [adjacent], expected: {primary_skill: implement, companion_skills: []}}

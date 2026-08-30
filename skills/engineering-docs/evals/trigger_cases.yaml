@@ -1,10 +1,10 @@
 schema_version: 1
 target_skill: engineering-docs
 cases:
-  - {id: q073, relation: positive, prompt: "Set up the documentation layout, indexes, and archive conventions for this new repository.", tags: [direct], expected: {primary_skill: engineering-docs, companion_skills: []}}
+  - {id: q073, relation: positive, prompt: "Read the repository process declaration, then place durable specifications in the declared docs home.", tags: [direct], expected: {primary_skill: engineering-docs, companion_skills: []}}
   - {id: q074, relation: positive, prompt: "Archive this retired runbook without deleting history and repair its live references.", tags: [direct], expected: {primary_skill: engineering-docs, companion_skills: []}}
   - {id: q075, relation: positive, prompt: "Reorganise these engineering docs, colocate a one-use diagram with its owner, and remove obsolete pointer files.", tags: [direct], expected: {primary_skill: engineering-docs, companion_skills: []}}
-  - {id: q076, relation: negative, prompt: "Rewrite this README paragraph for clarity but do not change the file structure.", tags: [adjacent], expected: {primary_skill: engineering-writing, companion_skills: []}}
+  - {id: q076, relation: negative, prompt: "Rewrite this README paragraph for clarity without changing the declared scope/story home.", tags: [adjacent], expected: {primary_skill: engineering-writing, companion_skills: []}}
   - {id: q077, relation: negative, prompt: "Create the current session handoff before context compaction.", tags: [adjacent], expected: {primary_skill: session, companion_skills: []}}
   - {id: q078, relation: negative, prompt: "Render this fixed-layout D2 architecture figure as SVG.", tags: [adjacent], expected: {primary_skill: d2-diagrams, companion_skills: []}}
   - {id: q079, relation: boundary, prompt: "Create a new operations runbook in the canonical docs tree and tighten its prose.", tags: [composition], expected: {primary_skill: engineering-docs, companion_skills: [engineering-writing]}}
