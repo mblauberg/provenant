@@ -34,8 +34,10 @@ before creating anything. Prefer modifying or composing the canonical owner for
 the same UI role. In a compatible shadcn/ui project, start from a suitable
 project component, shadcn component, block, template, or reviewed registry item,
 then customise the project-owned source to its content, states, tokens, and
-accessibility contract. Add a component only when no existing owner or
-composition fits; remove or deprecate the duplicate it supersedes.
+accessibility contract. For new shadcn work without an established primitive
+backend, choose Base UI; preserve a working Radix or other backend rather than
+migrating for this preference alone. Add a component only when no existing
+owner or composition fits; remove or deprecate the duplicate it supersedes.
 
 Compose the smallest semantic parts. Preserve native elements, refs, forwarded
 props, event handlers, accessible names, focus, dismissal, and state ownership.
