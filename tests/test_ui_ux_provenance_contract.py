@@ -57,19 +57,24 @@ def test_unmodified_modern_screenshot_bundle_matches_its_pinned_digest():
 
 
 def test_third_party_components_resolve_to_notices_and_local_licences():
-    ledger = yaml.safe_load((SKILL / "evals" / "provenance_components.yaml").read_text())
     notices = (ROOT / "THIRD_PARTY_NOTICES.md").read_text()
-    for component in ledger["components"]:
-        if component["origin"] != "third-party":
-            continue
-        assert (ROOT / component["local_licence"]).is_file()
-        assert component["source_url"].split("/tree/")[0] in notices
-        revisions = [
-            word.strip('".,;()')
-            for word in component["source_ref"].split()
-            if len(word.strip('".,;()')) == 40
-        ]
-        assert not revisions or all(revision in notices for revision in revisions)
+    ledgers = (
+        SKILL / "evals" / "provenance_components.yaml",
+        UI_EVIDENCE / "provenance_components.yaml",
+    )
+    for ledger_path in ledgers:
+        ledger = yaml.safe_load(ledger_path.read_text())
+        for component in ledger["components"]:
+            if component["origin"] != "third-party":
+                continue
+            assert (ROOT / component["local_licence"]).is_file()
+            assert component["source_url"].split("/tree/")[0] in notices
+            revisions = [
+                word.strip('".,;()')
+                for word in component["source_ref"].split()
+                if len(word.strip('".,;()')) == 40
+            ]
+            assert not revisions or all(revision in notices for revision in revisions)
 
 
 def test_every_ui_evidence_runtime_file_has_exactly_one_provenance_component():

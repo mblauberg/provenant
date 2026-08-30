@@ -5,10 +5,12 @@ import { pathToFileURL } from 'node:url';
 
 import { resolveUiEvidenceEntry } from './ui-evidence-paths.mjs';
 
+let detector;
 try {
-  const { detectCli } = await import(pathToFileURL(resolveUiEvidenceEntry()));
-  await detectCli();
+  detector = await import(pathToFileURL(resolveUiEvidenceEntry()));
 } catch (error) {
   process.stderr.write(`Error: ${error.message}\n`);
   process.exit(1);
 }
+
+await detector.detectCli();

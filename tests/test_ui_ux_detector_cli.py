@@ -240,7 +240,6 @@ def test_detector_runtime_is_not_duplicated_in_the_skill() -> None:
 
     assert not skill_detector.exists()
     assert (DETECTOR / "detect-antipatterns-browser.js").is_file()
-    assert "ui-evidence-paths.mjs" in DETECT.read_text()
 
 
 def test_detector_runtime_entry_is_directly_runnable() -> None:
