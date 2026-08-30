@@ -29,7 +29,7 @@ batch execution.
 | Ordinary dispatch runner and interface | `skills/orchestrate/scripts/dispatch_run.py` (implemented by [#690](https://github.com/mblauberg/provenant/pull/690)) | Owns one ordinary intent/policy attempt and its `attempt.json`, and delegates provider invocation to `cf_dispatch.sh`. |
 | Fixed bounded batches | `skills/orchestrate/scripts/batch_run.py` (implemented by [#692](https://github.com/mblauberg/provenant/pull/692)) | Builds on `dispatch_run.py` for fixed task sets, bounded concurrency, partial results and explicit retry; it does not own provider invocation or workspace policy. |
 | Coordination | `runtime/fabric` | Mailbox, shared tasks and activity only; no provider launch, scheduler or lifecycle owner. |
-| Dispatch evidence | `attempt.json`, indexed by existing `MANIFEST.md` and validated during `run_dir_finalize.py` finalisation | Records execution attempts, route lineage and observed completion; it is not delivery acceptance and must not create a parallel lifecycle ledger. |
+| Dispatch evidence | `attempt.json`, validated and indexed by `dispatch_run.py`; `run_controls.py` owns retained-attempt validation and operator controls | Records execution attempts, route lineage and observed completion. `run_dir_finalize.py` invokes the `run_controls.py` validator during generic custody finalisation but does not own the attempt schema; dispatch evidence is not delivery acceptance and must not create a parallel lifecycle ledger. |
 | Delivery evidence | `deliver` and canonical delivery `RUN.json` | Records artifact verification, review and acceptance; it may reference the orchestration receipt. |
 
 The dispatch runner provides the ordinary intent/policy interface and the
@@ -83,11 +83,12 @@ they do not create a new runtime authority.
 ### Compact dispatch manifests
 
 The compact dispatch manifest is the canonical attempt record for ordinary
-dispatch and batch execution. Existing orchestration `MANIFEST.md` indexes each
-`attempt.json`; `run_dir_finalize.py` validates that evidence while finalising
-`RUN_RECEIPT.json` custody and terminalisation. It does not copy attempt
-references into the receipt or create a new owner or parallel lifecycle ledger.
-Each task attempt records enough to
+dispatch and batch execution. `dispatch_run.py` validates each `attempt.json`
+and indexes it in the existing orchestration `MANIFEST.md`; `run_controls.py`
+reads validated attempt evidence for operator controls. `run_dir_finalize.py`
+invokes that validator while finalising generic `RUN_RECEIPT.json` custody and
+terminalisation; it does not own the attempt schema, copy attempt references
+into the receipt or create a new owner or parallel lifecycle ledger. Each task attempt records enough to
 reconstruct what happened: task and attempt IDs, requested and resolved route,
 actual provider and model, workspace and base identity when available,
 start/end, status, exit information, prompt/result paths and digests, and retry

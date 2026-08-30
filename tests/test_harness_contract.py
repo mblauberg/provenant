@@ -95,7 +95,10 @@ def test_dispatch_owner_boundaries_distinguish_assurance_from_ordinary_execution
     assert "MANIFEST.md" in adr
     assert "RUN_RECEIPT.json" in adr
     assert "run_dir_finalize.py" in adr
-    assert "does not copy attempt references into the receipt" in adr_compact
+    assert "`dispatch_run.py` validates each `attempt.json`" in adr_compact
+    assert "`run_controls.py` reads validated attempt evidence" in adr_compact
+    assert "invokes that validator while finalising" in adr_compact
+    assert "does not own the attempt schema, copy attempt references" in adr_compact
     assert "parallel lifecycle ledger" in adr
     assert "attempt.json" in adr
     assert "delivery `RUN.json` may reference the orchestration receipt" in adr_compact
