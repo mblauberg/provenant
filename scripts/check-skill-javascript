@@ -1,21 +1,22 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-[[ $# -le 1 ]] || { echo "usage: check-skill-javascript [skills-root]" >&2; exit 2; }
+[[ $# -le 2 ]] || { echo "usage: check-skill-javascript [javascript-root] [label]" >&2; exit 2; }
 
-SKILLS_ROOT="${1:-skills}"
+JAVASCRIPT_ROOT="${1:-skills}"
+LABEL="${2:-skill}"
 command -v node >/dev/null 2>&1 || { echo "node is required" >&2; exit 1; }
-[[ -d "$SKILLS_ROOT" ]] || { echo "skills root not found: $SKILLS_ROOT" >&2; exit 1; }
+[[ -d "$JAVASCRIPT_ROOT" ]] || { echo "$LABEL root not found: $JAVASCRIPT_ROOT" >&2; exit 1; }
 
 checked=0
 while IFS= read -r -d '' script; do
   node --check "$script" >/dev/null
   checked=$((checked + 1))
 done < <(
-  find "$SKILLS_ROOT" \
+  find "$JAVASCRIPT_ROOT" \
     -type d -name node_modules -prune -o \
     -type f \( -name '*.js' -o -name '*.mjs' -o -name '*.cjs' \) -print0
 )
 
-(( checked > 0 )) || { echo "no skill JavaScript files found under: $SKILLS_ROOT" >&2; exit 1; }
-echo "PASS: checked $checked skill JavaScript files"
+(( checked > 0 )) || { echo "no $LABEL JavaScript files found under: $JAVASCRIPT_ROOT" >&2; exit 1; }
+echo "PASS: checked $checked $LABEL JavaScript files"

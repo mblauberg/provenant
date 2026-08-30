@@ -1,0 +1,23 @@
+schema_version: 1
+target_runtime: ui-evidence
+components:
+  - id: impeccable-ui-evidence-runtime
+    origin: third-party
+    prefixes: [detector/]
+    marker_required_exact:
+      - detector/detect-antipatterns.mjs
+      - detector/cli/main.mjs
+      - detector/engines/browser/detect-url.mjs
+      - detector/engines/static-html/detect-html.mjs
+      - detector/node/file-system.mjs
+    modification_baseline: 160d110443677984fe033c32dd944d0fad0d4937
+    source_url: https://github.com/pbakaus/impeccable
+    source_ref: "upstream commit unavailable; first public local import a39c7b7e6db2778467e43f5ed3a05143c05c07dd"
+    licence: Apache-2.0
+    local_licence: LICENSES/impeccable-APACHE-2.0.txt
+    notice: NOTICE
+    modification: Moved into a private product runtime without changing detector behaviour; modified files carry neutral local modification notices.
+  - id: ui-evidence-runtime-shell
+    origin: harness-original
+    exact: [README.md, detect.mjs, provenance_components.yaml]
+    description: Private runtime entrypoint, ownership record, and architecture note.

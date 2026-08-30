@@ -1,11 +1,12 @@
 #!/usr/bin/env node
+// Modified for Provenant.
 
 /**
  * Anti-Pattern Detector for Impeccable
  * Copyright (c) 2026 Paul Bakaus
  * SPDX-License-Identifier: Apache-2.0
  *
- * Public API facade. Runtime engines live under cli/engine/engines/.
+ * Public API facade. Runtime engines are package-local under engines/.
  */
 
 import { detectCli } from './cli/main.mjs';

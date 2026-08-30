@@ -10,6 +10,7 @@ components:
       - scripts/contained-source.mjs
       - scripts/jsx-tag-scanner.mjs
       - scripts/live-server-startup.mjs
+      - scripts/ui-evidence-paths.mjs
     marker_required_exact:
       - scripts/live.mjs
       - scripts/live-poll.mjs
@@ -26,10 +27,7 @@ components:
       - scripts/live-complete.mjs
       - scripts/load-context.mjs
       - scripts/impeccable-paths.mjs
-      - scripts/detector/cli/main.mjs
-      - scripts/detector/engines/browser/detect-url.mjs
-      - scripts/detector/engines/static-html/detect-html.mjs
-      - scripts/detector/node/file-system.mjs
+      - scripts/detect.mjs
     marker_required_prefixes: [agents/, references/]
     modification_baseline: 160d110443677984fe033c32dd944d0fad0d4937
     source_url: https://github.com/pbakaus/impeccable
@@ -56,5 +54,6 @@ components:
       - scripts/contained-source.mjs
       - scripts/jsx-tag-scanner.mjs
       - scripts/live-server-startup.mjs
+      - scripts/ui-evidence-paths.mjs
       - tests/live-server-startup.test.mjs
     description: Local skill entrypoint, runtime safeguards, tests, routing, authority, disposition, and provenance fixtures; not upstream Impeccable expression.

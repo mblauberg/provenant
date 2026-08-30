@@ -33,6 +33,7 @@ while IFS= read -r -d '' script; do
 done < <(find "$SKILLS_ROOT" -type f -name '*.sh' -print0)
 
 "$SCRIPTS_ROOT/check-skill-javascript" "$SKILLS_ROOT"
+"$SCRIPTS_ROOT/check-skill-javascript" "$PRODUCT_ROOT/runtime/ui-evidence" "UI evidence runtime"
 
 # Skill JavaScript tests are discovered rather than listed, so a new one runs
 # in the gate the moment it lands instead of sitting unexecuted.
