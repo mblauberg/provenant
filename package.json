@@ -19,7 +19,7 @@
     "audit:all": "npm audit --audit-level=high"
   },
   "devDependencies": {
-    "tsx": "4.23.1",
+    "tsx": "4.23.12",
     "typescript": "7.0.2"
   }
 }
