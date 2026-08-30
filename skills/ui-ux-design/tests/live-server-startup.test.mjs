@@ -1,7 +1,8 @@
 import fs from 'node:fs';
+import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
-import { spawn, spawnSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -23,20 +24,6 @@ function stopServer(project) {
     encoding: 'utf8',
     timeout: 5_000,
   });
-}
-
-async function waitForServerInfo(project, child) {
-  const infoPath = path.join(project, '.impeccable', 'live', 'server.json');
-  const deadline = Date.now() + 5_000;
-  while (Date.now() < deadline) {
-    if (child.exitCode !== null) throw new Error(`server exited with ${child.exitCode}`);
-    try {
-      return JSON.parse(fs.readFileSync(infoPath, 'utf8'));
-    } catch {
-      await new Promise((resolve) => setTimeout(resolve, 25));
-    }
-  }
-  throw new Error('timed out waiting for live server fixture');
 }
 
 test('classifies a ready server as success with its observed elapsed time', () => {
@@ -153,28 +140,34 @@ test('background launcher replaces a stale server record before reporting succes
   }
 });
 
-test('background launcher reports an occupied-port startup refusal with observation', async () => {
+test('foreground server reports a structured occupied-port bind failure', async () => {
   const project = newProject();
-  const server = spawn(process.execPath, [SERVER], {
-    cwd: project,
-    stdio: 'ignore',
-  });
+  const occupied = net.createServer();
+  await new Promise((resolve) => occupied.listen(0, '127.0.0.1', resolve));
+  const port = occupied.address().port;
   try {
-    const info = await waitForServerInfo(project, server);
-    const result = spawnSync(process.execPath, [SERVER, '--background', `--port=${info.port}`], {
+    assert.equal(fs.existsSync(
+      path.join(project, '.impeccable', 'live', 'server.json'),
+    ), false);
+    const result = spawnSync(process.execPath, [SERVER, `--port=${port}`], {
       cwd: project,
       encoding: 'utf8',
-      timeout: 15_000,
+      timeout: 5_000,
     });
 
     assert.notEqual(result.status, 0);
     const diagnostic = JSON.parse(result.stderr);
-    assert.equal(diagnostic.status, 'refused');
-    assert.equal(diagnostic.observation.baselineMs, 10_000);
-    assert.ok(diagnostic.observation.elapsedMs >= 0);
+    assert.deepEqual(diagnostic, {
+      error: 'live_server_bind_failed',
+      code: 'EADDRINUSE',
+      port,
+      message: `Unable to bind live server to 127.0.0.1:${port}`,
+    });
+    assert.equal(fs.existsSync(
+      path.join(project, '.impeccable', 'live', 'server.json'),
+    ), false);
   } finally {
-    stopServer(project);
-    if (server.exitCode === null) server.kill('SIGTERM');
+    await new Promise((resolve) => occupied.close(resolve));
     fs.rmSync(project, { recursive: true, force: true });
   }
 });

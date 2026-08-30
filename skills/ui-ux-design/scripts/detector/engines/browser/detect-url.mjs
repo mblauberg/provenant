@@ -7,6 +7,11 @@ import { finding } from '../../findings.mjs';
 import { profileFindingsAsync, profileStep, profileStepAsync } from '../../profile/profiler.mjs';
 import { captureVisualContrastCandidate } from '../visual/screenshot-contrast.mjs';
 
+const URL_READINESS_DEFAULTS = Object.freeze({
+  waitUntil: 'load',
+  settleMs: 100,
+});
+
 async function runVisualContrastFallback(page, serializedGroups, options, profile, target) {
   if (options?.visualContrast === false) return [];
   const maxCandidates = Number.isFinite(options?.visualContrastMaxCandidates)
@@ -86,8 +91,10 @@ async function runVisualContrastFallback(page, serializedGroups, options, profil
 
 async function detectUrl(url, options = {}) {
   const profile = options?.profile;
-  const waitUntil = options?.waitUntil || 'networkidle0';
-  const settleMs = Number.isFinite(options?.settleMs) ? options.settleMs : 0;
+  const waitUntil = options?.waitUntil ?? URL_READINESS_DEFAULTS.waitUntil;
+  const settleMs = Number.isFinite(options?.settleMs)
+    ? options.settleMs
+    : URL_READINESS_DEFAULTS.settleMs;
   const viewport = options?.viewport || { width: 1280, height: 800 };
   const externalBrowser = options?.browser || null;
   const launchBrowser = options?.launchBrowser || null;
@@ -257,8 +264,10 @@ async function createBrowserDetector(options = {}) {
   }
   const ownsBrowser = !options.browser;
   const defaults = {
-    waitUntil: options.waitUntil || 'load',
-    settleMs: Number.isFinite(options.settleMs) ? options.settleMs : 100,
+    waitUntil: options.waitUntil ?? URL_READINESS_DEFAULTS.waitUntil,
+    settleMs: Number.isFinite(options.settleMs)
+      ? options.settleMs
+      : URL_READINESS_DEFAULTS.settleMs,
     viewport: options.viewport || { width: 1280, height: 800 },
   };
   return {
@@ -276,4 +285,9 @@ async function createBrowserDetector(options = {}) {
   };
 }
 
-export { runVisualContrastFallback, detectUrl, createBrowserDetector };
+export {
+  URL_READINESS_DEFAULTS,
+  runVisualContrastFallback,
+  detectUrl,
+  createBrowserDetector,
+};

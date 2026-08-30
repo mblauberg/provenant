@@ -1104,7 +1104,7 @@ function handlePollPost(req, res) {
 
 let httpServer = null;
 
-function shutdown() {
+function cleanupRuntimeState() {
   const current = readLiveServerInfo(process.cwd())?.info;
   if (current?.pid === process.pid && current?.token === state.token) {
     removeLiveServerInfo(process.cwd());
@@ -1118,7 +1118,11 @@ function shutdown() {
   state.sseClients.clear();
   for (const poll of state.pendingPolls) poll.resolve({ type: 'exit' });
   state.pendingPolls.length = 0;
-  if (httpServer) httpServer.close();
+}
+
+function shutdown() {
+  cleanupRuntimeState();
+  if (httpServer?.listening) httpServer.close();
   process.exit(0);
 }
 
@@ -1310,6 +1314,17 @@ state.agentStatePath = writeLiveAgentServerInfo(state.sessionDir, {
 
 const { detectScript, sessionPath, livePath } = loadBrowserScripts();
 httpServer = http.createServer(createRequestHandler({ detectScript, sessionPath, livePath }));
+
+httpServer.once('error', (error) => {
+  cleanupRuntimeState();
+  console.error(JSON.stringify({
+    error: 'live_server_bind_failed',
+    code: typeof error?.code === 'string' ? error.code : 'BIND_FAILED',
+    port: state.port,
+    message: `Unable to bind live server to 127.0.0.1:${state.port}`,
+  }));
+  process.exit(1);
+});
 
 httpServer.listen(state.port, '127.0.0.1', () => {
   writeLiveServerInfo(process.cwd(), {

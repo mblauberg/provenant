@@ -69,6 +69,7 @@ async function completeThroughServer(info, args) {
     : args.status === 'agent_error'
       ? 'error'
       : 'complete';
+  if (!info?.agentStatePath) return { unavailable: true };
   try {
     const agentToken = readLiveAgentServerInfo(info).agentToken;
     const res = await fetch(`http://127.0.0.1:${info.port}/poll`, {
@@ -82,7 +83,9 @@ async function completeThroughServer(info, args) {
     }
     return await res.json();
   } catch (error) {
-    if (error?.cause?.code === 'ECONNREFUSED') return { unavailable: true };
+    if (error?.code === 'live_agent_state_missing'
+      || error?.code === 'live_agent_state_stale'
+      || error?.cause?.code === 'ECONNREFUSED') return { unavailable: true };
     return { ok: false, message: error.message };
   }
 }

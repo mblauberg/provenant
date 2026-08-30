@@ -348,6 +348,51 @@ def test_browser_detector_accepts_injected_browser_or_launcher_without_puppeteer
     assert json.loads(result.stdout) == {"same": True, "launched": 1, "closed": 1}
 
 
+def test_direct_and_pooled_url_detection_share_readiness_defaults_and_overrides() -> None:
+    module_url = (
+        ROOT
+        / "skills"
+        / "ui-ux-design"
+        / "scripts"
+        / "detector"
+        / "engines"
+        / "browser"
+        / "detect-url.mjs"
+    ).as_uri()
+    script = (
+        f"import {{ createBrowserDetector, detectUrl }} from {json.dumps(module_url)};"
+        "const observations=[];"
+        "globalThis.setTimeout=(resolve,ms)=>{observations.push({kind:'settle',ms});resolve()};"
+        "const browser={newPage:async()=>({"
+        "setViewport:async()=>{},"
+        "goto:async(_url,options)=>observations.push({kind:'goto',options}),"
+        "evaluate:async()=>[],close:async()=>{}}),close:async()=>{}};"
+        "await detectUrl('http://example.invalid',{browser,visualContrast:false});"
+        "const pooled=await createBrowserDetector({browser});"
+        "await pooled.detectUrl('http://example.invalid',{visualContrast:false});"
+        "await detectUrl('http://example.invalid',{browser,visualContrast:false,waitUntil:'domcontentloaded',settleMs:0});"
+        "await pooled.detectUrl('http://example.invalid',{visualContrast:false,waitUntil:'networkidle2',settleMs:0});"
+        "process.stdout.write(JSON.stringify(observations));"
+    )
+
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    observations = json.loads(result.stdout)
+    assert [item["options"]["waitUntil"] for item in observations if item["kind"] == "goto"] == [
+        "load",
+        "load",
+        "domcontentloaded",
+        "networkidle2",
+    ]
+    assert [item["ms"] for item in observations if item["kind"] == "settle"] == [100, 100]
+
+
 def test_framework_probe_does_not_follow_redirects_off_origin() -> None:
     module_url = (
         ROOT

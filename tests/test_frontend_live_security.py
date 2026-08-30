@@ -2549,6 +2549,58 @@ def test_live_entrypoint_injects_private_server_token_without_logging_it(tmp_pat
         )
 
 
+def test_live_entrypoint_emits_bounded_context_metadata_without_document_bodies(
+    tmp_path: Path,
+) -> None:
+    page = tmp_path / "index.html"
+    page.write_text("<html><body>safe</body></html>\n")
+    _write_config(tmp_path, ["index.html"])
+    product_sentinel = "PRIVATE_PRODUCT_BODY_" + "p" * 100_000
+    design_sentinel = "PRIVATE_DESIGN_BODY_" + "d" * 100_000
+    (tmp_path / "PRODUCT.md").write_text(f"# Product\n\n{product_sentinel}\n## Users\n")
+    (tmp_path / "DESIGN.md").write_text(f"# Design\n\n{design_sentinel}\n## Components\n")
+    try:
+        result = subprocess.run(
+            ["node", str(SCRIPTS / "live.mjs")],
+            cwd=tmp_path,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert product_sentinel not in result.stdout
+        assert design_sentinel not in result.stdout
+        assert len(result.stdout) < 12_000
+        payload = json.loads(result.stdout)
+        assert "product" not in payload
+        assert "design" not in payload
+        assert payload["productPath"] == "PRODUCT.md"
+        assert payload["designPath"] == "DESIGN.md"
+        assert payload["productChars"] > 100_000
+        assert payload["designChars"] > 100_000
+        assert payload["productHeadings"] == [
+            {"level": 1, "title": "Product"},
+            {"level": 2, "title": "Users"},
+        ]
+        assert payload["designHeadings"] == [
+            {"level": 1, "title": "Design"},
+            {"level": 2, "title": "Components"},
+        ]
+        assert payload["metadataTruncation"]["productHeadings"]["total"] == 2
+        assert payload["metadataTruncation"]["designHeadings"]["total"] == 2
+    finally:
+        subprocess.run(
+            ["node", str(SERVER), "stop"],
+            cwd=tmp_path,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+
+
 def test_live_entrypoint_stops_only_the_server_it_started_when_injection_fails(
     tmp_path: Path,
 ) -> None:
@@ -3552,6 +3604,74 @@ def test_carbonized_accept_can_finish_through_the_live_server(
             assert status["activeSessions"] == []
         else:
             assert status["activeSessions"][0]["phase"] == "agent_error"
+
+
+def test_carbonized_accept_finishes_locally_when_stale_server_state_has_no_agent_state(
+    tmp_path: Path,
+) -> None:
+    event_id = "deadbeef"
+    module_url = (SCRIPTS / "live-session-store.mjs").as_uri()
+    setup = (
+        f"import {{ createLiveSessionStore }} from {json.dumps(module_url)};"
+        "const store=createLiveSessionStore({cwd:process.argv[1]});"
+        f"store.appendEvent({{type:'agent_done',id:{json.dumps(event_id)},carbonize:true}});"
+    )
+    prepared = subprocess.run(
+        ["node", "--input-type=module", "-e", setup, str(tmp_path)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert prepared.returncode == 0, prepared.stderr
+    live_dir = tmp_path / ".impeccable" / "live"
+    (live_dir / "server.json").write_text(
+        json.dumps({"pid": 2_147_483_647, "port": 8400, "token": TOKEN})
+    )
+
+    completed = subprocess.run(
+        ["node", str(SCRIPTS / "live-complete.mjs"), "--id", event_id],
+        cwd=tmp_path,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    payload = json.loads(completed.stdout)
+    assert payload["ok"] is True
+    assert payload["phase"] == "completed"
+    journal = live_dir / "sessions" / f"{event_id}.jsonl"
+    assert json.loads(journal.read_text().splitlines()[-1])["type"] == "complete"
+
+
+def test_live_complete_rejects_a_missing_agent_state_at_an_unsafe_path(
+    tmp_path: Path,
+) -> None:
+    live_dir = tmp_path / ".impeccable" / "live"
+    live_dir.mkdir(parents=True)
+    unsafe_agent_path = tmp_path.parent / "untrusted-live-state" / "agent.json"
+    (live_dir / "server.json").write_text(
+        json.dumps(
+            {
+                "pid": 2_147_483_647,
+                "port": 8400,
+                "token": TOKEN,
+                "agentStatePath": str(unsafe_agent_path),
+            }
+        )
+    )
+
+    completed = subprocess.run(
+        ["node", str(SCRIPTS / "live-complete.mjs"), "--id", "deadbeef"],
+        cwd=tmp_path,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode != 0
+    assert json.loads(completed.stderr)["error"] == "live_completion_rejected"
+    assert not (live_dir / "sessions" / "deadbeef.jsonl").exists()
 
 
 def test_session_store_normalization_redacts_token_defensively(tmp_path: Path) -> None:

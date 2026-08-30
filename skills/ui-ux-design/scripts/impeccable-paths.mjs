@@ -146,8 +146,25 @@ export function readLiveAgentServerInfo(serverInfo) {
     throw new Error('Live agent state path is invalid');
   }
   const parent = path.dirname(filePath);
-  const parentMetadata = fs.lstatSync(parent);
-  const parentReal = fs.realpathSync.native(parent);
+  const parentPath = path.resolve(parent);
+  const tempPath = path.resolve(os.tmpdir());
+  const lexicalRelative = path.relative(tempPath, parentPath);
+  if (!path.basename(parentPath).startsWith('impeccable-live-')
+    || lexicalRelative === '..'
+    || lexicalRelative.startsWith(`..${path.sep}`)) {
+    throw new Error('Live agent state directory is unsafe');
+  }
+  let parentMetadata;
+  let parentReal;
+  try {
+    parentMetadata = fs.lstatSync(parent);
+    parentReal = fs.realpathSync.native(parent);
+  } catch (cause) {
+    if (cause?.code !== 'ENOENT') throw cause;
+    const error = new Error('Live agent state is missing', { cause });
+    error.code = 'live_agent_state_missing';
+    throw error;
+  }
   const tempReal = fs.realpathSync.native(os.tmpdir());
   const relative = path.relative(tempReal, parentReal);
   if (parentMetadata.isSymbolicLink()
@@ -162,7 +179,15 @@ export function readLiveAgentServerInfo(serverInfo) {
   if (!Number.isInteger(fs.constants.O_NOFOLLOW)) {
     throw new Error('Live agent state requires O_NOFOLLOW support');
   }
-  const descriptor = fs.openSync(filePath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+  let descriptor;
+  try {
+    descriptor = fs.openSync(filePath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+  } catch (cause) {
+    if (cause?.code !== 'ENOENT') throw cause;
+    const error = new Error('Live agent state is missing', { cause });
+    error.code = 'live_agent_state_missing';
+    throw error;
+  }
   try {
     const metadata = fs.fstatSync(descriptor);
     if (!metadata.isFile()
@@ -176,7 +201,9 @@ export function readLiveAgentServerInfo(serverInfo) {
       || info?.port !== serverInfo.port
       || typeof info?.agentToken !== 'string'
       || !info.agentToken) {
-      throw new Error('Live agent state does not match the server');
+      const error = new Error('Live agent state does not match the server');
+      error.code = 'live_agent_state_stale';
+      throw error;
     }
     return info;
   } finally {

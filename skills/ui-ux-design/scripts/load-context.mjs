@@ -204,7 +204,7 @@ function summary(result) {
   };
 }
 
-function boundedSummaryJson(result) {
+export function summarizeContext(result) {
   const value = summary(result);
   let rendered = JSON.stringify(value, null, 2);
   while (rendered.length > SUMMARY_LIMITS.maxOutputChars
@@ -224,7 +224,11 @@ function boundedSummaryJson(result) {
     // future metadata fields from silently invalidating the total-output cap.
     throw new Error('Bounded context metadata exceeds maxOutputChars');
   }
-  return rendered;
+  return value;
+}
+
+function boundedSummaryJson(result) {
+  return JSON.stringify(summarizeContext(result), null, 2);
 }
 
 function boundedPreview(result, maxChars) {
