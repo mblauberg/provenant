@@ -21,14 +21,14 @@ top-level `NOTICE`. Repository history proves the first public local import at
 commit `a39c7b7e6db2778467e43f5ed3a05143c05c07dd` (10 July 2026), but does not
 retain a recoverable upstream Impeccable commit. No upstream head is inferred.
 The component ledger at `skills/ui-ux-design/evals/provenance_components.yaml`
-records the exact harness-original exceptions. Impeccable-derived source files
-modified by this consolidation carry a local marker pointing back to this
-index; this is not a claim that every historical file has a marker.
+records the exact harness-original exceptions. Attribution is centralised here
+and in that ledger; selected runtime sources also carry a local notice marker.
 `skills/ui-ux-design/SKILL.md`, `skills/ui-ux-design/evals/`,
-`scripts/contained-source.mjs`,
-`scripts/jsx-tag-scanner.mjs`, `scripts/live-server-startup.mjs`, and
-`tests/live-server-startup.test.mjs` are harness-original rather than upstream
-Impeccable expression.
+`skills/ui-ux-design/scripts/contained-source.mjs`,
+`skills/ui-ux-design/scripts/jsx-tag-scanner.mjs`,
+`skills/ui-ux-design/scripts/live-server-startup.mjs`, and
+`skills/ui-ux-design/tests/live-server-startup.test.mjs` are harness-original
+rather than upstream Impeccable expression.
 
 The bundled `skills/ui-ux-design/scripts/modern-screenshot.umd.js` is
 modern-screenshot 4.7.0 at peeled commit

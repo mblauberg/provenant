@@ -1,4 +1,3 @@
-<!-- Modified from Impeccable for this harness; see the repository THIRD_PARTY_NOTICES.md. -->
 
 # Reference grounding
 

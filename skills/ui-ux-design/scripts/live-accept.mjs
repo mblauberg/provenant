@@ -610,18 +610,22 @@ function detectCommentSyntax(filePath) {
 function findSessionFile(id, cwd) {
   const searchDirs = ['src', 'app', 'pages', 'components', 'public', 'views', 'templates', '.'];
   const seen = new Set();
+  const matches = [];
 
   for (const dir of searchDirs) {
     const absDir = path.join(cwd, dir);
     if (!fs.existsSync(absDir)) continue;
-    const result = searchDir(absDir, id, seen, 0);
-    if (result) {
-      const snapshot = readContainedSource(cwd, result);
-      const content = snapshot.bytes.toString('utf-8');
-      return { file: snapshot.path, content, lines: content.split('\n'), snapshot };
-    }
+    searchDir(absDir, id, seen, 0, matches);
   }
-  return null;
+  if (matches.length > 1) {
+    const error = new Error(`Session ${id} has markers in multiple files`);
+    error.code = 'session_markers_ambiguous';
+    throw error;
+  }
+  if (matches.length === 0) return null;
+  const snapshot = readContainedSource(cwd, matches[0]);
+  const content = snapshot.bytes.toString('utf-8');
+  return { file: snapshot.path, content, lines: content.split('\n'), snapshot };
 }
 
 function hasExecutableStartMarker(content, filePath, id) {
@@ -643,16 +647,16 @@ function hasExecutableStartMarker(content, filePath, id) {
   return false;
 }
 
-function searchDir(dir, id, seen, depth) {
-  if (depth > 5) return null;
+function searchDir(dir, id, seen, depth, matches) {
+  if (depth > 5) return;
   let realDir;
-  try { realDir = fs.realpathSync(dir); } catch { return null; }
-  if (seen.has(realDir)) return null;
+  try { realDir = fs.realpathSync(dir); } catch { return; }
+  if (seen.has(realDir)) return;
   seen.add(realDir);
 
   let entries;
   try { entries = fs.readdirSync(dir, { withFileTypes: true }); }
-  catch { return null; }
+  catch { return; }
 
   for (const entry of entries) {
     if (!entry.isFile()) continue;
@@ -660,18 +664,15 @@ function searchDir(dir, id, seen, depth) {
     const filePath = path.join(dir, entry.name);
     try {
       const content = fs.readFileSync(filePath, 'utf-8');
-      if (hasExecutableStartMarker(content, filePath, id)) return filePath;
+      if (hasExecutableStartMarker(content, filePath, id)) matches.push(filePath);
     } catch { /* skip */ }
   }
 
   for (const entry of entries) {
     if (!entry.isDirectory()) continue;
     if (['node_modules', '.git', 'dist', 'build'].includes(entry.name)) continue;
-    const result = searchDir(path.join(dir, entry.name), id, seen, depth + 1);
-    if (result) return result;
+    searchDir(path.join(dir, entry.name), id, seen, depth + 1, matches);
   }
-
-  return null;
 }
 
 // ---------------------------------------------------------------------------

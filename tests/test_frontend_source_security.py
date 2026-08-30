@@ -189,6 +189,24 @@ def _write_wrapped_session(project: Path, *, with_variant: bool) -> Path:
     return page
 
 
+def test_live_accept_fails_closed_when_session_markers_are_ambiguous(
+    tmp_path: Path,
+) -> None:
+    pages = [tmp_path / "src" / "a.html", tmp_path / "public" / "b.html"]
+    for page in pages:
+        page.parent.mkdir(parents=True, exist_ok=True)
+        page.write_text('<section class="target">original</section>\n')
+        wrapped = _run_wrap(tmp_path, "--file", str(page.relative_to(tmp_path)))
+        assert wrapped.returncode == 0, wrapped.stderr
+    before = {page: page.read_bytes() for page in pages}
+
+    result = _run_accept(tmp_path, "--discard")
+
+    assert result.returncode != 0
+    assert json.loads(result.stderr)["error"] == "session_markers_ambiguous"
+    assert {page: page.read_bytes() for page in pages} == before
+
+
 def _run_contained_source_probe(project: Path, body: str) -> subprocess.CompletedProcess[str]:
     module_url = (SCRIPTS / "contained-source.mjs").as_uri()
     script = (

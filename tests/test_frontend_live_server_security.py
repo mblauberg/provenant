@@ -1010,6 +1010,9 @@ def test_carbonized_accept_can_finish_through_the_live_server(
         )
         assert completed.returncode == 0, completed.stderr
         assert json.loads(completed.stdout)["phase"] == expected_phase
+        messages, _ = _read_sse_messages(server, 2, last_event_id="0")
+        terminal = next(message for message in messages if message["type"] in {"complete", "error"})
+        assert terminal["data"]["cleanup"] is True
         status = json.loads(
             _request(f"{server.base_url}/status?token={quote(server.token)}")[2]
         )
@@ -1018,6 +1021,37 @@ def test_carbonized_accept_can_finish_through_the_live_server(
             assert status["activeSessions"] == []
         else:
             assert status["activeSessions"][0]["phase"] == "agent_error"
+
+
+def test_retried_browser_event_is_acknowledged_without_requeueing(tmp_path: Path) -> None:
+    event = {"type": "discard", "id": "deadbeef"}
+    with LiveServer(tmp_path) as server:
+        event["token"] = server.token
+        assert _request(
+            f"{server.base_url}/events", method="POST", body=json.dumps(event).encode(),
+            extra_headers={"Content-Type": "application/json"},
+        )[0] == 200
+        lease = json.loads(_request(
+            f"{server.base_url}/poll?token={quote(server.agent_token)}&timeout=1000&leaseMs=1000"
+        )[2])
+        assert _request(
+            f"{server.base_url}/poll", method="POST",
+            body=json.dumps({
+                "token": server.agent_token, "leaseToken": lease["leaseToken"],
+                "id": event["id"], "type": "discarded",
+            }).encode(), extra_headers={"Content-Type": "application/json"},
+        )[0] == 200
+
+        retried = _request(
+            f"{server.base_url}/events", method="POST", body=json.dumps(event).encode(),
+            extra_headers={"Content-Type": "application/json"},
+        )
+        assert retried[0] == 200
+        assert json.loads(retried[2])["duplicate"] is True
+        status = json.loads(_request(
+            f"{server.base_url}/status?token={quote(server.token)}"
+        )[2])
+        assert status["pendingEvents"] == []
 
 
 def test_carbonized_accept_finishes_locally_when_stale_server_state_has_no_agent_state(

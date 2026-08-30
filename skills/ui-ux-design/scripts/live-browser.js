@@ -2382,6 +2382,18 @@
           break;
         }
         case 'error':
+          if (msg.id === currentSessionId && pendingAccept && msg.data?.cleanup === true) {
+            const accepted = pendingAccept;
+            pendingAccept = null;
+            markSessionHandled();
+            confirmAcceptedVariant(accepted.sessionId, accepted.variant);
+            showToast(
+              'Accepted change saved, but required cleanup failed: '
+                + (msg.message || 'unknown error'),
+              12000,
+            );
+            break;
+          }
           if (msg.id === currentSessionId && pendingAccept) {
             restorePendingAccept('Accept failed. The session is still available; try again.');
             break;

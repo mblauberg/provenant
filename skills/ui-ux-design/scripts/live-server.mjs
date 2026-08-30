@@ -106,12 +106,14 @@ async function probeServerInfo(info, timeoutMs = 1_000) {
 }
 
 async function acquireServerRecordLock(timeoutMs = LIVE_SERVER_STARTUP_TIMEOUT_MS) {
+  ensureCanonicalLiveStateRoot(process.cwd());
   const lockPath = getLiveServerPath(process.cwd()) + '.lock';
   fs.mkdirSync(path.dirname(lockPath), { recursive: true });
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     try {
       fs.mkdirSync(lockPath, { mode: 0o700 });
+      ensureCanonicalLiveStateRoot(process.cwd());
       let released = false;
       return () => {
         if (released) return;
@@ -161,6 +163,7 @@ const state = {
   port: null,
   sseClients: new Set(),   // SSE response objects (server→browser push)
   pendingEvents: [],       // browser events waiting for agent ack ({ event, leaseUntil, leaseToken })
+  seenBrowserEvents: new Set(),
   pendingPolls: [],        // agent poll callbacks waiting for browser events
   terminalOutcomes: [],    // bounded in-memory SSE replay for reconnecting browsers
   sseEventSequence: 0,
@@ -185,6 +188,7 @@ const MAX_JSON_BODY_BYTES = 256 * 1024;
 const MAX_PENDING_EVENTS = 64;
 const MAX_ACTIVE_SESSIONS = 64;
 const MAX_SSE_CLIENTS = 16;
+const TERMINAL_SESSION_PHASES = new Set(['completed', 'discarded']);
 
 function redactBearer(event) {
   if (!event || typeof event !== 'object') return event;
@@ -1085,6 +1089,15 @@ function createRequestHandler({ detectScript, sessionPath, livePath }) {
           res.end(JSON.stringify({ error }));
           return;
         }
+        const safeInput = redactBearer(msg);
+        const browserEventKey = safeInput.id && ['generate', 'accept', 'discard'].includes(safeInput.type)
+          ? `${safeInput.id}:${safeInput.type}`
+          : null;
+        if (browserEventKey && state.seenBrowserEvents.has(browserEventKey)) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, duplicate: true }));
+          return;
+        }
         let boundMessage;
         try {
           boundMessage = bindUploadedScreenshot(msg);
@@ -1106,7 +1119,13 @@ function createRequestHandler({ detectScript, sessionPath, livePath }) {
               includeCompleted: true,
               requireExisting: true,
             });
-            if (!existing && state.sessionStore.listActiveSessions().length >= MAX_ACTIVE_SESSIONS) {
+            if (existing && TERMINAL_SESSION_PHASES.has(existing.phase)) {
+              res.writeHead(409, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: 'Session is terminal' }));
+              return;
+            }
+            if (!existing
+              && state.sessionStore.listActiveSessions().length >= MAX_ACTIVE_SESSIONS) {
               res.writeHead(429, { 'Content-Type': 'application/json' });
               res.end(JSON.stringify({ error: 'Active session capacity reached' }));
               return;
@@ -1120,6 +1139,7 @@ function createRequestHandler({ detectScript, sessionPath, livePath }) {
         }
         if (!duplicate && safeMessage.type !== 'checkpoint') enqueueEvent(safeMessage);
         if (!duplicate) markUploadedScreenshotBound(safeMessage);
+        if (browserEventKey) state.seenBrowserEvents.add(browserEventKey);
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: true }));
       });
@@ -1228,6 +1248,7 @@ function handlePollPost(req, res) {
       return;
     }
     const leasedIndex = findLeasedPendingEventIndex(msg.id, msg.leaseToken);
+    const leasedEvent = leasedIndex === -1 ? null : state.pendingEvents[leasedIndex].event;
     if (leasedIndex !== -1
       && !isCompatibleAgentReply(state.pendingEvents[leasedIndex].event, msg)) {
       res.writeHead(409, { 'Content-Type': 'application/json' });
@@ -1235,13 +1256,15 @@ function handlePollPost(req, res) {
       return;
     }
     let matched = leasedIndex !== -1;
+    let matchedCarbonizeCompletion = false;
     if (!matched
       && ['complete', 'error'].includes(msg.type)
       && state.sessionStore
       && msg.id) {
       try {
-        matched = state.sessionStore.getSnapshot(msg.id, { includeCompleted: true })?.phase
-          === 'carbonize_required';
+        matchedCarbonizeCompletion = state.sessionStore
+          .getSnapshot(msg.id, { includeCompleted: true })?.phase === 'carbonize_required';
+        matched = matchedCarbonizeCompletion;
       } catch {
         matched = false;
       }
@@ -1280,6 +1303,9 @@ function handlePollPost(req, res) {
         res.end(JSON.stringify({ error: 'Leased event changed before acknowledgement' }));
         return;
       }
+      if (msg.type === 'error' && leasedEvent?.id && leasedEvent.type) {
+        state.seenBrowserEvents.delete(`${leasedEvent.id}:${leasedEvent.type}`);
+      }
     }
     flushPendingPolls();
     // Forward the reply to the browser via SSE. Terminal attempt outcomes are
@@ -1290,7 +1316,9 @@ function handlePollPost(req, res) {
       id: msg.id,
       message: msg.message,
       file: msg.file,
-      data: msg.data,
+      data: matchedCarbonizeCompletion
+        ? { ...(msg.data || {}), cleanup: true }
+        : msg.data,
     };
     const replayId = ['complete', 'discard', 'discarded', 'error'].includes(browserReply.type)
       ? rememberTerminalOutcome(browserReply)

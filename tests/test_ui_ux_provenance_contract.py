@@ -77,7 +77,7 @@ def test_removed_research_data_and_unused_bundles_stay_absent():
     assert not list(SKILL.rglob("*gsap*.js"))
 
 
-def test_modified_impeccable_sources_have_local_markers():
+def test_selected_impeccable_runtime_sources_have_local_markers():
     marker = "Modified from Impeccable for this harness"
     ledger = yaml.safe_load((SKILL / "evals" / "provenance_components.yaml").read_text())
     component = next(item for item in ledger["components"] if item["id"] == "impeccable-modified-distribution")
@@ -107,15 +107,8 @@ def test_modified_impeccable_sources_have_local_markers():
         == ["impeccable-modified-distribution"]
     }
     marker_exact = set(component["marker_required_exact"])
-    marker_prefixes = tuple(component["marker_required_prefixes"])
-    uncovered = {
-        relative
-        for relative in derived_modified
-        if relative not in marker_exact and not relative.startswith(marker_prefixes)
-    }
-    assert not uncovered, uncovered
-
-    paths = [SKILL / relative for relative in derived_modified]
+    assert marker_exact <= derived_modified
+    paths = [SKILL / relative for relative in marker_exact]
     for path in paths:
         assert marker in path.read_text()[:500], path
 
