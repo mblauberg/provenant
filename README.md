@@ -167,8 +167,8 @@ are separate; current dispatch activation is owned by
 | Codex | Supported | Enabled OpenAI primary |
 | Agy | Supported | Enabled optional broker; the receipt records the runtime model family |
 | Cursor | Supported | Enabled optional Composer/Grok and hosted third-party broker |
-| Kiro | Supported | Disabled: no verified bounded invocation and receipt contract |
-| OpenCode | Supported | Disabled: no verified invocation and receipt contract |
+| Kiro | Supported | Disabled; see [`kiro-acp` policy](config/adapter-compatibility.yaml) |
+| OpenCode | Supported | Disabled; see [`opencode-acp` policy](config/adapter-compatibility.yaml) |
 
 Provider CLI versions and digests are diagnostic observations, not admission
 locks. Direct dispatch enforces the checked-in activation decision and uses

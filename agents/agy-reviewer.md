@@ -49,10 +49,11 @@ Agy may use an Agent Fabric identity for stable addressing, not model-family
 proof. When Fabric is used, the caller records the correlation; the dispatch
 receipt and output file remain the execution evidence. The dispatcher records
 this route as `prompt_only`, not `enforced`, because `--sandbox` is not a
-read-only guarantee: agy is not sandboxed against writes. Verify the tree or
-output file rather than trusting status alone. It remains a genuine independent
-opinion, but is not certification eligible. A missing Fabric identity does not
-block a direct review.
+read-only guarantee. Unless a live capability probe demonstrates otherwise,
+treat Agy as write-capable and verify the tree or output file rather than
+trusting status alone. It remains a genuine independent opinion, but is not
+certification eligible. A missing Fabric identity does not block a direct
+review.
 
 ## Procedure
 

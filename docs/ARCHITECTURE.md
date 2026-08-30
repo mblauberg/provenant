@@ -247,7 +247,7 @@ design decision and `engineering-docs` owns canonical placement. `playwright`,
 UI finding contract. `caveman` is a presentation overlay only; it cannot narrow
 evidence, authority, high-stakes clarity or an artifact's domain-writing rules.
 
-`release` promotes one user-accepted artifact through a separately
+`release` promotes one digest- or Git-revision-bound, user-accepted artifact through a separately
 authorised `deploy`, `publish`, `share`, `send` or `activate` action. Targets are
 typed as environments, recipients or audiences; execution may use an approved
 command, connector or named user operation. Completion requires target-visible
