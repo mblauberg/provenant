@@ -551,14 +551,22 @@ function appendOriginToDirective(csp, directive, origin) {
   const re = new RegExp(`(^|;)(\\s*)(${directive})\\s+([^;]*)`, 'i');
   const m = csp.match(re);
   if (m) {
-    const tokens = m[4].trim().split(/\s+/);
+    const tokens = m[4].trim().split(/\s+/).filter(Boolean);
     if (tokens.includes(origin)) return csp;
-    return csp.replace(re, `${m[1]}${m[2]}${m[3]} ${[...tokens, origin].join(' ')}`);
+    const expanded = tokens.filter((token) => token.toLowerCase() !== "'none'");
+    return csp.replace(re, `${m[1]}${m[2]}${m[3]} ${[...expanded, origin].join(' ')}`);
   }
-  // Directive missing — add it. Use 'self' + origin so we don't inadvertently
-  // narrow the policy compared to the default-src fallback (most users with
-  // an explicit CSP have 'self' there).
-  return csp.trim().replace(/;?\s*$/, '') + `; ${directive} 'self' ${origin}`;
+  const defaultMatch = csp.match(/(^|;)\s*default-src\s+([^;]*)/i);
+  // With no default-src, a missing fetch directive is already unrestricted,
+  // so adding one would narrow the user's policy and is unnecessary.
+  if (!defaultMatch) return csp;
+  const inherited = defaultMatch[2]
+    .trim()
+    .split(/\s+/)
+    .filter((token) => token && token.toLowerCase() !== "'none'");
+  if (!inherited.includes(origin)) inherited.push(origin);
+  return csp.trim().replace(/;?\s*$/, '')
+    + `; ${directive} ${inherited.join(' ')}`;
 }
 
 export function patchCspMeta(content, port, filePath = '') {

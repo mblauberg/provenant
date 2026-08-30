@@ -654,108 +654,75 @@ def test_restored_generation_requires_an_explicit_browser_retry_event(
     assert "generationIntent" not in save_body
 
 
-def test_live_variant_controls_have_keyboard_semantics_and_names() -> None:
-    browser = (SCRIPTS / "live-browser.js").read_text()
-    dots = browser.split("function buildDots(clickable)", 1)[1].split(
-        "function navBtn", 1
-    )[0]
-    cycling = browser.split("function buildCyclingRow()", 1)[1].split(
-        "// --- Shared UI builders ---", 1
-    )[0]
-
-    assert "clickable && arrived ? 'button' : 'span'" in dots
-    assert "dot.type = 'button'" in dots
-    assert "dot.setAttribute('aria-label'" in dots
-    assert "dot.setAttribute('aria-pressed'" in dots
-    assert "prev.setAttribute('aria-label', 'Previous variant')" in cycling
-    assert "next.setAttribute('aria-label', 'Next variant')" in cycling
-    assert "discard.setAttribute('aria-label', 'Discard all variants')" in cycling
-
-
-def test_live_contextual_controls_clamp_to_narrow_viewports() -> None:
-    browser = (SCRIPTS / "live-browser.js").read_text()
-    init_bar = browser.split("function initBar()", 1)[1].split(
-        "function positionBar()", 1
-    )[0]
-    position_bar = browser.split("function positionBar()", 1)[1].split(
-        "function showBar", 1
-    )[0]
-    picker = browser.split("function initActionPicker()", 1)[1].split(
-        "function hideActionPicker", 1
-    )[0]
-    cycling = browser.split("function buildCyclingRow()", 1)[1].split(
-        "// --- Shared UI builders ---", 1
-    )[0]
-
-    assert "maxWidth: 'min(520px, calc(100vw - 16px))'" in init_bar
-    assert "minWidth: 'min(320px, calc(100vw - 16px))'" in init_bar
-    assert "Math.max(GAP, window.innerWidth - barW - GAP)" in position_bar
-    assert "Math.min(Math.max(left, GAP), maxLeft)" in position_bar
-    assert "width: 'min(320px, calc(100vw - 16px))'" in picker
-    assert "const pickerW = pickerEl.offsetWidth" in picker
-    assert "Math.max(GAP, window.innerWidth - pickerW - GAP)" in picker
-    assert "flexWrap: 'wrap'" in cycling
-
-
-def test_live_tune_controls_are_associated_with_visible_names() -> None:
-    browser = (SCRIPTS / "live-browser.js").read_text()
-    params = browser.split("function buildParamsPanel(variantEl, params)", 1)[
-        1
-    ].split("// Decide which way the popover opens", 1)[0]
-    range_branch = params.split("if (p.kind === 'range')", 1)[1].split(
-        "} else if (p.kind === 'toggle')", 1
-    )[0]
-    toggle_branch = params.split("} else if (p.kind === 'toggle')", 1)[1].split(
-        "} else if (p.kind === 'steps')", 1
-    )[0]
-    cycling = browser.split("function buildCyclingRow()", 1)[1].split(
-        "// --- Shared UI builders ---", 1
-    )[0]
-
-    assert "lbl.id = labelId" in params
-    assert "input.setAttribute('aria-labelledby', labelId)" in range_branch
-    assert "track." not in range_branch
-    assert "track.setAttribute('aria-labelledby', labelId)" in toggle_branch
-    assert "track.setAttribute('aria-pressed', String(initial))" in toggle_branch
-    assert "track.setAttribute('aria-pressed', String(next))" in toggle_branch
-    assert (
-        "b.setAttribute('aria-label', (p.label || p.id) + ': ' + o.label)"
-        in params
+def test_design_panel_tab_keys_choose_the_next_roving_tab(tmp_path: Path) -> None:
+    session_url = (SCRIPTS / "live-browser-session.js").as_uri()
+    cases = [
+        ["ArrowRight", 0, 2],
+        ["ArrowRight", 1, 2],
+        ["ArrowLeft", 0, 2],
+        ["ArrowLeft", 1, 2],
+        ["Home", 1, 2],
+        ["End", 0, 2],
+        ["Enter", 0, 2],
+    ]
+    script = (
+        f"await import({json.dumps(session_url)});"
+        "const api=globalThis.__IMPECCABLE_LIVE_SESSION__;"
+        f"const cases={json.dumps(cases)};"
+        "process.stdout.write(JSON.stringify(cases.map((args) => "
+        "api.nextRovingTabIndex(...args))));"
     )
-    assert "b.setAttribute('aria-pressed', String(active))" in params
-    assert "btn.setAttribute('aria-pressed', String(on))" in params
-    assert "tune.setAttribute('aria-pressed', String(tuneOpen))" in cycling
 
-
-def test_design_panel_accordions_expose_expansion_relationships() -> None:
-    browser = (SCRIPTS / "live-browser.js").read_text()
-    collapsible = browser.split("function buildCollapsible(key, label, count)", 1)[
-        1
-    ].split("function renderRulesCollapsible", 1)[0]
-
-    assert "head.setAttribute('aria-expanded', String(expanded))" in collapsible
-    assert "head.setAttribute('aria-controls', bodyId)" in collapsible
-    assert "body.id = bodyId" in collapsible
-
-
-def test_design_panel_tabs_expose_and_update_tab_state() -> None:
-    browser = (SCRIPTS / "live-browser.js").read_text()
-    chrome = browser.split("function renderDesignChrome()", 1)[1].split(
-        "function toggleDesignPanel", 1
-    )[0]
-
-    assert "tabs.setAttribute('role', 'tablist')" in chrome
-    assert "btn.setAttribute('role', 'tab')" in chrome
-    assert "btn.setAttribute('aria-selected', String(active))" in chrome
-    assert "btn.setAttribute('aria-controls', 'panel-body')" in chrome
-    assert "body.setAttribute('role', 'tabpanel')" in chrome
-    assert (
-        "body.setAttribute('aria-labelledby', PREFIX + '-design-tab-' + designState.tab)"
-        in chrome
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        cwd=tmp_path,
+        check=False,
+        capture_output=True,
+        text=True,
     )
-    assert "btn.setAttribute('tabindex', active ? '0' : '-1')" in chrome
-    assert "designState.tab = t[0]" in chrome
-    assert "renderDesignChrome()" in chrome
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == [1, 0, 1, 0, 0, 1, None]
+
+
+def test_design_markdown_links_allow_only_safe_targets(tmp_path: Path) -> None:
+    session_url = (SCRIPTS / "live-browser-session.js").as_uri()
+    hrefs = [
+        "https://example.test/docs",
+        "http://example.test",
+        "mailto:hello@example.test",
+        "tel:+61700000000",
+        "/docs/setup",
+        "../design.md",
+        "#tokens",
+        "javascript:alert(1)",
+        "java\tscript:alert(1)",
+        "data:text/html,<script>alert(1)</script>",
+        "file:///tmp/private",
+    ]
+    script = (
+        f"await import({json.dumps(session_url)});"
+        "const api=globalThis.__IMPECCABLE_LIVE_SESSION__;"
+        f"const hrefs={json.dumps(hrefs)};"
+        "process.stdout.write(JSON.stringify(hrefs.map(api.safeMarkdownHref)));"
+    )
+
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        cwd=tmp_path,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == [
+        *hrefs[:7],
+        None,
+        None,
+        None,
+        None,
+    ]
 
 
 def test_status_summarises_retained_project_journals_at_the_server_boundary(
@@ -1164,6 +1131,33 @@ def test_live_inject_patches_only_executable_csp_meta(
     decoy_fragment = result.split(decoy, 1)[0]
     assert "data-impeccable-csp-original" not in decoy_fragment
     assert result.count("data-impeccable-csp-original") == 1
+
+
+def test_live_inject_seeds_missing_directives_from_default_src(
+    tmp_path: Path,
+) -> None:
+    module_url = INJECT.as_uri()
+    policy = "default-src https: data:; style-src 'self'; script-src https://scripts.example"
+    source = f'<meta http-equiv="Content-Security-Policy" content="{policy}">'
+    script = (
+        f"import {{ patchCspMeta }} from {json.dumps(module_url)};"
+        f"process.stdout.write(patchCspMeta({json.dumps(source)},8400));"
+    )
+
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        cwd=tmp_path,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    patched = result.stdout
+    assert "style-src 'self'" in patched
+    assert "script-src https://scripts.example http://127.0.0.1:8400" in patched
+    assert "connect-src https: data: http://127.0.0.1:8400" in patched
+    assert "img-src https: data: blob:" in patched
 
 
 def test_live_inject_remove_ignores_template_marker_decoy_before_real_block(

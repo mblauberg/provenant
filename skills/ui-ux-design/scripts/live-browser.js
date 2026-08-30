@@ -51,7 +51,8 @@
   const Z = { highlight: 100001, bar: 100005, picker: 100007, toast: 100010 };
   const EASE = 'cubic-bezier(0.22, 1, 0.36, 1)'; // ease-out-quint
   const PREFIX = 'impeccable-live';
-  const sessionState = window.__IMPECCABLE_LIVE_SESSION__?.createLiveBrowserSessionState({
+  const sessionApi = window.__IMPECCABLE_LIVE_SESSION__;
+  const sessionState = sessionApi?.createLiveBrowserSessionState({
     prefix: PREFIX,
     storage: localStorage,
     idFactory: () => crypto.randomUUID().replace(/-/g, '').slice(0, 8),
@@ -1298,7 +1299,7 @@
 
   function buildDots(clickable) {
     const container = el('div', {
-      display: 'flex', alignItems: 'center', gap: '4px',
+      display: 'flex', alignItems: 'center', gap: '0',
     });
     for (let i = 1; i <= expectedVariants; i++) {
       const arrived = i <= arrivedVariants;
@@ -1313,6 +1314,18 @@
         : 'transparent';
       const dotBorder = arrived ? 'none' : '1.5px solid ' + BP.hairline;
       const dot = el(clickable && arrived ? 'button' : 'span', {
+        width: '24px',
+        height: '24px',
+        border: 'none',
+        background: 'transparent',
+        display: 'inline-flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        flexShrink: '0',
+        cursor: (clickable && arrived) ? 'pointer' : 'default',
+        padding: '0',
+      });
+      const visual = el('span', {
         width: active ? '8px' : '6px',
         height: active ? '8px' : '6px',
         borderRadius: '50%',
@@ -1320,11 +1333,11 @@
         border: dotBorder,
         boxSizing: 'border-box',
         transition: 'all 0.2s ' + EASE,
-        cursor: (clickable && arrived) ? 'pointer' : 'default',
         transform: arrived ? 'scale(1)' : 'scale(0.85)',
         opacity: arrived ? (active ? '1' : '0.6') : '0.4',
-        padding: '0',
+        pointerEvents: 'none',
       });
+      dot.appendChild(visual);
       if (clickable && arrived) {
         const idx = i;
         dot.type = 'button';
@@ -4400,7 +4413,9 @@ void main() {
     tabs.className = 'tabs';
     tabs.setAttribute('role', 'tablist');
     tabs.setAttribute('aria-label', 'Design panel view');
-    for (const t of [['visual', 'Visual'], ['raw', 'Raw']]) {
+    const tabOptions = [['visual', 'Visual'], ['raw', 'Raw']];
+    for (let tabIndex = 0; tabIndex < tabOptions.length; tabIndex++) {
+      const t = tabOptions[tabIndex];
       const btn = document.createElement('button');
       const active = designState.tab === t[0];
       btn.className = 'tab';
@@ -4412,13 +4427,17 @@ void main() {
       btn.setAttribute('aria-controls', 'panel-body');
       btn.setAttribute('tabindex', active ? '0' : '-1');
       btn.addEventListener('click', () => {
-        if (designState.tab === t[0]) return;
-        designState.tab = t[0];
-        saveDesignPrefs();
-        renderDesignChrome();
-        if (t[0] === 'raw' && designState.raw === null && !designState.loading) {
-          fetchDesignSystem(); // raw is part of the same fetch pair
-        }
+        activateDesignTab(t[0], true);
+      });
+      btn.addEventListener('keydown', (event) => {
+        const nextIndex = sessionApi.nextRovingTabIndex(
+          event.key,
+          tabIndex,
+          tabOptions.length,
+        );
+        if (nextIndex === null) return;
+        event.preventDefault();
+        activateDesignTab(tabOptions[nextIndex][0], true);
       });
       tabs.appendChild(btn);
     }
@@ -4432,6 +4451,20 @@ void main() {
     header.appendChild(close);
 
     return header;
+  }
+
+  function activateDesignTab(tab, restoreFocus) {
+    if (designState.tab !== tab) {
+      designState.tab = tab;
+      saveDesignPrefs();
+      renderDesignChrome();
+    }
+    if (restoreFocus) {
+      designShadow.querySelector('[role="tab"][data-active="true"]')?.focus();
+    }
+    if (tab === 'raw' && designState.raw === null && !designState.loading) {
+      fetchDesignSystem(); // raw is part of the same fetch pair
+    }
   }
 
   function toggleDesignPanel() {
@@ -5096,7 +5129,12 @@ void main() {
     // Code spans
     s = s.replace(/`([^`]+)`/g, (_, code) => `<code>${code}</code>`);
     // Links [text](url)
-    s = s.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_, t, u) => `<a href="${u}" target="_blank" rel="noopener noreferrer">${t}</a>`);
+    s = s.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_, t, u) => {
+      const href = sessionApi.safeMarkdownHref(u);
+      return href
+        ? `<a href="${href}" target="_blank" rel="noopener noreferrer">${t}</a>`
+        : t;
+    });
     // Bold
     s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
     // Italic (only single *…*, skip if inside bold already handled)

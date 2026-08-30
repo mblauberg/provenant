@@ -52,6 +52,32 @@
     return event;
   }
 
+  function nextRovingTabIndex(key, currentIndex, tabCount) {
+    if (!Number.isInteger(currentIndex)
+      || !Number.isInteger(tabCount)
+      || tabCount < 1
+      || currentIndex < 0
+      || currentIndex >= tabCount) return null;
+    if (key === 'Home') return 0;
+    if (key === 'End') return tabCount - 1;
+    if (key === 'ArrowRight') return (currentIndex + 1) % tabCount;
+    if (key === 'ArrowLeft') return (currentIndex - 1 + tabCount) % tabCount;
+    return null;
+  }
+
+  function safeMarkdownHref(value) {
+    const href = String(value ?? '').trim();
+    if (!href) return null;
+    // Browsers ignore ASCII control whitespace while parsing a scheme, so use
+    // the same compact form when deciding whether an explicit scheme is safe.
+    const compact = href.replace(/[\u0000-\u0020\u007f]+/g, '');
+    const scheme = compact.match(/^([a-z][a-z0-9+.-]*):/i);
+    if (!scheme) return href;
+    return ['http', 'https', 'mailto', 'tel'].includes(scheme[1].toLowerCase())
+      ? href
+      : null;
+  }
+
   function createLiveBrowserSessionState({ prefix, storage, idFactory }) {
     if (!prefix) throw new Error('prefix required');
     const store = storage || root.localStorage;
@@ -167,5 +193,7 @@
   root.__IMPECCABLE_LIVE_SESSION__ = {
     createLiveBrowserSessionState,
     buildRetryGenerationEvent,
+    nextRovingTabIndex,
+    safeMarkdownHref,
   };
 })(typeof window !== 'undefined' ? window : globalThis);
