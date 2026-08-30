@@ -84,6 +84,7 @@ def fake_dispatch(path: Path) -> None:
             finally:
                 os.close(fd)
         def leave(*_):
+            signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM, signal.SIGHUP})
             raise SystemExit(143)
         signal.signal(signal.SIGTERM, leave)
         signal.signal(signal.SIGHUP, leave)
