@@ -49,7 +49,8 @@ const server = new McpServer(
     instructions:
       "Fabric is a project-scoped mailbox, cooperative task ledger, and activity log. " +
       "Use fabric_inbox to claim requests, persist any response before calling " +
-      "fabric_acknowledge, and correlate replies with reply_to.",
+      "fabric_acknowledge, and correlate replies with reply_to. Create targeted " +
+      "tasks with an owner; owner is cooperative routing metadata, not an access-control boundary.",
   },
 );
 server.server.onclose = () => {
@@ -127,7 +128,10 @@ server.registerTool(
 server.registerTool(
   "fabric_task_create",
   {
-    description: "Record a task others can see, own and depend on.",
+    description:
+      "Record a task others can see, own and depend on. Set owner for targeted routing; " +
+      "an owner-bound task is already assigned and is not available to unowned-task claiming. " +
+      "Task ownership is cooperative routing metadata, not an access-control boundary.",
     inputSchema: {
       objective: z.string(),
       task_id: z.string().optional(),
@@ -152,7 +156,8 @@ server.registerTool(
   "fabric_task_claim",
   {
     description:
-      "Atomically claim an open, unowned task. Retrying as the winning owner is idempotent.",
+      "Atomically claim an open, unowned task. Owner-bound tasks are already assigned and " +
+      "are not available to other claimers; retrying as the winning owner is idempotent.",
     inputSchema: { task_id: z.string() },
   },
   ({ task_id }) => reply(readyStore().claimTask(who, task_id)),
