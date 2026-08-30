@@ -12,12 +12,14 @@ Impeccable (Apache License 2.0)
 ================================================================================
 
 The `skills/ui-ux-design/` skill (formerly `frontend-design`, merged with
-`frontend-review`) and its private `runtime/ui-evidence/` detector are a
+`frontend-review`) and its private `runtime/ui-evidence/` and
+`runtime/ui-live/` implementations are a
 renamed and modified distribution of Impeccable. Unless a file says otherwise,
 the Impeccable-derived material in those locations remains under Apache
 License 2.0. The exact harness-original exceptions are recorded in their
 component ledgers at `skills/ui-ux-design/evals/provenance_components.yaml`
-and `runtime/ui-evidence/provenance_components.yaml`, and indexed in
+`runtime/ui-evidence/provenance_components.yaml` and
+`runtime/ui-live/provenance_components.yaml`, and indexed in
 `THIRD_PARTY_NOTICES.md`.
 
   Original work:   https://github.com/pbakaus/impeccable

@@ -442,6 +442,13 @@ root or its physical source checkout. Target-project current directories,
 inputs. This one-way dependency keeps the detector independently checkable
 without adding user-facing setup or a competing lifecycle owner.
 
+`runtime/ui-live/` similarly owns the stateful live-iteration implementation,
+including its browser assets, source-containment helpers, and recovery store.
+The skill retains the stable `scripts/live*.mjs` commands. The runtime
+uses the target project only for authorised source work and project-local live
+state; it adds no package, workspace, service, registration, seat, or install
+lifecycle.
+
 Every installed file class has one owner: a product-shipped projection, an
 instance-owned file, or a product template seeded once and instance-owned
 thereafter ([ADR 0019](adr/0019-installed-file-class-ownership.md)).

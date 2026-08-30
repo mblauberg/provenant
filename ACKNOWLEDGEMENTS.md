@@ -9,8 +9,8 @@ not the legal record.
 ## Adapted or redistributed components
 
 - [Impeccable](https://github.com/pbakaus/impeccable) by Paul Bakaus is the
-  basis of `ui-ux-design` and its private `runtime/ui-evidence` detector
-  (Apache-2.0). The skill's live support retains
+  basis of `ui-ux-design` and its private `runtime/ui-evidence` and
+  `runtime/ui-live` implementations (Apache-2.0). The live runtime retains
   [modern-screenshot](https://github.com/qq15725/modern-screenshot) (MIT).
   Historical UI/UX research used data from
   [UI UX Pro Max](https://github.com/nextlevelbuilder/ui-ux-pro-max-skill/tree/539d52c424c18a14626601a0494ff70561b86d8b/.claude/skills/ui-ux-pro-max/data)
