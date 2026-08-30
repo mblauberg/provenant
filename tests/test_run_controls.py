@@ -257,12 +257,24 @@ def test_cancel_waits_through_late_summary_bundle_completion(tmp_path: Path, mon
     sidecar.unlink()
     batch_dir = run_dir / "dispatch/batches/batch-001"
     batch_dir.mkdir(parents=True)
+    source_manifest = batch_dir / "task-manifest.json"
+    source_manifest.write_text("{\"schema_version\":1,\"tasks\":[{\"id\":\"task-1\"}]}\n", encoding="utf-8")
     (batch_dir / "summary.json").write_text(json.dumps({
         "schema_version": 1, "record_type": "dispatch-batch", "batch_id": "batch-001",
         "status": "failed", "task_count": 1, "concurrency": 1,
         "counts": {"failed": 1}, "tasks": [{
+                "task_id": "task-1", "status": "failed", "outcome": "failed",
+                "attempt_path": "dispatch/tasks/task-1/attempt-001/attempt.json",
+                "attempt_digest": file_digest(attempt),
+        }],
+        "source_manifest": {
+            "path": "dispatch/batches/batch-001/task-manifest.json",
+            "digest": file_digest(source_manifest),
+        },
+        "reducer_inputs": [{
             "task_id": "task-1", "status": "failed",
             "attempt_path": "dispatch/tasks/task-1/attempt-001/attempt.json",
+            "result_path": None,
         }],
     }) + "\n", encoding="utf-8")
     module_spec = importlib.util.spec_from_file_location("run_controls_late_summary", SCRIPT)
@@ -334,7 +346,7 @@ def test_blocked_retry_requires_exact_retained_question_envelope(tmp_path: Path)
     )
 
     assert result.returncode == 2
-    assert "retained envelope" in json.loads(result.stdout)["message"]
+    assert "question disagrees with terminal result" in json.loads(result.stdout)["message"]
     assert not (run_dir / "dispatch/tasks/task-1/attempt-002").exists()
 
 

@@ -676,15 +676,15 @@ def test_late_signal_after_provider_exit_preserves_attempt_publication(tmp_path:
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         module.CF_DISPATCH = __import__('pathlib').Path({str(adapter)!r})
-        original = module.atomic_write
+        original = module.write_owned
         fired = False
-        def publish(path, content):
+        def publish(run_dir, path, content):
             global fired
-            original(path, content)
+            original(run_dir, path, content)
             if path.name == "attempt.json" and not fired:
                 fired = True
                 os.kill(os.getpid(), signal.SIGTERM)
-        module.atomic_write = publish
+        module.write_owned = publish
         raise SystemExit(module.dispatch(module.parser().parse_args(sys.argv[1:])))
     """), encoding="utf-8")
     result = subprocess.run([

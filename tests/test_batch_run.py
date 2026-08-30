@@ -268,12 +268,12 @@ def test_late_batch_cancel_does_not_override_natural_all_terminal_completion(tmp
 
     calls = 0
 
-    def late_cancel(run_dir):
+    def late_cancel(run_dir, custody=None):
         nonlocal calls
         calls += 1
         if calls == 2:
             module.request_cancel()
-        return original_reconcile(run_dir)
+        return original_reconcile(run_dir, custody)
 
     monkeypatch.setattr(module, 'reconcile_manifest', late_cancel)
     assert module.batch(args(module, run_dir, manifest, 1)) == 0
