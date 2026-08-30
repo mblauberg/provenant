@@ -12,7 +12,7 @@ from urllib.request import Request, urlopen
 
 import pytest
 
-from ui_ux_live_test_support import RESUME, SERVER, SCRIPTS, STATUS, TOKEN, write_live_config
+from ui_ux_live_test_support import ROOT, RESUME, SERVER, SCRIPTS, STATUS, TOKEN, write_live_config
 
 
 _write_config = write_live_config
@@ -1634,7 +1634,9 @@ def test_live_session_store_rejects_a_post_construction_legacy_parent_swap(
 def test_live_serves_the_checked_in_detector_and_screenshot_asset_contracts(
     tmp_path: Path,
 ) -> None:
-    detector_path = SCRIPTS / "detector" / "detect-antipatterns-browser.js"
+    detector_path = (
+        ROOT / "runtime" / "ui-evidence" / "detector" / "detect-antipatterns-browser.js"
+    )
     screenshot_path = SCRIPTS / "modern-screenshot.umd.js"
     with LiveServer(tmp_path) as server:
         status, headers, detector = _request(f"{server.base_url}/detect.js")

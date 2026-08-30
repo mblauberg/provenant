@@ -502,11 +502,7 @@ def test_browser_detector_accepts_injected_browser_or_launcher_without_puppeteer
 
 def test_direct_and_pooled_url_detection_share_readiness_defaults_and_overrides() -> None:
     module_url = (
-        ROOT
-        / "skills"
-        / "ui-ux-design"
-        / "scripts"
-        / "detector"
+        DETECTOR
         / "engines"
         / "browser"
         / "detect-url.mjs"
@@ -547,11 +543,7 @@ def test_direct_and_pooled_url_detection_share_readiness_defaults_and_overrides(
 
 def test_url_detection_waits_for_delayed_client_render_before_scanning() -> None:
     module_url = (
-        ROOT
-        / "skills"
-        / "ui-ux-design"
-        / "scripts"
-        / "detector"
+        DETECTOR
         / "engines"
         / "browser"
         / "detect-url.mjs"
