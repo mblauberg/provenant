@@ -46,6 +46,11 @@ def write_attempt(
     adapter_path.write_text("{}\n", encoding="utf-8")
     result_path = attempt_dir / "result.md"
     result_ref = None
+    if status == "blocked" and question is not None and result in (None, "question\n"):
+        result = json.dumps({
+            "schema_version": 1, "record_type": "provenant-worker-terminal",
+            "classification": "question", "question": question,
+        }, separators=(",", ":")) + "\n"
     if result is not None:
         result_path.write_text(result, encoding="utf-8")
         result_ref = {"path": str(result_path.relative_to(run_dir)), "digest": file_digest(result_path)}

@@ -10,6 +10,7 @@ by default; callers may provide a smaller or larger finite positive timeout.
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import fcntl
 import hashlib
 import json
@@ -21,7 +22,6 @@ import signal
 import stat
 import subprocess
 import sys
-import tempfile
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -40,7 +40,10 @@ WORKER_TERMINAL_RECORD_TYPE = "provenant-worker-terminal"
 CANCEL_MARKER_NAME = "cancel.request"
 
 from _shared.bounded_process import stop_process_group
-
+from _shared.custody import (
+    OwnedFileError, OwnedLinkError, atomic_write_contained, contained_regular_path,
+    ensure_contained_directory, create_contained_directory, open_contained_regular, read_bound_bytes,
+)
 
 class AttemptEvidenceError(ValueError):
     """A retained attempt cannot be reconciled without inventing evidence."""
@@ -67,18 +70,18 @@ def json_digest(value: Any) -> str:
     return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
 
 
-def atomic_write(path: Path, content: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-    temporary_path = Path(temporary)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as stream:
-            stream.write(content)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary_path, path)
-    finally:
-        temporary_path.unlink(missing_ok=True)
+def write_owned(run_dir: Path, path: Path, content: str) -> None:
+    atomic_write_contained(run_dir, path.relative_to(run_dir), content.encode(), label=str(path.name))
+
+
+@contextmanager
+def owned_text_file(run_dir: Path, path: Path, mode: str):
+    flags = os.O_WRONLY | os.O_CREAT | (os.O_APPEND if "a" in mode else os.O_EXCL)
+    fd, _relative, _target = open_contained_regular(
+        run_dir, path.relative_to(run_dir), flags, label=str(path.name)
+    )
+    with os.fdopen(fd, mode, encoding="utf-8") as stream:
+        yield stream
 
 
 def _valid_cancel_directory(run_dir: Path, directory: Path) -> bool:
@@ -154,26 +157,13 @@ def retained_path(run_dir: Path, value: Any) -> str:
 
 def ensure_owned_directory(run_dir: Path, path: Path) -> None:
     try:
-        parts = path.relative_to(run_dir).parts
+        relative = path.relative_to(run_dir)
     except ValueError as exc:
         raise AttemptEvidenceError(f"attempt directory escapes the run: {path}") from exc
-    current = run_dir
-    for part in parts:
-        current /= part
-        if current.is_symlink():
-            raise AttemptEvidenceError(f"attempt directory is a symlink: {current}")
-        try:
-            current.mkdir()
-        except FileExistsError:
-            pass
-        except OSError as exc:
-            raise AttemptEvidenceError(f"attempt directory cannot be created: {current}") from exc
-        try:
-            current.resolve().relative_to(run_dir.resolve())
-        except ValueError as exc:
-            raise AttemptEvidenceError(f"attempt directory escapes the run: {current}") from exc
-        if not current.is_dir():
-            raise AttemptEvidenceError(f"attempt directory is invalid: {current}")
+    try:
+        ensure_contained_directory(run_dir, relative, label="attempt directory")
+    except OwnedFileError as exc:
+        raise AttemptEvidenceError(str(exc)) from exc
 
 
 def active_receipt_error(receipt: Any) -> str | None:
@@ -252,11 +242,10 @@ def workspace_identity(workspace: Path) -> dict[str, Any]:
 
 def valid_regular_result(run_dir: Path, path: Path) -> bool:
     try:
-        metadata = path.lstat()
-        path.resolve().relative_to(run_dir.resolve())
-    except (OSError, ValueError):
+        contained_regular_path(run_dir, path.relative_to(run_dir), "retained evidence")
+    except (OSError, ValueError, OwnedFileError):
         return False
-    return stat.S_ISREG(metadata.st_mode) and metadata.st_nlink == 1
+    return True
 
 
 def success_receipt_error(
@@ -308,10 +297,10 @@ class _JSONObject(dict[str, Any]):
             self[key] = value
 
 
-def parse_worker_question_envelope(
+def worker_question_envelope_bytes(
     candidate: bytes, expected_digest: str | None = None
 ) -> dict[str, Any] | None:
-    """Validate one retained terminal candidate without reopening its path."""
+    """Validate one already-bound worker terminal result envelope."""
     if len(candidate) > MAX_WORKER_TERMINAL_ENVELOPE_BYTES:
         return None
     if expected_digest is not None:
@@ -381,7 +370,7 @@ def worker_question_envelope(result_path: Path, expected_digest: str) -> dict[st
         raise TerminalEnvelopeIntegrityError("terminal candidate cannot be safely read") from exc
     finally:
         os.close(fd)
-    return parse_worker_question_envelope(candidate, expected_digest)
+    return worker_question_envelope_bytes(candidate, expected_digest)
 
 
 def fail(run_dir: Path | None, status: str, message: str) -> int:
@@ -413,7 +402,11 @@ def manifest_rows(run_dir: Path, record: dict[str, Any]) -> list[tuple[str, str]
     return paths
 
 
-def append_manifest(run_dir: Path, record: dict[str, Any]) -> None:
+def append_manifest(run_dir: Path, record: dict[str, Any], custody=None) -> None:
+    append_manifest_to(run_dir, record, custody)
+
+
+def append_manifest_to(run_dir: Path, record: dict[str, Any], custody=None) -> None:
     manifest = run_dir / "MANIFEST.md"
     date = record["finished_at"][:10]
     prefix = f"dispatch-{record['task_id']}-{record['attempt_id']}"
@@ -423,20 +416,32 @@ def append_manifest(run_dir: Path, record: dict[str, Any]) -> None:
         f"{date} | verified | evidence | |\n"
         for kind, path in paths
     )
-    with manifest.open("a", encoding="utf-8") as stream:
-        stream.write(rows_text)
+    if custody is None:
+        with manifest.open("a", encoding="utf-8") as stream:
+            stream.write(rows_text)
+            stream.flush()
+            os.fsync(stream.fileno())
+    else:
+        custody.seek(0, os.SEEK_END)
+        custody.write(rows_text)
+        custody.flush()
+        os.fsync(custody.fileno())
 
 
 def ensure_manifest_appendable(run_dir: Path) -> None:
     """Check append access without changing the manifest."""
-    with (run_dir / "MANIFEST.md").open("a", encoding="utf-8"):
-        pass
+    fd, _relative, _target = open_contained_regular(
+        run_dir, "MANIFEST.md", os.O_RDWR | os.O_APPEND, label="MANIFEST.md"
+    )
+    os.close(fd)
 
 
 def acquire_run_custody(run_dir: Path):
     """Acquire the shared manifest lock without creating a new run artifact."""
-    flags = os.O_RDWR | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)
-    stream = os.fdopen(os.open(run_dir / "MANIFEST.md", flags), "a+", encoding="utf-8")
+    fd, _relative, _target = open_contained_regular(
+        run_dir, "MANIFEST.md", os.O_RDWR | os.O_APPEND, label="MANIFEST.md"
+    )
+    stream = os.fdopen(fd, "a+", encoding="utf-8")
     try:
         fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
@@ -445,10 +450,14 @@ def acquire_run_custody(run_dir: Path):
     return stream
 
 
-def reconcile_manifest(run_dir: Path) -> None:
+def reconcile_manifest(run_dir: Path, custody=None) -> None:
     """Index complete prior attempts whose manifest rows were lost on re-entry."""
     manifest = run_dir / "MANIFEST.md"
-    existing = manifest.read_text(encoding="utf-8", errors="replace")
+    if custody is None:
+        existing = manifest.read_text(encoding="utf-8", errors="replace")
+    else:
+        custody.seek(0)
+        existing = custody.read()
     attempt_dirs = sorted((run_dir / "dispatch" / "tasks").glob("*/attempt-*"))
     for attempt_dir in attempt_dirs:
         try:
@@ -490,7 +499,7 @@ def reconcile_manifest(run_dir: Path) -> None:
                 )
             sidecar = attempt_path.with_name("attempt.sha256")
             if not sidecar.is_file():
-                atomic_write(sidecar, f"{digest(attempt_path)}  {attempt_path.name}\n")
+                write_owned(run_dir, sidecar, f"{digest(attempt_path)}  {attempt_path.name}\n")
             if not valid_regular_result(run_dir, sidecar):
                 raise AttemptEvidenceError(f"attempt digest is not a regular retained file: {sidecar}")
             expected_sidecar = f"{digest(attempt_path)}  {attempt_path.name}\n"
@@ -542,13 +551,23 @@ def reconcile_manifest(run_dir: Path) -> None:
                 continue
             date = record["finished_at"][:10]
             prefix = f"dispatch-{record['task_id']}-{record['attempt_id']}"
-            with manifest.open("a", encoding="utf-8") as stream:
-                stream.writelines(
-                    f"| {prefix}-{kind} | {path} | single dispatch {kind} | dispatch_run | "
-                    f"{date} | verified | evidence | |\n"
-                    for kind, path in missing
-                )
-            existing = manifest.read_text(encoding="utf-8", errors="replace")
+            rows_text = "".join(
+                f"| {prefix}-{kind} | {path} | single dispatch {kind} | dispatch_run | "
+                f"{date} | verified | evidence | |\n"
+                for kind, path in missing
+            )
+            if custody is None:
+                with manifest.open("a", encoding="utf-8") as stream:
+                    stream.write(rows_text)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                existing = manifest.read_text(encoding="utf-8", errors="replace")
+            else:
+                custody.seek(0, os.SEEK_END)
+                custody.write(rows_text)
+                custody.flush()
+                os.fsync(custody.fileno())
+                existing += rows_text
         except AttemptEvidenceError:
             raise
         except (KeyError, TypeError, ValueError) as exc:
@@ -592,19 +611,51 @@ def build_command(args: argparse.Namespace, prompt_path: Path, result_path: Path
     return command
 
 
-def _dispatch(args: argparse.Namespace) -> int:
+def _read_prompt_once(workspace: Path, prompt_source: Path) -> bytes:
+    """Read the validated prompt inode once for both retention and provider use."""
+    try:
+        relative = prompt_source.relative_to(workspace)
+    except ValueError as exc:
+        raise OwnedFileError("prompt file must be inside the current workspace") from exc
+    fd, _relative, _target = open_contained_regular(
+        workspace, relative, os.O_RDONLY, label="prompt file"
+    )
+    try:
+        chunks: list[bytes] = []
+        while True:
+            chunk = os.read(fd, 1024 * 1024)
+            if not chunk:
+                return b"".join(chunks)
+            chunks.append(chunk)
+    finally:
+        os.close(fd)
+
+
+def _dispatch(args: argparse.Namespace, custody=None) -> int:
     run_dir = args.run_dir.resolve()
     workspace = Path.cwd().resolve()
     if run_dir != workspace and workspace not in run_dir.parents:
         return fail(run_dir, "run_dir_invalid", "run directory must be inside the current workspace")
     if not run_dir.is_dir():
         return fail(run_dir, "run_custody_missing", f"run directory does not exist: {run_dir}")
-    missing = [name for name in ("MANIFEST.md", "RUN_RECEIPT.json") if not (run_dir / name).is_file()]
-    if missing:
-        return fail(run_dir, "run_custody_missing", f"missing custody files: {', '.join(missing)}")
     try:
-        run_receipt = json.loads((run_dir / "RUN_RECEIPT.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        (run_dir / "RUN_RECEIPT.json").lstat()
+    except FileNotFoundError:
+        return fail(run_dir, "run_custody_missing", "RUN_RECEIPT.json does not exist")
+    except OSError:
+        return fail(run_dir, "run_custody_invalid", "RUN_RECEIPT.json is unavailable")
+    try:
+        (run_dir / "MANIFEST.md").lstat()
+    except FileNotFoundError:
+        return fail(run_dir, "run_custody_missing", "MANIFEST.md does not exist")
+    except OSError:
+        return fail(run_dir, "run_custody_invalid", "MANIFEST.md is unavailable")
+    try:
+        contained_regular_path(run_dir, "MANIFEST.md", "MANIFEST.md")
+        run_receipt = json.loads(
+            read_bound_bytes(run_dir, "RUN_RECEIPT.json", label="RUN_RECEIPT.json").decode("utf-8")
+        )
+    except (OSError, UnicodeDecodeError, ValueError, OwnedFileError):
         return fail(run_dir, "run_custody_invalid", "RUN_RECEIPT.json is not valid JSON")
     receipt_error = active_receipt_error(run_receipt)
     if receipt_error:
@@ -622,17 +673,21 @@ def _dispatch(args: argparse.Namespace) -> int:
     try:
         ensure_owned_directory(run_dir, run_dir / "dispatch" / "tasks")
         if not args.batch_child:
-            reconcile_manifest(run_dir)
+            reconcile_manifest(run_dir, custody)
             ensure_manifest_appendable(run_dir)
     except AttemptEvidenceError as exc:
         return fail(run_dir, "attempt_evidence_incomplete", str(exc))
     except OSError as exc:
         return fail(run_dir, "manifest_not_appendable", f"MANIFEST.md is not appendable: {exc}")
 
-    prompt_source = args.prompt_file.resolve() if args.prompt_file is not None else None
+    prompt_source = None
+    if args.prompt_file is not None:
+        prompt_source = args.prompt_file.expanduser()
+        if not prompt_source.is_absolute():
+            prompt_source = workspace / prompt_source
     prompt_bytes: bytes | None = None
     if prompt_source is not None:
-        if not prompt_source.is_file() or not os.access(prompt_source, os.R_OK):
+        if not prompt_source.exists():
             return fail(run_dir, "prompt_unavailable", f"cannot read prompt file: {prompt_source}")
         if not (prompt_source == run_dir or run_dir in prompt_source.parents or workspace in prompt_source.parents):
             return fail(run_dir, "prompt_path_forbidden", "prompt file must be inside the run directory or current workspace")
@@ -649,8 +704,12 @@ def _dispatch(args: argparse.Namespace) -> int:
         )
         if sensitive_roots.intersection(parts) or prompt_source.name.casefold() in sensitive_files or config_auth:
             return fail(run_dir, "credential_or_auth_store_denied", "prompt path is a credential or authentication store")
-        if prompt_source.stat().st_nlink > 1:
-            return fail(run_dir, "prompt_hard_link_denied", "prompt file has multiple hard links")
+        try:
+            prompt_bytes = _read_prompt_once(workspace, prompt_source)
+        except OwnedLinkError as exc:
+            return fail(run_dir, "prompt_hard_link_denied", str(exc))
+        except OwnedFileError as exc:
+            return fail(run_dir, "prompt_unavailable", str(exc))
     else:
         try:
             prompt_bytes = sys.stdin.buffer.read()
@@ -676,18 +735,22 @@ def _dispatch(args: argparse.Namespace) -> int:
     attempt_number = existing_attempt_number(task_dir)
     attempt_id = f"attempt-{attempt_number:03d}"
     attempt_dir = task_dir / attempt_id
-    attempt_dir.mkdir(parents=True)
+    try:
+        create_contained_directory(
+            run_dir, attempt_dir.relative_to(run_dir), label="attempt directory"
+        )
+    except OwnedFileError as exc:
+        return fail(run_dir, "attempt_path_invalid", str(exc))
     prompt_path = attempt_dir / "prompt.md"
     result_path = attempt_dir / "result.md"
     adapter_path = attempt_dir / "adapter-receipt.json"
     stderr_path = attempt_dir / "stderr.log"
-    if prompt_bytes is None:
-        shutil.copyfile(prompt_source, prompt_path)
-    else:
-        with prompt_path.open("wb") as stream:
-            stream.write(prompt_bytes)
-            stream.flush()
-            os.fsync(stream.fileno())
+    try:
+        atomic_write_contained(
+            run_dir, prompt_path.relative_to(run_dir), prompt_bytes or b"", label="prompt"
+        )
+    except OwnedFileError as exc:
+        return fail(run_dir, "attempt_path_invalid", str(exc))
     command = build_command(args, prompt_path, result_path)
     requested_route = {
         "intent": args.intent,
@@ -711,8 +774,8 @@ def _dispatch(args: argparse.Namespace) -> int:
     cancelled = False
     old_handlers: dict[int, Any] = {}
     try:
-        with adapter_path.open("w", encoding="utf-8") as adapter_stream, stderr_path.open(
-            "w", encoding="utf-8"
+        with owned_text_file(run_dir, adapter_path, "w") as adapter_stream, owned_text_file(
+            run_dir, stderr_path, "w"
         ) as stderr_stream:
             attempt_cancelled = cancellation_marker_present(run_dir, attempt_dir)
             batch_cancelled = batch_dir is not None and cancellation_marker_present(run_dir, batch_dir)
@@ -922,24 +985,24 @@ def _dispatch(args: argparse.Namespace) -> int:
     record["attempt_path"] = relative_path(run_dir, attempt_path)
     digest_path = attempt_dir / "attempt.sha256"
     record["attempt_digest_path"] = relative_path(run_dir, digest_path)
-    atomic_write(attempt_path, json.dumps(record, indent=2, sort_keys=True) + "\n")
+    write_owned(run_dir, attempt_path, json.dumps(record, indent=2, sort_keys=True) + "\n")
     attempt_digest = digest(attempt_path)
-    atomic_write(digest_path, f"{attempt_digest}  {attempt_path.name}\n")
+    write_owned(run_dir, digest_path, f"{attempt_digest}  {attempt_path.name}\n")
     manifest_error = False
     try:
         if args.batch_child:
             manifest_error = False
         else:
-            append_manifest(run_dir, record)
+            append_manifest(run_dir, record, custody)
     except OSError as exc:
         manifest_error = True
         record["status"] = "failed"
         record["outcome"] = "manifest_write_error"
         record["failure_code"] = "manifest_write_error"
         record["manifest_error"] = str(exc)
-        atomic_write(attempt_path, json.dumps(record, indent=2, sort_keys=True) + "\n")
+        write_owned(run_dir, attempt_path, json.dumps(record, indent=2, sort_keys=True) + "\n")
         attempt_digest = digest(attempt_path)
-        atomic_write(digest_path, f"{attempt_digest}  {attempt_path.name}\n")
+        write_owned(run_dir, digest_path, f"{attempt_digest}  {attempt_path.name}\n")
     remove_cancellation_marker(run_dir, attempt_dir)
     for sig, handler in old_handlers.items():
         signal.signal(sig, handler)
@@ -961,10 +1024,10 @@ def dispatch(args: argparse.Namespace) -> int:
         return _dispatch(args)
     try:
         custody = acquire_run_custody(run_dir)
-    except OSError:
+    except (OSError, OwnedFileError):
         return fail(run_dir, "run_custody_busy", "another dispatch, batch or finalizer owns the run")
     try:
-        return _dispatch(args)
+        return _dispatch(args, custody)
     finally:
         fcntl.flock(custody.fileno(), fcntl.LOCK_UN)
         custody.close()

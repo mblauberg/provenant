@@ -301,6 +301,34 @@ describe("CLI boundaries", () => {
     }
   });
 
+  it("forwards a positive inbox limit and rejects invalid limits", () => {
+    expect(runCli(["--help"]).stdout).toContain("[--limit N]");
+
+    const store = openStore();
+    const sender = agent("limit-sender");
+    const recipient = identify({
+      AGENT_FABRIC_SEAT: "codex",
+      AGENT_FABRIC_LABEL: "cli-reviewer",
+    }, repositoryRoot);
+    store.announce(sender);
+    store.announce(recipient);
+    for (const body of ["first", "second", "third"]) {
+      store.send(sender, recipient.agentId, body);
+    }
+    store.close();
+
+    const limited = runCli(["inbox", "--peek", "--limit", "2"]);
+    expect(limited.status, limited.stderr).toBe(0);
+    expect(JSON.parse(limited.stdout)).toHaveLength(2);
+
+    for (const value of ["0", "1.5", "-1"]) {
+      const result = runCli(["inbox", "--limit", value]);
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("inbox limit must be a positive integer");
+      expect(result.stderr).not.toContain("src/cli.ts");
+    }
+  });
+
   it("rejects extra fixed-shape CLI arguments before mutation", () => {
     const store = openStore();
     const cliAgent = identify({
@@ -832,7 +860,7 @@ describe("tasks", () => {
       state: "open",
     });
     expect(() => store.claimTask(bob, "claim-once")).toThrowError(
-      /task claim-once is not open and unowned/,
+      /task claim-once is already assigned to alice/,
     );
     expect(store.tasks(alice.project)).toMatchObject([{ owner: "alice" }]);
     expect(store.activity(alice.project).filter((entry) => entry.detail.includes("claimed by")))

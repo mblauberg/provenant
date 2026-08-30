@@ -882,6 +882,37 @@ def test_hard_linked_prompt_is_rejected_before_provider_launch(tmp_path: Path, m
     assert module.dispatch(args) == 2
 
 
+def test_hard_linked_prompt_reports_typed_custody_error(tmp_path: Path, monkeypatch, capsys) -> None:
+    run_dir = make_run(tmp_path, "hardlink-typed")
+    source = tmp_path / "prompt.md"
+    source.write_text("secret boundary\n", encoding="utf-8")
+    linked = tmp_path / "linked-prompt.md"
+    linked.hardlink_to(source)
+    module = load_dispatch_module()
+    args = module.parser().parse_args([
+        "--run-dir", str(run_dir), "--task-id", "hardlink-typed", "--adapter", "codex",
+        "--prompt-file", str(linked), "--alias", "workhorse", "--role", "worker",
+    ])
+    monkeypatch.chdir(tmp_path)
+    assert module.dispatch(args) == 2
+    assert json.loads(capsys.readouterr().out)["status"] == "prompt_hard_link_denied"
+
+
+def test_missing_run_receipt_reports_missing_custody(tmp_path: Path, monkeypatch, capsys) -> None:
+    run_dir = make_run(tmp_path, "missing-receipt")
+    (run_dir / "RUN_RECEIPT.json").unlink()
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("missing receipt\n", encoding="utf-8")
+    module = load_dispatch_module()
+    args = module.parser().parse_args([
+        "--run-dir", str(run_dir), "--task-id", "missing-receipt", "--adapter", "codex",
+        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+    ])
+    monkeypatch.chdir(tmp_path)
+    assert module.dispatch(args) == 2
+    assert json.loads(capsys.readouterr().out)["status"] == "run_custody_missing"
+
+
 def test_nonfinite_or_nonpositive_timeout_is_rejected() -> None:
     module = load_dispatch_module()
     for value in ("0", "-1", "nan", "inf", "-inf"):
