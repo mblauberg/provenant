@@ -13,6 +13,13 @@ import {
 } from '../scripts/live-server-startup.mjs';
 
 const SERVER = fileURLToPath(new URL('../scripts/live-server.mjs', import.meta.url));
+const PRODUCT_ROOT = path.resolve(path.dirname(SERVER), '..', '..', '..');
+
+function serverEnv() {
+  const env = { ...process.env, AGENT_FABRIC_PRODUCT_ROOT: PRODUCT_ROOT };
+  delete env.AGENTS_HOME;
+  return env;
+}
 
 function newProject() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'impeccable-live-startup-'));
@@ -23,6 +30,7 @@ function stopServer(project) {
     cwd: project,
     encoding: 'utf8',
     timeout: 5_000,
+    env: serverEnv(),
   });
 }
 
@@ -87,6 +95,7 @@ test('background launcher reports a successful startup without exposing its bear
       cwd: project,
       encoding: 'utf8',
       timeout: 15_000,
+      env: serverEnv(),
     });
 
     assert.equal(result.status, 0, result.stderr);
@@ -121,6 +130,7 @@ test('background launcher replaces a stale server record before reporting succes
       cwd: project,
       encoding: 'utf8',
       timeout: 15_000,
+      env: serverEnv(),
     });
 
     assert.equal(result.status, 0, result.stderr);
@@ -156,6 +166,7 @@ test('background launcher replaces a stale record that reuses a live unrelated p
       cwd: project,
       encoding: 'utf8',
       timeout: 15_000,
+      env: serverEnv(),
     });
 
     assert.equal(result.status, 0, result.stderr);
@@ -182,6 +193,7 @@ test('foreground server reports a structured occupied-port bind failure', async 
       cwd: project,
       encoding: 'utf8',
       timeout: 5_000,
+      env: serverEnv(),
     });
 
     assert.notEqual(result.status, 0);

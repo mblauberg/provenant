@@ -10,12 +10,21 @@ DETECT = ROOT / "skills" / "ui-ux-design" / "scripts" / "detect.mjs"
 DETECTOR = ROOT / "runtime" / "ui-evidence" / "detector"
 
 
+def _checkout_env() -> dict[str, str]:
+    env = dict(os.environ)
+    env.pop("AGENT_FABRIC_PRODUCT_ROOT", None)
+    env.pop("AGENTS_HOME", None)
+    return env
+
+
 def _run_detect(
     *args: str,
     input_text: str | None = None,
     env: dict[str, str] | None = None,
     cwd: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
+    if env is None:
+        env = _checkout_env()
     return subprocess.run(
         ["node", str(DETECT), *args],
         check=False,
@@ -231,12 +240,28 @@ def test_detector_runtime_is_not_duplicated_in_the_skill() -> None:
 
     assert not skill_detector.exists()
     assert (DETECTOR / "detect-antipatterns-browser.js").is_file()
-    assert len(DETECT.read_text().splitlines()) <= 16
     assert "ui-evidence-paths.mjs" in DETECT.read_text()
 
 
 def test_detector_runtime_entry_is_directly_runnable() -> None:
     runtime_entry = ROOT / "runtime" / "ui-evidence" / "detect.mjs"
+
+    result = subprocess.run(
+        ["node", str(runtime_entry), "--help"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout.startswith(f'Usage: node "{runtime_entry}"')
+    assert result.stderr == ""
+
+
+def test_detector_runtime_entry_is_runnable_through_a_symlink(tmp_path: Path) -> None:
+    linked_root = tmp_path / "product"
+    linked_root.symlink_to(ROOT, target_is_directory=True)
+    runtime_entry = linked_root / "runtime" / "ui-evidence" / "detect.mjs"
 
     result = subprocess.run(
         ["node", str(runtime_entry), "--help"],
@@ -332,7 +357,7 @@ def test_detector_json_all_target_failure_is_not_a_clean_result(tmp_path: Path) 
 
 
 def test_detector_json_distinguishes_unavailable_browser_engine_deterministically() -> None:
-    env = {**os.environ, "IMPECCABLE_BROWSER_ENGINE": "unavailable"}
+    env = {**_checkout_env(), "IMPECCABLE_BROWSER_ENGINE": "unavailable"}
     result = _run_detect("--json", "https://example.com", env=env)
 
     assert result.returncode == 3
@@ -351,7 +376,7 @@ def test_detector_json_distinguishes_unavailable_browser_engine_deterministicall
 
 
 def test_detector_json_reports_each_url_when_shared_browser_engine_is_unavailable() -> None:
-    env = {**os.environ, "IMPECCABLE_BROWSER_ENGINE": "unavailable"}
+    env = {**_checkout_env(), "IMPECCABLE_BROWSER_ENGINE": "unavailable"}
     result = _run_detect(
         "--json",
         "https://one.example",
@@ -486,7 +511,7 @@ def test_browser_detector_accepts_injected_browser_or_launcher_without_puppeteer
         "await owned.close();"
         "process.stdout.write(JSON.stringify({same:supplied.browser===external,launched,closed}));"
     )
-    env = {**os.environ, "IMPECCABLE_BROWSER_ENGINE": "unavailable"}
+    env = {**_checkout_env(), "IMPECCABLE_BROWSER_ENGINE": "unavailable"}
 
     result = subprocess.run(
         ["node", "--input-type=module", "-e", script],

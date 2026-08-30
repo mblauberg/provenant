@@ -10,5 +10,5 @@ try {
   await detectCli();
 } catch (error) {
   process.stderr.write(`Error: ${error.message}\n`);
-  process.exitCode = 1;
+  process.exit(1);
 }

@@ -91,7 +91,25 @@ def test_every_ui_evidence_runtime_file_has_exactly_one_provenance_component():
     )
     for key in ("source_url", "source_ref", "licence", "local_licence", "modification"):
         assert third_party[key]
-    for relative in third_party["marker_required_exact"]:
+
+    baseline = third_party["modification_baseline"]
+    modified = set()
+    for path in (UI_EVIDENCE / "detector").rglob("*"):
+        if not path.is_file():
+            continue
+        relative = path.relative_to(UI_EVIDENCE).as_posix()
+        original = f"skills/ui-ux-design/scripts/{relative}"
+        baseline_file = subprocess.run(
+            ["git", "show", f"{baseline}:{original}"],
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+        )
+        if baseline_file.returncode != 0 or baseline_file.stdout != path.read_bytes():
+            modified.add(relative)
+
+    assert modified == set(third_party["marker_required_exact"])
+    for relative in modified:
         assert "Modified for Provenant" in (UI_EVIDENCE / relative).read_text()[:500], relative
 
 

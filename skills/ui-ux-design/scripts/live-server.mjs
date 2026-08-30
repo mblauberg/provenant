@@ -1567,6 +1567,18 @@ if (portArg) {
     process.exit(1);
   }
 }
+
+let browserScripts;
+try {
+  browserScripts = loadBrowserScripts();
+} catch (error) {
+  console.error(JSON.stringify({
+    error: 'ui_evidence_runtime_unavailable',
+    message: error.message,
+  }));
+  process.exit(1);
+}
+
 state.token = randomUUID();
 state.agentToken = randomUUID();
 state.sessionStore = createLiveSessionStore({ cwd: process.cwd() });
@@ -1584,7 +1596,7 @@ state.agentStatePath = writeLiveAgentServerInfo(state.sessionDir, {
   agentToken: state.agentToken,
 });
 
-const { detectScript, sessionPath, livePath } = loadBrowserScripts();
+const { detectScript, sessionPath, livePath } = browserScripts;
 httpServer = http.createServer(createRequestHandler({ detectScript, sessionPath, livePath }));
 
 httpServer.once('error', (error) => {

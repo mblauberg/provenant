@@ -18,6 +18,12 @@ from ui_ux_live_test_support import ROOT, RESUME, SERVER, SCRIPTS, STATUS, TOKEN
 _write_config = write_live_config
 
 
+@pytest.fixture(autouse=True)
+def _pin_ui_evidence_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AGENT_FABRIC_PRODUCT_ROOT", str(ROOT))
+    monkeypatch.delenv("AGENTS_HOME", raising=False)
+
+
 def _available_port() -> int:
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
@@ -32,6 +38,10 @@ class LiveServer:
         self.token = ""
         self.agent_token = ""
         self.env = env
+        if self.env is None:
+            self.env = dict(os.environ)
+            self.env["AGENT_FABRIC_PRODUCT_ROOT"] = str(ROOT)
+            self.env.pop("AGENTS_HOME", None)
 
     def __enter__(self):
         self.process = subprocess.Popen(
@@ -1659,6 +1669,31 @@ def test_live_serves_the_checked_in_detector_and_screenshot_asset_contracts(
             text=True,
         )
         assert checked.returncode == 0, checked.stderr
+
+
+def test_live_server_fails_before_creating_private_state_when_runtime_is_missing(
+    tmp_path: Path,
+) -> None:
+    runtime_tmp = tmp_path / "runtime-tmp"
+    runtime_tmp.mkdir()
+    env = dict(os.environ)
+    env["AGENT_FABRIC_PRODUCT_ROOT"] = str(tmp_path / "missing-product")
+    env.pop("AGENTS_HOME", None)
+    env["TMPDIR"] = str(runtime_tmp)
+
+    result = subprocess.run(
+        ["node", str(SERVER), f"--port={_available_port()}"],
+        cwd=tmp_path,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
+        env=env,
+    )
+
+    assert result.returncode != 0
+    assert json.loads(result.stderr)["error"] == "ui_evidence_runtime_unavailable"
+    assert list(runtime_tmp.iterdir()) == []
 
 
 def test_source_endpoint_rejects_ancestor_sibling_prefix_and_symlink_escape(
