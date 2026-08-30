@@ -165,6 +165,7 @@ def test_harness_original_runtime_and_test_files_are_not_overattributed_to_impec
         "scripts/contained-source.mjs",
         "scripts/jsx-tag-scanner.mjs",
         "scripts/live-server-startup.mjs",
+        "scripts/ui-evidence-paths.mjs",
         "tests/live-server-startup.test.mjs",
     ):
         assert _component_for(relative, components) == ["harness-original-material"]

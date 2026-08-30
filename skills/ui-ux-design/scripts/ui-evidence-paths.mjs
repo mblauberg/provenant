@@ -18,9 +18,9 @@ function requireRuntime(productRoot, source) {
   return runtimeRoot;
 }
 
-function configuredProductRoot(env) {
+function configuredProductRoot() {
   for (const name of ['AGENT_FABRIC_PRODUCT_ROOT', 'AGENTS_HOME']) {
-    const value = env[name]?.trim();
+    const value = process.env[name]?.trim();
     if (!value) continue;
     if (!path.isAbsolute(value)) {
       throw new Error(`${name} must be an absolute product root, got ${value}`);
@@ -30,24 +30,24 @@ function configuredProductRoot(env) {
   return null;
 }
 
-export function resolveUiEvidenceRoot({ env = process.env, sourceUrl = import.meta.url } = {}) {
-  const configured = configuredProductRoot(env);
+export function resolveUiEvidenceRoot() {
+  const configured = configuredProductRoot();
   if (configured) {
     return requireRuntime(configured.value, configured.name);
   }
 
-  const physicalSource = fs.realpathSync.native(fileURLToPath(sourceUrl));
+  const physicalSource = fs.realpathSync.native(fileURLToPath(import.meta.url));
   const productRoot = path.resolve(path.dirname(physicalSource), '..', '..', '..');
   return requireRuntime(productRoot, 'the physical skill checkout at');
 }
 
-export function resolveUiEvidenceEntry(options) {
-  return path.join(resolveUiEvidenceRoot(options), 'detect.mjs');
+export function resolveUiEvidenceEntry() {
+  return path.join(resolveUiEvidenceRoot(), 'detect.mjs');
 }
 
-export function resolveUiEvidenceBrowserBundle(options) {
+export function resolveUiEvidenceBrowserBundle() {
   return path.join(
-    resolveUiEvidenceRoot(options),
+    resolveUiEvidenceRoot(),
     'detector',
     'detect-antipatterns-browser.js',
   );
