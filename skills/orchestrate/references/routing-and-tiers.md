@@ -41,6 +41,10 @@ routing remains a compatibility surface. Chair inheritance is exceptional: it
 must be explicit and recorded, never inferred from an omitted binding.
 Task-class dispatch rejects mismatched roles and requires a fresh, adapter-bound
 runtime snapshot. Codex snapshots verify model availability and supported effort.
+For Agy, the resolver intersects the fresh `agy models` snapshot with the
+configured preferred-family alias candidates; the shell owns no second model
+catalogue. An unprobed explicit Agy route remains `provider-unverified`, while
+an unprobed task-class route fails closed.
 Account-default transport omits the literal model, so receipts retain policy
 identity. Claude's no-tools, no-session subscription canary verifies the effective
 model and fails closed on the CLI's unknown-effort warning, but cannot observe
@@ -77,8 +81,11 @@ the default workhorse at low or medium effort, where it tends to beat Sonnet at
 a higher one. Sonnet stays admissible at workhorse and is the one to reach for
 when the work is genuinely routine. Each catalogue-configured risk tier has one bounded
 override occupant. Validation prevents it from being an alias or alias
-candidate. Callers must select the override explicitly and stay within that
-tier's configured roles, alias and effort ceiling. Retargeting a tier removes
+candidate. Lifecycle `risk_tier` remains delivery metadata and never selects
+that occupant. Callers must use the separate `--model-override-tier` input,
+select the override explicitly and stay within that tier's configured roles,
+alias and effort ceiling. The receipt records lifecycle risk and model override
+independently. Retargeting a tier removes
 that tier's special treatment from its former occupant; a model no configured
 tier names is no longer override-only. A malformed override block fails the
 whole family closed — every route on that family is rejected with
@@ -164,8 +171,10 @@ bulk/scout  → cheap diverse scout → strict schema → sampled verification
 On an auth/quota/limit/safety error from a tool: log it to the run scratchpad and advance to the next
 entry. Never silently skip the verification step.
 
-Cursor, Copilot, Kiro, Agy and Pi are adapters, not model families. Record the
-actual provider/model lineage. Gemini, xAI and other distinct families are
+Cursor, Copilot, Kiro, OpenCode, Agy and Pi are adapters, not model families.
+Record the actual provider/model lineage. Kiro and OpenCode execution are
+currently disabled by compatibility policy even though their Fabric MCP client
+registrations remain supported. Gemini, xAI and other distinct families are
 flexible advisory workers/reviewers: useful for blind spots, never load-bearing
 when quota/API output is absent. Pi stays dormant until a pinned distinct
 open-model route, current Herdr integration and smoke evaluation exist; it may

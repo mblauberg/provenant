@@ -9,6 +9,7 @@ import subprocess
 import sys
 
 import pytest
+import yaml
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -912,7 +913,7 @@ def test_risk_tier_override_catalogue_retargets_single_model(
 
     result = router.main([
         "resolve", "--adapter", "claude", "--alias", override["alias"],
-        "--role", override["roles"][0], "--risk-tier", "crucial",
+        "--role", override["roles"][0], "--model-override-tier", "crucial",
         "--model", override["models"][0], "--effort", "high",
     ])
 
@@ -920,9 +921,26 @@ def test_risk_tier_override_catalogue_retargets_single_model(
     assert result == 0
     assert route["status"] == "ok"
     assert route["resolved_model"] == "claude-retargeted-model"
-    assert route["route_source"] == "risk-tier-override"
+    assert route["route_source"] == "model-override"
     assert route["policy_override"] == "crucial-claude-retargeted-model-reviewer-one-reviewer-two"
     assert route["effort"] == "high"
+
+
+def test_special_model_override_uses_an_explicit_non_lifecycle_input():
+    override = CRUCIAL_RISK_OVERRIDE
+    model = override["models"][0]
+
+    result, route = resolve(
+        "--adapter", "claude", "--alias", override["alias"],
+        "--role", override["roles"][0], "--model-override-tier", "crucial",
+        "--model", model, "--effort", override["maximum_effort"],
+    )
+
+    assert result.returncode == 0
+    assert route["status"] == "ok"
+    assert route["model_override_tier"] == "crucial"
+    assert "risk_tier" not in route
+    assert route["resolved_model"] == model
 
 
 def test_retargeted_override_occupant_requires_explicit_risk_tier(
@@ -1290,7 +1308,7 @@ def test_capability_resolved_override_occupant_records_explicit_risk_tier(
 
     result = router.main([
         "resolve", "--adapter", "claude", "--alias", CRUCIAL_RISK_OVERRIDE["alias"],
-        "--role", CRUCIAL_RISK_OVERRIDE["roles"][0], "--risk-tier", "crucial",
+        "--role", CRUCIAL_RISK_OVERRIDE["roles"][0], "--model-override-tier", "crucial",
         "--capabilities-file", str(snapshot_path),
     ])
 
@@ -1299,18 +1317,18 @@ def test_capability_resolved_override_occupant_records_explicit_risk_tier(
     assert result == 0
     assert receipt["status"] == "ok"
     assert receipt["resolved_model"] == resolved_model
-    assert receipt["risk_tier"] == "crucial"
-    assert receipt["route_source"] == "risk-tier-override"
+    assert receipt["model_override_tier"] == "crucial"
+    assert receipt["route_source"] == "model-override"
 
 
-def test_unconfigured_inferred_family_cannot_bypass_override_gate():
+def test_disabled_adapter_precedes_inferred_family_override_checks():
     result, route = resolve(
         "--adapter", "opencode", "--alias", "flagship", "--role", "worker",
         "--model", "opencode/fable",
     )
 
     assert result.returncode == 1
-    assert route["status"] == "risk_tier_override_required"
+    assert route["status"] == "adapter_disabled"
 
 
 @pytest.mark.parametrize(
@@ -1325,12 +1343,12 @@ def test_override_occupant_requires_explicit_bounded_risk_route(
     model = override["models"][0]
     result, route = resolve(
         "--adapter", "claude", "--alias", override["alias"], "--role", role,
-        "--risk-tier", risk_tier, "--effort", effort, "--available-model", model,
+        "--model-override-tier", risk_tier, "--effort", effort, "--available-model", model,
     )
     assert result.returncode == 0
     assert route["resolved_model"] == model
-    assert route["risk_tier"] == risk_tier
-    assert route["route_source"] == "risk-tier-override"
+    assert route["model_override_tier"] == risk_tier
+    assert route["route_source"] == "model-override"
     assert route["policy_override"] == (
         f"{risk_tier}-{model}-{'-'.join(override['roles'])}"
     )
@@ -1341,20 +1359,20 @@ def test_override_occupant_requires_explicit_bounded_risk_route(
     ("arguments", "expected_status"),
     (
         (
-            ("--alias", "flagship", "--role", "synthesis", "--risk-tier", "substantial"),
+            ("--alias", "flagship", "--role", "synthesis", "--model-override-tier", "substantial"),
             "risk_tier_override_unavailable",
         ),
         (
-            ("--alias", "flagship", "--role", "worker", "--risk-tier", "crucial"),
+            ("--alias", "flagship", "--role", "worker", "--model-override-tier", "crucial"),
             "risk_tier_role_mismatch",
         ),
         (
-            ("--alias", "workhorse", "--role", "synthesis", "--risk-tier", "crucial"),
+            ("--alias", "workhorse", "--role", "synthesis", "--model-override-tier", "crucial"),
             "risk_tier_alias_mismatch",
         ),
         (
             (
-                "--alias", "flagship", "--role", "synthesis", "--risk-tier", "crucial",
+                "--alias", "flagship", "--role", "synthesis", "--model-override-tier", "crucial",
                 "--effort", "high",
             ),
             "risk_tier_effort_above_ceiling",
@@ -1376,7 +1394,7 @@ def test_risk_override_fails_closed_outside_bounded_role_tier_and_effort(
 def test_risk_override_rejects_non_occupant_explicit_models(model):
     result, route = resolve(
         "--adapter", "claude", "--alias", "flagship", "--role", "synthesis",
-        "--risk-tier", "crucial", "--model", model, "--effort", "medium",
+        "--model-override-tier", "crucial", "--model", model, "--effort", "medium",
     )
     assert result.returncode == 1
     assert route["status"] == "risk_tier_model_mismatch"
@@ -1416,7 +1434,7 @@ def test_risk_tier_override_configuration_is_closed_and_bounded(
 
     result = router.main([
         "resolve", "--adapter", "claude", "--alias", CRUCIAL_RISK_OVERRIDE["alias"],
-        "--role", CRUCIAL_RISK_OVERRIDE["roles"][0], "--risk-tier", "crucial",
+        "--role", CRUCIAL_RISK_OVERRIDE["roles"][0], "--model-override-tier", "crucial",
     ])
 
     route = json.loads(capsys.readouterr().out)
@@ -1436,7 +1454,7 @@ def test_non_dict_risk_tier_override_is_rejected_as_malformed(tmp_path, monkeypa
 
     result = router.main([
         "resolve", "--adapter", "claude", "--alias", "flagship",
-        "--role", "synthesis", "--risk-tier", "crucial",
+        "--role", "synthesis", "--model-override-tier", "crucial",
     ])
 
     route = json.loads(capsys.readouterr().out)
@@ -1455,7 +1473,7 @@ def test_absent_risk_tier_is_still_reported_unavailable(tmp_path, monkeypatch, c
 
     result = router.main([
         "resolve", "--adapter", "claude", "--alias", "flagship",
-        "--role", "synthesis", "--risk-tier", "crucial",
+        "--role", "synthesis", "--model-override-tier", "crucial",
     ])
 
     route = json.loads(capsys.readouterr().out)
@@ -1556,8 +1574,8 @@ def test_unusable_families_table_fails_closed(
     assert route.get("resolved_model") is None
 
 
-def test_adapter_pinned_to_an_undefined_family_requires_an_explicit_model(capsys):
-    """OpenCode has no alias table to route against, so an alias route rejects.
+def test_disabled_adapter_precedes_missing_alias_configuration(capsys):
+    """OpenCode is rejected by its configured execution gate before alias lookup.
 
     ``generic-open`` is deliberately absent from the families table: OpenCode
     routes on explicit account-catalogue models. Resolving an alias against it
@@ -1572,8 +1590,8 @@ def test_adapter_pinned_to_an_undefined_family_requires_an_explicit_model(capsys
     ])
 
     route = json.loads(capsys.readouterr().out)
-    assert result == 2
-    assert route["status"] == "model_required_for_broker"
+    assert result == 1
+    assert route["status"] == "adapter_disabled"
     assert route.get("resolved_model") is None
 
 
@@ -1716,7 +1734,7 @@ def test_override_field_of_the_wrong_type_fails_closed(
 
     result = router.main([
         "resolve", "--adapter", "claude", "--alias", "flagship", "--role", "a",
-        "--risk-tier", "crucial", "--model", "fable", "--available-model", "fable",
+        "--model-override-tier", "crucial", "--model", "fable", "--available-model", "fable",
     ])
 
     route = json.loads(capsys.readouterr().out)
@@ -2824,25 +2842,40 @@ def test_agy_accepts_only_explicit_gemini_routing():
     assert forbidden_route["status"] == "adapter_family_forbidden"
 
 
-def test_opencode_accepts_only_explicit_account_catalogue_models():
-    allowed, route = resolve(
+def test_agy_task_class_uses_fresh_preferred_family_capabilities(tmp_path):
+    snapshot = write_agy_capability_snapshot(tmp_path)
+
+    result, route = resolve(
+        "--adapter", "agy", "--task-class", "mechanical", "--role", "worker",
+        "--lead-family", "openai", "--require-distinct",
+        "--capabilities-file", str(snapshot),
+    )
+
+    assert result.returncode == 0
+    assert route["status"] == "ok"
+    assert route["alias"] == "scout"
+    assert route["resolved_model"] == "gemini-3.7-flash"
+    assert route["model_family"] == "google"
+    assert route["identity_source"] == "runtime-capability+catalog"
+    assert route["effort"] == "low"
+    assert route["effort_capability_source"] == "runtime-model-catalog"
+
+
+def test_disabled_opencode_route_fails_closed_with_configured_reason():
+    result, route = resolve(
         "--adapter", "opencode", "--model", "opencode/deepseek-v4-flash-free",
         "--alias", "scout", "--role", "worker",
         "--effort", "high",
     )
-    assert allowed.returncode == 0
-    assert route["status"] == "ok"
-    assert route["model_family"] == "generic-open"
-    assert route["compatibility_adapter"] == "opencode-acp"
-    assert route["adapter_enabled"] is True
-    assert route["effort"] == "high"
 
-    forbidden, forbidden_route = resolve(
-        "--adapter", "opencode", "--model", "anthropic/claude-opus",
-        "--alias", "scout", "--role", "worker",
+    assert result.returncode == 1
+    assert route["status"] == "adapter_disabled"
+    assert route["compatibility_adapter"] == "opencode-acp"
+    assert route["adapter_enabled"] is False
+    assert route["reason"] == (
+        "Provider execution is unavailable because the direct dispatch owner "
+        "has no verified OpenCode invocation or receipt contract."
     )
-    assert forbidden.returncode == 1
-    assert forbidden_route["status"] in {"adapter_family_mismatch", "adapter_model_forbidden"}
 
 
 def test_optional_adapter_preference_policy_is_ordered_and_native_first_for_fallbacks():
@@ -2936,37 +2969,86 @@ def test_cursor_accepts_preferred_and_supported_fallback_families_without_model_
     assert wrong_family_route["status"] == "adapter_family_forbidden"
 
 
-def test_kiro_accepts_only_open_weight_models():
-    allowed_models = (
-        ("deepseek-3.2", "deepseek"),
-        ("glm-5", "zhipu"),
-        ("minimax-m2.5", "minimax"),
-        ("qwen3-coder-next", "alibaba"),
-    )
-    for model, family in allowed_models:
-        allowed, allowed_route = resolve(
-            "--adapter", "kiro", "--model", model, "--alias", "scout", "--role", "worker",
-        )
-        assert allowed.returncode == 0
-        assert allowed_route["status"] == "ok"
-        assert allowed_route["model_family"] == family
-        assert allowed_route["compatibility_model_family"] == "open-weight"
-
-    forbidden, forbidden_route = resolve(
-        "--adapter", "kiro", "--model", "gemini-3.1-pro", "--alias", "scout", "--role", "worker"
+def test_disabled_kiro_route_fails_before_model_compatibility_checks():
+    result, route = resolve(
+        "--adapter", "kiro", "--model", "deepseek-3.2",
+        "--alias", "scout", "--role", "worker",
     )
 
-    assert forbidden.returncode == 1
-    assert forbidden_route["status"] == "adapter_family_forbidden"
+    assert result.returncode == 1
+    assert route["status"] == "adapter_disabled"
+    assert route["adapter_enabled"] is False
+    assert route["reason"] == (
+        "Provider execution is dormant until one bounded ordinary Kiro "
+        "invocation and safety boundary are verified."
+    )
 
 
-def test_pi_without_model_patterns_fails_closed_for_provider_families():
+@pytest.mark.parametrize(
+    "selector_args",
+    (
+        ("--alias", "not-a-route"),
+        ("--alias", "scout", "--task-class", "mechanical"),
+        ("--task-class", "not-a-task"),
+    ),
+)
+def test_disabled_adapter_gate_dominates_invalid_route_selectors(selector_args):
+    result, route = resolve(
+        "--adapter", "kiro", *selector_args, "--role", "worker",
+    )
+
+    assert result.returncode == 1
+    assert route["status"] == "adapter_disabled"
+    assert route["adapter_enabled"] is False
+    assert route["reason"] == (
+        "Provider execution is dormant until one bounded ordinary Kiro "
+        "invocation and safety boundary are verified."
+    )
+
+
+def test_disabled_pi_precedes_provider_family_checks():
     for model in ("gpt-5.6-sol", "claude-opus-4.5", "gemini-3.1-pro"):
         result, route = resolve(
             "--adapter", "pi", "--model", model, "--alias", "scout", "--role", "worker"
         )
         assert result.returncode == 1
-        assert route["status"] == "adapter_family_forbidden"
+        assert route["status"] == "adapter_disabled"
+
+
+@pytest.mark.parametrize("disabled_reason", [None, "", [], 7], ids=["missing", "empty", "list", "number"])
+def test_disabled_adapter_requires_a_nonempty_typed_reason(tmp_path, disabled_reason):
+    compatibility = yaml.safe_load(
+        (ROOT / "config/adapter-compatibility.yaml").read_text(encoding="utf-8")
+    )
+    entry = compatibility["adapters"]["pi-rpc"]
+    if disabled_reason is None:
+        entry.pop("disabled_reason")
+    else:
+        entry["disabled_reason"] = disabled_reason
+    compatibility_path = tmp_path / "adapter-compatibility.yaml"
+    compatibility_path.write_text(yaml.safe_dump(compatibility), encoding="utf-8")
+
+    result, route = resolve(
+        "--adapter", "pi", "--model", "deepseek-v3", "--alias", "scout",
+        "--role", "worker", "--adapter-compatibility", str(compatibility_path),
+    )
+
+    assert result.returncode == 2
+    assert route["status"] == "adapter_compatibility_invalid"
+
+
+def test_disabled_adapter_precedes_malformed_runtime_capability_snapshot(tmp_path):
+    snapshot = tmp_path / "capabilities.json"
+    snapshot.write_text("not-json", encoding="utf-8")
+
+    result, route = resolve(
+        "--adapter", "pi", "--model", "deepseek-v3", "--alias", "scout",
+        "--role", "worker", "--capabilities-file", str(snapshot),
+    )
+
+    assert result.returncode == 1
+    assert route["status"] == "adapter_disabled"
+    assert route["reason"].startswith("No trusted open-weight Pi provider/model")
 
 
 def test_same_family_rejection_precedes_adapter_family_rejection():
