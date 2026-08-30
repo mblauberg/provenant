@@ -1,3 +1,4 @@
+// Modified for Provenant.
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -21,7 +22,6 @@ import {
   resolveBackground,
   resolveBorderRadiusPx,
 } from '../../rules/checks.mjs';
-import { detectText } from '../regex/detect-text.mjs';
 import {
   StaticDocument,
   buildStaticStyleMap,
@@ -107,8 +107,13 @@ async function detectHtml(filePath, options = {}) {
         domutils,
       };
     });
-  } catch {
-    return detectText(html, filePath, options);
+  } catch (cause) {
+    const error = new Error(
+      'Static HTML engine unavailable: parser modules are missing; rerun with --fast for regex-only scanning',
+      { cause },
+    );
+    error.code = 'engine_unavailable';
+    throw error;
   }
 
   const resolvedPath = path.resolve(filePath);

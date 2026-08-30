@@ -1,12 +1,23 @@
 from collections import Counter
+import importlib.util
 import json
 from pathlib import Path
 import subprocess
 
+import pytest
 import yaml
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _harness_checker():
+    path = ROOT / "scripts" / "check_harness.py"
+    spec = importlib.util.spec_from_file_location("check_harness_route_fixtures", path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 FROZEN_CURRENT_ROUTING_PROTOCOL = {
@@ -83,6 +94,42 @@ def test_every_skill_has_canonical_positive_negative_and_boundary_routes():
             if primary is None:
                 assert companions == []
                 assert "no-skill" in case["tags"]
+
+
+def test_generic_route_fixture_loader_consumes_ui_regressions() -> None:
+    checker = _harness_checker()
+    skills = {path.parent.name for path in (ROOT / "skills").glob("*/SKILL.md")}
+
+    cases = checker.load_route_cases(ROOT / "skills" / "ui-ux-design", skills)
+
+    by_id = {case["id"]: case for case in cases}
+    assert {"r001", "r002", "r003"} <= set(by_id)
+    assert by_id["r001"]["expected"] == {
+        "primary_skill": "ui-ux-design",
+        "companion_skills": [],
+    }
+    assert by_id["r002"]["expected"]["companion_skills"] == ["web-stack-conventions"]
+    assert by_id["r003"]["expected"]["primary_skill"] == "ui-ux-design"
+
+
+def test_generic_route_fixture_loader_rejects_semantically_inverted_regressions(
+    tmp_path: Path,
+) -> None:
+    checker = _harness_checker()
+    skills = {path.parent.name for path in (ROOT / "skills").glob("*/SKILL.md")}
+    skill = tmp_path / "ui-ux-design"
+    evals = skill / "evals"
+    evals.mkdir(parents=True)
+    (evals / "trigger_cases.yaml").write_text(
+        (ROOT / "skills" / "ui-ux-design" / "evals" / "trigger_cases.yaml").read_text()
+    )
+    regression = load(ROOT / "skills" / "ui-ux-design" / "evals" / "regression_cases.yaml")
+    for case in regression["cases"]:
+        case["expected"] = {"primary_skill": "implement", "companion_skills": []}
+    (evals / "regression_cases.yaml").write_text(yaml.safe_dump(regression, sort_keys=False))
+
+    with pytest.raises(ValueError, match="positive route must use target as primary|boundary route must include target"):
+        checker.load_route_cases(skill, skills)
 
 
 def test_code_review_discipline_cases_have_prompt_and_expected_behaviour():

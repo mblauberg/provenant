@@ -1,3 +1,4 @@
+// Modified for Provenant.
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -5,6 +6,14 @@ import { fileURLToPath } from 'node:url';
 import { finding } from '../../findings.mjs';
 import { profileFindingsAsync, profileStep, profileStepAsync } from '../../profile/profiler.mjs';
 import { captureVisualContrastCandidate } from '../visual/screenshot-contrast.mjs';
+
+const URL_READINESS_DEFAULTS = Object.freeze({
+  waitUntil: 'load',
+  // Client-rendered UI commonly appears just after the load event. Keep this
+  // bounded and overridable rather than relying on network-idle, which never
+  // arrives for apps with persistent connections.
+  settleMs: 250,
+});
 
 async function runVisualContrastFallback(page, serializedGroups, options, profile, target) {
   if (options?.visualContrast === false) return [];
@@ -85,12 +94,20 @@ async function runVisualContrastFallback(page, serializedGroups, options, profil
 
 async function detectUrl(url, options = {}) {
   const profile = options?.profile;
-  const waitUntil = options?.waitUntil || 'networkidle0';
-  const settleMs = Number.isFinite(options?.settleMs) ? options.settleMs : 0;
+  const waitUntil = options?.waitUntil ?? URL_READINESS_DEFAULTS.waitUntil;
+  const settleMs = Number.isFinite(options?.settleMs)
+    ? options.settleMs
+    : URL_READINESS_DEFAULTS.settleMs;
   const viewport = options?.viewport || { width: 1280, height: 800 };
   const externalBrowser = options?.browser || null;
+  const launchBrowser = options?.launchBrowser || null;
   let puppeteer;
-  if (!externalBrowser) {
+  if (!externalBrowser && !launchBrowser) {
+    if (process.env.IMPECCABLE_BROWSER_ENGINE === 'unavailable') {
+      const error = new Error('Browser engine unavailable: install puppeteer to scan URLs');
+      error.code = 'engine_unavailable';
+      throw error;
+    }
     try {
       puppeteer = await profileStepAsync(profile, {
         engine: 'browser',
@@ -99,7 +116,9 @@ async function detectUrl(url, options = {}) {
         target: url,
       }, () => import('puppeteer'));
     } catch {
-      throw new Error('puppeteer is required for URL scanning. Install: npm install puppeteer');
+      const error = new Error('Browser engine unavailable: install puppeteer to scan URLs');
+      error.code = 'engine_unavailable';
+      throw error;
     }
   }
 
@@ -126,20 +145,24 @@ async function detectUrl(url, options = {}) {
   // Chrome can't initialize its sandbox there. Disable the sandbox only when
   // running in CI; local users keep the default hardened launch.
   const launchArgs = process.env.CI ? ['--no-sandbox', '--disable-setuid-sandbox'] : [];
-  const browser = externalBrowser || await profileStepAsync(profile, {
-    engine: 'browser',
-    phase: 'load',
-    ruleId: 'launch-browser',
-    target: url,
-  }, () => puppeteer.default.launch({ headless: true, args: launchArgs }));
-  const page = await profileStepAsync(profile, {
-    engine: 'browser',
-    phase: 'load',
-    ruleId: 'new-page',
-    target: url,
-  }, () => browser.newPage());
+  let browser = null;
+  let page = null;
   let results = [];
   try {
+    browser = externalBrowser || await profileStepAsync(profile, {
+      engine: 'browser',
+      phase: 'load',
+      ruleId: 'launch-browser',
+      target: url,
+    }, () => launchBrowser
+      ? launchBrowser({ headless: true, args: launchArgs })
+      : puppeteer.default.launch({ headless: true, args: launchArgs }));
+    page = await profileStepAsync(profile, {
+      engine: 'browser',
+      phase: 'load',
+      ruleId: 'new-page',
+      target: url,
+    }, () => browser.newPage());
     await profileStepAsync(profile, {
       engine: 'browser',
       phase: 'load',
@@ -197,19 +220,21 @@ async function detectUrl(url, options = {}) {
     const visualFindings = await runVisualContrastFallback(page, serializedGroups, options, profile, url);
     results.push(...visualFindings);
   } finally {
-    await profileStepAsync(profile, {
-      engine: 'browser',
-      phase: 'load',
-      ruleId: 'close-page',
-      target: url,
-    }, () => page.close().catch(() => {}));
-    if (!externalBrowser) {
+    if (page) {
+      await profileStepAsync(profile, {
+        engine: 'browser',
+        phase: 'load',
+        ruleId: 'close-page',
+        target: url,
+      }, () => page.close().catch(() => {}));
+    }
+    if (!externalBrowser && browser) {
       await profileStepAsync(profile, {
         engine: 'browser',
         phase: 'load',
         ruleId: 'close-browser',
         target: url,
-      }, () => browser.close());
+      }, () => browser.close().catch(() => {}));
     }
   }
   return results.map(f => finding(f.id, url, f.snippet));
@@ -217,20 +242,35 @@ async function detectUrl(url, options = {}) {
 
 async function createBrowserDetector(options = {}) {
   let puppeteer;
-  try {
-    puppeteer = await import('puppeteer');
-  } catch {
-    throw new Error('puppeteer is required for URL scanning. Install: npm install puppeteer');
-  }
   const launchArgs = options.launchArgs || (process.env.CI ? ['--no-sandbox', '--disable-setuid-sandbox'] : []);
-  const browser = options.browser || await puppeteer.default.launch({
-    headless: options.headless ?? true,
-    args: launchArgs,
-  });
+  let browser = options.browser || null;
+  if (!browser && !options.launchBrowser) {
+    if (process.env.IMPECCABLE_BROWSER_ENGINE === 'unavailable') {
+      const error = new Error('Browser engine unavailable: install puppeteer to scan URLs');
+      error.code = 'engine_unavailable';
+      throw error;
+    }
+    try {
+      puppeteer = await import('puppeteer');
+    } catch {
+      const error = new Error('Browser engine unavailable: install puppeteer to scan URLs');
+      error.code = 'engine_unavailable';
+      throw error;
+    }
+  }
+  if (!browser) {
+    const launch = options.launchBrowser || ((launchOptions) => puppeteer.default.launch(launchOptions));
+    browser = await launch({
+      headless: options.headless ?? true,
+      args: launchArgs,
+    });
+  }
   const ownsBrowser = !options.browser;
   const defaults = {
-    waitUntil: options.waitUntil || 'load',
-    settleMs: Number.isFinite(options.settleMs) ? options.settleMs : 100,
+    waitUntil: options.waitUntil ?? URL_READINESS_DEFAULTS.waitUntil,
+    settleMs: Number.isFinite(options.settleMs)
+      ? options.settleMs
+      : URL_READINESS_DEFAULTS.settleMs,
     viewport: options.viewport || { width: 1280, height: 800 },
   };
   return {
@@ -248,4 +288,9 @@ async function createBrowserDetector(options = {}) {
   };
 }
 
-export { runVisualContrastFallback, detectUrl, createBrowserDetector };
+export {
+  URL_READINESS_DEFAULTS,
+  runVisualContrastFallback,
+  detectUrl,
+  createBrowserDetector,
+};

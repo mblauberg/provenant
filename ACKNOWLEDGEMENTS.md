@@ -9,9 +9,11 @@ not the legal record.
 ## Adapted or redistributed components
 
 - [Impeccable](https://github.com/pbakaus/impeccable) by Paul Bakaus is the
-  basis of `ui-ux-design` (Apache-2.0). That component also includes
-  [modern-screenshot](https://github.com/qq15725/modern-screenshot) and data
-  derived from [UI UX Pro Max](https://github.com/nextlevelbuilder/ui-ux-pro-max-skill/tree/v2.0.0/.claude/skills/ui-ux-pro-max/data), both MIT-licensed.
+  basis of `ui-ux-design` (Apache-2.0). The distributed runtime includes
+  [modern-screenshot](https://github.com/qq15725/modern-screenshot) (MIT).
+  Historical UI/UX research used data from
+  [UI UX Pro Max](https://github.com/nextlevelbuilder/ui-ux-pro-max-skill/tree/539d52c424c18a14626601a0494ff70561b86d8b/.claude/skills/ui-ux-pro-max/data)
+  (MIT); that CSV data is not shipped in the active skill.
 - [Matt Pocock's `grill-me`](https://github.com/mattpocock/skills/blob/62f43a18177be6ec82da242e59ffbc490a4c22ea/skills/productivity/grill-me/SKILL.md) is the basis of
   `grill-me` (MIT).
 - [Skill Optimizer](https://github.com/hqhq1025/skill-optimizer/tree/f10e5d85371f72841459493ed750f45ed9afa99d/skills/skill-optimizer) by hqhq1025 is

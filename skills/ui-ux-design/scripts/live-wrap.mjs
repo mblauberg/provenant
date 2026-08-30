@@ -1,8 +1,9 @@
+// Modified for Provenant.
 /**
  * CLI helper: find an element in source and wrap it in a variant container.
  *
  * Usage:
- *   npx impeccable wrap --id SESSION_ID --count N --query "hero-combined-left" [--file path]
+ *   node live-wrap.mjs --id SESSION_ID --count N --query "hero-combined-left" [--file path]
  *
  * Searches project files for the element matching the query (class name, ID, or
  * text snippet), wraps it with the variant scaffolding, and prints the file path
@@ -14,14 +15,32 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { isGeneratedFile } from './is-generated.mjs';
+import {
+  readContainedSource,
+  replaceContainedSource,
+  resolveContainedSourcePath,
+} from './contained-source.mjs';
+import {
+  findJsxSubtree,
+  frameworkTemplateContextAtOffset,
+  hasExecutableJsxTagAtOffset,
+  htmlLexicalContextAtOffset,
+  isOffsetInsideAstroFrontmatter,
+  scanJsxTagAtOffset,
+} from './jsx-tag-scanner.mjs';
 
 const EXTENSIONS = ['.html', '.jsx', '.tsx', '.vue', '.svelte', '.astro'];
+const SESSION_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
+
+function resolveProjectSourceFile(projectRoot, requestedPath) {
+  return resolveContainedSourcePath(projectRoot, requestedPath, { relativeOnly: true });
+}
 
 export async function wrapCli() {
   const args = process.argv.slice(2);
 
   if (args.includes('--help') || args.includes('-h')) {
-    console.log(`Usage: impeccable wrap [options]
+    console.log(`Usage: node live-wrap.mjs [options]
 
 Find an element in source and wrap it in a variant container.
 
@@ -36,7 +55,8 @@ Element identification (at least one required):
   --query TEXT       Fallback: raw text to search for
 
 Optional:
-  --file PATH        Source file to search in (skips auto-detection)
+  --file PATH        Existing project-relative regular file (skips auto-detection;
+                     symlinks and multiply-linked files are rejected)
   --text TEXT        Picked element's textContent. Used to disambiguate when
                      classes/tag match multiple sibling elements (e.g. a list
                      of <Card>s with the same className). Pass the first ~80
@@ -51,7 +71,8 @@ The agent should insert variant HTML at insertLine.`);
   }
 
   const id = argVal(args, '--id');
-  const count = parseInt(argVal(args, '--count') || '3');
+  const countRaw = argVal(args, '--count') || '3';
+  const count = Number(countRaw);
   const elementId = argVal(args, '--element-id');
   const classes = argVal(args, '--classes');
   const tag = argVal(args, '--tag');
@@ -60,6 +81,14 @@ The agent should insert variant HTML at insertLine.`);
   const text = argVal(args, '--text');
 
   if (!id) { console.error('Missing --id'); process.exit(1); }
+  if (!SESSION_ID_PATTERN.test(id)) {
+    console.error(JSON.stringify({ error: 'invalid_session_id' }));
+    process.exit(1);
+  }
+  if (!/^[1-8]$/.test(countRaw) || !Number.isInteger(count)) {
+    console.error(JSON.stringify({ error: 'invalid_variant_count' }));
+    process.exit(1);
+  }
   if (!elementId && !classes && !query) {
     console.error('Need at least one of: --element-id, --classes, --query');
     process.exit(1);
@@ -75,9 +104,23 @@ The agent should insert variant HTML at insertLine.`);
   let targetFile = filePath;
   let matchedQuery = null;
   if (!targetFile) {
-    for (const q of queries) {
-      targetFile = findFileWithQuery(q, process.cwd(), genOpts);
-      if (targetFile) { matchedQuery = q; break; }
+    const candidates = findProjectCandidates(queries, text, process.cwd(), genOpts, tag);
+    if (candidates.length > 1) {
+        console.error(JSON.stringify({
+          error: 'element_ambiguous',
+          fallback: 'agent-driven',
+          candidates: candidates.map((candidate) => ({
+            file: path.relative(process.cwd(), candidate.file),
+            startLine: candidate.startLine + 1,
+            endLine: candidate.endLine + 1,
+          })),
+          hint: 'Multiple source elements match this identity. Pass --file, --element-id, or --text, or fall back to agent-driven wrapping.',
+        }));
+        process.exit(1);
+    }
+    if (candidates.length === 1) {
+      targetFile = candidates[0].file;
+      matchedQuery = candidates[0].query;
     }
     if (!targetFile) {
       // Nothing in source. Did the element show up in a generated file? That
@@ -105,88 +148,80 @@ The agent should insert variant HTML at insertLine.`);
       process.exit(1);
     }
   } else {
-    if (isGeneratedFile(targetFile, genOpts)) {
-      console.error(JSON.stringify({
-        error: 'file_is_generated',
-        fallback: 'agent-driven',
-        file: path.relative(process.cwd(), path.resolve(process.cwd(), targetFile)),
-        hint: 'Explicit --file points at a generated file. Writing here gets wiped by the next build. See "Handle fallback" in live.md.',
-      }));
-      process.exit(1);
-    }
     matchedQuery = queries[0];
   }
 
-  const content = fs.readFileSync(targetFile, 'utf-8');
+  let sourceSnapshot;
+  try {
+    sourceSnapshot = readContainedSource(process.cwd(), targetFile, { relativeOnly: !!filePath });
+    targetFile = sourceSnapshot.path;
+  } catch (error) {
+    console.error(JSON.stringify({
+      error: error.code || 'source_path_invalid',
+      fallback: 'agent-driven',
+      hint: error.message,
+    }));
+    process.exit(1);
+  }
+  if (isGeneratedFile(targetFile, genOpts)) {
+    console.error(JSON.stringify({
+      error: 'file_is_generated',
+      fallback: 'agent-driven',
+      file: path.relative(process.cwd(), targetFile),
+      hint: 'The target is generated. Writing here gets wiped by the next build. See "Handle fallback" in live.md.',
+    }));
+    process.exit(1);
+  }
+
+  const content = sourceSnapshot.bytes.toString('utf-8');
   const lines = content.split('\n');
+  const newline = content.includes('\r\n') ? '\r\n' : '\n';
+  const commentSyntax = detectCommentSyntax(targetFile);
+  const isJsx = commentSyntax.open === '{/*';
 
   // Find the element, trying each query in priority order. When `--text` is
-  // supplied, collect every candidate the queries surface and disambiguate
-  // by the picked element's textContent. Without `--text`, fall back to the
-  // legacy first-match behavior so unmodified callers keep working.
+  // supplied, collect every candidate the queries surface and require the
+  // picked element's textContent to prove one target. Without `--text`, keep
+  // the legacy first-match behavior for callers that did not provide the
+  // stronger browser identity signal.
   let match = null;
-  if (text) {
-    const candidates = [];
-    for (const q of queries) {
-      const all = findAllElements(lines, q, tag);
-      for (const c of all) {
-        if (!candidates.some((x) => x.startLine === c.startLine)) {
-          candidates.push(c);
-        }
-      }
-      // Once a more-specific query (ID, full className combo) yielded a unique
-      // result, stop — falling through to the loose tag+single-class query
-      // would readmit the siblings we just disambiguated past.
-      if (candidates.length === 1) break;
+  let selectionError = null;
+  for (const q of queries) {
+    let candidates = [];
+    try { candidates = findAllElements(lines, q, tag, isJsx, targetFile); }
+    catch (error) {
+      selectionError ??= error;
+      continue;
     }
-    if (candidates.length === 0) {
-      console.error(JSON.stringify({ error: 'Found file but could not locate element in ' + targetFile + '. Searched for: ' + queries.join(', ') }));
-      process.exit(1);
+    if (candidates.length > 1 && text) {
+      candidates = filterByText(candidates, content, text);
     }
     if (candidates.length === 1) {
       match = candidates[0];
-    } else {
-      const filtered = filterByText(candidates, lines, text);
-      if (filtered.length === 1) {
-        match = filtered[0];
-      } else if (filtered.length === 0) {
-        // Source uses dynamic content (`<h1>{title}</h1>` etc.) so the
-        // browser-side textContent doesn't appear literally in source. Fall
-        // back to first-match rather than refusing — this is the same
-        // behavior unmodified callers see, just preserved.
-        match = candidates[0];
-      } else {
-        // Multiple candidates ALSO match the text. Truly ambiguous — refuse
-        // rather than pick wrong, and hand the agent the candidate locations
-        // so it can disambiguate by reading the file.
-        console.error(JSON.stringify({
-          error: 'element_ambiguous',
-          fallback: 'agent-driven',
-          file: path.relative(process.cwd(), targetFile),
-          candidates: filtered.map((c) => ({
-            startLine: c.startLine + 1,
-            endLine: c.endLine + 1,
-          })),
-          hint: 'Multiple source elements match both classes/tag and textContent. Pass --element-id, a more specific --text, or write the wrapper manually. See "Handle fallback" in live.md.',
-        }));
-        process.exit(1);
-      }
+      break;
     }
-  } else {
-    for (const q of queries) {
-      match = findElement(lines, q, tag);
-      if (match) break;
-    }
-    if (!match) {
-      console.error(JSON.stringify({ error: 'Found file but could not locate element in ' + targetFile + '. Searched for: ' + queries.join(', ') }));
+    if (candidates.length > 1) {
+      console.error(JSON.stringify({
+        error: 'element_ambiguous',
+        fallback: 'agent-driven',
+        file: path.relative(process.cwd(), targetFile),
+        candidates: candidates.map((c) => ({
+          startLine: c.startLine + 1,
+          endLine: c.endLine + 1,
+        })),
+        hint: 'Multiple source elements match both classes/tag and textContent. Pass --element-id, a more specific --text, or use agent-driven wrapping.',
+      }));
       process.exit(1);
     }
   }
+  if (!match) {
+    if (selectionError) throw selectionError;
+    console.error(JSON.stringify({ error: 'Found file but could not locate element in ' + targetFile + '. Searched for: ' + queries.join(', ') }));
+    process.exit(1);
+  }
 
-  const { startLine, endLine } = match;
-  const commentSyntax = detectCommentSyntax(targetFile);
+  const { startLine, endLine, startOffset, endOffset } = match;
   const styleMode = detectStyleMode(targetFile);
-  const isJsx = commentSyntax.open === '{/*';
   const indent = lines[startLine].match(/^(\s*)/)[1];
 
   // Extract the original element. Reindent under the wrapper while preserving
@@ -196,7 +231,8 @@ The agent should insert variant HTML at insertLine.`);
   // the inner element at its parent's depth instead of nested inside it.
   // Strip only the COMMON minimum leading whitespace across the picked lines;
   // `deindentContent` on the accept side already mirrors this convention.
-  const originalLines = lines.slice(startLine, endLine + 1);
+  const originalSource = content.slice(startOffset, endOffset);
+  const originalLines = originalSource.split(/\r?\n/);
   const originalBaseIndent = minLeadingSpaces(originalLines);
   const reindentOriginal = (extra) => originalLines
     .map((l) => (l.trim() === '' ? '' : indent + extra + l.slice(originalBaseIndent)))
@@ -243,12 +279,21 @@ The agent should insert variant HTML at insertLine.`);
   ];
 
   // Replace the original element with the wrapper
-  const newLines = [
-    ...lines.slice(0, startLine),
-    ...wrapperLines,
-    ...lines.slice(endLine + 1),
-  ];
-  fs.writeFileSync(targetFile, newLines.join('\n'), 'utf-8');
+  const wrappedSource = wrapperLines.join(newline);
+  const replacementStartOffset = includeLeadingLineIndent(content, startOffset);
+  const updatedSource = content.slice(0, replacementStartOffset)
+    + wrappedSource
+    + content.slice(endOffset);
+  try {
+    replaceContainedSource(sourceSnapshot, updatedSource);
+  } catch (error) {
+    console.error(JSON.stringify({
+      error: error.code || 'source_replace_failed',
+      fallback: 'agent-driven',
+      hint: error.message,
+    }));
+    process.exit(1);
+  }
 
   // Calculate insert line (the "insert below this line" comment).
   // 0-indexed file position. Both HTML and JSX wrappers have 6 lines above
@@ -413,6 +458,79 @@ function findFileWithQuery(query, cwd, genOpts = {}) {
   return null;
 }
 
+function findFilesWithQuery(query, cwd, genOpts = {}) {
+  const searchDirs = ['src', 'app', 'pages', 'components', 'public', 'views', 'templates', '.'];
+  const seenDirs = new Set();
+  const seenFiles = new Set();
+  const matches = [];
+  for (const dir of searchDirs) {
+    const absDir = path.join(cwd, dir);
+    if (!fs.existsSync(absDir)) continue;
+    searchDirForAll(absDir, query, seenDirs, seenFiles, matches, 0, genOpts);
+  }
+  return matches;
+}
+
+function searchDirForAll(dir, query, seenDirs, seenFiles, matches, depth, genOpts) {
+  if (depth > 5) return;
+  const realDir = fs.realpathSync(dir);
+  if (seenDirs.has(realDir)) return;
+  seenDirs.add(realDir);
+  let entries;
+  try { entries = fs.readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name)); }
+  catch { return; }
+  for (const entry of entries) {
+    if (!entry.isFile()) continue;
+    const ext = path.extname(entry.name).toLowerCase();
+    if (!EXTENSIONS.includes(ext)) continue;
+    const filePath = path.join(dir, entry.name);
+    const realFile = fs.realpathSync(filePath);
+    if (seenFiles.has(realFile)) continue;
+    seenFiles.add(realFile);
+    if (!genOpts.includeGenerated && isGeneratedFile(filePath, genOpts)) continue;
+    try {
+      if (fs.readFileSync(filePath, 'utf-8').includes(query)) matches.push(filePath);
+    } catch { /* skip unreadable files */ }
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    if (entry.name === 'node_modules' || entry.name === '.git') continue;
+    searchDirForAll(path.join(dir, entry.name), query, seenDirs, seenFiles, matches, depth + 1, genOpts);
+  }
+}
+
+function findProjectCandidates(queries, text, cwd, genOpts, tag) {
+  for (const query of queries) {
+    const candidates = [];
+    const seen = new Set();
+    for (const file of findFilesWithQuery(query, cwd, genOpts)) {
+      let source;
+      try { source = fs.readFileSync(file, 'utf-8'); }
+      catch { continue; }
+      const lines = source.split('\n');
+      const isJsx = detectCommentSyntax(file).open === '{/*';
+      let found = [];
+      try { found = findAllElements(lines, query, tag, isJsx, file); }
+      catch { continue; }
+      for (const candidate of found) {
+        const key = `${fs.realpathSync(file)}:${candidate.startOffset}:${candidate.endOffset}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        candidates.push({ ...candidate, file, query, source });
+      }
+    }
+    if (candidates.length === 1) return candidates;
+    if (candidates.length > 1) {
+      if (!text) return candidates;
+      const filtered = candidates.filter(
+        (candidate) => filterByText([candidate], candidate.source, text).length === 1,
+      );
+      if (filtered.length > 0) return filtered;
+    }
+  }
+  return [];
+}
+
 function searchDir(dir, query, seen, depth, genOpts) {
   if (depth > 5) return null; // don't go too deep
   const realDir = fs.realpathSync(dir);
@@ -484,7 +602,50 @@ function minLeadingSpaces(lines) {
   return min === Infinity ? 0 : min;
 }
 
-function findElement(lines, query, tag = null) {
+function buildLineOffsets(lines) {
+  const offsets = [];
+  let offset = 0;
+  for (const line of lines) {
+    offsets.push(offset);
+    offset += line.length + 1;
+  }
+  return offsets;
+}
+
+function includeLeadingLineIndent(source, offset) {
+  const lineStart = source.lastIndexOf('\n', offset - 1) + 1;
+  return /^\s*$/.test(source.slice(lineStart, offset)) ? lineStart : offset;
+}
+
+function isExecutableOpener(
+  lines,
+  openerLine,
+  source,
+  offsets,
+  isJsx,
+  filePath,
+  openerIndex = null,
+) {
+  const opener = openerIndex === null
+    ? lines[openerLine].match(OPENER_RE)
+    : lines[openerLine].slice(openerIndex).match(OPENER_RE);
+  if (!opener) return false;
+  const offset = offsets[openerLine] + (openerIndex ?? opener.index);
+  if (isJsx) return hasExecutableJsxTagAtOffset(source, offset);
+  if (htmlLexicalContextAtOffset(source, offset) !== 'markup') return false;
+  const extension = path.extname(filePath || '').toLowerCase();
+  if (!['.astro', '.svelte', '.vue'].includes(extension)) return true;
+  if (extension === '.astro' && isOffsetInsideAstroFrontmatter(source, offset)) return false;
+  try {
+    return frameworkTemplateContextAtOffset(source, offset) === 'markup';
+  } catch {
+    return false;
+  }
+}
+
+function findElement(lines, query, tag = null, isJsx = false, filePath = '') {
+  const source = lines.join('\n');
+  const offsets = buildLineOffsets(lines);
   // Iterate all matches — the first substring hit isn't always the right one.
   for (let i = 0; i < lines.length; i++) {
     if (!lines[i].includes(query)) continue;
@@ -493,12 +654,11 @@ function findElement(lines, query, tag = null) {
     if (stripped.startsWith('<!--') || stripped.startsWith('{/*') || stripped.startsWith('//')) continue;
     // Skip lines already inside a variant wrapper
     if (lines[i].includes('data-impeccable-variant')) continue;
+    const opener = findOpener(lines, i, query, tag);
+    if (!opener) continue;
+    if (!isExecutableOpener(lines, opener.line, source, offsets, isJsx, filePath, opener.index)) continue;
 
-    const openerLine = findOpenerLine(lines, i, tag);
-    if (openerLine === -1) continue;
-
-    const endLine = findClosingLine(lines, openerLine);
-    return { startLine: openerLine, endLine };
+    return findElementRange(source, lines, offsets, opener.line, { isJsx, openerIndex: opener.index });
   }
 
   return null;
@@ -511,22 +671,90 @@ function findElement(lines, query, tag = null) {
  * first-match silently lands on the wrong branch. Returning all matches lets
  * the caller narrow by textContent or fail with a structured ambiguity error.
  */
-function findAllElements(lines, query, tag = null) {
+function findAllElements(lines, query, tag = null, isJsx = false, filePath = '') {
   const out = [];
   const seen = new Set();
+  const source = lines.join('\n');
+  const offsets = buildLineOffsets(lines);
   for (let i = 0; i < lines.length; i++) {
     if (!lines[i].includes(query)) continue;
     const stripped = lines[i].trim();
     if (stripped.startsWith('<!--') || stripped.startsWith('{/*') || stripped.startsWith('//')) continue;
     if (lines[i].includes('data-impeccable-variant')) continue;
-    const openerLine = findOpenerLine(lines, i, tag);
-    if (openerLine === -1) continue;
-    if (seen.has(openerLine)) continue; // multiple matches inside the same element
-    seen.add(openerLine);
-    const endLine = findClosingLine(lines, openerLine);
-    out.push({ startLine: openerLine, endLine });
+    for (const opener of findCandidateOpeners(lines, i, query, tag)) {
+      if (!isExecutableOpener(lines, opener.line, source, offsets, isJsx, filePath, opener.index)) continue;
+      const openerOffset = offsets[opener.line] + opener.index;
+      if (seen.has(openerOffset)) continue;
+      const range = findElementRange(source, lines, offsets, opener.line, {
+        isJsx,
+        openerIndex: opener.index,
+      });
+      if (!source.slice(range.startOffset, range.endOffset).includes(query)) continue;
+      seen.add(openerOffset);
+      out.push(range);
+    }
   }
   return out;
+}
+
+function findCandidateOpeners(lines, matchLine, query, tag) {
+  const line = lines[matchLine];
+  const sameLine = [...line.matchAll(/<([A-Za-z][A-Za-z0-9]*)(?=[\s/>]|$)/g)]
+    .filter((candidate) => !tag || candidate[1] === tag)
+    .map((candidate) => ({ line: matchLine, index: candidate.index, name: candidate[1] }));
+  const containing = sameLine.filter((candidate) => {
+    try { return scanJsxTagAtOffset(line, candidate.index)?.raw.includes(query); }
+    catch { return false; }
+  });
+  if (containing.length > 0) return containing;
+  if (sameLine.some((candidate) => ['script', 'style'].includes(candidate.name.toLowerCase()))) {
+    return [];
+  }
+  if (sameLine.length > 0) return sameLine;
+  const fallback = findOpener(lines, matchLine, query, tag);
+  return fallback ? [fallback] : [];
+}
+
+function findElementRange(source, lines, offsets, startLine, { isJsx, openerIndex = null }) {
+  const openerMatch = openerIndex === null
+    ? lines[startLine].match(OPENER_RE)
+    : lines[startLine].slice(openerIndex).match(OPENER_RE);
+  if (!openerMatch) throw new Error('Selected source line has no element opener');
+  const startOffset = offsets[startLine] + (openerIndex ?? openerMatch.index);
+  const opener = scanJsxTagAtOffset(source, startOffset);
+  if (!opener) throw new Error('Selected source offset has no element opener');
+  if (!isJsx && HTML_VOID_TAGS.has(opener.name.toLowerCase())) {
+    return {
+      startLine,
+      endLine: startLine + source.slice(startOffset, opener.end).split('\n').length - 1,
+      startOffset,
+      endOffset: opener.end,
+    };
+  }
+  let closing;
+  try {
+    ({ closing } = findJsxSubtree(
+      source.slice(startOffset),
+      (tag) => tag.start === 0 && tag.name === opener.name,
+      { strictNesting: isJsx },
+    ));
+  } catch (error) {
+    if (!isJsx
+      && HTML_OPTIONAL_END_TAGS.has(opener.name.toLowerCase())
+      && error.message.startsWith('Missing closing JSX tag')) {
+      const fallback = new Error('Selected HTML elements with implicit end tags require manual wrapping');
+      fallback.code = 'html_implicit_end_unsupported';
+      throw fallback;
+    }
+    throw error;
+  }
+  const endOffset = startOffset + closing.end;
+  return {
+    startLine,
+    endLine: startLine + source.slice(startOffset, endOffset).split('\n').length - 1,
+    startOffset,
+    endOffset,
+  };
 }
 
 /**
@@ -540,23 +768,17 @@ function findAllElements(lines, query, tag = null) {
  * Both are needed because `el.textContent` concatenates sibling text without
  * inserting whitespace (e.g. `<h1>Hero Two</h1><p>Second…</p>` reads as
  * `"Hero TwoSecond…"`), while the source has whitespace between tags. If
- * EITHER normalization matches, the candidate keeps. A snippet shorter than
- * 8 chars after stripping is too weak to disambiguate — the caller falls
- * back to first-match.
+ * Either normalization matches, the candidate keeps. Short visible labels
+ * remain useful when they identify exactly one structural candidate.
  */
-function filterByText(candidates, lines, text) {
+function filterByText(candidates, source, text) {
   const trimmed = text.replace(/\s+/g, ' ').trim().toLowerCase().slice(0, 80);
-  // Too short to disambiguate. Return [] so the caller's `filtered.length
-  // === 0` branch fires (fall back to first-match) — the previous
-  // `candidates.slice()` return forced `filtered.length > 1` and surfaced
-  // a spurious `element_ambiguous` error on every short-text picker event
-  // with multiple candidates.
-  if (trimmed.length < 8) return [];
+  if (trimmed.length === 0) return [];
   const targetSpaced = trimmed;
   const targetCompact = trimmed.replace(/\s+/g, '');
 
   return candidates.filter((c) => {
-    const body = lines.slice(c.startLine, c.endLine + 1).join(' ');
+    const body = source.slice(c.startOffset, c.endOffset);
     const inner = body
       .replace(/<[^>]*>/g, ' ')   // strip HTML/JSX tags
       .replace(/\{[^}]*\}/g, ' ')  // strip JSX expressions
@@ -576,57 +798,103 @@ function filterByText(candidates, lines, text) {
  *
  * Returns the line index of the opener, or -1 if none can be resolved.
  */
-function findOpenerLine(lines, matchLine, tag) {
-  const self = lines[matchLine].match(OPENER_RE);
-  if (self) {
-    if (!tag || self[1] === tag) return matchLine;
-    return -1;
+function findOpener(lines, matchLine, query, tag) {
+  const line = lines[matchLine];
+  const occurrences = [];
+  for (let index = line.indexOf(query); index !== -1; index = line.indexOf(query, index + 1)) {
+    occurrences.push(index);
+  }
+  const openers = [...line.matchAll(/<([A-Za-z][A-Za-z0-9]*)(?=[\s/>]|$)/g)]
+    .filter((candidate) => !tag || candidate[1] === tag);
+  if (occurrences.length > 1 && openers.length > 1) return null;
+  if (openers.length > 0 && occurrences.length === 1) {
+    const queryIndex = occurrences[0];
+    const containing = openers.filter((candidate) => {
+      try {
+        return scanJsxTagAtOffset(line, candidate.index)?.raw.includes(query);
+      } catch {
+        return false;
+      }
+    });
+    if (containing.length === 1) return { line: matchLine, index: containing[0].index };
+    if (containing.length > 1) return null;
+    const preceding = openers.filter((candidate) => candidate.index <= queryIndex);
+    if (preceding.length > 0) {
+      return { line: matchLine, index: preceding.at(-1).index };
+    }
   }
   const MAX_BACKWALK = 10;
   for (let i = matchLine - 1; i >= Math.max(0, matchLine - MAX_BACKWALK); i--) {
     const opener = lines[i].match(OPENER_RE);
     if (!opener) continue;
-    if (!tag || opener[1] === tag) return i;
+    if (!tag || opener[1] === tag) return { line: i, index: opener.index };
     // Different tag name than requested — abort; we're inside a non-target opener.
-    return -1;
+    return null;
   }
-  return -1;
+  return null;
 }
 
 /**
  * Starting from a line with an opening tag, find the line with the matching
  * closing tag by counting tag nesting depth.
  */
-function findClosingLine(lines, start) {
+const HTML_VOID_TAGS = new Set([
+  'area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input',
+  'link', 'meta', 'param', 'source', 'track', 'wbr',
+]);
+
+const HTML_OPTIONAL_END_TAGS = new Set([
+  'dd', 'dt', 'li', 'optgroup', 'option', 'p', 'rp', 'rt',
+  'tbody', 'td', 'tfoot', 'th', 'thead', 'tr',
+]);
+
+function findClosingLine(lines, start, { isJsx = true } = {}) {
   const openMatch = lines[start].match(OPENER_RE);
   if (!openMatch) return start; // caller passed a non-opener; nothing to span
 
   const tagName = openMatch[1];
-  let depth = 0;
-  const openRe = new RegExp('<' + tagName + '(?=[\\s/>]|$)', 'g');
-  const selfCloseRe = new RegExp('<' + tagName + '[^>]*/>', 'g');
-  const closeRe = new RegExp('</' + tagName + '\\s*>', 'g');
-
-  for (let i = start; i < lines.length; i++) {
-    const line = lines[i];
-    const opens = (line.match(openRe) || []).length;
-    const selfCloses = (line.match(selfCloseRe) || []).length;
-    const closes = (line.match(closeRe) || []).length;
-
-    depth += opens - selfCloses - closes;
-
-    if (depth <= 0) return i;
+  if (!isJsx && HTML_VOID_TAGS.has(tagName.toLowerCase())) return start;
+  const joined = lines.slice(start).join('\n');
+  let closing;
+  try {
+    ({ closing } = findJsxSubtree(
+      joined,
+      (tag) => tag.name === tagName,
+      { strictNesting: isJsx },
+    ));
+  } catch (error) {
+    if (!isJsx
+      && HTML_OPTIONAL_END_TAGS.has(tagName.toLowerCase())
+      && error.message.startsWith('Missing closing JSX tag')) {
+      const fallback = new Error(
+        'Selected HTML elements with implicit end tags require manual wrapping',
+      );
+      fallback.code = 'html_implicit_end_unsupported';
+      throw fallback;
+    }
+    throw error;
   }
-
-  // If we can't find the close, return a reasonable guess
-  return Math.min(start + 50, lines.length - 1);
+  return start + joined.slice(0, closing.end).split('\n').length - 1;
 }
 
 // Auto-execute when run directly (node live-wrap.mjs ...)
 const _running = process.argv[1];
 if (_running?.endsWith('live-wrap.mjs') || _running?.endsWith('live-wrap.mjs/')) {
-  wrapCli();
+  wrapCli().catch((error) => {
+    console.error(JSON.stringify({
+      error: error.code || 'wrap_failed',
+      fallback: 'agent-driven',
+      hint: error.message,
+    }));
+    process.exit(1);
+  });
 }
 
 // Test exports (used by tests/live-wrap.test.mjs)
-export { buildSearchQueries, findElement, findClosingLine, detectCommentSyntax };
+export {
+  buildSearchQueries,
+  findElement,
+  findClosingLine,
+  detectCommentSyntax,
+  resolveProjectSourceFile,
+};
