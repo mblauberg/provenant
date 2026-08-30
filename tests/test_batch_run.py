@@ -6,8 +6,10 @@ import importlib.util
 import inspect
 import json
 import os
+import signal
 import stat
 import subprocess
+import threading
 import time
 from pathlib import Path
 
@@ -416,6 +418,19 @@ def test_real_dispatch_cancellation_reaps_provider_process(tmp_path, monkeypatch
     provider = int(provider_pid.read_text())
     with pytest.raises(ProcessLookupError):
         os.kill(provider, 0)
+
+
+def test_batch_signal_handler_does_not_take_state_lock(tmp_path):
+    """A SIGTERM delivered while custody is locked must return immediately."""
+    module = load_module()
+    module._cancel_event.clear()
+    handler_thread = threading.Thread(target=module._signal_handler,
+                                      args=(signal.SIGTERM, None))
+    with module._state_lock:
+        handler_thread.start()
+        handler_thread.join(timeout=1)
+        assert not handler_thread.is_alive()
+    assert module._cancel_event.is_set()
 
 
 def test_external_batch_marker_cancels_active_child_and_skips_queued_provider(tmp_path, monkeypatch):

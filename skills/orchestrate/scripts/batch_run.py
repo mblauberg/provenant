@@ -21,7 +21,7 @@ import sys
 import threading
 import time
 from collections import Counter
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, wait
 from pathlib import Path
 from typing import Any
 
@@ -123,7 +123,10 @@ def request_cancel() -> None:
 
 
 def _signal_handler(_signum: int, _frame: Any) -> None:
-    request_cancel()
+    # Signal handlers must only record intent.  Process snapshots and group
+    # signalling run in ordinary control flow, outside the non-reentrant
+    # custody lock this owner uses for its active-child map.
+    _cancel_event.set()
 
 
 def _finite_timeout(value: Any, default: float = DEFAULT_TIMEOUT_SECONDS) -> float:
@@ -543,13 +546,20 @@ def _execute_batch(args: argparse.Namespace, tasks: list[dict[str, Any]], run_di
     try:
         with ThreadPoolExecutor(max_workers=args.concurrency, thread_name_prefix="provenant-batch") as pool:
             futures = {pool.submit(_run_task, task, run_dir, batch_dir): task["id"] for task in tasks}
-            for future in as_completed(futures):
-                task_id = futures[future]
-                try:
-                    results[task_id] = future.result()
-                except Exception as exc:  # preserve partial batch visibility
-                    results[task_id] = {"task_id": task_id, "status": "failed",
-                                        "outcome": "batch_worker_error", "message": str(exc)}
+            pending = set(futures)
+            cancellation_handled = False
+            while pending:
+                if _cancel_event.is_set() and not cancellation_handled:
+                    request_cancel()
+                    cancellation_handled = True
+                done, pending = wait(pending, timeout=0.05)
+                for future in done:
+                    task_id = futures[future]
+                    try:
+                        results[task_id] = future.result()
+                    except Exception as exc:  # preserve partial batch visibility
+                        results[task_id] = {"task_id": task_id, "status": "failed",
+                                            "outcome": "batch_worker_error", "message": str(exc)}
     finally:
         with _state_lock:
             _active_batch_dirs.discard(batch_dir)

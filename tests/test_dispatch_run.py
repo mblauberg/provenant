@@ -699,6 +699,61 @@ def test_late_signal_after_provider_exit_preserves_attempt_publication(tmp_path:
     assert (run_dir / "dispatch/tasks/late/attempt-001/attempt.json").is_file()
 
 
+def test_signal_during_popen_return_reaps_provider_and_publishes_cancelled_attempt(tmp_path: Path) -> None:
+    """A signal after spawn but before Popen returns cannot orphan the provider."""
+    run_dir = make_run(tmp_path, "popen-window")
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("popen window\n", encoding="utf-8")
+    provider_pid_path = tmp_path / "provider.pid"
+    adapter = tmp_path / "term-ignoring-adapter"
+    write_executable(
+        adapter,
+        f"""#!/usr/bin/env bash
+        printf '%s' "$$" > "{provider_pid_path}"
+        trap '' TERM HUP
+        while :; do sleep 1; done
+        """,
+    )
+    driver = tmp_path / "popen-window-driver.py"
+    driver.write_text(textwrap.dedent(f"""
+        import importlib.util, os, pathlib, signal, sys, time
+        spec = importlib.util.spec_from_file_location("popen_window_dispatch", {str(SCRIPT)!r})
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        module.CF_DISPATCH = pathlib.Path({str(adapter)!r})
+        original_popen = module.subprocess.Popen
+        def delayed_popen(*args, **kwargs):
+            process = original_popen(*args, **kwargs)
+            command = args[0] if args else kwargs.get("args")
+            if not command or command[0] != str(module.CF_DISPATCH):
+                return process
+            pid_path = pathlib.Path({str(provider_pid_path)!r})
+            deadline = time.monotonic() + 5
+            while not pid_path.exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            os.kill(os.getpid(), signal.SIGTERM)
+            time.sleep(0.05)
+            return process
+        module.subprocess.Popen = delayed_popen
+        raise SystemExit(module.dispatch(module.parser().parse_args(sys.argv[1:])))
+    """), encoding="utf-8")
+    result = subprocess.run([
+        sys.executable, str(driver), "--run-dir", str(run_dir), "--task-id", "window",
+        "--adapter", "codex", "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+    ], cwd=tmp_path, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
+
+    assert result.returncode == 1, result.stderr + result.stdout
+    record = json.loads(result.stdout)
+    assert record["status"] == "cancelled"
+    assert record["process"]["observed_exit"] is True
+    attempt_path = run_dir / "dispatch/tasks/window/attempt-001/attempt.json"
+    assert attempt_path.is_file()
+    assert json.loads(attempt_path.read_text())["status"] == "cancelled"
+    provider_pid = int(provider_pid_path.read_text())
+    with pytest.raises(ProcessLookupError):
+        os.kill(provider_pid, 0)
+
+
 def test_external_task_cancel_reaps_only_owned_provider_group(tmp_path: Path) -> None:
     run_dir = make_run(tmp_path, "external-cancel")
     prompt = tmp_path / "prompt.md"
