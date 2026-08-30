@@ -10,12 +10,12 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import hashlib
 import json
 import os
 import re
 import shutil
 import signal
-import stat
 import subprocess
 import sys
 import tempfile
@@ -41,6 +41,7 @@ from dispatch_run import (
     cancellation_marker_present,
     remove_cancellation_marker,
 )
+from _shared.custody import OwnedFileError, contained_regular_path, open_contained_regular, read_bound_bytes, read_contained_regular
 
 DISPATCH_RUN = Path(__file__).with_name("dispatch_run.py")
 TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
@@ -135,10 +136,13 @@ def _validate_run_dir(run_dir: Path) -> Path:
         raise BatchInputError("run directory must be an existing child of the workspace")
     receipt_path = run_dir / "RUN_RECEIPT.json"
     manifest_path = run_dir / "MANIFEST.md"
-    if not receipt_path.is_file() or not manifest_path.is_file():
-        raise BatchInputError("run directory is missing RUN_RECEIPT.json or MANIFEST.md")
     try:
-        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        contained_regular_path(run_dir, "RUN_RECEIPT.json", "RUN_RECEIPT.json")
+        contained_regular_path(run_dir, "MANIFEST.md", "MANIFEST.md")
+    except OwnedFileError as exc:
+        raise BatchInputError(str(exc)) from exc
+    try:
+        receipt = json.loads(read_bound_bytes(run_dir, "RUN_RECEIPT.json", label="RUN_RECEIPT.json").decode("utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise BatchInputError("RUN_RECEIPT.json is not valid JSON") from exc
     if not isinstance(receipt, dict) or receipt.get("schema_version") != 1:
@@ -245,29 +249,39 @@ def _acquire_batch_lock(run_dir: Path):
     try:
         ensure_owned_directory(run_dir, dispatch_dir)
         ensure_owned_directory(run_dir, dispatch_dir / "batches")
-        lock_path = run_dir / "MANIFEST.md"
-        flags = os.O_RDWR | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)
-        stream = os.fdopen(os.open(lock_path, flags, 0o600), "a+", encoding="utf-8")
+        fd, _relative, _target = open_contained_regular(
+            run_dir, "MANIFEST.md", os.O_RDWR | os.O_APPEND, label="MANIFEST.md"
+        )
+        stream = os.fdopen(fd, "a+", encoding="utf-8")
         fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         return stream
-    except (OSError, AttemptEvidenceError) as exc:
+    except (OSError, AttemptEvidenceError, OwnedFileError) as exc:
         if "stream" in locals():
             stream.close()
         raise BatchInputError("another batch already owns this orchestration run") from exc
 
 
-def _index_batch_files(run_dir: Path, batch_id: str, source_path: Path, summary_path: Path) -> None:
+def _index_batch_files(run_dir: Path, batch_id: str, source_path: Path, summary_path: Path, custody=None) -> None:
     date = time.strftime("%Y-%m-%d", time.gmtime())
     rows = (
         (f"dispatch-{batch_id}-manifest", source_path, "task manifest"),
         (f"dispatch-{batch_id}-summary", summary_path, "batch summary"),
     )
-    with (run_dir / "MANIFEST.md").open("a", encoding="utf-8") as stream:
-        for name, path, kind in rows:
-            stream.write(
-                f"| {name} | {path.relative_to(run_dir).as_posix()} | fixed batch {kind} | "
-                f"batch_run | {date} | verified | evidence | |\n"
-            )
+    text = "".join(
+        f"| {name} | {path.relative_to(run_dir).as_posix()} | fixed batch {kind} | "
+        f"batch_run | {date} | verified | evidence | |\n"
+        for name, path, kind in rows
+    )
+    if custody is None:
+        with (run_dir / "MANIFEST.md").open("a", encoding="utf-8") as stream:
+            stream.write(text)
+            stream.flush()
+            os.fsync(stream.fileno())
+    else:
+        custody.seek(0, os.SEEK_END)
+        custody.write(text)
+        custody.flush()
+        os.fsync(custody.fileno())
 
 
 def _command(task: dict[str, Any], run_dir: Path) -> list[str]:
@@ -299,17 +313,13 @@ def _parse_record(output: str) -> dict[str, Any] | None:
     return None
 
 
-def _contained_file(run_dir: Path, value: Any, label: str) -> tuple[str, Path]:
+def _contained_file(run_dir: Path, value: Any, label: str) -> tuple[str, bytes]:
     relative = retained_path(run_dir, value)
-    path = run_dir / relative
     try:
-        metadata = path.lstat()
-        path.resolve().relative_to(run_dir.resolve())
-    except (OSError, ValueError) as exc:
+        actual, _path, data = read_contained_regular(run_dir, relative, label=f"child {label}")
+    except (OSError, OwnedFileError, ValueError) as exc:
         raise BatchInputError(f"child {label} path is outside or unavailable: {value}") from exc
-    if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
-        raise BatchInputError(f"child {label} path is not a regular file: {value}")
-    return relative, path
+    return actual, data
 
 
 def _validate_child_record(task: dict[str, Any], record: dict[str, Any], run_dir: Path,
@@ -324,9 +334,9 @@ def _validate_child_record(task: dict[str, Any], record: dict[str, Any], run_dir
     attempt = None
     attempt_path = result_path = None
     if record.get("attempt_path") is not None:
-        attempt_path, attempt_file = _contained_file(run_dir, record["attempt_path"], "attempt")
+        attempt_path, attempt_bytes = _contained_file(run_dir, record["attempt_path"], "attempt")
         try:
-            attempt = json.loads(attempt_file.read_text(encoding="utf-8"))
+            attempt = json.loads(attempt_bytes.decode("utf-8"))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise BatchInputError(f"child attempt receipt is not valid JSON: {attempt_path}") from exc
         if (
@@ -348,7 +358,7 @@ def _validate_child_record(task: dict[str, Any], record: dict[str, Any], run_dir
             raise BatchInputError(f"child attempt identity does not match retained path: {task_id}")
         if attempt.get("attempt_path") != attempt_path:
             raise BatchInputError(f"child attempt path does not match its receipt: {attempt_path}")
-        if record.get("attempt_digest") != digest(attempt_file):
+        if record.get("attempt_digest") != "sha256:" + hashlib.sha256(attempt_bytes).hexdigest():
             raise BatchInputError(f"child attempt digest does not match: {task_id}")
         status = attempt.get("status") if isinstance(attempt.get("status"), str) else "failed"
         if status not in TERMINAL_TASK_STATUSES:
@@ -387,12 +397,12 @@ def _validate_child_record(task: dict[str, Any], record: dict[str, Any], run_dir
         if adapter_receipt is not None:
             if not isinstance(adapter_receipt, dict):
                 raise BatchInputError(f"child adapter receipt is malformed: {task_id}")
-            adapter_path, adapter_file = _contained_file(
+            adapter_path, adapter_bytes = _contained_file(
                 run_dir, adapter_receipt.get("path"), "adapter receipt"
             )
             if adapter_path != (attempt_root / "adapter-receipt.json").as_posix():
                 raise BatchInputError(f"child adapter receipt path does not match attempt: {task_id}")
-            if adapter_receipt.get("digest") != digest(adapter_file):
+            if adapter_receipt.get("digest") != "sha256:" + hashlib.sha256(adapter_bytes).hexdigest():
                 raise BatchInputError(f"child adapter receipt digest does not match: {task_id}")
         if status == "succeeded" and process_exit != 0:
             raise BatchInputError(f"succeeded child exited non-zero: {task_id}")
@@ -400,13 +410,13 @@ def _validate_child_record(task: dict[str, Any], record: dict[str, Any], run_dir
         if retained_result is not None:
             if not isinstance(retained_result, dict):
                 raise BatchInputError(f"child result receipt is malformed: {task_id}")
-            result_path, result_file = _contained_file(run_dir, retained_result.get("path"), "result")
+            result_path, result_bytes = _contained_file(run_dir, retained_result.get("path"), "result")
             if result_path != (attempt_root / "result.md").as_posix():
                 raise BatchInputError(f"child result path does not match attempt: {task_id}")
             expected_digest = retained_result.get("digest")
-            if not isinstance(expected_digest, str) or expected_digest != digest(result_file):
+            if not isinstance(expected_digest, str) or expected_digest != "sha256:" + hashlib.sha256(result_bytes).hexdigest():
                 raise BatchInputError(f"child result digest does not match: {task_id}")
-            if status == "succeeded" and result_file.stat().st_size == 0:
+            if status == "succeeded" and not result_bytes:
                 raise BatchInputError(f"successful child result is empty: {task_id}")
             child_result = record.get("result")
             if (
@@ -495,7 +505,7 @@ def _run_task(task: dict[str, Any], run_dir: Path, batch_dir: Path) -> dict[str,
 
 
 def _execute_batch(args: argparse.Namespace, tasks: list[dict[str, Any]], run_dir: Path,
-                   source_bytes: bytes) -> int:
+                   source_bytes: bytes, custody=None) -> int:
     batch_id = f"batch-{_batch_number(run_dir):03d}"
     batch_dir = run_dir / "dispatch" / "batches" / batch_id
     try:
@@ -521,7 +531,7 @@ def _execute_batch(args: argparse.Namespace, tasks: list[dict[str, Any]], run_di
                                          "outcome": "batch_cancelled"}) for task in tasks]
     reconciliation_error = None
     try:
-        reconcile_manifest(run_dir)
+        reconcile_manifest(run_dir, custody)
     except (AttemptEvidenceError, OSError) as exc:
         reconciliation_error = str(exc)
     batch_cancelled = _cancel_event.is_set() or any(item["status"] == "cancelled" for item in ordered)
@@ -546,7 +556,7 @@ def _execute_batch(args: argparse.Namespace, tasks: list[dict[str, Any]], run_di
     remove_cancellation_marker(run_dir, batch_dir)
     index_error = None
     try:
-        _index_batch_files(run_dir, batch_id, source_copy, summary_path)
+        _index_batch_files(run_dir, batch_id, source_copy, summary_path, custody)
     except OSError as exc:
         index_error = str(exc)
     output = {**summary, "summary_path": str(summary_path.relative_to(run_dir))}
@@ -583,13 +593,13 @@ def batch(args: argparse.Namespace) -> int:
     try:
         try:
             run_dir = _validate_run_dir(args.run_dir)
-            reconcile_manifest(run_dir)
-            ensure_manifest_appendable(run_dir)
+            reconcile_manifest(run_dir, batch_lock)
+            # The batch lock is the append handle; do not reopen MANIFEST.md.
         except (BatchInputError, AttemptEvidenceError, OSError) as exc:
             print(json.dumps({"schema_version": 1, "status": "custody_preflight_failed",
                               "message": str(exc)}, sort_keys=True))
             return 2
-        return _execute_batch(args, tasks, run_dir, source_bytes)
+        return _execute_batch(args, tasks, run_dir, source_bytes, batch_lock)
     finally:
         if old_handlers:
             for sig, handler in old_handlers.items():

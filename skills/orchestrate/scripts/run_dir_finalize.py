@@ -8,6 +8,8 @@ import fcntl
 import hashlib
 import json
 import os
+import re
+import stat
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,6 +22,11 @@ from _shared.review_ladder import (
 )
 from _shared.review_panel import PANEL_RECORD_KEYS, validate_panel_result
 from _shared.review_terminal import REVIEW_RESULT_KEYS, normalise_dispatch_review
+from _shared.custody import OwnedFileError, contained_regular_path, open_contained_regular, read_contained_regular
+
+SCRIPTS_ROOT = Path(__file__).resolve().parent
+if str(SCRIPTS_ROOT) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_ROOT))
 
 TERMINAL = {"succeeded", "failed", "cancelled"}
 STATUSES = {"draft", "verified", "superseded", "retired"}
@@ -83,14 +90,31 @@ def _batch_lock_held(run_dir: Path) -> bool:
 
 def _acquire_run_custody(run_dir: Path):
     """Hold the shared manifest lock through terminal receipt mutation."""
-    flags = os.O_RDWR | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)
-    stream = os.fdopen(os.open(run_dir / "MANIFEST.md", flags), "a+", encoding="utf-8")
+    fd, _relative, _target = open_contained_regular(
+        run_dir, "MANIFEST.md", os.O_RDWR | os.O_APPEND, label="MANIFEST.md"
+    )
+    stream = os.fdopen(fd, "a+", encoding="utf-8")
     try:
         fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
         stream.close()
         raise
     return stream
+
+
+def _receipt_path_is_bound(stream, path: Path) -> bool:
+    try:
+        path_metadata = path.lstat()
+        fd_metadata = os.fstat(stream.fileno())
+    except OSError:
+        return False
+    return (
+        stat.S_ISREG(path_metadata.st_mode)
+        and path_metadata.st_nlink == 1
+        and stat.S_ISREG(fd_metadata.st_mode)
+        and fd_metadata.st_nlink == 1
+        and (path_metadata.st_dev, path_metadata.st_ino) == (fd_metadata.st_dev, fd_metadata.st_ino)
+    )
 
 
 def _utc_timestamp(value: object) -> bool:
@@ -195,21 +219,25 @@ def _validate_review_plan(raw: object, run_dir: Path | None = None) -> list[str]
                 ):
                     errors.append(f"receipt review_plan.reviews[{index}].terminal_result is invalid")
                 elif run_dir is not None:
-                    terminal_target = run_dir / terminal_path
-                    if (
-                        not _inside(run_dir, terminal_target)
-                        or not terminal_target.is_file()
-                        or "sha256:" + hashlib.sha256(terminal_target.read_bytes()).hexdigest() != terminal_digest
-                    ):
+                    try:
+                        terminal_rel, terminal_bytes = _owned_bytes(
+                            run_dir, terminal_path, f"review {index} terminal result"
+                        )
+                        terminal_target = run_dir / terminal_rel
+                    except OwnedFileError:
+                        terminal_target = None
+                        terminal_bytes = None
+                    if terminal_target is None or "sha256:" + hashlib.sha256(terminal_bytes).hexdigest() != terminal_digest:
                         errors.append(f"receipt review_plan.reviews[{index}].terminal_result is missing or does not match")
                     else:
                         try:
-                            terminal_result_value = json.loads(terminal_target.read_text())
-                        except (OSError, json.JSONDecodeError):
+                            terminal_result_value = json.loads(terminal_bytes.decode("utf-8"))
+                        except (UnicodeDecodeError, json.JSONDecodeError):
                             errors.append(f"receipt review_plan.reviews[{index}].terminal_result is invalid JSON")
                         if not isinstance(terminal_result_value, dict) or set(terminal_result_value) != REVIEW_RESULT_KEYS:
                             errors.append(f"receipt review_plan.reviews[{index}].terminal_result is invalid")
         evidence = review["evidence"]
+        evidence_bytes: bytes | None = None
         if not isinstance(evidence, dict) or set(evidence) != {"path", "digest"}:
             errors.append(f"receipt review_plan.reviews[{index}].evidence is invalid")
         else:
@@ -218,8 +246,11 @@ def _validate_review_plan(raw: object, run_dir: Path | None = None) -> list[str]
             if path.is_absolute() or ".." in path.parts or not isinstance(digest, str) or not digest.startswith("sha256:"):
                 errors.append(f"receipt review_plan.reviews[{index}].evidence is invalid")
             elif run_dir is not None and review["status"] == "complete":
-                target = run_dir / path
-                if not _inside(run_dir, target) or not target.is_file() or "sha256:" + hashlib.sha256(target.read_bytes()).hexdigest() != digest:
+                try:
+                    _evidence_rel, evidence_bytes = _owned_bytes(run_dir, path, f"review {index} evidence")
+                except OwnedFileError:
+                    evidence_bytes = None
+                if evidence_bytes is None or "sha256:" + hashlib.sha256(evidence_bytes).hexdigest() != digest:
                     errors.append(f"receipt review_plan.reviews[{index}].evidence is missing or does not match")
         if isinstance(review["status"], str) and review["status"] in SKIPPED_STATUSES and (
             not isinstance(review["reason"], str) or not review["reason"]
@@ -234,13 +265,16 @@ def _validate_review_plan(raw: object, run_dir: Path | None = None) -> list[str]
             if route_path.is_absolute() or ".." in route_path.parts or not isinstance(route_digest, str) or not route_digest.startswith("sha256:"):
                 errors.append(f"receipt review_plan.reviews[{index}].route_receipt is invalid")
             elif run_dir is not None and review["status"] == "complete":
-                target = run_dir / route_path
-                if not _inside(run_dir, target) or not target.is_file() or "sha256:" + hashlib.sha256(target.read_bytes()).hexdigest() != route_digest:
+                try:
+                    _route_rel, route_bytes = _owned_bytes(run_dir, route_path, f"review {index} route receipt")
+                except OwnedFileError:
+                    route_bytes = None
+                if route_bytes is None or "sha256:" + hashlib.sha256(route_bytes).hexdigest() != route_digest:
                     errors.append(f"receipt review_plan.reviews[{index}].route_receipt is missing or does not match")
                 else:
                     try:
-                        route_value = json.loads(target.read_text())
-                    except (OSError, json.JSONDecodeError):
+                        route_value = json.loads(route_bytes.decode("utf-8"))
+                    except (UnicodeDecodeError, json.JSONDecodeError):
                         errors.append(f"receipt review_plan.reviews[{index}].route_receipt is invalid JSON")
                     else:
                         if not isinstance(route_value, dict):
@@ -270,12 +304,8 @@ def _validate_review_plan(raw: object, run_dir: Path | None = None) -> list[str]
                             route_alias = route_value.get("route_alias", route_value.get("alias"))
                             if review["tier"] == "flagship" and route_alias != "flagship":
                                 errors.append(f"receipt review_plan.reviews[{index}].route_receipt does not prove flagship strength")
-                            transcript_target = run_dir / path if run_dir is not None else None
                             transcript_available = bool(
-                                transcript_target is not None
-                                and _inside(run_dir, transcript_target)
-                                and transcript_target.is_file()
-                                and transcript_target.stat().st_size > 0
+                                evidence_bytes is not None and evidence_bytes
                             )
                             output_value = route_value.get("output_path")
                             output_target = (
@@ -296,8 +326,17 @@ def _validate_review_plan(raw: object, run_dir: Path | None = None) -> list[str]
                                 errors.append(
                                     f"receipt review_plan.reviews[{index}].terminal_result does not bind route output"
                                 )
-                            if output_target is not None and output_target.is_file():
-                                output_digest = "sha256:" + hashlib.sha256(output_target.read_bytes()).hexdigest()
+                            output_bytes: bytes | None = None
+                            if output_target is not None and _inside(run_dir, output_target):
+                                try:
+                                    _output_rel, output_bytes = _owned_bytes(
+                                        run_dir, output_target.relative_to(run_dir),
+                                        f"review {index} route output",
+                                    )
+                                except (OwnedFileError, ValueError):
+                                    output_bytes = None
+                            if output_bytes is not None:
+                                output_digest = "sha256:" + hashlib.sha256(output_bytes).hexdigest()
                                 if output_digest != route_value.get("output_digest"):
                                     terminal_result_value = None
                                     errors.append(
@@ -312,10 +351,7 @@ def _validate_review_plan(raw: object, run_dir: Path | None = None) -> list[str]
                                         f"receipt review_plan.reviews[{index}].terminal_result digest does not match dispatch output"
                                     )
                             dispatcher_output_available = bool(
-                                output_target is not None
-                                and _inside(run_dir, output_target)
-                                and output_target.is_file()
-                                and output_target.stat().st_size > 0
+                                output_bytes is not None and output_bytes
                             )
                             leg = normalise_dispatch_review(
                                 route_value,
@@ -480,26 +516,58 @@ def _validate_review_plan(raw: object, run_dir: Path | None = None) -> list[str]
     return errors
 
 
+def _owned_bytes(run_dir: Path, value: object, label: str) -> tuple[str, bytes]:
+    if not isinstance(value, (str, Path)):
+        raise OwnedFileError(f"{label} path is missing")
+    relative, _target, data = read_contained_regular(run_dir, value, label=label)
+    return relative, data
+
+
+def _owned_json(run_dir: Path, value: object, label: str) -> tuple[str, object]:
+    relative, data = _owned_bytes(run_dir, value, label)
+    try:
+        return relative, json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise OwnedFileError(f"{label} is not valid JSON: {relative}") from exc
+
+
+def _validate_dispatch_evidence(run_dir: Path) -> list[str]:
+    """Use the canonical run-control validator for retained dispatch evidence."""
+    from run_controls import validate_retained_dispatch
+
+    return validate_retained_dispatch(run_dir)
+
+
 def validate(run_dir: Path, terminal_status: str, reason: str | None,
-             custody_held: bool = False) -> tuple[list[str], list[dict[str, str]]]:
+             custody_held: bool = False, receipt_value: object = None,
+             manifest_text: str | None = None) -> tuple[list[str], list[dict[str, str]]]:
     errors: list[str] = []
     run_dir = run_dir.resolve()
     if terminal_status not in TERMINAL:
         return ["status must be succeeded, failed, or cancelled"], []
     if terminal_status in {"failed", "cancelled"} and not reason:
         errors.append("failed/cancelled finalisation requires --reason")
-    for name in ("MANIFEST.md", "RUN_RECEIPT.json", "SYNTHESIS.md", "FINAL_GATE.md"):
-        if not (run_dir / name).is_file():
-            errors.append(f"missing {name}")
+    for name in SCAFFOLD:
+        try:
+            contained_regular_path(run_dir, name, name)
+        except OwnedFileError:
+            if not (run_dir / name).exists():
+                errors.append(f"missing {name}")
+            else:
+                errors.append(f"{name} must be a contained regular single-link file")
     if not custody_held and _batch_lock_held(run_dir):
         errors.append("batch custody is active")
     if errors:
         return errors, []
 
-    try:
-        receipt = json.loads((run_dir / "RUN_RECEIPT.json").read_text())
-    except (OSError, json.JSONDecodeError) as exc:
-        return [f"invalid RUN_RECEIPT.json: {exc}"], []
+    if receipt_value is None:
+        try:
+            _receipt_rel, receipt_bytes = _owned_bytes(run_dir, "RUN_RECEIPT.json", "RUN_RECEIPT.json")
+            receipt = json.loads(receipt_bytes.decode("utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, OwnedFileError) as exc:
+            return [f"invalid RUN_RECEIPT.json: {exc}"], []
+    else:
+        receipt = receipt_value
     if not isinstance(receipt, dict):
         return ["invalid RUN_RECEIPT.json: root must be an object"], []
     if receipt.get("schema_version") != 1:
@@ -536,8 +604,12 @@ def validate(run_dir: Path, terminal_status: str, reason: str | None,
         if not isinstance(raw.get("lease_generation"), int) or isinstance(raw.get("lease_generation"), bool) or raw.get("lease_generation") < 0:
             errors.append(f"receipt handed_off_panes[{index}].lease_generation must be non-negative")
         evidence_value = raw.get("evidence_path")
-        evidence_path = run_dir / evidence_value if isinstance(evidence_value, str) else run_dir / "missing"
-        if not evidence_path.is_file() or hashlib.sha256(evidence_path.read_bytes()).hexdigest() != raw.get("evidence_sha256"):
+        try:
+            _evidence_rel, evidence_bytes = _owned_bytes(run_dir, evidence_value, f"receipt handed_off_panes[{index}] evidence")
+            evidence_ok = hashlib.sha256(evidence_bytes).hexdigest() == raw.get("evidence_sha256")
+        except (OwnedFileError, OSError):
+            evidence_ok = False
+        if not evidence_ok:
             errors.append(f"receipt handed_off_panes[{index}] requires matching provider evidence")
     for index, raw in enumerate(receipt.get("closed_panes", [])):
         if not isinstance(raw, dict):
@@ -547,8 +619,12 @@ def validate(run_dir: Path, terminal_status: str, reason: str | None,
         if any(not raw.get(field) for field in required) or raw.get("status") != "verified" or not _utc_timestamp(raw.get("closed_at")):
             errors.append(f"receipt closed_panes[{index}] requires verified identity and closure evidence")
         evidence_value = raw.get("evidence_path")
-        evidence_path = run_dir / evidence_value if isinstance(evidence_value, str) else run_dir / "missing"
-        if not evidence_path.is_file() or hashlib.sha256(evidence_path.read_bytes()).hexdigest() != raw.get("evidence_sha256"):
+        try:
+            _evidence_rel, evidence_bytes = _owned_bytes(run_dir, evidence_value, f"receipt closed_panes[{index}] evidence")
+            evidence_ok = hashlib.sha256(evidence_bytes).hexdigest() == raw.get("evidence_sha256")
+        except (OwnedFileError, OSError):
+            evidence_ok = False
+        if not evidence_ok:
             errors.append(f"receipt closed_panes[{index}] requires matching provider evidence")
 
     pair = receipt.get("pair")
@@ -581,11 +657,14 @@ def validate(run_dir: Path, terminal_status: str, reason: str | None,
             for raw in artifacts:
                 value = raw.get("path") if isinstance(raw, dict) else None
                 digest = raw.get("sha256") if isinstance(raw, dict) else None
-                path = Path(value) if isinstance(value, str) else Path("..")
-                target = path if path.is_absolute() else run_dir / path
-                if not isinstance(value, str) or path.is_absolute() or ".." in path.parts or not target.is_file():
+                try:
+                    _artifact_rel, artifact_bytes = _owned_bytes(run_dir, value, "paired assignment artifact")
+                    artifact_valid = True
+                except (OwnedFileError, OSError):
+                    artifact_valid = False
+                if not artifact_valid:
                     errors.append("paired receipt assignment_artifacts must be existing run-relative files")
-                elif not isinstance(digest, str) or len(digest) != 64 or hashlib.sha256(target.read_bytes()).hexdigest() != digest:
+                elif not isinstance(digest, str) or len(digest) != 64 or hashlib.sha256(artifact_bytes).hexdigest() != digest:
                     errors.append("paired receipt assignment_artifacts require matching SHA-256")
                 else:
                     artifact_paths.append(value)
@@ -617,11 +696,14 @@ def validate(run_dir: Path, terminal_status: str, reason: str | None,
                 for kind in ("assignment", "acknowledgement", "output"):
                     value = stage.get(f"{kind}_path")
                     digest = stage.get(f"{kind}_sha256")
-                    path = Path(value) if isinstance(value, str) else Path("..")
-                    target = run_dir / path
-                    if not isinstance(value, str) or path.is_absolute() or ".." in path.parts or not target.is_file():
+                    try:
+                        _stage_rel, stage_bytes = _owned_bytes(run_dir, value, f"paired stage {index} {kind} artifact")
+                        stage_valid = True
+                    except (OwnedFileError, OSError):
+                        stage_valid = False
+                    if not stage_valid:
                         errors.append(f"paired receipt stage_ledger[{index}] {kind} artifact is invalid")
-                    elif not isinstance(digest, str) or hashlib.sha256(target.read_bytes()).hexdigest() != digest:
+                    elif not isinstance(digest, str) or hashlib.sha256(stage_bytes).hexdigest() != digest:
                         errors.append(f"paired receipt stage_ledger[{index}] {kind} SHA-256 does not match")
                     else:
                         stage_artifact_paths.append(value)
@@ -645,10 +727,9 @@ def validate(run_dir: Path, terminal_status: str, reason: str | None,
             if pair.get("checkpoint_generation", -1) < len(stages):
                 errors.append("paired receipt checkpoint_generation trails the stage ledger")
         lease_value = pair.get("lease_path")
-        lease_path = run_dir / lease_value if isinstance(lease_value, str) else run_dir / "missing"
         try:
-            lease = json.loads(lease_path.read_text())
-        except (OSError, json.JSONDecodeError):
+            _lease_rel, lease = _owned_json(run_dir, lease_value, "paired receipt lease")
+        except (OSError, OwnedFileError):
             errors.append("paired receipt must reference a readable lease")
         else:
             if lease.get("generation") != pair.get("lease_generation") or lease.get("status") != "released":
@@ -662,14 +743,22 @@ def validate(run_dir: Path, terminal_status: str, reason: str | None,
         errors.append("successful finalisation requires receipt task")
     if terminal_status == "succeeded" and (reason or receipt.get("terminal_reason")):
         errors.append("successful finalisation cannot record a terminal failure reason")
-    if terminal_status == "succeeded" and not (run_dir / "SYNTHESIS.md").read_text().strip():
-        errors.append("successful finalisation requires non-empty SYNTHESIS.md")
+    if terminal_status == "succeeded":
+        try:
+            _synthesis_rel, synthesis_bytes = _owned_bytes(run_dir, "SYNTHESIS.md", "SYNTHESIS.md")
+        except (OwnedFileError, OSError):
+            synthesis_bytes = b""
+        if not synthesis_bytes.strip():
+            errors.append("successful finalisation requires non-empty SYNTHESIS.md")
     if terminal_status == "succeeded":
         errors.extend(_validate_review_plan(receipt.get("review_plan"), run_dir))
 
     columns = ["id", "path", "topic", "produced_by", "date", "status", "retention", "supersedes"]
     try:
-        rows = _table((run_dir / "MANIFEST.md").read_text(), columns)
+        rows = _table(
+            manifest_text if manifest_text is not None else _owned_bytes(run_dir, "MANIFEST.md", "MANIFEST.md")[1].decode("utf-8"),
+            columns,
+        )
     except (OSError, ValueError) as exc:
         return errors + [f"invalid MANIFEST.md: {exc}"], []
     ids = {row["id"] for row in rows if row["id"]}
@@ -692,8 +781,11 @@ def validate(run_dir: Path, terminal_status: str, reason: str | None,
         if path.as_posix() in listed:
             errors.append(f"{artifact_id}: duplicate manifest path: {rel}")
         listed.add(path.as_posix())
-        if row["status"] != "retired" and not target.is_file():
-            errors.append(f"{artifact_id}: manifest path does not exist: {rel}")
+        if row["status"] != "retired":
+            try:
+                contained_regular_path(run_dir, rel, f"{artifact_id} manifest artifact")
+            except OwnedFileError as exc:
+                errors.append(f"{artifact_id}: manifest path is not an owned regular file: {exc}")
         supersedes = row["supersedes"]
         if supersedes and supersedes != "-" and supersedes not in ids:
             errors.append(f"{artifact_id}: supersedes must reference an artifact id")
@@ -706,13 +798,14 @@ def validate(run_dir: Path, terminal_status: str, reason: str | None,
         if path.is_file() and path.relative_to(run_dir).as_posix() not in SCAFFOLD
     }
     if terminal_status == "succeeded":
+        errors.extend(_validate_dispatch_evidence(run_dir))
         for rel in sorted(payloads - listed):
             errors.append(f"unmanifested payload: {rel}")
 
     if terminal_status == "succeeded":
         try:
-            gates = _table((run_dir / "FINAL_GATE.md").read_text(), ["gate", "status", "evidence"])
-        except (OSError, ValueError) as exc:
+            gates = _table(_owned_bytes(run_dir, "FINAL_GATE.md", "FINAL_GATE.md")[1].decode("utf-8"), ["gate", "status", "evidence"])
+        except (OSError, UnicodeDecodeError, ValueError, OwnedFileError) as exc:
             errors.append(f"invalid FINAL_GATE.md: {exc}")
         else:
             names = [gate["gate"] for gate in gates]
@@ -790,14 +883,46 @@ def main(argv: list[str] | None = None) -> int:
         print("--apply requires --prune-ephemeral", file=sys.stderr)
         return 2
     custody = None
+    receipt_stream = None
     if (args.run_dir / "MANIFEST.md").is_file():
         try:
             custody = _acquire_run_custody(args.run_dir)
+            receipt_fd, _receipt_rel, _receipt_target = open_contained_regular(
+                args.run_dir.resolve(), "RUN_RECEIPT.json", os.O_RDWR, label="RUN_RECEIPT.json"
+            )
+            receipt_stream = os.fdopen(receipt_fd, "r+", encoding="utf-8")
         except OSError:
+            if custody is not None:
+                fcntl.flock(custody.fileno(), fcntl.LOCK_UN)
+                custody.close()
             print("FAIL: batch custody is active or unavailable", file=sys.stderr)
             return 1
+        except OwnedFileError as exc:
+            if custody is not None:
+                fcntl.flock(custody.fileno(), fcntl.LOCK_UN)
+                custody.close()
+            print(f"FAIL: run custody is unsafe: {exc}", file=sys.stderr)
+            return 1
     try:
-        errors, rows = validate(args.run_dir, args.status, args.reason, custody_held=custody is not None)
+        bound_receipt = None
+        bound_manifest = None
+        if custody is not None:
+            custody.seek(0)
+            bound_manifest = custody.read()
+        if receipt_stream is not None:
+            receipt_stream.seek(0)
+            try:
+                bound_receipt = json.loads(receipt_stream.read())
+            except (OSError, json.JSONDecodeError):
+                bound_receipt = None
+        errors, rows = validate(
+            args.run_dir,
+            args.status,
+            args.reason,
+            custody_held=custody is not None,
+            receipt_value=bound_receipt,
+            manifest_text=bound_manifest,
+        )
         if errors:
             for error in errors:
                 print(f"FAIL: {error}", file=sys.stderr)
@@ -810,8 +935,13 @@ def main(argv: list[str] | None = None) -> int:
             if args.apply:
                 path.unlink()
                 pruned.append(rel)
-        receipt_path = args.run_dir / "RUN_RECEIPT.json"
-        receipt = json.loads(receipt_path.read_text())
+        receipt_path = args.run_dir.resolve() / "RUN_RECEIPT.json"
+        assert receipt_stream is not None
+        receipt_stream.seek(0)
+        receipt = json.loads(receipt_stream.read())
+        if not _receipt_path_is_bound(receipt_stream, receipt_path):
+            print("FAIL: RUN_RECEIPT.json changed while finalising", file=sys.stderr)
+            return 1
         listed = {row["path"] for row in rows}
         unclassified = sorted(
             path.relative_to(args.run_dir).as_posix()
@@ -829,13 +959,19 @@ def main(argv: list[str] | None = None) -> int:
             "unclassified_paths": unclassified,
             "pruned_paths": sorted(set(receipt.get("pruned_paths", [])) | set(pruned)),
         })
-        receipt_path.write_text(json.dumps(receipt, indent=2) + "\n")
+        receipt_stream.seek(0)
+        receipt_stream.truncate()
+        receipt_stream.write(json.dumps(receipt, indent=2) + "\n")
+        receipt_stream.flush()
+        os.fsync(receipt_stream.fileno())
         print(f"PASS: run terminalised as {args.status}")
         return 0
     finally:
         if custody is not None:
             fcntl.flock(custody.fileno(), fcntl.LOCK_UN)
             custody.close()
+        if receipt_stream is not None:
+            receipt_stream.close()
 
 
 if __name__ == "__main__":
