@@ -1,8 +1,8 @@
 # Regression coverage carried over from the deleted `frontend-review` skill's
 # trigger fixtures (see git history for skills/frontend-review/evals/
 # trigger_cases.yaml before the merge into ui-ux-design). This suite is
-# structurally validated by tests/test_ui_ux_design_boundaries.py, but it is
-# not a provider-execution result and is not held to the trigger fixture's
+# structurally validated by the generic route-fixture harness, but it is not a
+# provider-execution result and is not held to the trigger fixture's
 # fixed 3 positive / 3 negative / 3 boundary distribution or q710-q719 block.
 #
 # Do not fold these back into trigger_cases.yaml — doing so would either
@@ -19,10 +19,8 @@ cases:
       primary_skill: ui-ux-design
       companion_skills: []
     note: >-
-      Screenshot/untested-state discipline from references/review.md's
-      "Record each selected lane as tested, failed, not tested or not
-      applicable" requirement. A screenshot alone must not be reported as
-      certifying more than what it shows.
+      Screenshot and untested-state discipline from references/review.md. A
+      screenshot alone must not be reported as certifying more than it shows.
   - id: r002
     relation: boundary
     prompt: "Review this app against WCAG 2.2 and separate automated evidence from untested conformance claims."
@@ -44,8 +42,7 @@ cases:
     note: >-
       Lighthouse-evidence companion to r002: a Lighthouse run is one
       evidence lane, not a substitute for manual inspection or a standards
-      certification (references/review.md, "Unknown is not passing;
-      heuristic judgement is not a standards result").
+      certification; see the claim-boundary section in references/review.md.
   - id: r004
     relation: boundary
     prompt: "Review this interface and then fix what you find."

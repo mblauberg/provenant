@@ -21,6 +21,13 @@ need public behaviour, applicable states, accessibility,
 composition, content stress, and version/migration expectations. Preserve
 platform semantics rather than wrapping everything into a bespoke primitive.
 
+For new shadcn/ui work with no established primitive backend, prefer the Base
+UI variant. Preserve an existing Radix or other working backend when it is
+already adopted or required for compatibility; do not migrate solely to satisfy
+this preference. This is a conditional default for shadcn/ui projects, not a
+universal stack requirement. Review third-party registry code before installing
+it.
+
 ## Document or extract
 
 When documenting an observed system, first locate its canonical artifact with

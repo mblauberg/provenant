@@ -29,6 +29,19 @@ owners. Choose the cheapest effective intervention in this order when
 appropriate: remove unnecessary treatment, use the platform, reuse, correct,
 then add.
 
+Inspect existing components, tokens, patterns, registries, and real consumers
+before creating anything. Prefer modifying or composing the canonical owner for
+the same UI role. In a compatible shadcn/ui project, start from a suitable
+project component, shadcn component, block, template, or reviewed registry item,
+then customise the project-owned source to its content, states, tokens, and
+accessibility contract. Add a component only when no existing owner or
+composition fits; remove or deprecate the duplicate it supersedes.
+
+Compose the smallest semantic parts. Preserve native elements, refs, forwarded
+props, event handlers, accessible names, focus, dismissal, and state ownership.
+Do not nest interactive controls, duplicate state, or push feature-specific
+layout into a shared primitive. Prefer one extended owner over a near-copy.
+
 For exploratory work, vary one meaningful axis at a time and keep variants in
 the authorised scratch artefact. Do not activate live work or production
 source through a request for directions alone. Once a direction is approved,
