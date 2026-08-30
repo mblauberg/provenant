@@ -13,6 +13,9 @@
 > commands and configuration are owned by
 > [`runtime/fabric/README.md`](../../runtime/fabric/README.md); Fabric now
 > coordinates messages, tasks and activity while direct CLIs execute providers.
+> The current front door delegates `route`, `worktree`, `check`, `fabric`,
+> `dispatch`, `batch` and `run` to the owners below. The original daemon-era
+> command table remains in Git history.
 
 ## Context
 
@@ -28,12 +31,13 @@ contracts:
 
 ```text
 provenant help
-provenant doctor [existing agent-fabric doctor arguments]
-provenant route [existing model-route arguments]
-provenant worktree [existing worktree arguments]
-provenant check [existing check-harness arguments]
-provenant fabric [existing agent-fabric arguments]
-provenant project [existing agent-fabric project arguments]
+provenant route ...
+provenant worktree ...
+provenant check ...
+provenant fabric ...
+provenant dispatch ...
+provenant batch ...
+provenant run ...
 ```
 
 `provenant` owns command names and help text. The existing commands remain the
@@ -41,24 +45,17 @@ sole behavioural owners:
 
 | Front-door command | Existing owner |
 | --- | --- |
-| `doctor` | `scripts/agent-fabric doctor` |
 | `route` | `scripts/model-route` |
 | `worktree` | `scripts/worktree` |
 | `check` | `scripts/check-harness` |
-| `fabric` | `scripts/agent-fabric` |
-| `project` | `scripts/agent-fabric project` |
+| `fabric` | `runtime/fabric/bin/fabric` |
+| `dispatch` | `skills/orchestrate/scripts/dispatch_run.py` |
+| `batch` | `skills/orchestrate/scripts/batch_run.py` |
+| `run` | `skills/orchestrate/scripts/run_controls.py` |
 
-The managed resolver must resolve the wrapper's real checkout without changing
-the caller's working directory. `doctor` prefixes its arguments with
-`scripts/agent-fabric doctor`; `route`, `worktree`, `check` and `fabric` pass
-every argument after the subcommand unchanged. Each delegation
-must preserve the caller's environment, standard input and signals, preserve
-stdout and stderr byte-for-byte, and return the existing command's exit code.
-
-This `doctor` passthrough was added on 27 July 2026 for issue #458 so the
-explicit `--consume-provider-quota` opt-in and `--help` remain reachable from
-the installed front door. The wrapper still does not interpret those arguments;
-Agent Fabric remains their behavioural owner.
+The managed resolver finds the product checkout without changing the caller's
+working directory. Each delegation preserves arguments, environment, standard
+input, signals, stdout, stderr and the owner's exit code.
 
 This gives agents one memorable discovery surface while keeping current scripts
 stable for automation and direct use.
@@ -105,25 +102,22 @@ active.
 ## Accepted slice and expansion gate
 
 The accepted slice is one installed shell wrapper plus focused contract tests.
-It does not modify the existing commands or their callers.
+It does not duplicate the existing commands.
 
 The slice is required to retain these measurements:
 
-1. All six delegated commands execute the documented existing owner.
+1. All seven delegated commands execute the documented existing owner.
 2. Representative success, usage-error and downstream-failure cases preserve
    stdout, stderr and exit status exactly.
 3. The same tests pass from the Provenant root, an unrelated Git repository and
    a non-repository temporary directory.
 4. Existing direct command tests and calls remain unchanged.
-5. `provenant help` identifies the six behavioural owners and distinguishes
+5. `provenant help` identifies the behavioural owners and distinguishes
    Fabric clients from providers.
 
-`project` is part of the managed resolver's accepted command set and delegates
-to `scripts/agent-fabric project`. Legacy symlinks are migration inputs only.
-Any further expansion beyond these commands or ownership boundaries requires a
-separate decision. Usage evidence may justify improving discovery text, but
-does not by itself authorise execution, fallback, scheduling or state behaviour
-here.
+Any expansion beyond these commands or ownership boundaries requires a separate
+decision. Usage evidence may justify discovery text, but does not itself
+authorise execution, fallback, scheduling or new state behaviour.
 
 ## Alternatives and trade-offs
 

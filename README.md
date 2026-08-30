@@ -156,9 +156,10 @@ database and registers the caller without a separate activation step.
 
 ## Providers
 
-The [Fabric MCP installer](docs/runbooks/fabric-mcp-registration.md) can
-register all six clients below. Direct provider execution is separately owned
-by [adapter compatibility](config/adapter-compatibility.yaml).
+The [Fabric MCP installer](docs/runbooks/fabric-mcp-registration.md) supports
+the six host clients below. Fabric registration and direct provider execution
+are separate; current dispatch activation is owned by
+[adapter compatibility](config/adapter-compatibility.yaml).
 
 | Client or provider | Fabric MCP registration | Direct provider execution |
 |---|---|---|
@@ -166,8 +167,8 @@ by [adapter compatibility](config/adapter-compatibility.yaml).
 | Codex | Supported | Enabled OpenAI primary |
 | Agy | Supported | Enabled optional broker; the receipt records the runtime model family |
 | Cursor | Supported | Enabled optional Composer/Grok and hosted third-party broker |
-| Kiro | Supported | Dormant until one bounded ordinary invocation and safety boundary are verified |
-| OpenCode | Supported | Unavailable until the dispatch owner has a verified invocation and receipt contract |
+| Kiro | Supported | Disabled: no verified bounded invocation and receipt contract |
+| OpenCode | Supported | Disabled: no verified invocation and receipt contract |
 
 Provider CLI versions and digests are diagnostic observations, not admission
 locks. Direct dispatch enforces the checked-in activation decision and uses

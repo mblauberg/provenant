@@ -247,7 +247,7 @@ design decision and `engineering-docs` owns canonical placement. `playwright`,
 UI finding contract. `caveman` is a presentation overlay only; it cannot narrow
 evidence, authority, high-stakes clarity or an artifact's domain-writing rules.
 
-`release` promotes one digest-pinned, user-accepted artifact through a separately
+`release` promotes one user-accepted artifact through a separately
 authorised `deploy`, `publish`, `share`, `send` or `activate` action. Targets are
 typed as environments, recipients or audiences; execution may use an approved
 command, connector or named user operation. Completion requires target-visible
@@ -469,9 +469,9 @@ artifact: absolute target roots and digests for one machine, ignored and never
 committed. The same class holds `.agent-fabric/product-root.json`, the pointer
 to this machine's product checkout, rewritten on every install so that
 committed instance state never carries an absolute machine path and relocating
-the product is always a re-run of the installer. Split-layout startup binds the product root for the global
-configuration layer, the compatibility policy and `${AGENTS_HOME}`, and the
-instance root for the routing and preference configuration seeded into it.
+the product is always a re-run of the installer. Split-layout startup binds the
+product root for shipped runtime and compatibility owners and `${AGENTS_HOME}`;
+the instance root owns its seeded routing and preference configuration.
 
 The canonical skill catalogue is also a constrained interface. Every skill has
 balanced positive, negative and boundary routes; descriptions place the trigger
@@ -495,6 +495,8 @@ before judgement. A fluent answer without trajectory evidence is not complete.
 - Keep model identities in routing data, not scattered prose or shell cases.
 - Make optional providers additive and non-blocking.
 - Prefer explicit receipts over raw transcripts or hidden memory.
-- Generalise only proven cross-project patterns; leave project policy local.
+- Promote only a clear reusable trigger, artifact, fixture and ownership
+  boundary; keep limited evidence opt-in and provisional, and project policy
+  local.
 - Test failure modes that were observed in real runs, including Herdr transport,
   provider limits, context churn and partial review artifacts.

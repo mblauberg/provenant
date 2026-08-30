@@ -70,7 +70,7 @@ def test_dispatch_manifest_and_delivery_run_have_distinct_owners():
     assert "Fabric remains coordination-only" in adr
 
 
-def test_dispatch_owner_boundaries_distinguish_current_assurance_from_future_execution():
+def test_dispatch_owner_boundaries_distinguish_assurance_from_ordinary_execution():
     orchestrate = (ROOT / "skills/orchestrate/SKILL.md").read_text()
     thin_cli = (ROOT / "docs/adr/0013-thin-provenant-cli.md").read_text()
     adr = (ROOT / "docs/adr/0021-configured-workspace-dispatch-boundaries.md").read_text()
@@ -85,8 +85,9 @@ def test_dispatch_owner_boundaries_distinguish_current_assurance_from_future_exe
     assert "direct official provider CLIs" in thin_cli
     assert "scripts/model-route" in adr
     assert "cf_dispatch" in adr
-    assert "#518" in adr
-    assert "#683" in adr
+    assert "Provider-invocation adapter" in adr
+    assert "skills/orchestrate/scripts/dispatch_run.py" in adr
+    assert "skills/orchestrate/scripts/batch_run.py" in adr
     assert "does not implement" in adr
     assert "delegates provider invocation to `cf_dispatch.sh`" in adr
     assert "ordinary intent/policy interface" in adr
@@ -94,15 +95,16 @@ def test_dispatch_owner_boundaries_distinguish_current_assurance_from_future_exe
     assert "MANIFEST.md" in adr
     assert "RUN_RECEIPT.json" in adr
     assert "run_dir_finalize.py" in adr
+    assert "does not copy attempt references into the receipt" in adr_compact
     assert "parallel lifecycle ledger" in adr
-    assert "exact attempt-record filename is a #518 schema decision" in adr
+    assert "attempt.json" in adr
     assert "delivery `RUN.json` may reference the orchestration receipt" in adr_compact
     assert "amended by ADR 0021" in index
-    assert "provider-agnostic orchestration runner" in adr.lower()
+    assert "ordinary dispatch runner" in adr.lower()
     assert "fixed bounded batch" in adr.lower()
-    assert "builds on the #518" in adr.lower()
+    assert "builds on `dispatch_run.py`" in adr.lower()
     assert "remains the assurance path" in adr_compact.lower()
-    assert "#683" in adr and "workspace-boundary work in [#683]" not in adr
+    assert "[#690]" in adr and "[#692]" in adr
     assert "secrets" in harness.lower()
 
 

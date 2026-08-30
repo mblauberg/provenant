@@ -4,8 +4,8 @@
 # This script is a helper, not an authority. The caller still chooses an appropriate
 # different-family verifier, checks data policy, and records failures in the run manifest.
 # Assurance remains the default. Ordinary execution can explicitly allow a same-family route.
-# Record the dispatch and its result in Fabric so the chair and the other lanes
-# can see it; Fabric carries the coordination, this helper carries the call.
+# When Fabric is used, the caller records correlation; this helper owns only the
+# provider call and its direct receipt.
 set -uo pipefail
 
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
@@ -17,10 +17,10 @@ Usage: cf_dispatch.sh --tool TOOL --orchestrator-family FAMILY --prompt TEXT [op
        cf_dispatch.sh --doctor
 
 Options:
-  --tool TOOL                  One of claude, codex, cursor, agy, copilot.
+  --tool TOOL                  One of claude, codex, cursor, agy, kiro, copilot.
   --task-class CLASS           Route task class through model_route.py.
   --chain SPECS                Space-separated fallback chain.
-  --orchestrator-family FAMILY Current orchestrator family; same-family routes fail closed.
+  --orchestrator-family FAMILY Labels the chair family; assurance requires separation.
   --intent INTENT              assurance (default) or ordinary execution.
   --alias ALIAS                Durable route alias: flagship, workhorse, scout.
                                Defaults from --role: flagship for lead,
@@ -38,7 +38,7 @@ Options:
   --doctor                     Print local dispatch diagnostics and exit.
   -h, --help                   Show this help.
 
-Record every dispatch and result in Fabric so the chair can follow the lane.
+When Fabric is used, the caller records any Fabric correlation.
 EOF
 }
 

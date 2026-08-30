@@ -6,6 +6,11 @@
 [#200](https://github.com/mblauberg/provenant/issues/200),
 [#201](https://github.com/mblauberg/provenant/issues/201))
 
+> **Current-reader note.** The daemon and its native-addon analysis are
+> historical after ADR 0020. The current Node workspace and lockfile owners are
+> `runtime/fabric/package.json` and the root lockfile. Provider CLI versions and
+> digests remain diagnostics, not admission gates.
+
 ## Context
 
 Bun promises faster installs, faster TypeScript startup and a bundled

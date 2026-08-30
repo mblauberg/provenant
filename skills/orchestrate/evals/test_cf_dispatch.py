@@ -551,7 +551,7 @@ def test_help_exits_cleanly():
         stderr=subprocess.PIPE,
     )
     assert result.returncode == 0
-    assert "Record every dispatch and result in Fabric" in result.stdout
+    assert "caller records any Fabric correlation" in result.stdout
     assert "--doctor" in result.stdout
 
 

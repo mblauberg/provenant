@@ -95,15 +95,29 @@ body:
     validations:
       required: true
 
-  - type: textarea
-    id: evidence
+  - type: dropdown
+    id: promotion-status
     attributes:
-      label: Evidence from two or more projects
+      label: Promotion status
       description: >-
-        A skill earns global promotion after proving useful in at least two
-        projects. Name them (redact private names), and for each say what it
-        produced and what went wrong, or would have gone wrong, without it.
-        Generalise project-specific values into knobs.
+        Choose the smallest honest status. Limited evidence belongs in an
+        opt-in provisional skill, not a global-ready claim.
+      options:
+        - Project-local
+        - Opt-in provisional
+        - Global-ready
+    validations:
+      required: true
+
+  - type: textarea
+    id: promotion-rationale
+    attributes:
+      label: Promotion rationale
+      description: >-
+        Name the reusable artifact and ownership boundary. Trigger terms and
+        fixtures are captured above. Cross-project evidence is helpful but not
+        required; state why the selected status is honest and generalise
+        project-specific values into knobs.
     validations:
       required: true
 

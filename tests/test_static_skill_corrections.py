@@ -32,9 +32,18 @@ def test_agent_product_evaluation_and_redaction_are_conditional_not_universal():
 def test_implement_receipt_rule_scales_once_with_risk():
     skill = compact("skills/implement/SKILL.md")
 
-    assert "For substantial+ work, create the canonical `delivery-run`" in skill
+    assert "For substantial+ work" in skill
+    assert '"${AGENTS_HOME:-$HOME/.agents}/skills/deliver/scripts/delivery_receipt.py" init' in skill
+    assert "canonical `delivery-run`" in skill
     assert "Routine minor work may proceed without `RUN.json`" in skill
     assert skill.count("Routine minor work may") == 1
+
+
+def test_orchestrate_names_the_current_ordinary_dispatch_owner():
+    skill = compact("skills/orchestrate/SKILL.md")
+
+    assert "ordinary dispatch is owned by `scripts/dispatch_run.py`" in skill
+    assert "future ordinary-dispatch owner" not in skill
 
 
 def test_scope_loads_grill_me_only_when_interactive_stress_testing_is_wanted():

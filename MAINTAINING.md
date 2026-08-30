@@ -100,9 +100,10 @@ the domain linters import, so a change there ripples to all of them.
 
 ## Promote and retire
 
-A project skill earns global promotion after proving useful in at least two
-projects. Generalise project-specific values into knobs and leave a thin local
-override. Project rules stay authoritative inside their workspace.
+Promote a project skill when a clear reusable trigger, artifact, fixture and
+ownership boundary justify it. When evidence is limited, start opt-in and
+provisional. Generalise project-specific values into knobs, leave a thin local
+override, and keep project rules authoritative inside their workspace.
 
 Audit usage periodically. Retire zero-use skills that add no durable capability,
 but preserve required third-party notices and use repository history instead of

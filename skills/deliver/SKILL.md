@@ -23,8 +23,12 @@ inventing.
 
 ## Lifecycle
 
-1. Create `.agent-run/<id>/RUN.json` from `templates/RUN.template.json` and
-   bind intent, design and authority by digest. When coordinated, bind
+1. Run
+   `"${AGENTS_HOME:-$HOME/.agents}/skills/deliver/scripts/delivery_receipt.py" init`
+   to create
+   `.agent-run/<id>/RUN.json` with the selected profile, risk, chair family,
+   intent and authority; then bind other required artifacts through the same
+   producer. When coordinated, bind
    `fabric_relationships` to project session, coordination run and workstream
    IDs per [the receipt contract](references/contract.md).
 2. Record each state transition. No state may jump an approval, evidence,
