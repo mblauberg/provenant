@@ -74,22 +74,33 @@ def fake_dispatch(path: Path) -> None:
         counter = pathlib.Path(os.environ['BATCH_COUNTER'])
         active = counter.with_name('active')
         maximum = counter.with_name('maximum')
-        with counter.with_name('lock').open('w') as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
-            current = int(active.read_text()) if active.exists() else 0
-            active.write_text(str(current + 1))
-            maximum.write_text(str(max(int(maximum.read_text()) if maximum.exists() else 0, current + 1)))
+        def write_counter(path, value):
+            # These counters stay below ten; pwrite publishes the single byte
+            # without a truncate-before-write window for a re-entrant signal.
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT, 0o600)
+            try:
+                os.pwrite(fd, str(value).encode(), 0)
+                os.fsync(fd)
+            finally:
+                os.close(fd)
         def leave(*_):
-            with counter.with_name('lock').open('w') as lock:
-                fcntl.flock(lock, fcntl.LOCK_EX)
-                active.write_text(str(max(0, int(active.read_text()) - 1)))
             raise SystemExit(143)
         signal.signal(signal.SIGTERM, leave)
         signal.signal(signal.SIGHUP, leave)
-        time.sleep(float(values.get('sleep', '0.01')))
-        with counter.with_name('lock').open('w') as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
-            active.write_text(str(max(0, int(active.read_text()) - 1)))
+        counted = False
+        try:
+            with counter.with_name('lock').open('w') as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                current = int(active.read_text()) if active.exists() else 0
+                counted = True
+                write_counter(active, current + 1)
+                write_counter(maximum, max(int(maximum.read_text()) if maximum.exists() else 0, current + 1))
+            time.sleep(float(values.get('sleep', '0.01')))
+        finally:
+            if counted:
+                with counter.with_name('lock').open('w') as lock:
+                    fcntl.flock(lock, fcntl.LOCK_EX)
+                    write_counter(active, max(0, int(active.read_text()) - 1))
         requested_status = values.get('status', 'succeeded')
         status = 'failed' if requested_status == 'empty' else requested_status
         outcome = 'result_missing_or_empty' if requested_status == 'empty' else status
@@ -943,7 +954,8 @@ def test_standalone_dispatch_is_blocked_by_batch_custody(tmp_path, monkeypatch):
         lock.close()
 
 
-def test_batch_cancellation_reaps_active_dispatches(tmp_path, monkeypatch):
+@pytest.mark.parametrize('_run', range(3))
+def test_batch_cancellation_reaps_active_dispatches(tmp_path, monkeypatch, _run):
     monkeypatch.chdir(tmp_path)
     run_dir = make_run(tmp_path, 'cancel')
     dispatch = tmp_path / 'fake-dispatch'
