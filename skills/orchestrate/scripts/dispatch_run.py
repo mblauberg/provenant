@@ -308,37 +308,18 @@ class _JSONObject(dict[str, Any]):
             self[key] = value
 
 
-def worker_question_envelope(result_path: Path, expected_digest: str) -> dict[str, Any] | None:
-    """Return a validated worker question, or fail closed for a reserved record."""
-    try:
-        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-        fd = os.open(result_path, flags)
-    except OSError as exc:
-        raise TerminalEnvelopeIntegrityError("terminal candidate cannot be safely reopened") from exc
-    try:
-        metadata = os.fstat(fd)
-        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
-            raise TerminalEnvelopeIntegrityError("terminal candidate is not a regular single-link file")
-        chunks: list[bytes] = []
-        total = 0
-        while total <= MAX_WORKER_TERMINAL_ENVELOPE_BYTES:
-            chunk = os.read(
-                fd, min(1024 * 1024, MAX_WORKER_TERMINAL_ENVELOPE_BYTES + 1 - total)
-            )
-            if not chunk:
-                break
-            chunks.append(chunk)
-            total += len(chunk)
-        candidate = b"".join(chunks)
-    except OSError as exc:
-        raise TerminalEnvelopeIntegrityError("terminal candidate cannot be safely read") from exc
-    finally:
-        os.close(fd)
+def parse_worker_question_envelope(
+    candidate: bytes, expected_digest: str | None = None
+) -> dict[str, Any] | None:
+    """Validate one retained terminal candidate without reopening its path."""
     if len(candidate) > MAX_WORKER_TERMINAL_ENVELOPE_BYTES:
         return None
-    candidate_hash = hashlib.sha256(candidate).hexdigest()
-    if expected_digest != f"sha256:{candidate_hash}":
-        raise TerminalEnvelopeIntegrityError("terminal candidate digest does not match retained result")
+    if expected_digest is not None:
+        candidate_hash = hashlib.sha256(candidate).hexdigest()
+        if expected_digest != f"sha256:{candidate_hash}":
+            raise TerminalEnvelopeIntegrityError(
+                "terminal candidate digest does not match retained result"
+            )
     try:
         value = json.loads(candidate.decode("utf-8"), object_pairs_hook=_JSONObject)
     except (UnicodeDecodeError, json.JSONDecodeError):
@@ -372,6 +353,35 @@ def worker_question_envelope(result_path: Path, expected_digest: str) -> dict[st
     ):
         raise ValueError("terminal worker envelope prompt is invalid")
     return {"code": "needs_input", "prompt": prompt}
+
+
+def worker_question_envelope(result_path: Path, expected_digest: str) -> dict[str, Any] | None:
+    """Return a validated worker question, or fail closed for a reserved record."""
+    try:
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(result_path, flags)
+    except OSError as exc:
+        raise TerminalEnvelopeIntegrityError("terminal candidate cannot be safely reopened") from exc
+    try:
+        metadata = os.fstat(fd)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            raise TerminalEnvelopeIntegrityError("terminal candidate is not a regular single-link file")
+        chunks: list[bytes] = []
+        total = 0
+        while total <= MAX_WORKER_TERMINAL_ENVELOPE_BYTES:
+            chunk = os.read(
+                fd, min(1024 * 1024, MAX_WORKER_TERMINAL_ENVELOPE_BYTES + 1 - total)
+            )
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+        candidate = b"".join(chunks)
+    except OSError as exc:
+        raise TerminalEnvelopeIntegrityError("terminal candidate cannot be safely read") from exc
+    finally:
+        os.close(fd)
+    return parse_worker_question_envelope(candidate, expected_digest)
 
 
 def fail(run_dir: Path | None, status: str, message: str) -> int:
@@ -699,6 +709,7 @@ def _dispatch(args: argparse.Namespace) -> int:
     process_error = ""
     process = None
     cancelled = False
+    old_handlers: dict[int, Any] = {}
     try:
         with adapter_path.open("w", encoding="utf-8") as adapter_stream, stderr_path.open(
             "w", encoding="utf-8"
@@ -722,11 +733,16 @@ def _dispatch(args: argparse.Namespace) -> int:
 
                 def cancel_handler(_signum: int, _frame: Any) -> None:
                     nonlocal cancelled
-                    cancelled = True
-                    try:
-                        stop_process_group(process)
-                    except OSError:
-                        pass
+                    # A late signal after the provider has exited is not a
+                    # cancellation of the attempt.  Keep this handler owned
+                    # until the durable attempt receipt and its index are
+                    # published, so a signal cannot interrupt custody.
+                    if process is not None and process.poll() is None:
+                        cancelled = True
+                        try:
+                            stop_process_group(process)
+                        except OSError:
+                            pass
 
                 old_handlers = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGHUP)}
                 signal.signal(signal.SIGTERM, cancel_handler)
@@ -775,8 +791,9 @@ def _dispatch(args: argparse.Namespace) -> int:
                             observed_exit = True
                             break
                 finally:
-                    for sig, handler in old_handlers.items():
-                        signal.signal(sig, handler)
+                    # Signal ownership deliberately remains with this
+                    # dispatch owner through evidence publication below.
+                    pass
                 if cancelled:
                     process_error = "cancelled"
     except OSError as exc:
@@ -924,6 +941,8 @@ def _dispatch(args: argparse.Namespace) -> int:
         attempt_digest = digest(attempt_path)
         atomic_write(digest_path, f"{attempt_digest}  {attempt_path.name}\n")
     remove_cancellation_marker(run_dir, attempt_dir)
+    for sig, handler in old_handlers.items():
+        signal.signal(sig, handler)
     output_record = {**record, "attempt_digest": attempt_digest}
     print(json.dumps(output_record, sort_keys=True))
     return 0 if status == "succeeded" and not manifest_error else 1

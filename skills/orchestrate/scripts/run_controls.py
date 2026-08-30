@@ -25,7 +25,11 @@ MAX_OPERATOR_RESPONSE_BYTES = 64 * 1024
 MAX_CANCEL_WAIT_SECONDS = 60.0
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from dispatch_run import create_cancellation_marker
+from dispatch_run import (
+    create_cancellation_marker,
+    parse_worker_question_envelope,
+    remove_cancellation_marker,
+)
 
 
 class ControlError(ValueError):
@@ -98,11 +102,34 @@ def _attempt_terminal(run_dir: Path, task_id: str, attempt_id: str) -> dict[str,
     try:
         record, _, _, _ = _attempt(run_dir, task_id, attempt_id)
     except ControlError as exc:
+        # Receipt publication is the terminal bundle commit point.  The
+        # receipt can briefly precede its digest sidecar or an atomically
+        # renamed evidence file; callers wait for that bundle to settle.
+        if _attempt_bundle_incomplete(run_dir, task_id, attempt_id):
+            return None
         raise ControlError("attempt evidence is invalid") from exc
     process = record.get("process")
     if not isinstance(process, dict) or process.get("observed_exit") is not True:
         raise ControlError("attempt evidence does not prove observed completion")
     return record
+
+
+def _attempt_bundle_incomplete(run_dir: Path, task_id: str, attempt_id: str) -> bool:
+    root = run_dir / "dispatch" / "tasks" / task_id / attempt_id
+    if not root.is_dir() or root.is_symlink():
+        return False
+    required = [root / "attempt.sha256", root / "prompt.md", root / "stderr.log",
+                root / "adapter-receipt.json"]
+    try:
+        record = json.loads((root / "attempt.json").read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    result = record.get("result") if isinstance(record, dict) else None
+    if result is not None:
+        required.append(root / "result.md")
+    # A missing path is the only transient state accepted here.  Symlinks,
+    # malformed files and digest mismatches remain hard failures.
+    return any(not path.exists() and not path.is_symlink() for path in required)
 
 
 def _wait_for_attempt_terminal(run_dir: Path, task_id: str, attempt_id: str, wait_seconds: float) -> dict[str, Any] | None:
@@ -134,11 +161,13 @@ def _cancel(args: argparse.Namespace) -> int:
             raise ControlError("cancel target attempt directory does not exist")
         existing = _attempt_terminal(run_dir, args.task_id, args.attempt_id)
         if existing is not None:
+            remove_cancellation_marker(run_dir, target)
             return _cancel_result("already_terminal", "attempt already has validated terminal evidence")
         _create_cancel_marker(run_dir, target)
         existing = _wait_for_attempt_terminal(run_dir, args.task_id, args.attempt_id, wait_seconds)
         if existing is None:
             return _cancel_result("completion_evidence_missing", "owner did not produce validated terminal attempt evidence", code=1)
+        remove_cancellation_marker(run_dir, target)
         status = "cancelled" if existing.get("status") == "cancelled" else "already_terminal"
         return _cancel_result(status, "validated terminal attempt evidence is durable")
 
@@ -158,8 +187,29 @@ def _cancel(args: argparse.Namespace) -> int:
     if summary_present:
         if summary_path.is_symlink() or not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
             raise ControlError("batch summary evidence is invalid")
-        _load_summary(run_dir, args.batch_id, require_complete=True)
-        return _cancel_result("already_terminal", "batch already has validated terminal summary evidence")
+        try:
+            _load_summary(run_dir, args.batch_id, require_complete=True)
+        except ControlError:
+            if wait_seconds <= 0 or not _summary_bundle_incomplete(run_dir, args.batch_id):
+                raise
+            summary = None
+        else:
+            remove_cancellation_marker(run_dir, target)
+            return _cancel_result("already_terminal", "batch already has validated terminal summary evidence")
+        if summary is None:
+            deadline = time.monotonic() + wait_seconds
+            while time.monotonic() < deadline:
+                try:
+                    summary = _load_summary(run_dir, args.batch_id, require_complete=True)
+                except ControlError:
+                    if not _summary_bundle_incomplete(run_dir, args.batch_id):
+                        raise
+                    time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+                    continue
+                remove_cancellation_marker(run_dir, target)
+                status = "cancelled" if summary.get("status") == "cancelled" else "already_terminal"
+                return _cancel_result(status, "validated terminal batch summary evidence is durable")
+            return _cancel_result("completion_evidence_missing", "owner did not produce validated terminal batch summary evidence", code=1)
     _create_cancel_marker(run_dir, target)
     deadline = time.monotonic() + wait_seconds
     while True:
@@ -172,15 +222,51 @@ def _cancel(args: argparse.Namespace) -> int:
             except FileNotFoundError:
                 summary_present = False
             if summary_present:
-                raise ControlError("batch summary evidence is invalid")
+                if not _summary_bundle_incomplete(run_dir, args.batch_id):
+                    raise ControlError("batch summary evidence is invalid")
             summary = None
         if summary is not None:
+            remove_cancellation_marker(run_dir, target)
             status = "cancelled" if summary.get("status") == "cancelled" else "already_terminal"
             return _cancel_result(status, "validated terminal batch summary evidence is durable")
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             return _cancel_result("completion_evidence_missing", "owner did not produce validated terminal batch summary evidence", code=1)
         time.sleep(min(0.05, remaining))
+
+
+def _summary_bundle_incomplete(run_dir: Path, batch_id: str) -> bool:
+    """Return true only for a valid summary whose retained bundle is settling."""
+    summary_path = run_dir / "dispatch" / "batches" / batch_id / "summary.json"
+    try:
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    if (not isinstance(summary, dict) or summary.get("schema_version") != 1
+            or summary.get("record_type") != "dispatch-batch"
+            or summary.get("batch_id") != batch_id
+            or not isinstance(summary.get("tasks"), list)
+            or type(summary.get("task_count")) is not int
+            or summary["task_count"] < 1
+            or summary["task_count"] != len(summary["tasks"])):
+        return False
+    for item in summary["tasks"]:
+        if not isinstance(item, dict) or item.get("status") not in TERMINAL_STATUSES:
+            return False
+        attempt_path = item.get("attempt_path")
+        if attempt_path is None:
+            continue
+        if not isinstance(attempt_path, str) or not attempt_path.endswith("/attempt.json"):
+            return False
+        parts = Path(attempt_path).parts
+        if len(parts) < 5 or parts[:3] != ("dispatch", "tasks", item.get("task_id")):
+            return False
+        attempt_id = parts[-2]
+        if not ATTEMPT_ID_RE.fullmatch(attempt_id):
+            return False
+        if _attempt_bundle_incomplete(run_dir, item["task_id"], attempt_id):
+            return True
+    return False
 
 
 def _run_dir(value: Path, *, require_active: bool = False) -> Path:
@@ -569,6 +655,9 @@ def _retry(args: argparse.Namespace) -> int:
     parent, artifacts, _, payloads = _attempt(run_dir, args.task_id, args.attempt_id)
     if parent["status"] == "succeeded":
         raise ControlError("successful attempts cannot be retried")
+    process = parent.get("process")
+    if not isinstance(process, dict) or process.get("observed_exit") is not True:
+        raise ControlError("retry requires retained evidence of observed provider exit")
     has_response_source = args.response_file is not None or args.response_stdin
     if parent["status"] == "blocked":
         if not has_response_source:
@@ -576,6 +665,15 @@ def _retry(args: argparse.Namespace) -> int:
         question = parent.get("question")
         if not _valid_worker_question(question):
             raise ControlError("blocked attempt has an invalid question")
+        result_digest = (parent.get("result") or {}).get("digest")
+        if "result" not in payloads or not isinstance(result_digest, str):
+            raise ControlError("blocked retry requires the retained question envelope")
+        try:
+            retained_question = parse_worker_question_envelope(payloads["result"], result_digest)
+        except (ValueError, ControlError) as exc:
+            raise ControlError("blocked retry requires the retained question envelope") from exc
+        if retained_question != question:
+            raise ControlError("blocked retry question does not match the retained envelope")
         prompt_bytes = _continuation_prompt(payloads["prompt"], question, _operator_response(args))
     else:
         if has_response_source:

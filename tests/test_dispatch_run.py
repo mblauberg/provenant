@@ -663,6 +663,42 @@ def test_sigterm_cancels_and_reaps_provider_group(tmp_path: Path) -> None:
         os.kill(provider_pid, 0)
 
 
+def test_late_signal_after_provider_exit_preserves_attempt_publication(tmp_path: Path) -> None:
+    run_dir = make_run(tmp_path, "late-signal")
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("late signal\n", encoding="utf-8")
+    adapter = tmp_path / "adapter"
+    write_success_adapter(adapter)
+    driver = tmp_path / "late-signal-driver.py"
+    driver.write_text(textwrap.dedent(f"""
+        import importlib.util, os, signal, sys
+        spec = importlib.util.spec_from_file_location("late_signal_dispatch", {str(SCRIPT)!r})
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        module.CF_DISPATCH = __import__('pathlib').Path({str(adapter)!r})
+        original = module.atomic_write
+        fired = False
+        def publish(path, content):
+            global fired
+            original(path, content)
+            if path.name == "attempt.json" and not fired:
+                fired = True
+                os.kill(os.getpid(), signal.SIGTERM)
+        module.atomic_write = publish
+        raise SystemExit(module.dispatch(module.parser().parse_args(sys.argv[1:])))
+    """), encoding="utf-8")
+    result = subprocess.run([
+        sys.executable, str(driver), "--run-dir", str(run_dir), "--task-id", "late",
+        "--adapter", "codex", "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+    ], cwd=tmp_path, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    record = json.loads(result.stdout)
+    assert record["status"] == "succeeded"
+    assert record["process"]["observed_exit"] is True
+    assert (run_dir / "dispatch/tasks/late/attempt-001/attempt.json").is_file()
+
+
 def test_external_task_cancel_reaps_only_owned_provider_group(tmp_path: Path) -> None:
     run_dir = make_run(tmp_path, "external-cancel")
     prompt = tmp_path / "prompt.md"

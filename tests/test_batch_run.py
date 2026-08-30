@@ -253,6 +253,35 @@ def test_real_dispatch_children_defer_manifest_race_and_preserve_route_identity(
     assert not (run_dir / 'dispatch/.batch.lock').exists()
 
 
+def test_late_batch_cancel_does_not_override_natural_all_terminal_completion(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    run_dir = make_run(tmp_path, 'late-cancel')
+    dispatch = tmp_path / 'fake-dispatch'
+    fake_dispatch(dispatch)
+    module = load_module()
+    module.DISPATCH_RUN = dispatch
+    counter = tmp_path / 'counter'
+    counter.write_text('0')
+    monkeypatch.setenv('BATCH_COUNTER', str(counter))
+    manifest = task_manifest(tmp_path, [task(tmp_path, 'natural', sleep='0.01')])
+    original_reconcile = module.reconcile_manifest
+
+    calls = 0
+
+    def late_cancel(run_dir):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            module.request_cancel()
+        return original_reconcile(run_dir)
+
+    monkeypatch.setattr(module, 'reconcile_manifest', late_cancel)
+    assert module.batch(args(module, run_dir, manifest, 1)) == 0
+    summary = json.loads((run_dir / 'dispatch/batches/batch-001/summary.json').read_text())
+    assert summary['status'] == 'completed'
+    assert summary['tasks'][0]['status'] == 'succeeded'
+
+
 def test_retained_non_success_attempt_allows_partial_route_and_question(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     run_dir = make_run(tmp_path, 'partial-receipt')
@@ -358,8 +387,9 @@ def test_real_dispatch_cancellation_reaps_provider_process(tmp_path, monkeypatch
           exit 0
         fi
         printf '%s' "$$" > "{provider_pid}"
-        sleep 10
-        """)
+        trap '' TERM HUP
+        while :; do sleep 1; done
+    """)
     monkeypatch.setenv('PATH', f"{bin_dir}:{ROOT / 'scripts'}:{os.environ['PATH']}")
     module = load_module()
     module.DISPATCH_RUN = BATCH.parent / 'dispatch_run.py'

@@ -39,6 +39,7 @@ from dispatch_run import (
     reconcile_manifest,
     retained_path,
     cancellation_marker_present,
+    create_cancellation_marker,
     remove_cancellation_marker,
 )
 
@@ -48,6 +49,10 @@ MAX_TASKS = 64
 MAX_CONCURRENCY = 8
 DEFAULT_CONCURRENCY = 4
 DEFAULT_TIMEOUT_SECONDS = 900.0
+# A cancellation signal is a request to the dispatch owner first.  The owner
+# must be allowed to stop/reap its provider and publish the attempt receipt
+# before the batch falls back to killing that owner.
+CANCEL_DISPATCH_GRACE_SECONDS = 2.0
 TERMINAL_TASK_STATUSES = {"blocked", "succeeded", "failed", "timed_out", "cancelled"}
 
 
@@ -58,6 +63,7 @@ class BatchInputError(ValueError):
 _state_lock = threading.Lock()
 _cancel_event = threading.Event()
 _active_processes: dict[str, subprocess.Popen[str]] = {}
+_active_batch_dirs: set[Path] = set()
 
 
 def atomic_write(path: Path, content: str) -> None:
@@ -89,15 +95,37 @@ def atomic_write_bytes(path: Path, content: bytes) -> None:
 
 
 def request_cancel() -> None:
-    """Cancel this batch and stop/reap every dispatch currently in flight."""
+    """Request cooperative cancellation, then bound the owner fallback."""
     _cancel_event.set()
     with _state_lock:
         processes = list(_active_processes.values())
+        batch_dirs = list(_active_batch_dirs)
+    # The marker is the durable request/evidence path.  Signals are only used
+    # to wake a live dispatch owner promptly; they must not kill it first.
+    for batch_dir in batch_dirs:
+        try:
+            create_cancellation_marker(batch_dir.parents[2], batch_dir)
+        except (OSError, ValueError):
+            pass
     for process in processes:
         try:
-            stop_process_group(process)
+            process.send_signal(signal.SIGTERM)
         except OSError:
             pass
+    deadline = time.monotonic() + CANCEL_DISPATCH_GRACE_SECONDS
+    for process in processes:
+        while process.poll() is None and time.monotonic() < deadline:
+            try:
+                process.wait(timeout=min(0.05, max(0.0, deadline - time.monotonic())))
+            except subprocess.TimeoutExpired:
+                pass
+            except OSError:
+                break
+        if process.poll() is None:
+            try:
+                stop_process_group(process)
+            except OSError:
+                pass
 
 
 def _signal_handler(_signum: int, _frame: Any) -> None:
@@ -457,8 +485,6 @@ def _run_task(task: dict[str, Any], run_dir: Path, batch_dir: Path) -> dict[str,
                                    start_new_session=True)
         with _state_lock:
             _active_processes[task_id] = process
-        if _cancel_event.is_set():
-            stop_process_group(process)
         try:
             stdout, stderr = process.communicate(timeout=task["timeout"] + 5.0)
         except subprocess.TimeoutExpired:
@@ -508,15 +534,21 @@ def _execute_batch(args: argparse.Namespace, tasks: list[dict[str, Any]], run_di
         raise
     source_digest = digest(source_copy)
     results: dict[str, dict[str, Any]] = {}
-    with ThreadPoolExecutor(max_workers=args.concurrency, thread_name_prefix="provenant-batch") as pool:
-        futures = {pool.submit(_run_task, task, run_dir, batch_dir): task["id"] for task in tasks}
-        for future in as_completed(futures):
-            task_id = futures[future]
-            try:
-                results[task_id] = future.result()
-            except Exception as exc:  # preserve partial batch visibility
-                results[task_id] = {"task_id": task_id, "status": "failed",
-                                    "outcome": "batch_worker_error", "message": str(exc)}
+    with _state_lock:
+        _active_batch_dirs.add(batch_dir)
+    try:
+        with ThreadPoolExecutor(max_workers=args.concurrency, thread_name_prefix="provenant-batch") as pool:
+            futures = {pool.submit(_run_task, task, run_dir, batch_dir): task["id"] for task in tasks}
+            for future in as_completed(futures):
+                task_id = futures[future]
+                try:
+                    results[task_id] = future.result()
+                except Exception as exc:  # preserve partial batch visibility
+                    results[task_id] = {"task_id": task_id, "status": "failed",
+                                        "outcome": "batch_worker_error", "message": str(exc)}
+    finally:
+        with _state_lock:
+            _active_batch_dirs.discard(batch_dir)
     ordered = [results.get(task["id"], {"task_id": task["id"], "status": "cancelled",
                                          "outcome": "batch_cancelled"}) for task in tasks]
     reconciliation_error = None
@@ -524,7 +556,10 @@ def _execute_batch(args: argparse.Namespace, tasks: list[dict[str, Any]], run_di
         reconcile_manifest(run_dir)
     except (AttemptEvidenceError, OSError) as exc:
         reconciliation_error = str(exc)
-    batch_cancelled = _cancel_event.is_set() or any(item["status"] == "cancelled" for item in ordered)
+    # A late request must not rewrite a naturally all-terminal batch as
+    # cancelled.  Cancellation is evidenced by a task outcome, not by the
+    # operator's event alone.
+    batch_cancelled = any(item["status"] == "cancelled" for item in ordered)
     status = "cancelled" if batch_cancelled else ("failed" if reconciliation_error else "completed")
     counts = dict(sorted(Counter(item["status"] for item in ordered).items()))
     summary_path = batch_dir / "summary.json"

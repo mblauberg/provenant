@@ -10,6 +10,8 @@ import os
 import stat
 import subprocess
 import textwrap
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -201,6 +203,85 @@ def test_cancel_after_natural_completion_reports_already_terminal(tmp_path: Path
     assert not (run_dir / "dispatch/tasks/natural/attempt-001/cancel.request").exists()
 
 
+def test_cancel_removes_stale_marker_after_validated_terminal_attempt(tmp_path: Path) -> None:
+    run_dir = make_run(tmp_path)
+    attempt = write_attempt(run_dir, status="failed", result=None)
+    marker = attempt.parent / "cancel.request"
+    marker.touch()
+
+    result = invoke(
+        "run", "cancel", "--run-dir", str(run_dir), "--task-id", "task-1",
+        "--attempt-id", "attempt-001", "--wait-seconds", "0", cwd=tmp_path,
+    )
+
+    assert result.returncode == 0
+    assert json.loads(result.stdout)["status"] == "already_terminal"
+    assert not marker.exists()
+
+
+def test_cancel_waits_through_attempt_sidecar_gap(tmp_path: Path) -> None:
+    run_dir = make_run(tmp_path)
+    attempt = write_attempt(run_dir, status="failed", result=None)
+    sidecar = attempt.with_name("attempt.sha256")
+    sidecar_bytes = sidecar.read_bytes()
+    sidecar.unlink()
+    module_spec = importlib.util.spec_from_file_location("run_controls_sidecar_gap", SCRIPT)
+    assert module_spec and module_spec.loader
+    module = importlib.util.module_from_spec(module_spec)
+    module_spec.loader.exec_module(module)
+
+    def publish_sidecar() -> None:
+        time.sleep(0.1)
+        sidecar.write_bytes(sidecar_bytes)
+
+    publisher = threading.Thread(target=publish_sidecar)
+    publisher.start()
+    try:
+        record = module._wait_for_attempt_terminal(run_dir, "task-1", "attempt-001", 1.0)
+    finally:
+        publisher.join()
+    assert record is not None
+    assert record["status"] == "failed"
+
+
+def test_cancel_waits_through_late_summary_bundle_completion(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    run_dir = make_run(tmp_path)
+    attempt = write_attempt(run_dir, status="failed", result=None)
+    sidecar = attempt.with_name("attempt.sha256")
+    sidecar_bytes = sidecar.read_bytes()
+    sidecar.unlink()
+    batch_dir = run_dir / "dispatch/batches/batch-001"
+    batch_dir.mkdir(parents=True)
+    (batch_dir / "summary.json").write_text(json.dumps({
+        "schema_version": 1, "record_type": "dispatch-batch", "batch_id": "batch-001",
+        "status": "failed", "task_count": 1, "concurrency": 1,
+        "counts": {"failed": 1}, "tasks": [{
+            "task_id": "task-1", "status": "failed",
+            "attempt_path": "dispatch/tasks/task-1/attempt-001/attempt.json",
+        }],
+    }) + "\n", encoding="utf-8")
+    module_spec = importlib.util.spec_from_file_location("run_controls_late_summary", SCRIPT)
+    assert module_spec and module_spec.loader
+    module = importlib.util.module_from_spec(module_spec)
+    module_spec.loader.exec_module(module)
+    monkeypatch.chdir(tmp_path)
+
+    def publish_sidecar() -> None:
+        time.sleep(0.1)
+        sidecar.write_bytes(sidecar_bytes)
+
+    publisher = threading.Thread(target=publish_sidecar)
+    publisher.start()
+    try:
+        args = module.parser().parse_args([
+            "cancel", "--run-dir", str(run_dir), "--batch-id", "batch-001",
+            "--wait-seconds", "1",
+        ])
+        assert module.run(args) == 0
+    finally:
+        publisher.join()
+
+
 def test_cancel_rejects_unobserved_terminal_attempt_evidence(tmp_path: Path) -> None:
     run_dir = make_run(tmp_path)
     write_attempt(run_dir, status="cancelled", observed_exit=False)
@@ -213,6 +294,43 @@ def test_cancel_rejects_unobserved_terminal_attempt_evidence(tmp_path: Path) -> 
     assert result.returncode == 2
     assert json.loads(result.stdout)["status"] == "invalid_target"
     assert not (run_dir / "dispatch/tasks/task-1/attempt-001/cancel.request").exists()
+
+
+def test_retry_requires_observed_provider_exit(tmp_path: Path) -> None:
+    run_dir = make_run(tmp_path)
+    write_attempt(run_dir, status="failed", result=None, observed_exit=False)
+
+    result = invoke(
+        "run", "retry", "--run-dir", str(run_dir), "--task-id", "task-1",
+        "--attempt-id", "attempt-001", "--same-route", cwd=tmp_path,
+    )
+
+    assert result.returncode == 2
+    assert "observed provider exit" in json.loads(result.stdout)["message"]
+    assert not (run_dir / "dispatch/tasks/task-1/attempt-002").exists()
+
+
+def test_blocked_retry_requires_exact_retained_question_envelope(tmp_path: Path) -> None:
+    run_dir = make_run(tmp_path)
+    parent_question = {"code": "needs_input", "prompt": "Which source?"}
+    retained_question = {"code": "needs_input", "prompt": "A different source?"}
+    envelope = json.dumps({
+        "schema_version": 1, "record_type": "provenant-worker-terminal",
+        "classification": "question", "question": retained_question,
+    }) + "\n"
+    write_attempt(run_dir, status="blocked", result=envelope, question=parent_question)
+    response = tmp_path / "response.md"
+    response.write_text("Use the archive.\n", encoding="utf-8")
+
+    result = invoke(
+        "run", "retry", "--run-dir", str(run_dir), "--task-id", "task-1",
+        "--attempt-id", "attempt-001", "--same-route", "--response-file", str(response),
+        cwd=tmp_path,
+    )
+
+    assert result.returncode == 2
+    assert "retained envelope" in json.loads(result.stdout)["message"]
+    assert not (run_dir / "dispatch/tasks/task-1/attempt-002").exists()
 
 
 def test_cancel_rejects_closed_run_without_writing_marker(tmp_path: Path) -> None:
@@ -399,7 +517,10 @@ def test_inspect_displays_real_worker_question_and_canonical_continuation(tmp_pa
 def test_blocked_retry_accepts_response_stdin_and_nonblocked_rejects_response(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     run_dir = make_run(tmp_path)
     question = {"code": "needs_input", "prompt": "Which source?"}
-    parent = write_attempt(run_dir, status="blocked", result="question\n", question=question)
+    parent = write_attempt(run_dir, status="blocked", result=json.dumps({
+        "schema_version": 1, "record_type": "provenant-worker-terminal",
+        "classification": "question", "question": question,
+    }) + "\n", question=question)
     fake = tmp_path / "dispatch-run"
     captured = tmp_path / "captured-prompt"
     fake.write_text(
@@ -521,8 +642,11 @@ def test_blocked_retry_rejects_oversized_response_stdin_before_dispatch(tmp_path
 
 def test_blocked_retry_escapes_lone_surrogate_in_question_prompt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     run_dir = make_run(tmp_path)
-    write_attempt(run_dir, status="blocked", result="question\n",
-                  question={"code": "needs_input", "prompt": "bad\ud800"})
+    question = {"code": "needs_input", "prompt": "bad\ud800"}
+    write_attempt(run_dir, status="blocked", result=json.dumps({
+        "schema_version": 1, "record_type": "provenant-worker-terminal",
+        "classification": "question", "question": question,
+    }) + "\n", question=question)
     fake = tmp_path / "dispatch-run"
     captured = tmp_path / "captured-prompt"
     fake.write_text(
