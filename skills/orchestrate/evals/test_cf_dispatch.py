@@ -2,6 +2,7 @@
 """Behaviour tests for cf_dispatch.sh with stubbed CLIs."""
 import json
 import os
+import shlex
 import shutil
 import signal
 import stat
@@ -340,6 +341,72 @@ def test_invalid_routing_output_returns_a_structured_failure_record():
     assert result.returncode != 0
     assert record["status"] == "routing_record_invalid"
     assert record["read_only_guarantee"] == "none"
+
+
+def test_non_ok_routing_record_never_launches_provider_even_with_zero_exit():
+    with tempfile.TemporaryDirectory() as td:
+        invoked = Path(td) / "provider.invoked"
+        stub = f"""\
+            #!/usr/bin/env bash
+            touch {shlex.quote(str(invoked))}
+            cat >/dev/null
+            printf 'provider must not run\n'
+        """
+        result, record, _ = run_dispatch_with_stub(
+            stub,
+            provenant_stub="""\
+                #!/usr/bin/env bash
+                printf '%s\n' '{"status":"adapter_disabled","reason":"configured off","adapter_enabled":false,"resolved_model":"opus","model_family":"anthropic","endpoint_provider":"disabled","identity_source":"runtime-configuration","alias":"workhorse"}'
+                exit 0
+            """,
+        )
+
+        assert result.returncode != 0
+        assert record["status"] == "adapter_disabled"
+        assert record["reason"] == "configured off"
+        assert record["read_only_guarantee"] == "none"
+        assert not invoked.exists()
+
+
+def test_ok_routing_record_requires_complete_execution_identity():
+    complete_route = {
+        "status": "ok",
+        "resolved_model": "opus",
+        "model_family": "anthropic",
+        "endpoint_provider": "anthropic",
+        "identity_source": "runtime-configuration",
+        "alias": "workhorse",
+    }
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        for missing_field in (
+            "resolved_model", "model_family", "endpoint_provider", "identity_source",
+        ):
+            invoked = root / f"{missing_field}.invoked"
+            stub = f"""\
+                #!/usr/bin/env bash
+                touch {shlex.quote(str(invoked))}
+                cat >/dev/null
+                printf 'provider must not run\n'
+            """
+            route = {
+                key: value for key, value in complete_route.items()
+                if key != missing_field
+            }
+            route_payload = shlex.quote(json.dumps(route, separators=(",", ":")))
+            result, record, _ = run_dispatch_with_stub(
+                stub,
+                provenant_stub=f"""\
+                    #!/usr/bin/env bash
+                    printf '%s\\n' {route_payload}
+                    exit 0
+                """,
+            )
+
+            assert result.returncode != 0, missing_field
+            assert record["status"] == "routing_record_invalid", missing_field
+            assert record["read_only_guarantee"] == "none", missing_field
+            assert not invoked.exists(), missing_field
 
 
 def test_claude_other_primary_uses_opus_without_implicit_fable_route():
@@ -943,6 +1010,45 @@ def test_agy_success_envelope_with_nonzero_process_exit_is_failure():
         assert record["certification_eligible"] is False
         assert "MUST NOT PASS" not in out.read_text(encoding="utf-8")
         assert "status=error exit=7" in out.read_text(encoding="utf-8")
+
+
+def test_agy_success_envelope_with_error_never_publishes_response():
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        write_executable(
+            bin_dir / "agy",
+            """#!/usr/bin/env bash
+            if [ "$1" = "models" ]; then
+              printf 'gemini-3.7-flash-medium\n'
+              exit 0
+            fi
+            printf '%s\n' '{"status":"SUCCESS","response":"MUST NOT PASS","error":"quota exceeded"}'
+            """,
+        )
+        out = tmp / "out.txt"
+        env = fabric_free_env()
+        env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
+
+        result = subprocess.run(
+            [
+                str(SCRIPT), "--intent", "ordinary", "--tool", "agy",
+                "--model", "gemini-3.7-flash", "--effort", "medium",
+                "--orchestrator-family", "openai", "--out", str(out),
+                "--prompt", "Review",
+            ],
+            cwd=tmp, env=env, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+
+        record = json.loads(result.stdout)
+        assert result.returncode != 0
+        assert record["status"] == "auth_or_quota_error"
+        assert record["certification_eligible"] is False
+        written = out.read_text(encoding="utf-8")
+        assert "MUST NOT PASS" not in written
+        assert "provider error: quota exceeded" in written
 
 
 def test_agy_requires_one_well_typed_json_envelope():

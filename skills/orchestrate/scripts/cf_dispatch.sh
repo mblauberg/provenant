@@ -453,6 +453,13 @@ route = json.loads(
 )
 if not isinstance(route, dict):
     raise ValueError("route must be a JSON object")
+if route.get("status") == "ok":
+    for key in (
+        "resolved_model", "model_family", "endpoint_provider", "identity_source",
+    ):
+        value = route.get(key)
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"successful route requires non-empty {key}")
 keys = (
     "status", "resolved_model", "model_family", "endpoint_provider",
     "identity_source", "requested_effort", "effort", "effort_source",
@@ -605,7 +612,7 @@ run_one() {  # $1 tool $2 model $3 effort $4 private tempdir -> JSON, returns 0/
       fi
       [ -n "$route_alias" ] && MODEL_ALIAS="$route_alias"
       [ -n "$requested_model" ] || requested_model="$model"
-      if [ "$route_rc" -ne 0 ]; then
+      if [ "$route_rc" -ne 0 ] || [ "$status" != "ok" ]; then
         guarantee="none"
         printf '%s\n' "$route_json" >>"$diag"
         rc=1
@@ -802,8 +809,12 @@ else:
     else:
         provider_status = envelope.get("status")
         response = envelope.get("response")
+        error = str(envelope.get("error", "")).strip()
         if not isinstance(provider_status, str) or not isinstance(response, str):
             status = "invalid_envelope"
+            response = ""
+        elif provider_status.upper() == "SUCCESS" and error:
+            status = "auth_or_quota_error" if auth.search(error) else "error"
             response = ""
         elif provider_status.upper() == "SUCCESS" and exit_code != 0:
             status = "error"
@@ -814,7 +825,6 @@ else:
             status = "empty_output"
             response = ""
         else:
-            error = str(envelope.get("error", ""))
             if "timeout" in error.lower():
                 status = "timeout"
             elif auth.search(error) or auth.search(stderr) or auth.search(stdout):
