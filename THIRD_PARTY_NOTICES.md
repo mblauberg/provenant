@@ -17,18 +17,71 @@ redistributed component to its licence text and records how it was adapted.
 [Impeccable](https://github.com/pbakaus/impeccable), copyright 2025 Paul
 Bakaus, under Apache License 2.0. Its licence text is
 `LICENSES/impeccable-APACHE-2.0.txt` and its §4(d) attribution notice is in the
-top-level `NOTICE`.
+top-level `NOTICE`. Repository history proves the first public local import at
+commit `a39c7b7e6db2778467e43f5ed3a05143c05c07dd` (10 July 2026), but does not
+retain a recoverable upstream Impeccable commit. No upstream head is inferred.
+The component ledger at `skills/ui-ux-design/evals/provenance_components.yaml`
+records the exact harness-original exceptions. Attribution is centralised here
+and in that ledger. Modified derived files carry only a neutral local
+modification notice.
+`skills/ui-ux-design/SKILL.md`, `skills/ui-ux-design/evals/`,
+`skills/ui-ux-design/scripts/contained-source.mjs`,
+`skills/ui-ux-design/scripts/jsx-tag-scanner.mjs`,
+`skills/ui-ux-design/scripts/live-server-startup.mjs`, and
+`skills/ui-ux-design/tests/live-server-startup.test.mjs` are harness-original
+rather than upstream Impeccable expression.
 
 The bundled `skills/ui-ux-design/scripts/modern-screenshot.umd.js` is
-modern-screenshot 4.7.0 (<https://github.com/qq15725/modern-screenshot>),
+modern-screenshot 4.7.0 at peeled commit
+[`792d6db7411839c62940a6e930161f8e376e817f`](https://github.com/qq15725/modern-screenshot/tree/792d6db7411839c62940a6e930161f8e376e817f),
 copyright 2021-present wxm, under the MIT License. Its terms are in
 `LICENSES/modern-screenshot-MIT.txt`.
 
-The files `skills/ui-ux-design/data/ui-styles.csv`,
-`font-pairings.csv`, `color-palettes.csv` and `chart-types.csv` contain data
-derived from [UI UX Pro Max v2.0.0](https://github.com/nextlevelbuilder/ui-ux-pro-max-skill/tree/v2.0.0/.claude/skills/ui-ux-pro-max/data),
-copyright 2024 Next Level Builder, under the MIT License. Its terms are in
-`LICENSES/ui-ux-pro-max-MIT.txt`.
+Four data files formerly shipped under `skills/ui-ux-design/data/` were derived
+from [UI UX Pro Max v2.0.0 at commit `539d52c424c18a14626601a0494ff70561b86d8b`](https://github.com/nextlevelbuilder/ui-ux-pro-max-skill/tree/539d52c424c18a14626601a0494ff70561b86d8b/.claude/skills/ui-ux-pro-max/data),
+copyright 2024 Next Level Builder, under the MIT License. They were removed
+from the active package when the retired action router was consolidated because
+no remaining owner or lookup call site consumed them. The historical terms
+remain in `LICENSES/ui-ux-pro-max-MIT.txt`; no UI UX Pro Max rows are
+redistributed by the current skill.
+
+### Research-informed methods
+
+The consolidated references independently paraphrase small methods inspected
+at the immutable commits below. These repositories are research inputs, not
+redistributed components: no source expression, code, prompt pack, catalogue,
+demo, runtime, or asset was copied, so their MIT texts are not carried as
+component licences.
+
+All seven sources in this section were retrieved on 2026-08-29.
+
+- [Designer Skills](https://github.com/Owl-Listener/designer-skills/tree/20e34c4a587e5eb09fcdf8351fa97b3ad761b31e),
+  commit `20e34c4a587e5eb09fcdf8351fa97b3ad761b31e`: knowledge-owner and workflow
+  boundary taxonomy.
+- [Emil Kowalski Skills](https://github.com/emilkowalski/skills/tree/d23d7f88a2e21c9e4b1418c7abe420f5c1052ba7),
+  commit `d23d7f88a2e21c9e4b1418c7abe420f5c1052ba7`: motion purpose, frequency,
+  restraint, and slowed inspection.
+- [Garden Skills](https://github.com/ConardLi/garden-skills/tree/aaf9a82f5efd73e87cc0998edc398e75bfc35901),
+  commit `aaf9a82f5efd73e87cc0998edc398e75bfc35901`: protected-contract discovery,
+  preserve/extend/overhaul, asset grounding, and browser acceptance.
+- [Jakub Krehel Skills](https://github.com/jakubkrehel/skills/tree/ca483852de23d48ab4f4ea71da37dad12bd70a95),
+  commit `ca483852de23d48ab4f4ea71da37dad12bd70a95`: bounded review scope,
+  applicable-state coverage, and one-component stress testing.
+- [Elaya AI Design Skills](https://github.com/elayadesign/ai-design-skills/tree/1c1e97cb9878e236552c772092dda7adcdddbcb2),
+  commit `1c1e97cb9878e236552c772092dda7adcdddbcb2`: narrative intent and adjacent
+  claim-to-proof placement.
+- [Meng To Skills](https://github.com/MengTo/Skills/tree/4c716b516b6b0143f3037631306b3730d2832344),
+  commit `4c716b516b6b0143f3037631306b3730d2832344`: settled capture, separation of
+  making from judging, and binary acceptance. The later mixed-lineage additions
+  at `321c769739b823de5eb94eb3a52aa1974fe783a2` were inspected but not adapted
+  or shipped.
+- [Tastemaker](https://github.com/codeswithroh/tastemaker/tree/45313ce9f60971134704a17f7b1a64c30909c240),
+  commit `45313ce9f60971134704a17f7b1a64c30909c240`: field-specific evidence limits
+  and stamp-versus-render integrity.
+
+Nested Three.js, GSAP, image-generation, and other bundled source-repository
+assets were not imported and are not claimed under a parent repository's MIT
+licence.
 
 ## Vercel React best practices
 

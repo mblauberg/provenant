@@ -1,3 +1,4 @@
+// Modified for Provenant.
 /**
  * CLI helper: insert/remove the live variant mode script tag in the project's
  * main HTML entry point.
@@ -17,6 +18,17 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { resolveLiveConfigPath } from './impeccable-paths.mjs';
+import {
+  hasExecutableJsxTagAtOffset,
+  hasExecutableJsxMarkerAtOffset,
+  frameworkTemplateContextAtOffset,
+  htmlLexicalContextAtOffset,
+  isOffsetInsideAstroFrontmatter,
+} from './jsx-tag-scanner.mjs';
+import {
+  readContainedSource,
+  replaceContainedSources,
+} from './contained-source.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CONFIG_PATH = resolveLiveConfigPath({ cwd: process.cwd(), scriptsDir: __dirname });
@@ -41,9 +53,11 @@ export async function injectCli() {
 
 Insert or remove the live mode script tag in the project's HTML entry point.
 Reads configuration from .impeccable/live/config.json.
+Every config.files target must resolve to an existing project-relative regular file;
+symlinks and multiply-linked files are rejected before any source change.
 
 Modes:
-  --port PORT   Insert script tag pointing at http://localhost:PORT/live.js
+  --port PORT   Insert script tag pointing at http://127.0.0.1:PORT/live.js
   --token TOKEN Authenticate the injected script with the current live server
   --remove      Remove the script tag (if present)
   --check       Print whether .impeccable/live/config.json exists and its content
@@ -84,27 +98,46 @@ Output (JSON):
   validateConfig(config);
 
   const resolvedFiles = resolveFiles(process.cwd(), config);
-  // Resolve and validate the complete target set before changing any file. A
-  // later escaping target must not leave earlier project files half-mutated.
-  const targets = resolvedFiles.map((relFile) => ({
-    relFile,
-    absFile: resolveProjectFileTarget(process.cwd(), relFile),
-  }));
-
+  if (resolvedFiles.length === 0) {
+    console.error(JSON.stringify({ ok: false, error: 'config_no_targets' }));
+    process.exit(1);
+  }
   if (args.includes('--remove')) {
-    const results = targets.map(({ relFile, absFile }) => {
-      if (!fs.existsSync(absFile)) return { file: relFile, error: 'file_not_found' };
-      const content = fs.readFileSync(absFile, 'utf-8');
-      const detagged = removeTag(content, config.commentSyntax);
-      const updated = revertCspMeta(detagged);
-      if (updated === content) return { file: relFile, removed: false, note: 'no tag present' };
-      fs.writeFileSync(absFile, updated, 'utf-8');
-      return {
+    const replacements = [];
+    const results = [];
+    for (const relFile of resolvedFiles) {
+      let snapshot;
+      try {
+        snapshot = readContainedSource(process.cwd(), relFile, { relativeOnly: true });
+      } catch (error) {
+        // A deleted literal target must not strand live markup in the other
+        // configured pages. Only a genuinely absent path is skippable;
+        // dangling symlinks and unreadable or malformed targets still fail.
+        try {
+          fs.lstatSync(path.resolve(process.cwd(), relFile));
+        } catch (statError) {
+          if (error?.code === 'source_path_invalid' && statError?.code === 'ENOENT') {
+            results.push({ file: relFile, removed: false, note: 'file missing' });
+            continue;
+          }
+        }
+        throw error;
+      }
+      const content = snapshot.bytes.toString('utf-8');
+      const detagged = removeTag(content, config.commentSyntax, relFile);
+      const updated = revertCspMeta(detagged, relFile);
+      if (updated === content) {
+        results.push({ file: relFile, removed: false, note: 'no tag present' });
+        continue;
+      }
+      replacements.push({ snapshot, content: updated });
+      results.push({
         file: relFile,
         removed: detagged !== content,
         cspReverted: updated !== detagged,
-      };
-    });
+      });
+    }
+    replaceContainedSources(replacements);
     console.log(JSON.stringify({ ok: true, results }));
     return;
   }
@@ -123,25 +156,35 @@ Output (JSON):
     process.exit(1);
   }
 
-  const results = targets.map(({ relFile, absFile }) => {
-    if (!fs.existsSync(absFile)) return { file: relFile, error: 'file_not_found' };
-    const content = fs.readFileSync(absFile, 'utf-8');
-    const withoutOld = revertCspMeta(removeTag(content, config.commentSyntax));
-    const withTag = insertTag(withoutOld, config, port, token);
+  // Insert remains all-or-nothing: validate every target before changing any
+  // source so a missing or unsafe later entry cannot leave partial markup.
+  const targets = resolvedFiles.map((relFile) => ({
+    relFile,
+    snapshot: readContainedSource(process.cwd(), relFile, { relativeOnly: true }),
+  }));
+  const replacements = [];
+  const results = targets.map(({ relFile, snapshot }) => {
+    const content = snapshot.bytes.toString('utf-8');
+    const withoutOld = revertCspMeta(removeTag(content, config.commentSyntax, relFile), relFile);
+    const withTag = insertTag(withoutOld, config, port, token, relFile);
     if (withTag === withoutOld) {
       return { file: relFile, error: 'insertion_point_not_found', anchor: config.insertBefore || config.insertAfter };
     }
-    const updated = patchCspMeta(withTag, port);
-    fs.writeFileSync(absFile, updated, 'utf-8');
+    const updated = patchCspMeta(withTag, port, relFile);
+    replacements.push({ snapshot, content: updated });
     return {
       file: relFile,
       inserted: true,
       cspPatched: updated !== withTag,
     };
   });
-  const anyInserted = results.some((r) => r.inserted);
-  console.log(JSON.stringify({ ok: anyInserted, port, results }));
-  if (!anyInserted) process.exit(1);
+  const failures = results.filter((result) => result.error);
+  if (failures.length > 0 || replacements.length !== targets.length) {
+    console.error(JSON.stringify({ ok: false, error: 'mutation_preflight_failed', results }));
+    process.exit(1);
+  }
+  replaceContainedSources(replacements);
+  console.log(JSON.stringify({ ok: true, port, results }));
 }
 
 /**
@@ -156,8 +199,10 @@ export function resolveFiles(rootDir, config) {
   const userExcludes = Array.isArray(config.exclude) ? config.exclude : [];
   const allExcludes = [...HARD_EXCLUDES, ...userExcludes];
   const excludeRegexes = allExcludes.map(globToRegex);
+  const hardExcludeRegexes = HARD_EXCLUDES.map(globToRegex);
 
   const isExcluded = (relPath) => excludeRegexes.some((re) => re.test(relPath));
+  const isHardExcluded = (relPath) => hardExcludeRegexes.some((re) => re.test(relPath));
   const isGlob = (s) => /[*?[]/.test(s);
 
   const seen = new Set();
@@ -166,8 +211,10 @@ export function resolveFiles(rootDir, config) {
     validateProjectRelativePath(pat, 'config.files');
     if (!isGlob(pat)) {
       // Literal path — include even if it doesn't exist yet; the caller
-      // reports file_not_found per-entry. Exclude list doesn't apply to
-      // explicit literal entries (user named it on purpose).
+      // reports file_not_found per-entry. User excludes do not override an
+      // explicit target, but dependency metadata is a hard boundary even
+      // when named literally.
+      if (isHardExcluded(pat.split(path.sep).join('/'))) continue;
       if (!seen.has(pat)) {
         seen.add(pat);
         out.push(pat);
@@ -332,29 +379,73 @@ function buildTagBlock(syntax, port, token) {
   const close = commentClose(syntax);
   return (
     open + ' ' + MARKER_OPEN_TEXT + ' ' + close + '\n' +
-    '<script src="http://localhost:' + port + '/live.js?token=' + encodeURIComponent(token) + '"></script>\n' +
+    '<script src="http://127.0.0.1:' + port + '/live.js?token=' + encodeURIComponent(token) + '"></script>\n' +
     open + ' ' + MARKER_CLOSE_TEXT + ' ' + close + '\n'
   );
 }
 
-function insertTag(content, config, port, token) {
+function insertTag(content, config, port, token, filePath = '') {
   const block = buildTagBlock(config.commentSyntax, port, token);
   // insertBefore: match the LAST occurrence. Anchors like `</body>` naturally
   // belong at the end, and the same literal can appear earlier in code blocks
   // within rendered documentation pages.
   if (config.insertBefore) {
-    const idx = content.lastIndexOf(config.insertBefore);
-    if (idx === -1) return content;
+    const matches = findExecutableAnchorOffsets(
+      content,
+      config.insertBefore,
+      filePath,
+      config.commentSyntax,
+    );
+    if (matches.length === 0) return content;
+    if (matches.length > 1) throw ambiguousAnchor();
+    const [idx] = matches;
     return content.slice(0, idx) + block + content.slice(idx);
   }
   // insertAfter: match the FIRST occurrence — typical anchors like `<head>` or
   // `<body>` open near the top of the document.
-  const idx = content.indexOf(config.insertAfter);
-  if (idx === -1) return content;
+  const matches = findExecutableAnchorOffsets(
+    content,
+    config.insertAfter,
+    filePath,
+    config.commentSyntax,
+  );
+  if (matches.length === 0) return content;
+  if (matches.length > 1) throw ambiguousAnchor();
+  const [idx] = matches;
   const after = idx + config.insertAfter.length;
   // Preserve a single trailing newline if the anchor didn't end with one
-  const prefix = content[after] === '\n' ? content.slice(0, after + 1) : content.slice(0, after) + '\n';
-  return prefix + block + content.slice(prefix.length);
+  const hasNewline = content[after] === '\n';
+  const prefix = hasNewline ? content.slice(0, after + 1) : content.slice(0, after) + '\n';
+  const suffixStart = hasNewline ? after + 1 : after;
+  return prefix + block + content.slice(suffixStart);
+}
+
+function ambiguousAnchor() {
+  const error = new Error('Insertion anchor is ambiguous in executable markup');
+  error.code = 'insertion_anchor_ambiguous';
+  return error;
+}
+
+function isExecutableMarkupAtOffset(content, offset, filePath, syntax) {
+  if (syntax === 'jsx') return hasExecutableJsxTagAtOffset(content, offset);
+  const extension = path.extname(filePath).toLowerCase();
+  if (['.astro', '.svelte', '.vue'].includes(extension)) {
+    return !isOffsetInsideAstroFrontmatter(content, offset)
+      && frameworkTemplateContextAtOffset(content, offset) === 'markup';
+  }
+  return htmlLexicalContextAtOffset(content, offset) === 'markup';
+}
+
+function findExecutableAnchorOffsets(content, anchor, filePath, syntax) {
+  const matches = [];
+  for (let offset = content.indexOf(anchor); offset !== -1; offset = content.indexOf(anchor, offset + 1)) {
+    try {
+      if (isExecutableMarkupAtOffset(content, offset, filePath, syntax)) matches.push(offset);
+    } catch {
+      // Malformed source cannot prove this occurrence is executable markup.
+    }
+  }
+  return matches;
 }
 
 /**
@@ -368,16 +459,48 @@ function insertTag(content, config, port, token) {
  * unindented. Replacing the whole block (plus its trailing newline) with just
  * the captured indent hands the indent back to the anchor that follows.
  */
-function removeTag(content, _syntax) {
+function removeTag(content, _syntax, filePath = '') {
+  const extension = path.extname(filePath).toLowerCase();
+  const isFramework = ['.astro', '.svelte', '.vue'].includes(extension);
   const patterns = [
-    /([ \t]*)<!--\s*impeccable-live-start\s*-->[\s\S]*?<!--\s*impeccable-live-end\s*-->[ \t]*\n/,
-    /([ \t]*)\{\/\*\s*impeccable-live-start\s*\*\/\}[\s\S]*?\{\/\*\s*impeccable-live-end\s*\*\/\}[ \t]*\n/,
+    {
+      syntax: 'jsx',
+      pattern: /([ \t]*)\{\/\* impeccable-live-start \*\/\}\r?\n[ \t]*<script src="http:\/\/127\.0\.0\.1:([0-9]{1,5})\/live\.js\?token=([0-9a-f-]+)"><\/script>\r?\n[ \t]*\{\/\* impeccable-live-end \*\/\}[ \t]*(?:\r?\n|$)/gi,
+    },
+    {
+      syntax: 'html',
+      pattern: /([ \t]*)<!-- impeccable-live-start -->\r?\n[ \t]*<script src="http:\/\/127\.0\.0\.1:([0-9]{1,5})\/live\.js\?token=([0-9a-f-]+)"><\/script>\r?\n[ \t]*<!-- impeccable-live-end -->[ \t]*(?:\r?\n|$)/gi,
+    },
   ];
-  for (const pat of patterns) {
-    const next = content.replace(pat, '$1');
-    if (next !== content) return next;
+  const matches = patterns.flatMap(({ syntax, pattern }) => (
+    [...content.matchAll(pattern)].filter((match) => {
+      const port = Number(match[2]);
+      if (!Number.isInteger(port) || port < 1 || port > 65535 || !isValidServerToken(match[3])) {
+        return false;
+      }
+      const markerOffset = match.index + match[1].length;
+      if (syntax === 'jsx') {
+        return hasExecutableJsxMarkerAtOffset(
+          content,
+          markerOffset,
+          '{/* impeccable-live-start */}'.length,
+        );
+      }
+      if (isFramework) {
+        return !isOffsetInsideAstroFrontmatter(content, markerOffset)
+          && frameworkTemplateContextAtOffset(content, markerOffset) === 'markup';
+      }
+      return htmlLexicalContextAtOffset(content, markerOffset) === 'markup';
+    })
+  ));
+  if (matches.length === 0) return content;
+  if (matches.length !== 1) {
+    const error = new Error('Multiple executable live marker blocks found');
+    error.code = 'live_marker_ambiguous';
+    throw error;
   }
-  return content;
+  const [match] = matches;
+  return content.slice(0, match.index) + match[1] + content.slice(match.index + match[0].length);
 }
 
 // ---------------------------------------------------------------------------
@@ -385,9 +508,9 @@ function removeTag(content, _syntax) {
 //
 // When the user's HTML carries `<meta http-equiv="Content-Security-Policy">`,
 // the cross-origin load of /live.js (and the SSE/POST connection back to
-// localhost:PORT) is blocked unless the CSP explicitly allows that origin.
+// 127.0.0.1:PORT) is blocked unless the CSP explicitly allows that origin.
 //
-// On insert: append `http://localhost:PORT` to `script-src` and `connect-src`,
+// On insert: append `http://127.0.0.1:PORT` to `script-src` and `connect-src`,
 // and stash the original `content` value in a `data-impeccable-csp-original`
 // attribute (base64) so revert is exact.
 //
@@ -402,42 +525,110 @@ function removeTag(content, _syntax) {
 
 const CSP_MARKER_ATTR = 'data-impeccable-csp-original';
 
-function findCspMetaTags(content) {
+function decodeCanonicalUtf8Base64(value) {
+  const canonicalBase64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
+  try {
+    if (!canonicalBase64.test(value)) throw new Error('non-canonical base64');
+    const bytes = Buffer.from(value, 'base64');
+    if (bytes.toString('base64') !== value) throw new Error('non-canonical base64');
+    const decoded = bytes.toString('utf8');
+    if (!Buffer.from(decoded, 'utf8').equals(bytes)) throw new Error('invalid UTF-8');
+    return decoded;
+  } catch (cause) {
+    const error = new Error('Malformed Impeccable CSP restoration marker', { cause });
+    error.code = 'csp_marker_invalid';
+    throw error;
+  }
+}
+
+function findCspMetaTags(content, filePath = '') {
   const out = [];
   const tagRe = /<meta\s+([^>]*?)\/?>/gis;
   let m;
   while ((m = tagRe.exec(content)) !== null) {
     const attrs = m[1];
-    if (!/(http-equiv|httpEquiv)\s*=\s*(['"])Content-Security-Policy\2/i.test(attrs)) continue;
+    const httpEquiv = getAttr(attrs, 'http-equiv') || getAttr(attrs, 'httpEquiv');
+    if (httpEquiv?.value.toLowerCase() !== 'content-security-policy') continue;
+    const syntax = ['.jsx', '.tsx'].includes(path.extname(filePath).toLowerCase())
+      ? 'jsx'
+      : 'html';
+    try {
+      if (!isExecutableMarkupAtOffset(content, m.index, filePath, syntax)) continue;
+    } catch {
+      continue;
+    }
     out.push({ start: m.index, end: m.index + m[0].length, full: m[0], attrs });
   }
   return out;
 }
 
 function getAttr(attrs, name) {
-  const re = new RegExp(`\\b${name}\\s*=\\s*(['"])([\\s\\S]*?)\\1`, 'i');
-  const m = attrs.match(re);
-  return m ? { quote: m[1], value: m[2], full: m[0] } : null;
+  const re = /([^\s=/>]+)\s*=\s*(?:(['"])([\s\S]*?)\2|([^\s"'=<>`]+))/g;
+  let match;
+  while ((match = re.exec(attrs)) !== null) {
+    if (match[1].toLowerCase() !== name.toLowerCase()) continue;
+    return {
+      start: match.index,
+      end: match.index + match[0].length,
+      name: match[1],
+      quote: match[2] || '',
+      value: match[2] ? match[3] : match[4],
+      full: match[0],
+    };
+  }
+  return null;
+}
+
+function findDirective(csp, directive) {
+  const re = new RegExp(`(^|;)(\\s*)(${directive})(?:\\s+([^;]*))?(?=;|$)`, 'i');
+  const m = csp.match(re);
+  return m ? {
+    match: m,
+    start: m.index,
+    end: m.index + m[0].length,
+    tokens: (m[4] || '').trim().split(/\s+/).filter(Boolean),
+  } : null;
 }
 
 function appendOriginToDirective(csp, directive, origin) {
-  const re = new RegExp(`(^|;)(\\s*)(${directive})\\s+([^;]*)`, 'i');
-  const m = csp.match(re);
+  const found = findDirective(csp, directive);
+  const m = found?.match;
   if (m) {
-    const tokens = m[4].trim().split(/\s+/);
+    const tokens = found.tokens;
     if (tokens.includes(origin)) return csp;
-    return csp.replace(re, `${m[1]}${m[2]}${m[3]} ${[...tokens, origin].join(' ')}`);
+    const expanded = tokens.filter((token) => token.toLowerCase() !== "'none'");
+    const replacement = `${m[1]}${m[2]}${m[3]} ${[...expanded, origin].join(' ')}`;
+    return csp.slice(0, found.start) + replacement + csp.slice(found.end);
   }
-  // Directive missing — add it. Use 'self' + origin so we don't inadvertently
-  // narrow the policy compared to the default-src fallback (most users with
-  // an explicit CSP have 'self' there).
-  return csp.trim().replace(/;?\s*$/, '') + `; ${directive} 'self' ${origin}`;
+  const defaultMatch = csp.match(/(^|;)\s*default-src\s+([^;]*)/i);
+  // With no default-src, a missing fetch directive is already unrestricted,
+  // so adding one would narrow the user's policy and is unnecessary.
+  if (!defaultMatch) return csp;
+  const inherited = defaultMatch[2]
+    .trim()
+    .split(/\s+/)
+    .filter((token) => token && token.toLowerCase() !== "'none'");
+  if (!inherited.includes(origin)) inherited.push(origin);
+  return csp.trim().replace(/;?\s*$/, '')
+    + `; ${directive} ${inherited.join(' ')}`;
 }
 
-export function patchCspMeta(content, port) {
-  const tags = findCspMetaTags(content);
+function effectiveScriptDirective(csp) {
+  for (const directive of ['script-src-elem', 'script-src', 'default-src']) {
+    const found = findDirective(csp, directive);
+    if (found) return { directive, tokens: found.tokens };
+  }
+  return null;
+}
+
+function replaceAttr(attrs, attr, replacement) {
+  return attrs.slice(0, attr.start) + replacement + attrs.slice(attr.end);
+}
+
+export function patchCspMeta(content, port, filePath = '') {
+  const tags = findCspMetaTags(content, filePath);
   if (tags.length === 0) return content;
-  const origin = `http://localhost:${port}`;
+  const origin = `http://127.0.0.1:${port}`;
 
   // Walk last-to-first so prior splices don't invalidate later indices.
   let result = content;
@@ -449,8 +640,18 @@ export function patchCspMeta(content, port) {
     if (!contentAttr) continue;
 
     const original = contentAttr.value;
+    const effectiveScript = effectiveScriptDirective(original);
+    if (effectiveScript?.tokens.some((token) => token.toLowerCase() === "'strict-dynamic'")) {
+      const error = new Error('CSP strict-dynamic requires a nonce-aware live script');
+      error.code = 'csp_strict_dynamic_unsupported';
+      throw error;
+    }
     let patched = original;
-    patched = appendOriginToDirective(patched, 'script-src', origin);
+    patched = appendOriginToDirective(
+      patched,
+      effectiveScript?.directive === 'script-src-elem' ? 'script-src-elem' : 'script-src',
+      origin,
+    );
     patched = appendOriginToDirective(patched, 'connect-src', origin);
     // The shader overlay during 'generating' creates a screenshot via
     // URL.createObjectURL, producing a `blob:` URL — img-src 'self' rejects
@@ -458,7 +659,8 @@ export function patchCspMeta(content, port) {
     patched = appendOriginToDirective(patched, 'img-src', 'blob:');
     if (patched === original) continue;
 
-    const newContentAttr = `content=${contentAttr.quote}${patched}${contentAttr.quote}`;
+    const outputQuote = contentAttr.quote || '"';
+    const newContentAttr = `content=${outputQuote}${patched}${outputQuote}`;
     const marker = `${CSP_MARKER_ATTR}="${Buffer.from(original, 'utf-8').toString('base64')}"`;
     // The tagRe captures any whitespace between the last attribute and the
     // closing `/>` as part of `attrs`. Naively appending ` ${marker}` after
@@ -469,7 +671,7 @@ export function patchCspMeta(content, port) {
     // `<meta … />` round-trips byte-for-byte.
     const trailingWs = (attrs.match(/[ \t]*$/) || [''])[0];
     const attrsBody = attrs.slice(0, attrs.length - trailingWs.length);
-    const newAttrs = attrsBody.replace(contentAttr.full, newContentAttr) + ' ' + marker + trailingWs;
+    const newAttrs = replaceAttr(attrsBody, contentAttr, newContentAttr) + ' ' + marker + trailingWs;
     const newTag = tag.full.replace(attrs, newAttrs);
 
     result = result.slice(0, tag.start) + newTag + result.slice(tag.end);
@@ -477,8 +679,8 @@ export function patchCspMeta(content, port) {
   return result;
 }
 
-export function revertCspMeta(content) {
-  const tags = findCspMetaTags(content);
+export function revertCspMeta(content, filePath = '') {
+  const tags = findCspMetaTags(content, filePath);
   if (tags.length === 0) return content;
 
   let result = content;
@@ -489,14 +691,21 @@ export function revertCspMeta(content) {
     const contentAttr = getAttr(tag.attrs, 'content');
     if (!contentAttr) continue;
 
-    let originalValue;
-    try { originalValue = Buffer.from(origAttr.value, 'base64').toString('utf-8'); }
-    catch { continue; }
+    const originalValue = decodeCanonicalUtf8Base64(origAttr.value);
 
-    const newContentAttr = `content=${contentAttr.quote}${originalValue}${contentAttr.quote}`;
-    let newAttrs = tag.attrs.replace(contentAttr.full, newContentAttr);
-    // Drop the marker attribute and any single space immediately preceding it.
-    newAttrs = newAttrs.replace(new RegExp(`\\s*${origAttr.full}`), '');
+    const outputQuote = contentAttr.quote || '"';
+    const newContentAttr = `content=${outputQuote}${originalValue}${outputQuote}`;
+    const markerStart = origAttr.start > 0 && tag.attrs[origAttr.start - 1] === ' '
+      ? origAttr.start - 1
+      : origAttr.start;
+    const edits = [
+      { start: contentAttr.start, end: contentAttr.end, replacement: newContentAttr },
+      { start: markerStart, end: origAttr.end, replacement: '' },
+    ].sort((left, right) => right.start - left.start);
+    let newAttrs = tag.attrs;
+    for (const edit of edits) {
+      newAttrs = newAttrs.slice(0, edit.start) + edit.replacement + newAttrs.slice(edit.end);
+    }
     const newTag = tag.full.replace(tag.attrs, newAttrs);
 
     result = result.slice(0, tag.start) + newTag + result.slice(tag.end);
@@ -510,7 +719,15 @@ export function revertCspMeta(content) {
 
 const _running = process.argv[1];
 if (_running?.endsWith('live-inject.mjs') || _running?.endsWith('live-inject.mjs/')) {
-  injectCli();
+  injectCli().catch((error) => {
+    console.error(JSON.stringify({
+      ok: false,
+      error: error.code || 'inject_failed',
+      message: error.message,
+      ...(error.rollbackErrors ? { rollbackErrors: error.rollbackErrors } : {}),
+    }));
+    process.exit(1);
+  });
 }
 
 export { insertTag, removeTag, validateConfig, buildTagBlock };

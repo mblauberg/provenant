@@ -1,62 +1,47 @@
 ---
 name: ui-ux-design
-description: "Use for frontend UI/UX: read-only review (default — visual, accessibility, responsive, interaction) or authorised design, redesign, and live iteration. Not for source-diff review or React profiling; use code-review or react-performance."
+description: "Use for UI/UX: read-only review by default (visual, accessibility, responsive, interaction), or design, redesign, design systems, and live iteration. Pair changes with implement. Source-diff review: code-review; React profiling: react-performance."
 ---
-
-<!-- Modified from Impeccable for this harness; see the repository THIRD_PARTY_NOTICES.md. -->
 
 # UI/UX design
 
-Review or design production-grade frontend interfaces. Two branches share one
-entry point; the model picks the branch from what the request authorises,
-never a slash command.
+Judge or shape frontend experiences against approved product intent, the
+project's current design owners, and observable UI evidence.
 
-## Branches
+## Review or change
 
-- **review** (default, read-only). Evidence-bearing critique of the rendered
-  UI: visual hierarchy, accessibility, responsiveness, interaction states,
-  copy and brand fit. No `Write`/`Edit`/`NotebookEdit` calls. Load
-  [review](reference/review.md).
-- **design/make** (write authority required). Design, implement, redesign or
-  polish an interface, including the interactive `live` codegen protocol.
-  Load [setup](reference/setup.md), then [command
-  routing](reference/command-routing.md); for live browser work,
-  [live](reference/live.md).
+**Review** covers critique, audit, comparison, and advice without requested
+source changes. It is read-only. Inspect source and rendered state using
+non-mutating navigation, GETs, and screenshots, with any output or cache outside
+the reviewed project tree. Do not change project or external state. Write only
+an assigned report outside that tree. Load [review](references/review.md).
 
-A request framed as review stays on the review branch even when a fix looks
-obvious; escalate to design/make only under an explicit authority grant
-naming `implement` (or this skill under `implement`) as action-owner. Never
-infer write authority from review findings alone.
+**Design** covers directions and requested UI changes. Advice without source
+changes remains read-only. A request to build, redesign, fix, polish, or
+otherwise change the product uses `implement` as primary and this skill as its
+design companion. Live iteration belongs to that change branch; load
+[live](references/live.md). When review and changes are combined, keep
+implementation primary and perform a fresh read-only review afterwards. An
+explicit read-only constraint wins; otherwise ambiguous intent defaults to
+review.
 
-## Lifecycle boundary
+## Ground and complete the work
 
-This skill supplies the frontend review and design methods; it is not a
-delivery lifecycle. Run every source-changing command inside `implement`.
-Route unsettled design intent through `scope`, design-document placement
-through `engineering-docs`, general source-diff review through `code-review`,
-and measured React performance work through `react-performance`. This skill
-cannot accept, release or certify its own work.
+For design or changes, start with the approved outcome, canonical local
+components and tokens, rendered pixels and states, supported users, and
+viewports. Classify the work as preserve, extend, or overhaul; preserve is the
+default for an existing product. Load
+[reference grounding](references/reference-grounding.md) and
+[design](references/design.md), including its reuse and composition guidance.
 
-## Detector evidence engine
+Load only the depth the request needs: [surfaces](references/surfaces.md),
+[visual system](references/visual-system.md), [design systems](references/design-systems.md),
+[interaction and states](references/interaction-states.md),
+[responsive accessibility](references/responsive-accessibility.md),
+[motion](references/motion.md), [content and conversion](references/content-conversion.md),
+or [visual QA](references/visual-qa.md).
 
-`scripts/detector/` is an antipattern and contrast-ratio engine (static
-HTML/CSS analysis, regex text scanning, full browser rendering) shared by
-both branches:
-
-```bash
-node "${AGENTS_HOME:-$HOME/.agents}/skills/ui-ux-design/scripts/detect.mjs" [file-or-dir-or-url...]
-```
-
-Review treats it as one evidence lane among several, never a substitute for
-manual inspection. Design/make may run it after edits to check for
-contrast/antipattern regressions; a clean result is evidence, not proof of
-completion.
-
-## Routing (design/make)
-
-[Command routing](reference/command-routing.md) holds the full command
-catalogue, lookup tables and dispatch rules. No argument shows the grouped
-menu; a known first word follows its reference; an unknown first word is
-general design context. Implement complexity proportional to the chosen
-aesthetic; interpret context creatively and reject category-derived
-defaults.
+Label evidence as `verified` or `judgement`, and each selected lane as `tested`,
+`failed`, `not tested`, or `not applicable`. Deterministic checks and user
+acceptance remain with the enclosing implementation lifecycle; design does not
+certify itself.

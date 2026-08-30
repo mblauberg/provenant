@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// Modified for Provenant.
 /**
  * Live variant mode server (self-contained, zero dependencies).
  *
@@ -17,21 +18,24 @@ import http from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { spawn, execFileSync } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import net from 'node:net';
 import { fileURLToPath } from 'node:url';
 import { parseDesignMd } from './design-parser.mjs';
 import { loadContext, resolveContextDir } from './load-context.mjs';
 import { resolveFiles } from './live-inject.mjs';
-import { createLiveSessionStore } from './live-session-store.mjs';
+import { createLiveSessionStore, summarizeLiveSession } from './live-session-store.mjs';
+import { readContainedSource } from './contained-source.mjs';
 import {
+  ensureCanonicalLiveStateRoot,
   getDesignSidecarPath,
-  getLiveAnnotationsDir,
+  getLiveServerPath,
   readLiveServerInfo,
-  removeLiveServerInfo,
   resolveLiveConfigPath,
   resolveDesignSidecarPath,
   writeLiveServerInfo,
+  writeLiveAgentServerInfo,
 } from './impeccable-paths.mjs';
 import {
   classifyStartupOutcome,
@@ -45,7 +49,11 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // DESIGN.json fallback for existing projects.
 const CONTEXT_DIR = resolveContextDir(process.cwd());
 const DEFAULT_POLL_TIMEOUT = 600_000;   // 10 min — agent re-polls on timeout anyway
+const DEFAULT_LEASE_MS = 600_000;
+const MAX_POLL_TIMEOUT = 600_000;
+const MAX_LEASE_MS = 600_000;
 const SSE_HEARTBEAT_INTERVAL = 30_000;  // keepalive ping every 30s
+const MAX_RECENT_TERMINAL_OUTCOMES = 128;
 const SAFE_SOURCE_EXTENSIONS = new Set([
   '.astro', '.htm', '.html', '.jsx', '.svelte', '.tsx', '.vue',
 ]);
@@ -55,14 +63,94 @@ const SAFE_SOURCE_EXTENSIONS = new Set([
 // ---------------------------------------------------------------------------
 
 async function findOpenPort(start = 8400) {
-  return new Promise((resolve) => {
+  if (!Number.isInteger(start) || start < 1 || start > 65535) {
+    throw new Error('No usable live server port remains');
+  }
+  return new Promise((resolve, reject) => {
     const srv = net.createServer();
     srv.listen(start, '127.0.0.1', () => {
       const port = srv.address().port;
       srv.close(() => resolve(port));
     });
-    srv.on('error', () => resolve(findOpenPort(start + 1)));
+    srv.on('error', (error) => {
+      if (error?.code === 'EADDRINUSE' && start < 65535) {
+        resolve(findOpenPort(start + 1));
+      } else {
+        reject(error);
+      }
+    });
   });
+}
+
+async function probeServerInfo(info, timeoutMs = 1_000) {
+  if (!info
+      || !Number.isInteger(info.pid)
+      || !Number.isInteger(info.port)
+      || info.port < 1
+      || info.port > 65535
+      || typeof info.token !== 'string'
+      || !info.token) return false;
+  try {
+    const response = await fetch(
+      `http://127.0.0.1:${info.port}/status?probe=1&token=${encodeURIComponent(info.token)}`,
+      { signal: AbortSignal.timeout(timeoutMs) },
+    );
+    if (!response.ok) return false;
+    const status = await response.json();
+    return status?.status === 'ok'
+      && status.pid === info.pid
+      && status.port === info.port;
+  } catch {
+    return false;
+  }
+}
+
+async function acquireServerRecordLock(timeoutMs = LIVE_SERVER_STARTUP_TIMEOUT_MS) {
+  ensureCanonicalLiveStateRoot(process.cwd());
+  const lockPath = getLiveServerPath(process.cwd()) + '.lock';
+  fs.mkdirSync(path.dirname(lockPath), { recursive: true });
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      fs.mkdirSync(lockPath, { mode: 0o700 });
+      ensureCanonicalLiveStateRoot(process.cwd());
+      let released = false;
+      return () => {
+        if (released) return;
+        released = true;
+        try { fs.rmdirSync(lockPath); } catch {}
+      };
+    } catch (error) {
+      if (error.code !== 'EEXIST') throw error;
+      try {
+        if (Date.now() - fs.statSync(lockPath).mtimeMs > LIVE_SERVER_STARTUP_TIMEOUT_MS * 2) {
+          fs.rmdirSync(lockPath);
+          continue;
+        }
+      } catch (staleError) {
+        if (!['ENOENT', 'ENOTEMPTY'].includes(staleError.code)) throw staleError;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  }
+  const error = new Error('Timed out waiting for live server state ownership');
+  error.code = 'live_server_lock_timeout';
+  throw error;
+}
+
+function removeServerRecordIfUnchanged(record) {
+  if (!record?.path || !record.info) return false;
+  const current = readLiveServerInfo(process.cwd());
+  if (!current || current.path !== record.path) return false;
+  for (const field of ['pid', 'port', 'token', 'agentStatePath']) {
+    if ((current.info?.[field] ?? null) !== (record.info?.[field] ?? null)) return false;
+  }
+  try {
+    fs.unlinkSync(record.path);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -71,31 +159,80 @@ async function findOpenPort(start = 8400) {
 
 const state = {
   token: null,
+  agentToken: null,
   port: null,
   sseClients: new Set(),   // SSE response objects (server→browser push)
-  pendingEvents: [],        // browser events waiting for agent ack ({ event, leaseUntil })
-  pendingPolls: [],         // agent poll callbacks waiting for browser events
+  pendingEvents: [],       // browser events waiting for agent ack ({ event, leaseUntil, leaseToken })
+  seenBrowserEvents: new Set(),
+  pendingPolls: [],        // agent poll callbacks waiting for browser events
+  terminalOutcomes: [],    // bounded in-memory SSE replay for reconnecting browsers
+  sseEventSequence: 0,
   exitTimer: null,
   sessionDir: null,         // per-session tmp dir for annotation screenshots
+  annotationFiles: new Map(),
+  annotationBytes: 0,
+  annotationUploads: 0,
+  annotationInflightBytes: 0,
+  agentStatePath: null,
   sessionStore: null,
   leaseTimer: null,
+  releaseServerRecordLock: null,
 };
 
 // Cap per-annotation upload size. A full 1920×1080 PNG is typically <1 MB;
 // cap at 10 MB to guard against runaway writes from a misbehaving client.
 const MAX_ANNOTATION_BYTES = 10 * 1024 * 1024;
+const MAX_ANNOTATION_FILES = 64;
+const MAX_ANNOTATION_TOTAL_BYTES = 64 * 1024 * 1024;
 const MAX_JSON_BODY_BYTES = 256 * 1024;
+const MAX_PENDING_EVENTS = 64;
+const MAX_ACTIVE_SESSIONS = 64;
+const MAX_SSE_CLIENTS = 16;
+const TERMINAL_SESSION_PHASES = new Set(['completed', 'discarded']);
+
+function redactBearer(event) {
+  if (!event || typeof event !== 'object') return event;
+  const { token: _bearerToken, ...safeEvent } = event;
+  return safeEvent;
+}
 
 function enqueueEvent(event) {
-  if (!event || (event.id && state.pendingEvents.some((entry) => entry.event?.id === event.id && entry.event?.type === event.type))) return;
-  state.pendingEvents.push({ event, leaseUntil: 0 });
+  const safeEvent = redactBearer(event);
+  if (!safeEvent || isPendingEventDuplicate(safeEvent)) return;
+  state.pendingEvents.push({ event: safeEvent, leaseUntil: 0, leaseToken: null });
   flushPendingPolls();
 }
 
-function restorePendingEventsFromStore() {
-  if (!state.sessionStore) return;
-  for (const snapshot of state.sessionStore.listActiveSessions()) {
-    if (snapshot.pendingEvent) enqueueEvent(snapshot.pendingEvent);
+function isPendingEventDuplicate(event) {
+  return Boolean(event?.id && state.pendingEvents.some((entry) => (
+    entry.event?.id === event.id && entry.event?.type === event.type
+  )));
+}
+
+function releaseAnnotationForEvent(event) {
+  const tracked = event?.id ? state.annotationFiles.get(event.id) : null;
+  if (!tracked) return;
+  try {
+    fs.unlinkSync(tracked.path);
+  } catch (error) {
+    if (error.code !== 'ENOENT') return;
+  }
+  state.annotationFiles.delete(event.id);
+  state.annotationBytes = Math.max(0, state.annotationBytes - tracked.bytes);
+}
+
+function reclaimOldestUnboundAnnotation() {
+  for (const [eventId, tracked] of state.annotationFiles) {
+    if (tracked.bound) continue;
+    releaseAnnotationForEvent({ id: eventId });
+    return true;
+  }
+  return false;
+}
+
+function reclaimUnboundAnnotationsUntil(predicate) {
+  while (predicate() && reclaimOldestUnboundAnnotation()) {
+    // Each pass releases at most one tracked upload and updates byte totals.
   }
 }
 
@@ -110,14 +247,36 @@ function leaseEvent(entry, leaseMs) {
     return entry.event;
   }
   entry.leaseUntil = Date.now() + leaseMs;
-  return entry.event;
+  entry.leaseToken = randomUUID();
+  return { ...entry.event, leaseToken: entry.leaseToken };
 }
 
-function acknowledgePendingEvent(id) {
-  if (!id) return false;
-  const idx = state.pendingEvents.findIndex((entry) => entry.event?.id === id);
-  if (idx === -1) return false;
-  state.pendingEvents.splice(idx, 1);
+function findLeasedPendingEventIndex(id, leaseToken) {
+  return state.pendingEvents.findIndex((entry) => (
+    entry.event?.id === id
+      && entry.leaseUntil > Date.now()
+      && typeof leaseToken === 'string'
+      && entry.leaseToken === leaseToken
+  ));
+}
+
+function isCompatibleAgentReply(event, message) {
+  if (!event) return false;
+  if (message.type === 'error') return true;
+  if (event.type === 'generate') return ['agent_done', 'done'].includes(message.type);
+  if (event.type === 'accept') {
+    return message.type === 'complete'
+      || (message.type === 'agent_done' && message.data?.carbonize === true);
+  }
+  if (event.type === 'discard') return ['discard', 'discarded'].includes(message.type);
+  return false;
+}
+
+function acknowledgePendingEvent(index, id, leaseToken) {
+  const entry = state.pendingEvents[index];
+  if (entry?.event?.id !== id || entry.leaseToken !== leaseToken) return false;
+  state.pendingEvents.splice(index, 1);
+  releaseAnnotationForEvent(entry.event);
   scheduleLeaseFlush();
   return true;
 }
@@ -153,12 +312,35 @@ function flushPendingPolls() {
   scheduleLeaseFlush();
 }
 
+function formatSseMessage(msg, eventId = null) {
+  const id = eventId === null ? '' : `id: ${eventId}\n`;
+  return id + 'data: ' + JSON.stringify(msg) + '\n\n';
+}
+
 /** Push a message to all connected SSE clients. */
-function broadcast(msg) {
-  const data = 'data: ' + JSON.stringify(msg) + '\n\n';
+function broadcast(msg, eventId = null) {
+  const data = formatSseMessage(msg, eventId);
   for (const res of state.sseClients) {
     try { res.write(data); } catch { /* client gone */ }
   }
+}
+
+function rememberTerminalOutcome(msg) {
+  if (!msg?.id) return null;
+  const eventId = ++state.sseEventSequence;
+  state.terminalOutcomes.push({ eventId, msg });
+  if (state.terminalOutcomes.length > MAX_RECENT_TERMINAL_OUTCOMES) {
+    state.terminalOutcomes.shift();
+  }
+  return eventId;
+}
+
+function parseLastSseEventId(req) {
+  const raw = req.headers['last-event-id'];
+  if (typeof raw !== 'string' || !/^[0-9]+$/.test(raw)) return null;
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value > state.sseEventSequence) return null;
+  return value;
 }
 
 // ---------------------------------------------------------------------------
@@ -201,8 +383,23 @@ function hasProjectContext() {
   return loadContext(process.cwd()).hasProduct;
 }
 
-function statOrNull(filePath) {
-  try { return fs.statSync(filePath); } catch { return null; }
+function pathExistsWithoutFollowing(filePath) {
+  try { fs.lstatSync(filePath); return true; } catch { return false; }
+}
+
+function readAuthorisedDesignSidecar(filePath) {
+  const candidate = path.resolve(filePath);
+  const projectRoot = path.resolve(process.cwd());
+  const contextRoot = path.resolve(CONTEXT_DIR);
+  if (isContainedPath(projectRoot, candidate)) {
+    return readContainedSource(projectRoot, candidate);
+  }
+  if (isContainedPath(contextRoot, candidate)) {
+    return readContainedSource(contextRoot, candidate);
+  }
+  const error = new Error('Design sidecar is outside authorised roots');
+  error.code = 'source_path_outside_project';
+  throw error;
 }
 
 // ---------------------------------------------------------------------------
@@ -219,10 +416,13 @@ const VISUAL_ACTIONS = [
 // any value that reaches a downstream child_process or DOM selector is
 // inert by construction.
 const ID_PATTERN = /^[0-9a-f]{8}$/;
-const VARIANT_ID_PATTERN = /^[0-9]{1,3}$/;
+const VARIANT_ID_PATTERN = /^[1-8]$/;
 
 function isValidId(v) { return typeof v === 'string' && ID_PATTERN.test(v); }
 function isValidVariantId(v) { return typeof v === 'string' && VARIANT_ID_PATTERN.test(v); }
+function isJsonObject(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
 
 function validateEvent(msg) {
   if (!msg || typeof msg !== 'object' || !msg.type) return 'Missing or invalid message';
@@ -263,6 +463,26 @@ function validateEvent(msg) {
     default:
       return 'Unknown event type: ' + msg.type;
   }
+}
+
+function bindUploadedScreenshot(msg) {
+  if (msg.type !== 'generate' || msg.screenshotPath === undefined) return msg;
+  if (!state.sessionDir) throw new Error('Session dir unavailable');
+  const expected = path.join(state.sessionDir, `${msg.id}.png`);
+  if (path.resolve(msg.screenshotPath) !== path.resolve(expected)) {
+    throw new Error('generate: screenshotPath is not bound to this event upload');
+  }
+  const stat = fs.lstatSync(expected);
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1) {
+    throw new Error('generate: screenshot upload is not a private regular file');
+  }
+  return { ...msg, screenshotPath: expected };
+}
+
+function markUploadedScreenshotBound(event) {
+  if (event?.type !== 'generate' || !event.screenshotPath) return;
+  const tracked = state.annotationFiles.get(event.id);
+  if (tracked) tracked.bound = true;
 }
 
 function readBoundedJsonBody(req, res, onMessage) {
@@ -448,12 +668,14 @@ function resolveConfiguredProjectSource(rootDir, requestedPath) {
     error.code = 'NOT_CONFIGURED_SOURCE';
     throw error;
   }
-  return sourceReal;
+  // Bind the response bytes to a no-follow descriptor after every allowlist
+  // check. Later pathname or parent swaps cannot redirect this read.
+  return readContainedSource(rootDir, requestedPath, { relativeOnly: true });
 }
 
 function createRequestHandler({ detectScript, sessionPath, livePath }) {
   return (req, res) => {
-    const url = new URL(req.url, `http://localhost:${state.port}`);
+    const url = new URL(req.url, `http://127.0.0.1:${state.port}`);
     const p = url.pathname;
     if (req.method === 'OPTIONS') {
       applyCors(req, res);
@@ -544,16 +766,52 @@ function createRequestHandler({ detectScript, sessionPath, livePath }) {
         res.end(JSON.stringify({ error: 'Session dir unavailable' }));
         return;
       }
+      if (state.annotationFiles.has(eventId)) {
+        res.writeHead(409, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Annotation already uploaded' }));
+        return;
+      }
+      if (state.annotationFiles.size + state.annotationUploads >= MAX_ANNOTATION_FILES) {
+        reclaimUnboundAnnotationsUntil(
+          () => state.annotationFiles.size + state.annotationUploads >= MAX_ANNOTATION_FILES,
+        );
+      }
+      if (state.annotationFiles.size + state.annotationUploads >= MAX_ANNOTATION_FILES) {
+        res.writeHead(507, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Annotation capacity reached' }));
+        return;
+      }
+      state.annotationUploads += 1;
       const chunks = [];
       let total = 0;
       let aborted = false;
+      let inflightReleased = false;
+      const releaseInflight = () => {
+        if (inflightReleased) return;
+        inflightReleased = true;
+        state.annotationUploads = Math.max(0, state.annotationUploads - 1);
+        state.annotationInflightBytes = Math.max(0, state.annotationInflightBytes - total);
+      };
       req.on('data', (c) => {
         if (aborted) return;
         total += c.length;
+        state.annotationInflightBytes += c.length;
         if (total > MAX_ANNOTATION_BYTES) {
           aborted = true;
+          releaseInflight();
           res.writeHead(413, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: 'Payload too large' }));
+          req.destroy();
+          return;
+        }
+        reclaimUnboundAnnotationsUntil(
+          () => state.annotationBytes + state.annotationInflightBytes > MAX_ANNOTATION_TOTAL_BYTES,
+        );
+        if (state.annotationBytes + state.annotationInflightBytes > MAX_ANNOTATION_TOTAL_BYTES) {
+          aborted = true;
+          releaseInflight();
+          res.writeHead(507, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Annotation capacity reached' }));
           req.destroy();
           return;
         }
@@ -561,22 +819,50 @@ function createRequestHandler({ detectScript, sessionPath, livePath }) {
       });
       req.on('end', () => {
         if (aborted) return;
+        releaseInflight();
+        reclaimUnboundAnnotationsUntil(
+          () => state.annotationFiles.size >= MAX_ANNOTATION_FILES
+            || state.annotationBytes + total > MAX_ANNOTATION_TOTAL_BYTES,
+        );
+        if (state.annotationFiles.size >= MAX_ANNOTATION_FILES
+          || state.annotationBytes + total > MAX_ANNOTATION_TOTAL_BYTES) {
+          res.writeHead(507, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Annotation capacity reached' }));
+          return;
+        }
         const absPath = path.join(state.sessionDir, eventId + '.png');
         try {
-          fs.writeFileSync(absPath, Buffer.concat(chunks));
+          fs.writeFileSync(absPath, Buffer.concat(chunks), { flag: 'wx', mode: 0o600 });
+          fs.chmodSync(absPath, 0o600);
         } catch (err) {
-          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.writeHead(err.code === 'EEXIST' ? 409 : 500, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: 'Write failed: ' + err.message }));
           return;
         }
+        state.annotationFiles.set(eventId, {
+          path: absPath,
+          bytes: total,
+          bound: false,
+        });
+        state.annotationBytes += total;
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: true, path: absPath }));
       });
       req.on('error', () => {
+        releaseInflight();
         if (!aborted) {
           res.writeHead(500, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: 'Upload failed' }));
         }
+      });
+      req.on('aborted', () => {
+        aborted = true;
+        releaseInflight();
+      });
+      req.on('close', () => {
+        if (req.complete) return;
+        aborted = true;
+        releaseInflight();
       });
       return;
     }
@@ -584,10 +870,18 @@ function createRequestHandler({ detectScript, sessionPath, livePath }) {
     // --- Health ---
     if (p === '/status') {
       if (!authenticateQuery(req, res, url)) return;
-      const sessions = state.sessionStore ? state.sessionStore.listActiveSessions() : [];
+      if (url.searchParams.get('probe') === '1') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ status: 'ok', pid: process.pid, port: state.port }));
+        return;
+      }
+      const sessions = state.sessionStore
+        ? state.sessionStore.listActiveSessions().map(summarizeLiveSession)
+        : [];
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({
         status: 'ok',
+        pid: process.pid,
         port: state.port,
         connectedClients: state.sseClients.size,
         pendingEvents: state.pendingEvents.map((entry) => ({
@@ -604,7 +898,7 @@ function createRequestHandler({ detectScript, sessionPath, livePath }) {
     if (p === '/health') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({
-        status: 'ok', port: state.port, mode: 'variant',
+        status: 'ok', pid: process.pid, port: state.port, mode: 'variant',
         hasProjectContext: hasProjectContext(),
         connectedClients: state.sseClients.size,
       }));
@@ -626,18 +920,37 @@ function createRequestHandler({ detectScript, sessionPath, livePath }) {
       if (!authenticateQuery(req, res, url)) return;
 
       const mdPath = path.join(CONTEXT_DIR, 'DESIGN.md');
-      const jsonPath = resolveDesignSidecarPath(process.cwd(), CONTEXT_DIR) || getDesignSidecarPath(process.cwd());
-      const mdStat = statOrNull(mdPath);
-      const jsonStat = statOrNull(jsonPath);
+      const existingJsonPath = resolveDesignSidecarPath(process.cwd(), CONTEXT_DIR);
+      const jsonPath = existingJsonPath || getDesignSidecarPath(process.cwd());
+      let mdSnapshot = null;
+      let mdReadError = null;
+      if (pathExistsWithoutFollowing(mdPath)) {
+        try {
+          mdSnapshot = readContainedSource(CONTEXT_DIR, mdPath);
+        } catch (error) {
+          mdReadError = error;
+        }
+      }
+      let jsonSnapshot = null;
+      let jsonReadError = null;
+      if (existingJsonPath) {
+        try {
+          jsonSnapshot = readAuthorisedDesignSidecar(jsonPath);
+        } catch (error) {
+          jsonReadError = error;
+        }
+      }
+      const jsonMtimeMs = jsonSnapshot ? Number(jsonSnapshot.mtimeNs) / 1_000_000 : null;
 
       if (p === '/design-system/raw') {
-        if (!mdStat) { res.writeHead(404); res.end('Not found'); return; }
+        if (mdReadError) { res.writeHead(403); res.end('Refused unsafe design markdown'); return; }
+        if (!mdSnapshot) { res.writeHead(404); res.end('Not found'); return; }
         res.writeHead(200, { 'Content-Type': 'text/markdown; charset=utf-8' });
-        res.end(fs.readFileSync(mdPath, 'utf-8'));
+        res.end(mdSnapshot.bytes.toString('utf-8'));
         return;
       }
 
-      if (!mdStat && !jsonStat) {
+      if (!mdSnapshot && !mdReadError && !jsonSnapshot && !jsonReadError) {
         res.writeHead(404, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ present: false }));
         return;
@@ -645,25 +958,30 @@ function createRequestHandler({ detectScript, sessionPath, livePath }) {
 
       const response = {
         present: true,
-        hasMd: !!mdStat,
-        hasSidecar: !!jsonStat,
-        mdNewerThanJson: !!(mdStat && jsonStat && mdStat.mtimeMs > jsonStat.mtimeMs + 1000),
+        hasMd: !!mdSnapshot,
+        hasSidecar: !!jsonSnapshot,
+        mdNewerThanJson: !!(mdSnapshot && jsonSnapshot
+          && Number(mdSnapshot.mtimeNs) / 1_000_000 > jsonMtimeMs + 1000),
       };
 
-      if (mdStat) {
+      if (mdSnapshot) {
         try {
-          response.parsed = parseDesignMd(fs.readFileSync(mdPath, 'utf-8'));
+          response.parsed = parseDesignMd(mdSnapshot.bytes.toString('utf-8'));
         } catch (err) {
           response.parseError = err.message;
         }
+      } else if (mdReadError) {
+        response.parseError = 'Refused unsafe design markdown: ' + (mdReadError.code || 'read_failed');
       }
 
-      if (jsonStat) {
+      if (jsonSnapshot) {
         try {
-          response.sidecar = JSON.parse(fs.readFileSync(jsonPath, 'utf-8'));
+          response.sidecar = JSON.parse(jsonSnapshot.bytes.toString('utf-8'));
         } catch (err) {
           response.sidecarError = 'Failed to parse .impeccable/design.json: ' + err.message;
         }
+      } else if (jsonReadError) {
+        response.sidecarError = 'Refused unsafe design sidecar: ' + (jsonReadError.code || 'read_failed');
       }
 
       res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -675,9 +993,9 @@ function createRequestHandler({ detectScript, sessionPath, livePath }) {
     if (p === '/source') {
       if (!authenticateQuery(req, res, url)) return;
       const filePath = url.searchParams.get('path');
-      let absPath;
+      let sourceSnapshot;
       try {
-        absPath = resolveConfiguredProjectSource(process.cwd(), filePath);
+        sourceSnapshot = resolveConfiguredProjectSource(process.cwd(), filePath);
       } catch (err) {
         const status = err.code === 'BAD_PATH'
           ? 400
@@ -690,24 +1008,45 @@ function createRequestHandler({ detectScript, sessionPath, livePath }) {
         res.end(err.message);
         return;
       }
-      const content = fs.readFileSync(absPath, 'utf-8');
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-      res.end(content);
+      res.end(sourceSnapshot.bytes.toString('utf-8'));
       return;
     }
 
     // --- SSE: server→browser push (replaces WebSocket) ---
     if (p === '/events' && req.method === 'GET') {
       if (!authenticateQuery(req, res, url)) return;
+      if (state.sseClients.size >= MAX_SSE_CLIENTS) {
+        res.writeHead(429, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'SSE client capacity reached' }));
+        return;
+      }
       res.writeHead(200, {
         'Content-Type': 'text/event-stream',
         'Cache-Control': 'no-cache',
         'Connection': 'keep-alive',
       });
-      res.write('data: ' + JSON.stringify({
+      const connected = {
         type: 'connected',
         hasProjectContext: hasProjectContext(),
-      }) + '\n\n');
+      };
+      const lastEventId = parseLastSseEventId(req);
+      const replayFloor = state.terminalOutcomes[0]?.eventId ?? null;
+      const replayGap = lastEventId !== null
+        && replayFloor !== null
+        && lastEventId < replayFloor - 1;
+      res.write(formatSseMessage(
+        connected,
+        lastEventId === null ? state.sseEventSequence : null,
+      ));
+      if (lastEventId !== null) {
+        for (const outcome of state.terminalOutcomes) {
+          if (outcome.eventId > lastEventId) {
+            res.write(formatSseMessage(outcome.msg, outcome.eventId));
+          }
+        }
+      }
+      if (replayGap) res.write(formatSseMessage({ type: 'replay_gap' }));
 
       state.sseClients.add(res);
       clearTimeout(state.exitTimer);
@@ -733,6 +1072,11 @@ function createRequestHandler({ detectScript, sessionPath, livePath }) {
     // --- Browser→server events (replaces WebSocket messages) ---
     if (p === '/events' && req.method === 'POST') {
       readBoundedJsonBody(req, res, (msg) => {
+        if (!isJsonObject(msg)) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Invalid message' }));
+          return;
+        }
         if (msg.token !== state.token) {
           res.writeHead(401, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: 'Unauthorized' }));
@@ -745,16 +1089,63 @@ function createRequestHandler({ detectScript, sessionPath, livePath }) {
           res.end(JSON.stringify({ error }));
           return;
         }
-        if (state.sessionStore && msg.id) {
+        const safeInput = redactBearer(msg);
+        const browserEventKey = safeInput.id && ['generate', 'accept', 'discard'].includes(safeInput.type)
+          ? `${safeInput.id}:${safeInput.type}`
+          : null;
+        if (browserEventKey && safeInput.retry !== true
+          && state.seenBrowserEvents.has(browserEventKey)) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, duplicate: true }));
+          return;
+        }
+        let boundMessage;
+        try {
+          boundMessage = bindUploadedScreenshot(msg);
+        } catch (err) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: err.message }));
+          return;
+        }
+        const safeMessage = redactBearer(boundMessage);
+        const duplicate = safeMessage.type !== 'checkpoint' && isPendingEventDuplicate(safeMessage);
+        if (!duplicate && safeMessage.type !== 'checkpoint' && state.pendingEvents.length >= MAX_PENDING_EVENTS) {
+          res.writeHead(429, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Pending event capacity reached' }));
+          return;
+        }
+        if (state.sessionStore && safeMessage.id) {
           try {
-            state.sessionStore.appendEvent(msg);
+            const existing = state.sessionStore.getSnapshot(safeMessage.id, {
+              includeCompleted: true,
+              requireExisting: true,
+            });
+            if (existing && TERMINAL_SESSION_PHASES.has(existing.phase)) {
+              res.writeHead(409, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: 'Session is terminal' }));
+              return;
+            }
+            if (!existing
+              && state.sessionStore.listActiveSessions().length >= MAX_ACTIVE_SESSIONS) {
+              res.writeHead(429, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: 'Active session capacity reached' }));
+              return;
+            }
+            if (!duplicate) state.sessionStore.appendEvent(safeMessage);
           } catch (err) {
-            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.writeHead(err.code === 'live_session_limit' ? 507 : 500, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ error: 'session_store_append_failed', message: err.message }));
             return;
           }
         }
-        if (msg.type !== 'checkpoint') enqueueEvent(msg);
+        if (!duplicate && safeMessage.type !== 'checkpoint') enqueueEvent(safeMessage);
+        if (!duplicate) markUploadedScreenshotBound(safeMessage);
+        if (browserEventKey) {
+          state.seenBrowserEvents.add(browserEventKey);
+          if (state.seenBrowserEvents.size > MAX_RECENT_TERMINAL_OUTCOMES) {
+            state.seenBrowserEvents.delete(state.seenBrowserEvents.values().next().value);
+          }
+        }
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: true }));
       });
@@ -766,7 +1157,7 @@ function createRequestHandler({ detectScript, sessionPath, livePath }) {
       if (!authenticateQuery(req, res, url)) return;
       res.writeHead(200, { 'Content-Type': 'text/plain' });
       res.end('stopping');
-      shutdown();
+      setImmediate(() => void shutdown());
       return;
     }
 
@@ -790,13 +1181,26 @@ function createRequestHandler({ detectScript, sessionPath, livePath }) {
 
 function handlePollGet(req, res, url) {
   const token = url.searchParams.get('token');
-  if (token !== state.token) {
+  if (token !== state.agentToken) {
     res.writeHead(401, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: 'Unauthorized' }));
     return;
   }
-  const timeout = parseInt(url.searchParams.get('timeout') || DEFAULT_POLL_TIMEOUT, 10);
-  const leaseMs = parseInt(url.searchParams.get('leaseMs') || '30000', 10);
+  const timeout = parseBoundedPositiveInteger(
+    url.searchParams.get('timeout'),
+    DEFAULT_POLL_TIMEOUT,
+    MAX_POLL_TIMEOUT,
+  );
+  const leaseMs = parseBoundedPositiveInteger(
+    url.searchParams.get('leaseMs'),
+    DEFAULT_LEASE_MS,
+    MAX_LEASE_MS,
+  );
+  if (timeout === null || leaseMs === null) {
+    res.writeHead(400, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Invalid poll bounds' }));
+    return;
+  }
   const available = findAvailablePendingEvent();
   if (available) {
     res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -824,23 +1228,67 @@ function handlePollGet(req, res, url) {
   });
 }
 
+function parseBoundedPositiveInteger(raw, fallback, maximum) {
+  if (raw === null) return fallback;
+  if (!/^[1-9][0-9]*$/.test(raw)) return null;
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value > maximum) return null;
+  return value;
+}
+
 function handlePollPost(req, res) {
   readBoundedJsonBody(req, res, (msg) => {
-    if (msg.token !== state.token) {
+    if (!isJsonObject(msg)) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Invalid agent reply' }));
+      return;
+    }
+    if (msg.token !== state.agentToken) {
       res.writeHead(401, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'Unauthorized' }));
       return;
     }
-    acknowledgePendingEvent(msg.id);
+    if (!['agent_done', 'complete', 'discard', 'discarded', 'done', 'error'].includes(msg.type)) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Invalid agent reply type' }));
+      return;
+    }
+    const leasedIndex = findLeasedPendingEventIndex(msg.id, msg.leaseToken);
+    const leasedEvent = leasedIndex === -1 ? null : state.pendingEvents[leasedIndex].event;
+    if (leasedIndex !== -1
+      && !isCompatibleAgentReply(state.pendingEvents[leasedIndex].event, msg)) {
+      res.writeHead(409, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Reply type does not match the leased event' }));
+      return;
+    }
+    let matched = leasedIndex !== -1;
+    let matchedCarbonizeCompletion = false;
+    if (!matched
+      && ['complete', 'error'].includes(msg.type)
+      && state.sessionStore
+      && msg.id) {
+      try {
+        matchedCarbonizeCompletion = state.sessionStore
+          .getSnapshot(msg.id, { includeCompleted: true })?.phase === 'carbonize_required';
+        matched = matchedCarbonizeCompletion;
+      } catch {
+        matched = false;
+      }
+    }
+    if (!matched) {
+      res.writeHead(409, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'No matching leased event' }));
+      return;
+    }
+    const eventType = msg.type === 'discard' || msg.type === 'discarded'
+      ? 'discarded'
+      : msg.type === 'complete'
+        ? 'complete'
+        : msg.type === 'error'
+          ? 'agent_error'
+          : 'agent_done';
     if (state.sessionStore && msg.id) {
       try {
-        const eventType = msg.type === 'discard' || msg.type === 'discarded'
-          ? 'discarded'
-          : msg.type === 'complete'
-            ? 'complete'
-            : msg.type === 'error'
-              ? 'agent_error'
-              : 'agent_done';
         state.sessionStore.appendEvent({
           type: eventType,
           id: msg.id,
@@ -848,11 +1296,40 @@ function handlePollPost(req, res) {
           message: msg.message,
           carbonize: msg.data?.carbonize === true,
         });
-      } catch { /* keep reply path best-effort; browser still needs SSE */ }
+      } catch (error) {
+        res.writeHead(error.code === 'live_session_limit' ? 507 : 500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'session_store_append_failed', message: error.message }));
+        return;
+      }
+    }
+    if (leasedIndex !== -1) {
+      const updated = acknowledgePendingEvent(leasedIndex, msg.id, msg.leaseToken);
+      if (!updated) {
+        res.writeHead(409, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Leased event changed before acknowledgement' }));
+        return;
+      }
+      if (msg.type === 'error' && leasedEvent?.id && leasedEvent.type) {
+        state.seenBrowserEvents.delete(`${leasedEvent.id}:${leasedEvent.type}`);
+      }
     }
     flushPendingPolls();
-    // Forward the reply to the browser via SSE
-    broadcast({ type: msg.type || 'done', id: msg.id, message: msg.message, file: msg.file, data: msg.data });
+    // Forward the reply to the browser via SSE. Terminal attempt outcomes are
+    // retained only in bounded process memory so a reconnect cannot miss its
+    // acknowledgement; project journals never drive this replay path.
+    const browserReply = {
+      type: msg.type || 'done',
+      id: msg.id,
+      message: msg.message,
+      file: msg.file,
+      data: matchedCarbonizeCompletion
+        ? { ...(msg.data || {}), cleanup: true }
+        : msg.data,
+    };
+    const replayId = ['complete', 'discard', 'discarded', 'error'].includes(browserReply.type)
+      ? rememberTerminalOutcome(browserReply)
+      : null;
+    broadcast(browserReply, replayId);
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ ok: true }));
   });
@@ -864,19 +1341,47 @@ function handlePollPost(req, res) {
 
 let httpServer = null;
 
-function shutdown() {
-  removeLiveServerInfo(process.cwd());
+function cleanupRuntimeState() {
   if (state.leaseTimer) clearTimeout(state.leaseTimer);
   state.leaseTimer = null;
   if (state.sessionDir) {
     try { fs.rmSync(state.sessionDir, { recursive: true, force: true }); } catch {}
   }
+  state.annotationFiles.clear();
+  state.annotationBytes = 0;
+  state.annotationUploads = 0;
+  state.annotationInflightBytes = 0;
   for (const res of state.sseClients) { try { res.end(); } catch {} }
   state.sseClients.clear();
   for (const poll of state.pendingPolls) poll.resolve({ type: 'exit' });
   state.pendingPolls.length = 0;
-  if (httpServer) httpServer.close();
-  process.exit(0);
+  state.releaseServerRecordLock?.();
+  state.releaseServerRecordLock = null;
+}
+
+let shuttingDown = false;
+
+async function shutdown() {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  let releaseLock = state.releaseServerRecordLock;
+  state.releaseServerRecordLock = null;
+  try {
+    releaseLock ||= await acquireServerRecordLock();
+    const record = readLiveServerInfo(process.cwd());
+    if (record?.info?.pid === process.pid && record.info.token === state.token) {
+      removeServerRecordIfUnchanged(record);
+    }
+  } catch {
+    // A stale self-owned record is safe: the next startup probes it under lock.
+  }
+  cleanupRuntimeState();
+  releaseLock?.();
+  if (httpServer?.listening) {
+    httpServer.close(() => process.exit(0));
+  } else {
+    process.exit(0);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -896,7 +1401,7 @@ Commands:
   stop --keep-inject   Stop the server only (leave the script tag in the HTML entry)
 
 Options:
-  --background  Start detached, print connection JSON to stdout, then exit
+  --background  Start detached, print non-secret process/port JSON, then exit
   --port=PORT   Use a specific port (default: auto-detect starting at 8400)
   --keep-inject Only with stop: skip live-inject.mjs --remove
   --help        Show this help
@@ -909,19 +1414,42 @@ Endpoints:
   /events              SSE stream (server→browser) + POST (browser→server)
   /poll                Long-poll for agent CLI
   /source              Raw source file reader (no-HMR fallback)
-  /status              Durable recovery status (token-protected)
+  /status              Durable session status (token-protected)
   /health              Health check`);
   process.exit(0);
 }
 
+try {
+  ensureCanonicalLiveStateRoot(process.cwd());
+} catch (error) {
+  console.error(JSON.stringify({
+    error: error.code || 'live_state_root_invalid',
+    message: error.message,
+  }));
+  process.exit(1);
+}
+
 if (args.includes('stop')) {
   const keepInject = args.includes('--keep-inject');
+  let releaseStopLock = null;
   try {
-    const { info } = readLiveServerInfo(process.cwd()) || {};
-    const res = await fetch(`http://localhost:${info.port}/stop?token=${info.token}`);
-    if (res.ok) console.log(`Stopped live server on port ${info.port}.`);
+    releaseStopLock = await acquireServerRecordLock();
+    const record = readLiveServerInfo(process.cwd());
+    if (record?.info && await probeServerInfo(record.info)) {
+      const { info } = record;
+      const res = await fetch(`http://127.0.0.1:${info.port}/stop?token=${info.token}`);
+      if (res.ok) {
+        removeServerRecordIfUnchanged(record);
+        console.log(`Stopped live server on port ${info.port}.`);
+      }
+    } else {
+      removeServerRecordIfUnchanged(record);
+      console.log('No running live server found.');
+    }
   } catch {
     console.log('No running live server found.');
+  } finally {
+    releaseStopLock?.();
   }
   if (!keepInject) {
     const injectPath = path.join(__dirname, 'live-inject.mjs');
@@ -958,7 +1486,6 @@ if (args.includes('stop')) {
 if (args.includes('--background')) {
   const childArgs = args.filter(a => a !== '--background');
   const startedAt = Date.now();
-  const previousInfo = readLiveServerInfo(process.cwd())?.info || null;
   const child = spawn(process.execPath, [fileURLToPath(import.meta.url), ...childArgs], {
     detached: true,
     stdio: 'ignore',
@@ -992,12 +1519,10 @@ if (args.includes('--background')) {
     }
     try {
       const { info } = readLiveServerInfo(process.cwd()) || {};
-      const replacedPreviousRecord = !previousInfo
-        || info.pid !== previousInfo.pid
-        || info.token !== previousInfo.token;
-      if (info.pid !== process.pid && replacedPreviousRecord) {
-        // Output JSON so the agent can read port + token from stdout.
-        console.log(JSON.stringify(info));
+      if (info?.pid === child.pid && await probeServerInfo(info)) {
+        // Browser bearer state stays in server.json and the agent credential
+        // stays outside the project tree; stdout receives only process identity.
+        console.log(JSON.stringify({ pid: info.pid, port: info.port }));
         process.exit(0);
       }
     } catch { /* not ready yet */ }
@@ -1013,46 +1538,89 @@ if (args.includes('--background')) {
     ...outcome,
     message: 'Timed out waiting for live server to start.',
   }));
+  try { process.kill(child.pid, 'SIGTERM'); } catch {}
   process.exit(1);
 }
+
+// Serialize record inspection, stale cleanup, bind, and publication so a
+// concurrent start/stop cannot delete or claim another process's record.
+try {
+  state.releaseServerRecordLock = await acquireServerRecordLock();
+} catch (error) {
+  console.error(JSON.stringify({ error: error.code, message: error.message }));
+  process.exit(1);
+}
+process.once('exit', () => state.releaseServerRecordLock?.());
 
 // Check for existing session
 const existingRecord = readLiveServerInfo(process.cwd());
 if (existingRecord?.info) {
   const existing = existingRecord.info;
-  try {
-    process.kill(existing.pid, 0);
+  if (await probeServerInfo(existing)) {
     console.error(`Live server already running on port ${existing.port} (pid ${existing.pid}).`);
     console.error('Stop it first with: node ' + path.basename(fileURLToPath(import.meta.url)) + ' stop');
+    state.releaseServerRecordLock?.();
+    state.releaseServerRecordLock = null;
     process.exit(1);
-  } catch {
-    try { fs.unlinkSync(existingRecord.path); } catch {}
   }
+  removeServerRecordIfUnchanged(existingRecord);
 }
 
-state.token = randomUUID();
-state.sessionStore = createLiveSessionStore({ cwd: process.cwd() });
-restorePendingEventsFromStore();
 const portArg = args.find(a => a.startsWith('--port='));
-state.port = portArg ? parseInt(portArg.split('=')[1], 10) : await findOpenPort();
-// Annotation screenshots live in the project root so the agent's Read tool
-// doesn't trip a per-file permission prompt. Sessioned by token so concurrent
-// projects (or quick restarts) don't collide.
-const annotRoot = getLiveAnnotationsDir(process.cwd());
-fs.mkdirSync(annotRoot, { recursive: true });
-state.sessionDir = fs.mkdtempSync(path.join(annotRoot, 'session-'));
+if (portArg) {
+  const rawPort = portArg.slice('--port='.length);
+  if (!/^[1-9][0-9]*$/.test(rawPort)
+      || !Number.isSafeInteger(Number(rawPort))
+      || Number(rawPort) > 65535) {
+    console.error(JSON.stringify({ error: 'invalid_port', value: rawPort }));
+    process.exit(1);
+  }
+}
+state.token = randomUUID();
+state.agentToken = randomUUID();
+state.sessionStore = createLiveSessionStore({ cwd: process.cwd() });
+// Durable journals remain available to explicit inspection through
+// live-resume.mjs, but they are project-controlled inputs and never establish
+// authority to enqueue work in a new server process.
+state.port = portArg ? Number(portArg.slice('--port='.length)) : await findOpenPort();
+// Keep annotation output in one fresh, private OS-temporary run directory.
+// Shutdown removes only this exact directory.
+state.sessionDir = fs.mkdtempSync(path.join(os.tmpdir(), 'impeccable-live-'));
+fs.chmodSync(state.sessionDir, 0o700);
+state.agentStatePath = writeLiveAgentServerInfo(state.sessionDir, {
+  pid: process.pid,
+  port: state.port,
+  agentToken: state.agentToken,
+});
 
 const { detectScript, sessionPath, livePath } = loadBrowserScripts();
 httpServer = http.createServer(createRequestHandler({ detectScript, sessionPath, livePath }));
 
+httpServer.once('error', (error) => {
+  cleanupRuntimeState();
+  console.error(JSON.stringify({
+    error: 'live_server_bind_failed',
+    code: typeof error?.code === 'string' ? error.code : 'BIND_FAILED',
+    port: state.port,
+    message: `Unable to bind live server to 127.0.0.1:${state.port}`,
+  }));
+  process.exit(1);
+});
+
 httpServer.listen(state.port, '127.0.0.1', () => {
-  writeLiveServerInfo(process.cwd(), { pid: process.pid, port: state.port, token: state.token });
-  const url = `http://localhost:${state.port}`;
+  writeLiveServerInfo(process.cwd(), {
+    pid: process.pid,
+    port: state.port,
+    token: state.token,
+    agentStatePath: state.agentStatePath,
+  });
+  state.releaseServerRecordLock?.();
+  state.releaseServerRecordLock = null;
+  const url = `http://127.0.0.1:${state.port}`;
   console.log(`\nImpeccable live server running on ${url}`);
-  console.log(`Token: ${state.token}\n`);
-  console.log(`Inject: <script src="${url}/live.js?token=${encodeURIComponent(state.token)}"><\/script>`);
+  console.log('Browser credential stored in .impeccable/live/server.json; agent credential stored outside the project tree.');
   console.log(`Stop:   node ${path.basename(fileURLToPath(import.meta.url))} stop`);
 });
 
-process.on('SIGINT', shutdown);
-process.on('SIGTERM', shutdown);
+process.on('SIGINT', () => void shutdown());
+process.on('SIGTERM', () => void shutdown());

@@ -1,3 +1,4 @@
+// Modified for Provenant.
 /**
  * CLI helper: deterministic accept/discard of variant sessions.
  *
@@ -16,8 +17,20 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { isGeneratedFile } from './is-generated.mjs';
+import { readContainedSource, replaceContainedSource } from './contained-source.mjs';
+import {
+  findJsxSubtree,
+  findMatchingJsxTag,
+  frameworkTemplateContextAtOffset,
+  hasExecutableJsxMarkerAtOffset,
+  htmlLexicalContextAtOffset,
+  isOffsetInsideAstroFrontmatter,
+  scanJsxTags,
+} from './jsx-tag-scanner.mjs';
 
 const EXTENSIONS = ['.html', '.jsx', '.tsx', '.vue', '.svelte', '.astro'];
+const SESSION_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
+const VARIANT_ID_PATTERN = /^[1-8]$/;
 
 // ---------------------------------------------------------------------------
 // CLI
@@ -50,6 +63,14 @@ Output (JSON):
 
   if (!id) { console.error('Missing --id'); process.exit(1); }
   if (!isDiscard && !variantNum) { console.error('Need --discard or --variant N'); process.exit(1); }
+  if (!SESSION_ID_PATTERN.test(id)) {
+    console.error(JSON.stringify({ error: 'invalid_session_id' }));
+    process.exit(1);
+  }
+  if (!isDiscard && !VARIANT_ID_PATTERN.test(variantNum)) {
+    console.error(JSON.stringify({ error: 'invalid_variant_id' }));
+    process.exit(1);
+  }
 
   let paramValues = null;
   if (paramValuesRaw) {
@@ -64,7 +85,7 @@ Output (JSON):
     process.exit(0);
   }
 
-  const { file: targetFile, content, lines } = found;
+  const { file: targetFile, lines, snapshot } = found;
   const relFile = path.relative(process.cwd(), targetFile);
 
   // Bail if the session lives in a generated file. The agent manually wrote
@@ -82,15 +103,15 @@ Output (JSON):
   }
 
   if (isDiscard) {
-    const result = handleDiscard(id, lines, targetFile);
+    const result = handleDiscard(id, lines, targetFile, snapshot);
     console.log(JSON.stringify({ handled: true, file: relFile, carbonize: false, ...result }));
   } else {
-    const result = handleAccept(id, variantNum, lines, targetFile, paramValues);
+    const result = handleAccept(id, variantNum, lines, targetFile, paramValues, snapshot);
     // Single-line attention-grabber when cleanup is required. The full
-    // five-step checklist lives in reference/live.md (loaded once per
+    // checklist lives in references/live.md (loaded once per
     // session); repeating it per-event would waste tokens.
     if (result.carbonize) {
-      result.todo = 'REQUIRED before next poll: carbonize cleanup in ' + relFile + '. See reference/live.md "Required after accept".';
+      result.todo = 'REQUIRED before next poll: carbonize cleanup in ' + relFile + '. See references/live.md "Required after accept".';
     }
     console.log(JSON.stringify({ handled: true, file: relFile, ...result }));
   }
@@ -100,13 +121,20 @@ Output (JSON):
 // Discard
 // ---------------------------------------------------------------------------
 
-function handleDiscard(id, lines, targetFile) {
-  const block = findMarkerBlock(id, lines);
-  if (!block) return { handled: false, error: 'Markers not found' };
+function handleDiscard(id, lines, targetFile, snapshot) {
+  const commentSyntax = detectCommentSyntax(targetFile);
+  const block = findMarkerBlock(id, lines, commentSyntax, targetFile);
+  if (!block) return { handled: false, error: 'Session markers are missing or ambiguous' };
 
-  const original = extractOriginal(lines, block);
-  const isJsx = detectCommentSyntax(targetFile).open === '{/*';
-  const replaceRange = expandReplaceRange(block, lines, isJsx);
+  const original = extractOriginal(lines, block, id);
+  if (original === null) return { handled: false, error: 'Original session content is missing' };
+  const isJsx = commentSyntax.open === '{/*';
+  let replaceRange;
+  try {
+    replaceRange = expandReplaceRange(id, block, lines, isJsx);
+  } catch (error) {
+    return { handled: false, error: error.code || 'Session wrapper is invalid' };
+  }
 
   // Restore at the line we're actually replacing FROM, not the marker line.
   // For JSX wrappers the marker comments live INSIDE the outer `<div>`, so
@@ -116,13 +144,12 @@ function handleDiscard(id, lines, targetFile) {
   // line, which is at the original element's indent for both HTML and JSX.
   const indent = lines[replaceRange.start].match(/^(\s*)/)[1];
   const restored = deindentContent(original, indent);
-
-  const newLines = [
-    ...lines.slice(0, replaceRange.start),
-    ...restored,
-    ...lines.slice(replaceRange.end + 1),
-  ];
-  fs.writeFileSync(targetFile, newLines.join('\n'), 'utf-8');
+  const source = lines.join('\n');
+  const replacement = joinReplacementLines(restored, source);
+  replaceContainedSource(
+    snapshot,
+    source.slice(0, replaceRange.startOffset) + replacement + source.slice(replaceRange.endOffset),
+  );
   return {};
 }
 
@@ -130,21 +157,28 @@ function handleDiscard(id, lines, targetFile) {
 // Accept
 // ---------------------------------------------------------------------------
 
-function handleAccept(id, variantNum, lines, targetFile, paramValues) {
-  const block = findMarkerBlock(id, lines);
-  if (!block) return { handled: false, error: 'Markers not found' };
-
+function handleAccept(id, variantNum, lines, targetFile, paramValues, snapshot) {
   const commentSyntax = detectCommentSyntax(targetFile);
+  const block = findMarkerBlock(id, lines, commentSyntax, targetFile);
+  if (!block) return { handled: false, error: 'Session markers are missing or ambiguous' };
+  if (extractOriginal(lines, block, id) === null) {
+    return { handled: false, error: 'Original session content is missing' };
+  }
   const isJsx = commentSyntax.open === '{/*';
   // Anchor indent on the line we're replacing FROM (the outer wrapper),
   // not on `block.start` — for JSX that's the marker comment 2 spaces
   // deeper than the original element. See handleDiscard for the full
   // rationale.
-  const replaceRange = expandReplaceRange(block, lines, isJsx);
+  let replaceRange;
+  try {
+    replaceRange = expandReplaceRange(id, block, lines, isJsx);
+  } catch (error) {
+    return { handled: false, error: error.code || 'Session wrapper is invalid' };
+  }
   const indent = lines[replaceRange.start].match(/^(\s*)/)[1];
 
   // Extract the chosen variant's inner content
-  const variantContent = extractVariant(lines, block, variantNum);
+  const variantContent = extractVariant(lines, block, variantNum, id);
   if (!variantContent) return { handled: false, error: 'Variant ' + variantNum + ' not found' };
 
   // Extract CSS block if present
@@ -173,8 +207,11 @@ function handleAccept(id, variantNum, lines, targetFile, paramValues) {
     replacement.push(indent + (isJsx ? '`}</style>' : '</style>'));
     if (paramValues && Object.keys(paramValues).length > 0) {
       // Preserve the user's knob positions for the carbonize-cleanup agent
-      // to bake into the final CSS when it collapses scoped rules.
-      replacement.push(indent + commentSyntax.open + ' impeccable-param-values ' + id + ': ' + JSON.stringify(paramValues) + ' ' + commentSyntax.close);
+      // to bake into the final CSS when it collapses scoped rules. Keep the
+      // JSON out of comment syntax: values may contain HTML or JSX comment
+      // terminators, so the payload is encoded as UTF-8 base64.
+      const encodedParamValues = Buffer.from(JSON.stringify(paramValues), 'utf8').toString('base64');
+      replacement.push(indent + commentSyntax.open + ' impeccable-param-values ' + id + ': base64:' + encodedParamValues + ' ' + commentSyntax.close);
     }
     replacement.push(indent + commentSyntax.open + ' impeccable-carbonize-end ' + id + ' ' + commentSyntax.close);
   }
@@ -197,12 +234,13 @@ function handleAccept(id, variantNum, lines, targetFile, paramValues) {
     replacement.push(...restored);
   }
 
-  const newLines = [
-    ...lines.slice(0, replaceRange.start),
-    ...replacement,
-    ...lines.slice(replaceRange.end + 1),
-  ];
-  fs.writeFileSync(targetFile, newLines.join('\n'), 'utf-8');
+  const source = lines.join('\n');
+  replaceContainedSource(
+    snapshot,
+    source.slice(0, replaceRange.startOffset)
+      + joinReplacementLines(replacement, source)
+      + source.slice(replaceRange.endOffset),
+  );
 
   return { carbonize: needsCarbonize };
 }
@@ -215,18 +253,49 @@ function handleAccept(id, variantNum, lines, targetFile, paramValues) {
  * Find the start/end marker lines for a session.
  * Returns { start, end } (0-indexed line numbers) or null.
  */
-function findMarkerBlock(id, lines) {
-  let start = -1;
-  let end = -1;
-  const startPattern = 'impeccable-variants-start ' + id;
-  const endPattern = 'impeccable-variants-end ' + id;
+function markerText(kind, id, commentSyntax) {
+  return `${commentSyntax.open} impeccable-variants-${kind} ${id} ${commentSyntax.close}`;
+}
 
-  for (let i = 0; i < lines.length; i++) {
-    if (start === -1 && lines[i].includes(startPattern)) start = i;
-    if (lines[i].includes(endPattern)) { end = i; break; }
+function findMarkerBlock(
+  id,
+  lines,
+  commentSyntax = { open: '<!--', close: '-->' },
+  filePath = '',
+) {
+  const startText = markerText('start', id, commentSyntax);
+  const endText = markerText('end', id, commentSyntax);
+  const starts = [];
+  const ends = [];
+  const source = lines.join('\n');
+  const offsets = buildLineOffsets(lines);
+  for (let index = 0; index < lines.length; index += 1) {
+    for (const [marker, found] of [
+      [startText, starts],
+      [endText, ends],
+    ]) {
+      let column = lines[index].indexOf(marker);
+      while (column !== -1) {
+        const offset = offsets[index] + column;
+        if (isExecutableMarker(source, offset, marker.length, filePath, commentSyntax)) {
+          found.push(index);
+        }
+        column = lines[index].indexOf(marker, column + marker.length);
+      }
+    }
   }
+  if (starts.length !== 1 || ends.length !== 1 || starts[0] >= ends[0]) return null;
+  return { start: starts[0], end: ends[0] };
+}
 
-  return (start !== -1 && end !== -1) ? { start, end } : null;
+function isExecutableMarker(source, offset, length, filePath, syntax) {
+  if (syntax.open === '{/*') return hasExecutableJsxMarkerAtOffset(source, offset, length);
+  const extension = path.extname(filePath).toLowerCase();
+  if (['.astro', '.svelte', '.vue'].includes(extension)) {
+    return !isOffsetInsideAstroFrontmatter(source, offset)
+      && frameworkTemplateContextAtOffset(source, offset) === 'markup';
+  }
+  return htmlLexicalContextAtOffset(source, offset) === 'markup';
 }
 
 /**
@@ -245,54 +314,71 @@ function findMarkerBlock(id, lines) {
  * Marker lines themselves stay where they were so extractOriginal /
  * extractVariant / extractCss continue to walk the same range.
  */
-function expandReplaceRange(block, lines, isJsx) {
-  if (!isJsx) return { start: block.start, end: block.end };
-
-  let { start, end } = block;
-
-  // Walk back for the wrapper `<div data-impeccable-variants="..."` opener.
-  // The attr may sit on a continuation line of a multi-line opening tag, so
-  // also walk to the line that actually contains `<div`.
-  for (let i = start - 1; i >= Math.max(0, start - 12); i--) {
-    if (/data-impeccable-variants=/.test(lines[i])) {
-      let opener = i;
-      while (opener > 0 && !/<div\b/.test(lines[opener])) opener--;
-      start = opener;
-      break;
+function expandReplaceRange(id, block, lines, isJsx) {
+  const wrapperNeedle = `data-impeccable-variants="${id}"`;
+  const source = lines.join('\n');
+  const offsets = buildLineOffsets(lines);
+  if (!isJsx) {
+    const blockText = lines.slice(block.start, block.end + 1).join('\n');
+    if (blockText.split(wrapperNeedle).length !== 2) {
+      const error = new Error('Session wrapper does not match its requested id');
+      error.code = 'session_structure_invalid';
+      throw error;
     }
-  }
-
-  // Walk forward to the matching `</div>` by div-depth tracking from the
-  // wrapper opener. Operate on JOINED text instead of per-line: a
-  // multi-line self-closing JSX `<div\n  className="spacer"\n/>` would
-  // fool per-line regex tracking (the `<div` line matches openRe but the
-  // `/>` line never matches selfCloseRe since it needs `<div` on the same
-  // line). That left depth permanently over-counted and the wrapper's
-  // outer `</div>` orphaned after accept/discard. Single regex with
-  // `[^>]*?` (which spans newlines in JS) handles either form correctly.
-  const joined = lines.slice(start).join('\n');
-  // Match either `<div … />` (self-close, group 1 is `/`), `<div … >`
-  // (open, group 1 is empty), or `</div>`.
-  const tagRe = /<div\b[^>]*?(\/?)>|<\/div\s*>/g;
-  let depth = 0;
-  let m;
-  while ((m = tagRe.exec(joined)) !== null) {
-    const isClose = m[0].startsWith('</');
-    const isSelfClose = !isClose && m[1] === '/';
-    if (isClose) depth--;
-    else if (!isSelfClose) depth++;
-    if (depth <= 0) {
-      // m.index is offset within `joined`; convert back to a file line.
-      const linesBefore = joined.slice(0, m.index + m[0].length).split('\n').length - 1;
-      const candidateEnd = start + linesBefore;
-      if (candidateEnd >= end) {
-        end = candidateEnd;
-        break;
-      }
+    const openMarker = `<!-- impeccable-variants-start ${id} -->`;
+    const closeMarker = `<!-- impeccable-variants-end ${id} -->`;
+    const openIndex = lines[block.start].indexOf(openMarker);
+    const closeIndex = lines[block.end].indexOf(closeMarker);
+    if (openIndex === -1 || closeIndex === -1) {
+      const error = new Error('Session marker offsets are invalid');
+      error.code = 'session_structure_invalid';
+      throw error;
     }
+    const exactStart = offsets[block.start] + openIndex;
+    return {
+      start: block.start,
+      end: block.end,
+      startOffset: includeLeadingLineIndent(source, exactStart),
+      endOffset: offsets[block.end] + closeIndex + closeMarker.length,
+    };
   }
+  const { opener, closing } = findJsxSubtree(source, (tag) => tag.name === 'div'
+    && tag.raw.includes(wrapperNeedle));
+  const start = source.slice(0, opener.start).split('\n').length - 1;
+  const end = source.slice(0, closing.end).split('\n').length - 1;
+  if (end < block.end) {
+    const error = new Error('JSX variant wrapper closes before its marker block');
+    error.code = 'jsx_scan_unbalanced';
+    throw error;
+  }
+  return {
+    start,
+    end,
+    startOffset: includeLeadingLineIndent(source, opener.start),
+    endOffset: closing.end,
+  };
+}
 
-  return { start, end };
+function buildLineOffsets(lines) {
+  const offsets = [];
+  let offset = 0;
+  for (const line of lines) {
+    offsets.push(offset);
+    offset += line.length + 1;
+  }
+  return offsets;
+}
+
+function includeLeadingLineIndent(source, offset) {
+  const lineStart = source.lastIndexOf('\n', offset - 1) + 1;
+  return /^\s*$/.test(source.slice(lineStart, offset)) ? lineStart : offset;
+}
+
+function joinReplacementLines(lines, source) {
+  const newline = source.includes('\r\n') ? '\r\n' : '\n';
+  return lines
+    .map((line) => (newline === '\r\n' && line.endsWith('\r') ? line.slice(0, -1) : line))
+    .join(newline);
 }
 
 /**
@@ -304,9 +390,10 @@ function expandReplaceRange(block, lines, isJsx) {
  *   - Same-line `<style>…</style>` blocks
  *   - Multi-line `<style>\n…\n</style>` blocks
  */
-function stripStyleAndJoin(lines, block) {
+function stripStyleAndJoin(lines, block, id) {
   const out = [];
   let inStyle = false;
+  const styleAttr = `data-impeccable-css="${id}"`;
   for (let i = block.start; i <= block.end; i++) {
     let line = lines[i];
 
@@ -314,14 +401,19 @@ function stripStyleAndJoin(lines, block) {
       // Strip any complete <style> elements on this line (self-closed or
       // same-line-closed), including their body content.
       line = line
-        .replace(/<style\b[^>]*>[\s\S]*?<\/style\s*>/g, '')
-        .replace(/<style\b[^>]*\/\s*>/g, '');
+        .replace(/<style\b[^>]*>[\s\S]*?<\/style\s*>/g, (match) => (
+          match.includes(styleAttr) ? '' : match
+        ))
+        .replace(/<style\b[^>]*\/\s*>/g, (match) => (
+          match.includes(styleAttr) ? '' : match
+        ));
 
       // If a <style> opener remains (multi-line body starts here), strip from
       // the opener to end-of-line and flip into skip mode.
-      const openerIdx = line.search(/<style\b/);
-      if (openerIdx !== -1) {
-        line = line.slice(0, openerIdx);
+      const opener = [...line.matchAll(/<style\b[^>]*>/g)]
+        .find((match) => match[0].includes(styleAttr));
+      if (opener) {
+        line = line.slice(0, opener.index);
         inStyle = true;
       }
       out.push(line);
@@ -341,54 +433,40 @@ function stripStyleAndJoin(lines, block) {
 /**
  * Find the inner content of `<TAG ...attrMatch...>…</TAG>` inside `text`,
  * handling nested same-tag elements via depth counting. `attrMatch` is a
- * regex source fragment that must appear inside the opener tag.
+ * literal attribute fragment that must appear inside the opener tag.
  * Returns the inner string (may be empty), or null if not found.
  */
 function extractInnerByAttr(text, attrMatch) {
-  const openerRe = new RegExp('<([A-Za-z][A-Za-z0-9]*)\\b[^>]*' + attrMatch + '[^>]*>');
-  const openMatch = text.match(openerRe);
-  if (!openMatch) return null;
-
-  const tagName = openMatch[1];
-  const innerStart = openMatch.index + openMatch[0].length;
-
-  // Match any opener or closer of this tag name after innerStart.
-  // (Does not match self-closing <TAG … />, which doesn't contribute to depth.)
-  const tagRe = new RegExp('<(?:/)?' + tagName + '\\b[^>]*>', 'g');
-  tagRe.lastIndex = innerStart;
-
-  let depth = 1;
-  let m;
-  while ((m = tagRe.exec(text))) {
-    const isClose = m[0].startsWith('</');
-    const isSelfClose = !isClose && /\/\s*>$/.test(m[0]);
-    if (isClose) {
-      depth--;
-      if (depth === 0) return text.slice(innerStart, m.index);
-    } else if (!isSelfClose) {
-      depth++;
-    }
-  }
-  return null;
+  const tags = scanJsxTags(text);
+  const openerIndex = tags.findIndex((tag) => !tag.closing
+    && !tag.selfClosing
+    && tag.raw.includes(attrMatch));
+  if (openerIndex === -1) return null;
+  const opener = tags[openerIndex];
+  const closing = findMatchingJsxTag(tags, openerIndex);
+  return text.slice(opener.end, closing.start);
 }
 
 /**
  * Extract the original element content from within the variant wrapper.
  * Returns an array of lines.
  */
-function extractOriginal(lines, block) {
-  const text = stripStyleAndJoin(lines, block);
+function extractOriginal(lines, block, id) {
+  const text = stripStyleAndJoin(lines, block, id);
   const inner = extractInnerByAttr(text, 'data-impeccable-variant="original"');
-  if (inner === null) return [];
-  return inner.split('\n');
+  if (inner === null) return null;
+  const result = inner.split('\n');
+  while (result.length > 1 && result[0].trim() === '') result.shift();
+  while (result.length > 1 && result[result.length - 1].trim() === '') result.pop();
+  return result;
 }
 
 /**
  * Extract a specific variant's inner content (stripping the wrapper div).
  * Returns an array of lines, or null if not found.
  */
-function extractVariant(lines, block, variantNum) {
-  const text = stripStyleAndJoin(lines, block);
+function extractVariant(lines, block, variantNum, id) {
+  const text = stripStyleAndJoin(lines, block, id);
   const inner = extractInnerByAttr(text, 'data-impeccable-variant="' + variantNum + '"');
   if (inner === null) return null;
   const result = inner.split('\n');
@@ -530,32 +608,55 @@ function detectCommentSyntax(filePath) {
 // ---------------------------------------------------------------------------
 
 function findSessionFile(id, cwd) {
-  const marker = 'impeccable-variants-start ' + id;
   const searchDirs = ['src', 'app', 'pages', 'components', 'public', 'views', 'templates', '.'];
   const seen = new Set();
+  const matches = [];
 
   for (const dir of searchDirs) {
     const absDir = path.join(cwd, dir);
     if (!fs.existsSync(absDir)) continue;
-    const result = searchDir(absDir, marker, seen, 0);
-    if (result) {
-      const content = fs.readFileSync(result, 'utf-8');
-      return { file: result, content, lines: content.split('\n') };
-    }
+    searchDir(absDir, id, seen, 0, matches);
   }
-  return null;
+  if (matches.length > 1) {
+    const error = new Error(`Session ${id} has markers in multiple files`);
+    error.code = 'session_markers_ambiguous';
+    throw error;
+  }
+  if (matches.length === 0) return null;
+  const snapshot = readContainedSource(cwd, matches[0]);
+  const content = snapshot.bytes.toString('utf-8');
+  return { file: snapshot.path, content, lines: content.split('\n'), snapshot };
 }
 
-function searchDir(dir, query, seen, depth) {
-  if (depth > 5) return null;
+function hasExecutableStartMarker(content, filePath, id) {
+  const syntax = detectCommentSyntax(filePath);
+  const marker = markerText('start', id, syntax);
+  let offset = 0;
+  for (const line of content.split('\n')) {
+    const markerColumn = line.indexOf(marker);
+    if (markerColumn === -1) {
+      offset += line.length + 1;
+      continue;
+    }
+    const markerOffset = offset + markerColumn;
+    if (isExecutableMarker(content, markerOffset, marker.length, filePath, syntax)) {
+      return true;
+    }
+    offset += line.length + 1;
+  }
+  return false;
+}
+
+function searchDir(dir, id, seen, depth, matches) {
+  if (depth > 5) return;
   let realDir;
-  try { realDir = fs.realpathSync(dir); } catch { return null; }
-  if (seen.has(realDir)) return null;
+  try { realDir = fs.realpathSync(dir); } catch { return; }
+  if (seen.has(realDir)) return;
   seen.add(realDir);
 
   let entries;
   try { entries = fs.readdirSync(dir, { withFileTypes: true }); }
-  catch { return null; }
+  catch { return; }
 
   for (const entry of entries) {
     if (!entry.isFile()) continue;
@@ -563,18 +664,15 @@ function searchDir(dir, query, seen, depth) {
     const filePath = path.join(dir, entry.name);
     try {
       const content = fs.readFileSync(filePath, 'utf-8');
-      if (content.includes(query)) return filePath;
+      if (hasExecutableStartMarker(content, filePath, id)) matches.push(filePath);
     } catch { /* skip */ }
   }
 
   for (const entry of entries) {
     if (!entry.isDirectory()) continue;
     if (['node_modules', '.git', 'dist', 'build'].includes(entry.name)) continue;
-    const result = searchDir(path.join(dir, entry.name), query, seen, depth + 1);
-    if (result) return result;
+    searchDir(path.join(dir, entry.name), id, seen, depth + 1, matches);
   }
-
-  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -589,7 +687,15 @@ function argVal(args, flag) {
 // Auto-execute when run directly
 const _running = process.argv[1];
 if (_running?.endsWith('live-accept.mjs') || _running?.endsWith('live-accept.mjs/')) {
-  acceptCli();
+  acceptCli().catch((error) => {
+    console.error(JSON.stringify({
+      handled: false,
+      error: error.code || 'accept_failed',
+      message: error.message,
+      ...(error.rollbackErrors ? { rollbackErrors: error.rollbackErrors } : {}),
+    }));
+    process.exit(1);
+  });
 }
 
 export { findMarkerBlock, extractOriginal, extractVariant, extractCss, deindentContent, detectCommentSyntax };

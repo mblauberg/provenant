@@ -1,42 +1,100 @@
+// Modified for Provenant.
 import fs from 'node:fs';
 import path from 'node:path';
-import { getLegacyLiveSessionsDir, getLiveSessionsDir } from './impeccable-paths.mjs';
+import {
+  ensureCanonicalLiveStateRoot,
+  getLegacyLiveSessionsDir,
+  getLiveSessionsDir,
+} from './impeccable-paths.mjs';
 
 const COMPLETED_PHASES = new Set(['completed', 'discarded']);
+const INERT_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
+const INERT_PHASES = new Set([
+  'new', 'idle', 'picking', 'configuring', 'generating', 'cycling', 'saving',
+  'confirmed', 'generate_requested', 'variants_ready', 'carbonize_required',
+  'accept_requested', 'discard_requested', 'discarded', 'completed', 'agent_error',
+]);
+const INERT_PENDING_TYPES = new Set(['generate', 'accept', 'discard']);
+const CHECKPOINT_LOCKED_PHASES = new Set([
+  'accept_requested',
+  'discard_requested',
+  'carbonize_required',
+  'completed',
+  'discarded',
+  'agent_error',
+]);
+const MAX_SESSION_JOURNAL_BYTES = 4 * 1024 * 1024;
+const MAX_SESSION_CHECKPOINT_BYTES = 2.5 * 1024 * 1024;
+const MAX_SESSION_TRANSITION_BYTES = 3 * 1024 * 1024;
+const MAX_SESSION_AGENT_RESULT_BYTES = 3.5 * 1024 * 1024;
+const TRANSITION_EVENT_TYPES = new Set(['accept', 'discard']);
+const FINAL_EVENT_TYPES = new Set(['complete', 'discarded', 'agent_error']);
+
+export function summarizeLiveSession(snapshot) {
+  const pendingType = snapshot?.pendingEvent?.type;
+  return {
+    id: INERT_ID_PATTERN.test(snapshot?.id || '') ? snapshot.id : null,
+    phase: INERT_PHASES.has(snapshot?.phase) ? snapshot.phase : 'unknown',
+    revision: Number.isSafeInteger(snapshot?.checkpointRevision)
+      && snapshot.checkpointRevision >= 0
+      ? snapshot.checkpointRevision
+      : 0,
+    hasPendingEvent: !!snapshot?.pendingEvent,
+    pendingEventType: INERT_PENDING_TYPES.has(pendingType) ? pendingType : null,
+  };
+}
 
 export function createLiveSessionStore({ cwd = process.cwd(), sessionId } = {}) {
-  const rootDir = getLiveSessionsDir(cwd);
+  ensureCanonicalLiveStateRoot(cwd);
+  const rootDir = ensureCanonicalSessionRoot(cwd);
+  const rootIdentity = directoryIdentity(rootDir);
   const legacyRootDir = getLegacyLiveSessionsDir(cwd);
-  fs.mkdirSync(rootDir, { recursive: true });
+  const legacyIdentity = optionalCanonicalDirectoryIdentity(legacyRootDir);
   const snapshotCache = new Map();
+  const assertRoot = () => assertDirectoryIdentity(rootDir, rootIdentity);
+  const assertLegacy = legacyIdentity
+    ? () => assertDirectoryIdentity(legacyRootDir, legacyIdentity)
+    : null;
 
   function loadCachedOrRebuild(id) {
+    assertRoot();
     const cached = snapshotCache.get(id);
     if (cached) return cached;
-    const journalPath = getReadableJournalPath(id);
-    const rebuilt = rebuildSnapshotFromJournal(journalPath, id);
+    const journal = getReadableJournalPath(id);
+    const rebuilt = rebuildSnapshotFromJournal(journal.path, id, journal.assertParent);
     snapshotCache.set(id, rebuilt);
     return rebuilt;
   }
 
   function getReadableJournalPath(id) {
+    assertRoot();
     const primary = getJournalPath(rootDir, id);
-    if (fs.existsSync(primary)) return primary;
+    if (fs.existsSync(primary)) return { path: primary, assertParent: assertRoot };
     const legacy = getJournalPath(legacyRootDir, id);
-    if (fs.existsSync(legacy)) return legacy;
-    return primary;
+    if (assertLegacy) {
+      assertLegacy();
+      if (fs.existsSync(legacy)) return { path: legacy, assertParent: assertLegacy };
+    }
+    return { path: primary, assertParent: assertRoot };
   }
 
   return {
     rootDir,
     legacyRootDir,
     appendEvent(event) {
+      assertRoot();
       const normalized = normalizeEvent(event, sessionId);
       const journalPath = getJournalPath(rootDir, normalized.id);
       const snapshotPath = getSnapshotPath(rootDir, normalized.id);
       const legacyJournalPath = getJournalPath(legacyRootDir, normalized.id);
-      if (!fs.existsSync(journalPath) && fs.existsSync(legacyJournalPath)) {
-        fs.copyFileSync(legacyJournalPath, journalPath);
+      if (assertLegacy) assertLegacy();
+      if (assertLegacy && !fs.existsSync(journalPath) && fs.existsSync(legacyJournalPath)) {
+        writeStateFile(
+          journalPath,
+          readStateFile(legacyJournalPath, assertLegacy),
+          fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL,
+          assertRoot,
+        );
       }
       const prior = loadCachedOrRebuild(normalized.id);
       const seq = prior.nextSeq;
@@ -47,36 +105,170 @@ export function createLiveSessionStore({ cwd = process.cwd(), sessionId } = {}) 
         ts: new Date().toISOString(),
         event: normalized,
       };
-      fs.appendFileSync(journalPath, JSON.stringify(entry) + '\n');
+      const serializedEntry = JSON.stringify(entry) + '\n';
+      const existingBytes = fs.existsSync(journalPath) ? fs.statSync(journalPath).size : 0;
+      const maximumBytes = FINAL_EVENT_TYPES.has(normalized.type)
+        ? MAX_SESSION_JOURNAL_BYTES
+        : normalized.type === 'agent_done'
+          ? MAX_SESSION_AGENT_RESULT_BYTES
+        : TRANSITION_EVENT_TYPES.has(normalized.type)
+          ? MAX_SESSION_TRANSITION_BYTES
+          : MAX_SESSION_CHECKPOINT_BYTES;
+      if (existingBytes + Buffer.byteLength(serializedEntry) > maximumBytes) {
+        const error = new Error('Live session journal capacity reached');
+        error.code = 'live_session_limit';
+        throw error;
+      }
+      writeStateFile(
+        journalPath,
+        serializedEntry,
+        fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_APPEND,
+        assertRoot,
+      );
       const next = applyEvent(prior.snapshot, entry, prior.diagnostics);
       snapshotCache.set(normalized.id, { snapshot: next, diagnostics: next.diagnostics || [], nextSeq: seq + 1 });
-      writeSnapshot(snapshotPath, next);
+      writeSnapshot(snapshotPath, next, assertRoot);
       return next;
     },
     getSnapshot(id = sessionId, opts = {}) {
       if (!id) throw new Error('session id required');
-      const journalPath = getReadableJournalPath(id);
+      assertRoot();
+      const journal = getReadableJournalPath(id);
+      if (opts.requireExisting && !fs.existsSync(journal.path)) return null;
       const snapshotPath = getSnapshotPath(rootDir, id);
-      const rebuilt = rebuildSnapshotFromJournal(journalPath, id);
+      const rebuilt = rebuildSnapshotFromJournal(journal.path, id, journal.assertParent);
       snapshotCache.set(id, rebuilt);
-      writeSnapshot(snapshotPath, rebuilt.snapshot);
+      writeSnapshot(snapshotPath, rebuilt.snapshot, assertRoot);
       if (!opts.includeCompleted && COMPLETED_PHASES.has(rebuilt.snapshot.phase)) return null;
       return rebuilt.snapshot;
     },
     listActiveSessions() {
+      assertRoot();
       const ids = new Set();
-      for (const dir of [legacyRootDir, rootDir]) {
+      const directories = assertLegacy ? [legacyRootDir, rootDir] : [rootDir];
+      for (const dir of directories) {
+        if (dir === legacyRootDir) assertLegacy();
         if (!fs.existsSync(dir)) continue;
         for (const name of fs.readdirSync(dir)) {
-          if (name.endsWith('.jsonl')) ids.add(name.slice(0, -'.jsonl'.length));
+          if (!name.endsWith('.jsonl')) continue;
+          const id = name.slice(0, -'.jsonl'.length);
+          if (isSafeSessionId(id)) ids.add(id);
         }
       }
       return [...ids]
         .sort()
-        .map((id) => this.getSnapshot(id))
+        .map((id) => {
+          try {
+            const snapshot = this.getSnapshot(id);
+            if (snapshot?.diagnostics?.some((item) => item.error === 'journal_parse_failed')) {
+              return null;
+            }
+            return snapshot;
+          } catch {
+            return null;
+          }
+        })
         .filter(Boolean);
     },
   };
+}
+
+function ensureCanonicalSessionRoot(cwd) {
+  const rootDir = getLiveSessionsDir(cwd);
+  try {
+    if (!fs.existsSync(rootDir)) fs.mkdirSync(rootDir);
+    const metadata = fs.lstatSync(rootDir);
+    if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
+      throw new Error('session state path is not a real directory');
+    }
+    if (fs.realpathSync.native(rootDir) !== path.resolve(rootDir)) {
+      throw new Error('session state path is non-canonical');
+    }
+  } catch (cause) {
+    const error = new Error('live_state_root_invalid: session state root must be canonical', {
+      cause,
+    });
+    error.code = 'live_state_root_invalid';
+    throw error;
+  }
+  return rootDir;
+}
+
+function directoryIdentity(directory) {
+  const metadata = fs.lstatSync(directory);
+  return { dev: metadata.dev, ino: metadata.ino };
+}
+
+function optionalCanonicalDirectoryIdentity(directory) {
+  try {
+    const metadata = fs.lstatSync(directory);
+    if (metadata.isSymbolicLink()
+      || !metadata.isDirectory()
+      || fs.realpathSync.native(directory) !== path.resolve(directory)) {
+      return null;
+    }
+    return { dev: metadata.dev, ino: metadata.ino };
+  } catch {
+    return null;
+  }
+}
+
+function assertDirectoryIdentity(directory, expected) {
+  try {
+    const metadata = fs.lstatSync(directory);
+    if (metadata.isSymbolicLink()
+      || !metadata.isDirectory()
+      || fs.realpathSync.native(directory) !== path.resolve(directory)
+      || metadata.dev !== expected.dev
+      || metadata.ino !== expected.ino) {
+      throw new Error('session state root identity changed');
+    }
+  } catch (cause) {
+    const error = new Error('live_state_root_invalid: session state root identity changed', {
+      cause,
+    });
+    error.code = 'live_state_root_invalid';
+    throw error;
+  }
+}
+
+function readStateFile(filePath, assertParent) {
+  const descriptor = openStateFile(filePath, fs.constants.O_RDONLY, assertParent);
+  try {
+    return fs.readFileSync(descriptor, 'utf8');
+  } finally {
+    fs.closeSync(descriptor);
+  }
+}
+
+function writeStateFile(filePath, content, flags, assertParent) {
+  const truncate = (flags & fs.constants.O_TRUNC) !== 0;
+  const descriptor = openStateFile(filePath, flags & ~fs.constants.O_TRUNC, assertParent);
+  try {
+    if (truncate) fs.ftruncateSync(descriptor, 0);
+    fs.writeFileSync(descriptor, content, 'utf8');
+  } finally {
+    fs.closeSync(descriptor);
+  }
+}
+
+function openStateFile(filePath, flags, assertParent) {
+  if (!Number.isInteger(fs.constants.O_NOFOLLOW)) {
+    throw new Error('State-file writes require O_NOFOLLOW support');
+  }
+  assertParent?.();
+  const descriptor = fs.openSync(filePath, flags | fs.constants.O_NOFOLLOW, 0o600);
+  try {
+    assertParent?.();
+    const metadata = fs.fstatSync(descriptor);
+    if (metadata.isFile() && metadata.nlink === 1) return descriptor;
+    const error = new Error('Session state file must be a single-link regular file');
+    error.code = 'live_state_file_invalid';
+    throw error;
+  } catch (error) {
+    fs.closeSync(descriptor);
+    throw error;
+  }
 }
 
 function normalizeEvent(event, fallbackId) {
@@ -84,7 +276,12 @@ function normalizeEvent(event, fallbackId) {
   const id = event.id || fallbackId;
   if (!id || typeof id !== 'string') throw new Error('event id required');
   if (!event.type || typeof event.type !== 'string') throw new Error('event type required');
-  return { ...event, id };
+  const {
+    token: _bearerToken,
+    screenshotPath: _transientScreenshotPath,
+    ...safeEvent
+  } = event;
+  return { ...safeEvent, id };
 }
 
 function getJournalPath(rootDir, id) {
@@ -96,8 +293,12 @@ function getSnapshotPath(rootDir, id) {
 }
 
 function safeSessionId(id) {
-  if (!/^[A-Za-z0-9_-]{1,128}$/.test(id)) throw new Error('invalid session id: ' + id);
+  if (!isSafeSessionId(id)) throw new Error('invalid session id: ' + id);
   return id;
+}
+
+function isSafeSessionId(id) {
+  return typeof id === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(id);
 }
 
 function baseSnapshot(id) {
@@ -123,13 +324,13 @@ function baseSnapshot(id) {
   };
 }
 
-function rebuildSnapshotFromJournal(journalPath, id) {
+function rebuildSnapshotFromJournal(journalPath, id, assertParent) {
   let snapshot = baseSnapshot(id);
   const diagnostics = [];
   let nextSeq = 1;
   if (!fs.existsSync(journalPath)) return { snapshot, diagnostics, nextSeq };
 
-  const lines = fs.readFileSync(journalPath, 'utf-8').split('\n');
+  const lines = readStateFile(journalPath, assertParent).split('\n');
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     if (!line.trim()) continue;
@@ -151,7 +352,8 @@ function rebuildSnapshotFromJournal(journalPath, id) {
 }
 
 function applyEvent(snapshot, entry, inheritedDiagnostics = []) {
-  const event = entry.event || entry;
+  const rawEvent = entry.event || entry;
+  const { screenshotPath: _transientScreenshotPath, ...event } = rawEvent;
   const next = {
     ...snapshot,
     paramValues: { ...(snapshot.paramValues || {}) },
@@ -172,7 +374,6 @@ function applyEvent(snapshot, entry, inheritedDiagnostics = []) {
       next.expectedVariants = event.count ?? next.expectedVariants;
       next.pendingEventSeq = entry.seq ?? next.pendingEventSeq;
       next.pendingEvent = toPendingEvent(event);
-      if (event.screenshotPath) upsertArtifact(next.annotationArtifacts, { type: 'screenshot', path: event.screenshotPath });
       break;
     case 'variants_ready':
     case 'agent_done':
@@ -190,7 +391,13 @@ function applyEvent(snapshot, entry, inheritedDiagnostics = []) {
       }
       break;
     case 'checkpoint':
-      if ((event.revision ?? 0) >= (next.checkpointRevision ?? 0)) {
+      if (CHECKPOINT_LOCKED_PHASES.has(next.phase)) {
+        next.diagnostics.push({
+          error: 'checkpoint_phase_locked',
+          revision: event.revision,
+          phase: next.phase,
+        });
+      } else if ((event.revision ?? 0) >= (next.checkpointRevision ?? 0)) {
         next.phase = event.phase ?? next.phase;
         next.checkpointRevision = event.revision ?? next.checkpointRevision;
         next.activeOwner = event.owner ?? next.activeOwner;
@@ -226,8 +433,6 @@ function applyEvent(snapshot, entry, inheritedDiagnostics = []) {
       break;
     case 'agent_error':
       next.phase = 'agent_error';
-      next.pendingEventSeq = null;
-      next.pendingEvent = null;
       next.diagnostics.push({ error: 'agent_error', message: event.message || 'unknown agent error' });
       break;
     default:
@@ -240,15 +445,15 @@ function applyEvent(snapshot, entry, inheritedDiagnostics = []) {
 function toPendingEvent(event) {
   const pending = { ...event };
   delete pending.token;
+  delete pending.screenshotPath;
   return pending;
 }
 
-function upsertArtifact(artifacts, artifact) {
-  if (!artifacts.some((existing) => existing.path === artifact.path && existing.type === artifact.type)) {
-    artifacts.push(artifact);
-  }
-}
-
-function writeSnapshot(snapshotPath, snapshot) {
-  fs.writeFileSync(snapshotPath, JSON.stringify(snapshot, null, 2) + '\n');
+function writeSnapshot(snapshotPath, snapshot, assertParent) {
+  writeStateFile(
+    snapshotPath,
+    JSON.stringify(snapshot, null, 2) + '\n',
+    fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_TRUNC,
+    assertParent,
+  );
 }

@@ -1,7 +1,7 @@
 schema_version: 1
 target_skill: ui-ux-design
 cases:
-  - {id: q710, relation: positive, prompt: "Review this frontend source read-only for UX, visual hierarchy, responsive, and accessibility defects.", tags: [direct], expected: {primary_skill: ui-ux-design, companion_skills: []}}
+  - {id: q710, relation: positive, prompt: "Review this running frontend read-only at desktop and mobile widths for UX, visual hierarchy, responsive, and accessibility defects.", tags: [direct], expected: {primary_skill: ui-ux-design, companion_skills: []}}
   - {id: q711, relation: positive, prompt: "Create three coherent responsive visual directions for this dashboard; do not change production source.", tags: [direct], expected: {primary_skill: ui-ux-design, companion_skills: []}}
   - {id: q712, relation: positive, prompt: "Review this checkout flow's rendered UI read-only against WCAG 2.2 success criteria and capture Lighthouse accessibility and performance scores as browser evidence.", tags: [direct], expected: {primary_skill: ui-ux-design, companion_skills: [web-stack-conventions]}}
   - {id: q713, relation: negative, prompt: "Profile why this React page has poor INP and a large client bundle.", tags: [adjacent], expected: {primary_skill: react-performance, companion_skills: []}}
