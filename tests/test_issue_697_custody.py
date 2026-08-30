@@ -419,6 +419,8 @@ def test_finalizer_prune_symlink_swap_fails_closed(tmp_path: Path, monkeypatch) 
     close_successful_run(run)
     candidate = run / "ephemeral.txt"
     candidate.write_text("temporary\n")
+    with (run / "MANIFEST.md").open("a") as manifest:
+        manifest.write("| ephemeral | ephemeral.txt | temporary | test | 2026-08-30 | retired | ephemeral | - |\n")
     outside = tmp_path / "outside.txt"
     outside.write_text("must survive\n")
     finalizer = load(FINALIZE, "finalize_prune_swap_issue_697")
@@ -451,6 +453,32 @@ def test_finalizer_atomic_commit_rejects_root_swap_after_binding_check(tmp_path:
     assert finalizer.main([str(run), "--status", "succeeded"]) == 1
     assert json.loads((old_root / "RUN_RECEIPT.json").read_text())["status"] == "active"
     assert json.loads((run / "RUN_RECEIPT.json").read_text())["status"] == "active"
+
+
+def test_finalizer_prune_rejects_root_replacement_without_deleting_either_tree(tmp_path: Path, monkeypatch) -> None:
+    run = make_run(tmp_path)
+    write_valid_attempt(run)
+    close_successful_run(run)
+    candidate = run / "ephemeral.txt"
+    candidate.write_text("temporary\n")
+    with (run / "MANIFEST.md").open("a") as manifest:
+        manifest.write("| ephemeral | ephemeral.txt | temporary | test | 2026-08-30 | retired | ephemeral | - |\n")
+    finalizer = load(FINALIZE, "finalize_prune_root_swap_issue_697")
+    old_root = tmp_path / "run-old"
+    swapped = False
+
+    def swap_before_prune(*_args):
+        nonlocal swapped
+        if not swapped:
+            swapped = True
+            run.rename(old_root)
+            shutil.copytree(old_root, run)
+        return [run / "ephemeral.txt"]
+
+    monkeypatch.setattr(finalizer, "prune_candidates", swap_before_prune)
+    assert finalizer.main([str(run), "--status", "succeeded", "--prune-ephemeral", "--apply"]) == 1
+    assert (old_root / "ephemeral.txt").read_text() == "temporary\n"
+    assert (run / "ephemeral.txt").read_text() == "temporary\n"
 
 
 def test_dispatch_classifies_missing_manifest_as_missing_custody(tmp_path: Path) -> None:

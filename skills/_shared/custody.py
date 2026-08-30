@@ -231,7 +231,13 @@ def atomic_write_contained(
             os.close(root_fd)
 
 
-def unlink_contained_regular(root: Path, value: str | Path, *, label: str = "file") -> None:
+def unlink_contained_regular(
+    root: Path,
+    value: str | Path,
+    *,
+    label: str = "file",
+    expected_root: os.stat_result | None = None,
+) -> None:
     """Unlink one contained regular file after binding its inode and parent fd."""
     raw = Path(value)
     if raw.is_absolute() or ".." in raw.parts or not raw.parts:
@@ -241,6 +247,10 @@ def unlink_contained_regular(root: Path, value: str | Path, *, label: str = "fil
     root_fd = parent_fd = file_fd = -1
     try:
         root_fd = os.open(root, os.O_RDONLY | nofollow | directory)
+        if expected_root is not None:
+            actual_root = os.fstat(root_fd)
+            if (actual_root.st_dev, actual_root.st_ino) != (expected_root.st_dev, expected_root.st_ino):
+                raise OwnedFileError(f"{label} run root changed while being removed")
         parent_fd = root_fd
         for part in raw.parts[:-1]:
             next_fd = os.open(part, os.O_RDONLY | nofollow | directory, dir_fd=parent_fd)

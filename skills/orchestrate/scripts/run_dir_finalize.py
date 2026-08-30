@@ -982,7 +982,9 @@ def main(argv: list[str] | None = None) -> int:
             print(("PRUNE" if args.apply else "WOULD-PRUNE") + f": {rel}")
             if args.apply:
                 try:
-                    unlink_contained_regular(args.run_dir, rel, label="prune candidate")
+                    unlink_contained_regular(
+                        args.run_dir, rel, label="prune candidate", expected_root=root_metadata
+                    )
                 except OwnedFileError as exc:
                     print(f"FAIL: prune candidate changed while finalising: {exc}", file=sys.stderr)
                     return 1
