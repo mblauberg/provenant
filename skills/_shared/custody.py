@@ -157,6 +157,76 @@ def create_contained_directory(root: Path, value: str | Path, *, mode: int = 0o7
     ensure_contained_directory(root, value, mode=mode, label=label, final_must_be_new=True)
 
 
+def atomic_write_contained(
+    root: Path,
+    value: str | Path,
+    content: bytes,
+    *,
+    mode: int = 0o600,
+    label: str = "file",
+) -> None:
+    """Atomically replace one contained file using a descriptor-bound parent."""
+    root = root.resolve()
+    raw = Path(value)
+    if raw.is_absolute() or ".." in raw.parts or not raw.parts:
+        raise OwnedFileError(f"{label} must be a run-relative path")
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    directory = getattr(os, "O_DIRECTORY", 0)
+    root_fd = parent_fd = temp_fd = -1
+    temp_name: str | None = None
+    try:
+        root_fd = os.open(root, os.O_RDONLY | nofollow | directory)
+        parent_fd = root_fd
+        for part in raw.parts[:-1]:
+            next_fd = os.open(part, os.O_RDONLY | nofollow | directory, dir_fd=parent_fd)
+            if not stat.S_ISDIR(os.fstat(next_fd).st_mode):
+                os.close(next_fd)
+                raise OwnedFileError(f"{label} path contains a non-directory component: {raw.as_posix()}")
+            if parent_fd != root_fd:
+                os.close(parent_fd)
+            parent_fd = next_fd
+        for _ in range(32):
+            candidate = f".{raw.parts[-1]}.{os.getpid()}.{os.urandom(8).hex()}"
+            try:
+                temp_fd = os.open(
+                    candidate,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow,
+                    mode,
+                    dir_fd=parent_fd,
+                )
+            except FileExistsError:
+                continue
+            temp_name = candidate
+            break
+        if temp_fd < 0 or temp_name is None:
+            raise OwnedFileError(f"{label} temporary file cannot be created: {raw.as_posix()}")
+        offset = 0
+        while offset < len(content):
+            offset += os.write(temp_fd, content[offset:])
+        os.fsync(temp_fd)
+        os.close(temp_fd)
+        temp_fd = -1
+        os.replace(temp_name, raw.parts[-1], src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+        temp_name = None
+        os.fsync(parent_fd)
+    except (OSError, OwnedFileError) as exc:
+        if isinstance(exc, OwnedFileError):
+            raise
+        raise OwnedFileError(f"{label} cannot be written safely: {raw.as_posix()}") from exc
+    finally:
+        if temp_fd >= 0:
+            os.close(temp_fd)
+        if temp_name is not None and parent_fd >= 0:
+            try:
+                os.unlink(temp_name, dir_fd=parent_fd)
+            except FileNotFoundError:
+                pass
+        if parent_fd >= 0 and parent_fd != root_fd:
+            os.close(parent_fd)
+        if root_fd >= 0:
+            os.close(root_fd)
+
+
 def read_bound_bytes(root: Path, value: str | Path, *, label: str = "file") -> bytes:
     """Read one checked inode without a second pathname open."""
     return read_contained_regular(root, value, label=label)[2]

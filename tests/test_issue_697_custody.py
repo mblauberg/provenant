@@ -359,3 +359,30 @@ def test_finalizer_rejects_blocked_attempt_without_matching_worker_envelope(tmp_
     refresh_attempt_digest(attempt)
     finalizer = load(FINALIZE, "finalize_blocked_envelope_issue_697")
     assert any("terminal question" in error or "question" in error for error in finalizer._validate_dispatch_evidence(run))
+
+
+def test_atomic_owned_write_preserves_old_bytes_on_interruption_and_replaces(tmp_path: Path, monkeypatch) -> None:
+    custody = load(ROOT / "skills/_shared/custody.py", "custody_atomic_write_issue_697")
+    run = tmp_path / "run"
+    run.mkdir()
+    target = run / "evidence.txt"
+    target.write_bytes(b"old\n")
+    real_write = custody.os.write
+    interrupted = False
+
+    def interrupt_once(fd, data):
+        nonlocal interrupted
+        if not interrupted:
+            interrupted = True
+            real_write(fd, data[:1])
+            raise OSError("injected interruption")
+        return real_write(fd, data)
+
+    monkeypatch.setattr(custody.os, "write", interrupt_once)
+    with pytest.raises(custody.OwnedFileError):
+        custody.atomic_write_contained(run, "evidence.txt", b"new\n", label="evidence")
+    assert target.read_bytes() == b"old\n"
+    assert list(run.glob(".evidence.txt.*")) == []
+    monkeypatch.setattr(custody.os, "write", real_write)
+    custody.atomic_write_contained(run, "evidence.txt", b"new\n", label="evidence")
+    assert target.read_bytes() == b"new\n"

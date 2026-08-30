@@ -41,8 +41,8 @@ CANCEL_MARKER_NAME = "cancel.request"
 
 from _shared.bounded_process import stop_process_group
 from _shared.custody import (
-    OwnedFileError, OwnedLinkError, contained_regular_path, ensure_contained_directory,
-    create_contained_directory, open_contained_regular, read_bound_bytes,
+    OwnedFileError, OwnedLinkError, atomic_write_contained, contained_regular_path,
+    ensure_contained_directory, create_contained_directory, open_contained_regular, read_bound_bytes,
 )
 
 class AttemptEvidenceError(ValueError):
@@ -71,13 +71,7 @@ def json_digest(value: Any) -> str:
 
 
 def write_owned(run_dir: Path, path: Path, content: str) -> None:
-    fd, _relative, _target = open_contained_regular(
-        run_dir, path.relative_to(run_dir), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, label=str(path.name)
-    )
-    with os.fdopen(fd, "w", encoding="utf-8") as stream:
-        stream.write(content)
-        stream.flush()
-        os.fsync(stream.fileno())
+    atomic_write_contained(run_dir, path.relative_to(run_dir), content.encode(), label=str(path.name))
 
 
 @contextmanager

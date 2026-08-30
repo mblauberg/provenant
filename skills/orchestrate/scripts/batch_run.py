@@ -40,7 +40,10 @@ from dispatch_run import (
     cancellation_marker_present,
     remove_cancellation_marker,
 )
-from _shared.custody import OwnedFileError, contained_regular_path, open_contained_regular, read_bound_bytes, read_contained_regular
+from _shared.custody import (
+    OwnedFileError, atomic_write_contained, contained_regular_path, open_contained_regular,
+    read_bound_bytes, read_contained_regular,
+)
 
 DISPATCH_RUN = Path(__file__).with_name("dispatch_run.py")
 TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
@@ -62,14 +65,12 @@ _active_processes: dict[str, subprocess.Popen[str]] = {}
 
 def atomic_write(run_dir: Path, path: Path, content: str | bytes) -> None:
     """Write one run-owned file through a descriptor-relative single inode."""
-    fd, _relative, _target = open_contained_regular(
-        run_dir, path.relative_to(run_dir), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, label=path.name
+    atomic_write_contained(
+        run_dir,
+        path.relative_to(run_dir),
+        content if isinstance(content, bytes) else content.encode(),
+        label=path.name,
     )
-    binary = isinstance(content, bytes)
-    with os.fdopen(fd, "wb" if binary else "w", encoding=None if binary else "utf-8") as stream:
-        stream.write(content)
-        stream.flush()
-        os.fsync(stream.fileno())
 
 
 def atomic_write_bytes(run_dir: Path, path: Path, content: bytes) -> None:
