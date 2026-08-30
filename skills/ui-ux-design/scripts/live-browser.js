@@ -860,7 +860,10 @@
       transition: 'box-shadow 0.2s ease, opacity 0.25s ' + EASE + ', transform 0.3s ' + EASE,
       fontFamily: FONT, fontSize: '13px', color: BP.text,
       padding: '6px',
-      maxWidth: '520px', minWidth: '320px',
+      width: 'max-content',
+      maxWidth: 'min(520px, calc(100vw - 16px))',
+      minWidth: 'min(320px, calc(100vw - 16px))',
+      boxSizing: 'border-box',
     });
     document.body.appendChild(barEl);
     defangOutsideHandlers(barEl);
@@ -889,8 +892,8 @@
     }
 
     let left = r.left + (r.width - barW) / 2;
-    if (left < GAP) left = GAP;
-    if (left + barW > window.innerWidth - GAP) left = window.innerWidth - barW - GAP;
+    const maxLeft = Math.max(GAP, window.innerWidth - barW - GAP);
+    left = Math.min(Math.max(left, GAP), maxLeft);
     Object.assign(barEl.style, { top: top + 'px', left: left + 'px' });
   }
 
@@ -1116,12 +1119,13 @@
 
   function buildCyclingRow() {
     const row = el('div', {
-      display: 'flex', alignItems: 'center', gap: '6px',
+      display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap',
       padding: '1px 2px',
     });
 
     // Prev
     const prev = navBtn('\u2190');
+    prev.setAttribute('aria-label', 'Previous variant');
     prev.addEventListener('click', (e) => { e.stopPropagation(); cycleVariant(-1); });
     if (visibleVariant <= 1) prev.style.opacity = '0.3';
     row.appendChild(prev);
@@ -1139,6 +1143,7 @@
 
     // Next
     const next = navBtn('\u2192');
+    next.setAttribute('aria-label', 'Next variant');
     next.addEventListener('click', (e) => { e.stopPropagation(); cycleVariant(1); });
     if (visibleVariant >= arrivedVariants) next.style.opacity = '0.3';
     row.appendChild(next);
@@ -1176,6 +1181,7 @@
       tuneBadge.textContent = String(visParams.length);
       tune.appendChild(tuneBadge);
       tune.title = 'Tune this variant (' + visParams.length + ' knob' + (visParams.length === 1 ? '' : 's') + ')';
+      tune.setAttribute('aria-pressed', String(tuneOpen));
       tune.addEventListener('mouseenter', () => {
         if (!tuneOpen) tune.style.background = BP.accentSoft;
       });
@@ -1217,6 +1223,7 @@
     });
     discard.textContent = '\u2715';
     discard.title = 'Discard all variants';
+    discard.setAttribute('aria-label', 'Discard all variants');
     discard.addEventListener('mouseenter', () => { discard.style.color = BP.text; discard.style.borderColor = BP.text; });
     discard.addEventListener('mouseleave', () => { discard.style.color = BP.textDim; discard.style.borderColor = BP.hairline; });
     discard.addEventListener('click', (e) => { e.stopPropagation(); handleDiscard(); });
@@ -1305,7 +1312,7 @@
         : arrived ? BP.textDim
         : 'transparent';
       const dotBorder = arrived ? 'none' : '1.5px solid ' + BP.hairline;
-      const dot = el('div', {
+      const dot = el(clickable && arrived ? 'button' : 'span', {
         width: active ? '8px' : '6px',
         height: active ? '8px' : '6px',
         borderRadius: '50%',
@@ -1316,9 +1323,13 @@
         cursor: (clickable && arrived) ? 'pointer' : 'default',
         transform: arrived ? 'scale(1)' : 'scale(0.85)',
         opacity: arrived ? (active ? '1' : '0.6') : '0.4',
+        padding: '0',
       });
       if (clickable && arrived) {
         const idx = i;
+        dot.type = 'button';
+        dot.setAttribute('aria-label', 'Show variant ' + i + ' of ' + arrivedVariants);
+        dot.setAttribute('aria-pressed', String(active));
         dot.addEventListener('click', (e) => {
           e.stopPropagation();
           visibleVariant = idx;
@@ -1377,6 +1388,9 @@
       borderRadius: '10px',
       boxShadow: '0 8px 30px oklch(0% 0 0 / 0.10), 0 2px 6px oklch(0% 0 0 / 0.06)',
       padding: '6px',
+      width: 'min(320px, calc(100vw - 16px))',
+      maxWidth: 'calc(100vw - 16px)',
+      boxSizing: 'border-box',
       fontFamily: FONT,
       backdropFilter: 'blur(10px)',
       WebkitBackdropFilter: 'blur(10px)',
@@ -1443,14 +1457,19 @@
       chip.style.background = isActive ? P.accentSoft : 'transparent';
       chip.style.color = isActive ? P.accent : P.text;
     });
-    // Position above the bar
+    // Position above the bar, clamped to the usable viewport.
     const barRect = barEl.getBoundingClientRect();
-    const pickerH = 170; // approximate; grows with icon + label rows
+    const GAP = 8;
+    pickerEl.style.display = 'block';
+    const pickerW = pickerEl.offsetWidth;
+    const pickerH = pickerEl.offsetHeight;
     let top = barRect.top - pickerH - 6;
-    if (top < 8) top = barRect.bottom + 6;
+    if (top < GAP) top = barRect.bottom + 6;
+    top = Math.min(Math.max(top, GAP), Math.max(GAP, window.innerHeight - pickerH - GAP));
+    const maxLeft = Math.max(GAP, window.innerWidth - pickerW - GAP);
+    const left = Math.min(Math.max(barRect.left, GAP), maxLeft);
     Object.assign(pickerEl.style, {
-      top: top + 'px', left: barRect.left + 'px',
-      display: 'block',
+      top: top + 'px', left: left + 'px',
     });
     requestAnimationFrame(() => {
       pickerEl.style.opacity = '1';
@@ -1601,7 +1620,9 @@
   function buildParamsPanel(variantEl, params) {
     const P = paramsPanelPalette || barPaletteForTheme(detectPageTheme());
     paramsPanelBody.innerHTML = '';
+    let paramIndex = 0;
     for (const p of params) {
+      const labelId = PREFIX + '-param-label-' + paramIndex++;
       const row = el('div', { display: 'flex', flexDirection: 'column', gap: '6px' });
       const labelRow = el('div', {
         display: 'flex', justifyContent: 'space-between',
@@ -1612,6 +1633,7 @@
         letterSpacing: '0.03em',
       });
       lbl.textContent = p.label || p.id;
+      lbl.id = labelId;
       labelRow.appendChild(lbl);
       const readout = el('span', {
         fontSize: '10.5px', color: P.textDim,
@@ -1627,6 +1649,7 @@
         input.max = String(p.max != null ? p.max : 1);
         input.step = String(p.step != null ? p.step : 0.05);
         input.value = String(p.default);
+        input.setAttribute('aria-labelledby', labelId);
         Object.assign(input.style, {
           width: '100%', accentColor: C.brand, cursor: 'pointer',
         });
@@ -1651,6 +1674,9 @@
           transition: 'background 0.15s ease',
           alignSelf: 'flex-start',
         });
+        track.type = 'button';
+        track.setAttribute('aria-labelledby', labelId);
+        track.setAttribute('aria-pressed', String(initial));
         const knob = el('span', {
           position: 'absolute', top: '2px',
           left: initial ? '18px' : '2px',
@@ -1665,6 +1691,7 @@
           const next = !paramsCurrentValues[p.id];
           paramsCurrentValues[p.id] = next;
           track.style.background = next ? C.brand : P.hairline;
+          track.setAttribute('aria-pressed', String(next));
           knob.style.left = next ? '18px' : '2px';
           readout.textContent = next ? 'On' : 'Off';
           applyParamValue(variantEl, p, next);
@@ -1695,6 +1722,9 @@
             transition: 'background 0.1s ease, color 0.1s ease',
           });
           b.textContent = o.label;
+          b.type = 'button';
+          b.setAttribute('aria-label', (p.label || p.id) + ': ' + o.label);
+          b.setAttribute('aria-pressed', String(active));
           b.addEventListener('click', (e) => {
             e.stopPropagation();
             paramsCurrentValues[p.id] = o.value;
@@ -1703,6 +1733,7 @@
               const on = val === o.value;
               btn.style.background = on ? C.brand : 'transparent';
               btn.style.color = on ? 'oklch(98% 0 0)' : P.text;
+              btn.setAttribute('aria-pressed', String(on));
             });
             applyParamValue(variantEl, p, o.value);
             queueCheckpoint('param_changed');
@@ -4348,6 +4379,8 @@ void main() {
     const body = document.createElement('div');
     body.className = 'panel-body';
     body.id = 'panel-body';
+    body.setAttribute('role', 'tabpanel');
+    body.setAttribute('aria-labelledby', PREFIX + '-design-tab-' + designState.tab);
     panel.appendChild(body);
     root.appendChild(panel);
 
@@ -4365,11 +4398,19 @@ void main() {
 
     const tabs = document.createElement('div');
     tabs.className = 'tabs';
+    tabs.setAttribute('role', 'tablist');
+    tabs.setAttribute('aria-label', 'Design panel view');
     for (const t of [['visual', 'Visual'], ['raw', 'Raw']]) {
       const btn = document.createElement('button');
+      const active = designState.tab === t[0];
       btn.className = 'tab';
+      btn.id = PREFIX + '-design-tab-' + t[0];
       btn.textContent = t[1];
-      btn.setAttribute('data-active', designState.tab === t[0] ? 'true' : 'false');
+      btn.setAttribute('data-active', String(active));
+      btn.setAttribute('role', 'tab');
+      btn.setAttribute('aria-selected', String(active));
+      btn.setAttribute('aria-controls', 'panel-body');
+      btn.setAttribute('tabindex', active ? '0' : '-1');
       btn.addEventListener('click', () => {
         if (designState.tab === t[0]) return;
         designState.tab = t[0];
@@ -4855,10 +4896,14 @@ void main() {
   function buildCollapsible(key, label, count) {
     const wrap = document.createElement('div');
     wrap.className = 'coll';
-    wrap.setAttribute('data-open', designState.collapsed[key] ? 'false' : 'true');
+    const expanded = !designState.collapsed[key];
+    const bodyId = PREFIX + '-design-section-' + key;
+    wrap.setAttribute('data-open', String(expanded));
 
     const head = document.createElement('button');
     head.className = 'coll-head';
+    head.setAttribute('aria-expanded', String(expanded));
+    head.setAttribute('aria-controls', bodyId);
     head.innerHTML = `
       <svg class="coll-chev" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 2.5L8 6 4 9.5"/></svg>
       <span>${escapeHtml(label)}</span>
@@ -4873,6 +4918,7 @@ void main() {
 
     const body = document.createElement('div');
     body.className = 'coll-body';
+    body.id = bodyId;
     wrap.appendChild(body);
     return { wrap, body };
   }

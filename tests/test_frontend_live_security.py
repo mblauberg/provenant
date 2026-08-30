@@ -626,6 +626,110 @@ def test_restored_generation_requires_an_explicit_browser_retry_event(
     assert "generationIntent" not in save_body
 
 
+def test_live_variant_controls_have_keyboard_semantics_and_names() -> None:
+    browser = (SCRIPTS / "live-browser.js").read_text()
+    dots = browser.split("function buildDots(clickable)", 1)[1].split(
+        "function navBtn", 1
+    )[0]
+    cycling = browser.split("function buildCyclingRow()", 1)[1].split(
+        "// --- Shared UI builders ---", 1
+    )[0]
+
+    assert "clickable && arrived ? 'button' : 'span'" in dots
+    assert "dot.type = 'button'" in dots
+    assert "dot.setAttribute('aria-label'" in dots
+    assert "dot.setAttribute('aria-pressed'" in dots
+    assert "prev.setAttribute('aria-label', 'Previous variant')" in cycling
+    assert "next.setAttribute('aria-label', 'Next variant')" in cycling
+    assert "discard.setAttribute('aria-label', 'Discard all variants')" in cycling
+
+
+def test_live_contextual_controls_clamp_to_narrow_viewports() -> None:
+    browser = (SCRIPTS / "live-browser.js").read_text()
+    init_bar = browser.split("function initBar()", 1)[1].split(
+        "function positionBar()", 1
+    )[0]
+    position_bar = browser.split("function positionBar()", 1)[1].split(
+        "function showBar", 1
+    )[0]
+    picker = browser.split("function initActionPicker()", 1)[1].split(
+        "function hideActionPicker", 1
+    )[0]
+    cycling = browser.split("function buildCyclingRow()", 1)[1].split(
+        "// --- Shared UI builders ---", 1
+    )[0]
+
+    assert "maxWidth: 'min(520px, calc(100vw - 16px))'" in init_bar
+    assert "minWidth: 'min(320px, calc(100vw - 16px))'" in init_bar
+    assert "Math.max(GAP, window.innerWidth - barW - GAP)" in position_bar
+    assert "Math.min(Math.max(left, GAP), maxLeft)" in position_bar
+    assert "width: 'min(320px, calc(100vw - 16px))'" in picker
+    assert "const pickerW = pickerEl.offsetWidth" in picker
+    assert "Math.max(GAP, window.innerWidth - pickerW - GAP)" in picker
+    assert "flexWrap: 'wrap'" in cycling
+
+
+def test_live_tune_controls_are_associated_with_visible_names() -> None:
+    browser = (SCRIPTS / "live-browser.js").read_text()
+    params = browser.split("function buildParamsPanel(variantEl, params)", 1)[
+        1
+    ].split("// Decide which way the popover opens", 1)[0]
+    range_branch = params.split("if (p.kind === 'range')", 1)[1].split(
+        "} else if (p.kind === 'toggle')", 1
+    )[0]
+    toggle_branch = params.split("} else if (p.kind === 'toggle')", 1)[1].split(
+        "} else if (p.kind === 'steps')", 1
+    )[0]
+    cycling = browser.split("function buildCyclingRow()", 1)[1].split(
+        "// --- Shared UI builders ---", 1
+    )[0]
+
+    assert "lbl.id = labelId" in params
+    assert "input.setAttribute('aria-labelledby', labelId)" in range_branch
+    assert "track." not in range_branch
+    assert "track.setAttribute('aria-labelledby', labelId)" in toggle_branch
+    assert "track.setAttribute('aria-pressed', String(initial))" in toggle_branch
+    assert "track.setAttribute('aria-pressed', String(next))" in toggle_branch
+    assert (
+        "b.setAttribute('aria-label', (p.label || p.id) + ': ' + o.label)"
+        in params
+    )
+    assert "b.setAttribute('aria-pressed', String(active))" in params
+    assert "btn.setAttribute('aria-pressed', String(on))" in params
+    assert "tune.setAttribute('aria-pressed', String(tuneOpen))" in cycling
+
+
+def test_design_panel_accordions_expose_expansion_relationships() -> None:
+    browser = (SCRIPTS / "live-browser.js").read_text()
+    collapsible = browser.split("function buildCollapsible(key, label, count)", 1)[
+        1
+    ].split("function renderRulesCollapsible", 1)[0]
+
+    assert "head.setAttribute('aria-expanded', String(expanded))" in collapsible
+    assert "head.setAttribute('aria-controls', bodyId)" in collapsible
+    assert "body.id = bodyId" in collapsible
+
+
+def test_design_panel_tabs_expose_and_update_tab_state() -> None:
+    browser = (SCRIPTS / "live-browser.js").read_text()
+    chrome = browser.split("function renderDesignChrome()", 1)[1].split(
+        "function toggleDesignPanel", 1
+    )[0]
+
+    assert "tabs.setAttribute('role', 'tablist')" in chrome
+    assert "btn.setAttribute('role', 'tab')" in chrome
+    assert "btn.setAttribute('aria-selected', String(active))" in chrome
+    assert "btn.setAttribute('aria-controls', 'panel-body')" in chrome
+    assert "body.setAttribute('role', 'tabpanel')" in chrome
+    assert (
+        "body.setAttribute('aria-labelledby', PREFIX + '-design-tab-' + designState.tab)"
+        in chrome
+    )
+    assert "btn.setAttribute('tabindex', active ? '0' : '-1')" in chrome
+    assert "designState.tab = t[0]" in chrome
+    assert "renderDesignChrome()" in chrome
+
+
 def test_status_summarises_retained_project_journals_at_the_server_boundary(
     tmp_path: Path,
 ) -> None:
