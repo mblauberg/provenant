@@ -1222,6 +1222,33 @@ def test_session_store_normalization_redacts_token_defensively(tmp_path: Path) -
     assert "/tmp/transient.png" not in journal.read_text()
 
 
+def test_delayed_checkpoint_cannot_regress_a_carbonize_required_session(
+    tmp_path: Path,
+) -> None:
+    module_url = (SCRIPTS / "live-session-store.mjs").as_uri()
+    script = (
+        f"import {{ createLiveSessionStore }} from {json.dumps(module_url)};"
+        "const store=createLiveSessionStore({cwd:process.argv[1]});"
+        "store.appendEvent({type:'accept',id:'deadbeef',variantId:'1'});"
+        "store.appendEvent({type:'agent_done',id:'deadbeef',carbonize:true});"
+        "const result=store.appendEvent({type:'checkpoint',id:'deadbeef',"
+        "revision:1,phase:'saving'});"
+        "process.stdout.write(JSON.stringify(result));"
+    )
+
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script, str(tmp_path)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    snapshot = json.loads(result.stdout)
+    assert snapshot["phase"] == "carbonize_required"
+    assert snapshot["diagnostics"][-1]["error"] == "checkpoint_phase_locked"
+
+
 def test_session_store_recovery_never_restores_a_transient_screenshot_path(
     tmp_path: Path,
 ) -> None:
@@ -1405,6 +1432,29 @@ def test_live_server_rejects_a_preexisting_symlinked_state_root(
     assert not (outside / "server.json").exists()
     assert not list(outside.glob("*.jsonl"))
     assert not list(outside.glob("*.snapshot.json"))
+
+
+def test_live_server_stop_does_not_follow_a_symlinked_state_root(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    outside = tmp_path / "outside-state"
+    project.mkdir()
+    (outside / "live").mkdir(parents=True)
+    record = outside / "live" / "server.json"
+    record.write_text(json.dumps({"pid": 2_147_483_647, "port": 65534, "token": "safe"}))
+    (project / ".impeccable").symlink_to(outside, target_is_directory=True)
+
+    result = subprocess.run(
+        ["node", str(SERVER), "stop", "--keep-inject"],
+        cwd=project,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+
+    assert result.returncode != 0
+    assert "live_state_root_invalid" in result.stderr
+    assert record.exists()
 
 
 @pytest.mark.parametrize("link_kind", ["symlink", "hardlink"])
@@ -1665,6 +1715,214 @@ def test_json_post_endpoints_reject_declared_and_streamed_oversize_bodies(
         status, _, body = _request(f"{server.base_url}/health")
         assert status == 200
         assert json.loads(body)["status"] == "ok"
+
+
+@pytest.mark.parametrize(
+    ("event_type", "expected_error"),
+    [
+        ("discard", "Pending event capacity reached"),
+        ("checkpoint", "Active session capacity reached"),
+    ],
+)
+def test_live_server_bounds_queued_work_and_active_sessions(
+    tmp_path: Path, event_type: str, expected_error: str,
+) -> None:
+    with LiveServer(tmp_path) as server:
+        for index in range(64):
+            event = {
+                "token": server.token,
+                "type": event_type,
+                "id": f"{index:08x}",
+            }
+            if event_type == "checkpoint":
+                event["revision"] = 0
+            assert _request(
+                f"{server.base_url}/events",
+                method="POST",
+                body=json.dumps(event).encode(),
+                extra_headers={"Content-Type": "application/json"},
+            )[0] == 200
+
+        overflow = {"token": server.token, "type": event_type, "id": "ffffffff"}
+        if event_type == "checkpoint":
+            overflow["revision"] = 0
+        status, _, body = _request(
+            f"{server.base_url}/events",
+            method="POST",
+            body=json.dumps(overflow).encode(),
+            extra_headers={"Content-Type": "application/json"},
+        )
+        assert status == 429
+        assert json.loads(body)["error"] == expected_error
+        assert _request(f"{server.base_url}/health")[0] == 200
+
+
+def test_live_server_bounds_sse_clients(tmp_path: Path) -> None:
+    connections: list[http.client.HTTPConnection] = []
+    responses: list[http.client.HTTPResponse] = []
+    with LiveServer(tmp_path) as server:
+        try:
+            for _ in range(16):
+                connection = http.client.HTTPConnection("127.0.0.1", server.port, timeout=3)
+                connection.request("GET", f"/events?token={quote(server.token)}")
+                response = connection.getresponse()
+                assert response.status == 200
+                connections.append(connection)
+                responses.append(response)
+
+            status, _, body = _request(
+                f"{server.base_url}/events?token={quote(server.token)}"
+            )
+            assert status == 429
+            assert json.loads(body)["error"] == "SSE client capacity reached"
+
+            responses[0].close()
+            connections[0].close()
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                replacement = http.client.HTTPConnection(
+                    "127.0.0.1", server.port, timeout=3
+                )
+                replacement.request("GET", f"/events?token={quote(server.token)}")
+                replacement_response = replacement.getresponse()
+                if replacement_response.status == 200:
+                    connections.append(replacement)
+                    responses.append(replacement_response)
+                    break
+                replacement_response.read()
+                replacement.close()
+                time.sleep(0.025)
+            else:
+                pytest.fail("SSE slot was not reclaimed after disconnect")
+        finally:
+            for response in responses:
+                response.close()
+            for connection in connections:
+                connection.close()
+
+
+def test_annotation_capacity_is_reclaimed_after_agent_acknowledgement(
+    tmp_path: Path,
+) -> None:
+    event_id = "00000000"
+    with LiveServer(tmp_path) as server:
+        interrupted = http.client.HTTPConnection("127.0.0.1", server.port, timeout=3)
+        interrupted.putrequest(
+            "POST",
+            f"/annotation?token={quote(server.token)}&eventId=interrupted",
+        )
+        interrupted.putheader("Content-Type", "image/png")
+        interrupted.putheader("Content-Length", "1024")
+        interrupted.endheaders()
+        interrupted.send(b"partial")
+        interrupted.close()
+        time.sleep(0.05)
+
+        screenshot_path = None
+        for index in range(64):
+            current_id = f"{index:08x}"
+            status, _, body = _request(
+                f"{server.base_url}/annotation?token={quote(server.token)}&eventId={current_id}",
+                method="POST",
+                body=b"\x89PNG\r\n\x1a\n",
+                extra_headers={"Content-Type": "image/png"},
+            )
+            assert status == 200
+            if current_id == event_id:
+                screenshot_path = json.loads(body)["path"]
+            event = {
+                "token": server.token,
+                "type": "generate",
+                "id": current_id,
+                "action": "polish",
+                "count": 1,
+                "element": {"outerHTML": "<main>safe</main>"},
+                "screenshotPath": json.loads(body)["path"],
+            }
+            assert _request(
+                f"{server.base_url}/events",
+                method="POST",
+                body=json.dumps(event).encode(),
+                extra_headers={"Content-Type": "application/json"},
+            )[0] == 200
+
+        assert screenshot_path
+        assert _request(
+            f"{server.base_url}/annotation?token={quote(server.token)}&eventId=overflow",
+            method="POST",
+            body=b"\x89PNG\r\n\x1a\n",
+            extra_headers={"Content-Type": "image/png"},
+        )[0] == 507
+
+        _, _, body = _request(
+            f"{server.base_url}/poll?token={quote(server.agent_token)}&timeout=1000&leaseMs=1000"
+        )
+        leased = json.loads(body)
+        reply = {
+            "token": server.agent_token,
+            "type": "agent_done",
+            "id": event_id,
+            "leaseToken": leased["leaseToken"],
+        }
+        assert _request(
+            f"{server.base_url}/poll",
+            method="POST",
+            body=json.dumps(reply).encode(),
+            extra_headers={"Content-Type": "application/json"},
+        )[0] == 200
+        assert not Path(screenshot_path).exists()
+        assert _request(
+            f"{server.base_url}/annotation?token={quote(server.token)}&eventId=reused-slot",
+            method="POST",
+            body=b"\x89PNG\r\n\x1a\n",
+            extra_headers={"Content-Type": "image/png"},
+        )[0] == 200
+
+
+def test_session_journal_has_a_bounded_capacity(tmp_path: Path) -> None:
+    module_url = (SCRIPTS / "live-session-store.mjs").as_uri()
+    script = (
+        f"import {{ createLiveSessionStore }} from {json.dumps(module_url)};"
+        "const store=createLiveSessionStore({cwd:process.argv[1]});"
+        "const payload='x'.repeat(240000);"
+        "let code=null;"
+        "for(let revision=0;revision<32;revision+=1){"
+        "try{store.appendEvent({type:'checkpoint',id:'deadbeef',revision,"
+        "phase:'generating',paramValues:{payload}});}"
+        "catch(error){code=error.code;break;}"
+        "}"
+        "process.stdout.write(JSON.stringify({code}));"
+    )
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script, str(tmp_path)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["code"] == "live_session_limit"
+    journal = tmp_path / ".impeccable" / "live" / "sessions" / "deadbeef.jsonl"
+    assert 2 * 1024 * 1024 < journal.stat().st_size <= int(2.5 * 1024 * 1024)
+
+    terminal = subprocess.run(
+        [
+            "node",
+            "--input-type=module",
+            "-e",
+            f"import {{ createLiveSessionStore }} from {json.dumps(module_url)};"
+            "const store=createLiveSessionStore({cwd:process.argv[1]});"
+            "store.appendEvent({type:'accept',id:'deadbeef',variantId:'1'});"
+            "store.appendEvent({type:'agent_done',id:'deadbeef',carbonize:true});"
+            "const result=store.appendEvent({type:'complete',id:'deadbeef'});"
+            "process.stdout.write(JSON.stringify(result));",
+            str(tmp_path),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert terminal.returncode == 0, terminal.stderr
+    assert json.loads(terminal.stdout)["phase"] == "completed"
 
 
 @pytest.mark.parametrize(

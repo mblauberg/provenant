@@ -30,8 +30,8 @@ import { readContainedSource } from './contained-source.mjs';
 import {
   ensureCanonicalLiveStateRoot,
   getDesignSidecarPath,
+  getLiveServerPath,
   readLiveServerInfo,
-  removeLiveServerInfo,
   resolveLiveConfigPath,
   resolveDesignSidecarPath,
   writeLiveServerInfo,
@@ -92,7 +92,7 @@ async function probeServerInfo(info, timeoutMs = 1_000) {
       || !info.token) return false;
   try {
     const response = await fetch(
-      `http://127.0.0.1:${info.port}/status?token=${encodeURIComponent(info.token)}`,
+      `http://127.0.0.1:${info.port}/status?probe=1&token=${encodeURIComponent(info.token)}`,
       { signal: AbortSignal.timeout(timeoutMs) },
     );
     if (!response.ok) return false;
@@ -100,6 +100,52 @@ async function probeServerInfo(info, timeoutMs = 1_000) {
     return status?.status === 'ok'
       && status.pid === info.pid
       && status.port === info.port;
+  } catch {
+    return false;
+  }
+}
+
+async function acquireServerRecordLock(timeoutMs = LIVE_SERVER_STARTUP_TIMEOUT_MS) {
+  const lockPath = getLiveServerPath(process.cwd()) + '.lock';
+  fs.mkdirSync(path.dirname(lockPath), { recursive: true });
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      fs.mkdirSync(lockPath, { mode: 0o700 });
+      let released = false;
+      return () => {
+        if (released) return;
+        released = true;
+        try { fs.rmdirSync(lockPath); } catch {}
+      };
+    } catch (error) {
+      if (error.code !== 'EEXIST') throw error;
+      try {
+        if (Date.now() - fs.statSync(lockPath).mtimeMs > LIVE_SERVER_STARTUP_TIMEOUT_MS * 2) {
+          fs.rmdirSync(lockPath);
+          continue;
+        }
+      } catch (staleError) {
+        if (!['ENOENT', 'ENOTEMPTY'].includes(staleError.code)) throw staleError;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  }
+  const error = new Error('Timed out waiting for live server state ownership');
+  error.code = 'live_server_lock_timeout';
+  throw error;
+}
+
+function removeServerRecordIfUnchanged(record) {
+  if (!record?.path || !record.info) return false;
+  const current = readLiveServerInfo(process.cwd());
+  if (!current || current.path !== record.path) return false;
+  for (const field of ['pid', 'port', 'token', 'agentStatePath']) {
+    if ((current.info?.[field] ?? null) !== (record.info?.[field] ?? null)) return false;
+  }
+  try {
+    fs.unlinkSync(record.path);
+    return true;
   } catch {
     return false;
   }
@@ -120,15 +166,25 @@ const state = {
   sseEventSequence: 0,
   exitTimer: null,
   sessionDir: null,         // per-session tmp dir for annotation screenshots
+  annotationFiles: new Map(),
+  annotationBytes: 0,
+  annotationUploads: 0,
+  annotationInflightBytes: 0,
   agentStatePath: null,
   sessionStore: null,
   leaseTimer: null,
+  releaseServerRecordLock: null,
 };
 
 // Cap per-annotation upload size. A full 1920×1080 PNG is typically <1 MB;
 // cap at 10 MB to guard against runaway writes from a misbehaving client.
 const MAX_ANNOTATION_BYTES = 10 * 1024 * 1024;
+const MAX_ANNOTATION_FILES = 64;
+const MAX_ANNOTATION_TOTAL_BYTES = 64 * 1024 * 1024;
 const MAX_JSON_BODY_BYTES = 256 * 1024;
+const MAX_PENDING_EVENTS = 64;
+const MAX_ACTIVE_SESSIONS = 64;
+const MAX_SSE_CLIENTS = 16;
 
 function redactBearer(event) {
   if (!event || typeof event !== 'object') return event;
@@ -138,9 +194,42 @@ function redactBearer(event) {
 
 function enqueueEvent(event) {
   const safeEvent = redactBearer(event);
-  if (!safeEvent || (safeEvent.id && state.pendingEvents.some((entry) => entry.event?.id === safeEvent.id && entry.event?.type === safeEvent.type))) return;
+  if (!safeEvent || isPendingEventDuplicate(safeEvent)) return;
   state.pendingEvents.push({ event: safeEvent, leaseUntil: 0, leaseToken: null });
   flushPendingPolls();
+}
+
+function isPendingEventDuplicate(event) {
+  return Boolean(event?.id && state.pendingEvents.some((entry) => (
+    entry.event?.id === event.id && entry.event?.type === event.type
+  )));
+}
+
+function releaseAnnotationForEvent(event) {
+  const tracked = event?.id ? state.annotationFiles.get(event.id) : null;
+  if (!tracked) return;
+  try {
+    fs.unlinkSync(tracked.path);
+  } catch (error) {
+    if (error.code !== 'ENOENT') return;
+  }
+  state.annotationFiles.delete(event.id);
+  state.annotationBytes = Math.max(0, state.annotationBytes - tracked.bytes);
+}
+
+function reclaimOldestUnboundAnnotation() {
+  for (const [eventId, tracked] of state.annotationFiles) {
+    if (tracked.bound) continue;
+    releaseAnnotationForEvent({ id: eventId });
+    return true;
+  }
+  return false;
+}
+
+function reclaimUnboundAnnotationsUntil(predicate) {
+  while (predicate() && reclaimOldestUnboundAnnotation()) {
+    // Each pass releases at most one tracked upload and updates byte totals.
+  }
 }
 
 function findAvailablePendingEvent(now = Date.now()) {
@@ -183,6 +272,7 @@ function acknowledgePendingEvent(index, id, leaseToken) {
   const entry = state.pendingEvents[index];
   if (entry?.event?.id !== id || entry.leaseToken !== leaseToken) return false;
   state.pendingEvents.splice(index, 1);
+  releaseAnnotationForEvent(entry.event);
   scheduleLeaseFlush();
   return true;
 }
@@ -383,6 +473,12 @@ function bindUploadedScreenshot(msg) {
     throw new Error('generate: screenshot upload is not a private regular file');
   }
   return { ...msg, screenshotPath: expected };
+}
+
+function markUploadedScreenshotBound(event) {
+  if (event?.type !== 'generate' || !event.screenshotPath) return;
+  const tracked = state.annotationFiles.get(event.id);
+  if (tracked) tracked.bound = true;
 }
 
 function readBoundedJsonBody(req, res, onMessage) {
@@ -666,16 +762,52 @@ function createRequestHandler({ detectScript, sessionPath, livePath }) {
         res.end(JSON.stringify({ error: 'Session dir unavailable' }));
         return;
       }
+      if (state.annotationFiles.has(eventId)) {
+        res.writeHead(409, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Annotation already uploaded' }));
+        return;
+      }
+      if (state.annotationFiles.size + state.annotationUploads >= MAX_ANNOTATION_FILES) {
+        reclaimUnboundAnnotationsUntil(
+          () => state.annotationFiles.size + state.annotationUploads >= MAX_ANNOTATION_FILES,
+        );
+      }
+      if (state.annotationFiles.size + state.annotationUploads >= MAX_ANNOTATION_FILES) {
+        res.writeHead(507, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Annotation capacity reached' }));
+        return;
+      }
+      state.annotationUploads += 1;
       const chunks = [];
       let total = 0;
       let aborted = false;
+      let inflightReleased = false;
+      const releaseInflight = () => {
+        if (inflightReleased) return;
+        inflightReleased = true;
+        state.annotationUploads = Math.max(0, state.annotationUploads - 1);
+        state.annotationInflightBytes = Math.max(0, state.annotationInflightBytes - total);
+      };
       req.on('data', (c) => {
         if (aborted) return;
         total += c.length;
+        state.annotationInflightBytes += c.length;
         if (total > MAX_ANNOTATION_BYTES) {
           aborted = true;
+          releaseInflight();
           res.writeHead(413, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: 'Payload too large' }));
+          req.destroy();
+          return;
+        }
+        reclaimUnboundAnnotationsUntil(
+          () => state.annotationBytes + state.annotationInflightBytes > MAX_ANNOTATION_TOTAL_BYTES,
+        );
+        if (state.annotationBytes + state.annotationInflightBytes > MAX_ANNOTATION_TOTAL_BYTES) {
+          aborted = true;
+          releaseInflight();
+          res.writeHead(507, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Annotation capacity reached' }));
           req.destroy();
           return;
         }
@@ -683,6 +815,17 @@ function createRequestHandler({ detectScript, sessionPath, livePath }) {
       });
       req.on('end', () => {
         if (aborted) return;
+        releaseInflight();
+        reclaimUnboundAnnotationsUntil(
+          () => state.annotationFiles.size >= MAX_ANNOTATION_FILES
+            || state.annotationBytes + total > MAX_ANNOTATION_TOTAL_BYTES,
+        );
+        if (state.annotationFiles.size >= MAX_ANNOTATION_FILES
+          || state.annotationBytes + total > MAX_ANNOTATION_TOTAL_BYTES) {
+          res.writeHead(507, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Annotation capacity reached' }));
+          return;
+        }
         const absPath = path.join(state.sessionDir, eventId + '.png');
         try {
           fs.writeFileSync(absPath, Buffer.concat(chunks), { flag: 'wx', mode: 0o600 });
@@ -692,14 +835,30 @@ function createRequestHandler({ detectScript, sessionPath, livePath }) {
           res.end(JSON.stringify({ error: 'Write failed: ' + err.message }));
           return;
         }
+        state.annotationFiles.set(eventId, {
+          path: absPath,
+          bytes: total,
+          bound: false,
+        });
+        state.annotationBytes += total;
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: true, path: absPath }));
       });
       req.on('error', () => {
+        releaseInflight();
         if (!aborted) {
           res.writeHead(500, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: 'Upload failed' }));
         }
+      });
+      req.on('aborted', () => {
+        aborted = true;
+        releaseInflight();
+      });
+      req.on('close', () => {
+        if (req.complete) return;
+        aborted = true;
+        releaseInflight();
       });
       return;
     }
@@ -707,6 +866,11 @@ function createRequestHandler({ detectScript, sessionPath, livePath }) {
     // --- Health ---
     if (p === '/status') {
       if (!authenticateQuery(req, res, url)) return;
+      if (url.searchParams.get('probe') === '1') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ status: 'ok', pid: process.pid, port: state.port }));
+        return;
+      }
       const sessions = state.sessionStore
         ? state.sessionStore.listActiveSessions().map(summarizeLiveSession)
         : [];
@@ -848,6 +1012,11 @@ function createRequestHandler({ detectScript, sessionPath, livePath }) {
     // --- SSE: server→browser push (replaces WebSocket) ---
     if (p === '/events' && req.method === 'GET') {
       if (!authenticateQuery(req, res, url)) return;
+      if (state.sseClients.size >= MAX_SSE_CLIENTS) {
+        res.writeHead(429, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'SSE client capacity reached' }));
+        return;
+      }
       res.writeHead(200, {
         'Content-Type': 'text/event-stream',
         'Cache-Control': 'no-cache',
@@ -925,16 +1094,32 @@ function createRequestHandler({ detectScript, sessionPath, livePath }) {
           return;
         }
         const safeMessage = redactBearer(boundMessage);
+        const duplicate = safeMessage.type !== 'checkpoint' && isPendingEventDuplicate(safeMessage);
+        if (!duplicate && safeMessage.type !== 'checkpoint' && state.pendingEvents.length >= MAX_PENDING_EVENTS) {
+          res.writeHead(429, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Pending event capacity reached' }));
+          return;
+        }
         if (state.sessionStore && safeMessage.id) {
           try {
-            state.sessionStore.appendEvent(safeMessage);
+            const existing = state.sessionStore.getSnapshot(safeMessage.id, {
+              includeCompleted: true,
+              requireExisting: true,
+            });
+            if (!existing && state.sessionStore.listActiveSessions().length >= MAX_ACTIVE_SESSIONS) {
+              res.writeHead(429, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: 'Active session capacity reached' }));
+              return;
+            }
+            if (!duplicate) state.sessionStore.appendEvent(safeMessage);
           } catch (err) {
-            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.writeHead(err.code === 'live_session_limit' ? 507 : 500, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ error: 'session_store_append_failed', message: err.message }));
             return;
           }
         }
-        if (safeMessage.type !== 'checkpoint') enqueueEvent(safeMessage);
+        if (!duplicate && safeMessage.type !== 'checkpoint') enqueueEvent(safeMessage);
+        if (!duplicate) markUploadedScreenshotBound(safeMessage);
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: true }));
       });
@@ -946,7 +1131,7 @@ function createRequestHandler({ detectScript, sessionPath, livePath }) {
       if (!authenticateQuery(req, res, url)) return;
       res.writeHead(200, { 'Content-Type': 'text/plain' });
       res.end('stopping');
-      shutdown();
+      setImmediate(() => void shutdown());
       return;
     }
 
@@ -1083,7 +1268,7 @@ function handlePollPost(req, res) {
           carbonize: msg.data?.carbonize === true,
         });
       } catch (error) {
-        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.writeHead(error.code === 'live_session_limit' ? 507 : 500, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'session_store_append_failed', message: error.message }));
         return;
       }
@@ -1123,25 +1308,46 @@ function handlePollPost(req, res) {
 let httpServer = null;
 
 function cleanupRuntimeState() {
-  const current = readLiveServerInfo(process.cwd())?.info;
-  if (current?.pid === process.pid && current?.token === state.token) {
-    removeLiveServerInfo(process.cwd());
-  }
   if (state.leaseTimer) clearTimeout(state.leaseTimer);
   state.leaseTimer = null;
   if (state.sessionDir) {
     try { fs.rmSync(state.sessionDir, { recursive: true, force: true }); } catch {}
   }
+  state.annotationFiles.clear();
+  state.annotationBytes = 0;
+  state.annotationUploads = 0;
+  state.annotationInflightBytes = 0;
   for (const res of state.sseClients) { try { res.end(); } catch {} }
   state.sseClients.clear();
   for (const poll of state.pendingPolls) poll.resolve({ type: 'exit' });
   state.pendingPolls.length = 0;
+  state.releaseServerRecordLock?.();
+  state.releaseServerRecordLock = null;
 }
 
-function shutdown() {
+let shuttingDown = false;
+
+async function shutdown() {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  let releaseLock = state.releaseServerRecordLock;
+  state.releaseServerRecordLock = null;
+  try {
+    releaseLock ||= await acquireServerRecordLock();
+    const record = readLiveServerInfo(process.cwd());
+    if (record?.info?.pid === process.pid && record.info.token === state.token) {
+      removeServerRecordIfUnchanged(record);
+    }
+  } catch {
+    // A stale self-owned record is safe: the next startup probes it under lock.
+  }
   cleanupRuntimeState();
-  if (httpServer?.listening) httpServer.close();
-  process.exit(0);
+  releaseLock?.();
+  if (httpServer?.listening) {
+    httpServer.close(() => process.exit(0));
+  } else {
+    process.exit(0);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1179,14 +1385,37 @@ Endpoints:
   process.exit(0);
 }
 
+try {
+  ensureCanonicalLiveStateRoot(process.cwd());
+} catch (error) {
+  console.error(JSON.stringify({
+    error: error.code || 'live_state_root_invalid',
+    message: error.message,
+  }));
+  process.exit(1);
+}
+
 if (args.includes('stop')) {
   const keepInject = args.includes('--keep-inject');
+  let releaseStopLock = null;
   try {
-    const { info } = readLiveServerInfo(process.cwd()) || {};
-    const res = await fetch(`http://127.0.0.1:${info.port}/stop?token=${info.token}`);
-    if (res.ok) console.log(`Stopped live server on port ${info.port}.`);
+    releaseStopLock = await acquireServerRecordLock();
+    const record = readLiveServerInfo(process.cwd());
+    if (record?.info && await probeServerInfo(record.info)) {
+      const { info } = record;
+      const res = await fetch(`http://127.0.0.1:${info.port}/stop?token=${info.token}`);
+      if (res.ok) {
+        removeServerRecordIfUnchanged(record);
+        console.log(`Stopped live server on port ${info.port}.`);
+      }
+    } else {
+      removeServerRecordIfUnchanged(record);
+      console.log('No running live server found.');
+    }
   } catch {
     console.log('No running live server found.');
+  } finally {
+    releaseStopLock?.();
   }
   if (!keepInject) {
     const injectPath = path.join(__dirname, 'live-inject.mjs');
@@ -1215,16 +1444,6 @@ if (args.includes('stop')) {
     }
   }
   process.exit(0);
-}
-
-try {
-  ensureCanonicalLiveStateRoot(process.cwd());
-} catch (error) {
-  console.error(JSON.stringify({
-    error: error.code || 'live_state_root_invalid',
-    message: error.message,
-  }));
-  process.exit(1);
 }
 
 // --background: spawn a detached child server, wait for it to be ready,
@@ -1289,18 +1508,28 @@ if (args.includes('--background')) {
   process.exit(1);
 }
 
+// Serialize record inspection, stale cleanup, bind, and publication so a
+// concurrent start/stop cannot delete or claim another process's record.
+try {
+  state.releaseServerRecordLock = await acquireServerRecordLock();
+} catch (error) {
+  console.error(JSON.stringify({ error: error.code, message: error.message }));
+  process.exit(1);
+}
+process.once('exit', () => state.releaseServerRecordLock?.());
+
 // Check for existing session
 const existingRecord = readLiveServerInfo(process.cwd());
 if (existingRecord?.info) {
   const existing = existingRecord.info;
-  try {
-    process.kill(existing.pid, 0);
+  if (await probeServerInfo(existing)) {
     console.error(`Live server already running on port ${existing.port} (pid ${existing.pid}).`);
     console.error('Stop it first with: node ' + path.basename(fileURLToPath(import.meta.url)) + ' stop');
+    state.releaseServerRecordLock?.();
+    state.releaseServerRecordLock = null;
     process.exit(1);
-  } catch {
-    try { fs.unlinkSync(existingRecord.path); } catch {}
   }
+  removeServerRecordIfUnchanged(existingRecord);
 }
 
 const portArg = args.find(a => a.startsWith('--port='));
@@ -1351,11 +1580,13 @@ httpServer.listen(state.port, '127.0.0.1', () => {
     token: state.token,
     agentStatePath: state.agentStatePath,
   });
+  state.releaseServerRecordLock?.();
+  state.releaseServerRecordLock = null;
   const url = `http://127.0.0.1:${state.port}`;
   console.log(`\nImpeccable live server running on ${url}`);
   console.log('Browser credential stored in .impeccable/live/server.json; agent credential stored outside the project tree.');
   console.log(`Stop:   node ${path.basename(fileURLToPath(import.meta.url))} stop`);
 });
 
-process.on('SIGINT', shutdown);
-process.on('SIGTERM', shutdown);
+process.on('SIGINT', () => void shutdown());
+process.on('SIGTERM', () => void shutdown());

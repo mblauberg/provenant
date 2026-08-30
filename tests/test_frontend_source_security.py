@@ -249,6 +249,55 @@ def test_contained_source_batch_rolls_back_prior_replacements_on_commit_failure(
     assert not list(tmp_path.glob(".*.tmp"))
 
 
+def test_contained_source_rollback_preserves_a_concurrent_edit(tmp_path: Path) -> None:
+    first = tmp_path / "first.html"
+    second = tmp_path / "second.html"
+    first.write_text("first")
+    second.write_text("second")
+    result = _run_contained_source_probe(
+        tmp_path,
+        "const fs=(await import('node:fs')).default;"
+        "const root=process.argv[1];"
+        "const first=readContainedSource(root,'first.html',{relativeOnly:true});"
+        "const second=readContainedSource(root,'second.html',{relativeOnly:true});"
+        "try{replaceContainedSources([{snapshot:first,content:'changed-first'},"
+        "{snapshot:second,content:'changed-second'}],{beforeReplace({index}){if(index===1){"
+        "fs.writeFileSync(first.path,'concurrent-first');"
+        "fs.writeFileSync(second.path,'concurrent-second');}}});}"
+        "catch(error){process.stdout.write(JSON.stringify({code:error.code,"
+        "rollbackErrors:error.rollbackErrors}));process.exit(7)}",
+    )
+
+    assert result.returncode == 7
+    payload = json.loads(result.stdout)
+    assert payload["code"] == "source_rollback_failed"
+    assert payload["rollbackErrors"][0]["code"] == "source_rollback_conflict"
+    assert first.read_text() == "concurrent-first"
+    assert second.read_text() == "concurrent-second"
+
+
+def test_contained_source_rolls_back_its_own_partial_write(tmp_path: Path) -> None:
+    source = tmp_path / "page.html"
+    source.write_text("original-bytes")
+    result = _run_contained_source_probe(
+        tmp_path,
+        "const fs=(await import('node:fs')).default;"
+        "const original=fs.writeSync.bind(fs);let calls=0;"
+        "fs.writeSync=(target,data,offset,length,position)=>{"
+        "if(Buffer.from(data).toString()==='replacement'){calls+=1;"
+        "if(calls===1){return original(target,data,offset,3,position);}"
+        "const error=new Error('partial');error.code='EIO';throw error;}"
+        "return original(target,data,offset,length,position);};"
+        "const snapshot=readContainedSource(process.argv[1],'page.html',{relativeOnly:true});"
+        "try{replaceContainedSources([{snapshot,content:'replacement'}]);}"
+        "catch(error){process.stdout.write(error.code);process.exit(7)}",
+    )
+
+    assert result.returncode == 7
+    assert result.stdout == "source_replace_failed"
+    assert source.read_text() == "original-bytes"
+
+
 def test_contained_source_rejects_same_inode_content_change_after_snapshot(tmp_path: Path) -> None:
     source = tmp_path / "page.html"
     source.write_text("first")

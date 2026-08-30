@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -136,6 +136,35 @@ test('background launcher replaces a stale server record before reporting succes
     assert.equal(result.stderr.includes(privateInfo.token), false);
   } finally {
     stopServer(project);
+    fs.rmSync(project, { recursive: true, force: true });
+  }
+});
+
+test('background launcher replaces a stale record that reuses a live unrelated pid', () => {
+  const project = newProject();
+  const unrelated = spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)'], {
+    stdio: 'ignore',
+  });
+  const serverRecord = path.join(project, '.impeccable', 'live');
+  fs.mkdirSync(serverRecord, { recursive: true });
+  fs.writeFileSync(
+    path.join(serverRecord, 'server.json'),
+    JSON.stringify({ pid: unrelated.pid, port: 65534, token: 'stale' }),
+  );
+  try {
+    const result = spawnSync(process.execPath, [SERVER, '--background'], {
+      cwd: project,
+      encoding: 'utf8',
+      timeout: 15_000,
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    const info = JSON.parse(result.stdout);
+    assert.notEqual(info.pid, unrelated.pid);
+    assert.doesNotThrow(() => process.kill(unrelated.pid, 0));
+  } finally {
+    stopServer(project);
+    unrelated.kill('SIGTERM');
     fs.rmSync(project, { recursive: true, force: true });
   }
 });

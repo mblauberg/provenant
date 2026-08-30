@@ -269,10 +269,12 @@ function openReplacement(snapshot, bytes) {
 function writeDescriptor(entry, bytes) {
   fs.ftruncateSync(entry.descriptor, 0);
   let offset = 0;
+  entry.writeProgress = 0;
   while (offset < bytes.length) {
     const written = fs.writeSync(entry.descriptor, bytes, offset, bytes.length - offset, offset);
     if (written === 0) throw sourceError('source_replace_failed', 'Source write made no progress');
     offset += written;
+    entry.writeProgress = offset;
   }
   fs.fsyncSync(entry.descriptor);
   const verified = readStableDescriptor(entry.descriptor);
@@ -330,8 +332,10 @@ export function replaceContainedSources(replacements, options = {}) {
       // Recheck the original bytes and parent after the last caller hook and
       // immediately before truncating this already-open descriptor.
       validateReplacementPreflight(entry);
+      entry.writeCompleted = false;
       applied.push(entry);
       writeDescriptor(entry, entry.replacement);
+      entry.writeCompleted = true;
       options.afterWrite?.({ index, path: entry.snapshot.path });
       validateParentBinding(entry.snapshot);
     }
@@ -339,9 +343,24 @@ export function replaceContainedSources(replacements, options = {}) {
     const rollbackErrors = [];
     for (const entry of applied.reverse()) {
       try {
+        const current = readStableDescriptor(entry.descriptor);
+        const expectedBytes = entry.writeCompleted
+          ? entry.replacement
+          : entry.replacement.subarray(0, entry.writeProgress || 0);
+        if (!sameObjectIdentity(current.before, entry.snapshot)
+          || !current.bytes.equals(expectedBytes)) {
+          throw sourceError(
+            'source_rollback_conflict',
+            'Source changed after replacement; concurrent bytes were preserved',
+          );
+        }
         writeDescriptor(entry, entry.original);
       } catch (rollbackError) {
-        rollbackErrors.push({ path: entry.snapshot.path, error: rollbackError.message });
+        rollbackErrors.push({
+          path: entry.snapshot.path,
+          code: rollbackError.code || 'source_rollback_failed',
+          error: rollbackError.message,
+        });
       }
     }
     if (rollbackErrors.length > 0) {

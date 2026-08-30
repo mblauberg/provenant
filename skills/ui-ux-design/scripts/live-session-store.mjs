@@ -15,6 +15,20 @@ const INERT_PHASES = new Set([
   'accept_requested', 'discard_requested', 'discarded', 'completed', 'agent_error',
 ]);
 const INERT_PENDING_TYPES = new Set(['generate', 'accept', 'discard']);
+const CHECKPOINT_LOCKED_PHASES = new Set([
+  'accept_requested',
+  'discard_requested',
+  'carbonize_required',
+  'completed',
+  'discarded',
+  'agent_error',
+]);
+const MAX_SESSION_JOURNAL_BYTES = 4 * 1024 * 1024;
+const MAX_SESSION_CHECKPOINT_BYTES = 2.5 * 1024 * 1024;
+const MAX_SESSION_TRANSITION_BYTES = 3 * 1024 * 1024;
+const MAX_SESSION_AGENT_RESULT_BYTES = 3.5 * 1024 * 1024;
+const TRANSITION_EVENT_TYPES = new Set(['accept', 'discard']);
+const FINAL_EVENT_TYPES = new Set(['complete', 'discarded', 'agent_error']);
 
 export function summarizeLiveSession(snapshot) {
   const pendingType = snapshot?.pendingEvent?.type;
@@ -91,9 +105,23 @@ export function createLiveSessionStore({ cwd = process.cwd(), sessionId } = {}) 
         ts: new Date().toISOString(),
         event: normalized,
       };
+      const serializedEntry = JSON.stringify(entry) + '\n';
+      const existingBytes = fs.existsSync(journalPath) ? fs.statSync(journalPath).size : 0;
+      const maximumBytes = FINAL_EVENT_TYPES.has(normalized.type)
+        ? MAX_SESSION_JOURNAL_BYTES
+        : normalized.type === 'agent_done'
+          ? MAX_SESSION_AGENT_RESULT_BYTES
+        : TRANSITION_EVENT_TYPES.has(normalized.type)
+          ? MAX_SESSION_TRANSITION_BYTES
+          : MAX_SESSION_CHECKPOINT_BYTES;
+      if (existingBytes + Buffer.byteLength(serializedEntry) > maximumBytes) {
+        const error = new Error('Live session journal capacity reached');
+        error.code = 'live_session_limit';
+        throw error;
+      }
       writeStateFile(
         journalPath,
-        JSON.stringify(entry) + '\n',
+        serializedEntry,
         fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_APPEND,
         assertRoot,
       );
@@ -363,7 +391,13 @@ function applyEvent(snapshot, entry, inheritedDiagnostics = []) {
       }
       break;
     case 'checkpoint':
-      if ((event.revision ?? 0) >= (next.checkpointRevision ?? 0)) {
+      if (CHECKPOINT_LOCKED_PHASES.has(next.phase)) {
+        next.diagnostics.push({
+          error: 'checkpoint_phase_locked',
+          revision: event.revision,
+          phase: next.phase,
+        });
+      } else if ((event.revision ?? 0) >= (next.checkpointRevision ?? 0)) {
         next.phase = event.phase ?? next.phase;
         next.checkpointRevision = event.revision ?? next.checkpointRevision;
         next.activeOwner = event.owner ?? next.activeOwner;

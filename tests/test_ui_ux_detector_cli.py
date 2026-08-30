@@ -36,6 +36,20 @@ def test_detector_json_clean_file_is_an_empty_findings_list(tmp_path: Path) -> N
     assert result.stderr == ""
 
 
+def test_detector_directory_scan_skips_symlinked_source_files(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "clean.tsx").write_text("export const Label = () => <span>Safe</span>;\n")
+    outside = tmp_path / "outside.tsx"
+    outside.write_text('<h1 class="bg-clip-text bg-gradient-to-r">Outside</h1>\n')
+    (project / "leak.tsx").symlink_to(outside)
+
+    result = _run_detect("--json", "--fast", str(project))
+
+    assert result.returncode == 0
+    assert json.loads(result.stdout) == []
+
+
 def test_detector_json_finding_is_a_nonempty_findings_list() -> None:
     result = _run_detect(
         "--json",
@@ -188,26 +202,6 @@ def test_detector_json_reports_each_url_when_shared_browser_engine_is_unavailabl
         "https://two.example",
     ]
     assert {error["code"] for error in payload["errors"]} == {"engine_unavailable"}
-    assert result.stderr == ""
-
-
-def test_detector_json_turns_graph_and_file_read_errors_into_one_incomplete_result(
-    tmp_path: Path,
-) -> None:
-    source = tmp_path / "clean.tsx"
-    source.write_text("export const Label = () => <span>Account</span>;\n")
-    (tmp_path / "broken.tsx").symlink_to(tmp_path / "missing.tsx")
-
-    result = _run_detect("--json", str(tmp_path))
-
-    assert result.returncode == 1
-    payload = json.loads(result.stdout)
-    assert payload["status"] == "incomplete"
-    assert payload["findings"] == []
-    assert payload["errors"]
-    assert {error["code"] for error in payload["errors"]} <= {"graph_read_failed", "scan_failed"}
-    assert all("stack" not in error for error in payload["errors"])
-    assert result.stdout.count('"status"') == 1
     assert result.stderr == ""
 
 
