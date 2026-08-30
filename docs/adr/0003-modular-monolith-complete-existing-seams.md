@@ -2,6 +2,11 @@
 
 **Status:** Accepted 2026-07-13 (human ratification of chair + codex-pair calls)
 
+> **Current-reader note.** ADR 0020 retired the daemon and
+> `runtime/agent-fabric`; current coordination lives in `runtime/fabric`. The
+> retained rule is to complete proven seams and avoid speculative scaffolding;
+> paths and implementation detail below are historical.
+
 ## Context
 
 At the time of this decision `runtime/agent-fabric/src/core/fabric.ts` was a

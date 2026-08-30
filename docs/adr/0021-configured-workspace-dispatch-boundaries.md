@@ -22,25 +22,24 @@ batch execution.
 
 ### Owner map
 
-| Concern | Current or planned owner | Boundary |
+| Concern | Current owner | Boundary |
 |---|---|---|
 | Model and tier resolution | `scripts/model-route` | Resolves configured routes and records route identity; it does not launch providers. |
-| Assurance dispatch adapter | `skills/orchestrate/scripts/cf_dispatch.sh` | Current provider-invocation adapter for assurance and review paths; its distinct-family requirement remains assurance policy. |
-| Ordinary dispatch interface and runner | provider-agnostic orchestration runner `skills/orchestrate/scripts/dispatch_run.py` ([#518](https://github.com/mblauberg/provenant/issues/518)) | Owns one ordinary intent/policy attempt and its compact evidence, and delegates provider invocation to `cf_dispatch.sh`; fixed batches remain #683. |
-| Fixed bounded batches | `skills/orchestrate/scripts/batch_run.py` ([#683](https://github.com/mblauberg/provenant/issues/683)) | Builds on the #518 interface for fixed task sets, concurrency, partial results and retry coordination; it does not own provider invocation or workspace policy. |
+| Provider-invocation adapter | `skills/orchestrate/scripts/cf_dispatch.sh` | Invoked by ordinary and assurance routes; its distinct-family requirement remains assurance policy. |
+| Ordinary dispatch runner and interface | `skills/orchestrate/scripts/dispatch_run.py` (implemented by [#690](https://github.com/mblauberg/provenant/pull/690)) | Owns one ordinary intent/policy attempt and its `attempt.json`, and delegates provider invocation to `cf_dispatch.sh`. |
+| Fixed bounded batches | `skills/orchestrate/scripts/batch_run.py` (implemented by [#692](https://github.com/mblauberg/provenant/pull/692)) | Builds on `dispatch_run.py` for fixed task sets, bounded concurrency, partial results and explicit retry; it does not own provider invocation or workspace policy. |
 | Coordination | `runtime/fabric` | Mailbox, shared tasks and activity only; no provider launch, scheduler or lifecycle owner. |
-| Dispatch evidence | #518 attempt-record schema indexed by existing `MANIFEST.md` and bound into `RUN_RECEIPT.json`/`run_dir_finalize.py` | Records execution attempts, route lineage and observed completion; it is not delivery acceptance and must not create a parallel lifecycle ledger. |
+| Dispatch evidence | `attempt.json`, validated and indexed by `dispatch_run.py`; `run_controls.py` owns retained-attempt validation and operator controls | Records execution attempts, route lineage and observed completion. `run_dir_finalize.py` invokes the `run_controls.py` validator during generic custody finalisation but does not own the attempt schema; dispatch evidence is not delivery acceptance and must not create a parallel lifecycle ledger. |
 | Delivery evidence | `deliver` and canonical delivery `RUN.json` | Records artifact verification, review and acceptance; it may reference the orchestration receipt. |
 
-The #518 runner now provides the ordinary intent/policy interface and the
-ordinary single-dispatch intent/policy mode;
-the #683 batch layer provides the fixed bounded implementation boundary. The existing
+The dispatch runner provides the ordinary intent/policy interface and the
+ordinary single-dispatch intent/policy mode; the batch layer provides the fixed
+bounded implementation boundary. The existing
 distinct-family behaviour in `cf_dispatch.sh` remains the assurance path, while
 ordinary execution explicitly records that it makes no independence claim.
 Credential/auth-store exclusions, unrelated-path containment, explicit denials,
 write/resource limits and external-action gates remain implementation acceptance
-gates for the [#518](https://github.com/mblauberg/provenant/issues/518) runner and
-the [#683](https://github.com/mblauberg/provenant/issues/683) batch layer.
+gates for both runners.
 
 ### Configured-workspace access
 
@@ -76,20 +75,22 @@ is the stable operator front door and may expose bounded `dispatch`, `batch` and
 `run` inspection commands, but it delegates to that owner. It must not create a
 second adapter parser, scheduler, lifecycle database or delivery receipt.
 
-Fixed bounded batches are a first-class capability under #683: fixed task sets,
+Fixed bounded batches are a first-class capability: fixed task sets,
 concurrency limits, per-task timeout, partial results and explicit retry
 attempts. Adaptive waves and reducers may be layered on that interface;
 they do not create a new runtime authority.
 
 ### Compact dispatch manifests
 
-The compact dispatch manifest is the canonical, append-only attempt-record
-schema that #518 must define for ordinary dispatch and batch execution. Existing
-orchestration `MANIFEST.md` indexes the record and `RUN_RECEIPT.json`, finalized
-by `run_dir_finalize.py`, provides its run custody and terminalisation. The
-exact attempt-record filename is a #518 schema decision; it is not an unnamed
-new owner or a parallel lifecycle ledger. Each task attempt records enough to
-reconstruct what happened: task and attempt IDs, requested and resolved route,
+The compact dispatch manifest is the canonical attempt record for ordinary
+dispatch and batch execution. `dispatch_run.py` validates each `attempt.json`
+and indexes it in the existing orchestration `MANIFEST.md`; `run_controls.py`
+reads validated attempt evidence for operator controls. `run_dir_finalize.py`
+invokes that validator while finalising generic `RUN_RECEIPT.json` custody and
+terminalisation; it does not own the attempt schema, copy attempt references
+into the receipt or create a new owner or parallel lifecycle ledger. Each task
+attempt records enough to reconstruct what happened: task and attempt IDs,
+requested and resolved route,
 actual provider and model, workspace and base identity when available,
 start/end, status, exit information, prompt/result paths and digests, and retry
 lineage.

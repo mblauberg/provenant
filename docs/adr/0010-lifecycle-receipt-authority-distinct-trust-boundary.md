@@ -2,6 +2,11 @@
 
 **Status:** Accepted 2026-07-15 (human, W005/W008 dependency call)
 
+> **Current-reader note.** ADR 0020 retired the external daemon-era lifecycle
+> authority and paths described below. Current delivery evidence is the local
+> canonical receipt owned by `deliver`; the retained decision is that unlike
+> evidence types must not be conflated merely because each is called a receipt.
+
 ## Context
 
 "Receipt" now names three unrelated things, and the collision is manufacturing a

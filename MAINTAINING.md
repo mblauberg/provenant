@@ -27,9 +27,9 @@ Documentation claims sit in three tiers, and the third is deliberate:
    `docs/ARCHITECTURE.md` remain maintained documentation, with their source
    constants and prose reviewed together. Do not hand-edit generated-looking
    content without checking the corresponding source.
-2. **Review-checked.** The spec schema baseline and migration assertions have
-   retained machine checks. Table prose, fenced commands, placeholders,
-   relative links and document projections remain review-owned.
+2. **Review-checked.** Runtime schema and migration structure is owned by code
+   and tests. Specification prose, fenced commands, placeholders, relative
+   links and document projections remain review-owned.
    `HARNESS.md` stays compact because it is an always-loaded constitution.
 3. **Unchecked prose.** Design intent and rationale carry no machine gate,
    on purpose; review keeps them honest, not tooling.
@@ -100,9 +100,10 @@ the domain linters import, so a change there ripples to all of them.
 
 ## Promote and retire
 
-A project skill earns global promotion after proving useful in at least two
-projects. Generalise project-specific values into knobs and leave a thin local
-override. Project rules stay authoritative inside their workspace.
+Promote a project skill when a clear reusable trigger, artifact, fixture and
+ownership boundary justify it. When evidence is limited, start opt-in and
+provisional. Generalise project-specific values into knobs, leave a thin local
+override, and keep project rules authoritative inside their workspace.
 
 Audit usage periodically. Retire zero-use skills that add no durable capability,
 but preserve required third-party notices and use repository history instead of

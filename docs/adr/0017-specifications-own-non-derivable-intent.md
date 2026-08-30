@@ -5,6 +5,11 @@
 0011](0011-github-owns-work-state.md) and [ADR
 0004](0004-per-domain-truth-owners.md)
 
+> **Current-reader note.** The SQL and `runtime/agent-fabric` inventory below is
+> historical after ADR 0020; the current Fabric schema owner is
+> `runtime/fabric/schema.sql`. The live rule remains: specifications own
+> non-derivable intent, while code and tests own implemented structure.
+
 ## Context
 
 The specification corpus reached 34 documents and 18,102 lines. Roughly 4,701 of
@@ -63,10 +68,9 @@ Concretely:
   requirements, ordering and concurrency constraints, digest preimage
   definitions, intended failure semantics, security boundaries and explicit
   requirement matrices.
-- Any structure a specification does still restate is gated against its owner.
-  `scripts/check_spec_schema_drift.py` ratchets table presence, column sets and
-  ordered primary-key, unique and foreign-key signatures. Excluded schema
-  properties and surrounding prose remain review-owned.
+- Any structure a specification still restates must be gated against its live
+  owner. ADR 0020 retired this ADR's legacy schema-drift checker with the old
+  Fabric runtime; current structure is owned and tested under `runtime/fabric`.
 - A requirement that is normative but unimplemented is an open GitHub issue, not
   a present-tense sentence in a specification.
 - `docs/invariants/agent-fabric.md` is the retention pattern: a durable claim, the
@@ -91,8 +95,9 @@ relations, and build reduced support schemas around the objects under test.
 Replaying their inserts against the baseline fails at 98%, and two negative
 assertions were shown to pass against the baseline for the wrong reason, on an
 unrelated foreign key. Repointing them would destroy a working oracle and
-manufacture false confidence rather than remove it. The drift gate gives the
-protection the repoint was meant to give, without that cost.
+manufacture false confidence rather than remove it. At adoption, the now-retired
+legacy drift gate supplied that protection without that cost; current Fabric
+structure is code- and test-owned under ADR 0020.
 
 Deleting a restatement therefore requires knowing that it *is* one. Identifier
 absence alone does not establish that a specification describes something

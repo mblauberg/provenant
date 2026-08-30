@@ -5,8 +5,7 @@ description: "Use for taking an approved research, analysis, document, or agent-
 
 # Deliver
 
-Run the domain-neutral lifecycle kernel. This skill coordinates existing
-capabilities; domain skills own domain methods.
+Coordinate the domain-neutral lifecycle; domain skills own their methods.
 
 ## Entry
 
@@ -23,10 +22,18 @@ inventing.
 
 ## Lifecycle
 
-1. Create `.agent-run/<id>/RUN.json` from `templates/RUN.template.json` and
-   bind intent, design and authority by digest. When coordinated, bind
-   `fabric_relationships` to project session, coordination run and workstream
-   IDs per [the receipt contract](references/contract.md).
+1. From the authorised workspace root, create `.agent-run/<id>/RUN.json`:
+   ```sh
+   "${AGENTS_HOME:-$HOME/.agents}/skills/deliver/scripts/delivery_receipt.py" init \
+     --run-dir ".agent-run/<id>" --run-id "<id>" --profile "<profile>" \
+     --chair-family "<family>" --risk-assessment "<risk-assessment.json>" \
+     --intent "<approved-intent-file>" --authority "<authority.json>"
+   ```
+   The intent file must be non-empty; `--risk-assessment` and `--authority`
+   accept a JSON file path or inline JSON. Add `--fabric-relationships` only
+   for coordinated work, then bind other required artifacts through the same
+   producer and follow
+   [the receipt contract](references/contract.md).
 2. Record each state transition. No state may jump an approval, evidence,
    review, acceptance or release gate.
 3. Execute through relevant skills. Software routes through `implement`;
