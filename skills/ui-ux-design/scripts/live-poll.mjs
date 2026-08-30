@@ -5,8 +5,8 @@
  * Usage:
  *   node live-poll.mjs                         # Block until browser event, print JSON
  *   node live-poll.mjs --timeout=600000        # Custom timeout (ms); default is long-poll friendly
- *   node live-poll.mjs --reply <id> done       # Reply "done" to event <id>
- *   node live-poll.mjs --reply <id> error "msg" # Reply with error
+ *   node live-poll.mjs --reply <id> done --lease-token <token>
+ *   node live-poll.mjs --reply <id> error --lease-token <token> "msg"
  */
 
 import { execFileSync } from 'node:child_process';
@@ -37,8 +37,8 @@ function readServerInfo() {
   return record.info;
 }
 
-export function buildPollReplyPayload(token, { id, type, message, file, data }) {
-  return { token, id, type, message, file, data };
+export function buildPollReplyPayload(token, { id, type, leaseToken, message, file, data }) {
+  return { token, id, type, leaseToken, message, file, data };
 }
 
 async function postReply(base, token, reply) {
@@ -63,8 +63,10 @@ Wait for a browser event from the live variant server, or reply to one.
 
 Modes:
   poll                             Block until a browser event arrives, print JSON
-  poll --reply <id> done           Reply "done" to event <id>
-  poll --reply <id> error "msg"    Reply with an error message
+  poll --reply <id> done --lease-token <token>
+                                   Reply "done" to the leased event
+  poll --reply <id> error --lease-token <token> "msg"
+                                   Reply with an error message
 
 Options:
   --timeout=MS   Long-poll timeout in ms (default: 600000). Use the default unless the user asked to pause live; never use a short timeout to end the chat turn
@@ -89,16 +91,26 @@ Options:
     const status = args[replyIdx + 2] || 'done';
     const fileIdx = args.indexOf('--file');
     const filePath = fileIdx !== -1 && fileIdx + 1 < args.length ? args[fileIdx + 1] : undefined;
+    const leaseTokenIdx = args.indexOf('--lease-token');
+    const inlineLeaseToken = args.find((arg) => arg.startsWith('--lease-token='));
+    const leaseToken = leaseTokenIdx !== -1 && leaseTokenIdx + 1 < args.length
+      ? args[leaseTokenIdx + 1]
+      : inlineLeaseToken?.slice('--lease-token='.length);
     // Message is any remaining positional arg that isn't a flag
-    const message = args.find((a, i) => i > replyIdx + 2 && !a.startsWith('--') && i !== fileIdx + 1) || undefined;
+    const message = args.find((a, i) => (
+      i > replyIdx + 2
+        && !a.startsWith('--')
+        && i !== fileIdx + 1
+        && i !== leaseTokenIdx + 1
+    )) || undefined;
 
-    if (!id) {
-      console.error(`Usage: ${POLL_COMMAND} --reply <id> <status> [--file path] [message]`);
+    if (!id || !leaseToken) {
+      console.error(`Usage: ${POLL_COMMAND} --reply <id> <status> --lease-token <token> [--file path] [message]`);
       process.exit(1);
     }
 
     try {
-      await postReply(base, agentToken, { id, type: status, message, file: filePath });
+      await postReply(base, agentToken, { id, type: status, leaseToken, message, file: filePath });
 
       // Success — silent exit (agent doesn't need output for replies)
     } catch (err) {
@@ -176,6 +188,7 @@ Options:
         await postReply(base, agentToken, {
           id: event.id,
           type: completionType,
+          leaseToken: event.leaseToken,
           message: event._acceptResult?.error,
           file: event._acceptResult?.file,
           data: event._acceptResult?.carbonize === true ? { carbonize: true } : undefined,

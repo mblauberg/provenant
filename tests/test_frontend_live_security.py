@@ -66,6 +66,22 @@ def _run_completion_type_probe(
     )
 
 
+def _run_poll_reply_payload_probe(project: Path) -> subprocess.CompletedProcess[str]:
+    module_url = (SCRIPTS / "live-poll.mjs").as_uri()
+    script = (
+        f"import {{ buildPollReplyPayload }} from {json.dumps(module_url)};"
+        "process.stdout.write(JSON.stringify(buildPollReplyPayload('agent-secret',"
+        "{id:'deadbeef',type:'done',leaseToken:'lease-secret'})));"
+    )
+    return subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        cwd=project,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+
 def _run_wrap(project: Path, *args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [
@@ -477,6 +493,18 @@ def test_failed_accept_result_remains_recoverable_as_an_error(tmp_path: Path) ->
 
     assert result.returncode == 0, result.stderr
     assert result.stdout == "error"
+
+
+def test_live_poll_replies_echo_the_exact_lease_token(tmp_path: Path) -> None:
+    completed = _run_poll_reply_payload_probe(tmp_path)
+
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(completed.stdout) == {
+        "token": "agent-secret",
+        "id": "deadbeef",
+        "type": "done",
+        "leaseToken": "lease-secret",
+    }
 
 
 def test_agent_error_keeps_the_pending_accept_event_recoverable(tmp_path: Path) -> None:
@@ -2749,6 +2777,30 @@ def _request(
         return error.code, error.headers, error.read().decode("utf-8")
 
 
+def _read_sse_messages(
+    server: "LiveServer", count: int, *, last_event_id: str | None = None,
+) -> tuple[list[dict[str, object]], str | None]:
+    connection = http.client.HTTPConnection("127.0.0.1", server.port, timeout=1)
+    headers = {"Last-Event-ID": last_event_id} if last_event_id is not None else {}
+    connection.request(
+        "GET", f"/events?token={quote(server.token)}", headers=headers,
+    )
+    response = connection.getresponse()
+    assert response.status == 200
+    messages: list[dict[str, object]] = []
+    latest_event_id = last_event_id
+    try:
+        while len(messages) < count:
+            line = response.fp.readline().decode("utf-8")
+            if line.startswith("id: "):
+                latest_event_id = line.removeprefix("id: ").strip()
+            elif line.startswith("data: "):
+                messages.append(json.loads(line.removeprefix("data: ")))
+    finally:
+        connection.close()
+    return messages, latest_event_id
+
+
 def test_live_script_requires_token_and_never_echoes_it_to_cross_origin_callers(
     tmp_path: Path,
 ) -> None:
@@ -3188,7 +3240,7 @@ def test_live_generate_rejects_unbound_browser_supplied_screenshot_path(
         assert json.loads(polled)["type"] == "timeout"
 
 
-def test_browser_credential_cannot_complete_agent_work_and_errors_requeue(
+def test_browser_credential_cannot_complete_work_and_error_does_not_starve_queue(
     tmp_path: Path,
 ) -> None:
     event_id = "deadbeef"
@@ -3206,12 +3258,22 @@ def test_browser_credential_cannot_complete_agent_work_and_errors_requeue(
             extra_headers={"Content-Type": "application/json"},
         )[0] == 200
 
-        def reply(token: str, event_type: str) -> tuple[int, object, str]:
+        def reply(
+            token: str,
+            event_type: str,
+            lease_token: str | None = None,
+            reply_id: str = event_id,
+        ) -> tuple[int, object, str]:
             return _request(
                 f"{server.base_url}/poll",
                 method="POST",
                 body=json.dumps(
-                    {"token": token, "id": event_id, "type": event_type}
+                    {
+                        "token": token,
+                        "leaseToken": lease_token,
+                        "id": reply_id,
+                        "type": event_type,
+                    }
                 ).encode(),
                 extra_headers={"Content-Type": "application/json"},
             )
@@ -3223,12 +3285,30 @@ def test_browser_credential_cannot_complete_agent_work_and_errors_requeue(
             f"{server.base_url}/poll?token={quote(server.agent_token)}"
             "&timeout=1000&leaseMs=1000"
         )
-        assert json.loads(_request(poll_url)[2])["id"] == event_id
+        first_lease = json.loads(_request(poll_url)[2])
+        assert first_lease["id"] == event_id
         assert reply(server.agent_token, "erorr")[0] == 400
-        assert reply(server.agent_token, "done")[0] == 409
-        assert reply(server.agent_token, "error")[0] == 200
-        assert json.loads(_request(poll_url)[2])["id"] == event_id
-        assert reply(server.agent_token, "complete")[0] == 200
+        assert reply(server.agent_token, "done", first_lease["leaseToken"])[0] == 409
+        assert reply(server.agent_token, "error", first_lease["leaseToken"])[0] == 200
+        next_id = "cafebabe"
+        assert _request(
+            f"{server.base_url}/events",
+            method="POST",
+            body=json.dumps(
+                {"token": server.token, "type": "discard", "id": next_id}
+            ).encode(),
+            extra_headers={"Content-Type": "application/json"},
+        )[0] == 200
+        second_lease = json.loads(_request(poll_url)[2])
+        assert second_lease["id"] == next_id
+        assert second_lease["leaseToken"] != first_lease["leaseToken"]
+        assert reply(server.agent_token, "complete", first_lease["leaseToken"])[0] == 409
+        assert reply(
+            server.agent_token,
+            "discarded",
+            second_lease["leaseToken"],
+            next_id,
+        )[0] == 200
 
         status = json.loads(
             _request(
@@ -3236,6 +3316,106 @@ def test_browser_credential_cannot_complete_agent_work_and_errors_requeue(
             )[2]
         )
         assert status["pendingEvents"] == []
+
+
+@pytest.mark.parametrize(
+    ("browser_event", "agent_reply"),
+    [("accept", "complete"), ("discard", "discarded"), ("accept", "error")],
+)
+def test_live_server_replays_terminal_outcome_after_browser_reconnect(
+    tmp_path: Path, browser_event: str, agent_reply: str,
+) -> None:
+    event_id = "deadbeef"
+    with LiveServer(tmp_path) as server:
+        event = {"token": server.token, "type": browser_event, "id": event_id}
+        if browser_event == "accept":
+            event["variantId"] = "1"
+        assert _request(
+            f"{server.base_url}/events",
+            method="POST",
+            body=json.dumps(event).encode(),
+            extra_headers={"Content-Type": "application/json"},
+        )[0] == 200
+        leased = json.loads(
+            _request(
+                f"{server.base_url}/poll?token={quote(server.agent_token)}"
+                "&timeout=1000&leaseMs=1000"
+            )[2]
+        )
+        assert leased["id"] == event_id
+        initial, watermark = _read_sse_messages(server, 1)
+        assert initial[0]["type"] == "connected"
+        assert watermark is not None
+
+        status, _, body = _request(
+            f"{server.base_url}/poll",
+            method="POST",
+            body=json.dumps(
+                {
+                    "token": server.agent_token,
+                    "leaseToken": leased["leaseToken"],
+                    "id": event_id,
+                    "type": agent_reply,
+                }
+            ).encode(),
+            extra_headers={"Content-Type": "application/json"},
+        )
+        assert status == 200, body
+
+        reconnected, _ = _read_sse_messages(
+            server, 2, last_event_id=watermark,
+        )
+        connected, replayed = reconnected
+        assert connected["type"] == "connected"
+        assert replayed == {"type": agent_reply, "id": event_id}
+
+
+def test_expired_lease_cannot_override_a_competing_worker_lease(
+    tmp_path: Path,
+) -> None:
+    event_id = "deadbeef"
+    with LiveServer(tmp_path) as server:
+        assert _request(
+            f"{server.base_url}/events",
+            method="POST",
+            body=json.dumps(
+                {"token": server.token, "type": "discard", "id": event_id}
+            ).encode(),
+            extra_headers={"Content-Type": "application/json"},
+        )[0] == 200
+        poll_url = (
+            f"{server.base_url}/poll?token={quote(server.agent_token)}"
+            "&timeout=1000&leaseMs=25"
+        )
+        first_lease = json.loads(_request(poll_url)[2])
+        assert first_lease["id"] == event_id
+        assert first_lease["leaseToken"]
+
+        time.sleep(0.06)
+        second_lease = json.loads(_request(poll_url)[2])
+        assert second_lease["id"] == event_id
+        assert second_lease["leaseToken"] != first_lease["leaseToken"]
+
+        def acknowledge(lease_token: str) -> tuple[int, object, str]:
+            return _request(
+                f"{server.base_url}/poll",
+                method="POST",
+                body=json.dumps(
+                    {
+                        "token": server.agent_token,
+                        "leaseToken": lease_token,
+                        "id": event_id,
+                        "type": "discarded",
+                    }
+                ).encode(),
+                extra_headers={"Content-Type": "application/json"},
+            )
+
+        stale = acknowledge(first_lease["leaseToken"])
+        assert stale[0] == 409
+        assert json.loads(stale[2])["error"] == "No matching leased event"
+        current = acknowledge(second_lease["leaseToken"])
+        assert current[0] == 200, current[2]
 
 
 def test_live_reply_persists_before_removing_the_leased_event(tmp_path: Path) -> None:
@@ -3255,9 +3435,10 @@ def test_live_reply_persists_before_removing_the_leased_event(tmp_path: Path) ->
         )[0] == 200
         poll_url = (
             f"{server.base_url}/poll?token={quote(server.agent_token)}"
-            "&timeout=1000&leaseMs=1000"
+            "&timeout=1000&leaseMs=5000"
         )
-        assert json.loads(_request(poll_url)[2])["id"] == event_id
+        lease = json.loads(_request(poll_url)[2])
+        assert lease["id"] == event_id
 
         sessions = tmp_path / ".impeccable" / "live" / "sessions"
         moved = sessions.with_name("sessions-moved")
@@ -3272,6 +3453,7 @@ def test_live_reply_persists_before_removing_the_leased_event(tmp_path: Path) ->
                 body=json.dumps(
                     {
                         "token": server.agent_token,
+                        "leaseToken": lease["leaseToken"],
                         "id": event_id,
                         "type": "complete",
                     }
@@ -3295,6 +3477,7 @@ def test_live_reply_persists_before_removing_the_leased_event(tmp_path: Path) ->
             body=json.dumps(
                 {
                     "token": server.agent_token,
+                    "leaseToken": lease["leaseToken"],
                     "id": event_id,
                     "type": "complete",
                 }
@@ -3329,13 +3512,15 @@ def test_carbonized_accept_can_finish_through_the_live_server(
             f"{server.base_url}/poll?token={quote(server.agent_token)}"
             "&timeout=1000&leaseMs=1000"
         )
-        assert json.loads(_request(poll_url)[2])["id"] == event_id
+        lease = json.loads(_request(poll_url)[2])
+        assert lease["id"] == event_id
         acknowledged = _request(
             f"{server.base_url}/poll",
             method="POST",
             body=json.dumps(
                 {
                     "token": server.agent_token,
+                    "leaseToken": lease["leaseToken"],
                     "id": event_id,
                     "type": "agent_done",
                     "data": {"carbonize": True},
@@ -3457,6 +3642,29 @@ def test_live_poll_rejects_malformed_timeout_and_lease_values(
 
         assert status == 400
         assert json.loads(body)["error"] == "Invalid poll bounds"
+
+
+def test_default_lease_covers_the_normal_ten_minute_agent_poll_window(
+    tmp_path: Path,
+) -> None:
+    with LiveServer(tmp_path) as server:
+        assert _request(
+            f"{server.base_url}/events",
+            method="POST",
+            body=json.dumps(
+                {"token": server.token, "type": "discard", "id": "deadbeef"}
+            ).encode(),
+            extra_headers={"Content-Type": "application/json"},
+        )[0] == 200
+        before_poll_ms = int(time.time() * 1000)
+        assert _request(
+            f"{server.base_url}/poll?token={quote(server.agent_token)}&timeout=1000"
+        )[0] == 200
+        status = json.loads(
+            _request(f"{server.base_url}/status?token={quote(server.token)}")[2]
+        )
+
+        assert status["pendingEvents"][0]["leaseUntil"] >= before_poll_ms + 590_000
 
 
 def test_design_sidecar_endpoint_rejects_a_symlink_instead_of_serving_it(

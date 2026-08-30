@@ -49,10 +49,11 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // DESIGN.json fallback for existing projects.
 const CONTEXT_DIR = resolveContextDir(process.cwd());
 const DEFAULT_POLL_TIMEOUT = 600_000;   // 10 min — agent re-polls on timeout anyway
-const DEFAULT_LEASE_MS = 30_000;
+const DEFAULT_LEASE_MS = 600_000;
 const MAX_POLL_TIMEOUT = 600_000;
 const MAX_LEASE_MS = 600_000;
 const SSE_HEARTBEAT_INTERVAL = 30_000;  // keepalive ping every 30s
+const MAX_RECENT_TERMINAL_OUTCOMES = 128;
 const SAFE_SOURCE_EXTENSIONS = new Set([
   '.astro', '.htm', '.html', '.jsx', '.svelte', '.tsx', '.vue',
 ]);
@@ -113,8 +114,10 @@ const state = {
   agentToken: null,
   port: null,
   sseClients: new Set(),   // SSE response objects (server→browser push)
-  pendingEvents: [],        // browser events waiting for agent ack ({ event, leaseUntil })
-  pendingPolls: [],         // agent poll callbacks waiting for browser events
+  pendingEvents: [],       // browser events waiting for agent ack ({ event, leaseUntil, leaseToken })
+  pendingPolls: [],        // agent poll callbacks waiting for browser events
+  terminalOutcomes: [],    // bounded in-memory SSE replay for reconnecting browsers
+  sseEventSequence: 0,
   exitTimer: null,
   sessionDir: null,         // per-session tmp dir for annotation screenshots
   agentStatePath: null,
@@ -136,7 +139,7 @@ function redactBearer(event) {
 function enqueueEvent(event) {
   const safeEvent = redactBearer(event);
   if (!safeEvent || (safeEvent.id && state.pendingEvents.some((entry) => entry.event?.id === safeEvent.id && entry.event?.type === safeEvent.type))) return;
-  state.pendingEvents.push({ event: safeEvent, leaseUntil: 0 });
+  state.pendingEvents.push({ event: safeEvent, leaseUntil: 0, leaseToken: null });
   flushPendingPolls();
 }
 
@@ -151,12 +154,16 @@ function leaseEvent(entry, leaseMs) {
     return entry.event;
   }
   entry.leaseUntil = Date.now() + leaseMs;
-  return entry.event;
+  entry.leaseToken = randomUUID();
+  return { ...entry.event, leaseToken: entry.leaseToken };
 }
 
-function findLeasedPendingEventIndex(id) {
+function findLeasedPendingEventIndex(id, leaseToken) {
   return state.pendingEvents.findIndex((entry) => (
-    entry.event?.id === id && entry.leaseUntil > 0
+    entry.event?.id === id
+      && entry.leaseUntil > Date.now()
+      && typeof leaseToken === 'string'
+      && entry.leaseToken === leaseToken
   ));
 }
 
@@ -172,20 +179,10 @@ function isCompatibleAgentReply(event, message) {
   return false;
 }
 
-function acknowledgePendingEvent(id) {
-  if (!id) return false;
-  const idx = findLeasedPendingEventIndex(id);
-  if (idx === -1) return false;
-  state.pendingEvents.splice(idx, 1);
-  scheduleLeaseFlush();
-  return true;
-}
-
-function releasePendingEvent(id) {
-  if (!id) return false;
-  const idx = findLeasedPendingEventIndex(id);
-  if (idx === -1) return false;
-  state.pendingEvents[idx].leaseUntil = 0;
+function acknowledgePendingEvent(index, id, leaseToken) {
+  const entry = state.pendingEvents[index];
+  if (entry?.event?.id !== id || entry.leaseToken !== leaseToken) return false;
+  state.pendingEvents.splice(index, 1);
   scheduleLeaseFlush();
   return true;
 }
@@ -221,12 +218,35 @@ function flushPendingPolls() {
   scheduleLeaseFlush();
 }
 
+function formatSseMessage(msg, eventId = null) {
+  const id = eventId === null ? '' : `id: ${eventId}\n`;
+  return id + 'data: ' + JSON.stringify(msg) + '\n\n';
+}
+
 /** Push a message to all connected SSE clients. */
-function broadcast(msg) {
-  const data = 'data: ' + JSON.stringify(msg) + '\n\n';
+function broadcast(msg, eventId = null) {
+  const data = formatSseMessage(msg, eventId);
   for (const res of state.sseClients) {
     try { res.write(data); } catch { /* client gone */ }
   }
+}
+
+function rememberTerminalOutcome(msg) {
+  if (!msg?.id) return null;
+  const eventId = ++state.sseEventSequence;
+  state.terminalOutcomes.push({ eventId, msg });
+  if (state.terminalOutcomes.length > MAX_RECENT_TERMINAL_OUTCOMES) {
+    state.terminalOutcomes.shift();
+  }
+  return eventId;
+}
+
+function parseLastSseEventId(req) {
+  const raw = req.headers['last-event-id'];
+  if (typeof raw !== 'string' || !/^[0-9]+$/.test(raw)) return null;
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value > state.sseEventSequence) return null;
+  return value;
 }
 
 // ---------------------------------------------------------------------------
@@ -830,10 +850,22 @@ function createRequestHandler({ detectScript, sessionPath, livePath }) {
         'Cache-Control': 'no-cache',
         'Connection': 'keep-alive',
       });
-      res.write('data: ' + JSON.stringify({
+      const connected = {
         type: 'connected',
         hasProjectContext: hasProjectContext(),
-      }) + '\n\n');
+      };
+      const lastEventId = parseLastSseEventId(req);
+      res.write(formatSseMessage(
+        connected,
+        lastEventId === null ? state.sseEventSequence : null,
+      ));
+      if (lastEventId !== null) {
+        for (const outcome of state.terminalOutcomes) {
+          if (outcome.eventId > lastEventId) {
+            res.write(formatSseMessage(outcome.msg, outcome.eventId));
+          }
+        }
+      }
 
       state.sseClients.add(res);
       clearTimeout(state.exitTimer);
@@ -992,7 +1024,7 @@ function handlePollPost(req, res) {
       res.end(JSON.stringify({ error: 'Invalid agent reply type' }));
       return;
     }
-    const leasedIndex = findLeasedPendingEventIndex(msg.id);
+    const leasedIndex = findLeasedPendingEventIndex(msg.id, msg.leaseToken);
     if (leasedIndex !== -1
       && !isCompatibleAgentReply(state.pendingEvents[leasedIndex].event, msg)) {
       res.writeHead(409, { 'Content-Type': 'application/json' });
@@ -1039,9 +1071,7 @@ function handlePollPost(req, res) {
       }
     }
     if (leasedIndex !== -1) {
-      const updated = msg.type === 'error'
-        ? releasePendingEvent(msg.id)
-        : acknowledgePendingEvent(msg.id);
+      const updated = acknowledgePendingEvent(leasedIndex, msg.id, msg.leaseToken);
       if (!updated) {
         res.writeHead(409, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'Leased event changed before acknowledgement' }));
@@ -1049,8 +1079,20 @@ function handlePollPost(req, res) {
       }
     }
     flushPendingPolls();
-    // Forward the reply to the browser via SSE
-    broadcast({ type: msg.type || 'done', id: msg.id, message: msg.message, file: msg.file, data: msg.data });
+    // Forward the reply to the browser via SSE. Terminal attempt outcomes are
+    // retained only in bounded process memory so a reconnect cannot miss its
+    // acknowledgement; project journals never drive this replay path.
+    const browserReply = {
+      type: msg.type || 'done',
+      id: msg.id,
+      message: msg.message,
+      file: msg.file,
+      data: msg.data,
+    };
+    const replayId = ['complete', 'discard', 'discarded', 'error'].includes(browserReply.type)
+      ? rememberTerminalOutcome(browserReply)
+      : null;
+    broadcast(browserReply, replayId);
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ ok: true }));
   });
