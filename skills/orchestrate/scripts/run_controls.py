@@ -25,7 +25,8 @@ MAX_OPERATOR_RESPONSE_BYTES = 64 * 1024
 MAX_CANCEL_WAIT_SECONDS = 60.0
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from dispatch_run import create_cancellation_marker
+from dispatch_run import create_cancellation_marker, worker_question_envelope_bytes
+from _shared.custody import OwnedFileError, read_contained_regular
 
 
 class ControlError(ValueError):
@@ -222,58 +223,10 @@ def _read_regular(
     relative = _relative(run_dir, value, label)
     if expected is not None and relative != expected:
         raise ControlError(f"{label} path does not match its attempt: {relative}")
-    path = run_dir / relative
-    parts = Path(relative).parts
-    root_fd: int | None = None
-    directory_fd: int | None = None
-    fd: int | None = None
     try:
-        nofollow = getattr(os, "O_NOFOLLOW", 0)
-        directory = getattr(os, "O_DIRECTORY", 0)
-        root_fd = os.open(run_dir, os.O_RDONLY | nofollow | directory)
-        directory_fd = root_fd
-        for part in parts[:-1]:
-            next_fd = os.open(part, os.O_RDONLY | nofollow | directory, dir_fd=directory_fd)
-            try:
-                if not stat.S_ISDIR(os.fstat(next_fd).st_mode):
-                    raise ControlError(f"{label} path contains a non-directory component: {relative}")
-            except BaseException:
-                os.close(next_fd)
-                raise
-            if directory_fd != root_fd:
-                os.close(directory_fd)
-            directory_fd = next_fd
-        fd = os.open(parts[-1], os.O_RDONLY | nofollow, dir_fd=directory_fd)
-        metadata = os.fstat(fd)
-        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
-            raise ControlError(f"{label} path is not a regular single-link file: {relative}")
-        chunks: list[bytes] = []
-        total = 0
-        while True:
-            read_size = 1024 * 1024
-            if max_bytes is not None:
-                read_size = min(read_size, max_bytes + 1 - total)
-                if read_size <= 0:
-                    raise ControlError(f"{label} exceeds the {max_bytes}-byte limit: {relative}")
-            chunk = os.read(fd, read_size)
-            if not chunk:
-                break
-            chunks.append(chunk)
-            total += len(chunk)
-            if max_bytes is not None and total > max_bytes:
-                raise ControlError(f"{label} exceeds the {max_bytes}-byte limit: {relative}")
-        return relative, path, b"".join(chunks)
-    except ControlError:
-        raise
-    except (OSError, ValueError) as exc:
+        return read_contained_regular(run_dir, relative, label=label, max_bytes=max_bytes)
+    except (OwnedFileError, OSError, ValueError) as exc:
         raise ControlError(f"{label} path is outside or unavailable: {relative}") from exc
-    finally:
-        if fd is not None:
-            os.close(fd)
-        if directory_fd is not None and directory_fd != root_fd:
-            os.close(directory_fd)
-        if root_fd is not None:
-            os.close(root_fd)
 
 
 def _attempt(run_dir: Path, task_id: str, attempt_id: str) -> tuple[dict[str, Any], dict[str, str], Path, dict[str, bytes]]:
@@ -304,7 +257,7 @@ def _attempt(run_dir: Path, task_id: str, attempt_id: str) -> tuple[dict[str, An
     if sidecar_bytes.decode("utf-8") != expected_sidecar:
         raise ControlError(f"attempt digest does not match retained receipt: {attempt_rel}")
     artifacts: dict[str, str] = {"attempt": attempt_rel, "attempt_digest": sidecar_rel}
-    payloads: dict[str, bytes] = {}
+    payloads: dict[str, bytes] = {"attempt": attempt_bytes}
     expected = {
         "prompt": root / "prompt.md",
         "diagnostic_log": root / "stderr.log",
@@ -340,7 +293,70 @@ def _attempt(run_dir: Path, task_id: str, attempt_id: str) -> tuple[dict[str, An
         question = record.get("question")
         if not _valid_worker_question(question):
             raise ControlError(f"blocked attempt has no question: {attempt_rel}")
+        result_claim = record.get("result")
+        if not isinstance(result_claim, dict) or "result" not in payloads:
+            raise ControlError(f"blocked attempt has no retained terminal question: {attempt_rel}")
+        try:
+            envelope_question = worker_question_envelope_bytes(
+                payloads["result"], result_claim.get("digest")
+            )
+        except (ValueError, TypeError) as exc:
+            raise ControlError(f"blocked attempt has an invalid terminal question: {attempt_rel}") from exc
+        if envelope_question != question:
+            raise ControlError(f"blocked attempt question disagrees with terminal result: {attempt_rel}")
     return record, artifacts, attempt_path, payloads
+
+
+def _validate_successful_adapter(
+    run_dir: Path, record: dict[str, Any], payloads: dict[str, bytes]
+) -> None:
+    """Validate successful adapter claims against the already-read evidence bytes."""
+    adapter_bytes = payloads.get("adapter_receipt")
+    if adapter_bytes is None:
+        raise ControlError("successful attempt has no adapter receipt")
+    try:
+        lines = [line for line in adapter_bytes.decode("utf-8").splitlines() if line.strip()]
+        adapter = json.loads(lines[-1]) if lines else None
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ControlError("successful adapter receipt is not valid JSON") from exc
+    if not isinstance(adapter, dict) or adapter.get("status") != "ok":
+        raise ControlError("successful adapter receipt is invalid")
+    route = record.get("route")
+    if not isinstance(route, dict):
+        raise ControlError("successful attempt route is invalid")
+    required = (
+        "tool", "adapter", "execution_intent", "resolved_model", "provider_family",
+        "model_family", "endpoint_provider", "identity_source", "output_path", "output_digest",
+        "read_only_guarantee",
+    )
+    if any(not isinstance(adapter.get(field), str) or not adapter[field] for field in required):
+        raise ControlError("successful adapter receipt is missing route identity")
+    requested = record.get("requested_route")
+    expected_adapter = requested.get("adapter") if isinstance(requested, dict) else None
+    expected_intent = requested.get("intent") if isinstance(requested, dict) else None
+    if adapter["tool"] != expected_adapter or adapter["adapter"] != expected_adapter:
+        raise ControlError("successful adapter receipt does not match the requested adapter")
+    if adapter["execution_intent"] != expected_intent:
+        raise ControlError("successful adapter receipt does not match the requested intent")
+    for field in ("adapter", "execution_intent", "provider_family", "resolved_model"):
+        if route.get(field) != adapter.get(field):
+            raise ControlError(f"successful attempt route disagrees with adapter receipt: {field}")
+    result = record.get("result")
+    result_bytes = payloads.get("result")
+    if not isinstance(result, dict) or result_bytes is None:
+        raise ControlError("successful adapter receipt has no retained result")
+    try:
+        output_matches = Path(adapter["output_path"]).resolve() == (run_dir / result["path"]).resolve()
+    except (OSError, TypeError, ValueError):
+        output_matches = False
+    if not output_matches or adapter["output_digest"] != _digest_bytes(result_bytes):
+        raise ControlError("successful adapter receipt does not match the retained output")
+    if not isinstance(adapter.get("exit"), int) or isinstance(adapter["exit"], bool) or adapter["exit"] != 0:
+        raise ControlError("successful adapter receipt must record exit 0")
+    if not isinstance(adapter.get("cross_family"), bool) or not isinstance(adapter.get("certification_eligible"), bool):
+        raise ControlError("successful adapter receipt is missing assurance flags")
+    if expected_intent == "ordinary" and adapter["certification_eligible"]:
+        raise ControlError("ordinary execution cannot be certification eligible")
 
 
 def _continuation(record: dict[str, Any]) -> str:
@@ -619,6 +635,33 @@ def _load_summary(run_dir: Path, batch_id: str, *, require_complete: bool = Fals
             or summary.get("record_type") != "dispatch-batch"
             or summary.get("batch_id") != batch_id or not isinstance(summary.get("tasks"), list)):
         raise ControlError(f"batch summary has invalid schema or identity: {summary_path}")
+    source = summary.get("source_manifest")
+    expected_source = f"dispatch/batches/{batch_id}/task-manifest.json"
+    source_value = None
+    if source is None and not require_complete:
+        pass
+    else:
+        if not isinstance(source, dict) or source.get("path") != expected_source:
+            raise ControlError(f"batch summary source manifest identity is invalid: {summary_path}")
+        _, _, source_bytes = _read_regular(run_dir, expected_source, "batch source manifest", expected_source)
+        if source.get("digest") != _digest_bytes(source_bytes):
+            raise ControlError(f"batch source manifest digest does not match: {summary_path}")
+        try:
+            source_value = json.loads(source_bytes.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ControlError(f"batch source manifest is not valid JSON: {summary_path}") from exc
+        if require_complete:
+            source_tasks = source_value.get("tasks") if isinstance(source_value, dict) else None
+            source_ids = [task.get("id") for task in source_tasks] if isinstance(source_tasks, list) else None
+            if (
+                not isinstance(source_value, dict)
+                or source_value.get("schema_version") != 1
+                or not isinstance(source_tasks, list)
+                or not source_tasks
+                or any(not isinstance(task, dict) or not isinstance(task.get("id"), str) for task in source_tasks)
+                or source_ids != [item.get("task_id") for item in summary["tasks"]]
+            ):
+                raise ControlError(f"batch source task universe disagrees with summary: {summary_path}")
     if require_complete:
         if summary.get("status") not in {"completed", "cancelled", "failed"}:
             raise ControlError(f"batch summary has invalid terminal status: {summary_path}")
@@ -646,23 +689,105 @@ def _load_summary(run_dir: Path, batch_id: str, *, require_complete: bool = Fals
         if not attempt_rel.startswith(expected_prefix) or not attempt_rel.endswith("/attempt.json"):
             raise ControlError(f"batch summary attempt identity is invalid: {summary_path}")
         attempt_id = attempt_rel[len(expected_prefix):-len("/attempt.json")]
-        record, artifacts, _, _ = _attempt(run_dir, item["task_id"], attempt_id)
+        record, artifacts, _, payloads = _attempt(run_dir, item["task_id"], attempt_id)
         if record["status"] != status:
             raise ControlError(f"batch summary status disagrees with attempt: {item['task_id']}")
+        for field in ("requested_route", "route"):
+            flattened = item.get(field)
+            canonical = record.get(field)
+            if flattened is not None:
+                if not isinstance(flattened, dict) or not isinstance(canonical, dict) or any(
+                    key not in canonical or canonical[key] != value for key, value in flattened.items()
+                ):
+                    raise ControlError(f"batch summary {field} disagrees with attempt: {item['task_id']}")
+        if require_complete and item.get("outcome") != record.get("outcome"):
+            raise ControlError(f"batch summary outcome disagrees with attempt: {item['task_id']}")
+        attempt_digest = item.get("attempt_digest")
+        if require_complete and not isinstance(attempt_digest, str):
+            raise ControlError(f"batch summary attempt digest is missing: {item['task_id']}")
+        if attempt_digest is not None and attempt_digest != _digest_bytes(payloads["attempt"]):
+            raise ControlError(f"batch summary attempt digest disagrees with attempt: {item['task_id']}")
         process = record.get("process")
-        if not isinstance(process, dict) or process.get("observed_exit") is not True:
+        if not isinstance(process, dict) or not isinstance(process.get("observed_exit"), bool):
+            raise ControlError(f"batch attempt has invalid observed completion: {item['task_id']}")
+        if process.get("observed_exit") is not True and not (
+            status == "failed"
+            and record.get("outcome") == "process_spawn_error"
+            and process.get("pid") is None
+            and process.get("exit_code") is None
+        ):
             raise ControlError(f"batch attempt lacks observed completion: {item['task_id']}")
         result_path = item.get("result_path")
         if result_path is not None and result_path != artifacts.get("result"):
             raise ControlError(f"batch summary result identity disagrees with attempt: {item['task_id']}")
         if status == "succeeded" and result_path is None:
             raise ControlError(f"successful batch task has no result path: {summary_path}")
+        if require_complete and status == "succeeded":
+            _validate_successful_adapter(run_dir, record, payloads)
     if require_complete:
         if summary.get("counts") != dict(sorted(actual_counts.items())):
             raise ControlError(f"batch summary counts disagree with its tasks: {summary_path}")
         if (summary["status"] == "cancelled") != (actual_counts.get("cancelled", 0) > 0):
             raise ControlError(f"batch summary cancellation status disagrees with its tasks: {summary_path}")
+        reducer_inputs = summary.get("reducer_inputs")
+        if not isinstance(reducer_inputs, list):
+            raise ControlError(f"batch summary reducer inputs are missing: {summary_path}")
+        expected_reducers = {
+            item["task_id"]: item for item in summary["tasks"]
+            if item.get("attempt_path") or item.get("result_path")
+        }
+        seen_reducers: set[str] = set()
+        for reducer in reducer_inputs:
+            if not isinstance(reducer, dict) or not isinstance(reducer.get("task_id"), str):
+                raise ControlError(f"batch summary reducer input identity is invalid: {summary_path}")
+            task_id = reducer["task_id"]
+            if task_id in seen_reducers or task_id not in expected_reducers:
+                raise ControlError(f"batch summary reducer input is foreign or duplicated: {task_id}")
+            seen_reducers.add(task_id)
+            expected = expected_reducers[task_id]
+            if any(reducer.get(key) != expected.get(key) for key in ("status", "attempt_path", "result_path")):
+                raise ControlError(f"batch summary reducer input disagrees with task: {task_id}")
+        if seen_reducers != set(expected_reducers):
+            raise ControlError(f"batch summary reducer inputs do not cover its tasks: {summary_path}")
     return summary
+
+
+def validate_retained_dispatch(run_dir: Path) -> list[str]:
+    """Validate every retained attempt and complete batch through control owners."""
+    errors: list[str] = []
+    task_root = run_dir / "dispatch" / "tasks"
+    if task_root.is_dir() and not task_root.is_symlink():
+        for attempt_path in sorted(task_root.glob("*/attempt-*/attempt.json")):
+            task_id = attempt_path.parent.parent.name
+            attempt_id = attempt_path.parent.name
+            try:
+                record, artifacts, _path, payloads = _attempt(run_dir, task_id, attempt_id)
+                process = record.get("process")
+                if not isinstance(process, dict) or not isinstance(process.get("observed_exit"), bool):
+                    raise ControlError("attempt has invalid observed completion")
+                if process.get("observed_exit") is not True and not (
+                    record.get("status") == "failed"
+                    and record.get("outcome") == "process_spawn_error"
+                    and process.get("pid") is None
+                    and process.get("exit_code") is None
+                ):
+                    raise ControlError("attempt does not prove observed completion")
+                if record.get("status") == "succeeded" and process.get("exit_code") != 0:
+                    raise ControlError("successful attempt does not prove exit 0")
+                if record.get("status") == "succeeded":
+                    _validate_successful_adapter(run_dir, record, payloads)
+            except (ControlError, OSError, ValueError) as exc:
+                errors.append(f"dispatch attempt {attempt_path.relative_to(run_dir)}: {exc}")
+    batch_root = run_dir / "dispatch" / "batches"
+    if batch_root.is_dir() and not batch_root.is_symlink():
+        for batch_dir in sorted(batch_root.iterdir()):
+            if not batch_dir.is_dir() or batch_dir.is_symlink() or not BATCH_ID_RE.fullmatch(batch_dir.name):
+                continue
+            try:
+                _load_summary(run_dir, batch_dir.name, require_complete=True)
+            except (ControlError, OSError, ValueError) as exc:
+                errors.append(f"dispatch batch {batch_dir.name}: {exc}")
+    return errors
 
 
 def _input_ref(value: str) -> tuple[str, str]:

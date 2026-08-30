@@ -969,3 +969,23 @@ def test_receipt_path_lists_reject_non_strings(tmp_path):
     receipt.write_text(json.dumps(data))
     errors, _ = run_dir_finalize.validate(run, "failed", "bad")
     assert "receipt pruned_paths entries must be strings" in errors
+
+
+def test_finalisation_fails_if_canonical_receipt_inode_is_replaced(tmp_path, monkeypatch):
+    run = init_run(tmp_path)
+    receipt = run / "RUN_RECEIPT.json"
+    original_bytes = receipt.read_bytes()
+    original_check = run_dir_finalize._receipt_path_is_bound
+    swapped = False
+
+    def replace_visible_receipt(stream, path):
+        nonlocal swapped
+        if not swapped:
+            receipt.rename(tmp_path / "unlinked-receipt.json")
+            receipt.write_bytes(original_bytes)
+            swapped = True
+        return original_check(stream, path)
+
+    monkeypatch.setattr(run_dir_finalize, "_receipt_path_is_bound", replace_visible_receipt)
+    assert run_dir_finalize.main([str(run), "--status", "failed", "--reason", "custody race"]) == 1
+    assert json.loads(receipt.read_text())["status"] == "active"
