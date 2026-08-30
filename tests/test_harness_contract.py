@@ -17,6 +17,14 @@ def frontmatter_name(path: Path) -> str:
     return match.group(1).strip()
 
 
+def markdown_table_row(text: str, label: str) -> list[str]:
+    for line in text.splitlines():
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        if cells and cells[0] == label:
+            return cells
+    raise AssertionError(f"missing Markdown table row: {label}")
+
+
 def test_lifecycle_skills_are_portable_and_named_for_their_directory():
     for name in ("implement", "code-review"):
         skill = ROOT / "skills" / name / "SKILL.md"
@@ -79,6 +87,7 @@ def test_dispatch_owner_boundaries_distinguish_assurance_from_ordinary_execution
 
     orchestrate_compact = " ".join(orchestrate.lower().split())
     adr_compact = " ".join(adr.split())
+    dispatch_evidence = markdown_table_row(adr, "Dispatch evidence")
     assert "ordinary configured-provider cli dispatch may use same-family routes" in orchestrate_compact
     assert "same-family cli only for auth/preflight smoke tests" not in orchestrate_compact
     assert "orchestration adapter" in thin_cli
@@ -95,10 +104,11 @@ def test_dispatch_owner_boundaries_distinguish_assurance_from_ordinary_execution
     assert "MANIFEST.md" in adr
     assert "RUN_RECEIPT.json" in adr
     assert "run_dir_finalize.py" in adr
-    assert "`dispatch_run.py` validates each `attempt.json`" in adr_compact
-    assert "`run_controls.py` reads validated attempt evidence" in adr_compact
-    assert "invokes that validator while finalising" in adr_compact
-    assert "does not own the attempt schema, copy attempt references" in adr_compact
+    assert len(dispatch_evidence) == 3
+    assert "validated and indexed by `dispatch_run.py`" in dispatch_evidence[1]
+    assert "`run_controls.py` owns retained-attempt validation" in dispatch_evidence[1]
+    assert "`run_dir_finalize.py` invokes" in dispatch_evidence[2]
+    assert "does not own the attempt schema" in dispatch_evidence[2]
     assert "parallel lifecycle ledger" in adr
     assert "attempt.json" in adr
     assert "delivery `RUN.json` may reference the orchestration receipt" in adr_compact

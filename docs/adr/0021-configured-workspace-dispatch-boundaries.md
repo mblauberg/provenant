@@ -88,8 +88,9 @@ and indexes it in the existing orchestration `MANIFEST.md`; `run_controls.py`
 reads validated attempt evidence for operator controls. `run_dir_finalize.py`
 invokes that validator while finalising generic `RUN_RECEIPT.json` custody and
 terminalisation; it does not own the attempt schema, copy attempt references
-into the receipt or create a new owner or parallel lifecycle ledger. Each task attempt records enough to
-reconstruct what happened: task and attempt IDs, requested and resolved route,
+into the receipt or create a new owner or parallel lifecycle ledger. Each task
+attempt records enough to reconstruct what happened: task and attempt IDs,
+requested and resolved route,
 actual provider and model, workspace and base identity when available,
 start/end, status, exit information, prompt/result paths and digests, and retry
 lineage.
