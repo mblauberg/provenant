@@ -38,6 +38,16 @@ raise SystemExit(int(os.environ.get("PROVENANT_TEST_EXIT", "0")))
         path = scripts / owner
         path.write_text(recorder)
         path.chmod(0o755)
+    dispatch_owner = checkout / "skills/orchestrate/scripts/dispatch_run.py"
+    dispatch_owner.parent.mkdir(parents=True)
+    dispatch_owner.write_text(recorder)
+    dispatch_owner.chmod(0o755)
+    run_owner = checkout / "skills/orchestrate/scripts/run_controls.py"
+    run_owner.write_text(recorder)
+    run_owner.chmod(0o755)
+    batch_owner = checkout / "skills/orchestrate/scripts/batch_run.py"
+    batch_owner.write_text(recorder)
+    batch_owner.chmod(0o755)
     fabric_bin = checkout / "runtime" / "fabric" / "bin"
     fabric_bin.mkdir(parents=True)
     for owner in ("fabric", "fabric-mcp"):
@@ -344,6 +354,8 @@ def test_owner_exec_failure_reports_command_context_without_traceback(tmp_path):
         ("worktree", ["check"]),
         ("check", ["--doctor"]),
         ("fabric", ["tasks"]),
+        ("batch", ["--manifest", "tasks.json"]),
+        ("run", ["inspect"]),
     ],
 )
 @pytest.mark.parametrize("cwd_kind", ["provenant-root", "unrelated-git", "nonrepo"])
@@ -379,6 +391,17 @@ def test_check_and_fabric_delegate_without_reinterpreting_arguments(tmp_path):
     assert json.loads(fabric.stdout)["argv"][1:] == ["send", "reviewer", "x y"]
 
 
+def test_dispatch_delegates_without_reinterpreting_arguments(tmp_path):
+    _, command = make_checkout(tmp_path)
+
+    result = invoke(command, "dispatch", "--tool", "codex", "--task-id", "x y", cwd=tmp_path)
+
+    payload = json.loads(result.stdout)
+    assert result.returncode == 0
+    assert payload["argv"][1:] == ["--tool", "codex", "--task-id", "x y"]
+    assert payload["cwd"] == str(tmp_path)
+
+
 def test_missing_or_unknown_command_prints_usage_to_stderr_and_exits_2(tmp_path):
     _, command = make_checkout(tmp_path)
 
@@ -398,6 +421,7 @@ def test_help_is_concise_and_names_existing_command_owners(tmp_path):
     assert result.stderr == ""
     assert "route" in result.stdout and "scripts/model-route" in result.stdout
     assert "fabric ...     runtime/fabric/bin/fabric ..." in result.stdout
+    assert "batch ...      skills/orchestrate/scripts/batch_run.py ..." in result.stdout
     assert "doctor" not in result.stdout
     assert "project ..." not in result.stdout
     assert "Fabric derives who you are from the working directory" in result.stdout

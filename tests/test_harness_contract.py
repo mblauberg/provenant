@@ -90,7 +90,7 @@ def test_dispatch_owner_boundaries_distinguish_current_assurance_from_future_exe
     assert "does not implement" in adr
     assert "delegates provider invocation to `cf_dispatch.sh`" in adr
     assert "ordinary intent/policy interface" in adr
-    assert "no ordinary mode exists yet" in adr_compact.lower()
+    assert "ordinary single-dispatch intent/policy mode" in adr_compact.lower()
     assert "MANIFEST.md" in adr
     assert "RUN_RECEIPT.json" in adr
     assert "run_dir_finalize.py" in adr
@@ -101,7 +101,7 @@ def test_dispatch_owner_boundaries_distinguish_current_assurance_from_future_exe
     assert "provider-agnostic orchestration runner" in adr.lower()
     assert "fixed bounded batch" in adr.lower()
     assert "builds on the #518" in adr.lower()
-    assert "remains limited to assurance paths" in adr_compact.lower()
+    assert "remains the assurance path" in adr_compact.lower()
     assert "#683" in adr and "workspace-boundary work in [#683]" not in adr
     assert "secrets" in harness.lower()
 

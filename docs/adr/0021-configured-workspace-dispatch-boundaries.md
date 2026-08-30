@@ -26,16 +26,17 @@ batch execution.
 |---|---|---|
 | Model and tier resolution | `scripts/model-route` | Resolves configured routes and records route identity; it does not launch providers. |
 | Assurance dispatch adapter | `skills/orchestrate/scripts/cf_dispatch.sh` | Current provider-invocation adapter for assurance and review paths; its distinct-family requirement remains assurance policy. |
-| Ordinary dispatch interface and runner | Provider-agnostic orchestration runner planned by [#518](https://github.com/mblauberg/provenant/issues/518) | Owns the ordinary intent/policy interface and attempt lifecycle, and delegates provider invocation to `cf_dispatch.sh`. No ordinary mode exists yet. |
-| Fixed bounded batches | Batch layer planned by [#683](https://github.com/mblauberg/provenant/issues/683) | Builds on the #518 interface for fixed task sets, concurrency, partial results and retry coordination; it does not own provider invocation or workspace policy. |
+| Ordinary dispatch interface and runner | provider-agnostic orchestration runner `skills/orchestrate/scripts/dispatch_run.py` ([#518](https://github.com/mblauberg/provenant/issues/518)) | Owns one ordinary intent/policy attempt and its compact evidence, and delegates provider invocation to `cf_dispatch.sh`; fixed batches remain #683. |
+| Fixed bounded batches | `skills/orchestrate/scripts/batch_run.py` ([#683](https://github.com/mblauberg/provenant/issues/683)) | Builds on the #518 interface for fixed task sets, concurrency, partial results and retry coordination; it does not own provider invocation or workspace policy. |
 | Coordination | `runtime/fabric` | Mailbox, shared tasks and activity only; no provider launch, scheduler or lifecycle owner. |
 | Dispatch evidence | #518 attempt-record schema indexed by existing `MANIFEST.md` and bound into `RUN_RECEIPT.json`/`run_dir_finalize.py` | Records execution attempts, route lineage and observed completion; it is not delivery acceptance and must not create a parallel lifecycle ledger. |
 | Delivery evidence | `deliver` and canonical delivery `RUN.json` | Records artifact verification, review and acceptance; it may reference the orchestration receipt. |
 
-The planned #518 runner and #683 batch layer are implementation boundaries, not
-a claim that ordinary dispatch or batch runtime already exists. The #518 runner
-adds the ordinary intent/policy mode; until it is implemented, the existing
-distinct-family behaviour in `cf_dispatch.sh` remains limited to assurance paths.
+The #518 runner now provides the ordinary intent/policy interface and the
+ordinary single-dispatch intent/policy mode;
+the #683 batch layer provides the fixed bounded implementation boundary. The existing
+distinct-family behaviour in `cf_dispatch.sh` remains the assurance path, while
+ordinary execution explicitly records that it makes no independence claim.
 Credential/auth-store exclusions, unrelated-path containment, explicit denials,
 write/resource limits and external-action gates remain implementation acceptance
 gates for the [#518](https://github.com/mblauberg/provenant/issues/518) runner and
@@ -75,9 +76,9 @@ is the stable operator front door and may expose bounded `dispatch`, `batch` and
 `run` inspection commands, but it delegates to that owner. It must not create a
 second adapter parser, scheduler, lifecycle database or delivery receipt.
 
-Fixed bounded batches are a first-class planned capability under #683: fixed
-task sets, concurrency limits, per-task timeout, partial results and explicit
-retry attempts. Adaptive waves and reducers may be layered on that interface;
+Fixed bounded batches are a first-class capability under #683: fixed task sets,
+concurrency limits, per-task timeout, partial results and explicit retry
+attempts. Adaptive waves and reducers may be layered on that interface;
 they do not create a new runtime authority.
 
 ### Compact dispatch manifests
@@ -127,7 +128,7 @@ boundary.
 
 ## Non-goals
 
-This decision does not implement a provider adapter, batch runner, scheduler,
+This decision does not implement a provider adapter, scheduler,
 daemon, recursive manager tree, automatic fallback, silent substitution or
 unbounded raw-output retention. Those are implementation decisions under this
 boundary and must preserve its ownership and evidence rules.

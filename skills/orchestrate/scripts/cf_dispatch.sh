@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Dispatch one prompt to a different-family CLI with conservative safety defaults.
+# Dispatch one prompt to a configured provider CLI with conservative safety defaults.
 #
 # This script is a helper, not an authority. The caller still chooses an appropriate
 # different-family verifier, checks data policy, and records failures in the run manifest.
-# Pass --orchestrator-family when known so same-family verifier routes fail closed.
+# Assurance remains the default. Ordinary execution can explicitly allow a same-family route.
 # Record the dispatch and its result in Fabric so the chair and the other lanes
 # can see it; Fabric carries the coordination, this helper carries the call.
 set -uo pipefail
@@ -18,8 +18,10 @@ Usage: cf_dispatch.sh --tool TOOL --orchestrator-family FAMILY --prompt TEXT [op
 
 Options:
   --tool TOOL                  One of claude, codex, cursor, agy, kiro, copilot.
+  --task-class CLASS           Route task class through model_route.py.
   --chain SPECS                Space-separated fallback chain.
   --orchestrator-family FAMILY Current orchestrator family; same-family routes fail closed.
+  --intent INTENT              assurance (default) or ordinary execution.
   --alias ALIAS                Durable route alias: flagship, workhorse, scout.
                                Defaults from --role: flagship for lead,
                                orchestrator and critical-review, workhorse otherwise.
@@ -39,7 +41,7 @@ Record every dispatch and result in Fabric so the chair can follow the lane.
 EOF
 }
 
-TOOL="" MODEL="" EFFORT="" OUT="" PROMPT="" PROMPT_FILE="" CHAIN="" ORCH_FAMILY="" MODEL_ALIAS="" ROUTE_ROLE="reviewer" RISK_TIER="" REVIEWER_ID="" DOCTOR=0
+TOOL="" MODEL="" EFFORT="" OUT="" PROMPT="" PROMPT_FILE="" CHAIN="" ORCH_FAMILY="" MODEL_ALIAS="" TASK_CLASS="" ROUTE_ROLE="reviewer" RISK_TIER="" REVIEWER_ID="" INTENT="assurance" DOCTOR=0
 ALIAS_EXPLICIT=0
 OUT_CREATED=false
 AGY_ADD_DIRS=()
@@ -51,6 +53,7 @@ while [ $# -gt 0 ]; do
     -h|--help) usage; exit 0;;
     --doctor) DOCTOR=1; shift;;
     --tool) need_value "$@"; TOOL="$2"; shift 2;;
+    --task-class) need_value "$@"; TASK_CLASS="$2"; shift 2;;
     --model) need_value "$@"; MODEL="$2"; shift 2;;
     --effort) need_value "$@"; EFFORT="$2"; shift 2;;
     --add-dir) need_value "$@"; AGY_ADD_DIRS+=("$2"); shift 2;;
@@ -59,6 +62,7 @@ while [ $# -gt 0 ]; do
     --prompt-file) need_value "$@"; PROMPT_FILE="$2"; shift 2;;
     --chain) need_value "$@"; CHAIN="$2"; shift 2;;
     --orchestrator-family) need_value "$@"; ORCH_FAMILY="$2"; shift 2;;
+    --intent|--execution-intent) need_value "$@"; INTENT="$2"; shift 2;;
     --alias) need_value "$@"; MODEL_ALIAS="$2"; ALIAS_EXPLICIT=1; shift 2;;
     --role) need_value "$@"; ROUTE_ROLE="$2"; shift 2;;
     --risk-tier) need_value "$@"; RISK_TIER="$2"; shift 2;;
@@ -66,6 +70,11 @@ while [ $# -gt 0 ]; do
     *) echo "unknown arg: $1" >&2; exit 2;;
   esac
 done
+
+case "$INTENT" in
+  assurance|ordinary) ;;
+  *) echo "invalid intent: $INTENT" >&2; exit 2;;
+esac
 
 # When the caller does not name an alias, derive it from the role rather than
 # defaulting everything to flagship. A bare dispatch is ordinary work and must not
@@ -77,7 +86,7 @@ done
 # declares alias "flagship", and the resolver rejects any other alias with
 # risk_tier_alias_mismatch. Keep both lists in step with the config. The rule only
 # governs the case where the caller named neither an alias nor a model.
-if [ "$ALIAS_EXPLICIT" -eq 0 ]; then
+if [ "$ALIAS_EXPLICIT" -eq 0 ] && [ -z "$TASK_CLASS" ]; then
   if [ -n "$MODEL" ] || [ -n "$RISK_TIER" ]; then
     # An explicitly named model has already made the cost decision, so leave the
     # alias at flagship rather than narrowing the candidate list under it.
@@ -205,6 +214,18 @@ endpoint_provider() {
     *) echo "";;
   esac
 }
+install_output() {
+  local source="$1" destination="$2" directory temporary
+  directory="$(dirname -- "$destination")"
+  [ -d "$directory" ] || return 1
+  [ ! -d "$destination" ] || [ -L "$destination" ] || return 1
+  temporary="$(mktemp "$directory/.cf-dispatch-output.XXXXXX")" || return 1
+  if cp "$source" "$temporary" && mv -f "$temporary" "$destination"; then
+    return 0
+  fi
+  rm -f "$temporary"
+  return 1
+}
 emit_record() {
   local tool="$1" model="$2" effort="$3" status="$4" rc="$5" path="$6" guarantee="$7"
   local family="${8:-}" endpoint="${9:-}" identity="${10:-}" effort_substitution="${11:-}"
@@ -222,10 +243,11 @@ emit_record() {
   cross="false"
   [ -n "$ORCH_FAMILY" ] && valid_family "$ORCH_FAMILY" && [ -n "$family" ] && [ "$ORCH_FAMILY" != "$family" ] && cross="true"
   cert="false"
-  [ "$status" = "ok" ] && [ "$cross" = "true" ] && { [ "$guarantee" = "enforced" ] || [ "$guarantee" = "oauth_safe_mode" ]; } && cert="true"
-  printf '{"tool":"%s","adapter":"%s","adapter_gate":"direct-cli","model":"%s","requested_model":"%s","resolved_model":"%s","fallback_model":"%s","requested_effort":"%s","effort":"%s","effort_source":"%s","effort_capability_source":"%s","effort_substitution":"%s","substitution":"%s","status":"%s","exit":%s,"output_path":"%s","output_digest":"%s","read_only_guarantee":"%s","orchestrator_family":"%s","provider_family":"%s","model_family":"%s","endpoint_provider":"%s","identity_source":"%s","catalog_model":"%s","model_selection":"%s","route_alias":"%s","reviewer_id":"%s","risk_tier":"%s","policy_override":"%s","cross_family":%s,"certification_eligible":%s}\n' \
+  [ "$INTENT" = "assurance" ] && [ "$status" = "ok" ] && [ "$cross" = "true" ] && { [ "$guarantee" = "enforced" ] || [ "$guarantee" = "oauth_safe_mode" ]; } && cert="true"
+  printf '{"tool":"%s","adapter":"%s","adapter_gate":"direct-cli","execution_intent":"%s","model":"%s","requested_model":"%s","resolved_model":"%s","fallback_model":"%s","requested_effort":"%s","effort":"%s","effort_source":"%s","effort_capability_source":"%s","effort_substitution":"%s","substitution":"%s","status":"%s","exit":%s,"output_path":"%s","output_digest":"%s","read_only_guarantee":"%s","orchestrator_family":"%s","provider_family":"%s","model_family":"%s","endpoint_provider":"%s","identity_source":"%s","catalog_model":"%s","model_selection":"%s","route_alias":"%s","reviewer_id":"%s","risk_tier":"%s","policy_override":"%s","cross_family":%s,"certification_eligible":%s}\n' \
     "$(printf '%s' "$tool" | json_escape)" \
     "$(printf '%s' "$tool" | json_escape)" \
+    "$(printf '%s' "$INTENT" | json_escape)" \
     "$(printf '%s' "$model" | json_escape)" \
     "$(printf '%s' "$requested_model" | json_escape)" \
     "$(printf '%s' "$model" | json_escape)" \
@@ -274,6 +296,7 @@ resolve_routing() {
   # Returns JSON. If neither method is available, returns status="model_routing_unavailable".
   local tool="$1" alias="$2" role="$3" lead_family="$4" diag_file="$5"
   local model="$6" effort="$7" risk_tier="$8" capabilities_file="$9"
+  local task_class="${10:-}"
   local product_root=""
   local -a cmd route_args
 
@@ -288,7 +311,13 @@ resolve_routing() {
     product_root="$(cd "$SCRIPT_DIR" && git rev-parse --show-toplevel 2>/dev/null || true)"
   fi
 
-  route_args=(--adapter "$tool" --alias "$alias" --role "$role" --lead-family "$lead_family" --require-distinct)
+  route_args=(--adapter "$tool" --role "$role" --lead-family "$lead_family")
+  if [ -n "$task_class" ]; then
+    route_args+=(--task-class "$task_class")
+  else
+    route_args+=(--alias "$alias")
+  fi
+  [ "$INTENT" = "assurance" ] && route_args+=(--require-distinct)
   [ -n "$model" ] && route_args+=(--model "$model")
   # agy 1.1.17 accepts --model and --effort independently. The historical
   # model-id resolver rejects a bare model plus an explicit effort, so preserve
@@ -339,7 +368,7 @@ agy_has_unsafe_arg() {
 }
 
 run_one() {  # $1 tool $2 model $3 effort -> writes clean answer to OUT, echoes JSON, returns 0/1
-  local tool="$1" model="$2" effort="$3" tmpdir raw diag combined clean rc status opath guarantee family endpoint identity effort_substitution substitution requested_model requested_effort effort_source effort_capability_source route_json route_rc route_fields capabilities_file fallback_model primary_model catalog_model model_selection policy_override route_risk_tier agy_status agy_requested_effort agy_dir agy_prompt_bytes
+  local tool="$1" model="$2" effort="$3" tmpdir raw diag combined clean rc status opath guarantee family endpoint identity effort_substitution substitution requested_model requested_effort effort_source effort_capability_source route_json route_rc route_fields capabilities_file fallback_model primary_model catalog_model model_selection policy_override route_risk_tier route_alias agy_status agy_requested_effort agy_dir agy_prompt_bytes
   model="$(resolve_model "$tool" "$model")"
   agy_requested_effort="$effort"
   tmpdir="$(make_tmp_dir)"
@@ -378,7 +407,7 @@ run_one() {  # $1 tool $2 model $3 effort -> writes clean answer to OUT, echoes 
     status="invalid_orchestrator_family"
     echo "invalid orchestrator family: $ORCH_FAMILY" >"$diag"
     rc=1
-  elif [ -z "$ORCH_FAMILY" ]; then
+  elif [ "$INTENT" = "assurance" ] && [ -z "$ORCH_FAMILY" ]; then
     guarantee="none"
     status="orchestrator_family_required"
     echo "$tool disabled: pass --orchestrator-family so cross-family status can be proven" >"$diag"
@@ -391,10 +420,11 @@ run_one() {  # $1 tool $2 model $3 effort -> writes clean answer to OUT, echoes 
         rm -f "$capabilities_file"
       fi
     fi
-    route_json="$(resolve_routing "$tool" "$MODEL_ALIAS" "$ROUTE_ROLE" "$ORCH_FAMILY" "$diag" "$model" "$effort" "$RISK_TIER" "$capabilities_file")"
+    route_json="$(resolve_routing "$tool" "$MODEL_ALIAS" "$ROUTE_ROLE" "$ORCH_FAMILY" "$diag" "$model" "$effort" "$RISK_TIER" "$capabilities_file" "$TASK_CLASS")"
     route_rc=$?
-    if route_fields="$(printf '%s' "$route_json" | python3 -c 'import json,sys; r=json.load(sys.stdin); print("|".join(str(r.get(k,"")) for k in ("status","resolved_model","model_family","endpoint_provider","identity_source","requested_effort","effort","effort_source","effort_capability_source","effort_substitution","substitution","fallback_model","catalog_model","model_selection","risk_tier","policy_override")))' 2>>"$diag")"; then
-      IFS='|' read -r status model family endpoint identity requested_effort effort effort_source effort_capability_source effort_substitution substitution fallback_model catalog_model model_selection route_risk_tier policy_override <<<"$route_fields"
+    if route_fields="$(printf '%s' "$route_json" | python3 -c 'import json,sys; r=json.load(sys.stdin); print("|".join(str(r.get(k,"")) for k in ("status","resolved_model","model_family","endpoint_provider","identity_source","requested_effort","effort","effort_source","effort_capability_source","effort_substitution","substitution","fallback_model","catalog_model","model_selection","risk_tier","policy_override","alias")))' 2>>"$diag")"; then
+      IFS='|' read -r status model family endpoint identity requested_effort effort effort_source effort_capability_source effort_substitution substitution fallback_model catalog_model model_selection route_risk_tier policy_override route_alias <<<"$route_fields"
+      [ -n "$route_alias" ] && MODEL_ALIAS="$route_alias"
       [ -n "$requested_model" ] || requested_model="$model"
       if [ "$tool" = "agy" ] && [ -n "$agy_requested_effort" ]; then
         requested_effort="$agy_requested_effort"
@@ -691,7 +721,7 @@ PY
   [ "$status" = "tool_not_found" ] && guarantee="none"
 
   if [ "$status" = "ok" ]; then
-    if cp "$clean" "$OUT"; then
+    if install_output "$clean" "$OUT"; then
       opath="$OUT"
     else
       status="output_write_error"
@@ -700,7 +730,7 @@ PY
       opath=""
     fi
   else
-    if cp "$combined" "$OUT"; then
+    if install_output "$combined" "$OUT"; then
       opath="$OUT"
     else
       status="output_write_error"
