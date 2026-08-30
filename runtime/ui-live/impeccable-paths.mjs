@@ -209,14 +209,6 @@ export function getLegacyLiveSessionsDir(cwd = process.cwd()) {
   return path.join(cwd, '.impeccable-live', 'sessions');
 }
 
-export function getLiveAnnotationsDir(cwd = process.cwd()) {
-  return path.join(getLiveDir(cwd), 'annotations');
-}
-
-export function getLegacyLiveAnnotationsDir(cwd = process.cwd()) {
-  return path.join(cwd, '.impeccable-live', 'annotations');
-}
-
 function firstExisting(paths) {
   return paths.find((filePath) => fs.existsSync(filePath)) || null;
 }

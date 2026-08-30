@@ -19,8 +19,9 @@ import {
 } from './impeccable-paths.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const POLL_COMMAND = `node ${JSON.stringify(fileURLToPath(import.meta.url))}`;
-const LIVE_COMMAND = `node ${JSON.stringify(path.join(__dirname, 'live.mjs'))}`;
+const invokedPath = path.resolve(process.argv[1] || fileURLToPath(import.meta.url));
+const POLL_COMMAND = `node ${JSON.stringify(invokedPath)}`;
+const LIVE_COMMAND = `node ${JSON.stringify(path.join(path.dirname(invokedPath), 'live.mjs'))}`;
 
 // Node's built-in fetch (undici under the hood) enforces a 300s headers
 // timeout that can't be lowered per-request. We cap each request below

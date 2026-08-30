@@ -444,7 +444,7 @@ without adding user-facing setup or a competing lifecycle owner.
 
 `runtime/ui-live/` similarly owns the stateful live-iteration implementation,
 including its browser assets, source-containment helpers, and recovery store.
-The skill retains thin `scripts/live*.mjs` compatibility commands. The runtime
+The skill retains the stable `scripts/live*.mjs` commands. The runtime
 uses the target project only for authorised source work and project-local live
 state; it adds no package, workspace, service, registration, seat, or install
 lifecycle.
