@@ -42,6 +42,7 @@ components:
   - id: modern-screenshot-runtime
     origin: third-party
     exact: [scripts/modern-screenshot.umd.js]
+    sha256: bb36665889124a0b6e15f16045265737449c3bdcf2712cdb08af3cfa01563e2b
     source_url: https://github.com/qq15725/modern-screenshot/tree/792d6db7411839c62940a6e930161f8e376e817f
     source_ref: "v4.7.0 peeled commit 792d6db7411839c62940a6e930161f8e376e817f"
     licence: MIT

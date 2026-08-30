@@ -1,3 +1,4 @@
+import hashlib
 from pathlib import Path
 import subprocess
 
@@ -42,6 +43,16 @@ def test_every_shipped_skill_file_has_exactly_one_provenance_component():
         for relative in component.get("exclude", []):
             assert (SKILL / relative).is_file(), (component["id"], relative)
             assert _component_for(relative, components), relative
+
+
+def test_unmodified_modern_screenshot_bundle_matches_its_pinned_digest():
+    ledger = yaml.safe_load((SKILL / "evals" / "provenance_components.yaml").read_text())
+    component = next(
+        item for item in ledger["components"] if item["id"] == "modern-screenshot-runtime"
+    )
+    bundle = SKILL / component["exact"][0]
+
+    assert hashlib.sha256(bundle.read_bytes()).hexdigest() == component["sha256"]
 
 
 def test_ui_ux_notices_are_exact_and_removed_data_stays_historical_only():

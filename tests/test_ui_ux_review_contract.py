@@ -1,4 +1,7 @@
+import re
 from pathlib import Path
+
+import yaml
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -12,6 +15,33 @@ def _text(name: str) -> str:
 def _has_all(text: str, *concepts: str) -> None:
     missing = [concept for concept in concepts if concept.lower() not in text]
     assert not missing, missing
+
+
+def _has_words(text: str, *words: str) -> None:
+    missing = [
+        word
+        for word in words
+        if re.search(rf"(?<![\w-]){re.escape(word.lower())}(?![\w-])", text) is None
+    ]
+    assert not missing, missing
+
+
+def test_composition_routes_name_each_enclosing_owner_explicitly():
+    cases = yaml.safe_load((SKILL / "evals" / "trigger_cases.yaml").read_text())["cases"]
+    by_id = {case["id"]: case["expected"] for case in cases}
+
+    assert by_id["q716"] == {
+        "primary_skill": "implement",
+        "companion_skills": ["ui-ux-design"],
+    }
+    assert by_id["q717"] == {
+        "primary_skill": "code-review",
+        "companion_skills": ["ui-ux-design"],
+    }
+    assert by_id["q718"] == {
+        "primary_skill": "ui-ux-design",
+        "companion_skills": ["playwright"],
+    }
 
 
 def test_review_contract_keeps_evidence_coverage_and_certification_boundaries():
@@ -30,8 +60,10 @@ def test_review_contract_keeps_evidence_coverage_and_certification_boundaries():
         "not verified",
         "wcag certification",
     )
-    _has_all(review, "observation", "divergence", "remedy", "pass", "minor", "major")
-    _has_all(review, "navigation", "get", "screenshot", "submission", "outside the protected")
+    _has_all(review, "observation", "divergence", "remedy")
+    _has_words(review, "pass", "minor", "major")
+    _has_all(review, "navigation", "screenshot", "submission", "outside the protected")
+    _has_words(review, "get")
     _has_all(qa, "field performance", "screenshot", "does not prove")
     _has_all(
         review,
