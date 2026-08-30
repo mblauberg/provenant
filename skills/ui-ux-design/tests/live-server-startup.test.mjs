@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
@@ -23,20 +24,6 @@ function stopServer(project) {
     encoding: 'utf8',
     timeout: 5_000,
   });
-}
-
-async function waitForServerInfo(project, child) {
-  const infoPath = path.join(project, '.impeccable', 'live', 'server.json');
-  const deadline = Date.now() + 5_000;
-  while (Date.now() < deadline) {
-    if (child.exitCode !== null) throw new Error(`server exited with ${child.exitCode}`);
-    try {
-      return JSON.parse(fs.readFileSync(infoPath, 'utf8'));
-    } catch {
-      await new Promise((resolve) => setTimeout(resolve, 25));
-    }
-  }
-  throw new Error('timed out waiting for live server fixture');
 }
 
 test('classifies a ready server as success with its observed elapsed time', () => {
@@ -93,7 +80,7 @@ test('does not classify an unobserved startup as an environmental timeout', () =
   );
 });
 
-test('background launcher reports a successful startup using its compatible JSON payload', () => {
+test('background launcher reports a successful startup without exposing its bearer token', () => {
   const project = newProject();
   try {
     const result = spawnSync(process.execPath, [SERVER, '--background'], {
@@ -106,7 +93,14 @@ test('background launcher reports a successful startup using its compatible JSON
     const info = JSON.parse(result.stdout);
     assert.equal(typeof info.pid, 'number');
     assert.equal(typeof info.port, 'number');
-    assert.equal(typeof info.token, 'string');
+    assert.deepEqual(Object.keys(info).sort(), ['pid', 'port']);
+    const privateInfo = JSON.parse(fs.readFileSync(
+      path.join(project, '.impeccable', 'live', 'server.json'),
+      'utf8',
+    ));
+    assert.equal(typeof privateInfo.token, 'string');
+    assert.equal(result.stdout.includes(privateInfo.token), false);
+    assert.equal(result.stderr.includes(privateInfo.token), false);
     assert.equal(result.stderr, '');
   } finally {
     stopServer(project);
@@ -132,35 +126,77 @@ test('background launcher replaces a stale server record before reporting succes
     assert.equal(result.status, 0, result.stderr);
     const info = JSON.parse(result.stdout);
     assert.notEqual(info.pid, 2_147_483_647);
-    assert.notEqual(info.token, 'stale');
+    assert.deepEqual(Object.keys(info).sort(), ['pid', 'port']);
+    const privateInfo = JSON.parse(fs.readFileSync(
+      path.join(project, '.impeccable', 'live', 'server.json'),
+      'utf8',
+    ));
+    assert.notEqual(privateInfo.token, 'stale');
+    assert.equal(result.stdout.includes(privateInfo.token), false);
+    assert.equal(result.stderr.includes(privateInfo.token), false);
   } finally {
     stopServer(project);
     fs.rmSync(project, { recursive: true, force: true });
   }
 });
 
-test('background launcher reports an occupied-port startup refusal with observation', async () => {
+test('background launcher replaces a stale record that reuses a live unrelated pid', () => {
   const project = newProject();
-  const server = spawn(process.execPath, [SERVER], {
-    cwd: project,
+  const unrelated = spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)'], {
     stdio: 'ignore',
   });
+  const serverRecord = path.join(project, '.impeccable', 'live');
+  fs.mkdirSync(serverRecord, { recursive: true });
+  fs.writeFileSync(
+    path.join(serverRecord, 'server.json'),
+    JSON.stringify({ pid: unrelated.pid, port: 65534, token: 'stale' }),
+  );
   try {
-    const info = await waitForServerInfo(project, server);
-    const result = spawnSync(process.execPath, [SERVER, '--background', `--port=${info.port}`], {
+    const result = spawnSync(process.execPath, [SERVER, '--background'], {
       cwd: project,
       encoding: 'utf8',
       timeout: 15_000,
     });
 
-    assert.notEqual(result.status, 0);
-    const diagnostic = JSON.parse(result.stderr);
-    assert.equal(diagnostic.status, 'refused');
-    assert.equal(diagnostic.observation.baselineMs, 10_000);
-    assert.ok(diagnostic.observation.elapsedMs >= 0);
+    assert.equal(result.status, 0, result.stderr);
+    const info = JSON.parse(result.stdout);
+    assert.notEqual(info.pid, unrelated.pid);
+    assert.doesNotThrow(() => process.kill(unrelated.pid, 0));
   } finally {
     stopServer(project);
-    if (server.exitCode === null) server.kill('SIGTERM');
+    unrelated.kill('SIGTERM');
+    fs.rmSync(project, { recursive: true, force: true });
+  }
+});
+
+test('foreground server reports a structured occupied-port bind failure', async () => {
+  const project = newProject();
+  const occupied = net.createServer();
+  await new Promise((resolve) => occupied.listen(0, '127.0.0.1', resolve));
+  const port = occupied.address().port;
+  try {
+    assert.equal(fs.existsSync(
+      path.join(project, '.impeccable', 'live', 'server.json'),
+    ), false);
+    const result = spawnSync(process.execPath, [SERVER, `--port=${port}`], {
+      cwd: project,
+      encoding: 'utf8',
+      timeout: 5_000,
+    });
+
+    assert.notEqual(result.status, 0);
+    const diagnostic = JSON.parse(result.stderr);
+    assert.deepEqual(diagnostic, {
+      error: 'live_server_bind_failed',
+      code: 'EADDRINUSE',
+      port,
+      message: `Unable to bind live server to 127.0.0.1:${port}`,
+    });
+    assert.equal(fs.existsSync(
+      path.join(project, '.impeccable', 'live', 'server.json'),
+    ), false);
+  } finally {
+    await new Promise((resolve) => occupied.close(resolve));
     fs.rmSync(project, { recursive: true, force: true });
   }
 });

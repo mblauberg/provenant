@@ -1,0 +1,41 @@
+# Migration evidence for umbrella issue #680. This inventory proves that each
+# retired filename received one adjudication; it is not permanent product
+# doctrine and does not by itself prove semantic guidance coverage.
+schema_version: 1
+target_skill: ui-ux-design
+references:
+  - {old: adapt.md, status: folded, owners: [responsive-accessibility.md]}
+  - {old: animate.md, status: folded, owners: [motion.md]}
+  - {old: bolder.md, status: folded, owners: [design.md, visual-system.md]}
+  - {old: brand.md, status: folded, owners: [surfaces.md, visual-system.md, content-conversion.md]}
+  - {old: clarify.md, status: folded, owners: [content-conversion.md, interaction-states.md]}
+  - {old: codex.md, status: folded, owners: [design.md, reference-grounding.md]}
+  - {old: cognitive-load.md, status: folded, owners: [interaction-states.md, content-conversion.md]}
+  - {old: color-and-contrast.md, status: folded, owners: [visual-system.md, responsive-accessibility.md]}
+  - {old: colorize.md, status: folded, owners: [visual-system.md]}
+  - {old: command-routing.md, status: removed, owners: []}
+  - {old: core-laws.md, status: folded, owners: [visual-system.md, interaction-states.md, motion.md, content-conversion.md]}
+  - {old: craft.md, status: folded, owners: [design.md, visual-qa.md]}
+  - {old: delight.md, status: folded, owners: [motion.md, content-conversion.md, surfaces.md]}
+  - {old: distill.md, status: folded, owners: [design.md]}
+  - {old: document.md, status: folded, owners: [design-systems.md]}
+  - {old: extract.md, status: folded, owners: [design-systems.md]}
+  - {old: harden.md, status: folded, owners: [interaction-states.md, responsive-accessibility.md, visual-qa.md]}
+  - {old: interaction-design.md, status: folded, owners: [interaction-states.md]}
+  - {old: layout.md, status: folded, owners: [visual-system.md, surfaces.md]}
+  - {old: live.md, status: retained, owners: [live.md]}
+  - {old: motion-design.md, status: folded, owners: [motion.md]}
+  - {old: onboard.md, status: folded, owners: [content-conversion.md, interaction-states.md]}
+  - {old: overdrive.md, status: folded, owners: [design.md, motion.md]}
+  - {old: polish.md, status: folded, owners: [design.md, design-systems.md, visual-qa.md]}
+  - {old: product.md, status: folded, owners: [surfaces.md]}
+  - {old: quieter.md, status: folded, owners: [design.md, visual-system.md]}
+  - {old: responsive-design.md, status: folded, owners: [responsive-accessibility.md]}
+  - {old: review.md, status: retained, owners: [review.md]}
+  - {old: setup.md, status: folded, owners: [reference-grounding.md, design.md]}
+  - {old: shape.md, status: folded, owners: [design.md, reference-grounding.md]}
+  - {old: spatial-design.md, status: folded, owners: [visual-system.md]}
+  - {old: teach.md, status: folded, owners: [reference-grounding.md, design-systems.md]}
+  - {old: typeset.md, status: folded, owners: [visual-system.md]}
+  - {old: typography.md, status: folded, owners: [visual-system.md]}
+  - {old: ux-writing.md, status: folded, owners: [content-conversion.md, interaction-states.md]}

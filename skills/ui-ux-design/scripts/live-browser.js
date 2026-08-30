@@ -1,8 +1,8 @@
-// Modified from Impeccable for this harness; see the repository THIRD_PARTY_NOTICES.md.
+// Modified for Provenant.
 /**
  * Impeccable Live Variant Mode — Browser Script
  *
- * Injected into the user's page via <script src="http://localhost:PORT/live.js">.
+ * Injected into the user's page via <script src="http://127.0.0.1:PORT/live.js">.
  * The server prepends window.__IMPECCABLE_TOKEN__ and window.__IMPECCABLE_PORT__
  * before this code.
  *
@@ -51,7 +51,8 @@
   const Z = { highlight: 100001, bar: 100005, picker: 100007, toast: 100010 };
   const EASE = 'cubic-bezier(0.22, 1, 0.36, 1)'; // ease-out-quint
   const PREFIX = 'impeccable-live';
-  const sessionState = window.__IMPECCABLE_LIVE_SESSION__?.createLiveBrowserSessionState({
+  const sessionApi = window.__IMPECCABLE_LIVE_SESSION__;
+  const sessionState = sessionApi?.createLiveBrowserSessionState({
     prefix: PREFIX,
     storage: localStorage,
     idFactory: () => crypto.randomUUID().replace(/-/g, '').slice(0, 8),
@@ -123,6 +124,13 @@
   let hasProjectContext = false;
   let selectedAction = 'impeccable';
   let selectedCount = 3;
+  let generatingNeedsRetry = false;
+  let generatingNeedsRestart = false;
+  // Complete generation intent is browser-memory only. It is never written to
+  // localStorage or recovered from the project journal.
+  let generationIntent = null;
+  let pendingDiscard = null;
+  let pendingAccept = null;
   const browserOwner = sessionState.owner;
   let checkpointTimer = null;
 
@@ -853,7 +861,10 @@
       transition: 'box-shadow 0.2s ease, opacity 0.25s ' + EASE + ', transform 0.3s ' + EASE,
       fontFamily: FONT, fontSize: '13px', color: BP.text,
       padding: '6px',
-      maxWidth: '520px', minWidth: '320px',
+      width: 'max-content',
+      maxWidth: 'min(520px, calc(100vw - 16px))',
+      minWidth: 'min(320px, calc(100vw - 16px))',
+      boxSizing: 'border-box',
     });
     document.body.appendChild(barEl);
     defangOutsideHandlers(barEl);
@@ -882,8 +893,8 @@
     }
 
     let left = r.left + (r.width - barW) / 2;
-    if (left < GAP) left = GAP;
-    if (left + barW > window.innerWidth - GAP) left = window.innerWidth - barW - GAP;
+    const maxLeft = Math.max(GAP, window.innerWidth - barW - GAP);
+    left = Math.min(Math.max(left, GAP), maxLeft);
     Object.assign(barEl.style, { top: top + 'px', left: left + 'px' });
   }
 
@@ -1057,12 +1068,48 @@
       fontSize: '11px', color: BP.textDim, whiteSpace: 'nowrap',
       marginLeft: 'auto',
     });
-    // Variants currently arrive atomically in a single file edit, so a
-    // per-variant counter would lie. Say what's true.
+    status.setAttribute('role', 'status');
+    status.setAttribute('aria-live', 'polite');
+    status.setAttribute('aria-atomic', 'true');
+    // The UI advances only after one completed source edit is reported, so a
+    // per-variant counter would lie. This is a completion boundary, not a
+    // claim that the underlying in-place filesystem write is atomic.
     status.textContent = arrivedVariants < expectedVariants
-      ? 'Generating ' + expectedVariants + ' variants...'
+      ? generatingNeedsRetry || generatingNeedsRestart
+        ? 'Generation interrupted'
+        : 'Generating ' + expectedVariants + ' variants...'
       : 'Done';
     row.appendChild(status);
+
+    if (generatingNeedsRetry) {
+      const retry = el('button', {
+        padding: '5px 10px', borderRadius: '6px',
+        border: 'none', background: BP.accent, color: BP.mark,
+        fontFamily: FONT, fontSize: '11px', fontWeight: '600',
+        cursor: 'pointer', whiteSpace: 'nowrap',
+      });
+      retry.textContent = 'Retry';
+      retry.title = 'Reissue this generation request to the current live server';
+      retry.addEventListener('click', (event) => {
+        event.stopPropagation();
+        retryGeneration();
+      });
+      row.appendChild(retry);
+    } else if (generatingNeedsRestart) {
+      const restart = el('button', {
+        padding: '5px 10px', borderRadius: '6px',
+        border: 'none', background: BP.accent, color: BP.mark,
+        fontFamily: FONT, fontSize: '11px', fontWeight: '600',
+        cursor: 'pointer', whiteSpace: 'nowrap',
+      });
+      restart.textContent = 'Restart';
+      restart.title = 'End this incomplete session, then reselect the element';
+      restart.addEventListener('click', (event) => {
+        event.stopPropagation();
+        restartInterruptedGeneration();
+      });
+      row.appendChild(restart);
+    }
 
     return row;
   }
@@ -1073,14 +1120,19 @@
 
   function buildCyclingRow() {
     const row = el('div', {
-      display: 'flex', alignItems: 'center', gap: '6px',
+      display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap',
       padding: '1px 2px',
     });
 
     // Prev
     const prev = navBtn('\u2190');
+    prev.setAttribute('aria-label', 'Previous variant');
     prev.addEventListener('click', (e) => { e.stopPropagation(); cycleVariant(-1); });
-    if (visibleVariant <= 1) prev.style.opacity = '0.3';
+    if (visibleVariant <= 1) {
+      prev.disabled = true;
+      prev.setAttribute('aria-disabled', 'true');
+      prev.style.opacity = '0.3';
+    }
     row.appendChild(prev);
 
     // Dots (clickable)
@@ -1096,8 +1148,13 @@
 
     // Next
     const next = navBtn('\u2192');
+    next.setAttribute('aria-label', 'Next variant');
     next.addEventListener('click', (e) => { e.stopPropagation(); cycleVariant(1); });
-    if (visibleVariant >= arrivedVariants) next.style.opacity = '0.3';
+    if (visibleVariant >= arrivedVariants) {
+      next.disabled = true;
+      next.setAttribute('aria-disabled', 'true');
+      next.style.opacity = '0.3';
+    }
     row.appendChild(next);
 
     // Tune chip — only when the visible variant exposes params
@@ -1133,6 +1190,7 @@
       tuneBadge.textContent = String(visParams.length);
       tune.appendChild(tuneBadge);
       tune.title = 'Tune this variant (' + visParams.length + ' knob' + (visParams.length === 1 ? '' : 's') + ')';
+      tune.setAttribute('aria-pressed', String(tuneOpen));
       tune.addEventListener('mouseenter', () => {
         if (!tuneOpen) tune.style.background = BP.accentSoft;
       });
@@ -1174,6 +1232,7 @@
     });
     discard.textContent = '\u2715';
     discard.title = 'Discard all variants';
+    discard.setAttribute('aria-label', 'Discard all variants');
     discard.addEventListener('mouseenter', () => { discard.style.color = BP.text; discard.style.borderColor = BP.text; });
     discard.addEventListener('mouseleave', () => { discard.style.color = BP.textDim; discard.style.borderColor = BP.hairline; });
     discard.addEventListener('click', (e) => { e.stopPropagation(); handleDiscard(); });
@@ -1202,7 +1261,15 @@
     const label = el('span', {
       fontSize: '12px', color: BP.textDim, fontWeight: '500',
     });
-    label.textContent = 'Applying variant...';
+    label.textContent = pendingAccept
+      ? 'Applying accepted variant...'
+      : pendingDiscard
+      ? pendingDiscard.restart
+        ? 'Clearing interrupted session...'
+        : 'Discarding session...'
+      : 'Applying variant...';
+    label.setAttribute('role', 'status');
+    label.setAttribute('aria-live', 'polite');
     row.appendChild(label);
 
     // Inject the keyframes if not already present
@@ -1240,7 +1307,7 @@
 
   function buildDots(clickable) {
     const container = el('div', {
-      display: 'flex', alignItems: 'center', gap: '4px',
+      display: 'flex', alignItems: 'center', gap: '0',
     });
     for (let i = 1; i <= expectedVariants; i++) {
       const arrived = i <= arrivedVariants;
@@ -1254,7 +1321,19 @@
         : arrived ? BP.textDim
         : 'transparent';
       const dotBorder = arrived ? 'none' : '1.5px solid ' + BP.hairline;
-      const dot = el('div', {
+      const dot = el(clickable && arrived ? 'button' : 'span', {
+        width: '24px',
+        height: '24px',
+        border: 'none',
+        background: 'transparent',
+        display: 'inline-flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        flexShrink: '0',
+        cursor: (clickable && arrived) ? 'pointer' : 'default',
+        padding: '0',
+      });
+      const visual = el('span', {
         width: active ? '8px' : '6px',
         height: active ? '8px' : '6px',
         borderRadius: '50%',
@@ -1262,12 +1341,16 @@
         border: dotBorder,
         boxSizing: 'border-box',
         transition: 'all 0.2s ' + EASE,
-        cursor: (clickable && arrived) ? 'pointer' : 'default',
         transform: arrived ? 'scale(1)' : 'scale(0.85)',
         opacity: arrived ? (active ? '1' : '0.6') : '0.4',
+        pointerEvents: 'none',
       });
+      dot.appendChild(visual);
       if (clickable && arrived) {
         const idx = i;
+        dot.type = 'button';
+        dot.setAttribute('aria-label', 'Show variant ' + i + ' of ' + arrivedVariants);
+        dot.setAttribute('aria-pressed', String(active));
         dot.addEventListener('click', (e) => {
           e.stopPropagation();
           visibleVariant = idx;
@@ -1326,6 +1409,9 @@
       borderRadius: '10px',
       boxShadow: '0 8px 30px oklch(0% 0 0 / 0.10), 0 2px 6px oklch(0% 0 0 / 0.06)',
       padding: '6px',
+      width: 'min(320px, calc(100vw - 16px))',
+      maxWidth: 'calc(100vw - 16px)',
+      boxSizing: 'border-box',
       fontFamily: FONT,
       backdropFilter: 'blur(10px)',
       WebkitBackdropFilter: 'blur(10px)',
@@ -1392,14 +1478,19 @@
       chip.style.background = isActive ? P.accentSoft : 'transparent';
       chip.style.color = isActive ? P.accent : P.text;
     });
-    // Position above the bar
+    // Position above the bar, clamped to the usable viewport.
     const barRect = barEl.getBoundingClientRect();
-    const pickerH = 170; // approximate; grows with icon + label rows
+    const GAP = 8;
+    pickerEl.style.display = 'block';
+    const pickerW = pickerEl.offsetWidth;
+    const pickerH = pickerEl.offsetHeight;
     let top = barRect.top - pickerH - 6;
-    if (top < 8) top = barRect.bottom + 6;
+    if (top < GAP) top = barRect.bottom + 6;
+    top = Math.min(Math.max(top, GAP), Math.max(GAP, window.innerHeight - pickerH - GAP));
+    const maxLeft = Math.max(GAP, window.innerWidth - pickerW - GAP);
+    const left = Math.min(Math.max(barRect.left, GAP), maxLeft);
     Object.assign(pickerEl.style, {
-      top: top + 'px', left: barRect.left + 'px',
-      display: 'block',
+      top: top + 'px', left: left + 'px',
     });
     requestAnimationFrame(() => {
       pickerEl.style.opacity = '1';
@@ -1550,7 +1641,9 @@
   function buildParamsPanel(variantEl, params) {
     const P = paramsPanelPalette || barPaletteForTheme(detectPageTheme());
     paramsPanelBody.innerHTML = '';
+    let paramIndex = 0;
     for (const p of params) {
+      const labelId = PREFIX + '-param-label-' + paramIndex++;
       const row = el('div', { display: 'flex', flexDirection: 'column', gap: '6px' });
       const labelRow = el('div', {
         display: 'flex', justifyContent: 'space-between',
@@ -1561,6 +1654,7 @@
         letterSpacing: '0.03em',
       });
       lbl.textContent = p.label || p.id;
+      lbl.id = labelId;
       labelRow.appendChild(lbl);
       const readout = el('span', {
         fontSize: '10.5px', color: P.textDim,
@@ -1576,6 +1670,7 @@
         input.max = String(p.max != null ? p.max : 1);
         input.step = String(p.step != null ? p.step : 0.05);
         input.value = String(p.default);
+        input.setAttribute('aria-labelledby', labelId);
         Object.assign(input.style, {
           width: '100%', accentColor: C.brand, cursor: 'pointer',
         });
@@ -1600,6 +1695,9 @@
           transition: 'background 0.15s ease',
           alignSelf: 'flex-start',
         });
+        track.type = 'button';
+        track.setAttribute('aria-labelledby', labelId);
+        track.setAttribute('aria-pressed', String(initial));
         const knob = el('span', {
           position: 'absolute', top: '2px',
           left: initial ? '18px' : '2px',
@@ -1614,6 +1712,7 @@
           const next = !paramsCurrentValues[p.id];
           paramsCurrentValues[p.id] = next;
           track.style.background = next ? C.brand : P.hairline;
+          track.setAttribute('aria-pressed', String(next));
           knob.style.left = next ? '18px' : '2px';
           readout.textContent = next ? 'On' : 'Off';
           applyParamValue(variantEl, p, next);
@@ -1644,6 +1743,9 @@
             transition: 'background 0.1s ease, color 0.1s ease',
           });
           b.textContent = o.label;
+          b.type = 'button';
+          b.setAttribute('aria-label', (p.label || p.id) + ': ' + o.label);
+          b.setAttribute('aria-pressed', String(active));
           b.addEventListener('click', (e) => {
             e.stopPropagation();
             paramsCurrentValues[p.id] = o.value;
@@ -1652,6 +1754,7 @@
               const on = val === o.value;
               btn.style.background = on ? C.brand : 'transparent';
               btn.style.color = on ? 'oklch(98% 0 0)' : P.text;
+              btn.setAttribute('aria-pressed', String(on));
             });
             applyParamValue(variantEl, p, o.value);
             queueCheckpoint('param_changed');
@@ -1838,7 +1941,7 @@
    * This works even when the dev server caches HTML (Bun, static servers).
    */
   function injectVariantsFromSource(filePath, sessionId) {
-    const url = 'http://localhost:' + PORT + '/source?token=' + TOKEN + '&path=' + encodeURIComponent(filePath);
+    const url = 'http://127.0.0.1:' + PORT + '/source?token=' + TOKEN + '&path=' + encodeURIComponent(filePath);
     fetch(url)
       .then(r => { if (!r.ok) throw new Error(r.status); return r.text(); })
       .then(html => {
@@ -1898,6 +2001,9 @@
         selectedElement = pickVariantContent(wrapper, visibleVariant) || wrapper.parentElement;
 
         state = 'CYCLING';
+        generatingNeedsRetry = false;
+        generatingNeedsRestart = false;
+        generationIntent = null;
         hideShaderOverlay();
         updateBarContent('cycling');
         refreshParamsPanel();
@@ -2146,6 +2252,9 @@
       if (expected > 0) expectedVariants = expected;
 
       if (arrivedVariants >= expectedVariants && expectedVariants > 0) {
+        generatingNeedsRetry = false;
+        generatingNeedsRestart = false;
+        generationIntent = null;
         state = 'CYCLING';
         hideShaderOverlay();
         updateBarContent('cycling');
@@ -2196,7 +2305,11 @@
   const SSE_MAX_RETRIES = 20;  // generous: heartbeats keep the connection alive, so retries mean real trouble
 
   function connectSSE() {
-    evtSource = new EventSource('http://localhost:' + PORT + '/events?token=' + TOKEN);
+    const server = currentServerCredentials();
+    if (!server) return;
+    evtSource = new EventSource(
+      'http://127.0.0.1:' + server.port + '/events?token=' + encodeURIComponent(server.token),
+    );
 
     evtSource.onopen = () => {
       sseRetries = 0; // reset on successful (re)connect
@@ -2208,9 +2321,16 @@
       switch (msg.type) {
         case 'connected':
           hasProjectContext = !!msg.hasProjectContext;
-          if (!hasProjectContext) showToast('No PRODUCT.md found. Variants will be brand-agnostic. Run /ui-ux-design teach to generate one.', 7000);
+          if (!hasProjectContext) showToast('No PRODUCT.md found. Variants will use only the available project evidence.', 7000);
           console.log('[impeccable] Live mode connected.');
           if (state === 'IDLE') state = 'PICKING';
+          break;
+        case 'replay_gap':
+          if (pendingAccept) {
+            restorePendingAccept('The completion outcome could not be confirmed; inspect the result before trying again.');
+          } else if (pendingDiscard) {
+            restorePendingDiscard('The discard outcome could not be confirmed; inspect the session before trying again.');
+          }
           break;
         case 'done':
           // Variants already arrived via HMR → normal transition.
@@ -2238,7 +2358,50 @@
             );
           }, 2000);
           break;
+        case 'complete': {
+          if (msg.id !== currentSessionId || !pendingAccept) break;
+          const accepted = pendingAccept;
+          pendingAccept = null;
+          markSessionHandled();
+          confirmAcceptedVariant(accepted.sessionId, accepted.variant);
+          break;
+        }
+        case 'discard':
+        case 'discarded': {
+          if (msg.id !== currentSessionId || !pendingDiscard) break;
+          const wasRestart = pendingDiscard.restart;
+          pendingDiscard = null;
+          markSessionHandled();
+          cleanup();
+          showToast(
+            wasRestart
+              ? 'Interrupted session cleared. Reselect the element to restart.'
+              : 'Session discarded.',
+            5000,
+          );
+          break;
+        }
         case 'error':
+          if (msg.id === currentSessionId && pendingAccept && msg.data?.cleanup === true) {
+            const accepted = pendingAccept;
+            pendingAccept = null;
+            markSessionHandled();
+            confirmAcceptedVariant(accepted.sessionId, accepted.variant);
+            showToast(
+              'Accepted change saved, but required cleanup failed: '
+                + (msg.message || 'unknown error'),
+              12000,
+            );
+            break;
+          }
+          if (msg.id === currentSessionId && pendingAccept) {
+            restorePendingAccept('Accept failed. The session is still available; try again.');
+            break;
+          }
+          if (msg.id === currentSessionId && pendingDiscard) {
+            restorePendingDiscard('Discard failed. The session is still available; try again.');
+            break;
+          }
           console.error('[impeccable] Error:', msg.message);
           showToast('Error: ' + msg.message, 5000);
           hideBar();
@@ -2261,40 +2424,88 @@
     };
   }
 
-  /** Server died or became unreachable. Reset UI to a clean state. */
+  /** Server died or became unreachable. Keep any explicit recovery action visible. */
   function handleServerLost() {
+    const acceptWasUnconfirmed = !!pendingAccept;
+    if (pendingAccept) {
+      pendingAccept = null;
+      state = 'CYCLING';
+    }
+    const discardWasUnconfirmed = !!pendingDiscard;
+    if (pendingDiscard) {
+      const interrupted = pendingDiscard;
+      pendingDiscard = null;
+      state = interrupted.returnState;
+      if (interrupted.restart) {
+        generatingNeedsRetry = false;
+        generatingNeedsRestart = true;
+      }
+    }
     const recoveryState = currentSessionId ? state : 'IDLE';
-    if (state === 'GENERATING' || state === 'CYCLING' || state === 'SAVING') {
+    const interruptedGeneration = state === 'GENERATING' && !!currentSessionId;
+    const recoverableCycling = state === 'CYCLING' && !!currentSessionId;
+    if (interruptedGeneration) {
+      generatingNeedsRetry = !!generationIntent;
+      generatingNeedsRestart = !generationIntent;
+      showToast(
+        discardWasUnconfirmed
+          ? 'Discard was not confirmed. Reconnect live mode, then try again.'
+          : generationIntent
+          ? 'Live server disconnected. Reconnect live mode, then retry explicitly.'
+          : 'Live server disconnected. Restart this session, then reselect the element.',
+        7000,
+      );
+    } else if (recoverableCycling) {
+      showToast(
+        acceptWasUnconfirmed
+          ? 'Accept was not confirmed. Reconnect live mode, then try again.'
+          : discardWasUnconfirmed
+          ? 'Discard was not confirmed. Reconnect live mode, then try again.'
+          : 'Live server disconnected. Reconnect live mode to Accept or Discard.',
+        7000,
+      );
+    } else if (state === 'SAVING') {
       showToast('Live server disconnected. Session ended.', 5000);
     }
-    hideBar();
+    if (!interruptedGeneration && !recoverableCycling) hideBar();
     hideHighlight();
     hideShaderOverlay();
     hideAnnotOverlay();
     stopScrollTracking();
     if (variantObserver) { variantObserver.disconnect(); variantObserver = null; }
     stopScrollLock();
-    // Preserve local session state on server loss. The durable journal is the
-    // source of truth, but localStorage plus the variant wrapper lets the UI
-    // resume after a helper restart or page reload instead of treating a
-    // transient disconnect as an explicit discard.
-    selectedElement = null;
-    selectedAction = 'impeccable';
+    // Project journals are advisory only. A same-page generating session keeps
+    // its complete browser-memory intent for one explicit retry; a reload can
+    // only offer a discard-and-reselect restart.
+    if (!interruptedGeneration && !recoverableCycling) selectedElement = null;
     state = recoveryState;
-    if (currentSessionId) saveSession();
+    if (currentSessionId) {
+      saveSession();
+      if (interruptedGeneration) showBar('generating');
+      else if (recoverableCycling) showBar('cycling');
+    }
+  }
+
+  function currentServerCredentials() {
+    const token = window.__IMPECCABLE_TOKEN__;
+    const port = Number(window.__IMPECCABLE_PORT__);
+    if (typeof token !== 'string' || !token
+      || !Number.isInteger(port) || port < 1 || port > 65535) return null;
+    return { token, port };
   }
 
   function sendEvent(msg, opts) {
-    msg.token = TOKEN;
     function handleFailure(err) {
       console.error('[impeccable] Failed to send event:', err);
       if (opts && opts.throwOnError) throw err;
       return null;
     }
-    return fetch('http://localhost:' + PORT + '/events', {
+    const server = currentServerCredentials();
+    if (!server) return Promise.resolve().then(() => handleFailure(new Error('Live server unavailable')));
+    return fetch('http://127.0.0.1:' + server.port + '/events', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(msg),
+      body: JSON.stringify({ ...msg, token: server.token }),
     }).then(res => {
       if (res.ok) return res;
       return handleFailure(new Error('HTTP ' + res.status + ' ' + res.statusText));
@@ -2523,6 +2734,88 @@
     }
   }
 
+  function retryGeneration() {
+    if (!generatingNeedsRetry || state !== 'GENERATING'
+      || !currentSessionId || !generationIntent) return;
+    const wrapper = document.querySelector('[data-impeccable-variants="' + currentSessionId + '"]');
+    const original = wrapper ? pickVariantContent(wrapper, 'original') : null;
+    const target = original || selectedElement;
+    const event = target && sessionState.buildRetryGenerationEvent({
+      id: currentSessionId,
+      intent: generationIntent,
+    });
+    if (!event) {
+      showToast('This session can no longer be retried safely. Pick the element again.', 5000);
+      return;
+    }
+    const snapshot = {
+      comments: event.comments || [],
+      strokes: event.strokes || [],
+    };
+    generatingNeedsRetry = false;
+    updateBarContent('generating');
+    if (!evtSource) {
+      sseRetries = 0;
+      connectSSE();
+    }
+    if (!scrollRaf) startScrollTracking();
+    if (variantObserver) variantObserver.disconnect();
+    variantObserver = startVariantObserver(currentSessionId);
+    startScrollLock(currentSessionId, readScrollY());
+    captureAndEmit(
+      target,
+      { ...event, retry: true },
+      snapshot,
+      target.getBoundingClientRect(),
+      { throwOnError: true },
+    )
+      .then(() => {
+        saveSession();
+        queueCheckpoint('generation_reissued');
+        showToast('Generation request reissued.', 2500);
+      })
+      .catch(() => {
+        generatingNeedsRetry = true;
+        updateBarContent('generating');
+        showToast('Retry could not reach the live server.', 5000);
+      });
+  }
+
+  function restartInterruptedGeneration() {
+    if (!generatingNeedsRestart || state !== 'GENERATING'
+      || !currentSessionId || pendingDiscard) return;
+    pendingDiscard = { returnState: 'GENERATING', restart: true };
+    generatingNeedsRestart = false;
+    state = 'SAVING';
+    updateBarContent('saving');
+    if (!evtSource) {
+      sseRetries = 0;
+      connectSSE();
+    }
+    sendEvent({ type: 'discard', id: currentSessionId }, { throwOnError: true })
+      .then(() => {
+        if (!pendingDiscard) return;
+        saveSession();
+        showToast('Clearing interrupted session. Waiting for agent confirmation.', 5000);
+      })
+      .catch(() => restorePendingDiscard(
+        'Restart could not reach the live server. The session is still available.',
+      ));
+  }
+
+  function restorePendingDiscard(message) {
+    if (!pendingDiscard) return;
+    const pending = pendingDiscard;
+    pendingDiscard = null;
+    state = pending.returnState;
+    if (pending.restart) {
+      generatingNeedsRetry = false;
+      generatingNeedsRestart = true;
+    }
+    updateBarContent(state === 'GENERATING' ? 'generating' : 'cycling');
+    showToast(message, 5000);
+  }
+
   function handleGo() {
     if (!selectedElement || state !== 'CONFIGURING') return;
     const input = document.getElementById(PREFIX + '-input');
@@ -2532,6 +2825,8 @@
     if (annotEditing) finalizeEditingPin();
 
     currentSessionId = id8();
+    generatingNeedsRetry = false;
+    generatingNeedsRestart = false;
     expectedVariants = selectedCount;
     arrivedVariants = 0;
     visibleVariant = 0;
@@ -2556,6 +2851,17 @@
     };
     if (snapshot.comments.length > 0) basePayload.comments = snapshot.comments;
     if (snapshot.strokes.length > 0) basePayload.strokes = snapshot.strokes;
+    generationIntent = {
+      action: basePayload.action,
+      count: basePayload.count,
+      pageUrl: basePayload.pageUrl,
+      element: basePayload.element,
+      ...(basePayload.freeformPrompt !== undefined
+        ? { freeformPrompt: basePayload.freeformPrompt }
+        : {}),
+      ...(basePayload.comments ? { comments: basePayload.comments } : {}),
+      ...(basePayload.strokes ? { strokes: basePayload.strokes } : {}),
+    };
 
     // Hide the interactive overlay so it doesn't linger during generation.
     hideAnnotOverlay();
@@ -2579,12 +2885,12 @@
   // ---------------------------------------------------------------------------
 
   let msLoadPromise = null;
-  function loadModernScreenshot() {
+  function loadModernScreenshot(port = PORT) {
     if (window.modernScreenshot) return Promise.resolve(window.modernScreenshot);
     if (msLoadPromise) return msLoadPromise;
     msLoadPromise = new Promise((resolve, reject) => {
       const s = document.createElement('script');
-      s.src = 'http://localhost:' + PORT + '/modern-screenshot.js';
+      s.src = 'http://127.0.0.1:' + port + '/modern-screenshot.js';
       s.onload = () => resolve(window.modernScreenshot);
       s.onerror = () => { msLoadPromise = null; reject(new Error('modern-screenshot failed to load')); };
       document.head.appendChild(s);
@@ -2705,7 +3011,7 @@
   // Capture the element (with current annotations baked in) and return a PNG
   // Blob. Shared between the Go flow (uploads it to the server) and the
   // debug toggle (displays it as an overlay for side-by-side comparison).
-  async function captureElementToBlob(el, snapshot, rect) {
+  async function captureElementToBlob(el, snapshot, rect, port = PORT) {
     try { if (document.fonts?.ready) await document.fonts.ready; } catch {}
     const hasAnnotations = snapshot && (snapshot.comments.length > 0 || snapshot.strokes.length > 0);
     let annotNode = null;
@@ -2720,7 +3026,7 @@
       el.appendChild(annotNode);
     }
     try {
-      const ms = await loadModernScreenshot();
+      const ms = await loadModernScreenshot(port);
       const fontCssText = await collectFontCssText();
       const backgroundColor = resolveCanvasBackground(el);
       return await ms.domToBlob(el, {
@@ -2734,11 +3040,13 @@
     }
   }
 
-  async function captureAndEmit(el, basePayload, snapshot, rect) {
+  async function captureAndEmit(el, basePayload, snapshot, rect, sendOpts) {
     let screenshotPath;
     let blob;
+    const server = currentServerCredentials();
     try {
-      blob = await captureElementToBlob(el, snapshot, rect);
+      if (!server) throw new Error('Live server unavailable');
+      blob = await captureElementToBlob(el, snapshot, rect, server.port);
     } catch (err) {
       console.warn('[impeccable] capture failed, proceeding without screenshot:', err);
     }
@@ -2755,7 +3063,7 @@
     if (blob && hasAnnotations) {
       try {
         const uploadRes = await fetch(
-          'http://localhost:' + PORT + '/annotation?token=' + encodeURIComponent(TOKEN) +
+          'http://127.0.0.1:' + server.port + '/annotation?token=' + encodeURIComponent(server.token) +
           '&eventId=' + encodeURIComponent(basePayload.id),
           { method: 'POST', headers: { 'Content-Type': 'image/png' }, body: blob },
         );
@@ -2769,7 +3077,7 @@
         console.warn('[impeccable] annotation upload failed:', err);
       }
     }
-    sendEvent(screenshotPath ? { ...basePayload, screenshotPath } : basePayload);
+    return sendEvent(screenshotPath ? { ...basePayload, screenshotPath } : basePayload, sendOpts);
   }
 
   // ---------------------------------------------------------------------------
@@ -2987,45 +3295,10 @@ void main() {
     frame();
   }
 
-  function handleAccept() {
-    if (!currentSessionId || arrivedVariants === 0) return;
-    const domVisibleVariant = readVisibleVariantFromDOM(currentSessionId);
-    if (domVisibleVariant > 0) visibleVariant = domVisibleVariant;
-    const acceptPayload = { type: 'accept', id: currentSessionId, variantId: String(visibleVariant) };
-    if (Object.keys(paramsCurrentValues).length > 0) {
-      acceptPayload.paramValues = { ...paramsCurrentValues };
-    }
-    // The accepted variant is already the only visible child of the wrapper
-    // (all other variants are display:none). HMR from the source rewrite will
-    // replace the wrapper imminently. Don't eagerly replaceChild here — React
-    // reconciliation races with our mutation and throws NotFoundError in Next
-    // 16 / Turbopack. Schedule a fallback that runs the manual swap only if
-    // HMR hasn't cleaned up by then (keeps static-server flows working).
-    const acceptedSessionId = currentSessionId;
-    const acceptedVariant = visibleVariant;
-
-    state = 'SAVING';
-    updateBarContent('saving');
-
-    sendEvent(acceptPayload, { throwOnError: true })
-      .then(() => {
-        markSessionHandled();
-        confirmAcceptAfterReceipt();
-      })
-      .catch(() => {
-        state = 'CYCLING';
-        updateBarContent('cycling');
-        showToast('Could not confirm accept with the live server. Session kept for recovery; try Accept again.', 5000);
-      });
-
-    function confirmAcceptAfterReceipt() {
-      state = 'CONFIRMED';
-      updateBarContent('confirmed');
-      scheduleAcceptCleanup();
-    }
-
-    function scheduleAcceptCleanup() {
-      setTimeout(function() {
+  function confirmAcceptedVariant(acceptedSessionId, acceptedVariant) {
+    state = 'CONFIRMED';
+    updateBarContent('confirmed');
+    setTimeout(function() {
       hideBar();
       hideHighlight();
       stopScrollTracking();
@@ -3040,7 +3313,7 @@ void main() {
     }, 1800);
 
     // Static-server / no-HMR fallback: if the wrapper is still around 2s after
-    // the cleanup above, swap it out manually. By now React has either moved
+    // acknowledgement, swap it out manually. By now React has either moved
     // on or the app isn't React at all. Preserve the `data-impeccable-variant="N"`
     // div (with display:contents) so @scope rules anchored to the variant
     // attribute keep matching until reload replaces it with the carbonize block.
@@ -3054,18 +3327,61 @@ void main() {
         accepted.style.display = 'contents';
         parent.replaceChild(accepted, wrapper);
       }
-      }, 2000);
+    }, 2000);
+  }
+
+  function restorePendingAccept(message) {
+    if (!pendingAccept) return;
+    pendingAccept = null;
+    state = 'CYCLING';
+    updateBarContent('cycling');
+    showToast(message, 5000);
+  }
+
+  function handleAccept() {
+    if (!currentSessionId || arrivedVariants === 0 || pendingAccept) return;
+    const domVisibleVariant = readVisibleVariantFromDOM(currentSessionId);
+    if (domVisibleVariant > 0) visibleVariant = domVisibleVariant;
+    const acceptPayload = { type: 'accept', id: currentSessionId, variantId: String(visibleVariant) };
+    if (Object.keys(paramsCurrentValues).length > 0) {
+      acceptPayload.paramValues = { ...paramsCurrentValues };
     }
+    pendingAccept = { sessionId: currentSessionId, variant: visibleVariant };
+    state = 'SAVING';
+    updateBarContent('saving');
+    if (!evtSource) {
+      sseRetries = 0;
+      connectSSE();
+    }
+    sendEvent(acceptPayload, { throwOnError: true })
+      .then(() => {
+        if (!pendingAccept) return;
+        saveSession();
+        showToast('Accept requested. Waiting for agent confirmation.', 5000);
+      })
+      .catch(() => restorePendingAccept(
+        'Could not request accept. The session is still available; try again.',
+      ));
   }
 
   function handleDiscard() {
-    if (!currentSessionId) return;
+    if (!currentSessionId || pendingDiscard) return;
+    pendingDiscard = { returnState: state, restart: false };
+    state = 'SAVING';
+    updateBarContent('saving');
+    if (!evtSource) {
+      sseRetries = 0;
+      connectSSE();
+    }
     sendEvent({ type: 'discard', id: currentSessionId }, { throwOnError: true })
       .then(() => {
-        markSessionHandled();
-        cleanup();
+        if (!pendingDiscard) return;
+        saveSession();
+        showToast('Discard requested. Waiting for agent confirmation.', 5000);
       })
-      .catch(() => showToast('Could not confirm discard with the live server. Session kept for recovery.', 5000));
+      .catch(() => restorePendingDiscard(
+        'Could not request discard. The session is still available.',
+      ));
   }
 
   // ---------------------------------------------------------------------------
@@ -3148,6 +3464,11 @@ void main() {
     selectedElement = null;
     currentSessionId = null;
     selectedAction = 'impeccable';
+    generatingNeedsRetry = false;
+    generatingNeedsRestart = false;
+    generationIntent = null;
+    pendingDiscard = null;
+    pendingAccept = null;
     state = 'PICKING';
   }
 
@@ -3175,19 +3496,27 @@ void main() {
       transition: 'opacity 0.25s ' + EASE + ', transform 0.25s ' + EASE,
       pointerEvents: 'none', maxWidth: '420px', textAlign: 'center',
     });
+    toastEl.setAttribute('role', 'status');
+    toastEl.setAttribute('aria-live', 'polite');
+    toastEl.setAttribute('aria-atomic', 'true');
     toastEl.id = PREFIX + '-toast';
-    toastEl.textContent = message;
     document.body.appendChild(toastEl);
+    const renderedToast = toastEl;
     requestAnimationFrame(() => {
-      toastEl.style.opacity = '1';
-      toastEl.style.transform = 'translateX(-50%) translateY(0)';
+      if (toastEl !== renderedToast) return;
+      renderedToast.textContent = message;
+      renderedToast.style.opacity = '1';
+      renderedToast.style.transform = 'translateX(-50%) translateY(0)';
     });
     setTimeout(() => {
-      if (toastEl) {
-        toastEl.style.opacity = '0';
-        toastEl.style.transform = 'translateX(-50%) translateY(8px)';
-        setTimeout(() => { if (toastEl) { toastEl.remove(); toastEl = null; } }, 250);
-      }
+      if (toastEl !== renderedToast) return;
+      renderedToast.style.opacity = '0';
+      renderedToast.style.transform = 'translateX(-50%) translateY(8px)';
+      setTimeout(() => {
+        if (toastEl !== renderedToast) return;
+        renderedToast.remove();
+        toastEl = null;
+      }, 250);
     }, duration);
   }
 
@@ -3199,8 +3528,18 @@ void main() {
   // If a [data-impeccable-variants] wrapper exists in the DOM, the agent wrote
   // variants before HMR fired. Pick up where we left off.
   function resumeSession() {
+    const saved = loadSession();
     const wrapper = document.querySelector('[data-impeccable-variants]');
-    if (!wrapper) { clearSession(); clearHandled(); return false; }
+    if (!wrapper) {
+      const interruptedGeneration = saved?.state === 'GENERATING';
+      clearSession();
+      clearHandled();
+      if (interruptedGeneration) {
+        state = 'PICKING';
+        showToast('Interrupted session could not be restored. Reselect the element to restart.', 7000);
+      }
+      return false;
+    }
 
     const sessionId = wrapper.dataset.impeccableVariants;
 
@@ -3213,7 +3552,6 @@ void main() {
     arrivedVariants = variants.length;
 
     // Restore state from localStorage if available
-    const saved = loadSession();
     if (saved && saved.id === sessionId) {
       visibleVariant = (saved.visible > 0 && saved.visible <= arrivedVariants) ? saved.visible : (arrivedVariants > 0 ? 1 : 0);
       if (saved.action) selectedAction = saved.action;
@@ -3232,6 +3570,8 @@ void main() {
     if (visibleVariant > 0) showVariantInDOM(currentSessionId, visibleVariant);
 
     state = arrivedVariants >= expectedVariants ? 'CYCLING' : 'GENERATING';
+    generatingNeedsRetry = false;
+    generatingNeedsRestart = state === 'GENERATING' && !generationIntent;
     showBar(state === 'CYCLING' ? 'cycling' : 'generating');
     startScrollTracking();
     // Build the params panel for the restored visible variant. Previously
@@ -3649,7 +3989,7 @@ void main() {
     if (detectScriptLoaded) return;
     detectScriptLoaded = true;
     const s = document.createElement('script');
-    s.src = 'http://localhost:' + PORT + '/detect.js';
+    s.src = 'http://127.0.0.1:' + PORT + '/detect.js';
     s.dataset.impeccableExtension = 'true';
     document.head.appendChild(s);
   }
@@ -4084,6 +4424,8 @@ void main() {
     const body = document.createElement('div');
     body.className = 'panel-body';
     body.id = 'panel-body';
+    body.setAttribute('role', 'tabpanel');
+    body.setAttribute('aria-labelledby', PREFIX + '-design-tab-' + designState.tab);
     panel.appendChild(body);
     root.appendChild(panel);
 
@@ -4101,19 +4443,33 @@ void main() {
 
     const tabs = document.createElement('div');
     tabs.className = 'tabs';
-    for (const t of [['visual', 'Visual'], ['raw', 'Raw']]) {
+    tabs.setAttribute('role', 'tablist');
+    tabs.setAttribute('aria-label', 'Design panel view');
+    const tabOptions = [['visual', 'Visual'], ['raw', 'Raw']];
+    for (let tabIndex = 0; tabIndex < tabOptions.length; tabIndex++) {
+      const t = tabOptions[tabIndex];
       const btn = document.createElement('button');
+      const active = designState.tab === t[0];
       btn.className = 'tab';
+      btn.id = PREFIX + '-design-tab-' + t[0];
       btn.textContent = t[1];
-      btn.setAttribute('data-active', designState.tab === t[0] ? 'true' : 'false');
+      btn.setAttribute('data-active', String(active));
+      btn.setAttribute('role', 'tab');
+      btn.setAttribute('aria-selected', String(active));
+      btn.setAttribute('aria-controls', 'panel-body');
+      btn.setAttribute('tabindex', active ? '0' : '-1');
       btn.addEventListener('click', () => {
-        if (designState.tab === t[0]) return;
-        designState.tab = t[0];
-        saveDesignPrefs();
-        renderDesignChrome();
-        if (t[0] === 'raw' && designState.raw === null && !designState.loading) {
-          fetchDesignSystem(); // raw is part of the same fetch pair
-        }
+        activateDesignTab(t[0], true);
+      });
+      btn.addEventListener('keydown', (event) => {
+        const nextIndex = sessionApi.nextRovingTabIndex(
+          event.key,
+          tabIndex,
+          tabOptions.length,
+        );
+        if (nextIndex === null) return;
+        event.preventDefault();
+        activateDesignTab(tabOptions[nextIndex][0], true);
       });
       tabs.appendChild(btn);
     }
@@ -4127,6 +4483,20 @@ void main() {
     header.appendChild(close);
 
     return header;
+  }
+
+  function activateDesignTab(tab, restoreFocus) {
+    if (designState.tab !== tab) {
+      designState.tab = tab;
+      saveDesignPrefs();
+      renderDesignChrome();
+    }
+    if (restoreFocus) {
+      designShadow.querySelector('[role="tab"][data-active="true"]')?.focus();
+    }
+    if (tab === 'raw' && designState.raw === null && !designState.loading) {
+      fetchDesignSystem(); // raw is part of the same fetch pair
+    }
   }
 
   function toggleDesignPanel() {
@@ -4144,8 +4514,8 @@ void main() {
     renderDesignBody();
     try {
       const [jsonRes, rawRes] = await Promise.all([
-        fetch(`http://localhost:${PORT}/design-system.json?token=${TOKEN}`, { cache: 'no-store' }),
-        fetch(`http://localhost:${PORT}/design-system/raw?token=${TOKEN}`, { cache: 'no-store' }),
+        fetch(`http://127.0.0.1:${PORT}/design-system.json?token=${TOKEN}`, { cache: 'no-store' }),
+        fetch(`http://127.0.0.1:${PORT}/design-system/raw?token=${TOKEN}`, { cache: 'no-store' }),
       ]);
       const jsonData = await jsonRes.json();
       designState.present = jsonData.present === true;
@@ -4180,7 +4550,7 @@ void main() {
     if (designState.present === false) {
       const empty = document.createElement('div');
       empty.className = 'empty';
-      empty.innerHTML = `<strong>No DESIGN.md yet</strong>Create one by running <code>/ui-ux-design document</code> in your terminal, then re-open this panel.`;
+      empty.innerHTML = `<strong>No DESIGN.md yet</strong>Ask for an authorised design-system document, then re-open this panel.`;
       body.appendChild(empty);
       return;
     }
@@ -4210,7 +4580,7 @@ void main() {
     box.className = 'stale';
     box.innerHTML = `
       <span class="stale-dot"></span>
-      <span class="stale-text"><strong>DESIGN.md is newer than .impeccable/design.json.</strong> Run <code>/ui-ux-design document</code> to refresh the sidecar.</span>
+      <span class="stale-text"><strong>DESIGN.md is newer than .impeccable/design.json.</strong> Regenerate the authorised design-system sidecar to refresh this view.</span>
     `;
     return box;
   }
@@ -4218,7 +4588,7 @@ void main() {
   function renderParsedMdCta() {
     const box = document.createElement('div');
     box.className = 'parsed-md-cta';
-    box.innerHTML = `<strong>Basic view</strong>This panel reads the tokens in your <code>DESIGN.md</code> frontmatter. Running <code>/ui-ux-design document</code> also generates a <code>.impeccable/design.json</code> sidecar with your project's actual component snippets (button, input, nav) and tonal ramps, rendered live below the tokens.`;
+    box.innerHTML = `<strong>Basic view</strong>This panel reads the tokens in your <code>DESIGN.md</code> frontmatter. An authorised design-system documentation run can also generate a <code>.impeccable/design.json</code> sidecar with the project's actual component snippets (button, input, nav) and tonal ramps, rendered live below the tokens.`;
     return box;
   }
 
@@ -4591,10 +4961,14 @@ void main() {
   function buildCollapsible(key, label, count) {
     const wrap = document.createElement('div');
     wrap.className = 'coll';
-    wrap.setAttribute('data-open', designState.collapsed[key] ? 'false' : 'true');
+    const expanded = !designState.collapsed[key];
+    const bodyId = PREFIX + '-design-section-' + key;
+    wrap.setAttribute('data-open', String(expanded));
 
     const head = document.createElement('button');
     head.className = 'coll-head';
+    head.setAttribute('aria-expanded', String(expanded));
+    head.setAttribute('aria-controls', bodyId);
     head.innerHTML = `
       <svg class="coll-chev" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 2.5L8 6 4 9.5"/></svg>
       <span>${escapeHtml(label)}</span>
@@ -4609,6 +4983,7 @@ void main() {
 
     const body = document.createElement('div');
     body.className = 'coll-body';
+    body.id = bodyId;
     wrap.appendChild(body);
     return { wrap, body };
   }
@@ -4786,7 +5161,12 @@ void main() {
     // Code spans
     s = s.replace(/`([^`]+)`/g, (_, code) => `<code>${code}</code>`);
     // Links [text](url)
-    s = s.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_, t, u) => `<a href="${u}" target="_blank" rel="noopener noreferrer">${t}</a>`);
+    s = s.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_, t, u) => {
+      const href = sessionApi.safeMarkdownHref(u);
+      return href
+        ? `<a href="${href}" target="_blank" rel="noopener noreferrer">${t}</a>`
+        : t;
+    });
     // Bold
     s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
     // Italic (only single *…*, skip if inside bold already handled)

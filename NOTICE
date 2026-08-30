@@ -15,6 +15,9 @@ The `skills/ui-ux-design/` skill (formerly `frontend-design`, merged with
 `frontend-review`) is a renamed and modified distribution of Impeccable.
 Unless a file says otherwise, the Impeccable-derived material in that skill
 remains under Apache License 2.0.
+The exact harness-original exceptions are recorded in
+`skills/ui-ux-design/evals/provenance_components.yaml` and indexed in
+`THIRD_PARTY_NOTICES.md`.
 
   Original work:   https://github.com/pbakaus/impeccable
   Original author: Paul Bakaus

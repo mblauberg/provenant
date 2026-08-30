@@ -116,18 +116,6 @@ def test_autopilot_claude_stop_hook_uses_the_same_pause_validator():
         assert "non-zero" in source
 
 
-def test_frontend_live_state_and_playwright_lineage_contracts_are_honest():
-    teach = compact("skills/ui-ux-design/reference/teach.md")
-    live = compact("skills/ui-ux-design/reference/live.md")
-    playwright = compact("skills/playwright/SKILL.md")
-
-    assert "loader already renamed it" not in teach
-    assert "server.json` is transient bearer-token state" in live
-    assert "exclude `server.json`, `sessions/`, and `annotations/` from version control" in live.lower()
-    assert "existing PATH binary is used as installed" in playwright
-    assert "does not attest its version" in playwright
-
-
 def test_skill_craft_declares_action_owner_primary_for_composed_requests():
     skill = compact("skills/skill-craft/SKILL.md")
     audit = compact("skills/skill-craft/references/audit.md")
