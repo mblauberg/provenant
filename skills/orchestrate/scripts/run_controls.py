@@ -25,7 +25,7 @@ MAX_OPERATOR_RESPONSE_BYTES = 64 * 1024
 MAX_CANCEL_WAIT_SECONDS = 60.0
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from dispatch_run import create_cancellation_marker
+from dispatch_run import create_cancellation_marker, worker_question_envelope_bytes
 from _shared.custody import OwnedFileError, read_contained_regular
 
 
@@ -293,6 +293,17 @@ def _attempt(run_dir: Path, task_id: str, attempt_id: str) -> tuple[dict[str, An
         question = record.get("question")
         if not _valid_worker_question(question):
             raise ControlError(f"blocked attempt has no question: {attempt_rel}")
+        result_claim = record.get("result")
+        if not isinstance(result_claim, dict) or "result" not in payloads:
+            raise ControlError(f"blocked attempt has no retained terminal question: {attempt_rel}")
+        try:
+            envelope_question = worker_question_envelope_bytes(
+                payloads["result"], result_claim.get("digest")
+            )
+        except (ValueError, TypeError) as exc:
+            raise ControlError(f"blocked attempt has an invalid terminal question: {attempt_rel}") from exc
+        if envelope_question != question:
+            raise ControlError(f"blocked attempt question disagrees with terminal result: {attempt_rel}")
     return record, artifacts, attempt_path, payloads
 
 
@@ -699,8 +710,13 @@ def _load_summary(run_dir: Path, batch_id: str, *, require_complete: bool = Fals
         process = record.get("process")
         if not isinstance(process, dict) or not isinstance(process.get("observed_exit"), bool):
             raise ControlError(f"batch attempt has invalid observed completion: {item['task_id']}")
-        if status == "succeeded" and process.get("observed_exit") is not True:
-            raise ControlError(f"successful batch attempt lacks observed completion: {item['task_id']}")
+        if process.get("observed_exit") is not True and not (
+            status == "failed"
+            and record.get("outcome") == "process_spawn_error"
+            and process.get("pid") is None
+            and process.get("exit_code") is None
+        ):
+            raise ControlError(f"batch attempt lacks observed completion: {item['task_id']}")
         result_path = item.get("result_path")
         if result_path is not None and result_path != artifacts.get("result"):
             raise ControlError(f"batch summary result identity disagrees with attempt: {item['task_id']}")
@@ -749,8 +765,13 @@ def validate_retained_dispatch(run_dir: Path) -> list[str]:
                 process = record.get("process")
                 if not isinstance(process, dict) or not isinstance(process.get("observed_exit"), bool):
                     raise ControlError("attempt has invalid observed completion")
-                if record.get("status") == "succeeded" and process.get("observed_exit") is not True:
-                    raise ControlError("successful attempt does not prove observed completion")
+                if process.get("observed_exit") is not True and not (
+                    record.get("status") == "failed"
+                    and record.get("outcome") == "process_spawn_error"
+                    and process.get("pid") is None
+                    and process.get("exit_code") is None
+                ):
+                    raise ControlError("attempt does not prove observed completion")
                 if record.get("status") == "succeeded" and process.get("exit_code") != 0:
                     raise ControlError("successful attempt does not prove exit 0")
                 if record.get("status") == "succeeded":

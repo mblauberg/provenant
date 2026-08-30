@@ -18,7 +18,6 @@ import shutil
 import signal
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 from collections import Counter
@@ -61,32 +60,25 @@ _cancel_event = threading.Event()
 _active_processes: dict[str, subprocess.Popen[str]] = {}
 
 
-def atomic_write(path: Path, content: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-    temporary_path = Path(temporary)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as stream:
-            stream.write(content)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary_path, path)
-    finally:
-        temporary_path.unlink(missing_ok=True)
+def atomic_write(run_dir: Path, path: Path, content: str | bytes) -> None:
+    """Write one run-owned file through a descriptor-relative single inode."""
+    fd, _relative, _target = open_contained_regular(
+        run_dir, path.relative_to(run_dir), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, label=path.name
+    )
+    binary = isinstance(content, bytes)
+    with os.fdopen(fd, "wb" if binary else "w", encoding=None if binary else "utf-8") as stream:
+        stream.write(content)
+        stream.flush()
+        os.fsync(stream.fileno())
 
 
-def atomic_write_bytes(path: Path, content: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-    temporary_path = Path(temporary)
-    try:
-        with os.fdopen(fd, "wb") as stream:
-            stream.write(content)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary_path, path)
-    finally:
-        temporary_path.unlink(missing_ok=True)
+def atomic_write_bytes(run_dir: Path, path: Path, content: bytes) -> None:
+    """Compatibility wrapper for descriptor-bound byte writes."""
+    atomic_write(run_dir, path, content)
+
+
+def _digest_bytes(value: bytes) -> str:
+    return f"sha256:{hashlib.sha256(value).hexdigest()}"
 
 
 def request_cancel() -> None:
@@ -456,7 +448,8 @@ def _run_task(task: dict[str, Any], run_dir: Path, batch_dir: Path) -> dict[str,
     dispatch_task = {**task, "_batch_id": batch_dir.name}
     if "_inline_prompt" in task:
         temporary_prompt = batch_dir / "prompts" / f"{task_id}.md"
-        atomic_write(temporary_prompt, task["_inline_prompt"])
+        ensure_owned_directory(run_dir, temporary_prompt.parent)
+        atomic_write(run_dir, temporary_prompt, task["_inline_prompt"])
         dispatch_task = {**task, "prompt_file": str(temporary_prompt), "_batch_id": batch_dir.name}
     process: subprocess.Popen[str] | None = None
     started = time.monotonic()
@@ -511,12 +504,12 @@ def _execute_batch(args: argparse.Namespace, tasks: list[dict[str, Any]], run_di
     try:
         ensure_owned_directory(run_dir, batch_dir)
         source_copy = batch_dir / "task-manifest.json"
-        atomic_write_bytes(source_copy, source_bytes)
+        atomic_write_bytes(run_dir, source_copy, source_bytes)
     except BaseException:
         if batch_dir.is_dir() and not batch_dir.is_symlink():
             shutil.rmtree(batch_dir)
         raise
-    source_digest = digest(source_copy)
+    source_digest = _digest_bytes(source_bytes)
     results: dict[str, dict[str, Any]] = {}
     with ThreadPoolExecutor(max_workers=args.concurrency, thread_name_prefix="provenant-batch") as pool:
         futures = {pool.submit(_run_task, task, run_dir, batch_dir): task["id"] for task in tasks}
@@ -552,7 +545,7 @@ def _execute_batch(args: argparse.Namespace, tasks: list[dict[str, Any]], run_di
     }
     if reconciliation_error:
         summary["reconciliation_error"] = reconciliation_error
-    atomic_write(summary_path, json.dumps(summary, indent=2, sort_keys=True) + "\n")
+    atomic_write(run_dir, summary_path, json.dumps(summary, indent=2, sort_keys=True) + "\n")
     remove_cancellation_marker(run_dir, batch_dir)
     index_error = None
     try:

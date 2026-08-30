@@ -106,7 +106,14 @@ def open_contained_regular(
     return fd, relative, target
 
 
-def ensure_contained_directory(root: Path, value: str | Path, *, mode: int = 0o700, label: str = "directory") -> None:
+def ensure_contained_directory(
+    root: Path,
+    value: str | Path,
+    *,
+    mode: int = 0o700,
+    label: str = "directory",
+    final_must_be_new: bool = False,
+) -> None:
     """Create or open each directory component relative to a bound parent fd."""
     root = root.resolve()
     raw = Path(value)
@@ -118,11 +125,12 @@ def ensure_contained_directory(root: Path, value: str | Path, *, mode: int = 0o7
     try:
         root_fd = os.open(root, os.O_RDONLY | nofollow | directory)
         directory_fd = root_fd
-        for part in raw.parts:
+        for index, part in enumerate(raw.parts):
             try:
                 os.mkdir(part, mode, dir_fd=directory_fd)
             except FileExistsError:
-                pass
+                if final_must_be_new and index == len(raw.parts) - 1:
+                    raise OwnedFileError(f"{label} already exists: {raw.as_posix()}")
             next_fd = os.open(part, os.O_RDONLY | nofollow | directory, dir_fd=directory_fd)
             if not stat.S_ISDIR(os.fstat(next_fd).st_mode):
                 os.close(next_fd)
@@ -142,6 +150,11 @@ def ensure_contained_directory(root: Path, value: str | Path, *, mode: int = 0o7
         os.close(directory_fd)
     if root_fd >= 0:
         os.close(root_fd)
+
+
+def create_contained_directory(root: Path, value: str | Path, *, mode: int = 0o700, label: str = "directory") -> None:
+    """Create a new contained directory, binding its parent by descriptors."""
+    ensure_contained_directory(root, value, mode=mode, label=label, final_must_be_new=True)
 
 
 def read_bound_bytes(root: Path, value: str | Path, *, label: str = "file") -> bytes:

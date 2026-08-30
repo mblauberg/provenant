@@ -117,6 +117,25 @@ def _receipt_path_is_bound(stream, path: Path) -> bool:
     )
 
 
+def _run_root_is_bound(run_dir: Path, manifest_stream, root_metadata) -> bool:
+    """Keep custody attached to the canonical run root and manifest inode."""
+    try:
+        current_root = run_dir.lstat()
+        current_manifest = (run_dir / "MANIFEST.md").lstat()
+        manifest_fd = os.fstat(manifest_stream.fileno())
+    except OSError:
+        return False
+    return (
+        stat.S_ISDIR(root_metadata.st_mode)
+        and (current_root.st_dev, current_root.st_ino) == (root_metadata.st_dev, root_metadata.st_ino)
+        and stat.S_ISREG(current_manifest.st_mode)
+        and current_manifest.st_nlink == 1
+        and stat.S_ISREG(manifest_fd.st_mode)
+        and manifest_fd.st_nlink == 1
+        and (current_manifest.st_dev, current_manifest.st_ino) == (manifest_fd.st_dev, manifest_fd.st_ino)
+    )
+
+
 def _utc_timestamp(value: object) -> bool:
     if not isinstance(value, str) or not value.endswith("Z"):
         return False
@@ -879,11 +898,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--prune-ephemeral", action="store_true", help="list safe candidates (dry-run)")
     parser.add_argument("--apply", action="store_true", help="apply --prune-ephemeral after validation")
     args = parser.parse_args(argv)
+    args.run_dir = args.run_dir.resolve()
     if args.apply and not args.prune_ephemeral:
         print("--apply requires --prune-ephemeral", file=sys.stderr)
         return 2
     custody = None
     receipt_stream = None
+    root_metadata = None
     if (args.run_dir / "MANIFEST.md").is_file():
         try:
             custody = _acquire_run_custody(args.run_dir)
@@ -891,13 +912,20 @@ def main(argv: list[str] | None = None) -> int:
                 args.run_dir.resolve(), "RUN_RECEIPT.json", os.O_RDWR, label="RUN_RECEIPT.json"
             )
             receipt_stream = os.fdopen(receipt_fd, "r+", encoding="utf-8")
+            root_metadata = args.run_dir.lstat()
+            if not _run_root_is_bound(args.run_dir, custody, root_metadata):
+                raise OwnedFileError("canonical run root changed while acquiring custody")
         except OSError:
+            if receipt_stream is not None:
+                receipt_stream.close()
             if custody is not None:
                 fcntl.flock(custody.fileno(), fcntl.LOCK_UN)
                 custody.close()
             print("FAIL: batch custody is active or unavailable", file=sys.stderr)
             return 1
         except OwnedFileError as exc:
+            if receipt_stream is not None:
+                receipt_stream.close()
             if custody is not None:
                 fcntl.flock(custody.fileno(), fcntl.LOCK_UN)
                 custody.close()
@@ -935,13 +963,24 @@ def main(argv: list[str] | None = None) -> int:
             if args.apply:
                 path.unlink()
                 pruned.append(rel)
-        receipt_path = args.run_dir.resolve() / "RUN_RECEIPT.json"
+        receipt_path = args.run_dir / "RUN_RECEIPT.json"
         assert receipt_stream is not None
         receipt_stream.seek(0)
-        receipt = json.loads(receipt_stream.read())
+        try:
+            reread_receipt = json.loads(receipt_stream.read())
+        except (OSError, json.JSONDecodeError):
+            print("FAIL: RUN_RECEIPT.json changed while finalising", file=sys.stderr)
+            return 1
+        if root_metadata is None or not _run_root_is_bound(args.run_dir, custody, root_metadata):
+            print("FAIL: canonical run root changed while finalising", file=sys.stderr)
+            return 1
         if not _receipt_path_is_bound(receipt_stream, receipt_path):
             print("FAIL: RUN_RECEIPT.json changed while finalising", file=sys.stderr)
             return 1
+        if reread_receipt != bound_receipt:
+            print("FAIL: RUN_RECEIPT.json changed while finalising", file=sys.stderr)
+            return 1
+        receipt = dict(bound_receipt)
         listed = {row["path"] for row in rows}
         unclassified = sorted(
             path.relative_to(args.run_dir).as_posix()

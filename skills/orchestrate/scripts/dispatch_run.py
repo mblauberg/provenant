@@ -42,7 +42,7 @@ CANCEL_MARKER_NAME = "cancel.request"
 from _shared.bounded_process import stop_process_group
 from _shared.custody import (
     OwnedFileError, OwnedLinkError, contained_regular_path, ensure_contained_directory,
-    open_contained_regular, read_bound_bytes,
+    create_contained_directory, open_contained_regular, read_bound_bytes,
 )
 
 class AttemptEvidenceError(ValueError):
@@ -303,32 +303,8 @@ class _JSONObject(dict[str, Any]):
             self[key] = value
 
 
-def worker_question_envelope(result_path: Path, expected_digest: str) -> dict[str, Any] | None:
-    """Return a validated worker question, or fail closed for a reserved record."""
-    try:
-        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-        fd = os.open(result_path, flags)
-    except OSError as exc:
-        raise TerminalEnvelopeIntegrityError("terminal candidate cannot be safely reopened") from exc
-    try:
-        metadata = os.fstat(fd)
-        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
-            raise TerminalEnvelopeIntegrityError("terminal candidate is not a regular single-link file")
-        chunks: list[bytes] = []
-        total = 0
-        while total <= MAX_WORKER_TERMINAL_ENVELOPE_BYTES:
-            chunk = os.read(
-                fd, min(1024 * 1024, MAX_WORKER_TERMINAL_ENVELOPE_BYTES + 1 - total)
-            )
-            if not chunk:
-                break
-            chunks.append(chunk)
-            total += len(chunk)
-        candidate = b"".join(chunks)
-    except OSError as exc:
-        raise TerminalEnvelopeIntegrityError("terminal candidate cannot be safely read") from exc
-    finally:
-        os.close(fd)
+def worker_question_envelope_bytes(candidate: bytes, expected_digest: str) -> dict[str, Any] | None:
+    """Validate one already-bound worker terminal result envelope."""
     if len(candidate) > MAX_WORKER_TERMINAL_ENVELOPE_BYTES:
         return None
     candidate_hash = hashlib.sha256(candidate).hexdigest()
@@ -367,6 +343,35 @@ def worker_question_envelope(result_path: Path, expected_digest: str) -> dict[st
     ):
         raise ValueError("terminal worker envelope prompt is invalid")
     return {"code": "needs_input", "prompt": prompt}
+
+
+def worker_question_envelope(result_path: Path, expected_digest: str) -> dict[str, Any] | None:
+    """Return a validated worker question, or fail closed for a reserved record."""
+    try:
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(result_path, flags)
+    except OSError as exc:
+        raise TerminalEnvelopeIntegrityError("terminal candidate cannot be safely reopened") from exc
+    try:
+        metadata = os.fstat(fd)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            raise TerminalEnvelopeIntegrityError("terminal candidate is not a regular single-link file")
+        chunks: list[bytes] = []
+        total = 0
+        while total <= MAX_WORKER_TERMINAL_ENVELOPE_BYTES:
+            chunk = os.read(
+                fd, min(1024 * 1024, MAX_WORKER_TERMINAL_ENVELOPE_BYTES + 1 - total)
+            )
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+        candidate = b"".join(chunks)
+    except OSError as exc:
+        raise TerminalEnvelopeIntegrityError("terminal candidate cannot be safely read") from exc
+    finally:
+        os.close(fd)
+    return worker_question_envelope_bytes(candidate, expected_digest)
 
 
 def fail(run_dir: Path | None, status: str, message: str) -> int:
@@ -728,7 +733,12 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
     attempt_number = existing_attempt_number(task_dir)
     attempt_id = f"attempt-{attempt_number:03d}"
     attempt_dir = task_dir / attempt_id
-    attempt_dir.mkdir(parents=True)
+    try:
+        create_contained_directory(
+            run_dir, attempt_dir.relative_to(run_dir), label="attempt directory"
+        )
+    except OwnedFileError as exc:
+        return fail(run_dir, "attempt_path_invalid", str(exc))
     prompt_path = attempt_dir / "prompt.md"
     result_path = attempt_dir / "result.md"
     adapter_path = attempt_dir / "adapter-receipt.json"

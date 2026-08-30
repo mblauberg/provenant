@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import hashlib
 import json
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -202,7 +203,7 @@ def test_finalizer_rejects_forged_success_adapter_claims(tmp_path: Path, field: 
     assert any("adapter" in error for error in errors)
 
 
-def test_finalizer_allows_unobserved_non_success_attempt(tmp_path: Path) -> None:
+def test_finalizer_rejects_unobserved_non_success_attempt(tmp_path: Path) -> None:
     run = make_run(tmp_path)
     attempt = write_valid_attempt(run, observed_exit=False)
     record = json.loads(attempt.read_text())
@@ -211,7 +212,7 @@ def test_finalizer_allows_unobserved_non_success_attempt(tmp_path: Path) -> None
     attempt.write_text(json.dumps(record, sort_keys=True) + "\n")
     refresh_attempt_digest(attempt)
     finalizer = load(FINALIZE, "finalize_unobserved_non_success_issue_697")
-    assert finalizer._validate_dispatch_evidence(run) == []
+    assert any("observed completion" in error for error in finalizer._validate_dispatch_evidence(run))
 
 
 def test_successful_batch_is_validated_by_finalizer(tmp_path: Path) -> None:
@@ -300,3 +301,61 @@ def test_descriptor_relative_directory_creation_rejects_parent_swap(tmp_path: Pa
     monkeypatch.setattr(custody.os, "open", swap_before_dispatch)
     with pytest.raises(custody.OwnedFileError):
         custody.ensure_contained_directory(run, "dispatch/tasks/task", label="attempt directory")
+
+
+def test_finalizer_rejects_run_root_replacement_before_terminal_commit(tmp_path: Path, monkeypatch) -> None:
+    run = make_run(tmp_path)
+    write_valid_attempt(run)
+    close_successful_run(run)
+    finalizer = load(FINALIZE, "finalize_run_root_swap_issue_697")
+    original = finalizer._run_root_is_bound
+    old_root = tmp_path / "run-old"
+    calls = 0
+
+    def swap_after_validation(run_dir, manifest_stream, root_metadata):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            run_dir.rename(old_root)
+            shutil.copytree(old_root, run_dir)
+        return original(run_dir, manifest_stream, root_metadata)
+
+    monkeypatch.setattr(finalizer, "_run_root_is_bound", swap_after_validation)
+    assert finalizer.main([str(run), "--status", "succeeded"]) == 1
+    assert json.loads((old_root / "RUN_RECEIPT.json").read_text())["status"] == "active"
+    assert json.loads((run / "RUN_RECEIPT.json").read_text())["status"] == "active"
+
+
+def test_finalizer_rejects_same_inode_receipt_schema_mutation(tmp_path: Path, monkeypatch) -> None:
+    run = make_run(tmp_path)
+    write_valid_attempt(run)
+    close_successful_run(run)
+    finalizer = load(FINALIZE, "finalize_receipt_mutation_issue_697")
+    original = finalizer.validate
+
+    def mutate_after_validation(*args, **kwargs):
+        result = original(*args, **kwargs)
+        receipt_path = run / "RUN_RECEIPT.json"
+        receipt = json.loads(receipt_path.read_text())
+        receipt["status"] = "forged"
+        receipt_path.write_text(json.dumps(receipt) + "\n")
+        return result
+
+    monkeypatch.setattr(finalizer, "validate", mutate_after_validation)
+    assert finalizer.main([str(run), "--status", "succeeded"]) == 1
+    assert json.loads((run / "RUN_RECEIPT.json").read_text())["status"] == "forged"
+
+
+def test_finalizer_rejects_blocked_attempt_without_matching_worker_envelope(tmp_path: Path) -> None:
+    run = make_run(tmp_path)
+    attempt = write_valid_attempt(run)
+    record = json.loads(attempt.read_text())
+    result = attempt.parent / "result.md"
+    question = {"code": "needs_input", "prompt": "Which source?"}
+    record.update({"status": "blocked", "outcome": "question", "question": question})
+    result.write_text("not a worker envelope\n")
+    record["result"]["digest"] = "sha256:" + hashlib.sha256(result.read_bytes()).hexdigest()
+    attempt.write_text(json.dumps(record, sort_keys=True) + "\n")
+    refresh_attempt_digest(attempt)
+    finalizer = load(FINALIZE, "finalize_blocked_envelope_issue_697")
+    assert any("terminal question" in error or "question" in error for error in finalizer._validate_dispatch_evidence(run))
