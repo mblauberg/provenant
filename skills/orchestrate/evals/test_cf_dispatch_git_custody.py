@@ -222,4 +222,3 @@ def test_provider_inherits_the_validated_repository_context(tmp_path):
     assert Path(observed_root.read_text(encoding="utf-8").strip()).resolve() == (
         case.source.resolve()
     )
-
