@@ -38,7 +38,7 @@ docs-layout homes, merge policy/authority and work-item runbook pointer. Use
 pointers only; never duplicate runbook or policy content.
 With `issue-tracker`, the parent issue is the canonical change scope/story home;
 do not duplicate it. This block, not the GitHub scaffolding, is the completion gate.
-With tracker `none`, name a `project-docs` workflow-state owner.
+With tracker `none`, use `project-docs` for both scope/story and workflow state.
 
 ## Docs layout
 

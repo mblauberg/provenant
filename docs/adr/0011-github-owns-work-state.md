@@ -36,8 +36,9 @@ field are the exclusive owners of current work state:
 - Project Status owns workflow state.
 - The issue owns the current owner, dependencies, scope-specific user gates and
   links to delivery pull requests.
-- Specifications own requirements and acceptance criteria, without reporting
-  implementation or verification state.
+- Specifications own durable requirements and normative acceptance criteria,
+  without reporting implementation or verification state; issues own
+  change-bound acceptance and evidence.
 - ADRs own architectural and governance decisions, without reporting live
   repository or delivery state.
 - Effort maps are curated route maps. They link specifications, ADRs, issues and

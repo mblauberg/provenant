@@ -40,7 +40,7 @@ Each subject file is an independent normative specification. Directories and
 contract, load order, version mirror or acceptance state.
 
 - One file owns each durable behaviour and each normative requirement ID.
-- Requirements and acceptance stay with their owning specification.
+- Durable requirements and normative acceptance criteria stay with their specification.
 - Filenames and links use stable semantic names, never positional numbering.
 - Git commits own byte integrity and history. Checked-in content hashes,
   ordered manifests and synthetic family concatenation are not maintained.

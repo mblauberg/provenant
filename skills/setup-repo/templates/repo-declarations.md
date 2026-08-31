@@ -15,6 +15,9 @@
 - Owner: `<tracker|project-docs>`
 - Pointer: `<workflow-state-owner>`
 
+If tracker Choice is `none`, both Canonical home and Owner must be
+`project-docs`; `issue-tracker` and `tracker` are invalid without a tracker.
+
 ### Docs layout
 
 - Pointer: `<docs-index-or-home-list>`

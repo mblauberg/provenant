@@ -7,24 +7,13 @@ Canonical decision: [ADR 0020](../../adr/0020-retire-the-daemon-fabric.md) owns
 the current daemonless Fabric wording; the progressive-disclosure decisions
 remain normative.
 
-## Problem
+## Historical problem (July 2026)
 
-The ambient instruction layer is heavier than its job requires and leaks
-repo-relative paths and skill internals:
-
-- `AGENTS.md` (~34 lines) is loaded every prompt on both harnesses (symlinked
-  `~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`). `HARNESS.md` (~113 lines,
-  ~1.4k tokens) is read on a broad trigger and cascades into 3 orchestrate
-  reference files plus runbooks — a ~4–6k-token effective constitution read.
-- `HARNESS.md` mixes constitution (authority, gates, review pressure) with
-  operational depth owned elsewhere: compaction cadence (`session`), routing
-  mechanics (`orchestrate`), receipt detail (`deliver`).
-- Files outside a skill reach into `skills/<x>/references/*`: `HARNESS.md` →
-  3 orchestrate references; accelerator workflows (`~/.claude/workflows/*.js`)
-  → `dynamic-workflows.md`, `cli-headless.md`; writing skills →
-  `natural-writing/references/*`.
-- `AGENTS.md`/`HARNESS.md` carry 9 repo-relative `docs/*`, `config/*`,
-  `scripts/*` paths that mislead agents whose cwd is another repository.
+Before this refactor, ambient instructions mixed constitution with operational
+detail owned by `session`, `orchestrate` and `deliver`. Files outside skills
+reached into skill references, and repo-relative paths misled agents working in
+other repositories. The accepted decisions below retain the boundaries; the
+current ambient files and tests own their implemented shape.
 
 `docs/ARCHITECTURE.md` already states the intended model — tiny bootstrap,
 compact constitution, skills load depth only when triggered — so this
@@ -48,7 +37,7 @@ refactor enforces existing doctrine.
 | D12 | **Skill-name resolution contract.** `HARNESS.md` carries the sole resolver line, pointing to installed `~/.claude/skills/` and `~/.codex/skills/` roots; `AGENTS.md` carries none and neither names `.agents/skills/`. Named skills load their `SKILL.md`; provider-native discovery may implement that resolution. Skill names are binding, not advisory. |
 | D13 | **Acceptance structure.** Acceptance splits into (a) static final-tree gates; (b) per-PR checks; and (c) release conditions confirmed at close-out. Historical line targets and reference budgets are advisory because line counts invite formatting games and reject legitimate edits. |
 | D14 | **Accelerator custody (r3, user-approved).** Canonical sources for `cross-verify.js`, `codebase-polish.js`, `implement-run.js` move into the repository under `workflows/`; `install-harness` manages `~/.claude/workflows/` from them like it manages skills. They are a Claude-only surface (they drive Claude Code's Workflow tool); Codex does not consume them and reaches equivalent orchestration through the `orchestrate` skill. Once in-tree they fall under the D3 reference rule and AC-S2 scan. Includes a bounded alignment refresh: re-validate their doctrine citations against post-prune reality; behavioural redesign stays out of scope. |
-| D15 | **Documentation custody (r3, user-approved).** A landing PR (PR0) commits this spec, the execution handoff, ADR-0014, and the `docs/specs/` + `docs/handoffs/` index entries before implementation PRs begin. ADR-0014 lands here instead of PR4; PR4 keeps the MAINTAINING.md amendments that cite it. The handoff and its index entry are removed by the session that consumes them. |
+| D15 | **Documentation custody (r3, user-approved).** Durable decisions and specifications land before dependent implementation; `session` owns temporary handoff lifecycle. The former PR sequence was migration history. |
 
 ## Migration manifest (single fixture; replaces the separate disclosure-ledger fixture and verdict manifest)
 
@@ -102,22 +91,9 @@ orchestrate `SKILL.md`; verdict unchanged):
 | cli-headless.md | keep | routing section becomes a pointer; load-bearing for cross-verify |
 | autonomous-implementation.md | keep | consumed by autopilot |
 
-Consumer migration, single change with the prune:
-
-1. Remove loader entries for archived/merged files from orchestrate SKILL.md.
-2. Repair `verification.md:49` forwarding pointer before deleting
-   `debate-and-panels.md`.
-3. Update `evals/contract_cases.yaml:40,54` reference invariants.
-4. Replace the hand-maintained `REQUIRED_REFS`
-   (the former trigger checker) with a set **derived from this manifest's
-   keep+slim rows** — never from the directory listing itself (a
-   directory-derived expectation is circular and cannot detect accidental
-   deletion).
-5. Update `docs/research/README.md`: archived files get an index entry with a
-   normative-owner note, per that index's own contract.
-6. Accelerator repoints (private-path citations → public
-   `orchestration-contract` doctrine or embedded rule) happen in PR5 against
-   the in-repo sources (D14); never leave a dangling private-path citation.
+The completed consumer migration removed obsolete loader and fixture references,
+repaired links and indexed archived research. Git history retains its procedure;
+it is not a current runbook.
 
 ## Acceptance
 

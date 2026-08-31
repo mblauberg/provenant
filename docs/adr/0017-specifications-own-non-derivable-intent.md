@@ -40,7 +40,7 @@ Two existing decisions already cover most of the remedy:
 
 - ADR 0004 gives each domain one truth owner that generates or validates its own
   projections. The migration is the schema's natural owner.
-- ADR 0011 requires specifications to own requirements and acceptance criteria
+- ADR 0011 requires specifications to own durable requirements and normative acceptance criteria
   "without reporting implementation or verification state". Present-indicative
   delivery narration in the corpus already violates it.
 

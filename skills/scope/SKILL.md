@@ -5,7 +5,7 @@ description: "Use when unsettled requirements or decisions need a spec, options,
 
 # Scope
 
-Produce decided, testable scope.
+Produce testable scope.
 
 ## Frame
 
@@ -31,8 +31,8 @@ the authority envelope, never private memory.
 
 Load `grill-me` only when the user explicitly asks to be grilled or dependent owner decisions remain
 materially unresolved. Then work purpose -> users ->
-constraints -> edge cases -> failure modes -> success -> exclusions, one
-question per round. Otherwise present a compact decision packet with 2–3
+constraints -> edge cases -> failure modes -> success -> exclusions. Otherwise
+present a compact decision packet with 2–3
 choices, a recommendation and parked calls.
 
 Agents decide engineering calls. Business, legal or financial owner calls stay
@@ -47,8 +47,8 @@ scratch.
 
 Compare viable options through correctness, cost and operations. Put
 costly-to-reverse choices and rejected alternatives in an ADR; keep reversible
-detail in the spec/story. In paired-primary mode one chair asks while the peer
-audits evidence; record authorship.
+detail in the spec/story. In paired-primary mode one chair asks; the peer audits.
+Record authorship.
 
 ## Land outputs
 
@@ -58,10 +58,10 @@ project files. In project-write mode, land only approved artifacts:
 
 | Output | Owner |
 |---|---|
-| Durable specifications and acceptance criteria | project docs via `engineering-docs` |
+| Durable requirements and normative acceptance criteria | project docs via `engineering-docs` |
 | One-way decisions | project ADR process |
-| User gates | existing register or `docs/OPEN_DECISIONS.md` |
-| Change scope and stories | declared issue tracker or project-docs home |
+| User gates | declared scope/story owner; project-docs may name a register |
+| Change scope, stories and delivery acceptance | declared issue tracker or project-docs home |
 | Work items | declared project tracker |
 | Durable context | declared project-docs owner; run state stays run-local |
 

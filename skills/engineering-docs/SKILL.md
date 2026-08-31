@@ -25,7 +25,7 @@ paths without creating them.
 | Architecture map | `docs/ARCHITECTURE.md` | current state; link ADRs |
 | Diagrams | owning document or `docs/diagrams/` | colocate unless independently owned, reused or generated |
 | Runbooks | `docs/runbooks/` | numbered steps; verification |
-| Open-decision register | `docs/OPEN_DECISIONS.md` | one row per user/owner gate; never auto-answered |
+| Open-decision register | declared project-docs path | never create in issue-tracker mode |
 | Threat models | `docs/threat-models/` | STRIDE/LINDDUN structure |
 | Session or run continuity | declared owner; explicit run state | `session` handoff; autopilot state remains run-local |
 | Archive | `docs/archive/` | indexed by its README |
