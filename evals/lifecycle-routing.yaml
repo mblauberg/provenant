@@ -1,5 +1,8 @@
 schema_version: 1
 dataset_id: lifecycle-routing-held-out-v1
+status: historical
+catalogue_state: pre-autopilot-rename
+note: Expected autonomous-lab routing records the July 2026 predecessor catalogue and is not a current routable skill.
 cases:
   - id: positive-software
     kind: positive

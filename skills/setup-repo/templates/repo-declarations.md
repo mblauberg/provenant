@@ -26,7 +26,7 @@
 
 Default is `non-derivable-intent`: requirements, must-never rules, ordering
 constraints and failure semantics. Code and schemas own what exists, tests own
-that it behaves, and the tracker owns delivery state.
+that it behaves, and the declared workflow-state owner owns delivery state.
 
 Choose `intent-and-structure` only with a drift gate named above. A second copy
 of a structure its owner also defines will diverge, and an ungated copy diverges

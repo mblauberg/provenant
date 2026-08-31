@@ -96,7 +96,7 @@ an ignored cache or delete it with a filesystem command.
 
 Use private memory only for genuine cross-project user preferences. Put
 project knowledge in its durable owner, such as a project instruction, spec,
-ADR or runbook, and keep moving status in the declared work tracker or
+ADR or runbook, and keep moving status in the declared workflow-state owner or
 explicit run state.
 
 Keep the memory store plain and easy to edit:

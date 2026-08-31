@@ -3,9 +3,9 @@
 The repository's `Repository process` declaration names the canonical
 scope/story home. This specification grants no authority. Current user and
 project instructions, plus an authorised run, are required; only an authorised
-run may make scoped reversible changes. In this repository, the current issue
-scopes changes to this contract and Project Status records workflow state; this
-file retains the durable lifecycle requirements.
+run may make scoped reversible changes. The repository declaration points to
+the current scope/story and workflow-state owners; this file retains only the
+durable lifecycle requirements.
 
 The current contract permits direct read-only analysis of local session history,
 keeps sharing and export separately gated, and treats unsupported or

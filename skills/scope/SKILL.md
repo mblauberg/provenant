@@ -9,17 +9,15 @@ Turn an idea into decided, testable scope.
 
 ## Frame
 
-Read the repository's `Repository process` declaration. If it is absent
-or ambiguous, use an unambiguous existing owner; otherwise return proposed
-content in chat without inventing or writing a new owner. Define the decision,
-users and done; put change scope and story in the declared parent tracker issue
-or named project-docs home. Emit the minimum `config/risk-policy.json` tier, path bounds,
-prohibited actions, external effects, expiry and approver. Credentials,
-secrets, unrelated paths, denials and project bans remain outside authority;
-path, write and resource limits stay explicit. Ordinary authorised workspace
-content proceeds without a family-separation gate, but execution permission is
-not assurance. Only a user may downgrade risk. Judgement-bearing AI requires
-`evaluate`.
+Read the repository's `Repository process` declaration. If absent or ambiguous,
+use an unambiguous existing owner or return proposed content in chat; never
+invent an owner. Define the decision, users and done in the declared parent
+issue or project-docs home. Emit the minimum risk tier, path bounds, prohibited
+actions, external effects, expiry and approver. Credentials, unrelated paths,
+denials and project bans remain outside authority. Execution permission is not
+assurance. Ordinary authorised workspace content proceeds without a
+family-separation gate. Only a user may downgrade risk. Judgement-bearing AI
+requires `evaluate`.
 
 Scope owns accepted content and the decision register: retain intake, goals,
 constraints, alternatives and decided/parked branches without forking scope.
@@ -43,12 +41,10 @@ Research surviving questions through `orchestrate`; use `prototype` only for a
 timeboxed feasibility answer, then harvest it and clean only manifest-owned
 scratch.
 
-For viable options, compare cost, reversibility, risk and prior fit through
-correctness, cost and operations lenses. Use independent reviewers when
-available. Put costly-to-reverse choices and rejected alternatives in an ADR;
-keep reversible detail in the spec/story.
-Paired-primary mode has one chair ask while the peer audits evidence; record
-authorship.
+Compare viable options through correctness, cost and operations lenses. Put
+costly-to-reverse choices and rejected alternatives in an ADR; keep reversible
+detail in the spec/story. In paired-primary mode one chair asks while the peer
+audits evidence; record authorship.
 
 ## Land outputs
 
@@ -69,10 +65,9 @@ Write observable acceptance criteria. Preserve project schemas; pin only
 decision-critical interfaces with native locks/constraints. Link or cache
 authority with its source and relevant date/version; never vendor without a licence.
 
-Before handoff, record decided/parked branches, exclusions, machine-readable
-risk/authority and anchored evidence, with user approval of the spec and
-one-way doors. The execution handoff is digest-bound; any change creates a new
-revision and gate.
+Before handoff, record decided/parked branches, exclusions, risk/authority and
+anchored evidence, with user approval of the spec and one-way doors. A changed
+execution handoff needs a new revision and gate.
 
 ## Adapter-absent path
 

@@ -98,7 +98,7 @@ def test_normative_docs_match_the_local_first_contract():
     compact_adr = " ".join(adr.split())
     compact_spec = " ".join(spec.split())
 
-    assert "current issue" in compact_spec.lower()
+    assert "current issue" not in compact_spec.lower()
     assert "Status: Base implementation machine verified" not in spec
     assert "current contract permits direct read-only analysis" in compact_spec
     assert "## Local skill evidence and shared exports" in spec
@@ -111,6 +111,10 @@ def test_normative_docs_match_the_local_first_contract():
     assert "Unsupported or unattributable evidence is `N/A`, never zero" in spec
     assert "Canonical decision:" in disclosure
     assert "superseded Fabric text is retained" not in disclosure
+    assert "not a permanent full-tree checker" in disclosure
+    assert "Fabric remains the task/authority owner" not in (
+        ROOT / "docs" / "research" / "native-orchestration-and-discovery-surfaces.md"
+    ).read_text()
     assert "direct request for read-only local history analysis" in compact_adr
     assert "raw cross-provider handoff" in compact_adr
     retired_names = (

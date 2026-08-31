@@ -53,8 +53,9 @@ refactor enforces existing doctrine.
 ## Migration manifest (single fixture; replaces the separate disclosure-ledger fixture and verdict manifest)
 
 One machine-readable fixture at `tests/fixtures/disclosure-migration.yaml`
-(schema `disclosure-migration.v1`) carries both inventories; one contract test
-validates AC-S3 and AC-S4 from it. Rows below are the approved content.
+(schema `disclosure-migration.v1`) records both migration inventories. Current
+tests consume selected surviving invariants; the fixture is not a live exact-tree
+manifest. Rows below are the approved content.
 
 Ambient rows (`section`, `disposition`, `destination` — owner is a skill
 unless marked repo-surface; repo-surfaces sit outside AC-S3's "exactly one
@@ -120,7 +121,7 @@ Consumer migration, single change with the prune:
 
 ## Acceptance
 
-Static gates (machine-checkable, final tree):
+Current gates and retained migration conditions:
 
 - AC-S1: `AGENTS.md` ≤ 35 lines; `HARNESS.md` ≤ 60 lines (hard, D1); no
   dates; no repo-relative `docs/`/`config/`/`scripts/` paths; no
@@ -132,14 +133,8 @@ Static gates (machine-checkable, final tree):
   skills, ambient files, `scripts/`, `workflows/` (post-D14), live
   tests/fixtures (updated in the same change). Declared allowlist:
   `docs/archive/`, `docs/research/`, `.agent-run/`, git history.
-- AC-S3: migration-manifest test — ambient rows: every row present, no
-  duplicate canonical owner, every stripped row's destination anchor exists.
-- AC-S4: migration-manifest test — orchestrate rows: `references/` directory
-  equals the manifest's keep+slim set; archived files absent from
-  `references/`, present in `docs/research/` with an index entry; merged file
-  absent with its content demonstrably in the absorbing file (retained-content
-  invariants greppable); migration steps 1–5 verifiable. Advisory budgets
-  reported, not enforced.
+- AC-S3/AC-S4 were migration acceptance conditions. The retained fixture feeds
+  selected owner-specific tests; it is not a permanent full-tree checker.
 - AC-S5: catalogue within the approved cap, reviewed against the source
   catalogue. The former generated-catalogue measurement is historical and is
   not a current gate.

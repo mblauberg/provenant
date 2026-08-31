@@ -1,6 +1,8 @@
 from pathlib import Path
 import json
 
+import yaml
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -68,7 +70,7 @@ def test_issue_native_decision_and_spec_reconciliation_are_recorded():
     assert "## Landed implementation train" not in disclosure
     assert "## Historical Fabric custody note" not in disclosure
     assert "Issue #23" not in lifecycle
-    assert "current issue" in lifecycle.lower()
+    assert "current issue" not in lifecycle.lower()
     for stale in (
         "routeEvaluationEvidenceV1",
         "evaluatedRouteIdentityV1",
@@ -103,3 +105,11 @@ def test_issue_native_decision_and_spec_reconciliation_are_recorded():
     assert "Do not mirror children in a checklist" in runbook
     assert "#" in contract["source"]["state_graph"]
     assert ":91-95" not in contract["source"]["state_graph"]
+
+
+def test_pre_rename_lifecycle_routing_dataset_is_explicitly_historical():
+    dataset = yaml.safe_load(read("evals/lifecycle-routing.yaml"))
+
+    assert dataset["status"] == "historical"
+    assert dataset["catalogue_state"] == "pre-autopilot-rename"
+    assert "not a current routable skill" in dataset["note"]

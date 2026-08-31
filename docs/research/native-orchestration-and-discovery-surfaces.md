@@ -36,7 +36,7 @@ project sessions and chair
 
 | System/paper class | Useful pattern | Local boundary |
 |---|---|---|
-| Agent Orchestrator, Symphony, Gas Town/Beads | Stable work identity, reconciliation and persistent worker/worktree fleets. | Fabric remains the task/authority owner. |
+| Agent Orchestrator, Symphony, Gas Town/Beads | Stable work identity, reconciliation and persistent worker/worktree fleets. | Fabric owns coordination and task metadata; the user/chair envelope owns authority. |
 | OpenCode and Codex | Structured events and substantial terminal/native orchestration implementations. | No provider host becomes a second chair. |
 | Open SWE | Immutable Git approval bound to exact source/destination state. | Git effects remain typed, revision-bound and separately authorised. |
 | OpenHands, Cline/Kanban, agtx, Claude Squad, Goose, Aider, SWE-agent, Continue, Vibe Kanban, Overstory | Alternative worker, review and operator patterns. | Popularity/maintenance are volatile; no wholesale dependency adoption. |

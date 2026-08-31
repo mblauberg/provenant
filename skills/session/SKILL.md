@@ -9,18 +9,15 @@ Read the repository's `Repository process` declaration first, including its
 scope/story and workflow-state owners. Write continuity only to an authorised
 handoff or explicit run-local state; without that authority, propose a chat
 delta. Updating an external tracker requires matching external-write authority.
-There is no default rolling project state
-file. Explicit run state, such as autopilot's `.agent-run/<mission-id>/STATE.md`,
-remains run-local and is not project-wide truth. Project instructions may
-override continuity paths. Fallbacks: handoffs `docs/handoffs/`, archive
-`docs/archive/`.
+There is no default rolling project state file. Explicit run state remains
+run-local, not project-wide truth. Project instructions may override continuity
+paths. Fallbacks: handoffs `docs/handoffs/`, archive `docs/archive/`.
 
 ## Start
 
-For substantial work, start at the approved phase/slice and reopen disk state;
-never trust injected state. Resume from the declared scope/story and
-workflow-state owners plus the digest-bound handoff, reading only relevant
-docs/open decisions. User gates stay unanswered until decided.
+For substantial work, reopen disk state; never trust injected state. Resume from
+declared owners and the digest-bound handoff, reading only relevant docs/open
+decisions. User gates stay unanswered until decided.
 Routine bounded work may continue with context inside authority.
 
 ## Checkpoint
@@ -33,19 +30,17 @@ otherwise return it without writing. Use
 - original goal, disk-backed progress paths/commits, ordered remainder;
 - invariants and exact verification commands.
 
-Keep at most one active handoff per effort/leg. A fresh session resumes from it.
-In the same update, archive a consumed handoff, mark it consumed/time-stamped
-and index it; never delete it. Update `work-map` only when the durable route
+Keep one active handoff per effort/leg. Archive a consumed handoff, mark and
+index it; never delete it. Update `work-map` only when the durable route
 changes; live state belongs to the declared workflow-state owner.
 
 Before checkpoint load [context-hygiene.md](references/context-hygiene.md). Run
 its read-only audit when run directories, logs, handoffs or large agent-facing
 docs accumulate. Consolidate state; never paste transcripts into handoffs.
 
-Provider session retention is minimal: contract-required identifiers,
-generation/callback state and resumable digests only. Never retain credentials
-or raw transcripts as continuity state. After compaction, revalidate generation,
-expiry and ownership before reuse.
+Retain only required provider identifiers, callback state and resumable digests.
+Never retain credentials or raw transcripts as continuity state. After
+compaction, revalidate generation, expiry and ownership before reuse.
 
 ## End after changed state
 
@@ -66,10 +61,9 @@ expiry and ownership before reuse.
    it may recur. `retrospect` owns analysis and process changes after a completed
    cycle; session closure does not start a mini-retrospective.
 
-Periodic hygiene is opt-in; record owner, cadence, scope, resource cap, last
-success and disable condition. It may audit/archive classified artifacts and
-refresh indexes, but not commit, deploy, communicate or delete
-unknown files. Staleness becomes visible state, not catch-up churn.
+Periodic hygiene is opt-in; record owner, cadence, scope, resource cap and
+disable condition. It may audit/archive classified artifacts and refresh
+indexes, but not commit, deploy, communicate or delete unknown files.
 
 Put project knowledge in project docs; follow
 [context-hygiene.md](references/context-hygiene.md) for lightweight private memory.

@@ -5,10 +5,9 @@ description: "Use when a multi-session effort needs one durable, curated route l
 
 # work-map: the map for multi-session efforts
 
-A `session` handoff carries one session's baton. Across many sessions or agents,
-the work map preserves one canonical route per effort. The route is the parent
-issue when it is sufficient, otherwise a declared project-docs file or a
-link-only fallback carries it.
+A `session` handoff carries one session's baton. A work map preserves one
+canonical route per effort: the sufficient parent issue, a declared project
+document or a link-only fallback.
 
 Read the repository's `Repository process` declaration first. Its declared
 workflow-state owner holds live state; this map never does. In `issue-tracker`
@@ -21,10 +20,9 @@ restates current status, owner, dependencies or user gates.
 
 ## Optional link-only map
 
-Create a file only for declared `project-docs`, or an unavailable/cross-tracker
-fallback. A sufficient parent issue remains the canonical map. A docs fallback
-may use `docs/efforts/EFFORT-<slug>.md`
-when authorised; otherwise return the route without writing.
+Create a file only for declared `project-docs` or an unavailable/cross-tracker
+fallback. A docs fallback may use `docs/efforts/EFFORT-<slug>.md` when
+authorised; otherwise return the route without writing.
 
 ```markdown
 # EFFORT: <name>
@@ -48,10 +46,9 @@ What the route is intended to deliver. Link the owning specification.
   Provenant).
 - **Route entries are links, not task summaries.** Stable grouping/order is
   allowed; issue and pull-request prose carries changing detail.
-- **Resume order:** declared scope/story and workflow-state owners → this map
-  when it exists for fallback or cross-tracker route context → the claimed
-  session handoff only.
-  Never reconstruct the route from transcripts or piled-up handoffs.
+- **Resume order:** declared scope/story and workflow-state owners → fallback or
+  cross-tracker map → claimed session handoff. Never reconstruct from
+  transcripts or piled-up handoffs.
 - **Handoffs stay temporary.** They carry continuity for an active session or
   run, are not linked as route state, and are removed or archived when consumed.
 - **One map writer.** Parallel workers write namespaced continuity artifacts;

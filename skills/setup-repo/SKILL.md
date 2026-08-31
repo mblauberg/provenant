@@ -29,18 +29,16 @@ remains out of scope: a documented skip, not alternate-tracker scaffolding.
 
 ## Declare repository process
 
-Amend the fixed-heading **Repository process** block in target
-`MAINTAINING.md`, creating it if absent, from
+Amend the fixed-heading **Repository process** block in `MAINTAINING.md`,
+creating it if absent, from
 [`templates/repo-declarations.md`](templates/repo-declarations.md). Record the
 tracker choice, canonical **scope and stories** home (`issue-tracker` or
 `project-docs`), workflow-state owner (`tracker` or `project-docs`) and pointer,
 docs-layout homes, merge policy/authority and work-item runbook pointer. Use
 pointers only; never duplicate runbook or policy content.
-When `issue-tracker` is selected, the parent tracker issue is the canonical
-change scope/story home; do not create a duplicate project story. This block,
-not the GitHub scaffolding, is the completion gate.
-When the tracker is `none`, name a `project-docs` workflow-state owner rather
-than leaving live state ownerless.
+With `issue-tracker`, the parent issue is the canonical change scope/story home;
+do not duplicate it. This block, not the GitHub scaffolding, is the completion gate.
+With tracker `none`, name a `project-docs` workflow-state owner.
 
 ## Docs layout
 
