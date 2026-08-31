@@ -25,10 +25,14 @@ def _display_path(path: Path) -> Path:
 
 def _markdown_anchors(path: Path) -> set[str]:
     anchors: set[str] = set()
+    occurrences: dict[str, int] = {}
     for heading in re.findall(r"^#{1,6}\s+(.+?)\s*$", path.read_text(), re.MULTILINE):
         plain = re.sub(r"<[^>]+>", "", heading).lower().strip()
         plain = re.sub(r"[^\w\- ]", "", plain)
-        anchors.add(re.sub(r"\s+", "-", plain))
+        base = re.sub(r"\s+", "-", plain)
+        duplicate = occurrences.get(base, 0)
+        anchors.add(base if duplicate == 0 else f"{base}-{duplicate}")
+        occurrences[base] = duplicate + 1
     return anchors
 
 
@@ -38,10 +42,10 @@ def markdown_link_errors(paths: list[Path]) -> list[str]:
     errors: list[str] = []
     for source in paths:
         for target in MARKDOWN_LINK_PATTERN.findall(source.read_text()):
-            if target.startswith(("http://", "https://", "#", "/")):
+            if target.startswith(("http://", "https://", "/")):
                 continue
             relative, separator, fragment = target.partition("#")
-            destination = source.parent / relative
+            destination = source.parent / relative if relative else source
             if relative and not destination.exists():
                 errors.append(f"{_display_path(source)}: broken link {target}")
             elif separator and fragment and destination.suffix == ".md":
@@ -91,6 +95,19 @@ def issue_form_errors(paths: list[Path]) -> list[str]:
                 options = attributes.get("options")
                 if not isinstance(options, list) or not options:
                     errors.append(f"{display}: body item {index} requires options")
+                elif item["type"] == "dropdown" and any(
+                    not isinstance(option, str) or not option.strip() for option in options
+                ):
+                    errors.append(
+                        f"{display}: dropdown item {index} requires non-empty string options"
+                    )
+                elif item["type"] == "checkboxes" and any(
+                    not isinstance(option, dict)
+                    or not isinstance(option.get("label"), str)
+                    or not option["label"].strip()
+                    for option in options
+                ):
+                    errors.append(f"{display}: checkbox item {index} requires options with labels")
     return errors
 
 

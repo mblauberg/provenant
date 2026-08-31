@@ -44,7 +44,7 @@ doctrine checker passed.
 ## Current deterministic owner
 
 Current deterministic evidence lives in `trigger_cases.yaml`,
-`regression_cases.yaml` and owner-specific contract tests. The four
+`regression_cases.yaml` and owner-specific contract tests. The nine
 `lifecycle_cases.yaml` files are retained descriptive fixtures; no current
 runner consumes them.
 
