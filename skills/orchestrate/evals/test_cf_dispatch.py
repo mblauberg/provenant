@@ -377,7 +377,7 @@ def test_dispatch_rejects_a_copied_linked_worktree_before_provider_launch():
         copied_git.symlink_to(source / ".git")
         symlink_result = dispatch_from(copied, "symlink-out.txt")
         assert symlink_result.returncode == 2
-        assert "symlinked linked-worktree" in symlink_result.stderr
+        assert "symlinked .git" in symlink_result.stderr
         assert not invoked.exists()
         assert {
             "config": (repo / ".git" / "config").read_bytes(),
@@ -412,6 +412,21 @@ def test_dispatch_rejects_a_copied_linked_worktree_before_provider_launch():
             ),
         } == before
 
+        back_pointer.write_bytes(
+            back_pointer_content.rstrip("\n").encode("utf-8") + b"\0",
+        )
+        nul_result = dispatch_from(copied, "nul-out.txt")
+        assert nul_result.returncode == 2
+        assert "invalid linked-worktree back-pointer" in nul_result.stderr
+        assert not invoked.exists()
+        assert {
+            "config": (repo / ".git" / "config").read_bytes(),
+            "index": index_path.read_bytes(),
+            "refs": subprocess.check_output(
+                ["git", "-C", str(repo), "show-ref"], text=True,
+            ),
+        } == before
+
         back_pointer.unlink()
         malformed_result = dispatch_from(copied, "malformed-out.txt")
         assert malformed_result.returncode == 2
@@ -437,14 +452,6 @@ def test_dispatch_rejects_a_copied_linked_worktree_before_provider_launch():
         )
         valid_result = dispatch_from(source, "valid-out.txt")
         assert valid_result.returncode == 0, valid_result.stderr
-        assert invoked.exists()
-
-        invoked.unlink()
-        metadata = tmp / "standalone-metadata"
-        shutil.move(repo / ".git", metadata)
-        (repo / ".git").symlink_to(metadata, target_is_directory=True)
-        symlinked_repo_result = dispatch_from(repo, "symlinked-repo-out.txt")
-        assert symlinked_repo_result.returncode == 0, symlinked_repo_result.stderr
         assert invoked.exists()
 
 

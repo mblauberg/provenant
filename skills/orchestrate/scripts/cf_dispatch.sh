@@ -170,7 +170,11 @@ if resolved_git_root="$(git rev-parse --show-toplevel 2>/dev/null)"; then
       exit 2
       ;;
   esac
-  if [ -L "$resolved_git_root/.git" ] || [ -f "$resolved_git_root/.git" ]; then
+  if [ -L "$resolved_git_root/.git" ]; then
+    echo "refusing dispatch with symlinked .git metadata" >&2
+    exit 2
+  fi
+  if [ -f "$resolved_git_root/.git" ]; then
     resolved_git_dir="$(git rev-parse --absolute-git-dir 2>/dev/null)" || {
       echo "cannot resolve dispatch Git directory" >&2
       exit 2
@@ -188,13 +192,19 @@ if resolved_git_root="$(git rev-parse --show-toplevel 2>/dev/null)"; then
       exit 2
     }
     if [ "$resolved_git_dir" != "$resolved_common_git_dir" ]; then
-      if [ -L "$resolved_git_root/.git" ]; then
-        echo "refusing dispatch with symlinked linked-worktree metadata" >&2
-        exit 2
-      fi
       if [ ! -f "$resolved_git_dir/gitdir" ] \
         || [ -L "$resolved_git_dir/gitdir" ] \
         || [ ! -r "$resolved_git_dir/gitdir" ]; then
+        echo "refusing dispatch with invalid linked-worktree back-pointer metadata" >&2
+        exit 2
+      fi
+      if ! python3 - "$resolved_git_dir/gitdir" <<'PY'
+import sys
+from pathlib import Path
+
+raise SystemExit(1 if b"\0" in Path(sys.argv[1]).read_bytes() else 0)
+PY
+      then
         echo "refusing dispatch with invalid linked-worktree back-pointer metadata" >&2
         exit 2
       fi
