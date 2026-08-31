@@ -5,8 +5,10 @@ workflow-state owner (`tracker` or `project-docs`) in repository process.
 
 **Status:** Accepted 2026-07-16 (user, [issue
 #156](https://github.com/mblauberg/provenant/issues/156)); supersedes [ADR
-0006](0006-defer-backlog-contract.md); amended 2026-08-31 and consistent with
-the issue-native scope amendment in [ADR 0017](0017-specifications-own-non-derivable-intent.md)
+0006](0006-defer-backlog-contract.md); amended 2026-08-31 (user, [issue
+#711](https://github.com/mblauberg/provenant/issues/711)) and consistent with
+the issue-native scope amendment in
+[ADR 0017](0017-specifications-own-non-derivable-intent.md)
 
 ## Context
 

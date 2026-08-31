@@ -42,7 +42,8 @@ cross-tracker routes, not a second current-work owner.
 ### Specifications
 
 - Owns: `non-derivable-intent`
-- Drift gate: `none`
+- Drift gate: `tests/test_projection.py` for retained runtime-graph projections;
+  other prose is review-checked
 
 ### Merge policy
 

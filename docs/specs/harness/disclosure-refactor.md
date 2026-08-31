@@ -149,7 +149,7 @@ Per-PR checks:
   harness-managed file, existing-unmanaged-instructions branch}. Oracles per
   cell: expected exit code (0 / 0 / 3), expected link/manifest state, and —
   on the exit-3 arm — byte-identical preservation of the unmanaged file
-  (`install-harness:113-129`, extending `test_install_harness.py:184-195`).
+  (owned by `install-harness` and `test_install_harness.py`).
 - AC-P3: skill-resolution fixture green — from an isolated install, every
   skill name referenced in the ambient files resolves to an installed
   `skills/<name>/SKILL.md` on both platform layouts (including the

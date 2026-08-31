@@ -3,8 +3,9 @@
 **Status:** Accepted 2026-07-28 (user); amends [ADR
 0009](0009-standalone-semantic-specifications.md); applies [ADR
 0011](0011-github-owns-work-state.md) and [ADR
-0004](0004-per-domain-truth-owners.md); amended 2026-08-31 for
-[issue-native change scope](https://github.com/mblauberg/provenant/issues/711)
+0004](0004-per-domain-truth-owners.md); amended 2026-08-31 (user, [issue
+#711](https://github.com/mblauberg/provenant/issues/711)) for issue-native
+change scope
 
 > **Current-reader note.** The SQL and `runtime/agent-fabric` inventory below is
 > historical after ADR 0020; the current Fabric schema owner is
@@ -82,8 +83,8 @@ Concretely:
   current structure is owned and tested under `runtime/fabric`.
 - A requirement that is normative but unimplemented is an open work item in the
   declared scope/story owner, not a present-tense sentence in a specification.
-- `docs/invariants/agent-fabric.md` is the retention pattern: a durable claim, the
-  mechanism that enforces it, and the test that evidences it.
+- Retained structural claims name their code owner and drift test; current
+  Fabric architecture is owned under `runtime/fabric`.
 
 ## Consequences
 

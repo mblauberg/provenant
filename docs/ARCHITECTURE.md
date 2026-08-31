@@ -398,12 +398,13 @@ Project knowledge must remain visible to every family. Durable facts therefore
 live in project-owned state files, specifications, ADRs ([adr/](adr/)),
 runbooks and context digests.
 Private harness memory is limited to cross-project user preferences. For this
-repository, GitHub issues own the current owner, dependencies and user gates;
-Project Status owns workflow state. Project-local effort maps link that work
-without restating it. Retention follows project and risk policy plus bounded
-run-artifact rules. No canonical backlog contract, cross-store migration or god
-manifest is introduced. The governing decisions are recorded in the
-[ADR index](adr/README.md).
+repository, the `Repository process` declaration names the scope/story and
+workflow-state owners: GitHub issues own the current owner, dependencies and
+user gates; Project Status owns workflow state. Other repositories declare
+their own owners. Project-local effort maps link that work without restating
+it. Retention follows project and risk policy plus bounded run-artifact rules.
+No canonical backlog contract, cross-store migration or god manifest is
+introduced. The governing decisions are recorded in the [ADR index](adr/README.md).
 
 Workers return compressed findings and artifact paths. Session hygiene checks
 freshness, size, duplication, stale logs, scratch manifests and handoff quality.

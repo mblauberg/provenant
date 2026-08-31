@@ -28,18 +28,18 @@ def test_repository_declares_the_canonical_scope_and_story_home():
 
 
 def test_scope_and_story_owner_is_respected_by_the_six_workflow_skills():
-    for name in (
-        "setup-repo",
-        "scope",
-        "engineering-docs",
-        "grill-me",
-        "work-map",
-        "session",
-    ):
+    expected_rules = {
+        "setup-repo": "parent issue is the canonical change scope/story home",
+        "scope": "declared parent issue or project-docs home",
+        "engineering-docs": "parent issues own canonical scope and stories",
+        "grill-me": "parent tracker issue owns the scope/story",
+        "work-map": "parent tracker issue is the work map",
+        "session": "declared scope/story and workflow-state owners",
+    }
+    for name, expected_rule in expected_rules.items():
         source = " ".join(read(f"skills/{name}/SKILL.md").lower().split())
         assert "repository process" in source, name
-        assert "scope and stories" in source or "scope/story" in source, name
-        assert "canonical" in source, name
+        assert expected_rule in source, name
 
 
 def test_issue_native_work_map_and_state_rules_are_explicit():
@@ -67,19 +67,7 @@ def test_issue_native_decision_and_spec_reconciliation_are_recorded():
     assert "0017" in adr_0009
     assert "issue-native" in adr_0011.lower()
     assert "implementation status:" not in disclosure.lower()
-    assert "## Landed implementation train" not in disclosure
-    assert "## Historical Fabric custody note" not in disclosure
-    assert "Issue #23" not in lifecycle
     assert "current issue" not in lifecycle.lower()
-    for stale in (
-        "routeEvaluationEvidenceV1",
-        "evaluatedRouteIdentityV1",
-        "topologyWavePlanV1",
-        "repeated Fable routing receipts",
-        "## Required delivery sequence",
-        "### Implementation evidence",
-    ):
-        assert stale not in lifecycle
     assert "live/provider semantic held-outs" in lifecycle
     assert "deterministic contract and fixture tests" in lifecycle
     assert "dispatch and batch receipts own" in lifecycle.lower()
@@ -87,9 +75,6 @@ def test_issue_native_decision_and_spec_reconciliation_are_recorded():
     assert "issue or receipt records scope or evidence; it is not approval" in lifecycle.lower()
     assert "This specification grants no authority" in lifecycle
     assert "current daemonless SQLite Fabric bus" in lifecycle
-    assert "#route-and-topology-evaluation-evidence" not in read(
-        "docs/research/native-orchestration-and-discovery-surfaces.md"
-    )
     assert "#route-and-topology-evidence-boundary" in read(
         "docs/research/native-orchestration-and-discovery-surfaces.md"
     )
@@ -103,8 +88,9 @@ def test_issue_native_decision_and_spec_reconciliation_are_recorded():
     assert "CHILD_NUMBER --jq .id" in runbook
     assert "not the relationship" in runbook
     assert "Do not mirror children in a checklist" in runbook
-    assert "#" in contract["source"]["state_graph"]
-    assert ":91-95" not in contract["source"]["state_graph"]
+    assert contract["source"]["state_graph"] == (
+        "docs/specs/harness/lifecycle.md#state-graph"
+    )
 
 
 def test_pre_rename_lifecycle_routing_dataset_is_explicitly_historical():

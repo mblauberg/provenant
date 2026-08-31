@@ -14,7 +14,8 @@ If it is absent or ambiguous, use an unambiguous existing owner; otherwise
 return the proposed register in chat without inventing or writing a new owner.
 The parent tracker issue owns the scope/story when it declares `issue-tracker`;
 use the named project-docs home when it declares `project-docs`. Do not create a
-parallel story or status record.
+parallel story or status record. Writing a tracker needs explicit external-write
+authority; otherwise return the proposed register in chat.
 
 Keep the explicit decision context current: intake/revision, constraints,
 evidence, decided branches, parked owner calls and the next unresolved branch.

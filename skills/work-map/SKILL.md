@@ -9,8 +9,9 @@ A `session` handoff carries one session's baton. A work map preserves one
 canonical route per effort: the sufficient parent issue, a declared project
 document or a link-only fallback.
 
-Read the repository's `Repository process` declaration first. Its declared
-workflow-state owner holds live state; this map never does. In `issue-tracker`
+Read the repository's `Repository process` declaration first. If absent, use an
+existing owner or propose the route in chat; never invent one. Its
+declared workflow-state owner holds live state; this map never does. In `issue-tracker`
 mode, if the parent issue has enough destination, route and invariant detail,
 the parent tracker issue is the work map: link to it and do not create a
 duplicate file. In
@@ -20,9 +21,8 @@ restates current status, owner, dependencies or user gates.
 
 ## Optional link-only map
 
-Create a file only for declared `project-docs` or an unavailable/cross-tracker
-fallback. A docs fallback may use `docs/efforts/EFFORT-<slug>.md` when
-authorised; otherwise return the route without writing.
+Create a file only for `project-docs` or an unavailable/cross-tracker fallback.
+A docs fallback may use `docs/efforts/EFFORT-<slug>.md` when authorised.
 
 ```markdown
 # EFFORT: <name>
@@ -42,8 +42,7 @@ What the route is intended to deliver. Link the owning specification.
 
 - **Link, never restate live work state.** Do not add status fields, task
   checkboxes, completion claims, owner names, dependencies, blockers or user
-  gates. Readers follow the declared workflow-state owner (Project Status for
-  Provenant).
+  gates. Readers follow the declared workflow-state owner.
 - **Route entries are links, not task summaries.** Stable grouping/order is
   allowed; issue and pull-request prose carries changing detail.
 - **Resume order:** declared scope/story and workflow-state owners → fallback or
@@ -51,8 +50,7 @@ What the route is intended to deliver. Link the owning specification.
   transcripts or piled-up handoffs.
 - **Handoffs stay temporary.** They carry continuity for an active session or
   run, are not linked as route state, and are removed or archived when consumed.
-- **One map writer.** Parallel workers write namespaced continuity artifacts;
-  one chair updates the shared route after checking the declared owners.
+- **One map writer.** One chair updates the route after checking declared owners.
 - Archive a route map under the project's archival policy only when the
   declared workflow-state owner records that disposition.
 - Validate an authored map with

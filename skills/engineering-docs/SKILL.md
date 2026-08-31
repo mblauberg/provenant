@@ -5,19 +5,19 @@ description: "Use for creating, placing, indexing, updating, or archiving engine
 
 # Engineering docs
 
-Treat docs as deliverables: cite decisions, archive retired docs, use
-Australian English; load `engineering-writing` for substantial prose.
+Treat docs as deliverables: cite decisions, archive retired docs and load
+`engineering-writing` for substantial prose.
 
-Read `Repository process` first. In `issue-tracker`, parent issues own
+Read `Repository process` first. If absent, use an unambiguous existing owner or
+propose paths in chat; never invent one. In `issue-tracker`, parent issues own
 canonical scope and stories; docs own durable intent, decisions and invariants.
 In `project-docs`, use its named home. Do not create a second story or status
 projection. Link-only files are unavailable or cross-tracker fallbacks.
 
 ## Default homes
 
-Resolve project instructions and owners first. Use this table only when
-project-write authority includes docs setup; advisory mode proposes paths
-without creating them.
+Use this table only with docs-setup write authority; advisory mode proposes
+paths without creating them.
 
 | Type | Home | Convention |
 |---|---|---|
@@ -37,15 +37,15 @@ without creating them.
 3. Keep numbered directories contiguous and update their index in the same
    change.
 4. Quote and link frozen legal, compliance or gate wording; do not paraphrase.
-5. **Anti-bloat**: an agent-facing doc past ~15 KB signals review, not an
-   automatic split. Split when owners, audiences, lifecycles or change rates
+5. **Anti-bloat**: a doc past ~15 KB signals review, not an automatic split.
+   Split when owners, audiences, lifecycles or change rates
    differ; merge duplicate truths or tiny files changed together. Keep one
    owner and make claim → owner → evidence reachable in three hops. Session
    residue belongs in `session`'s context-hygiene pass.
 
 ## Diagrams
 
-Default to **Mermaid in markdown** for GitHub and operational docs: use
+Default to **Mermaid** for GitHub and operational docs: use
 `flowchart` for routing, `sequenceDiagram` for calls, `stateDiagram-v2` for
 lifecycles and `erDiagram` for schemas. Colocate a load-bearing diagram with
 its owner when both have the same audience, owner and lifecycle; separate it when reused,
@@ -60,8 +60,8 @@ out="$(mktemp -d)"
 (cd "$out" && mmdc -i "$src" -o check.md)
 ```
 
-Keep one conceptual level; check normal and narrow widths for
-overlap, clipping, crossings, blank space and unreadable scaling. Apply
+Keep one conceptual level; check normal and narrow widths for overlap, clipping,
+crossings and unreadable scaling. Apply
 [diagram-quality.md](references/diagram-quality.md); use `d2-diagrams` only
 when fixed layout or publication quality justifies it.
 

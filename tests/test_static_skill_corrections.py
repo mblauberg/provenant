@@ -97,7 +97,7 @@ def test_session_records_a_friction_pointer_but_retrospect_owns_process_change()
 def test_work_map_links_live_work_state_instead_of_repeating_it():
     skill = compact("skills/work-map/SKILL.md")
 
-    assert "Project Status" in skill
+    assert "declared workflow-state owner" in skill
     assert "never restates current status, owner, dependencies or user gates" in skill
     assert "validate_work_map.py" in skill
 

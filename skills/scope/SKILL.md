@@ -5,7 +5,7 @@ description: "Use when unsettled requirements or decisions need a spec, options,
 
 # Scope
 
-Turn an idea into decided, testable scope.
+Produce decided, testable scope.
 
 ## Frame
 
@@ -19,21 +19,24 @@ assurance. Ordinary authorised workspace content proceeds without a
 family-separation gate. Only a user may downgrade risk. Judgement-bearing AI
 requires `evaluate`.
 
-Scope owns accepted content and the decision register: retain intake, goals,
-constraints, alternatives and decided/parked branches without forking scope.
-Record disclosure in the authority envelope, never private memory.
+Writing a tracker needs explicit external-write authority; project-write
+authority alone does not grant it.
+
+Scope owns accepted content and its decision register: intake, goals,
+constraints, alternatives and decided/parked branches. Record disclosure in
+the authority envelope, never private memory.
 
 ## Grill
 
-Load `grill-me` only when the user explicitly asks to be grilled or dependent
-owner decisions remain materially unresolved. Then work purpose -> users ->
+Load `grill-me` only when the user explicitly asks to be grilled or dependent owner decisions remain
+materially unresolved. Then work purpose -> users ->
 constraints -> edge cases -> failure modes -> success -> exclusions, one
 question per round. Otherwise present a compact decision packet with 2–3
-choices, a recommendation and parked owner calls.
+choices, a recommendation and parked calls.
 
 Agents decide engineering calls. Business, legal or financial owner calls stay
 parked as open-decision rows; never guess. Put every unresolved branch in
-the spec.
+scope.
 
 ## Resolve uncertainty
 
@@ -41,14 +44,14 @@ Research surviving questions through `orchestrate`; use `prototype` only for a
 timeboxed feasibility answer, then harvest it and clean only manifest-owned
 scratch.
 
-Compare viable options through correctness, cost and operations lenses. Put
+Compare viable options through correctness, cost and operations. Put
 costly-to-reverse choices and rejected alternatives in an ADR; keep reversible
 detail in the spec/story. In paired-primary mode one chair asks while the peer
 audits evidence; record authorship.
 
 ## Land outputs
 
-First resolve artifact authority and canonical owners. In advisory/read-only
+Resolve artifact authority. In advisory/read-only
 mode, return proposed scope and named open decisions in chat; do not change
 project files. In project-write mode, land only approved artifacts:
 

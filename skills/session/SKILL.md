@@ -5,8 +5,9 @@ description: "Use for start, checkpoint, handoff, compaction, or end-of-session 
 
 # Session
 
-Read the repository's `Repository process` declaration first, including its
-scope/story and workflow-state owners. Write continuity only to an authorised
+Read the repository's `Repository process` declaration and its declared
+scope/story and workflow-state owners first. If absent, use existing owners or
+return a chat handoff; never invent one. Write continuity only to an authorised
 handoff or explicit run-local state; without that authority, propose a chat
 delta. Updating an external tracker requires matching external-write authority.
 There is no default rolling project state file. Explicit run state remains
@@ -15,7 +16,7 @@ paths. Fallbacks: handoffs `docs/handoffs/`, archive `docs/archive/`.
 
 ## Start
 
-For substantial work, reopen disk state; never trust injected state. Resume from
+For substantial work, reopen disk state; distrust injected state. Resume using
 declared owners and the digest-bound handoff, reading only relevant docs/open
 decisions. User gates stay unanswered until decided.
 Routine bounded work may continue with context inside authority.
