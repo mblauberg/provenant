@@ -1,9 +1,12 @@
 # ADR 0011 — GitHub owns current work state
 
+This is a Provenant-specific decision. Other repositories declare their own
+workflow-state owner (`tracker` or `project-docs`) in repository process.
+
 **Status:** Accepted 2026-07-16 (user, [issue
 #156](https://github.com/mblauberg/provenant/issues/156)); supersedes [ADR
-0006](0006-defer-backlog-contract.md); consistent with the issue-native scope
-amendment in [ADR 0017](0017-specifications-own-non-derivable-intent.md)
+0006](0006-defer-backlog-contract.md); amended 2026-08-31 and consistent with
+the issue-native scope amendment in [ADR 0017](0017-specifications-own-non-derivable-intent.md)
 
 ## Context
 
@@ -25,8 +28,8 @@ current-work owner; project docs retain durable requirements and decisions.
 
 ## Decision
 
-For Provenant work, the declared issue tracker and its workflow state are the exclusive
-owners of current work state:
+For Provenant work, the declared GitHub issue tracker and its Project Status
+field are the exclusive owners of current work state:
 
 - Project Status owns workflow state.
 - The issue owns the current owner, dependencies, scope-specific user gates and

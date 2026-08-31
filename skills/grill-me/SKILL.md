@@ -10,6 +10,8 @@ and a recommended answer with its trade-off.
 
 Read the repository's `Repository process` declaration before recording scope
 and stories.
+If it is absent or ambiguous, use an unambiguous existing owner; otherwise
+return the proposed register in chat without inventing or writing a new owner.
 The parent tracker issue owns the scope/story when it declares `issue-tracker`;
 use the named project-docs home when it declares `project-docs`. Do not create a
 parallel story or status record.

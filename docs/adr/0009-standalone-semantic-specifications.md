@@ -1,9 +1,10 @@
 # ADR 0009 — Standalone semantic specifications
 
 **Status:** Accepted 2026-07-15 (human direction; supersedes the earlier
-family-manifest form of this ADR); amended 2026-07-28 by [ADR
+family-manifest form of this ADR); amended 2026-07-28 and 2026-08-31 by [ADR
 0017](0017-specifications-own-non-derivable-intent.md), which narrows what these
-specifications may contain and adds a permanent gate over the same corpus
+specifications may contain and aligns their checks with current documentation
+tiers.
 
 ADR 0017's 2026-08-31 issue-native scope amendment is consistent with this
 decision: tracker issues or the declared project-docs home carry change scope
@@ -48,10 +49,9 @@ contract, load order, version mirror or acceptance state.
 - A normative specification is limited to 999 lines and 100 KiB. New ownership
   is split into another semantic specification instead of packing content to
   meet a fixed module count.
-- The permanent gate checks only the limits, duplicate normative IDs, local
-  links/fragments, complete discovery-index coverage, exact
-  `docs/specs/<domain>/<topic>.md` depth with root and deeper paths rejected,
-  and rejected positional or continuation filenames.
+- Owner-specific tests gate machine-critical projections. Specification prose
+  and reasoning remain review-owned; there is no universal specification
+  checker or permanent checker over the whole corpus.
 - Source-equivalence maps and frozen-block comparisons are one-time migration
   evidence, not permanent runtime or authoring machinery.
 
@@ -66,7 +66,7 @@ hashes, root metadata or ordered lists. Reviewers can open the one owner linked
 from an issue or pull request. The repository loses a canonical concatenation
 order, but no current runtime consumer requires one.
 
-The family-manifest checker is replaced by a small generic specification
-checker. Existing behavioural fixtures read their specific owning specs or an
-explicit test-only set of owners; no production helper reconstructs a
-pseudo-monolith.
+Existing behavioural fixtures read their specific owning specs or an explicit
+test-only set of owners; no production helper reconstructs a pseudo-monolith.
+Machine-critical projections stay with their owner-specific tests, while prose
+and reasoning remain review-owned.

@@ -5,9 +5,11 @@ description: "Use for start, checkpoint, handoff, compaction, or end-of-session 
 
 # Session
 
-Read the repository's `Repository process` declaration first. Store continuity
-in the declared scope/story owner and temporary handoffs; without write
-authority, propose a chat delta. There is no default rolling project state
+Read the repository's `Repository process` declaration first, including its
+scope/story and workflow-state owners. Write continuity only to an authorised
+handoff or explicit run-local state; without that authority, propose a chat
+delta. Updating an external tracker requires matching external-write authority.
+There is no default rolling project state
 file. Explicit run state, such as autopilot's `.agent-run/<mission-id>/STATE.md`,
 remains run-local and is not project-wide truth. Project instructions may
 override continuity paths. Fallbacks: handoffs `docs/handoffs/`, archive
@@ -16,9 +18,9 @@ override continuity paths. Fallbacks: handoffs `docs/handoffs/`, archive
 ## Start
 
 For substantial work, start at the approved phase/slice and reopen disk state;
-never trust injected state. Resume from the declared scope/story owner and the
-digest-bound handoff, reading only relevant docs/open decisions. User gates stay
-unanswered until decided.
+never trust injected state. Resume from the declared scope/story and
+workflow-state owners plus the digest-bound handoff, reading only relevant
+docs/open decisions. User gates stay unanswered until decided.
 Routine bounded work may continue with context inside authority.
 
 ## Checkpoint
@@ -33,8 +35,8 @@ otherwise return it without writing. Use
 
 Keep at most one active handoff per effort/leg. A fresh session resumes from it.
 In the same update, archive a consumed handoff, mark it consumed/time-stamped
-and index it; never delete it. Update `work-map` only when the
-durable route changes; live state belongs to the work tracker.
+and index it; never delete it. Update `work-map` only when the durable route
+changes; live state belongs to the declared workflow-state owner.
 
 Before checkpoint load [context-hygiene.md](references/context-hygiene.md). Run
 its read-only audit when run directories, logs, handoffs or large agent-facing
@@ -49,7 +51,8 @@ expiry and ownership before reuse.
 
 1. **Graduate:** merge surviving behaviour-changing knowledge into its owner:
    decision -> spec/ADR; domain fact -> context/README; convention -> project
-   `AGENTS.md`; moving status -> declared tracker or explicit run state.
+   `AGENTS.md`; moving status -> declared workflow-state owner or explicit run
+   state, with external writes separately authorised.
    Reconcile contradictions, mark
    supersession, refresh timestamps, archive over-cap history; never duplicate.
 2. **Close context:** retain minimal manifest, synthesis, verification and

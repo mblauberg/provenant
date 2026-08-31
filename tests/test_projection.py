@@ -9,6 +9,7 @@ drift gate, which is the failure the gate exists to stop.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -140,6 +141,22 @@ def test_architecture_lifecycle_projection_contains_the_runtime_state_graph():
         for line in region.splitlines()
         if line.strip() in contract["side_states"]
     } == set(contract["side_states"])
+
+    lifecycle = (ROOT / "docs" / "specs" / "harness" / "lifecycle.md").read_text()
+    match = re.search(r"#### State graph\n\n```text\n(?P<graph>.*?)\n```", lifecycle, re.S)
+    assert match, "lifecycle spec must expose the state graph under its anchor"
+    graph_lines = [line.strip() for line in match.group("graph").splitlines() if line.strip()]
+    graph_edges = {
+        tuple(part.strip() for part in line.split(" -> ", 1))
+        for line in graph_lines
+        if " -> " in line
+    }
+    expected_edges = {
+        (transition["state"], transition["to_state"])
+        for transition in contract["transitions"]
+    }
+    assert len(graph_lines) == len(expected_edges)
+    assert graph_edges == expected_edges
     assert contract["source"]["state_graph"].endswith("#state-graph")
 
 
@@ -148,6 +165,10 @@ def test_architecture_risk_projection_matches_the_runtime_policy():
     policy = json.loads((ROOT / "config" / "risk-policy.json").read_text())
     _, region, _ = split_marked_region(architecture, "risk-factor-table")
     rows = {}
+    table_lines = [line for line in region.splitlines() if line.startswith("|")]
+    header = [cell.strip().replace("`", "") for cell in table_lines[0].strip("|").split("|")]
+    tiers = policy["tier_order"]
+    assert header == ["Factor", *tiers]
     for line in region.splitlines():
         if not line.startswith("|") or line.startswith("|---"):
             continue
@@ -156,7 +177,6 @@ def test_architecture_risk_projection_matches_the_runtime_policy():
         if factor in policy["factors"]:
             rows[factor] = cells[1:]
 
-    tiers = policy["tier_order"]
     assert set(rows) == set(policy["factors"])
     for factor, mapping in policy["factors"].items():
         expected = [

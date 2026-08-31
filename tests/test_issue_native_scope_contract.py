@@ -18,6 +18,11 @@ def test_repository_declares_the_canonical_scope_and_story_home():
     assert "https://github.com/mblauberg/provenant/issues" in maintaining
     assert "### Scope and stories" in template
     assert "<issue-tracker|project-docs>" in template
+    assert "### Workflow state" in maintaining
+    assert "- Owner: tracker" in maintaining
+    assert "https://github.com/mblauberg/provenant/projects/2" in maintaining
+    assert "### Workflow state" in template
+    assert "<tracker|project-docs>" in template
 
 
 def test_scope_and_story_owner_is_respected_by_the_six_workflow_skills():
@@ -78,5 +83,23 @@ def test_issue_native_decision_and_spec_reconciliation_are_recorded():
     assert "dispatch and batch receipts own" in lifecycle.lower()
     assert "fabric only" in lifecycle.lower()
     assert "issue or receipt records scope or evidence; it is not approval" in lifecycle.lower()
+    assert "This specification grants no authority" in lifecycle
+    assert "current daemonless SQLite Fabric bus" in lifecycle
+    assert "#route-and-topology-evaluation-evidence" not in read(
+        "docs/research/native-orchestration-and-discovery-surfaces.md"
+    )
+    assert "#route-and-topology-evidence-boundary" in read(
+        "docs/research/native-orchestration-and-discovery-surfaces.md"
+    )
+    assert "#route-and-topology-evidence-boundary" in read(
+        "docs/research/evidence-based-provider-routing.md"
+    )
+    runbook = read("docs/runbooks/github-workflow.md")
+    assert "### Native sub-issues" in runbook
+    assert "sub_issues" in runbook
+    assert "sub_issue_id" in runbook
+    assert "CHILD_NUMBER --jq .id" in runbook
+    assert "not the relationship" in runbook
+    assert "Do not mirror children in a checklist" in runbook
     assert "#" in contract["source"]["state_graph"]
     assert ":91-95" not in contract["source"]["state_graph"]

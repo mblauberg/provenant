@@ -33,11 +33,14 @@ Amend the fixed-heading **Repository process** block in target
 `MAINTAINING.md`, creating it if absent, from
 [`templates/repo-declarations.md`](templates/repo-declarations.md). Record the
 tracker choice, canonical **scope and stories** home (`issue-tracker` or
-`project-docs`), docs-layout homes, merge policy/authority and work-item
-runbook pointer. Use pointers only; never duplicate runbook or policy content.
+`project-docs`), workflow-state owner (`tracker` or `project-docs`) and pointer,
+docs-layout homes, merge policy/authority and work-item runbook pointer. Use
+pointers only; never duplicate runbook or policy content.
 When `issue-tracker` is selected, the parent tracker issue is the canonical
 change scope/story home; do not create a duplicate project story. This block,
 not the GitHub scaffolding, is the completion gate.
+When the tracker is `none`, name a `project-docs` workflow-state owner rather
+than leaving live state ownerless.
 
 ## Docs layout
 

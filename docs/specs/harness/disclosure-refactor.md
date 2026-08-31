@@ -1,21 +1,11 @@
 # Spec: harness progressive-disclosure refactor
 
-Canonical, self-contained copy (r3, 2026-07-20). Supersedes run-scoped r1
-(sha256 817f2c27…) and r2 (sha256 ca105389…) and inlines everything they
-carried; `.agent-run/` artifacts are provenance only, never a normative
-dependency. Chairs: Claude session 809bd55e (r1/r2), 5f732d6c (r3 amendment
-pass). Risk tier `substantial`. Review pressure: r2 Codex paired-primary
-adversarial audit (verdict AMEND REQUIRED, five findings folded); r3 chaired
-three-leg review — chair sweep + fresh Claude pair (READY-WITH-AMENDMENTS) +
-Codex other-primary via Fabric roundtrip and high-effort CLI (both NOT-READY;
-all convergent findings folded here); fresh targeted review at implementation;
-held-out evals waived per
-[ADR 0014](../../adr/0014-comparative-skill-evals-on-suspicion.md).
+Canonical decision specification. Git history retains revision and review
+provenance; `.agent-run/` artifacts are not normative dependencies.
 
-Currentness note: [ADR 0020](../../adr/0020-retire-the-daemon-fabric.md)
-supersedes the Fabric bootstrap, workspace-trust and task-claim wording below.
-The progressive-disclosure decisions remain normative; the superseded Fabric
-text is retained as dated implementation provenance only.
+Canonical decision: [ADR 0020](../../adr/0020-retire-the-daemon-fabric.md) owns
+the current daemonless Fabric wording; the progressive-disclosure decisions
+remain normative.
 
 ## Problem
 

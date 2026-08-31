@@ -54,17 +54,18 @@ def test_default_agent_run_directory_is_ignored_in_the_harness_repo():
 def test_configured_workspace_execution_is_family_agnostic_but_assurance_is_explicit():
     harness = (ROOT / "HARNESS.md").read_text()
     scope = (ROOT / "skills/scope/SKILL.md").read_text()
+    compact_scope = " ".join(scope.lower().split())
     routing = (ROOT / "skills/orchestrate/references/routing-and-tiers.md").read_text()
     orchestrate = (ROOT / "skills/orchestrate/SKILL.md").read_text()
 
     assert "ordinary workspace content" in harness
-    assert "ordinary authorised workspace content" in scope.lower()
+    assert "ordinary authorised workspace content" in compact_scope
     assert "family separation" in harness
     assert "family-separation" in scope
     assert "family separation" in routing
     assert "family separation" in orchestrate
     assert "family separation is an assurance property" in " ".join(harness.split())
-    assert "without a family-separation gate" in scope
+    assert "without a family-separation gate" in compact_scope
     assert "assurance claim" in routing
     assert "execution freedom" in orchestrate
 

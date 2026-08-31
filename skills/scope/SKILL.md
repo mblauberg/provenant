@@ -5,21 +5,21 @@ description: "Use when unsettled requirements or decisions need a spec, options,
 
 # Scope
 
-Turn an idea into decided, testable scope under project constraints.
+Turn an idea into decided, testable scope.
 
 ## Frame
 
-Read the target repository's `Repository process` declaration. Define the
-decision, users and done; put change scope and story in its declared home: the
-parent tracker issue for `issue-tracker`, or named project docs for
-`project-docs`. Emit the minimum `config/risk-policy.json` tier, path bounds,
+Read the repository's `Repository process` declaration. If it is absent
+or ambiguous, use an unambiguous existing owner; otherwise return proposed
+content in chat without inventing or writing a new owner. Define the decision,
+users and done; put change scope and story in the declared parent tracker issue
+or named project-docs home. Emit the minimum `config/risk-policy.json` tier, path bounds,
 prohibited actions, external effects, expiry and approver. Credentials,
 secrets, unrelated paths, denials and project bans remain outside authority;
-path, write and resource limits stay explicit. Ordinary authorised workspace content
-is ordinary execution without a family-separation gate; this is execution
-permission, not assurance.
-Only a user may downgrade risk. Judgement-bearing AI,
-ranking or heuristics require `evaluate`.
+path, write and resource limits stay explicit. Ordinary authorised workspace
+content proceeds without a family-separation gate, but execution permission is
+not assurance. Only a user may downgrade risk. Judgement-bearing AI requires
+`evaluate`.
 
 Scope owns accepted content and the decision register: retain intake, goals,
 constraints, alternatives and decided/parked branches without forking scope.
@@ -34,21 +34,21 @@ question per round. Otherwise present a compact decision packet with 2–3
 choices, a recommendation and parked owner calls.
 
 Agents decide engineering calls. Business, legal or financial owner calls stay
-parked as named open-decision rows; never guess. Put every unresolved branch in
+parked as open-decision rows; never guess. Put every unresolved branch in
 the spec.
 
 ## Resolve uncertainty
 
 Research surviving questions through `orchestrate`; use `prototype` only for a
 timeboxed feasibility answer, then harvest it and clean only manifest-owned
-scratch. Neither lane exists for curiosity.
+scratch.
 
 For viable options, compare cost, reversibility, risk and prior fit through
 correctness, cost and operations lenses. Use independent reviewers when
 available. Put costly-to-reverse choices and rejected alternatives in an ADR;
 keep reversible detail in the spec/story.
 Paired-primary mode has one chair ask while the peer audits evidence; record
-authorship for later independence.
+authorship.
 
 ## Land outputs
 
@@ -65,7 +65,7 @@ project files. In project-write mode, land only approved artifacts:
 | Work items | declared project tracker |
 | Durable context | declared project-docs owner; run state stays run-local |
 
-Write clear, observable acceptance criteria. Preserve project schemas; pin only
+Write observable acceptance criteria. Preserve project schemas; pin only
 decision-critical interfaces with native locks/constraints. Link or cache
 authority with its source and relevant date/version; never vendor without a licence.
 

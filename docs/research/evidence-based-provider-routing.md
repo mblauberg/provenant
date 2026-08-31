@@ -6,7 +6,7 @@ Evidence snapshot: [July 2026 continuity and routing evidence](evidence-snapshot
 
 Normative owners: evidence and review
 and provider actions and adapters,
-the [harness route and topology evidence contract](../specs/harness/lifecycle.md#route-and-topology-evaluation-evidence),
+the [harness route and topology evidence boundary](../specs/harness/lifecycle.md#route-and-topology-evidence-boundary),
 the activation capability contract,
 and review-bundle custody
 and operational observation.
@@ -26,14 +26,13 @@ and operational observation.
   pre-dispatch CAS rechecks snapshot, contract, model, effort, mode and
   permissions; pre-effect drift resolves anew, while ambiguity stays with the
   original action.
-- Route evidence is task-local, repeated where stochastic, baseline-relative,
-  revision-bound and expiring. Model popularity, list price and unrelated
-  benchmarks are priors at most.
+- Dispatch/batch receipts own actual route and attempt facts. Evaluation is
+  task-local and opt-in; model popularity, list price and unrelated benchmarks
+  are priors at most.
 - Human/project pins narrow the eligible set but cannot manufacture capability,
   quality or a mandatory reviewer-family relation.
-- Promotion states and evidence belong in receipts. Automatic learned/Pareto
-  selection remains unapproved until its floors, trials, expiry and baseline
-  gates are separately decided.
+- Assurance labels reflect available evidence. Automatic promotion, learned or
+  Pareto selection, and a universal digest/version protocol remain unapproved.
 
 ## Evidence
 

@@ -4,9 +4,9 @@ Read [`AGENTS.md`](AGENTS.md), [`HARNESS.md`](HARNESS.md) and
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) before changing the harness.
 Inspect the live diff and preserve unrelated work. `HARNESS.md` owns lifecycle,
 risk, authority, orchestration and review policy; [`docs/worktrees.md`](docs/worktrees.md)
-owns branch and linked-worktree operation. Use the
-[GitHub work-item workflow](docs/runbooks/github-workflow.md) for issue intake,
-Project status, pull-request linking and user gates.
+owns branch and linked-worktree operation. Use the repository process
+declaration below for issue intake, workflow state, pull-request linking and
+user gates.
 
 Agent merges are authorised for this repository; mechanics remain in the
 GitHub work-item workflow. This is Provenant-local process, not harness
@@ -30,6 +30,11 @@ invariants. A repository declaring `project-docs` uses its documented scope or
 story home instead. A link-only map is a fallback for unavailable or
 cross-tracker routes, not a second current-work owner.
 
+### Workflow state
+
+- Owner: tracker
+- Pointer: <https://github.com/mblauberg/provenant/projects/2>
+
 ### Docs layout
 
 - Pointer: [`docs/`](docs/)
@@ -41,7 +46,7 @@ cross-tracker routes, not a second current-work owner.
 
 ### Merge policy
 
-- Pointer: [`docs/worktrees.md`](docs/worktrees.md) and [`docs/runbooks/github-workflow.md`](docs/runbooks/github-workflow.md)
+- Pointer: [`docs/worktrees.md`](docs/worktrees.md)
 
 ### Work-item runbook
 

@@ -10,6 +10,7 @@ AUDIT = SKILL_CRAFT / "references" / "audit.md"
 METHOD = SKILL_CRAFT / "references" / "method.md"
 FIXTURES = SKILL_CRAFT / "evals" / "boundary_trace_cases.yaml"
 SPEC = ROOT / "docs" / "specs" / "harness" / "lifecycle.md"
+DISCLOSURE = ROOT / "docs" / "specs" / "harness" / "disclosure-refactor.md"
 ADR = ROOT / "docs" / "adr" / "0001-personal-first-product-compatible.md"
 
 
@@ -92,6 +93,7 @@ def test_local_history_routing_separates_audit_from_export():
 
 def test_normative_docs_match_the_local_first_contract():
     spec = SPEC.read_text()
+    disclosure = DISCLOSURE.read_text()
     adr = ADR.read_text()
     compact_adr = " ".join(adr.split())
     compact_spec = " ".join(spec.split())
@@ -107,6 +109,8 @@ def test_normative_docs_match_the_local_first_contract():
     assert "cannot score that skill" in compact_spec
     assert "prospective contract coverage" in spec
     assert "Unsupported or unattributable evidence is `N/A`, never zero" in spec
+    assert "Canonical decision:" in disclosure
+    assert "superseded Fabric text is retained" not in disclosure
     assert "direct request for read-only local history analysis" in compact_adr
     assert "raw cross-provider handoff" in compact_adr
     retired_names = (

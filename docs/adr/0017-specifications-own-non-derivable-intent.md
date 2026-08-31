@@ -63,7 +63,7 @@ Ownership across the tree is:
 |---|---|
 | What exists | code, schemas, registries, `0001-current-baseline.sql` |
 | That it behaves | the behavioural test suites |
-| What is delivered, and by whom | the declared issue tracker and its workflow state |
+| What is delivered, and by whom | the declared workflow-state owner |
 | What change scope and story are current | the repository's declared canonical home |
 | Why the architecture is this way | ADRs |
 | What was required, and what must never happen | specifications |
@@ -76,11 +76,12 @@ Concretely:
   requirements, ordering and concurrency constraints, digest preimage
   definitions, intended failure semantics, security boundaries and explicit
   requirement matrices.
-- Any structure a specification still restates must be gated against its live
-  owner. ADR 0020 retired this ADR's legacy schema-drift checker with the old
-  Fabric runtime; current structure is owned and tested under `runtime/fabric`.
+- Any machine-critical structure a specification still restates must be gated
+  against its live owner; prose and reasoning remain review-owned. ADR 0020
+  retired this ADR's legacy schema-drift checker with the old Fabric runtime;
+  current structure is owned and tested under `runtime/fabric`.
 - A requirement that is normative but unimplemented is an open work item in the
-  declared tracker, not a present-tense sentence in a specification.
+  declared scope/story owner, not a present-tense sentence in a specification.
 - `docs/invariants/agent-fabric.md` is the retention pattern: a durable claim, the
   mechanism that enforces it, and the test that evidences it.
 

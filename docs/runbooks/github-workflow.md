@@ -36,6 +36,23 @@ issues are disabled.
    agent never infers it. User-originated items follow the same evidence and
    scope checks.
 
+### Native sub-issues
+
+The parent issue owns change scope, story and remaining gates. Native child
+issues own independently deliverable slices. Create or link a child through
+GitHub's `sub_issues` API using the numeric issue id, not a checklist or title:
+
+```sh
+child_id=$(gh api repos/OWNER/REPO/issues/CHILD_NUMBER --jq .id)
+gh api --method POST repos/OWNER/REPO/issues/PARENT_NUMBER/sub_issues \
+  -F sub_issue_id="$child_id"
+```
+
+The parent URL in a child body is navigation only and is not the relationship.
+Do not mirror children in a checklist. Closing the parent remains separately
+gated after its children and all parent-level acceptance or release gates are
+handled.
+
 ## Execute and review
 
 1. Set `In progress` when an owner starts the accepted scope.

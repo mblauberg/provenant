@@ -10,7 +10,8 @@ the work map preserves one canonical route per effort. The route is the parent
 issue when it is sufficient, otherwise a declared project-docs file or a
 link-only fallback carries it.
 
-Read the repository's `Repository process` declaration first. In `issue-tracker`
+Read the repository's `Repository process` declaration first. Its declared
+workflow-state owner holds live state; this map never does. In `issue-tracker`
 mode, if the parent issue has enough destination, route and invariant detail,
 the parent tracker issue is the work map: link to it and do not create a
 duplicate file. In
@@ -21,8 +22,8 @@ restates current status, owner, dependencies or user gates.
 ## Optional link-only map
 
 Create a file only for declared `project-docs`, or an unavailable/cross-tracker
-fallback. If the parent issue has enough route detail, it is the canonical map
-and no file is created. A docs fallback may use `docs/efforts/EFFORT-<slug>.md`
+fallback. A sufficient parent issue remains the canonical map. A docs fallback
+may use `docs/efforts/EFFORT-<slug>.md`
 when authorised; otherwise return the route without writing.
 
 ```markdown
@@ -43,29 +44,31 @@ What the route is intended to deliver. Link the owning specification.
 
 - **Link, never restate live work state.** Do not add status fields, task
   checkboxes, completion claims, owner names, dependencies, blockers or user
-  gates. Readers follow the linked issue and its Project Status field.
+  gates. Readers follow the declared workflow-state owner (Project Status for
+  Provenant).
 - **Route entries are links, not task summaries.** Stable grouping/order is
   allowed; issue and pull-request prose carries changing detail.
-- **Resume order:** declared scope/story owner → this map when it exists for
-  fallback or cross-tracker route context → the claimed session handoff only.
+- **Resume order:** declared scope/story and workflow-state owners → this map
+  when it exists for fallback or cross-tracker route context → the claimed
+  session handoff only.
   Never reconstruct the route from transcripts or piled-up handoffs.
 - **Handoffs stay temporary.** They carry continuity for an active session or
   run, are not linked as route state, and are removed or archived when consumed.
 - **One map writer.** Parallel workers write namespaced continuity artifacts;
-  one chair updates the shared route after checking the tracker.
+  one chair updates the shared route after checking the declared owners.
 - Archive a route map under the project's archival policy only when the
-  owning issue records that disposition.
+  declared workflow-state owner records that disposition.
 - Validate an authored map with
   `scripts/validate_work_map.py <EFFORT-file>` before handoff.
 
 ## Red flags
 
 - `Status:`, task checkboxes or an "Updated" freshness claim → delete them and
-  link the work tracker.
+  link the declared workflow-state owner.
 - Map restates a specification, decision or issue → link, don't copy.
 - A handoff appears as route state → keep it in the temporary continuity layer.
 - Re-planning changes accepted scope → return to `scope`, then update stable
-  route links after the owning issue records the decision.
+  route links after the declared scope/story owner records the decision.
 
 ## Adapter-absent path
 

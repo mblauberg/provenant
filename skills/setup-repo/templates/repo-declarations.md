@@ -10,6 +10,11 @@
 - Canonical home: `<issue-tracker|project-docs>`
 - Pointer: `<canonical-scope-or-story-home>`
 
+### Workflow state
+
+- Owner: `<tracker|project-docs>`
+- Pointer: `<workflow-state-owner>`
+
 ### Docs layout
 
 - Pointer: `<docs-index-or-home-list>`

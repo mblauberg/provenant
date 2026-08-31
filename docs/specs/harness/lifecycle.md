@@ -1,18 +1,25 @@
 # Adaptive agent harness lifecycle
 
 The repository's `Repository process` declaration names the canonical
-scope/story home. In this repository, changes to this contract are scoped by
-the current issue and its Project Status; this specification retains
-the durable lifecycle requirements.
+scope/story home. This specification grants no authority. Current user and
+project instructions, plus an authorised run, are required; only an authorised
+run may make scoped reversible changes. In this repository, the current issue
+scopes changes to this contract and Project Status records workflow state; this
+file retains the durable lifecycle requirements.
 
-The current contract permits direct read-only analysis of local session history, keeps sharing and export separately gated, and treats unsupported or unattributable evidence as `N/A`, never zero. It does not retain the synthetic collector, which had no provider-native adapter or producer. Route evaluation remains task-local, receipt-bound and content-free; it does not approve a learned or Pareto router.
+The current contract permits direct read-only analysis of local session history,
+keeps sharing and export separately gated, and treats unsupported or
+unattributable evidence as `N/A`, never zero. It does not retain the synthetic
+collector, which had no provider-native adapter or producer. Route evaluation
+remains task-local, receipt-bound and content-free; it does not approve a
+learned or Pareto router.
 
 ## Authority and decision
 
-The lifecycle contract permits reversible repository changes, tests and
-documentation within the existing harness. It does not authorise provider
-login, external communications, deployment, live installation, destructive
-migration, Git push or release.
+The lifecycle contract grants nothing. An authorised run may make scoped
+reversible repository changes, tests and documentation within the existing
+harness. It does not authorise provider login, external communications,
+deployment, live installation, destructive migration, Git push or release.
 
 This specification is grounded in
 [`docs/research/agentic-sdlc-harness-2026.md`](../../research/agentic-sdlc-harness-2026.md).
@@ -55,7 +62,7 @@ to Git. The target is a small stable kernel plus profiles and existing skills.
 - Making optional providers, Herdr, Pi or the agent fabric prerequisites for a
   normal run.
 - Replacing project-specific legal, compliance or release authority.
-- Reimplementing the separately specified shared agent fabric.
+- Reimplementing the current daemonless SQLite Fabric bus.
 
 ## Lifecycle model
 
@@ -92,9 +99,20 @@ runtime-owned delivery contract:
 #### State graph
 
 ```text
-draft -> scoped -> approved -> executing -> verifying -> reviewing
-      -> repairing -> awaiting_acceptance -> accepted
-      -> awaiting_release -> observing -> closed
+draft -> scoped
+scoped -> approved
+approved -> executing
+executing -> verifying
+verifying -> reviewing
+verifying -> executing
+reviewing -> repairing
+reviewing -> awaiting_acceptance
+repairing -> verifying
+awaiting_acceptance -> accepted
+awaiting_acceptance -> repairing
+accepted -> awaiting_release
+awaiting_release -> observing
+observing -> closed
 ```
 
 `blocked`, `cancelled` and `degraded` are side states with reasons and recovery
