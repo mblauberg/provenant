@@ -2,6 +2,7 @@ import importlib.util
 import hashlib
 import json
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 
@@ -63,6 +64,44 @@ def test_creation_from_linked_checkout_still_anchors_primary_root(tmp_path, caps
     assert Path(receipt["primary_root"]) == repo
     assert Path(receipt["worktree_root"]) == repo / ".worktrees" / "second"
     assert not (first / ".worktrees").exists()
+
+
+def test_copied_linked_checkout_cannot_mutate_its_source_repository(tmp_path, capsys):
+    repo = tmp_path / "project"
+    head = init_repo(repo)
+    source = repo / ".worktrees" / "source"
+    source.parent.mkdir()
+    subprocess.run(
+        ["git", "-C", str(repo), "worktree", "add", "--detach", str(source), head],
+        check=True,
+    )
+    copied = tmp_path / "copied"
+    shutil.copytree(source, copied)
+    assert (copied / ".git").is_file()
+
+    def source_state():
+        return {
+            "config": (repo / ".git" / "config").read_bytes(),
+            "index": Path(subprocess.check_output(
+                ["git", "-C", str(source), "rev-parse", "--git-path", "index"],
+                text=True,
+            ).strip()).read_bytes(),
+            "refs": subprocess.check_output(
+                ["git", "-C", str(repo), "show-ref"], text=True,
+            ),
+            "worktrees": subprocess.check_output(
+                ["git", "-C", str(repo), "worktree", "list", "--porcelain"], text=True,
+            ),
+        }
+
+    before = source_state()
+    assert worktree_policy.main([
+        "create", "leak", "--repo", str(copied), "--detach", head,
+        "--human-authorised",
+    ]) == 2
+    assert "copied checkout" in capsys.readouterr().err
+    assert source_state() == before
+    assert not (repo / ".worktrees" / "leak").exists()
 
 
 def test_creation_requires_authority_and_rejects_unsafe_names(tmp_path, capsys):

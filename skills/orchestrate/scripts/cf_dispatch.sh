@@ -157,6 +157,50 @@ if [ "$DOCTOR" = "1" ]; then
   exit 0
 fi
 
+dispatch_root="$(pwd -P)" || { echo "cannot resolve dispatch directory" >&2; exit 2; }
+if resolved_git_root="$(git rev-parse --show-toplevel 2>/dev/null)"; then
+  resolved_git_root="$(CDPATH= cd -- "$resolved_git_root" 2>/dev/null && pwd -P)" || {
+    echo "cannot resolve dispatch Git root" >&2
+    exit 2
+  }
+  case "$dispatch_root" in
+    "$resolved_git_root"|"$resolved_git_root"/*) ;;
+    *)
+      echo "refusing dispatch from a copied linked worktree that still points to $resolved_git_root" >&2
+      exit 2
+      ;;
+  esac
+  if [ -f "$resolved_git_root/.git" ]; then
+    resolved_git_dir="$(git rev-parse --absolute-git-dir 2>/dev/null)" || {
+      echo "cannot resolve dispatch Git directory" >&2
+      exit 2
+    }
+    if [ -f "$resolved_git_dir/gitdir" ]; then
+      IFS= read -r linked_git_file <"$resolved_git_dir/gitdir" || {
+        echo "cannot read linked-worktree back-pointer" >&2
+        exit 2
+      }
+      [ -n "$linked_git_file" ] || {
+        echo "linked-worktree back-pointer is empty" >&2
+        exit 2
+      }
+      case "$linked_git_file" in
+        /*) ;;
+        *) linked_git_file="$resolved_git_dir/$linked_git_file" ;;
+      esac
+      linked_git_parent="$(CDPATH= cd -- "$(dirname -- "$linked_git_file")" 2>/dev/null && pwd -P)" || {
+        echo "cannot resolve linked-worktree back-pointer" >&2
+        exit 2
+      }
+      linked_git_file="$linked_git_parent/$(basename -- "$linked_git_file")"
+      if [ "$linked_git_file" != "$resolved_git_root/.git" ]; then
+        echo "refusing dispatch from a copied linked worktree that still points to $linked_git_file" >&2
+        exit 2
+      fi
+    fi
+  fi
+fi
+
 if [ -n "$PROMPT_FILE" ]; then
   [ -r "$PROMPT_FILE" ] || { echo "cannot read prompt file: $PROMPT_FILE" >&2; exit 2; }
 elif [ -z "$PROMPT" ]; then

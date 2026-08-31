@@ -282,6 +282,117 @@ def fabric_free_env():
     }
 
 
+def test_dispatch_rejects_a_copied_linked_worktree_before_provider_launch():
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        repo = tmp / "project"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        subprocess.run(["git", "-C", str(repo), "config", "user.name", "Test"], check=True)
+        subprocess.run(
+            ["git", "-C", str(repo), "config", "user.email", "test@example.com"],
+            check=True,
+        )
+        (repo / "tracked.txt").write_text("base\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(repo), "add", "tracked.txt"], check=True)
+        subprocess.run(["git", "-C", str(repo), "commit", "-qm", "base"], check=True)
+
+        source = tmp / "source-worktree"
+        subprocess.run(
+            ["git", "-C", str(repo), "worktree", "add", "-qb", "fixture", str(source)],
+            check=True,
+        )
+        copied = tmp / "copied-worktree"
+        shutil.copytree(source, copied)
+        assert (copied / ".git").is_file()
+
+        index_path = Path(subprocess.check_output(
+            ["git", "-C", str(source), "rev-parse", "--git-path", "index"],
+            text=True,
+        ).strip())
+        before = {
+            "config": (repo / ".git" / "config").read_bytes(),
+            "index": index_path.read_bytes(),
+            "refs": subprocess.check_output(
+                ["git", "-C", str(repo), "show-ref"], text=True,
+            ),
+        }
+
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        invoked = tmp / "provider.invoked"
+        write_executable(
+            bin_dir / "claude",
+            f"""\
+            #!/usr/bin/env bash
+            touch {shlex.quote(str(invoked))}
+            git config fixture.provider-ran true
+            printf 'changed\\n' > tracked.txt
+            git add tracked.txt
+            git commit -qm provider
+            printf 'OK\\n'
+            """,
+        )
+        write_executable(
+            bin_dir / "provenant",
+            """\
+            #!/usr/bin/env bash
+            printf '%s\\n' '{"status":"ok","alias":"workhorse","resolved_model":"opus","model_family":"anthropic","endpoint_provider":"anthropic","identity_source":"test","requested_effort":"","effort":"","effort_source":"route-default","effort_capability_source":"test"}'
+            """,
+        )
+        out = tmp / "out.txt"
+        env = fabric_free_env()
+        env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
+        result = subprocess.run(
+            [
+                str(SCRIPT), "--intent", "ordinary", "--tool", "claude",
+                "--orchestrator-family", "openai", "--alias", "workhorse",
+                "--role", "worker", "--out", str(out), "--prompt", "inspect",
+            ],
+            cwd=copied,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+
+        assert result.returncode == 2
+        assert "copied linked worktree" in result.stderr
+        assert not invoked.exists()
+        assert {
+            "config": (repo / ".git" / "config").read_bytes(),
+            "index": index_path.read_bytes(),
+            "refs": subprocess.check_output(
+                ["git", "-C", str(repo), "show-ref"], text=True,
+            ),
+        } == before
+
+        write_executable(
+            bin_dir / "claude",
+            f"""\
+            #!/usr/bin/env bash
+            touch {shlex.quote(str(invoked))}
+            cat >/dev/null
+            printf 'OK\\n'
+            """,
+        )
+        valid_out = tmp / "valid-out.txt"
+        valid_result = subprocess.run(
+            [
+                str(SCRIPT), "--intent", "ordinary", "--tool", "claude",
+                "--orchestrator-family", "openai", "--alias", "workhorse",
+                "--role", "worker", "--out", str(valid_out), "--prompt", "inspect",
+            ],
+            cwd=source,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        assert valid_result.returncode == 0, valid_result.stderr
+        assert invoked.exists()
+
+
 def run_dispatch_with_stub(
     stub,
     role="reviewer",

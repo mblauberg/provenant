@@ -212,8 +212,28 @@ def _run_git(
 
 
 def owning_root(repo: Path) -> Path:
-    result = git(repo.expanduser().resolve(), "rev-parse", "--show-toplevel")
-    return Path(result.stdout.strip()).resolve()
+    requested = repo.expanduser().resolve()
+    result = git(requested, "rev-parse", "--show-toplevel")
+    root = Path(result.stdout.strip()).resolve()
+    if requested != root and not requested.is_relative_to(root):
+        raise PolicyError(
+            f"{requested} is outside the Git working tree it resolves to ({root}); "
+            "refusing copied checkout metadata"
+        )
+    dot_git = root / ".git"
+    if dot_git.is_file():
+        git_dir = Path(git(root, "rev-parse", "--absolute-git-dir").stdout.strip())
+        back_pointer = git_dir / "gitdir"
+        if back_pointer.is_file():
+            target = Path(back_pointer.read_text(errors="replace").strip())
+            if not target.is_absolute():
+                target = git_dir / target
+            if target.resolve() != dot_git.resolve():
+                raise PolicyError(
+                    f"{root} is a copied checkout whose Git metadata points to "
+                    f"{target.resolve()}"
+                )
+    return root
 
 
 def worktree_records(repo: Path) -> list[dict[str, object]]:
