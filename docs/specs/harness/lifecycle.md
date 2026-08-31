@@ -26,14 +26,12 @@ This specification is grounded in
 Research claims expire for decision purposes after 90 days or when a cited
 standard/provider interface materially changes, whichever occurs first.
 
-## Problem
+## Historical problem
 
-The repository has a mature agentic software loop but its top-level claim is
-broader. Non-code delivery has no shared executable contract, design approval
-can be unbound from a design artifact, continuous improvement is prose-only,
-and the skill-evidence policy treats requested local inspection like exported
-research telemetry. Security, observation, installation reconciliation and
-trigger evaluation also need stronger machine evidence.
+At adoption, the repository had a mature software loop but no shared executable
+contract for non-code delivery. Design approval could be unbound from its
+artifact, and security, observation, installation reconciliation and trigger
+evaluation lacked sufficient machine evidence.
 
 A large all-in-one workflow would increase context cost and couple every domain
 to Git. The target is a small stable kernel plus profiles and existing skills.
@@ -162,7 +160,7 @@ any base profile.
 
 `scope`, `prototype`, `tdd`, `diagnose`, `evaluate`, `code-review`, `release`,
 `session`, `work-map`, `orchestrate` and domain skills remain independently
-triggerable. The kernel (or a future `deliver` entrypoint) calls only what the
+triggerable. The `deliver` entrypoint calls only what the
 risk and profile require. A tiny answer does not create a run directory merely
 to satisfy ceremony.
 
