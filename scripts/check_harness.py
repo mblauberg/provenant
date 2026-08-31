@@ -47,6 +47,7 @@ def _markdown_anchors(path: Path) -> set[str]:
         if not match:
             continue
         heading = match.group(1)
+        heading = re.sub(r"(?<!\w)(_{1,3})(?=\S)(.+?\S)\1(?!\w)", r"\2", heading)
         plain = re.sub(r"<[^>]+>", "", heading).lower().strip()
         plain = re.sub(r"[^\w\- ]", "", plain)
         base = plain.replace(" ", "-")
@@ -78,7 +79,7 @@ def markdown_link_errors(paths: list[Path]) -> list[str]:
 
 
 def issue_form_errors(paths: list[Path]) -> list[str]:
-    """Validate the minimal structure GitHub requires from issue forms."""
+    """Validate required core issue-form shape, not every optional preview key."""
 
     errors: list[str] = []
     for path in paths:
@@ -119,7 +120,17 @@ def issue_form_errors(paths: list[Path]) -> list[str]:
             if not isinstance(attributes, dict):
                 errors.append(f"{display}: body item {index} requires attributes")
                 continue
+            validations = item.get("validations")
+            if validations is not None:
+                if not isinstance(validations, dict):
+                    errors.append(f"{display}: body item {index} requires mapping validations")
+                elif "required" in validations and not isinstance(validations["required"], bool):
+                    errors.append(
+                        f"{display}: body item {index} requires a boolean required validation"
+                    )
             if item_type == "markdown":
+                if "id" in item:
+                    errors.append(f"{display}: markdown item {index} must not have an id")
                 if not isinstance(attributes.get("value"), str) or not attributes["value"].strip():
                     errors.append(f"{display}: markdown item {index} requires a value")
             else:

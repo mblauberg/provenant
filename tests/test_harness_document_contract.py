@@ -72,6 +72,15 @@ def test_markdown_link_check_allocates_collision_safe_duplicate_slugs(tmp_path):
     assert _checker().markdown_link_errors([source]) == []
 
 
+def test_markdown_link_check_removes_underscore_emphasis_from_slugs(tmp_path):
+    target = tmp_path / "target.md"
+    source = tmp_path / "source.md"
+    target.write_text("# A _helpful_ section\n")
+    source.write_text("[heading](target.md#a-helpful-section)\n")
+
+    assert _checker().markdown_link_errors([source]) == []
+
+
 def test_issue_form_check_rejects_a_body_item_without_attributes(tmp_path):
     form = tmp_path / "work-item.yml"
     form.write_text(
@@ -216,4 +225,44 @@ def test_issue_form_check_rejects_unknown_top_level_and_body_keys(tmp_path):
     assert _checker().issue_form_errors([form]) == [
         f"{form}: unsupported top-level keys: unknown",
         f"{form}: body item 1 has unsupported keys: unknown",
+    ]
+
+
+def test_issue_form_check_rejects_an_id_on_markdown(tmp_path):
+    form = tmp_path / "work-item.yml"
+    form.write_text(
+        "name: Work item\n"
+        "description: A bounded change.\n"
+        "body:\n"
+        "  - type: markdown\n"
+        "    id: context\n"
+        "    attributes:\n"
+        "      value: Context.\n"
+        "  - type: input\n"
+        "    id: outcome\n"
+        "    attributes:\n"
+        "      label: Outcome\n"
+    )
+
+    assert _checker().issue_form_errors([form]) == [
+        f"{form}: markdown item 1 must not have an id"
+    ]
+
+
+def test_issue_form_check_rejects_non_boolean_required_validation(tmp_path):
+    form = tmp_path / "work-item.yml"
+    form.write_text(
+        "name: Work item\n"
+        "description: A bounded change.\n"
+        "body:\n"
+        "  - type: input\n"
+        "    id: outcome\n"
+        "    attributes:\n"
+        "      label: Outcome\n"
+        "    validations:\n"
+        "      required: nope\n"
+    )
+
+    assert _checker().issue_form_errors([form]) == [
+        f"{form}: body item 1 requires a boolean required validation"
     ]
