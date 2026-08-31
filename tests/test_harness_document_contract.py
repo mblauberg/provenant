@@ -81,6 +81,33 @@ def test_markdown_link_check_removes_underscore_emphasis_from_slugs(tmp_path):
     assert _checker().markdown_link_errors([source]) == []
 
 
+def test_markdown_link_check_preserves_underscores_inside_code_spans(tmp_path):
+    target = tmp_path / "target.md"
+    source = tmp_path / "source.md"
+    target.write_text("# The `__init__` hook\n")
+    source.write_text("[heading](target.md#the-__init__-hook)\n")
+
+    assert _checker().markdown_link_errors([source]) == []
+
+
+def test_markdown_link_check_handles_single_character_emphasis(tmp_path):
+    target = tmp_path / "target.md"
+    source = tmp_path / "source.md"
+    target.write_text("# An _x_ value\n")
+    source.write_text("[heading](target.md#an-x-value)\n")
+
+    assert _checker().markdown_link_errors([source]) == []
+
+
+def test_markdown_link_check_preserves_intraword_underscores(tmp_path):
+    target = tmp_path / "target.md"
+    source = tmp_path / "source.md"
+    target.write_text("# A snake_case value\n")
+    source.write_text("[heading](target.md#a-snake_case-value)\n")
+
+    assert _checker().markdown_link_errors([source]) == []
+
+
 def test_issue_form_check_rejects_a_body_item_without_attributes(tmp_path):
     form = tmp_path / "work-item.yml"
     form.write_text(

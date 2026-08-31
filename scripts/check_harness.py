@@ -47,7 +47,15 @@ def _markdown_anchors(path: Path) -> set[str]:
         if not match:
             continue
         heading = match.group(1)
-        heading = re.sub(r"(?<!\w)(_{1,3})(?=\S)(.+?\S)\1(?!\w)", r"\2", heading)
+        parts = re.split(r"(`+[^`]*`+)", heading)
+        for index, part in enumerate(parts):
+            if part.startswith("`"):
+                parts[index] = part.strip("`")
+            else:
+                parts[index] = re.sub(
+                    r"(?<!\w)(_{1,3})(\S(?:.*?\S)?)\1(?!\w)", r"\2", part
+                )
+        heading = "".join(parts)
         plain = re.sub(r"<[^>]+>", "", heading).lower().strip()
         plain = re.sub(r"[^\w\- ]", "", plain)
         base = plain.replace(" ", "-")
