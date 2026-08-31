@@ -65,12 +65,13 @@ A live session retains the prior constitution until restart.
 Documentation claims sit in three tiers, and the third is deliberate:
 
 1. **Source-owned.** Marked regions in the README and
-   `docs/ARCHITECTURE.md` remain maintained documentation, with their source
-   constants and prose reviewed together. Do not hand-edit generated-looking
-   content without checking the corresponding source.
+   `docs/ARCHITECTURE.md` remain maintained documentation.
+   `tests/test_projection.py` binds the architecture regions to
+   `config/risk-policy.json` and the delivery lifecycle contract. The README
+   skill count is machine-checked; its catalogue prose is review-owned.
 2. **Review-checked.** Runtime schema and migration structure is owned by code
    and tests. Specification prose, fenced commands, placeholders, relative
-   links and document projections remain review-owned.
+   links and unbound projections remain review-owned.
    `HARNESS.md` stays compact because it is an always-loaded constitution.
 3. **Unchecked prose.** Design intent and rationale carry no machine gate,
    on purpose; review keeps them honest, not tooling.
@@ -126,9 +127,9 @@ only licensed, evidence-backed mechanisms into the nearest owner; create a skill
 only when its trigger, authority, artifact and gate remain distinct.
 
 Nothing outside a skill may name a file under that skill's `references/`
-directory. Cross-skill references use the skill name only. The harness contract
-test enforces this for the ambient `AGENTS.md` and `HARNESS.md`; elsewhere it is
-a review rule. Licence attribution in `THIRD_PARTY_NOTICES.md` is the deliberate
+directory. Cross-skill references use the skill name only. This is a review
+rule; no contract test currently scans it. Licence attribution in
+`THIRD_PARTY_NOTICES.md` is the deliberate
 exception, because an attribution must name the file it covers.
 
 `natural-writing` is the writing hub and single owner of the shared prose
@@ -166,17 +167,10 @@ validator. A new domain should compose an existing base profile and a domain
 skill first. Add a base profile only when its artifacts, deterministic gates,
 judgement gates and release meaning are materially distinct.
 
-Trigger fixtures and contract tests remain mandatory. Under
-[ADR 0014](docs/adr/0014-comparative-skill-evals-on-suspicion.md), frozen
-held-out comparative evals are conditional. Run them when a routing regression
-is suspected or observed in use; a change rewrites trigger-bearing description
-text across several skills, at the maintainer's discretion; or the harness is
-being prepared for publication or another operator. When run, use the held-out
-portfolio and lifecycle dataset with repeated trials, recording raw numerator
-and denominator, model and harness versions. Routine skill maintenance loses a
-heavyweight gate; the operator accepts detection-in-use as the
-routing-regression backstop. Publication to other users re-arms the full
-requirement; this ADR must be revisited in any public-release checklist.
+Trigger fixtures and contract tests remain mandatory. The ADR 0014 eval
+triggers under **Change a skill** apply unchanged. When they fire here, use the
+held-out portfolio and lifecycle dataset with repeated trials, recording raw
+numerator and denominator, model and harness versions.
 
 ## Public and third-party hygiene
 
@@ -199,6 +193,7 @@ Run the checkout gates, or require exact-head `ci-status`:
 ```sh
 scripts/check-harness
 npm run check
+npm run test:package-install --workspace @local/fabric
 node runtime/fabric/mcp-smoke.mjs
 npm audit --workspace=@local/fabric --omit=dev --audit-level=high
 scripts/static-security-check.py

@@ -51,6 +51,7 @@ def test_issue_native_work_map_and_state_rules_are_explicit():
 
     assert "parent tracker issue is the work map" in work_map.lower()
     assert "link-only" in work_map.lower()
+    assert "never delete" in work_map.lower()
     assert "no default rolling project state" in session.lower()
     assert "run-local" in autopilot.lower()
     assert "state.md" in autopilot.lower()
@@ -67,6 +68,7 @@ def test_issue_native_user_gates_do_not_fork_into_a_markdown_register():
 
     assert "user gates | declared scope/story owner" in scope
     assert "never create in issue-tracker mode" in engineering_docs
+    assert "`setup-repo` write authority" in engineering_docs
 
 
 def test_issue_native_decision_and_spec_reconciliation_are_recorded():

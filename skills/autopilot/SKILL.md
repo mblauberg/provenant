@@ -9,8 +9,7 @@ A thin autonomous **conductor** for large missions: autonomous scoping,
 self-drive, durable cross-session state/recovery, and a hard user `STOP`
 gate. It owns no lifecycle machinery itself; it delegates every bounded wave
 to `orchestrate` and every decision/software change to `implement`/`deliver`,
-then records the durable pointers. See Entry gate below for when to use this
-tier instead of `orchestrate`, `implement` or `diagnose`.
+then records the durable pointers.
 
 It is **higher-authority** than `orchestrate`'s pre-scoped
 autonomous-implementation mode, which stops at a user PR gate; autopilot
@@ -73,7 +72,6 @@ closure protocol.
 
 ## References
 
-Load one relevant reference: [state-contract.md](references/state-contract.md)
-(the file set + `.agent-run/<mission-id>/` location),
+Load one relevant reference: [state-contract.md](references/state-contract.md),
 [cross-family-review.md](references/cross-family-review.md), or the
 loop/recovery/Codex files above.

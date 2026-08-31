@@ -1,6 +1,6 @@
 ---
 name: session
-description: "Use for start, checkpoint, handoff, compaction, or end-of-session continuity on substantial work. Not for a multi-session route map or read-only write authority; use work-map for effort state."
+description: "Use for start, checkpoint, handoff, compaction, or end-of-session continuity on substantial work. Not for a multi-session route map; use work-map for effort state."
 ---
 
 # Session

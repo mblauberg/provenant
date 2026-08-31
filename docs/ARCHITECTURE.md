@@ -266,10 +266,6 @@ state and synthesis. On substantial work it combines:
 3. the other primary family for independent review;
 4. an available distinct family for dissent and blind-spot discovery.
 
-The targeted and other-primary legs load-bear from `substantial` up. Terminal
-work increases targeted and adversarial pressure; distinct-family availability
-and any skip reason are recorded.
-
 Distinct-family failure never replaces the required other-primary leg. The other
 primary is required for the substantial review contract, and there is no
 degradation note that buys past it: a run may execute without that leg, but
@@ -331,9 +327,9 @@ identity to authorship or decision custody. Validator success therefore proves
 declared topology and family separation, not actor-level independence. Policy
 still disqualifies the chair and authoring subagents from certifying their own
 work. Blue marks exactly those participants, while independent targeted
-reviewers remain eligible. Herdr sits outside the decision path entirely. Terminal work adds stronger
-targeted and adversarial pressure; a distinct-family skip is recorded when it is
-not warranted.
+reviewers remain eligible. Herdr sits outside the decision path entirely.
+Terminal work adds stronger targeted and adversarial pressure; every skipped or
+unavailable distinct-family leg is recorded.
 
 Paired-primary mode lets Claude and Codex rotate stage ownership, coordinated
 through Fabric, which carries the messages, shared tasks and activity log
@@ -355,10 +351,8 @@ The router separates policy from execution:
 `flagship`, `workhorse` and `scout` are capability aliases, not permanent jobs
 for a vendor. Opus is the default Claude flagship. The catalogue may configure
 one bounded override occupant per risk tier. Each configured occupant is
-reserved for that tier's roles, alias and effort ceiling; Fable currently
-occupies both configured tiers. GPT-5.6 supports
-`ultra` where runtime discovery proves it. Model catalogues are dated caches,
-not assertions about current availability.
+reserved for that tier's roles, alias and effort ceiling. Runtime discovery,
+not this document, determines effort support and current availability.
 Lifecycle risk stays in delivery and dispatch receipts. Selecting a configured
 override occupant requires the separate explicit model-override input; ordinary
 risk metadata cannot change a route.
@@ -395,8 +389,7 @@ location and lifecycle are defined in [worktrees.md](worktrees.md).
 ## Context and durable memory
 
 Project knowledge must remain visible to every family. Durable facts therefore
-live in project-owned state files, specifications, ADRs ([adr/](adr/)),
-runbooks and context digests.
+live in specifications, ADRs ([adr/](adr/)), runbooks and context digests.
 Private harness memory is limited to cross-project user preferences. For this
 repository, the `Repository process` declaration names the scope/story and
 workflow-state owners: GitHub issues own the current owner, dependencies and
@@ -464,11 +457,11 @@ thereafter ([ADR 0019](adr/0019-installed-file-class-ownership.md)).
 path-free, committable desired state at `config/installation.json`: product
 name, version and install mode, `fused` when the instance root and product root
 are one tree. It seeds `AGENTS.md`, `config/model-preferences.json` and
-`config/model-routing.json` only when they are absent. Neither is ever
-rewritten by a later install; Git is the drift detector, so there is no
-hash-drift check and no merge. The installation receipt stays the opposite
-artifact: absolute target roots and digests for one machine, ignored and never
-committed. The same class holds `.agent-fabric/product-root.json`, the pointer
+`config/model-routing.json` only when they are absent. Neither the desired state
+nor a seeded file is rewritten by a later install; Git is the drift detector,
+so there is no hash-drift check and no merge. The installation receipt stays the
+opposite artifact: absolute target roots and digests for one machine, ignored
+and never committed. The same class holds `.agent-fabric/product-root.json`, the pointer
 to this machine's product checkout, rewritten on every install so that
 committed instance state never carries an absolute machine path and relocating
 the product is always a re-run of the installer. Split-layout startup binds the

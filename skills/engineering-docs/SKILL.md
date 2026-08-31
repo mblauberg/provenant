@@ -16,7 +16,7 @@ projection. Link-only files are unavailable or cross-tracker fallbacks.
 
 ## Default homes
 
-Use this table only with docs-setup write authority; advisory mode proposes
+Use this table only with `setup-repo` write authority; advisory mode proposes
 paths without creating them.
 
 | Type | Home | Convention |

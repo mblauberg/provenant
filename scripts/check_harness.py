@@ -12,6 +12,86 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 DESCRIPTION_LIMIT_CHARS = 1_024
+MARKDOWN_LINK_PATTERN = re.compile(r"\[[^]]+\]\(([^)]+)\)")
+ISSUE_FORM_TYPES = {"checkboxes", "dropdown", "input", "markdown", "textarea"}
+
+
+def _display_path(path: Path) -> Path:
+    try:
+        return path.relative_to(ROOT)
+    except ValueError:
+        return path
+
+
+def _markdown_anchors(path: Path) -> set[str]:
+    anchors: set[str] = set()
+    for heading in re.findall(r"^#{1,6}\s+(.+?)\s*$", path.read_text(), re.MULTILINE):
+        plain = re.sub(r"<[^>]+>", "", heading).lower().strip()
+        plain = re.sub(r"[^\w\- ]", "", plain)
+        anchors.add(re.sub(r"\s+", "-", plain))
+    return anchors
+
+
+def markdown_link_errors(paths: list[Path]) -> list[str]:
+    """Validate local Markdown file and fragment targets."""
+
+    errors: list[str] = []
+    for source in paths:
+        for target in MARKDOWN_LINK_PATTERN.findall(source.read_text()):
+            if target.startswith(("http://", "https://", "#", "/")):
+                continue
+            relative, separator, fragment = target.partition("#")
+            destination = source.parent / relative
+            if relative and not destination.exists():
+                errors.append(f"{_display_path(source)}: broken link {target}")
+            elif separator and fragment and destination.suffix == ".md":
+                if fragment not in _markdown_anchors(destination):
+                    errors.append(f"{_display_path(source)}: broken link {target}")
+    return errors
+
+
+def issue_form_errors(paths: list[Path]) -> list[str]:
+    """Validate the minimal structure GitHub requires from issue forms."""
+
+    errors: list[str] = []
+    for path in paths:
+        display = _display_path(path)
+        try:
+            form = yaml.safe_load(path.read_text())
+        except yaml.YAMLError as error:
+            errors.append(f"{display}: invalid YAML: {error}")
+            continue
+        if not isinstance(form, dict):
+            errors.append(f"{display}: issue form must be a mapping")
+            continue
+        for field in ("name", "description"):
+            if not isinstance(form.get(field), str) or not form[field].strip():
+                errors.append(f"{display}: {field} is required")
+        body = form.get("body")
+        if not isinstance(body, list) or not body:
+            errors.append(f"{display}: body must be a non-empty list")
+            continue
+        for index, item in enumerate(body, start=1):
+            if not isinstance(item, dict) or item.get("type") not in ISSUE_FORM_TYPES:
+                errors.append(f"{display}: body item {index} has unsupported type")
+                continue
+            attributes = item.get("attributes")
+            if not isinstance(attributes, dict):
+                errors.append(f"{display}: body item {index} requires attributes")
+                continue
+            if item["type"] == "markdown":
+                if not isinstance(attributes.get("value"), str) or not attributes["value"].strip():
+                    errors.append(f"{display}: markdown item {index} requires a value")
+            else:
+                if not isinstance(item.get("id"), str) or not item["id"].strip():
+                    errors.append(f"{display}: body item {index} requires an id")
+                if not isinstance(attributes.get("label"), str) or not attributes["label"].strip():
+                    errors.append(f"{display}: body item {index} requires a label")
+            if item["type"] in {"checkboxes", "dropdown"}:
+                options = attributes.get("options")
+                if not isinstance(options, list) or not options:
+                    errors.append(f"{display}: body item {index} requires options")
+    return errors
 
 
 def load_route_cases(skill_dir: Path, valid_skills: set[str]) -> list[dict]:
@@ -98,7 +178,6 @@ def load_route_cases(skill_dir: Path, valid_skills: set[str]) -> list[dict]:
 
 def skill_errors() -> list[str]:
     errors: list[str] = []
-    link_pattern = re.compile(r"\[[^]]+\]\(([^)]+)\)")
     skill_files = sorted((ROOT / "skills").glob("*/SKILL.md"))
     valid_skills = {skill.parent.name for skill in skill_files}
     for skill in skill_files:
@@ -131,7 +210,7 @@ def skill_errors() -> list[str]:
             load_route_cases(skill.parent, valid_skills)
         except ValueError as error:
             errors.append(str(error))
-        for target in link_pattern.findall(text):
+        for target in MARKDOWN_LINK_PATTERN.findall(text):
             if target.startswith(("http://", "https://", "#", "/")):
                 continue
             relative = target.split("#", 1)[0]
@@ -171,12 +250,21 @@ def openai_sidecar_errors() -> list[str]:
 
 
 def main() -> int:
-    errors = skill_errors() + openai_sidecar_errors()
+    documentation = sorted((ROOT / "docs").rglob("*.md"))
+    issue_forms = sorted((ROOT / ".github" / "ISSUE_TEMPLATE").glob("*.yml"))
+    issue_forms += sorted((ROOT / "skills" / "setup-repo" / "templates" / "ISSUE_TEMPLATE").glob("*.yml"))
+    issue_forms = [path for path in issue_forms if path.name != "config.yml"]
+    errors = (
+        skill_errors()
+        + markdown_link_errors(documentation)
+        + issue_form_errors(issue_forms)
+        + openai_sidecar_errors()
+    )
     if errors:
         for error in errors:
             print(f"FAIL: {error}", file=sys.stderr)
         return 1
-    print("PASS: frontmatter, fixtures, links and sidecars clean")
+    print("PASS: frontmatter, fixtures, links, issue forms and sidecars clean")
     return 0
 
 

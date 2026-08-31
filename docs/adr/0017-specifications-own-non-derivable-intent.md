@@ -14,10 +14,10 @@ change scope
 
 ## Context
 
-The specification corpus reached 34 documents and 18,102 lines. Roughly 4,701 of
-those lines are SQL DDL spread across nine files, describing the same schema that
-`runtime/agent-fabric/migrations/0001-current-baseline.sql` already defines in
-10,797 authoritative lines.
+Before ADR 0020, the specification corpus reached 34 documents and 18,102
+lines. Roughly 4,701 lines were SQL DDL spread across nine files, describing
+the schema then defined by the 10,797-line
+`runtime/agent-fabric/migrations/0001-current-baseline.sql`.
 
 Nothing binds the two. `database-baseline.mjs` reads, executes and hashes only
 the migration; `migrations.ts` rejects a hash mismatch against the migration; no
@@ -36,10 +36,11 @@ None of this is caught, because nothing compares the two artefacts.
 This is the failure ADR 0004 predicted. A domain grew a second source of truth
 beside its natural owner, and no drift check stood between them.
 
-Two existing decisions already cover most of the remedy:
+Two existing decisions covered most of the remedy:
 
 - ADR 0004 gives each domain one truth owner that generates or validates its own
-  projections. The migration is the schema's natural owner.
+  projections. The migration was the legacy schema's natural owner; the current
+  owner is `runtime/fabric/schema.sql`.
 - ADR 0011 requires specifications to own durable requirements and normative acceptance criteria
   "without reporting implementation or verification state". Present-indicative
   delivery narration in the corpus already violates it.

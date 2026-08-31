@@ -25,7 +25,7 @@ historical evidence; the current Fabric owner is
 | [0006](0006-defer-backlog-contract.md) | Defer a canonical backlog contract | Superseded by ADR 0011 |
 | [0007](0007-defer-universal-retention-and-deletion.md) | Defer universal retention classes and typed deletion | Accepted (amended 2026-07-15) |
 | [0008](0008-review-pressure-risk-and-oracle-adjusted.md) | Risk/oracle-adjusted certifying review | Accepted; unimplemented follow-up superseded 2026-07-15; amended 2026-07-16; addendum 2026-07-22 |
-| [0009](0009-standalone-semantic-specifications.md) | Standalone semantic specifications | Accepted (amended 2026-07-28 and 2026-08-31 by ADR 0017) |
+| [0009](0009-standalone-semantic-specifications.md) | Standalone semantic specifications | Accepted (amended 2026-07-28 by ADR 0017; 2026-08-31 issue-native amendment noted) |
 | [0010](0010-lifecycle-receipt-authority-distinct-trust-boundary.md) | The lifecycle receipt authority is a trust boundary distinct from provider authority compilation | Accepted; daemon-era implementation historical after ADR 0020; vocabulary boundary retained |
 | [0011](0011-github-owns-work-state.md) | GitHub owns current work state | Accepted (user amendment 2026-08-31 via issue 711) |
 | [0012](0012-defer-bun-node-pinned-runtime.md) | Defer Bun; Node stays the pinned runtime family | Accepted; daemon analysis historical after ADR 0020 |

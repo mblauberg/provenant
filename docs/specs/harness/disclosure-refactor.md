@@ -25,7 +25,7 @@ refactor enforces existing doctrine.
 |---|---|
 | D1 | Two-file ambient layer, both stripped. `AGENTS.md` stays minimal and `HARNESS.md` remains the compact constitution for topology, lifecycle, user gates, risk, Git, routing and memory. The former 35/60-line migration targets are not current gates. |
 | D2 | Strip destinations: compaction/checkpoint cadence → `session`; routing depth/degradation → `orchestrate`; receipt schema detail → `deliver`. Each already owns a landing reference. |
-| D3 | Cross-skill reference rule: nothing outside skill X names a file under `skills/X/references/`. Cross-references use the **skill name only** (e.g. "`implement` skill"), not paths. Enforced by a contract test. Writing-family links to `natural-writing` internals are rewritten to skill-name references; the hub keeps owning shared prose doctrine. |
+| D3 | Cross-skill reference rule: nothing outside skill X names a file under `skills/X/references/`. Cross-references use the **skill name only** (e.g. "`implement` skill"), not paths. Writing-family links to `natural-writing` internals are rewritten to skill-name references; the hub keeps owning shared prose doctrine. |
 | D4 | No repo-relative paths in `AGENTS.md`/`HARNESS.md`. Repo-local process pointers move to repo-scoped surfaces or become skill-name references. Runnable commands are PATH-resolved (`provenant …`), never location-bearing; Fabric identity is derived from the working directory and needs no workspace-trust command. |
 | D5 | Orchestrate stays one skill; per-file verdicts in the table below. No new catalogue entries (see AC-S5 baseline). |
 | D6 | MAINTAINING.md: frozen held-out eval comparisons downgrade to on-suspicion/pre-publication; trigger fixtures + contract tests stay mandatory. Recorded as ADR-0014. |
@@ -104,10 +104,10 @@ Current gates and retained migration conditions:
   `skills/<x>/references/` paths anywhere outside the owning skill;
   cross-references use skill names. The D12 resolver line exists only in
   `HARNESS.md`; PATH-resolved `provenant` invocations are not location-bearing.
-- AC-S2: reference-rule contract test passes. Scan scope (in-tree only):
-  skills, ambient files, `scripts/`, `workflows/` (post-D14), live
-  tests/fixtures (updated in the same change). Declared allowlist:
-  `docs/archive/`, `docs/research/`, `.agent-run/`, git history.
+- AC-S2 was a migration review condition over skills, ambient files, `scripts/`,
+  `workflows/` and live tests/fixtures. Its declared exclusions were
+  `docs/archive/`, `docs/research/`, `.agent-run/` and Git history. No permanent
+  full-tree checker enforces it.
 - AC-S3/AC-S4 were migration acceptance conditions. The retained fixture feeds
   selected owner-specific tests; it is not a permanent full-tree checker.
 - AC-S5: catalogue within the approved cap, reviewed against the source
