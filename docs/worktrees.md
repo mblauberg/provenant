@@ -95,18 +95,30 @@ test "$(git -C <primary-root> symbolic-ref --quiet --short HEAD)" = "<integratio
 # 2. Sync the integration branch.
 git -C <primary-root> fetch origin
 git -C <primary-root> merge --ff-only origin/<integration-branch>
+```
 
-# 3. Prove the merge. Use the gate that matches how the merge landed.
-#    Merge commit -- ancestry holds. This exiting 0 is the gate.
+Then choose the proof that matches how the pull request merged. For a merge
+commit, ancestry is the gate:
+
+```sh
 git -C <primary-root> merge-base --is-ancestor <merged-branch> <integration-branch>
-#    Squash merge -- ancestry does NOT hold. Prove content instead:
-gh pr view <n> --json state,headRefName,baseRefName   # MERGED, and the refs in front of you
-git -C <primary-root> diff <integration-branch> <merged-branch> -- <paths the branch touched>
-#    Empty output is the gate.
+```
 
-# 4. Prune only that branch's artefacts.
+For a squash merge, ancestry cannot hold. The pull request must report
+`MERGED` with the expected refs and the scoped content diff must be empty:
+
+```sh
+gh pr view <n> --json state,headRefName,baseRefName
+git -C <primary-root> diff <integration-branch> <merged-branch> -- <paths the branch touched>
+```
+
+Only after the applicable proof passes, prune that branch's artefacts. Use
+`-d` after a merge commit, or `-D` only after the squash content proof:
+
+```sh
 scripts/worktree remove <name> --repo <primary-root> --human-authorised
-git -C <primary-root> branch -d <merged-branch>    # -D after a squash merge; see below
+git -C <primary-root> branch -d <merged-branch>  # merge commit
+# git -C <primary-root> branch -D <merged-branch>  # squash merge only
 git -C <primary-root> worktree prune
 git -C <primary-root> remote prune origin
 ```
@@ -125,8 +137,8 @@ Constraints that keep this narrow:
 
   A **squash merge produces a new commit with no ancestry link**, so that gate
   refuses a branch that is fully merged. An agent following it either stalls or
-  reaches for the force-delete the policy exists to prevent. Where the repository
-  squash-merges — this one does — prove *content* instead: the pull request
+  reaches for the force-delete the policy exists to prevent. When the pull
+  request was squash-merged, prove *content* instead: the pull request
   reports `MERGED`, and
 
   ```sh
