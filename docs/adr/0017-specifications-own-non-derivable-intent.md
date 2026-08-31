@@ -64,8 +64,8 @@ Ownership across the tree is:
 |---|---|
 | What exists | code, schemas, registries, `0001-current-baseline.sql` |
 | That it behaves | the behavioural test suites |
-| What is delivered, and by whom | the declared workflow-state owner |
-| What change scope and story are current | the repository's declared canonical home |
+| What change scope, story and owner are current | the declared scope/story owner |
+| What workflow phase is current | the declared workflow-state owner |
 | Why the architecture is this way | ADRs |
 | What was required, and what must never happen | specifications |
 

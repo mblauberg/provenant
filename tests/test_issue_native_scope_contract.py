@@ -105,6 +105,8 @@ def test_issue_native_decision_and_spec_reconciliation_are_recorded():
     assert "sub_issues" in runbook
     assert "sub_issue_id" in runbook
     assert "CHILD_NUMBER --jq .id" in runbook
+    assert "requires explicit external-write authority" in runbook
+    assert "do not call `gh`" in runbook
     assert "not the relationship" in runbook
     assert "Do not mirror children in a checklist" in runbook
     live_form = read(".github/ISSUE_TEMPLATE/work-item.yml")

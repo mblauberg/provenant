@@ -42,6 +42,9 @@ The parent issue owns change scope, story and remaining gates. Native child
 issues own independently deliverable slices. Create or link a child through
 GitHub's `sub_issues` API using the numeric issue id, not a checklist or title:
 
+The POST requires explicit external-write authority. Without it, return the
+proposed parent/child relation and do not call `gh`.
+
 ```sh
 child_id=$(gh api repos/OWNER/REPO/issues/CHILD_NUMBER --jq .id)
 gh api --method POST repos/OWNER/REPO/issues/PARENT_NUMBER/sub_issues \
