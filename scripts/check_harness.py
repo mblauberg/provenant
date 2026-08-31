@@ -26,10 +26,26 @@ def _display_path(path: Path) -> Path:
 def _markdown_anchors(path: Path) -> set[str]:
     anchors: set[str] = set()
     occurrences: dict[str, int] = {}
-    for heading in re.findall(r"^#{1,6}\s+(.+?)\s*$", path.read_text(), re.MULTILINE):
+    fence_character = ""
+    fence_length = 0
+    for line in path.read_text().splitlines():
+        fence = re.match(r"^\s{0,3}(`{3,}|~{3,})", line)
+        if fence:
+            marker = fence.group(1)
+            if not fence_character:
+                fence_character, fence_length = marker[0], len(marker)
+            elif marker[0] == fence_character and len(marker) >= fence_length:
+                fence_character, fence_length = "", 0
+            continue
+        if fence_character:
+            continue
+        match = re.match(r"^#{1,6}\s+(.+?)\s*$", line)
+        if not match:
+            continue
+        heading = match.group(1)
         plain = re.sub(r"<[^>]+>", "", heading).lower().strip()
         plain = re.sub(r"[^\w\- ]", "", plain)
-        base = re.sub(r"\s+", "-", plain)
+        base = plain.replace(" ", "-")
         duplicate = occurrences.get(base, 0)
         anchors.add(base if duplicate == 0 else f"{base}-{duplicate}")
         occurrences[base] = duplicate + 1

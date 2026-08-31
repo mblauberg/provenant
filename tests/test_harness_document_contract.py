@@ -43,6 +43,26 @@ def test_markdown_link_check_accepts_a_duplicate_heading_suffix(tmp_path):
     assert _checker().markdown_link_errors([source]) == []
 
 
+def test_markdown_link_check_preserves_each_space_in_github_anchors(tmp_path):
+    target = tmp_path / "target.md"
+    source = tmp_path / "source.md"
+    target.write_text("# Two  spaces\n")
+    source.write_text("[heading](target.md#two--spaces)\n")
+
+    assert _checker().markdown_link_errors([source]) == []
+
+
+def test_markdown_link_check_ignores_headings_inside_fences(tmp_path):
+    target = tmp_path / "target.md"
+    source = tmp_path / "source.md"
+    target.write_text("```text\n# Not a heading\n```\n")
+    source.write_text("[false heading](target.md#not-a-heading)\n")
+
+    assert _checker().markdown_link_errors([source]) == [
+        f"{source}: broken link target.md#not-a-heading"
+    ]
+
+
 def test_issue_form_check_rejects_a_body_item_without_attributes(tmp_path):
     form = tmp_path / "work-item.yml"
     form.write_text(

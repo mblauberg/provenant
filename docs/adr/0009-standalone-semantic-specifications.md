@@ -35,7 +35,7 @@ docs/specs/
   harness/<subject>.md
 ```
 
-[`docs/specs/README.md`](../specs/README.md) is the live inventory. Directories
+[`docs/specs/README.md`](../specs/README.md) is the discovery index. Directories
 retired with their runtimes are historical, not current specification homes.
 
 Each subject file is an independent normative specification. Directories and
