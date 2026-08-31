@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import re
 import selectors
+import stat
 import subprocess
 import sys
 from typing import Sequence
@@ -221,11 +222,23 @@ def owning_root(repo: Path) -> Path:
             "refusing copied checkout metadata"
         )
     dot_git = root / ".git"
+    if dot_git.is_symlink():
+        raise PolicyError(f"{root} has symlinked .git metadata")
     if dot_git.is_file():
-        git_dir = Path(git(root, "rev-parse", "--absolute-git-dir").stdout.strip())
-        back_pointer = git_dir / "gitdir"
-        if back_pointer.is_file():
-            target = Path(back_pointer.read_text(errors="replace").strip())
+        git_dir = Path(git(root, "rev-parse", "--absolute-git-dir").stdout.strip()).resolve()
+        common_dir = Path(git(
+            root, "rev-parse", "--path-format=absolute", "--git-common-dir",
+        ).stdout.strip()).resolve()
+        if git_dir != common_dir:
+            back_pointer = git_dir / "gitdir"
+            try:
+                if not stat.S_ISREG(back_pointer.lstat().st_mode):
+                    raise OSError("not a regular file")
+                target = Path(back_pointer.read_text(errors="replace").strip())
+            except OSError as exc:
+                raise PolicyError(
+                    f"{root} has invalid linked-worktree back-pointer metadata"
+                ) from exc
             if not target.is_absolute():
                 target = git_dir / target
             if target.resolve() != dot_git.resolve():

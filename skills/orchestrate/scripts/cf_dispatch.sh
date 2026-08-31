@@ -170,12 +170,34 @@ if resolved_git_root="$(git rev-parse --show-toplevel 2>/dev/null)"; then
       exit 2
       ;;
   esac
+  if [ -L "$resolved_git_root/.git" ]; then
+    echo "refusing dispatch with symlinked .git metadata" >&2
+    exit 2
+  fi
   if [ -f "$resolved_git_root/.git" ]; then
     resolved_git_dir="$(git rev-parse --absolute-git-dir 2>/dev/null)" || {
       echo "cannot resolve dispatch Git directory" >&2
       exit 2
     }
-    if [ -f "$resolved_git_dir/gitdir" ]; then
+    resolved_common_git_dir="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || {
+      echo "cannot resolve dispatch common Git directory" >&2
+      exit 2
+    }
+    resolved_git_dir="$(CDPATH= cd -- "$resolved_git_dir" 2>/dev/null && pwd -P)" || {
+      echo "cannot canonicalise dispatch Git directory" >&2
+      exit 2
+    }
+    resolved_common_git_dir="$(CDPATH= cd -- "$resolved_common_git_dir" 2>/dev/null && pwd -P)" || {
+      echo "cannot canonicalise dispatch common Git directory" >&2
+      exit 2
+    }
+    if [ "$resolved_git_dir" != "$resolved_common_git_dir" ]; then
+      if [ ! -f "$resolved_git_dir/gitdir" ] \
+        || [ -L "$resolved_git_dir/gitdir" ] \
+        || [ ! -r "$resolved_git_dir/gitdir" ]; then
+        echo "refusing dispatch with invalid linked-worktree back-pointer metadata" >&2
+        exit 2
+      fi
       IFS= read -r linked_git_file <"$resolved_git_dir/gitdir" || {
         echo "cannot read linked-worktree back-pointer" >&2
         exit 2

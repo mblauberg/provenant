@@ -367,6 +367,70 @@ def test_dispatch_rejects_a_copied_linked_worktree_before_provider_launch():
             ),
         } == before
 
+        copied_git = copied / ".git"
+        copied_git_content = copied_git.read_text(encoding="utf-8")
+        copied_git.unlink()
+        copied_git.symlink_to(source / ".git")
+        symlink_out = tmp / "symlink-out.txt"
+        symlink_result = subprocess.run(
+            [
+                str(SCRIPT), "--intent", "ordinary", "--tool", "claude",
+                "--orchestrator-family", "openai", "--alias", "workhorse",
+                "--role", "worker", "--out", str(symlink_out),
+                "--prompt", "inspect",
+            ],
+            cwd=copied,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        assert symlink_result.returncode == 2
+        assert "symlinked .git" in symlink_result.stderr
+        assert not invoked.exists()
+        assert {
+            "config": (repo / ".git" / "config").read_bytes(),
+            "index": index_path.read_bytes(),
+            "refs": subprocess.check_output(
+                ["git", "-C", str(repo), "show-ref"], text=True,
+            ),
+        } == before
+        copied_git.unlink()
+        copied_git.write_text(copied_git_content, encoding="utf-8")
+
+        git_dir = Path(subprocess.check_output(
+            ["git", "-C", str(source), "rev-parse", "--absolute-git-dir"],
+            text=True,
+        ).strip())
+        back_pointer = git_dir / "gitdir"
+        back_pointer_content = back_pointer.read_text(encoding="utf-8")
+        back_pointer.unlink()
+        malformed_out = tmp / "malformed-out.txt"
+        malformed_result = subprocess.run(
+            [
+                str(SCRIPT), "--intent", "ordinary", "--tool", "claude",
+                "--orchestrator-family", "openai", "--alias", "workhorse",
+                "--role", "worker", "--out", str(malformed_out),
+                "--prompt", "inspect",
+            ],
+            cwd=copied,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        assert malformed_result.returncode == 2
+        assert "invalid linked-worktree back-pointer" in malformed_result.stderr
+        assert not invoked.exists()
+        assert {
+            "config": (repo / ".git" / "config").read_bytes(),
+            "index": index_path.read_bytes(),
+            "refs": subprocess.check_output(
+                ["git", "-C", str(repo), "show-ref"], text=True,
+            ),
+        } == before
+        back_pointer.write_text(back_pointer_content, encoding="utf-8")
+
         write_executable(
             bin_dir / "claude",
             f"""\

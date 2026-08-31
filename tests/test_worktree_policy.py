@@ -103,6 +103,34 @@ def test_copied_linked_checkout_cannot_mutate_its_source_repository(tmp_path, ca
     assert source_state() == before
     assert not (repo / ".worktrees" / "leak").exists()
 
+    copied_git = copied / ".git"
+    copied_git_content = copied_git.read_text()
+    copied_git.unlink()
+    copied_git.symlink_to(source / ".git")
+    before = source_state()
+    assert worktree_policy.main([
+        "create", "leak", "--repo", str(copied), "--detach", head,
+        "--human-authorised",
+    ]) == 2
+    assert "symlinked .git" in capsys.readouterr().err
+    assert source_state() == before
+    assert not (repo / ".worktrees" / "leak").exists()
+    copied_git.unlink()
+    copied_git.write_text(copied_git_content)
+
+    git_dir = Path(subprocess.check_output(
+        ["git", "-C", str(source), "rev-parse", "--absolute-git-dir"], text=True,
+    ).strip())
+    (git_dir / "gitdir").unlink()
+    before = source_state()
+    assert worktree_policy.main([
+        "create", "leak", "--repo", str(copied), "--detach", head,
+        "--human-authorised",
+    ]) == 2
+    assert "invalid linked-worktree back-pointer" in capsys.readouterr().err
+    assert source_state() == before
+    assert not (repo / ".worktrees" / "leak").exists()
+
 
 def test_creation_requires_authority_and_rejects_unsafe_names(tmp_path, capsys):
     repo = tmp_path / "project"
