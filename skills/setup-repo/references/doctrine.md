@@ -66,6 +66,14 @@ reason and reopen condition; set `Done`, close as not planned), **Deferred**
 A new commit invalidates exact-head evidence (checks, independent review);
 rerun both against the new head before merge.
 
+## Native sub-issues
+
+The parent issue owns change scope, story and remaining gates; child issues own
+independently deliverable slices. Creating the native `sub_issues` relation
+requires explicit external-write authority and the child's numeric issue id;
+otherwise return the proposed relation. A parent URL is navigation only. Never
+mirror children in a checklist.
+
 ## Merge authority
 
 State this explicitly in the target project's own runbook — it is a

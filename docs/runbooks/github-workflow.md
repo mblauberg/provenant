@@ -352,7 +352,7 @@ Afterwards:
    change's canonical `delivery-run` receipt directory must survive the merge
    (see [Merge](#merge)). Satisfy that first.
 
-5. The user-authorised repository setting `delete_branch_on_merge=true`
+4. The user-authorised repository setting `delete_branch_on_merge=true`
    (enabled 2026-07-19) automatically deletes a merged pull request's remote
    head branch, so the remote ref is usually already gone by the time you prune;
    `git remote prune origin` clears the stale remote-tracking ref. This

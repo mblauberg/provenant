@@ -111,8 +111,11 @@ def test_issue_native_decision_and_spec_reconciliation_are_recorded():
     assert "Do not mirror children in a checklist" in runbook
     live_form = read(".github/ISSUE_TEMPLATE/work-item.yml")
     template_form = read("skills/setup-repo/templates/ISSUE_TEMPLATE/work-item.yml")
+    doctrine = read("skills/setup-repo/references/doctrine.md")
     assert "URL is navigation only" in live_form
     assert live_form == template_form
+    assert "## Native sub-issues" in doctrine
+    assert "requires explicit external-write authority" in doctrine
     assert contract["source"]["state_graph"] == (
         "docs/specs/harness/lifecycle.md#state-graph"
     )
