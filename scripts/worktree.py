@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import re
 import selectors
+import stat
 import subprocess
 import sys
 from typing import Sequence
@@ -212,8 +213,44 @@ def _run_git(
 
 
 def owning_root(repo: Path) -> Path:
-    result = git(repo.expanduser().resolve(), "rev-parse", "--show-toplevel")
-    return Path(result.stdout.strip()).resolve()
+    requested = repo.expanduser().resolve()
+    result = git(requested, "rev-parse", "--show-toplevel")
+    root = Path(result.stdout.strip()).resolve()
+    if requested != root and not requested.is_relative_to(root):
+        raise PolicyError(
+            f"{requested} is outside the Git working tree it resolves to ({root}); "
+            "refusing copied checkout metadata"
+        )
+    dot_git = root / ".git"
+    if dot_git.is_symlink():
+        raise PolicyError(f"{root} has symlinked .git metadata")
+    if dot_git.is_file():
+        git_dir = Path(git(root, "rev-parse", "--absolute-git-dir").stdout.strip()).resolve()
+        common_dir = Path(git(
+            root, "rev-parse", "--path-format=absolute", "--git-common-dir",
+        ).stdout.strip()).resolve()
+        if git_dir != common_dir:
+            back_pointer = git_dir / "gitdir"
+            try:
+                if not stat.S_ISREG(back_pointer.lstat().st_mode):
+                    raise OSError("not a regular file")
+                raw_target = back_pointer.read_text(errors="replace").strip()
+                if "\0" in raw_target or "\n" in raw_target or "\r" in raw_target:
+                    raise ValueError("invalid path bytes")
+                target = Path(raw_target)
+                if not target.is_absolute():
+                    target = git_dir / target
+                resolved_target = target.resolve()
+            except (OSError, ValueError) as exc:
+                raise PolicyError(
+                    f"{root} has invalid linked-worktree back-pointer metadata"
+                ) from exc
+            if resolved_target != dot_git.resolve():
+                raise PolicyError(
+                    f"{root} is a copied checkout whose Git metadata points to "
+                    f"{resolved_target}"
+                )
+    return root
 
 
 def worktree_records(repo: Path) -> list[dict[str, object]]:
@@ -575,6 +612,32 @@ def check_worktrees(args: argparse.Namespace) -> dict[str, object]:
     }
 
 
+def validate_context(args: argparse.Namespace) -> dict[str, object]:
+    requested = args.repo.expanduser().resolve()
+    probe = git(requested, "rev-parse", "--show-toplevel", check=False)
+    if probe.returncode != 0:
+        metadata = None
+        for ancestor in (requested, *requested.parents):
+            candidate = ancestor / ".git"
+            try:
+                candidate.lstat()
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                raise PolicyError(
+                    f"could not inspect Git metadata at {candidate}: {exc}"
+                ) from exc
+            metadata = candidate
+            break
+        if args.allow_non_git and metadata is None:
+            return {"status": "not-git", "requested_root": str(requested)}
+        if metadata is not None:
+            raise PolicyError(f"invalid Git metadata at {metadata}")
+        raise PolicyError(probe.stderr.strip() or "not a Git working tree")
+    root = owning_root(requested)
+    return {"status": "valid", "git_root": str(root), "requested_root": str(requested)}
+
+
 def verify_claim_command(args: argparse.Namespace) -> dict[str, object]:
     try:
         return verify_claim(
@@ -611,6 +674,14 @@ def parser() -> argparse.ArgumentParser:
     check_parser = sub.add_parser("check")
     check_parser.add_argument("--repo", type=Path, default=Path.cwd())
     check_parser.set_defaults(handler=check_worktrees)
+
+    context_parser = sub.add_parser(
+        "validate-context",
+        help="reject copied or ambiguous linked-worktree metadata before Git writes",
+    )
+    context_parser.add_argument("--repo", type=Path, default=Path.cwd())
+    context_parser.add_argument("--allow-non-git", action="store_true")
+    context_parser.set_defaults(handler=validate_context)
 
     verify_parser = sub.add_parser(
         "verify-claim",

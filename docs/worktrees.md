@@ -55,6 +55,11 @@ run contract requires them. A removal receipt emits only `status`, `name` and
   worktrees or artifact-only scopes.
 - Worktrees share Git objects, configuration and hooks; they are not security
   sandboxes. Secrets, LFS and submodules need their own deliberate setup.
+- A filesystem copy of a linked worktree keeps its `.git` pointer and can still
+  write the source repository's refs, index and local configuration. For a Git
+  fixture, use a fresh repository or copy the required files without `.git`,
+  then run `git init` in the copy. The harness also rejects symlinked `.git`
+  metadata because it cannot prove which checkout owns the resulting writes.
 - Worktrees do not share ignored dependencies or build output. Before treating
   a suite failure as a product defect, run the owning repository's declared
   lockfile bootstrap and build commands in that worktree, then record the exact

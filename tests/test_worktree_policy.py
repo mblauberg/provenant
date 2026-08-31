@@ -2,6 +2,7 @@ import importlib.util
 import hashlib
 import json
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 
@@ -63,6 +64,105 @@ def test_creation_from_linked_checkout_still_anchors_primary_root(tmp_path, caps
     assert Path(receipt["primary_root"]) == repo
     assert Path(receipt["worktree_root"]) == repo / ".worktrees" / "second"
     assert not (first / ".worktrees").exists()
+
+
+def test_copied_linked_checkout_cannot_mutate_its_source_repository(tmp_path, capsys):
+    repo = tmp_path / "project"
+    head = init_repo(repo)
+    source = repo / ".worktrees" / "source"
+    source.parent.mkdir()
+    subprocess.run(
+        ["git", "-C", str(repo), "worktree", "add", "--detach", str(source), head],
+        check=True,
+    )
+    copied = tmp_path / "copied"
+    shutil.copytree(source, copied)
+    assert (copied / ".git").is_file()
+
+    def source_state():
+        return {
+            "config": (repo / ".git" / "config").read_bytes(),
+            "index": Path(subprocess.check_output(
+                ["git", "-C", str(source), "rev-parse", "--git-path", "index"],
+                text=True,
+            ).strip()).read_bytes(),
+            "refs": subprocess.check_output(
+                ["git", "-C", str(repo), "show-ref"], text=True,
+            ),
+            "worktrees": subprocess.check_output(
+                ["git", "-C", str(repo), "worktree", "list", "--porcelain"], text=True,
+            ),
+        }
+
+    before = source_state()
+    assert worktree_policy.main([
+        "create", "leak", "--repo", str(copied), "--detach", head,
+        "--human-authorised",
+    ]) == 2
+    assert "copied checkout" in capsys.readouterr().err
+    assert source_state() == before
+    assert not (repo / ".worktrees" / "leak").exists()
+
+    copied_git = copied / ".git"
+    copied_git_content = copied_git.read_text()
+    copied_git.unlink()
+    copied_git.symlink_to(source / ".git")
+    before = source_state()
+    assert worktree_policy.main([
+        "create", "leak", "--repo", str(copied), "--detach", head,
+        "--human-authorised",
+    ]) == 2
+    assert "symlinked .git" in capsys.readouterr().err
+    assert source_state() == before
+    assert not (repo / ".worktrees" / "leak").exists()
+    copied_git.unlink()
+    copied_git.write_text(copied_git_content)
+
+    git_dir = Path(subprocess.check_output(
+        ["git", "-C", str(source), "rev-parse", "--absolute-git-dir"], text=True,
+    ).strip())
+    back_pointer = git_dir / "gitdir"
+    back_pointer_content = back_pointer.read_bytes()
+    back_pointer.write_bytes(back_pointer_content.rstrip(b"\n") + b"\0")
+    before = source_state()
+    assert worktree_policy.main([
+        "create", "leak", "--repo", str(copied), "--detach", head,
+        "--human-authorised",
+    ]) == 2
+    assert "invalid linked-worktree back-pointer" in capsys.readouterr().err
+    assert source_state() == before
+    assert not (repo / ".worktrees" / "leak").exists()
+
+    back_pointer.unlink()
+    before = source_state()
+    assert worktree_policy.main([
+        "create", "leak", "--repo", str(copied), "--detach", head,
+        "--human-authorised",
+    ]) == 2
+    assert "invalid linked-worktree back-pointer" in capsys.readouterr().err
+    assert source_state() == before
+    assert not (repo / ".worktrees" / "leak").exists()
+
+
+@pytest.mark.parametrize("metadata_kind", ["file", "directory", "broken-symlink"])
+def test_validate_context_does_not_treat_invalid_git_metadata_as_non_git(
+    tmp_path, capsys, metadata_kind,
+):
+    root = tmp_path / "project"
+    nested = root / "nested"
+    nested.mkdir(parents=True)
+    dot_git = root / ".git"
+    if metadata_kind == "file":
+        dot_git.write_text("invalid\n")
+    elif metadata_kind == "directory":
+        dot_git.mkdir()
+    else:
+        dot_git.symlink_to(root / "missing-git-dir")
+
+    assert worktree_policy.main([
+        "validate-context", "--repo", str(nested), "--allow-non-git",
+    ]) == 2
+    assert "invalid Git metadata" in capsys.readouterr().err
 
 
 def test_creation_requires_authority_and_rejects_unsafe_names(tmp_path, capsys):

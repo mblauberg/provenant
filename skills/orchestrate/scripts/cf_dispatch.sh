@@ -10,6 +10,15 @@ set -uo pipefail
 
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 
+# The provider must inherit the same repository discovered by the validator,
+# never a repository redirected through the caller's Git environment.
+unset GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_CEILING_DIRECTORIES GIT_COMMON_DIR \
+  GIT_CONFIG GIT_CONFIG_COUNT GIT_CONFIG_PARAMETERS GIT_DIR \
+  GIT_DISCOVERY_ACROSS_FILESYSTEM GIT_GRAFT_FILE GIT_IMPLICIT_WORK_TREE \
+  GIT_INDEX_FILE GIT_NAMESPACE GIT_NO_REPLACE_OBJECTS GIT_OBJECT_DIRECTORY \
+  GIT_PREFIX GIT_QUARANTINE_PATH GIT_REPLACE_REF_BASE GIT_SHALLOW_FILE \
+  GIT_WORK_TREE
+
 usage() {
   cat <<'EOF'
 Usage: cf_dispatch.sh --tool TOOL --orchestrator-family FAMILY --prompt TEXT [options]
@@ -156,6 +165,14 @@ if [ "$DOCTOR" = "1" ]; then
   show_doctor
   exit 0
 fi
+
+WORKTREE_POLICY="$SCRIPT_DIR/../../../scripts/worktree.py"
+[ -f "$WORKTREE_POLICY" ] || {
+  echo "worktree context validator is unavailable: $WORKTREE_POLICY" >&2
+  exit 2
+}
+python3 "$WORKTREE_POLICY" validate-context --repo "$(pwd -P)" --allow-non-git \
+  >/dev/null || exit 2
 
 if [ -n "$PROMPT_FILE" ]; then
   [ -r "$PROMPT_FILE" ] || { echo "cannot read prompt file: $PROMPT_FILE" >&2; exit 2; }

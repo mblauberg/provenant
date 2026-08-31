@@ -661,7 +661,8 @@ for (let cycle = 0; cycle <= maxRepairCycles; cycle += 1) {
   await checkpoint(`verify-${cycle}-dispatch`, 'reconcile objective verification', [`verify:${cycle}`], [])
   verify = await agent(
     'Run objective verification for the proposed patches on the narrowest meaningful lane. Apply patches ' +
-      'only to an isolated scratch copy; never land them in the real tree. Map every acceptance criterion ' +
+      'only to a scratch copy made without the source .git metadata; initialise fresh Git metadata if needed. ' +
+      'Never land them in the real tree. Map every acceptance criterion ' +
       'to evidence and report skipped/unavailable checks as failures.\n' +
       `Acceptance criteria: ${JSON.stringify(acceptanceCriteria)}\n` +
       `Discovered test lane: ${conv.testLane || '(none)'}\nLint/format: ${conv.lintCmd || '(none)'} / ${conv.formatCmd || '(none)'}\n` +

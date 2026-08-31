@@ -2373,6 +2373,7 @@ def test_non_git_fallback_routes_via_product_root_model_route():
             "model_route.py",
             "model_route_catalog.py",
             "model_route_preferences.py",
+            "worktree.py",
         ):
             shutil.copy2(PRODUCT_ROOT / "scripts" / name, product / "scripts" / name)
         bin_dir = tmp / "bin"
