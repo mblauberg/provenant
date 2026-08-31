@@ -5,9 +5,9 @@
 -- a mediating process could only inconvenience an honest caller. The security
 -- boundary is the mode on this file's directory.
 --
--- Identity is derived, never provisioned: an agent is (project, agent_id) where
--- project is the git toplevel of its cwd and agent_id comes from the environment
--- the provider was launched with. Nothing needs bootstrapping or provisioning.
+-- Identity is derived, never provisioned: ordinary registered worktrees share
+-- their primary checkout; other Git and non-Git roots stand alone. The
+-- agent_id comes from the provider environment. Nothing needs provisioning.
 
 PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;

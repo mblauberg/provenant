@@ -134,22 +134,12 @@ canonical record of scope, output and verification. The chair explicitly reads
 its inbox and verifies the reply relation; do not assume a subscription,
 transactional callback, terminal result or automatic wake-up exists.
 
-Fabric identity follows the working directory, so a linked worktree is a
-different Fabric project from the primary checkout. Measured: the primary
-resolves to `<repo>`, while `<repo>/.worktrees/<name>` resolves to a project of
-its own. Messages, shared tasks and the activity log do not cross that boundary.
-A targeted send normally fails with an unknown-recipient error until that label
-has been announced in the worktree project; it does not silently land in the
-primary project. Dispatcher subagents make this worse, because their tool
-grants carry no MCP, so `fabric_*` is unavailable to them entirely and their
-only route is the `fabric` CLI through Bash, which writes to whichever project
-its working directory implies.
-
-So coordinate worktree lanes through brief and report files at explicit absolute
-paths, and keep Fabric for agents operating inside the chair's own project. When
-a lane genuinely must report into the chair's project, run `fabric` with the
-primary checkout as the working directory and say so, rather than assuming the
-worktree's own seat reaches the chair.
+Fabric derives the project from the working directory. A repository's primary
+checkout and ordinary registered linked worktrees share messages, tasks and
+activity, while `fabric_whoami` retains the caller's resolved `cwd`. Agents may
+therefore keep a persistent MCP session or use the CLI from their own worktree
+without a manual project override. Separate repositories and copied worktree
+metadata stay isolated.
 
 If the active integration cannot carry a Fabric request and reply, record
 `FABRIC-ROUNDTRIP-UNAVAILABLE`, use a named artifact plus an explicit bounded

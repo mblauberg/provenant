@@ -66,8 +66,9 @@ stale and cross-project IDs fail before a message or activity row is inserted.
 
 An identity is `(project, agent_id)`:
 
-- `project` is the Git top level of the working directory, or the absolute
-  directory outside Git;
+- `project` is the primary checkout shared by ordinary registered Git
+  worktrees, otherwise the Git top level or absolute directory outside Git;
+- `cwd` is the caller's resolved working directory;
 - `agent_id` is `AGENT_FABRIC_LABEL`, falling back to the client seat; and
 - the client seat is `AGENT_FABRIC_SEAT`, then
   `AGENT_FABRIC_CLIENT_LABEL`, then `agent`.
@@ -89,6 +90,10 @@ Several processes may deliberately share one label. They then compete for the
 same inbox claims, while a distinct `AGENT_FABRIC_LABEL` gives each process its
 own address.
 
+Existing rows keyed by an ordinary primary checkout remain valid. Rows
+previously written under a linked-worktree path are left untouched; Fabric does
+not guess at or bulk-rewrite old coordination state.
+
 ## Teams, tasks and activity
 
 `fabric_team_create` creates a team or atomically replaces all membership of an
@@ -107,10 +112,15 @@ is idempotent. Task ownership is cooperative routing metadata, not an
 access-control boundary, and does not grant or restrict tool or filesystem
 access.
 
-Fabric identity follows the process working directory. Start the coordinating
-provider process from the intended project root so its messages and tasks use
-the same project scope. A provider may inspect code in a linked worktree, but a
-coordination process started there belongs to that worktree's project identity.
+Fabric derives identity from the process working directory. The primary checkout
+and all of its registered linked worktrees share messages, tasks, teams and
+activity without configuration; `cwd` still shows where each caller is working.
+Separate repositories, copied worktree metadata and non-Git directories remain
+separate projects.
+
+Git does not record a main working-tree path for separate-git-dir, bare-main or
+submodule layouts. Fabric keeps those ambiguous working trees separate instead
+of guessing an alias that a copied checkout could inherit.
 
 Activity entries expose their monotonic `seq`. `fabric_activity` accepts
 `after_seq` for ascending cursor reads. CLI `watch` uses that cursor and drains

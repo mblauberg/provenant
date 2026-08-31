@@ -99,11 +99,12 @@ def test_reply_precedes_ack_and_duplicate_redelivery_is_deduped() -> None:
         assert "acknowledges the claim after durable processing" not in source
 
 
-def test_worktree_recipient_failure_is_explicit_until_the_label_is_announced() -> None:
+def test_registered_worktrees_share_one_fabric_project() -> None:
     source = (ROOT / "skills" / "orchestrate" / "references" / "herdr-panes.md").read_text()
-    assert "unknown-recipient error" in source
-    assert "does not silently land in the" in source
-    assert "simply lands in a project the" not in source
+    normalized = " ".join(source.split())
+    assert "ordinary registered linked worktrees share messages, tasks and activity" in normalized
+    assert "retains the caller's resolved `cwd`" in normalized
+    assert "different Fabric project from the primary checkout" not in source
 
 
 def test_reader_facing_herdr_descriptions_do_not_promise_wake_or_callback() -> None:

@@ -33,7 +33,8 @@ const USAGE = `fabric <command>
   status [--json]             read-only summary; absent state is healthy
   doctor [--json]             read-only schema and integrity diagnostics
 
-Identity comes from the working directory and AGENT_FABRIC_LABEL. There is
+Identity comes from the working directory and AGENT_FABRIC_LABEL. Registered
+worktrees share one repository project while retaining their own cwd. There is
 nothing to install, trust or provision.`;
 
 const argv = process.argv.slice(2);

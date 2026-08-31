@@ -25,12 +25,14 @@ Every entry carries exactly three environment variables:
 | `AGENT_FABRIC_SEAT` | Client routing metadata recorded with the Fabric identity; not model-family proof |
 | `AGENT_FABRIC_CLIENT_LABEL` | The label the provider is addressed by |
 
-No entry binds a project. The client's working directory decides which project
-a call belongs to, which is what lets one registration cover every directory you
-work in. `AGENT_FABRIC_PROJECT_PATH` is not a fourth global variable: it belongs
-only in an explicit, separately managed project-scoped entry for a client that
-cannot preserve the workspace working directory, and must never be reused
-globally.
+No entry binds a project. The client's working directory selects a repository;
+its ordinary registered worktrees share one Fabric project. This lets one
+registration cover every directory you work in. Clients must preserve the
+workspace working directory; Fabric has no manual project override.
+
+The registered client label is a shared default address. Give concurrently
+working agents distinct `AGENT_FABRIC_LABEL` values when they need separate
+inboxes; agents that intentionally share a label compete for the same claims.
 
 `AGENT_FABRIC_PRODUCT_ROOT` and `AGENT_FABRIC_INSTANCE_ROOT` are CLI-only
 controls and should be absent from every global client registration.

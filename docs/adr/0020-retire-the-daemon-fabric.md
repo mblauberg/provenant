@@ -32,9 +32,9 @@ MCP tools, a shell CLI, and identity derived from the working directory rather
 than issued to the caller.
 
 Nothing is trusted, bootstrapped, provisioned, renewed or leased. An agent is
-`(project, agent_id)`, where the project is the git toplevel of the working
-directory or the directory itself, and the agent id comes from the environment
-the provider already sets. Identity does not expire or need renewal. Delivery
+`(project, agent_id)`, where ordinary registered worktrees share their primary
+checkout and other Git or non-Git roots stand alone. The agent id comes from
+the environment the provider already sets. Identity does not expire or need renewal. Delivery
 claims are the narrow exception: an unacknowledged claim expires and redelivers
 the message, without creating a provider lease, liveness proof or renewal flow.
 

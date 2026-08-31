@@ -13,8 +13,9 @@ routing, delegation, memory or pane decisions.
   shared-branch pushes need user authority.
 - **Fabric:** messages, shared tasks and an activity log for agents in one
   project, over MCP (`fabric_*`) or the `fabric` command. Identity is derived
-  from the working directory, so there is nothing to trust, bootstrap or
-  provision; run it from the project you mean. `AGENT_FABRIC_LABEL` gives
+  from the working directory; ordinary registered worktrees share their
+  repository's project while retaining their own cwd. There is nothing to trust, bootstrap
+  or provision. `AGENT_FABRIC_LABEL` gives
   several agents of one provider separate inboxes.
 - **CLI:** use `provenant help` for discovery; route answer-bearing external
   work through the `orchestrate` skill and Fabric.

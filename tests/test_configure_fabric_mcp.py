@@ -1162,15 +1162,13 @@ def test_absent_target_replaced_after_link_fails_closed_with_recovery(tmp_path: 
 def test_registration_runbook_documents_a_project_free_registration_and_its_recovery() -> None:
     runbook = (ROOT / "docs/runbooks/fabric-mcp-registration.md").read_text()
     assert "configure-fabric-mcp.py" in runbook
-    # The registration binds no project: cwd decides. The fourth variable is an
-    # exception for one client, never a global.
+    # Registration binds no project: cwd decides, with no manual override.
     assert "exactly three environment variables" in runbook
     assert "AGENT_FABRIC_STATE_DIRECTORY" in runbook
     assert "AGENT_FABRIC_SEAT" in runbook
     assert "AGENT_FABRIC_CLIENT_LABEL" in runbook
-    assert "AGENT_FABRIC_PROJECT_PATH" in runbook
-    assert "not a fourth global variable" in runbook
-    assert "cannot preserve" in runbook
+    assert "AGENT_FABRIC_PROJECT_PATH" not in runbook
+    assert "Fabric has no manual project override" in runbook
     assert "Claude Code and Codex" in runbook
     assert "six clients" in runbook
     assert "not model-family proof" in runbook

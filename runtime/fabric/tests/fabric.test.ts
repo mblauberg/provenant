@@ -13,7 +13,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { identify, projectRoot } from "../src/identity.js";
+import { identify } from "../src/identity.js";
 import { inspectDatabase, Store, type Message } from "../src/store.js";
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
@@ -537,15 +537,6 @@ describe("identity derivation", () => {
     store.close();
 
     expect(statSync(stateDirectory).mode & 0o777).toBe(0o700);
-  });
-
-  it("uses the git toplevel in a repository and the directory outside one", () => {
-    expect(projectRoot(repositoryRoot)).toBe(repositoryRoot);
-    expect(projectRoot(temporaryDirectory)).toBe(resolve(temporaryDirectory));
-    expect(execFileSync("git", ["rev-parse", "--show-toplevel"], {
-      cwd: repositoryRoot,
-      encoding: "utf8",
-    }).trim()).toBe(repositoryRoot);
   });
 
   it("uses seat for provider and label for agent id, with client-label fallback", () => {

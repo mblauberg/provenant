@@ -40,8 +40,9 @@ The current pre-release tree includes:
   effective effort, capability source and any substitution.
 - Fabric, at `runtime/fabric`: messages, shared tasks and an activity log for
   the agents working on one project, over MCP or a shell CLI. One SQLite file,
-  no daemon, and identity derived from the working directory, so there is
-  nothing to trust, bootstrap or provision.
+  no daemon, and identity derived from the working directory. Ordinary registered
+  linked worktrees share their repository's project while retaining their resolved
+  cwd, with nothing to trust, bootstrap or provision.
 - Gates: `scripts/check-harness` (policy checks, skill trigger fixtures, shell
   parse, `pytest`), `scripts/static-security-check.py` and
   `scripts/public-release-check`, plus a CI workflow that runs the harness
