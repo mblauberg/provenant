@@ -361,7 +361,7 @@ def test_dispatch_rejects_a_copied_linked_worktree_before_provider_launch():
         result = dispatch_from(copied, "out.txt")
 
         assert result.returncode == 2
-        assert "copied linked worktree" in result.stderr
+        assert "copied checkout" in result.stderr
         assert not invoked.exists()
         assert {
             "config": (repo / ".git" / "config").read_bytes(),
@@ -402,7 +402,7 @@ def test_dispatch_rejects_a_copied_linked_worktree_before_provider_launch():
         )
         trailing_result = dispatch_from(copied, "trailing-out.txt")
         assert trailing_result.returncode == 2
-        assert "trailing content" in trailing_result.stderr
+        assert "invalid linked-worktree back-pointer" in trailing_result.stderr
         assert not invoked.exists()
         assert {
             "config": (repo / ".git" / "config").read_bytes(),
@@ -2546,6 +2546,7 @@ def test_non_git_fallback_routes_via_product_root_model_route():
             "model_route.py",
             "model_route_catalog.py",
             "model_route_preferences.py",
+            "worktree.py",
         ):
             shutil.copy2(PRODUCT_ROOT / "scripts" / name, product / "scripts" / name)
         bin_dir = tmp / "bin"

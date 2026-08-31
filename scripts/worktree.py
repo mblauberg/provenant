@@ -235,8 +235,8 @@ def owning_root(repo: Path) -> Path:
                 if not stat.S_ISREG(back_pointer.lstat().st_mode):
                     raise OSError("not a regular file")
                 raw_target = back_pointer.read_text(errors="replace").strip()
-                if "\0" in raw_target:
-                    raise ValueError("NUL byte")
+                if "\0" in raw_target or "\n" in raw_target or "\r" in raw_target:
+                    raise ValueError("invalid path bytes")
                 target = Path(raw_target)
                 if not target.is_absolute():
                     target = git_dir / target
@@ -612,6 +612,17 @@ def check_worktrees(args: argparse.Namespace) -> dict[str, object]:
     }
 
 
+def validate_context(args: argparse.Namespace) -> dict[str, object]:
+    requested = args.repo.expanduser().resolve()
+    probe = git(requested, "rev-parse", "--show-toplevel", check=False)
+    if probe.returncode != 0:
+        if args.allow_non_git:
+            return {"status": "not-git", "requested_root": str(requested)}
+        raise PolicyError(probe.stderr.strip() or "not a Git working tree")
+    root = owning_root(requested)
+    return {"status": "valid", "git_root": str(root), "requested_root": str(requested)}
+
+
 def verify_claim_command(args: argparse.Namespace) -> dict[str, object]:
     try:
         return verify_claim(
@@ -648,6 +659,14 @@ def parser() -> argparse.ArgumentParser:
     check_parser = sub.add_parser("check")
     check_parser.add_argument("--repo", type=Path, default=Path.cwd())
     check_parser.set_defaults(handler=check_worktrees)
+
+    context_parser = sub.add_parser(
+        "validate-context",
+        help="reject copied or ambiguous linked-worktree metadata before Git writes",
+    )
+    context_parser.add_argument("--repo", type=Path, default=Path.cwd())
+    context_parser.add_argument("--allow-non-git", action="store_true")
+    context_parser.set_defaults(handler=validate_context)
 
     verify_parser = sub.add_parser(
         "verify-claim",
