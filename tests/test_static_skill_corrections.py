@@ -134,7 +134,7 @@ def test_skill_craft_declares_action_owner_primary_for_composed_requests():
 
     assert "companion to a primary lifecycle owner" in skill
     assert "stays the action-owner" in skill
-    assert "not for plugin packaging; use its platform owner" in skill.lower()
+    assert "plugin packaging (use plugin-creator)" in skill.lower()
     assert "action-owning lifecycle remains primary" in audit
     # These richer branch-tagged composition cases live in
     # boundary_trace_cases.yaml's routing_reference_cases (not in the

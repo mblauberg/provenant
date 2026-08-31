@@ -63,7 +63,7 @@ Ownership across the tree is:
 
 | Question | Owner |
 |---|---|
-| What exists | code, schemas, registries, `0001-current-baseline.sql` |
+| What exists | code, schemas and registries; current Fabric: `runtime/fabric/schema.sql` |
 | That it behaves | the behavioural test suites |
 | What change scope, story and owner are current | the declared scope/story owner |
 | What workflow phase is current | the declared workflow-state owner |
@@ -95,9 +95,9 @@ where it survives. Excluded schema properties and surrounding prose still need
 review against their owners.
 
 Readers lose the convenience of a prose tour of the schema sitting beside its
-narrative, and must open the migration or the generated catalogue for concrete
-tables, columns and indexes. That cost is accepted because those artefacts are
-already the only authoritative ones.
+narrative, and must open the live code owner for concrete tables, columns and
+indexes. Current Fabric readers use `runtime/fabric/schema.sql`. That cost is
+accepted because the live code owner is already authoritative.
 
 The behavioural fixtures are deliberately **not** repointed at the migration.
 Investigation found they are a semantic re-modelling rather than a failed copy:

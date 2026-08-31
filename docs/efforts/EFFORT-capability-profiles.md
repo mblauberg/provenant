@@ -11,10 +11,6 @@ historical disposition. Current Fabric ownership is
 ## Route
 
 - [Programme issue #23](https://github.com/mblauberg/provenant/issues/23)
-- Authority specification
-- Workspace-containment specification
-- Provider-actions specification
-- Provider-write specification
 - [Lifecycle-authority issue #118](https://github.com/mblauberg/provenant/issues/118)
 - [Authority-envelope issue #123](https://github.com/mblauberg/provenant/issues/123)
 - [Provider-write issue #129](https://github.com/mblauberg/provenant/issues/129)

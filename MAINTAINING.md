@@ -71,8 +71,9 @@ Documentation claims sit in three tiers, and the third is deliberate:
    skill count is machine-checked; its catalogue prose is review-owned.
 2. **Review-checked.** Runtime schema and migration structure is owned by code
    and tests. Specification prose, fenced commands, placeholders and unbound
-   projections remain review-owned. Relative Markdown links in `docs/` and
-   skills are machine-checked; other links remain review-owned.
+   projections remain review-owned. Relative Markdown links in `docs/` and each
+   `SKILL.md` are machine-checked; skill-reference links and other links remain
+   review-owned.
    `HARNESS.md` stays compact because it is an always-loaded constitution.
 3. **Unchecked prose.** Design intent and rationale carry no machine gate,
    on purpose; review keeps them honest, not tooling.

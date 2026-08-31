@@ -44,8 +44,9 @@ field are the exclusive owners of current work state:
 - Effort maps are curated route maps. They link specifications, ADRs, issues and
   pull requests but never restate current status, owner, dependencies or user
   gates.
-- Handoffs are temporary continuity notes linked to an issue or run and removed
-  or archived when consumed. They do not become durable work-state owners.
+- Handoffs are temporary continuity notes linked to an issue or run, then
+  archived and indexed when consumed. They do not become durable work-state
+  owners.
 
 This is a direct ownership cutover. Git history preserves superseded narration;
 no Markdown-to-GitHub synchronisation, backlog schema, cross-store migration or

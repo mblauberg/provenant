@@ -13,7 +13,12 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 DESCRIPTION_LIMIT_CHARS = 1_024
 MARKDOWN_LINK_PATTERN = re.compile(r"\[[^]]+\]\(([^)]+)\)")
-ISSUE_FORM_TYPES = {"checkboxes", "dropdown", "input", "markdown", "textarea"}
+ISSUE_FORM_TYPES = {"checkboxes", "dropdown", "input", "markdown", "textarea", "upload"}
+ISSUE_FORM_TOP_LEVEL_KEYS = {
+    "assignees", "body", "description", "labels", "name", "projects", "title", "type"
+}
+ISSUE_FORM_BODY_KEYS = {"attributes", "id", "type", "validations"}
+ISSUE_FORM_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
 def _display_path(path: Path) -> Path:
@@ -25,7 +30,6 @@ def _display_path(path: Path) -> Path:
 
 def _markdown_anchors(path: Path) -> set[str]:
     anchors: set[str] = set()
-    occurrences: dict[str, int] = {}
     fence_character = ""
     fence_length = 0
     for line in path.read_text().splitlines():
@@ -46,9 +50,12 @@ def _markdown_anchors(path: Path) -> set[str]:
         plain = re.sub(r"<[^>]+>", "", heading).lower().strip()
         plain = re.sub(r"[^\w\- ]", "", plain)
         base = plain.replace(" ", "-")
-        duplicate = occurrences.get(base, 0)
-        anchors.add(base if duplicate == 0 else f"{base}-{duplicate}")
-        occurrences[base] = duplicate + 1
+        candidate = base
+        suffix = 1
+        while candidate in anchors:
+            candidate = f"{base}-{suffix}"
+            suffix += 1
+        anchors.add(candidate)
     return anchors
 
 
@@ -84,6 +91,9 @@ def issue_form_errors(paths: list[Path]) -> list[str]:
         if not isinstance(form, dict):
             errors.append(f"{display}: issue form must be a mapping")
             continue
+        unsupported = sorted(set(form) - ISSUE_FORM_TOP_LEVEL_KEYS)
+        if unsupported:
+            errors.append(f"{display}: unsupported top-level keys: {', '.join(unsupported)}")
         for field in ("name", "description"):
             if not isinstance(form.get(field), str) or not form[field].strip():
                 errors.append(f"{display}: {field} is required")
@@ -91,39 +101,66 @@ def issue_form_errors(paths: list[Path]) -> list[str]:
         if not isinstance(body, list) or not body:
             errors.append(f"{display}: body must be a non-empty list")
             continue
+        seen_ids: set[str] = set()
+        input_items = 0
         for index, item in enumerate(body, start=1):
             if not isinstance(item, dict) or item.get("type") not in ISSUE_FORM_TYPES:
                 errors.append(f"{display}: body item {index} has unsupported type")
                 continue
+            item_type = item["type"]
+            unsupported = sorted(set(item) - ISSUE_FORM_BODY_KEYS)
+            if unsupported:
+                errors.append(
+                    f"{display}: body item {index} has unsupported keys: {', '.join(unsupported)}"
+                )
+            if item_type != "markdown":
+                input_items += 1
             attributes = item.get("attributes")
             if not isinstance(attributes, dict):
                 errors.append(f"{display}: body item {index} requires attributes")
                 continue
-            if item["type"] == "markdown":
+            if item_type == "markdown":
                 if not isinstance(attributes.get("value"), str) or not attributes["value"].strip():
                     errors.append(f"{display}: markdown item {index} requires a value")
             else:
-                if not isinstance(item.get("id"), str) or not item["id"].strip():
+                item_id = item.get("id")
+                if not isinstance(item_id, str) or not item_id.strip():
                     errors.append(f"{display}: body item {index} requires an id")
+                else:
+                    if ISSUE_FORM_ID_PATTERN.fullmatch(item_id) is None:
+                        errors.append(f"{display}: body item {index} has an invalid id")
+                    if item_id in seen_ids:
+                        errors.append(f"{display}: body item {index} duplicates id {item_id}")
+                    seen_ids.add(item_id)
                 if not isinstance(attributes.get("label"), str) or not attributes["label"].strip():
                     errors.append(f"{display}: body item {index} requires a label")
-            if item["type"] in {"checkboxes", "dropdown"}:
+            if item_type in {"checkboxes", "dropdown"}:
                 options = attributes.get("options")
                 if not isinstance(options, list) or not options:
                     errors.append(f"{display}: body item {index} requires options")
-                elif item["type"] == "dropdown" and any(
+                elif item_type == "dropdown" and any(
                     not isinstance(option, str) or not option.strip() for option in options
                 ):
                     errors.append(
                         f"{display}: dropdown item {index} requires non-empty string options"
                     )
-                elif item["type"] == "checkboxes" and any(
+                elif item_type == "dropdown" and len(options) != len(set(options)):
+                    errors.append(f"{display}: dropdown item {index} requires unique options")
+                elif item_type == "checkboxes" and any(
                     not isinstance(option, dict)
                     or not isinstance(option.get("label"), str)
                     or not option["label"].strip()
                     for option in options
                 ):
                     errors.append(f"{display}: checkbox item {index} requires options with labels")
+                elif item_type == "checkboxes":
+                    labels = [option["label"] for option in options]
+                    if len(labels) != len(set(labels)):
+                        errors.append(
+                            f"{display}: checkbox item {index} requires unique option labels"
+                        )
+        if input_items == 0:
+            errors.append(f"{display}: body must contain at least one input item")
     return errors
 
 

@@ -8,9 +8,9 @@ ADRs 0011–0012 were ratified on 2026-07-16; ADR 0013 was ratified on
 2026-07-18; ADR 0014 was ratified on 2026-07-20; ADRs 0015–0016 were ratified
 on 2026-07-21; ADRs 0017–0018 were ratified on 2026-07-28; ADR 0019 was
 ratified on 2026-07-30 and amended on 2026-07-31; ADR 0020 was ratified on
-2026-08-02; ADR 0021 was ratified on 2026-08-29. The user approved the
-2026-08-31 issue-native amendments to ADRs 0011 and 0017 in issue 711 were
-noted as consistent with ADR 0009.
+2026-08-02; ADR 0021 was ratified on 2026-08-29. The user-approved 2026-08-31
+issue-native amendments to ADRs 0011 and 0017 in issue 711 were noted as
+consistent with ADR 0009.
 Pre-ADR-0020 implementation
 paths in retained decisions are
 historical evidence; the current Fabric owner is
