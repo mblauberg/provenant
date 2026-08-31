@@ -616,8 +616,23 @@ def validate_context(args: argparse.Namespace) -> dict[str, object]:
     requested = args.repo.expanduser().resolve()
     probe = git(requested, "rev-parse", "--show-toplevel", check=False)
     if probe.returncode != 0:
-        if args.allow_non_git:
+        metadata = None
+        for ancestor in (requested, *requested.parents):
+            candidate = ancestor / ".git"
+            try:
+                candidate.lstat()
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                raise PolicyError(
+                    f"could not inspect Git metadata at {candidate}: {exc}"
+                ) from exc
+            metadata = candidate
+            break
+        if args.allow_non_git and metadata is None:
             return {"status": "not-git", "requested_root": str(requested)}
+        if metadata is not None:
+            raise PolicyError(f"invalid Git metadata at {metadata}")
         raise PolicyError(probe.stderr.strip() or "not a Git working tree")
     root = owning_root(requested)
     return {"status": "valid", "git_root": str(root), "requested_root": str(requested)}

@@ -144,6 +144,27 @@ def test_copied_linked_checkout_cannot_mutate_its_source_repository(tmp_path, ca
     assert not (repo / ".worktrees" / "leak").exists()
 
 
+@pytest.mark.parametrize("metadata_kind", ["file", "directory", "broken-symlink"])
+def test_validate_context_does_not_treat_invalid_git_metadata_as_non_git(
+    tmp_path, capsys, metadata_kind,
+):
+    root = tmp_path / "project"
+    nested = root / "nested"
+    nested.mkdir(parents=True)
+    dot_git = root / ".git"
+    if metadata_kind == "file":
+        dot_git.write_text("invalid\n")
+    elif metadata_kind == "directory":
+        dot_git.mkdir()
+    else:
+        dot_git.symlink_to(root / "missing-git-dir")
+
+    assert worktree_policy.main([
+        "validate-context", "--repo", str(nested), "--allow-non-git",
+    ]) == 2
+    assert "invalid Git metadata" in capsys.readouterr().err
+
+
 def test_creation_requires_authority_and_rejects_unsafe_names(tmp_path, capsys):
     repo = tmp_path / "project"
     head = init_repo(repo)

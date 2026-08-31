@@ -441,18 +441,49 @@ def test_dispatch_rejects_a_copied_linked_worktree_before_provider_launch():
         } == before
         back_pointer.write_text(back_pointer_content, encoding="utf-8")
 
+        for metadata_name in ("HEAD", "commondir"):
+            metadata_path = git_dir / metadata_name
+            metadata_content = metadata_path.read_bytes()
+            metadata_path.unlink()
+            try:
+                missing_result = dispatch_from(copied, f"missing-{metadata_name}.txt")
+                assert missing_result.returncode == 2
+                assert "invalid Git metadata" in missing_result.stderr
+                assert not invoked.exists()
+            finally:
+                metadata_path.write_bytes(metadata_content)
+        assert {
+            "config": (repo / ".git" / "config").read_bytes(),
+            "index": index_path.read_bytes(),
+            "refs": subprocess.check_output(
+                ["git", "-C", str(repo), "show-ref"], text=True,
+            ),
+        } == before
+
+        observed_root = tmp / "provider-root.txt"
         write_executable(
             bin_dir / "claude",
             f"""\
             #!/usr/bin/env bash
+            if [ -n "${{GIT_DIR+x}}${{GIT_WORK_TREE+x}}${{GIT_COMMON_DIR+x}}${{GIT_INDEX_FILE+x}}" ]; then
+              exit 88
+            fi
+            git rev-parse --show-toplevel > {shlex.quote(str(observed_root))}
             touch {shlex.quote(str(invoked))}
             cat >/dev/null
             printf 'OK\\n'
             """,
         )
+        env.update({
+            "GIT_DIR": str(repo / ".git"),
+            "GIT_WORK_TREE": str(repo),
+            "GIT_COMMON_DIR": str(repo / ".git"),
+            "GIT_INDEX_FILE": str(repo / ".git" / "index"),
+        })
         valid_result = dispatch_from(source, "valid-out.txt")
         assert valid_result.returncode == 0, valid_result.stderr
         assert invoked.exists()
+        assert Path(observed_root.read_text(encoding="utf-8").strip()).resolve() == source.resolve()
 
 
 def run_dispatch_with_stub(
