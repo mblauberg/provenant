@@ -465,9 +465,9 @@ def test_dispatch_rejects_a_copied_linked_worktree_before_provider_launch():
             bin_dir / "claude",
             f"""\
             #!/usr/bin/env bash
-            if [ -n "${{GIT_DIR+x}}${{GIT_WORK_TREE+x}}${{GIT_COMMON_DIR+x}}${{GIT_INDEX_FILE+x}}" ]; then
-              exit 88
-            fi
+            for name in GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE GIT_QUARANTINE_PATH; do
+              printenv "$name" >/dev/null 2>&1 && exit 88
+            done
             git rev-parse --show-toplevel > {shlex.quote(str(observed_root))}
             touch {shlex.quote(str(invoked))}
             cat >/dev/null
@@ -479,6 +479,7 @@ def test_dispatch_rejects_a_copied_linked_worktree_before_provider_launch():
             "GIT_WORK_TREE": str(repo),
             "GIT_COMMON_DIR": str(repo / ".git"),
             "GIT_INDEX_FILE": str(repo / ".git" / "index"),
+            "GIT_QUARANTINE_PATH": str(repo / ".git" / "objects"),
         })
         valid_result = dispatch_from(source, "valid-out.txt")
         assert valid_result.returncode == 0, valid_result.stderr
