@@ -4,13 +4,54 @@ Read [`AGENTS.md`](AGENTS.md), [`HARNESS.md`](HARNESS.md) and
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) before changing the harness.
 Inspect the live diff and preserve unrelated work. `HARNESS.md` owns lifecycle,
 risk, authority, orchestration and review policy; [`docs/worktrees.md`](docs/worktrees.md)
-owns branch and linked-worktree operation. Use the
-[GitHub work-item workflow](docs/runbooks/github-workflow.md) for issue intake,
-Project status, pull-request linking and user gates.
+owns branch and linked-worktree operation. Use the repository process
+declaration below for issue intake, workflow state, pull-request linking and
+user gates.
 
 Agent merges are authorised for this repository; mechanics remain in the
 GitHub work-item workflow. This is Provenant-local process, not harness
 doctrine.
+
+## Repository process
+
+### Tracker
+
+- Choice: `github-issues`
+- Pointer: <https://github.com/mblauberg/provenant/issues>
+
+### Scope and stories
+
+- Canonical home: issue-tracker
+- Pointer: <https://github.com/mblauberg/provenant/issues>
+
+Change scope and stories live in the parent issue when the repository declares
+`issue-tracker`; project documents retain durable intent, decisions and
+invariants. A repository declaring `project-docs` uses its documented scope or
+story home instead. A link-only map is a fallback for unavailable or
+cross-tracker routes, not a second current-work owner.
+
+### Workflow state
+
+- Owner: tracker
+- Pointer: <https://github.com/mblauberg/provenant/projects/2>
+
+### Docs layout
+
+- Pointer: [`docs/`](docs/)
+
+### Specifications
+
+- Owns: `non-derivable-intent`
+- Drift gate: `tests/test_projection.py` for retained runtime-graph projections;
+  other prose is review-checked
+
+### Merge policy
+
+- Pointer: [`docs/worktrees.md`](docs/worktrees.md)
+
+### Work-item runbook
+
+- Pointer: [`docs/runbooks/github-workflow.md`](docs/runbooks/github-workflow.md)
 
 This repository is loaded by multiple agent platforms. A convenient
 Claude-only or Codex-only change is a regression unless the approved scope is

@@ -8,6 +8,15 @@ decisions one at a time; do not exhaustively interrogate low-value detail. For
 each question, give the evidence already known, 2–3 concrete options when useful,
 and a recommended answer with its trade-off.
 
+Read the repository's `Repository process` declaration before recording scope
+and stories.
+If it is absent or ambiguous, use an unambiguous existing owner; otherwise
+return the proposed register in chat without inventing or writing a new owner.
+The parent tracker issue owns the scope/story when it declares `issue-tracker`;
+use the named project-docs home when it declares `project-docs`. Do not create a
+parallel story or status record. Writing a tracker needs explicit external-write
+authority; otherwise return the proposed register in chat.
+
 Keep the explicit decision context current: intake/revision, constraints,
 evidence, decided branches, parked owner calls and the next unresolved branch.
 Do not start a parallel interview when revising the same request.

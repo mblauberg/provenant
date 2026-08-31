@@ -1,8 +1,14 @@
 # ADR 0011 — GitHub owns current work state
 
+This is a Provenant-specific decision. Other repositories declare their own
+workflow-state owner (`tracker` or `project-docs`) in repository process.
+
 **Status:** Accepted 2026-07-16 (user, [issue
 #156](https://github.com/mblauberg/provenant/issues/156)); supersedes [ADR
-0006](0006-defer-backlog-contract.md)
+0006](0006-defer-backlog-contract.md); amended 2026-08-31 (user, [issue
+#711](https://github.com/mblauberg/provenant/issues/711)) and consistent with
+the issue-native scope amendment in
+[ADR 0017](0017-specifications-own-non-derivable-intent.md)
 
 ## Context
 
@@ -18,16 +24,21 @@ Provenant decisions and specifications own Provenant requirements;
 `docs/efforts/` and `docs/handoffs/` are Provenant-meta navigation and temporary
 continuity, not globally applied doctrine or current-work authority.
 
+The repository declaration makes the current change scope/story home explicit.
+For this repository it is the GitHub issue, so this decision remains the sole
+current-work owner; project docs retain durable requirements and decisions.
+
 ## Decision
 
-For Provenant work, GitHub issues and the Project Status field are the exclusive
-owners of current work state:
+For Provenant work, the declared GitHub issue tracker and its Project Status
+field are the exclusive owners of current work state:
 
 - Project Status owns workflow state.
 - The issue owns the current owner, dependencies, scope-specific user gates and
   links to delivery pull requests.
-- Specifications own requirements and acceptance criteria, without reporting
-  implementation or verification state.
+- Specifications own durable requirements and normative acceptance criteria,
+  without reporting implementation or verification state; issues own
+  change-bound acceptance and evidence.
 - ADRs own architectural and governance decisions, without reporting live
   repository or delivery state.
 - Effort maps are curated route maps. They link specifications, ADRs, issues and

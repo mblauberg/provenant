@@ -6,7 +6,7 @@ Evidence snapshot: [July 2026 continuity and routing evidence](evidence-snapshot
 
 Normative owners: [HARNESS topology](../../HARNESS.md),
 ownership and topology,
-the [harness route/topology evidence contract](../specs/harness/lifecycle.md#route-and-topology-evaluation-evidence),
+the [harness route/topology evidence boundary](../specs/harness/lifecycle.md#route-and-topology-evidence-boundary),
 project sessions and chair
 
 ## Conclusions
@@ -24,9 +24,9 @@ project sessions and chair
   writer scope.
 - Discovery should expose only capability- and authority-correct tools. More
   description is not automatically better; selection evidence matters.
-- The current mature requirement is a digest of the actual visible route
-  surface, not a new universal hard ceiling. Provider-profile targets and total
-  ceilings remain open research.
+- Dispatch and batch receipts own actual route facts. Route/topology evaluation
+  is task-local and opt-in; no universal digest or version-lock protocol is
+  required.
 - OSS harnesses are pattern sources, not new canonical state owners. Event
   journals, stable task identity, immutable Git approval, worktree preflight,
   safe-turn delivery and dynamic terminal layout reinforce existing Fabric
@@ -36,7 +36,7 @@ project sessions and chair
 
 | System/paper class | Useful pattern | Local boundary |
 |---|---|---|
-| Agent Orchestrator, Symphony, Gas Town/Beads | Stable work identity, reconciliation and persistent worker/worktree fleets. | Fabric remains the task/authority owner. |
+| Agent Orchestrator, Symphony, Gas Town/Beads | Stable work identity, reconciliation and persistent worker/worktree fleets. | Fabric owns coordination and task metadata; the user/chair envelope owns authority. |
 | OpenCode and Codex | Structured events and substantial terminal/native orchestration implementations. | No provider host becomes a second chair. |
 | Open SWE | Immutable Git approval bound to exact source/destination state. | Git effects remain typed, revision-bound and separately authorised. |
 | OpenHands, Cline/Kanban, agtx, Claude Squad, Goose, Aider, SWE-agent, Continue, Vibe Kanban, Overstory | Alternative worker, review and operator patterns. | Popularity/maintenance are volatile; no wholesale dependency adoption. |
@@ -54,12 +54,10 @@ observations. They never prove completion, authority or delivery.
 
 ## Discovery-surface record
 
-Each deployed route binds a `discoverySurfaceDigest` to an immutable run-owned
-artifact containing exact host/version/profile/native-mode identity and the
-rendered bootstrap instructions, skill names/descriptions, advertised tool
-names/descriptions/input schemas, and agent/command descriptions visible at
-session start. The artifact is evidence, not policy: no ceiling or optimisation
-claim follows merely from recording it.
+When discovery context matters, dispatch or batch receipts may reference
+source-labelled host, version, profile, native-mode and rendered-surface facts.
+That evidence is not policy: no ceiling or optimisation claim follows merely
+from recording it.
 
 Tools absent from the current principal, negotiated feature set or activated
 adapter capability are absent from discovery rather than advertised as stubs.

@@ -8,9 +8,15 @@ drift gate, which is the failure the gate exists to stop.
 
 from __future__ import annotations
 
+import json
+import re
+from pathlib import Path
+
 import pytest
 
 from scripts.lib.projection import ProjectionError, project, split_marked_region
+
+ROOT = Path(__file__).resolve().parents[1]
 
 MARKER = "sample-region"
 DOC = (
@@ -105,3 +111,85 @@ def test_project_refuses_a_rendering_that_lost_the_region(tmp_path):
     with pytest.raises(ProjectionError, match="rendered doc.md"):
         project(path, MARKER, "no markers survived rendering\n", check=False)
     assert path.read_text() == DOC
+
+
+def test_architecture_lifecycle_projection_contains_the_runtime_state_graph():
+    architecture = (ROOT / "docs" / "ARCHITECTURE.md").read_text()
+    contract = json.loads(
+        (ROOT / "skills" / "deliver" / "contract" / "lifecycle.v1.json").read_text()
+    )
+    _, region, _ = split_marked_region(architecture, "delivery-state-machine")
+
+    normal_edges = set()
+    for line in region.splitlines():
+        if " --> " not in line:
+            continue
+        source, target = (part.strip() for part in line.split(" --> ", 1))
+        target = target.split(":", 1)[0].strip()
+        if source == "[*]" or target == "[*]":
+            continue
+        normal_edges.add((source, target))
+
+    expected_edges = {
+        (transition["state"], transition["to_state"])
+        for transition in contract["transitions"]
+    }
+    assert normal_edges == expected_edges
+    assert {node for edge in normal_edges for node in edge} == set(contract["states"])
+    assert {
+        line.strip()
+        for line in region.splitlines()
+        if line.strip() in contract["side_states"]
+    } == set(contract["side_states"])
+    bare_state_declarations = {
+        line.strip()
+        for line in region.splitlines()
+        if re.fullmatch(r"[a-z_][a-z0-9_]*", line.strip())
+    }
+    assert bare_state_declarations == set(contract["side_states"])
+
+    lifecycle = (ROOT / "docs" / "specs" / "harness" / "lifecycle.md").read_text()
+    match = re.search(r"#### State graph\n\n```text\n(?P<graph>.*?)\n```", lifecycle, re.S)
+    assert match, "lifecycle spec must expose the state graph under its anchor"
+    graph_lines = [line.strip() for line in match.group("graph").splitlines() if line.strip()]
+    graph_edges = {
+        tuple(part.strip() for part in line.split(" -> ", 1))
+        for line in graph_lines
+        if " -> " in line
+    }
+    expected_edges = {
+        (transition["state"], transition["to_state"])
+        for transition in contract["transitions"]
+    }
+    assert len(graph_lines) == len(expected_edges)
+    assert graph_edges == expected_edges
+    assert contract["source"]["state_graph"].endswith("#state-graph")
+
+
+def test_architecture_risk_projection_matches_the_runtime_policy():
+    architecture = (ROOT / "docs" / "ARCHITECTURE.md").read_text()
+    policy = json.loads((ROOT / "config" / "risk-policy.json").read_text())
+    _, region, _ = split_marked_region(architecture, "risk-factor-table")
+    rows = {}
+    table_lines = [line for line in region.splitlines() if line.startswith("|")]
+    header = [cell.strip().replace("`", "") for cell in table_lines[0].strip("|").split("|")]
+    tiers = policy["tier_order"]
+    assert header == ["Factor", *tiers]
+    for line in table_lines[2:]:
+        cells = [cell.strip() for cell in line.strip("|").split("|")]
+        assert len(cells) == len(header)
+        factor = cells[0].replace(" ", "_")
+        assert factor not in rows
+        rows[factor] = cells[1:]
+
+    assert set(rows) == set(policy["factors"])
+    for factor, mapping in policy["factors"].items():
+        expected = [
+            {value for value, tier in mapping.items() if tier == level}
+            for level in tiers
+        ]
+        actual = [
+            {value.strip() for value in cell.replace("`", "").split(",") if value.strip()}
+            for cell in rows[factor]
+        ]
+        assert actual == expected

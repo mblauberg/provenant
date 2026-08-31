@@ -80,6 +80,8 @@ def test_repository_process_template_is_the_invariant_completion_artifact():
     assert "Repository process" in instructions
     assert "completion gate" in instructions
     assert "not the GitHub scaffolding" in instructions
+    assert "both scope/story and workflow state" in normalised
+    assert "invalid without a tracker" in template
     assert "per heading" in normalised
     assert "engineering-docs" in instructions
     assert "skills/engineering-docs" not in instructions

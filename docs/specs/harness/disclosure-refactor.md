@@ -1,44 +1,19 @@
 # Spec: harness progressive-disclosure refactor
 
-Canonical, self-contained copy (r3, 2026-07-20). Supersedes run-scoped r1
-(sha256 817f2c27…) and r2 (sha256 ca105389…) and inlines everything they
-carried; `.agent-run/` artifacts are provenance only, never a normative
-dependency. Chairs: Claude session 809bd55e (r1/r2), 5f732d6c (r3 amendment
-pass). Risk tier `substantial`. Review pressure: r2 Codex paired-primary
-adversarial audit (verdict AMEND REQUIRED, five findings folded); r3 chaired
-three-leg review — chair sweep + fresh Claude pair (READY-WITH-AMENDMENTS) +
-Codex other-primary via Fabric roundtrip and high-effort CLI (both NOT-READY;
-all convergent findings folded here); fresh targeted review at implementation;
-held-out evals waived per
-[ADR 0014](../../adr/0014-comparative-skill-evals-on-suspicion.md).
+Canonical decision specification. Git history retains revision and review
+provenance; `.agent-run/` artifacts are not normative dependencies.
 
-Implementation status: completed through PRs #337, #338, #340, #343, #339 and
-#348. The decisions and acceptance criteria below remain the normative record;
-the delivery-train sections record how they landed.
+Canonical decision: [ADR 0020](../../adr/0020-retire-the-daemon-fabric.md) owns
+the current daemonless Fabric wording; the progressive-disclosure decisions
+remain normative.
 
-Currentness note: [ADR 0020](../../adr/0020-retire-the-daemon-fabric.md)
-supersedes the Fabric bootstrap, workspace-trust and task-claim wording below.
-The progressive-disclosure decisions remain normative; the superseded Fabric
-text is retained as dated implementation provenance only.
+## Historical problem (July 2026)
 
-## Problem
-
-The ambient instruction layer is heavier than its job requires and leaks
-repo-relative paths and skill internals:
-
-- `AGENTS.md` (~34 lines) is loaded every prompt on both harnesses (symlinked
-  `~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`). `HARNESS.md` (~113 lines,
-  ~1.4k tokens) is read on a broad trigger and cascades into 3 orchestrate
-  reference files plus runbooks — a ~4–6k-token effective constitution read.
-- `HARNESS.md` mixes constitution (authority, gates, review pressure) with
-  operational depth owned elsewhere: compaction cadence (`session`), routing
-  mechanics (`orchestrate`), receipt detail (`deliver`).
-- Files outside a skill reach into `skills/<x>/references/*`: `HARNESS.md` →
-  3 orchestrate references; accelerator workflows (`~/.claude/workflows/*.js`)
-  → `dynamic-workflows.md`, `cli-headless.md`; writing skills →
-  `natural-writing/references/*`.
-- `AGENTS.md`/`HARNESS.md` carry 9 repo-relative `docs/*`, `config/*`,
-  `scripts/*` paths that mislead agents whose cwd is another repository.
+Before this refactor, ambient instructions mixed constitution with operational
+detail owned by `session`, `orchestrate` and `deliver`. Files outside skills
+reached into skill references, and repo-relative paths misled agents working in
+other repositories. The accepted decisions below retain the boundaries; the
+current ambient files and tests own their implemented shape.
 
 `docs/ARCHITECTURE.md` already states the intended model — tiny bootstrap,
 compact constitution, skills load depth only when triggered — so this
@@ -48,7 +23,7 @@ refactor enforces existing doctrine.
 
 | # | Decision |
 |---|---|
-| D1 | Two-file ambient layer, both stripped. `AGENTS.md` ≤ 35 lines. `HARNESS.md` becomes pure constitution ≤ 60 lines: accountable topology, lifecycle + user gates, risk tiers + review-pressure table, standing git envelope, 2-line routing invariant, 1-line memory rule, trigger index. These two caps are hard static gates. |
+| D1 | Two-file ambient layer, both stripped. `AGENTS.md` stays minimal and `HARNESS.md` remains the compact constitution for topology, lifecycle, user gates, risk, Git, routing and memory. The former 35/60-line migration targets are not current gates. |
 | D2 | Strip destinations: compaction/checkpoint cadence → `session`; routing depth/degradation → `orchestrate`; receipt schema detail → `deliver`. Each already owns a landing reference. |
 | D3 | Cross-skill reference rule: nothing outside skill X names a file under `skills/X/references/`. Cross-references use the **skill name only** (e.g. "`implement` skill"), not paths. Enforced by a contract test. Writing-family links to `natural-writing` internals are rewritten to skill-name references; the hub keeps owning shared prose doctrine. |
 | D4 | No repo-relative paths in `AGENTS.md`/`HARNESS.md`. Repo-local process pointers move to repo-scoped surfaces or become skill-name references. Runnable commands are PATH-resolved (`provenant …`), never location-bearing; Fabric identity is derived from the working directory and needs no workspace-trust command. |
@@ -58,21 +33,22 @@ refactor enforces existing doctrine.
 | D8 | Orchestrate verdict table approved (r1, 2026-07-20; F2 evidence amendment folded). Removed files archive to `docs/research/` (with index entry) rather than delete; `debate-and-panels.md` is the one approved merge-then-delete because its rules survive verbatim inside `verification.md`. |
 | D9 | The "GitHub (this repo only)" bullet moves out of global `AGENTS.md`; its authority clause ("agent merges authorised") lands in `MAINTAINING.md`, mechanics stay in the github-workflow runbook. |
 | D10 | `AGENTS.md` and `HARNESS.md` carry no dates; revision provenance lives in git history. |
-| D11 | **PR drift.** This spec binds decisions, not file states. Implementation begins with a re-validation sweep of all line-cited evidence against then-current `main`; the execution handoff carries the exact `baseRevision` SHA it validated, and the sweep result is recorded as a comment on #335. A landed PR contradicting a verdict row re-opens that row only, not the interview. |
-| D12 | **Skill-name resolution contract.** Each ambient file carries one resolver line: skills live at `$HOME/.agents/skills/<name>/` and a named skill means read its `SKILL.md`, which discloses its own references. Claude resolves via its Skill tool; Codex resolves via the resolver line + installed `~/.codex/skills/` mirror. The resolver line is the sole location-bearing statement in the ambient files. Skill names are binding, not advisory. |
-| D13 | **Acceptance structure.** Acceptance splits into (a) static gates — machine-checkable on the final tree; (b) per-PR checks — run in each PR's CI; (c) release conditions — history/process states confirmed at close-out. The two ambient line caps (D1) are hard maxima; reference-file budgets are advisory targets paired with named retained-content invariants (r3 amendment: line counts alone invite formatting games and fail legitimate edits). |
+| D11 | **Source drift.** This spec binds decisions, not file states. Implementation re-validates source-owned evidence at the accepted issue's head; Git history preserves provenance. A source change that contradicts a decision re-opens that decision, not the interview. |
+| D12 | **Skill-name resolution contract.** `HARNESS.md` carries the sole resolver line, pointing to installed `~/.claude/skills/` and `~/.codex/skills/` roots; `AGENTS.md` carries none and neither names `.agents/skills/`. Named skills load their `SKILL.md`; provider-native discovery may implement that resolution. Skill names are binding, not advisory. |
+| D13 | **Acceptance structure.** Acceptance splits into (a) static final-tree gates; (b) per-PR checks; and (c) release conditions confirmed at close-out. Historical line targets and reference budgets are advisory because line counts invite formatting games and reject legitimate edits. |
 | D14 | **Accelerator custody (r3, user-approved).** Canonical sources for `cross-verify.js`, `codebase-polish.js`, `implement-run.js` move into the repository under `workflows/`; `install-harness` manages `~/.claude/workflows/` from them like it manages skills. They are a Claude-only surface (they drive Claude Code's Workflow tool); Codex does not consume them and reaches equivalent orchestration through the `orchestrate` skill. Once in-tree they fall under the D3 reference rule and AC-S2 scan. Includes a bounded alignment refresh: re-validate their doctrine citations against post-prune reality; behavioural redesign stays out of scope. |
-| D15 | **Documentation custody (r3, user-approved).** A landing PR (PR0) commits this spec, the execution handoff, ADR-0014, and the `docs/specs/` + `docs/handoffs/` index entries before implementation PRs begin. ADR-0014 lands here instead of PR4; PR4 keeps the MAINTAINING.md amendments that cite it. The handoff and its index entry are removed by the session that consumes them. |
+| D15 | **Documentation custody (r3, user-approved).** Durable decisions and specifications land before dependent implementation; `session` owns temporary handoff lifecycle. The former PR sequence was migration history. |
 
 ## Migration manifest (single fixture; replaces the separate disclosure-ledger fixture and verdict manifest)
 
 One machine-readable fixture at `tests/fixtures/disclosure-migration.yaml`
-(schema `disclosure-migration.v1`) carries both inventories; one contract test
-validates AC-S3 and AC-S4 from it. Rows below are the approved content.
+(schema `disclosure-migration.v1`) records both migration inventories. Current
+tests consume selected surviving invariants; the fixture is not a live exact-tree
+manifest. The rows below are historical migration evidence, not current-tree
+authority.
 
-Ambient rows (`section`, `disposition`, `destination` — owner is a skill
-unless marked repo-surface; repo-surfaces sit outside AC-S3's "exactly one
-owning skill" count):
+Ambient rows (`section`, `disposition`, `destination` — owner is a skill unless
+marked repo-surface; repo-surfaces sat outside historical AC-S3's owner count):
 
 | Source section | Disposition | Destination |
 |---|---|---|
@@ -115,45 +91,25 @@ orchestrate `SKILL.md`; verdict unchanged):
 | cli-headless.md | keep | routing section becomes a pointer; load-bearing for cross-verify |
 | autonomous-implementation.md | keep | consumed by autopilot |
 
-Consumer migration, single change with the prune:
-
-1. Remove loader entries for archived/merged files from orchestrate SKILL.md.
-2. Repair `verification.md:49` forwarding pointer before deleting
-   `debate-and-panels.md`.
-3. Update `evals/contract_cases.yaml:40,54` reference invariants.
-4. Replace the hand-maintained `REQUIRED_REFS`
-   (the former trigger checker) with a set **derived from this manifest's
-   keep+slim rows** — never from the directory listing itself (a
-   directory-derived expectation is circular and cannot detect accidental
-   deletion).
-5. Update `docs/research/README.md`: archived files get an index entry with a
-   normative-owner note, per that index's own contract.
-6. Accelerator repoints (private-path citations → public
-   `orchestration-contract` doctrine or embedded rule) happen in PR5 against
-   the in-repo sources (D14); never leave a dangling private-path citation.
+The completed consumer migration removed obsolete loader and fixture references,
+repaired links and indexed archived research. Git history retains its procedure;
+it is not a current runbook.
 
 ## Acceptance
 
-Static gates (machine-checkable, final tree):
+Current gates and retained migration conditions:
 
-- AC-S1: `AGENTS.md` ≤ 35 lines; `HARNESS.md` ≤ 60 lines (hard, D1); no
-  dates; no repo-relative `docs/`/`config/`/`scripts/` paths; no
+- AC-S1: ambient files contain no dates, no repo-relative
+  `docs/`/`config/`/`scripts/` paths and no
   `skills/<x>/references/` paths anywhere outside the owning skill;
-  cross-references by skill name only. The D12 resolver line is the sole
-  location-bearing statement; PATH-resolved `provenant` invocations are not
-  location-bearing. Scan counts prose and code/comment content alike.
+  cross-references use skill names. The D12 resolver line exists only in
+  `HARNESS.md`; PATH-resolved `provenant` invocations are not location-bearing.
 - AC-S2: reference-rule contract test passes. Scan scope (in-tree only):
   skills, ambient files, `scripts/`, `workflows/` (post-D14), live
   tests/fixtures (updated in the same change). Declared allowlist:
   `docs/archive/`, `docs/research/`, `.agent-run/`, git history.
-- AC-S3: migration-manifest test — ambient rows: every row present, no
-  duplicate canonical owner, every stripped row's destination anchor exists.
-- AC-S4: migration-manifest test — orchestrate rows: `references/` directory
-  equals the manifest's keep+slim set; archived files absent from
-  `references/`, present in `docs/research/` with an index entry; merged file
-  absent with its content demonstrably in the absorbing file (retained-content
-  invariants greppable); migration steps 1–5 verifiable. Advisory budgets
-  reported, not enforced.
+- AC-S3/AC-S4 were migration acceptance conditions. The retained fixture feeds
+  selected owner-specific tests; it is not a permanent full-tree checker.
 - AC-S5: catalogue within the approved cap, reviewed against the source
   catalogue. The former generated-catalogue measurement is historical and is
   not a current gate.
@@ -168,7 +124,7 @@ Per-PR checks:
   harness-managed file, existing-unmanaged-instructions branch}. Oracles per
   cell: expected exit code (0 / 0 / 3), expected link/manifest state, and —
   on the exit-3 arm — byte-identical preservation of the unmanaged file
-  (`install-harness:113-129`, extending `test_install_harness.py:184-195`).
+  (owned by `install-harness` and `test_install_harness.py`).
 - AC-P3: skill-resolution fixture green — from an isolated install, every
   skill name referenced in the ambient files resolves to an installed
   `skills/<name>/SKILL.md` on both platform layouts (including the
@@ -177,54 +133,10 @@ Per-PR checks:
   model-routing behaviour is explicitly out of scope (ADR-0014
   detection-in-use applies).
 
-Close-out conditions (satisfied by the landed train):
+## Current ownership
 
-- AC-R1: PR0 (docs custody, D15) merged: spec, handoff, ADR-0014, both index
-  entries.
-- AC-R2: MAINTAINING.md amended: conditional-eval rule citing ADR-0014; the
-  skill-name reference rule; the repo-scoped GitHub authority clause (D9);
-  the stale-session note — ambient-file changes apply from the next session;
-  live sessions retain the prior constitution until restart.
-- AC-R3: chair receipt closed and its substance durably recorded as a comment
-  on #335 (run directories are retention-cleaned; the issue is the durable
-  record). Required fields: review legs with verdicts, degradations,
-  adjudications, model lineage, user gates.
-
-## Historical Fabric custody note (superseded by ADR 0020)
-
-The daemon-era implementation recorded that the bootstrap authority omitted
-`fabric.v1.task.claim` and delegation only narrowed, so paired tasks remained
-`ready` by design. Its deliverable of record was the correlated response
-message plus the hash-bound artifact (r1 and r2 precedent; r2 additionally
-proved the `participantAgentIds` fix for task-audience messaging). This is
-historical evidence, not current operating guidance. Agent-facing Fabric
-usability gaps observed during both dispatches were tracked in
-[#336](https://github.com/mblauberg/provenant/issues/336) and resolved through
-PR #385; they were not part of #335.
-
-## Landed implementation train (6 PRs)
-
-- PR0 / #337 landed docs custody (D15): spec r3, handoff, ADR-0014,
-  `docs/specs/README.md` and `docs/handoffs/README.md` index entries. It
-  included amending
-  `test_harness_contract.py::test_current_docs_use_live_issue_and_durable_decision_owners`,
-  which asserts the literal `"No active handoffs."` and so forbids ever
-  committing an active handoff entry — assert structure (Active section
-  present), not the transient empty state.
-- PR1 / #338 stripped the constitution (D1–D4, D9, D10), added installer
-  fixtures (AC-P2) and updated `install-harness` bootstrap text.
-- PR2 / #340 landed the reference rule, migration-manifest contract
-  (AC-S2/S3), resolver fixture (AC-P3) and writing-family pointer rewrites.
-- PR3 / #343 pruned `orchestrate` per the manifest (migration steps 1–5,
-  AC-S4).
-- PR4 / #339 landed the MAINTAINING.md governance amendments (AC-R2).
-- PR5 / #348 brought accelerator custody under `workflows/`, with installer
-  management, private-path repoints and a bounded alignment refresh (D14).
-
-## Gate close-out
-
-- OD1–OD4 closed on 2026-07-20 (D8–D10 and ADR-0014 wording approved).
-- OD5 closed through the implementation re-validation and landed PR train. The
-  2026-07-20 chaired three-leg review surfaced the amendment set folded into
-  this r3; the user approved the amendments, D14/D15 additions and D13 budget
-  change the same day.
+The repository's declared issue tracker owns change scope and stories. This
+specification retains progressive-disclosure invariants and acceptance
+requirements; it does not report delivery status, implementation history or
+current work state. Durable decisions remain in ADRs and runtime structure
+remains owned by code and tests.

@@ -23,6 +23,29 @@ body:
     validations:
       required: true
 
+  - type: input
+    id: parent-issue
+    attributes:
+      label: Parent tracker issue (if any)
+      description: >-
+        Link the parent issue that owns this change scope or story. Leave blank
+        only when this is a top-level work item. The URL is navigation only;
+        create the native sub-issue relation separately using the work-item runbook.
+      placeholder: https://github.com/owner/repository/issues/123
+    validations:
+      required: false
+
+  - type: input
+    id: durable-owner
+    attributes:
+      label: Durable owner
+      description: >-
+        Link the specification, ADR, invariant or other project document that
+        remains authoritative after this issue's delivery state changes.
+      placeholder: https://github.com/owner/repository/blob/main/docs/specs/topic.md
+    validations:
+      required: false
+
   - type: textarea
     id: scope
     attributes:

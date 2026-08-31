@@ -7,8 +7,8 @@ remove only ephemeral material whose ownership is proven.
 ## Three tiers
 
 1. **Current routing context** — project instructions, approved spec/design,
-   open decisions, canonical work-tracker links and the stable effort route
-   map. Keep it short; follow the linked owners for current state.
+   open decisions, the declared scope/story owner and stable fallback route map.
+   Keep it short; follow the linked owners for current state.
 2. **Recoverable run evidence** — manifests, synthesis, receipts, accepted
    findings and verification records. Preserve paths and provenance; a fresh
    agent should not need raw logs to resume.
@@ -81,9 +81,9 @@ an ignored cache or delete it with a filesystem command.
 
 ## Freshness and invalidation
 
-- Rolling state and context digests declare `Updated` or `Last verified` near
-  the top. Their claims point to the current owning file, command or external
-  source.
+- Explicit run state and context digests declare `Updated` or `Last verified`
+  near the top. Their claims point to the current owning file, command or
+  external source; no rolling project state is implied.
 - Refresh means re-open the owner and reconcile the existing summary. Do not
   append a second version. Mark contradicted claims superseded or remove them
   from current context while preserving history in the archive.
@@ -96,7 +96,8 @@ an ignored cache or delete it with a filesystem command.
 
 Use private memory only for genuine cross-project user preferences. Put
 project knowledge in its durable owner, such as a project instruction, spec,
-ADR or runbook, and keep moving status in the work tracker or state file.
+ADR or runbook, and keep moving status in the declared workflow-state owner or
+explicit run state.
 
 Keep the memory store plain and easy to edit:
 

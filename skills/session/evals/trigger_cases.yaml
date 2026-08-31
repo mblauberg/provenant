@@ -1,10 +1,10 @@
 schema_version: 1
 target_skill: session
 cases:
-  - {id: q226, relation: positive, prompt: "Resume this substantial task from the live project state and current handoff.", tags: [direct], expected: {primary_skill: session, companion_skills: []}}
+  - {id: q226, relation: positive, prompt: "Resume this substantial task from its declared scope/story owner and current handoff, not a rolling project state file.", tags: [direct], expected: {primary_skill: session, companion_skills: []}}
   - {id: q227, relation: positive, prompt: "Checkpoint the current session before compaction with exact progress, remainder, and verification commands.", tags: [direct], expected: {primary_skill: session, companion_skills: []}}
   - {id: q228, relation: positive, prompt: "End this changed session by graduating durable findings and classifying retained versus scratch artifacts.", tags: [direct], expected: {primary_skill: session, companion_skills: []}}
-  - {id: q229, relation: negative, prompt: "Create a persistent route for this six-session migration with legs, blockers, and dependencies.", tags: [adjacent], expected: {primary_skill: work-map, companion_skills: []}}
+  - {id: q229, relation: negative, prompt: "Create a durable route linking the parent issue, specification, and ADRs for this six-session migration without copying live status.", tags: [adjacent], expected: {primary_skill: work-map, companion_skills: []}}
   - {id: q230, relation: negative, prompt: "Analyse recurring process friction across the completed delivery and turn it into evidence-backed regression gates.", tags: [adjacent, completed-cycle], expected: {primary_skill: retrospect, companion_skills: []}}
   - {id: q231, relation: negative, prompt: "Explain what a shell session is in one sentence.", tags: [no-skill], expected: {primary_skill: null, companion_skills: []}}
   - {id: q232, relation: boundary, prompt: "Checkpoint this multi-session effort and update both the session handoff and its current route leg.", tags: [composition], expected: {primary_skill: session, companion_skills: [work-map]}}

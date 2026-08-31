@@ -5,25 +5,29 @@ description: "Use for creating, placing, indexing, updating, or archiving engine
 
 # Engineering docs
 
-Treat docs as durable, audited deliverables. Cite decisions, archive retired
-docs, use Australian English and load `engineering-writing` for substantial
-prose.
+Treat docs as deliverables: cite decisions, archive retired docs and load
+`engineering-writing` for substantial prose.
+
+Read `Repository process` first. If absent, use an unambiguous existing owner or
+propose paths in chat; never invent one. In `issue-tracker`, parent issues own
+canonical scope and stories; docs own durable intent, decisions and invariants.
+In `project-docs`, use its named home. Do not create a second story or status
+projection. Link-only files are unavailable or cross-tracker fallbacks.
 
 ## Default homes
 
-Resolve project instructions and existing canonical owners first. The table is
-a fallback only when project-write authority includes documentation setup. In
-advisory mode, propose paths without creating them.
+Use this table only with docs-setup write authority; advisory mode proposes
+paths without creating them.
 
 | Type | Home | Convention |
 |---|---|---|
-| Stories / specs | `docs/stories/` or `docs/specs/` | `NN-slug.md`, indexed |
-| Architecture map | `docs/ARCHITECTURE.md` | current state; links to ADRs |
-| Diagrams | owning document or `docs/diagrams/` | colocate by default; separate when independently owned, reused or generated |
-| Runbooks | `docs/runbooks/` | numbered steps and verification |
-| Open-decision register | `docs/OPEN_DECISIONS.md` | one row per user/owner gate; never auto-answered |
+| Durable intent / specifications | `docs/specs/` | semantic, indexed |
+| Architecture map | `docs/ARCHITECTURE.md` | current state; link ADRs |
+| Diagrams | owning document or `docs/diagrams/` | colocate unless independently owned, reused or generated |
+| Runbooks | `docs/runbooks/` | numbered steps; verification |
+| Open-decision register | declared project-docs path | never create in issue-tracker mode |
 | Threat models | `docs/threat-models/` | STRIDE/LINDDUN structure |
-| Rolling state | `docs/STATE.md` | rules embedded in the file (`session` skill) |
+| Session or run continuity | declared owner; explicit run state | `session` handoff; autopilot state remains run-local |
 | Archive | `docs/archive/` | indexed by its README |
 
 ## Binding rules
@@ -33,25 +37,22 @@ advisory mode, propose paths without creating them.
 3. Keep numbered directories contiguous and update their index in the same
    change.
 4. Quote and link frozen legal, compliance or gate wording; do not paraphrase.
-5. **Anti-bloat**: an agent-facing doc past ~15 KB is a split/merge review
-   signal, not an automatic split. Split when owners, audiences, lifecycles or
-   change rates differ; merge duplicate truths or tiny files always changed
-   together. Keep one canonical owner and make current claim → owner → evidence
-   reachable in at most three hops. Session residue never accumulates in live
-   dirs; use `session`'s context-hygiene pass.
+5. **Anti-bloat**: a doc past ~15 KB signals review, not an automatic split.
+   Split when owners, audiences, lifecycles or change rates
+   differ; merge duplicate truths or tiny files changed together. Keep one
+   owner and make claim → owner → evidence reachable in three hops. Session
+   residue belongs in `session`'s context-hygiene pass.
 
 ## Diagrams
 
-Default to **Mermaid in markdown** for GitHub and operational docs. Use
+Default to **Mermaid** for GitHub and operational docs: use
 `flowchart` for routing, `sequenceDiagram` for calls, `stateDiagram-v2` for
-lifecycles, `erDiagram` for schemas and a C4-style flowchart for context.
+lifecycles and `erDiagram` for schemas. Colocate a load-bearing diagram with
+its owner when both have the same audience, owner and lifecycle; separate it when reused,
+generated or independently maintained.
 
-Place a load-bearing diagram in the document whose explanation it supports
-when both have the same audience, owner and lifecycle. Use a separate diagram
-file when it is reused, generated, or maintained as an independent artifact.
-
-**Render and visually inspect before commit.** Parser success proves syntax,
-not layout quality:
+**Render and visually inspect before commit.** Parser success proves syntax, not
+layout quality:
 
 ```sh
 src="$(pwd)/path/to/owning-document.md"
@@ -59,19 +60,18 @@ out="$(mktemp -d)"
 (cd "$out" && mmdc -i "$src" -o check.md)
 ```
 
-Keep one conceptual level per diagram. Split overview from detail when return
-edges distort the main path. Check normal and narrow widths for overlap,
-clipping, crossings, blank space and unreadable scaling. Apply
-[diagram-quality.md](references/diagram-quality.md). Use `d2-diagrams` only
-when fixed layout or publication quality justifies a rendered asset.
+Keep one conceptual level; check normal and narrow widths for overlap, clipping,
+crossings and unreadable scaling. Apply
+[diagram-quality.md](references/diagram-quality.md); use `d2-diagrams` only
+when fixed layout or publication quality justifies it.
 
 ## Retirement and archiving
 
-Preserve durable records in the archive and update its index. After an
-authorised move, repair inbound links and remove a pointer-only file when
-repository history and the relevant index preserve provenance. Keep a
-tombstone only while a stable external link or unsupported consumer still
-requires one. Deleting a substantive record still requires owner authority.
+Preserve durable records in the archive and index. After an authorised move,
+repair inbound links and remove a pointer-only file when history and the index
+preserve provenance. Keep a tombstone only while an external link or
+unsupported consumer requires one. Deleting substantive records needs owner
+authority.
 
 ## Red flags
 

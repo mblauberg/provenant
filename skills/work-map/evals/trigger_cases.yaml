@@ -1,8 +1,8 @@
 schema_version: 1
 target_skill: work-map
 cases:
-  - {id: q298, relation: positive, prompt: "Create the persistent effort map for this multi-session migration by linking its specification and GitHub work items.", tags: [direct], expected: {primary_skill: work-map, companion_skills: []}}
-  - {id: q299, relation: positive, prompt: "Resume this long effort by reopening its curated route links, then follow the issue for live state.", tags: [direct], expected: {primary_skill: work-map, companion_skills: []}}
+  - {id: q298, relation: positive, prompt: "Read the repository process declaration; use the parent tracker issue as this effort's canonical map when it has enough route detail.", tags: [direct], expected: {primary_skill: work-map, companion_skills: []}}
+  - {id: q299, relation: positive, prompt: "Resume this long effort from its declared scope/story owner, using a link-only map only for the cross-tracker route.", tags: [direct], expected: {primary_skill: work-map, companion_skills: []}}
   - {id: q300, relation: positive, prompt: "Update the effort route links after the owning issue records a durable route change, without copying its status.", tags: [direct], expected: {primary_skill: work-map, companion_skills: []}}
   - {id: q301, relation: negative, prompt: "Make a checklist for this one-session edit.", tags: [no-skill], expected: {primary_skill: null, companion_skills: []}}
   - {id: q302, relation: negative, prompt: "Write the current session handoff before compaction.", tags: [adjacent], expected: {primary_skill: session, companion_skills: []}}

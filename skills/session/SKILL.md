@@ -5,19 +5,21 @@ description: "Use for start, checkpoint, handoff, compaction, or end-of-session 
 
 # Session
 
-Store continuity in the project owner; without write authority, propose a chat
-delta. Project instructions may override continuity paths.
-Fallbacks:
-state `docs/STATE.md` (about 120 lines), handoffs `docs/handoffs/`, archive
-`docs/archive/`. Instructions may override `STATE_FILE`, `HANDOFF_DIR` and
-`ARCHIVE_DIR`.
+Read the repository's `Repository process` declaration and its declared
+scope/story and workflow-state owners first. If absent, use existing owners or
+return a chat handoff; never invent one. Write continuity only to an authorised
+handoff or explicit run-local state; without that authority, propose a chat
+delta. Updating an external tracker requires external-write authority.
+There is no default rolling project state file. Run state remains run-local,
+not project-wide truth. Project instructions may override continuity
+paths. Fallbacks: handoffs `docs/handoffs/`, archive `docs/archive/`.
 
 ## Start
 
-For substantial work, start at the approved phase/slice and reopen disk state;
-never trust injected state. Resume from the digest-bound handoff, reading only
-relevant docs/open decisions. User gates stay unanswered until decided.
-Routine bounded work may continue with context inside authority.
+For substantial work, reopen disk state; distrust injected state. Resume using
+declared owners and the digest-bound handoff, reading only relevant docs/open
+decisions. User gates stay unanswered until decided.
+Bounded work may continue within authority.
 
 ## Checkpoint
 
@@ -29,25 +31,25 @@ otherwise return it without writing. Use
 - original goal, disk-backed progress paths/commits, ordered remainder;
 - invariants and exact verification commands.
 
-Keep at most one active handoff per effort/leg. A fresh session resumes from it.
-In the same update, archive a consumed handoff, mark it consumed/time-stamped
-and index it; never delete it. Update `work-map` only when the
-durable route changes; live state belongs to the work tracker.
+Keep one active handoff per effort/leg. Archive a consumed handoff, mark and
+index it; never delete it. Update `work-map` only when the durable route
+changes; live state belongs to the declared workflow-state owner.
 
 Before checkpoint load [context-hygiene.md](references/context-hygiene.md). Run
 its read-only audit when run directories, logs, handoffs or large agent-facing
 docs accumulate. Consolidate state; never paste transcripts into handoffs.
 
-Provider session retention is minimal: contract-required identifiers,
-generation/callback state and resumable digests only. Never retain credentials
-or raw transcripts as continuity state. After compaction, revalidate generation,
-expiry and ownership before reuse.
+Retain only required provider identifiers, generation/callback state and digests.
+Never retain credentials or raw transcripts as continuity state. After
+compaction, revalidate generation, expiry and ownership before reuse.
 
 ## End after changed state
 
 1. **Graduate:** merge surviving behaviour-changing knowledge into its owner:
    decision -> spec/ADR; domain fact -> context/README; convention -> project
-   `AGENTS.md`; moving status -> state. Reconcile contradictions, mark
+   `AGENTS.md`; moving status -> declared workflow-state owner or explicit run
+   state, with external writes separately authorised.
+   Reconcile contradictions, mark
    supersession, refresh timestamps, archive over-cap history; never duplicate.
 2. **Close context:** retain minimal manifest, synthesis, verification and
    failure receipts; archive consumed records. Remove only run-owned,
@@ -62,8 +64,8 @@ expiry and ownership before reuse.
 
 Periodic hygiene is opt-in; record owner, cadence, scope, resource cap, last
 success and disable condition. It may audit/archive classified artifacts and
-refresh indexes, but not commit, deploy, communicate or delete
-unknown files. Staleness becomes visible state, not catch-up churn.
+refresh indexes, but not commit, deploy, communicate or delete unknown files.
+Staleness stays visible.
 
 Put project knowledge in project docs; follow
 [context-hygiene.md](references/context-hygiene.md) for lightweight private memory.

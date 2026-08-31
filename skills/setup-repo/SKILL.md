@@ -13,8 +13,9 @@ permission. Ask for an unnamed target; never infer it from cwd.
 
 ## Inspect and classify
 
-Inventory `MAINTAINING.md`, docs layout, `.github/**`, the work-item runbook and
-board. Classify each action as **keep (exact match)**, **create
+Read the target's `Repository process` declaration first, then inventory
+`MAINTAINING.md`, docs layout, `.github/**`, the work-item runbook and board.
+Classify each action as **keep (exact match)**, **create
 (absent)**, **adapt (compatible; propose the merge)** or **conflict (semantic
 mismatch; STOP and ask)**. Never overwrite; amend the declarations block per
 heading. A re-run against an already-set-up repository must produce no diff.
@@ -28,12 +29,16 @@ remains out of scope: a documented skip, not alternate-tracker scaffolding.
 
 ## Declare repository process
 
-Amend the fixed-heading **Repository process** block in target
-`MAINTAINING.md`, creating it if absent, from
+Amend the fixed-heading **Repository process** block in `MAINTAINING.md`,
+creating it if absent, from
 [`templates/repo-declarations.md`](templates/repo-declarations.md). Record the
-tracker choice, docs-layout homes, merge policy/authority and work-item runbook
-pointer. Use pointers only; never duplicate runbook or policy content. This
-block, not the GitHub scaffolding, is the completion gate.
+tracker choice, canonical **scope and stories** home (`issue-tracker` or
+`project-docs`), workflow-state owner (`tracker` or `project-docs`) and pointer,
+docs-layout homes, merge policy/authority and work-item runbook pointer. Use
+pointers only; never duplicate runbook or policy content.
+With `issue-tracker`, the parent issue is the canonical change scope/story home;
+do not duplicate it. This block, not the GitHub scaffolding, is the completion gate.
+With tracker `none`, use `project-docs` for both scope/story and workflow state.
 
 ## Docs layout
 

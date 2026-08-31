@@ -1,8 +1,8 @@
 schema_version: 1
 target_skill: setup-repo
 cases:
-  - {id: q900, relation: positive, prompt: "Set up GitHub for this project: declare its process, labels, branch ruleset, issue forms, PR template, and Project board.", tags: [direct, github], expected: {primary_skill: setup-repo, companion_skills: []}}
-  - {id: q901, relation: positive, prompt: "Set up this repository's process without GitHub issues; record our tracker, docs homes, merge policy, and work-item runbook pointers.", tags: [direct, non-github], expected: {primary_skill: setup-repo, companion_skills: []}}
+  - {id: q900, relation: positive, prompt: "Set up GitHub for this project and declare the issue tracker as the canonical scope/story home before adding forms and board.", tags: [direct, github], expected: {primary_skill: setup-repo, companion_skills: []}}
+  - {id: q901, relation: positive, prompt: "Set up this repository's process without GitHub issues; declare project-docs as the canonical scope/story home and record its pointers.", tags: [direct, non-github], expected: {primary_skill: setup-repo, companion_skills: []}}
   - {id: q902, relation: positive, prompt: "Re-run repository setup against this existing repo, keeping exact matches and proposing only compatible adaptations with no duplicate scaffolding.", tags: [direct, idempotent], expected: {primary_skill: setup-repo, companion_skills: []}}
   - {id: q903, relation: negative, prompt: "Walk this accepted issue from Ready through merge using this repository's existing GitHub work-item runbook.", tags: [adjacent, no-skill], expected: {primary_skill: null, companion_skills: []}}
   - {id: q904, relation: negative, prompt: "Implement the approved change on its feature branch and open the pull request per our existing template.", tags: [adjacent], expected: {primary_skill: implement, companion_skills: []}}

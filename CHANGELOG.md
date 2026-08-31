@@ -100,6 +100,9 @@ The current pre-release tree includes:
 
 ### Changed
 
+- Repository process declarations now name canonical scope/story and
+  workflow-state owners. In `issue-tracker` mode, the parent issue owns change
+  scope and story while durable intent remains in project docs (#711).
 - Fabric MCP now publishes concise protocol instructions for clients that
   materialise tool guidance, and read-only diagnostics reject inaccessible or
   unstable database snapshots instead of reporting healthy absence or stale
