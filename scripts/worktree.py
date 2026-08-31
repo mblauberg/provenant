@@ -222,14 +222,14 @@ def owning_root(repo: Path) -> Path:
             "refusing copied checkout metadata"
         )
     dot_git = root / ".git"
-    if dot_git.is_symlink():
-        raise PolicyError(f"{root} has symlinked .git metadata")
-    if dot_git.is_file():
+    if dot_git.is_symlink() or dot_git.is_file():
         git_dir = Path(git(root, "rev-parse", "--absolute-git-dir").stdout.strip()).resolve()
         common_dir = Path(git(
             root, "rev-parse", "--path-format=absolute", "--git-common-dir",
         ).stdout.strip()).resolve()
         if git_dir != common_dir:
+            if dot_git.is_symlink():
+                raise PolicyError(f"{root} has symlinked linked-worktree metadata")
             back_pointer = git_dir / "gitdir"
             try:
                 if not stat.S_ISREG(back_pointer.lstat().st_mode):

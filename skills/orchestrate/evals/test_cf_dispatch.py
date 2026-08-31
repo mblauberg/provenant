@@ -340,21 +340,25 @@ def test_dispatch_rejects_a_copied_linked_worktree_before_provider_launch():
             printf '%s\\n' '{"status":"ok","alias":"workhorse","resolved_model":"opus","model_family":"anthropic","endpoint_provider":"anthropic","identity_source":"test","requested_effort":"","effort":"","effort_source":"route-default","effort_capability_source":"test"}'
             """,
         )
-        out = tmp / "out.txt"
         env = fabric_free_env()
         env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
-        result = subprocess.run(
-            [
-                str(SCRIPT), "--intent", "ordinary", "--tool", "claude",
-                "--orchestrator-family", "openai", "--alias", "workhorse",
-                "--role", "worker", "--out", str(out), "--prompt", "inspect",
-            ],
-            cwd=copied,
-            env=env,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
+
+        def dispatch_from(cwd, out_name):
+            return subprocess.run(
+                [
+                    str(SCRIPT), "--intent", "ordinary", "--tool", "claude",
+                    "--orchestrator-family", "openai", "--alias", "workhorse",
+                    "--role", "worker", "--out", str(tmp / out_name),
+                    "--prompt", "inspect",
+                ],
+                cwd=cwd,
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+
+        result = dispatch_from(copied, "out.txt")
 
         assert result.returncode == 2
         assert "copied linked worktree" in result.stderr
@@ -371,22 +375,9 @@ def test_dispatch_rejects_a_copied_linked_worktree_before_provider_launch():
         copied_git_content = copied_git.read_text(encoding="utf-8")
         copied_git.unlink()
         copied_git.symlink_to(source / ".git")
-        symlink_out = tmp / "symlink-out.txt"
-        symlink_result = subprocess.run(
-            [
-                str(SCRIPT), "--intent", "ordinary", "--tool", "claude",
-                "--orchestrator-family", "openai", "--alias", "workhorse",
-                "--role", "worker", "--out", str(symlink_out),
-                "--prompt", "inspect",
-            ],
-            cwd=copied,
-            env=env,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
+        symlink_result = dispatch_from(copied, "symlink-out.txt")
         assert symlink_result.returncode == 2
-        assert "symlinked .git" in symlink_result.stderr
+        assert "symlinked linked-worktree" in symlink_result.stderr
         assert not invoked.exists()
         assert {
             "config": (repo / ".git" / "config").read_bytes(),
@@ -404,21 +395,25 @@ def test_dispatch_rejects_a_copied_linked_worktree_before_provider_launch():
         ).strip())
         back_pointer = git_dir / "gitdir"
         back_pointer_content = back_pointer.read_text(encoding="utf-8")
-        back_pointer.unlink()
-        malformed_out = tmp / "malformed-out.txt"
-        malformed_result = subprocess.run(
-            [
-                str(SCRIPT), "--intent", "ordinary", "--tool", "claude",
-                "--orchestrator-family", "openai", "--alias", "workhorse",
-                "--role", "worker", "--out", str(malformed_out),
-                "--prompt", "inspect",
-            ],
-            cwd=copied,
-            env=env,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+
+        back_pointer.write_text(
+            back_pointer_content.rstrip("\n") + "\ntrailing-junk\n",
+            encoding="utf-8",
         )
+        trailing_result = dispatch_from(copied, "trailing-out.txt")
+        assert trailing_result.returncode == 2
+        assert "trailing content" in trailing_result.stderr
+        assert not invoked.exists()
+        assert {
+            "config": (repo / ".git" / "config").read_bytes(),
+            "index": index_path.read_bytes(),
+            "refs": subprocess.check_output(
+                ["git", "-C", str(repo), "show-ref"], text=True,
+            ),
+        } == before
+
+        back_pointer.unlink()
+        malformed_result = dispatch_from(copied, "malformed-out.txt")
         assert malformed_result.returncode == 2
         assert "invalid linked-worktree back-pointer" in malformed_result.stderr
         assert not invoked.exists()
@@ -440,20 +435,16 @@ def test_dispatch_rejects_a_copied_linked_worktree_before_provider_launch():
             printf 'OK\\n'
             """,
         )
-        valid_out = tmp / "valid-out.txt"
-        valid_result = subprocess.run(
-            [
-                str(SCRIPT), "--intent", "ordinary", "--tool", "claude",
-                "--orchestrator-family", "openai", "--alias", "workhorse",
-                "--role", "worker", "--out", str(valid_out), "--prompt", "inspect",
-            ],
-            cwd=source,
-            env=env,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
+        valid_result = dispatch_from(source, "valid-out.txt")
         assert valid_result.returncode == 0, valid_result.stderr
+        assert invoked.exists()
+
+        invoked.unlink()
+        metadata = tmp / "standalone-metadata"
+        shutil.move(repo / ".git", metadata)
+        (repo / ".git").symlink_to(metadata, target_is_directory=True)
+        symlinked_repo_result = dispatch_from(repo, "symlinked-repo-out.txt")
+        assert symlinked_repo_result.returncode == 0, symlinked_repo_result.stderr
         assert invoked.exists()
 
 

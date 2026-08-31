@@ -170,11 +170,7 @@ if resolved_git_root="$(git rev-parse --show-toplevel 2>/dev/null)"; then
       exit 2
       ;;
   esac
-  if [ -L "$resolved_git_root/.git" ]; then
-    echo "refusing dispatch with symlinked .git metadata" >&2
-    exit 2
-  fi
-  if [ -f "$resolved_git_root/.git" ]; then
+  if [ -L "$resolved_git_root/.git" ] || [ -f "$resolved_git_root/.git" ]; then
     resolved_git_dir="$(git rev-parse --absolute-git-dir 2>/dev/null)" || {
       echo "cannot resolve dispatch Git directory" >&2
       exit 2
@@ -192,13 +188,17 @@ if resolved_git_root="$(git rev-parse --show-toplevel 2>/dev/null)"; then
       exit 2
     }
     if [ "$resolved_git_dir" != "$resolved_common_git_dir" ]; then
+      if [ -L "$resolved_git_root/.git" ]; then
+        echo "refusing dispatch with symlinked linked-worktree metadata" >&2
+        exit 2
+      fi
       if [ ! -f "$resolved_git_dir/gitdir" ] \
         || [ -L "$resolved_git_dir/gitdir" ] \
         || [ ! -r "$resolved_git_dir/gitdir" ]; then
         echo "refusing dispatch with invalid linked-worktree back-pointer metadata" >&2
         exit 2
       fi
-      IFS= read -r linked_git_file <"$resolved_git_dir/gitdir" || {
+      linked_git_file="$(cat -- "$resolved_git_dir/gitdir")" || {
         echo "cannot read linked-worktree back-pointer" >&2
         exit 2
       }
@@ -206,6 +206,12 @@ if resolved_git_root="$(git rev-parse --show-toplevel 2>/dev/null)"; then
         echo "linked-worktree back-pointer is empty" >&2
         exit 2
       }
+      case "$linked_git_file" in
+        *$'\n'*)
+          echo "linked-worktree back-pointer contains trailing content" >&2
+          exit 2
+          ;;
+      esac
       case "$linked_git_file" in
         /*) ;;
         *) linked_git_file="$resolved_git_dir/$linked_git_file" ;;

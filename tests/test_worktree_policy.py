@@ -112,7 +112,7 @@ def test_copied_linked_checkout_cannot_mutate_its_source_repository(tmp_path, ca
         "create", "leak", "--repo", str(copied), "--detach", head,
         "--human-authorised",
     ]) == 2
-    assert "symlinked .git" in capsys.readouterr().err
+    assert "symlinked linked-worktree" in capsys.readouterr().err
     assert source_state() == before
     assert not (repo / ".worktrees" / "leak").exists()
     copied_git.unlink()
@@ -130,6 +130,16 @@ def test_copied_linked_checkout_cannot_mutate_its_source_repository(tmp_path, ca
     assert "invalid linked-worktree back-pointer" in capsys.readouterr().err
     assert source_state() == before
     assert not (repo / ".worktrees" / "leak").exists()
+
+
+def test_owning_root_allows_a_symlinked_standalone_git_directory(tmp_path):
+    repo = tmp_path / "project"
+    init_repo(repo)
+    metadata = tmp_path / "metadata"
+    shutil.move(repo / ".git", metadata)
+    (repo / ".git").symlink_to(metadata, target_is_directory=True)
+
+    assert worktree_policy.owning_root(repo) == repo
 
 
 def test_creation_requires_authority_and_rejects_unsafe_names(tmp_path, capsys):
