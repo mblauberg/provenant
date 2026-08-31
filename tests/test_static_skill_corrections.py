@@ -92,6 +92,7 @@ def test_session_records_a_friction_pointer_but_retrospect_owns_process_change()
     assert "docs/FRICTION.md" not in skill
     assert "compact friction pointer" in skill
     assert "`retrospect` owns analysis and process changes" in skill
+    assert "read-only write authority" not in skill
 
 
 def test_work_map_links_live_work_state_instead_of_repeating_it():
@@ -99,7 +100,9 @@ def test_work_map_links_live_work_state_instead_of_repeating_it():
 
     assert "declared workflow-state owner" in skill
     assert "never restates current status, owner, dependencies or user gates" in skill
-    assert "validate_work_map.py" in skill
+    assert '${AGENTS_HOME:-$HOME/.agents}/skills/work-map/scripts/validate_work_map.py' in skill
+    assert "Stable grouping/order" not in skill
+    assert "Stable ordering is allowed" in skill
 
 
 def test_autopilot_yields_when_bounded_reenumeration_finds_no_work():
@@ -131,6 +134,7 @@ def test_skill_craft_declares_action_owner_primary_for_composed_requests():
 
     assert "companion to a primary lifecycle owner" in skill
     assert "stays the action-owner" in skill
+    assert "plugin packaging (use plugin-creator)" in skill.lower()
     assert "action-owning lifecycle remains primary" in audit
     # These richer branch-tagged composition cases live in
     # boundary_trace_cases.yaml's routing_reference_cases (not in the

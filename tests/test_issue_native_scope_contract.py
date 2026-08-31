@@ -51,6 +51,7 @@ def test_issue_native_work_map_and_state_rules_are_explicit():
 
     assert "parent tracker issue is the work map" in work_map.lower()
     assert "link-only" in work_map.lower()
+    assert "never delete" in work_map.lower()
     assert "no default rolling project state" in session.lower()
     assert "run-local" in autopilot.lower()
     assert "state.md" in autopilot.lower()
@@ -67,6 +68,7 @@ def test_issue_native_user_gates_do_not_fork_into_a_markdown_register():
 
     assert "user gates | declared scope/story owner" in scope
     assert "never create in issue-tracker mode" in engineering_docs
+    assert "`setup-repo` write authority" in engineering_docs
 
 
 def test_issue_native_decision_and_spec_reconciliation_are_recorded():
@@ -80,7 +82,9 @@ def test_issue_native_decision_and_spec_reconciliation_are_recorded():
     assert "issue-native change scope" in adr.lower()
     assert "Git retains durable invariants" in adr
     assert "0017" in adr_0009
+    assert "must open the migration" not in adr.lower()
     assert "issue-native" in adr_0011.lower()
+    assert "archived and indexed when consumed" in adr_0011.lower()
     assert "implementation status:" not in disclosure.lower()
     assert "## Historical problem (July 2026)" in disclosure
     assert "~34 lines" not in disclosure

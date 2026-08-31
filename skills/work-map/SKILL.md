@@ -43,18 +43,20 @@ What the route is intended to deliver. Link the owning specification.
 - **Link, never restate live work state.** Do not add status fields, task
   checkboxes, completion claims, owner names, dependencies, blockers or user
   gates. Readers follow the declared workflow-state owner.
-- **Route entries are links, not task summaries.** Stable grouping/order is
-  allowed; issue and pull-request prose carries changing detail.
+- **Route entries are links, not task summaries.** Stable ordering is allowed;
+  Route and Invariants contain links only.
 - **Resume order:** declared scope/story and workflow-state owners → fallback or
   cross-tracker map → claimed session handoff. Never reconstruct from
   transcripts or piled-up handoffs.
 - **Handoffs stay temporary.** They carry continuity for an active session or
-  run, are not linked as route state, and are removed or archived when consumed.
+  run, are not linked as route state, and are archived by `session` when
+  consumed; never delete them.
 - **One map writer.** One chair updates the route after checking declared owners.
 - Archive a route map under the project's archival policy only when the
   declared workflow-state owner records that disposition.
 - Validate an authored map with
-  `scripts/validate_work_map.py <EFFORT-file>` before handoff.
+  `python3 "${AGENTS_HOME:-$HOME/.agents}/skills/work-map/scripts/validate_work_map.py" <EFFORT-file>`
+  before handoff.
 
 ## Red flags
 

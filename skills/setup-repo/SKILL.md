@@ -7,9 +7,9 @@ description: "Use when asked to set up or scaffold a repository's process, label
 
 ## User gate first
 
-Before any write, user approves a plan naming the target, the exact
+Before any write, user approves a plan naming the target, exact
 keep/create/adapt/conflict diff and, for GitHub, the Project board. Confirm
-permission. Ask for an unnamed target; never infer it from cwd.
+permission; if the target is unnamed, ask instead of inferring it from cwd.
 
 ## Inspect and classify
 
@@ -25,12 +25,11 @@ heading. A re-run against an already-set-up repository must produce no diff.
 Ask: **Use GitHub issues?** If yes, use the GitHub branch, confirming
 the remote host before any `gh` command. If no, record the chosen tracker or
 `none`; skip labels, ruleset, issue forms and board. Tracker-specific setup
-remains out of scope: a documented skip, not alternate-tracker scaffolding.
+remains out of scope; document the skip.
 
 ## Declare repository process
 
-Amend the fixed-heading **Repository process** block in `MAINTAINING.md`,
-creating it if absent, from
+Amend or create the **Repository process** block in `MAINTAINING.md` from
 [`templates/repo-declarations.md`](templates/repo-declarations.md). Record the
 tracker choice, canonical **scope and stories** home (`issue-tracker` or
 `project-docs`), workflow-state owner (`tracker` or `project-docs`) and pointer,
@@ -42,9 +41,8 @@ With tracker `none`, use `project-docs` for both scope/story and workflow state.
 
 ## Docs layout
 
-Ask where specs, runbooks and ADRs live. Defaults: reference
-`engineering-docs`'s **Default homes** table by skill name; do not invoke it.
-`setup-repo` owns the declaration.
+Ask where specs, runbooks and ADRs live. `setup-repo` owns the declaration and
+may apply `engineering-docs`'s **Default homes** without invoking it.
 
 ## GitHub branch: steps 1-7
 
@@ -58,12 +56,13 @@ Only when the tracker is GitHub issues and the remote host is confirmed:
    then create the ruleset per
    [ruleset guidance](references/ruleset-and-ci.md), confirming its app id.
 3. **Issue forms/security:** copy [`templates/SECURITY.md`](templates/SECURITY.md)
-   to the root, or verify existing policy has a valid private route. Copy
-   `templates/ISSUE_TEMPLATE/*.yml` to `.github/ISSUE_TEMPLATE/`; adapt gate
-   wording and replace owner/repo. Confirm private vulnerability reporting is
-   enabled, or replace `<private-reporting-route>` with a working confidential
-   contact method. Publish only when the placeholder is gone and both routes
-   work.
+   to the root or verify a valid private route. Copy
+   `templates/ISSUE_TEMPLATE/*.yml` to `.github/ISSUE_TEMPLATE/`, adapting
+   project gates, fields, owner and repo. Use feature for discovery and
+   work-item for accepted, bounded proposals. Confirm private vulnerability
+   reporting is enabled or replace `<private-reporting-route>` with a working
+   confidential contact method. Publish only when the placeholder is gone and
+   both routes work.
 4. **PR template:** copy
    [`templates/pull_request_template.md`](templates/pull_request_template.md)
    into `.github/` and adapt evidence rows; retain decision and review sections.

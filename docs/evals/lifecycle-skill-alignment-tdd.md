@@ -43,10 +43,10 @@ doctrine checker passed.
 
 ## Current deterministic owner
 
-The current evaluator validates all 36 focused cases from the descriptive
-`lifecycle_cases.yaml` fixtures and executes every project-artifact fallback
-with Console, Herdr and GitHub absent. This is the maintained deterministic
-gate.
+Current deterministic evidence lives in `trigger_cases.yaml`,
+`regression_cases.yaml` and owner-specific contract tests. The nine
+`lifecycle_cases.yaml` files are retained descriptive fixtures; no current
+runner consumes them.
 
 The earlier provider-routing bundle is catalogue-bound evidence. It remains
 byte-for-byte under `docs/archive/evals/` and is not relabelled, rehashed or

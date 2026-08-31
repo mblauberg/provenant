@@ -85,6 +85,8 @@ def test_repository_process_template_is_the_invariant_completion_artifact():
     assert "per heading" in normalised
     assert "engineering-docs" in instructions
     assert "skills/engineering-docs" not in instructions
+    assert "feature for discovery" in normalised
+    assert "work-item for accepted, bounded proposals" in normalised
 
 
 def test_inspect_classify_and_remote_gates_make_setup_convergent_and_safe():

@@ -1,6 +1,6 @@
 ---
 name: skill-craft
-description: "Use for creating, revising, or read-only auditing an Agent Skill: SKILL.md, triggers, progressive disclosure, fixtures, overlap, and token cost. Defaults to audit; edits need explicit authority. Not for plugin packaging or delivery; use implement."
+description: "Use to create, revise, or audit Agent Skills: SKILL.md, triggers, progressive disclosure, fixtures, overlap, token cost. Defaults to read-only audit; edits need authority. Not for plugin packaging (use plugin-creator) or delivery (use implement)."
 ---
 
 # Skill craft

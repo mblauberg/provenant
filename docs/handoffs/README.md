@@ -20,7 +20,8 @@ its durable authority is the spec
 [`harness/disclosure-refactor.md`](../specs/harness/disclosure-refactor.md) and
 [ADR 0014](../adr/0014-comparative-skill-evals-on-suspicion.md). All remain
 available in Git history. A new handoff is only for live session or run
-continuity: it must name its current issue or run and be removed when consumed.
+continuity: it must name its current issue or run, then be archived and indexed
+when consumed.
 
 For historical W010 evidence, start with the canonical [capability-compiled
 execution authority route](../efforts/EFFORT-capability-profiles.md), then

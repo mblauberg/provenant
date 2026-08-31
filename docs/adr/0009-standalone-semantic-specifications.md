@@ -1,10 +1,10 @@
 # ADR 0009 — Standalone semantic specifications
 
 **Status:** Accepted 2026-07-15 (human direction; supersedes the earlier
-family-manifest form of this ADR); amended 2026-07-28 and 2026-08-31 by [ADR
+family-manifest form of this ADR); amended 2026-07-28 by [ADR
 0017](0017-specifications-own-non-derivable-intent.md), which narrows what these
 specifications may contain and aligns their checks with current documentation
-tiers.
+tiers. Its 2026-08-31 issue-native scope amendment is noted below as consistent.
 
 ADR 0017's 2026-08-31 issue-native scope amendment is consistent with this
 decision: tracker issues or the declared project-docs home carry change scope
@@ -25,7 +25,7 @@ should not create new numbering or cross-reference dependencies.
 
 ## Decision
 
-Current normative specifications live at semantic paths:
+Normative specifications use semantic paths. At adoption, the layout was:
 
 ```text
 docs/specs/
@@ -34,6 +34,9 @@ docs/specs/
   console/<subject>.md
   harness/<subject>.md
 ```
+
+[`docs/specs/README.md`](../specs/README.md) is the discovery index. Directories
+retired with their runtimes are historical, not current specification homes.
 
 Each subject file is an independent normative specification. Directories and
 `docs/specs/README.md` exist only for discovery; they do not impose a parent

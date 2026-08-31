@@ -277,9 +277,6 @@ alignment, security, privacy, performance, reliability/concurrency, state/type
 boundaries, test/eval coverage, accessibility, evidence quality,
 readability/maintainability and structural simplification.
 
-Substantial work requires multiple targeted lenses and the other primary family.
-Crucial work uses a distinct family when available. Terminal work increases
-targeted and adversarial pressure and records any skipped distinct-family leg.
 Reviewers work independently before synthesis. The reducer adjudicates against
 evidence and records disagreement; no majority vote can override a deterministic
 failure or user authority.

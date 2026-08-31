@@ -40,10 +40,12 @@ issues are disabled.
 
 The parent issue owns change scope, story and remaining gates. Native child
 issues own independently deliverable slices. Create or link a child through
-GitHub's `sub_issues` API using the numeric issue id, not a checklist or title:
+GitHub's `sub_issues` API, not a checklist or title.
 
 The POST requires explicit external-write authority. Without it, return the
 proposed parent/child relation and do not call `gh`.
+
+When authorised, use the numeric issue id:
 
 ```sh
 child_id=$(gh api repos/OWNER/REPO/issues/CHILD_NUMBER --jq .id)
@@ -204,12 +206,10 @@ merge --auto` may be queued once those gates are met.
 
 `ci-status` is the single required check on branch protection. It is the
 aggregate job at the end of [`ci.yml`](../../.github/workflows/ci.yml): it
-runs on `if: always()`, succeeds only when every needed job (`detect-changes`,
-`harness`, `fabric`, `review-portal-supervisor`, `console`, `herdr`,
-`split-root`, `zizmor`)
+runs on `if: always()`, succeeds only when every job in its live `needs:` list
 either succeeded or was skipped by the path filter, and fails closed on any
-failure or cancellation, including `detect-changes` itself. "CI is green"
-means exactly this one context; no other check is required.
+failure or cancellation. "CI is green" means exactly this one context; no
+other check is required.
 
 Read that check's state correctly. `gh pr view <n> --json statusCheckRollup`
 leaves `.conclusion` as an empty string while a check is still running, so a
