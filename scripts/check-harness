@@ -60,7 +60,7 @@ run_test "$SCRIPTS_ROOT/static-security-check.py"
 run_test -m pytest -q \
   "$TESTS_ROOT" \
   "$SKILLS_ROOT/implement/tests/test_checkpoint_run.py" \
-  "$SKILLS_ROOT/orchestrate/evals/test_cf_dispatch.py"
+  "$SKILLS_ROOT/orchestrate/evals"
 
 if [[ "$DOCTOR" == true ]]; then
   echo "environment doctor"
