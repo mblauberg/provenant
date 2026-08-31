@@ -401,8 +401,9 @@ Private harness memory is limited to cross-project user preferences. For this
 repository, the `Repository process` declaration names the scope/story and
 workflow-state owners: GitHub issues own the current owner, dependencies and
 user gates; Project Status owns workflow state. Other repositories declare
-their own owners. Project-local effort maps link that work without restating
-it. Retention follows project and risk policy plus bounded run-artifact rules.
+their own owners. A project-local effort map exists only for a declared
+project-docs, unavailable-tracker or cross-tracker route; it never mirrors live
+work. Retention follows project and risk policy plus bounded run-artifact rules.
 No canonical backlog contract, cross-store migration or god manifest is
 introduced. The governing decisions are recorded in the [ADR index](adr/README.md).
 

@@ -141,6 +141,12 @@ def test_architecture_lifecycle_projection_contains_the_runtime_state_graph():
         for line in region.splitlines()
         if line.strip() in contract["side_states"]
     } == set(contract["side_states"])
+    bare_state_declarations = {
+        line.strip()
+        for line in region.splitlines()
+        if re.fullmatch(r"[a-z_][a-z0-9_]*", line.strip())
+    }
+    assert bare_state_declarations == set(contract["side_states"])
 
     lifecycle = (ROOT / "docs" / "specs" / "harness" / "lifecycle.md").read_text()
     match = re.search(r"#### State graph\n\n```text\n(?P<graph>.*?)\n```", lifecycle, re.S)
@@ -169,13 +175,12 @@ def test_architecture_risk_projection_matches_the_runtime_policy():
     header = [cell.strip().replace("`", "") for cell in table_lines[0].strip("|").split("|")]
     tiers = policy["tier_order"]
     assert header == ["Factor", *tiers]
-    for line in region.splitlines():
-        if not line.startswith("|") or line.startswith("|---"):
-            continue
+    for line in table_lines[2:]:
         cells = [cell.strip() for cell in line.strip("|").split("|")]
-        factor = cells[0].replace(" ", "_") if cells else ""
-        if factor in policy["factors"]:
-            rows[factor] = cells[1:]
+        assert len(cells) == len(header)
+        factor = cells[0].replace(" ", "_")
+        assert factor not in rows
+        rows[factor] = cells[1:]
 
     assert set(rows) == set(policy["factors"])
     for factor, mapping in policy["factors"].items():

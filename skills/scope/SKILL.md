@@ -12,17 +12,18 @@ Produce decided, testable scope.
 Read the repository's `Repository process` declaration. If absent or ambiguous,
 use an unambiguous existing owner or return proposed content in chat; never
 invent an owner. Define the decision, users and done in the declared parent
-issue or project-docs home. Emit the minimum risk tier, path bounds, prohibited
-actions, external effects, expiry and approver. Credentials, unrelated paths,
-denials and project bans remain outside authority. Execution permission is not
-assurance. Ordinary authorised workspace content proceeds without a
+issue or project-docs home. Emit the minimum `config/risk-policy.json` tier,
+path/write/resource limits, prohibited actions, external effects, expiry and
+approver. Credentials, secrets, unrelated paths, denials and project bans stay
+outside authority. Execution permission is not assurance. Ordinary authorised
+workspace content proceeds without a
 family-separation gate. Only a user may downgrade risk. Judgement-bearing AI
 requires `evaluate`.
 
 Writing a tracker needs explicit external-write authority; project-write
 authority alone does not grant it.
 
-Scope owns accepted content and its decision register: intake, goals,
+Scope owns accepted content and decision register: intake, goals,
 constraints, alternatives and decided/parked branches. Record disclosure in
 the authority envelope, never private memory.
 
@@ -52,7 +53,7 @@ audits evidence; record authorship.
 ## Land outputs
 
 Resolve artifact authority. In advisory/read-only
-mode, return proposed scope and named open decisions in chat; do not change
+mode, return proposed scope and open decisions in chat; do not change
 project files. In project-write mode, land only approved artifacts:
 
 | Output | Owner |
@@ -66,11 +67,12 @@ project files. In project-write mode, land only approved artifacts:
 
 Write observable acceptance criteria. Preserve project schemas; pin only
 decision-critical interfaces with native locks/constraints. Link or cache
-authority with its source and relevant date/version; never vendor without a licence.
+authority with its source and relevant date/version; vendor only with
+redistribution permission.
 
 Before handoff, record decided/parked branches, exclusions, risk/authority and
-anchored evidence, with user approval of the spec and one-way doors. A changed
-execution handoff needs a new revision and gate.
+anchored evidence, with user approval of the spec and one-way doors. The
+execution handoff is digest-bound; any change creates a new revision and gate.
 
 ## Adapter-absent path
 

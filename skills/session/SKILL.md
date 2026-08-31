@@ -9,9 +9,9 @@ Read the repository's `Repository process` declaration and its declared
 scope/story and workflow-state owners first. If absent, use existing owners or
 return a chat handoff; never invent one. Write continuity only to an authorised
 handoff or explicit run-local state; without that authority, propose a chat
-delta. Updating an external tracker requires matching external-write authority.
-There is no default rolling project state file. Explicit run state remains
-run-local, not project-wide truth. Project instructions may override continuity
+delta. Updating an external tracker requires external-write authority.
+There is no default rolling project state file. Run state remains run-local,
+not project-wide truth. Project instructions may override continuity
 paths. Fallbacks: handoffs `docs/handoffs/`, archive `docs/archive/`.
 
 ## Start
@@ -19,7 +19,7 @@ paths. Fallbacks: handoffs `docs/handoffs/`, archive `docs/archive/`.
 For substantial work, reopen disk state; distrust injected state. Resume using
 declared owners and the digest-bound handoff, reading only relevant docs/open
 decisions. User gates stay unanswered until decided.
-Routine bounded work may continue with context inside authority.
+Bounded work may continue within authority.
 
 ## Checkpoint
 
@@ -39,7 +39,7 @@ Before checkpoint load [context-hygiene.md](references/context-hygiene.md). Run
 its read-only audit when run directories, logs, handoffs or large agent-facing
 docs accumulate. Consolidate state; never paste transcripts into handoffs.
 
-Retain only required provider identifiers, callback state and resumable digests.
+Retain only required provider identifiers, generation/callback state and digests.
 Never retain credentials or raw transcripts as continuity state. After
 compaction, revalidate generation, expiry and ownership before reuse.
 
@@ -62,9 +62,10 @@ compaction, revalidate generation, expiry and ownership before reuse.
    it may recur. `retrospect` owns analysis and process changes after a completed
    cycle; session closure does not start a mini-retrospective.
 
-Periodic hygiene is opt-in; record owner, cadence, scope, resource cap and
-disable condition. It may audit/archive classified artifacts and refresh
-indexes, but not commit, deploy, communicate or delete unknown files.
+Periodic hygiene is opt-in; record owner, cadence, scope, resource cap, last
+success and disable condition. It may audit/archive classified artifacts and
+refresh indexes, but not commit, deploy, communicate or delete unknown files.
+Staleness stays visible.
 
 Put project knowledge in project docs; follow
 [context-hygiene.md](references/context-hygiene.md) for lightweight private memory.

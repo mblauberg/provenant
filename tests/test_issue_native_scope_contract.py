@@ -46,12 +46,17 @@ def test_issue_native_work_map_and_state_rules_are_explicit():
     work_map = read("skills/work-map/SKILL.md")
     session = read("skills/session/SKILL.md")
     autopilot = read("skills/autopilot/SKILL.md")
+    architecture = read("docs/ARCHITECTURE.md")
+    compact_architecture = " ".join(architecture.lower().split())
 
     assert "parent tracker issue is the work map" in work_map.lower()
     assert "link-only" in work_map.lower()
     assert "no default rolling project state" in session.lower()
     assert "run-local" in autopilot.lower()
     assert "state.md" in autopilot.lower()
+    assert "only for a declared" in compact_architecture
+    assert "unavailable-tracker or cross-tracker route" in compact_architecture
+    assert "never mirrors live work" in compact_architecture
 
 
 def test_issue_native_decision_and_spec_reconciliation_are_recorded():
