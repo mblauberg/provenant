@@ -100,6 +100,56 @@ def test_root_harness_checker_reports_identity_before_loading_test_helpers(tmp_p
     assert not marker.exists()
 
 
+def test_non_git_product_does_not_borrow_identity_or_python_from_an_ancestor_repo(tmp_path):
+    outer = tmp_path / "outer"
+    outer.mkdir()
+    clean_git_environment = os.environ.copy()
+    for name in (
+        "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_CEILING_DIRECTORIES", "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+    ):
+        clean_git_environment.pop(name, None)
+    subprocess.run(
+        ["git", "init", "-q"], cwd=outer, env=clean_git_environment, check=True
+    )
+    product = outer / "product"
+    product.mkdir()
+    scripts_root = tmp_path / "scripts"
+    helper = scripts_root / "lib/harness-python.sh"
+    helper.parent.mkdir(parents=True)
+    shutil.copy2(ROOT / "scripts/lib/harness-python.sh", helper)
+    marker = tmp_path / "borrowed-python-ran"
+    borrowed = outer / ".venv/bin/python"
+    borrowed.parent.mkdir(parents=True)
+    borrowed.write_text(f"#!/bin/sh\ntouch '{marker}'\nexit 0\n")
+    borrowed.chmod(0o755)
+    environment = clean_git_environment.copy()
+    environment.update({
+        "AGENT_FABRIC_PRODUCT_ROOT": str(product),
+        "PROVENANT_SCRIPTS_ROOT": str(scripts_root),
+        "PROVENANT_SKILLS_ROOT": str(tmp_path / "skills"),
+        "PROVENANT_TESTS_ROOT": str(tmp_path / "tests"),
+    })
+
+    result = subprocess.run(
+        ["bash", str(ROOT / "scripts/check-harness")],
+        cwd=product,
+        env=environment,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+
+    assert result.returncode == 3
+    assert result.stdout.splitlines()[:2] == [
+        f"check-harness: product_root={product}", "check-harness: git_head=unavailable",
+    ]
+    assert f"check-harness: cannot verify a full Git HEAD for {product}" in result.stderr
+    assert not marker.exists()
+
+
 def test_dispatchers_use_the_stable_product_command_and_local_skill_helpers():
     dispatcher = (ROOT / "skills" / "orchestrate" / "scripts" / "cf_dispatch.sh").read_text()
     assert 'resolve_routing' in dispatcher  # tries provenant, falls back to model_route.py

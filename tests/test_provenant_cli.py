@@ -703,6 +703,35 @@ def test_installed_check_refuses_a_registered_worktree_path_replaced_by_a_symlin
     assert "OUTSIDE" not in result.stderr
 
 
+def test_installed_check_refuses_a_registered_path_replaced_by_another_repository(tmp_path):
+    primary, linked = make_registered_linked_checkout(tmp_path, "issue-722-foreign-repo")
+    displaced = tmp_path / "displaced-worktree"
+    linked.rename(displaced)
+    foreign, _ = make_checkout(tmp_path / "foreign")
+    git_fixture(foreign, "init", "-q")
+    git_fixture(foreign, "config", "user.email", "test@example.com")
+    git_fixture(foreign, "config", "user.name", "Test")
+    git_fixture(foreign, "add", ".")
+    git_fixture(foreign, "commit", "-qm", "foreign")
+    foreign.rename(linked)
+    foreign_check = linked / "scripts/check-harness"
+    foreign_check.write_text("#!/bin/sh\nprintf 'FOREIGN\\n'\n")
+    foreign_check.chmod(0o755)
+    command = install_stub(tmp_path)
+
+    result = invoke(
+        command,
+        "check",
+        cwd=linked,
+        AGENT_FABRIC_PRODUCT_ROOT=str(primary),
+    )
+
+    assert result.returncode == 3
+    assert result.stdout == ""
+    assert "belongs to another Git repository" in result.stderr
+    assert "FOREIGN" not in result.stderr
+
+
 def test_owner_exec_failure_reports_command_context_without_traceback(tmp_path):
     checkout, command = make_checkout(tmp_path)
     owner = checkout / "scripts/model-route"

@@ -203,6 +203,8 @@ def registered_caller_checkout(product_root: Path) -> Path | None:
             raise ValueError(f"invalid Git metadata at {caller_metadata}: {exc}") from exc
         if selected_root != selected:
             raise ValueError(f"registered checkout identity does not match {selected}")
+        if common_git_dir(selected_root) != common_git_dir(product_checkout):
+            raise ValueError(f"registered checkout {selected} belongs to another Git repository")
         return selected
     try:
         caller_root = owning_root(caller)
