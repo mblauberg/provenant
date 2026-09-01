@@ -150,7 +150,9 @@ the Codex block remain until removed by hand.
 
 Fabric derives the project from the current working directory. Run
 `provenant fabric whoami` from the project you mean; the first call creates its
-database and registers the caller without a separate activation step.
+database and registers the caller without a separate activation step. A
+repository's ordinary registered linked worktrees share that Fabric project
+while each caller retains its resolved working directory.
 
 </details>
 

@@ -1,8 +1,8 @@
 #!/bin/sh
 # Fabric from a shell. Symlink this onto PATH to run `fabric watch` anywhere.
 #
-# The working directory decides which project you are talking about, so run it
-# from the project you care about.
+# The working directory selects the repository; its registered worktrees share
+# one Fabric project while retaining their own cwd.
 set -eu
 
 node=${FABRIC_NODE:-$(command -v node 2>/dev/null || true)}
