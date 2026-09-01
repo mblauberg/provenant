@@ -49,8 +49,10 @@ def registered_worktree(tmp_path: Path) -> tuple[Path, Path]:
 
     root_package = json.loads((ROOT / "package.json").read_text())
     root_package["scripts"] = {
-        "precheck": "node scripts/node-workspace-preflight.mjs",
-        "check": "node -e \"require('node:fs').writeFileSync('gate-ran','yes')\"",
+        "check": (
+            "node scripts/node-workspace-preflight.mjs && "
+            "node -e \"require('node:fs').writeFileSync('gate-ran','yes')\""
+        ),
     }
     (primary / "package.json").write_text(json.dumps(root_package, indent=2) + "\n")
     shutil.copy2(ROOT / "runtime/fabric/package.json", primary / "runtime/fabric/package.json")
@@ -69,14 +71,16 @@ def registered_worktree(tmp_path: Path) -> tuple[Path, Path]:
 def test_root_check_runs_checkout_dependency_preflight() -> None:
     package = json.loads((ROOT / "package.json").read_text())
 
-    assert package["scripts"]["precheck"] == "node scripts/node-workspace-preflight.mjs"
-    assert package["scripts"]["check"] == "npm run typecheck && npm run test"
+    assert "precheck" not in package["scripts"]
+    assert package["scripts"]["check"] == (
+        "node scripts/node-workspace-preflight.mjs && npm run typecheck && npm run test"
+    )
 
 
 def test_fresh_registered_worktree_fails_before_dependent_gate(tmp_path: Path) -> None:
     _primary, linked = registered_worktree(tmp_path)
 
-    result = run("npm", "run", "check", cwd=linked)
+    result = run("npm", "run", "check", "--ignore-scripts", cwd=linked)
 
     assert result.returncode == 3
     assert "missing checkout dependencies" in result.stderr
