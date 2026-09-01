@@ -25,6 +25,7 @@ import { fileURLToPath } from 'node:url';
 import { loadContext, summarizeContext } from './load-context.mjs';
 import { resolveFiles } from './live-inject.mjs';
 import { ensureCanonicalLiveStateRoot, readLiveServerInfo } from './impeccable-paths.mjs';
+import { LIVE_SERVER_STOP_TIMEOUT_MS, waitForProcessExit } from './live-process.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -97,15 +98,16 @@ The agent should then:
   ]);
   const injectResult = safeParse(injectExecution.stdout) || safeParse(injectExecution.stderr);
   if (!injectResult || !injectResult.ok) {
-    const serverCleanup = serverInfo.startedByThisInvocation
+    const cleanup = serverInfo.startedByThisInvocation
       ? await stopOwnedServer(serverInfo)
-      : 'not-owned';
+      : { status: 'not-owned' };
     console.log(JSON.stringify({
       ok: false,
       error: 'inject_failed',
       detail: injectResult || 'Live injection failed without a structured result',
       serverPort: serverInfo.port,
-      serverCleanup,
+      serverCleanup: cleanup.status,
+      ...(cleanup.diagnostic ? { serverCleanupDiagnostic: cleanup.diagnostic } : {}),
     }));
     process.exit(1);
   }
@@ -318,30 +320,66 @@ async function ensureServerRunning() {
   return null;
 }
 
-
-async function stopOwnedServer(serverInfo) {
-  const current = readLiveServerInfo(process.cwd())?.info;
+export async function stopOwnedServer(serverInfo) {
+  const record = readLiveServerInfo(process.cwd());
+  const current = record?.info;
+  const diagnostic = {
+    pid: serverInfo?.pid ?? null,
+    port: serverInfo?.port ?? current?.port ?? null,
+    path: record?.path ?? null,
+  };
   if (!current || current.pid !== serverInfo.pid || current.token !== serverInfo.token) {
-    return 'ownership-lost';
+    return {
+      status: 'ownership-lost',
+      diagnostic: { ...diagnostic, reason: 'server_record_changed' },
+    };
   }
   try {
     const response = await fetch(
       `http://127.0.0.1:${current.port}/stop?token=${encodeURIComponent(current.token)}`,
+      { signal: AbortSignal.timeout(LIVE_SERVER_STOP_TIMEOUT_MS) },
     );
-    if (!response.ok) return 'failed';
-  } catch {
-    return 'failed';
+    if (!response.ok) {
+      return {
+        status: 'failed',
+        diagnostic: { ...diagnostic, reason: 'stop_request_failed', httpStatus: response.status },
+      };
+    }
+  } catch (error) {
+    return {
+      status: 'failed',
+      diagnostic: {
+        ...diagnostic,
+        reason: error?.name === 'TimeoutError' ? 'stop_request_timeout' : 'stop_request_error',
+        timeoutMs: LIVE_SERVER_STOP_TIMEOUT_MS,
+        message: error.message,
+      },
+    };
   }
 
-  const deadline = Date.now() + 2_000;
-  while (Date.now() < deadline) {
-    const stillCurrent = readLiveServerInfo(process.cwd())?.info;
-    if (!stillCurrent || stillCurrent.pid !== serverInfo.pid || stillCurrent.token !== serverInfo.token) {
-      return 'stopped';
-    }
-    await new Promise((resolve) => setTimeout(resolve, 25));
+  if (await waitForProcessExit(current.pid, { timeoutMs: LIVE_SERVER_STOP_TIMEOUT_MS })) {
+    const finalRecord = readLiveServerInfo(process.cwd());
+    if (!finalRecord) return { status: 'stopped' };
+    const sameServer = finalRecord.info?.pid === current.pid
+      && finalRecord.info?.port === current.port
+      && finalRecord.info?.token === current.token;
+    return {
+      status: 'failed',
+      diagnostic: {
+        ...diagnostic,
+        reason: sameServer ? 'server_cleanup_incomplete' : 'server_record_changed',
+        timeoutMs: LIVE_SERVER_STOP_TIMEOUT_MS,
+      },
+    };
   }
-  return 'failed';
+  return {
+    status: 'failed',
+    diagnostic: {
+      ...diagnostic,
+      reason: 'server_process_exit_timeout',
+      timeoutMs: LIVE_SERVER_STOP_TIMEOUT_MS,
+    },
+  };
 }
 
 // ---------------------------------------------------------------------------
