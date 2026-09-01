@@ -2,14 +2,15 @@
 
 import {
   existsSync,
+  lstatSync,
   readFileSync,
   realpathSync,
+  statSync,
 } from "node:fs";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { fileURLToPath } from "node:url";
+import { isAbsolute, join, relative, sep } from "node:path";
 
 
-const checkout = realpathSync(resolve(dirname(fileURLToPath(import.meta.url)), ".."));
+const checkout = realpathSync(process.cwd());
 const rootPackage = readPackage(join(checkout, "package.json"));
 const workspacePaths = Array.isArray(rootPackage.workspaces)
   ? rootPackage.workspaces
@@ -31,10 +32,10 @@ for (const [manifestRoot, manifest] of manifests) {
   for (const dependency of Object.keys(dependencies)) {
     const packagePath = dependency.split("/");
     const candidates = [
-      join(manifestRoot, "node_modules", ...packagePath, "package.json"),
-      join(checkout, "node_modules", ...packagePath, "package.json"),
+      join(manifestRoot, "node_modules", ...packagePath),
+      join(checkout, "node_modules", ...packagePath),
     ];
-    if (!candidates.some(isLocalPackage)) {
+    if (!candidates.some((candidate) => isLocalPackage(candidate, dependency))) {
       missing.add(dependency);
     }
   }
@@ -55,12 +56,28 @@ function readPackage(path) {
 }
 
 
-function isLocalPackage(path) {
-  if (!existsSync(path)) {
+function isLocalPackage(packageDirectory, expectedName) {
+  if (!existsSync(packageDirectory)) {
     return false;
   }
-  const resolved = realpathSync(path);
-  const offset = relative(checkout, resolved);
+  try {
+    const resolvedDirectory = realpathSync(packageDirectory);
+    if (!isInsideCheckout(resolvedDirectory) || !statSync(resolvedDirectory).isDirectory()) {
+      return false;
+    }
+    const packageFile = join(resolvedDirectory, "package.json");
+    if (!lstatSync(packageFile).isFile()) {
+      return false;
+    }
+    return readPackage(packageFile).name === expectedName;
+  } catch {
+    return false;
+  }
+}
+
+
+function isInsideCheckout(path) {
+  const offset = relative(checkout, path);
   return offset !== ""
     && offset !== ".."
     && !offset.startsWith(`..${sep}`)

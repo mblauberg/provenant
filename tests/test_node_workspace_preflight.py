@@ -38,7 +38,7 @@ def provision_direct_dependencies(checkout: Path) -> None:
     for dependency in direct_dependencies(checkout):
         package = checkout / "node_modules" / dependency / "package.json"
         package.parent.mkdir(parents=True, exist_ok=True)
-        package.write_text("{}\n")
+        package.write_text(json.dumps({"name": dependency}) + "\n")
 
 
 def registered_worktree(tmp_path: Path) -> tuple[Path, Path]:
@@ -95,6 +95,51 @@ def test_borrowed_primary_dependencies_do_not_mask_unready_worktree(tmp_path: Pa
 
     assert result.returncode == 3
     assert "missing checkout dependencies" in result.stderr
+    assert not (linked / "gate-ran").exists()
+
+
+def test_symlinked_preflight_cannot_select_the_primary_checkout(tmp_path: Path) -> None:
+    primary, linked = registered_worktree(tmp_path)
+    provision_direct_dependencies(primary)
+    (linked / "scripts/node-workspace-preflight.mjs").unlink()
+    (linked / "scripts/node-workspace-preflight.mjs").symlink_to(
+        primary / "scripts/node-workspace-preflight.mjs"
+    )
+
+    result = run("npm", "run", "check", cwd=linked)
+
+    assert result.returncode == 3
+    assert str(linked.resolve()) in result.stderr
+    assert not (linked / "gate-ran").exists()
+
+
+def test_external_package_directory_is_not_a_local_dependency(tmp_path: Path) -> None:
+    _primary, linked = registered_worktree(tmp_path)
+    provision_direct_dependencies(linked)
+    external = tmp_path / "external-tsx"
+    external.mkdir()
+    marker = linked / "node_modules/.tsx-package.json"
+    marker.write_text('{"name":"tsx"}\n')
+    (external / "package.json").symlink_to(marker)
+    shutil.rmtree(linked / "node_modules/tsx")
+    (linked / "node_modules/tsx").symlink_to(external, target_is_directory=True)
+
+    result = run("npm", "run", "check", cwd=linked)
+
+    assert result.returncode == 3
+    assert "tsx" in result.stderr
+    assert not (linked / "gate-ran").exists()
+
+
+def test_package_marker_must_name_the_declared_dependency(tmp_path: Path) -> None:
+    _primary, linked = registered_worktree(tmp_path)
+    provision_direct_dependencies(linked)
+    (linked / "node_modules/tsx/package.json").write_text("{}\n")
+
+    result = run("npm", "run", "check", cwd=linked)
+
+    assert result.returncode == 3
+    assert "tsx" in result.stderr
     assert not (linked / "gate-ran").exists()
 
 
