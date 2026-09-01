@@ -425,11 +425,15 @@ describe("MCP startup boundaries", () => {
       },
       stdio: ["pipe", "pipe", "pipe"],
     });
+    let stdout = "";
     let stderr = "";
+    child.stdout.on("data", (chunk: Buffer | string) => { stdout += chunk.toString(); });
     child.stderr.on("data", (chunk: Buffer | string) => { stderr += chunk.toString(); });
-    const closed = new Promise<void>((resolveClosed) => {
-      child.once("close", () => resolveClosed());
-    });
+    const closed = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
+      (resolveClosed) => {
+        child.once("close", (code, signal) => resolveClosed({ code, signal }));
+      },
+    );
     child.stdin.write([
       JSON.stringify({
         jsonrpc: "2.0",
@@ -453,13 +457,15 @@ describe("MCP startup boundaries", () => {
     await delay(100);
     child.stdin.end();
 
-    const exited = await Promise.race([
-      closed.then(() => true),
-      delay(800).then(() => false),
+    const exit = await Promise.race([
+      closed,
+      delay(800).then(() => null),
     ]);
-    if (!exited) child.kill("SIGTERM");
-    await closed;
-    expect(exited, stderr).toBe(true);
+    if (exit === null) child.kill("SIGTERM");
+    const finalExit = await closed;
+    expect(exit, stderr).not.toBeNull();
+    expect(finalExit).toEqual({ code: 0, signal: null });
+    expect(stdout).toContain('"id":1');
   }, 3_000);
 
   it("waits inside one inbox call until a message arrives", async () => {
