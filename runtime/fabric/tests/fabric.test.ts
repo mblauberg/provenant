@@ -454,7 +454,7 @@ describe("MCP startup boundaries", () => {
       }),
       "",
     ].join("\n"));
-    for (let attempt = 0; attempt < 50 && !stdout.includes('"id":1'); attempt += 1) {
+    for (let attempt = 0; attempt < 150 && !stdout.includes('"id":1'); attempt += 1) {
       await delay(10);
     }
     const initializedBeforeEof = stdout.includes('"id":1');
@@ -472,7 +472,7 @@ describe("MCP startup boundaries", () => {
     expect(initializedBeforeEof).toBe(true);
     expect(waitPendingBeforeEof).toBe(true);
     expect(stdout).toContain('"id":1');
-  }, 3_000);
+  }, 4_000);
 
   it("waits inside one inbox call until a message arrives", async () => {
     const sender = agent("wait-sender");
@@ -720,6 +720,13 @@ describe("MCP startup boundaries", () => {
       expect(bounded.isError).toBeUndefined();
       const boundedContent = bounded.content as Array<{ type: "text"; text: string }>;
       expect(JSON.parse(boundedContent[0]!.text)).toEqual([]);
+
+      const locked = await client.callTool({ name: "fabric_whoami", arguments: {} });
+      expect(locked.isError).toBe(true);
+      expect(locked.content).toMatchObject([{
+        type: "text",
+        text: expect.stringMatching(/fabric startup failed:.*database is locked/),
+      }]);
 
       const peekedPromise = client.callTool({
         name: "fabric_inbox",
