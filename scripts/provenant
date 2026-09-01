@@ -191,20 +191,23 @@ def registered_caller_checkout(product_root: Path) -> Path | None:
     if selected_record is not None and selected_record[0].is_symlink():
         raise ValueError(f"registered checkout path is a symlink: {selected_record[0]}")
     selected = selected_record[1] if selected_record is not None else None
+    if selected is not None:
+        try:
+            selected_root = owning_root(selected)
+            selected_common = common_git_dir(selected_root)
+            product_common = common_git_dir(product_checkout)
+        except PolicyError as exc:
+            raise ValueError(f"cannot verify Git ownership for {selected}: {exc}") from exc
+        if selected_root != selected:
+            raise ValueError(f"registered checkout identity does not match {selected}")
+        if selected_common != product_common:
+            raise ValueError(f"registered checkout {selected} belongs to another Git repository")
     caller_metadata = nearest_git_metadata(caller)
     if caller_metadata is None:
         if selected is not None:
             raise ValueError(f"registered checkout {selected} has no .git metadata")
         return selected
     if selected is not None and caller_metadata == selected / ".git":
-        try:
-            selected_root = owning_root(selected)
-        except PolicyError as exc:
-            raise ValueError(f"invalid Git metadata at {caller_metadata}: {exc}") from exc
-        if selected_root != selected:
-            raise ValueError(f"registered checkout identity does not match {selected}")
-        if common_git_dir(selected_root) != common_git_dir(product_checkout):
-            raise ValueError(f"registered checkout {selected} belongs to another Git repository")
         return selected
     try:
         caller_root = owning_root(caller)
@@ -213,7 +216,12 @@ def registered_caller_checkout(product_root: Path) -> Path | None:
             f"invalid Git metadata at {caller_metadata}; repair: run ./scripts/check-harness "
             "from the checkout you intend to check"
         ) from exc
-    if common_git_dir(caller_root) == common_git_dir(product_checkout):
+    try:
+        caller_common = common_git_dir(caller_root)
+        product_common = common_git_dir(product_checkout)
+    except PolicyError as exc:
+        raise ValueError(f"cannot verify caller Git ownership: {exc}") from exc
+    if caller_common == product_common:
         raise ValueError(
             f"caller checkout {caller_root} is not a registered worktree of product root "
             f"{product_checkout}; repair: run ./scripts/check-harness from the checkout you "

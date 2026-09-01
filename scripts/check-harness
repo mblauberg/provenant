@@ -26,17 +26,6 @@ done
   exit 3
 }
 export PROVENANT_GIT_BIN
-PROVENANT_CMP_BIN=""
-for cmp_candidate in /usr/bin/cmp /bin/cmp /opt/homebrew/bin/cmp /usr/local/bin/cmp; do
-  if [[ -x "$cmp_candidate" ]]; then
-    PROVENANT_CMP_BIN="$cmp_candidate"
-    break
-  fi
-done
-[[ -n "$PROVENANT_CMP_BIN" ]] || {
-  echo "check-harness: trusted cmp executable is unavailable" >&2
-  exit 3
-}
 
 CAPTURED_GIT_PATH=""
 capture_git_path() {
@@ -51,7 +40,40 @@ capture_git_path() {
   CAPTURED_GIT_PATH="${record%$'\n'}"
 }
 
-PRODUCT_ROOT="${AGENT_FABRIC_PRODUCT_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
+requested_product_root="${AGENT_FABRIC_PRODUCT_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
+cd -P -- "$requested_product_root" 2>/dev/null || {
+  echo "check-harness: product root is unavailable: $requested_product_root" >&2
+  exit 3
+}
+PRODUCT_ROOT="$PWD"
+CAPTURED_PHYSICAL_DIR=""
+capture_physical_dir() {
+  cd -P -- "$1" 2>/dev/null || return 1
+  CAPTURED_PHYSICAL_DIR="$PWD"
+  cd -P -- "$PRODUCT_ROOT" 2>/dev/null || return 1
+}
+
+CHECKOUT_REGISTERED=0
+checkout_is_registered() {
+  local field registered_path
+  CHECKOUT_REGISTERED=0
+  "$PROVENANT_GIT_BIN" -C "$PRODUCT_ROOT" worktree list --porcelain -z \
+    >/dev/null 2>&1 || return 1
+  while IFS= read -r -d '' field; do
+    case "$field" in
+      "worktree "*)
+        registered_path="${field#worktree }"
+        if [[ ! -L "$registered_path" ]] \
+            && capture_physical_dir "$registered_path" \
+            && [[ "$CAPTURED_PHYSICAL_DIR" == "$PRODUCT_ROOT" ]]; then
+          CHECKOUT_REGISTERED=1
+        fi
+        ;;
+    esac
+  done < <("$PROVENANT_GIT_BIN" -C "$PRODUCT_ROOT" worktree list --porcelain -z)
+  [[ "$CHECKOUT_REGISTERED" == 1 ]]
+}
+
 SCRIPTS_ROOT="${PROVENANT_SCRIPTS_ROOT:-$PRODUCT_ROOT/scripts}"
 SKILLS_ROOT="${PROVENANT_SKILLS_ROOT:-$PRODUCT_ROOT/skills}"
 TESTS_ROOT="${PROVENANT_TESTS_ROOT:-$PRODUCT_ROOT/tests}"
@@ -65,14 +87,41 @@ checked_head=""
 git_top=""
 git_metadata_valid=0
 if [[ -d "$PRODUCT_ROOT/.git" && ! -L "$PRODUCT_ROOT/.git" ]]; then
-  git_metadata_valid=1
+  if capture_git_path -C "$PRODUCT_ROOT" rev-parse --path-format=absolute --git-common-dir \
+      && capture_physical_dir "$CAPTURED_GIT_PATH" \
+      && [[ "$CAPTURED_PHYSICAL_DIR" == "$PRODUCT_ROOT/.git" ]] \
+      && checkout_is_registered; then
+    git_metadata_valid=1
+  fi
 elif [[ -f "$PRODUCT_ROOT/.git" && ! -L "$PRODUCT_ROOT/.git" ]] \
     && capture_git_path -C "$PRODUCT_ROOT" rev-parse --absolute-git-dir; then
   git_admin="$CAPTURED_GIT_PATH"
-  if [[ -f "$git_admin/gitdir" && ! -L "$git_admin/gitdir" ]] \
-      && "$PROVENANT_CMP_BIN" -s "$git_admin/gitdir" \
-        <(printf '%s\n' "$PRODUCT_ROOT/.git"); then
-    git_metadata_valid=1
+  if capture_physical_dir "$git_admin"; then
+    git_admin="$CAPTURED_PHYSICAL_DIR"
+    git_back_pointer=""
+    if [[ -f "$git_admin/gitdir" && ! -L "$git_admin/gitdir" ]] \
+        && ! IFS= read -r -d '' git_back_pointer < "$git_admin/gitdir" \
+        && [[ "$git_back_pointer" == *$'\n' ]]; then
+      git_back_pointer="${git_back_pointer%$'\n'}"
+      if [[ "$git_back_pointer" == */* ]]; then
+        git_back_parent="${git_back_pointer%/*}"
+        git_back_name="${git_back_pointer##*/}"
+        [[ -n "$git_back_parent" ]] || git_back_parent="/"
+      else
+        git_back_parent="."
+        git_back_name="$git_back_pointer"
+      fi
+      [[ "$git_back_parent" == /* ]] || git_back_parent="$git_admin/$git_back_parent"
+      if [[ "$git_back_name" == .git ]] \
+          && capture_physical_dir "$git_back_parent" \
+          && [[ "$CAPTURED_PHYSICAL_DIR/$git_back_name" == "$PRODUCT_ROOT/.git" ]] \
+          && capture_git_path -C "$PRODUCT_ROOT" \
+            rev-parse --path-format=absolute --git-common-dir \
+          && capture_physical_dir "$CAPTURED_GIT_PATH" \
+          && checkout_is_registered; then
+        git_metadata_valid=1
+      fi
+    fi
   fi
 fi
 if [[ "$git_metadata_valid" == 1 ]] \

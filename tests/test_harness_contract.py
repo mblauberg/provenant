@@ -9,6 +9,18 @@ import yaml
 
 
 ROOT = Path(__file__).resolve().parents[1]
+GIT_REDIRECT_VARIABLES = (
+    "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_CEILING_DIRECTORIES", "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+)
+
+
+def clean_git_test_environment() -> dict[str, str]:
+    environment = os.environ.copy()
+    for name in GIT_REDIRECT_VARIABLES:
+        environment.pop(name, None)
+    return environment
 
 
 def frontmatter_name(path: Path) -> str:
@@ -211,6 +223,154 @@ def test_checker_refuses_git_metadata_owned_by_another_repository(tmp_path, meta
     ]
     assert "cannot verify checkout ownership" in result.stderr
     assert not marker.exists()
+
+
+def direct_checker_probe(product: Path, tmp_path: Path) -> tuple[subprocess.CompletedProcess[str], Path]:
+    scripts_root = tmp_path / "probe-scripts"
+    helper = scripts_root / "lib/harness-python.sh"
+    helper.parent.mkdir(parents=True)
+    marker = tmp_path / "helper-loaded"
+    helper.write_text(f"touch '{marker}'\nexit 19\n")
+    environment = clean_git_test_environment()
+    environment.update({
+        "AGENT_FABRIC_PRODUCT_ROOT": str(product),
+        "PROVENANT_SCRIPTS_ROOT": str(scripts_root),
+        "PROVENANT_SKILLS_ROOT": str(tmp_path / "probe-skills"),
+        "PROVENANT_TESTS_ROOT": str(tmp_path / "probe-tests"),
+    })
+    return subprocess.run(
+        ["bash", str(ROOT / "scripts/check-harness")],
+        cwd=product,
+        env=environment,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    ), marker
+
+
+def initialise_git_fixture(path: Path) -> str:
+    path.mkdir()
+    environment = clean_git_test_environment()
+    subprocess.run(["git", "init", "-q"], cwd=path, env=environment, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=path, env=environment, check=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"], cwd=path, env=environment, check=True
+    )
+    (path / "tracked").write_text(f"{path.name}\n")
+    subprocess.run(["git", "add", "tracked"], cwd=path, env=environment, check=True)
+    subprocess.run(["git", "commit", "-qm", path.name], cwd=path, env=environment, check=True)
+    return subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=path, env=environment, text=True
+    ).strip()
+
+
+def test_checker_refuses_a_foreign_common_git_directory(tmp_path):
+    product = tmp_path / "product"
+    foreign = tmp_path / "foreign"
+    product_head = initialise_git_fixture(product)
+    foreign_head = initialise_git_fixture(foreign)
+    assert product_head != foreign_head
+    (product / ".git/commondir").write_text(f"{foreign / '.git'}\n")
+
+    result, marker = direct_checker_probe(product, tmp_path)
+
+    assert result.returncode == 3
+    assert result.stdout.splitlines()[:2] == [
+        f"check-harness: product_root={product}", "check-harness: git_head=unavailable",
+    ]
+    assert foreign_head not in result.stdout
+    assert not marker.exists()
+
+
+def test_checker_refuses_a_linked_admin_with_a_foreign_common_directory(tmp_path):
+    primary = tmp_path / "primary"
+    initialise_git_fixture(primary)
+    linked = tmp_path / "linked"
+    subprocess.run(
+        ["git", "worktree", "add", "-q", "-b", "linked-fixture", str(linked)],
+        cwd=primary,
+        env=clean_git_test_environment(),
+        check=True,
+    )
+    admin = Path(
+        subprocess.check_output(
+            ["git", "rev-parse", "--absolute-git-dir"],
+            cwd=linked,
+            env=clean_git_test_environment(),
+            text=True,
+        ).strip()
+    )
+    foreign = tmp_path / "foreign"
+    foreign_head = initialise_git_fixture(foreign)
+    subprocess.run(
+        ["git", "branch", "linked-fixture"],
+        cwd=foreign,
+        env=clean_git_test_environment(),
+        check=True,
+    )
+    (admin / "commondir").write_text(f"{foreign / '.git'}\n")
+    assert subprocess.check_output(
+        ["git", "rev-parse", "HEAD"],
+        cwd=linked,
+        env=clean_git_test_environment(),
+        text=True,
+    ).strip() == foreign_head
+
+    result, marker = direct_checker_probe(linked, tmp_path)
+
+    assert result.returncode == 3
+    assert result.stdout.splitlines()[:2] == [
+        f"check-harness: product_root={linked}", "check-harness: git_head=unavailable",
+    ]
+    assert foreign_head not in result.stdout
+    assert not marker.exists()
+
+
+def test_checker_accepts_a_registered_relative_back_pointer(tmp_path):
+    primary = tmp_path / "primary"
+    initialise_git_fixture(primary)
+    linked = tmp_path / "linked"
+    subprocess.run(
+        ["git", "worktree", "add", "-q", "-b", "relative-fixture", str(linked)],
+        cwd=primary,
+        env=clean_git_test_environment(),
+        check=True,
+    )
+    admin = Path(
+        subprocess.check_output(
+            ["git", "rev-parse", "--absolute-git-dir"],
+            cwd=linked,
+            env=clean_git_test_environment(),
+            text=True,
+        ).strip()
+    )
+    (admin / "gitdir").write_text(f"{os.path.relpath(linked / '.git', admin)}\n")
+
+    result, marker = direct_checker_probe(linked, tmp_path)
+
+    assert result.returncode == 19, result.stderr
+    assert result.stdout.splitlines()[0] == f"check-harness: product_root={linked}"
+    assert marker.exists()
+
+
+@pytest.mark.skipif(not Path("/private/var").is_dir(), reason="macOS /var alias only")
+def test_checker_canonicalises_the_macos_var_alias(tmp_path):
+    product = tmp_path / "product"
+    initialise_git_fixture(product)
+    canonical = product.resolve()
+    if not str(canonical).startswith("/private/var/"):
+        pytest.skip("temporary directory is not beneath /private/var")
+    alias = Path(str(canonical).removeprefix("/private"))
+
+    result, marker = direct_checker_probe(alias, tmp_path)
+
+    assert result.returncode == 19, result.stderr
+    assert result.stdout.splitlines()[0] == f"check-harness: product_root={canonical}"
+    assert marker.exists()
 
 
 def test_dispatchers_use_the_stable_product_command_and_local_skill_helpers():

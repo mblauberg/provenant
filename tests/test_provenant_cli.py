@@ -703,7 +703,10 @@ def test_installed_check_refuses_a_registered_worktree_path_replaced_by_a_symlin
     assert "OUTSIDE" not in result.stderr
 
 
-def test_installed_check_refuses_a_registered_path_replaced_by_another_repository(tmp_path):
+@pytest.mark.parametrize("nested_caller", [False, True])
+def test_installed_check_refuses_a_registered_path_replaced_by_another_repository(
+    tmp_path, nested_caller,
+):
     primary, linked = make_registered_linked_checkout(tmp_path, "issue-722-foreign-repo")
     displaced = tmp_path / "displaced-worktree"
     linked.rename(displaced)
@@ -718,11 +721,21 @@ def test_installed_check_refuses_a_registered_path_replaced_by_another_repositor
     foreign_check.write_text("#!/bin/sh\nprintf 'FOREIGN\\n'\n")
     foreign_check.chmod(0o755)
     command = install_stub(tmp_path)
+    caller = linked
+    if nested_caller:
+        caller = linked / "nested"
+        caller.mkdir()
+        git_fixture(caller, "init", "-q")
+        git_fixture(caller, "config", "user.email", "test@example.com")
+        git_fixture(caller, "config", "user.name", "Test")
+        (caller / "nested").write_text("nested\n")
+        git_fixture(caller, "add", "nested")
+        git_fixture(caller, "commit", "-qm", "nested")
 
     result = invoke(
         command,
         "check",
-        cwd=linked,
+        cwd=caller,
         AGENT_FABRIC_PRODUCT_ROOT=str(primary),
     )
 
