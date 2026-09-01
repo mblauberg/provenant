@@ -97,7 +97,7 @@ jobs:
               - 'config/**'
               - 'pyproject.toml'
               - 'scripts/**'
-              - 'skills/orchestrate/scripts/**'
+              - 'skills/**'
               - 'uv.lock'
               - 'runtime/fabric/**'
             split-root:

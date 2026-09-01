@@ -505,7 +505,7 @@ def test_fabric_workspace_and_ci_share_the_locked_daemonless_check_graph() -> No
         "config/**",
         "pyproject.toml",
         "scripts/**",
-        "skills/orchestrate/scripts/**",
+        "skills/**",
         "uv.lock",
     } <= fabric_paths
     node_setup = next(
