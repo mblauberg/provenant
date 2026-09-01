@@ -71,15 +71,6 @@ case "$provenant_command" in
     exit 3
     ;;
 esac
-if [[ -d "$provenant_bin_dir" ]]; then
-  provenant_bin_real="$(CDPATH= cd -- "$provenant_bin_dir" && pwd -P)"
-  case "$provenant_bin_real/provenant" in
-    "$PRODUCT_ROOT"|"$PRODUCT_ROOT"/*)
-      echo "PROVENANT_BIN_DIR resolves inside the product checkout: $provenant_bin_real" >&2
-      exit 3
-      ;;
-  esac
-fi
 case "$instance_root" in
   /*) ;;
   *) echo "Agent Fabric instance root must be absolute" >&2; exit 3 ;;
@@ -87,6 +78,18 @@ esac
 
 # shellcheck source=scripts/lib/harness-python.sh
 source "$PRODUCT_ROOT/scripts/lib/harness-python.sh"
+
+provenant_bin_real="$(run_stdlib -c '
+from pathlib import Path
+import sys
+print(Path(sys.argv[1]).resolve(strict=False))
+' "$provenant_bin_dir")"
+case "$provenant_bin_real/provenant" in
+  "$PRODUCT_ROOT"|"$PRODUCT_ROOT"/*)
+    echo "PROVENANT_BIN_DIR resolves inside the product checkout: $provenant_bin_real" >&2
+    exit 3
+    ;;
+esac
 
 select_primary() {
   PLATFORM="$1"

@@ -1054,6 +1054,24 @@ def test_rejects_a_provenant_bin_directory_inside_the_product(tmp_path):
     assert not (tmp_path / "instance/.agent-fabric/product-root.json").exists()
 
 
+def test_rejects_a_missing_bin_directory_under_a_symlinked_product_parent(tmp_path):
+    product = copy_product(ROOT, tmp_path / "product")
+    alias = tmp_path / "product-alias"
+    alias.symlink_to(product, target_is_directory=True)
+
+    result = run_product(
+        product,
+        "codex",
+        tmp_path,
+        PROVENANT_BIN_DIR=str(alias / "new-bin"),
+    )
+
+    assert result.returncode == 3
+    assert "resolves inside the product checkout" in result.stderr
+    assert not (product / "new-bin").exists()
+    assert not (tmp_path / "instance/.agent-fabric/product-root.json").exists()
+
+
 def test_updates_a_managed_provenant_file_to_the_current_template(tmp_path):
     bin_dir = tmp_path / "custom-bin"
     bin_dir.mkdir()
