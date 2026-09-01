@@ -89,6 +89,40 @@ def run(platform: str, home: Path, *arguments: str, **extra_env):
     )
 
 
+def copy_product(root: Path, destination: Path) -> Path:
+    shutil.copytree(
+        root,
+        destination,
+        symlinks=True,
+        ignore=shutil.ignore_patterns(".git", ".agent-run", "node_modules", ".venv"),
+    )
+    return destination
+
+
+def run_product(product: Path, platform: str, home: Path, **extra_env):
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "HOME": str(home / "home"),
+            "AGENT_FABRIC_INSTANCE_ROOT": str(home / "instance"),
+            "HARNESS_PYTHON": sys.executable,
+            "PROVENANT_BIN_DIR": str(home / "bin"),
+            "CLAUDE_CONFIG_DIR": str(home / "claude"),
+            "CODEX_HOME": str(home / "codex"),
+            "PATH": f"{home / 'bin'}{os.pathsep}{os.environ['PATH']}",
+        }
+    )
+    environment.update(extra_env)
+    return subprocess.run(
+        [str(product / "scripts/install-harness"), "--platform", platform],
+        cwd=product,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+
 def test_install_harness_requires_acknowledgement_for_a_linked_worktree(tmp_path):
     product = tmp_path / "product"
     scripts = product / "scripts"
@@ -287,6 +321,169 @@ def test_installs_codex_skills_and_global_instructions(tmp_path):
     assert codex_config.read_text() == configured
 
 
+def test_late_instruction_conflict_leaves_existing_product_pointer_unchanged(tmp_path):
+    config = tmp_path / "claude-config"
+    config.mkdir()
+    instructions = config / "CLAUDE.md"
+    instructions.write_bytes(UNMANAGED_BYTES)
+    instance = instance_root_for(tmp_path)
+    pointer = instance / ".agent-fabric/product-root.json"
+    pointer.parent.mkdir(parents=True)
+    original = '{"product_root": "/old/product", "schema_version": 1}\n'
+    pointer.write_text(original)
+
+    result = run("claude", tmp_path, CLAUDE_CONFIG_DIR=str(config))
+
+    assert result.returncode == 3
+    assert pointer.read_text() == original
+    assert not (config / "skills").exists()
+
+
+def test_post_seed_failure_leaves_existing_product_pointer_unchanged(tmp_path):
+    product = tmp_path / "product with spaces"
+    shutil.copytree(
+        ROOT,
+        product,
+        symlinks=True,
+        ignore=shutil.ignore_patterns(".git", ".agent-run", "node_modules", ".venv"),
+    )
+    failing_skills = product / "scripts/install-skills"
+    failing_skills.write_text("#!/usr/bin/env bash\nexit 7\n")
+    failing_skills.chmod(0o755)
+    instance = instance_root_for(tmp_path)
+    pointer = instance / ".agent-fabric/product-root.json"
+    pointer.parent.mkdir(parents=True)
+    original = '{"product_root": "/old/product", "schema_version": 1}\n'
+    pointer.write_text(original)
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "HOME": str(tmp_path / "home"),
+            "AGENT_FABRIC_INSTANCE_ROOT": str(instance),
+            "HARNESS_PYTHON": sys.executable,
+            "PROVENANT_ALLOW_LINKED_WORKTREE_INSTALL": "1",
+            "PROVENANT_BIN_DIR": str(tmp_path / "bin"),
+            "CODEX_HOME": str(tmp_path / "codex"),
+        }
+    )
+
+    result = subprocess.run(
+        [str(product / "scripts/install-harness"), "--platform", "codex"],
+        cwd=product,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 7
+    assert pointer.read_text() == original
+    assert (instance / "AGENTS.md").is_file(), "the forced failure must occur after seeding"
+    assert result.stdout.count("product root pointer updated=") == 0
+    source = (product / "scripts/install-harness").read_text()
+    assert source.count("write-product-root-pointer.py") == 1
+    assert 'instance_installation.py" seed' in source
+    assert "--no-pointer" in source
+
+
+def test_refuses_receiptless_noncanonical_skill_directory_link_before_pointer(tmp_path):
+    config = tmp_path / "claude-config"
+    old_product_skills = tmp_path / "old-product/skills"
+    old_product_skills.mkdir(parents=True)
+    config.mkdir()
+    (config / "skills").symlink_to(old_product_skills, target_is_directory=True)
+    instance = instance_root_for(tmp_path)
+    pointer = instance / ".agent-fabric/product-root.json"
+    pointer.parent.mkdir(parents=True)
+    original = '{"product_root": "/old/product", "schema_version": 1}\n'
+    pointer.write_text(original)
+
+    result = run("claude", tmp_path, CLAUDE_CONFIG_DIR=str(config))
+
+    assert result.returncode == 3
+    assert "non-canonical symlink" in result.stderr
+    assert pointer.read_text() == original
+    assert (config / "skills").is_symlink()
+
+
+def test_refuses_receiptless_skill_entry_before_pointer(tmp_path):
+    config = tmp_path / "codex-home"
+    foreign_skill = tmp_path / "old-product/skills/scope"
+    foreign_skill.mkdir(parents=True)
+    (foreign_skill / "SKILL.md").write_text("---\nname: scope\ndescription: old\n---\n")
+    (config / "skills").mkdir(parents=True)
+    (config / "skills/scope").symlink_to(foreign_skill, target_is_directory=True)
+    instance = instance_root_for(tmp_path)
+    pointer = instance / ".agent-fabric/product-root.json"
+    pointer.parent.mkdir(parents=True)
+    original = '{"product_root": "/old/product", "schema_version": 1}\n'
+    pointer.write_text(original)
+
+    result = run("codex", tmp_path, CODEX_HOME=str(config))
+
+    assert result.returncode == 3
+    assert "conflicting managed targets changed outside harness" in result.stderr
+    assert pointer.read_text() == original
+    assert (config / "skills/scope").is_symlink()
+    assert not (config / "AGENTS.md").exists()
+
+
+def test_refuses_receiptless_workflow_entry_before_pointer(tmp_path):
+    config = tmp_path / "claude-config"
+    foreign_workflow = tmp_path / "old-product/workflows/codebase-polish.js"
+    foreign_workflow.parent.mkdir(parents=True)
+    foreign_workflow.write_text("// old workflow\n")
+    (config / "workflows").mkdir(parents=True)
+    (config / "workflows/codebase-polish.js").symlink_to(foreign_workflow)
+    instance = instance_root_for(tmp_path)
+    pointer = instance / ".agent-fabric/product-root.json"
+    pointer.parent.mkdir(parents=True)
+    original = '{"product_root": "/old/product", "schema_version": 1}\n'
+    pointer.write_text(original)
+
+    result = run("claude", tmp_path, CLAUDE_CONFIG_DIR=str(config))
+
+    assert result.returncode == 3
+    assert "conflicting managed targets" in result.stderr
+    assert pointer.read_text() == original
+    assert (config / "workflows/codebase-polish.js").is_symlink()
+    assert not (config / "AGENTS.md").exists()
+
+
+def test_refuses_self_targeting_pointer_directory_before_seed(tmp_path):
+    config = tmp_path / "codex-home"
+    config.mkdir()
+    instance = instance_root_for(tmp_path)
+    instance.mkdir()
+    pointer = instance / "product-root.json"
+    original = '{"product_root": "/old/product", "schema_version": 1}\n'
+    pointer.write_text(original)
+    (instance / ".agent-fabric").symlink_to(instance, target_is_directory=True)
+
+    result = run("codex", tmp_path, CODEX_HOME=str(config))
+
+    assert result.returncode == 3
+    assert "must not be a symlink" in result.stderr
+    assert pointer.read_text() == original
+    assert not (instance / "AGENTS.md").exists()
+    assert not (instance / ".gitignore").exists()
+
+
+def test_accepts_canonical_directory_links_for_claude_surfaces(tmp_path):
+    config = tmp_path / "claude-config"
+    config.mkdir()
+    (config / "skills").symlink_to(ROOT / "skills", target_is_directory=True)
+    (config / "agents").symlink_to(ROOT / "agents", target_is_directory=True)
+    (config / "workflows").symlink_to(ROOT / "workflows", target_is_directory=True)
+
+    result = run("claude", tmp_path, CLAUDE_CONFIG_DIR=str(config))
+
+    assert result.returncode == 0, result.stderr
+    assert (config / "skills").resolve() == (ROOT / "skills").resolve()
+    assert (config / "agents").resolve() == (ROOT / "agents").resolve()
+    assert (config / "workflows").resolve() == (ROOT / "workflows").resolve()
+
+
 def test_claude_subagent_conflict_fails_before_harness_mutation(tmp_path):
     config = tmp_path / "claude-config"
     agents = config / "agents"
@@ -374,16 +571,10 @@ def test_claude_workflow_install_preserves_an_unmanaged_file_byte_identically(
     assert result.returncode == 3
     assert unmanaged.read_bytes() == UNMANAGED_WORKFLOW_BYTES
     assert not unmanaged.is_symlink()
-    assert "codebase-polish.js=unmanaged" in result.stderr
-    managed_names = WORKFLOW_NAMES - {name}
-    for managed_name in managed_names:
-        installed = workflows / managed_name
-        assert installed.is_symlink()
-        assert installed.resolve() == ROOT / "workflows" / managed_name
-    manifest = json.loads(
-        (config / ".agent-harness-workflows-installation.json").read_text()
-    )
-    assert set(manifest["managed"]) == managed_names
+    assert "codebase-polish.js" in result.stderr
+    assert not (config / ".agent-harness-workflows-installation.json").exists()
+    for managed_name in WORKFLOW_NAMES - {name}:
+        assert not (workflows / managed_name).exists()
 
 
 @pytest.mark.parametrize("kind", ["copy", "symlink"])
@@ -410,11 +601,8 @@ def test_claude_workflow_install_rejects_an_equivalent_unmanaged_file(
     else:
         assert unmanaged.is_symlink()
         assert unmanaged.resolve() == source
-    assert "codebase-polish.js=unmanaged" in result.stderr
-    manifest = json.loads(
-        (config / ".agent-harness-workflows-installation.json").read_text()
-    )
-    assert name not in manifest["managed"]
+    assert "codebase-polish.js" in result.stderr
+    assert not (config / ".agent-harness-workflows-installation.json").exists()
 
 
 def test_claude_workflow_install_rejects_a_foreign_broken_symlink_at_a_managed_path(
@@ -708,7 +896,7 @@ def test_preserves_existing_instructions_and_prints_merge_line(tmp_path):
     assert "instructions preserved=" in result.stderr
     assert str(instance_root_for(tmp_path) / "AGENTS.md") in result.stderr
     assert str(ROOT / "HARNESS.md") in result.stderr
-    assert {path.name for path in (config / "skills").iterdir()} == expected_installed_entries()
+    assert not (config / "skills").exists()
 
 
 def test_preserves_existing_codex_instructions_and_prints_merge_line(tmp_path):
@@ -726,7 +914,7 @@ def test_preserves_existing_codex_instructions_and_prints_merge_line(tmp_path):
     assert "instructions preserved=" in result.stderr
     assert str(instance_root_for(tmp_path) / "AGENTS.md") in result.stderr
     assert str(ROOT / "HARNESS.md") in result.stderr
-    assert {path.name for path in (config / "skills").iterdir()} == expected_installed_entries()
+    assert not (config / "skills").exists()
 
 
 def test_accepts_claude_instruction_symlink_to_canonical_agents_file(tmp_path):
@@ -965,6 +1153,128 @@ def test_split_install_is_idempotent_over_its_own_instructions(tmp_path):
     assert second.returncode == 0, second.stderr
     instructions = config / "CLAUDE.md"
     assert f"instructions existing={instructions}" in second.stdout
+
+
+@pytest.mark.parametrize("platform", ["claude", "codex"])
+def test_relocation_rewrites_only_an_exact_generated_bootstrap_and_preserves_conflicts(
+    tmp_path, platform
+):
+    old_product = copy_product(ROOT, tmp_path / "old product")
+    new_product = copy_product(ROOT, tmp_path / "new product")
+
+    first = run_product(old_product, platform, tmp_path)
+    assert first.returncode == 0, first.stderr
+    instructions = (
+        tmp_path / "claude" / "CLAUDE.md"
+        if platform == "claude"
+        else tmp_path / "codex" / "AGENTS.md"
+    )
+    original = instructions.read_bytes()
+    pointer = tmp_path / "instance/.agent-fabric/product-root.json"
+    old_pointer = pointer.read_text()
+    harness = (
+        tmp_path / "claude" / "HARNESS.md"
+        if platform == "claude"
+        else tmp_path / "codex" / "HARNESS.md"
+    )
+    harness.symlink_to(Path("../old product/HARNESS.md"))
+    old_harness_target = os.readlink(harness)
+    instructions.write_bytes(original + b"\n# User-owned addition\n")
+
+    refused = run_product(new_product, platform, tmp_path)
+
+    assert refused.returncode == 3
+    assert instructions.read_bytes() == original + b"\n# User-owned addition\n"
+    assert os.readlink(harness) == old_harness_target
+    assert pointer.read_text() == old_pointer
+    instructions.write_bytes(original)
+
+    relocated = run_product(new_product, platform, tmp_path)
+
+    assert relocated.returncode == 0, relocated.stderr
+    assert "instructions updated=" in relocated.stdout
+    assert str(new_product / "HARNESS.md") in instructions.read_text()
+    assert str(old_product / "HARNESS.md") not in instructions.read_text()
+    assert harness.resolve() == (new_product / "HARNESS.md").resolve()
+    assert json.loads(pointer.read_text())["product_root"] == str(new_product.resolve())
+
+
+def test_all_primary_cutover_preflights_second_primary_before_mutating_first(tmp_path):
+    old_product = copy_product(ROOT, tmp_path / "old product")
+    new_product = copy_product(ROOT, tmp_path / "new product")
+    first = run_product(old_product, "claude", tmp_path)
+    assert first.returncode == 0, first.stderr
+    pointer = tmp_path / "instance/.agent-fabric/product-root.json"
+    old_pointer = pointer.read_text()
+    claude_skill = tmp_path / "claude/skills/scope"
+    old_claude_target = claude_skill.resolve()
+
+    foreign_skill = tmp_path / "foreign/skills/scope"
+    foreign_skill.mkdir(parents=True)
+    (foreign_skill / "SKILL.md").write_text("---\nname: scope\ndescription: old\n---\n")
+    codex_skills = tmp_path / "codex/skills"
+    codex_skills.mkdir(parents=True)
+    (codex_skills / "scope").symlink_to(foreign_skill, target_is_directory=True)
+
+    result = run_product(new_product, "all", tmp_path)
+
+    assert result.returncode == 3
+    assert pointer.read_text() == old_pointer
+    assert claude_skill.resolve() == old_claude_target
+    assert (tmp_path / "claude/CLAUDE.md").read_bytes() != b""
+    assert (codex_skills / "scope").is_symlink()
+    assert (tmp_path / "new product/HARNESS.md").is_file()
+
+
+def test_all_primary_install_configures_both_surfaces_and_publishes_once(tmp_path):
+    product = copy_product(ROOT, tmp_path / "product with spaces")
+
+    result = run_product(product, "all", tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.count("product root pointer updated=") == 1
+    assert (tmp_path / "claude/skills/scope/SKILL.md").is_file()
+    assert (tmp_path / "claude/agents/codex-analyst.md").is_file()
+    assert (tmp_path / "claude/workflows/implement-run.js").is_file()
+    assert (tmp_path / "codex/skills/scope/SKILL.md").is_file()
+    assert (tmp_path / "claude/CLAUDE.md").read_text().find(str(product / "HARNESS.md")) >= 0
+    assert (tmp_path / "codex/AGENTS.md").read_text().find(str(product / "HARNESS.md")) >= 0
+
+    claude_mcp = json.loads((tmp_path / "home/.claude.json").read_text())
+    codex_config = tomllib.loads((tmp_path / "codex/config.toml").read_text())
+    assert claude_mcp["mcpServers"]["fabric"]["command"] == str(tmp_path / "bin/provenant")
+    assert codex_config["mcp_servers"]["fabric"]["command"] == str(tmp_path / "bin/provenant")
+    assert claude_mcp["mcpServers"]["fabric"]["env"]["AGENT_FABRIC_SEAT"] == "claude"
+    assert codex_config["mcp_servers"]["fabric"]["env"]["AGENT_FABRIC_SEAT"] == "codex"
+    assert not (tmp_path / "home/.cursor/mcp.json").exists()
+    assert not (tmp_path / "home/.gemini/config/mcp_config.json").exists()
+    assert not (tmp_path / "home/.kiro/settings/mcp.json").exists()
+    assert not (tmp_path / "home/.config/opencode/opencode.jsonc").exists()
+
+
+@pytest.mark.parametrize("platform", ["claude", "codex"])
+def test_foreign_harness_link_is_rejected_before_pointer_publish(tmp_path, platform):
+    old_product = copy_product(ROOT, tmp_path / "old product")
+    new_product = copy_product(ROOT, tmp_path / "new product")
+    first = run_product(old_product, platform, tmp_path)
+    assert first.returncode == 0, first.stderr
+
+    home = tmp_path / ("claude" if platform == "claude" else "codex")
+    harness = home / "HARNESS.md"
+    foreign = tmp_path / "foreign/HARNESS.md"
+    foreign.parent.mkdir()
+    foreign.write_text("user-owned harness\n")
+    harness.symlink_to(Path("../foreign/HARNESS.md"))
+    pointer = tmp_path / "instance/.agent-fabric/product-root.json"
+    old_pointer = pointer.read_text()
+    old_target = os.readlink(harness)
+
+    result = run_product(new_product, platform, tmp_path)
+
+    assert result.returncode == 3
+    assert pointer.read_text() == old_pointer
+    assert os.readlink(harness) == old_target
+    assert "HARNESS.md is not a canonical or receipt-owned product link" in result.stderr
 
 
 LEGACY_BOOTSTRAP = (

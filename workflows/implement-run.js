@@ -30,7 +30,7 @@
 
 export const meta = {
   name: 'implement-run',
-  description: 'Claude accelerator for ~/.agents/skills/implement: approved contract, routed implementation, independent review, bounded repair, serial apply/escalation, human gate.',
+  description: 'Claude accelerator for the installed implement skill: approved contract, routed implementation, independent review, bounded repair, serial apply/escalation, human gate.',
   whenToUse: 'an approved ordinary software change with acceptance criteria; unresolved requirements route to scope',
   phases: [
     { title: 'Bootstrap' },
@@ -318,9 +318,9 @@ function crossFamilyDispatchHint(runDir, gitCwd, kind = 'primary') {
     'Dispatch the load-bearing OpenAI other-primary worker. ' +
     cwdClause +
     ' Write your prompt to a file, then run:\n' +
-    '  ~/.agents/skills/orchestrate/scripts/cf_dispatch.sh ' +
+    '  "$(provenant root)/skills/orchestrate/scripts/cf_dispatch.sh" ' +
     '--orchestrator-family anthropic --tool codex --alias flagship --role other-primary --prompt-file <your-prompt-file> ' +
-    `--out ${runDir}/crossfamily/<name>.txt > ${runDir}/crossfamily/<name>.route.json\n` +
+    `--out "${runDir}/crossfamily/<name>.txt" > "${runDir}/crossfamily/<name>.route.json"\n` +
     (kind === 'primary-review'
       ? 'For this certifying review, the provider output at <your --out path> is the retained terminal result: ask the provider to return exactly one JSON object matching the existing REVIEW_SCHEMA keys angle, verdict, issues, crossFamily and path, with no markdown or prose. If the provider has no verdict, preserve that failure as non-certifying; never manufacture JSON in the wrapper. '
       : '') +
@@ -387,7 +387,7 @@ const boot = await agent(
     `1. Resolve the WORKSPACE ROOT (the dir that holds .work/, or the outermost project dir if none) and ` +
     `build an ABSOLUTE run-dir path <workspace-root>/.work/wf/implement/<runId> so the run dir never lands ` +
     `under a nested subproject. ${runIdClause}\n` +
-    '   Then run: ~/.agents/skills/orchestrate/scripts/run_dir_init.sh <abs run-dir>\n' +
+    '   Then run: "$(provenant root)/skills/orchestrate/scripts/run_dir_init.sh" <abs run-dir>\n' +
     '   and ALSO run: mkdir -p <abs run-dir>/patches   (the patch-emitting builder writes there; ' +
     'run_dir_init.sh scaffolds findings/ crossfamily/ traces/ but NOT patches/).\n' +
     '   If run_dir_init.sh is unavailable or fails, return no runDir and stop; do not create an incomplete fallback.\n' +
@@ -450,7 +450,7 @@ const CHECKPOINT_SCHEMA = {
 async function checkpoint(currentSlice, nextAction, inFlight, artifactPaths) {
   const result = await agent(
     `Run the deterministic checkpoint updater; do not edit JSON yourself or touch source:\n` +
-      `python3 ${'${AGENTS_HOME:-$HOME/.agents}'}/skills/implement/scripts/checkpoint_run.py ${runDir}/RUN.json ` +
+      `python3 "$(provenant root)/skills/implement/scripts/checkpoint_run.py" "${runDir}/RUN.json" ` +
       `--current-slice ${JSON.stringify(currentSlice)} --next-action ${JSON.stringify(nextAction)} ` +
       `--in-flight-json '${JSON.stringify(inFlight)}' --artifact-paths-json '${JSON.stringify(artifactPaths)}'\n` +
       'Return its JSON stdout exactly as the structured result. A non-zero exit is failure.',
@@ -609,7 +609,7 @@ for (let cycle = 0; cycle <= maxRepairCycles; cycle += 1) {
   const rawReviews = await parallel(
     REVIEW_ANGLES.map((rv) => () =>
       agent(
-        `Load ${'${AGENTS_HOME:-$HOME/.agents}'}/skills/code-review/SKILL.md and its required references. ` +
+        'Load the installed code-review skill and its required references. ' +
           `Review cycle ${cycle}, angle "${rv.angle}": ${rv.lens}. Read-only; the diff is entrypoint, not boundary.\n` +
           `Task: """${task}"""\nAcceptance criteria: ${JSON.stringify(acceptanceCriteria)}\n` +
           `Patches: ${patchDigest}\nConventions: ${JSON.stringify(conv)}\n` +
@@ -787,7 +787,7 @@ const apply = await agent(
     `targeted/other-primary review artifacts, ${JSON.stringify(councilChallenge || {})}, and ${JSON.stringify(councilReduction || {})}; ` +
     `record distinct paths, output SHA-256 values, actor family/adapter/review role, final reviewed_revision and post_repair_review; ` +
     `name the correctness lens exactly correctness-spec. Run ` +
-    `${'${AGENTS_HOME:-$HOME/.agents}'}/skills/deliver/scripts/validate_delivery.py ${runDir}/RUN.json --workspace-root ${gitCwd} --verify-hashes. ` +
+    '"$(provenant root)/skills/deliver/scripts/validate_delivery.py" ' + `"${runDir}/RUN.json" --workspace-root "${gitCwd}" --verify-hashes. ` +
     `If validation fails, machineGatePassed=false, stop further mutation and escalate with the validator output; ` +
     `preserve any already-applied, independently checked low-risk patch honestly.\n` +
     `Update ${runDir}/MANIFEST.md with every run artifact after serial work. Use stable artifact IDs, ` +

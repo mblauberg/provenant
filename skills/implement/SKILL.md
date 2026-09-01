@@ -49,7 +49,7 @@ reconciliation run.
    audit context, graduate durable findings and classify retained/ephemeral
    artifacts in `RUN.json`.
 7. When a receipt exists, validate with
-   `"${AGENTS_HOME:-$HOME/.agents}/skills/deliver/scripts/validate_delivery.py" \
+   `"$(provenant root)/skills/deliver/scripts/validate_delivery.py" \
    .agent-run/<id>/RUN.json --workspace-root "$PWD" --verify-hashes`.
    Hand off only after this machine gate.
 8. User final acceptance is mandatory; promotion needs separate `release`

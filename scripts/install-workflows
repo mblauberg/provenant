@@ -194,7 +194,20 @@ def _integrity_state(destination: Path, source: Path) -> str:
         return "noncanonical"
 
 
-def install(target: Path) -> tuple[int, int, list[str]]:
+def _canonical_directory_link(target: Path) -> bool:
+    if not target.is_symlink():
+        return False
+    try:
+        return target.resolve(strict=True) == SOURCE.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return False
+
+
+def _preflight(target: Path, *, reject_unmanaged: bool = False) -> None:
+    if target.is_symlink():
+        if _canonical_directory_link(target):
+            return
+        raise InstallError("target must not be a non-canonical symlink")
     target = target.resolve()
     sources = _sources()
     manifest = _load_manifest(target)
@@ -202,7 +215,11 @@ def install(target: Path) -> tuple[int, int, list[str]]:
     for name, source in sources.items():
         destination = target / name
         states[name] = _state(destination, source, manifest["managed"].get(name))
-    conflicts = [name for name, state in states.items() if state == "conflicting"]
+    conflicts = [
+        name
+        for name, state in states.items()
+        if state == "conflicting" or (reject_unmanaged and state == "unmanaged")
+    ]
     for name in sorted(set(manifest["managed"]) - set(sources)):
         destination = target / name
         recorded_source = Path(manifest["managed"][name]["source_target"])
@@ -212,6 +229,17 @@ def install(target: Path) -> tuple[int, int, list[str]]:
             conflicts.append(name)
     if conflicts:
         raise InstallError("conflicting managed targets: " + ", ".join(conflicts))
+
+
+def install(target: Path) -> tuple[int, int, list[str]]:
+    _preflight(target)
+    target = target.resolve()
+    sources = _sources()
+    manifest = _load_manifest(target)
+    states = {
+        name: _state(target / name, source, manifest["managed"].get(name))
+        for name, source in sources.items()
+    }
 
     target.mkdir(parents=True, exist_ok=True)
     newly_managed = [name for name, state in states.items() if state == "missing"]
@@ -254,17 +282,19 @@ def main(argv: list[str] | None = None) -> int:
         usage="install-workflows --target <global-workflows-directory>",
     )
     parser.add_argument("--target", required=True, type=Path)
+    parser.add_argument("--preflight", action="store_true")
     args = parser.parse_args(argv)
-    if args.target.is_symlink():
+    if args.preflight:
         try:
-            canonical_directory_link = (
-                args.target.resolve(strict=True) == SOURCE.resolve(strict=True)
-            )
-        except (OSError, RuntimeError):
-            canonical_directory_link = False
-        if canonical_directory_link:
-            print(f"workflows existing=directory-link target={args.target}")
-            return 0
+            _preflight(args.target, reject_unmanaged=True)
+        except (OSError, InstallError) as exc:
+            print(f"conflicting: {exc}", file=sys.stderr)
+            return 3
+        print(f"workflows preflight=ok target={args.target}")
+        return 0
+    if _canonical_directory_link(args.target):
+        print(f"workflows existing=directory-link target={args.target}")
+        return 0
     try:
         linked, existing, failures = install(args.target)
     except (OSError, InstallError) as exc:

@@ -48,8 +48,8 @@ def write_pointer_file(instance_root: Path, product_root: Path) -> None:
 
     Writing goes through the pointer's parent directory three times, and
     `mkdir` follows a symlink, so the resolved parent is required to stay inside
-    the resolved instance root: a swapped `.agent-fabric` is refused rather than
-    followed. This is hardening on the same trust model as the seeding guards in
+    the resolved instance root: a swapped or symlinked `.agent-fabric` is refused
+    rather than followed. This is hardening on the same trust model as the seeding guards in
     `instance_installation._publish`, not a privilege boundary. Anyone able to
     swap a directory inside the instance root already holds the user's own
     privileges on the user's own machine.
@@ -57,6 +57,14 @@ def write_pointer_file(instance_root: Path, product_root: Path) -> None:
     resolved_product = product_root.expanduser().resolve(strict=True)
     resolved_instance = instance_root.expanduser().resolve()
     pointer = instance_root.expanduser() / POINTER_RELATIVE_PATH
+    if pointer.parent.is_symlink():
+        resolved_parent = pointer.parent.resolve(strict=False)
+        if resolved_parent != resolved_instance and resolved_instance not in resolved_parent.parents:
+            raise ValueError(
+                "product pointer directory escapes the instance root: "
+                f"{pointer.parent} resolves to {resolved_parent}"
+            )
+        raise ValueError("product pointer directory must not be a symlink")
     pointer.parent.mkdir(parents=True, exist_ok=True)
     resolved_parent = pointer.parent.resolve()
     if resolved_parent != resolved_instance and resolved_instance not in resolved_parent.parents:

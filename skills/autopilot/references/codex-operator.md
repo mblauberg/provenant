@@ -40,14 +40,14 @@ The Codex equivalent of Stop-hook-plus-`/loop`. Run it from the mission root
 #!/bin/sh
 # autopilot-driver.sh — re-invoke active iterations; exit on valid PAUSED or user STOP.
 MISSION_DIR="${1:?usage: autopilot-driver.sh <MISSION_DIR>}"
-LEASE_TOOL="${AGENTS_HOME:-$HOME/.agents}/skills/orchestrate/scripts/lease.py"
-PAUSE_VALIDATOR="${AGENTS_HOME:-$HOME/.agents}/skills/autopilot/scripts/validate_idle_pause.py"
+LEASE_TOOL="$(provenant root)/skills/orchestrate/scripts/lease.py"
+PAUSE_VALIDATOR="$(provenant root)/skills/autopilot/scripts/validate_idle_pause.py"
 LEASE="$MISSION_DIR/LEASE.json"
 HOLDER="codex-driver-$$"
 python3 "$LEASE_TOOL" acquire "$LEASE" --holder "$HOLDER" --ttl "${MISSION_LEASE_SECONDS:-900}" || exit 1
 trap 'python3 "$LEASE_TOOL" release "$LEASE" --holder "$HOLDER" >/dev/null 2>&1 || true' EXIT INT TERM HUP
 PROMPT="You are the conductor for the autopilot mission at $MISSION_DIR.
-Read ${AGENTS_HOME:-$HOME/.agents}/skills/autopilot/references/operating-loop.md
+Read "$(provenant root)/skills/autopilot/references/operating-loop.md"
 and recovery-and-cadence.md IN FULL first — they are your constitution.
 Then read GOAL.md, STATE.md, and QUEUE.md's head. Run ONE iteration of the
 8-step loop (RECONCILE → READ → SELECT → DISPATCH → RECORD → PROPAGATE →

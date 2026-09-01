@@ -60,7 +60,7 @@ or authority condition. Final scrub adds no new argument, fact or authority.
 It adds no history or courtesy closer unless legally necessary.
 
 ```sh
-python3 "${AGENTS_HOME:-$HOME/.agents}/skills/legal-writing/scripts/lint_legal_style.py" path/to/source
+python3 "$(provenant root)/skills/legal-writing/scripts/lint_legal_style.py" path/to/source
 ```
 
 Lint is a guardrail; source checks, forum skills, render checks and user gates

@@ -18,10 +18,10 @@ import yaml
 
 
 PRODUCT_ROOT = Path(
-    os.environ.get("AGENT_FABRIC_PRODUCT_ROOT", Path(__file__).resolve().parents[1])
+    os.environ.get("AGENT_FABRIC_PRODUCT_ROOT") or Path(__file__).resolve().parents[1]
 ).expanduser()
 INSTANCE_ROOT = Path(
-    os.environ.get("AGENT_FABRIC_INSTANCE_ROOT", PRODUCT_ROOT)
+    os.environ.get("AGENT_FABRIC_INSTANCE_ROOT") or Path.home() / ".agents"
 ).expanduser()
 CATALOG_PATH = INSTANCE_ROOT / "config" / "model-routing.json"
 COMPATIBILITY_PATH = PRODUCT_ROOT / "config" / "adapter-compatibility.yaml"

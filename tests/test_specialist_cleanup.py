@@ -88,7 +88,8 @@ def test_uml_core_has_no_course_or_fixed_model_profile() -> None:
         assert course_contract not in corpus
 
     entry = _text("skills/uml-diagrams/SKILL.md")
-    assert '${AGENTS_HOME:-$HOME/.agents}' in entry
+    renderer = _text("skills/uml-diagrams/scripts/render_plantuml.py")
+    assert '$(provenant root)/skills/uml-diagrams/scripts/render_plantuml.py' in renderer
     assert "project's diagram profile" in " ".join(entry.lower().split())
 
 

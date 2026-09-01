@@ -100,7 +100,7 @@ def test_work_map_links_live_work_state_instead_of_repeating_it():
 
     assert "declared workflow-state owner" in skill
     assert "never restates current status, owner, dependencies or user gates" in skill
-    assert '${AGENTS_HOME:-$HOME/.agents}/skills/work-map/scripts/validate_work_map.py' in skill
+    assert '$(provenant root)/skills/work-map/scripts/validate_work_map.py' in skill
     assert "Stable grouping/order" not in skill
     assert "Stable ordering is allowed" in skill
 

@@ -176,6 +176,15 @@ def test_route_preserves_argv_environment_stdio_and_exit_status_through_symlink(
     }
 
 
+def test_root_prints_the_resolved_product_checkout(tmp_path):
+    checkout, command = make_checkout(tmp_path)
+
+    result = invoke(command, "root", cwd=tmp_path, AGENT_FABRIC_PRODUCT_ROOT=str(checkout))
+
+    assert result.returncode == 0
+    assert result.stdout == f"{checkout}\n"
+
+
 def test_worktree_runs_from_arbitrary_cwd_without_changing_it(tmp_path):
     _, command = make_checkout(tmp_path)
     caller_cwd = tmp_path / "another-repository"

@@ -225,6 +225,36 @@ def test_the_product_path_lives_only_in_the_ignored_pointer(tmp_path):
         assert str(product.resolve()) not in path.read_text()
 
 
+def test_non_pointer_seed_path_does_not_call_pointer_writer(tmp_path, monkeypatch):
+    product = build_product(tmp_path)
+    instance_root = tmp_path / "instance"
+    instance_root.mkdir()
+
+    def unexpected_pointer_write(*args, **kwargs):
+        raise AssertionError("seed --no-pointer must not publish the pointer")
+
+    monkeypatch.setattr(instance, "write_pointer", unexpected_pointer_write)
+    result = instance.execute(
+        "seed", product, instance_root, write_product_pointer=False
+    )
+
+    assert result["product_pointer"] is None
+    assert not (instance_root / ".agent-fabric/product-root.json").exists()
+
+
+def test_validate_summary_is_non_mutating_and_reports_seed_state(tmp_path):
+    product = build_product(tmp_path)
+    instance_root = tmp_path / "instance"
+    instance_root.mkdir()
+
+    result = run("validate", product, instance_root, "--summary")
+
+    assert result.returncode == 0, result.stderr
+    assert "instance mode=split desired-state=missing seeded=0 existing=0 missing=3" in result.stdout
+    assert not (instance_root / "config" / "installation.json").exists()
+    assert not (instance_root / ".agent-fabric" / "product-root.json").exists()
+
+
 def test_the_pointer_is_rewritten_rather_than_seeded_once(tmp_path):
     """Relocating the product is always a re-run of the installer."""
     product = build_product(tmp_path)

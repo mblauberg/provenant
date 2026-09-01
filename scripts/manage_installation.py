@@ -166,6 +166,10 @@ def _plan(
                 )
         elif _same_link(destination, source_path):
             state = "managed" if entry.get("source_sha256") == _sha_skill(source_path) else "stale"
+        elif _same_link(destination, Path(entry["source_target"])):
+            # A recorded link to the previous product root is safe to rebind
+            # after relocation. An unrecorded link remains foreign below.
+            state = "stale"
         elif destination.is_symlink() and not destination.exists():
             state = "stale"
         elif not destination.exists() and not destination.is_symlink():
@@ -301,6 +305,8 @@ def _raise_on_conflicts(
     items: list[dict[str, str]],
     manifest: dict[str, Any],
     target: Path,
+    *,
+    reject_unmanaged: bool = False,
 ) -> None:
     custom_conflicts = [
         item["name"]
@@ -320,6 +326,12 @@ def _raise_on_conflicts(
         for item in items
         if item["state"] == "conflicting"
     ]
+    if reject_unmanaged:
+        conflicts.extend(
+            item["name"]
+            for item in items
+            if item["state"] == "unmanaged"
+        )
     if conflicts:
         raise InstallError(
             "conflicting managed targets changed outside harness: "
@@ -336,6 +348,7 @@ def execute(
     if action not in {
         "validate-sources",
         "plan",
+        "preflight",
         "check",
         "install",
         "reconcile",
@@ -368,7 +381,20 @@ def execute(
         }
     target = Path(target).resolve()
     manifest = _load_manifest(target)
-    if action == "plan":
+    if action in {"plan", "preflight"}:
+        if action == "preflight":
+            _raise_on_conflicts(
+                _plan(
+                    managed_catalogue,
+                    custom_catalogue,
+                    target,
+                    manifest,
+                    custom_source_provided=custom_source_provided,
+                ),
+                manifest,
+                target,
+                reject_unmanaged=True,
+            )
         return {
             "schema_version": 1,
             "action": action,
@@ -491,6 +517,7 @@ def main(argv: list[str] | None = None) -> int:
         choices=(
             "validate-sources",
             "plan",
+            "preflight",
             "check",
             "install",
             "reconcile",

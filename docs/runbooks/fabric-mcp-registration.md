@@ -3,9 +3,12 @@
 Status: current
 Applies to: `scripts/configure-fabric-mcp.py` and `runtime/fabric/bin/fabric-mcp`
 
-`install-harness` registers the Fabric MCP server for every client it finds.
-`scripts/configure-fabric-mcp.py` does the registry writing and can be run on
-its own to add a client, check the registrations or repair one.
+`install-harness --platform all` registers the Fabric MCP server for the two
+primary clients (Claude Code and Codex) by default. Add
+`--mcp-clients all` when the six supported client registries should be
+configured. `scripts/configure-fabric-mcp.py --platform all` also configures
+all six directly; it does the registry writing and can be run on its own to
+add a client, check the registrations or repair one.
 
 ## What gets registered
 

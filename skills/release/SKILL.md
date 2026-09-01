@@ -47,7 +47,7 @@ impact/authority gate.
 Run read-only gate before requesting promotion:
 
 ```sh
-${AGENTS_HOME:-$HOME/.agents}/skills/release/scripts/validate_release.py --gate ready RELEASE.json
+"$(provenant root)/skills/release/scripts/validate_release.py" --gate ready RELEASE.json
 ```
 
 The CLI binds artifact to the live delivery receipt. Unit tests may call

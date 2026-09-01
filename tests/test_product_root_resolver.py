@@ -82,6 +82,20 @@ def test_a_symlinked_pointer_directory_is_refused_not_followed(tmp_path: Path) -
     assert list(outside.iterdir()) == [], "nothing may be written through the swap"
 
 
+def test_a_self_targeting_pointer_directory_is_refused_not_followed(tmp_path: Path) -> None:
+    instance_root = tmp_path / "instance"
+    instance_root.mkdir()
+    product_root = tmp_path / "product"
+    product_root.mkdir()
+    (instance_root / ".agent-fabric").symlink_to(instance_root, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="must not be a symlink"):
+        write_pointer_file(instance_root, product_root)
+
+    assert not (instance_root / ".gitignore").exists()
+    assert not (instance_root / "product-root.json").exists()
+
+
 def test_the_pointer_writer_cli_reports_an_escape_as_a_conflict(tmp_path: Path) -> None:
     instance_root = tmp_path / "instance"
     instance_root.mkdir()

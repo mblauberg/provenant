@@ -22,7 +22,7 @@ sample the critical path. A full review expands the state and viewport matrix,
 but neither implies exhaustive coverage.
 
 For deterministic leads, run
-`node "${AGENTS_HOME:-$HOME/.agents}/skills/ui-ux-design/scripts/detect.mjs" --help`,
+`node "$(provenant root)/skills/ui-ux-design/scripts/detect.mjs" --help`,
 then scan the relevant file, directory, or URL. Treat every structured
 `incomplete` target or engine failure as missing coverage, not a clean result.
 A clean scan remains supporting evidence and never certifies the rendered UI.

@@ -69,7 +69,7 @@ archive digest; binders never emit that legacy form.
 From the project root:
 
 ```sh
-"${AGENTS_HOME:-$HOME/.agents}/skills/deliver/scripts/validate_delivery.py" \
+"$(provenant root)/skills/deliver/scripts/validate_delivery.py" \
   .agent-run/<id>/RUN.json --workspace-root "$PWD" --verify-hashes \
   --product-root "<product-root>"
 ```

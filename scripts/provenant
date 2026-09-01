@@ -77,7 +77,7 @@ def resolve_product_root(instance_root: Path | None = None) -> Path:
 
 
 def usage() -> None:
-    print("usage: provenant <help|route|worktree|check|fabric|dispatch|batch|run> [arguments...]", file=sys.stderr)
+    print("usage: provenant <help|root|route|worktree|check|fabric|dispatch|batch|run> [arguments...]", file=sys.stderr)
 
 
 def help_text() -> None:
@@ -85,6 +85,7 @@ def help_text() -> None:
         """usage: provenant <command> [arguments...]
 
 Thin front door; each command delegates to its existing owner:
+  root           print the resolved product checkout
   route ...      scripts/model-route ... (low-level resolver; capability-bound
                  aliases need a fresh snapshot, normally supplied by dispatch)
   worktree ...   scripts/worktree ...
@@ -285,6 +286,17 @@ def main(arguments: list[str]) -> int:
             usage()
             return 2
         help_text()
+        return 0
+
+    if command == "root":
+        if command_arguments:
+            usage()
+            return 2
+        try:
+            print(resolve_product_root())
+        except (OSError, ValueError) as exc:
+            print(f"provenant: {exc}", file=sys.stderr)
+            return 3
         return 0
 
     owners = {

@@ -122,7 +122,7 @@ durable completion marker atomically to `run_dir/done`:
 
 ```
 run_dir=${TMPDIR:-/tmp}/codex-<unique-slug>
-"${AGENTS_HOME:-$HOME/.agents}/skills/orchestrate/scripts/run_worker_detached.sh" \
+"$(provenant root)/skills/orchestrate/scripts/run_worker_detached.sh" \
   --run-dir "$run_dir" -- \
   codex exec -s workspace-write -C <ABSOLUTE_WORKTREE> -m gpt-5.6-luna \
     -c service_tier=default -c model_reasoning_effort=xhigh - \
@@ -140,9 +140,9 @@ failure, never a reason to accept or reuse the run. Do not use a watcher or a
 side-channel rendezvous:
 
 ```
-helper="${AGENTS_HOME:-$HOME/.agents}/skills/orchestrate/scripts/run_worker_detached.sh"
+helper="$(provenant root)/skills/orchestrate/scripts/run_worker_detached.sh"
 while :; do
-  validation="$($helper --validate --run-dir "$run_dir" 2>/dev/null)"
+  validation="$("$helper" --validate --run-dir "$run_dir" 2>/dev/null)"
   validation_status=$?
   if [ "$validation_status" -eq 0 ]; then
     break

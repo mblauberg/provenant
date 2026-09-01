@@ -27,7 +27,7 @@ returns to `scope`; it is not a repair.
 Validate from the project root:
 
 ```sh
-"${AGENTS_HOME:-$HOME/.agents}/skills/deliver/scripts/validate_delivery.py" \
+"$(provenant root)/skills/deliver/scripts/validate_delivery.py" \
   .agent-run/<id>/RUN.json --workspace-root "$PWD" --verify-hashes \
   --product-root "<product-root>"
 ```
@@ -52,7 +52,7 @@ production promotion remain separate gates.
 
 When a run directory exists, terminalise it after acceptance, failure or
 cancellation with
-`${AGENTS_HOME:-$HOME/.agents}/skills/orchestrate/scripts/run_dir_finalize.py`.
+`"$(provenant root)/skills/orchestrate/scripts/run_dir_finalize.py"`.
 An outer orchestrator's `awaiting-user` transport remains active across that
 call and does not rename the canonical receipt state, so a still-open outer
 run is not a reason to skip terminalising the inner one.

@@ -52,7 +52,7 @@ The mission is driven entirely through **`GOAL.md`**.
 
   ```
   /loop You are the conductor for the autopilot mission in this mission root.
-  Read ${AGENTS_HOME:-$HOME/.agents}/skills/autopilot/references/operating-loop.md
+  Read "$(provenant root)/skills/autopilot/references/operating-loop.md"
   IN FULL first, then GOAL.md (mission + STATUS gate + Active directives),
   STATE.md (your recover-after-compaction anchor), and QUEUE.md's head.
   Run ONE iteration of the 8-step loop (RECONCILE → READ → SELECT → DISPATCH →
@@ -62,7 +62,7 @@ The mission is driven entirely through **`GOAL.md`**.
   STATUS==STOP, write a clean handoff and HALT. Otherwise self-pace while
   work is active and use the validated idle-frontier PAUSED checkpoint when
   the frontier is dry. Before accepting PAUSED, run
-  `python3 "${AGENTS_HOME:-$HOME/.agents}/skills/autopilot/scripts/validate_idle_pause.py" "STATE.md" --queue "QUEUE.md"`.
+  `python3 "$(provenant root)/skills/autopilot/scripts/validate_idle_pause.py" "STATE.md" --queue "QUEUE.md"`.
   A non-zero result means re-invoke one iteration; do not exit the driver.
   ```
 

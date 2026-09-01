@@ -2392,6 +2392,11 @@ def test_non_git_fallback_routes_via_product_root_model_route():
         # cf_dispatch.sh appends $HOME/.local/bin and $HOME/bin to PATH;
         # point HOME at the sandbox so an installed provenant cannot leak in.
         env["HOME"] = str(tmp)
+        instance = tmp / "instance"
+        (instance / "config").mkdir(parents=True)
+        for name in ("model-routing.json", "model-preferences.json"):
+            shutil.copy2(product / "config" / name, instance / "config" / name)
+        env["AGENT_FABRIC_INSTANCE_ROOT"] = str(instance)
         out = tmp / "out.txt"
         result = subprocess.run(
             [

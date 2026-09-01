@@ -1171,6 +1171,8 @@ def test_registration_runbook_documents_a_project_free_registration_and_its_reco
     assert "Fabric has no manual project override" in runbook
     assert "Claude Code and Codex" in runbook
     assert "six clients" in runbook
+    assert "`--mcp-clients all`" in runbook
+    assert "two\nprimary clients" in runbook
     assert "not model-family proof" in runbook
     assert "exact provider/model" in runbook
     verification = runbook.split("## Verify", 1)[1].split("\n## ", 1)[0]
@@ -1180,3 +1182,12 @@ def test_registration_runbook_documents_a_project_free_registration_and_its_reco
     assert "first-client atomic install" in recovery
     assert "partial-state" in recovery
     assert "exit code `4`" in recovery
+
+
+def test_relocation_runbook_uses_configured_instance_root_and_checks_shim_separately() -> None:
+    runbook = (ROOT / "docs/runbooks/split-product-relocation.md").read_text()
+    assert "`<instance-root>/.agent-fabric/product-root.json`" in runbook
+    assert "same exact instance root" in runbook
+    assert 'provenant_bin="${PROVENANT_BIN_DIR:-$HOME/.local/bin}/provenant"' in runbook
+    assert "elif [ -f \"$provenant_bin\" ]; then" in runbook
+    assert '"${CLAUDE_CONFIG_DIR:-$HOME/.claude}" "${CODEX_HOME:-$HOME/.codex}" \\\n  -type l -exec realpath' in runbook

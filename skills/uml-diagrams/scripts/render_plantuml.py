@@ -6,8 +6,8 @@ Resolution order:
 2. `plantuml` executable on PATH.
 
 Examples:
-    python3 "$AGENTS_HOME/skills/uml-diagrams/scripts/render_plantuml.py" diagram.puml --format svg
-    PLANTUML_JAR=/path/to/plantuml.jar python3 "$AGENTS_HOME/skills/uml-diagrams/scripts/render_plantuml.py" diagram.puml --format png
+    python3 "$(provenant root)/skills/uml-diagrams/scripts/render_plantuml.py" diagram.puml --format svg
+    PLANTUML_JAR=/path/to/plantuml.jar python3 "$(provenant root)/skills/uml-diagrams/scripts/render_plantuml.py" diagram.puml --format png
 """
 from __future__ import annotations
 

@@ -231,7 +231,7 @@ const ARCH_DOCTRINE =
   'never auto-apply a cross-file refactor.'
 
 const cfDispatch =
-  '~/.agents/skills/orchestrate/scripts/cf_dispatch.sh'
+  '"$(provenant root)/skills/orchestrate/scripts/cf_dispatch.sh"'
 
 // ---------------------------------------------------------------------------
 // Workflow body.
@@ -275,7 +275,7 @@ const recon = await agent(
     '',
     '0. FIRST resolve the workspace/repo ROOT for the run dir: prefer `git rev-parse --show-toplevel`',
     `   from the slice; if the slice is non-git, walk up for a workspace marker (AGENTS.md / CLAUDE.md / .git / package.json) and use that dir. Then anchor the run dir at <root>/${runDirHintSuffix} — do NOT create it blindly under the current cwd (cwd may be a sub-package, which mis-places .work/).`,
-    `1. Create the run dir by running: ~/.agents/skills/orchestrate/scripts/run_dir_init.sh <root>/${runDirHintSuffix}`,
+    `1. Create the run dir by running: "$(provenant root)/skills/orchestrate/scripts/run_dir_init.sh" "<root>/${runDirHintSuffix}"`,
     '   (it prints the resolved absolute path; if the script is missing, mkdir -p the dir and its findings/ crossfamily/ traces/ patches/ subdirs and a MANIFEST.md). Also ensure a patches/ subdir exists.',
     '2. DISCOVER conventions AT RUNTIME — do not assume any project layout:',
     '   - lint/format/typecheck/test commands: read Makefile targets, AGENTS.md / CLAUDE.md validation sections, and package.json scripts. Capture the EXACT narrowest commands.',
@@ -416,9 +416,9 @@ const reviewStage = (cand, _orig, _i) => parallel([
         'Then run the dispatcher (flags only — all guidance is in this prose, not in shell comments):',
         `${cfDispatch} --orchestrator-family claude \\`,
         `  --chain "codex::low cursor:: agy:: " \\`,
-        `  --prompt-file ${runDir}/crossfamily/${cand.id}.prompt \\`,
-        `  --out ${runDir}/crossfamily/${cand.id}.out.txt \\`,
-        `  > ${runDir}/crossfamily/${cand.id}.json`,
+        `  --prompt-file "${runDir}/crossfamily/${cand.id}.prompt" \\`,
+        `  --out "${runDir}/crossfamily/${cand.id}.out.txt" \\`,
+        `  > "${runDir}/crossfamily/${cand.id}.json"`,
         'Fail-over order is codex -> cursor -> agy (agy advisory/best-effort only).',
         `The CLEAN cross-family answer is in ${runDir}/crossfamily/${cand.id}.out.txt; the normalised dispatcher record (read provider_family, cross_family and read_only_guarantee from it) is in ${runDir}/crossfamily/${cand.id}.json. Do NOT conflate the two: the .json is the record, the .out.txt is the answer.`,
         'Set recordPath to the .json path. If every tool fails (chain status all_failed) or disclosure was withheld, set crossFamilyRan=false and record CROSS-FAMILY-NOT-RUN: <reason> in the manifest. Never silently downgrade.',

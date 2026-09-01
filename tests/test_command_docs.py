@@ -3,9 +3,9 @@ import re
 
 
 ROOT = Path(__file__).resolve().parents[1]
-VALIDATE = '"${AGENTS_HOME:-$HOME/.agents}/skills/deliver/scripts/validate_delivery.py"'
+VALIDATE = '"$(provenant root)/skills/deliver/scripts/validate_delivery.py"'
 RECEIPT_AND_ARGS = '.agent-run/<id>/RUN.json --workspace-root "$PWD" --verify-hashes'
-RECEIPT_INIT = '"${AGENTS_HOME:-$HOME/.agents}/skills/deliver/scripts/delivery_receipt.py" init'
+RECEIPT_INIT = '"$(provenant root)/skills/deliver/scripts/delivery_receipt.py" init'
 REQUIRED_INIT_FLAGS = {
     "--run-dir",
     "--run-id",
@@ -98,3 +98,14 @@ def test_adr_index_marks_daemon_era_task_completion_decision_superseded():
     source = read("docs/adr/README.md")
     row = next(line for line in source.splitlines() if "[0015](" in line)
     assert "Superseded by ADR 0020" in row
+
+
+def test_root_derived_workflow_paths_are_shell_quoted():
+    polish = read("workflows/codebase-polish.js")
+    implement = read("workflows/implement-run.js")
+
+    assert 'run_dir_init.sh" "<root>/${runDirHintSuffix}"' in polish
+    assert '--prompt-file "${runDir}/crossfamily/' in polish
+    assert '--out "${runDir}/crossfamily/' in polish
+    assert '> "${runDir}/crossfamily/' in polish
+    assert '--out "${runDir}/crossfamily/<name>.txt"' in implement
