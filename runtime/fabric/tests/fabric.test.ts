@@ -509,6 +509,45 @@ describe("MCP startup boundaries", () => {
         },
       });
 
+      const queuedWriter = openStore();
+      queuedWriter.send(sender, "wait-recipient", "queued before locked cancellation");
+      queuedWriter.close();
+      const cancellationBlocker = new Database(databasePath);
+      cancellationBlocker.exec("BEGIN IMMEDIATE");
+      const lockedController = new AbortController();
+      const lockedCancellation = client.callTool({
+        name: "fabric_inbox",
+        arguments: { wait_seconds: 2 },
+      }, undefined, { signal: lockedController.signal });
+      const lockedRejection = expect(lockedCancellation).rejects.toThrow();
+      await delay(25);
+      lockedController.abort();
+      await delay(5);
+      cancellationBlocker.exec("ROLLBACK");
+      cancellationBlocker.close();
+      await lockedRejection;
+      await delay(100);
+
+      const afterLockedCancellation = await client.callTool({
+        name: "fabric_inbox",
+        arguments: {},
+      });
+      const afterLockedContent = afterLockedCancellation.content as Array<{
+        type: "text"; text: string;
+      }>;
+      const afterLockedMessages = JSON.parse(afterLockedContent[0]!.text) as Message[];
+      expect(afterLockedMessages).toMatchObject([{
+        body: "queued before locked cancellation",
+        claimId: expect.any(String),
+      }]);
+      await client.callTool({
+        name: "fabric_acknowledge",
+        arguments: {
+          message_id: afterLockedMessages[0]!.messageId,
+          claim_id: afterLockedMessages[0]!.claimId,
+        },
+      });
+
       const blocker = new Database(databasePath);
       blocker.exec("BEGIN IMMEDIATE");
       try {

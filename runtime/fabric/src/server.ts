@@ -78,6 +78,7 @@ const waitForInbox = async (
 ) => {
   const deadline = performance.now() + waitMs;
   for (;;) {
+    if (waitMs > 0) await delay(0, undefined, { signal });
     signal.throwIfAborted();
     const remainingBeforeClaim = deadline - performance.now();
     if (waitMs > 0 && remainingBeforeClaim <= 0) return [];
@@ -85,7 +86,7 @@ const waitForInbox = async (
     try {
       const busyTimeoutMs = waitMs === 0
         ? undefined
-        : Math.max(1, Math.min(50, Math.floor(remainingBeforeClaim)));
+        : 1;
       messages = readyStore(busyTimeoutMs).inbox(who, {
         ...options,
         busyTimeoutMs,
