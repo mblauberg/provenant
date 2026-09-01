@@ -6,6 +6,7 @@ import { z } from "zod";
 import { databasePath, identify } from "./identity.js";
 import { isSQLiteContention, Store, type Message } from "./store.js";
 
+// Leave margin under the MCP SDK's 60-second default request timeout.
 const MAX_WAIT_SECONDS = 55;
 
 /**
@@ -240,4 +241,6 @@ server.registerTool(
     : readyStore().activityAfter(who.project, after_seq, limit)),
 );
 
-await server.connect(new StdioServerTransport());
+const transport = new StdioServerTransport();
+process.stdin.once("end", () => { void transport.close(); });
+await server.connect(transport);

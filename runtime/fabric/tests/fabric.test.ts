@@ -411,6 +411,57 @@ describe("CLI boundaries", () => {
 });
 
 describe("MCP startup boundaries", () => {
+  it("closes an active wait when stdin reaches EOF", async () => {
+    const serverPath = fileURLToPath(new URL("../src/server.ts", import.meta.url));
+    const tsxLoader = createRequire(import.meta.url).resolve("tsx");
+    const child = spawn(process.execPath, ["--import", tsxLoader, serverPath], {
+      cwd: repositoryRoot,
+      env: {
+        ...process.env,
+        AGENT_FABRIC_STATE_DIRECTORY: temporaryDirectory,
+        AGENT_FABRIC_SEAT: "codex",
+        AGENT_FABRIC_LABEL: "eof-recipient",
+        NODE_NO_WARNINGS: "1",
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    let stderr = "";
+    child.stderr.on("data", (chunk: Buffer | string) => { stderr += chunk.toString(); });
+    const closed = new Promise<void>((resolveClosed) => {
+      child.once("close", () => resolveClosed());
+    });
+    child.stdin.write([
+      JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: "2025-06-18",
+          capabilities: {},
+          clientInfo: { name: "eof-regression", version: "1" },
+        },
+      }),
+      JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }),
+      JSON.stringify({
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/call",
+        params: { name: "fabric_inbox", arguments: { wait_seconds: 2 } },
+      }),
+      "",
+    ].join("\n"));
+    await delay(100);
+    child.stdin.end();
+
+    const exited = await Promise.race([
+      closed.then(() => true),
+      delay(800).then(() => false),
+    ]);
+    if (!exited) child.kill("SIGTERM");
+    await closed;
+    expect(exited, stderr).toBe(true);
+  }, 3_000);
+
   it("waits inside one inbox call until a message arrives", async () => {
     const sender = agent("wait-sender");
     const seed = openStore();
