@@ -23,6 +23,7 @@ DISPATCH_RUN = Path(__file__).with_name("dispatch_run.py")
 MAX_WORKER_QUESTION_PROMPT = 4096
 MAX_OPERATOR_RESPONSE_BYTES = 64 * 1024
 MAX_CANCEL_WAIT_SECONDS = 60.0
+MAX_GIT_EVIDENCE_HEADER_BYTES = 64 * 1024
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from dispatch_run import (
@@ -30,7 +31,7 @@ from dispatch_run import (
     remove_cancellation_marker,
     worker_question_envelope_bytes,
 )
-from _shared.custody import OwnedFileError, read_contained_regular
+from _shared.custody import OwnedFileError, open_contained_regular, read_contained_regular
 
 
 class ControlError(ValueError):
@@ -315,6 +316,90 @@ def _read_regular(
         raise ControlError(f"{label} path is outside or unavailable: {relative}") from exc
 
 
+def _validate_git_evidence(
+    run_dir: Path, root: Path, claim: Any,
+) -> str:
+    """Validate retained packet identity and structure without loading its body."""
+    if not isinstance(claim, dict) or set(claim) != {"path", "digest", "checkout"}:
+        raise ControlError("Git evidence receipt is malformed")
+    expected = (root / "evidence" / "git-evidence.md").as_posix()
+    rel = _relative(run_dir, claim.get("path"), "Git evidence")
+    if rel != expected:
+        raise ControlError(f"Git evidence path does not match its attempt: {rel}")
+    try:
+        fd, _relative_path, _target = open_contained_regular(
+            run_dir, rel, os.O_RDONLY, label="Git evidence"
+        )
+    except (OSError, OwnedFileError) as exc:
+        raise ControlError(f"Git evidence path is outside or unavailable: {rel}") from exc
+    hasher = hashlib.sha256()
+    header = bytearray()
+    metadata: Any = None
+    status_prefix = b"--- status ---\n"
+    body_prefix = bytearray()
+    marker = b"\n--- diff ---\n"
+    tail = b""
+    try:
+        while chunk := os.read(fd, 1024 * 1024):
+            hasher.update(chunk)
+            remaining = chunk
+            if metadata is None:
+                header.extend(remaining)
+                if len(header) > MAX_GIT_EVIDENCE_HEADER_BYTES and b"\n" not in header:
+                    raise ControlError("Git evidence packet header exceeds its 64 KiB limit")
+                separator = header.find(b"\n")
+                if separator < 0:
+                    continue
+                if separator > MAX_GIT_EVIDENCE_HEADER_BYTES:
+                    raise ControlError("Git evidence packet header exceeds its 64 KiB limit")
+                try:
+                    metadata = json.loads(bytes(header[:separator]).decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                    raise ControlError("Git evidence packet header is invalid") from exc
+                remaining = bytes(header[separator + 1:])
+            body_prefix.extend(remaining[: len(status_prefix) - len(body_prefix)])
+            if len(body_prefix) >= len(status_prefix) and bytes(body_prefix) != status_prefix:
+                raise ControlError("Git evidence packet is missing its status section")
+            combined = tail + remaining
+            if marker in combined:
+                tail = marker
+            else:
+                tail = combined[-(len(marker) - 1):]
+    finally:
+        os.close(fd)
+    if claim.get("digest") != f"sha256:{hasher.hexdigest()}":
+        raise ControlError(f"Git evidence digest does not match retained evidence: {rel}")
+    required = {
+        "schema_version", "record_type", "repository", "git_root", "head",
+        "diff_base", "working_tree", "diff_from", "paths", "encoding",
+    }
+    if (
+        not isinstance(metadata, dict)
+        or set(metadata) != required
+        or metadata.get("schema_version") != 1
+        or metadata.get("record_type") != "provenant-git-evidence"
+        or not isinstance(metadata.get("repository"), str)
+        or not isinstance(metadata.get("git_root"), str)
+        or not isinstance(metadata.get("head"), str)
+        or re.fullmatch(r"[0-9a-f]{40,64}", metadata["head"]) is None
+        or not isinstance(metadata.get("diff_base"), str)
+        or re.fullmatch(r"[0-9a-f]{40,64}", metadata["diff_base"]) is None
+        or metadata.get("working_tree") not in {"clean", "dirty"}
+        or not isinstance(metadata.get("diff_from"), str)
+        or not metadata["diff_from"]
+        or metadata.get("encoding") != "utf-8-replacement"
+        or not isinstance(metadata.get("paths"), list)
+        or any(not isinstance(path, str) for path in metadata["paths"])
+        or len(body_prefix) < len(status_prefix)
+        or bytes(body_prefix) != status_prefix
+        or marker not in tail
+    ):
+        raise ControlError("Git evidence packet is invalid")
+    if claim["checkout"] != metadata:
+        raise ControlError("Git evidence checkout identity disagrees with packet")
+    return rel
+
+
 def _attempt(run_dir: Path, task_id: str, attempt_id: str) -> tuple[dict[str, Any], dict[str, str], Path, dict[str, bytes]]:
     if not TASK_ID_RE.fullmatch(task_id):
         raise ControlError("task id is invalid")
@@ -375,6 +460,10 @@ def _attempt(run_dir: Path, task_id: str, attempt_id: str) -> tuple[dict[str, An
         payloads["result"] = data
     elif record.get("status") == "succeeded":
         raise ControlError(f"successful attempt has no result evidence: {attempt_rel}")
+    git_evidence = record.get("git_evidence")
+    if git_evidence is not None:
+        rel = _validate_git_evidence(run_dir, root, git_evidence)
+        artifacts["git_evidence"] = rel
     if record.get("status") == "blocked":
         question = record.get("question")
         if not _valid_worker_question(question):
