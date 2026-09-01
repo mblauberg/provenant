@@ -215,7 +215,9 @@ def _run_git(
 def owning_root(repo: Path) -> Path:
     requested = repo.expanduser().resolve()
     result = git(requested, "rev-parse", "--show-toplevel")
-    root = Path(result.stdout.strip()).resolve()
+    if not result.stdout.endswith("\n"):
+        raise PolicyError("Git top-level output was incomplete")
+    root = Path(result.stdout.removesuffix("\n")).resolve()
     if requested != root and not requested.is_relative_to(root):
         raise PolicyError(
             f"{requested} is outside the Git working tree it resolves to ({root}); "
@@ -234,10 +236,12 @@ def owning_root(repo: Path) -> Path:
             try:
                 if not stat.S_ISREG(back_pointer.lstat().st_mode):
                     raise OSError("not a regular file")
-                raw_target = back_pointer.read_text(errors="replace").strip()
-                if "\0" in raw_target or "\n" in raw_target or "\r" in raw_target:
+                raw_target = back_pointer.read_bytes()
+                if not raw_target.endswith(b"\n") or b"\0" in raw_target:
                     raise ValueError("invalid path bytes")
-                target = Path(raw_target)
+                target = Path(os.fsdecode(raw_target.removesuffix(b"\n")))
+                if target.name != ".git":
+                    raise ValueError("invalid back-pointer target")
                 if not target.is_absolute():
                     target = git_dir / target
                 resolved_target = target.resolve()

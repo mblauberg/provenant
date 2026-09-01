@@ -155,27 +155,45 @@ def registered_caller_checkout(product_root: Path) -> Path | None:
     if product_metadata is None:
         return None
     try:
-        product_checkout = owning_root(product_root)
-        records = worktree_records(product_checkout)
+        records = worktree_records(product_root)
     except PolicyError as exc:
         raise ValueError(f"cannot verify product checkout {product_root}: {exc}") from exc
 
     registered = [
-        Path(str(record["worktree"])).resolve()
+        (Path(str(record["worktree"])), Path(str(record["worktree"])).resolve())
         for record in records
         if record.get("worktree") is not None
     ]
+    resolved_product = product_root.resolve()
+    product_records = [raw for raw, resolved in registered if resolved == resolved_product]
+    if not product_records or any(path.is_symlink() for path in product_records):
+        raise ValueError(
+            f"product checkout {resolved_product} is not registered in its Git repository; "
+            "repair: run ./scripts/check-harness from a registered checkout"
+        )
+    product_checkout = resolved_product
     containing = [
-        checkout
-        for checkout in registered
+        (raw, checkout)
+        for raw, checkout in registered
         if caller == checkout or caller.is_relative_to(checkout)
     ]
-    if containing:
-        return max(containing, key=lambda path: len(path.parts))
-
+    selected_record = max(containing, key=lambda item: len(item[1].parts)) if containing else None
+    if selected_record is not None and selected_record[0].is_symlink():
+        raise ValueError(f"registered checkout path is a symlink: {selected_record[0]}")
+    selected = selected_record[1] if selected_record is not None else None
     caller_metadata = nearest_git_metadata(caller)
     if caller_metadata is None:
-        return None
+        if selected is not None:
+            raise ValueError(f"registered checkout {selected} has no .git metadata")
+        return selected
+    if selected is not None and caller_metadata == selected / ".git":
+        try:
+            selected_root = owning_root(selected)
+        except PolicyError as exc:
+            raise ValueError(f"invalid Git metadata at {caller_metadata}: {exc}") from exc
+        if selected_root != selected:
+            raise ValueError(f"registered checkout identity does not match {selected}")
+        return selected
     try:
         caller_root = owning_root(caller)
     except PolicyError as exc:
@@ -189,7 +207,7 @@ def registered_caller_checkout(product_root: Path) -> Path | None:
             f"{product_checkout}; repair: run ./scripts/check-harness from the checkout you "
             "intend to check"
         )
-    return None
+    return selected
 
 
 def checked_target(root: Path) -> Path:

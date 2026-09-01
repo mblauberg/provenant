@@ -14,7 +14,7 @@ _run_harness_python() {
   # one virtualenv per lane would be wasteful. When this checkout has no venv,
   # borrow the primary checkout's: the common Git directory names it.
   if test -z "${HARNESS_PYTHON:-}" && ! test -x "$candidate"; then
-    common_dir="$(git -C "$product_root" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)"
+    common_dir="$("${PROVENANT_GIT_BIN:-git}" -C "$product_root" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)"
     if test -n "$common_dir"; then
       primary_root="$(dirname "$common_dir")"
       if test -x "$primary_root/.venv/bin/python"; then

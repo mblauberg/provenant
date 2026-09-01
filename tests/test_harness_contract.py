@@ -44,15 +44,31 @@ def test_root_harness_checker_is_available():
 
 def test_root_harness_checker_reports_identity_before_loading_test_helpers(tmp_path):
     scripts_root = tmp_path / "scripts"
+    marker = tmp_path / "shadow-git-ran"
+    shadow_dir = tmp_path / "shadow-bin"
+    shadow_dir.mkdir()
+    shadow_git = shadow_dir / "git"
+    shadow_git.write_text(f"#!/bin/sh\ntouch '{marker}'\nprintf '%040d\\n' 0\n")
+    shadow_git.chmod(0o755)
     helper = scripts_root / "lib/harness-python.sh"
     helper.parent.mkdir(parents=True)
     helper.write_text(
-        "printf 'git_dir=%s ceiling=%s\\n' "
-        '"${GIT_DIR-<unset>}" "${GIT_CEILING_DIRECTORIES-<unset>}"\n'
+        "printf 'git_dir=%s ceiling=%s git_bin=%s\\n' "
+        '"${GIT_DIR-<unset>}" "${GIT_CEILING_DIRECTORIES-<unset>}" '
+        '"${PROVENANT_GIT_BIN-<unset>}"\n'
         "exit 19\n"
     )
+    clean_git_environment = os.environ.copy()
+    for name in (
+        "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_CEILING_DIRECTORIES", "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+    ):
+        clean_git_environment.pop(name, None)
     expected_head = subprocess.check_output(
-        ["git", "-C", str(ROOT), "rev-parse", "--verify", "HEAD"], text=True
+        ["git", "-C", str(ROOT), "rev-parse", "--verify", "HEAD"],
+        env=clean_git_environment,
+        text=True,
     ).strip()
     environment = os.environ.copy()
     environment.update({
@@ -62,6 +78,7 @@ def test_root_harness_checker_reports_identity_before_loading_test_helpers(tmp_p
         "PROVENANT_TESTS_ROOT": str(tmp_path / "tests"),
         "GIT_DIR": str(tmp_path / "redirected.git"),
         "GIT_CEILING_DIRECTORIES": str(ROOT),
+        "PATH": f"{shadow_dir}:{environment['PATH']}",
     })
 
     result = subprocess.run(
@@ -75,11 +92,12 @@ def test_root_harness_checker_reports_identity_before_loading_test_helpers(tmp_p
     )
 
     assert result.returncode == 19
-    assert result.stdout.splitlines() == [
-        f"check-harness: product_root={ROOT}",
-        f"check-harness: git_head={expected_head}",
-        "git_dir=<unset> ceiling=<unset>",
+    output = result.stdout.splitlines()
+    assert output[:2] == [
+        f"check-harness: product_root={ROOT}", f"check-harness: git_head={expected_head}",
     ]
+    assert output[2].startswith("git_dir=<unset> ceiling=<unset> git_bin=/")
+    assert not marker.exists()
 
 
 def test_dispatchers_use_the_stable_product_command_and_local_skill_helpers():
