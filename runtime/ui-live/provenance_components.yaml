@@ -62,6 +62,7 @@ components:
       - contained-source.mjs
       - jsx-tag-scanner.mjs
       - live-server-startup.mjs
+      - live-process.mjs
       - provenance_components.yaml
       - tests/live-server-startup.test.mjs
     description: Private runtime documentation, safeguards, startup classifier, test, and ownership record.
