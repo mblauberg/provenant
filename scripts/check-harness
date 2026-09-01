@@ -8,6 +8,12 @@ if [[ "${1:-}" == "--doctor" ]]; then
 fi
 [[ $# -eq 0 ]] || { echo "usage: check-harness [--doctor]" >&2; exit 2; }
 
+# Git discovery for checkout identity and interpreter selection must not inherit
+# caller redirects that can point the gate at another repository.
+unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE
+unset GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES
+unset GIT_CEILING_DIRECTORIES GIT_DISCOVERY_ACROSS_FILESYSTEM
+
 PRODUCT_ROOT="${AGENT_FABRIC_PRODUCT_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 SCRIPTS_ROOT="${PROVENANT_SCRIPTS_ROOT:-$PRODUCT_ROOT/scripts}"
 SKILLS_ROOT="${PROVENANT_SKILLS_ROOT:-$PRODUCT_ROOT/skills}"
@@ -18,11 +24,7 @@ for component_root in "$PRODUCT_ROOT" "$SCRIPTS_ROOT" "$SKILLS_ROOT" "$TESTS_ROO
     exit 3
   }
 done
-checked_head="$(
-  unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE
-  unset GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES
-  git -C "$PRODUCT_ROOT" rev-parse --verify HEAD 2>/dev/null || true
-)"
+checked_head="$(git -C "$PRODUCT_ROOT" rev-parse --verify HEAD 2>/dev/null || true)"
 [[ "$checked_head" =~ ^[0-9a-fA-F]{40}([0-9a-fA-F]{24})?$ ]] || checked_head=unavailable
 echo "check-harness: product_root=$PRODUCT_ROOT"
 echo "check-harness: git_head=$checked_head"

@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-import subprocess
 import sys
 from typing import NoReturn
 
@@ -126,66 +125,84 @@ def execute(
         raise SystemExit(3) from None
 
 
-def git_output(root: Path, *arguments: str) -> subprocess.CompletedProcess[bytes]:
-    environment = os.environ.copy()
-    for name in GIT_REDIRECT_ENVIRONMENT:
-        environment.pop(name, None)
-    try:
-        return subprocess.run(
-            ["git", "-C", str(root), *arguments],
-            env=environment,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        )
-    except OSError:
-        return subprocess.CompletedProcess([], 127, b"", b"")
+def nearest_git_metadata(root: Path) -> Path | None:
+    """Return the nearest .git entry without following or trusting it."""
+    requested = root.resolve()
+    for ancestor in (requested, *requested.parents):
+        candidate = ancestor / ".git"
+        try:
+            candidate.lstat()
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise ValueError(f"cannot inspect Git metadata at {candidate}: {exc}") from exc
+        return candidate
+    return None
 
 
 def registered_caller_checkout(product_root: Path) -> Path | None:
-    """Return a different caller checkout only when Git registers it here."""
-    caller = git_output(Path.cwd(), "rev-parse", "--show-toplevel")
-    product = git_output(product_root, "rev-parse", "--show-toplevel")
-    if caller.returncode != 0 or product.returncode != 0:
-        return None
-    caller_root = Path(os.fsdecode(caller.stdout.rstrip(b"\n"))).resolve()
-    product_checkout = Path(os.fsdecode(product.stdout.rstrip(b"\n"))).resolve()
-    if caller_root == product_checkout:
-        return None
+    """Return the registered product checkout containing the caller, if any."""
+    # Import the existing Git-custody owner only for `check`. Other Provenant
+    # commands remain usable from thin test/install dispatchers that do not
+    # carry the worktree implementation.
+    try:
+        from worktree import PolicyError, common_git_dir, owning_root, worktree_records
+    except ImportError as exc:
+        raise ValueError(f"worktree policy owner is unavailable; {REPAIR}") from exc
 
-    caller_common = git_output(caller_root, "rev-parse", "--git-common-dir")
-    product_common = git_output(product_checkout, "rev-parse", "--git-common-dir")
-    if caller_common.returncode != 0 or product_common.returncode != 0:
+    caller = Path.cwd().resolve()
+    product_metadata = nearest_git_metadata(product_root)
+    if product_metadata is None:
         return None
+    try:
+        product_checkout = owning_root(product_root)
+        records = worktree_records(product_checkout)
+    except PolicyError as exc:
+        raise ValueError(f"cannot verify product checkout {product_root}: {exc}") from exc
 
-    def resolved_git_path(root: Path, value: bytes) -> Path:
-        path = Path(os.fsdecode(value.rstrip(b"\n")))
-        return (root / path).resolve() if not path.is_absolute() else path.resolve()
+    registered = [
+        Path(str(record["worktree"])).resolve()
+        for record in records
+        if record.get("worktree") is not None
+    ]
+    containing = [
+        checkout
+        for checkout in registered
+        if caller == checkout or caller.is_relative_to(checkout)
+    ]
+    if containing:
+        return max(containing, key=lambda path: len(path.parts))
 
-    if resolved_git_path(caller_root, caller_common.stdout) != resolved_git_path(
-        product_checkout, product_common.stdout
-    ):
+    caller_metadata = nearest_git_metadata(caller)
+    if caller_metadata is None:
         return None
-
-    records = git_output(product_checkout, "worktree", "list", "--porcelain", "-z")
-    if records.returncode != 0:
+    try:
+        caller_root = owning_root(caller)
+    except PolicyError as exc:
         raise ValueError(
-            f"cannot verify caller checkout {caller_root} against product root {product_checkout}; "
-            "repair: run ./scripts/check-harness from the checkout you intend to check"
-        )
-    registered = {
-        Path(os.fsdecode(field.removeprefix(b"worktree "))).resolve()
-        for record in records.stdout.split(b"\0\0")
-        for field in record.split(b"\0")
-        if field.startswith(b"worktree ")
-    }
-    if caller_root not in registered:
+            f"invalid Git metadata at {caller_metadata}; repair: run ./scripts/check-harness "
+            "from the checkout you intend to check"
+        ) from exc
+    if common_git_dir(caller_root) == common_git_dir(product_checkout):
         raise ValueError(
             f"caller checkout {caller_root} is not a registered worktree of product root "
             f"{product_checkout}; repair: run ./scripts/check-harness from the checkout you "
             "intend to check"
         )
-    return caller_root
+    return None
+
+
+def checked_target(root: Path) -> Path:
+    """Require the selected checkout's own regular executable checker."""
+    target = root / "scripts/check-harness"
+    if target.is_symlink() or not target.is_file() or not os.access(target, os.X_OK):
+        raise ValueError(
+            f"selected checkout {root} has no regular executable scripts/check-harness; "
+            "repair: restore that checkout or run the checker directly from another checkout"
+        )
+    if not target.resolve().is_relative_to(root.resolve()):
+        raise ValueError(f"selected checker {target} resolves outside checkout {root}")
+    return target
 
 
 def dispatch_target(relative: str) -> tuple[Path, Path | None]:
@@ -206,15 +223,9 @@ def check_target() -> tuple[Path, Path | None]:
     caller_root = registered_caller_checkout(product_root)
     if caller_root is None:
         if local_available:
-            return local_target, None
-        return product_root / "scripts/check-harness", product_root
-    target = caller_root / "scripts/check-harness"
-    if not target.is_file():
-        raise ValueError(
-            f"registered caller checkout {caller_root} has no scripts/check-harness; "
-            "repair: restore that checkout or run the checker directly from another checkout"
-        )
-    return target, caller_root
+            return checked_target(local_root), local_root
+        return checked_target(product_root), product_root
+    return checked_target(caller_root), caller_root
 
 
 def main(arguments: list[str]) -> int:
@@ -253,7 +264,7 @@ def main(arguments: list[str]) -> int:
         return 2
     try:
         target, product_root = check_target() if command == "check" else dispatch_target(owner)
-    except ValueError as exc:
+    except (OSError, ValueError) as exc:
         print(f"provenant: {exc}", file=sys.stderr)
         return 3
     execute(target, command_arguments, product_root, clear_git_redirects=command == "check")

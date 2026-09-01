@@ -54,8 +54,11 @@ sole behavioural owners:
 | `run` | `skills/orchestrate/scripts/run_controls.py` |
 
 The managed resolver finds the product checkout without changing the caller's
-working directory. Each delegation preserves arguments, environment, standard
-input, signals, stdout, stderr and the owner's exit code.
+working directory. Each delegation preserves arguments, standard input,
+signals, stdout, stderr and the owner's exit code. The `check` command also
+selects the caller's registered checkout and clears Git redirect variables so
+the gate cannot certify another checkout; direct `scripts/check-harness` uses
+the same identity and redirect rules. Other commands preserve the environment.
 
 This gives agents one memorable discovery surface while keeping current scripts
 stable for automation and direct use.

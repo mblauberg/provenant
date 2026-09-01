@@ -1,4 +1,5 @@
 from pathlib import Path
+import os
 import re
 import shutil
 import subprocess
@@ -39,6 +40,46 @@ def test_root_harness_checker_is_available():
     source = checker.read_text()
     assert re.search(r'echo\s+"[^"\n]*product_root=\$PRODUCT_ROOT"', source)
     assert re.search(r'echo\s+"[^"\n]*git_head=\$checked_head"', source)
+
+
+def test_root_harness_checker_reports_identity_before_loading_test_helpers(tmp_path):
+    scripts_root = tmp_path / "scripts"
+    helper = scripts_root / "lib/harness-python.sh"
+    helper.parent.mkdir(parents=True)
+    helper.write_text(
+        "printf 'git_dir=%s ceiling=%s\\n' "
+        '"${GIT_DIR-<unset>}" "${GIT_CEILING_DIRECTORIES-<unset>}"\n'
+        "exit 19\n"
+    )
+    expected_head = subprocess.check_output(
+        ["git", "-C", str(ROOT), "rev-parse", "--verify", "HEAD"], text=True
+    ).strip()
+    environment = os.environ.copy()
+    environment.update({
+        "AGENT_FABRIC_PRODUCT_ROOT": str(ROOT),
+        "PROVENANT_SCRIPTS_ROOT": str(scripts_root),
+        "PROVENANT_SKILLS_ROOT": str(tmp_path / "skills"),
+        "PROVENANT_TESTS_ROOT": str(tmp_path / "tests"),
+        "GIT_DIR": str(tmp_path / "redirected.git"),
+        "GIT_CEILING_DIRECTORIES": str(ROOT),
+    })
+
+    result = subprocess.run(
+        ["bash", str(ROOT / "scripts/check-harness")],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+
+    assert result.returncode == 19
+    assert result.stdout.splitlines() == [
+        f"check-harness: product_root={ROOT}",
+        f"check-harness: git_head={expected_head}",
+        "git_dir=<unset> ceiling=<unset>",
+    ]
 
 
 def test_dispatchers_use_the_stable_product_command_and_local_skill_helpers():
