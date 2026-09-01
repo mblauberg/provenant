@@ -81,6 +81,7 @@ def test_root_harness_checker_reports_identity_before_loading_test_helpers(tmp_p
         "PROVENANT_TESTS_ROOT": str(tmp_path / "tests"),
         "GIT_DIR": str(tmp_path / "redirected.git"),
         "GIT_CEILING_DIRECTORIES": str(ROOT),
+        "HARNESS_PYTHON": str(tmp_path / "selected-python"),
         "PATH": f"{shadow_dir}:{environment['PATH']}",
     })
 
@@ -113,7 +114,8 @@ def test_root_harness_checker_reports_identity_before_loading_test_helpers(tmp_p
         f"check-harness: product_root={ROOT}", f"check-harness: git_head={expected_head}",
     ]
     assert output[2].startswith("check-harness: test_overrides=scripts_root=")
-    assert output[3].startswith("git_dir=<unset> ceiling=<unset> git_bin=/")
+    assert output[3] == f"check-harness: harness_python={tmp_path / 'selected-python'}"
+    assert output[4].startswith("git_dir=<unset> ceiling=<unset> git_bin=/")
     assert not marker.exists()
 
 
