@@ -115,7 +115,9 @@ untouched.
 SQLite bus on first use. There is no daemon, trust record, initial provisioning or
 warm/build step. `provenant check` runs the harness policy gate from the registered
 checkout containing the caller, so a linked-worktree check cannot certify the
-primary checkout. `npm run check` covers the Fabric typecheck and tests.
+primary checkout. `npm run check` covers the Fabric typecheck and tests. It
+first reports missing dependencies for that exact checkout and tells the
+operator to run `npm ci`; it never installs or borrows another checkout's tree.
 
 <details>
 <summary>Filesystem layout, Codex config and uninstall</summary>
