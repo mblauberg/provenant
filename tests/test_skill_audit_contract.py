@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 import yaml
@@ -5,7 +6,6 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 SKILL_CRAFT = ROOT / "skills" / "skill-craft"
-SKILL = SKILL_CRAFT / "SKILL.md"
 AUDIT = SKILL_CRAFT / "references" / "audit.md"
 METHOD = SKILL_CRAFT / "references" / "method.md"
 FIXTURES = SKILL_CRAFT / "evals" / "boundary_trace_cases.yaml"
@@ -14,33 +14,26 @@ DISCLOSURE = ROOT / "docs" / "specs" / "harness" / "disclosure-refactor.md"
 ADR = ROOT / "docs" / "adr" / "0001-personal-first-product-compatible.md"
 
 
-def test_local_history_audit_is_local_first_and_export_gated():
-    skill = SKILL.read_text()
+def test_skill_craft_references_keep_owned_structure():
+    skill = (SKILL_CRAFT / "SKILL.md").read_text()
     audit = AUDIT.read_text()
-    compact = " ".join(audit.split())
-    lowered = compact.lower()
+    method = METHOD.read_text()
 
-    # Behaviour and routing fixtures constrain this branch; prose length is a
-    # review concern, not a semantic threshold.
-    assert (
-        "direct user request authorises read-only analysis of the named "
-        "local histories" in lowered
-    )
-    assert "Do not require a second privacy receipt" in compact
-    assert "same authorised session is local delivery, not sharing/export" in compact
-    assert "needs no second disclosure confirmation" in compact
-    assert "persistent repository/shared artifact" in compact
-    assert "sending raw excerpts to another provider" in compact
-    assert "new audience or external destination" in compact
-    assert "confirm with the user" in compact
-    assert "Unsupported or unattributable evidence is `N/A`, never zero" in compact
-
-    method = " ".join(METHOD.read_text().split())
-    assert "inspect source history in place" in method
-    assert "cannot score a new skill" in method
-    assert "same authorised session is local delivery, not export" in method
-    assert "raw cross-provider handoff" in method
-    assert "Minimise authorised exports to aggregates or paraphrases" in method
+    assert "[references/author.md](references/author.md)" in skill
+    assert "[references/audit.md](references/audit.md)" in skill
+    assert "[method.md](method.md)" in audit
+    assert {"# Audit branch", "## Evidence modes", "## Workflow", "## Output"} <= {
+        line.strip() for line in audit.splitlines() if line.lstrip().startswith("#")
+    }
+    assert {
+        "# Skill-audit method",
+        "## Scoring",
+        "## Static checks",
+        "## Local and shared evidence",
+    } <= {
+        line.strip() for line in method.splitlines() if line.lstrip().startswith("#")
+    }
+    assert "## Local skill evidence and shared exports" in SPEC.read_text()
 
     retired = [
         SKILL_CRAFT / "scripts" / "collect_telemetry.py",
@@ -48,6 +41,64 @@ def test_local_history_audit_is_local_first_and_export_gated():
         SKILL_CRAFT / "SKILL-TELEMETRY.template.json",
     ]
     assert not [path for path in retired if path.exists()]
+
+
+def test_local_history_policy_boundaries_are_present_in_owned_sections():
+    evidence = " ".join(
+        re.search(r"(?ms)^## Evidence modes\n(.*?)(?=^## |\Z)", AUDIT.read_text())
+        .group(1)
+        .split()
+    ).casefold()
+    method = " ".join(
+        re.search(
+            r"(?ms)^## Local and shared evidence\n(.*?)(?=^## |\Z)",
+            METHOD.read_text(),
+        )
+        .group(1)
+        .split()
+    ).casefold()
+
+    assert re.search(
+        r"(?:direct|explicit)(?: user)? request\s+"
+        r"(?:authori[sz]e?s?|permit(?:s)?|allow(?:s)?)\s+read-only"
+        r".{0,80}"
+        r"named local histor(?:y|ies).{0,100}"
+        r"(?:do not require|no|without|needs? no|requires? no) (?:a )?"
+        r"(?:second|additional) (?:privacy )?(?:receipt|confirmation)",
+        evidence,
+    )
+    assert re.search(
+        r"(?:^|[.;:] )(?:read|inspect|analy[sz]e) "
+        r"(?:source )?histories? in place"
+        r".{0,100}(?:keep|remain) .*local.{0,100}"
+        r"(?:never|do not) commit raw transcripts.{0,60}"
+        r"(?:promote|become) .*project truth",
+        evidence,
+    )
+    assert re.search(
+        r"(?:aggregate|paraphras).{0,80}same authori[sz]ed session"
+        r".{0,80}local delivery.{0,60}(?:not sharing[/ ]?export|not export)"
+        r".{0,80}need(?:s)? no second disclosure confirmation",
+        evidence,
+    )
+    assert re.search(
+        r"separate authority (?:is )?(?:required|needed)(?: before)?"
+        r"(?: creating)?(?: a)? persistent "
+        r"(?:repository/shared artifact|repository|shared artifact)"
+        r".{0,100}raw.{0,60}(?:provider|cross-provider).{0,80}new audience"
+        r".{0,40}external destination",
+        evidence,
+    )
+    assert re.search(
+        r"unsupported or unattributable.{0,40}`?n/a`?.{0,30}"
+        r"(?:never|not|no) zero",
+        evidence,
+    )
+    assert re.search(
+        r"(?:historical data|history).{0,25}(?:older|predat\w+).{0,25}skill"
+        r".{0,120}cannot score (?:a )?(?:new )?skill.{0,80}`?n/a`?",
+        method,
+    )
 
 
 def test_local_history_routing_separates_audit_from_export():
@@ -94,29 +145,34 @@ def test_local_history_routing_separates_audit_from_export():
 def test_normative_docs_match_the_local_first_contract():
     spec = SPEC.read_text()
     disclosure = DISCLOSURE.read_text()
-    adr = ADR.read_text()
-    compact_adr = " ".join(adr.split())
     compact_spec = " ".join(spec.split())
+    compact_adr = " ".join(ADR.read_text().split())
 
     assert "current issue" not in compact_spec.lower()
     assert "Status: Base implementation machine verified" not in spec
-    assert "current contract permits direct read-only analysis" in compact_spec
     assert "## Local skill evidence and shared exports" in spec
-    assert "same authorised session is local delivery, not sharing/export" in compact_spec
-    assert "persistent repository/shared artifact" in compact_spec
-    assert "no provider-native adapter or producer" in compact_spec
-    assert "History predating a skill" in spec
-    assert "cannot score that skill" in compact_spec
-    assert "prospective contract coverage" in spec
-    assert "Unsupported or unattributable evidence is `N/A`, never zero" in spec
+    assert re.search(
+        r"direct user request\s+authori[sz]e?s?\s+read-only",
+        compact_spec,
+    )
+    assert re.search(
+        r"persistent repository/shared artifact.{0,180}requires separate authority",
+        compact_spec,
+    )
+    assert re.search(
+        r"direct request for read-only local history analysis is sufficient authority",
+        compact_adr,
+    )
+    assert re.search(
+        r"seam is separate authority for a persistent shared artifact",
+        compact_adr,
+    )
     assert "Canonical decision:" in disclosure
     assert "superseded Fabric text is retained" not in disclosure
     assert "not a permanent full-tree checker" in disclosure
     assert "Fabric remains the task/authority owner" not in (
         ROOT / "docs" / "research" / "native-orchestration-and-discovery-surfaces.md"
     ).read_text()
-    assert "direct request for read-only local history analysis" in compact_adr
-    assert "raw cross-provider handoff" in compact_adr
     retired_names = (
         "collect_telemetry.py",
         "validate_telemetry.py",

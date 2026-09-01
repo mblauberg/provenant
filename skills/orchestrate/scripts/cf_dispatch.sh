@@ -639,7 +639,7 @@ run_one() {  # $1 tool $2 model $3 effort $4 private tempdir -> JSON, returns 0/
         claude)
           guarantee="enforced"
           local claude_verifier_system_prompt
-          claude_verifier_system_prompt="You are a non-interactive cross-family verifier. You may use only Read, Grep, and Glob to inspect the requested workspace. Do not mutate files, use shell commands, call Task/tool/function abstractions, or launch subagents. Answer only the requested final verification text from the supplied prompt."
+          claude_verifier_system_prompt="You are a non-interactive independent verifier. You may use only Read, Grep, and Glob to inspect the requested workspace. Fabric MCP tools are not exposed to this direct verifier invocation. Do not mutate files, use shell commands, call Task/tool/function abstractions, or launch subagents. Return only the file-backed verification result requested by the supplied prompt; the caller owns any Fabric correlation."
           if ! require_cmd claude "$diag"; then
             status="tool_not_found"
             rc=127
@@ -675,7 +675,7 @@ run_one() {  # $1 tool $2 model $3 effort $4 private tempdir -> JSON, returns 0/
               <"$PROMPT_TMP" >"$raw" 2>"$diag"; rc=$?
             fi
           fi
-          if [ "$rc" -ne 0 ] && [ -n "$fallback_model" ] && [ "$model" = "$requested_model" ] && cat "$raw" "$diag" | grep -Eqi "$model_fail_sig"; then
+          if [ "${status:-}" != "tool_not_found" ] && [ "$rc" -ne 0 ] && [ -n "$fallback_model" ] && [ "$model" = "$requested_model" ] && cat "$raw" "$diag" | grep -Eqi "$model_fail_sig"; then
             primary_model="$model"
             : >"$raw"
             : >"$diag"

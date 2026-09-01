@@ -23,6 +23,8 @@ const execFileAsync = promisify(execFile);
 export const MAX_EXECUTION_WAIT_SECONDS = 55;
 const DEFAULT_WAIT_SECONDS = 55;
 const DEFAULT_TIMEOUT_SECONDS = 900;
+const FIRST_ATTEMPT_ID = "attempt-001";
+const FIRST_BATCH_ID = "batch-001";
 const SUPPORTED_ADAPTERS = new Set(["agy", "claude", "codex", "cursor", "kiro", "opencode"]);
 const DISPATCH_TERMINAL_STATUSES = new Set(["succeeded", "failed", "blocked", "timed_out", "cancelled"]);
 const BATCH_TERMINAL_STATUSES = new Set(["completed", "failed", "cancelled"]);
@@ -568,16 +570,25 @@ function compactBatch(started: StartedOwner, completion: OwnerCompletion): Recor
   };
 }
 
-function running(started: StartedOwner, kind: "dispatch" | "batch", identity: Identity): Record<string, unknown> {
+function running(
+  started: StartedOwner,
+  kind: "dispatch" | "batch",
+  identity: Identity,
+  identifier: string,
+): Record<string, unknown> {
+  const paths = kind === "dispatch"
+    ? { ...basePaths(started), attempt: join(started.runDir, "dispatch", "tasks", identifier, FIRST_ATTEMPT_ID, "attempt.json") }
+    : { ...basePaths(started), summary: join(started.runDir, "dispatch", "batches", FIRST_BATCH_ID, "summary.json") };
   return {
     schema_version: 1,
     status: "running",
     kind,
+    ...(kind === "dispatch" ? { task_id: identifier } : { batch_id: identifier }),
     route: null,
     route_status: "pending",
     workspace: identity.cwd,
     pid: started.child.pid ?? null,
-    paths: basePaths(started),
+    paths,
   };
 }
 
@@ -619,13 +630,13 @@ export async function dispatchConfiguredProvider(
   const started = startOwner(python, [owner, ...args], identity, env, runDir, {
     command: python,
     args: [controls, "cancel", "--run-dir", runDir, "--task-id", taskId,
-      "--attempt-id", "attempt-001", "--wait-seconds", "5"],
-    targetDirectory: join(runDir, "dispatch", "tasks", taskId, "attempt-001"),
+      "--attempt-id", FIRST_ATTEMPT_ID, "--wait-seconds", "5"],
+    targetDirectory: join(runDir, "dispatch", "tasks", taskId, FIRST_ATTEMPT_ID),
     cwd: identity.cwd,
     env,
   }, input.prompt === undefined ? [] : [promptPath]);
   const completion = await observeOwner(started, input.wait_seconds, signal);
-  return completion === undefined ? running(started, "dispatch", identity) : compactDispatch(started, completion);
+  return completion === undefined ? running(started, "dispatch", identity, taskId) : compactDispatch(started, completion);
 }
 
 function normaliseTask(task: BatchTaskInput, index: number, identity: Identity): Record<string, unknown> {
@@ -666,12 +677,12 @@ export async function dispatchConfiguredBatch(
     "--concurrency", String(concurrency),
   ], identity, env, runDir, {
     command: python,
-    args: [controls, "cancel", "--run-dir", runDir, "--batch-id", "batch-001",
+    args: [controls, "cancel", "--run-dir", runDir, "--batch-id", FIRST_BATCH_ID,
       "--wait-seconds", "5"],
-    targetDirectory: join(runDir, "dispatch", "batches", "batch-001"),
+    targetDirectory: join(runDir, "dispatch", "batches", FIRST_BATCH_ID),
     cwd: identity.cwd,
     env,
   }, [manifestPath]);
   const completion = await observeOwner(started, input.wait_seconds, signal);
-  return completion === undefined ? running(started, "batch", identity) : compactBatch(started, completion);
+  return completion === undefined ? running(started, "batch", identity, FIRST_BATCH_ID) : compactBatch(started, completion);
 }
