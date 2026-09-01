@@ -143,6 +143,21 @@ def test_package_marker_must_name_the_declared_dependency(tmp_path: Path) -> Non
     assert not (linked / "gate-ran").exists()
 
 
+def test_workspace_manifest_must_be_a_local_regular_file(tmp_path: Path) -> None:
+    _primary, linked = registered_worktree(tmp_path)
+    provision_direct_dependencies(linked)
+    external = tmp_path / "external-package.json"
+    external.write_text('{"name":"@local/fabric"}\n')
+    (linked / "runtime/fabric/package.json").unlink()
+    (linked / "runtime/fabric/package.json").symlink_to(external)
+
+    result = run("npm", "run", "check", cwd=linked)
+
+    assert result.returncode == 3
+    assert "workspace manifest" in result.stderr
+    assert not (linked / "gate-ran").exists()
+
+
 def test_locally_provisioned_worktree_continues_into_gate(tmp_path: Path) -> None:
     _primary, linked = registered_worktree(tmp_path)
     provision_direct_dependencies(linked)

@@ -11,15 +11,18 @@ import { isAbsolute, join, relative, sep } from "node:path";
 
 
 const checkout = realpathSync(process.cwd());
-const rootPackage = readPackage(join(checkout, "package.json"));
+const rootPackage = readLocalManifest(join(checkout, "package.json"), "root manifest");
 const workspacePaths = Array.isArray(rootPackage.workspaces)
   ? rootPackage.workspaces
   : [];
 const manifests = [
   [checkout, rootPackage],
   ...workspacePaths.map((workspace) => {
-    const workspaceRoot = join(checkout, workspace);
-    return [workspaceRoot, readPackage(join(workspaceRoot, "package.json"))];
+    const workspaceRoot = localWorkspace(join(checkout, workspace));
+    return [
+      workspaceRoot,
+      readLocalManifest(join(workspaceRoot, "package.json"), "workspace manifest"),
+    ];
   }),
 ];
 
@@ -51,8 +54,39 @@ if (missing.size > 0) {
 }
 
 
-function readPackage(path) {
+function readJson(path) {
   return JSON.parse(readFileSync(path, "utf8"));
+}
+
+
+function readLocalManifest(path, label) {
+  try {
+    if (!lstatSync(path).isFile() || !isInsideCheckout(realpathSync(path))) {
+      throw new Error("not local");
+    }
+    return readJson(path);
+  } catch {
+    process.stderr.write(
+      `node-workspace-preflight: ${label} is not a local regular file: ${path}\n`,
+    );
+    process.exit(3);
+  }
+}
+
+
+function localWorkspace(path) {
+  try {
+    const resolved = realpathSync(path);
+    if (!isInsideCheckout(resolved) || !statSync(resolved).isDirectory()) {
+      throw new Error("not local");
+    }
+    return resolved;
+  } catch {
+    process.stderr.write(
+      `node-workspace-preflight: workspace is not a local directory: ${path}\n`,
+    );
+    process.exit(3);
+  }
 }
 
 
@@ -69,7 +103,7 @@ function isLocalPackage(packageDirectory, expectedName) {
     if (!lstatSync(packageFile).isFile()) {
       return false;
     }
-    return readPackage(packageFile).name === expectedName;
+    return readJson(packageFile).name === expectedName;
   } catch {
     return false;
   }
