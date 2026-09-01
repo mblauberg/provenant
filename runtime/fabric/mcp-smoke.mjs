@@ -654,6 +654,10 @@ try {
     cwd: realWorkspace,
     productRoot: resolve(import.meta.dirname, "../.."),
     env: {
+      // Route from this checkout's seeded catalog. A cold CI process can spend
+      // the whole one-second timeout failing to find the default ~/.agents
+      // catalog, which tests route startup rather than provider timeout.
+      AGENT_FABRIC_INSTANCE_ROOT: resolve(import.meta.dirname, "../.."),
       PATH: `${realProviderBin}:/usr/bin:/bin`,
       ...(process.env.HARNESS_PYTHON === undefined ? {} : {
         HARNESS_PYTHON: process.env.HARNESS_PYTHON,
@@ -706,6 +710,7 @@ try {
     },
   }));
   assert.equal(timedOut.status, "timed_out", JSON.stringify(timedOut));
+  assert.ok(existsSync(providerMarker), "the timeout must occur after the provider starts");
   const timedOutAttempt = JSON.parse(readFileSync(timedOut.paths.attempt, "utf8"));
   assert.equal(timedOutAttempt.status, "timed_out");
   assert.equal(timedOutAttempt.outcome, "timeout");
@@ -725,6 +730,7 @@ try {
     ], { cwd: realWorkspace, encoding: "utf8" }), /PASS: run terminalised as failed/u);
   }
 
+  rmSync(providerMarker);
   const realCancelled = payload(await realExecutor.callTool({
     name: "fabric_dispatch",
     arguments: {
