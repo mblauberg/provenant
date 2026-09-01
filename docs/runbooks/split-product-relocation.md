@@ -28,6 +28,8 @@ explicitly:
 AGENT_FABRIC_INSTANCE_ROOT=/abs/instance \
 PROVENANT_BIN_DIR=/abs/bin \
 ./scripts/install-harness --platform all
+
+AGENT_FABRIC_INSTANCE_ROOT=/abs/instance /abs/bin/provenant root
 ```
 
 Use `--platform claude` or `--platform codex` only when deliberately

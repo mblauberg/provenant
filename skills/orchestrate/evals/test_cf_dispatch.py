@@ -273,13 +273,16 @@ def test_output_parent_swap_cannot_certify_an_identical_outside_file():
 
 
 def fabric_free_env():
-    # Stripping the fabric variables stops an inherited developer instance
-    # from steering these evals through an installed provenant command.
-    return {
+    # Keep the evals on this checkout's fused fixtures rather than an inherited
+    # developer instance or the operator's default ~/.agents instance.
+    env = {
         key: value
         for key, value in os.environ.items()
         if key != "AGENTS_HOME" and not key.startswith("AGENT_FABRIC_")
     }
+    env["AGENT_FABRIC_PRODUCT_ROOT"] = str(PRODUCT_ROOT)
+    env["AGENT_FABRIC_INSTANCE_ROOT"] = str(PRODUCT_ROOT)
+    return env
 
 
 def run_dispatch_with_stub(

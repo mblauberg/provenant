@@ -212,15 +212,16 @@ preflight_harness_link() {
 }
 
 is_receipt_owned_old_harness() {
-  local harness="$1" link_target resolved_target
+  local harness="$1" link_target
   [[ -L "$harness" && -n "$old_product_root" ]] || return 1
   link_target="$(readlink "$harness")" || return 1
-  resolved_target="$(run_stdlib -c '
-import os
+  run_stdlib -c '
+from pathlib import Path
 import sys
-print(os.path.abspath(os.path.join(os.path.dirname(sys.argv[1]), sys.argv[2])))
-' "$harness" "$link_target")" || return 1
-  [[ "$resolved_target" == "$old_product_root/HARNESS.md" ]]
+target = (Path(sys.argv[1]).parent / sys.argv[2]).resolve(strict=False)
+expected = Path(sys.argv[3]).resolve(strict=False) / "HARNESS.md"
+raise SystemExit(0 if target == expected else 1)
+' "$harness" "$link_target" "$old_product_root"
 }
 
 rebind_harness_link() {

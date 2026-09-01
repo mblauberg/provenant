@@ -1416,6 +1416,26 @@ def test_relocation_rebinds_a_dangling_relative_old_harness_link(tmp_path):
     assert harness.resolve() == (new_product / "HARNESS.md").resolve()
 
 
+def test_relocation_matches_dangling_link_through_a_symlinked_parent(tmp_path):
+    physical = tmp_path / "physical"
+    physical.mkdir()
+    alias = tmp_path / "alias"
+    alias.symlink_to(physical, target_is_directory=True)
+    old_product = copy_product(ROOT, physical / "old product")
+    new_product = copy_product(ROOT, physical / "new product")
+    first = run_product(old_product, "claude", tmp_path)
+    assert first.returncode == 0, first.stderr
+
+    harness = tmp_path / "claude/HARNESS.md"
+    harness.symlink_to(Path("../alias/old product/HARNESS.md"))
+    old_product.rename(physical / "moved old product")
+
+    result = run_product(new_product, "claude", tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    assert harness.resolve() == (new_product / "HARNESS.md").resolve()
+
+
 def test_instance_leaf_symlink_conflicts_are_rejected_before_publication(tmp_path):
     product = copy_product(ROOT, tmp_path / "product")
     instance = tmp_path / "instance"
