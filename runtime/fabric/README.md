@@ -26,8 +26,10 @@ Common CLI operations are:
 
 ```sh
 fabric send codex "review auth.ts" --kind request
+fabric send codex "result is ready" --task-id review-auth --output-path /tmp/review.md
 fabric inbox                         # claim available deliveries (default: 20)
 fabric inbox --limit 5               # claim at most five deliveries
+fabric inbox --task-id review-auth    # claim only that task's deliveries
 fabric ack <message-id> <claim-id>   # acknowledge after receipt succeeds
 fabric task "review the change"
 fabric claim <task-id>
@@ -68,6 +70,12 @@ acknowledged delivery; the additive `delivery_claims` table holds new claims.
 
 A supplied reply parent must already exist in the caller's project. Missing,
 stale and cross-project IDs fail before a message or activity row is inserted.
+Messages may also carry an existing same-project `task_id` and an opaque
+`output_path`. The path is metadata only: Fabric never reads, stats, hashes,
+canonicalises or
+grants authority to it. Replies do not inherit either link unless supplied.
+`fabric_inbox` can filter by `task_id`; filtering happens before any claim, so
+unrelated pending deliveries remain available and redelivery is unchanged.
 
 ## Identity and scope
 

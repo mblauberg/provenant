@@ -18,9 +18,12 @@ const USAGE = `fabric <command>
   send <to> <body...>         to an agent id, a team id, or "all"
        [--reply-to <id>]      thread this onto an existing message
        [--kind <kind>]        note (default), request, response
+       [--task-id <id>]       link an existing Fabric task
+       [--output-path <path>]  opaque output or run path metadata
   inbox [--peek]              claim unacknowledged messages; --peek does not claim
         [--limit N]           return at most N deliveries (default 20)
         [--claim-seconds N]   claim lifetime, 1 to 3600 seconds (default 300)
+        [--task-id <id>]       return only deliveries linked to this task
   ack <message-id> <claim-id> acknowledge one claimed delivery
   note <text...>              record something in the activity log
   tasks [state]               list tasks, optionally filtered by state
@@ -113,12 +116,14 @@ try {
     // Strip the flags first so whatever is left is the recipient and the body.
     const replyTo = flag("reply-to");
     const kind = flag("kind");
+    const taskId = flag("task-id");
+    const outputPath = flag("output-path");
     const to = argv[1];
     const body = argv.slice(2).join(" ");
     if (to === undefined || body.length === 0) {
       throw new Error("usage: fabric send [--reply-to <id>] [--kind <kind>] <to> <body...>");
     }
-    show(store.send(who, to, body, { kind, replyTo }));
+    show(store.send(who, to, body, { kind, replyTo, taskId, outputPath }));
     break;
   }
 
@@ -136,10 +141,11 @@ try {
     const peekAt = argv.indexOf("--peek");
     const peek = peekAt !== -1;
     if (peek) argv.splice(peekAt, 1);
+    const taskId = flag("task-id");
     if (argv.length !== 1) {
-      throw new Error("usage: fabric inbox [--peek] [--limit N] [--claim-seconds N]");
+      throw new Error("usage: fabric inbox [--peek] [--limit N] [--claim-seconds N] [--task-id <id>]");
     }
-    show(store.inbox(who, { limit, peek, claimTtlMs: claimSeconds * 1000 }));
+    show(store.inbox(who, { limit, peek, claimTtlMs: claimSeconds * 1000, taskId }));
     break;
   }
 

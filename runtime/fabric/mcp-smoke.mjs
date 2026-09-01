@@ -159,6 +159,61 @@ try {
     arguments: { task_id: task.taskId },
   }));
 
+  const linkedTask = payload(await claude.callTool({
+    name: "fabric_task_create",
+    arguments: { task_id: "mcp-message-link", objective: "Carry the smoke artifact" },
+  }));
+  const linkedMessage = payload(await claude.callTool({
+    name: "fabric_send",
+    arguments: {
+      to: "codex-client",
+      body: "opaque artifact link",
+      task_id: linkedTask.taskId,
+      output_path: "/path/that/is/never/read",
+    },
+  }));
+  const linkedPeek = payload(await codex.callTool({
+    name: "fabric_inbox",
+    arguments: { peek: true, task_id: linkedTask.taskId },
+  }));
+  assert.deepEqual(linkedPeek[0], {
+    messageId: linkedMessage.messageId,
+    from: "claude-client",
+    body: "opaque artifact link",
+    kind: "note",
+    conversationId: linkedMessage.messageId,
+    replyTo: null,
+    at: linkedPeek[0].at,
+    claimId: null,
+    claimExpiresAt: null,
+    taskId: linkedTask.taskId,
+    outputPath: "/path/that/is/never/read",
+  });
+  const linkedClaim = payload(await codex.callTool({
+    name: "fabric_inbox",
+    arguments: { task_id: linkedTask.taskId },
+  }))[0];
+  await codex.callTool({
+    name: "fabric_acknowledge",
+    arguments: { message_id: linkedClaim.messageId, claim_id: linkedClaim.claimId },
+  });
+  await expectToolError(claude.callTool({
+    name: "fabric_task_create",
+    arguments: { task_id: "", objective: "empty task id must fail" },
+  }));
+  await expectToolError(claude.callTool({
+    name: "fabric_send",
+    arguments: { to: "codex-client", body: "empty task id must fail", task_id: "" },
+  }));
+  await expectToolError(claude.callTool({
+    name: "fabric_send",
+    arguments: { to: "codex-client", body: "empty output path must fail", output_path: "" },
+  }));
+  await expectToolError(codex.callTool({
+    name: "fabric_inbox",
+    arguments: { task_id: "" },
+  }));
+
   const targetedTask = payload(await claude.callTool({
     name: "fabric_task_create",
     arguments: { task_id: "mcp-targeted", objective: "Review once", owner: "agy-client" },
