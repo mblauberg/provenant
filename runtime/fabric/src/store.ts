@@ -17,9 +17,11 @@ const REQUIRED_CLAIM_COLUMNS = [
 ];
 const BOOTSTRAP_WAIT = new Int32Array(new SharedArrayBuffer(4));
 
-const isSQLiteContention = (error: unknown): boolean => {
+export const isSQLiteContention = (error: unknown): boolean => {
   const code = (error as { code?: unknown } | null)?.code;
-  return code === "SQLITE_BUSY" || code === "SQLITE_LOCKED";
+  if (code === "SQLITE_BUSY" || code === "SQLITE_LOCKED") return true;
+  const cause = (error as { cause?: unknown } | null)?.cause;
+  return cause !== undefined && cause !== error && isSQLiteContention(cause);
 };
 
 export interface Message {
@@ -67,16 +69,19 @@ export interface Activity {
 export class Store {
   readonly #db: Database.Database;
 
-  constructor(path: string) {
+  constructor(path: string, busyTimeoutMs = 5000) {
+    if (!Number.isSafeInteger(busyTimeoutMs) || busyTimeoutMs < 1 || busyTimeoutMs > 5000) {
+      throw new Error("busy timeout must be between 1 and 5000 milliseconds");
+    }
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-    this.#db = new Database(path, { timeout: 5000 });
+    this.#db = new Database(path, { timeout: busyTimeoutMs });
     try {
       // Migration/schema PRAGMAs also contend on the first simultaneous open.
       // Install the wait policy before executing any of them, then retry only
       // the idempotent schema bootstrap on bounded SQLite contention.
-      this.#db.pragma("busy_timeout = 5000");
+      this.#db.pragma(`busy_timeout = ${busyTimeoutMs}`);
       const schema = readFileSync(SCHEMA, "utf8");
-      const deadline = Date.now() + 5000;
+      const deadline = Date.now() + busyTimeoutMs;
       for (;;) {
         try {
           this.#db.exec(schema);
@@ -94,6 +99,11 @@ export class Store {
 
   close(): void {
     this.#db.close();
+  }
+
+  /** Leave a lazily opened store on the normal operation timeout. */
+  restoreDefaultBusyTimeout(): void {
+    this.#db.pragma("busy_timeout = 5000");
   }
 
   /** Register the caller if this is the first time it has been seen. */
@@ -207,7 +217,12 @@ export class Store {
   /** Claim unacknowledged messages for the caller. Peeking never creates a claim. */
   inbox(
     who: Identity,
-    options: { limit?: number; peek?: boolean; claimTtlMs?: number } = {},
+    options: {
+      limit?: number;
+      peek?: boolean;
+      claimTtlMs?: number;
+      busyTimeoutMs?: number;
+    } = {},
   ): Message[] {
     const limit = options.limit ?? 20;
     if (!Number.isSafeInteger(limit) || limit <= 0) throw new Error("inbox limit must be positive");
@@ -224,37 +239,46 @@ export class Store {
           : row.claim_expires_at));
     }
 
-    return this.#db.transaction(() => {
-      // BEGIN IMMEDIATE has acquired the writer lock before this callback runs.
-      // Starting the lease here prevents lock wait time consuming the claim TTL.
-      const now = Date.now();
-      const rows = this.#deliveryRows(who, limit, now, false);
-      const claim = this.#db.prepare(
-        `INSERT INTO delivery_claims(
-           message_id, project, recipient_id, claim_id, claimed_at, expires_at
-         ) VALUES (?, ?, ?, ?, ?, ?)
-         ON CONFLICT(message_id, recipient_id) DO UPDATE SET
-           project = excluded.project,
-           claim_id = excluded.claim_id,
-           claimed_at = excluded.claimed_at,
-           expires_at = excluded.expires_at
-         WHERE delivery_claims.expires_at <= ?`,
-      );
-      return rows.flatMap((row) => {
-        const claimId = randomUUID();
-        const expiresAt = now + claimTtlMs;
-        const changed = claim.run(
-          row.message_id,
-          who.project,
-          who.agentId,
-          claimId,
-          now,
-          expiresAt,
-          now,
+    const busyTimeoutMs = options.busyTimeoutMs ?? 5000;
+    if (!Number.isSafeInteger(busyTimeoutMs) || busyTimeoutMs < 1 || busyTimeoutMs > 5000) {
+      throw new Error("busy timeout must be between 1 and 5000 milliseconds");
+    }
+    this.#db.pragma(`busy_timeout = ${busyTimeoutMs}`);
+    try {
+      return this.#db.transaction(() => {
+        // BEGIN IMMEDIATE has acquired the writer lock before this callback runs.
+        // Starting the lease here prevents lock wait time consuming the claim TTL.
+        const now = Date.now();
+        const rows = this.#deliveryRows(who, limit, now, false);
+        const claim = this.#db.prepare(
+          `INSERT INTO delivery_claims(
+             message_id, project, recipient_id, claim_id, claimed_at, expires_at
+           ) VALUES (?, ?, ?, ?, ?, ?)
+           ON CONFLICT(message_id, recipient_id) DO UPDATE SET
+             project = excluded.project,
+             claim_id = excluded.claim_id,
+             claimed_at = excluded.claimed_at,
+             expires_at = excluded.expires_at
+           WHERE delivery_claims.expires_at <= ?`,
         );
-        return changed.changes === 1 ? [this.#message(row, claimId, expiresAt)] : [];
-      });
-    }).immediate();
+        return rows.flatMap((row) => {
+          const claimId = randomUUID();
+          const expiresAt = now + claimTtlMs;
+          const changed = claim.run(
+            row.message_id,
+            who.project,
+            who.agentId,
+            claimId,
+            now,
+            expiresAt,
+            now,
+          );
+          return changed.changes === 1 ? [this.#message(row, claimId, expiresAt)] : [];
+        });
+      }).immediate();
+    } finally {
+      if (busyTimeoutMs !== 5000) this.#db.pragma("busy_timeout = 5000");
+    }
   }
 
   /** Acknowledge one claimed delivery. Retries with the same token are idempotent. */

@@ -411,6 +411,226 @@ describe("CLI boundaries", () => {
 });
 
 describe("MCP startup boundaries", () => {
+  it("closes an active wait when stdin reaches EOF", async () => {
+    const serverPath = fileURLToPath(new URL("../src/server.ts", import.meta.url));
+    const tsxLoader = createRequire(import.meta.url).resolve("tsx");
+    const child = spawn(process.execPath, ["--import", tsxLoader, serverPath], {
+      cwd: repositoryRoot,
+      env: {
+        ...process.env,
+        AGENT_FABRIC_STATE_DIRECTORY: temporaryDirectory,
+        AGENT_FABRIC_SEAT: "codex",
+        AGENT_FABRIC_LABEL: "eof-recipient",
+        NODE_NO_WARNINGS: "1",
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk: Buffer | string) => { stdout += chunk.toString(); });
+    child.stderr.on("data", (chunk: Buffer | string) => { stderr += chunk.toString(); });
+    const closed = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
+      (resolveClosed) => {
+        child.once("close", (code, signal) => resolveClosed({ code, signal }));
+      },
+    );
+    child.stdin.write([
+      JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: "2025-06-18",
+          capabilities: {},
+          clientInfo: { name: "eof-regression", version: "1" },
+        },
+      }),
+      JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }),
+      JSON.stringify({
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/call",
+        params: { name: "fabric_inbox", arguments: { wait_seconds: 2 } },
+      }),
+      "",
+    ].join("\n"));
+    for (let attempt = 0; attempt < 150 && !stdout.includes('"id":1'); attempt += 1) {
+      await delay(10);
+    }
+    const initializedBeforeEof = stdout.includes('"id":1');
+    const waitPendingBeforeEof = !stdout.includes('"id":2');
+    child.stdin.end();
+
+    const exit = await Promise.race([
+      closed,
+      delay(800).then(() => null),
+    ]);
+    if (exit === null) child.kill("SIGTERM");
+    const finalExit = await closed;
+    expect(exit, stderr).not.toBeNull();
+    expect(finalExit).toEqual({ code: 0, signal: null });
+    expect(initializedBeforeEof).toBe(true);
+    expect(waitPendingBeforeEof).toBe(true);
+    expect(stdout).toContain('"id":1');
+  }, 4_000);
+
+  it("waits inside one inbox call until a message arrives", async () => {
+    const sender = agent("wait-sender");
+    const seed = openStore();
+    seed.announce(sender);
+    seed.close();
+
+    const serverPath = fileURLToPath(new URL("../src/server.ts", import.meta.url));
+    const tsxLoader = createRequire(import.meta.url).resolve("tsx");
+    const transport = new StdioClientTransport({
+      command: process.execPath,
+      args: ["--import", tsxLoader, serverPath],
+      cwd: repositoryRoot,
+      stderr: "pipe",
+      env: {
+        HOME: process.env.HOME ?? temporaryDirectory,
+        PATH: process.env.PATH ?? "/usr/bin:/bin",
+        NODE_NO_WARNINGS: "1",
+        AGENT_FABRIC_STATE_DIRECTORY: temporaryDirectory,
+        AGENT_FABRIC_SEAT: "codex",
+        AGENT_FABRIC_LABEL: "wait-recipient",
+      },
+    });
+    const client = new Client({ name: "wait-regression", version: "1" });
+    try {
+      await client.connect(transport);
+      let settled = false;
+      const waiting = client.callTool({
+        name: "fabric_inbox",
+        arguments: { wait_seconds: 1 },
+      }).finally(() => { settled = true; });
+
+      await delay(75);
+      expect(settled).toBe(false);
+      const writer = openStore();
+      writer.send(sender, "wait-recipient", "arrived during the MCP wait");
+      writer.close();
+
+      const result = await waiting;
+      expect(result.isError).toBeUndefined();
+      const content = result.content as Array<{ type: "text"; text: string }>;
+      expect(JSON.parse(content[0]!.text)).toMatchObject([{
+        body: "arrived during the MCP wait",
+        claimId: expect.any(String),
+      }]);
+      const messages = JSON.parse(content[0]!.text) as Message[];
+      await client.callTool({
+        name: "fabric_acknowledge",
+        arguments: {
+          message_id: messages[0]!.messageId,
+          claim_id: messages[0]!.claimId,
+        },
+      });
+
+      const timeoutStarted = Date.now();
+      const timedOut = await client.callTool({
+        name: "fabric_inbox",
+        arguments: { wait_seconds: 1 },
+      });
+      expect(Date.now() - timeoutStarted).toBeGreaterThanOrEqual(900);
+      const timeoutContent = timedOut.content as Array<{ type: "text"; text: string }>;
+      expect(JSON.parse(timeoutContent[0]!.text)).toEqual([]);
+
+      const controller = new AbortController();
+      const abandoned = client.callTool({
+        name: "fabric_inbox",
+        arguments: { wait_seconds: 2 },
+      }, undefined, { signal: controller.signal });
+      await delay(75);
+      controller.abort();
+      await expect(abandoned).rejects.toThrow();
+
+      const writerAfterCancellation = openStore();
+      writerAfterCancellation.send(sender, "wait-recipient", "arrived after cancellation");
+      writerAfterCancellation.close();
+      await delay(150);
+
+      const afterCancellation = await client.callTool({
+        name: "fabric_inbox",
+        arguments: {},
+      });
+      const afterCancellationContent = afterCancellation.content as Array<{
+        type: "text"; text: string;
+      }>;
+      const afterCancellationMessages = JSON.parse(
+        afterCancellationContent[0]!.text,
+      ) as Message[];
+      expect(afterCancellationMessages).toMatchObject([{
+        body: "arrived after cancellation",
+        claimId: expect.any(String),
+      }]);
+      await client.callTool({
+        name: "fabric_acknowledge",
+        arguments: {
+          message_id: afterCancellationMessages[0]!.messageId,
+          claim_id: afterCancellationMessages[0]!.claimId,
+        },
+      });
+
+      const queuedWriter = openStore();
+      queuedWriter.send(sender, "wait-recipient", "queued before locked cancellation");
+      queuedWriter.close();
+      const cancellationBlocker = new Database(databasePath);
+      cancellationBlocker.exec("BEGIN IMMEDIATE");
+      const lockedController = new AbortController();
+      const lockedCancellation = client.callTool({
+        name: "fabric_inbox",
+        arguments: { wait_seconds: 2 },
+      }, undefined, { signal: lockedController.signal });
+      const lockedRejection = expect(lockedCancellation).rejects.toThrow();
+      await delay(25);
+      lockedController.abort();
+      await delay(5);
+      cancellationBlocker.exec("ROLLBACK");
+      cancellationBlocker.close();
+      await lockedRejection;
+      await delay(100);
+
+      const afterLockedCancellation = await client.callTool({
+        name: "fabric_inbox",
+        arguments: {},
+      });
+      const afterLockedContent = afterLockedCancellation.content as Array<{
+        type: "text"; text: string;
+      }>;
+      const afterLockedMessages = JSON.parse(afterLockedContent[0]!.text) as Message[];
+      expect(afterLockedMessages).toMatchObject([{
+        body: "queued before locked cancellation",
+        claimId: expect.any(String),
+      }]);
+      await client.callTool({
+        name: "fabric_acknowledge",
+        arguments: {
+          message_id: afterLockedMessages[0]!.messageId,
+          claim_id: afterLockedMessages[0]!.claimId,
+        },
+      });
+
+      const blocker = new Database(databasePath);
+      blocker.exec("BEGIN IMMEDIATE");
+      try {
+        const lockedStarted = performance.now();
+        const locked = await client.callTool({
+          name: "fabric_inbox",
+          arguments: { wait_seconds: 1 },
+        }, undefined, { timeout: 2_000 });
+        expect(performance.now() - lockedStarted).toBeLessThan(1_400);
+        const lockedContent = locked.content as Array<{ type: "text"; text: string }>;
+        expect(JSON.parse(lockedContent[0]!.text)).toEqual([]);
+      } finally {
+        blocker.exec("ROLLBACK");
+        blocker.close();
+      }
+    } finally {
+      await client.close().catch(() => undefined);
+    }
+  }, 10_000);
+
   it("keeps the transport open with a stable tool error after a client-seat collision", async () => {
     const store = openStore();
     store.announce(identify({
@@ -491,6 +711,16 @@ describe("MCP startup boundaries", () => {
     const client = new Client({ name: "lock-recovery", version: "1" });
     try {
       await client.connect(transport);
+      const boundedStarted = performance.now();
+      const bounded = await client.callTool({
+        name: "fabric_inbox",
+        arguments: { wait_seconds: 1 },
+      });
+      expect(performance.now() - boundedStarted).toBeLessThan(1_400);
+      expect(bounded.isError).toBeUndefined();
+      const boundedContent = bounded.content as Array<{ type: "text"; text: string }>;
+      expect(JSON.parse(boundedContent[0]!.text)).toEqual([]);
+
       const locked = await client.callTool({ name: "fabric_whoami", arguments: {} });
       expect(locked.isError).toBe(true);
       expect(locked.content).toMatchObject([{
@@ -498,8 +728,28 @@ describe("MCP startup boundaries", () => {
         text: expect.stringMatching(/fabric startup failed:.*database is locked/),
       }]);
 
+      const peekedPromise = client.callTool({
+        name: "fabric_inbox",
+        arguments: { peek: true, wait_seconds: 2 },
+      });
+      await delay(100);
       blocker.exec("COMMIT");
       lockHeld = false;
+      const peeked = await peekedPromise;
+      expect(peeked.isError).toBeUndefined();
+
+      const writeBlocker = new Database(databasePath);
+      writeBlocker.exec("BEGIN IMMEDIATE");
+      const notePromise = client.callTool({
+        name: "fabric_note",
+        arguments: { detail: "write after lazy peek startup" },
+      });
+      await delay(100);
+      writeBlocker.exec("ROLLBACK");
+      writeBlocker.close();
+      const noted = await notePromise;
+      expect(noted.isError).toBeUndefined();
+
       const recovered = await client.callTool({ name: "fabric_whoami", arguments: {} });
       expect(recovered.isError).toBeUndefined();
       expect(recovered.content).toMatchObject([{

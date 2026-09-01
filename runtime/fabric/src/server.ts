@@ -1,9 +1,13 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { setTimeout as delay } from "node:timers/promises";
 import { z } from "zod";
 
 import { databasePath, identify } from "./identity.js";
-import { Store } from "./store.js";
+import { isSQLiteContention, Store, type Message } from "./store.js";
+
+// Leave margin under the MCP SDK's 60-second default request timeout.
+const MAX_WAIT_SECONDS = 55;
 
 /**
  * One MCP process per agent, holding the store open directly.
@@ -14,10 +18,11 @@ import { Store } from "./store.js";
  */
 const who = identify();
 let store: Store | undefined;
-const initialiseStore = (): Store => {
-  const opened = new Store(databasePath());
+const initialiseStore = (busyTimeoutMs = 5000): Store => {
+  const opened = new Store(databasePath(), busyTimeoutMs);
   try {
     opened.announce(who);
+    opened.restoreDefaultBusyTimeout();
     store = opened;
     return opened;
   } catch (error) {
@@ -33,13 +38,13 @@ try {
   // allowing transient SQLite locks to recover without a background process.
 }
 
-const readyStore = (): Store => {
+const readyStore = (busyTimeoutMs = 5000): Store => {
   if (store !== undefined) return store;
   try {
-    return initialiseStore();
+    return initialiseStore(busyTimeoutMs);
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
-    throw new Error(`fabric startup failed: ${detail}`);
+    throw new Error(`fabric startup failed: ${detail}`, { cause: error });
   }
 };
 
@@ -62,6 +67,42 @@ server.server.onclose = () => {
 function reply(payload: unknown): { content: Array<{ type: "text"; text: string }> } {
   return { content: [{ type: "text", text: JSON.stringify(payload, null, 2) }] };
 }
+
+const waitForInbox = async (
+  options: {
+    limit?: number;
+    peek?: boolean;
+    claimTtlMs?: number;
+    busyTimeoutMs?: number;
+  },
+  waitMs: number,
+  signal: AbortSignal,
+) => {
+  const deadline = performance.now() + waitMs;
+  for (;;) {
+    if (waitMs > 0) await delay(0, undefined, { signal });
+    signal.throwIfAborted();
+    const remainingBeforeClaim = deadline - performance.now();
+    if (waitMs > 0 && remainingBeforeClaim <= 0) return [];
+    let messages: Message[];
+    try {
+      const busyTimeoutMs = waitMs === 0
+        ? undefined
+        : 1;
+      messages = readyStore(busyTimeoutMs).inbox(who, {
+        ...options,
+        busyTimeoutMs,
+      });
+    } catch (error) {
+      if (waitMs === 0 || !isSQLiteContention(error)) throw error;
+      messages = [];
+    }
+    if (messages.length > 0 || waitMs === 0) return messages;
+    const remaining = deadline - performance.now();
+    if (remaining <= 0) return [];
+    await delay(Math.min(100, remaining), undefined, { signal });
+  }
+};
 
 server.registerTool(
   "fabric_whoami",
@@ -92,19 +133,21 @@ server.registerTool(
   "fabric_inbox",
   {
     description:
-      "Claim my unacknowledged messages. Peek observes without claiming; expired claims redeliver.",
+      "Claim my unacknowledged messages. Peek observes without claiming; expired claims redeliver. " +
+      "Set wait_seconds for one bounded wait inside this MCP call; never poll SQLite or start a watcher.",
     inputSchema: {
       limit: z.number().int().positive().optional(),
       peek: z.boolean().optional(),
       claim_seconds: z.number().int().min(1).max(3600).optional(),
+      wait_seconds: z.number().int().min(0).max(MAX_WAIT_SECONDS).optional(),
     },
   },
-  ({ limit, peek, claim_seconds }) =>
-    reply(readyStore().inbox(who, {
+  async ({ limit, peek, claim_seconds, wait_seconds }, { signal }) =>
+    reply(await waitForInbox({
       limit,
       peek,
       claimTtlMs: claim_seconds === undefined ? undefined : claim_seconds * 1000,
-    })),
+    }, (wait_seconds ?? 0) * 1000, signal)),
 );
 
 server.registerTool(
@@ -199,4 +242,6 @@ server.registerTool(
     : readyStore().activityAfter(who.project, after_seq, limit)),
 );
 
-await server.connect(new StdioServerTransport());
+const transport = new StdioServerTransport();
+process.stdin.once("end", () => { void transport.close(); });
+await server.connect(transport);
