@@ -8,6 +8,21 @@ const value = (flag) => {
 };
 
 const owner = process.env.PROVENANT_FIXTURE_OWNER ?? basename(process.argv[1]);
+const waitForRelease = (runDir, callback) => {
+  const readyPath = join(runDir, "delayed-ready");
+  const releasePath = join(runDir, "delayed-release");
+  writeFileSync(readyPath, "ready\n");
+  const wait = () => {
+    try {
+      readFileSync(releasePath);
+      callback();
+    } catch {
+      setTimeout(wait, 10);
+    }
+  };
+  wait();
+};
+
 if (owner === "run_dir_init.sh") {
   const runDir = process.argv[2];
   mkdirSync(join(runDir, "findings"), { recursive: true });
@@ -110,6 +125,39 @@ if (owner === "run_controls.py") {
         execution_intent: "ordinary",
       },
     }) + "\n");
+  } else if (prompt.startsWith("delayed dispatch ")) {
+    const kind = prompt.slice("delayed dispatch ".length);
+    waitForRelease(runDir, () => {
+      const attemptDir = join(runDir, "dispatch", "tasks", taskId, "attempt-001");
+      mkdirSync(attemptDir, { recursive: true });
+      const attemptPath = join(attemptDir, "attempt.json");
+      const record = {
+        schema_version: 1,
+        record_type: "dispatch-attempt",
+        status: kind === "success" ? "succeeded" : kind === "timeout" ? "timed_out" : "failed",
+        outcome: `delayed dispatch ${kind}`,
+        task_id: taskId,
+        attempt_id: "attempt-001",
+        attempt_path: relative(runDir, attemptPath),
+      };
+      if (kind === "success") {
+        const resultPath = join(attemptDir, "result.md");
+        const stderrPath = join(attemptDir, "stderr.log");
+        writeFileSync(resultPath, "delayed dispatch success content\n");
+        writeFileSync(stderrPath, "");
+        record.result = { path: relative(runDir, resultPath) };
+        record.stderr = { path: relative(runDir, stderrPath) };
+        record.route = {
+          adapter: value("--adapter"),
+          provider_family: value("--adapter"),
+          resolved_model: value("--model") ?? value("--alias") ?? value("--task-class"),
+          execution_intent: "ordinary",
+        };
+      }
+      writeFileSync(attemptPath, JSON.stringify(record, null, 2) + "\n");
+      process.stdout.write(JSON.stringify(record) + "\n");
+      process.exit(0);
+    });
   } else if (prompt === "sleep until cancelled") {
     process.once("SIGTERM", () => {
       writeFileSync(join(runDir, "cancelled.marker"), "cancelled\n");
@@ -154,47 +202,96 @@ if (owner === "run_controls.py") {
   }
 } else if (owner === "batch_run.py") {
   const manifest = JSON.parse(readFileSync(value("--manifest"), "utf8"));
-  if (manifest.tasks[0]?.prompt === "emit incomplete completed batch") {
+  const batchPrompt = manifest.tasks[0]?.prompt;
+  if (batchPrompt?.startsWith("delayed batch ")) {
+    const kind = batchPrompt.slice("delayed batch ".length);
+    waitForRelease(runDir, () => {
+      const task = manifest.tasks[0];
+      const batchDir = join(runDir, "dispatch", "batches", "batch-001");
+      const attemptDir = join(runDir, "dispatch", "tasks", task.id, "attempt-001");
+      mkdirSync(attemptDir, { recursive: true });
+      mkdirSync(batchDir, { recursive: true });
+      const attemptPath = join(attemptDir, "attempt.json");
+      const taskStatus = kind === "success" ? "succeeded" : kind === "timeout" ? "timed_out" : "failed";
+      const taskRecord = {
+        task_id: task.id,
+        status: taskStatus,
+        outcome: `delayed batch ${kind}`,
+        attempt_path: relative(runDir, attemptPath),
+      };
+      if (kind === "success") {
+        const resultPath = join(attemptDir, "result.md");
+        writeFileSync(resultPath, "delayed batch success content\n");
+        taskRecord.result_path = relative(runDir, resultPath);
+        taskRecord.route = {
+          adapter: task.adapter,
+          provider_family: task.adapter,
+          resolved_model: task.model ?? task.alias ?? task.task_class,
+          execution_intent: "ordinary",
+        };
+      }
+      writeFileSync(attemptPath, JSON.stringify({ status: taskStatus }) + "\n");
+      const summaryPath = join(batchDir, "summary.json");
+      const summary = {
+        schema_version: 1,
+        record_type: "dispatch-batch",
+        status: kind === "success" ? "completed" : "failed",
+        batch_id: "batch-001",
+        task_count: 1,
+        concurrency: 1,
+        counts: { [taskStatus]: 1 },
+        tasks: [taskRecord],
+        summary_path: relative(runDir, summaryPath),
+      };
+      writeFileSync(summaryPath, JSON.stringify(summary, null, 2) + "\n");
+      process.stdout.write(JSON.stringify(summary) + "\n");
+      process.exit(0);
+    });
+  } else if (batchPrompt === "sleep until cancelled batch") {
+    const batchDir = join(runDir, "dispatch", "batches", "batch-001");
+    mkdirSync(batchDir, { recursive: true });
+    writeFileSync(join(runDir, "sleeping.pid"), `${process.pid}\n`);
+    process.once("SIGTERM", () => {
+      writeFileSync(join(runDir, "cancelled.marker"), "cancelled\n");
+      process.exit(143);
+    });
+    setInterval(() => undefined, 1000);
+  } else if (batchPrompt === "emit incomplete completed batch") {
     process.stdout.write(JSON.stringify({
       schema_version: 1,
       record_type: "dispatch-batch",
       status: "completed",
     }) + "\n");
     process.exit(0);
-  }
-  if (manifest.tasks[0]?.prompt === "emit typed running batch") {
+  } else if (batchPrompt === "emit typed running batch") {
     process.stdout.write(JSON.stringify({
       schema_version: 1,
       record_type: "dispatch-batch",
       status: "running",
     }) + "\n");
     process.exit(0);
-  }
-  if (manifest.tasks[0]?.prompt === "emit untyped running batch") {
+  } else if (batchPrompt === "emit untyped running batch") {
     process.stdout.write(JSON.stringify({
       schema_version: 1,
       status: "running",
       message: "owner already exited",
     }) + "\n");
     process.exit(0);
-  }
-  if (manifest.tasks[0]?.prompt === "emit untyped cancelled batch") {
+  } else if (batchPrompt === "emit untyped cancelled batch") {
     process.stdout.write(JSON.stringify({
       schema_version: 1,
       status: "cancelled",
       message: "no retained batch",
     }) + "\n");
     process.exit(0);
-  }
-  if (manifest.tasks[0]?.prompt === "emit untyped batch preflight error") {
+  } else if (batchPrompt === "emit untyped batch preflight error") {
     process.stdout.write(JSON.stringify({
       schema_version: 1,
       status: "invalid_manifest",
       message: "task manifest is invalid",
     }) + "\n");
     process.exit(2);
-  }
-  if (manifest.tasks[0]?.prompt === "emit nonexistent completed batch") {
+  } else if (batchPrompt === "emit nonexistent completed batch") {
     process.stdout.write(JSON.stringify({
       schema_version: 1,
       record_type: "dispatch-batch",
@@ -207,7 +304,7 @@ if (owner === "run_controls.py") {
       summary_path: "dispatch/batches/batch-001/summary.json",
     }) + "\n");
     process.exit(0);
-  }
+  } else {
   const batchDir = join(runDir, "dispatch", "batches", "batch-001");
   mkdirSync(batchDir, { recursive: true });
   const tasks = manifest.tasks.map((task) => {
@@ -246,6 +343,7 @@ if (owner === "run_controls.py") {
   writeFileSync(summaryPath, JSON.stringify(summary, null, 2) + "\n");
   process.stdout.write(JSON.stringify(summary) + "\n");
   if (manifest.tasks[0]?.prompt === "claim batch success then fail") process.exitCode = 7;
+  }
 } else {
   throw new Error(`unexpected fixture owner: ${owner}`);
 }
