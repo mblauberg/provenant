@@ -478,6 +478,9 @@ try {
     productRoot: resolve(import.meta.dirname, "../.."),
     env: {
       PATH: `${realProviderBin}:/usr/bin:/bin`,
+      ...(process.env.HARNESS_PYTHON === undefined ? {} : {
+        HARNESS_PYTHON: process.env.HARNESS_PYTHON,
+      }),
       GIT_DIR: resolve(foreignProduct, ".git"),
       GIT_WORK_TREE: foreignProduct,
       FABRIC_SMOKE_PROVIDER_MARKER: providerMarker,
