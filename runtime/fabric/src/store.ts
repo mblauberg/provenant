@@ -101,6 +101,11 @@ export class Store {
     this.#db.close();
   }
 
+  /** Leave a lazily opened store on the normal operation timeout. */
+  restoreDefaultBusyTimeout(): void {
+    this.#db.pragma("busy_timeout = 5000");
+  }
+
   /** Register the caller if this is the first time it has been seen. */
   announce(who: Identity): void {
     if (who.agentId === "all") throw new Error('recipient id "all" is reserved for broadcast');

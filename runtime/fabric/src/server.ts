@@ -22,6 +22,7 @@ const initialiseStore = (busyTimeoutMs = 5000): Store => {
   const opened = new Store(databasePath(), busyTimeoutMs);
   try {
     opened.announce(who);
+    opened.restoreDefaultBusyTimeout();
     store = opened;
     return opened;
   } catch (error) {

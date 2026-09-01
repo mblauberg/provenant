@@ -454,7 +454,11 @@ describe("MCP startup boundaries", () => {
       }),
       "",
     ].join("\n"));
-    await delay(100);
+    for (let attempt = 0; attempt < 50 && !stdout.includes('"id":1'); attempt += 1) {
+      await delay(10);
+    }
+    expect(stdout).toContain('"id":1');
+    expect(stdout).not.toContain('"id":2');
     child.stdin.end();
 
     const exit = await Promise.race([
@@ -715,15 +719,28 @@ describe("MCP startup boundaries", () => {
       const boundedContent = bounded.content as Array<{ type: "text"; text: string }>;
       expect(JSON.parse(boundedContent[0]!.text)).toEqual([]);
 
-      const locked = await client.callTool({ name: "fabric_whoami", arguments: {} });
-      expect(locked.isError).toBe(true);
-      expect(locked.content).toMatchObject([{
-        type: "text",
-        text: expect.stringMatching(/fabric startup failed:.*database is locked/),
-      }]);
-
+      const peekedPromise = client.callTool({
+        name: "fabric_inbox",
+        arguments: { peek: true, wait_seconds: 2 },
+      });
+      await delay(100);
       blocker.exec("COMMIT");
       lockHeld = false;
+      const peeked = await peekedPromise;
+      expect(peeked.isError).toBeUndefined();
+
+      const writeBlocker = new Database(databasePath);
+      writeBlocker.exec("BEGIN IMMEDIATE");
+      const notePromise = client.callTool({
+        name: "fabric_note",
+        arguments: { detail: "write after lazy peek startup" },
+      });
+      await delay(100);
+      writeBlocker.exec("ROLLBACK");
+      writeBlocker.close();
+      const noted = await notePromise;
+      expect(noted.isError).toBeUndefined();
+
       const recovered = await client.callTool({ name: "fabric_whoami", arguments: {} });
       expect(recovered.isError).toBeUndefined();
       expect(recovered.content).toMatchObject([{
