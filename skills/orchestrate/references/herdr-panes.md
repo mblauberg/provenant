@@ -214,8 +214,9 @@ means integration or detection is not yet reliable.
 
 For answer-bearing Fabric work, the chair explicitly reads the correlated reply
 from its inbox and verifies the named artifact. Use one bounded
-`fabric_inbox(wait_seconds)` call when there is no useful local work left; do
-not improvise a database poller or watcher. Fabric has no subscription,
+`fabric_inbox(wait_seconds)` call when there is no useful local work left. When
+several tasks share an inbox, pass `task_id` so unrelated deliveries remain
+untouched. Do not improvise a database poller or watcher. Fabric has no subscription,
 terminal callback or automatic lead wake-up; pane state remains advisory and
 never proves completion.
 

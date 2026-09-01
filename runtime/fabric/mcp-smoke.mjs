@@ -63,6 +63,14 @@ const expectToolError = async (promise) => {
 
 const shellQuote = (value) => `'${value.replaceAll("'", `'\"'\"'`)}'`;
 
+const waitForFile = async (path, timeoutMs = 2_000) => {
+  const deadline = Date.now() + timeoutMs;
+  while (!existsSync(path) && Date.now() < deadline) {
+    await new Promise((resolveWait) => setTimeout(resolveWait, 10));
+  }
+  assert.ok(existsSync(path), `timed out waiting for ${path}`);
+};
+
 try {
   const claude = await spawnAgent("claude", "claude-client");
   const codex = await spawnAgent("codex", "codex-client");
@@ -157,6 +165,61 @@ try {
   await expectToolError(codex.callTool({
     name: "fabric_task_claim",
     arguments: { task_id: task.taskId },
+  }));
+
+  const linkedTask = payload(await claude.callTool({
+    name: "fabric_task_create",
+    arguments: { task_id: "mcp-message-link", objective: "Carry the smoke artifact" },
+  }));
+  const linkedMessage = payload(await claude.callTool({
+    name: "fabric_send",
+    arguments: {
+      to: "codex-client",
+      body: "opaque artifact link",
+      task_id: linkedTask.taskId,
+      output_path: "/path/that/is/never/read",
+    },
+  }));
+  const linkedPeek = payload(await codex.callTool({
+    name: "fabric_inbox",
+    arguments: { peek: true, task_id: linkedTask.taskId },
+  }));
+  assert.deepEqual(linkedPeek[0], {
+    messageId: linkedMessage.messageId,
+    from: "claude-client",
+    body: "opaque artifact link",
+    kind: "note",
+    conversationId: linkedMessage.messageId,
+    replyTo: null,
+    at: linkedPeek[0].at,
+    claimId: null,
+    claimExpiresAt: null,
+    taskId: linkedTask.taskId,
+    outputPath: "/path/that/is/never/read",
+  });
+  const linkedClaim = payload(await codex.callTool({
+    name: "fabric_inbox",
+    arguments: { task_id: linkedTask.taskId },
+  }))[0];
+  await codex.callTool({
+    name: "fabric_acknowledge",
+    arguments: { message_id: linkedClaim.messageId, claim_id: linkedClaim.claimId },
+  });
+  await expectToolError(claude.callTool({
+    name: "fabric_task_create",
+    arguments: { task_id: "", objective: "empty task id must fail" },
+  }));
+  await expectToolError(claude.callTool({
+    name: "fabric_send",
+    arguments: { to: "codex-client", body: "empty task id must fail", task_id: "" },
+  }));
+  await expectToolError(claude.callTool({
+    name: "fabric_send",
+    arguments: { to: "codex-client", body: "empty output path must fail", output_path: "" },
+  }));
+  await expectToolError(codex.callTool({
+    name: "fabric_inbox",
+    arguments: { task_id: "" },
   }));
 
   const targetedTask = payload(await claude.callTool({
@@ -423,11 +486,20 @@ try {
 
   const running = payload(await executor.callTool({
     name: "fabric_dispatch",
-    arguments: { prompt: "sleep until cancelled", adapter: "codex", wait_seconds: 0 },
+    arguments: {
+      prompt: "sleep until cancelled",
+      task_id: "sleeping-dispatch",
+      adapter: "codex",
+      wait_seconds: 0,
+    },
   }));
   assert.equal(running.status, "running");
+  assert.equal(running.task_id, "sleeping-dispatch");
   assert.equal(running.route, null);
   assert.equal(running.route_status, "pending");
+  assert.equal(running.paths.attempt, resolve(
+    running.paths.run_dir, "dispatch/tasks/sleeping-dispatch/attempt-001/attempt.json",
+  ));
   const sleepingPid = resolve(running.paths.run_dir, "sleeping.pid");
   for (let attempts = 0; attempts < 100; attempts += 1) {
     try {
@@ -438,8 +510,8 @@ try {
     }
   }
   assert.match(readFileSync(sleepingPid, "utf8"), /^[0-9]+\n$/u);
-  await executor.close();
   const cancelledMarker = resolve(running.paths.run_dir, "cancelled.marker");
+  await executor.close();
   for (let attempts = 0; attempts < 100; attempts += 1) {
     try {
       readFileSync(cancelledMarker);
@@ -449,6 +521,111 @@ try {
     }
   }
   assert.equal(readFileSync(cancelledMarker, "utf8"), "cancelled\n");
+
+  const batchExecutor = await spawnAgent("codex", "batch-execution-client", {
+    cwd: workspace,
+    productRoot: fakeProduct,
+    env: { HARNESS_PYTHON: fixturePython },
+  });
+  const runningBatch = payload(await batchExecutor.callTool({
+    name: "fabric_batch",
+    arguments: {
+      wait_seconds: 0,
+      tasks: [{ id: "sleeping-batch", prompt: "sleep until cancelled batch", adapter: "codex" }],
+    },
+  }));
+  assert.equal(runningBatch.status, "running");
+  assert.equal(runningBatch.batch_id, "batch-001");
+  assert.equal(runningBatch.paths.summary, resolve(
+    runningBatch.paths.run_dir, "dispatch/batches/batch-001/summary.json",
+  ));
+  const batchSleepingPid = resolve(runningBatch.paths.run_dir, "sleeping.pid");
+  for (let attempts = 0; attempts < 100; attempts += 1) {
+    try {
+      readFileSync(batchSleepingPid);
+      break;
+    } catch {
+      await new Promise((resolveWait) => setTimeout(resolveWait, 10));
+    }
+  }
+  assert.match(readFileSync(batchSleepingPid, "utf8"), /^[0-9]+\n$/u);
+  await batchExecutor.close();
+  const batchCancelledMarker = resolve(runningBatch.paths.run_dir, "cancelled.marker");
+  for (let attempts = 0; attempts < 100; attempts += 1) {
+    try {
+      readFileSync(batchCancelledMarker);
+      break;
+    } catch {
+      await new Promise((resolveWait) => setTimeout(resolveWait, 10));
+    }
+  }
+  assert.equal(readFileSync(batchCancelledMarker, "utf8"), "cancelled\n");
+
+  const delayedExecutor = await spawnAgent("codex", "delayed-execution-client", {
+    cwd: workspace,
+    productRoot: fakeProduct,
+    env: { HARNESS_PYTHON: fixturePython },
+  });
+  for (const [kind, taskId, expectedStatus] of [
+    ["success", "delayed-dispatch-success", "succeeded"],
+    ["failure", "delayed-dispatch-failure", "failed"],
+    ["timeout", "delayed-dispatch-timeout", "timed_out"],
+  ]) {
+    const response = payload(await delayedExecutor.callTool({
+      name: "fabric_dispatch",
+      arguments: {
+        prompt: `delayed dispatch ${kind}`,
+        task_id: taskId,
+        adapter: "codex",
+        model: "gpt-fixture",
+        wait_seconds: 0,
+      },
+    }));
+    assert.equal(response.status, "running");
+    assert.equal(response.task_id, taskId);
+    await waitForFile(resolve(response.paths.run_dir, "delayed-ready"));
+    assert.equal(existsSync(response.paths.attempt), false);
+    writeFileSync(resolve(response.paths.run_dir, "delayed-release"), "release\n");
+    await waitForFile(response.paths.attempt);
+    const attempt = JSON.parse(readFileSync(response.paths.attempt, "utf8"));
+    assert.equal(attempt.task_id, taskId);
+    assert.equal(attempt.status, expectedStatus);
+    assert.equal(attempt.outcome, `delayed dispatch ${kind}`);
+    if (kind === "success") {
+      assert.equal(readFileSync(resolve(response.paths.attempt, "../result.md"), "utf8"),
+        "delayed dispatch success content\n");
+    }
+  }
+  for (const [kind, taskId, expectedTaskStatus, expectedBatchStatus] of [
+    ["success", "delayed-batch-success", "succeeded", "completed"],
+    ["failure", "delayed-batch-failure", "failed", "failed"],
+    ["timeout", "delayed-batch-timeout", "timed_out", "failed"],
+  ]) {
+    const response = payload(await delayedExecutor.callTool({
+      name: "fabric_batch",
+      arguments: {
+        wait_seconds: 0,
+        tasks: [{ id: taskId, prompt: `delayed batch ${kind}`, adapter: "codex", model: "gpt-fixture" }],
+      },
+    }));
+    assert.equal(response.status, "running");
+    assert.equal(response.batch_id, "batch-001");
+    await waitForFile(resolve(response.paths.run_dir, "delayed-ready"));
+    assert.equal(existsSync(response.paths.summary), false);
+    writeFileSync(resolve(response.paths.run_dir, "delayed-release"), "release\n");
+    await waitForFile(response.paths.summary);
+    const summary = JSON.parse(readFileSync(response.paths.summary, "utf8"));
+    assert.equal(summary.batch_id, response.batch_id);
+    assert.equal(summary.status, expectedBatchStatus);
+    assert.equal(summary.tasks[0].task_id, taskId);
+    assert.equal(summary.tasks[0].status, expectedTaskStatus);
+    assert.equal(summary.tasks[0].outcome, `delayed batch ${kind}`);
+    if (kind === "success") {
+      assert.equal(readFileSync(resolve(response.paths.run_dir, "dispatch/tasks", taskId, "attempt-001/result.md"), "utf8"),
+        "delayed batch success content\n");
+    }
+  }
+  await delayedExecutor.close();
 
   // Exercise the real orchestration owners without starting a provider. An
   // unsupported adapter fails inside cf_dispatch.sh after the real owners have
@@ -517,6 +694,19 @@ try {
   assert.equal(JSON.parse(readFileSync(realBatch.paths.summary, "utf8")).record_type, "dispatch-batch");
   assert.ok(!readdirSync(realDispatch.paths.run_dir).some((name) => name.startsWith("owner.") || name === "prompt.md"));
   assert.ok(!readdirSync(realBatch.paths.run_dir).some((name) => name.startsWith("owner.") || name === "task-manifest.json"));
+
+  const timedOut = payload(await realExecutor.callTool({
+    name: "fabric_dispatch",
+    arguments: {
+      prompt: "force a timeout before result",
+      adapter: "claude",
+      model: "claude-opus-4-6",
+      timeout_seconds: 1,
+      wait_seconds: 10,
+    },
+  }));
+  assert.equal(timedOut.status, "timed_out", JSON.stringify(timedOut));
+  assert.equal(timedOut.paths.result, null);
   const finalizer = resolve(import.meta.dirname, "../../skills/orchestrate/scripts/run_dir_finalize.py");
   for (const runDir of [realDispatch.paths.run_dir, realBatch.paths.run_dir]) {
     assert.match(execFileSync(fixturePython, [

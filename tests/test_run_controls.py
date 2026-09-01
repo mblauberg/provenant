@@ -90,6 +90,54 @@ def file_digest(path: Path) -> str:
     return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def test_retained_git_evidence_path_digest_and_payload_are_validated(tmp_path: Path):
+    run_dir = make_run(tmp_path)
+    attempt = write_attempt(run_dir, status="failed", result=None)
+    attempt_dir = attempt.parent
+    packet = attempt_dir / "evidence" / "git-evidence.md"
+    packet.parent.mkdir()
+    metadata = {
+        "schema_version": 1, "record_type": "provenant-git-evidence",
+        "repository": str(tmp_path), "git_root": str(tmp_path), "head": "a" * 40,
+        "diff_base": "b" * 40, "working_tree": "clean", "diff_from": "HEAD",
+        "paths": [], "encoding": "utf-8-replacement",
+    }
+    packet.write_text(
+        json.dumps(metadata, sort_keys=True) + "\n--- status ---\n--- diff ---\n" + ("x" * 2_000_000),
+        encoding="utf-8",
+    )
+    record = json.loads(attempt.read_text(encoding="utf-8"))
+    record["git_evidence"] = {
+        "path": str(packet.relative_to(run_dir)), "digest": file_digest(packet), "checkout": metadata,
+    }
+    attempt.write_text(json.dumps(record, sort_keys=True) + "\n", encoding="utf-8")
+    (attempt_dir / "attempt.sha256").write_text(f"{file_digest(attempt)}  attempt.json\n", encoding="utf-8")
+    valid_packet = packet.read_bytes()
+    module_spec = importlib.util.spec_from_file_location("run_controls_git_evidence", SCRIPT)
+    assert module_spec and module_spec.loader
+    module = importlib.util.module_from_spec(module_spec)
+    module_spec.loader.exec_module(module)
+
+    module._attempt(run_dir, "task-1", "attempt-001")
+    assert module.validate_retained_dispatch(run_dir) == []
+    packet.write_text(packet.read_text(encoding="utf-8") + "tampered\n", encoding="utf-8")
+    with pytest.raises(module.ControlError, match="Git evidence digest"):
+        module._attempt(run_dir, "task-1", "attempt-001")
+    packet.write_bytes(valid_packet)
+    packet.unlink()
+    with pytest.raises(module.ControlError, match="unavailable"):
+        module._attempt(run_dir, "task-1", "attempt-001")
+    packet.write_bytes(valid_packet)
+    substitute = packet.with_name("substitute.md")
+    substitute.write_bytes(valid_packet)
+    record["git_evidence"]["path"] = str(substitute.relative_to(run_dir))
+    record["git_evidence"]["digest"] = file_digest(substitute)
+    attempt.write_text(json.dumps(record, sort_keys=True) + "\n", encoding="utf-8")
+    (attempt_dir / "attempt.sha256").write_text(f"{file_digest(attempt)}  attempt.json\n", encoding="utf-8")
+    with pytest.raises(module.ControlError, match="does not match its attempt"):
+        module._attempt(run_dir, "task-1", "attempt-001")
+
+
 def write_executable(path: Path, body: str) -> None:
     path.write_text(textwrap.dedent(body), encoding="utf-8")
     path.chmod(path.stat().st_mode | stat.S_IXUSR)

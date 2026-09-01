@@ -23,6 +23,11 @@ and collection step. Certification requires an enforced read-only boundary. A
 prompt-only review can still provide a genuine independent opinion, but it is
 not certification eligible.
 
+Direct Claude verifier invocations do not expose Fabric MCP tools. They return only
+the requested file-backed result; the caller owns any Fabric correlation.
+Provider-native sessions with Fabric access follow their own coordination
+contract.
+
 ## Harness-conditioned rule
 
 Treat `claude -p` and `codex exec` as noninteractive verifier surfaces, not native subagent surfaces.
@@ -204,6 +209,29 @@ questions: <what to refute, complete, or falsify>
 return: hypothesis | risk | evidence_needed | likely_files | falsification_check
 ```
 
+For a larger Agy review of Git state, keep the evidence out of the prompt
+argument. Materialise one selected diff into a run-owned packet, then let
+`dispatch_run.py` copy and bind it to the attempt:
+
+```sh
+python3 scripts/git_evidence.py --repository "$PWD" \
+  --output ".agent-run/<run>/git-evidence.md" \
+  --diff-from origin/main
+python3 skills/orchestrate/scripts/dispatch_run.py \
+  --run-dir ".agent-run/<run>" --task-id review --adapter agy \
+  --orchestrator-family anthropic --alias workhorse --role reviewer --git-evidence \
+  ".agent-run/<run>/git-evidence.md" --prompt-file review.md
+```
+
+The packet records the checkout root, exact `HEAD`, resolved diff base, status
+and selected revision/path. `--path` values are literal relative workspace
+paths, not Git pathspecs. Full-checkout evidence, or a selected path with
+untracked content, fails closed because this packet does not snapshot arbitrary
+files; unrelated untracked paths remain disclosed in status. `dispatch_run.py` exposes only the copied evidence directory
+through Agy's existing `--add-dir`, adds a no-tools instruction, and records
+the packet path, digest and checkout identity in the attempt. A non-`ok`
+adapter status, including `permission_denied`, remains a failed review.
+
 Do not treat distinct-family output as established fact. Feed its claims to targeted reviewers or certified
 cross-family verifiers for source/test/schema confirmation.
 
@@ -211,9 +239,9 @@ cross-family verifiers for source/test/schema confirmation.
 
 `codex exec -s workspace-write -C <absolute-worktree>` is the one headless lane that writes.
 Direct provider invocation is ordinary execution, not a degraded fallback.
-Coordinate through Fabric when available; otherwise record the degraded
-coordination path under the safety rule above. Soft family affinity for who
-gets token-heavy legwork belongs in the preference catalogue named by
+The caller coordinates through Fabric when available; otherwise record the
+degraded coordination path under the safety rule above. Soft family affinity
+for who gets token-heavy legwork belongs in the preference catalogue named by
 [routing-and-tiers.md](routing-and-tiers.md), never in a remembered model name here.
 
 Four failure modes are specific to this lane:

@@ -73,6 +73,14 @@ under that directory, with no allow-rule needed, so point it at paths rather
 than pasting a huge diff inline. Path globs in `permissions.allow` do not
 work; `--add-dir` is the mechanism.
 
+For Git reviews, materialise the selected diff first with
+`python3 scripts/git_evidence.py --repository <CHECKOUT> --output
+.agent-run/<RUN>/git-evidence.md --diff-from <REVISION>`. Pass that file to
+`dispatch_run.py --git-evidence`; it copies the packet into the attempt,
+exposes only that directory through `--add-dir`, and records its checkout
+identity. The injected instruction tells Gemini to read the packet and not
+invoke shell, Git or other tools. A provider denial remains a failed review.
+
 Use a Gemini model only. On 2026-08-22, agy 1.1.17 listed
 `gemini-3.7-flash-{high,medium,low}`, `gemini-3.6-flash-{high,medium,low}`,
 `gemini-3.5-flash-{high,medium,low}` and `gemini-3.1-pro-{high,low}`, plus

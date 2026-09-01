@@ -42,6 +42,11 @@ import {
   LIVE_SERVER_STARTUP_TIMEOUT_MS,
   observeStartup,
 } from './live-server-startup.mjs';
+import {
+  LIVE_SERVER_STOP_TIMEOUT_MS,
+  isProcessAlive,
+  waitForProcessExit,
+} from './live-process.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const UI_EVIDENCE_BROWSER_BUNDLE = fileURLToPath(
@@ -172,6 +177,7 @@ const state = {
   sseEventSequence: 0,
   exitTimer: null,
   sessionDir: null,         // per-session tmp dir for annotation screenshots
+  activeUploads: new Set(),
   annotationFiles: new Map(),
   annotationBytes: 0,
   annotationUploads: 0,
@@ -192,6 +198,12 @@ const MAX_PENDING_EVENTS = 64;
 const MAX_ACTIVE_SESSIONS = 64;
 const MAX_SSE_CLIENTS = 16;
 const TERMINAL_SESSION_PHASES = new Set(['completed', 'discarded']);
+const SESSION_CLEANUP_RETRIES = 4;
+const SESSION_CLEANUP_RETRY_DELAY_MS = 25;
+// Leave a small margin inside the caller's stop window for cleanup and the
+// final exact-PID observation. This prevents shutdown lock contention from
+// consuming the entire external stop budget.
+const SHUTDOWN_LOCK_MARGIN_MS = 1_000;
 
 function redactBearer(event) {
   if (!event || typeof event !== 'object') return event;
@@ -677,6 +689,15 @@ function createRequestHandler({ detectScript, sessionPath, livePath }) {
       return;
     }
 
+    // Once shutdown starts, reject new work while allowing requests already
+    // reading a bounded body to drain and finish safely before close.
+    if (shuttingDown && p !== '/stop') {
+      res.writeHead(503, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Live server is stopping' }));
+      req.resume();
+      return;
+    }
+
     // --- Scripts ---
     if (p === '/live.js') {
       // The script URL carries the bearer token. Refuse unauthenticated loads
@@ -775,6 +796,7 @@ function createRequestHandler({ detectScript, sessionPath, livePath }) {
         return;
       }
       state.annotationUploads += 1;
+      state.activeUploads.add(req);
       const chunks = [];
       let total = 0;
       let aborted = false;
@@ -785,6 +807,7 @@ function createRequestHandler({ detectScript, sessionPath, livePath }) {
         state.annotationUploads = Math.max(0, state.annotationUploads - 1);
         state.annotationInflightBytes = Math.max(0, state.annotationInflightBytes - total);
       };
+      const releaseUpload = () => state.activeUploads.delete(req);
       req.on('data', (c) => {
         if (aborted) return;
         total += c.length;
@@ -811,8 +834,15 @@ function createRequestHandler({ detectScript, sessionPath, livePath }) {
         chunks.push(c);
       });
       req.on('end', () => {
+        releaseUpload();
         if (aborted) return;
         releaseInflight();
+        if (shuttingDown) {
+          aborted = true;
+          res.writeHead(503, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Live server is stopping' }));
+          return;
+        }
         reclaimUnboundAnnotationsUntil(
           () => state.annotationFiles.size >= MAX_ANNOTATION_FILES
             || state.annotationBytes + total > MAX_ANNOTATION_TOTAL_BYTES,
@@ -842,6 +872,7 @@ function createRequestHandler({ detectScript, sessionPath, livePath }) {
         res.end(JSON.stringify({ ok: true, path: absPath }));
       });
       req.on('error', () => {
+        releaseUpload();
         releaseInflight();
         if (!aborted) {
           res.writeHead(500, { 'Content-Type': 'application/json' });
@@ -849,10 +880,12 @@ function createRequestHandler({ detectScript, sessionPath, livePath }) {
         }
       });
       req.on('aborted', () => {
+        releaseUpload();
         aborted = true;
         releaseInflight();
       });
       req.on('close', () => {
+        releaseUpload();
         if (req.complete) return;
         aborted = true;
         releaseInflight();
@@ -1052,7 +1085,7 @@ function createRequestHandler({ detectScript, sessionPath, livePath }) {
       req.on('close', () => {
         clearInterval(heartbeat);
         state.sseClients.delete(res);
-        if (state.sseClients.size === 0) {
+        if (!shuttingDown && state.sseClients.size === 0) {
           clearTimeout(state.exitTimer);
           state.exitTimer = setTimeout(() => {
             if (state.sseClients.size === 0) enqueueEvent({ type: 'exit' });
@@ -1065,6 +1098,11 @@ function createRequestHandler({ detectScript, sessionPath, livePath }) {
     // --- Browser→server events (replaces WebSocket messages) ---
     if (p === '/events' && req.method === 'POST') {
       readBoundedJsonBody(req, res, (msg) => {
+        if (shuttingDown) {
+          res.writeHead(503, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Live server is stopping' }));
+          return;
+        }
         if (!isJsonObject(msg)) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: 'Invalid message' }));
@@ -1334,46 +1372,97 @@ function handlePollPost(req, res) {
 
 let httpServer = null;
 
+function cleanupSessionDirectory() {
+  if (!state.sessionDir) return null;
+  const sessionDir = state.sessionDir;
+  try {
+    fs.rmSync(sessionDir, {
+      recursive: true,
+      force: true,
+      maxRetries: SESSION_CLEANUP_RETRIES,
+      retryDelay: SESSION_CLEANUP_RETRY_DELAY_MS,
+    });
+    state.sessionDir = null;
+    return null;
+  } catch (error) {
+    return {
+      error: 'live_session_cleanup_failed',
+      code: typeof error?.code === 'string' ? error.code : 'CLEANUP_FAILED',
+      path: sessionDir,
+      pid: process.pid,
+      message: error?.message || String(error),
+    };
+  }
+}
+
 function cleanupRuntimeState() {
   if (state.leaseTimer) clearTimeout(state.leaseTimer);
   state.leaseTimer = null;
-  if (state.sessionDir) {
-    try { fs.rmSync(state.sessionDir, { recursive: true, force: true }); } catch {}
-  }
+  const cleanupError = cleanupSessionDirectory();
   state.annotationFiles.clear();
   state.annotationBytes = 0;
   state.annotationUploads = 0;
   state.annotationInflightBytes = 0;
+  state.activeUploads.clear();
   for (const res of state.sseClients) { try { res.end(); } catch {} }
   state.sseClients.clear();
-  for (const poll of state.pendingPolls) poll.resolve({ type: 'exit' });
+  for (const poll of state.pendingPolls.splice(0)) poll.resolve({ type: 'exit' });
   state.pendingPolls.length = 0;
   state.releaseServerRecordLock?.();
   state.releaseServerRecordLock = null;
+  return cleanupError;
 }
 
 let shuttingDown = false;
+
+function quiesceRuntimeConnections() {
+  if (state.exitTimer) clearTimeout(state.exitTimer);
+  state.exitTimer = null;
+  if (state.leaseTimer) clearTimeout(state.leaseTimer);
+  state.leaseTimer = null;
+  for (const res of state.sseClients) { try { res.end(); } catch {} }
+  for (const poll of state.pendingPolls.splice(0)) poll.resolve({ type: 'exit' });
+  for (const req of state.activeUploads) { try { req.destroy(); } catch {} }
+}
 
 async function shutdown() {
   if (shuttingDown) return;
   shuttingDown = true;
   let releaseLock = state.releaseServerRecordLock;
+  let shutdownLockAcquired = Boolean(releaseLock);
   state.releaseServerRecordLock = null;
   try {
-    releaseLock ||= await acquireServerRecordLock();
-    const record = readLiveServerInfo(process.cwd());
-    if (record?.info?.pid === process.pid && record.info.token === state.token) {
-      removeServerRecordIfUnchanged(record);
-    }
+    releaseLock ||= await acquireServerRecordLock(
+      Math.max(1_000, LIVE_SERVER_STOP_TIMEOUT_MS - SHUTDOWN_LOCK_MARGIN_MS),
+    );
+    shutdownLockAcquired = true;
   } catch {
-    // A stale self-owned record is safe: the next startup probes it under lock.
+    // Cleanup remains authoritative; retain the record if ownership cannot be
+    // reacquired so the stop command can report an incomplete shutdown.
   }
-  cleanupRuntimeState();
-  releaseLock?.();
+  // Close long-lived connections and retain upload/session state until the
+  // HTTP server has stopped listening.
+  quiesceRuntimeConnections();
+  const finishShutdown = () => {
+    const sessionCleanupError = cleanupRuntimeState();
+    if (sessionCleanupError) console.error(JSON.stringify(sessionCleanupError));
+    if (!sessionCleanupError && shutdownLockAcquired) {
+      const record = readLiveServerInfo(process.cwd());
+      if (record?.info?.pid === process.pid && record.info.token === state.token) {
+        removeServerRecordIfUnchanged(record);
+      }
+    }
+    releaseLock?.();
+    process.exit(sessionCleanupError ? 1 : 0);
+  };
   if (httpServer?.listening) {
-    httpServer.close(() => process.exit(0));
+    httpServer.close(finishShutdown);
+    // A partial upload has no useful completion once shutdown is owned. Abort
+    // remaining HTTP connections so cleanup cannot wait on an abandoned body.
+    httpServer.closeIdleConnections?.();
+    httpServer.closeAllConnections?.();
   } else {
-    process.exit(0);
+    finishShutdown();
   }
 }
 
@@ -1425,22 +1514,120 @@ try {
 if (args.includes('stop')) {
   const keepInject = args.includes('--keep-inject');
   let releaseStopLock = null;
+  let stopExitCode = 0;
   try {
     releaseStopLock = await acquireServerRecordLock();
     const record = readLiveServerInfo(process.cwd());
     if (record?.info && await probeServerInfo(record.info)) {
       const { info } = record;
-      const res = await fetch(`http://127.0.0.1:${info.port}/stop?token=${info.token}`);
-      if (res.ok) {
-        removeServerRecordIfUnchanged(record);
-        console.log(`Stopped live server on port ${info.port}.`);
+      let response;
+      try {
+        response = await fetch(`http://127.0.0.1:${info.port}/stop?token=${encodeURIComponent(info.token)}`, {
+          signal: AbortSignal.timeout(LIVE_SERVER_STOP_TIMEOUT_MS),
+        });
+      } catch (error) {
+        console.error(JSON.stringify({
+          error: 'live_server_stop_failed',
+          pid: info.pid,
+          port: info.port,
+          path: record.path,
+          reason: error?.name === 'TimeoutError' ? 'stop_request_timeout' : 'stop_request_error',
+          timeoutMs: LIVE_SERVER_STOP_TIMEOUT_MS,
+          message: error.message,
+        }));
+        stopExitCode = 1;
       }
+      if (response?.ok) {
+        // The server needs this same lock to finish its shutdown. Release the
+        // stop-command lock before waiting, then reacquire it for final
+        // record cleanup after the exact process has exited.
+        releaseStopLock?.();
+        releaseStopLock = null;
+        if (await waitForProcessExit(info.pid, { timeoutMs: LIVE_SERVER_STOP_TIMEOUT_MS })) {
+          try {
+            releaseStopLock = await acquireServerRecordLock();
+          } catch (error) {
+            console.error(JSON.stringify({
+              error: 'live_server_stop_failed',
+              pid: info.pid,
+              port: info.port,
+              path: record.path,
+              timeoutMs: LIVE_SERVER_STOP_TIMEOUT_MS,
+              reason: 'record_lock_error',
+              message: error.message,
+            }));
+            stopExitCode = 1;
+          }
+          if (releaseStopLock) {
+            const finalRecord = readLiveServerInfo(process.cwd());
+            if (!finalRecord) {
+              console.log(`Stopped live server on port ${info.port}.`);
+            } else if (finalRecord.info?.pid === info.pid
+              && finalRecord.info?.port === info.port
+              && finalRecord.info?.token === info.token) {
+              console.error(JSON.stringify({
+                error: 'server_cleanup_incomplete',
+                pid: info.pid,
+                port: info.port,
+                path: record.path,
+                timeoutMs: LIVE_SERVER_STOP_TIMEOUT_MS,
+                message: 'The live server exited but retained its state record; inspect the private state path before retrying cleanup.',
+              }));
+              stopExitCode = 1;
+            } else {
+              console.error(JSON.stringify({
+                error: 'live_server_record_changed',
+                pid: info.pid,
+                port: info.port,
+                path: record.path,
+                timeoutMs: LIVE_SERVER_STOP_TIMEOUT_MS,
+                message: 'The live server exited but its state record changed; refusing to remove the current record.',
+              }));
+              stopExitCode = 1;
+            }
+          }
+        } else {
+          console.error(JSON.stringify({
+            error: 'live_server_stop_timeout',
+            pid: info.pid,
+            port: info.port,
+            path: record.path,
+            timeoutMs: LIVE_SERVER_STOP_TIMEOUT_MS,
+            message: 'The owned live server did not exit within the bounded shutdown window.',
+          }));
+          stopExitCode = 1;
+        }
+      } else if (response && !response.ok) {
+        console.error(JSON.stringify({
+          error: 'live_server_stop_failed',
+          pid: info.pid,
+          port: info.port,
+          path: record.path,
+          reason: 'stop_request_failed',
+          httpStatus: response.status,
+        }));
+        stopExitCode = 1;
+      }
+    } else if (record?.info && isProcessAlive(record.info.pid)) {
+      console.error(JSON.stringify({
+        error: 'live_server_probe_failed',
+        pid: record.info.pid,
+        port: record.info.port,
+        path: record.path,
+        message: 'The recorded live-server PID is still alive but its authenticated probe failed; state was preserved.',
+      }));
+      stopExitCode = 1;
     } else {
       removeServerRecordIfUnchanged(record);
       console.log('No running live server found.');
     }
-  } catch {
-    console.log('No running live server found.');
+  } catch (error) {
+    console.error(JSON.stringify({
+      error: 'live_server_stop_failed',
+      reason: 'stop_command_error',
+      message: error.message,
+    }));
+    stopExitCode = 1;
   } finally {
     releaseStopLock?.();
   }
@@ -1470,7 +1657,7 @@ if (args.includes('stop')) {
       console.warn(`Note: could not remove live script tag (${detail.split('\n')[0]})`);
     }
   }
-  process.exit(0);
+  process.exit(stopExitCode);
 }
 
 // --background: spawn a detached child server, wait for it to be ready,
@@ -1602,7 +1789,8 @@ const { detectScript, sessionPath, livePath } = browserScripts;
 httpServer = http.createServer(createRequestHandler({ detectScript, sessionPath, livePath }));
 
 httpServer.once('error', (error) => {
-  cleanupRuntimeState();
+  const cleanupError = cleanupRuntimeState();
+  if (cleanupError) console.error(JSON.stringify(cleanupError));
   console.error(JSON.stringify({
     error: 'live_server_bind_failed',
     code: typeof error?.code === 'string' ? error.code : 'BIND_FAILED',
