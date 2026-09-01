@@ -326,6 +326,11 @@ try {
     arguments: { prompt: "emit untyped running", adapter: "codex", wait_seconds: 5 },
   }));
   assert.equal(untypedRunning.status, "owner_output_invalid");
+  const untypedCancelled = payload(await executor.callTool({
+    name: "fabric_dispatch",
+    arguments: { prompt: "emit untyped cancelled", adapter: "codex", wait_seconds: 5 },
+  }));
+  assert.equal(untypedCancelled.status, "owner_output_invalid");
   const untypedPreflight = payload(await executor.callTool({
     name: "fabric_dispatch",
     arguments: { prompt: "emit untyped preflight error", adapter: "codex", wait_seconds: 5 },
@@ -373,6 +378,14 @@ try {
     },
   }));
   assert.equal(untypedRunningBatch.status, "owner_output_invalid");
+  const untypedCancelledBatch = payload(await executor.callTool({
+    name: "fabric_batch",
+    arguments: {
+      wait_seconds: 5,
+      tasks: [{ id: "cancelled-untyped", prompt: "emit untyped cancelled batch", adapter: "codex" }],
+    },
+  }));
+  assert.equal(untypedCancelledBatch.status, "owner_output_invalid");
   const untypedBatchPreflight = payload(await executor.callTool({
     name: "fabric_batch",
     arguments: {

@@ -68,6 +68,12 @@ if (owner === "run_controls.py") {
       status: "running",
       message: "owner already exited",
     }) + "\n");
+  } else if (prompt === "emit untyped cancelled") {
+    process.stdout.write(JSON.stringify({
+      schema_version: 1,
+      status: "cancelled",
+      message: "no retained attempt",
+    }) + "\n");
   } else if (prompt === "emit untyped preflight error") {
     process.stdout.write(JSON.stringify({
       schema_version: 1,
@@ -169,6 +175,14 @@ if (owner === "run_controls.py") {
       schema_version: 1,
       status: "running",
       message: "owner already exited",
+    }) + "\n");
+    process.exit(0);
+  }
+  if (manifest.tasks[0]?.prompt === "emit untyped cancelled batch") {
+    process.stdout.write(JSON.stringify({
+      schema_version: 1,
+      status: "cancelled",
+      message: "no retained batch",
     }) + "\n");
     process.exit(0);
   }
