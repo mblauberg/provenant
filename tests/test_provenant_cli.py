@@ -585,6 +585,48 @@ def test_checkout_check_handles_a_primary_path_ending_in_newline(tmp_path):
     assert result.stdout == "PRIMARY\n"
 
 
+def test_non_git_product_nested_in_an_unrelated_repository_stays_non_git(tmp_path):
+    outer = tmp_path / "outer"
+    outer.mkdir()
+    git_fixture(outer, "init", "-q")
+    product, command = make_checkout(outer)
+
+    result = invoke(command, "check", cwd=product)
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["cwd"] == str(product)
+
+
+def test_check_reports_a_deleted_working_directory_with_a_remedy(tmp_path):
+    checkout, command = make_checkout(tmp_path)
+    gone = tmp_path / "gone"
+    gone.mkdir()
+    environment = clean_git_environment()
+    for name in AMBIENT_ROOT_VARIABLES:
+        environment.pop(name, None)
+    environment["AGENT_FABRIC_PRODUCT_ROOT"] = str(checkout)
+
+    result = subprocess.run(
+        [
+            "bash", "-c",
+            'cd "$1" && rmdir "$1" && exec "$2" check',
+            "provenant-deleted-cwd", str(gone), str(command),
+        ],
+        cwd=tmp_path,
+        env=environment,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+
+    assert result.returncode == 3
+    assert result.stdout == ""
+    assert "cannot resolve the working directory" in result.stderr
+    assert "cd into the checkout you intend to check" in result.stderr
+    assert "Traceback" not in result.stderr
+
+
 def test_installed_check_refuses_a_symlinked_checker(tmp_path):
     primary, linked = make_registered_linked_checkout(tmp_path, "issue-722-symlink")
     outside = tmp_path / "outside-check"

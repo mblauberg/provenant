@@ -150,10 +150,20 @@ def registered_caller_checkout(product_root: Path) -> Path | None:
     except ImportError as exc:
         raise ValueError(f"worktree policy owner is unavailable; {REPAIR}") from exc
 
-    caller = Path.cwd().resolve()
-    product_metadata = nearest_git_metadata(product_root)
-    if product_metadata is None:
+    try:
+        caller = Path.cwd().resolve()
+    except OSError as exc:
+        raise ValueError(
+            "cannot resolve the working directory; repair: cd into the checkout you intend "
+            "to check"
+        ) from exc
+    product_metadata = product_root.resolve() / ".git"
+    try:
+        product_metadata.lstat()
+    except FileNotFoundError:
         return None
+    except OSError as exc:
+        raise ValueError(f"cannot inspect product Git metadata at {product_metadata}: {exc}") from exc
     try:
         records = worktree_records(product_root)
     except PolicyError as exc:
