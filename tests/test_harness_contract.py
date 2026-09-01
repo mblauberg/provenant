@@ -146,7 +146,70 @@ def test_non_git_product_does_not_borrow_identity_or_python_from_an_ancestor_rep
     assert result.stdout.splitlines()[:2] == [
         f"check-harness: product_root={product}", "check-harness: git_head=unavailable",
     ]
-    assert f"check-harness: cannot verify a full Git HEAD for {product}" in result.stderr
+    assert (
+        f"check-harness: cannot verify checkout ownership and a full Git HEAD for {product}"
+        in result.stderr
+    )
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize("metadata_kind", ["symlink", "gitfile"])
+def test_checker_refuses_git_metadata_owned_by_another_repository(tmp_path, metadata_kind):
+    outer = tmp_path / "outer"
+    outer.mkdir()
+    environment = os.environ.copy()
+    for name in (
+        "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_CEILING_DIRECTORIES", "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+    ):
+        environment.pop(name, None)
+    subprocess.run(["git", "init", "-q"], cwd=outer, env=environment, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=outer, env=environment, check=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=outer, env=environment, check=True,
+    )
+    (outer / "tracked").write_text("fixture\n")
+    subprocess.run(["git", "add", "tracked"], cwd=outer, env=environment, check=True)
+    subprocess.run(["git", "commit", "-qm", "fixture"], cwd=outer, env=environment, check=True)
+    product = outer / "product"
+    product.mkdir()
+    dot_git = product / ".git"
+    if metadata_kind == "symlink":
+        dot_git.symlink_to(outer / ".git", target_is_directory=True)
+    else:
+        dot_git.write_text(f"gitdir: {outer / '.git'}\n")
+    marker = tmp_path / "borrowed-python-ran"
+    borrowed = outer / ".venv/bin/python"
+    borrowed.parent.mkdir(parents=True)
+    borrowed.write_text(f"#!/bin/sh\ntouch '{marker}'\nexit 0\n")
+    borrowed.chmod(0o755)
+    environment.update({
+        "AGENT_FABRIC_PRODUCT_ROOT": str(product),
+        "PROVENANT_SCRIPTS_ROOT": str(tmp_path / "scripts"),
+        "PROVENANT_SKILLS_ROOT": str(tmp_path / "skills"),
+        "PROVENANT_TESTS_ROOT": str(tmp_path / "tests"),
+    })
+
+    result = subprocess.run(
+        ["bash", str(ROOT / "scripts/check-harness")],
+        cwd=product,
+        env=environment,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+
+    assert result.returncode == 3
+    assert result.stdout.splitlines()[:2] == [
+        f"check-harness: product_root={product}", "check-harness: git_head=unavailable",
+    ]
+    assert "cannot verify checkout ownership" in result.stderr
     assert not marker.exists()
 
 
