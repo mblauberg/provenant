@@ -35,8 +35,17 @@ def load_configurer():
     return module
 
 
-def run_configure(tmp_path: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
+def run_configure(
+    tmp_path: Path, *arguments: str, inherit_roots: bool = False,
+) -> subprocess.CompletedProcess[str]:
     shim = stable_shim(tmp_path)
+    environment = os.environ.copy()
+    # This helper exercises the default registration contract. CI itself runs
+    # under explicit split roots, which must not leak into this subprocess and
+    # silently turn the default case into an explicit-instance case.
+    if not inherit_roots:
+        environment.pop("AGENT_FABRIC_INSTANCE_ROOT", None)
+        environment.pop("AGENT_FABRIC_PRODUCT_ROOT", None)
     return subprocess.run(
         [
             str(SCRIPT),
@@ -52,6 +61,7 @@ def run_configure(tmp_path: Path, *arguments: str) -> subprocess.CompletedProces
             *arguments,
         ],
         cwd=ROOT,
+        env=environment,
         text=True,
         capture_output=True,
         check=False,
@@ -62,11 +72,15 @@ def run_configure_with_closed_stdout(
     tmp_path: Path, *arguments: str,
 ) -> tuple[int, str]:
     paths = all_client_paths(tmp_path)
+    environment = os.environ.copy()
+    environment.pop("AGENT_FABRIC_INSTANCE_ROOT", None)
+    environment.pop("AGENT_FABRIC_PRODUCT_ROOT", None)
     read_descriptor, write_descriptor = os.pipe()
     os.close(read_descriptor)
     process = subprocess.Popen(
         [str(SCRIPT), *all_client_arguments(tmp_path, paths), *arguments],
         cwd=ROOT,
+        env=environment,
         stdout=write_descriptor,
         stderr=subprocess.PIPE,
         text=True,
@@ -360,7 +374,7 @@ def test_direct_repair_preserves_ambient_nondefault_instance_root(
     instance_root = tmp_path / "instance"
     monkeypatch.setenv("AGENT_FABRIC_INSTANCE_ROOT", str(instance_root))
 
-    result = run_configure(tmp_path, "--platform", "codex")
+    result = run_configure(tmp_path, "--platform", "codex", inherit_roots=True)
 
     assert result.returncode == 0, result.stderr
     registration = tomllib.loads((tmp_path / "codex.toml").read_text())["mcp_servers"]["fabric"]

@@ -706,7 +706,18 @@ try {
     },
   }));
   assert.equal(timedOut.status, "timed_out", JSON.stringify(timedOut));
-  assert.equal(timedOut.paths.result, null);
+  const timedOutAttempt = JSON.parse(readFileSync(timedOut.paths.attempt, "utf8"));
+  assert.equal(timedOutAttempt.status, "timed_out");
+  assert.equal(timedOutAttempt.outcome, "timeout");
+  // The timeout signal races the adapter's ordinary failure cleanup. If that
+  // cleanup wins, its diagnostic output is a legitimate retained result; if
+  // the owner stops first, there is no result. Both are truthful outcomes.
+  assert.equal(timedOut.paths.result, timedOutAttempt.result === null
+    ? null
+    : resolve(timedOut.paths.run_dir, timedOutAttempt.result.path));
+  if (timedOut.paths.result !== null) {
+    assert.ok(existsSync(timedOut.paths.result));
+  }
   const finalizer = resolve(import.meta.dirname, "../../skills/orchestrate/scripts/run_dir_finalize.py");
   for (const runDir of [realDispatch.paths.run_dir, realBatch.paths.run_dir]) {
     assert.match(execFileSync(fixturePython, [

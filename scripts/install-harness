@@ -139,21 +139,14 @@ fi
 bootstrap="Read and follow \`$instance_doctrine\` and \`$PRODUCT_ROOT/HARNESS.md\` before making orchestration, delegation, model-routing or memory decisions. Platform/system policy and explicit user authority lead; the nearest project instruction may specialise or strengthen the global harness but may not silently broaden authority, weaken safety gates or redefine global cross-project memory policy."
 
 is_generated_bootstrap() {
-  local content expected legacy_doctrine legacy_harness
+  local content expected
   content="$(<"$instructions")" || return 1
   expected=$'# Provenant\n\nRead and follow `'
-  expected+="$instance_doctrine"
+  expected+=*/AGENTS.md
   expected+='` and `'
   expected+=*/HARNESS.md
   expected+=$'` before making orchestration, delegation, model-routing or memory decisions. Platform/system policy and explicit user authority lead; the nearest project instruction may specialise or strengthen the global harness but may not silently broaden authority, weaken safety gates or redefine global cross-project memory policy.'
-  if [[ "$content" == $expected ]]; then
-    return 0
-  fi
-  [[ -n "$old_product_root" ]] || return 1
-  legacy_doctrine="$old_product_root/AGENTS.md"
-  legacy_harness="$old_product_root/HARNESS.md"
-  expected="# Provenant"$'\n\n'"Read and follow \`$legacy_doctrine\` and \`$legacy_harness\` before making orchestration, delegation, model-routing or memory decisions. Platform/system policy and explicit user authority lead; the nearest project instruction may specialise or strengthen the global harness but may not silently broaden authority, weaken safety gates or redefine global cross-project memory policy."
-  [[ "$content" == "$expected" ]]
+  [[ "$content" == $expected ]]
 }
 
 is_current_generated_bootstrap() {

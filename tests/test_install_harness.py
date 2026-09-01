@@ -101,6 +101,9 @@ def copy_product(root: Path, destination: Path) -> Path:
 
 def run_product(product: Path, platform: str, home: Path, **extra_env):
     environment = os.environ.copy()
+    # Resolve the copied product through the pointer written by this install,
+    # not through an explicit product root inherited from the outer CI job.
+    environment.pop("AGENT_FABRIC_PRODUCT_ROOT", None)
     environment.update(
         {
             "HOME": str(home / "home"),
@@ -1191,6 +1194,31 @@ def test_split_install_is_idempotent_over_its_own_instructions(tmp_path):
     assert f"instructions existing={instructions}" in second.stdout
 
 
+def test_split_install_rebinds_its_bootstrap_when_instance_root_changes(tmp_path):
+    product = copy_product(ROOT, tmp_path / "product")
+    first_instance = tmp_path / "instance-one"
+    second_instance = tmp_path / "instance-two"
+
+    first = run_product(
+        product, "codex", tmp_path,
+        AGENT_FABRIC_INSTANCE_ROOT=str(first_instance),
+    )
+    assert first.returncode == 0, first.stderr
+
+    second = run_product(
+        product, "codex", tmp_path,
+        AGENT_FABRIC_INSTANCE_ROOT=str(second_instance),
+    )
+
+    assert second.returncode == 0, second.stderr
+    instructions = (tmp_path / "codex/AGENTS.md").read_text()
+    assert str(second_instance / "AGENTS.md") in instructions
+    assert str(first_instance / "AGENTS.md") not in instructions
+    assert json.loads(
+        (second_instance / ".agent-fabric/product-root.json").read_text()
+    )["product_root"] == str(product.resolve())
+
+
 @pytest.mark.parametrize("platform", ["claude", "codex"])
 def test_relocation_rewrites_only_an_exact_generated_bootstrap_and_preserves_conflicts(
     tmp_path, platform
@@ -1352,14 +1380,16 @@ def test_all_primary_install_configures_both_surfaces_and_publishes_once(tmp_pat
     assert codex_config["mcp_servers"]["fabric"]["env"]["AGENT_FABRIC_INSTANCE_ROOT"] == str(tmp_path / "instance")
     clean_home = tmp_path / "clean-home"
     clean_home.mkdir()
+    registered_environment = os.environ.copy()
+    registered_environment.pop("AGENT_FABRIC_PRODUCT_ROOT", None)
+    registered_environment.update({
+        "HOME": str(clean_home),
+        **claude_mcp["mcpServers"]["fabric"]["env"],
+    })
     registered = subprocess.run(
         [claude_mcp["mcpServers"]["fabric"]["command"], "root"],
         cwd=clean_home,
-        env={
-            **os.environ,
-            "HOME": str(clean_home),
-            **claude_mcp["mcpServers"]["fabric"]["env"],
-        },
+        env=registered_environment,
         capture_output=True,
         text=True,
         check=False,
