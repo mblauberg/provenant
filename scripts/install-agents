@@ -2,6 +2,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# shellcheck source=scripts/lib/harness-python.sh
+source "$ROOT/scripts/lib/harness-python.sh"
 TARGET=""
 
 usage() {
@@ -32,7 +34,7 @@ manager=("$ROOT/scripts/manage_installation.py" --surface agents --source "$ROOT
 # Preserve the canonical directory-link layout without creating a receipt in
 # either the client home or the product root. Validate the source first so a
 # symlinked source directory cannot bypass the ownership boundary.
-"${manager[@]}" validate-sources --summary >/dev/null
+run_stdlib "${manager[@]}" validate-sources --summary >/dev/null
 if [[ -L "$TARGET" ]]; then
   target_real=""
   if target_real="$(cd "$TARGET" 2>/dev/null && pwd -P)" \
@@ -44,6 +46,5 @@ if [[ -L "$TARGET" ]]; then
   exit 3
 fi
 
-"${manager[@]}" install --summary
-exec "${manager[@]}" check --summary
-
+run_stdlib "${manager[@]}" install --summary
+run_stdlib "${manager[@]}" check --summary

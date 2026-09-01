@@ -379,7 +379,7 @@ for primary in "${primary_platforms[@]}"; do
     --target "$platform_home/skills" \
     --custom-source "$instance_root/custom-skills"
   if [[ "$PLATFORM" == "claude" ]]; then
-    "$PRODUCT_ROOT/scripts/install-workflows" --target "$platform_home/workflows"
+    run_stdlib "$PRODUCT_ROOT/scripts/install-workflows" --target "$platform_home/workflows"
     "$PRODUCT_ROOT/scripts/install-agents" --target "$platform_home/agents"
   fi
   if [[ "$PLATFORM" == "codex" ]]; then

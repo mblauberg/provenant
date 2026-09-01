@@ -1372,6 +1372,26 @@ def test_all_primary_install_configures_both_surfaces_and_publishes_once(tmp_pat
     assert not (tmp_path / "home/.config/opencode/opencode.jsonc").exists()
 
 
+def test_all_primary_install_uses_selected_python_when_path_has_no_python3(tmp_path):
+    product = copy_product(ROOT, tmp_path / "product")
+    tool_bin = tmp_path / "tools"
+    tool_bin.mkdir()
+    for name in (
+        "bash", "basename", "chmod", "cp", "dirname", "grep", "ln", "mkdir",
+        "mktemp", "mv", "readlink", "realpath", "rm", "rmdir", "sed", "sort", "wc",
+    ):
+        executable = shutil.which(name)
+        assert executable is not None
+        (tool_bin / name).symlink_to(executable)
+
+    result = run_product(product, "all", tmp_path, PATH=str(tool_bin))
+
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "claude/workflows/implement-run.js").is_file()
+    assert (tmp_path / "claude/agents/codex-analyst.md").is_file()
+    assert (tmp_path / "codex/skills/scope/SKILL.md").is_file()
+
+
 @pytest.mark.parametrize("platform", ["claude", "codex"])
 def test_foreign_harness_link_is_rejected_before_pointer_publish(tmp_path, platform):
     old_product = copy_product(ROOT, tmp_path / "old product")
