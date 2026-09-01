@@ -37,12 +37,12 @@ None of them is a stage the work passes through.
 ```mermaid
 flowchart TB
     accTitle: The three parts and the delivery loop they serve
-    accDescr: A user request enters the delivery loop, which runs scope, implement, verify and review, and produces a scoped, verified, independently reviewed change. Three parts act on that loop concurrently rather than in sequence. HARNESS.md, the constitution, sets the rules — authority, lifecycle and review pressure. The skills library supplies the procedure, one SKILL.md per task loaded when the task matches. Cross-provider dispatch runs and reviews the work, with Claude Code and Codex as primaries reviewing each other and Fabric carrying the messages, tasks and activity between them.
+    accDescr: A user request enters the delivery loop, which runs scope, implement, verify and review, and produces a scoped, verified, independently reviewed change. Three parts act on that loop concurrently rather than in sequence. HARNESS.md, the constitution, sets the rules — authority, lifecycle and review pressure. The skills library supplies the procedure, one SKILL.md per task loaded when the task matches. Cross-provider dispatch runs and reviews the work, with Claude Code and Codex as primaries reviewing each other and Fabric providing messages, tasks, activity and a thin front door to the existing dispatch owners.
     U(["User request"]) --> LOOP["Delivery loop<br/>scope · implement · verify · review"]
     LOOP --> OUT(["Scoped, verified,<br/>independently reviewed change"])
     H["HARNESS.md — the constitution<br/>authority · lifecycle · review pressure"] -. "sets the rules" .-> LOOP
     SK["Skills library — 32 Agent Skills<br/>one procedure per task, loaded on match"] -. "supplies the procedure" .-> LOOP
-    F["Cross-provider dispatch<br/>Claude Code and Codex review each other;<br/>Fabric carries messages, tasks and activity"] -. "runs and reviews the work" .-> LOOP
+    F["Cross-provider dispatch<br/>Claude Code and Codex review each other;<br/>Fabric coordinates and can start existing dispatch owners"] -. "runs and reviews the work" .-> LOOP
     classDef out fill:#1f6f43,stroke:#4fd08a,color:#ffffff,stroke-width:2px
     class OUT out
 ```
@@ -53,9 +53,9 @@ flowchart TB
 - **Skills:** the <!--skills-->32<!--/skills--> Agent Skills are task-specific
   procedures, one folder with a `SKILL.md` each. Only the one-line descriptions
   sit in permanent context; a full body loads only when the task matches it.
-- **Fabric:** messages, shared tasks and an activity log between the agents
-  working on one project, so the primaries can run and review each other's
-  work. One SQLite file, no daemon, nothing to provision.
+- **Fabric:** messages, shared tasks and activity between agents working on one
+  project, plus two MCP tools that delegate ordinary dispatch and finite batches
+  to the existing owners. One SQLite file, no daemon, nothing to provision.
 
 ## Quick start
 
@@ -257,8 +257,9 @@ The canonical ladder lives in [`HARNESS.md`](HARNESS.md).
 - specification approval, acceptance and release stay separate user decisions
   ([`HARNESS.md`](HARNESS.md)).
 
-Provider workers are dispatched as direct command-line calls; Fabric carries
-the messages, shared tasks and activity log between them.
+Provider workers can be dispatched through Fabric MCP or the direct command
+line; both paths use the same orchestration owners and retain full output in run
+files. Fabric also carries messages, shared tasks and activity between agents.
 [Herdr](https://herdr.dev) is optional: it observes and sends fire-and-forget
 steering; it does not provide wake, callback or completion delivery.
 

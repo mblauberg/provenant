@@ -11,8 +11,9 @@ routing, delegation, memory or pane decisions.
   including parallel work; one writer per worktree. An authorised merge prunes
   its own worktree and merged refs; other deletion, force-removal, rewrites and
   shared-branch pushes need user authority.
-- **Fabric:** messages, shared tasks and an activity log for agents in one
-  project, over MCP (`fabric_*`) or the `fabric` command. Identity is derived
+- **Fabric:** messages, shared tasks, activity and a thin MCP dispatch/batch
+  front door for agents in one project. Execution tools delegate to the existing
+  orchestration owners and keep full output in run files. Identity is derived
   from the working directory; ordinary registered worktrees share their
   repository's project while retaining their own cwd. There is nothing to trust, bootstrap
   or provision. `AGENT_FABRIC_LABEL` gives

@@ -2,13 +2,15 @@
 import assert from "node:assert/strict";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { rmSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 
 const state = resolve(tmpdir(), `fabric-mcp-smoke-${String(process.pid)}`);
+const executionRoot = resolve(tmpdir(), `fabric-mcp-execution-${String(process.pid)}`);
 rmSync(state, { recursive: true, force: true });
+rmSync(executionRoot, { recursive: true, force: true });
 
 // Override this with the managed `provenant` shim to verify installed routing.
 const command = process.env.AGENT_FABRIC_MCP_COMMAND ?? resolve(import.meta.dirname, "bin/fabric-mcp");
@@ -16,10 +18,10 @@ const tsxLoader = process.env.AGENT_FABRIC_TSX_LOADER ??
   createRequire(import.meta.url).resolve("tsx");
 const clients = [];
 
-const spawnAgent = async (seat, clientLabel) => {
+const spawnAgent = async (seat, clientLabel, options = {}) => {
   const transport = new StdioClientTransport({
     command,
-    cwd: process.cwd(),
+    cwd: options.cwd ?? process.cwd(),
     env: {
       HOME: process.env.HOME,
       PATH: process.env.AGENT_FABRIC_MCP_PATH ?? "/usr/bin:/bin",
@@ -35,6 +37,9 @@ const spawnAgent = async (seat, clientLabel) => {
         AGENT_FABRIC_INSTANCE_ROOT: process.env.AGENT_FABRIC_INSTANCE_ROOT,
       }),
       AGENT_FABRIC_TSX_LOADER: tsxLoader,
+      ...(options.productRoot === undefined ? {} : {
+        AGENT_FABRIC_PRODUCT_ROOT: options.productRoot,
+      }),
     },
   });
   const client = new Client({ name: `test-${clientLabel}`, version: "1" });
@@ -54,6 +59,8 @@ const expectToolError = async (promise) => {
   assert.equal(result.isError, true, JSON.stringify(result));
 };
 
+const shellQuote = (value) => `'${value.replaceAll("'", `'\"'\"'`)}'`;
+
 try {
   const claude = await spawnAgent("claude", "claude-client");
   const codex = await spawnAgent("codex", "codex-client");
@@ -65,6 +72,8 @@ try {
   assert.deepEqual(listed.tools.map((tool) => tool.name).sort(), [
     "fabric_acknowledge",
     "fabric_activity",
+    "fabric_batch",
+    "fabric_dispatch",
     "fabric_inbox",
     "fabric_note",
     "fabric_send",
@@ -75,6 +84,7 @@ try {
     "fabric_team_create",
     "fabric_whoami",
   ]);
+  assert.match(claude.getInstructions() ?? "", /configured-provider work/);
   const taskCreateTool = listed.tools.find((tool) => tool.name === "fabric_task_create");
   const taskClaimTool = listed.tools.find((tool) => tool.name === "fabric_task_claim");
   assert.match(taskCreateTool?.description ?? "", /owner-bound task is already assigned/);
@@ -181,6 +191,103 @@ try {
     name: "fabric_send",
     arguments: { to: "missing-agent", body: "must fail" },
   }));
+
+  const workspace = resolve(executionRoot, "workspace");
+  const fakeProduct = resolve(executionRoot, "product");
+  const ownerDirectory = resolve(fakeProduct, "skills/orchestrate/scripts");
+  mkdirSync(workspace, { recursive: true });
+  mkdirSync(ownerDirectory, { recursive: true });
+  const fixtureOwner = resolve(import.meta.dirname, "tests/execution-owner-fixture.mjs");
+  for (const name of ["run_dir_init.sh", "dispatch_run.py", "batch_run.py"]) {
+    const owner = resolve(ownerDirectory, name);
+    writeFileSync(owner,
+      `#!/bin/sh\nPROVENANT_FIXTURE_OWNER=${shellQuote(name)} exec ${shellQuote(process.execPath)} ${shellQuote(fixtureOwner)} "$@"\n`,
+    );
+    chmodSync(owner, 0o755);
+  }
+  const executor = await spawnAgent("codex", "execution-client", {
+    cwd: workspace,
+    productRoot: fakeProduct,
+  });
+  const dispatched = payload(await executor.callTool({
+    name: "fabric_dispatch",
+    arguments: {
+      prompt: "inspect the fixture",
+      model: "gpt-fixture",
+      wait_seconds: 5,
+    },
+  }));
+  assert.equal(dispatched.status, "succeeded");
+  assert.equal(dispatched.route.adapter, "codex");
+  assert.equal(dispatched.route.resolved_model, "gpt-fixture");
+  assert.match(readFileSync(dispatched.paths.result, "utf8"), /fixture result for: inspect the fixture/);
+  assert.ok(dispatched.paths.run_dir.startsWith(resolve(realpathSync(workspace), ".agent-run")));
+  assert.doesNotMatch(JSON.stringify(dispatched), /fixture result for: inspect the fixture/);
+  const invocation = JSON.parse(readFileSync(
+    resolve(dispatched.paths.run_dir, "dispatch_run.py.invocation.json"), "utf8",
+  ));
+  assert.equal(invocation.cwd, realpathSync(workspace));
+  assert.ok(invocation.argv.includes("gpt-fixture"));
+
+  const batched = payload(await executor.callTool({
+    name: "fabric_batch",
+    arguments: {
+      concurrency: 2,
+      wait_seconds: 5,
+      tasks: [
+        { id: "luna-one", prompt: "first", adapter: "codex", model: "gpt-5.6-luna" },
+        { id: "luna-two", prompt: "second", adapter: "codex", model: "gpt-5.6-luna" },
+      ],
+    },
+  }));
+  assert.equal(batched.status, "completed");
+  assert.equal(batched.task_count, 2);
+  assert.equal(batched.concurrency, 2);
+  assert.deepEqual(batched.counts, { succeeded: 2 });
+  assert.deepEqual(batched.tasks.map((task) => task.route.resolved_model), [
+    "gpt-5.6-luna",
+    "gpt-5.6-luna",
+  ]);
+  assert.ok(batched.tasks.every((task) => task.message === undefined && task.stderr === undefined));
+  assert.equal(JSON.parse(readFileSync(
+    resolve(batched.paths.run_dir, "batch_run.py.invocation.json"), "utf8",
+  )).cwd, realpathSync(workspace));
+
+  const runCount = readdirSync(resolve(workspace, ".agent-run")).length;
+  await expectToolError(executor.callTool({
+    name: "fabric_batch",
+    arguments: { tasks: [{ id: "invalid", adapter: "codex" }] },
+  }));
+  assert.equal(readdirSync(resolve(workspace, ".agent-run")).length, runCount);
+
+  const running = payload(await executor.callTool({
+    name: "fabric_dispatch",
+    arguments: { prompt: "sleep until cancelled", adapter: "codex", wait_seconds: 0 },
+  }));
+  assert.equal(running.status, "running");
+  assert.equal(running.route, null);
+  assert.equal(running.route_status, "pending");
+  const sleepingPid = resolve(running.paths.run_dir, "sleeping.pid");
+  for (let attempts = 0; attempts < 100; attempts += 1) {
+    try {
+      readFileSync(sleepingPid);
+      break;
+    } catch {
+      await new Promise((resolveWait) => setTimeout(resolveWait, 10));
+    }
+  }
+  assert.match(readFileSync(sleepingPid, "utf8"), /^[0-9]+\n$/u);
+  await executor.close();
+  const cancelledMarker = resolve(running.paths.run_dir, "cancelled.marker");
+  for (let attempts = 0; attempts < 100; attempts += 1) {
+    try {
+      readFileSync(cancelledMarker);
+      break;
+    } catch {
+      await new Promise((resolveWait) => setTimeout(resolveWait, 10));
+    }
+  }
+  assert.equal(readFileSync(cancelledMarker, "utf8"), "cancelled\n");
   await expectToolError(claude.callTool({
     name: "fabric_send",
     arguments: { to: "codex-client" },
@@ -191,4 +298,5 @@ try {
 } finally {
   await Promise.allSettled(clients.map(async (client) => await client.close()));
   rmSync(state, { recursive: true, force: true });
+  rmSync(executionRoot, { recursive: true, force: true });
 }

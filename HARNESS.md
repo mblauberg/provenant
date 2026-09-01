@@ -12,8 +12,9 @@ Claude Code and Codex are equal primary orchestrators; the harness the user star
 and owns authority, user communication, run state, gates and final synthesis; equal-primary
 is not concurrent bosses. For substantial work use native subagents and the other primary;
 approved authority may permit paired-primary mode, but one chair and one stage owner remain.
-Agent Fabric owns project-scoped durable messages, shared tasks and activity; direct provider
-CLIs execute external models. Answer-bearing coordination uses a correlated Fabric exchange where
+Agent Fabric owns project-scoped durable messages, shared tasks and activity. Its thin MCP
+dispatch/batch front door delegates to the same orchestration owners that execute direct provider
+CLIs; it does not implement provider mechanics. Answer-bearing coordination uses a correlated Fabric exchange where
 available, otherwise a named degraded artifact records the direct result and collection path.
 Fabric claim/ack records enforce message-delivery ownership and redelivery, not provider liveness
 or completion. Herdr observes and sends fire-and-forget steering only. Partition concurrent

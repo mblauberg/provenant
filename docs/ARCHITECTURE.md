@@ -272,9 +272,9 @@ degradation note that buys past it: a run may execute without that leg, but
 `validate_delivery.py` rejects the receipt once it reaches acceptance. The only
 relief is a user-approved risk downgrade carrying an approver, a reason and
 evidence. Provider-backed external workers, including the other primary and
-distinct families, are dispatched as direct command-line calls and coordinated
-through Fabric; dispatch procedure remains under `orchestrate`, not standalone
-skills.
+distinct families, are dispatched through Fabric MCP or the direct command
+line. Both front doors delegate to the same `orchestrate` owners; Fabric does
+not implement provider mechanics.
 
 The picture below separates the legs that can block a run from the legs that
 cannot.

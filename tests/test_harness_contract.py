@@ -407,7 +407,8 @@ def test_dispatch_manifest_and_delivery_run_have_distinct_owners():
     assert "compact dispatch manifest" in adr
     assert "is not a delivery `RUN.json`" in adr
     assert "one dispatch owner" in adr.lower()
-    assert "Fabric remains coordination-only" in adr
+    assert "Fabric remains a thin coordination and dispatch façade" in adr
+    assert "does not implement provider routes" in " ".join(adr.lower().split())
 
 
 def test_dispatch_owner_boundaries_distinguish_assurance_from_ordinary_execution():
@@ -444,7 +445,7 @@ def test_dispatch_owner_boundaries_distinguish_assurance_from_ordinary_execution
     assert "parallel lifecycle ledger" in adr
     assert "attempt.json" in adr
     assert "delivery `RUN.json` may reference the orchestration receipt" in adr_compact
-    assert "amended by ADR 0021" in index
+    assert "amended by ADRs 0020–0022" in index
     assert "ordinary dispatch runner" in adr.lower()
     assert "fixed bounded batch" in adr.lower()
     assert "builds on `dispatch_run.py`" in adr.lower()
@@ -453,13 +454,17 @@ def test_dispatch_owner_boundaries_distinguish_assurance_from_ordinary_execution
     assert "secrets" in harness.lower()
 
 
-def test_thin_cli_decision_is_amended_by_dispatch_boundary_decision():
+def test_thin_cli_and_fabric_decisions_share_one_dispatch_owner():
     index = (ROOT / "docs/adr/README.md").read_text()
     thin_cli = (ROOT / "docs/adr/0013-thin-provenant-cli.md").read_text()
+    fabric_facade = (ROOT / "docs/adr/0022-thin-fabric-mcp-execution-facade.md").read_text()
 
-    assert "0021" in index
+    assert "0021" in index and "0022" in index
     assert "0021-configured-workspace-dispatch-boundaries.md" in thin_cli
     assert "bounded dispatch and batch commands" in thin_cli
+    assert "exactly two execution tools" in fabric_facade
+    assert "delegate unchanged" in fabric_facade
+    assert "Direct CLI execution remains supported" in fabric_facade
 
 
 @pytest.mark.skipif(shutil.which("mmdc") is None, reason="optional local Mermaid CLI is absent")

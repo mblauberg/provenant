@@ -1,8 +1,9 @@
 # Fabric
 
 Fabric is a project-scoped mailbox, small shared task ledger and activity log.
-One SQLite file, no daemon, no setup. Each process opens it directly; there is
-no provider executor, scheduler, background wake service or workflow engine.
+One SQLite file, no daemon, no setup. Each process opens it directly. Its MCP
+surface also provides a thin front door to the existing dispatch and batch
+owners; Fabric has no provider implementation, scheduler or workflow engine.
 
 ## Start
 
@@ -141,8 +142,22 @@ The MCP server announces its identity at ordinary startup and exposes:
 fabric_whoami       fabric_send          fabric_inbox
 fabric_acknowledge  fabric_team_create   fabric_task_create
 fabric_task_claim   fabric_task_update   fabric_tasks
-fabric_note         fabric_activity
+fabric_note         fabric_activity      fabric_dispatch
+fabric_batch
 ```
+
+`fabric_dispatch` accepts one inline prompt or prompt file. `fabric_batch`
+accepts 1–64 fixed tasks with concurrency capped at eight. Both default to the
+current provider seat, the `workhorse` route and the `worker` role. They create
+the run directory automatically, delegate to `dispatch_run.py` or
+`batch_run.py`, and return compact status, route and absolute artifact paths;
+full prompts, results and diagnostics remain file-backed. `wait_seconds: 0`
+returns immediately, while values through 55 wait within one MCP call.
+
+The existing run controls inspect, retry or cancel an execution after the MCP
+call returns. Closing the MCP transport asks any owner started by that process
+to terminate. Fabric does not add a session database, transcript copy,
+scheduler, retry policy, model-family gate or delivery receipt.
 
 `mcp-smoke.mjs` asserts this wire contract with Claude, Codex and Agy client
 seats. Set `AGENT_FABRIC_MCP_COMMAND` to the managed `provenant` shim to test
@@ -163,5 +178,6 @@ before use.
 The threat model is one local operating-system user. Every participating
 process can open the same file, so capability tokens would not create a real
 isolation boundary. SQLite WAL and immediate transactions provide the required
-concurrency. Provider lifecycle, cancellation and wake-up remain outside
-Fabric.
+concurrency. Provider lifecycle and cancellation remain with the existing
+orchestration owners; Fabric only forwards transport closure to a child it
+started. Wake-up remains outside Fabric.
