@@ -26,6 +26,11 @@ const DEFAULT_TIMEOUT_SECONDS = 900;
 const SUPPORTED_ADAPTERS = new Set(["agy", "claude", "codex", "cursor", "kiro", "opencode"]);
 const DISPATCH_TERMINAL_STATUSES = new Set(["succeeded", "failed", "blocked", "timed_out", "cancelled"]);
 const BATCH_TERMINAL_STATUSES = new Set(["completed", "failed", "cancelled"]);
+const RESERVED_UNTYPED_STATUSES = new Set([
+  ...DISPATCH_TERMINAL_STATUSES,
+  ...BATCH_TERMINAL_STATUSES,
+  "running",
+]);
 
 export interface RouteInput {
   adapter?: string;
@@ -408,7 +413,7 @@ function validOwnerRecord(
 ): boolean {
   if (record.schema_version !== 1 || typeof record.status !== "string" || record.status.length === 0) return false;
   if (record.record_type === undefined) {
-    return record.status !== "succeeded" && record.status !== "completed" &&
+    return !RESERVED_UNTYPED_STATUSES.has(record.status) &&
       typeof record.message === "string" && record.message.length > 0;
   }
   if (record.record_type !== (kind === "dispatch" ? "dispatch-attempt" : "dispatch-batch")) return false;

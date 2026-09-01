@@ -62,6 +62,12 @@ if (owner === "run_controls.py") {
       record_type: "dispatch-attempt",
       status: "running",
     }) + "\n");
+  } else if (prompt === "emit untyped running") {
+    process.stdout.write(JSON.stringify({
+      schema_version: 1,
+      status: "running",
+      message: "owner already exited",
+    }) + "\n");
   } else if (prompt === "emit untyped success") {
     process.stdout.write(JSON.stringify({
       schema_version: 1,
@@ -149,6 +155,14 @@ if (owner === "run_controls.py") {
       schema_version: 1,
       record_type: "dispatch-batch",
       status: "running",
+    }) + "\n");
+    process.exit(0);
+  }
+  if (manifest.tasks[0]?.prompt === "emit untyped running batch") {
+    process.stdout.write(JSON.stringify({
+      schema_version: 1,
+      status: "running",
+      message: "owner already exited",
     }) + "\n");
     process.exit(0);
   }

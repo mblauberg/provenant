@@ -321,6 +321,11 @@ try {
     arguments: { prompt: "emit typed running", adapter: "codex", wait_seconds: 5 },
   }));
   assert.equal(typedRunning.status, "owner_output_invalid");
+  const untypedRunning = payload(await executor.callTool({
+    name: "fabric_dispatch",
+    arguments: { prompt: "emit untyped running", adapter: "codex", wait_seconds: 5 },
+  }));
+  assert.equal(untypedRunning.status, "owner_output_invalid");
   const untypedSuccess = payload(await executor.callTool({
     name: "fabric_dispatch",
     arguments: { prompt: "emit untyped success", adapter: "codex", wait_seconds: 5 },
@@ -354,6 +359,14 @@ try {
     },
   }));
   assert.equal(typedRunningBatch.status, "owner_output_invalid");
+  const untypedRunningBatch = payload(await executor.callTool({
+    name: "fabric_batch",
+    arguments: {
+      wait_seconds: 5,
+      tasks: [{ id: "running-untyped", prompt: "emit untyped running batch", adapter: "codex" }],
+    },
+  }));
+  assert.equal(untypedRunningBatch.status, "owner_output_invalid");
   const nonexistentBatch = payload(await executor.callTool({
     name: "fabric_batch",
     arguments: {
