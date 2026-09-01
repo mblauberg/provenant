@@ -457,8 +457,8 @@ describe("MCP startup boundaries", () => {
     for (let attempt = 0; attempt < 50 && !stdout.includes('"id":1'); attempt += 1) {
       await delay(10);
     }
-    expect(stdout).toContain('"id":1');
-    expect(stdout).not.toContain('"id":2');
+    const initializedBeforeEof = stdout.includes('"id":1');
+    const waitPendingBeforeEof = !stdout.includes('"id":2');
     child.stdin.end();
 
     const exit = await Promise.race([
@@ -469,6 +469,8 @@ describe("MCP startup boundaries", () => {
     const finalExit = await closed;
     expect(exit, stderr).not.toBeNull();
     expect(finalExit).toEqual({ code: 0, signal: null });
+    expect(initializedBeforeEof).toBe(true);
+    expect(waitPendingBeforeEof).toBe(true);
     expect(stdout).toContain('"id":1');
   }, 3_000);
 
