@@ -479,10 +479,8 @@ def test_the_installer_seeds_a_scratch_instance_root(tmp_path):
     """`install-harness` honours AGENT_FABRIC_INSTANCE_ROOT for the instance side."""
     source = (ROOT / "scripts" / "install-harness").read_text()
     # The instance root is resolved once, on the contract #529 established.
-    assert 'instance_root="${AGENT_FABRIC_INSTANCE_ROOT:-$HOME/.agents}"' in source
-    assert source.count("instance_root=$") + source.count('instance_root="$') == 1, (
-        "install-harness must resolve the instance root exactly once"
-    )
+    assignment = 'instance_root="${AGENT_FABRIC_INSTANCE_ROOT:-$HOME/.agents}"'
+    assert source.splitlines().count(assignment) == 1
     assert "scripts/instance_installation.py\" seed" in source
 
     product = tmp_path / "product"
