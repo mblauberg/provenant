@@ -36,13 +36,16 @@ BATCH_ID_RE = re.compile(r"^batch-(?:\d{3}|[1-9]\d{3,})$")
 DEFAULT_TIMEOUT_SECONDS = 900.0
 MAX_WORKER_QUESTION_PROMPT = 4096
 MAX_WORKER_TERMINAL_ENVELOPE_BYTES = 64 * 1024
+MAX_GIT_EVIDENCE_HEADER_BYTES = 64 * 1024
 WORKER_TERMINAL_RECORD_TYPE = "provenant-worker-terminal"
+GIT_EVIDENCE_RECORD_TYPE = "provenant-git-evidence"
 CANCEL_MARKER_NAME = "cancel.request"
 
 from _shared.bounded_process import stop_process_group
 from _shared.custody import (
     OwnedFileError, OwnedLinkError, atomic_write_contained, contained_regular_path,
     ensure_contained_directory, create_contained_directory, open_contained_regular, read_bound_bytes,
+    unlink_contained_regular,
 )
 
 class AttemptEvidenceError(ValueError):
@@ -399,6 +402,8 @@ def manifest_rows(run_dir: Path, record: dict[str, Any]) -> list[tuple[str, str]
     ]
     if record["result"] is not None:
         paths.append(("result", record["result"]["path"]))
+    if record.get("git_evidence") is not None:
+        paths.append(("git-evidence", record["git_evidence"]["path"]))
     return paths
 
 
@@ -519,6 +524,8 @@ def reconcile_manifest(run_dir: Path, custody=None) -> None:
                 "attempt-digest": (attempt_root / "attempt.sha256").as_posix(),
                 "result": (attempt_root / "result.md").as_posix(),
             }
+            if record.get("git_evidence") is not None:
+                expected["git-evidence"] = (attempt_root / "evidence" / "git-evidence.md").as_posix()
             mismatched = [kind for kind, path in rows if path != expected[kind]]
             if mismatched:
                 raise AttemptEvidenceError(
@@ -536,6 +543,11 @@ def reconcile_manifest(run_dir: Path, custody=None) -> None:
             }
             if record["result"] is not None:
                 claimed_digests["result"] = record["result"]["digest"]
+            if record.get("git_evidence") is not None:
+                evidence = record["git_evidence"]
+                if not isinstance(evidence, dict) or not isinstance(evidence.get("digest"), str):
+                    raise AttemptEvidenceError(f"Git evidence receipt is malformed: {attempt_path}")
+                claimed_digests["git-evidence"] = evidence["digest"]
             mismatched_digests = [
                 kind
                 for kind, path in rows
@@ -583,7 +595,10 @@ def existing_attempt_number(task_dir: Path) -> int:
     return max(numbers, default=0) + 1
 
 
-def build_command(args: argparse.Namespace, prompt_path: Path, result_path: Path) -> list[str]:
+def build_command(
+    args: argparse.Namespace, prompt_path: Path, result_path: Path,
+    evidence_dir: Path | None = None,
+) -> list[str]:
     command = [
         str(CF_DISPATCH),
         "--intent",
@@ -609,6 +624,8 @@ def build_command(args: argparse.Namespace, prompt_path: Path, result_path: Path
     ):
         if value:
             command.extend((flag, value))
+    if evidence_dir is not None:
+        command.extend(("--add-dir", str(evidence_dir)))
     return command
 
 
@@ -630,6 +647,129 @@ def _read_prompt_once(workspace: Path, prompt_source: Path) -> bytes:
             chunks.append(chunk)
     finally:
         os.close(fd)
+
+
+def _validate_git_evidence_metadata(metadata: Any) -> dict[str, Any]:
+    """Validate the bounded JSON header of one Git evidence packet."""
+    try:
+        valid = (
+            isinstance(metadata, dict)
+            and set(metadata) == {
+                "schema_version", "record_type", "repository", "git_root", "head",
+                "diff_base", "working_tree", "diff_from", "paths", "encoding",
+            }
+            and metadata.get("schema_version") == 1
+            and metadata.get("record_type") == GIT_EVIDENCE_RECORD_TYPE
+            and isinstance(metadata.get("repository"), str)
+            and isinstance(metadata.get("git_root"), str)
+            and isinstance(metadata.get("head"), str)
+            and re.fullmatch(r"[0-9a-f]{40,64}", metadata["head"]) is not None
+            and isinstance(metadata.get("diff_base"), str)
+            and re.fullmatch(r"[0-9a-f]{40,64}", metadata["diff_base"]) is not None
+            and metadata.get("working_tree") in {"clean", "dirty"}
+            and isinstance(metadata.get("diff_from"), str)
+            and bool(metadata["diff_from"])
+            and isinstance(metadata.get("paths"), list)
+            and all(isinstance(path, str) for path in metadata["paths"])
+            and metadata.get("encoding") == "utf-8-replacement"
+        )
+    except (KeyError, TypeError):
+        valid = False
+    if not valid:
+        raise AttemptEvidenceError("Git evidence packet header is invalid")
+    return metadata
+
+
+def _copy_git_evidence(
+    workspace: Path, run_dir: Path, source: Path, destination: Path
+) -> tuple[dict[str, Any], str]:
+    """Validate and copy a packet in bounded memory while hashing its bytes."""
+    try:
+        source.relative_to(run_dir)
+        source_relative = source.relative_to(workspace)
+        destination_relative = destination.relative_to(run_dir)
+    except ValueError as exc:
+        raise AttemptEvidenceError("Git evidence must be materialised inside the run directory") from exc
+    source_fd = destination_fd = -1
+    try:
+        source_fd, _source_rel, _source_target = open_contained_regular(
+            workspace, source_relative, os.O_RDONLY, label="Git evidence source"
+        )
+        destination_fd, _destination_rel, _destination_target = open_contained_regular(
+            run_dir,
+            destination_relative,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            label="Git evidence packet",
+        )
+    except (OwnedLinkError, OwnedFileError) as exc:
+        if source_fd >= 0:
+            os.close(source_fd)
+        raise AttemptEvidenceError(str(exc)) from exc
+    hasher = hashlib.sha256()
+    header = bytearray()
+    metadata: dict[str, Any] | None = None
+    status_prefix = b"--- status ---\n"
+    body_prefix = bytearray()
+    marker = b"\n--- diff ---\n"
+    tail = b""
+
+    def write_all(fd: int, value: bytes) -> None:
+        offset = 0
+        while offset < len(value):
+            offset += os.write(fd, value[offset:])
+
+    try:
+        while chunk := os.read(source_fd, 1024 * 1024):
+            hasher.update(chunk)
+            write_all(destination_fd, chunk)
+            remaining = chunk
+            if metadata is None:
+                header.extend(remaining)
+                if len(header) > MAX_GIT_EVIDENCE_HEADER_BYTES and b"\n" not in header:
+                    raise AttemptEvidenceError("Git evidence packet header exceeds its 64 KiB limit")
+                separator = header.find(b"\n")
+                if separator < 0:
+                    continue
+                if separator > MAX_GIT_EVIDENCE_HEADER_BYTES:
+                    raise AttemptEvidenceError("Git evidence packet header exceeds its 64 KiB limit")
+                first_line = bytes(header[:separator])
+                metadata = _validate_git_evidence_metadata(
+                    json.loads(first_line.decode("utf-8"))
+                )
+                remaining = bytes(header[separator + 1:])
+            body_prefix.extend(remaining[: len(status_prefix) - len(body_prefix)])
+            if len(body_prefix) >= len(status_prefix) and bytes(body_prefix) != status_prefix:
+                raise AttemptEvidenceError("Git evidence packet is missing its status section")
+            combined = tail + remaining
+            if marker in combined:
+                tail = marker
+            else:
+                tail = combined[-(len(marker) - 1):]
+        if metadata is None:
+            raise AttemptEvidenceError("Git evidence packet has no JSON header")
+        if len(body_prefix) < len(status_prefix):
+            raise AttemptEvidenceError("Git evidence packet is missing its status section")
+        if marker not in tail:
+            raise AttemptEvidenceError("Git evidence packet is missing its diff section")
+        os.fsync(destination_fd)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        try:
+            unlink_contained_regular(run_dir, destination_relative, label="Git evidence packet")
+        except (OSError, OwnedFileError):
+            pass
+        raise AttemptEvidenceError("Git evidence packet has an invalid JSON header") from exc
+    except BaseException:
+        try:
+            unlink_contained_regular(run_dir, destination_relative, label="Git evidence packet")
+        except (OSError, OwnedFileError):
+            pass
+        raise
+    finally:
+        if source_fd >= 0:
+            os.close(source_fd)
+        if destination_fd >= 0:
+            os.close(destination_fd)
+    return metadata, f"sha256:{hasher.hexdigest()}"
 
 
 def _dispatch(args: argparse.Namespace, custody=None) -> int:
@@ -716,6 +856,15 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
             prompt_bytes = sys.stdin.buffer.read()
         except OSError as exc:
             return fail(run_dir, "prompt_unavailable", f"cannot read prompt stdin: {exc}")
+    git_evidence_requested = args.git_evidence is not None
+    git_evidence_identity: dict[str, Any] | None = None
+    git_evidence_source: Path | None = None
+    if args.git_evidence is not None:
+        if args.tool != "agy":
+            return fail(run_dir, "git_evidence_requires_agy", "Git evidence is currently supported only for Agy")
+        git_evidence_source = args.git_evidence.expanduser()
+        if not git_evidence_source.is_absolute():
+            git_evidence_source = workspace / git_evidence_source
     if not CF_DISPATCH.is_file() or not os.access(CF_DISPATCH, os.X_OK):
         return fail(run_dir, "adapter_unavailable", f"provider adapter is missing or not executable: {CF_DISPATCH}")
 
@@ -746,13 +895,32 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
     result_path = attempt_dir / "result.md"
     adapter_path = attempt_dir / "adapter-receipt.json"
     stderr_path = attempt_dir / "stderr.log"
+    evidence_dir = attempt_dir / "evidence" if git_evidence_requested else None
+    evidence_path = evidence_dir / "git-evidence.md" if evidence_dir is not None else None
+    if evidence_dir is not None and evidence_path is not None:
+        try:
+            create_contained_directory(run_dir, evidence_dir.relative_to(run_dir), label="Git evidence directory")
+            git_evidence_identity, git_evidence_digest = _copy_git_evidence(
+                workspace,
+                run_dir,
+                git_evidence_source if git_evidence_source is not None else evidence_path,
+                evidence_path,
+            )
+        except (OSError, OwnedFileError, AttemptEvidenceError) as exc:
+            return fail(run_dir, "git_evidence_invalid", str(exc))
+        prompt_bytes = (
+            b"Read the supplied evidence files under evidence/. In particular, read "
+            b"evidence/git-evidence.md. Do not invoke shell, Git, or any other tools; "
+            b"answer from the supplied files.\n\n"
+            + (prompt_bytes or b"")
+        )
     try:
         atomic_write_contained(
             run_dir, prompt_path.relative_to(run_dir), prompt_bytes or b"", label="prompt"
         )
     except OwnedFileError as exc:
         return fail(run_dir, "attempt_path_invalid", str(exc))
-    command = build_command(args, prompt_path, result_path)
+    command = build_command(args, prompt_path, result_path, evidence_dir)
     requested_route = {
         "intent": args.intent,
         "adapter": args.tool,
@@ -799,12 +967,15 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                 old_handlers = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGHUP)}
                 signal.signal(signal.SIGTERM, cancel_handler)
                 signal.signal(signal.SIGHUP, cancel_handler)
+                provider_environment = os.environ.copy()
+                if git_evidence_requested:
+                    provider_environment.pop("CF_DISPATCH_AGY_ADD_DIR", None)
                 process = subprocess.Popen(
                     command,
                     cwd=workspace,
                     stdout=adapter_stream,
                     stderr=stderr_stream,
-                    env=os.environ.copy(),
+                    env=provider_environment,
                     start_new_session=True,
                 )
 
@@ -996,6 +1167,12 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
         "argv_digest": json_digest(command),
         "retry_lineage": [retry_of] if retry_of else [],
     }
+    if evidence_path is not None and git_evidence_identity is not None:
+        record["git_evidence"] = {
+            "path": relative_path(run_dir, evidence_path),
+            "digest": git_evidence_digest,
+            "checkout": git_evidence_identity,
+        }
     if question is not None:
         record["question"] = question
     if process_error:
@@ -1082,6 +1259,10 @@ def parser() -> argparse.ArgumentParser:
         help=f"maximum provider runtime in seconds (default: {DEFAULT_TIMEOUT_SECONDS:g})",
     )
     root.add_argument("--retry-of", help="existing attempt id under this task, for lineage only")
+    root.add_argument(
+        "--git-evidence", type=Path,
+        help="run-owned Git evidence packet to copy into an Agy attempt",
+    )
     root.add_argument("--batch-child", action="store_true", help=argparse.SUPPRESS)
     root.add_argument("--batch-id", help=argparse.SUPPRESS)
     return root

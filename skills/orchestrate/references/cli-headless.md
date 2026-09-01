@@ -204,6 +204,29 @@ questions: <what to refute, complete, or falsify>
 return: hypothesis | risk | evidence_needed | likely_files | falsification_check
 ```
 
+For a larger Agy review of Git state, keep the evidence out of the prompt
+argument. Materialise one selected diff into a run-owned packet, then let
+`dispatch_run.py` copy and bind it to the attempt:
+
+```sh
+python3 scripts/git_evidence.py --repository "$PWD" \
+  --output ".agent-run/<run>/git-evidence.md" \
+  --diff-from origin/main
+python3 skills/orchestrate/scripts/dispatch_run.py \
+  --run-dir ".agent-run/<run>" --task-id review --adapter agy \
+  --orchestrator-family anthropic --alias workhorse --role reviewer --git-evidence \
+  ".agent-run/<run>/git-evidence.md" --prompt-file review.md
+```
+
+The packet records the checkout root, exact `HEAD`, resolved diff base, status
+and selected revision/path. `--path` values are literal relative workspace
+paths, not Git pathspecs. Full-checkout evidence, or a selected path with
+untracked content, fails closed because this packet does not snapshot arbitrary
+files; unrelated untracked paths remain disclosed in status. `dispatch_run.py` exposes only the copied evidence directory
+through Agy's existing `--add-dir`, adds a no-tools instruction, and records
+the packet path, digest and checkout identity in the attempt. A non-`ok`
+adapter status, including `permission_denied`, remains a failed review.
+
 Do not treat distinct-family output as established fact. Feed its claims to targeted reviewers or certified
 cross-family verifiers for source/test/schema confirmation.
 

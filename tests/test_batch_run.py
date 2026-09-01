@@ -322,6 +322,43 @@ def test_batch_forwards_lifecycle_risk_and_model_override_separately(tmp_path, m
     assert attempt['requested_route']['model_override_tier'] == 'crucial'
 
 
+def test_batch_forwards_run_owned_agy_git_evidence_path(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    module = load_module()
+    run_dir = make_run(tmp_path, 'batch-evidence')
+    prompt = tmp_path / 'prompt.md'
+    prompt.write_text('review\n', encoding='utf-8')
+    evidence = run_dir / 'evidence.md'
+    evidence.write_text('packet\n', encoding='utf-8')
+    manifest = task_manifest(tmp_path, [{
+        'id': 'agy', 'prompt_file': str(prompt), 'adapter': 'agy',
+        'model': 'gemini-3.7-flash', 'git_evidence': str(evidence),
+    }])
+
+    loaded = module._load_manifest(manifest, run_dir=run_dir)[0]
+    command = module._command(loaded[0], run_dir)
+    assert command[command.index('--git-evidence') + 1] == str(evidence)
+
+
+def test_batch_rejects_symlink_git_evidence_source(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    module = load_module()
+    run_dir = make_run(tmp_path, 'batch-evidence-symlink')
+    evidence = run_dir / 'evidence.md'
+    evidence.write_text('packet\n', encoding='utf-8')
+    alias = run_dir / 'evidence-alias.md'
+    alias.symlink_to(evidence)
+    prompt = tmp_path / 'prompt.md'
+    prompt.write_text('review\n', encoding='utf-8')
+    manifest = task_manifest(tmp_path, [{
+        'id': 'agy', 'prompt_file': str(prompt), 'adapter': 'agy',
+        'model': 'gemini-3.7-flash', 'git_evidence': str(alias),
+    }])
+
+    with pytest.raises(module.BatchInputError, match='regular local file'):
+        module._load_manifest(manifest, run_dir=run_dir)
+
+
 def test_real_full_chain_keeps_lifecycle_risk_separate_from_model_override(
     tmp_path, monkeypatch
 ):

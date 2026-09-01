@@ -178,7 +178,9 @@ def _validate_run_dir(run_dir: Path) -> Path:
     return run_dir
 
 
-def _load_manifest(path: Path, concurrency: int | None = None) -> tuple[list[dict[str, Any]], Path, bytes]:
+def _load_manifest(
+    path: Path, concurrency: int | None = None, run_dir: Path | None = None
+) -> tuple[list[dict[str, Any]], Path, bytes]:
     """Load and validate the fixed task list before launching any child."""
     manifest_path = _local_regular(path, "task manifest")
     try:
@@ -226,6 +228,24 @@ def _load_manifest(path: Path, concurrency: int | None = None) -> tuple[list[dic
         adapter = task.get("adapter", task.get("tool"))
         if not isinstance(adapter, str) or not adapter:
             raise BatchInputError(f"task {task_id} requires adapter")
+        git_evidence = task.get("git_evidence")
+        if git_evidence is not None:
+            if adapter != "agy" or not isinstance(git_evidence, str) or not git_evidence:
+                raise BatchInputError(f"task {task_id} Git evidence requires the Agy adapter")
+            evidence_path = Path(git_evidence).expanduser()
+            if not evidence_path.is_absolute():
+                evidence_path = workspace / evidence_path
+            evidence_path = _local_regular(evidence_path, f"task {task_id} git_evidence")
+            try:
+                evidence_path.relative_to(workspace)
+            except ValueError as exc:
+                raise BatchInputError(f"task {task_id} git_evidence must be inside the workspace") from exc
+            if run_dir is not None:
+                try:
+                    evidence_path.relative_to(run_dir.resolve())
+                except ValueError as exc:
+                    raise BatchInputError(f"task {task_id} git_evidence must be inside the run directory") from exc
+            git_evidence = str(evidence_path)
         if task.get("intent", "ordinary") != "ordinary":
             raise BatchInputError(f"task {task_id} must use ordinary intent")
         selectors = [name for name in ("alias", "task_class", "model") if task.get(name)]
@@ -246,6 +266,8 @@ def _load_manifest(path: Path, concurrency: int | None = None) -> tuple[list[dic
         timeout = _finite_timeout(task.get("timeout"))
         normalized = dict(task)
         normalized.update({"id": task_id, "adapter": adapter, "role": role, "timeout": timeout})
+        if git_evidence is not None:
+            normalized["git_evidence"] = git_evidence
         if prompt is not None:
             normalized["prompt_file"] = str(prompt)
         else:
@@ -327,6 +349,8 @@ def _command(task: dict[str, Any], run_dir: Path) -> list[str]:
                        ("effort", "--effort"), ("retry_of", "--retry-of")):
         if task.get(name):
             command.extend((flag, str(task[name])))
+    if task.get("git_evidence"):
+        command.extend(("--git-evidence", str(task["git_evidence"])))
     return command
 
 
@@ -611,11 +635,11 @@ def _execute_batch(args: argparse.Namespace, tasks: list[dict[str, Any]], run_di
 
 def batch(args: argparse.Namespace) -> int:
     try:
-        tasks, _source_manifest, source_bytes = _load_manifest(args.manifest, args.concurrency)
         if not 1 <= args.concurrency <= MAX_CONCURRENCY:
             raise BatchInputError(f"concurrency must be between 1 and {MAX_CONCURRENCY}")
-        args.concurrency = min(args.concurrency, len(tasks))
         run_dir = _validate_run_dir(args.run_dir)
+        tasks, _source_manifest, source_bytes = _load_manifest(args.manifest, args.concurrency, run_dir)
+        args.concurrency = min(args.concurrency, len(tasks))
         if not DISPATCH_RUN.is_file() or not os.access(DISPATCH_RUN, os.X_OK):
             raise BatchInputError(f"dispatch owner is unavailable: {DISPATCH_RUN}")
     except BatchInputError as exc:
@@ -659,7 +683,7 @@ def parser() -> argparse.ArgumentParser:
 Each task uses ordinary intent and exactly one of prompt_file/prompt plus one
 route selector (alias, task_class or model). Read-only tasks may run together;
 source_writing is rejected in this read-only release; partitioned/worktree-isolated
-writers are deferred.""",
+writers are deferred. Agy tasks may also name a run-owned git_evidence packet.""",
     )
     root.add_argument("--run-dir", type=Path, required=True)
     root.add_argument("--manifest", type=Path, required=True)

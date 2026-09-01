@@ -47,6 +47,29 @@ def write_success_adapter(path: Path) -> None:
     )
 
 
+def write_evidence_adapter(path: Path, *, status: str = "ok") -> None:
+    write_executable(
+        path,
+        f"""#!/usr/bin/env bash
+        prompt=''; out=''; add_dir=''
+        while [ "$#" -gt 0 ]; do
+          case "$1" in
+            --out) out="$2"; shift 2;;
+            --prompt-file) prompt="$2"; shift 2;;
+            --add-dir) add_dir="$2"; shift 2;;
+            *) shift;;
+          esac
+        done
+        grep -qi 'read the supplied evidence files' "$prompt" || exit 21
+        test -f "$add_dir/git-evidence.md" || exit 22
+        test -z "${{CF_DISPATCH_AGY_ADD_DIR:-}}" || exit 23
+        printf 'OK\\n' > "$out"
+        digest="sha256:$(shasum -a 256 "$out" | awk '{{print $1}}')"
+        printf '{{"tool":"agy","adapter":"agy","execution_intent":"ordinary","resolved_model":"gemini-3.7-flash","provider_family":"google","model_family":"google","endpoint_provider":"agy","identity_source":"test-fixture","status":"{status}","exit":{0 if status == 'ok' else 1},"output_path":"%s","output_digest":"%s","read_only_guarantee":"prompt_only","cross_family":true,"certification_eligible":false}}\\n' "$out" "$digest"
+        """,
+    )
+
+
 def write_question_adapter(path: Path, *, exit_code: int = 0, result: str | None = None) -> None:
     output = (result or json.dumps({
         "schema_version": 1,
@@ -153,6 +176,110 @@ def test_ordinary_single_dispatch_records_one_attempt_and_route_identity(tmp_pat
     assert receipt["attempt_digest"] == f"sha256:{expected_digest}"
     assert receipt["attempt_digest_path"].endswith("attempt.sha256")
     assert (run_dir / "RUN_RECEIPT.json").read_bytes() == receipt_before
+
+
+def test_agy_git_evidence_is_copied_into_attempt_and_bound_to_prompt(tmp_path: Path, monkeypatch) -> None:
+    run_dir = make_run(tmp_path, "agy-evidence")
+    source = run_dir / "evidence" / "git-evidence.md"
+    source.parent.mkdir()
+    source.write_text(
+        json.dumps({
+            "schema_version": 1,
+            "record_type": "provenant-git-evidence",
+            "repository": str(tmp_path / "repo"),
+            "git_root": str(tmp_path / "repo"),
+            "head": "a" * 40,
+            "diff_base": "a" * 40,
+            "working_tree": "dirty",
+            "diff_from": "HEAD",
+            "paths": ["file.txt"],
+            "encoding": "utf-8-replacement",
+        }) + "\n--- status ---\n M file.txt\n--- diff ---\n+after\n" + ("x" * 2_000_000),
+        encoding="utf-8",
+    )
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("Review the supplied change.\n", encoding="utf-8")
+    adapter = tmp_path / "agy-adapter"
+    write_evidence_adapter(adapter)
+    module = load_dispatch_module()
+    monkeypatch.setattr(module, "CF_DISPATCH", adapter)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CF_DISPATCH_AGY_ADD_DIR", str(tmp_path / "unrelated"))
+    args = module.parser().parse_args([
+        "--run-dir", str(run_dir), "--task-id", "agy", "--adapter", "agy",
+        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "reviewer",
+        "--git-evidence", str(source),
+    ])
+
+    assert module.dispatch(args) == 0
+    attempt = json.loads((run_dir / "dispatch/tasks/agy/attempt-001/attempt.json").read_text())
+    evidence = attempt["git_evidence"]
+    evidence_path = run_dir / evidence["path"]
+    assert evidence_path.parent.name == "evidence"
+    assert evidence_path != source
+    assert evidence_path.read_text(encoding="utf-8") == source.read_text(encoding="utf-8")
+    assert evidence["digest"].startswith("sha256:")
+    assert evidence["checkout"]["repository"] == str(tmp_path / "repo")
+    assert evidence["checkout"]["git_root"] == str(tmp_path / "repo")
+    assert evidence["checkout"]["head"] == "a" * 40
+    assert evidence["checkout"]["working_tree"] == "dirty"
+    assert evidence["checkout"]["diff_from"] == "HEAD"
+    assert evidence["checkout"]["paths"] == ["file.txt"]
+    assert "read the supplied evidence files" in (run_dir / attempt["prompt"]["path"]).read_text().lower()
+    module.reconcile_manifest(run_dir)
+
+
+def test_agy_git_evidence_retains_denial_without_accepting_result(tmp_path: Path, monkeypatch) -> None:
+    run_dir = make_run(tmp_path, "agy-denial")
+    source = run_dir / "evidence.md"
+    source.write_text(
+        json.dumps({
+            "schema_version": 1,
+            "record_type": "provenant-git-evidence",
+            "repository": str(tmp_path), "git_root": str(tmp_path), "head": "b" * 40,
+            "diff_base": "b" * 40, "working_tree": "clean", "diff_from": "HEAD", "paths": [],
+            "encoding": "utf-8-replacement",
+        }) + "\n--- status ---\n--- diff ---\n",
+        encoding="utf-8",
+    )
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("Review.\n", encoding="utf-8")
+    adapter = tmp_path / "agy-adapter-denied"
+    write_evidence_adapter(adapter, status="permission_denied")
+    module = load_dispatch_module()
+    monkeypatch.setattr(module, "CF_DISPATCH", adapter)
+    monkeypatch.chdir(tmp_path)
+    args = module.parser().parse_args([
+        "--run-dir", str(run_dir), "--task-id", "deny", "--adapter", "agy",
+        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "reviewer",
+        "--git-evidence", str(source),
+    ])
+
+    assert module.dispatch(args) == 1
+    attempt = json.loads((run_dir / "dispatch/tasks/deny/attempt-001/attempt.json").read_text())
+    assert attempt["status"] == "failed"
+    assert attempt["outcome"] == "permission_denied"
+    assert attempt["git_evidence"]["path"].startswith("dispatch/tasks/deny/attempt-001/")
+
+
+def test_agy_git_evidence_rejects_symlink_source(tmp_path: Path, monkeypatch) -> None:
+    run_dir = make_run(tmp_path, "agy-symlink")
+    source = run_dir / "evidence.md"
+    source.write_text("not a packet\n", encoding="utf-8")
+    alias = run_dir / "evidence-alias.md"
+    alias.symlink_to(source)
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("Review.\n", encoding="utf-8")
+    module = load_dispatch_module()
+    monkeypatch.chdir(tmp_path)
+    args = module.parser().parse_args([
+        "--run-dir", str(run_dir), "--task-id", "symlink", "--adapter", "agy",
+        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "reviewer",
+        "--git-evidence", str(alias),
+    ])
+
+    assert module.dispatch(args) == 2
+    assert not (run_dir / "dispatch/tasks/symlink/attempt-001/evidence/git-evidence.md").exists()
 
 
 def test_valid_worker_question_envelope_is_retained_as_blocked_attempt(tmp_path: Path, monkeypatch) -> None:
