@@ -4,7 +4,9 @@ import { setTimeout as delay } from "node:timers/promises";
 import { z } from "zod";
 
 import { databasePath, identify } from "./identity.js";
-import { Store } from "./store.js";
+import { isSQLiteContention, Store, type Message } from "./store.js";
+
+const MAX_WAIT_SECONDS = 55;
 
 /**
  * One MCP process per agent, holding the store open directly.
@@ -65,16 +67,36 @@ function reply(payload: unknown): { content: Array<{ type: "text"; text: string 
 }
 
 const waitForInbox = async (
-  options: { limit?: number; peek?: boolean; claimTtlMs?: number },
+  options: {
+    limit?: number;
+    peek?: boolean;
+    claimTtlMs?: number;
+    busyTimeoutMs?: number;
+  },
   waitMs: number,
+  signal: AbortSignal,
 ) => {
-  const deadline = Date.now() + waitMs;
+  const deadline = performance.now() + waitMs;
   for (;;) {
-    const messages = readyStore().inbox(who, options);
+    signal.throwIfAborted();
+    const remainingBeforeClaim = deadline - performance.now();
+    if (waitMs > 0 && remainingBeforeClaim <= 0) return [];
+    let messages: Message[];
+    try {
+      messages = readyStore().inbox(who, {
+        ...options,
+        busyTimeoutMs: waitMs === 0
+          ? undefined
+          : Math.max(1, Math.min(50, Math.floor(remainingBeforeClaim))),
+      });
+    } catch (error) {
+      if (waitMs === 0 || !isSQLiteContention(error)) throw error;
+      messages = [];
+    }
     if (messages.length > 0 || waitMs === 0) return messages;
-    const remaining = deadline - Date.now();
+    const remaining = deadline - performance.now();
     if (remaining <= 0) return [];
-    await delay(Math.min(100, remaining));
+    await delay(Math.min(100, remaining), undefined, { signal });
   }
 };
 
@@ -113,15 +135,15 @@ server.registerTool(
       limit: z.number().int().positive().optional(),
       peek: z.boolean().optional(),
       claim_seconds: z.number().int().min(1).max(3600).optional(),
-      wait_seconds: z.number().int().min(0).max(120).optional(),
+      wait_seconds: z.number().int().min(0).max(MAX_WAIT_SECONDS).optional(),
     },
   },
-  async ({ limit, peek, claim_seconds, wait_seconds }) =>
+  async ({ limit, peek, claim_seconds, wait_seconds }, { signal }) =>
     reply(await waitForInbox({
       limit,
       peek,
       claimTtlMs: claim_seconds === undefined ? undefined : claim_seconds * 1000,
-    }, (wait_seconds ?? 0) * 1000)),
+    }, (wait_seconds ?? 0) * 1000, signal)),
 );
 
 server.registerTool(

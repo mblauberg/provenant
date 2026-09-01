@@ -472,10 +472,62 @@ describe("MCP startup boundaries", () => {
       expect(Date.now() - timeoutStarted).toBeGreaterThanOrEqual(900);
       const timeoutContent = timedOut.content as Array<{ type: "text"; text: string }>;
       expect(JSON.parse(timeoutContent[0]!.text)).toEqual([]);
+
+      const controller = new AbortController();
+      const abandoned = client.callTool({
+        name: "fabric_inbox",
+        arguments: { wait_seconds: 2 },
+      }, undefined, { signal: controller.signal });
+      await delay(75);
+      controller.abort();
+      await expect(abandoned).rejects.toThrow();
+
+      const writerAfterCancellation = openStore();
+      writerAfterCancellation.send(sender, "wait-recipient", "arrived after cancellation");
+      writerAfterCancellation.close();
+      await delay(150);
+
+      const afterCancellation = await client.callTool({
+        name: "fabric_inbox",
+        arguments: {},
+      });
+      const afterCancellationContent = afterCancellation.content as Array<{
+        type: "text"; text: string;
+      }>;
+      const afterCancellationMessages = JSON.parse(
+        afterCancellationContent[0]!.text,
+      ) as Message[];
+      expect(afterCancellationMessages).toMatchObject([{
+        body: "arrived after cancellation",
+        claimId: expect.any(String),
+      }]);
+      await client.callTool({
+        name: "fabric_acknowledge",
+        arguments: {
+          message_id: afterCancellationMessages[0]!.messageId,
+          claim_id: afterCancellationMessages[0]!.claimId,
+        },
+      });
+
+      const blocker = new Database(databasePath);
+      blocker.exec("BEGIN IMMEDIATE");
+      try {
+        const lockedStarted = performance.now();
+        const locked = await client.callTool({
+          name: "fabric_inbox",
+          arguments: { wait_seconds: 1 },
+        }, undefined, { timeout: 2_000 });
+        expect(performance.now() - lockedStarted).toBeLessThan(1_400);
+        const lockedContent = locked.content as Array<{ type: "text"; text: string }>;
+        expect(JSON.parse(lockedContent[0]!.text)).toEqual([]);
+      } finally {
+        blocker.exec("ROLLBACK");
+        blocker.close();
+      }
     } finally {
       await client.close().catch(() => undefined);
     }
-  }, 5_000);
+  }, 10_000);
 
   it("keeps the transport open with a stable tool error after a client-seat collision", async () => {
     const store = openStore();
