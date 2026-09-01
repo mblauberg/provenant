@@ -178,7 +178,7 @@ async function initialiseRun(identity: Identity, env: NodeJS.ProcessEnv, root: s
   try {
     await execFileAsync(owner, [runDir], {
       cwd: identity.cwd,
-      env,
+      env: withoutGitRedirects(env),
       timeout: 10_000,
       maxBuffer: 64 * 1024,
     });
@@ -232,6 +232,7 @@ function startOwner(
   cancelSpec: CancelSpec,
   cleanupPaths: string[] = [],
 ): StartedOwner {
+  const ownerEnv = withoutGitRedirects(env);
   const logPrefix = join(dirname(runDir), basename(runDir));
   const stdoutPath = `${logPrefix}-owner.stdout.jsonl`;
   const stderrPath = `${logPrefix}-owner.stderr.log`;
@@ -241,7 +242,7 @@ function startOwner(
   try {
     child = spawn(owner, args, {
       cwd: identity.cwd,
-      env,
+      env: ownerEnv,
       stdio: ["ignore", stdout, stderr],
     });
   } finally {
@@ -260,7 +261,14 @@ function startOwner(
       resolveCompletion({ exitCode, signal, ...(spawnError === undefined ? {} : { error: spawnError }) });
     });
   });
-  started = { child, completion, cancelSpec, runDir, stdoutPath, stderrPath };
+  started = {
+    child,
+    completion,
+    cancelSpec: { ...cancelSpec, env: ownerEnv },
+    runDir,
+    stdoutPath,
+    stderrPath,
+  };
   activeOwners.add(started);
   return started;
 }
@@ -364,6 +372,17 @@ function retainedAbsolute(runDir: string, value: unknown): string | null {
   return inside(runDir, path) ? path : null;
 }
 
+function retainedRegularFile(runDir: string, value: unknown): string | null {
+  const path = retainedAbsolute(runDir, value);
+  if (path === null) return null;
+  try {
+    const metadata = lstatSync(path);
+    return metadata.isFile() && !metadata.isSymbolicLink() ? path : null;
+  } catch {
+    return null;
+  }
+}
+
 function objectValue(value: unknown): Record<string, unknown> | undefined {
   return typeof value === "object" && value !== null && !Array.isArray(value)
     ? value as Record<string, unknown>
@@ -372,6 +391,12 @@ function objectValue(value: unknown): Record<string, unknown> | undefined {
 
 function nonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.length > 0;
+}
+
+function completeRoute(value: unknown): boolean {
+  const route = objectValue(value);
+  return route !== undefined && ["adapter", "provider_family", "resolved_model", "execution_intent"]
+    .every((field) => nonEmptyString(route[field]));
 }
 
 function validOwnerRecord(
@@ -389,9 +414,9 @@ function validOwnerRecord(
     const result = objectValue(record.result);
     const stderr = objectValue(record.stderr);
     return nonEmptyString(record.outcome) && nonEmptyString(record.task_id) && nonEmptyString(record.attempt_id) &&
-      retainedAbsolute(runDir, record.attempt_path) !== null &&
-      retainedAbsolute(runDir, result?.path) !== null &&
-      retainedAbsolute(runDir, stderr?.path) !== null && compactRoute(record.route) !== null;
+      retainedRegularFile(runDir, record.attempt_path) !== null &&
+      retainedRegularFile(runDir, result?.path) !== null &&
+      retainedRegularFile(runDir, stderr?.path) !== null && completeRoute(record.route);
   }
   if (kind === "batch" && record.status === "completed") {
     const tasks = Array.isArray(record.tasks) ? record.tasks : [];
@@ -400,9 +425,13 @@ function validOwnerRecord(
       Number.isInteger(record.concurrency) && Number(record.concurrency) > 0 &&
       tasks.length === record.task_count && tasks.every((value) => {
         const task = objectValue(value);
-        return task !== undefined && nonEmptyString(task.task_id) && nonEmptyString(task.status);
+        if (task === undefined || !nonEmptyString(task.task_id) || !nonEmptyString(task.status)) return false;
+        return task.status !== "succeeded" || (
+          nonEmptyString(task.outcome) && retainedRegularFile(runDir, task.attempt_path) !== null &&
+          retainedRegularFile(runDir, task.result_path) !== null && completeRoute(task.route)
+        );
       }) && counts !== undefined && Object.keys(counts).length > 0 &&
-      retainedAbsolute(runDir, record.summary_path) !== null;
+      retainedRegularFile(runDir, record.summary_path) !== null;
   }
   return true;
 }

@@ -68,6 +68,24 @@ if (owner === "run_controls.py") {
       record_type: "dispatch-attempt",
       status: "succeeded",
     }) + "\n");
+  } else if (prompt === "emit nonexistent success") {
+    process.stdout.write(JSON.stringify({
+      schema_version: 1,
+      record_type: "dispatch-attempt",
+      status: "succeeded",
+      outcome: "ok",
+      task_id: taskId,
+      attempt_id: "attempt-001",
+      attempt_path: `dispatch/tasks/${taskId}/attempt-001/attempt.json`,
+      result: { path: `dispatch/tasks/${taskId}/attempt-001/result.md` },
+      stderr: { path: `dispatch/tasks/${taskId}/attempt-001/stderr.log` },
+      route: {
+        adapter: "codex",
+        provider_family: "openai",
+        resolved_model: "gpt-fixture",
+        execution_intent: "ordinary",
+      },
+    }) + "\n");
   } else if (prompt === "sleep until cancelled") {
     process.once("SIGTERM", () => {
       writeFileSync(join(runDir, "cancelled.marker"), "cancelled\n");
@@ -105,6 +123,7 @@ if (owner === "run_controls.py") {
       stderr: { path: relative(runDir, stderrPath) },
       route,
     };
+    if (prompt === "emit incomplete route success") record.route = { adapter: "codex" };
     writeFileSync(attemptPath, JSON.stringify(record, null, 2) + "\n");
     process.stdout.write(JSON.stringify(record) + "\n");
     if (prompt === "claim success then fail") process.exitCode = 1;
@@ -119,19 +138,43 @@ if (owner === "run_controls.py") {
     }) + "\n");
     process.exit(0);
   }
+  if (manifest.tasks[0]?.prompt === "emit nonexistent completed batch") {
+    process.stdout.write(JSON.stringify({
+      schema_version: 1,
+      record_type: "dispatch-batch",
+      status: "completed",
+      batch_id: "batch-001",
+      task_count: 1,
+      concurrency: 1,
+      counts: { succeeded: 1 },
+      tasks: [{ task_id: "missing", status: "succeeded" }],
+      summary_path: "dispatch/batches/batch-001/summary.json",
+    }) + "\n");
+    process.exit(0);
+  }
   const batchDir = join(runDir, "dispatch", "batches", "batch-001");
   mkdirSync(batchDir, { recursive: true });
-  const tasks = manifest.tasks.map((task) => ({
-    task_id: task.id,
-    status: "succeeded",
-    outcome: "ok",
-    route: {
-      adapter: task.adapter,
-      provider_family: task.adapter,
-      resolved_model: task.model ?? task.alias ?? task.task_class,
-      execution_intent: "ordinary",
-    },
-  }));
+  const tasks = manifest.tasks.map((task) => {
+    const attemptDir = join(runDir, "dispatch", "tasks", task.id, "attempt-001");
+    mkdirSync(attemptDir, { recursive: true });
+    const attemptPath = join(attemptDir, "attempt.json");
+    const resultPath = join(attemptDir, "result.md");
+    writeFileSync(attemptPath, "{}\n");
+    writeFileSync(resultPath, `fixture result for: ${task.prompt}`);
+    return {
+      task_id: task.id,
+      status: "succeeded",
+      outcome: "ok",
+      attempt_path: relative(runDir, attemptPath),
+      result_path: relative(runDir, resultPath),
+      route: {
+        adapter: task.adapter,
+        provider_family: task.adapter,
+        resolved_model: task.model ?? task.alias ?? task.task_class,
+        execution_intent: "ordinary",
+      },
+    };
+  });
   const summaryPath = join(batchDir, "summary.json");
   const summary = {
     schema_version: 1,

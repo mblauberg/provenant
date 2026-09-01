@@ -326,6 +326,13 @@ try {
     arguments: { prompt: "emit incomplete success", adapter: "codex", wait_seconds: 5 },
   }));
   assert.equal(incompleteSuccess.status, "owner_output_invalid");
+  for (const prompt of ["emit nonexistent success", "emit incomplete route success"]) {
+    const invalidSuccess = payload(await executor.callTool({
+      name: "fabric_dispatch",
+      arguments: { prompt, adapter: "codex", wait_seconds: 5 },
+    }));
+    assert.equal(invalidSuccess.status, "owner_output_invalid");
+  }
   const incompleteBatch = payload(await executor.callTool({
     name: "fabric_batch",
     arguments: {
@@ -334,6 +341,14 @@ try {
     },
   }));
   assert.equal(incompleteBatch.status, "owner_output_invalid");
+  const nonexistentBatch = payload(await executor.callTool({
+    name: "fabric_batch",
+    arguments: {
+      wait_seconds: 5,
+      tasks: [{ id: "missing", prompt: "emit nonexistent completed batch", adapter: "codex" }],
+    },
+  }));
+  assert.equal(nonexistentBatch.status, "owner_output_invalid");
   const conflictingBatch = payload(await executor.callTool({
     name: "fabric_batch",
     arguments: {
@@ -386,6 +401,16 @@ try {
   // written and validated their attempt and batch evidence.
   const realWorkspace = resolve(executionRoot, "real-workspace");
   mkdirSync(realWorkspace, { recursive: true });
+  writeFileSync(resolve(realWorkspace, "README.md"), "real workspace\n");
+  execFileSync("git", ["init", "--quiet"], { cwd: realWorkspace });
+  execFileSync("git", ["add", "README.md"], { cwd: realWorkspace });
+  execFileSync("git", ["-c", "user.name=Fabric smoke", "-c", "user.email=fabric@example.invalid",
+    "commit", "--quiet", "-m", "real"], { cwd: realWorkspace });
+  const realHead = execFileSync("git", ["rev-parse", "HEAD"], { cwd: realWorkspace, encoding: "utf8" }).trim();
+  writeFileSync(resolve(foreignProduct, "README.md"), "foreign workspace\n");
+  execFileSync("git", ["add", "README.md"], { cwd: foreignProduct });
+  execFileSync("git", ["-c", "user.name=Fabric smoke", "-c", "user.email=fabric@example.invalid",
+    "commit", "--quiet", "-m", "foreign"], { cwd: foreignProduct });
   const realProviderBin = resolve(executionRoot, "real-provider-bin");
   mkdirSync(realProviderBin);
   const slowCodex = resolve(realProviderBin, "codex");
@@ -394,7 +419,11 @@ try {
   const realExecutor = await spawnAgent("codex", "real-execution-client", {
     cwd: realWorkspace,
     productRoot: resolve(import.meta.dirname, "../.."),
-    env: { PATH: `${realProviderBin}:/usr/bin:/bin` },
+    env: {
+      PATH: `${realProviderBin}:/usr/bin:/bin`,
+      GIT_DIR: resolve(foreignProduct, ".git"),
+      GIT_WORK_TREE: foreignProduct,
+    },
   });
   const realDispatch = payload(await realExecutor.callTool({
     name: "fabric_dispatch",
@@ -406,7 +435,10 @@ try {
     },
   }));
   assert.equal(realDispatch.status, "failed", JSON.stringify(realDispatch));
-  assert.equal(JSON.parse(readFileSync(realDispatch.paths.attempt, "utf8")).record_type, "dispatch-attempt");
+  const realAttempt = JSON.parse(readFileSync(realDispatch.paths.attempt, "utf8"));
+  assert.equal(realAttempt.record_type, "dispatch-attempt");
+  assert.equal(realAttempt.workspace.root, realpathSync(realWorkspace));
+  assert.equal(realAttempt.workspace.base_revision, realHead);
   const realBatch = payload(await realExecutor.callTool({
     name: "fabric_batch",
     arguments: {
