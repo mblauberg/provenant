@@ -24,7 +24,7 @@ inventing.
 
 1. From the authorised workspace root, create `.agent-run/<id>/RUN.json`:
    ```sh
-   "${AGENTS_HOME:-$HOME/.agents}/skills/deliver/scripts/delivery_receipt.py" init \
+   "$(provenant root)/skills/deliver/scripts/delivery_receipt.py" init \
      --run-dir ".agent-run/<id>" --run-id "<id>" --profile "<profile>" \
      --chair-family "<family>" --risk-assessment "<risk-assessment.json>" \
      --intent "<approved-intent-file>" --authority "<authority.json>"
@@ -51,7 +51,7 @@ inventing.
 6. Repair under a risk-tier scaled budget defined by the `implement` skill's
    run contract. Scope/design drift returns to the user gate.
 7. Validate from the project root with
-   `"${AGENTS_HOME:-$HOME/.agents}/skills/deliver/scripts/validate_delivery.py"
+   `"$(provenant root)/skills/deliver/scripts/validate_delivery.py"
    .agent-run/<id>/RUN.json --workspace-root "$PWD" --verify-hashes` (plus
    digest-bound `--project-policy` when used).
    `awaiting_acceptance` is machine-ready, not complete.

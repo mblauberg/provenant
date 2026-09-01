@@ -162,7 +162,8 @@ the run directory automatically, delegate to `dispatch_run.py` or
 full prompts, results and diagnostics remain file-backed. `wait_seconds: 0`
 returns immediately, while values through 55 wait within one MCP call. Immediate
 responses include the task or batch identifier and expected evidence path; a
-terminal response has a null result path when no result was retained.
+terminal response has a null result path when no result was retained. Failed,
+cancelled or timed-out attempts may retain provider output or diagnostics there.
 
 The existing run controls inspect, retry or cancel an execution after the MCP
 call returns. Closing the MCP transport asks any owner started by that process

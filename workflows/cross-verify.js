@@ -186,7 +186,7 @@ const RAW_RUN_ID = (args && args.runId) || ''
 const SAFE_RUN_ID = (RAW_RUN_ID.match(/[A-Za-z0-9._-]+/g) || []).join('-')
 const RUN_ID = SAFE_RUN_ID || 'cross-verify-run'
 const RUN_DIR = `.work/wf/cross-verify/${RUN_ID}`
-const SKILL_SCRIPTS = '~/.agents/skills/orchestrate/scripts'
+const SKILL_SCRIPTS = '"$(provenant root)/skills/orchestrate/scripts"'
 
 function bootstrapPrompt() {
   return [

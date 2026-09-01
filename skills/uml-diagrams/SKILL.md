@@ -35,11 +35,11 @@ Prefer PlantUML source (`.puml`) and inspect a render before finalising.
 4. Lint with the skill-relative script (the linter is heuristic, not a project
    conformance oracle):
    ```bash
-   python3 "${AGENTS_HOME:-$HOME/.agents}/skills/uml-diagrams/scripts/lint_plantuml_diagram.py" path/to/diagram.puml --type auto
+   python3 "$(provenant root)/skills/uml-diagrams/scripts/lint_plantuml_diagram.py" path/to/diagram.puml --type auto
    ```
 5. Render:
    ```bash
-   python3 "${AGENTS_HOME:-$HOME/.agents}/skills/uml-diagrams/scripts/render_plantuml.py" path/to/diagram.puml --format svg
+   python3 "$(provenant root)/skills/uml-diagrams/scripts/render_plantuml.py" path/to/diagram.puml --format svg
    ```
    Set `PLANTUML_JAR=/path/to/plantuml.jar` and `--format png` to render through a
    local PlantUML JAR instead of the default installation.

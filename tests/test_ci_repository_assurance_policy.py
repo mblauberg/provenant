@@ -481,7 +481,11 @@ def test_harness_python_test_dependencies_install_locked_and_cached() -> None:
     gate_step = next(
         step for step in harness_steps if str(step.get("run", "")).strip() == "scripts/check-harness"
     )
-    assert gate_step.get("env") == {"HARNESS_PYTHON": "${{ github.workspace }}/.venv/bin/python"}
+    assert gate_step.get("env") == {
+        "AGENT_FABRIC_PRODUCT_ROOT": "${{ github.workspace }}",
+        "AGENT_FABRIC_INSTANCE_ROOT": "${{ github.workspace }}",
+        "HARNESS_PYTHON": "${{ github.workspace }}/.venv/bin/python",
+    }
 
     pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     # Not a Python package: uv must never build or install the repo itself.

@@ -137,7 +137,7 @@ mission terminated. Only `{{STOP_CONDITION}}` closes the mission.
   iteration. Before accepting an idle pause it runs:
 
   ```sh
-  python3 "${AGENTS_HOME:-$HOME/.agents}/skills/autopilot/scripts/validate_idle_pause.py" \
+  python3 "$(provenant root)/skills/autopilot/scripts/validate_idle_pause.py" \
     "{{MISSION_DIR}}/STATE.md" \
     --queue "{{MISSION_DIR}}/QUEUE.md"
   ```

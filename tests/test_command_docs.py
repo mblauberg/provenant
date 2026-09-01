@@ -1,11 +1,13 @@
 from pathlib import Path
+import json
 import re
+import subprocess
 
 
 ROOT = Path(__file__).resolve().parents[1]
-VALIDATE = '"${AGENTS_HOME:-$HOME/.agents}/skills/deliver/scripts/validate_delivery.py"'
+VALIDATE = '"$(provenant root)/skills/deliver/scripts/validate_delivery.py"'
 RECEIPT_AND_ARGS = '.agent-run/<id>/RUN.json --workspace-root "$PWD" --verify-hashes'
-RECEIPT_INIT = '"${AGENTS_HOME:-$HOME/.agents}/skills/deliver/scripts/delivery_receipt.py" init'
+RECEIPT_INIT = '"$(provenant root)/skills/deliver/scripts/delivery_receipt.py" init'
 REQUIRED_INIT_FLAGS = {
     "--run-dir",
     "--run-id",
@@ -52,6 +54,7 @@ def test_readme_product_commands_follow_the_explicit_checkout():
     assert 'cd "<PRODUCT_ROOT>"' in shell
     assert "npm ci" in shell
     assert "scripts/install-harness" in shell
+    assert "scripts/install-harness --platform all" in shell
     assert "AGENTS_HOME" not in shell
     assert "\nscripts/manage_installation.py" not in source
 
@@ -98,3 +101,43 @@ def test_adr_index_marks_daemon_era_task_completion_decision_superseded():
     source = read("docs/adr/README.md")
     row = next(line for line in source.splitlines() if "[0015](" in line)
     assert "Superseded by ADR 0020" in row
+
+
+def test_root_derived_workflow_paths_are_shell_quoted():
+    polish = read("workflows/codebase-polish.js")
+    implement = read("workflows/implement-run.js")
+
+    assert 'run_dir_init.sh" "<root>/${runDirHintSuffix}"' in polish
+    assert '--prompt-file "${runDir}/crossfamily/' in polish
+    assert '--out "${runDir}/crossfamily/' in polish
+    assert '> "${runDir}/crossfamily/' in polish
+    assert 'run_dir_init.sh" "<abs run-dir>"' in implement
+    assert 'mkdir -p "<abs run-dir>/patches"' in implement
+    assert '--out "${runDir}/crossfamily/<name>.txt"' in implement
+
+
+def test_checkpoint_workflow_quotes_json_arguments_for_shell_apostrophes():
+    source = read("workflows/implement-run.js")
+    assert "function shellQuote(value)" in source
+    assert 'replaceAll("\'", "\'\\\\\'\'")' in source
+    assert "--in-flight-json ${shellQuote(JSON.stringify(inFlight))}" in source
+    assert "--artifact-paths-json ${shellQuote(JSON.stringify(artifactPaths))}" in source
+
+    function = re.search(
+        r"function shellQuote\(value\) \{\n  return .*\n\}", source
+    )
+    assert function is not None
+    payload = json.dumps(["/tmp/path with spaces", "O'Brien"])
+    rendered = subprocess.run(
+        [
+            "node",
+            "-e",
+            function.group(0)
+            + f"\nprocess.stdout.write(shellQuote({json.dumps(payload)}));",
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert rendered.returncode == 0, rendered.stderr
+    assert rendered.stdout == "'" + payload.replace("'", "'\\''") + "'"

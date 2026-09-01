@@ -9,7 +9,7 @@ from pathlib import Path
 import sys
 from typing import NoReturn
 
-from lib.product_root_resolver import load_pointer_file
+from lib.product_root_resolver import POINTER_RELATIVE_PATH, load_pointer_file
 
 
 REPAIR = (
@@ -38,9 +38,9 @@ def resolve_product_root(instance_root: Path | None = None) -> Path:
     the instance pointer, ``AGENTS_HOME``, or ``~/.agents``.
     The selected root must contain the executable Fabric MCP launcher.
     """
-    configured = os.environ.get("AGENT_FABRIC_PRODUCT_ROOT")
-    agents_home = os.environ.get("AGENTS_HOME")
-    configured_instance = os.environ.get("AGENT_FABRIC_INSTANCE_ROOT")
+    configured = os.environ.get("AGENT_FABRIC_PRODUCT_ROOT") or None
+    agents_home = os.environ.get("AGENTS_HOME") or None
+    configured_instance = os.environ.get("AGENT_FABRIC_INSTANCE_ROOT") or None
     if instance_root is None:
         instance_value = configured_instance
         instance_root = (
@@ -51,6 +51,7 @@ def resolve_product_root(instance_root: Path | None = None) -> Path:
     if not instance_root.is_absolute():
         raise ValueError(f"instance root must be an absolute path, got {instance_root}; {REPAIR}")
     resolved_instance = instance_root.resolve()
+    pointer = resolved_instance / POINTER_RELATIVE_PATH
     pointed = load_pointer_file(resolved_instance)
 
     if configured is not None:
@@ -60,7 +61,9 @@ def resolve_product_root(instance_root: Path | None = None) -> Path:
                 f"AGENT_FABRIC_PRODUCT_ROOT must be an absolute path, got {configured}; {REPAIR}"
             )
         candidate = candidate.resolve()
-    elif pointed is not None:
+    elif pointer.exists() or pointer.is_symlink():
+        if pointed is None:
+            raise ValueError(f"product-root pointer is invalid or stale at {pointer}; {REPAIR}")
         candidate = pointed.resolve()
     elif agents_home is not None:
         candidate = Path(agents_home).expanduser()
@@ -77,7 +80,7 @@ def resolve_product_root(instance_root: Path | None = None) -> Path:
 
 
 def usage() -> None:
-    print("usage: provenant <help|route|worktree|check|fabric|dispatch|batch|run> [arguments...]", file=sys.stderr)
+    print("usage: provenant <help|root|route|worktree|check|fabric|dispatch|batch|run> [arguments...]", file=sys.stderr)
 
 
 def help_text() -> None:
@@ -85,6 +88,7 @@ def help_text() -> None:
         """usage: provenant <command> [arguments...]
 
 Thin front door; each command delegates to its existing owner:
+  root           print the resolved product checkout
   route ...      scripts/model-route ... (low-level resolver; capability-bound
                  aliases need a fresh snapshot, normally supplied by dispatch)
   worktree ...   scripts/worktree ...
@@ -285,6 +289,17 @@ def main(arguments: list[str]) -> int:
             usage()
             return 2
         help_text()
+        return 0
+
+    if command == "root":
+        if command_arguments:
+            usage()
+            return 2
+        try:
+            print(resolve_product_root())
+        except (OSError, ValueError) as exc:
+            print(f"provenant: {exc}", file=sys.stderr)
+            return 3
         return 0
 
     owners = {

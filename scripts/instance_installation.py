@@ -30,10 +30,18 @@ import tempfile
 from typing import Any
 
 try:
-    from scripts.lib.product_root_resolver import write_pointer_file
+    from scripts.lib.product_root_resolver import (
+        POINTER_RELATIVE_PATH,
+        SCHEMA_VERSION as POINTER_SCHEMA_VERSION,
+        write_pointer_file,
+    )
 except ModuleNotFoundError:  # invoked as a script rather than as a package
     sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from lib.product_root_resolver import write_pointer_file  # type: ignore[no-redef]
+    from lib.product_root_resolver import (  # type: ignore[no-redef]
+        POINTER_RELATIVE_PATH,
+        SCHEMA_VERSION as POINTER_SCHEMA_VERSION,
+        write_pointer_file,
+    )
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -56,16 +64,6 @@ SEEDED_FILES = (
     "config/model-routing.json",
 )
 
-#: Machine-local pointer to the product checkout, in the receipt class rather
-#: than the committed one. Committed instance state never carries an absolute
-#: machine path, so the path a consumer needs lives here, is ignored, and is
-#: rewritten on every install. Relocating the product is therefore always
-#: "re-run install-harness", never an edit to a committed file or a client
-#: configuration.
-POINTER_RELATIVE = (".agent-fabric", "product-root.json")
-POINTER_SCHEMA_VERSION = 1
-
-
 class InstallError(ValueError):
     pass
 
@@ -75,7 +73,7 @@ def desired_state_path(instance_root: Path) -> Path:
 
 
 def pointer_path(instance_root: Path) -> Path:
-    return Path(instance_root).joinpath(*POINTER_RELATIVE)
+    return Path(instance_root) / POINTER_RELATIVE_PATH
 
 
 def write_pointer(product_root: Path, instance_root: Path) -> dict[str, Any]:
@@ -88,8 +86,6 @@ def write_pointer(product_root: Path, instance_root: Path) -> dict[str, Any]:
     """
     try:
         write_pointer_file(Path(instance_root), Path(product_root))
-    except InstallError:
-        raise
     except ValueError as exc:
         # The shared writer refuses a pointer directory that escapes the
         # instance root; surface it as a conflict rather than a traceback.
@@ -112,6 +108,7 @@ def read_pointer(instance_root: Path) -> dict[str, Any] | None:
         raise InstallError(f"product pointer is unreadable: {exc}") from exc
     if (
         not isinstance(document, dict)
+        or isinstance(document.get("schema_version"), bool)
         or document.get("schema_version") != POINTER_SCHEMA_VERSION
         or set(document) != {"schema_version", "product_root"}
         or not isinstance(document.get("product_root"), str)
@@ -334,8 +331,60 @@ def seed_instance_files(product_root: Path, instance_root: Path) -> list[dict[st
     return results
 
 
-def execute(action: str, product_root: Path, instance_root: Path) -> dict[str, Any]:
-    if action not in {"seed", "show"}:
+def validate_install(product_root: Path, instance_root: Path) -> dict[str, Any]:
+    """Check seed inputs and destinations without writing the instance."""
+    product_root = Path(product_root).resolve()
+    instance_root = Path(instance_root).resolve()
+    desired = load_desired_state(instance_root)
+    pointer_directory = pointer_path(instance_root).parent
+    if pointer_directory.is_symlink():
+        resolved = pointer_directory.resolve(strict=False)
+        if resolved != instance_root and instance_root not in resolved.parents:
+            raise InstallError("product pointer directory escapes the instance root")
+        raise InstallError("product pointer directory must not be a symlink")
+    if pointer_directory.exists() and not pointer_directory.is_dir():
+        raise InstallError("product pointer directory must be a directory")
+    pointer_gitignore = pointer_directory / ".gitignore"
+    if pointer_gitignore.is_symlink():
+        raise InstallError("product pointer .gitignore must not be a symlink")
+    if pointer_gitignore.exists() and not pointer_gitignore.is_file():
+        raise InstallError("product pointer .gitignore must be a regular file")
+    config_directory = instance_root / "config"
+    if config_directory.is_symlink():
+        raise InstallError("instance config directory must not be a symlink")
+    if config_directory.exists() and not config_directory.is_dir():
+        raise InstallError("instance config directory must be a directory")
+    pointer = read_pointer(instance_root)
+    seeded = []
+    for relative in SEEDED_FILES:
+        source = product_root.joinpath(*relative.split("/"))
+        destination = instance_root.joinpath(*relative.split("/"))
+        if destination.exists() or destination.is_symlink():
+            seeded.append({"path": relative, "state": "existing"})
+            continue
+        if not source.is_file():
+            raise InstallError(f"product template is missing: {relative}")
+        seeded.append({"path": relative, "state": "missing"})
+    return {
+        "schema_version": 1,
+        "action": "validate",
+        "mode": install_mode(product_root, instance_root),
+        "desired_state": desired,
+        "desired_state_state": "existing" if desired is not None else "missing",
+        "product_pointer": pointer,
+        "seeded": seeded,
+        "changed": [],
+    }
+
+
+def execute(
+    action: str,
+    product_root: Path,
+    instance_root: Path,
+    *,
+    write_product_pointer: bool = True,
+) -> dict[str, Any]:
+    if action not in {"seed", "show", "validate"}:
         raise InstallError(f"unsupported action: {action}")
     product_root = Path(product_root).resolve()
     instance_root = Path(instance_root).resolve()
@@ -360,6 +409,8 @@ def execute(action: str, product_root: Path, instance_root: Path) -> dict[str, A
                 for relative in SEEDED_FILES
             ],
         }
+    if action == "validate":
+        return validate_install(product_root, instance_root)
     state, desired = seed_desired_state(product_root, instance_root)
     return {
         "schema_version": 1,
@@ -367,7 +418,11 @@ def execute(action: str, product_root: Path, instance_root: Path) -> dict[str, A
         "mode": install_mode(product_root, instance_root),
         "desired_state": desired,
         "desired_state_state": state,
-        "product_pointer": write_pointer(product_root, instance_root),
+        "product_pointer": (
+            write_pointer(product_root, instance_root)
+            if write_product_pointer
+            else read_pointer(instance_root)
+        ),
         "seeded": seed_instance_files(product_root, instance_root),
     }
 
@@ -396,10 +451,15 @@ def default_instance_root(environment: dict[str, str] | None = None) -> Path:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("seed", "show"))
+    parser.add_argument("action", choices=("seed", "show", "validate"))
     parser.add_argument("--product-root", type=Path, default=ROOT)
     parser.add_argument("--instance-root", type=Path, default=None)
     parser.add_argument("--summary", action="store_true")
+    parser.add_argument(
+        "--no-pointer",
+        action="store_true",
+        help="seed instance files without publishing the product pointer",
+    )
     args = parser.parse_args(argv)
     try:
         instance_root = (
@@ -407,18 +467,27 @@ def main(argv: list[str] | None = None) -> int:
             if args.instance_root is not None
             else default_instance_root()
         )
-        result = execute(args.action, args.product_root, instance_root)
+        result = execute(
+            args.action,
+            args.product_root,
+            instance_root,
+            write_product_pointer=not args.no_pointer,
+        )
     except (OSError, InstallError) as exc:
         print(f"conflicting: {exc}", file=sys.stderr)
         return 3
     if args.summary:
-        created = sum(item["state"] == "created" for item in result["seeded"])
-        print(
+        created = sum(item["state"] == "created" for item in result.get("seeded", []))
+        existing = sum(item["state"] == "existing" for item in result.get("seeded", []))
+        missing = sum(item["state"] == "missing" for item in result.get("seeded", []))
+        summary = (
             f"instance mode={result['mode']} "
             f"desired-state={result['desired_state_state']} "
-            f"seeded={created} existing={len(result['seeded']) - created} "
-            f"root={instance_root}"
+            f"seeded={created} existing={existing}"
         )
+        if missing:
+            summary += f" missing={missing}"
+        print(f"{summary} root={instance_root}")
     else:
         print(json.dumps(result, indent=2, sort_keys=True))
     return 0

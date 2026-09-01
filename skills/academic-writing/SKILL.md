@@ -52,7 +52,7 @@ fact, caveat, scope condition, term or reference, stop.
 For local files, use the checker as a review prompt, not proof:
 
 ```sh
-python3 "${AGENTS_HOME:-$HOME/.agents}/skills/academic-writing/scripts/check_academic_style.py" path/to/file.tex
+python3 "$(provenant root)/skills/academic-writing/scripts/check_academic_style.py" path/to/file.tex
 ```
 
 Return rewritten prose first and concise risk flags second. For diagnosis,

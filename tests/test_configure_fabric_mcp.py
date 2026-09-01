@@ -35,8 +35,17 @@ def load_configurer():
     return module
 
 
-def run_configure(tmp_path: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
+def run_configure(
+    tmp_path: Path, *arguments: str, inherit_roots: bool = False,
+) -> subprocess.CompletedProcess[str]:
     shim = stable_shim(tmp_path)
+    environment = os.environ.copy()
+    # This helper exercises the default registration contract. CI itself runs
+    # under explicit split roots, which must not leak into this subprocess and
+    # silently turn the default case into an explicit-instance case.
+    if not inherit_roots:
+        environment.pop("AGENT_FABRIC_INSTANCE_ROOT", None)
+        environment.pop("AGENT_FABRIC_PRODUCT_ROOT", None)
     return subprocess.run(
         [
             str(SCRIPT),
@@ -52,6 +61,7 @@ def run_configure(tmp_path: Path, *arguments: str) -> subprocess.CompletedProces
             *arguments,
         ],
         cwd=ROOT,
+        env=environment,
         text=True,
         capture_output=True,
         check=False,
@@ -62,11 +72,15 @@ def run_configure_with_closed_stdout(
     tmp_path: Path, *arguments: str,
 ) -> tuple[int, str]:
     paths = all_client_paths(tmp_path)
+    environment = os.environ.copy()
+    environment.pop("AGENT_FABRIC_INSTANCE_ROOT", None)
+    environment.pop("AGENT_FABRIC_PRODUCT_ROOT", None)
     read_descriptor, write_descriptor = os.pipe()
     os.close(read_descriptor)
     process = subprocess.Popen(
         [str(SCRIPT), *all_client_arguments(tmp_path, paths), *arguments],
         cwd=ROOT,
+        env=environment,
         stdout=write_descriptor,
         stderr=subprocess.PIPE,
         text=True,
@@ -352,6 +366,19 @@ def test_rejects_a_relative_stable_shim_path(tmp_path: Path) -> None:
     assert result.returncode == 3
     assert "stable Provenant shim path must be absolute" in result.stderr
     assert not any(path.exists() for path in all_client_paths(tmp_path).values())
+
+
+def test_direct_repair_preserves_ambient_nondefault_instance_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    instance_root = tmp_path / "instance"
+    monkeypatch.setenv("AGENT_FABRIC_INSTANCE_ROOT", str(instance_root))
+
+    result = run_configure(tmp_path, "--platform", "codex", inherit_roots=True)
+
+    assert result.returncode == 0, result.stderr
+    registration = tomllib.loads((tmp_path / "codex.toml").read_text())["mcp_servers"]["fabric"]
+    assert registration["env"]["AGENT_FABRIC_INSTANCE_ROOT"] == str(instance_root)
 
 
 def test_check_rejects_a_missing_stable_shim(tmp_path: Path) -> None:
@@ -1163,7 +1190,7 @@ def test_registration_runbook_documents_a_project_free_registration_and_its_reco
     runbook = (ROOT / "docs/runbooks/fabric-mcp-registration.md").read_text()
     assert "configure-fabric-mcp.py" in runbook
     # Registration binds no project: cwd decides, with no manual override.
-    assert "exactly three environment variables" in runbook
+    assert "three environment variables by default" in runbook
     assert "AGENT_FABRIC_STATE_DIRECTORY" in runbook
     assert "AGENT_FABRIC_SEAT" in runbook
     assert "AGENT_FABRIC_CLIENT_LABEL" in runbook
@@ -1171,6 +1198,8 @@ def test_registration_runbook_documents_a_project_free_registration_and_its_reco
     assert "Fabric has no manual project override" in runbook
     assert "Claude Code and Codex" in runbook
     assert "six clients" in runbook
+    assert "`--mcp-clients all`" in runbook
+    assert "two\nprimary clients" in runbook
     assert "not model-family proof" in runbook
     assert "exact provider/model" in runbook
     verification = runbook.split("## Verify", 1)[1].split("\n## ", 1)[0]
@@ -1180,3 +1209,14 @@ def test_registration_runbook_documents_a_project_free_registration_and_its_reco
     assert "first-client atomic install" in recovery
     assert "partial-state" in recovery
     assert "exit code `4`" in recovery
+
+
+def test_relocation_runbook_uses_configured_instance_root_and_checks_shim_separately() -> None:
+    runbook = (ROOT / "docs/runbooks/split-product-relocation.md").read_text()
+    assert "`<instance-root>/.agent-fabric/product-root.json`" in runbook
+    assert "same exact instance root" in runbook
+    assert 'provenant_bin="${PROVENANT_BIN_DIR:-$HOME/.local/bin}/provenant"' in runbook
+    assert "elif [ -f \"$provenant_bin\" ]; then" in runbook
+    assert 'old="/path/to/old/provenant"' in runbook
+    assert 'for root in "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"' in runbook
+    assert 'printf "%s -> %s\\n" "$link" "$(realpath "$link")"' in runbook

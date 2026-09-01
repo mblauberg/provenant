@@ -273,13 +273,16 @@ def test_output_parent_swap_cannot_certify_an_identical_outside_file():
 
 
 def fabric_free_env():
-    # Stripping the fabric variables stops an inherited developer instance
-    # from steering these evals through an installed provenant command.
-    return {
+    # Keep the evals on this checkout's fused fixtures rather than an inherited
+    # developer instance or the operator's default ~/.agents instance.
+    env = {
         key: value
         for key, value in os.environ.items()
         if key != "AGENTS_HOME" and not key.startswith("AGENT_FABRIC_")
     }
+    env["AGENT_FABRIC_PRODUCT_ROOT"] = str(PRODUCT_ROOT)
+    env["AGENT_FABRIC_INSTANCE_ROOT"] = str(PRODUCT_ROOT)
+    return env
 
 
 def run_dispatch_with_stub(
@@ -2480,6 +2483,11 @@ def test_non_git_fallback_routes_via_product_root_model_route():
         # cf_dispatch.sh appends $HOME/.local/bin and $HOME/bin to PATH;
         # point HOME at the sandbox so an installed provenant cannot leak in.
         env["HOME"] = str(tmp)
+        instance = tmp / "instance"
+        (instance / "config").mkdir(parents=True)
+        for name in ("model-routing.json", "model-preferences.json"):
+            shutil.copy2(product / "config" / name, instance / "config" / name)
+        env["AGENT_FABRIC_INSTANCE_ROOT"] = str(instance)
         out = tmp / "out.txt"
         result = subprocess.run(
             [

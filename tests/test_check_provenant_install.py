@@ -63,3 +63,51 @@ def test_check_rejects_a_symlink_instead_of_a_managed_copy(tmp_path: Path) -> No
 
     assert result.returncode == 1
     assert "must be a regular managed copy" in result.stderr
+
+
+def test_check_rejects_a_stale_pointer_instead_of_abstaining(tmp_path: Path) -> None:
+    instance_root = tmp_path / "instance"
+    pointer = instance_root / ".agent-fabric/product-root.json"
+    pointer.parent.mkdir(parents=True)
+    pointer.write_text(
+        f'{{"schema_version": 1, "product_root": "{tmp_path / "moved"}"}}\n'
+    )
+
+    result = subprocess.run(
+        [str(SCRIPT)],
+        env={**os.environ, "AGENT_FABRIC_INSTANCE_ROOT": str(instance_root)},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 1
+    assert "product-root pointer is invalid or stale" in result.stderr
+
+
+def test_check_treats_empty_root_variables_as_unset(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    instance_root = home / ".agents"
+    pointer = instance_root / ".agent-fabric/product-root.json"
+    pointer.parent.mkdir(parents=True)
+    pointer.write_text(f'{{"schema_version": 1, "product_root": "{ROOT}"}}\n')
+    command = home / ".local/bin/provenant"
+    command.parent.mkdir(parents=True)
+    shutil.copy2(TEMPLATE, command)
+    command.chmod(0o755)
+
+    result = subprocess.run(
+        [str(SCRIPT)],
+        env={
+            **os.environ,
+            "HOME": str(home),
+            "AGENT_FABRIC_INSTANCE_ROOT": "",
+            "PROVENANT_BIN_DIR": "",
+        },
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "provenant installed stub=ok" in result.stdout

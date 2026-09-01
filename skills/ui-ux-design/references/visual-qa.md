@@ -19,7 +19,7 @@ Use rendered inspection, screenshots, accessibility tree, keyboard path,
 console, and network evidence as distinct lanes. Check hierarchy, alignment,
 clipping, layering, focus, overflow, state continuity, assets, errors, and
 unexpected requests. For a quick anti-pattern and contrast lead, run
-`node "${AGENTS_HOME:-$HOME/.agents}/skills/ui-ux-design/scripts/detect.mjs" --help`;
+`node "$(provenant root)/skills/ui-ux-design/scripts/detect.mjs" --help`;
 its output or a build stamp is
 not evidence that the page rendered as claimed, so verify the shipped artefact.
 

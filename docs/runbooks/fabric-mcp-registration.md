@@ -3,9 +3,12 @@
 Status: current
 Applies to: `scripts/configure-fabric-mcp.py` and `runtime/fabric/bin/fabric-mcp`
 
-`install-harness` registers the Fabric MCP server for every client it finds.
-`scripts/configure-fabric-mcp.py` does the registry writing and can be run on
-its own to add a client, check the registrations or repair one.
+`install-harness --platform all` registers the Fabric MCP server for the two
+primary clients (Claude Code and Codex) by default. Add
+`--mcp-clients all` when the six supported client registries should be
+configured. `scripts/configure-fabric-mcp.py --platform all` also configures
+all six directly; it does the registry writing and can be run on its own to
+add a client, check the registrations or repair one.
 
 ## What gets registered
 
@@ -17,7 +20,7 @@ path means moving the checkout does not invalidate six client registries: re-run
 `scripts/install-harness` from the new checkout and the pointer at
 `<instance-root>/.agent-fabric/product-root.json` is updated atomically.
 
-Every entry carries exactly three environment variables:
+Every entry carries these three environment variables by default:
 
 | Variable | Purpose |
 | --- | --- |
@@ -34,8 +37,11 @@ The registered client label is a shared default address. Give concurrently
 working agents distinct `AGENT_FABRIC_LABEL` values when they need separate
 inboxes; agents that intentionally share a label compete for the same claims.
 
-`AGENT_FABRIC_PRODUCT_ROOT` and `AGENT_FABRIC_INSTANCE_ROOT` are CLI-only
-controls and should be absent from every global client registration.
+`AGENT_FABRIC_PRODUCT_ROOT` is a CLI-only control and is absent from global
+client registrations. When a non-default instance root is selected,
+`install-harness` also records that explicit `AGENT_FABRIC_INSTANCE_ROOT` in
+the registration so the stable shim resolves the same instance; default-root
+registrations need no extra variable.
 
 ## The six clients
 

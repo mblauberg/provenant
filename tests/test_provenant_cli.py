@@ -176,6 +176,60 @@ def test_route_preserves_argv_environment_stdio_and_exit_status_through_symlink(
     }
 
 
+def test_root_prints_the_resolved_product_checkout(tmp_path):
+    checkout, command = make_checkout(tmp_path)
+
+    result = invoke(command, "root", cwd=tmp_path, AGENT_FABRIC_PRODUCT_ROOT=str(checkout))
+
+    assert result.returncode == 0
+    assert result.stdout == f"{checkout}\n"
+
+
+@pytest.mark.parametrize("launcher", ["source", "template"])
+def test_empty_root_environment_values_use_the_default_instance_pointer(tmp_path, launcher):
+    checkout, _ = make_checkout(tmp_path)
+    home = tmp_path / "home"
+    pointer = home / ".agents/.agent-fabric/product-root.json"
+    pointer.parent.mkdir(parents=True)
+    pointer.write_text(json.dumps({"schema_version": 1, "product_root": str(checkout)}))
+    command = checkout / "scripts/provenant" if launcher == "source" else install_stub(tmp_path)
+
+    result = invoke(
+        command,
+        "root",
+        cwd=tmp_path,
+        HOME=str(home),
+        AGENT_FABRIC_INSTANCE_ROOT="",
+        AGENT_FABRIC_PRODUCT_ROOT="",
+        AGENTS_HOME="",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == f"{checkout}\n"
+
+
+@pytest.mark.parametrize("launcher", ["source", "template"])
+def test_stale_pointer_fails_loudly_instead_of_falling_back_to_fused_checkout(
+    tmp_path, launcher
+):
+    home = tmp_path / "home"
+    fallback, _ = make_checkout(home)
+    fallback.rename(home / ".agents")
+    fallback = home / ".agents"
+    pointer = fallback / ".agent-fabric/product-root.json"
+    pointer.parent.mkdir(parents=True)
+    pointer.write_text(
+        json.dumps({"schema_version": 1, "product_root": str(tmp_path / "moved")})
+    )
+    command = fallback / "scripts/provenant" if launcher == "source" else install_stub(tmp_path)
+
+    result = invoke(command, "root", cwd=tmp_path, HOME=str(home))
+
+    assert result.returncode == 3
+    assert result.stdout == ""
+    assert "product-root pointer is invalid or stale" in result.stderr
+
+
 def test_worktree_runs_from_arbitrary_cwd_without_changing_it(tmp_path):
     _, command = make_checkout(tmp_path)
     caller_cwd = tmp_path / "another-repository"

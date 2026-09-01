@@ -9,7 +9,7 @@ while [[ -L "$script_path" ]]; do
     *) script_path=$(dirname "$script_path")/$link ;;
   esac
 done
-PRODUCT_ROOT="$(CDPATH= cd -- "$(dirname "$script_path")/.." && pwd)"
+PRODUCT_ROOT="$(CDPATH= cd -- "$(dirname "$script_path")/.." && pwd -P)"
 if [[ -f "$PRODUCT_ROOT/.git" && "${PROVENANT_ALLOW_LINKED_WORKTREE_INSTALL:-}" != 1 ]]; then
   echo "install-harness refuses a linked worktree product root: $PRODUCT_ROOT" >&2
   echo "repair: run from the canonical checkout, or explicitly acknowledge with PROVENANT_ALLOW_LINKED_WORKTREE_INSTALL=1" >&2
@@ -19,7 +19,7 @@ PLATFORM=""
 MCP_CLIENTS="primary"
 
 usage() {
-  echo "usage: install-harness --platform <claude|codex> [--mcp-clients <primary|all>]" >&2
+  echo "usage: install-harness --platform <claude|codex|all> [--mcp-clients <primary|all>]" >&2
 }
 
 while [[ $# -gt 0 ]]; do
@@ -46,19 +46,11 @@ while [[ $# -gt 0 ]]; do
 done
 
 case "$PLATFORM" in
-  claude)
-    platform_home="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
-    instructions="$platform_home/CLAUDE.md"
-    ;;
-  codex)
-    platform_home="${CODEX_HOME:-$HOME/.codex}"
-    instructions="$platform_home/AGENTS.md"
-    ;;
-  *)
-    usage
-    exit 2
-    ;;
+  claude|codex) primary_platforms=("$PLATFORM") ;;
+  all) primary_platforms=(claude codex) ;;
+  *) usage; exit 2 ;;
 esac
+REQUESTED_PLATFORM="$PLATFORM"
 
 case "$MCP_CLIENTS" in
   primary|all) ;;
@@ -73,6 +65,12 @@ case "$provenant_bin_dir" in
   /*) ;;
   *) echo "PROVENANT_BIN_DIR must be absolute" >&2; exit 3 ;;
 esac
+case "$provenant_command" in
+  "$PRODUCT_ROOT"|"$PRODUCT_ROOT"/*)
+    echo "PROVENANT_BIN_DIR must be outside the product checkout: $PRODUCT_ROOT" >&2
+    exit 3
+    ;;
+esac
 case "$instance_root" in
   /*) ;;
   *) echo "Agent Fabric instance root must be absolute" >&2; exit 3 ;;
@@ -81,19 +79,214 @@ esac
 # shellcheck source=scripts/lib/harness-python.sh
 source "$PRODUCT_ROOT/scripts/lib/harness-python.sh"
 
-# Validate the complete skill namespace before publishing the command, product
-# pointer, seeded instance files, client links or installation receipt.
-run_stdlib "$PRODUCT_ROOT/scripts/manage_installation.py" validate-sources \
-  --source "$PRODUCT_ROOT/skills" \
-  --custom-source "$instance_root/custom-skills" \
-  --target "$platform_home/skills" >/dev/null
-if [[ "$PLATFORM" == "claude" ]]; then
-  run_stdlib "$PRODUCT_ROOT/scripts/manage_installation.py" plan \
-    --surface agents \
-    --source "$PRODUCT_ROOT/agents" \
-    --target "$platform_home/agents" \
-    --summary >/dev/null
+provenant_bin_real="$(run_stdlib -c '
+from pathlib import Path
+import sys
+print(Path(sys.argv[1]).resolve(strict=False))
+' "$provenant_bin_dir")"
+case "$provenant_bin_real/provenant" in
+  "$PRODUCT_ROOT"|"$PRODUCT_ROOT"/*)
+    echo "PROVENANT_BIN_DIR resolves inside the product checkout: $provenant_bin_real" >&2
+    exit 3
+    ;;
+esac
+
+select_primary() {
+  PLATFORM="$1"
+  case "$PLATFORM" in
+    claude)
+      platform_home="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+      instructions="$platform_home/CLAUDE.md"
+      ;;
+    codex)
+      platform_home="${CODEX_HOME:-$HOME/.codex}"
+      instructions="$platform_home/AGENTS.md"
+      ;;
+    *) echo "unsupported primary: $PLATFORM" >&2; exit 2 ;;
+  esac
+}
+
+preflight_directory_target() {
+  local target="$1"
+  local source="$2"
+  if [[ ! -L "$target" ]]; then
+    return 0
+  fi
+  local target_real=""
+  local source_real=""
+  if ! target_real="$(CDPATH= cd -- "$target" 2>/dev/null && pwd -P)" \
+    || ! source_real="$(CDPATH= cd -- "$source" 2>/dev/null && pwd -P)" \
+    || [[ "$target_real" != "$source_real" ]]; then
+    echo "conflicting: managed directory is a non-canonical symlink: $target" >&2
+    echo "repair: restore the directory or deliberately use the canonical product link $source" >&2
+    exit 3
+  fi
+}
+
+instance_doctrine="$instance_root/AGENTS.md"
+product_pointer="$instance_root/.agent-fabric/product-root.json"
+old_product_root=""
+if [[ -f "$product_pointer" ]]; then
+  old_product_root="$(run_stdlib -c '
+from pathlib import Path
+import sys
+sys.path.insert(0, sys.argv[1])
+from lib.product_root_resolver import load_pointer_path
+value = load_pointer_path(Path(sys.argv[2]))
+print(value or "")
+' "$PRODUCT_ROOT/scripts" "$instance_root")"
 fi
+bootstrap="Read and follow \`$instance_doctrine\` and \`$PRODUCT_ROOT/HARNESS.md\` before making orchestration, delegation, model-routing or memory decisions. Platform/system policy and explicit user authority lead; the nearest project instruction may specialise or strengthen the global harness but may not silently broaden authority, weaken safety gates or redefine global cross-project memory policy."
+
+is_generated_bootstrap() {
+  local content expected
+  content="$(<"$instructions")" || return 1
+  expected=$'# Provenant\n\nRead and follow `'
+  expected+=*/AGENTS.md
+  expected+='` and `'
+  expected+=*/HARNESS.md
+  expected+=$'` before making orchestration, delegation, model-routing or memory decisions. Platform/system policy and explicit user authority lead; the nearest project instruction may specialise or strengthen the global harness but may not silently broaden authority, weaken safety gates or redefine global cross-project memory policy.'
+  [[ "$content" == $expected ]]
+}
+
+is_current_generated_bootstrap() {
+  local content
+  content="$(<"$instructions")" || return 1
+  [[ "$content" == "# Provenant"$'\n\n'"$bootstrap" ]]
+}
+
+rewrite_generated_bootstrap() {
+  local temporary
+  temporary="$(mktemp "${instructions}.provenant.XXXXXXXX")"
+  if ! printf '# Provenant\n\n%s\n' "$bootstrap" > "$temporary"; then
+    rm -f "$temporary"
+    exit 3
+  fi
+  mv -f "$temporary" "$instructions"
+  echo "instructions updated=$instructions"
+}
+
+create_generated_bootstrap() {
+  local temporary
+  temporary="$(mktemp "${instructions}.provenant.XXXXXXXX")"
+  if ! {
+    echo "# Provenant"
+    echo
+    echo "$bootstrap"
+  } > "$temporary"; then
+    rm -f "$temporary"
+    exit 3
+  fi
+  mv -f "$temporary" "$instructions"
+  echo "instructions created=$instructions"
+}
+
+preflight_instructions() {
+  if [[ ! -e "$instructions" && ! -L "$instructions" ]]; then
+    return 0
+  fi
+  if [[ -L "$instructions" ]]; then
+    if [[ "$instructions" -ef "$instance_doctrine" ]]; then
+      return 0
+    fi
+    echo "conflicting: instructions symlink is not the instance doctrine: $instructions" >&2
+    echo "repair: restore the file or link it to $instance_doctrine" >&2
+    exit 3
+  fi
+  if is_generated_bootstrap; then
+    return 0
+  fi
+  if grep -Fq "$instance_doctrine" "$instructions" \
+    && grep -Fq "$PRODUCT_ROOT/HARNESS.md" "$instructions"; then
+    return 0
+  fi
+  echo "conflicting: instructions preserved=$instructions" >&2
+  echo "add this line to that file:" >&2
+  echo "$bootstrap" >&2
+  exit 3
+}
+
+preflight_harness_link() {
+  local harness="$platform_home/HARNESS.md"
+  if [[ ! -e "$harness" && ! -L "$harness" ]]; then
+    return 0
+  fi
+  if [[ -L "$harness" ]] && [[ "$harness" -ef "$PRODUCT_ROOT/HARNESS.md" ]]; then
+    return 0
+  fi
+  if is_receipt_owned_old_harness "$harness"; then
+    return 0
+  fi
+  echo "conflicting: HARNESS.md is not a canonical or receipt-owned product link: $harness" >&2
+  echo "repair: restore the file or link it to $PRODUCT_ROOT/HARNESS.md" >&2
+  exit 3
+}
+
+is_receipt_owned_old_harness() {
+  local harness="$1" link_target
+  [[ -L "$harness" && -n "$old_product_root" ]] || return 1
+  link_target="$(readlink "$harness")" || return 1
+  run_stdlib -c '
+from pathlib import Path
+import sys
+target = (Path(sys.argv[1]).parent / sys.argv[2]).resolve(strict=False)
+expected = Path(sys.argv[3]).resolve(strict=False) / "HARNESS.md"
+raise SystemExit(0 if target == expected else 1)
+' "$harness" "$link_target" "$old_product_root"
+}
+
+rebind_harness_link() {
+  local harness="$platform_home/HARNESS.md"
+  if is_receipt_owned_old_harness "$harness" \
+    && [[ ! "$harness" -ef "$PRODUCT_ROOT/HARNESS.md" ]]; then
+    local temporary_directory temporary
+    temporary_directory="$(mktemp -d "${harness}.provenant-new.XXXXXXXX")"
+    temporary="$temporary_directory/HARNESS.md"
+    if ! ln -s "$PRODUCT_ROOT/HARNESS.md" "$temporary" \
+      || ! mv -f "$temporary" "$harness"; then
+      rm -f "$temporary"
+      rmdir "$temporary_directory"
+      exit 3
+    fi
+    rmdir "$temporary_directory"
+    echo "harness updated=$harness"
+  fi
+}
+
+# Validate every selected primary before publishing the command, product
+# pointer, seeded instance files, client links or installation receipt. A
+# canonical whole-directory link was already checked above; it has no
+# per-entry catalogue to preflight.
+for primary in "${primary_platforms[@]}"; do
+  select_primary "$primary"
+  preflight_directory_target "$platform_home/skills" "$PRODUCT_ROOT/skills"
+  if [[ "$PLATFORM" == "claude" ]]; then
+    preflight_directory_target "$platform_home/agents" "$PRODUCT_ROOT/agents"
+    preflight_directory_target "$platform_home/workflows" "$PRODUCT_ROOT/workflows"
+  fi
+  if [[ ! -L "$platform_home/skills" ]]; then
+    run_stdlib "$PRODUCT_ROOT/scripts/manage_installation.py" preflight \
+      --source "$PRODUCT_ROOT/skills" \
+      --custom-source "$instance_root/custom-skills" \
+      --target "$platform_home/skills" >/dev/null
+  fi
+  run_stdlib "$PRODUCT_ROOT/scripts/instance_installation.py" validate \
+    --product-root "$PRODUCT_ROOT" --instance-root "$instance_root" >/dev/null
+  if [[ "$PLATFORM" == "claude" ]]; then
+    if [[ ! -L "$platform_home/agents" ]]; then
+      run_stdlib "$PRODUCT_ROOT/scripts/manage_installation.py" plan \
+        --surface agents \
+        --source "$PRODUCT_ROOT/agents" \
+        --target "$platform_home/agents" \
+        --summary >/dev/null
+    fi
+    if [[ ! -L "$platform_home/workflows" ]]; then
+      run_stdlib "$PRODUCT_ROOT/scripts/install-workflows" --target "$platform_home/workflows" --preflight
+    fi
+  fi
+  preflight_instructions
+  preflight_harness_link
+done
 
 # Refuse a command collision before any installation mutation. Publication
 # revalidates this state and uses atomic no-replace or exchange primitives.
@@ -105,13 +298,12 @@ provenant_preflight="$(
 
 state_directory="${AGENT_FABRIC_STATE_DIRECTORY:-$HOME/.local/state/agent-harness/fabric}"
 claude_mcp_config="${CLAUDE_MCP_CONFIG:-$HOME/.claude.json}"
-mcp_platform="$PLATFORM"
+mcp_platform="$REQUESTED_PLATFORM"
 if [[ "$MCP_CLIENTS" == "all" ]]; then
   mcp_platform="all"
 fi
 codex_mcp_config="${CODEX_MCP_CONFIG:-${CODEX_HOME:-$HOME/.codex}/config.toml}"
 mcp_args=(
-  --platform "$mcp_platform"
   --agents-home "$PRODUCT_ROOT"
   --state-directory "$state_directory"
   --shim-path "$provenant_command"
@@ -122,10 +314,33 @@ mcp_args=(
   --kiro-config "${KIRO_MCP_CONFIG:-$HOME/.kiro/settings/mcp.json}"
   --opencode-config "${OPENCODE_MCP_CONFIG:-$HOME/.config/opencode/opencode.jsonc}"
 )
+mcp_instance_root=""
+if [[ -n "${AGENT_FABRIC_INSTANCE_ROOT:-}" && "$instance_root" != "$HOME/.agents" ]]; then
+  mcp_instance_root="$instance_root"
+  mcp_args+=(--instance-root "$instance_root")
+fi
 
-run_stdlib "$PRODUCT_ROOT/scripts/configure-fabric-mcp.py" "${mcp_args[@]}" --preflight
+configure_fabric_mcp() {
+  local action="${1:-}"
+  local mcp_command=("${mcp_args[@]}")
+  if [[ -n "$action" ]]; then mcp_command+=("$action"); fi
+  if [[ "$REQUESTED_PLATFORM" == "all" && "$MCP_CLIENTS" == "primary" ]]; then
+    for mcp_primary in claude codex; do
+      AGENT_FABRIC_INSTANCE_ROOT="$mcp_instance_root" \
+        run_stdlib "$PRODUCT_ROOT/scripts/configure-fabric-mcp.py" \
+        --platform "$mcp_primary" "${mcp_command[@]}"
+    done
+  else
+    AGENT_FABRIC_INSTANCE_ROOT="$mcp_instance_root" \
+      run_stdlib "$PRODUCT_ROOT/scripts/configure-fabric-mcp.py" \
+      --platform "$mcp_platform" "${mcp_command[@]}"
+  fi
+}
 
-if [[ "$PLATFORM" == "codex" ]]; then
+configure_fabric_mcp --preflight
+
+if [[ "$REQUESTED_PLATFORM" == "codex" || "$REQUESTED_PLATFORM" == "all" ]]; then
+  select_primary codex
   run_stdlib "$PRODUCT_ROOT/scripts/configure-codex-skill-overrides.py" --preflight \
     --config "$platform_home/config.toml"
 fi
@@ -138,8 +353,6 @@ provenant_status="$(
     --expected "$provenant_preflight"
 )" || exit 3
 echo "command $provenant_status=$provenant_command"
-run_stdlib "$PRODUCT_ROOT/scripts/write-product-root-pointer.py" "$instance_root" "$PRODUCT_ROOT"
-echo "product root pointer updated=$instance_root/.agent-fabric/product-root.json"
 case ":${PATH:-}:" in
   *":$provenant_bin_dir:"*) ;;
   *) echo "warning: $provenant_bin_dir is not on PATH" >&2 ;;
@@ -150,45 +363,53 @@ esac
 # 0019), so this is a no-op on every install after the first. `instance_root` is
 # resolved once, above, on the contract #529 established.
 run_stdlib "$PRODUCT_ROOT/scripts/instance_installation.py" seed \
-  --product-root "$PRODUCT_ROOT" --instance-root "$instance_root" --summary
+  --product-root "$PRODUCT_ROOT" --instance-root "$instance_root" --no-pointer --summary
 
-mkdir -p "$platform_home"
-"$PRODUCT_ROOT/scripts/install-skills" \
-  --target "$platform_home/skills" \
-  --custom-source "$instance_root/custom-skills"
-if [[ "$PLATFORM" == "claude" ]]; then
-  "$PRODUCT_ROOT/scripts/install-workflows" --target "$platform_home/workflows"
-  "$PRODUCT_ROOT/scripts/install-agents" --target "$platform_home/agents"
-fi
-if [[ "$PLATFORM" == "codex" ]]; then
-  run_stdlib "$PRODUCT_ROOT/scripts/configure-codex-skill-overrides.py" \
-    --config "$platform_home/config.toml"
-fi
-run_stdlib "$PRODUCT_ROOT/scripts/configure-fabric-mcp.py" "${mcp_args[@]}"
+for primary in "${primary_platforms[@]}"; do
+  select_primary "$primary"
+  mkdir -p "$platform_home"
+  "$PRODUCT_ROOT/scripts/install-skills" \
+    --target "$platform_home/skills" \
+    --custom-source "$instance_root/custom-skills"
+  if [[ "$PLATFORM" == "claude" ]]; then
+    run_stdlib "$PRODUCT_ROOT/scripts/install-workflows" --target "$platform_home/workflows"
+    "$PRODUCT_ROOT/scripts/install-agents" --target "$platform_home/agents"
+  fi
+  if [[ "$PLATFORM" == "codex" ]]; then
+    run_stdlib "$PRODUCT_ROOT/scripts/configure-codex-skill-overrides.py" \
+      --config "$platform_home/config.toml"
+  fi
+  rebind_harness_link
 
-# AGENTS.md is instance-owned once seeded and HARNESS.md stays product-shipped
-# (ADR 0019), so the client reads doctrine from the instance and the harness
-# constitution from the product. In a fused layout both roots are one directory,
-# so this is the text that was always emitted.
-instance_doctrine="$instance_root/AGENTS.md"
-bootstrap="Read and follow \`$instance_doctrine\` and \`$PRODUCT_ROOT/HARNESS.md\` before making orchestration, delegation, model-routing or memory decisions. Platform/system policy and explicit user authority lead; the nearest project instruction may specialise or strengthen the global harness but may not silently broaden authority, weaken safety gates or redefine global cross-project memory policy."
+  # AGENTS.md is instance-owned once seeded and HARNESS.md stays product-shipped
+  # (ADR 0019), so the client reads doctrine from the instance and the harness
+  # constitution from the product. In a fused layout both roots are one directory,
+  # so this is the text that was always emitted.
+  if [[ ! -e "$instructions" && ! -L "$instructions" ]]; then
+    create_generated_bootstrap
+  elif [[ -L "$instructions" ]] && [[ "$instructions" -ef "$instance_doctrine" ]]; then
+    # A link the user made to the instance doctrine already resolves to doctrine;
+    # repointing someone's deliberate symlink is more than an upgrade should do.
+    echo "instructions existing=$instructions"
+  elif is_generated_bootstrap; then
+    if is_current_generated_bootstrap; then
+      echo "instructions existing=$instructions"
+    else
+      rewrite_generated_bootstrap
+    fi
+  elif grep -Fq "$instance_doctrine" "$instructions" && grep -Fq "$PRODUCT_ROOT/HARNESS.md" "$instructions"; then
+    echo "instructions existing=$instructions"
+  else
+    echo "instructions preserved=$instructions" >&2
+    echo "add this line to that file:" >&2
+    echo "$bootstrap" >&2
+    exit 3
+  fi
+done
 
-if [[ ! -e "$instructions" && ! -L "$instructions" ]]; then
-  {
-    echo "# Provenant"
-    echo
-    echo "$bootstrap"
-  } > "$instructions"
-  echo "instructions created=$instructions"
-elif [[ -L "$instructions" ]] && [[ "$instructions" -ef "$instance_doctrine" ]]; then
-  # A link the user made to the instance doctrine already resolves to doctrine;
-  # repointing someone's deliberate symlink is more than an upgrade should do.
-  echo "instructions existing=$instructions"
-elif grep -Fq "$instance_doctrine" "$instructions" && grep -Fq "$PRODUCT_ROOT/HARNESS.md" "$instructions"; then
-  echo "instructions existing=$instructions"
-else
-  echo "instructions preserved=$instructions" >&2
-  echo "add this line to that file:" >&2
-  echo "$bootstrap" >&2
-  exit 3
-fi
+configure_fabric_mcp
+
+# The pointer is the final publication. Every deterministic conflict has been
+# checked above, so a failed install preserves the previous product selection.
+run_stdlib "$PRODUCT_ROOT/scripts/write-product-root-pointer.py" "$instance_root" "$PRODUCT_ROOT"
+echo "product root pointer updated=$instance_root/.agent-fabric/product-root.json"

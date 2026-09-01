@@ -55,7 +55,7 @@ What the route is intended to deliver. Link the owning specification.
 - Archive a route map under the project's archival policy only when the
   declared workflow-state owner records that disposition.
 - Validate an authored map with
-  `python3 "${AGENTS_HOME:-$HOME/.agents}/skills/work-map/scripts/validate_work_map.py" <EFFORT-file>`
+  `python3 "$(provenant root)/skills/work-map/scripts/validate_work_map.py" <EFFORT-file>`
   before handoff.
 
 ## Red flags

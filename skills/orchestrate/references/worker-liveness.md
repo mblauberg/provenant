@@ -3,7 +3,7 @@
 Run the read-only helper as one command:
 
 ```bash
-python3 "${AGENTS_HOME:-$HOME/.agents}/skills/orchestrate/scripts/worker_liveness.py"
+python3 "$(provenant root)/skills/orchestrate/scripts/worker_liveness.py"
 ```
 
 By default it reports one row per dispatched `codex exec` worker in the current
@@ -46,7 +46,7 @@ returned status are the completion evidence; use this command only for a
 detached protocol that captured `WORKER_PID` and `STATUS`:
 
 ```bash
-python3 "${AGENTS_HOME:-$HOME/.agents}/skills/orchestrate/scripts/worker_liveness.py" \
+python3 "$(provenant root)/skills/orchestrate/scripts/worker_liveness.py" \
   terminal-report --pid "$WORKER_PID" --classification complete --exit-status "$STATUS"
 ```
 
@@ -111,7 +111,7 @@ to `run_dir/done`. The caller captures the wrapper PID separately:
 
 ```bash
 run_dir=${TMPDIR:-/tmp}/provenant-worker-<unique-slug>
-"${AGENTS_HOME:-$HOME/.agents}/skills/orchestrate/scripts/run_worker_detached.sh" \
+"$(provenant root)/skills/orchestrate/scripts/run_worker_detached.sh" \
   --run-dir "$run_dir" -- <worker command> &
 WRAPPER_PID=$!
 wait "$WRAPPER_PID"
@@ -126,9 +126,9 @@ recorded wrapper exit. A wrapper exit without a marker is an evidence failure,
 never a reason to accept or reuse the run:
 
 ```bash
-helper="${AGENTS_HOME:-$HOME/.agents}/skills/orchestrate/scripts/run_worker_detached.sh"
+helper="$(provenant root)/skills/orchestrate/scripts/run_worker_detached.sh"
 while :; do
-  validation="$($helper --validate --run-dir "$run_dir" 2>/dev/null)"
+  validation="$("$helper" --validate --run-dir "$run_dir" 2>/dev/null)"
   validation_status=$?
   if [ "$validation_status" -eq 0 ]; then
     break

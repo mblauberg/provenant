@@ -90,6 +90,46 @@ def test_source_name_collision_aborts_before_link_or_receipt_mutation(tmp_path):
     assert not manifest_for(target).exists()
 
 
+def test_recorded_link_can_rebind_after_product_relocation(tmp_path):
+    old_source = tmp_path / "old-product/skills"
+    new_source = tmp_path / "new-product/skills"
+    target = tmp_path / "installed-skills"
+    for source, marker in ((old_source, "old"), (new_source, "new")):
+        skill = source / "example"
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text(
+            f"---\nname: example\ndescription: {marker}\n---\n"
+        )
+
+    first = subprocess.run(
+        [sys.executable, str(MANAGER), "install", "--source", str(old_source), "--target", str(target)],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert first.returncode == 0, first.stderr
+    assert (target / "example").resolve() == (old_source / "example").resolve()
+
+    preflight = subprocess.run(
+        [sys.executable, str(MANAGER), "preflight", "--source", str(new_source), "--target", str(target)],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert preflight.returncode == 0, preflight.stderr
+    second = subprocess.run(
+        [sys.executable, str(MANAGER), "install", "--source", str(new_source), "--target", str(target)],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert second.returncode == 0, second.stderr
+    assert (target / "example").resolve() == (new_source / "example").resolve()
+
+
 def test_second_two_source_run_is_a_filesystem_no_op(tmp_path):
     target = tmp_path / "skills"
     custom_source = custom_skill_source(tmp_path)

@@ -118,7 +118,7 @@ a clipped brief be reviewed as though whole. Large material belongs behind
 **2. Run it through the dispatcher, in the FOREGROUND.**
 
 ```
-~/.agents/skills/orchestrate/scripts/cf_dispatch.sh --tool agy \
+"$(provenant root)/skills/orchestrate/scripts/cf_dispatch.sh" --tool agy \
   --model gemini-3.7-flash --effort medium \
   --orchestrator-family anthropic \
   --add-dir <ABSOLUTE_REPO> \

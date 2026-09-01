@@ -15,8 +15,8 @@ audit branch first for read-only assessment of anything that already exists;
    MCP/app, or independently distributed plugin. Split only for a distinct
    trigger, authority, artifact and gate.
 3. Choose one kebab-case capability name and create `SKILL.md`. Place portable
-   user-global skills under `$HOME/.agents/skills`, repo-local skills under
-   `.agents/skills`, and this harness's owners under `skills/`. Its frontmatter
+   user-global skills under the configured user skills directory, repo-local
+   skills under `.agents/skills`, and this harness's owners under `skills/`. Its frontmatter
    permits only `name` and `description`; provider sidecars are outputs, never
    authority grants.
 4. Match freedom to risk: principles for judgement, templates for repeatable

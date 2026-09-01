@@ -12,7 +12,7 @@ def test_documented_fresh_checkout_sequence_produces_runnable_fabric(tmp_path):
     readme = (ROOT / "README.md").read_text()
     commands = [
         'npm ci',
-        'scripts/install-harness --platform claude',
+        'scripts/install-harness --platform all',
         'provenant help',
         'provenant fabric whoami',
     ]

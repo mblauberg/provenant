@@ -51,7 +51,7 @@ receipt; link safe relative artifacts and SHA-256 digests.
 Validate the receipt with:
 
 ```sh
-${AGENTS_HOME:-$HOME/.agents}/skills/evaluate/scripts/validate_evaluation.py \
+"$(provenant root)/skills/evaluate/scripts/validate_evaluation.py" \
   EVALUATION.json --verify-hashes --require-pass \
   --expected-evaluation-id "$EVALUATION_ID" \
   --expected-plan-digest "$FROZEN_PLAN_DIGEST" \
