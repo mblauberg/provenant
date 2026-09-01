@@ -108,6 +108,8 @@ The current pre-release tree includes:
   materialise tool guidance, and read-only diagnostics reject inaccessible or
   unstable database snapshots instead of reporting healthy absence or stale
   counts.
+- Fabric MCP inbox reads can wait for up to 120 seconds inside one tool call,
+  avoiding agent-authored SQLite polling and background watchers.
 - Raised the OpenAI worker route from `medium` to `high` effort via
   `openai.role_effort_defaults.worker.workhorse`, completing the Luna reorder.
   Moving `gpt-5.6-luna` to the front of `aliases.workhorse` on its own bought

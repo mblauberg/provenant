@@ -2,7 +2,7 @@
 
 Fabric is a project-scoped mailbox, small shared task ledger and activity log.
 One SQLite file, no daemon, no setup. Each process opens it directly; there is
-no provider executor, scheduler, wake mechanism or workflow engine.
+no provider executor, scheduler, background wake service or workflow engine.
 
 ## Start
 
@@ -53,6 +53,11 @@ one second to one hour. An unacknowledged expired claim is available for
 redelivery on the next inbox call; no background process is required. A stale
 claim token cannot acknowledge a delivery after another reader reclaims it.
 Repeating a successful acknowledgement with the same token is idempotent.
+
+MCP callers may set `wait_seconds` from zero to 120 on `fabric_inbox`. An empty
+inbox then waits inside that one tool call until a message arrives or the bound
+expires. It returns `[]` on expiry. Do not query Fabric's SQLite file or start a
+shell watcher; return or make another bounded MCP call instead.
 
 `inbox --peek` is observation-only: it neither claims nor acknowledges. It can
 show an actively claimed delivery, but never reveals that reader's claim token.

@@ -1,5 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { setTimeout as delay } from "node:timers/promises";
 import { z } from "zod";
 
 import { databasePath, identify } from "./identity.js";
@@ -63,6 +64,20 @@ function reply(payload: unknown): { content: Array<{ type: "text"; text: string 
   return { content: [{ type: "text", text: JSON.stringify(payload, null, 2) }] };
 }
 
+const waitForInbox = async (
+  options: { limit?: number; peek?: boolean; claimTtlMs?: number },
+  waitMs: number,
+) => {
+  const deadline = Date.now() + waitMs;
+  for (;;) {
+    const messages = readyStore().inbox(who, options);
+    if (messages.length > 0 || waitMs === 0) return messages;
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) return [];
+    await delay(Math.min(100, remaining));
+  }
+};
+
 server.registerTool(
   "fabric_whoami",
   {
@@ -92,19 +107,21 @@ server.registerTool(
   "fabric_inbox",
   {
     description:
-      "Claim my unacknowledged messages. Peek observes without claiming; expired claims redeliver.",
+      "Claim my unacknowledged messages. Peek observes without claiming; expired claims redeliver. " +
+      "Set wait_seconds for one bounded wait inside this MCP call; never poll SQLite or start a watcher.",
     inputSchema: {
       limit: z.number().int().positive().optional(),
       peek: z.boolean().optional(),
       claim_seconds: z.number().int().min(1).max(3600).optional(),
+      wait_seconds: z.number().int().min(0).max(120).optional(),
     },
   },
-  ({ limit, peek, claim_seconds }) =>
-    reply(readyStore().inbox(who, {
+  async ({ limit, peek, claim_seconds, wait_seconds }) =>
+    reply(await waitForInbox({
       limit,
       peek,
       claimTtlMs: claim_seconds === undefined ? undefined : claim_seconds * 1000,
-    })),
+    }, (wait_seconds ?? 0) * 1000)),
 );
 
 server.registerTool(

@@ -411,6 +411,72 @@ describe("CLI boundaries", () => {
 });
 
 describe("MCP startup boundaries", () => {
+  it("waits inside one inbox call until a message arrives", async () => {
+    const sender = agent("wait-sender");
+    const seed = openStore();
+    seed.announce(sender);
+    seed.close();
+
+    const serverPath = fileURLToPath(new URL("../src/server.ts", import.meta.url));
+    const tsxLoader = createRequire(import.meta.url).resolve("tsx");
+    const transport = new StdioClientTransport({
+      command: process.execPath,
+      args: ["--import", tsxLoader, serverPath],
+      cwd: repositoryRoot,
+      stderr: "pipe",
+      env: {
+        HOME: process.env.HOME ?? temporaryDirectory,
+        PATH: process.env.PATH ?? "/usr/bin:/bin",
+        NODE_NO_WARNINGS: "1",
+        AGENT_FABRIC_STATE_DIRECTORY: temporaryDirectory,
+        AGENT_FABRIC_SEAT: "codex",
+        AGENT_FABRIC_LABEL: "wait-recipient",
+      },
+    });
+    const client = new Client({ name: "wait-regression", version: "1" });
+    try {
+      await client.connect(transport);
+      let settled = false;
+      const waiting = client.callTool({
+        name: "fabric_inbox",
+        arguments: { wait_seconds: 1 },
+      }).finally(() => { settled = true; });
+
+      await delay(75);
+      expect(settled).toBe(false);
+      const writer = openStore();
+      writer.send(sender, "wait-recipient", "arrived during the MCP wait");
+      writer.close();
+
+      const result = await waiting;
+      expect(result.isError).toBeUndefined();
+      const content = result.content as Array<{ type: "text"; text: string }>;
+      expect(JSON.parse(content[0]!.text)).toMatchObject([{
+        body: "arrived during the MCP wait",
+        claimId: expect.any(String),
+      }]);
+      const messages = JSON.parse(content[0]!.text) as Message[];
+      await client.callTool({
+        name: "fabric_acknowledge",
+        arguments: {
+          message_id: messages[0]!.messageId,
+          claim_id: messages[0]!.claimId,
+        },
+      });
+
+      const timeoutStarted = Date.now();
+      const timedOut = await client.callTool({
+        name: "fabric_inbox",
+        arguments: { wait_seconds: 1 },
+      });
+      expect(Date.now() - timeoutStarted).toBeGreaterThanOrEqual(900);
+      const timeoutContent = timedOut.content as Array<{ type: "text"; text: string }>;
+      expect(JSON.parse(timeoutContent[0]!.text)).toEqual([]);
+    } finally {
+      await client.close().catch(() => undefined);
+    }
+  }, 5_000);
+
   it("keeps the transport open with a stable tool error after a client-seat collision", async () => {
     const store = openStore();
     store.announce(identify({
