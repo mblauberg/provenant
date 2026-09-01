@@ -138,6 +138,11 @@ jobs:
         run: uv sync --locked --only-group test
       - name: Run ordinary checks and Python tests
         env:
+          # A source checkout is the fused product/instance fixture for this
+          # job. The split-root job below provisions and verifies the installed
+          # two-root contract separately.
+          AGENT_FABRIC_PRODUCT_ROOT: ${{ github.workspace }}
+          AGENT_FABRIC_INSTANCE_ROOT: ${{ github.workspace }}
           HARNESS_PYTHON: ${{ github.workspace }}/.venv/bin/python
         run: scripts/check-harness
 
