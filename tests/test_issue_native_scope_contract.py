@@ -92,7 +92,8 @@ def test_issue_native_decision_and_spec_reconciliation_are_recorded():
     assert "live/provider semantic held-outs" in lifecycle
     assert "deterministic contract and fixture tests" in lifecycle
     assert "dispatch and batch receipts own" in lifecycle.lower()
-    assert "fabric only" in lifecycle.lower()
+    assert "fabric mcp" in lifecycle.lower()
+    assert "does not implement provider mechanics" in " ".join(lifecycle.lower().split())
     assert "issue or receipt records scope or evidence; it is not approval" in lifecycle.lower()
     assert "This specification grants no authority" in lifecycle
     assert "Non-code delivery has no shared executable contract" not in lifecycle

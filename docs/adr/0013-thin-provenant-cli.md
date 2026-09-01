@@ -13,7 +13,8 @@ by [ADR 0022](0022-thin-fabric-mcp-execution-facade.md) on 2026-09-01
 > are historical evidence, not current operational guidance. Current Fabric
 > commands and configuration are owned by
 > [`runtime/fabric/README.md`](../../runtime/fabric/README.md); Fabric now
-> coordinates messages, tasks and activity while direct CLIs execute providers.
+> coordinates messages, tasks and activity, and its thin MCP façade can start
+> the same provider owners available through the direct CLI.
 > The current front door delegates `route`, `worktree`, `check`, `fabric`,
 > `dispatch`, `batch` and `run` to the owners below. The original daemon-era
 > command table remains in Git history.

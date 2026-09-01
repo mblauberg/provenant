@@ -38,11 +38,12 @@ The current pre-release tree includes:
   `workhorse` and `scout` aliases from runtime capability discovery, with
   receipts that separate adapter, endpoint, model family, requested and
   effective effort, capability source and any substitution.
-- Fabric, at `runtime/fabric`: messages, shared tasks and an activity log for
-  the agents working on one project, over MCP or a shell CLI. One SQLite file,
-  no daemon, and identity derived from the working directory. Ordinary registered
-  linked worktrees share their repository's project while retaining their resolved
-  cwd, with nothing to trust, bootstrap or provision.
+- Fabric, at `runtime/fabric`: messages, shared tasks and activity for agents
+  working on one project, plus thin MCP dispatch and batch tools that delegate
+  to the existing execution owners and keep full output file-backed. One SQLite
+  file, no daemon, and identity derived from the working directory. Ordinary
+  registered linked worktrees share their repository's project while retaining
+  their resolved cwd, with nothing to trust, bootstrap or provision.
 - Gates: `scripts/check-harness` (policy checks, skill trigger fixtures, shell
   parse, `pytest`), `scripts/static-security-check.py` and
   `scripts/public-release-check`, plus a CI workflow that runs the harness

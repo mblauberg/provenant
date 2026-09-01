@@ -10,9 +10,11 @@ import {
   openSync,
   readFileSync,
   realpathSync,
+  rmSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 
 import type { Identity } from "./identity.js";
@@ -66,16 +68,28 @@ interface OwnerCompletion {
 interface StartedOwner {
   child: ChildProcess;
   completion: Promise<OwnerCompletion>;
+  cancellation?: Promise<void>;
+  cancelSpec: CancelSpec;
   runDir: string;
   stdoutPath: string;
   stderrPath: string;
 }
 
-const activeOwners = new Set<ChildProcess>();
+interface CancelSpec {
+  command: string;
+  args: string[];
+  targetDirectory: string;
+  cwd: string;
+  env: NodeJS.ProcessEnv;
+}
+
+type NormalisedRoute = Required<Pick<RouteInput, "adapter" | "role">> & Omit<RouteInput, "adapter" | "role">;
+
+const activeOwners = new Set<StartedOwner>();
 
 export function cancelActiveExecutions(): void {
-  for (const child of activeOwners) {
-    if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
+  for (const started of activeOwners) {
+    void requestOwnerCancellation(started);
   }
 }
 
@@ -115,7 +129,37 @@ function executableOwner(root: string, relativePath: string): string {
   return path;
 }
 
-function createRunDirectory(identity: Identity, env: NodeJS.ProcessEnv): { runDir: string; root: string } {
+async function pythonOwner(root: string, identity: Identity, env: NodeJS.ProcessEnv): Promise<string> {
+  const helper = join(root, "scripts/lib/harness-python.sh");
+  const metadata = lstatSync(helper);
+  if (!metadata.isFile() || metadata.isSymbolicLink()) {
+    throw new Error(`Python owner selector must be a regular local file: ${helper}`);
+  }
+  try {
+    const { stdout } = await execFileAsync("/bin/bash", [
+      "-c",
+      'source "$1"; run_stdlib -c "import sys; print(sys.executable)"',
+      "provenant-python-owner",
+      helper,
+    ], {
+      cwd: identity.cwd,
+      env,
+      encoding: "utf8",
+      timeout: 10_000,
+      maxBuffer: 64 * 1024,
+    });
+    const selected = canonical(stdout.trim());
+    const selectedMetadata = lstatSync(selected);
+    accessSync(selected, constants.X_OK);
+    if (!isAbsolute(selected) || !selectedMetadata.isFile()) throw new Error("selector returned a non-file");
+    return selected;
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(`Python execution owner is unavailable: ${detail}`, { cause: error });
+  }
+}
+
+function createRunDirectory(identity: Identity): string {
   const workspace = canonical(identity.cwd);
   const agentRun = join(workspace, ".agent-run");
   mkdirSync(agentRun, { recursive: true, mode: 0o700 });
@@ -125,45 +169,50 @@ function createRunDirectory(identity: Identity, env: NodeJS.ProcessEnv): { runDi
   }
   const runRoot = canonical(agentRun);
   if (!inside(workspace, runRoot)) throw new Error("execution run root escapes the caller workspace");
-  const runDir = mkdtempSync(join(runRoot, "mcp-"));
-  const root = productRoot(env);
-  return { runDir, root };
+  return mkdtempSync(join(runRoot, "mcp-"));
 }
 
-async function initialiseRun(identity: Identity, env: NodeJS.ProcessEnv): Promise<{ runDir: string; root: string }> {
-  const created = createRunDirectory(identity, env);
-  const owner = executableOwner(created.root, "skills/orchestrate/scripts/run_dir_init.sh");
+async function initialiseRun(identity: Identity, env: NodeJS.ProcessEnv, root: string): Promise<string> {
+  const owner = executableOwner(root, "skills/orchestrate/scripts/run_dir_init.sh");
+  const runDir = createRunDirectory(identity);
   try {
-    await execFileAsync(owner, [created.runDir], {
+    await execFileAsync(owner, [runDir], {
       cwd: identity.cwd,
       env,
       timeout: 10_000,
       maxBuffer: 64 * 1024,
     });
   } catch (error) {
+    rmSync(runDir, { recursive: true, force: true });
     const detail = error instanceof Error ? error.message : String(error);
     throw new Error(`execution run setup failed: ${detail}`, { cause: error });
   }
-  return created;
+  return runDir;
 }
 
-function routeArguments(input: RouteInput, identity: Identity): string[] {
+function normaliseRoute(input: RouteInput, identity: Identity): NormalisedRoute {
   const adapter = input.adapter ?? (SUPPORTED_ADAPTERS.has(identity.provider) ? identity.provider : undefined);
   if (adapter === undefined) throw new Error("adapter is required when the Fabric seat is not a provider adapter");
   const selectors = [input.alias, input.task_class, input.model].filter((value) => value !== undefined);
   if (selectors.length > 1) throw new Error("provide at most one of alias, task_class or model");
-  const args = ["--adapter", adapter, "--role", input.role ?? "worker"];
-  if (input.task_class !== undefined) args.push("--task-class", input.task_class);
-  else if (input.model !== undefined) args.push("--model", input.model);
-  else args.push("--alias", input.alias ?? "workhorse");
-  for (const [flag, value] of [
-    ["--effort", input.effort],
-    ["--orchestrator-family", input.orchestrator_family],
-    ["--risk-tier", input.risk_tier],
-    ["--model-override-tier", input.model_override_tier],
-    ["--reviewer-id", input.reviewer_id],
-  ] as const) {
-    if (value !== undefined) args.push(flag, value);
+  return {
+    adapter,
+    role: input.role ?? "worker",
+    ...(input.task_class !== undefined
+      ? { task_class: input.task_class }
+      : input.model !== undefined ? { model: input.model } : { alias: input.alias ?? "workhorse" }),
+    ...(input.effort === undefined ? {} : { effort: input.effort }),
+    ...(input.orchestrator_family === undefined ? {} : { orchestrator_family: input.orchestrator_family }),
+    ...(input.risk_tier === undefined ? {} : { risk_tier: input.risk_tier }),
+    ...(input.model_override_tier === undefined ? {} : { model_override_tier: input.model_override_tier }),
+    ...(input.reviewer_id === undefined ? {} : { reviewer_id: input.reviewer_id }),
+  };
+}
+
+function routeArguments(route: NormalisedRoute): string[] {
+  const args: string[] = [];
+  for (const [key, value] of Object.entries(route)) {
+    if (value !== undefined) args.push(`--${key.replaceAll("_", "-")}`, value);
   }
   return args;
 }
@@ -174,9 +223,18 @@ function validatePrompt(prompt: string | undefined, promptFile: string | undefin
   }
 }
 
-function startOwner(owner: string, args: string[], identity: Identity, env: NodeJS.ProcessEnv, runDir: string): StartedOwner {
-  const stdoutPath = join(runDir, "owner.stdout.jsonl");
-  const stderrPath = join(runDir, "owner.stderr.log");
+function startOwner(
+  owner: string,
+  args: string[],
+  identity: Identity,
+  env: NodeJS.ProcessEnv,
+  runDir: string,
+  cancelSpec: CancelSpec,
+  cleanupPaths: string[] = [],
+): StartedOwner {
+  const logPrefix = join(dirname(runDir), basename(runDir));
+  const stdoutPath = `${logPrefix}-owner.stdout.jsonl`;
+  const stderrPath = `${logPrefix}-owner.stderr.log`;
   const stdout = openSync(stdoutPath, "wx", 0o600);
   const stderr = openSync(stderrPath, "wx", 0o600);
   let child: ChildProcess;
@@ -190,16 +248,56 @@ function startOwner(owner: string, args: string[], identity: Identity, env: Node
     closeSync(stdout);
     closeSync(stderr);
   }
-  activeOwners.add(child);
+  let started: StartedOwner;
   const completion = new Promise<OwnerCompletion>((resolveCompletion) => {
     let spawnError: string | undefined;
     child.once("error", (error) => { spawnError = error.message; });
     child.once("close", (exitCode, signal) => {
-      activeOwners.delete(child);
+      activeOwners.delete(started);
+      for (const path of cleanupPaths) {
+        try { unlinkSync(path); } catch { /* Exact staging input may already be absent. */ }
+      }
       resolveCompletion({ exitCode, signal, ...(spawnError === undefined ? {} : { error: spawnError }) });
     });
   });
-  return { child, completion, runDir, stdoutPath, stderrPath };
+  started = { child, completion, cancelSpec, runDir, stdoutPath, stderrPath };
+  activeOwners.add(started);
+  return started;
+}
+
+function cancellationTargetReady(path: string): boolean {
+  try {
+    const metadata = lstatSync(path);
+    return metadata.isDirectory() && !metadata.isSymbolicLink();
+  } catch {
+    return false;
+  }
+}
+
+async function requestOwnerCancellation(started: StartedOwner): Promise<void> {
+  if (started.cancellation !== undefined) return await started.cancellation;
+  started.cancellation = (async () => {
+    const deadline = Date.now() + 5_000;
+    while (started.child.exitCode === null && started.child.signalCode === null
+      && !cancellationTargetReady(started.cancelSpec.targetDirectory) && Date.now() < deadline) {
+      await new Promise((resolveWait) => setTimeout(resolveWait, 25));
+    }
+    if (started.child.exitCode !== null || started.child.signalCode !== null) return;
+    if (cancellationTargetReady(started.cancelSpec.targetDirectory)) {
+      try {
+        await execFileAsync(started.cancelSpec.command, started.cancelSpec.args, {
+          cwd: started.cancelSpec.cwd,
+          env: started.cancelSpec.env,
+          timeout: 10_000,
+          maxBuffer: 64 * 1024,
+        });
+      } catch {
+        // The owner still receives a bounded graceful signal below.
+      }
+    }
+    if (started.child.exitCode === null && started.child.signalCode === null) started.child.kill("SIGTERM");
+  })();
+  await started.cancellation;
 }
 
 async function observeOwner(
@@ -211,14 +309,14 @@ async function observeOwner(
   if (!Number.isInteger(seconds) || seconds < 0 || seconds > MAX_EXECUTION_WAIT_SECONDS) {
     throw new Error(`wait_seconds must be an integer from 0 to ${MAX_EXECUTION_WAIT_SECONDS}`);
   }
+  if (signal.aborted) {
+    await requestOwnerCancellation(started);
+    signal.throwIfAborted();
+  }
   if (seconds === 0) {
     return started.child.exitCode === null && started.child.signalCode === null
       ? undefined
       : await started.completion;
-  }
-  if (signal.aborted) {
-    started.child.kill("SIGTERM");
-    signal.throwIfAborted();
   }
   return await new Promise<OwnerCompletion | undefined>((resolveWait, rejectWait) => {
     let settled = false;
@@ -231,11 +329,12 @@ async function observeOwner(
     };
     const aborted = (): void => {
       if (settled) return;
-      started.child.kill("SIGTERM");
       settled = true;
       clearTimeout(timer);
       signal.removeEventListener("abort", aborted);
-      rejectWait(signal.reason instanceof Error ? signal.reason : new Error("execution wait cancelled"));
+      void requestOwnerCancellation(started).finally(() => {
+        rejectWait(signal.reason instanceof Error ? signal.reason : new Error("execution wait cancelled"));
+      });
     };
     const timer = setTimeout(() => { finish(undefined); }, seconds * 1000);
     signal.addEventListener("abort", aborted, { once: true });
@@ -271,6 +370,16 @@ function objectValue(value: unknown): Record<string, unknown> | undefined {
     : undefined;
 }
 
+function validOwnerRecord(record: Record<string, unknown>, kind: "dispatch" | "batch"): boolean {
+  if (record.schema_version !== 1 || typeof record.status !== "string" || record.status.length === 0) return false;
+  if (record.record_type === undefined) return typeof record.message === "string" && record.message.length > 0;
+  return record.record_type === (kind === "dispatch" ? "dispatch-attempt" : "dispatch-batch");
+}
+
+function completionConflict(completion: OwnerCompletion, successful: boolean): boolean {
+  return completion.error !== undefined || completion.signal !== null || (successful && completion.exitCode !== 0);
+}
+
 function compactRoute(value: unknown): Record<string, string> | null {
   const route = objectValue(value);
   if (route === undefined) return null;
@@ -293,10 +402,21 @@ function basePaths(started: StartedOwner): Record<string, string> {
 
 function compactDispatch(started: StartedOwner, completion: OwnerCompletion): Record<string, unknown> {
   const record = parseOwnerOutput(started.stdoutPath);
-  if (record === undefined) {
+  if (record === undefined || !validOwnerRecord(record, "dispatch")) {
     return {
       schema_version: 1,
       status: "owner_output_invalid",
+      owner_exit: completion.exitCode,
+      owner_signal: completion.signal,
+      ...(completion.error === undefined ? {} : { message: completion.error }),
+      paths: basePaths(started),
+    };
+  }
+  if (completionConflict(completion, record.status === "succeeded")) {
+    return {
+      schema_version: 1,
+      status: "owner_completion_conflict",
+      owner_status: record.status,
       owner_exit: completion.exitCode,
       owner_signal: completion.signal,
       ...(completion.error === undefined ? {} : { message: completion.error }),
@@ -324,10 +444,21 @@ function compactDispatch(started: StartedOwner, completion: OwnerCompletion): Re
 
 function compactBatch(started: StartedOwner, completion: OwnerCompletion): Record<string, unknown> {
   const record = parseOwnerOutput(started.stdoutPath);
-  if (record === undefined) {
+  if (record === undefined || !validOwnerRecord(record, "batch")) {
     return {
       schema_version: 1,
       status: "owner_output_invalid",
+      owner_exit: completion.exitCode,
+      owner_signal: completion.signal,
+      ...(completion.error === undefined ? {} : { message: completion.error }),
+      paths: basePaths(started),
+    };
+  }
+  if (completion.error !== undefined || completion.signal !== null) {
+    return {
+      schema_version: 1,
+      status: "owner_completion_conflict",
+      owner_status: record.status,
       owner_exit: completion.exitCode,
       owner_signal: completion.signal,
       ...(completion.error === undefined ? {} : { message: completion.error }),
@@ -383,6 +514,10 @@ function timeoutSeconds(value: number | undefined): number {
   return timeout;
 }
 
+function stagingPath(runDir: string, name: string): string {
+  return join(dirname(runDir), `${basename(runDir)}-${name}`);
+}
+
 export async function dispatchConfiguredProvider(
   input: DispatchInput,
   identity: Identity,
@@ -390,37 +525,44 @@ export async function dispatchConfiguredProvider(
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<Record<string, unknown>> {
   validatePrompt(input.prompt, input.prompt_file);
-  const { runDir, root } = await initialiseRun(identity, env);
+  const route = normaliseRoute(input, identity);
+  const timeout = timeoutSeconds(input.timeout_seconds);
   const taskId = input.task_id ?? `task-${randomUUID().slice(0, 8)}`;
-  const promptPath = input.prompt === undefined ? input.prompt_file! : join(runDir, "prompt.md");
-  if (input.prompt !== undefined) writeFileSync(promptPath, input.prompt, { flag: "wx", mode: 0o600 });
+  const root = productRoot(env);
   const owner = executableOwner(root, "skills/orchestrate/scripts/dispatch_run.py");
+  const controls = executableOwner(root, "skills/orchestrate/scripts/run_controls.py");
+  const python = await pythonOwner(root, identity, env);
+  const runDir = await initialiseRun(identity, env, root);
+  const promptPath = input.prompt === undefined ? input.prompt_file! : stagingPath(runDir, "prompt.md");
+  if (input.prompt !== undefined) writeFileSync(promptPath, input.prompt, { flag: "wx", mode: 0o600 });
   const args = [
     "--run-dir", runDir,
     "--task-id", taskId,
     "--prompt-file", promptPath,
     "--intent", "ordinary",
-    "--timeout", String(timeoutSeconds(input.timeout_seconds)),
-    ...routeArguments(input, identity),
+    "--timeout", String(timeout),
+    ...routeArguments(route),
   ];
-  const started = startOwner(owner, args, identity, env, runDir);
+  const started = startOwner(python, [owner, ...args], identity, env, runDir, {
+    command: python,
+    args: [controls, "cancel", "--run-dir", runDir, "--task-id", taskId,
+      "--attempt-id", "attempt-001", "--wait-seconds", "5"],
+    targetDirectory: join(runDir, "dispatch", "tasks", taskId, "attempt-001"),
+    cwd: identity.cwd,
+    env,
+  }, input.prompt === undefined ? [] : [promptPath]);
   const completion = await observeOwner(started, input.wait_seconds, signal);
   return completion === undefined ? running(started, "dispatch", identity) : compactDispatch(started, completion);
 }
 
 function normaliseTask(task: BatchTaskInput, index: number, identity: Identity): Record<string, unknown> {
   validatePrompt(task.prompt, task.prompt_file);
-  const route = routeArguments(task, identity);
-  const normalised: Record<string, unknown> = {
+  return {
     id: task.id ?? `task-${index + 1}`,
     ...(task.prompt === undefined ? { prompt_file: task.prompt_file } : { prompt: task.prompt }),
     timeout: timeoutSeconds(task.timeout_seconds),
+    ...normaliseRoute(task, identity),
   };
-  for (let cursor = 0; cursor < route.length; cursor += 2) {
-    const key = route[cursor]!.slice(2).replaceAll("-", "_");
-    normalised[key] = route[cursor + 1];
-  }
-  return normalised;
 }
 
 export async function dispatchConfiguredBatch(
@@ -435,18 +577,28 @@ export async function dispatchConfiguredBatch(
     throw new Error("concurrency must be an integer from 1 to 8");
   }
   const tasks = input.tasks.map((task, index) => normaliseTask(task, index, identity));
-  const { runDir, root } = await initialiseRun(identity, env);
-  const manifestPath = join(runDir, "task-manifest.json");
+  const root = productRoot(env);
+  const owner = executableOwner(root, "skills/orchestrate/scripts/batch_run.py");
+  const controls = executableOwner(root, "skills/orchestrate/scripts/run_controls.py");
+  const python = await pythonOwner(root, identity, env);
+  const runDir = await initialiseRun(identity, env, root);
+  const manifestPath = stagingPath(runDir, "task-manifest.json");
   writeFileSync(manifestPath, JSON.stringify({
     schema_version: 1,
     tasks,
   }, null, 2) + "\n", { flag: "wx", mode: 0o600 });
-  const owner = executableOwner(root, "skills/orchestrate/scripts/batch_run.py");
-  const started = startOwner(owner, [
+  const started = startOwner(python, [owner,
     "--run-dir", runDir,
     "--manifest", manifestPath,
     "--concurrency", String(concurrency),
-  ], identity, env, runDir);
+  ], identity, env, runDir, {
+    command: python,
+    args: [controls, "cancel", "--run-dir", runDir, "--batch-id", "batch-001",
+      "--wait-seconds", "5"],
+    targetDirectory: join(runDir, "dispatch", "batches", "batch-001"),
+    cwd: identity.cwd,
+    env,
+  }, [manifestPath]);
   const completion = await observeOwner(started, input.wait_seconds, signal);
   return completion === undefined ? running(started, "batch", identity) : compactBatch(started, completion);
 }

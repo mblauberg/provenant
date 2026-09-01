@@ -28,16 +28,42 @@ writeFileSync(join(runDir, `${owner}.invocation.json`), JSON.stringify({
   cwd: process.cwd(),
 }, null, 2) + "\n");
 
-if (owner === "dispatch_run.py") {
+if (owner === "run_controls.py") {
+  const sleepingPid = join(runDir, "sleeping.pid");
+  const cancelledMarker = join(runDir, "cancelled.marker");
+  const cancelWhenReady = () => {
+    try {
+      process.kill(Number(readFileSync(sleepingPid, "utf8")), "SIGTERM");
+    } catch {
+      setTimeout(cancelWhenReady, 10);
+      return;
+    }
+    const finishWhenReady = () => {
+      try {
+        readFileSync(cancelledMarker, "utf8");
+      } catch {
+        setTimeout(finishWhenReady, 10);
+        return;
+      }
+      process.stdout.write('{"status":"cancelled"}\n');
+    };
+    finishWhenReady();
+  };
+  cancelWhenReady();
+} else if (owner === "dispatch_run.py") {
   const taskId = value("--task-id");
   const promptPath = value("--prompt-file");
   const prompt = readFileSync(promptPath, "utf8");
-  if (prompt === "sleep until cancelled") {
-    writeFileSync(join(runDir, "sleeping.pid"), `${process.pid}\n`);
+  if (prompt === "emit malformed owner output") {
+    process.stdout.write("{}\n");
+  } else if (prompt === "sleep until cancelled") {
     process.once("SIGTERM", () => {
       writeFileSync(join(runDir, "cancelled.marker"), "cancelled\n");
       process.exit(143);
     });
+    const attemptDir = join(runDir, "dispatch", "tasks", taskId, "attempt-001");
+    mkdirSync(attemptDir, { recursive: true });
+    writeFileSync(join(runDir, "sleeping.pid"), `${process.pid}\n`);
     setInterval(() => undefined, 1000);
   } else {
     const attemptDir = join(runDir, "dispatch", "tasks", taskId, "attempt-001");
@@ -69,6 +95,7 @@ if (owner === "dispatch_run.py") {
     };
     writeFileSync(attemptPath, JSON.stringify(record, null, 2) + "\n");
     process.stdout.write(JSON.stringify(record) + "\n");
+    if (prompt === "claim success then fail") process.exitCode = 1;
   }
 } else if (owner === "batch_run.py") {
   const manifest = JSON.parse(readFileSync(value("--manifest"), "utf8"));

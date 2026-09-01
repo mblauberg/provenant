@@ -39,10 +39,11 @@ controls and should be absent from every global client registration.
 
 ## The six clients
 
-Registration is coordination plumbing, not permission to execute a provider.
-Kiro and OpenCode remain registered here while direct execution is disabled by
-[adapter compatibility](../../config/adapter-compatibility.yaml); changing an
-MCP registry never overrides that activation decision.
+Registration exposes coordination and, on current clients, the thin dispatch
+and batch façade. It does not activate a provider: Kiro and OpenCode remain
+registered here while execution is disabled by [adapter
+compatibility](../../config/adapter-compatibility.yaml). Changing an MCP
+registry never overrides that decision.
 
 | Client | Global registry |
 | --- | --- |
