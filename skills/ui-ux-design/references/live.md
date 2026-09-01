@@ -81,9 +81,12 @@ remain after a process or power crash.
 ## Exit
 
 Stop only the exact background-task handle returned by this run, or a run-owned
-PID plus its command and start identity. Refuse broad name or pattern kills.
-Verify source/configuration cleanup against the baseline and retain the journal
-needed for honest recovery.
+PID plus its command and start identity. Refuse broad name or pattern kills. A
+successful stop waits for that exact PID to exit; a timeout reports the PID,
+port, and state path so the residual listener can be inspected or stopped
+explicitly. Stop also reports a cleanup failure and retains the matching state
+record rather than claiming a clean shutdown. Verify source/configuration
+cleanup against the baseline and retain the journal needed for honest recovery.
 
 ## Cleanup
 

@@ -514,33 +514,117 @@ def test_reviewer_id_round_trips_into_dispatch_receipt():
     assert output.strip() == "OK"
 
 
-def test_claude_fallback_runs_after_oauth_safe_mode_model_failure():
-    stub = """\
-        #!/usr/bin/env bash
-        if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
-          echo '{"loggedIn":true}'
-          exit 0
-        fi
-        model=""; safe=0; bare=0
-        while [ $# -gt 0 ]; do
-          case "$1" in
-            --model) model="$2"; shift 2 ;;
-            --safe-mode) safe=1; shift ;;
-            --bare) bare=1; shift ;;
-            *) shift ;;
-          esac
-        done
-        cat >/dev/null
-        if [ "$bare" = 1 ]; then echo "Not logged in" >&2; exit 1; fi
-        if [ "$safe" = 1 ] && [ "$model" = "fable" ]; then echo "model fable is not available" >&2; exit 1; fi
-        if [ "$safe" = 1 ] && [ "$model" = "opus" ]; then echo "SAFE OPUS"; exit 0; fi
-        exit 9
-    """
-    result, record, output = run_dispatch_with_stub(stub, role="other-primary")
-    assert result.returncode == 0, result.output
-    assert record["resolved_model"] == "opus"
-    assert record["read_only_guarantee"] == "oauth_safe_mode"
-    assert output.strip() == "SAFE OPUS"
+def test_claude_bare_oauth_model_fallback_reuses_verifier_contract():
+    with tempfile.TemporaryDirectory() as td:
+        args_file = Path(td) / "claude.args"
+        stub = f"""\
+            #!/usr/bin/env bash
+            if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
+              echo '{{"loggedIn":true,"authMethod":"claude.ai"}}'
+              exit 0
+            fi
+            printf '%s\\n' "$@" >> {args_file}
+            printf 'CLAUDE_CODE_DISABLE_WORKFLOWS=%s\\n' "$CLAUDE_CODE_DISABLE_WORKFLOWS" >> {args_file}
+            printf '%s\\n' '--END-INVOCATION--' >> {args_file}
+            model=""; safe=0; bare=0
+            while [ $# -gt 0 ]; do
+              case "$1" in
+                --model) model="$2"; shift 2 ;;
+                --safe-mode) safe=1; shift ;;
+                --bare) bare=1; shift ;;
+                *) shift ;;
+              esac
+            done
+            cat >/dev/null
+            if [ "$bare" = 1 ]; then echo "Not logged in" >&2; exit 1; fi
+            if [ "$safe" = 1 ] && [ "$model" = "opus" ]; then echo "model opus is not available" >&2; exit 1; fi
+            if [ "$safe" = 1 ] && [ "$model" = "sonnet" ]; then echo "SAFE SONNET"; exit 0; fi
+            exit 9
+        """
+        result, record, output = run_dispatch_with_stub(stub, role="other-primary")
+        assert result.returncode == 0, result.output
+        assert record["resolved_model"] == "sonnet"
+        assert record["requested_model"] == "opus"
+        assert record["fallback_model"] == "sonnet"
+        assert record["identity_source"] == "runtime-provider-fallback"
+        assert "opus unavailable; used sonnet" in record["substitution"]
+        assert record["read_only_guarantee"] == "oauth_safe_mode"
+        assert output.strip() == "SAFE SONNET"
+        invocations = args_file.read_text(encoding="utf-8").split("--END-INVOCATION--\n")[:-1]
+        assert len(invocations) == 3
+        assert "--bare" in invocations[0]
+        assert "--safe-mode" in invocations[1]
+        assert "--safe-mode" in invocations[2]
+        for invocation in invocations:
+            assert "--disable-slash-commands" in invocation
+            assert "--no-session-persistence" in invocation
+            assert "--permission-mode\nplan" in invocation
+            assert "--tools\nRead,Grep,Glob" in invocation
+            assert "--system-prompt" in invocation
+            assert "Fabric MCP tools are not exposed" in invocation
+            assert "Return only the file-backed verification result" in invocation
+            assert "caller owns any Fabric correlation" in invocation
+            assert "independent verifier" in invocation
+            assert "cross-family verifier" not in invocation
+            assert "CLAUDE_CODE_DISABLE_WORKFLOWS=1" in invocation
+        assert "--model\nopus" in invocations[0]
+        assert "--model\nopus" in invocations[1]
+        assert "--model\nsonnet" in invocations[2]
+
+
+def test_claude_tool_not_found_keeps_diagnostic_instead_of_retrying_fallback():
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        misleading_path = tmp / "model-unavailable"
+        misleading_path.mkdir()
+        home = tmp / "home"
+        home.mkdir()
+        bash_env = tmp / "bash-env"
+        bash_env.write_text(
+            "command() {\n"
+            "  if [ \"$1\" = \"-v\" ] && [ \"$2\" = \"claude\" ]; then return 1; fi\n"
+            "  builtin command \"$@\"\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        env = fabric_free_env()
+        env["HOME"] = str(home)
+        env["BASH_ENV"] = str(bash_env)
+        env["AGENT_FABRIC_PRODUCT_ROOT"] = str(PRODUCT_ROOT)
+        env["AGENT_FABRIC_INSTANCE_ROOT"] = str(PRODUCT_ROOT)
+        env["PATH"] = os.pathsep.join(
+            [
+                str(misleading_path),
+                str(PRODUCT_ROOT / "scripts"),
+                *(
+                    entry
+                    for entry in env["PATH"].split(os.pathsep)
+                    if not (Path(entry) / "claude").exists()
+                ),
+            ]
+        )
+        out = tmp / "out.txt"
+        result = subprocess.run(
+            [
+                str(SCRIPT),
+                "--tool", "claude",
+                "--orchestrator-family", "codex",
+                "--role", "other-primary",
+                "--out", str(out),
+                "--prompt", "Reply exactly OK",
+            ],
+            cwd=tmp,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        record = json.loads(result.stdout)
+        assert result.returncode != 0
+        assert record["status"] == "tool_not_found"
+        assert record["fallback_model"] == "sonnet"
+        assert "claude not found. PATH=" in out.read_text(encoding="utf-8")
+        assert "model-unavailable" in out.read_text(encoding="utf-8")
 
 
 def test_help_exits_cleanly():
@@ -668,8 +752,12 @@ def test_claude_oauth_fallback_uses_verifier_system_prompt():
         args = args_file.read_text(encoding="utf-8")
         assert "--system-prompt" in args
         assert "--disable-slash-commands" in args
-        assert "non-interactive cross-family verifier" in args
+        assert "non-interactive independent verifier" in args
+        assert "cross-family verifier" not in args
         assert "launch subagents" in args
+        assert args.count("Fabric MCP tools are not exposed") == 2
+        assert args.count("Return only the file-backed verification result") == 2
+        assert args.count("caller owns any Fabric correlation") == 2
         assert "CLAUDE_CODE_DISABLE_WORKFLOWS=1" in args
         assert "Read,Grep,Glob" in args.splitlines()
         assert "Bash" not in args.splitlines()
