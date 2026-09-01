@@ -17,6 +17,10 @@ cd /path/to/provenant
 ./scripts/install-harness --platform all
 ```
 
+Use the product checkout's `.venv/bin/python`, or set `HARNESS_PYTHON` to an
+equivalent Python 3.11+ environment with the harness test dependencies before
+installing.
+
 For a non-default instance or bin directory, pass the exact absolute paths
 explicitly:
 
@@ -45,7 +49,7 @@ Verify the result from the new checkout:
 
 ```sh
 ./scripts/check-harness
-provenant root
+"${PROVENANT_BIN_DIR:-$HOME/.local/bin}/provenant" root
 ```
 
 The `all` invocation preflights both primaries before changing either one and
@@ -76,7 +80,7 @@ separately from symlinked managed projections. For both primaries, inspect
 their managed links for the old target before removing it:
 
 ```sh
-old=/path/to/old/provenant
+old="/path/to/old/provenant"
 provenant_bin="${PROVENANT_BIN_DIR:-$HOME/.local/bin}/provenant"
 if [ -L "$provenant_bin" ]; then
   realpath "$provenant_bin"
@@ -85,8 +89,12 @@ elif [ -f "$provenant_bin" ]; then
 else
   echo "missing Provenant command: $provenant_bin"
 fi
-find "${CLAUDE_CONFIG_DIR:-$HOME/.claude}" "${CODEX_HOME:-$HOME/.codex}" \
-  -type l -exec realpath {} + | grep -F "$old" || true
+for root in "${CLAUDE_CONFIG_DIR:-$HOME/.claude}" "${CODEX_HOME:-$HOME/.codex}"; do
+  [ -d "$root" ] || continue
+  find "$root" -type l -exec sh -c '
+    for link do printf "%s -> %s\n" "$link" "$(realpath "$link")"; done
+  ' sh {} +
+done | grep -F "$old" || true
 ```
 
 If `realpath` is not provided by the platform, use its equivalent (for

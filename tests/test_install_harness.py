@@ -967,7 +967,7 @@ def test_rejects_instruction_symlink_to_foreign_file(tmp_path):
     assert instructions.is_symlink()
     assert instructions.resolve() == foreign
     assert foreign.read_text() == "# Foreign instructions\n"
-    assert "add this line" in result.stderr
+    assert "restore the file or link it to" in result.stderr
 
 
 def test_requires_supported_platform(tmp_path):
@@ -1199,6 +1199,69 @@ def test_relocation_rewrites_only_an_exact_generated_bootstrap_and_preserves_con
     assert json.loads(pointer.read_text())["product_root"] == str(new_product.resolve())
 
 
+def test_three_line_custom_instructions_are_not_mistaken_for_generated_bootstrap(tmp_path):
+    old_product = copy_product(ROOT, tmp_path / "old product")
+    new_product = copy_product(ROOT, tmp_path / "new product")
+    first = run_product(old_product, "codex", tmp_path)
+    assert first.returncode == 0, first.stderr
+
+    instructions = tmp_path / "codex/AGENTS.md"
+    generated_line = instructions.read_text().splitlines()[2]
+    custom = f"# My instructions\n\n{generated_line}\n"
+    instructions.write_text(custom)
+    pointer = tmp_path / "instance/.agent-fabric/product-root.json"
+    original_pointer = pointer.read_text()
+
+    result = run_product(new_product, "codex", tmp_path)
+
+    assert result.returncode == 3
+    assert instructions.read_text() == custom
+    assert pointer.read_text() == original_pointer
+
+
+def test_split_relocation_recognises_the_exact_legacy_fused_bootstrap(tmp_path):
+    new_product = copy_product(ROOT, tmp_path / "new product")
+    old_product = tmp_path / "old product"
+    instance = tmp_path / "instance"
+    pointer = instance / ".agent-fabric/product-root.json"
+    pointer.parent.mkdir(parents=True)
+    pointer.write_text(
+        json.dumps({"schema_version": 1, "product_root": str(old_product)}) + "\n"
+    )
+    instructions = tmp_path / "codex/AGENTS.md"
+    instructions.parent.mkdir(parents=True)
+    instructions.write_text(
+        "# Provenant\n\n"
+        + LEGACY_BOOTSTRAP.format(product=old_product)
+        + "\n"
+    )
+    (tmp_path / "codex/HARNESS.md").symlink_to(old_product / "HARNESS.md")
+
+    result = run_product(new_product, "codex", tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    assert "instructions updated=" in result.stdout
+    assert str(instance / "AGENTS.md") in instructions.read_text()
+    assert str(new_product / "HARNESS.md") in instructions.read_text()
+
+
+def test_generated_bootstrap_is_repaired_even_when_pointer_already_names_product(tmp_path):
+    product = copy_product(ROOT, tmp_path / "product")
+    first = run_product(product, "codex", tmp_path)
+    assert first.returncode == 0, first.stderr
+    instructions = tmp_path / "codex/AGENTS.md"
+    stale = instructions.read_text().replace(
+        str(product / "HARNESS.md"), str(tmp_path / "older product/HARNESS.md")
+    )
+    instructions.write_text(stale)
+
+    result = run_product(product, "codex", tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    assert "instructions updated=" in result.stdout
+    assert str(product / "HARNESS.md") in instructions.read_text()
+
+
 def test_all_primary_cutover_preflights_second_primary_before_mutating_first(tmp_path):
     old_product = copy_product(ROOT, tmp_path / "old product")
     new_product = copy_product(ROOT, tmp_path / "new product")
@@ -1246,6 +1309,24 @@ def test_all_primary_install_configures_both_surfaces_and_publishes_once(tmp_pat
     assert codex_config["mcp_servers"]["fabric"]["command"] == str(tmp_path / "bin/provenant")
     assert claude_mcp["mcpServers"]["fabric"]["env"]["AGENT_FABRIC_SEAT"] == "claude"
     assert codex_config["mcp_servers"]["fabric"]["env"]["AGENT_FABRIC_SEAT"] == "codex"
+    assert claude_mcp["mcpServers"]["fabric"]["env"]["AGENT_FABRIC_INSTANCE_ROOT"] == str(tmp_path / "instance")
+    assert codex_config["mcp_servers"]["fabric"]["env"]["AGENT_FABRIC_INSTANCE_ROOT"] == str(tmp_path / "instance")
+    clean_home = tmp_path / "clean-home"
+    clean_home.mkdir()
+    registered = subprocess.run(
+        [claude_mcp["mcpServers"]["fabric"]["command"], "root"],
+        cwd=clean_home,
+        env={
+            **os.environ,
+            "HOME": str(clean_home),
+            **claude_mcp["mcpServers"]["fabric"]["env"],
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert registered.returncode == 0, registered.stderr
+    assert registered.stdout == f"{product.resolve()}\n"
     assert not (tmp_path / "home/.cursor/mcp.json").exists()
     assert not (tmp_path / "home/.gemini/config/mcp_config.json").exists()
     assert not (tmp_path / "home/.kiro/settings/mcp.json").exists()
@@ -1275,6 +1356,103 @@ def test_foreign_harness_link_is_rejected_before_pointer_publish(tmp_path, platf
     assert pointer.read_text() == old_pointer
     assert os.readlink(harness) == old_target
     assert "HARNESS.md is not a canonical or receipt-owned product link" in result.stderr
+
+
+def test_generated_instruction_symlink_is_rejected_without_following_external_target(tmp_path):
+    product = copy_product(ROOT, tmp_path / "product")
+    first = run_product(product, "codex", tmp_path)
+    assert first.returncode == 0, first.stderr
+
+    instructions = tmp_path / "codex/AGENTS.md"
+    generated = instructions.read_bytes()
+    external = tmp_path / "external/AGENTS.md"
+    external.parent.mkdir()
+    external.write_bytes(generated)
+    instructions.unlink()
+    instructions.symlink_to(Path("../external/AGENTS.md"))
+    pointer = tmp_path / "instance/.agent-fabric/product-root.json"
+    original_pointer = pointer.read_text()
+
+    result = run_product(product, "codex", tmp_path)
+
+    assert result.returncode == 3
+    assert instructions.is_symlink()
+    assert external.read_bytes() == generated
+    assert pointer.read_text() == original_pointer
+    assert "instructions symlink is not the instance doctrine" in result.stderr
+
+
+def test_harness_rebind_uses_collision_safe_staging(tmp_path):
+    old_product = copy_product(ROOT, tmp_path / "old product")
+    new_product = copy_product(ROOT, tmp_path / "new product")
+    first = run_product(old_product, "claude", tmp_path)
+    assert first.returncode == 0, first.stderr
+
+    harness = tmp_path / "claude/HARNESS.md"
+    harness.symlink_to(old_product / "HARNESS.md")
+    reserved = tmp_path / "claude/HARNESS.md.provenant-new"
+    reserved.write_text("user-owned staging name\n")
+
+    result = run_product(new_product, "claude", tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    assert reserved.read_text() == "user-owned staging name\n"
+    assert harness.resolve() == (new_product / "HARNESS.md").resolve()
+
+
+def test_relocation_rebinds_a_dangling_relative_old_harness_link(tmp_path):
+    old_product = copy_product(ROOT, tmp_path / "old'\\product")
+    new_product = copy_product(ROOT, tmp_path / "new product")
+    first = run_product(old_product, "claude", tmp_path)
+    assert first.returncode == 0, first.stderr
+
+    harness = tmp_path / "claude/HARNESS.md"
+    harness.symlink_to(Path("../old'\\product/HARNESS.md"))
+    old_product.rename(tmp_path / "moved old product")
+
+    result = run_product(new_product, "claude", tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    assert harness.resolve() == (new_product / "HARNESS.md").resolve()
+
+
+def test_instance_leaf_symlink_conflicts_are_rejected_before_publication(tmp_path):
+    product = copy_product(ROOT, tmp_path / "product")
+    instance = tmp_path / "instance"
+    instance.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (instance / ".agent-fabric").mkdir()
+    (instance / ".agent-fabric/.gitignore").symlink_to(outside / "gitignore")
+    (instance / "config").symlink_to(outside / "config", target_is_directory=True)
+    pointer = instance / ".agent-fabric/product-root.json"
+
+    result = run_product(
+        product,
+        "codex",
+        tmp_path,
+        AGENT_FABRIC_INSTANCE_ROOT=str(instance),
+    )
+
+    assert result.returncode == 3
+    assert not pointer.exists()
+    assert list(outside.iterdir()) == []
+
+
+def test_instance_config_directory_symlink_is_rejected_before_publication(tmp_path):
+    product = copy_product(ROOT, tmp_path / "product")
+    instance = tmp_path / "instance"
+    instance.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (instance / "config").symlink_to(outside / "config", target_is_directory=True)
+    pointer = instance / ".agent-fabric/product-root.json"
+
+    result = run_product(product, "codex", tmp_path, AGENT_FABRIC_INSTANCE_ROOT=str(instance))
+
+    assert result.returncode == 3
+    assert not pointer.exists()
+    assert list(outside.iterdir()) == []
 
 
 LEGACY_BOOTSTRAP = (

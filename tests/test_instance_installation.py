@@ -322,6 +322,7 @@ def test_a_fresh_split_instance_ignores_its_pointer_without_help(tmp_path):
     "document",
     [
         {"schema_version": 2, "product_root": "/opt/provenant"},
+        {"schema_version": True, "product_root": "/opt/provenant"},
         {"schema_version": 1, "product_root": "relative/product"},
         {"schema_version": 1, "product_root": "/opt/provenant", "extra": 1},
     ],

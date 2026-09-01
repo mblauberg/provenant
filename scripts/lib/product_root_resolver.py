@@ -13,8 +13,26 @@ SCHEMA_VERSION = 1
 POINTER_RELATIVE_PATH = Path(".agent-fabric/product-root.json")
 
 
-def load_pointer_file(instance_root: Path) -> Path | None:
-    """Return the valid product root named by an instance pointer, if any."""
+def _atomic_write_text(destination: Path, content: str, *, prefix: str) -> None:
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=prefix,
+        suffix=".tmp",
+        dir=destination.parent,
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w") as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def load_pointer_path(instance_root: Path) -> Path | None:
+    """Parse the product path in an instance pointer, even if it moved."""
     try:
         value: Any = json.loads((instance_root / POINTER_RELATIVE_PATH).read_text())
         if not isinstance(value, dict):
@@ -30,11 +48,17 @@ def load_pointer_file(instance_root: Path) -> Path | None:
         ):
             return None
         candidate = Path(product_root).expanduser()
-        if not candidate.is_absolute() or not candidate.exists():
+        if not candidate.is_absolute():
             return None
         return candidate
     except (OSError, TypeError, ValueError, json.JSONDecodeError):
         return None
+
+
+def load_pointer_file(instance_root: Path) -> Path | None:
+    """Return the existing product root named by an instance pointer, if any."""
+    candidate = load_pointer_path(instance_root)
+    return candidate if candidate is not None and candidate.exists() else None
 
 
 def write_pointer_file(instance_root: Path, product_root: Path) -> None:
@@ -72,30 +96,12 @@ def write_pointer_file(instance_root: Path, product_root: Path) -> None:
             "product pointer directory escapes the instance root: "
             f"{pointer.parent} resolves to {resolved_parent}"
         )
-    (pointer.parent / ".gitignore").write_text("*\n")
-    descriptor, temporary_name = tempfile.mkstemp(
-        prefix=".product-root.",
-        suffix=".tmp",
-        dir=pointer.parent,
+    _atomic_write_text(pointer.parent / ".gitignore", "*\n", prefix=".gitignore.")
+    payload = json.dumps(
+        {
+            "schema_version": SCHEMA_VERSION,
+            "product_root": str(resolved_product),
+        },
+        sort_keys=True,
     )
-    temporary = Path(temporary_name)
-    try:
-        with os.fdopen(descriptor, "w") as stream:
-            json.dump(
-                {
-                    "schema_version": SCHEMA_VERSION,
-                    "product_root": str(resolved_product),
-                },
-                stream,
-                sort_keys=True,
-            )
-            stream.write("\n")
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.chmod(temporary, 0o600)
-        os.replace(temporary, pointer)
-    finally:
-        try:
-            temporary.unlink()
-        except FileNotFoundError:
-            pass
+    _atomic_write_text(pointer, payload + "\n", prefix=".product-root.")

@@ -1163,7 +1163,7 @@ def test_registration_runbook_documents_a_project_free_registration_and_its_reco
     runbook = (ROOT / "docs/runbooks/fabric-mcp-registration.md").read_text()
     assert "configure-fabric-mcp.py" in runbook
     # Registration binds no project: cwd decides, with no manual override.
-    assert "exactly three environment variables" in runbook
+    assert "three environment variables by default" in runbook
     assert "AGENT_FABRIC_STATE_DIRECTORY" in runbook
     assert "AGENT_FABRIC_SEAT" in runbook
     assert "AGENT_FABRIC_CLIENT_LABEL" in runbook
@@ -1190,4 +1190,6 @@ def test_relocation_runbook_uses_configured_instance_root_and_checks_shim_separa
     assert "same exact instance root" in runbook
     assert 'provenant_bin="${PROVENANT_BIN_DIR:-$HOME/.local/bin}/provenant"' in runbook
     assert "elif [ -f \"$provenant_bin\" ]; then" in runbook
-    assert '"${CLAUDE_CONFIG_DIR:-$HOME/.claude}" "${CODEX_HOME:-$HOME/.codex}" \\\n  -type l -exec realpath' in runbook
+    assert 'old="/path/to/old/provenant"' in runbook
+    assert 'for root in "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"' in runbook
+    assert 'printf "%s -> %s\\n" "$link" "$(realpath "$link")"' in runbook

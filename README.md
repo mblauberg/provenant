@@ -78,8 +78,7 @@ cd "<PRODUCT_ROOT>"
 # install the pinned workspace dependencies
 npm ci
 
-scripts/install-harness --platform claude
-scripts/install-harness --platform codex
+scripts/install-harness --platform all
 
 # discover commands, then verify the daemonless Fabric bus
 provenant help
@@ -94,9 +93,10 @@ Each installer command registers the Fabric MCP server for the platform it
 installs. Pass `--mcp-clients all` to either one to register all six clients
 instead.
 
-Installation links each skill into `~/.claude/skills/` and `~/.codex/skills/`,
-installs the Claude subagents from `agents/` into `~/.claude/agents/`,
-and installs a managed copy of the thin `provenant` command in
+With `--platform all`, installation links skills into both primary clients and
+installs the Claude subagents and workflows. A single-platform install changes
+only that primary. Every install also writes a managed copy of the thin
+`provenant` command in
 `${PROVENANT_BIN_DIR:-$HOME/.local/bin}`; it warns when that directory is not
 on `PATH`, and never edits shell startup files. During an upgrade, the installer
 replaces only the legacy link that exactly names
@@ -105,6 +105,9 @@ other files and links as user-owned. If the installer exits
 non-zero, follow the message it prints: exit `3` flags a command collision,
 incompatible instruction target, or managed skill-link conflict, and
 instruction conflicts include the bootstrap line to add.
+
+To move the product checkout while retaining a small instance root, follow the
+[split-product relocation runbook](docs/runbooks/split-product-relocation.md).
 
 The Claude subagent links have a separate
 `.agent-harness-agents-installation.json` receipt beside `~/.claude/agents/`.

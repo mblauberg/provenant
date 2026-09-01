@@ -38,9 +38,9 @@ def resolve_product_root(instance_root: Path | None = None) -> Path:
     the instance pointer, ``AGENTS_HOME``, or ``~/.agents``.
     The selected root must contain the executable Fabric MCP launcher.
     """
-    configured = os.environ.get("AGENT_FABRIC_PRODUCT_ROOT")
-    agents_home = os.environ.get("AGENTS_HOME")
-    configured_instance = os.environ.get("AGENT_FABRIC_INSTANCE_ROOT")
+    configured = os.environ.get("AGENT_FABRIC_PRODUCT_ROOT") or None
+    agents_home = os.environ.get("AGENTS_HOME") or None
+    configured_instance = os.environ.get("AGENT_FABRIC_INSTANCE_ROOT") or None
     if instance_root is None:
         instance_value = configured_instance
         instance_root = (

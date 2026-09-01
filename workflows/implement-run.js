@@ -387,8 +387,8 @@ const boot = await agent(
     `1. Resolve the WORKSPACE ROOT (the dir that holds .work/, or the outermost project dir if none) and ` +
     `build an ABSOLUTE run-dir path <workspace-root>/.work/wf/implement/<runId> so the run dir never lands ` +
     `under a nested subproject. ${runIdClause}\n` +
-    '   Then run: "$(provenant root)/skills/orchestrate/scripts/run_dir_init.sh" <abs run-dir>\n' +
-    '   and ALSO run: mkdir -p <abs run-dir>/patches   (the patch-emitting builder writes there; ' +
+    '   Then run: "$(provenant root)/skills/orchestrate/scripts/run_dir_init.sh" "<abs run-dir>"\n' +
+    '   and ALSO run: mkdir -p "<abs run-dir>/patches"   (the patch-emitting builder writes there; ' +
     'run_dir_init.sh scaffolds findings/ crossfamily/ traces/ but NOT patches/).\n' +
     '   If run_dir_init.sh is unavailable or fails, return no runDir and stop; do not create an incomplete fallback.\n' +
     `   Copy the global deliver RUN.template.json to <abs run-dir>/RUN.json immediately. Set contract=delivery-run, ` +
@@ -447,12 +447,15 @@ const CHECKPOINT_SCHEMA = {
     verified: { type: 'boolean' },
   },
 }
+function shellQuote(value) {
+  return "'" + String(value).replaceAll("'", "'\\''") + "'"
+}
 async function checkpoint(currentSlice, nextAction, inFlight, artifactPaths) {
   const result = await agent(
     `Run the deterministic checkpoint updater; do not edit JSON yourself or touch source:\n` +
       `python3 "$(provenant root)/skills/implement/scripts/checkpoint_run.py" "${runDir}/RUN.json" ` +
       `--current-slice ${JSON.stringify(currentSlice)} --next-action ${JSON.stringify(nextAction)} ` +
-      `--in-flight-json '${JSON.stringify(inFlight)}' --artifact-paths-json '${JSON.stringify(artifactPaths)}'\n` +
+      `--in-flight-json ${shellQuote(JSON.stringify(inFlight))} --artifact-paths-json ${shellQuote(JSON.stringify(artifactPaths))}\n` +
       'Return its JSON stdout exactly as the structured result. A non-zero exit is failure.',
     { label: `checkpoint:${currentSlice}`, phase: 'Bootstrap', schema: CHECKPOINT_SCHEMA, model: models.scout },
   )

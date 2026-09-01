@@ -30,10 +30,18 @@ import tempfile
 from typing import Any
 
 try:
-    from scripts.lib.product_root_resolver import write_pointer_file
+    from scripts.lib.product_root_resolver import (
+        POINTER_RELATIVE_PATH,
+        SCHEMA_VERSION as POINTER_SCHEMA_VERSION,
+        write_pointer_file,
+    )
 except ModuleNotFoundError:  # invoked as a script rather than as a package
     sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from lib.product_root_resolver import write_pointer_file  # type: ignore[no-redef]
+    from lib.product_root_resolver import (  # type: ignore[no-redef]
+        POINTER_RELATIVE_PATH,
+        SCHEMA_VERSION as POINTER_SCHEMA_VERSION,
+        write_pointer_file,
+    )
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -62,10 +70,6 @@ SEEDED_FILES = (
 #: rewritten on every install. Relocating the product is therefore always
 #: "re-run install-harness", never an edit to a committed file or a client
 #: configuration.
-POINTER_RELATIVE = (".agent-fabric", "product-root.json")
-POINTER_SCHEMA_VERSION = 1
-
-
 class InstallError(ValueError):
     pass
 
@@ -75,7 +79,7 @@ def desired_state_path(instance_root: Path) -> Path:
 
 
 def pointer_path(instance_root: Path) -> Path:
-    return Path(instance_root).joinpath(*POINTER_RELATIVE)
+    return Path(instance_root) / POINTER_RELATIVE_PATH
 
 
 def write_pointer(product_root: Path, instance_root: Path) -> dict[str, Any]:
@@ -112,6 +116,7 @@ def read_pointer(instance_root: Path) -> dict[str, Any] | None:
         raise InstallError(f"product pointer is unreadable: {exc}") from exc
     if (
         not isinstance(document, dict)
+        or isinstance(document.get("schema_version"), bool)
         or document.get("schema_version") != POINTER_SCHEMA_VERSION
         or set(document) != {"schema_version", "product_root"}
         or not isinstance(document.get("product_root"), str)
@@ -347,6 +352,16 @@ def validate_install(product_root: Path, instance_root: Path) -> dict[str, Any]:
         raise InstallError("product pointer directory must not be a symlink")
     if pointer_directory.exists() and not pointer_directory.is_dir():
         raise InstallError("product pointer directory must be a directory")
+    pointer_gitignore = pointer_directory / ".gitignore"
+    if pointer_gitignore.is_symlink():
+        raise InstallError("product pointer .gitignore must not be a symlink")
+    if pointer_gitignore.exists() and not pointer_gitignore.is_file():
+        raise InstallError("product pointer .gitignore must be a regular file")
+    config_directory = instance_root / "config"
+    if config_directory.is_symlink():
+        raise InstallError("instance config directory must not be a symlink")
+    if config_directory.exists() and not config_directory.is_dir():
+        raise InstallError("instance config directory must be a directory")
     pointer = read_pointer(instance_root)
     seeded = []
     for relative in SEEDED_FILES:

@@ -19,7 +19,7 @@ FABRIC_MCP = "runtime/fabric/bin/fabric-mcp"
 
 
 def instance_root() -> Path:
-    configured = os.environ.get("AGENT_FABRIC_INSTANCE_ROOT")
+    configured = os.environ.get("AGENT_FABRIC_INSTANCE_ROOT") or None
     candidate = Path(configured).expanduser() if configured is not None else Path.home() / ".agents"
     if not candidate.is_absolute():
         raise ValueError(f"instance root must be an absolute path, got {configured}; {REPAIR}")
@@ -45,8 +45,8 @@ def pointer_product_root(root: Path) -> Path | None:
 
 
 def resolve_product_root(root: Path) -> Path:
-    configured = os.environ.get("AGENT_FABRIC_PRODUCT_ROOT")
-    agents_home = os.environ.get("AGENTS_HOME")
+    configured = os.environ.get("AGENT_FABRIC_PRODUCT_ROOT") or None
+    agents_home = os.environ.get("AGENTS_HOME") or None
     if configured is not None:
         candidate = Path(configured).expanduser()
         label = "AGENT_FABRIC_PRODUCT_ROOT"

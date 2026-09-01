@@ -9,7 +9,7 @@ while [[ -L "$script_path" ]]; do
     *) script_path=$(dirname "$script_path")/$link ;;
   esac
 done
-PRODUCT_ROOT="$(CDPATH= cd -- "$(dirname "$script_path")/.." && pwd)"
+PRODUCT_ROOT="$(CDPATH= cd -- "$(dirname "$script_path")/.." && pwd -P)"
 if [[ -f "$PRODUCT_ROOT/.git" && "${PROVENANT_ALLOW_LINKED_WORKTREE_INSTALL:-}" != 1 ]]; then
   echo "install-harness refuses a linked worktree product root: $PRODUCT_ROOT" >&2
   echo "repair: run from the canonical checkout, or explicitly acknowledge with PROVENANT_ALLOW_LINKED_WORKTREE_INSTALL=1" >&2
@@ -109,38 +109,78 @@ instance_doctrine="$instance_root/AGENTS.md"
 product_pointer="$instance_root/.agent-fabric/product-root.json"
 old_product_root=""
 if [[ -f "$product_pointer" ]]; then
-  old_product_root="$(sed -n 's/.*"product_root": "\([^"]*\)".*/\1/p' "$product_pointer")"
+  old_product_root="$(run_stdlib -c '
+from pathlib import Path
+import sys
+sys.path.insert(0, sys.argv[1])
+from lib.product_root_resolver import load_pointer_path
+value = load_pointer_path(Path(sys.argv[2]))
+print(value or "")
+' "$PRODUCT_ROOT/scripts" "$instance_root")"
 fi
 bootstrap="Read and follow \`$instance_doctrine\` and \`$PRODUCT_ROOT/HARNESS.md\` before making orchestration, delegation, model-routing or memory decisions. Platform/system policy and explicit user authority lead; the nearest project instruction may specialise or strengthen the global harness but may not silently broaden authority, weaken safety gates or redefine global cross-project memory policy."
 
 is_generated_bootstrap() {
-  local content generated_prefix generated_suffix
+  local content expected legacy_doctrine legacy_harness
   content="$(<"$instructions")" || return 1
-  generated_prefix=$'# Provenant\n\nRead and follow `'"$instance_doctrine"$'` and `'
-  generated_suffix=$'\` before making orchestration, delegation, model-routing or memory decisions. Platform/system policy and explicit user authority lead; the nearest project instruction may specialise or strengthen the global harness but may not silently broaden authority, weaken safety gates or redefine global cross-project memory policy.'
-  local line_count line tick line_prefix line_suffix
-  line_count="$(wc -l < "$instructions")"
-  line="$(sed -n '3p' "$instructions")"
-  tick=$(printf '\140')
-  line_prefix="Read and follow ${tick}${instance_doctrine}${tick} and ${tick}"
-  line_suffix="${tick} before making orchestration, delegation, model-routing or memory decisions. Platform/system policy and explicit user authority lead; the nearest project instruction may specialise or strengthen the global harness but may not silently broaden authority, weaken safety gates or redefine global cross-project memory policy."
-  if [[ "$line_count" -eq 3 ]] && [[ "$line" == "$line_prefix"*/HARNESS.md"$line_suffix" ]]; then
+  expected=$'# Provenant\n\nRead and follow `'
+  expected+="$instance_doctrine"
+  expected+='` and `'
+  expected+=*/HARNESS.md
+  expected+=$'` before making orchestration, delegation, model-routing or memory decisions. Platform/system policy and explicit user authority lead; the nearest project instruction may specialise or strengthen the global harness but may not silently broaden authority, weaken safety gates or redefine global cross-project memory policy.'
+  if [[ "$content" == $expected ]]; then
     return 0
   fi
-  [[ "$content" == "$generated_prefix"/*"/HARNESS.md$generated_suffix" ]]
+  [[ -n "$old_product_root" ]] || return 1
+  legacy_doctrine="$old_product_root/AGENTS.md"
+  legacy_harness="$old_product_root/HARNESS.md"
+  expected="# Provenant"$'\n\n'"Read and follow \`$legacy_doctrine\` and \`$legacy_harness\` before making orchestration, delegation, model-routing or memory decisions. Platform/system policy and explicit user authority lead; the nearest project instruction may specialise or strengthen the global harness but may not silently broaden authority, weaken safety gates or redefine global cross-project memory policy."
+  [[ "$content" == "$expected" ]]
+}
+
+is_current_generated_bootstrap() {
+  local content
+  content="$(<"$instructions")" || return 1
+  [[ "$content" == "# Provenant"$'\n\n'"$bootstrap" ]]
 }
 
 rewrite_generated_bootstrap() {
-  printf '# Provenant\n\n%s\n' "$bootstrap" > "$instructions"
+  local temporary
+  temporary="$(mktemp "${instructions}.provenant.XXXXXXXX")"
+  if ! printf '# Provenant\n\n%s\n' "$bootstrap" > "$temporary"; then
+    rm -f "$temporary"
+    exit 3
+  fi
+  mv -f "$temporary" "$instructions"
   echo "instructions updated=$instructions"
+}
+
+create_generated_bootstrap() {
+  local temporary
+  temporary="$(mktemp "${instructions}.provenant.XXXXXXXX")"
+  if ! {
+    echo "# Provenant"
+    echo
+    echo "$bootstrap"
+  } > "$temporary"; then
+    rm -f "$temporary"
+    exit 3
+  fi
+  mv -f "$temporary" "$instructions"
+  echo "instructions created=$instructions"
 }
 
 preflight_instructions() {
   if [[ ! -e "$instructions" && ! -L "$instructions" ]]; then
     return 0
   fi
-  if [[ -L "$instructions" ]] && [[ "$instructions" -ef "$instance_doctrine" ]]; then
-    return 0
+  if [[ -L "$instructions" ]]; then
+    if [[ "$instructions" -ef "$instance_doctrine" ]]; then
+      return 0
+    fi
+    echo "conflicting: instructions symlink is not the instance doctrine: $instructions" >&2
+    echo "repair: restore the file or link it to $instance_doctrine" >&2
+    exit 3
   fi
   if is_generated_bootstrap; then
     return 0
@@ -163,8 +203,7 @@ preflight_harness_link() {
   if [[ -L "$harness" ]] && [[ "$harness" -ef "$PRODUCT_ROOT/HARNESS.md" ]]; then
     return 0
   fi
-  if [[ -L "$harness" && -n "$old_product_root" ]] \
-    && [[ "$harness" -ef "$old_product_root/HARNESS.md" ]]; then
+  if is_receipt_owned_old_harness "$harness"; then
     return 0
   fi
   echo "conflicting: HARNESS.md is not a canonical or receipt-owned product link: $harness" >&2
@@ -172,15 +211,32 @@ preflight_harness_link() {
   exit 3
 }
 
+is_receipt_owned_old_harness() {
+  local harness="$1" link_target resolved_target
+  [[ -L "$harness" && -n "$old_product_root" ]] || return 1
+  link_target="$(readlink "$harness")" || return 1
+  resolved_target="$(run_stdlib -c '
+import os
+import sys
+print(os.path.abspath(os.path.join(os.path.dirname(sys.argv[1]), sys.argv[2])))
+' "$harness" "$link_target")" || return 1
+  [[ "$resolved_target" == "$old_product_root/HARNESS.md" ]]
+}
+
 rebind_harness_link() {
   local harness="$platform_home/HARNESS.md"
-  if [[ -L "$harness" && -n "$old_product_root" ]] \
-    && [[ "$harness" -ef "$old_product_root/HARNESS.md" ]] \
+  if is_receipt_owned_old_harness "$harness" \
     && [[ ! "$harness" -ef "$PRODUCT_ROOT/HARNESS.md" ]]; then
-    local temporary="$harness.provenant-new"
-    rm -f "$temporary"
-    ln -s "$PRODUCT_ROOT/HARNESS.md" "$temporary"
-    mv -f "$temporary" "$harness"
+    local temporary_directory temporary
+    temporary_directory="$(mktemp -d "${harness}.provenant-new.XXXXXXXX")"
+    temporary="$temporary_directory/HARNESS.md"
+    if ! ln -s "$PRODUCT_ROOT/HARNESS.md" "$temporary" \
+      || ! mv -f "$temporary" "$harness"; then
+      rm -f "$temporary"
+      rmdir "$temporary_directory"
+      exit 3
+    fi
+    rmdir "$temporary_directory"
     echo "harness updated=$harness"
   fi
 }
@@ -246,6 +302,9 @@ mcp_args=(
   --kiro-config "${KIRO_MCP_CONFIG:-$HOME/.kiro/settings/mcp.json}"
   --opencode-config "${OPENCODE_MCP_CONFIG:-$HOME/.config/opencode/opencode.jsonc}"
 )
+if [[ -n "${AGENT_FABRIC_INSTANCE_ROOT:-}" && "$instance_root" != "$HOME/.agents" ]]; then
+  mcp_args+=(--instance-root "$instance_root")
+fi
 
 configure_fabric_mcp() {
   local action="${1:-}"
@@ -311,18 +370,17 @@ for primary in "${primary_platforms[@]}"; do
   # constitution from the product. In a fused layout both roots are one directory,
   # so this is the text that was always emitted.
   if [[ ! -e "$instructions" && ! -L "$instructions" ]]; then
-    {
-      echo "# Provenant"
-      echo
-      echo "$bootstrap"
-    } > "$instructions"
-    echo "instructions created=$instructions"
+    create_generated_bootstrap
   elif [[ -L "$instructions" ]] && [[ "$instructions" -ef "$instance_doctrine" ]]; then
     # A link the user made to the instance doctrine already resolves to doctrine;
     # repointing someone's deliberate symlink is more than an upgrade should do.
     echo "instructions existing=$instructions"
-  elif is_generated_bootstrap && [[ -z "$old_product_root" || "$old_product_root" != "$PRODUCT_ROOT" ]]; then
-    rewrite_generated_bootstrap
+  elif is_generated_bootstrap; then
+    if is_current_generated_bootstrap; then
+      echo "instructions existing=$instructions"
+    else
+      rewrite_generated_bootstrap
+    fi
   elif grep -Fq "$instance_doctrine" "$instructions" && grep -Fq "$PRODUCT_ROOT/HARNESS.md" "$instructions"; then
     echo "instructions existing=$instructions"
   else

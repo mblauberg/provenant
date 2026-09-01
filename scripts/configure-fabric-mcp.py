@@ -166,6 +166,7 @@ def registration(
     seat: str,
     client_label: str | None = None,
     shim_path: Path | None = None,
+    instance_root: Path | None = None,
 ) -> dict[str, Any]:
     """Return a registration through the stable, relocation-safe Provenant shim.
 
@@ -182,6 +183,8 @@ def registration(
         "AGENT_FABRIC_SEAT": seat,
         "AGENT_FABRIC_CLIENT_LABEL": client_label or seat,
     }
+    if instance_root is not None:
+        environment["AGENT_FABRIC_INSTANCE_ROOT"] = str(instance_root)
     result: dict[str, Any] = {
         "command": str(stable_shim),
         "env": environment,
@@ -573,6 +576,12 @@ def main(argv: list[str] | None = None) -> int:
         "--state-directory", type=Path,
         default=Path(os.environ.get("AGENT_FABRIC_STATE_DIRECTORY", Path.home() / ".local/state/agent-harness/fabric")),
     )
+    parser.add_argument(
+        "--instance-root",
+        type=Path,
+        default=None,
+        help="explicit instance root to pass to the stable client shim",
+    )
     parser.add_argument("--shim-path", type=Path, default=Path.home() / ".local/bin/provenant")
     parser.add_argument("--claude-config", type=Path, default=Path.home() / ".claude.json")
     parser.add_argument(
@@ -605,16 +614,19 @@ def main(argv: list[str] | None = None) -> int:
         state_directory = args.state_directory.expanduser()
         if not state_directory.is_absolute():
             raise RegistrationError("Agent Fabric state directory must be absolute")
+        instance_root = args.instance_root.expanduser() if args.instance_root is not None else None
+        if instance_root is not None and not instance_root.is_absolute():
+            raise RegistrationError("Agent Fabric instance root must be absolute")
         proposals: list[ConfigProposal] = []
         if args.platform in {"all", "claude"}:
             proposals.append(claude_update(
                 args.claude_config,
-                registration(agents_home, state_directory, "claude", shim_path=shim_path),
+                registration(agents_home, state_directory, "claude", shim_path=shim_path, instance_root=instance_root),
             ))
         if args.platform in {"all", "codex"}:
             proposals.append(codex_update(
                 args.codex_config,
-                registration(agents_home, state_directory, "codex", shim_path=shim_path),
+                registration(agents_home, state_directory, "codex", shim_path=shim_path, instance_root=instance_root),
             ))
         optional_configs = {
             "cursor": args.cursor_config,
@@ -631,6 +643,7 @@ def main(argv: list[str] | None = None) -> int:
                         CLIENT_SEATS[client],
                         client,
                         shim_path=shim_path,
+                        instance_root=instance_root,
                     ),
                     client,
                 ))
@@ -643,6 +656,7 @@ def main(argv: list[str] | None = None) -> int:
                     "codex",
                     "opencode",
                     shim_path=shim_path,
+                    instance_root=instance_root,
                 ),
             ))
         if args.check:

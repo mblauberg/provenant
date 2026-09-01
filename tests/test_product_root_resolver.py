@@ -6,7 +6,7 @@ import threading
 
 import pytest
 
-from scripts.lib.product_root_resolver import load_pointer_file, write_pointer_file
+from scripts.lib.product_root_resolver import load_pointer_file, load_pointer_path, write_pointer_file
 
 
 def test_pointer_file_round_trips_an_absolute_existing_product_root(tmp_path: Path) -> None:
@@ -41,6 +41,17 @@ def test_pointer_file_returns_none_for_missing_invalid_or_stale_values(tmp_path:
 
     pointer.unlink()
     assert load_pointer_file(instance_root) is None
+
+
+def test_pointer_path_preserves_an_absolute_stale_path_for_relocation(tmp_path: Path) -> None:
+    instance_root = tmp_path / "instance"
+    pointer = instance_root / ".agent-fabric/product-root.json"
+    pointer.parent.mkdir(parents=True)
+    stale = tmp_path / "old'\\product"
+    pointer.write_text(json.dumps({"schema_version": 1, "product_root": str(stale)}))
+
+    assert load_pointer_file(instance_root) is None
+    assert load_pointer_path(instance_root) == stale
 
 
 def test_concurrent_pointer_writes_leave_complete_valid_json(tmp_path: Path) -> None:
@@ -94,6 +105,23 @@ def test_a_self_targeting_pointer_directory_is_refused_not_followed(tmp_path: Pa
 
     assert not (instance_root / ".gitignore").exists()
     assert not (instance_root / "product-root.json").exists()
+
+
+def test_pointer_writer_replaces_gitignore_symlink_without_following_it(tmp_path: Path) -> None:
+    instance_root = tmp_path / "instance"
+    pointer_directory = instance_root / ".agent-fabric"
+    pointer_directory.mkdir(parents=True)
+    product_root = tmp_path / "product"
+    product_root.mkdir()
+    external = tmp_path / "external-gitignore"
+    external.write_text("keep me\n")
+    (pointer_directory / ".gitignore").symlink_to(external)
+
+    write_pointer_file(instance_root, product_root)
+
+    assert external.read_text() == "keep me\n"
+    assert not (pointer_directory / ".gitignore").is_symlink()
+    assert (pointer_directory / ".gitignore").read_text() == "*\n"
 
 
 def test_the_pointer_writer_cli_reports_an_escape_as_a_conflict(tmp_path: Path) -> None:
