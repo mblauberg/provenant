@@ -380,7 +380,10 @@ function validOwnerRecord(
   runDir: string,
 ): boolean {
   if (record.schema_version !== 1 || typeof record.status !== "string" || record.status.length === 0) return false;
-  if (record.record_type === undefined) return typeof record.message === "string" && record.message.length > 0;
+  if (record.record_type === undefined) {
+    return record.status !== "succeeded" && record.status !== "completed" &&
+      typeof record.message === "string" && record.message.length > 0;
+  }
   if (record.record_type !== (kind === "dispatch" ? "dispatch-attempt" : "dispatch-batch")) return false;
   if (kind === "dispatch" && record.status === "succeeded") {
     const result = objectValue(record.result);
@@ -482,7 +485,9 @@ function compactBatch(started: StartedOwner, completion: OwnerCompletion): Recor
       paths: basePaths(started),
     };
   }
-  if (completion.error !== undefined || completion.signal !== null) {
+  const allTasksSucceeded = Array.isArray(record.tasks) && record.tasks.length > 0 &&
+    record.tasks.every((value) => objectValue(value)?.status === "succeeded");
+  if (completionConflict(completion, allTasksSucceeded)) {
     return {
       schema_version: 1,
       status: "owner_completion_conflict",

@@ -316,6 +316,11 @@ try {
     arguments: { prompt: "emit malformed owner output", adapter: "codex", wait_seconds: 5 },
   }));
   assert.equal(malformed.status, "owner_output_invalid");
+  const untypedSuccess = payload(await executor.callTool({
+    name: "fabric_dispatch",
+    arguments: { prompt: "emit untyped success", adapter: "codex", wait_seconds: 5 },
+  }));
+  assert.equal(untypedSuccess.status, "owner_output_invalid");
   const incompleteSuccess = payload(await executor.callTool({
     name: "fabric_dispatch",
     arguments: { prompt: "emit incomplete success", adapter: "codex", wait_seconds: 5 },
@@ -329,6 +334,16 @@ try {
     },
   }));
   assert.equal(incompleteBatch.status, "owner_output_invalid");
+  const conflictingBatch = payload(await executor.callTool({
+    name: "fabric_batch",
+    arguments: {
+      wait_seconds: 5,
+      tasks: [{ id: "conflicting", prompt: "claim batch success then fail", adapter: "codex" }],
+    },
+  }));
+  assert.equal(conflictingBatch.status, "owner_completion_conflict");
+  assert.equal(conflictingBatch.owner_status, "completed");
+  assert.equal(conflictingBatch.owner_exit, 7);
   const conflicting = payload(await executor.callTool({
     name: "fabric_dispatch",
     arguments: { prompt: "claim success then fail", adapter: "codex", wait_seconds: 5 },

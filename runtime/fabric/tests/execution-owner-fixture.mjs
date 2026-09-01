@@ -56,6 +56,12 @@ if (owner === "run_controls.py") {
   const prompt = readFileSync(promptPath, "utf8");
   if (prompt === "emit malformed owner output") {
     process.stdout.write("{}\n");
+  } else if (prompt === "emit untyped success") {
+    process.stdout.write(JSON.stringify({
+      schema_version: 1,
+      status: "succeeded",
+      message: "not an attempt",
+    }) + "\n");
   } else if (prompt === "emit incomplete success") {
     process.stdout.write(JSON.stringify({
       schema_version: 1,
@@ -140,6 +146,7 @@ if (owner === "run_controls.py") {
   };
   writeFileSync(summaryPath, JSON.stringify(summary, null, 2) + "\n");
   process.stdout.write(JSON.stringify(summary) + "\n");
+  if (manifest.tasks[0]?.prompt === "claim batch success then fail") process.exitCode = 7;
 } else {
   throw new Error(`unexpected fixture owner: ${owner}`);
 }
