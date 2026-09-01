@@ -241,6 +241,40 @@ try {
   assert.equal(invocation.cwd, realpathSync(workspace));
   assert.ok(invocation.argv.includes("gpt-fixture"));
 
+  // The Python selector may borrow the primary checkout's environment for a
+  // linked worktree, but inherited Git redirects must not steer that lookup to
+  // another repository.
+  execFileSync("git", ["init", "--quiet"], { cwd: fakeProduct });
+  execFileSync("git", ["add", "."], { cwd: fakeProduct });
+  execFileSync("git", ["-c", "user.name=Fabric smoke", "-c", "user.email=fabric@example.invalid",
+    "commit", "--quiet", "-m", "fixture"], { cwd: fakeProduct });
+  const linkedProduct = resolve(executionRoot, "linked-product");
+  execFileSync("git", ["worktree", "add", "--quiet", "--detach", linkedProduct, "HEAD"], { cwd: fakeProduct });
+  const primaryPython = resolve(fakeProduct, ".venv/bin/python");
+  mkdirSync(resolve(fakeProduct, ".venv/bin"), { recursive: true });
+  writeFileSync(primaryPython, `#!/bin/sh\nexec ${shellQuote(fixturePython)} "$@"\n`);
+  chmodSync(primaryPython, 0o755);
+  const foreignProduct = resolve(executionRoot, "foreign-product");
+  mkdirSync(foreignProduct);
+  execFileSync("git", ["init", "--quiet"], { cwd: foreignProduct });
+  const foreignMarker = resolve(executionRoot, "foreign-python-ran");
+  const foreignPython = resolve(foreignProduct, ".venv/bin/python");
+  mkdirSync(resolve(foreignProduct, ".venv/bin"), { recursive: true });
+  writeFileSync(foreignPython,
+    `#!/bin/sh\ntouch ${shellQuote(foreignMarker)}\nexec ${shellQuote(fixturePython)} "$@"\n`);
+  chmodSync(foreignPython, 0o755);
+  const redirectedExecutor = await spawnAgent("codex", "redirected-execution-client", {
+    cwd: workspace,
+    productRoot: linkedProduct,
+    env: { GIT_DIR: resolve(foreignProduct, ".git"), GIT_WORK_TREE: foreignProduct },
+  });
+  const redirectedDispatch = payload(await redirectedExecutor.callTool({
+    name: "fabric_dispatch",
+    arguments: { prompt: "ignore foreign Git redirects", model: "gpt-fixture", wait_seconds: 5 },
+  }));
+  assert.equal(redirectedDispatch.status, "succeeded");
+  assert.equal(existsSync(foreignMarker), false);
+
   const batched = payload(await executor.callTool({
     name: "fabric_batch",
     arguments: {
@@ -282,6 +316,19 @@ try {
     arguments: { prompt: "emit malformed owner output", adapter: "codex", wait_seconds: 5 },
   }));
   assert.equal(malformed.status, "owner_output_invalid");
+  const incompleteSuccess = payload(await executor.callTool({
+    name: "fabric_dispatch",
+    arguments: { prompt: "emit incomplete success", adapter: "codex", wait_seconds: 5 },
+  }));
+  assert.equal(incompleteSuccess.status, "owner_output_invalid");
+  const incompleteBatch = payload(await executor.callTool({
+    name: "fabric_batch",
+    arguments: {
+      wait_seconds: 5,
+      tasks: [{ id: "incomplete", prompt: "emit incomplete completed batch", adapter: "codex" }],
+    },
+  }));
+  assert.equal(incompleteBatch.status, "owner_output_invalid");
   const conflicting = payload(await executor.callTool({
     name: "fabric_dispatch",
     arguments: { prompt: "claim success then fail", adapter: "codex", wait_seconds: 5 },
@@ -324,9 +371,15 @@ try {
   // written and validated their attempt and batch evidence.
   const realWorkspace = resolve(executionRoot, "real-workspace");
   mkdirSync(realWorkspace, { recursive: true });
+  const realProviderBin = resolve(executionRoot, "real-provider-bin");
+  mkdirSync(realProviderBin);
+  const slowCodex = resolve(realProviderBin, "codex");
+  writeFileSync(slowCodex, "#!/bin/sh\ntrap 'exit 143' TERM INT HUP\nwhile :; do /bin/sleep 1; done\n");
+  chmodSync(slowCodex, 0o755);
   const realExecutor = await spawnAgent("codex", "real-execution-client", {
     cwd: realWorkspace,
     productRoot: resolve(import.meta.dirname, "../.."),
+    env: { PATH: `${realProviderBin}:/usr/bin:/bin` },
   });
   const realDispatch = payload(await realExecutor.callTool({
     name: "fabric_dispatch",
@@ -368,8 +421,8 @@ try {
     arguments: {
       prompt: "cancel the real owner during startup",
       task_id: "real-cancel",
-      adapter: "unsupported-fixture",
-      model: "fixture-model",
+      adapter: "codex",
+      model: "gpt-5.6-luna",
       wait_seconds: 0,
     },
   }));
@@ -381,6 +434,8 @@ try {
     await new Promise((resolveWait) => setTimeout(resolveWait, 10));
   }
   const cancelledRecord = JSON.parse(readFileSync(realCancelledAttempt, "utf8"));
+  assert.equal(cancelledRecord.status, "cancelled");
+  assert.equal(cancelledRecord.failure_code, "cancelled");
   assert.equal(cancelledRecord.process.observed_exit, true);
   assert.match(execFileSync(fixturePython, [
     finalizer, realCancelled.paths.run_dir, "--status", "cancelled", "--reason", "MCP close",

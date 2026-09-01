@@ -56,6 +56,12 @@ if (owner === "run_controls.py") {
   const prompt = readFileSync(promptPath, "utf8");
   if (prompt === "emit malformed owner output") {
     process.stdout.write("{}\n");
+  } else if (prompt === "emit incomplete success") {
+    process.stdout.write(JSON.stringify({
+      schema_version: 1,
+      record_type: "dispatch-attempt",
+      status: "succeeded",
+    }) + "\n");
   } else if (prompt === "sleep until cancelled") {
     process.once("SIGTERM", () => {
       writeFileSync(join(runDir, "cancelled.marker"), "cancelled\n");
@@ -99,6 +105,14 @@ if (owner === "run_controls.py") {
   }
 } else if (owner === "batch_run.py") {
   const manifest = JSON.parse(readFileSync(value("--manifest"), "utf8"));
+  if (manifest.tasks[0]?.prompt === "emit incomplete completed batch") {
+    process.stdout.write(JSON.stringify({
+      schema_version: 1,
+      record_type: "dispatch-batch",
+      status: "completed",
+    }) + "\n");
+    process.exit(0);
+  }
   const batchDir = join(runDir, "dispatch", "batches", "batch-001");
   mkdirSync(batchDir, { recursive: true });
   const tasks = manifest.tasks.map((task) => ({

@@ -88,8 +88,9 @@ The current pre-release tree includes:
   [ADR 0020](docs/adr/0020-retire-the-daemon-fabric.md); the tree is preserved
   on the `legacy/agent-fabric` branch.
 - The model router's daemon-activation gate and `config/agent-fabric.yaml`.
-  There are no in-process provider adapters left to activate, so every
-  cross-provider dispatch is a direct CLI call. Adapter compatibility, which
+  There are no in-process provider adapters left to activate. Fabric MCP and
+  the direct command line both delegate cross-provider dispatch to the same
+  external CLI owners. Adapter compatibility, which
   constrains which model families each provider CLI accepts, is unchanged.
 - The `allowed_fabric_operations` and `denied_fabric_operations` delivery
   receipt fields, which scoped authority against the retired protocol's

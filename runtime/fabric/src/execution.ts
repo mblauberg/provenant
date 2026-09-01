@@ -17,7 +17,7 @@ import {
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 
-import type { Identity } from "./identity.js";
+import { withoutGitRedirects, type Identity } from "./identity.js";
 
 const execFileAsync = promisify(execFile);
 export const MAX_EXECUTION_WAIT_SECONDS = 55;
@@ -143,7 +143,7 @@ async function pythonOwner(root: string, identity: Identity, env: NodeJS.Process
       helper,
     ], {
       cwd: identity.cwd,
-      env,
+      env: withoutGitRedirects(env),
       encoding: "utf8",
       timeout: 10_000,
       maxBuffer: 64 * 1024,
@@ -370,10 +370,38 @@ function objectValue(value: unknown): Record<string, unknown> | undefined {
     : undefined;
 }
 
-function validOwnerRecord(record: Record<string, unknown>, kind: "dispatch" | "batch"): boolean {
+function nonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0;
+}
+
+function validOwnerRecord(
+  record: Record<string, unknown>,
+  kind: "dispatch" | "batch",
+  runDir: string,
+): boolean {
   if (record.schema_version !== 1 || typeof record.status !== "string" || record.status.length === 0) return false;
   if (record.record_type === undefined) return typeof record.message === "string" && record.message.length > 0;
-  return record.record_type === (kind === "dispatch" ? "dispatch-attempt" : "dispatch-batch");
+  if (record.record_type !== (kind === "dispatch" ? "dispatch-attempt" : "dispatch-batch")) return false;
+  if (kind === "dispatch" && record.status === "succeeded") {
+    const result = objectValue(record.result);
+    const stderr = objectValue(record.stderr);
+    return nonEmptyString(record.outcome) && nonEmptyString(record.task_id) && nonEmptyString(record.attempt_id) &&
+      retainedAbsolute(runDir, record.attempt_path) !== null &&
+      retainedAbsolute(runDir, result?.path) !== null &&
+      retainedAbsolute(runDir, stderr?.path) !== null && compactRoute(record.route) !== null;
+  }
+  if (kind === "batch" && record.status === "completed") {
+    const tasks = Array.isArray(record.tasks) ? record.tasks : [];
+    const counts = objectValue(record.counts);
+    return nonEmptyString(record.batch_id) && Number.isInteger(record.task_count) && Number(record.task_count) > 0 &&
+      Number.isInteger(record.concurrency) && Number(record.concurrency) > 0 &&
+      tasks.length === record.task_count && tasks.every((value) => {
+        const task = objectValue(value);
+        return task !== undefined && nonEmptyString(task.task_id) && nonEmptyString(task.status);
+      }) && counts !== undefined && Object.keys(counts).length > 0 &&
+      retainedAbsolute(runDir, record.summary_path) !== null;
+  }
+  return true;
 }
 
 function completionConflict(completion: OwnerCompletion, successful: boolean): boolean {
@@ -402,7 +430,7 @@ function basePaths(started: StartedOwner): Record<string, string> {
 
 function compactDispatch(started: StartedOwner, completion: OwnerCompletion): Record<string, unknown> {
   const record = parseOwnerOutput(started.stdoutPath);
-  if (record === undefined || !validOwnerRecord(record, "dispatch")) {
+  if (record === undefined || !validOwnerRecord(record, "dispatch", started.runDir)) {
     return {
       schema_version: 1,
       status: "owner_output_invalid",
@@ -444,7 +472,7 @@ function compactDispatch(started: StartedOwner, completion: OwnerCompletion): Re
 
 function compactBatch(started: StartedOwner, completion: OwnerCompletion): Record<string, unknown> {
   const record = parseOwnerOutput(started.stdoutPath);
-  if (record === undefined || !validOwnerRecord(record, "batch")) {
+  if (record === undefined || !validOwnerRecord(record, "batch", started.runDir)) {
     return {
       schema_version: 1,
       status: "owner_output_invalid",
