@@ -609,6 +609,16 @@ describe("MCP startup boundaries", () => {
     const client = new Client({ name: "lock-recovery", version: "1" });
     try {
       await client.connect(transport);
+      const boundedStarted = performance.now();
+      const bounded = await client.callTool({
+        name: "fabric_inbox",
+        arguments: { wait_seconds: 1 },
+      });
+      expect(performance.now() - boundedStarted).toBeLessThan(1_400);
+      expect(bounded.isError).toBeUndefined();
+      const boundedContent = bounded.content as Array<{ type: "text"; text: string }>;
+      expect(JSON.parse(boundedContent[0]!.text)).toEqual([]);
+
       const locked = await client.callTool({ name: "fabric_whoami", arguments: {} });
       expect(locked.isError).toBe(true);
       expect(locked.content).toMatchObject([{

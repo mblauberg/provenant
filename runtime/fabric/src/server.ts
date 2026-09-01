@@ -17,8 +17,8 @@ const MAX_WAIT_SECONDS = 55;
  */
 const who = identify();
 let store: Store | undefined;
-const initialiseStore = (): Store => {
-  const opened = new Store(databasePath());
+const initialiseStore = (busyTimeoutMs = 5000): Store => {
+  const opened = new Store(databasePath(), busyTimeoutMs);
   try {
     opened.announce(who);
     store = opened;
@@ -36,13 +36,13 @@ try {
   // allowing transient SQLite locks to recover without a background process.
 }
 
-const readyStore = (): Store => {
+const readyStore = (busyTimeoutMs = 5000): Store => {
   if (store !== undefined) return store;
   try {
-    return initialiseStore();
+    return initialiseStore(busyTimeoutMs);
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
-    throw new Error(`fabric startup failed: ${detail}`);
+    throw new Error(`fabric startup failed: ${detail}`, { cause: error });
   }
 };
 
@@ -83,11 +83,12 @@ const waitForInbox = async (
     if (waitMs > 0 && remainingBeforeClaim <= 0) return [];
     let messages: Message[];
     try {
-      messages = readyStore().inbox(who, {
+      const busyTimeoutMs = waitMs === 0
+        ? undefined
+        : Math.max(1, Math.min(50, Math.floor(remainingBeforeClaim)));
+      messages = readyStore(busyTimeoutMs).inbox(who, {
         ...options,
-        busyTimeoutMs: waitMs === 0
-          ? undefined
-          : Math.max(1, Math.min(50, Math.floor(remainingBeforeClaim))),
+        busyTimeoutMs,
       });
     } catch (error) {
       if (waitMs === 0 || !isSQLiteContention(error)) throw error;

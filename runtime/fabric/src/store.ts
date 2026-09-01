@@ -19,7 +19,9 @@ const BOOTSTRAP_WAIT = new Int32Array(new SharedArrayBuffer(4));
 
 export const isSQLiteContention = (error: unknown): boolean => {
   const code = (error as { code?: unknown } | null)?.code;
-  return code === "SQLITE_BUSY" || code === "SQLITE_LOCKED";
+  if (code === "SQLITE_BUSY" || code === "SQLITE_LOCKED") return true;
+  const cause = (error as { cause?: unknown } | null)?.cause;
+  return cause !== undefined && cause !== error && isSQLiteContention(cause);
 };
 
 export interface Message {
@@ -67,16 +69,19 @@ export interface Activity {
 export class Store {
   readonly #db: Database.Database;
 
-  constructor(path: string) {
+  constructor(path: string, busyTimeoutMs = 5000) {
+    if (!Number.isSafeInteger(busyTimeoutMs) || busyTimeoutMs < 1 || busyTimeoutMs > 5000) {
+      throw new Error("busy timeout must be between 1 and 5000 milliseconds");
+    }
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-    this.#db = new Database(path, { timeout: 5000 });
+    this.#db = new Database(path, { timeout: busyTimeoutMs });
     try {
       // Migration/schema PRAGMAs also contend on the first simultaneous open.
       // Install the wait policy before executing any of them, then retry only
       // the idempotent schema bootstrap on bounded SQLite contention.
-      this.#db.pragma("busy_timeout = 5000");
+      this.#db.pragma(`busy_timeout = ${busyTimeoutMs}`);
       const schema = readFileSync(SCHEMA, "utf8");
-      const deadline = Date.now() + 5000;
+      const deadline = Date.now() + busyTimeoutMs;
       for (;;) {
         try {
           this.#db.exec(schema);
