@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 import sys
 
-from lib.product_root_resolver import load_pointer_file
+from lib.product_root_resolver import POINTER_RELATIVE_PATH, load_pointer_file
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -15,7 +15,7 @@ TEMPLATE = ROOT / "scripts/provenant.template"
 
 
 def main() -> int:
-    instance_value = os.environ.get("AGENT_FABRIC_INSTANCE_ROOT")
+    instance_value = os.environ.get("AGENT_FABRIC_INSTANCE_ROOT") or None
     instance_root = (
         Path(instance_value).expanduser()
         if instance_value is not None
@@ -25,11 +25,15 @@ def main() -> int:
         print("FAIL: Agent Fabric instance root must be absolute", file=sys.stderr)
         return 1
     pointed_product = load_pointer_file(instance_root)
+    pointer = instance_root / POINTER_RELATIVE_PATH
+    if (pointer.exists() or pointer.is_symlink()) and pointed_product is None:
+        print(f"FAIL: product-root pointer is invalid or stale at {pointer}", file=sys.stderr)
+        return 1
     if pointed_product is None or pointed_product.resolve() != ROOT.resolve():
         print("provenant installed stub=not-owned-by-this-checkout")
         return 0
 
-    bin_value = os.environ.get("PROVENANT_BIN_DIR")
+    bin_value = os.environ.get("PROVENANT_BIN_DIR") or None
     bin_directory = (
         Path(bin_value).expanduser()
         if bin_value is not None

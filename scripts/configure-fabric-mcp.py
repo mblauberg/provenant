@@ -579,7 +579,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--instance-root",
         type=Path,
-        default=None,
+        default=(
+            Path(os.environ["AGENT_FABRIC_INSTANCE_ROOT"])
+            if os.environ.get("AGENT_FABRIC_INSTANCE_ROOT")
+            else None
+        ),
         help="explicit instance root to pass to the stable client shim",
     )
     parser.add_argument("--shim-path", type=Path, default=Path.home() / ".local/bin/provenant")

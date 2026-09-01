@@ -27,21 +27,24 @@ def instance_root() -> Path:
 
 
 def pointer_product_root(root: Path) -> Path | None:
+    pointer = root / ".agent-fabric/product-root.json"
+    if not pointer.exists() and not pointer.is_symlink():
+        return None
     try:
-        value = json.loads((root / ".agent-fabric/product-root.json").read_text())
+        value = json.loads(pointer.read_text())
         if (
             not isinstance(value, dict)
             or type(value.get("schema_version")) is not int
             or value["schema_version"] != 1
             or not isinstance(value.get("product_root"), str)
         ):
-            return None
+            raise ValueError(f"product-root pointer is invalid at {pointer}; {REPAIR}")
         candidate = Path(value["product_root"]).expanduser()
         if not candidate.is_absolute() or not candidate.exists():
-            return None
+            raise ValueError(f"product-root pointer is invalid or stale at {pointer}; {REPAIR}")
         return candidate
-    except (OSError, TypeError, ValueError, json.JSONDecodeError):
-        return None
+    except (OSError, TypeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"product-root pointer is unreadable at {pointer}: {exc}; {REPAIR}") from None
 
 
 def resolve_product_root(root: Path) -> Path:

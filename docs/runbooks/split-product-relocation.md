@@ -29,6 +29,9 @@ AGENT_FABRIC_INSTANCE_ROOT=/abs/instance \
 PROVENANT_BIN_DIR=/abs/bin \
 ./scripts/install-harness --platform all
 
+AGENT_FABRIC_INSTANCE_ROOT=/abs/instance \
+PROVENANT_BIN_DIR=/abs/bin \
+./scripts/check-harness
 AGENT_FABRIC_INSTANCE_ROOT=/abs/instance /abs/bin/provenant root
 ```
 
@@ -47,7 +50,7 @@ If a directory-level link to the old checkout is refused, restore that target
 as a real directory or deliberately recreate the canonical link to the new
 product checkout, then re-run the installer. Do not replace it automatically.
 
-Verify the result from the new checkout:
+With the default instance and bin paths, verify the result from the new checkout:
 
 ```sh
 ./scripts/check-harness
@@ -57,6 +60,14 @@ Verify the result from the new checkout:
 The `all` invocation preflights both primaries before changing either one and
 publishes the shared product pointer once. It is idempotent. If only one
 primary is installed, use its individual platform instead.
+
+### Existing fused checkout
+
+When `~/.agents` is the current product checkout, the install above establishes
+split routing but deliberately leaves that checkout intact. Verify the new
+pointer, command and managed links first. Thinning `~/.agents` to its
+instance-owned files is a later, separately authorised cleanup; the installer
+does not guess which untracked or customised files are safe to remove.
 
 ## Roll back
 

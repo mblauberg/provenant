@@ -1036,6 +1036,24 @@ def test_rejects_a_relative_provenant_bin_directory_before_mutation(tmp_path):
     assert not (tmp_path / ".codex").exists()
 
 
+def test_rejects_a_provenant_bin_directory_inside_the_product(tmp_path):
+    product = copy_product(ROOT, tmp_path / "product")
+    source = product / "scripts/provenant"
+    original = source.read_bytes()
+
+    result = run_product(
+        product,
+        "codex",
+        tmp_path,
+        PROVENANT_BIN_DIR=str(product / "scripts"),
+    )
+
+    assert result.returncode == 3
+    assert "must be outside the product checkout" in result.stderr
+    assert source.read_bytes() == original
+    assert not (tmp_path / "instance/.agent-fabric/product-root.json").exists()
+
+
 def test_updates_a_managed_provenant_file_to_the_current_template(tmp_path):
     bin_dir = tmp_path / "custom-bin"
     bin_dir.mkdir()
@@ -1196,6 +1214,9 @@ def test_relocation_rewrites_only_an_exact_generated_bootstrap_and_preserves_con
     assert str(new_product / "HARNESS.md") in instructions.read_text()
     assert str(old_product / "HARNESS.md") not in instructions.read_text()
     assert harness.resolve() == (new_product / "HARNESS.md").resolve()
+    assert (tmp_path / platform / "skills/scope").resolve().is_relative_to(
+        (new_product / "skills").resolve()
+    )
     assert json.loads(pointer.read_text())["product_root"] == str(new_product.resolve())
 
 

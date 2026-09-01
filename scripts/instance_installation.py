@@ -64,12 +64,6 @@ SEEDED_FILES = (
     "config/model-routing.json",
 )
 
-#: Machine-local pointer to the product checkout, in the receipt class rather
-#: than the committed one. Committed instance state never carries an absolute
-#: machine path, so the path a consumer needs lives here, is ignored, and is
-#: rewritten on every install. Relocating the product is therefore always
-#: "re-run install-harness", never an edit to a committed file or a client
-#: configuration.
 class InstallError(ValueError):
     pass
 
@@ -92,8 +86,6 @@ def write_pointer(product_root: Path, instance_root: Path) -> dict[str, Any]:
     """
     try:
         write_pointer_file(Path(instance_root), Path(product_root))
-    except InstallError:
-        raise
     except ValueError as exc:
         # The shared writer refuses a pointer directory that escapes the
         # instance root; surface it as a conflict rather than a traceback.

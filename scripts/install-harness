@@ -65,6 +65,21 @@ case "$provenant_bin_dir" in
   /*) ;;
   *) echo "PROVENANT_BIN_DIR must be absolute" >&2; exit 3 ;;
 esac
+case "$provenant_command" in
+  "$PRODUCT_ROOT"|"$PRODUCT_ROOT"/*)
+    echo "PROVENANT_BIN_DIR must be outside the product checkout: $PRODUCT_ROOT" >&2
+    exit 3
+    ;;
+esac
+if [[ -d "$provenant_bin_dir" ]]; then
+  provenant_bin_real="$(CDPATH= cd -- "$provenant_bin_dir" && pwd -P)"
+  case "$provenant_bin_real/provenant" in
+    "$PRODUCT_ROOT"|"$PRODUCT_ROOT"/*)
+      echo "PROVENANT_BIN_DIR resolves inside the product checkout: $provenant_bin_real" >&2
+      exit 3
+      ;;
+  esac
+fi
 case "$instance_root" in
   /*) ;;
   *) echo "Agent Fabric instance root must be absolute" >&2; exit 3 ;;
@@ -303,7 +318,9 @@ mcp_args=(
   --kiro-config "${KIRO_MCP_CONFIG:-$HOME/.kiro/settings/mcp.json}"
   --opencode-config "${OPENCODE_MCP_CONFIG:-$HOME/.config/opencode/opencode.jsonc}"
 )
+mcp_instance_root=""
 if [[ -n "${AGENT_FABRIC_INSTANCE_ROOT:-}" && "$instance_root" != "$HOME/.agents" ]]; then
+  mcp_instance_root="$instance_root"
   mcp_args+=(--instance-root "$instance_root")
 fi
 
@@ -313,11 +330,13 @@ configure_fabric_mcp() {
   if [[ -n "$action" ]]; then mcp_command+=("$action"); fi
   if [[ "$REQUESTED_PLATFORM" == "all" && "$MCP_CLIENTS" == "primary" ]]; then
     for mcp_primary in claude codex; do
-      run_stdlib "$PRODUCT_ROOT/scripts/configure-fabric-mcp.py" \
+      AGENT_FABRIC_INSTANCE_ROOT="$mcp_instance_root" \
+        run_stdlib "$PRODUCT_ROOT/scripts/configure-fabric-mcp.py" \
         --platform "$mcp_primary" "${mcp_command[@]}"
     done
   else
-    run_stdlib "$PRODUCT_ROOT/scripts/configure-fabric-mcp.py" \
+    AGENT_FABRIC_INSTANCE_ROOT="$mcp_instance_root" \
+      run_stdlib "$PRODUCT_ROOT/scripts/configure-fabric-mcp.py" \
       --platform "$mcp_platform" "${mcp_command[@]}"
   fi
 }

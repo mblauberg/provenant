@@ -354,6 +354,19 @@ def test_rejects_a_relative_stable_shim_path(tmp_path: Path) -> None:
     assert not any(path.exists() for path in all_client_paths(tmp_path).values())
 
 
+def test_direct_repair_preserves_ambient_nondefault_instance_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    instance_root = tmp_path / "instance"
+    monkeypatch.setenv("AGENT_FABRIC_INSTANCE_ROOT", str(instance_root))
+
+    result = run_configure(tmp_path, "--platform", "codex")
+
+    assert result.returncode == 0, result.stderr
+    registration = tomllib.loads((tmp_path / "codex.toml").read_text())["mcp_servers"]["fabric"]
+    assert registration["env"]["AGENT_FABRIC_INSTANCE_ROOT"] == str(instance_root)
+
+
 def test_check_rejects_a_missing_stable_shim(tmp_path: Path) -> None:
     configured = run_configure(tmp_path)
     assert configured.returncode == 0, configured.stderr

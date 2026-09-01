@@ -333,7 +333,7 @@ an additional workspace root at startup.
 
 MCP client registration falls in the machine-local, ignored class:
 `~/.claude.json`, `~/.codex/config.toml` and the other client configuration
-files written by `scripts/configure-agent-fabric-mcp.py`. It is named here for completeness of the table only. The registration
+files written by `scripts/configure-fabric-mcp.py`. It is named here for completeness of the table only. The registration
 path itself is owned by [issue
 #529](https://github.com/mblauberg/provenant/issues/529) and is not changed by
 this decision.
