@@ -83,6 +83,7 @@ const waitForInbox = async (
     peek?: boolean;
     claimTtlMs?: number;
     busyTimeoutMs?: number;
+    taskId?: string;
   },
   waitMs: number,
   signal: AbortSignal,
@@ -132,10 +133,17 @@ server.registerTool(
       body: z.string(),
       kind: z.string().optional().describe("note, request, response, or anything you like"),
       reply_to: z.string().optional().describe("message id this replies to"),
+      task_id: z.string().min(1).optional().describe("existing Fabric task to link"),
+      output_path: z.string().min(1).optional().describe("opaque output or run path metadata"),
     },
   },
-  ({ to, body, kind, reply_to }) =>
-    reply(readyStore().send(who, to, body, { kind, replyTo: reply_to })),
+  ({ to, body, kind, reply_to, task_id, output_path }) =>
+    reply(readyStore().send(who, to, body, {
+      kind,
+      replyTo: reply_to,
+      taskId: task_id,
+      outputPath: output_path,
+    })),
 );
 
 server.registerTool(
@@ -143,19 +151,22 @@ server.registerTool(
   {
     description:
       "Claim my unacknowledged messages. Peek observes without claiming; expired claims redeliver. " +
-      "Set wait_seconds for one bounded wait inside this MCP call; never poll SQLite or start a watcher.",
+      "Set wait_seconds for one bounded wait inside this MCP call; task_id limits the same atomic " +
+      "claim/peek to one Fabric task; never poll SQLite or start a watcher.",
     inputSchema: {
       limit: z.number().int().positive().optional(),
       peek: z.boolean().optional(),
       claim_seconds: z.number().int().min(1).max(3600).optional(),
+      task_id: z.string().min(1).optional(),
       wait_seconds: z.number().int().min(0).max(MAX_WAIT_SECONDS).optional(),
     },
   },
-  async ({ limit, peek, claim_seconds, wait_seconds }, { signal }) =>
+  async ({ limit, peek, claim_seconds, task_id, wait_seconds }, { signal }) =>
     reply(await waitForInbox({
       limit,
       peek,
       claimTtlMs: claim_seconds === undefined ? undefined : claim_seconds * 1000,
+      taskId: task_id,
     }, (wait_seconds ?? 0) * 1000, signal)),
 );
 
@@ -242,7 +253,7 @@ server.registerTool(
       "Task ownership is cooperative routing metadata, not an access-control boundary.",
     inputSchema: {
       objective: z.string(),
-      task_id: z.string().optional(),
+      task_id: z.string().min(1).optional(),
       owner: z.string().optional(),
       depends_on: z.array(z.string()).optional(),
     },

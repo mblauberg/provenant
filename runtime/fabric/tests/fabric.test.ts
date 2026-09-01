@@ -121,6 +121,22 @@ describe("CLI boundaries", () => {
     expect(result.stdout).toBe("");
   });
 
+  it("rejects empty task and output links at the CLI boundary", () => {
+    const store = openStore();
+    announce(store, "sender");
+
+    for (const args of [
+      ["send", "sender", "empty task", "--task-id", ""],
+      ["send", "sender", "empty path", "--output-path", ""],
+      ["inbox", "--task-id", ""],
+    ]) {
+      const result = runCli(args);
+      expect(result.status, result.stderr).toBe(1);
+      expect(result.stderr).toContain("must not be empty");
+      expect(result.stderr).not.toContain("src/cli.ts");
+    }
+  });
+
   it("reports status and doctor results without creating or updating the database", () => {
     for (const command of ["status", "doctor"]) {
       const absentState = join(temporaryDirectory, `${command}-absent`);
@@ -478,6 +494,7 @@ describe("MCP startup boundaries", () => {
     const sender = agent("wait-sender");
     const seed = openStore();
     seed.announce(sender);
+    seed.createTask(sender, "wait for one task", { taskId: "wait-task" });
     seed.close();
 
     const serverPath = fileURLToPath(new URL("../src/server.ts", import.meta.url));
@@ -502,13 +519,13 @@ describe("MCP startup boundaries", () => {
       let settled = false;
       const waiting = client.callTool({
         name: "fabric_inbox",
-        arguments: { wait_seconds: 1 },
+        arguments: { wait_seconds: 1, task_id: "wait-task" },
       }).finally(() => { settled = true; });
 
       await delay(75);
       expect(settled).toBe(false);
       const writer = openStore();
-      writer.send(sender, "wait-recipient", "arrived during the MCP wait");
+      writer.send(sender, "wait-recipient", "arrived during the MCP wait", { taskId: "wait-task" });
       writer.close();
 
       const result = await waiting;
@@ -1044,6 +1061,107 @@ describe("messaging", () => {
       replyTo: parent.messageId,
     });
     expect(replies).toHaveLength(1);
+  });
+
+  it("links messages to an existing task and leaves an output path opaque", () => {
+    const store = openStore();
+    announce(store, "alice", "bob");
+    const alice = agent("alice");
+    const bob = agent("bob");
+    const task = store.createTask(alice, "review the result", { taskId: "review" });
+    const sent = store.send(alice, "bob", "artifact ready", {
+      taskId: task.taskId,
+      outputPath: "/path/that/does/not/exist",
+    });
+    const message = store.inbox(bob)[0]!;
+    expect(message).toMatchObject({
+      messageId: sent.messageId,
+      taskId: "review",
+      outputPath: "/path/that/does/not/exist",
+    });
+    expect(Object.keys(message)).toContain("outputPath");
+  });
+
+  it("rejects empty task ids and output paths for direct Store callers", () => {
+    const store = openStore();
+    announce(store, "alice", "bob");
+    const alice = agent("alice");
+    const bob = agent("bob");
+    expect(() => store.createTask(alice, "invalid", { taskId: "" }))
+      .toThrowError("task id must not be empty");
+    store.createTask(alice, "valid", { taskId: "valid" });
+    expect(() => store.send(alice, "bob", "invalid task", { taskId: "" }))
+      .toThrowError("task id must not be empty");
+    expect(() => store.send(alice, "bob", "invalid path", { outputPath: "" }))
+      .toThrowError("output path must not be empty");
+    expect(() => store.inbox(bob, { taskId: "" }))
+      .toThrowError("task id must not be empty");
+  });
+
+  it("validates task links atomically within the sender project", () => {
+    const store = openStore();
+    announce(store, "alice", "bob");
+    const alice = agent("alice");
+    store.createTask(alice, "same project task", { taskId: "local-task" });
+    const foreign = identify({ AGENT_FABRIC_SEAT: "foreign" }, temporaryDirectory);
+    const foreignRecipient = identify({ AGENT_FABRIC_SEAT: "foreign-recipient" }, temporaryDirectory);
+    store.announce(foreign);
+    store.announce(foreignRecipient);
+    store.createTask(foreign, "foreign task", { taskId: "foreign-task" });
+
+    const beforeDatabase = new Database(databasePath, { readonly: true });
+    const before = beforeDatabase.prepare("SELECT count(*) AS count FROM messages")
+      .get() as { count: number };
+    beforeDatabase.close();
+    expect(() => store.send(alice, "bob", "missing task", { taskId: "missing-task" }))
+      .toThrowError(/task missing-task does not exist in project/);
+    expect(() => store.send(alice, "bob", "foreign task", { taskId: "foreign-task" }))
+      .toThrowError(/task foreign-task does not exist in project/);
+    const afterDatabase = new Database(databasePath, { readonly: true });
+    const after = afterDatabase.prepare("SELECT count(*) AS count FROM messages").get() as { count: number };
+    const deliveries = afterDatabase.prepare("SELECT count(*) AS count FROM deliveries").get() as { count: number };
+    afterDatabase.close();
+    expect(after.count).toBe(before.count);
+    expect(deliveries.count).toBe(0);
+  });
+
+  it("migrates legacy messages and omits absent optional links", () => {
+    const store = openStore();
+    announce(store, "alice", "bob");
+    const sent = store.send(agent("alice"), "bob", "legacy shape");
+    store.close();
+    const legacy = new Database(databasePath);
+    legacy.exec("ALTER TABLE messages DROP COLUMN task_id; ALTER TABLE messages DROP COLUMN output_path;");
+    legacy.close();
+
+    const migrated = openStore();
+    const message = migrated.inbox(agent("bob"))[0]!;
+    expect(message.messageId).toBe(sent.messageId);
+    expect(message).not.toHaveProperty("taskId");
+    expect(message).not.toHaveProperty("outputPath");
+  });
+
+  it("filters peek and claims without disturbing other pending deliveries", async () => {
+    const store = openStore();
+    announce(store, "alice", "bob");
+    const alice = agent("alice");
+    const bob = agent("bob");
+    store.createTask(alice, "first", { taskId: "first" });
+    store.createTask(alice, "second", { taskId: "second" });
+    store.send(alice, "bob", "first result", { taskId: "first" });
+    store.send(alice, "bob", "second result", { taskId: "second" });
+    store.send(alice, "bob", "unrelated result");
+
+    expect(store.inbox(bob, { peek: true, taskId: "first" })).toMatchObject([{
+      body: "first result", claimId: null, taskId: "first",
+    }]);
+    const first = store.inbox(bob, { taskId: "first", claimTtlMs: 50 })[0]!;
+    expect(first.body).toBe("first result");
+    expect(store.inbox(bob, { taskId: "second" })).toMatchObject([{ body: "second result" }]);
+    expect(store.inbox(bob, { taskId: "first" })).toEqual([]);
+    expect(store.inbox(bob)).toMatchObject([{ body: "unrelated result" }]);
+    await delay(75);
+    expect(store.inbox(bob, { taskId: "first" })).toMatchObject([{ body: "first result" }]);
   });
 });
 

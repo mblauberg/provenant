@@ -29,6 +29,8 @@ CREATE TABLE IF NOT EXISTS messages (
   kind            TEXT NOT NULL DEFAULT 'note',
   conversation_id TEXT NOT NULL,
   reply_to        TEXT REFERENCES messages(message_id),
+  task_id         TEXT,
+  output_path     TEXT,
   created_at      INTEGER NOT NULL
 );
 

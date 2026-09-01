@@ -34,6 +34,8 @@ export interface Message {
   at: string;
   claimId: string | null;
   claimExpiresAt: string | null;
+  taskId?: string;
+  outputPath?: string;
 }
 
 export interface Acknowledgement {
@@ -85,6 +87,7 @@ export class Store {
       for (;;) {
         try {
           this.#db.exec(schema);
+          this.#ensureMessageLinkColumns();
           break;
         } catch (error) {
           if (!isSQLiteContention(error) || Date.now() >= deadline) throw error;
@@ -168,8 +171,14 @@ export class Store {
     who: Identity,
     to: string,
     body: string,
-    options: { kind?: string; replyTo?: string } = {},
+    options: { kind?: string; replyTo?: string; taskId?: string; outputPath?: string } = {},
   ): { messageId: string; recipients: string[] } {
+    if (options.taskId !== undefined && options.taskId.length === 0) {
+      throw new Error("task id must not be empty");
+    }
+    if (options.outputPath !== undefined && options.outputPath.length === 0) {
+      throw new Error("output path must not be empty");
+    }
     const messageId = randomUUID();
     const now = Date.now();
 
@@ -188,12 +197,22 @@ export class Store {
       if (options.replyTo !== undefined && parentConversation === undefined) {
         throw new Error(`reply parent ${options.replyTo} does not exist in project ${who.project}`);
       }
+      if (options.taskId !== undefined) {
+        const task = this.#db
+          .prepare(`SELECT 1 FROM tasks WHERE project = ? AND task_id = ?`)
+          .get(who.project, options.taskId);
+        if (task === undefined) {
+          throw new Error(`task ${options.taskId} does not exist in project ${who.project}`);
+        }
+      }
       const conversationId = parentConversation ?? messageId;
       const replyTo = options.replyTo ?? null;
       this.#db
         .prepare(
-          `INSERT INTO messages(message_id, project, sender_id, body, kind, conversation_id, reply_to, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO messages(
+             message_id, project, sender_id, body, kind, conversation_id, reply_to,
+             task_id, output_path, created_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           messageId,
@@ -203,6 +222,8 @@ export class Store {
           options.kind ?? "note",
           conversationId,
           replyTo,
+          options.taskId ?? null,
+          options.outputPath ?? null,
           now,
         );
       const delivery = this.#db.prepare(
@@ -222,10 +243,14 @@ export class Store {
       peek?: boolean;
       claimTtlMs?: number;
       busyTimeoutMs?: number;
+      taskId?: string;
     } = {},
   ): Message[] {
     const limit = options.limit ?? 20;
     if (!Number.isSafeInteger(limit) || limit <= 0) throw new Error("inbox limit must be positive");
+    if (options.taskId !== undefined && options.taskId.length === 0) {
+      throw new Error("task id must not be empty");
+    }
     const claimTtlMs = options.claimTtlMs ?? 300_000;
     if (!Number.isSafeInteger(claimTtlMs) || claimTtlMs <= 0 || claimTtlMs > 3_600_000) {
       throw new Error("claim TTL must be between 1 and 3600000 milliseconds");
@@ -233,7 +258,7 @@ export class Store {
 
     if (options.peek ?? false) {
       const observedAt = Date.now();
-      return this.#deliveryRows(who, limit, observedAt, true).map((row) =>
+      return this.#deliveryRows(who, limit, observedAt, true, options.taskId).map((row) =>
         this.#message(row, null, row.claim_expires_at === null || row.claim_expires_at <= observedAt
           ? null
           : row.claim_expires_at));
@@ -249,7 +274,7 @@ export class Store {
         // BEGIN IMMEDIATE has acquired the writer lock before this callback runs.
         // Starting the lease here prevents lock wait time consuming the claim TTL.
         const now = Date.now();
-        const rows = this.#deliveryRows(who, limit, now, false);
+        const rows = this.#deliveryRows(who, limit, now, false, options.taskId);
         const claim = this.#db.prepare(
           `INSERT INTO delivery_claims(
              message_id, project, recipient_id, claim_id, claimed_at, expires_at
@@ -366,6 +391,7 @@ export class Store {
     options: { taskId?: string; owner?: string; dependsOn?: string[] } = {},
   ): Task {
     const taskId = options.taskId ?? randomUUID().slice(0, 8);
+    if (taskId.length === 0) throw new Error("task id must not be empty");
     const now = Date.now();
     this.#db.transaction(() => {
       this.#db
@@ -496,24 +522,35 @@ export class Store {
     limit: number,
     now: number,
     includeClaimed: boolean,
+    taskId?: string,
   ): DeliveryRow[] {
     return this.#db
       .prepare(
         `SELECT m.message_id, m.sender_id, m.body, m.kind, m.conversation_id,
-                m.reply_to, m.created_at, c.expires_at AS claim_expires_at
+                m.reply_to, m.task_id, m.output_path, m.created_at,
+                c.expires_at AS claim_expires_at
          FROM deliveries d
          JOIN messages m ON m.message_id = d.message_id
          LEFT JOIN delivery_claims c
            ON c.message_id = d.message_id AND c.recipient_id = d.recipient_id
          WHERE d.project = ? AND d.recipient_id = ? AND d.read_at IS NULL
            AND (? = 1 OR c.expires_at IS NULL OR c.expires_at <= ?)
+           AND (? IS NULL OR m.task_id = ?)
          ORDER BY m.created_at, m.message_id LIMIT ?`,
       )
-      .all(who.project, who.agentId, includeClaimed ? 1 : 0, now, limit) as DeliveryRow[];
+      .all(
+        who.project,
+        who.agentId,
+        includeClaimed ? 1 : 0,
+        now,
+        taskId ?? null,
+        taskId ?? null,
+        limit,
+      ) as DeliveryRow[];
   }
 
   #message(row: DeliveryRow, claimId: string | null, expiresAt: number | null): Message {
-    return {
+    const message: Message = {
       messageId: row.message_id,
       from: row.sender_id,
       body: row.body,
@@ -524,6 +561,25 @@ export class Store {
       claimId,
       claimExpiresAt: expiresAt === null ? null : new Date(expiresAt).toISOString(),
     };
+    if (row.task_id !== null) message.taskId = row.task_id;
+    if (row.output_path !== null) message.outputPath = row.output_path;
+    return message;
+  }
+
+  #ensureMessageLinkColumns(): void {
+    const columns = new Set(
+      (this.#db.pragma("table_info(messages)") as Array<{ name: string }>).map((column) => column.name),
+    );
+    // Additive nullable fields keep old databases and rows intact. A duplicate
+    // column is harmless if two first openers race this migration.
+    for (const [name, definition] of [["task_id", "TEXT"], ["output_path", "TEXT"]] as const) {
+      if (columns.has(name)) continue;
+      try {
+        this.#db.exec(`ALTER TABLE messages ADD COLUMN ${name} ${definition}`);
+      } catch (error) {
+        if (!(error instanceof Error) || !/duplicate column name/i.test(error.message)) throw error;
+      }
+    }
   }
 
   #activity(row: ActivityRow): Activity {
@@ -568,6 +624,8 @@ interface DeliveryRow {
   kind: string;
   conversation_id: string;
   reply_to: string | null;
+  task_id: string | null;
+  output_path: string | null;
   created_at: number;
   claim_expires_at: number | null;
 }
