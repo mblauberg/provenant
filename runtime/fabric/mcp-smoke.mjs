@@ -326,6 +326,12 @@ try {
     arguments: { prompt: "emit untyped running", adapter: "codex", wait_seconds: 5 },
   }));
   assert.equal(untypedRunning.status, "owner_output_invalid");
+  const untypedPreflight = payload(await executor.callTool({
+    name: "fabric_dispatch",
+    arguments: { prompt: "emit untyped preflight error", adapter: "codex", wait_seconds: 5 },
+  }));
+  assert.equal(untypedPreflight.status, "adapter_unavailable");
+  assert.equal(untypedPreflight.message, "provider adapter is unavailable");
   const untypedSuccess = payload(await executor.callTool({
     name: "fabric_dispatch",
     arguments: { prompt: "emit untyped success", adapter: "codex", wait_seconds: 5 },
@@ -367,6 +373,15 @@ try {
     },
   }));
   assert.equal(untypedRunningBatch.status, "owner_output_invalid");
+  const untypedBatchPreflight = payload(await executor.callTool({
+    name: "fabric_batch",
+    arguments: {
+      wait_seconds: 5,
+      tasks: [{ id: "preflight", prompt: "emit untyped batch preflight error", adapter: "codex" }],
+    },
+  }));
+  assert.equal(untypedBatchPreflight.status, "invalid_manifest");
+  assert.equal(untypedBatchPreflight.message, "task manifest is invalid");
   const nonexistentBatch = payload(await executor.callTool({
     name: "fabric_batch",
     arguments: {

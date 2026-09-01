@@ -26,11 +26,7 @@ const DEFAULT_TIMEOUT_SECONDS = 900;
 const SUPPORTED_ADAPTERS = new Set(["agy", "claude", "codex", "cursor", "kiro", "opencode"]);
 const DISPATCH_TERMINAL_STATUSES = new Set(["succeeded", "failed", "blocked", "timed_out", "cancelled"]);
 const BATCH_TERMINAL_STATUSES = new Set(["completed", "failed", "cancelled"]);
-const RESERVED_UNTYPED_STATUSES = new Set([
-  ...DISPATCH_TERMINAL_STATUSES,
-  ...BATCH_TERMINAL_STATUSES,
-  "running",
-]);
+const RESERVED_UNTYPED_STATUSES = new Set(["succeeded", "completed", "running"]);
 
 export interface RouteInput {
   adapter?: string;
@@ -497,6 +493,7 @@ function compactDispatch(started: StartedOwner, completion: OwnerCompletion): Re
   return {
     schema_version: 1,
     status: record.status,
+    ...(record.message === undefined ? {} : { message: record.message }),
     outcome: record.outcome,
     task_id: record.task_id,
     attempt_id: record.attempt_id,
@@ -553,6 +550,7 @@ function compactBatch(started: StartedOwner, completion: OwnerCompletion): Recor
   return {
     schema_version: 1,
     status: record.status,
+    ...(record.message === undefined ? {} : { message: record.message }),
     batch_id: record.batch_id,
     task_count: record.task_count,
     concurrency: record.concurrency,

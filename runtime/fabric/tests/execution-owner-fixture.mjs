@@ -68,6 +68,12 @@ if (owner === "run_controls.py") {
       status: "running",
       message: "owner already exited",
     }) + "\n");
+  } else if (prompt === "emit untyped preflight error") {
+    process.stdout.write(JSON.stringify({
+      schema_version: 1,
+      status: "adapter_unavailable",
+      message: "provider adapter is unavailable",
+    }) + "\n");
   } else if (prompt === "emit untyped success") {
     process.stdout.write(JSON.stringify({
       schema_version: 1,
@@ -165,6 +171,14 @@ if (owner === "run_controls.py") {
       message: "owner already exited",
     }) + "\n");
     process.exit(0);
+  }
+  if (manifest.tasks[0]?.prompt === "emit untyped batch preflight error") {
+    process.stdout.write(JSON.stringify({
+      schema_version: 1,
+      status: "invalid_manifest",
+      message: "task manifest is invalid",
+    }) + "\n");
+    process.exit(2);
   }
   if (manifest.tasks[0]?.prompt === "emit nonexistent completed batch") {
     process.stdout.write(JSON.stringify({
