@@ -23,6 +23,11 @@ and collection step. Certification requires an enforced read-only boundary. A
 prompt-only review can still provide a genuine independent opinion, but it is
 not certification eligible.
 
+Direct Claude verifier invocations do not expose Fabric MCP tools. They return only
+the requested file-backed result; the caller owns any Fabric correlation.
+Provider-native sessions with Fabric access follow their own coordination
+contract.
+
 ## Harness-conditioned rule
 
 Treat `claude -p` and `codex exec` as noninteractive verifier surfaces, not native subagent surfaces.
@@ -211,9 +216,9 @@ cross-family verifiers for source/test/schema confirmation.
 
 `codex exec -s workspace-write -C <absolute-worktree>` is the one headless lane that writes.
 Direct provider invocation is ordinary execution, not a degraded fallback.
-Coordinate through Fabric when available; otherwise record the degraded
-coordination path under the safety rule above. Soft family affinity for who
-gets token-heavy legwork belongs in the preference catalogue named by
+The caller coordinates through Fabric when available; otherwise record the
+degraded coordination path under the safety rule above. Soft family affinity
+for who gets token-heavy legwork belongs in the preference catalogue named by
 [routing-and-tiers.md](routing-and-tiers.md), never in a remembered model name here.
 
 Four failure modes are specific to this lane:
