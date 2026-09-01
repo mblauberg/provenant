@@ -94,6 +94,8 @@ jobs:
             fabric:
               - *ci-contract
               - *node-workspace
+              - 'pyproject.toml'
+              - 'uv.lock'
               - 'runtime/fabric/**'
             split-root:
               - *ci-contract
@@ -151,11 +153,21 @@ jobs:
           persist-credentials: false
       - name: Set up Node.js workspace
         uses: ./.github/actions/setup-node-workspace
+      - name: Set up uv and Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - name: Install locked orchestration dependencies
+        run: uv sync --locked --only-group test
       - name: Run typecheck and tests
         run: npm run check
       - name: Verify packed Fabric CLI and MCP bins
         run: npm run test:package-install --workspace @local/fabric
       - name: Drive the registered MCP launcher end to end
+        env:
+          HARNESS_PYTHON: ${{ github.workspace }}/.venv/bin/python
         run: node runtime/fabric/mcp-smoke.mjs
       - name: Audit production dependencies
         run: npm audit --workspace=@local/fabric --omit=dev --audit-level=high
