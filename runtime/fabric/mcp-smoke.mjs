@@ -316,6 +316,11 @@ try {
     arguments: { prompt: "emit malformed owner output", adapter: "codex", wait_seconds: 5 },
   }));
   assert.equal(malformed.status, "owner_output_invalid");
+  const typedRunning = payload(await executor.callTool({
+    name: "fabric_dispatch",
+    arguments: { prompt: "emit typed running", adapter: "codex", wait_seconds: 5 },
+  }));
+  assert.equal(typedRunning.status, "owner_output_invalid");
   const untypedSuccess = payload(await executor.callTool({
     name: "fabric_dispatch",
     arguments: { prompt: "emit untyped success", adapter: "codex", wait_seconds: 5 },
@@ -341,6 +346,14 @@ try {
     },
   }));
   assert.equal(incompleteBatch.status, "owner_output_invalid");
+  const typedRunningBatch = payload(await executor.callTool({
+    name: "fabric_batch",
+    arguments: {
+      wait_seconds: 5,
+      tasks: [{ id: "running", prompt: "emit typed running batch", adapter: "codex" }],
+    },
+  }));
+  assert.equal(typedRunningBatch.status, "owner_output_invalid");
   const nonexistentBatch = payload(await executor.callTool({
     name: "fabric_batch",
     arguments: {
@@ -413,9 +426,12 @@ try {
     "commit", "--quiet", "-m", "foreign"], { cwd: foreignProduct });
   const realProviderBin = resolve(executionRoot, "real-provider-bin");
   mkdirSync(realProviderBin);
-  const slowCodex = resolve(realProviderBin, "codex");
-  writeFileSync(slowCodex, "#!/bin/sh\ntrap 'exit 143' TERM INT HUP\nwhile :; do /bin/sleep 1; done\n");
-  chmodSync(slowCodex, 0o755);
+  const slowClaude = resolve(realProviderBin, "claude");
+  const providerMarker = resolve(executionRoot, "real-provider.pid");
+  writeFileSync(slowClaude,
+    "#!/bin/sh\nprintf '%s\\n' \"$$\" > \"$FABRIC_SMOKE_PROVIDER_MARKER\"\n" +
+    "trap 'exit 143' TERM INT HUP\nwhile :; do /bin/sleep 1; done\n");
+  chmodSync(slowClaude, 0o755);
   const realExecutor = await spawnAgent("codex", "real-execution-client", {
     cwd: realWorkspace,
     productRoot: resolve(import.meta.dirname, "../.."),
@@ -423,6 +439,7 @@ try {
       PATH: `${realProviderBin}:/usr/bin:/bin`,
       GIT_DIR: resolve(foreignProduct, ".git"),
       GIT_WORK_TREE: foreignProduct,
+      FABRIC_SMOKE_PROVIDER_MARKER: providerMarker,
     },
   });
   const realDispatch = payload(await realExecutor.callTool({
@@ -468,12 +485,34 @@ try {
     arguments: {
       prompt: "cancel the real owner during startup",
       task_id: "real-cancel",
-      adapter: "codex",
-      model: "gpt-5.6-luna",
+      adapter: "claude",
+      model: "claude-opus-4-6",
       wait_seconds: 0,
     },
   }));
-  await realExecutor.close();
+  for (let attempts = 0; attempts < 500 && !existsSync(providerMarker); attempts += 1) {
+    await new Promise((resolveWait) => setTimeout(resolveWait, 10));
+  }
+  if (!existsSync(providerMarker)) {
+    const attemptPath = resolve(
+      realCancelled.paths.run_dir, "dispatch/tasks/real-cancel/attempt-001/attempt.json",
+    );
+    assert.fail(JSON.stringify({
+      running: realCancelled,
+      attempt: existsSync(attemptPath) ? JSON.parse(readFileSync(attemptPath, "utf8")) : null,
+      owner_stdout: readFileSync(realCancelled.paths.owner_stdout, "utf8"),
+      owner_stderr: readFileSync(realCancelled.paths.owner_stderr, "utf8"),
+    }));
+  }
+  const providerPid = Number(readFileSync(providerMarker, "utf8").trim());
+  assert.ok(Number.isInteger(providerPid) && providerPid > 0);
+  await Promise.race([
+    realExecutor.close(),
+    new Promise((_, reject) => {
+      const timeout = setTimeout(() => reject(new Error("MCP transport close timed out")), 10_000);
+      timeout.unref();
+    }),
+  ]);
   const realCancelledAttempt = resolve(
     realCancelled.paths.run_dir, "dispatch/tasks/real-cancel/attempt-001/attempt.json",
   );
@@ -484,6 +523,15 @@ try {
   assert.equal(cancelledRecord.status, "cancelled");
   assert.equal(cancelledRecord.failure_code, "cancelled");
   assert.equal(cancelledRecord.process.observed_exit, true);
+  for (let attempts = 0; attempts < 500; attempts += 1) {
+    try {
+      process.kill(providerPid, 0);
+      await new Promise((resolveWait) => setTimeout(resolveWait, 10));
+    } catch {
+      break;
+    }
+  }
+  assert.throws(() => process.kill(providerPid, 0));
   assert.match(execFileSync(fixturePython, [
     finalizer, realCancelled.paths.run_dir, "--status", "cancelled", "--reason", "MCP close",
   ], { cwd: realWorkspace, encoding: "utf8" }), /PASS: run terminalised as cancelled/u);

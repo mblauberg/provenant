@@ -56,6 +56,12 @@ if (owner === "run_controls.py") {
   const prompt = readFileSync(promptPath, "utf8");
   if (prompt === "emit malformed owner output") {
     process.stdout.write("{}\n");
+  } else if (prompt === "emit typed running") {
+    process.stdout.write(JSON.stringify({
+      schema_version: 1,
+      record_type: "dispatch-attempt",
+      status: "running",
+    }) + "\n");
   } else if (prompt === "emit untyped success") {
     process.stdout.write(JSON.stringify({
       schema_version: 1,
@@ -135,6 +141,14 @@ if (owner === "run_controls.py") {
       schema_version: 1,
       record_type: "dispatch-batch",
       status: "completed",
+    }) + "\n");
+    process.exit(0);
+  }
+  if (manifest.tasks[0]?.prompt === "emit typed running batch") {
+    process.stdout.write(JSON.stringify({
+      schema_version: 1,
+      record_type: "dispatch-batch",
+      status: "running",
     }) + "\n");
     process.exit(0);
   }

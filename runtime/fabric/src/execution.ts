@@ -24,6 +24,8 @@ export const MAX_EXECUTION_WAIT_SECONDS = 55;
 const DEFAULT_WAIT_SECONDS = 55;
 const DEFAULT_TIMEOUT_SECONDS = 900;
 const SUPPORTED_ADAPTERS = new Set(["agy", "claude", "codex", "cursor", "kiro", "opencode"]);
+const DISPATCH_TERMINAL_STATUSES = new Set(["succeeded", "failed", "blocked", "timed_out", "cancelled"]);
+const BATCH_TERMINAL_STATUSES = new Set(["completed", "failed", "cancelled"]);
 
 export interface RouteInput {
   adapter?: string;
@@ -410,6 +412,8 @@ function validOwnerRecord(
       typeof record.message === "string" && record.message.length > 0;
   }
   if (record.record_type !== (kind === "dispatch" ? "dispatch-attempt" : "dispatch-batch")) return false;
+  const terminalStatuses = kind === "dispatch" ? DISPATCH_TERMINAL_STATUSES : BATCH_TERMINAL_STATUSES;
+  if (!terminalStatuses.has(record.status)) return false;
   if (kind === "dispatch" && record.status === "succeeded") {
     const result = objectValue(record.result);
     const stderr = objectValue(record.stderr);
