@@ -62,6 +62,22 @@ raise SystemExit(int(os.environ.get("PROVENANT_TEST_EXIT", "0")))
     return checkout, command
 
 
+def make_registered_linked_checkout(tmp_path: Path, branch: str) -> tuple[Path, Path]:
+    primary, _ = make_checkout(tmp_path)
+    subprocess.run(["git", "init", "-q"], cwd=primary, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=primary, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=primary, check=True)
+    subprocess.run(["git", "add", "."], cwd=primary, check=True)
+    subprocess.run(["git", "commit", "-qm", "fixture"], cwd=primary, check=True)
+    linked = tmp_path / "linked"
+    subprocess.run(
+        ["git", "worktree", "add", "-q", "-b", branch, str(linked)],
+        cwd=primary,
+        check=True,
+    )
+    return primary, linked
+
+
 #: Every test here asserts what the dispatcher itself does with the fabric root
 #: variables, so inheriting them from the ambient environment makes the file
 #: answer a different question than it asks. The split-root CI job exports
@@ -332,6 +348,72 @@ def test_installed_stub_delegates_non_mcp_commands_to_checkout_cli(tmp_path):
 
     assert result.returncode == 0, result.stderr
     assert "Thin front door" in result.stdout
+
+
+def test_installed_check_uses_the_registered_caller_worktree(tmp_path):
+    primary, linked = make_registered_linked_checkout(tmp_path, "issue-722")
+    primary_check = primary / "scripts/check-harness"
+    primary_check.write_text("#!/bin/sh\nprintf 'WRONG primary checkout\\n'\n")
+    primary_check.chmod(0o755)
+    linked_check = linked / "scripts/check-harness"
+    linked_check.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, os, subprocess\n"
+        "print(json.dumps({\n"
+        "    'cwd': os.getcwd(),\n"
+        "    'product_root': os.environ.get('AGENT_FABRIC_PRODUCT_ROOT'),\n"
+        "    'git_head': subprocess.check_output(\n"
+        "        ['git', 'rev-parse', '--verify', 'HEAD'], text=True\n"
+        "    ).strip(),\n"
+        "}, sort_keys=True))\n"
+        "raise SystemExit(19)\n"
+    )
+    linked_check.chmod(0o755)
+    command = install_stub(tmp_path)
+
+    result = invoke(
+        command,
+        "check",
+        cwd=linked,
+        AGENT_FABRIC_PRODUCT_ROOT=str(primary),
+        GIT_DIR=str(tmp_path / "redirected.git"),
+        GIT_WORK_TREE=str(tmp_path / "redirected-worktree"),
+        GIT_CEILING_DIRECTORIES=str(linked.parent),
+    )
+
+    assert result.returncode == 19
+    assert "WRONG primary checkout" not in result.stdout
+    payload = json.loads(result.stdout)
+    assert payload == {
+        "cwd": str(linked),
+        "git_head": subprocess.check_output(
+            ["git", "rev-parse", "--verify", "HEAD"], cwd=linked, text=True
+        ).strip(),
+        "product_root": str(linked),
+    }
+
+
+def test_installed_check_refuses_a_copied_linked_worktree(tmp_path):
+    primary, linked = make_registered_linked_checkout(tmp_path, "issue-722-copy")
+    copied = tmp_path / "copied"
+    shutil.copytree(linked, copied)
+    primary_check = primary / "scripts/check-harness"
+    primary_check.write_text("#!/bin/sh\nprintf 'WRONG primary checkout\\n'\n")
+    primary_check.chmod(0o755)
+    command = install_stub(tmp_path)
+
+    result = invoke(
+        command,
+        "check",
+        cwd=copied,
+        AGENT_FABRIC_PRODUCT_ROOT=str(primary),
+    )
+
+    assert result.returncode == 3
+    assert result.stdout == ""
+    assert "is not a registered worktree" in result.stderr
+    assert str(copied) in result.stderr
+    assert "WRONG primary checkout" not in result.stderr
 
 
 def test_owner_exec_failure_reports_command_context_without_traceback(tmp_path):

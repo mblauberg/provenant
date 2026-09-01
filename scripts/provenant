@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import subprocess
 import sys
 from typing import NoReturn
 
@@ -18,6 +19,16 @@ REPAIR = (
 )
 FABRIC_MCP = "runtime/fabric/bin/fabric-mcp"
 FABRIC_CLI = "runtime/fabric/bin/fabric"
+GIT_REDIRECT_ENVIRONMENT = (
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_COMMON_DIR",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_CEILING_DIRECTORIES",
+    "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+)
 
 
 def resolve_product_root(instance_root: Path | None = None) -> Path:
@@ -92,17 +103,89 @@ project you mean. `provenant fabric --help` lists its commands."""
     )
 
 
-def execute(path: Path, arguments: list[str], product_root: Path | None = None) -> NoReturn:
+def execute(
+    path: Path,
+    arguments: list[str],
+    product_root: Path | None = None,
+    *,
+    clear_git_redirects: bool = False,
+) -> NoReturn:
     try:
-        if product_root is None:
+        if product_root is None and not clear_git_redirects:
             os.execv(path, [str(path), *arguments])
         environment = os.environ.copy()
-        environment["AGENT_FABRIC_PRODUCT_ROOT"] = str(product_root)
-        environment["AGENTS_HOME"] = str(product_root)
+        if clear_git_redirects:
+            for name in GIT_REDIRECT_ENVIRONMENT:
+                environment.pop(name, None)
+        if product_root is not None:
+            environment["AGENT_FABRIC_PRODUCT_ROOT"] = str(product_root)
+            environment["AGENTS_HOME"] = str(product_root)
         os.execve(path, [str(path), *arguments], environment)
     except OSError as exc:
         print(f"provenant: cannot execute {path}: {exc.strerror or exc}; {REPAIR}", file=sys.stderr)
         raise SystemExit(3) from None
+
+
+def git_output(root: Path, *arguments: str) -> subprocess.CompletedProcess[bytes]:
+    environment = os.environ.copy()
+    for name in GIT_REDIRECT_ENVIRONMENT:
+        environment.pop(name, None)
+    try:
+        return subprocess.run(
+            ["git", "-C", str(root), *arguments],
+            env=environment,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    except OSError:
+        return subprocess.CompletedProcess([], 127, b"", b"")
+
+
+def registered_caller_checkout(product_root: Path) -> Path | None:
+    """Return a different caller checkout only when Git registers it here."""
+    caller = git_output(Path.cwd(), "rev-parse", "--show-toplevel")
+    product = git_output(product_root, "rev-parse", "--show-toplevel")
+    if caller.returncode != 0 or product.returncode != 0:
+        return None
+    caller_root = Path(os.fsdecode(caller.stdout.rstrip(b"\n"))).resolve()
+    product_checkout = Path(os.fsdecode(product.stdout.rstrip(b"\n"))).resolve()
+    if caller_root == product_checkout:
+        return None
+
+    caller_common = git_output(caller_root, "rev-parse", "--git-common-dir")
+    product_common = git_output(product_checkout, "rev-parse", "--git-common-dir")
+    if caller_common.returncode != 0 or product_common.returncode != 0:
+        return None
+
+    def resolved_git_path(root: Path, value: bytes) -> Path:
+        path = Path(os.fsdecode(value.rstrip(b"\n")))
+        return (root / path).resolve() if not path.is_absolute() else path.resolve()
+
+    if resolved_git_path(caller_root, caller_common.stdout) != resolved_git_path(
+        product_checkout, product_common.stdout
+    ):
+        return None
+
+    records = git_output(product_checkout, "worktree", "list", "--porcelain", "-z")
+    if records.returncode != 0:
+        raise ValueError(
+            f"cannot verify caller checkout {caller_root} against product root {product_checkout}; "
+            "repair: run ./scripts/check-harness from the checkout you intend to check"
+        )
+    registered = {
+        Path(os.fsdecode(field.removeprefix(b"worktree "))).resolve()
+        for record in records.stdout.split(b"\0\0")
+        for field in record.split(b"\0")
+        if field.startswith(b"worktree ")
+    }
+    if caller_root not in registered:
+        raise ValueError(
+            f"caller checkout {caller_root} is not a registered worktree of product root "
+            f"{product_checkout}; repair: run ./scripts/check-harness from the checkout you "
+            "intend to check"
+        )
+    return caller_root
 
 
 def dispatch_target(relative: str) -> tuple[Path, Path | None]:
@@ -112,6 +195,26 @@ def dispatch_target(relative: str) -> tuple[Path, Path | None]:
         return local_root / relative, None
     product_root = resolve_product_root()
     return product_root / relative, product_root
+
+
+def check_target() -> tuple[Path, Path | None]:
+    """Select the registered checkout containing the caller, without trusting copies."""
+    local_root = Path(__file__).resolve().parent.parent
+    local_target = local_root / "scripts/check-harness"
+    local_available = (local_root / FABRIC_MCP).is_file() and local_target.is_file()
+    product_root = local_root if local_available else resolve_product_root()
+    caller_root = registered_caller_checkout(product_root)
+    if caller_root is None:
+        if local_available:
+            return local_target, None
+        return product_root / "scripts/check-harness", product_root
+    target = caller_root / "scripts/check-harness"
+    if not target.is_file():
+        raise ValueError(
+            f"registered caller checkout {caller_root} has no scripts/check-harness; "
+            "repair: restore that checkout or run the checker directly from another checkout"
+        )
+    return target, caller_root
 
 
 def main(arguments: list[str]) -> int:
@@ -149,11 +252,11 @@ def main(arguments: list[str]) -> int:
         usage()
         return 2
     try:
-        target, product_root = dispatch_target(owner)
+        target, product_root = check_target() if command == "check" else dispatch_target(owner)
     except ValueError as exc:
         print(f"provenant: {exc}", file=sys.stderr)
         return 3
-    execute(target, command_arguments, product_root)
+    execute(target, command_arguments, product_root, clear_git_redirects=command == "check")
 
 
 if __name__ == "__main__":

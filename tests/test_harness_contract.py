@@ -36,6 +36,9 @@ def test_root_harness_checker_is_available():
     checker = ROOT / "scripts" / "check-harness"
     assert checker.is_file()
     assert checker.stat().st_mode & 0o111
+    source = checker.read_text()
+    assert re.search(r'echo\s+"[^"\n]*product_root=\$PRODUCT_ROOT"', source)
+    assert re.search(r'echo\s+"[^"\n]*git_head=\$checked_head"', source)
 
 
 def test_dispatchers_use_the_stable_product_command_and_local_skill_helpers():

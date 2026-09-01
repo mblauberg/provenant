@@ -113,8 +113,9 @@ untouched.
 
 `provenant fabric whoami` creates the project-local Fabric identity and shared
 SQLite bus on first use. There is no daemon, trust record, initial provisioning or
-warm/build step. `provenant check` runs the harness policy gate; `npm run check`
-covers the Fabric typecheck and tests.
+warm/build step. `provenant check` runs the harness policy gate from the registered
+checkout containing the caller, so a linked-worktree check cannot certify the
+primary checkout. `npm run check` covers the Fabric typecheck and tests.
 
 <details>
 <summary>Filesystem layout, Codex config and uninstall</summary>
