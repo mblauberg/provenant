@@ -14,7 +14,7 @@
   "scripts": {
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
-    "check": "npm run typecheck && npm run test",
+    "check": "node scripts/node-workspace-preflight.mjs && npm run typecheck && npm run test",
     "audit": "npm audit --omit=dev --audit-level=high",
     "audit:all": "npm audit --audit-level=high"
   },
