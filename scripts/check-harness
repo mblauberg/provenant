@@ -115,9 +115,6 @@ elif [[ -f "$PRODUCT_ROOT/.git" && ! -L "$PRODUCT_ROOT/.git" ]] \
       if [[ "$git_back_name" == .git ]] \
           && capture_physical_dir "$git_back_parent" \
           && [[ "$CAPTURED_PHYSICAL_DIR/$git_back_name" == "$PRODUCT_ROOT/.git" ]] \
-          && capture_git_path -C "$PRODUCT_ROOT" \
-            rev-parse --path-format=absolute --git-common-dir \
-          && capture_physical_dir "$CAPTURED_GIT_PATH" \
           && checkout_is_registered; then
         git_metadata_valid=1
       fi
@@ -135,8 +132,20 @@ fi
 echo "check-harness: product_root=$PRODUCT_ROOT"
 echo "check-harness: git_head=$checked_head"
 if [[ "$checked_head" == unavailable ]]; then
-  echo "check-harness: cannot verify checkout ownership and a full Git HEAD for $PRODUCT_ROOT" >&2
+  echo "check-harness: cannot verify checkout ownership or a full Git HEAD for $PRODUCT_ROOT" >&2
   exit 3
+fi
+if [[ "$SCRIPTS_ROOT" != "$PRODUCT_ROOT/scripts" \
+    || "$SKILLS_ROOT" != "$PRODUCT_ROOT/skills" \
+    || "$TESTS_ROOT" != "$PRODUCT_ROOT/tests" ]]; then
+  [[ "${PROVENANT_CHECK_TEST_OVERRIDES:-}" == 1 ]] || {
+    echo "check-harness: component-root overrides require PROVENANT_CHECK_TEST_OVERRIDES=1" >&2
+    exit 3
+  }
+  echo "check-harness: test_overrides=scripts_root=$SCRIPTS_ROOT skills_root=$SKILLS_ROOT tests_root=$TESTS_ROOT"
+fi
+if [[ -n "${HARNESS_PYTHON:-}" ]]; then
+  echo "check-harness: harness_python=$HARNESS_PYTHON"
 fi
 # shellcheck source=scripts/lib/harness-python.sh
 source "$SCRIPTS_ROOT/lib/harness-python.sh"

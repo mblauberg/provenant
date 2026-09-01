@@ -12,7 +12,8 @@ def test_harness_python_selection_is_portable():
     checker = read("scripts/check-harness")
 
     assert "miniforge" not in checker
-    assert 'PRODUCT_ROOT="${AGENT_FABRIC_PRODUCT_ROOT:-' in checker
+    assert 'requested_product_root="${AGENT_FABRIC_PRODUCT_ROOT:-' in checker
+    assert 'PRODUCT_ROOT="$PWD"' in checker
     assert 'SCRIPTS_ROOT="${PROVENANT_SCRIPTS_ROOT:-' in checker
     assert 'SKILLS_ROOT="${PROVENANT_SKILLS_ROOT:-' in checker
     assert 'source "$SCRIPTS_ROOT/lib/harness-python.sh"' in checker

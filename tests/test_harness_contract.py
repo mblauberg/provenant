@@ -49,9 +49,6 @@ def test_root_harness_checker_is_available():
     checker = ROOT / "scripts" / "check-harness"
     assert checker.is_file()
     assert checker.stat().st_mode & 0o111
-    source = checker.read_text()
-    assert re.search(r'echo\s+"[^"\n]*product_root=\$PRODUCT_ROOT"', source)
-    assert re.search(r'echo\s+"[^"\n]*git_head=\$checked_head"', source)
 
 
 def test_root_harness_checker_reports_identity_before_loading_test_helpers(tmp_path):
@@ -70,13 +67,7 @@ def test_root_harness_checker_reports_identity_before_loading_test_helpers(tmp_p
         '"${PROVENANT_GIT_BIN-<unset>}"\n'
         "exit 19\n"
     )
-    clean_git_environment = os.environ.copy()
-    for name in (
-        "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
-        "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-        "GIT_CEILING_DIRECTORIES", "GIT_DISCOVERY_ACROSS_FILESYSTEM",
-    ):
-        clean_git_environment.pop(name, None)
+    clean_git_environment = clean_git_test_environment()
     expected_head = subprocess.check_output(
         ["git", "-C", str(ROOT), "rev-parse", "--verify", "HEAD"],
         env=clean_git_environment,
@@ -93,6 +84,19 @@ def test_root_harness_checker_reports_identity_before_loading_test_helpers(tmp_p
         "PATH": f"{shadow_dir}:{environment['PATH']}",
     })
 
+    refused = subprocess.run(
+        ["bash", str(ROOT / "scripts/check-harness")],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    assert refused.returncode == 3
+    assert "component-root overrides require PROVENANT_CHECK_TEST_OVERRIDES=1" in refused.stderr
+    environment["PROVENANT_CHECK_TEST_OVERRIDES"] = "1"
+
     result = subprocess.run(
         ["bash", str(ROOT / "scripts/check-harness")],
         cwd=ROOT,
@@ -108,20 +112,15 @@ def test_root_harness_checker_reports_identity_before_loading_test_helpers(tmp_p
     assert output[:2] == [
         f"check-harness: product_root={ROOT}", f"check-harness: git_head={expected_head}",
     ]
-    assert output[2].startswith("git_dir=<unset> ceiling=<unset> git_bin=/")
+    assert output[2].startswith("check-harness: test_overrides=scripts_root=")
+    assert output[3].startswith("git_dir=<unset> ceiling=<unset> git_bin=/")
     assert not marker.exists()
 
 
 def test_non_git_product_does_not_borrow_identity_or_python_from_an_ancestor_repo(tmp_path):
     outer = tmp_path / "outer"
     outer.mkdir()
-    clean_git_environment = os.environ.copy()
-    for name in (
-        "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
-        "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-        "GIT_CEILING_DIRECTORIES", "GIT_DISCOVERY_ACROSS_FILESYSTEM",
-    ):
-        clean_git_environment.pop(name, None)
+    clean_git_environment = clean_git_test_environment()
     subprocess.run(
         ["git", "init", "-q"], cwd=outer, env=clean_git_environment, check=True
     )
@@ -159,7 +158,7 @@ def test_non_git_product_does_not_borrow_identity_or_python_from_an_ancestor_rep
         f"check-harness: product_root={product}", "check-harness: git_head=unavailable",
     ]
     assert (
-        f"check-harness: cannot verify checkout ownership and a full Git HEAD for {product}"
+        f"check-harness: cannot verify checkout ownership or a full Git HEAD for {product}"
         in result.stderr
     )
     assert not marker.exists()
@@ -169,13 +168,7 @@ def test_non_git_product_does_not_borrow_identity_or_python_from_an_ancestor_rep
 def test_checker_refuses_git_metadata_owned_by_another_repository(tmp_path, metadata_kind):
     outer = tmp_path / "outer"
     outer.mkdir()
-    environment = os.environ.copy()
-    for name in (
-        "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
-        "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-        "GIT_CEILING_DIRECTORIES", "GIT_DISCOVERY_ACROSS_FILESYSTEM",
-    ):
-        environment.pop(name, None)
+    environment = clean_git_test_environment()
     subprocess.run(["git", "init", "-q"], cwd=outer, env=environment, check=True)
     subprocess.run(
         ["git", "config", "user.email", "test@example.com"],
@@ -237,6 +230,7 @@ def direct_checker_probe(product: Path, tmp_path: Path) -> tuple[subprocess.Comp
         "PROVENANT_SCRIPTS_ROOT": str(scripts_root),
         "PROVENANT_SKILLS_ROOT": str(tmp_path / "probe-skills"),
         "PROVENANT_TESTS_ROOT": str(tmp_path / "probe-tests"),
+        "PROVENANT_CHECK_TEST_OVERRIDES": "1",
     })
     return subprocess.run(
         ["bash", str(ROOT / "scripts/check-harness")],
