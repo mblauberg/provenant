@@ -10,6 +10,29 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "scripts" / "provenant"
 STUB = ROOT / "scripts" / "provenant.template"
+GIT_REDIRECT_VARIABLES = (
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_COMMON_DIR",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_CEILING_DIRECTORIES",
+    "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+)
+
+
+def clean_git_environment() -> dict[str, str]:
+    environment = os.environ.copy()
+    for name in GIT_REDIRECT_VARIABLES:
+        environment.pop(name, None)
+    return environment
+
+
+def git_fixture(cwd: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", *arguments], cwd=cwd, env=clean_git_environment(), text=True, check=True
+    )
 
 
 def make_checkout(tmp_path: Path) -> tuple[Path, Path]:
@@ -17,6 +40,7 @@ def make_checkout(tmp_path: Path) -> tuple[Path, Path]:
     scripts = checkout / "scripts"
     scripts.mkdir(parents=True)
     shutil.copy2(SOURCE, scripts / "provenant")
+    shutil.copy2(ROOT / "scripts/worktree.py", scripts / "worktree.py")
     shutil.copytree(ROOT / "scripts/lib", scripts / "lib")
 
     recorder = """#!/usr/bin/env python3
@@ -60,6 +84,18 @@ raise SystemExit(int(os.environ.get("PROVENANT_TEST_EXIT", "0")))
     command = bin_dir / "provenant"
     command.symlink_to(scripts / "provenant")
     return checkout, command
+
+
+def make_registered_linked_checkout(tmp_path: Path, branch: str) -> tuple[Path, Path]:
+    primary, _ = make_checkout(tmp_path)
+    git_fixture(primary, "init", "-q")
+    git_fixture(primary, "config", "user.email", "test@example.com")
+    git_fixture(primary, "config", "user.name", "Test")
+    git_fixture(primary, "add", ".")
+    git_fixture(primary, "commit", "-qm", "fixture")
+    linked = tmp_path / "linked"
+    git_fixture(primary, "worktree", "add", "-q", "-b", branch, str(linked))
+    return primary, linked
 
 
 #: Every test here asserts what the dispatcher itself does with the fabric root
@@ -334,6 +370,381 @@ def test_installed_stub_delegates_non_mcp_commands_to_checkout_cli(tmp_path):
     assert "Thin front door" in result.stdout
 
 
+def test_installed_check_uses_the_registered_caller_worktree(tmp_path):
+    primary, linked = make_registered_linked_checkout(tmp_path, "issue-722")
+    primary_check = primary / "scripts/check-harness"
+    primary_check.write_text("#!/bin/sh\nprintf 'WRONG primary checkout\\n'\n")
+    primary_check.chmod(0o755)
+    linked_check = linked / "scripts/check-harness"
+    linked_check.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, os, subprocess\n"
+        "print(json.dumps({\n"
+        "    'cwd': os.getcwd(),\n"
+        "    'product_root': os.environ.get('AGENT_FABRIC_PRODUCT_ROOT'),\n"
+        "    'git_head': subprocess.check_output(\n"
+        "        ['git', 'rev-parse', '--verify', 'HEAD'], text=True\n"
+        "    ).strip(),\n"
+        "}, sort_keys=True))\n"
+        "raise SystemExit(19)\n"
+    )
+    linked_check.chmod(0o755)
+    command = install_stub(tmp_path)
+
+    result = invoke(
+        command,
+        "check",
+        cwd=linked,
+        AGENT_FABRIC_PRODUCT_ROOT=str(primary),
+        GIT_DIR=str(tmp_path / "redirected.git"),
+        GIT_WORK_TREE=str(tmp_path / "redirected-worktree"),
+        GIT_CEILING_DIRECTORIES=str(linked.parent),
+    )
+
+    assert result.returncode == 19
+    assert "WRONG primary checkout" not in result.stdout
+    payload = json.loads(result.stdout)
+    assert payload == {
+        "cwd": str(linked),
+        "git_head": subprocess.check_output(
+            ["git", "rev-parse", "--verify", "HEAD"],
+            cwd=linked,
+            env=clean_git_environment(),
+            text=True,
+        ).strip(),
+        "product_root": str(linked),
+    }
+
+
+def test_checkout_check_overrides_an_ambient_primary_product_root(tmp_path):
+    primary, linked = make_registered_linked_checkout(tmp_path, "issue-722-direct")
+    primary_check = primary / "scripts/check-harness"
+    primary_check.write_text("#!/bin/sh\nprintf 'WRONG primary checkout\\n'\n")
+    primary_check.chmod(0o755)
+    linked_check = linked / "scripts/check-harness"
+    linked_check.write_text(
+        "#!/bin/sh\n"
+        "printf '%s\\n' \"${AGENT_FABRIC_PRODUCT_ROOT-<unset>}\"\n"
+    )
+    linked_check.chmod(0o755)
+
+    result = invoke(
+        linked / "scripts/provenant",
+        "check",
+        cwd=linked,
+        AGENT_FABRIC_PRODUCT_ROOT=str(primary),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == f"{linked}\n"
+    assert "WRONG primary checkout" not in result.stdout
+
+
+def test_installed_check_refuses_a_copied_linked_worktree(tmp_path):
+    primary, linked = make_registered_linked_checkout(tmp_path, "issue-722-copy")
+    copied = tmp_path / "copied"
+    shutil.copytree(linked, copied)
+    primary_check = primary / "scripts/check-harness"
+    primary_check.write_text("#!/bin/sh\nprintf 'WRONG primary checkout\\n'\n")
+    primary_check.chmod(0o755)
+    command = install_stub(tmp_path)
+
+    result = invoke(
+        command,
+        "check",
+        cwd=copied,
+        AGENT_FABRIC_PRODUCT_ROOT=str(primary),
+    )
+
+    assert result.returncode == 3
+    assert result.stdout == ""
+    assert "invalid Git metadata" in result.stderr
+    assert str(copied / ".git") in result.stderr
+    assert "WRONG primary checkout" not in result.stderr
+
+
+def test_installed_check_refuses_an_orphaned_copied_linked_worktree(tmp_path):
+    primary, linked = make_registered_linked_checkout(tmp_path, "issue-722-orphan")
+    copied = tmp_path / "orphaned-copy"
+    shutil.copytree(linked, copied)
+    git_fixture(primary, "worktree", "remove", "--force", str(linked))
+    primary_check = primary / "scripts/check-harness"
+    primary_check.write_text("#!/bin/sh\nprintf 'WRONG primary checkout\\n'\n")
+    primary_check.chmod(0o755)
+    command = install_stub(tmp_path)
+
+    result = invoke(
+        command,
+        "check",
+        cwd=copied,
+        AGENT_FABRIC_PRODUCT_ROOT=str(primary),
+    )
+
+    assert result.returncode == 3
+    assert result.stdout == ""
+    assert "invalid Git metadata" in result.stderr
+    assert str(copied / ".git") in result.stderr
+    assert "WRONG primary checkout" not in result.stderr
+
+
+def test_installed_check_refuses_a_copied_worktree_nested_in_a_registered_checkout(tmp_path):
+    primary, linked = make_registered_linked_checkout(tmp_path, "issue-722-nested-copy")
+    staged = tmp_path / "staged-copy"
+    shutil.copytree(linked, staged)
+    copied = primary / "nested-copy"
+    shutil.move(staged, copied)
+    primary_check = primary / "scripts/check-harness"
+    primary_check.write_text("#!/bin/sh\nprintf 'WRONG registered checkout\\n'\n")
+    primary_check.chmod(0o755)
+    command = install_stub(tmp_path)
+
+    result = invoke(
+        command,
+        "check",
+        cwd=copied,
+        AGENT_FABRIC_PRODUCT_ROOT=str(primary),
+    )
+
+    assert result.returncode == 3
+    assert result.stdout == ""
+    assert "invalid Git metadata" in result.stderr
+    assert str(copied / ".git") in result.stderr
+    assert "WRONG registered checkout" not in result.stderr
+
+
+def test_installed_check_ignores_a_shadow_git_on_the_caller_path(tmp_path):
+    primary, linked = make_registered_linked_checkout(tmp_path, "issue-722-shadow-git")
+    marker = tmp_path / "shadow-git-ran"
+    shadow_dir = tmp_path / "shadow-bin"
+    shadow_dir.mkdir()
+    shadow = shadow_dir / "git"
+    shadow.write_text(f"#!/bin/sh\ntouch '{marker}'\nexit 1\n")
+    shadow.chmod(0o755)
+    linked_check = linked / "scripts/check-harness"
+    linked_check.write_text("#!/bin/sh\nprintf 'LINKED\\n'\n")
+    linked_check.chmod(0o755)
+    command = install_stub(tmp_path)
+
+    result = invoke(
+        command,
+        "check",
+        cwd=linked,
+        AGENT_FABRIC_PRODUCT_ROOT=str(primary),
+        PATH=f"{shadow_dir}:{os.environ['PATH']}",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "LINKED\n"
+    assert not marker.exists()
+
+
+def test_installed_check_handles_a_registered_worktree_path_ending_in_newline(tmp_path):
+    primary, _ = make_checkout(tmp_path)
+    git_fixture(primary, "init", "-q")
+    git_fixture(primary, "config", "user.email", "test@example.com")
+    git_fixture(primary, "config", "user.name", "Test")
+    git_fixture(primary, "add", ".")
+    git_fixture(primary, "commit", "-qm", "fixture")
+    linked = tmp_path / "linked\n"
+    git_fixture(primary, "worktree", "add", "-q", "-b", "issue-722-newline", str(linked))
+    primary_check = primary / "scripts/check-harness"
+    primary_check.write_text("#!/bin/sh\nprintf 'WRONG primary checkout\\n'\n")
+    primary_check.chmod(0o755)
+    linked_check = linked / "scripts/check-harness"
+    linked_check.write_text("#!/bin/sh\nprintf 'LINKED\\n'\n")
+    linked_check.chmod(0o755)
+    command = install_stub(tmp_path)
+
+    result = invoke(
+        command,
+        "check",
+        cwd=linked,
+        AGENT_FABRIC_PRODUCT_ROOT=str(primary),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "LINKED\n"
+
+
+def test_checkout_check_handles_a_primary_path_ending_in_newline(tmp_path):
+    primary, _ = make_checkout(tmp_path)
+    renamed = tmp_path / "primary\n"
+    primary.rename(renamed)
+    git_fixture(renamed, "init", "-q")
+    git_fixture(renamed, "config", "user.email", "test@example.com")
+    git_fixture(renamed, "config", "user.name", "Test")
+    git_fixture(renamed, "add", ".")
+    git_fixture(renamed, "commit", "-qm", "fixture")
+    checker = renamed / "scripts/check-harness"
+    checker.write_text("#!/bin/sh\nprintf 'PRIMARY\\n'\n")
+    checker.chmod(0o755)
+
+    result = invoke(renamed / "scripts/provenant", "check", cwd=renamed)
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "PRIMARY\n"
+
+
+def test_non_git_product_nested_in_an_unrelated_repository_stays_non_git(tmp_path):
+    outer = tmp_path / "outer"
+    outer.mkdir()
+    git_fixture(outer, "init", "-q")
+    product, command = make_checkout(outer)
+
+    result = invoke(command, "check", cwd=product)
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["cwd"] == str(product)
+
+
+def test_check_reports_a_deleted_working_directory_with_a_remedy(tmp_path):
+    checkout, command = make_checkout(tmp_path)
+    gone = tmp_path / "gone"
+    gone.mkdir()
+    environment = clean_git_environment()
+    for name in AMBIENT_ROOT_VARIABLES:
+        environment.pop(name, None)
+    environment["AGENT_FABRIC_PRODUCT_ROOT"] = str(checkout)
+
+    result = subprocess.run(
+        [
+            "bash", "-c",
+            'cd "$1" && rmdir "$1" && exec "$2" check',
+            "provenant-deleted-cwd", str(gone), str(command),
+        ],
+        cwd=tmp_path,
+        env=environment,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+
+    assert result.returncode == 3
+    assert result.stdout == ""
+    assert "cannot resolve the working directory" in result.stderr
+    assert "cd into the checkout you intend to check" in result.stderr
+    assert "Traceback" not in result.stderr
+
+
+def test_installed_check_refuses_a_symlinked_checker(tmp_path):
+    primary, linked = make_registered_linked_checkout(tmp_path, "issue-722-symlink")
+    outside = tmp_path / "outside-check"
+    outside.write_text("#!/bin/sh\nprintf 'OUTSIDE\\n'\n")
+    outside.chmod(0o755)
+    linked_check = linked / "scripts/check-harness"
+    linked_check.unlink()
+    linked_check.symlink_to(outside)
+    command = install_stub(tmp_path)
+
+    result = invoke(
+        command,
+        "check",
+        cwd=linked,
+        AGENT_FABRIC_PRODUCT_ROOT=str(primary),
+    )
+
+    assert result.returncode == 3
+    assert result.stdout == ""
+    assert "no regular executable scripts/check-harness" in result.stderr
+    assert "OUTSIDE" not in result.stderr
+
+
+@pytest.mark.parametrize("metadata_kind", ["missing", "garbled", "symlink"])
+def test_installed_check_refuses_invalid_metadata_in_a_registered_worktree(
+    tmp_path, metadata_kind
+):
+    primary, linked = make_registered_linked_checkout(
+        tmp_path, f"issue-722-invalid-{metadata_kind}"
+    )
+    dot_git = linked / ".git"
+    dot_git.unlink()
+    if metadata_kind == "garbled":
+        dot_git.write_text("invalid\n")
+    elif metadata_kind == "symlink":
+        dot_git.symlink_to(primary / ".git")
+    linked_check = linked / "scripts/check-harness"
+    linked_check.write_text("#!/bin/sh\nprintf 'WRONG linked checkout\\n'\n")
+    linked_check.chmod(0o755)
+    command = install_stub(tmp_path)
+
+    result = invoke(
+        command,
+        "check",
+        cwd=linked,
+        AGENT_FABRIC_PRODUCT_ROOT=str(primary),
+    )
+
+    assert result.returncode == 3
+    assert result.stdout == ""
+    assert "WRONG linked checkout" not in result.stderr
+
+
+def test_installed_check_refuses_a_registered_worktree_path_replaced_by_a_symlink(tmp_path):
+    primary, linked = make_registered_linked_checkout(tmp_path, "issue-722-path-symlink")
+    outside = tmp_path / "outside-worktree"
+    linked.rename(outside)
+    linked.symlink_to(outside, target_is_directory=True)
+    outside_check = outside / "scripts/check-harness"
+    outside_check.write_text("#!/bin/sh\nprintf 'OUTSIDE\\n'\n")
+    outside_check.chmod(0o755)
+    command = install_stub(tmp_path)
+
+    result = invoke(
+        command,
+        "check",
+        cwd=linked,
+        AGENT_FABRIC_PRODUCT_ROOT=str(primary),
+    )
+
+    assert result.returncode == 3
+    assert result.stdout == ""
+    assert "registered checkout path is a symlink" in result.stderr
+    assert "OUTSIDE" not in result.stderr
+
+
+@pytest.mark.parametrize("nested_caller", [False, True])
+def test_installed_check_refuses_a_registered_path_replaced_by_another_repository(
+    tmp_path, nested_caller,
+):
+    primary, linked = make_registered_linked_checkout(tmp_path, "issue-722-foreign-repo")
+    displaced = tmp_path / "displaced-worktree"
+    linked.rename(displaced)
+    foreign, _ = make_checkout(tmp_path / "foreign")
+    git_fixture(foreign, "init", "-q")
+    git_fixture(foreign, "config", "user.email", "test@example.com")
+    git_fixture(foreign, "config", "user.name", "Test")
+    git_fixture(foreign, "add", ".")
+    git_fixture(foreign, "commit", "-qm", "foreign")
+    foreign.rename(linked)
+    foreign_check = linked / "scripts/check-harness"
+    foreign_check.write_text("#!/bin/sh\nprintf 'FOREIGN\\n'\n")
+    foreign_check.chmod(0o755)
+    command = install_stub(tmp_path)
+    caller = linked
+    if nested_caller:
+        caller = linked / "nested"
+        caller.mkdir()
+        git_fixture(caller, "init", "-q")
+        git_fixture(caller, "config", "user.email", "test@example.com")
+        git_fixture(caller, "config", "user.name", "Test")
+        (caller / "nested").write_text("nested\n")
+        git_fixture(caller, "add", "nested")
+        git_fixture(caller, "commit", "-qm", "nested")
+
+    result = invoke(
+        command,
+        "check",
+        cwd=caller,
+        AGENT_FABRIC_PRODUCT_ROOT=str(primary),
+    )
+
+    assert result.returncode == 3
+    assert result.stdout == ""
+    assert "belongs to another Git repository" in result.stderr
+    assert "FOREIGN" not in result.stderr
+
+
 def test_owner_exec_failure_reports_command_context_without_traceback(tmp_path):
     checkout, command = make_checkout(tmp_path)
     owner = checkout / "scripts/model-route"
@@ -368,7 +779,7 @@ def test_every_delegated_command_preserves_each_supported_caller_cwd(
     elif cwd_kind == "unrelated-git":
         caller_cwd = tmp_path / "unrelated-git"
         caller_cwd.mkdir()
-        subprocess.run(["git", "init", "-q"], cwd=caller_cwd, check=True)
+        git_fixture(caller_cwd, "init", "-q")
         assert (caller_cwd / ".git").is_dir()
     else:
         caller_cwd = tmp_path / "nonrepo"
