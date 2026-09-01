@@ -4,10 +4,16 @@ import { setTimeout as delay } from "node:timers/promises";
 import { z } from "zod";
 
 import { databasePath, identify } from "./identity.js";
+import {
+  cancelActiveExecutions,
+  dispatchConfiguredBatch,
+  dispatchConfiguredProvider,
+  MAX_EXECUTION_WAIT_SECONDS,
+} from "./execution.js";
 import { isSQLiteContention, Store, type Message } from "./store.js";
 
 // Leave margin under the MCP SDK's 60-second default request timeout.
-const MAX_WAIT_SECONDS = 55;
+const MAX_WAIT_SECONDS = MAX_EXECUTION_WAIT_SECONDS;
 
 /**
  * One MCP process per agent, holding the store open directly.
@@ -55,10 +61,13 @@ const server = new McpServer(
       "Fabric is a project-scoped mailbox, cooperative task ledger, and activity log. " +
       "Use fabric_inbox to claim requests, persist any response before calling " +
       "fabric_acknowledge, and correlate replies with reply_to. Create targeted " +
-      "tasks with an owner; owner is cooperative routing metadata, not an access-control boundary.",
+      "tasks with an owner; owner is cooperative routing metadata, not an access-control boundary. " +
+      "Use fabric_dispatch or fabric_batch for ordinary configured-provider work; full output stays " +
+      "in the returned run paths.",
   },
 );
 server.server.onclose = () => {
+  cancelActiveExecutions();
   store?.close();
   store = undefined;
 };
@@ -148,6 +157,62 @@ server.registerTool(
       peek,
       claimTtlMs: claim_seconds === undefined ? undefined : claim_seconds * 1000,
     }, (wait_seconds ?? 0) * 1000, signal)),
+);
+
+const routeInputSchema = {
+  adapter: z.string().min(1).optional().describe("provider adapter; defaults to the current Fabric seat"),
+  alias: z.string().min(1).optional().describe("route alias; defaults to workhorse"),
+  task_class: z.string().min(1).optional(),
+  model: z.string().min(1).optional(),
+  role: z.string().min(1).optional().describe("worker role; defaults to worker"),
+  effort: z.string().min(1).optional(),
+  orchestrator_family: z.string().min(1).optional(),
+  risk_tier: z.string().min(1).optional(),
+  model_override_tier: z.enum(["routine", "substantial", "crucial", "terminal"]).optional(),
+  reviewer_id: z.string().min(1).optional(),
+};
+
+const batchTaskSchema = z.object({
+  id: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u).optional(),
+  prompt: z.string().optional(),
+  prompt_file: z.string().min(1).optional(),
+  timeout_seconds: z.number().positive().finite().optional(),
+  ...routeInputSchema,
+});
+
+server.registerTool(
+  "fabric_dispatch",
+  {
+    description:
+      "Start one ordinary configured-provider task. Run custody is automatic and full prompt, " +
+      "result and diagnostics stay in named files. The response is compact; set wait_seconds to " +
+      "0 for immediate start or up to 55 for a terminal result and actual route when it finishes.",
+    inputSchema: {
+      prompt: z.string().optional(),
+      prompt_file: z.string().min(1).optional(),
+      task_id: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u).optional(),
+      timeout_seconds: z.number().positive().finite().optional(),
+      wait_seconds: z.number().int().min(0).max(MAX_WAIT_SECONDS).optional(),
+      ...routeInputSchema,
+    },
+  },
+  async (input, { signal }) => reply(await dispatchConfiguredProvider(input, who, signal)),
+);
+
+server.registerTool(
+  "fabric_batch",
+  {
+    description:
+      "Start a fixed ordinary batch of 1-64 configured-provider tasks with concurrency capped at 8. " +
+      "The existing batch owner keeps partial results and rejects shared-writer batches. Full output " +
+      "stays in named files; set wait_seconds to 0 for immediate start or up to 55 to await completion.",
+    inputSchema: {
+      tasks: z.array(batchTaskSchema).min(1).max(64),
+      concurrency: z.number().int().min(1).max(8).optional(),
+      wait_seconds: z.number().int().min(0).max(MAX_WAIT_SECONDS).optional(),
+    },
+  },
+  async (input, { signal }) => reply(await dispatchConfiguredBatch(input, who, signal)),
 );
 
 server.registerTool(

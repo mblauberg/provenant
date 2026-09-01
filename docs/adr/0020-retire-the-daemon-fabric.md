@@ -2,7 +2,8 @@
 
 **Status:** Accepted 2026-08-02 (user); supersedes [ADR
 0002](0002-capability-compiled-execution-authority.md) and [ADR
-0018](0018-accept-portal-stdio-v1-launch-custody.md)
+0018](0018-accept-portal-stdio-v1-launch-custody.md); amended by [ADR
+0022](0022-thin-fabric-mcp-execution-facade.md) on 2026-09-01
 
 ## Context
 
@@ -27,8 +28,8 @@ current regression claim.
 
 ## Decision
 
-Delete the five packages. `runtime/fabric` replaces them: one SQLite file, eleven
-MCP tools, a shell CLI, and identity derived from the working directory rather
+Delete the five packages. `runtime/fabric` replaces them: one SQLite file, a
+small MCP surface, a shell CLI, and identity derived from the working directory rather
 than issued to the caller.
 
 Nothing is trusted, bootstrapped, provisioned, renewed or leased. An agent is
@@ -38,9 +39,10 @@ the environment the provider already sets. Identity does not expire or need rene
 claims are the narrow exception: an unacknowledged claim expires and redelivers
 the message, without creating a provider lease, liveness proof or renewal flow.
 
-Provider execution leaves Fabric entirely. There are no in-process adapters:
-cross-provider work is dispatched as a direct command-line call, and Fabric
-carries the messages, shared tasks and activity log around it. The doctrine
+There are no in-process adapters. ADR 0022 later permits Fabric MCP to start the
+existing external dispatch owners without moving provider mechanics, process
+receipts or lifecycle state into Fabric. Direct command-line dispatch remains
+supported, and Fabric carries messages, shared tasks and activity around it. The doctrine
 that direct CLIs were a degraded fallback is reversed, because the path they
 were a fallback to no longer exists.
 

@@ -500,6 +500,14 @@ def test_harness_python_test_dependencies_install_locked_and_cached() -> None:
 def test_fabric_workspace_and_ci_share_the_locked_daemonless_check_graph() -> None:
     document = _workflow()
     fabric_steps = _steps(_job(document, "fabric"))
+    fabric_paths = set(_flatten_patterns(_change_filters(document)["fabric"]))
+    assert {
+        "config/**",
+        "pyproject.toml",
+        "scripts/**",
+        "skills/**",
+        "uv.lock",
+    } <= fabric_paths
     node_setup = next(
         step for step in _setup_action_steps() if str(step.get("uses", "")).startswith("actions/setup-node@")
     )
@@ -536,9 +544,26 @@ def test_fabric_workspace_and_ci_share_the_locked_daemonless_check_graph() -> No
     assert isinstance(dependencies, dict)
     assert isinstance(dependencies.get("tsx"), str)
 
+    setup_uv = next(
+        step for step in fabric_steps if str(step.get("uses", "")).startswith("astral-sh/setup-uv@")
+    )
+    assert setup_uv.get("with") == {
+        "python-version": "3.12",
+        "enable-cache": True,
+        "cache-dependency-glob": "uv.lock",
+    }
+    smoke_step = next(
+        step for step in fabric_steps
+        if str(step.get("run", "")).strip() == "node runtime/fabric/mcp-smoke.mjs"
+    )
+    assert smoke_step.get("env") == {
+        "HARNESS_PYTHON": "${{ github.workspace }}/.venv/bin/python",
+    }
+
     fabric_commands = "\n".join(str(step.get("run", "")) for step in fabric_steps)
     assert (
-        fabric_commands.index("npm run check")
+        fabric_commands.index("uv sync --locked --only-group test")
+        < fabric_commands.index("npm run check")
         < fabric_commands.index("npm run test:package-install --workspace @local/fabric")
         < fabric_commands.index("node runtime/fabric/mcp-smoke.mjs")
         < fabric_commands.index("npm audit --workspace=@local/fabric --omit=dev --audit-level=high")

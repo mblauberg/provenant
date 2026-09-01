@@ -38,11 +38,12 @@ The current pre-release tree includes:
   `workhorse` and `scout` aliases from runtime capability discovery, with
   receipts that separate adapter, endpoint, model family, requested and
   effective effort, capability source and any substitution.
-- Fabric, at `runtime/fabric`: messages, shared tasks and an activity log for
-  the agents working on one project, over MCP or a shell CLI. One SQLite file,
-  no daemon, and identity derived from the working directory. Ordinary registered
-  linked worktrees share their repository's project while retaining their resolved
-  cwd, with nothing to trust, bootstrap or provision.
+- Fabric, at `runtime/fabric`: messages, shared tasks and activity for agents
+  working on one project, plus thin MCP dispatch and batch tools that delegate
+  to the existing execution owners and keep full output file-backed. One SQLite
+  file, no daemon, and identity derived from the working directory. Ordinary
+  registered linked worktrees share their repository's project while retaining
+  their resolved cwd, with nothing to trust, bootstrap or provision.
 - Gates: `scripts/check-harness` (policy checks, skill trigger fixtures, shell
   parse, `pytest`), `scripts/static-security-check.py` and
   `scripts/public-release-check`, plus a CI workflow that runs the harness
@@ -87,8 +88,9 @@ The current pre-release tree includes:
   [ADR 0020](docs/adr/0020-retire-the-daemon-fabric.md); the tree is preserved
   on the `legacy/agent-fabric` branch.
 - The model router's daemon-activation gate and `config/agent-fabric.yaml`.
-  There are no in-process provider adapters left to activate, so every
-  cross-provider dispatch is a direct CLI call. Adapter compatibility, which
+  There are no in-process provider adapters left to activate. Fabric MCP and
+  the direct command line both delegate cross-provider dispatch to the same
+  external CLI owners. Adapter compatibility, which
   constrains which model families each provider CLI accepts, is unchanged.
 - The `allowed_fabric_operations` and `denied_fabric_operations` delivery
   receipt fields, which scoped authority against the retired protocol's

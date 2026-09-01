@@ -1,6 +1,7 @@
 # ADR 0021 — Configured-workspace provider access and dispatch boundaries
 
-**Status:** Accepted 2026-08-29 (issue [#682](https://github.com/mblauberg/provenant/issues/682))
+**Status:** Accepted 2026-08-29 (issue [#682](https://github.com/mblauberg/provenant/issues/682)); amended by [ADR
+0022](0022-thin-fabric-mcp-execution-facade.md) on 2026-09-01
 
 **Amends:** [ADR 0013](0013-thin-provenant-cli.md) and the current
 orchestration, routing and workspace-access doctrine.
@@ -28,7 +29,7 @@ batch execution.
 | Provider-invocation adapter | `skills/orchestrate/scripts/cf_dispatch.sh` | Invoked by ordinary and assurance routes; its distinct-family requirement remains assurance policy. |
 | Ordinary dispatch runner and interface | `skills/orchestrate/scripts/dispatch_run.py` (implemented by [#690](https://github.com/mblauberg/provenant/pull/690)) | Owns one ordinary intent/policy attempt and its `attempt.json`, and delegates provider invocation to `cf_dispatch.sh`. |
 | Fixed bounded batches | `skills/orchestrate/scripts/batch_run.py` (implemented by [#692](https://github.com/mblauberg/provenant/pull/692)) | Builds on `dispatch_run.py` for fixed task sets, bounded concurrency, partial results and explicit retry; it does not own provider invocation or workspace policy. |
-| Coordination | `runtime/fabric` | Mailbox, shared tasks and activity only; no provider launch, scheduler or lifecycle owner. |
+| Coordination and MCP front door | `runtime/fabric` | Mailbox, shared tasks and activity; its two execution tools only start the existing dispatch owners. No provider implementation, scheduler or lifecycle owner. |
 | Dispatch evidence | `attempt.json`, validated and indexed by `dispatch_run.py`; `run_controls.py` owns retained-attempt validation and operator controls | Records execution attempts, route lineage and observed completion. `run_dir_finalize.py` invokes the `run_controls.py` validator during generic custody finalisation but does not own the attempt schema; dispatch evidence is not delivery acceptance and must not create a parallel lifecycle ledger. |
 | Delivery evidence | `deliver` and canonical delivery `RUN.json` | Records artifact verification, review and acceptance; it may reference the orchestration receipt. |
 
@@ -105,13 +106,14 @@ Exact prompts and results are retained once in the local run directory according
 to the active retention policy. Receipts and Fabric messages carry paths,
 digests and compact status rather than duplicate transcripts.
 
-### Fabric remains coordination-only
+### Fabric remains a thin coordination and dispatch façade
 
 Fabric remains the project-scoped mailbox, shared task ledger and activity log.
-It may carry dispatch requests, correlations and status, but it does not launch
-providers, own provider sessions, schedule batches, wait on processes or decide
-delivery acceptance. Direct official provider CLIs remain the execution
-boundary.
+ADR 0022 permits two MCP tools to start the existing single-dispatch and fixed
+batch owners, wait briefly and return compact file paths. Fabric does not
+implement provider routes, own persistent provider sessions, schedule work,
+duplicate transcripts or decide delivery acceptance. Direct CLI use remains a
+first-class path to the same owners.
 
 ## Consequences
 
@@ -145,6 +147,7 @@ boundary and must preserve its ownership and evidence rules.
 4. Batch status preserves partial results and individual failure states.
 5. Delivery `RUN.json` remains distinct and may reference the orchestration
    receipt that indexes attempt records.
-6. Fabric tests continue to demonstrate coordination-only behaviour.
+6. Fabric tests demonstrate that MCP execution delegates to the existing owners
+   and keeps full output file-backed.
 7. `provenant` exposes only delegated bounded commands; provider mechanics are
    not duplicated in the front door.

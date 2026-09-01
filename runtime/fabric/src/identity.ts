@@ -14,6 +14,12 @@ const GIT_REPOSITORY_REDIRECTS = [
   "GIT_DISCOVERY_ACROSS_FILESYSTEM",
 ] as const;
 
+export function withoutGitRedirects(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const cleanEnv: NodeJS.ProcessEnv = { ...env };
+  for (const key of GIT_REPOSITORY_REDIRECTS) delete cleanEnv[key];
+  return cleanEnv;
+}
+
 /**
  * Who am I, and which project am I in?
  *
@@ -112,8 +118,7 @@ function validLinkedMetadata(top: string, gitDirectory: string, commonDirectory:
 }
 
 function runGit(cwd: string, args: string[], env: NodeJS.ProcessEnv): string {
-  const cleanEnv: NodeJS.ProcessEnv = { ...process.env, ...env };
-  for (const key of GIT_REPOSITORY_REDIRECTS) delete cleanEnv[key];
+  const cleanEnv = withoutGitRedirects({ ...process.env, ...env });
   return execFileSync("git", args, {
     cwd,
     env: cleanEnv,

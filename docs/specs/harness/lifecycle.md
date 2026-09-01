@@ -488,8 +488,9 @@ remain separately gated by current authority.
 ## Route and topology evidence boundary
 
 Dispatch and batch receipts own the actual resolved route, provider/model and
-attempt facts. Delivery may reference those receipts for evidence; Fabric only
-coordinates and does not own provider execution or lifecycle acceptance.
+attempt facts. Delivery may reference those receipts for evidence. Fabric MCP
+may start the existing dispatch owners, but does not implement provider
+mechanics or own lifecycle acceptance.
 Assurance labels reflect the evidence that exists and do not infer coverage.
 
 This specification defines no learned router, global leaderboard, automatic
