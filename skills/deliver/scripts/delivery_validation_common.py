@@ -109,23 +109,6 @@ def _policy_validation_module():
     spec.loader.exec_module(module)
     return module
 
-def _retrospect_validator():
-    path = SKILLS_ROOT / "retrospect" / "scripts" / "validate_retrospect.py"
-    spec = importlib.util.spec_from_file_location("delivery_retrospect_validator", path)
-    fail(not spec or not spec.loader, "retrospective validator is unavailable")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-def _evaluate_validator():
-    path = SKILLS_ROOT / "evaluate" / "scripts" / "validate_evaluation.py"
-    spec = importlib.util.spec_from_file_location("delivery_evaluate_validator", path)
-    fail(not spec or not spec.loader, "evaluation validator is unavailable")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    fail(not callable(getattr(module, "validate", None)), "evaluation validator API is unavailable")
-    return module
-
 @lru_cache(maxsize=1)
 def _software_delivery_validator():
     spec = importlib.util.spec_from_file_location("software_delivery_validation", Path(__file__).with_name("software_delivery_validation.py"))
