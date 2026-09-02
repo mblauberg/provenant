@@ -15,13 +15,17 @@
  * pretend otherwise.
  */
 import { execFileSync } from "node:child_process";
-import { lstatSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
+import {
+  lstatSync, readFileSync, readdirSync, rmSync, statSync, unlinkSync, writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 
 export const OWNER_RECORD_NAME = "dispatch-owner.json";
 export const PROVIDER_RECORD_NAME = "dispatch-provider.json";
 export const RUN_DIRECTORY_PREFIX = "mcp-";
 export const RUN_ROOT_NAME = ".agent-run";
+/** A week: long enough to read yesterday's evidence, short enough to bound growth. */
+export const DEFAULT_RETENTION_HOURS = 168;
 /** Long enough for a cooperative owner to publish evidence, short enough to end. */
 const ESCALATION_MS = 3_000;
 
@@ -282,4 +286,75 @@ export function reapOrphanedRuns(workspace: string): TerminationOutcome[] {
     reaped.push({ run_dir: run.run_dir, signalled, escalated: false, reason: "host gone" });
   }
   return reaped;
+}
+
+/**
+ * How long a finished MCP dispatch run is kept, in hours.
+ *
+ * A malformed setting must not fail a dispatch, and silently keeping
+ * everything would restore the unbounded growth this exists to stop, so an
+ * unusable value falls back to the default rather than to no pruning at all.
+ */
+export function retentionHours(env: NodeJS.ProcessEnv): number {
+  const configured = env.AGENT_FABRIC_RUN_RETENTION_HOURS;
+  if (configured === undefined) return DEFAULT_RETENTION_HOURS;
+  const hours = Number(configured);
+  return Number.isFinite(hours) && hours >= 0 ? hours : DEFAULT_RETENTION_HOURS;
+}
+
+/**
+ * The owner logs and staging inputs written as siblings of a run directory,
+ * which any prune that only walks run directories would leave behind.
+ */
+function siblingPaths(root: string, name: string): string[] {
+  try {
+    return readdirSync(root)
+      .filter((entry) => entry !== name && entry.startsWith(`${name}-`))
+      .map((entry) => join(root, entry));
+  } catch {
+    return [];
+  }
+}
+
+function newestMtimeMs(paths: string[]): number {
+  let newest = 0;
+  for (const path of paths) {
+    try {
+      newest = Math.max(newest, statSync(path).mtimeMs);
+    } catch { /* A path that has vanished cannot hold a run open. */ }
+  }
+  return newest;
+}
+
+/**
+ * Age out MCP dispatch run directories and the owner logs beside them.
+ *
+ * Only `mcp-` directories are touched: run directories from other
+ * orchestration paths share this root and are not this front door's to delete.
+ * Liveness decides before age does, so a run still in flight is never pruned
+ * however old its directory looks. That liveness is the owner record from
+ * #746, not a second mechanism invented here.
+ */
+export function pruneDispatchRuns(workspace: string, env: NodeJS.ProcessEnv): string[] {
+  const cutoff = Date.now() - retentionHours(env) * 3_600_000;
+  const root = runRoot(workspace);
+  const pruned: string[] = [];
+  for (const name of runDirectoryNames(workspace)) {
+    const runDir = join(root, name);
+    try {
+      const metadata = lstatSync(runDir);
+      if (!metadata.isDirectory() || metadata.isSymbolicLink()) continue;
+      const record = readOwnerRecord(runDir);
+      if (record !== undefined && (
+        processMatches(record.owner_pid, record.owner_started_at) ||
+        processMatches(record.host_pid, record.host_started_at)
+      )) continue;
+      const siblings = siblingPaths(root, name);
+      if (newestMtimeMs([runDir, ...siblings]) > cutoff) continue;
+      rmSync(runDir, { recursive: true, force: true });
+      for (const sibling of siblings) rmSync(sibling, { recursive: true, force: true });
+      pruned.push(runDir);
+    } catch { /* A run another process is already removing is already pruned. */ }
+  }
+  return pruned;
 }

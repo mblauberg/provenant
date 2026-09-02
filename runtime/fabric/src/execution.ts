@@ -20,6 +20,7 @@ import { promisify } from "node:util";
 import { withoutGitRedirects, type Identity } from "./identity.js";
 import {
   processStartedAt,
+  pruneDispatchRuns,
   reapOrphanedRuns,
   readProviderRecord,
   removeOwnerRecord,
@@ -231,18 +232,24 @@ function createRunDirectory(identity: Identity): string {
 
 /**
  * The dispatch path is the only scheduler this needs. Before a new run is
- * staged, orphans from a dead host are signalled. Reaping is never allowed to
- * fail a dispatch.
+ * staged, orphans from a dead host are signalled and runs past their retention
+ * are removed with the owner logs written beside them. Reaping runs first, so
+ * a run it has just ended can age out on the same pass. Neither step is ever
+ * allowed to fail a dispatch.
  */
-function maintainRunRoot(identity: Identity): void {
+function maintainRunRoot(identity: Identity, env: NodeJS.ProcessEnv): void {
+  const workspace = canonical(identity.cwd);
   try {
-    reapOrphanedRuns(canonical(identity.cwd));
+    reapOrphanedRuns(workspace);
   } catch { /* Reaping is best effort; the run it protects still starts. */ }
+  try {
+    pruneDispatchRuns(workspace, env);
+  } catch { /* Pruning is best effort; the run it tidies still starts. */ }
 }
 
 async function initialiseRun(identity: Identity, env: NodeJS.ProcessEnv, root: string): Promise<string> {
   const owner = executableOwner(root, "skills/orchestrate/scripts/run_dir_init.sh");
-  maintainRunRoot(identity);
+  maintainRunRoot(identity, env);
   const runDir = createRunDirectory(identity);
   try {
     await execFileAsync(owner, [runDir], {

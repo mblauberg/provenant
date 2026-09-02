@@ -10,7 +10,9 @@
  *   fabric watch [--interval 2]
  */
 import { databasePath, identify } from "./identity.js";
-import { findRecordedRun, listRecordedRuns, terminateRecordedRun } from "./run-registry.js";
+import {
+  findRecordedRun, listRecordedRuns, retentionHours, terminateRecordedRun,
+} from "./run-registry.js";
 import { inspectDatabase, Store } from "./store.js";
 
 const USAGE = `fabric <command>
@@ -87,7 +89,11 @@ if (command === "dispatch") {
     }
     const runs = listRecordedRuns(who.cwd);
     if (json) {
-      console.log(JSON.stringify({ workspace: who.cwd, runs }, null, 2));
+      console.log(JSON.stringify({
+        workspace: who.cwd,
+        retention_hours: retentionHours(process.env),
+        runs,
+      }, null, 2));
     } else if (runs.length === 0) {
       console.log("no recorded dispatch runs");
     } else {
