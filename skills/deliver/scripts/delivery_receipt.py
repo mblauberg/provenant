@@ -44,12 +44,26 @@ import _shared.workspace_paths as paths
 # import-or-file-load pattern used below, because the module carries a type:
 # loading it twice would give two `ReceiptError` classes, and an `except
 # ReceiptError` would silently stop catching the other one (#755).
-from _shared.delivery_run_invariants import (
-    RISK_POLICY_PATH, RISKS, ReceiptError, _reject_future_timestamp, _utc,
-    derive_risk, digest_bytes, ensure_allowed_artifact_target,
-    ensure_immutable_risk, ensure_run_open, load_risk_policy,
-    safe_workspace_path, validate_override,
-)
+import _shared.delivery_run_invariants as invariants
+
+# Re-exported one by one, and by attribute off a single module object, so the
+# names below are the very objects the shared module defines. `ReceiptError`
+# in particular has to stay one class: a second one would mean an `except
+# ReceiptError` here silently ceasing to catch a refusal raised through the
+# `implement` checkpoint writer, and the reverse.
+ReceiptError = invariants.ReceiptError
+RISKS = invariants.RISKS
+RISK_POLICY_PATH = invariants.RISK_POLICY_PATH
+digest_bytes = invariants.digest_bytes
+_utc = invariants._utc
+_reject_future_timestamp = invariants._reject_future_timestamp
+safe_workspace_path = invariants.safe_workspace_path
+ensure_allowed_artifact_target = invariants.ensure_allowed_artifact_target
+load_risk_policy = invariants.load_risk_policy
+derive_risk = invariants.derive_risk
+validate_override = invariants.validate_override
+ensure_immutable_risk = invariants.ensure_immutable_risk
+ensure_run_open = invariants.ensure_run_open
 
 # `skills/_shared/roots.py` is the single resolver for the product root (#754).
 # The fallback loads that one file when this script is run directly by path and
