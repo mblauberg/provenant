@@ -1,0 +1,36 @@
+# Regression coverage for the contract-test boundary added under issue #761:
+# see the "Contract-test boundary" doctrine in SKILL.md, step 6 in
+# references/author.md and step 7 of "Change a skill" in MAINTAINING.md.
+# Structurally validated by the generic route-fixture harness, but not held to
+# trigger_cases.yaml's fixed 3 positive / 3 negative / 3 boundary distribution
+# or its q700-q708 block.
+#
+# Do not fold these back into trigger_cases.yaml; that would break its fixed
+# 3/3/3 contract or force dropping another case to make room.
+schema_version: 1
+target_skill: skill-craft
+cases:
+  - id: r001
+    relation: positive
+    prompt: "Reword this skill's explanation and examples for clarity without changing any trigger, route, gate or script."
+    tags: [direct, docs-only]
+    expected:
+      primary_skill: skill-craft
+      companion_skills: []
+    note: >-
+      A wording-only skill change stays with skill-craft and still refreshes
+      its trigger fixtures, but adds no contract test: it alters no invariant a
+      script, validator or CI gate evaluates at runtime, and asserting the new
+      sentence would be a change detector.
+  - id: r002
+    relation: boundary
+    prompt: "Revise this skill's wording and refresh its fixtures, then decide whether the change needs a contract test."
+    tags: [composition, docs-only]
+    expected:
+      primary_skill: skill-craft
+      companion_skills: [tdd]
+    note: >-
+      skill-craft owns the skill revision and its fixtures; tdd supplies the
+      boundary that answers no, because prose carries no machine-enforced
+      invariant. If the invariant has no enforcing script, the correct output
+      is an enforcing script or nothing.

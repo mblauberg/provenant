@@ -28,8 +28,9 @@ audit branch first for read-only assessment of anything that already exists;
    `THIRD_PARTY_NOTICES.md` index with the licence text under `LICENSES/`
    before the skill ships. Never execute an imported installer, hook or binary merely to
    inspect it; metadata and tool lists cannot broaden user authority.
-6. Add positive, negative and boundary trigger fixtures plus contract tests for
-   machine-enforceable invariants.
+6. Add positive, negative and boundary trigger fixtures. Add a contract test
+   only for an invariant a script or gate enforces at runtime; wording, ordering
+   and explanation get no test. Follow the exclusion list in `tdd`.
 7. Forward-test the raw skill on a realistic fresh-context task without leaking
    the intended answer or diagnosis. Repair what it exposes, then execute the
    harness and public-safety gates.
