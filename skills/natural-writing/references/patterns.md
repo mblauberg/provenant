@@ -98,9 +98,10 @@ when voice authenticity matters.
 - **Journalistic**: use named attribution, dates and jurisdictions; remove vague
   sourcing and generic news wrappers.
 
-Route software documentation and READMEs to `engineering-writing`, scholarly
-work to `academic-writing`, and Australian legal drafting to `legal-writing`.
-Use `natural-writing` for general, mixed or unclassified prose.
+Route software documentation and READMEs to `engineering-writing`, and
+Australian legal drafting to `legal-writing`. Use `natural-writing` for
+general, mixed or unclassified prose, and for scholarly prose with
+[academic-prose.md](academic-prose.md).
 
 ## Detector limits
 

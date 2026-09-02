@@ -1,10 +1,11 @@
 # Condense pass
 
 `natural-writing` owns this procedure for the writing family.
-`academic-writing`, `engineering-writing` and `legal-writing` link here for
-the shared steps and add only their own domain lock-list and stop conditions
-(LaTeX labels and citation keys; commands, flags and version numbers; source
-anchors, exhibit labels and forum wording).
+`engineering-writing` and `legal-writing` link here for the shared steps and
+add only their own domain lock-list and stop conditions (commands, flags and
+version numbers; source anchors, exhibit labels and forum wording). The
+academic lock-list (LaTeX labels, citation keys, result macros) is in
+[academic-prose.md](academic-prose.md).
 
 Use this when prose is over-long and the job is to shorten it while keeping
 the meaning; a rewrite improves a passage in place, a condense makes it
