@@ -364,7 +364,7 @@ verify_installed_output() {
 }
 emit_record() {
   local tool="$1" model="$2" effort="$3" status="$4" rc="$5" path="$6" guarantee="$7"
-  local family="${8:-}" endpoint="${9:-}" identity="${10:-}" effort_substitution="${11:-}"
+  local family="${8:-}" endpoint_provider="${9:-}" identity="${10:-}" effort_substitution="${11:-}"
   local requested_effort="${12:-}" effort_source="${13:-}" effort_capability_source="${14:-}" cross cert
   local substitution="${15:-}" requested_model="${16:-$model}" fallback_model="${17:-}"
   local catalog_model="${18:-}" model_selection="${19:-}"
@@ -373,7 +373,7 @@ emit_record() {
   local reason="${23:-}"
   local output_digest=""
   model="$(resolve_model "$tool" "$model")"
-  [ -n "$endpoint" ] || endpoint="$(endpoint_provider "$tool")"
+  [ -n "$endpoint_provider" ] || endpoint_provider="$(endpoint_provider "$tool")"
   [ -n "$identity" ] || identity="unresolved"
   if [ -n "$path" ]; then
     if verify_installed_output "$path"; then
@@ -418,7 +418,7 @@ emit_record() {
     "$(printf '%s' "$ORCH_FAMILY" | json_escape)" \
     "$(printf '%s' "$family" | json_escape)" \
     "$(printf '%s' "$family" | json_escape)" \
-    "$(printf '%s' "$endpoint" | json_escape)" \
+    "$(printf '%s' "$endpoint_provider" | json_escape)" \
     "$(printf '%s' "$identity" | json_escape)" \
     "$(printf '%s' "$catalog_model" | json_escape)" \
     "$(printf '%s' "$model_selection" | json_escape)" \
