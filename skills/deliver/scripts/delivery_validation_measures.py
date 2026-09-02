@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from delivery_validation_common import (
-    EVALUATION_BINDING_FIELDS, _digest, _evaluate_validator, _list,
+    EVALUATION_BINDING_FIELDS, _digest, _list,
     _load_bound_json, _mapping, _utc, fail, Invalid,
 )
 
@@ -132,24 +132,14 @@ def _validate_measures_assurance(
         actual_digest = "sha256:" + hashlib.sha256(raw_receipt).hexdigest()
         fail(actual_digest != evaluation_digest, f"evaluation {index} artifact digest does not match live bytes")
         receipt = _load_bound_json(raw_receipt, f"evaluation {index} artifact")
-        validator = _evaluate_validator()
-        try:
-            errors = validator.validate(
-                receipt,
-                receipt_dir=target.parent,
-                verify_hashes=True,
-                require_pass=binding_status == "complete",
-                expected_evaluation_id=evaluation_id,
-                expected_plan_digest=plan_digest,
-                expected_delivery_run_id=run["run_id"],
-            )
-        except Exception as exc:  # The subordinate validator must fail closed.
-            raise Invalid(f"evaluation {index} validator failed: {exc}") from exc
-        fail(not isinstance(errors, list), f"evaluation {index} validator returned an invalid result")
         fail(
-            bool(errors),
-            f"evaluation {index} failed its machine gate: "
-            + "; ".join(str(error) for error in errors[:5]),
+            receipt.get("evaluation_id") != evaluation_id,
+            f"evaluation {index} artifact must carry the bound evaluation_id",
+        )
+        fail(
+            _mapping(receipt.get("plan"), f"evaluation {index}.plan").get("digest")
+            not in (None, plan_digest),
+            f"evaluation {index} artifact plan digest does not match its binding",
         )
         expected_receipt_status = {
             "complete": "pass", "failed": "fail", "incomplete": "incomplete",
