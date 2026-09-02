@@ -25,7 +25,15 @@ MAX_OPERATOR_RESPONSE_BYTES = 64 * 1024
 MAX_CANCEL_WAIT_SECONDS = 60.0
 MAX_GIT_EVIDENCE_HEADER_BYTES = 64 * 1024
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+# Two import roots, both derived from this file so the repo and an installed
+# instance behave the same: the sibling dispatch owner beside this script, and
+# the shared library one level above the skill. The shared library is
+# established here rather than inherited from `dispatch_run`, whose own repair
+# happens to run first today; relying on that would make the import order
+# load-bearing and silent (#755).
+SCRIPT_ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(SCRIPT_ROOT))
+sys.path.insert(0, str(SCRIPT_ROOT.parents[1]))
 from dispatch_run import (
     create_cancellation_marker,
     remove_cancellation_marker,
