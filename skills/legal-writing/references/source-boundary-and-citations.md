@@ -106,6 +106,7 @@ Two recurring source-boundary cases:
 - Verify legislation from official legislation sites.
 - Verify forms, fees, practice directions and filing methods from official court or tribunal pages.
 - Use AGLC-style legal citations where a formal authority citation is needed.
+  For AGLC4 formatting itself, load `aglc4-citation.md`.
 - Do not invent pinpoint references, case quotes or proposition support.
 
 ## Citation And Content Integrity

@@ -9,7 +9,12 @@ needs:
 |---|---|
 | submissions / written advocacy | `argument-structure-and-paragraphing.md` |
 | forms, affidavits, orders, annexures | `forum-and-document-recipes.md` |
+| statutory declarations, or choosing between a declaration, an affidavit and a witness statement | `statutory-declarations.md` |
+| deeds, agreements, releases, guarantees, variations | `deeds-and-agreements.md` |
+| tribunal work and merits review | `tribunals-and-merits-review.md` |
 | correspondence | `legal-correspondence-style.md` |
+| letters of demand, pre-action letters, settlement offers | `demands-and-pre-action-correspondence.md` |
+| AGLC citation in academic work, advices and research memoranda | `aglc4-citation.md` |
 | non-filing legal decision overview | `decision-overviews.md` |
 | family-violence or redaction-sensitive material | `family-violence-and-redaction.md` |
 | house style questions | `australian-english-house-style.md` |
@@ -28,6 +33,10 @@ Run the checks the task needs, not all of them:
 | affidavit work | Affidavit + Source + Safety |
 | orders/minutes | Document Function + the Orders cut-list in `forum-and-document-recipes.md` |
 | correspondence | Correspondence + Filing-Facing Style |
+| letter of demand or pre-action letter | Correspondence + Source + the checks in `demands-and-pre-action-correspondence.md` |
+| statutory declaration | Source + Safety + the regime and execution checks in `statutory-declarations.md` |
+| deed or agreement | Document Function + the review pass in `deeds-and-agreements.md` |
+| tribunal application, contentions or submissions | Concision + Argument Structure + the completion gate in `tribunals-and-merits-review.md` |
 | legal decision overview | Decision Overview + Source |
 
 ## Decision Overview Check
