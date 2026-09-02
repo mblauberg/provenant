@@ -294,7 +294,7 @@ try {
   }));
   assert.equal(dispatched.status, "succeeded");
   assert.equal(dispatched.route.adapter, "codex");
-  assert.equal(dispatched.route.resolved_model, "gpt-fixture");
+  assert.equal(dispatched.route.resolved_model, "workhorse");
   assert.match(readFileSync(dispatched.paths.result, "utf8"), /fixture result for: inspect the fixture/);
   assert.ok(dispatched.paths.run_dir.startsWith(resolve(realpathSync(workspace), ".agent-run")));
   assert.doesNotMatch(JSON.stringify(dispatched), /fixture result for: inspect the fixture/);
@@ -352,7 +352,7 @@ try {
   });
   const redirectedDispatch = payload(await redirectedExecutor.callTool({
     name: "fabric_dispatch",
-    arguments: { prompt: "ignore foreign Git redirects", model: "gpt-fixture", wait_seconds: 5 },
+    arguments: { prompt: "ignore foreign Git redirects", wait_seconds: 5 },
   }));
   assert.equal(redirectedDispatch.status, "succeeded");
   assert.equal(existsSync(foreignMarker), false);
@@ -363,8 +363,8 @@ try {
       concurrency: 2,
       wait_seconds: 5,
       tasks: [
-        { id: "luna-one", prompt: "first", adapter: "codex", model: "gpt-5.6-luna" },
-        { id: "luna-two", prompt: "second", adapter: "codex", model: "gpt-5.6-luna" },
+        { id: "luna-one", prompt: "first", adapter: "codex", alias: "scout" },
+        { id: "luna-two", prompt: "second", adapter: "codex", alias: "scout" },
       ],
     },
   }));
@@ -373,8 +373,8 @@ try {
   assert.equal(batched.concurrency, 2);
   assert.deepEqual(batched.counts, { succeeded: 2 });
   assert.deepEqual(batched.tasks.map((task) => task.route.resolved_model), [
-    "gpt-5.6-luna",
-    "gpt-5.6-luna",
+    "scout",
+    "scout",
   ]);
   assert.ok(batched.tasks.every((task) => task.message === undefined && task.stderr === undefined));
   assert.equal(JSON.parse(readFileSync(
@@ -613,7 +613,6 @@ try {
         prompt: `delayed dispatch ${kind}`,
         task_id: taskId,
         adapter: "codex",
-        model: "gpt-fixture",
         wait_seconds: 0,
       },
     }));
@@ -641,7 +640,7 @@ try {
       name: "fabric_batch",
       arguments: {
         wait_seconds: 0,
-        tasks: [{ id: taskId, prompt: `delayed batch ${kind}`, adapter: "codex", model: "gpt-fixture" }],
+        tasks: [{ id: taskId, prompt: `delayed batch ${kind}`, adapter: "codex", alias: "workhorse" }],
       },
     }));
     assert.equal(response.status, "running");
@@ -708,7 +707,6 @@ try {
     arguments: {
       prompt: "exercise the real dispatch owner",
       adapter: "unsupported-fixture",
-      model: "fixture-model",
       wait_seconds: 10,
     },
   }));
@@ -723,8 +721,8 @@ try {
       concurrency: 2,
       wait_seconds: 10,
       tasks: [
-        { id: "real-one", prompt: "first", adapter: "unsupported-fixture", model: "fixture-model" },
-        { id: "real-two", prompt: "second", adapter: "unsupported-fixture", model: "fixture-model" },
+        { id: "real-one", prompt: "first", adapter: "unsupported-fixture" },
+        { id: "real-two", prompt: "second", adapter: "unsupported-fixture" },
       ],
     },
   }));
@@ -740,7 +738,6 @@ try {
     arguments: {
       prompt: "force a timeout before result",
       adapter: "claude",
-      model: "claude-opus-4-6",
       timeout_seconds: 1,
       wait_seconds: 10,
     },
@@ -773,7 +770,6 @@ try {
       prompt: "cancel the real owner during startup",
       task_id: "real-cancel",
       adapter: "claude",
-      model: "claude-opus-4-6",
       wait_seconds: 0,
     },
   }));
