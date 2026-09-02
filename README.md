@@ -65,15 +65,22 @@ Requirements:
 - **Claude Code** or **Codex**, subscription-authenticated, per primary client
 - **Node.js** `>=24.15.0 <25` and **npm** `>=11.12.1 <12` for repository
   verification (the suite shells out to `node`)
-- **PyYAML** and **pytest** for harness checks (`uv sync --only-group test`
-  installs the locked versions; `scripts/check-harness` honours
-  `HARNESS_PYTHON`)
+- **[uv](https://docs.astral.sh/uv/)**, or an already-built harness interpreter.
+  `scripts/install-harness` and `scripts/check-harness` both select their
+  interpreter through `scripts/lib/harness-python.sh`, which refuses to run
+  without one, so this is a hard prerequisite rather than a convenience
+- **PyYAML** and **pytest** for harness checks (`uv sync --locked --only-group
+  test` installs the locked versions into `.venv/`; `scripts/check-harness`
+  honours `HARNESS_PYTHON` if you would rather point at your own interpreter)
 
 Install either platform independently, or both:
 
 ```sh
 git clone https://github.com/mblauberg/provenant.git "<PRODUCT_ROOT>"
 cd "<PRODUCT_ROOT>"
+
+# build the harness interpreter; install-harness cannot run without one
+uv sync --locked --only-group test
 
 # install the pinned workspace dependencies
 npm ci
@@ -105,6 +112,20 @@ other files and links as user-owned. If the installer exits
 non-zero, follow the message it prints: exit `3` flags a command collision,
 incompatible instruction target, or managed skill-link conflict, and
 instruction conflicts include the bootstrap line to add.
+
+Exit `3` also covers a missing harness interpreter, which is what a machine
+without `uv` meets first:
+
+```text
+harness-python: unusable interpreter: <PRODUCT_ROOT>/.venv/bin/python
+repair: uv sync --project <PRODUCT_ROOT> --locked --only-group test
+```
+
+Run the repair line the message prints, or export `HARNESS_PYTHON` pointing at a
+Python 3.11+ interpreter that already imports `yaml` and `pytest`. Every
+`install-harness` and `check-harness` step is gated on this, so nothing else in
+the quickstart runs until it resolves. `scripts/check-harness --doctor` reports
+whether `uv` is on `PATH`.
 
 To move the product checkout while retaining a small instance root, follow the
 [split-product relocation runbook](docs/runbooks/split-product-relocation.md).

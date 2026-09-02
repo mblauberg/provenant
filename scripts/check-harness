@@ -193,6 +193,15 @@ run_test -m pytest -q \
 
 if [[ "$DOCTOR" == true ]]; then
   echo "environment doctor"
+  if uv_bin="$(command -v uv 2>/dev/null)" && [[ -x "$uv_bin" ]]; then
+    echo "uv=ok path=$uv_bin"
+  else
+    # Without uv the harness interpreter cannot be built, and every step above
+    # would have exited 3 before reaching the doctor, so this is only reachable
+    # when HARNESS_PYTHON or an existing .venv already supplies one.
+    echo "uv=WARN not found; a missing harness interpreter cannot be repaired" \
+      "with: uv sync --project $PRODUCT_ROOT --locked --only-group test"
+  fi
   if host_bin="$(command -v codex-code-mode-host 2>/dev/null)" && [[ -x "$host_bin" ]]; then
     echo "codex-code-mode-host=ok path=$host_bin"
   else
