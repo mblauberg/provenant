@@ -2932,6 +2932,10 @@ def test_split_root_defaults_use_instance_routing_and_product_compatibility(tmp_
     product_root = tmp_path / "product"
     instance_root = tmp_path / "instance"
     shutil.copytree(ROOT / "scripts", product_root / "scripts")
+    # scripts/lib/roots.py re-exports the one product-root resolver, which lives
+    # in the shared skill library so the installed skills catalogue stays
+    # self-sufficient (#754). A product tree carrying model_route.py carries it.
+    shutil.copytree(ROOT / "skills" / "_shared", product_root / "skills" / "_shared")
     (product_root / "config").mkdir()
     shutil.copy2(
         ROOT / "config/adapter-compatibility.yaml",
