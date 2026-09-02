@@ -74,32 +74,19 @@ recomputed from retained scores.
 
 ## Validation
 
-```sh
-validate_evaluation.py EVALUATION.json --verify-hashes --require-pass \
-  --expected-evaluation-id "$EVALUATION_ID" \
-  --expected-plan-digest "$FROZEN_PLAN_DIGEST" \
-  --expected-delivery-run-id "$DELIVERY_RUN_ID"
-```
+There is no receipt validator. The consumer reads the receipt itself and
+confirms, in order: the artifact's own SHA-256 matches the digest its binding
+records; `evaluation_id`, `plan.digest` and the enclosing delivery run ID match
+the anchors frozen before execution; every linked artifact digest matches its
+live bytes; accounting conserves against retained rows; and `status` is `pass`
+only where every applicable threshold and margin held.
 
-API callers use:
-
-```python
-errors = validate(
-    receipt,
-    receipt_dir=receipt_path.parent,
-    verify_hashes=True,
-    require_pass=True,
-    expected_evaluation_id=assurance["evaluation_id"],
-    expected_plan_digest=assurance["plan_digest"],
-    expected_delivery_run_id=delivery_run["run_id"],
-)
-```
-
-An empty error list proves only a machine pass for the canonical receipt. Before execution the
+A clean reading proves only a machine pass for the canonical receipt. Before execution the
 consumer anchors evaluation ID, plan digest and delivery run ID. Afterwards it
 binds the evaluation artifact's own SHA-256, loads it, requires
-`contract: evaluation-run`, `schema_version: 2`, and runs the API above. It must
-not trust copied dataset, threshold or summary fields.
+`contract: evaluation-run` and `schema_version: 2`, and reads the receipt
+against the checks above. It must not trust copied dataset, threshold or
+summary fields.
 
 Unsupported receipts lack sufficient lineage and provenance to migrate
 truthfully. Preserve them as historical evidence and rerun from a fresh frozen

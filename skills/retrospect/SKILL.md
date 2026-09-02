@@ -18,8 +18,10 @@ resource use and retained artifacts. Use only authorised sources. Mark absent
 dimensions `unknown`; never infer success from a clean final answer.
 
 For substantial+ or repeated cycles, create `RETROSPECT.json` from the
-[template](templates/RETROSPECT.template.json) and validate with
-`scripts/validate_retrospect.py`. It is evidence, not diary/project truth.
+[template](templates/RETROSPECT.template.json). It is evidence, not diary or
+project truth. Before closing it, confirm `scope` names every cycle reviewed and
+its profile, each source digest matches its live artifact, each finding cites a
+retained source, and `status` follows the rules below.
 
 ## Review dimensions
 
