@@ -40,6 +40,11 @@ Options:
   --reviewer-id ID             Stable worker/reviewer identity for receipt binding.
   --model MODEL                Optional model passed to adapter.
   --effort EFFORT              Optional effort passed to adapter.
+  --timeout-seconds N          Provider deadline in whole seconds, where the CLI
+                               accepts one. Only agy does (--print-timeout); the
+                               claude and codex headless CLIs expose no timeout
+                               flag, so on those arms the calling owner's own
+                               deadline is the only bound.
   --add-dir PATH               Additional agy read directory; repeatable.
   --access-mode MODE           read_only (default) or worktree_write.
   --worktree PATH              Git worktree root the writer owns exclusively.
@@ -63,6 +68,7 @@ INSTALLED_OUTPUT_DEVICE=""
 INSTALLED_OUTPUT_INODE=""
 AGY_ADD_DIRS=()
 ACCESS_MODE="read_only"
+TIMEOUT_SECONDS=""
 WORKTREE=""
 WORKTREE_GIT_COMMON=""
 need_value() {
@@ -78,6 +84,7 @@ while [ $# -gt 0 ]; do
     --effort) need_value "$@"; EFFORT="$2"; shift 2;;
     --add-dir) need_value "$@"; AGY_ADD_DIRS+=("$2"); shift 2;;
     --access-mode) need_value "$@"; ACCESS_MODE="$2"; shift 2;;
+    --timeout-seconds) need_value "$@"; TIMEOUT_SECONDS="$2"; shift 2;;
     --worktree) need_value "$@"; WORKTREE="$2"; shift 2;;
     --out) need_value "$@"; OUT="$2"; shift 2;;
     --prompt) need_value "$@"; PROMPT="$2"; shift 2;;
@@ -98,6 +105,39 @@ case "$INTENT" in
   assurance|ordinary) ;;
   *) echo "invalid intent: $INTENT" >&2; exit 2;;
 esac
+
+# The caller's deadline, in whole seconds. Only the arms whose CLI accepts a
+# headless timeout consume it; the rest stay bounded by the calling owner.
+case "$TIMEOUT_SECONDS" in
+  "") ;;
+  0*|*[!0-9]*) echo "invalid timeout-seconds: $TIMEOUT_SECONDS" >&2; exit 2;;
+esac
+
+# Adapters with an executing arm in run_one, and adapters the catalogue declares
+# for routing but this dispatcher cannot execute. Both lists are bound to
+# DISPATCH_ADAPTERS in runtime/fabric/src/execution.ts and to the "dispatch"
+# field in config/model-routing.json by runtime/fabric/tests/adapter-registry.test.ts,
+# so the three cannot drift.
+DISPATCH_IMPLEMENTED_ADAPTERS="agy claude codex copilot cursor kiro"
+DISPATCH_DORMANT_ADAPTERS="opencode"
+# An adapter with neither an arm nor a declared dormant route is an input error,
+# refused here rather than after a temporary directory, prompt staging and route
+# resolution have already been paid for.
+known_adapter() {
+  local candidate="$1" known
+  for known in $DISPATCH_IMPLEMENTED_ADAPTERS $DISPATCH_DORMANT_ADAPTERS; do
+    [ "$candidate" = "$known" ] && return 0
+  done
+  return 1
+}
+# Unquoted on purpose: --chain is a space-separated list of tool:model:effort
+# specs, and an empty TOOL or CHAIN contributes no word at all.
+for candidate in ${TOOL:-} ${CHAIN:-}; do
+  known_adapter "${candidate%%:*}" || {
+    echo "unimplemented adapter: ${candidate%%:*} (known: $DISPATCH_IMPLEMENTED_ADAPTERS $DISPATCH_DORMANT_ADAPTERS)" >&2
+    exit 2
+  }
+done
 
 # Access mode is the only writable route. It stays off by default, is refused for
 # assurance work, and demands a Git worktree root the caller has already given the
@@ -303,6 +343,22 @@ then
 fi
 PROMPT_ARG=""
 IFS= read -r -d '' PROMPT_ARG <"$PROMPT_TMP" || true
+PROMPT_BYTES="$(wc -c <"$PROMPT_TMP" | tr -d ' ')"
+# agy, cursor, kiro and copilot have no file-backed prompt input, so the prompt
+# goes in as one argv value. That puts it under the kernel's argument limits, and
+# the binding one is per-string, not total: Linux caps a single argv element at
+# MAX_ARG_STRLEN, 32 pages = 128 KiB, and refuses the exec with E2BIG, while
+# darwin has no per-string cap and allows 1 MiB in total. So a prompt that works
+# on a developer's Mac fails on a Linux runner. Take the smaller limit on both,
+# with room for the flags, and fail closed with a typed status: a brief silently
+# clipped by the kernel would be reviewed as if it were complete.
+ARGV_PROMPT_LIMIT=126976
+argv_prompt_too_large() {
+  local tool="$1" diag_path="$2"
+  [ "$PROMPT_BYTES" -gt "$ARGV_PROMPT_LIMIT" ] || return 1
+  echo "$tool prompt is ${PROMPT_BYTES} bytes, over the 124 KiB single-argument ceiling; pass the material by reference instead" >"$diag_path"
+  return 0
+}
 
 strip_ansi() { sed $'s/\x1b\\[[0-9;?]*[A-Za-z]//g'; }
 json_escape() {
@@ -829,6 +885,9 @@ run_one() {  # $1 tool $2 model $3 effort $4 private tempdir -> JSON, returns 0/
           if ! require_cmd cursor-agent "$diag"; then
             status="tool_not_found"
             rc=127
+          elif argv_prompt_too_large cursor "$diag"; then
+            status="prompt_too_large"
+            rc=1
           else
             cursor-agent -p --trust --mode ask --sandbox enabled --output-format text \
               ${model:+--model "$model"} "$PROMPT_ARG" </dev/null >"$raw" 2>"$diag"; rc=$?
@@ -845,7 +904,13 @@ run_one() {  # $1 tool $2 model $3 effort $4 private tempdir -> JSON, returns 0/
           else
             local -a agy_cmd
             agy_cmd=(agy --output-format json --disable-slash-commands --sandbox)
-            if [ -n "${CF_DISPATCH_AGY_TIMEOUT:-}" ]; then
+            # The caller's deadline wins, because it is the one the dispatch
+            # owner will enforce by killing this process group. The environment
+            # override stays as an escape hatch for a direct call that passes no
+            # --timeout-seconds.
+            if [ -n "$TIMEOUT_SECONDS" ]; then
+              agy_cmd+=(--print-timeout "${TIMEOUT_SECONDS}s")
+            elif [ -n "${CF_DISPATCH_AGY_TIMEOUT:-}" ]; then
               agy_cmd+=(--print-timeout "${CF_DISPATCH_AGY_TIMEOUT}")
             else
               agy_cmd+=(--print-timeout 900s)
@@ -877,18 +942,10 @@ run_one() {  # $1 tool $2 model $3 effort $4 private tempdir -> JSON, returns 0/
               # with none it exits 2 on "flag needs an argument", and `--print -`
               # is worse than useless, because agy treats the dash as the literal
               # prompt, ignores stdin and answers it -- exit 0, plausible prose,
-              # wrong question. So the prompt goes in as one argv value.
-              #
-              # That puts it under the kernel's argument limits, and the binding
-              # one is per-string, not total. Linux caps a single argv element at
-              # MAX_ARG_STRLEN, 32 pages = 128 KiB, and refuses the exec with
-              # E2BIG; darwin has no per-string cap and allows 1 MiB in total, so
-              # a prompt that works on a developer's Mac can fail on a Linux
-              # runner. Take the smaller limit on both, with room for the flags.
-              agy_prompt_bytes=$(wc -c <"$PROMPT_TMP")
-              if [ "$agy_prompt_bytes" -gt 126976 ]; then
-                status="error"
-                echo "agy prompt is ${agy_prompt_bytes} bytes, over the 124 KiB single-argument ceiling; pass the material with --add-dir instead" >"$diag"
+              # wrong question. So the prompt goes in as one argv value, under
+              # the shared single-argument ceiling.
+              if argv_prompt_too_large agy "$diag"; then
+                status="prompt_too_large"
                 rc=1
               else
                 agy_cmd+=(--print "$PROMPT_ARG")
@@ -896,7 +953,8 @@ run_one() {  # $1 tool $2 model $3 effort $4 private tempdir -> JSON, returns 0/
               fi
             fi
           fi
-          if [ "${status:-}" != "tool_not_found" ] && [ "${status:-}" != "unsafe_by_default" ] && [ "${status:-}" != "error" ]; then
+          if [ "${status:-}" != "tool_not_found" ] && [ "${status:-}" != "unsafe_by_default" ] \
+            && [ "${status:-}" != "error" ] && [ "${status:-}" != "prompt_too_large" ]; then
             agy_status="$(python3 - "$raw" "$diag" "$clean" "$rc" <<'PY'
 import json
 import re
@@ -1019,6 +1077,9 @@ PY
             if ! require_cmd kiro-cli "$diag"; then
               status="tool_not_found"
               rc=127
+            elif argv_prompt_too_large kiro "$diag"; then
+              status="prompt_too_large"
+              rc=1
             else
               kiro-cli chat --no-interactive ${model:+--model "$model"} ${effort:+--effort "$effort"} \
                 "$PROMPT_ARG" </dev/null >"$raw" 2>"$diag"; rc=$?
@@ -1035,6 +1096,9 @@ PY
             if ! require_cmd copilot "$diag"; then
               status="tool_not_found"
               rc=127
+            elif argv_prompt_too_large copilot "$diag"; then
+              status="prompt_too_large"
+              rc=1
             else
               copilot -p "$PROMPT_ARG" --mode plan --silent --disable-builtin-mcps \
                 --available-tools='' --disallow-temp-dir ${model:+--model "$model"} ${effort:+--effort "$effort"} \

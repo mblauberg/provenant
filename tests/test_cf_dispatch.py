@@ -2,6 +2,7 @@
 """Contract tests for cf_dispatch.sh, the provider adapter, with stubbed CLIs."""
 import json
 import os
+import re
 import shlex
 import shutil
 import signal
@@ -1020,7 +1021,7 @@ def test_agy_oversized_prompt_fails_closed_instead_of_truncating():
         )
         record = json.loads(result.stdout)
         assert result.returncode != 0
-        assert record["status"] == "error"
+        assert record["status"] == "prompt_too_large"
         assert record["certification_eligible"] is False
         assert "SHOULD NOT RUN" not in out.read_text(encoding="utf-8")
 
@@ -2893,3 +2894,194 @@ def test_codex_endpoint_with_an_unusable_wire_api_dispatches_nothing():
     assert result.returncode != 0
     assert json.loads(result.stdout)["status"] == "endpoint_config_invalid"
     assert recorded == []
+
+
+def test_unimplemented_adapter_is_refused_before_any_provider_work():
+    """An adapter with no executing arm is an input error, not a late refusal.
+
+    The catalogue declares adapters for routing that this dispatcher cannot run.
+    Discovering that after the temporary directory, prompt staging and route
+    resolution have been paid for costs about ten processes to report a typo.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        invoked = tmp / "pi.invoked"
+        write_executable(
+            bin_dir / "pi",
+            f"#!/usr/bin/env bash\ntouch {invoked}\nexit 0\n",
+        )
+        env = fabric_free_env()
+        env["PATH"] = f"{bin_dir}:{env['PATH']}"
+        out = tmp / "out.txt"
+        for args in (
+            ["--tool", "pi"],
+            ["--tool", "not-an-adapter"],
+            ["--chain", "claude:opus:low pi:pi-model:low"],
+        ):
+            result = subprocess.run(
+                [
+                    str(SCRIPT), *args,
+                    "--orchestrator-family", "anthropic",
+                    "--out", str(out),
+                    "--prompt", "Review",
+                ],
+                cwd=td, env=env, text=True,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+            assert result.returncode == 2, (args, result.stdout, result.stderr)
+            assert "unimplemented adapter" in result.stderr
+            assert result.stdout == ""
+            assert not out.exists()
+            assert not invoked.exists()
+
+
+def test_declared_dormant_adapter_still_reaches_its_configured_reason():
+    """opencode has no arm but does have a declared route, so it is not a typo.
+
+    The pre-flight rejection must not swallow the configured activation reason
+    the routing policy returns for a dormant adapter.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        env = fabric_free_env()
+        out = tmp / "out.txt"
+        result = subprocess.run(
+            [
+                str(SCRIPT), "--tool", "opencode",
+                "--model", "opencode/deepseek-v4-flash-free",
+                "--orchestrator-family", "anthropic",
+                "--out", str(out),
+                "--prompt", "Review",
+            ],
+            cwd=td, env=env, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        record = json.loads(result.stdout)
+        assert result.returncode != 0
+        assert record["status"] != "unknown_tool"
+        assert record["reason"]
+
+
+def test_oversized_argv_prompt_is_typed_for_cursor():
+    """cursor takes the prompt as one argv value, like agy.
+
+    Without a bound the kernel refuses the exec with E2BIG and the caller sees
+    an untyped error, or worse a brief the kernel silently clipped.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        invoked = tmp / "cursor.invoked"
+        write_executable(
+            bin_dir / "cursor-agent",
+            f"#!/usr/bin/env bash\ntouch {invoked}\necho 'SHOULD NOT RUN'\n",
+        )
+        big_prompt = tmp / "big-prompt.txt"
+        big_prompt.write_text("x" * 200_000, encoding="utf-8")
+        env = fabric_free_env()
+        env["PATH"] = f"{bin_dir}:{env['PATH']}"
+        out = tmp / "out.txt"
+        result = subprocess.run(
+            [
+                str(SCRIPT), "--tool", "cursor",
+                "--model", "cursor-grok-4.5-high",
+                "--orchestrator-family", "openai",
+                "--out", str(out),
+                # Via --prompt-file: passing an oversized prompt directly would
+                # fail in this test's own exec before cf_dispatch ran.
+                "--prompt-file", str(big_prompt),
+            ],
+            cwd=td, env=env, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        record = json.loads(result.stdout)
+        assert result.returncode != 0
+        assert record["status"] == "prompt_too_large", record
+        assert record["certification_eligible"] is False
+        assert not invoked.exists()
+        assert "SHOULD NOT RUN" not in out.read_text(encoding="utf-8")
+
+
+def test_every_argv_prompt_adapter_arm_bounds_the_prompt():
+    """kiro and copilot are dormant behind adapter policy, so their arms cannot
+    be reached from a test today. The bound is still a property of the source:
+    any arm that hands the prompt to a CLI as one argv value must go through the
+    shared ceiling first, or a future activation reintroduces the E2BIG defect.
+    """
+    source = SCRIPT.read_text(encoding="utf-8")
+    arms = re.split(r"^ {8}([a-z]+)\)$", source, flags=re.MULTILINE)
+    bodies = dict(zip(arms[1::2], arms[2::2]))
+    assert {"agy", "cursor", "kiro", "copilot"} <= set(bodies), sorted(bodies)
+    guarded = [tool for tool, body in bodies.items() if '"$PROMPT_ARG"' in body]
+    assert sorted(guarded) == ["agy", "copilot", "cursor", "kiro"], guarded
+    for tool in guarded:
+        assert "argv_prompt_too_large" in bodies[tool], tool
+
+
+def test_timeout_seconds_reaches_the_agy_print_timeout():
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        args_file = tmp / "agy.args"
+        write_executable(
+            bin_dir / "agy",
+            f"""#!/usr/bin/env bash
+            if [ "$1" = "models" ]; then
+              printf 'gemini-3.7-flash-high\ngemini-3.7-flash-medium\ngemini-3.7-flash-low\n'
+              exit 0
+            fi
+            printf '%s\n' "$@" > {args_file}
+            printf '%s\n' '{{"status":"SUCCESS","response":"AGY OK"}}'
+            """,
+        )
+        out = tmp / "out.txt"
+        env = fabric_free_env()
+        env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
+        # The environment override must lose to the caller's explicit deadline,
+        # because the caller is the one enforcing it.
+        env["CF_DISPATCH_AGY_TIMEOUT"] = "900s"
+
+        result = subprocess.run(
+            [
+                str(SCRIPT), "--intent", "ordinary", "--tool", "agy",
+                "--orchestrator-family", "openai", "--role", "worker",
+                "--model", "gemini-3.7-flash", "--effort", "medium",
+                "--timeout-seconds", "7", "--prompt", "Review", "--out", str(out),
+            ],
+            cwd=tmp, env=env, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+
+        record = json.loads(result.stdout)
+        assert result.returncode == 0, result.stderr + result.stdout
+        assert record["status"] == "ok"
+        passed = args_file.read_text(encoding="utf-8").splitlines()
+        assert "--print-timeout" in passed
+        assert passed[passed.index("--print-timeout") + 1] == "7s"
+
+
+def test_timeout_seconds_rejects_a_value_that_is_not_a_positive_integer():
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        write_executable(bin_dir / "agy", "#!/usr/bin/env bash\necho 'SHOULD NOT RUN' >&2\nexit 1\n")
+        env = fabric_free_env()
+        env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
+        for value in ("0", "-5", "3.5", "7s", "1e3"):
+            result = subprocess.run(
+                [
+                    str(SCRIPT), "--intent", "ordinary", "--tool", "agy",
+                    "--orchestrator-family", "openai", "--role", "worker",
+                    "--timeout-seconds", value, "--prompt", "Review",
+                ],
+                cwd=tmp, env=env, text=True,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+            assert result.returncode == 2, value
+            assert "invalid timeout-seconds" in result.stderr, value
+            assert "SHOULD NOT RUN" not in result.stderr, value

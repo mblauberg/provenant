@@ -665,6 +665,25 @@ def release_worktree_lease(handle) -> None:
         handle.close()
 
 
+# Provider deadlines sit slightly under the owner's own deadline so the provider
+# reaches its limit first and exits through its normal path, flushing whatever
+# result it has. Without the gap the owner kills the process group mid-write and
+# the truncated result is diagnosed as a corrupt receipt rather than a timeout.
+PROVIDER_TIMEOUT_MARGIN_SECONDS = 5.0
+
+
+def provider_timeout_seconds(timeout_seconds: float) -> int:
+    """Return the whole-second deadline handed to the provider CLI.
+
+    Only the adapters whose CLI accepts a headless timeout consume it: on this
+    machine that is agy (``--print-timeout``). Neither ``claude`` nor
+    ``codex exec`` exposes a timeout flag, so on those arms the owner's deadline
+    below remains the only bound.
+    """
+    margin = max(1.0, min(PROVIDER_TIMEOUT_MARGIN_SECONDS, timeout_seconds * 0.1))
+    return max(1, int(timeout_seconds - margin))
+
+
 def build_command(
     args: argparse.Namespace, prompt_path: Path, result_path: Path,
     evidence_dir: Path | None = None,
@@ -693,6 +712,7 @@ def build_command(
         ("--effort", args.effort),
         ("--access-mode", args.access_mode),
         ("--worktree", str(args.worktree) if args.worktree else ""),
+        ("--timeout-seconds", str(provider_timeout_seconds(args.timeout_seconds))),
     ):
         if value:
             command.extend((flag, value))
@@ -1153,6 +1173,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
         release_worktree_lease(worktree_lease)
 
     finished_at = now()
+    duration_seconds = round(time.monotonic() - started, 6)
     adapter: dict[str, Any] = {}
     adapter_text = adapter_path.read_text(encoding="utf-8", errors="replace") if adapter_path.exists() else ""
     try:
@@ -1190,6 +1211,17 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
             result_integrity_error = True
         except ValueError:
             terminal_envelope_error = True
+    # A result that is missing, empty or truncated because the deadline expired is
+    # a timeout, not a content or receipt defect, so the deadline is checked
+    # before any of those classifications. `completed_cleanly` keeps a run that
+    # answered inside its budget out of the timeout arm even when it finished at
+    # the boundary.
+    completed_cleanly = (
+        observed_exit and exit_code == 0 and adapter_status == "ok"
+        and result_nonempty and not receipt_error
+        and not result_integrity_error and not terminal_envelope_error
+    )
+    deadline_reached = duration_seconds >= provider_timeout_seconds(args.timeout_seconds)
     if process_error == "timeout":
         status = "timed_out"
         outcome = "timeout"
@@ -1202,6 +1234,14 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
     elif result_invalid:
         status = "failed"
         outcome = "result_invalid_path"
+    elif adapter_status == "timeout":
+        # The provider reached its own deadline first, which is what the smaller
+        # provider timeout is for.
+        status = "timed_out"
+        outcome = "provider_timeout"
+    elif deadline_reached and not completed_cleanly:
+        status = "timed_out"
+        outcome = "deadline_exceeded"
     elif adapter_status == "ok" and receipt_error:
         status = "failed"
         outcome = "adapter_receipt_invalid"
@@ -1247,7 +1287,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
         "status": status,
         "started_at": started_at,
         "finished_at": finished_at,
-        "duration_seconds": round(time.monotonic() - started, 6),
+        "duration_seconds": duration_seconds,
         "workspace": workspace_observation,
         "prompt": {"path": relative_path(run_dir, prompt_path), "digest": digest(prompt_path)},
         "result": (
