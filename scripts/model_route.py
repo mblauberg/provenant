@@ -153,6 +153,47 @@ def check_adapter_compatibility(
     return compatibility_family, ""
 
 
+def resolve_endpoint_profile(
+    name: str, adapter: str, catalog: dict[str, Any]
+) -> tuple[dict[str, Any], str]:
+    """Resolve a named Anthropic-compatible endpoint into route fields.
+
+    The profile carries the base URL and the name of the environment variable
+    holding the token. The token itself is never read into the route: the
+    dispatcher reads the named variable when it builds the provider command, so
+    no credential reaches a record, a run file or the catalogue.
+    """
+    endpoints = catalog.get("endpoints")
+    profile = endpoints.get(name) if isinstance(endpoints, dict) else None
+    if not isinstance(profile, dict):
+        return {}, "unknown_endpoint"
+    base_url = profile.get("base_url")
+    token_env = profile.get("token_env")
+    family = profile.get("model_family")
+    adapters = profile.get("adapters")
+    if (
+        not isinstance(base_url, str)
+        or not base_url.startswith("https://")
+        or not isinstance(token_env, str)
+        or not token_env.strip()
+        or not isinstance(family, str)
+        or not family.strip()
+        or not isinstance(adapters, list)
+        or not all(isinstance(item, str) and item.strip() for item in adapters)
+    ):
+        return {}, "endpoint_config_invalid"
+    if adapter not in adapters:
+        return {}, "endpoint_adapter_unsupported"
+    if not os.environ.get(token_env, "").strip():
+        return {}, "endpoint_token_missing"
+    return {
+        "endpoint_profile": name,
+        "endpoint_base_url": base_url,
+        "endpoint_token_env": token_env,
+        "model_family": family,
+    }, ""
+
+
 def emit(record: dict[str, Any], code: int) -> int:
     print(json.dumps(record, sort_keys=True))
     return code
@@ -364,7 +405,13 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
     )
     args.capability_models = capability_models
     adapter = catalog["adapters"].get(args.adapter)
+    endpoint_profile = getattr(args, "endpoint_profile", {})
     fixed_family = adapter.get("fixed_model_family") if adapter else None
+    # An endpoint profile repoints the adapter's CLI at a provider's
+    # Anthropic-compatible base URL, so the family it may run is the endpoint's,
+    # not the adapter's default. Every other gate stays in force.
+    if endpoint_profile:
+        fixed_family = endpoint_profile["model_family"]
     family_config = catalog["families"].get(fixed_family, {}) if fixed_family else {}
     # Normalise the alias table once, at its single load site, so no reader further
     # down dereferences a table that is not one. Several did, and each crashed with
@@ -425,7 +472,11 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
         })
     if not adapter:
         return emit({**base, "status": "unknown_adapter"}, 2)
-    args.effort_transport = adapter.get("effort_transport", "none")
+    # A third-party endpoint exposes no reasoning-effort control on the Anthropic
+    # wire format, so an endpoint route carries no effort rather than a claimed one.
+    args.effort_transport = (
+        "none" if endpoint_profile else adapter.get("effort_transport", "none")
+    )
     # account-default adapters dispatch on the provider account's default
     # model: the runtime rejects explicit model ids, so the resolver keeps the
     # catalog id for effort/audit lookups but emits an empty dispatch model.
@@ -810,6 +861,14 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
                 "compatibility_model_family": compatibility_family,
             }
         )
+    if endpoint_profile:
+        record.update(
+            {
+                key: value
+                for key, value in endpoint_profile.items()
+                if key != "model_family"
+            }
+        )
     if args.require_distinct and not args.lead_family:
         return emit_route({**record, "status": "lead_family_required"}, 2)
     if args.require_distinct and not distinct:
@@ -832,6 +891,7 @@ def parser() -> argparse.ArgumentParser:
     command.add_argument("--available-effort", action="append", default=[])
     command.add_argument("--capabilities-file")
     command.add_argument("--lead-family")
+    command.add_argument("--endpoint")
     command.add_argument("--require-distinct", action="store_true")
     command.add_argument(
         "--catalog",
@@ -885,6 +945,7 @@ def main(argv: list[str] | None = None) -> int:
 
         args.task_class_effort = ""
         args.model_override = {}
+        args.endpoint_profile = {}
         if not args.alias and not args.task_class:
             return reject("route_input_missing")
         # A families table that is not a mapping reserves nothing, so a reservation
@@ -1020,6 +1081,13 @@ def main(argv: list[str] | None = None) -> int:
             if args.effort and EFFORT_ORDER[args.effort] > EFFORT_ORDER[maximum_effort]:
                 return reject("risk_tier_effort_above_ceiling", alias=args.alias, effort=args.effort)
             args.model_override = override
+        if args.endpoint:
+            profile, endpoint_status = resolve_endpoint_profile(
+                args.endpoint, args.adapter, catalog
+            )
+            if endpoint_status:
+                return reject(endpoint_status, alias=args.alias, endpoint=args.endpoint)
+            args.endpoint_profile = profile
         return resolve(args, catalog)
     return 2
 

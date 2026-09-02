@@ -290,6 +290,7 @@ def run_dispatch_with_stub(
     role="reviewer",
     extra_args=None,
     provenant_stub=None,
+    extra_env=None,
 ):
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
@@ -301,6 +302,7 @@ def run_dispatch_with_stub(
         out = tmp / "out.txt"
         # PATH precedence keeps the checkout's stubs first.
         env = fabric_free_env()
+        env.update(extra_env or {})
         env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
         command = [
                 str(SCRIPT),
@@ -2545,7 +2547,9 @@ def make_worktree(root):
     return worktree.resolve()
 
 
-def run_worktree_dispatch(tool, stub, worktree=None, extra_args=None, intent="ordinary"):
+def run_worktree_dispatch(
+    tool, stub, worktree=None, extra_args=None, intent="ordinary", extra_env=None,
+):
     """Dispatch one stubbed provider, optionally on the worktree writer route."""
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td).resolve()
@@ -2555,6 +2559,7 @@ def run_worktree_dispatch(tool, stub, worktree=None, extra_args=None, intent="or
         write_executable(bin_dir / tool, stub.format(args_file=args_file))
         out = tmp / "out.txt"
         env = fabric_free_env()
+        env.update(extra_env or {})
         env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
         command = [
             str(SCRIPT), "--tool", tool, "--orchestrator-family", "codex",
@@ -2691,3 +2696,68 @@ def test_worktree_writer_route_rejects_a_path_that_is_not_a_worktree_root():
     assert result.returncode == 2
     assert "worktree" in result.output
     assert recorded == ""
+
+
+ENDPOINT_STUB = """\
+    #!/usr/bin/env bash
+    cat >/dev/null
+    printf 'base=%s token=%s\n' "${ANTHROPIC_BASE_URL:-unset}" "${ANTHROPIC_AUTH_TOKEN:-unset}"
+"""
+
+
+def test_named_endpoint_reaches_the_claude_process_environment():
+    result, record, output = run_dispatch_with_stub(
+        ENDPOINT_STUB,
+        role="other-primary",
+        extra_args=["--model", "glm-4.7"],
+        extra_env={"CF_DISPATCH_ENDPOINT": "zai-glm", "ZAI_API_KEY": "endpoint-token-fixture"},
+    )
+
+    assert result.returncode == 0, result.output
+    assert record["status"] == "ok"
+    assert record["model_family"] == "zhipu"
+    assert record["resolved_model"] == "glm-4.7"
+    # These endpoints expose no effort control, so the dispatch carries none.
+    assert record["effort"] == ""
+    assert output.strip() == "base=https://api.z.ai/api/anthropic token=endpoint-token-fixture"
+
+
+def test_claude_without_a_named_endpoint_keeps_the_default_anthropic_environment():
+    result, record, output = run_dispatch_with_stub(ENDPOINT_STUB, role="other-primary")
+
+    assert result.returncode == 0, result.output
+    assert record["status"] == "ok"
+    assert record["model_family"] == "anthropic"
+    assert output.strip() == "base=unset token=unset"
+
+
+CLAUDE_ENDPOINT_ARGV_STUB = """\
+    #!/usr/bin/env bash
+    if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
+      echo '{{"loggedIn":true,"authMethod":"claude.ai"}}'
+      exit 0
+    fi
+    printf 'base=%s\\n' "${{ANTHROPIC_BASE_URL:-unset}}" >> {args_file}
+    printf 'token=%s\\n' "${{ANTHROPIC_AUTH_TOKEN:-unset}}" >> {args_file}
+    cat >/dev/null
+    echo "OK"
+"""
+
+
+def test_named_endpoint_reaches_the_claude_writer_route_environment():
+    result, recorded, worktree = run_worktree_dispatch(
+        "claude",
+        CLAUDE_ENDPOINT_ARGV_STUB,
+        worktree="make",
+        extra_args=["--model", "glm-4.7"],
+        extra_env={"CF_DISPATCH_ENDPOINT": "zai-glm", "ZAI_API_KEY": "endpoint-token-fixture"},
+    )
+
+    assert result.returncode == 0, result.output
+    record = json.loads(result.output)
+    assert record["status"] == "ok"
+    assert record["access_mode"] == "worktree_write"
+    assert record["worktree"] == str(worktree)
+    assert record["model_family"] == "zhipu"
+    assert "base=https://api.z.ai/api/anthropic" in recorded
+    assert "token=endpoint-token-fixture" in recorded

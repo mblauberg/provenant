@@ -133,6 +133,23 @@ from `scripts/model-route` has a fixed schema with no advisory field, so the
 citation lives in the chair-authored run receipt and worker brief, never in
 resolver output.
 
+## Endpoint profiles
+
+`config/model-routing.json` carries an `endpoints` map of Anthropic-compatible
+provider endpoints (Z.ai GLM, Moonshot Kimi and DeepSeek ship as examples). Each
+profile names a base URL, the model family it serves, the adapters allowed to use
+it, and the environment variable that holds the token. Tokens are never stored in
+the catalogue or written into a route record. Name one with
+`CF_DISPATCH_ENDPOINT=<profile>` and pass an explicit `--model`: the resolver
+takes the profile's family in place of the adapter's pinned family, emits
+`endpoint_base_url` and `endpoint_token_env`, and the dispatcher exports
+`ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN` into the Claude child process
+only. These endpoints expose no reasoning-effort control, so an endpoint route
+carries no effort at all and rejects an explicit `--effort` rather than claiming
+one. A route naming an unknown profile, an adapter the profile does not list, or
+a token variable that is unset fails closed with a typed status and dispatches
+nothing.
+
 ## Default stack & fallback chains
 
 Default once this skill triggers: **native same-harness workers + at least one different-family
