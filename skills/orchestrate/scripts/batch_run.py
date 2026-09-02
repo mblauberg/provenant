@@ -25,9 +25,15 @@ from concurrent.futures import ThreadPoolExecutor, wait
 from pathlib import Path
 from typing import Any
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
-sys.path.insert(0, str(REPO_ROOT / "skills"))
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+# Two import roots, both derived from this file so the repo and an installed
+# instance behave the same: the shared library one level above this skill, and
+# the sibling dispatch owner beside this script. Resolving the shared library
+# from the skill rather than from a repository root two levels further up keeps
+# the installed per-entry layout working even when the instance directory that
+# holds the linked skills is not itself named "skills" (#755).
+SCRIPT_ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(SCRIPT_ROOT.parents[1]))
+sys.path.insert(0, str(SCRIPT_ROOT))
 from _shared.bounded_process import stop_process_group
 from dispatch_run import (
     ACCESS_MODES,

@@ -27,8 +27,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
-sys.path.insert(0, str(REPO_ROOT / "skills"))
+# The shared library sits one level above this skill. Resolving it from the
+# skill rather than from a repository root two levels further up keeps the
+# installed per-entry layout working even when the instance directory that
+# holds the linked skills is not itself named "skills" (#755).
+SKILLS_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(SKILLS_ROOT))
 CF_DISPATCH = Path(__file__).with_name("cf_dispatch.sh")
 TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 ATTEMPT_ID_RE = re.compile(r"^attempt-(?P<number>\d{3}|[1-9]\d{3,})$")
