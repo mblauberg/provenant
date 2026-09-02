@@ -1,6 +1,6 @@
 ---
 name: ui-ux-design
-description: "Use for UI/UX: read-only review by default (visual, accessibility, responsive, interaction), or design, redesign, design systems, and live iteration. Pair changes with implement. Source-diff review: code-review; React profiling: react-performance."
+description: "Use for UI/UX: read-only review by default (visual, accessibility, responsive, interaction), or design, redesign, design systems, and live iteration. Pair changes with implement. Source-diff review: code-review."
 ---
 
 # UI/UX design

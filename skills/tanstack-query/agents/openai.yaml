@@ -1,4 +1,0 @@
-interface:
-  display_name: TanStack Query
-  short_description: Build and review TanStack Query v5 server-state boundaries.
-  default_prompt: Use $tanstack-query for this React Query server-state task.
