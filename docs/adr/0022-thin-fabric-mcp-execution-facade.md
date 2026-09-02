@@ -23,8 +23,11 @@ Fabric MCP exposes exactly two execution tools:
   eight.
 
 Both create a run directory automatically and delegate unchanged to
-`dispatch_run.py` or `batch_run.py`. The default route is the current provider
-seat, the `workhorse` alias and the `worker` role. Same-family and mixed-family
+`dispatch_run.py` or `batch_run.py`. The routing surface is `adapter`, `alias`
+and `mode`, with `worktree` when the mode is `worktree_write`; the schemas are
+strict, so an assurance selector is a typed input error rather than a silently
+ignored one. The default route is the current provider seat, the `workhorse`
+alias, the `worker` role and `read_only` access. Same-family and mixed-family
 ordinary work are allowed; independence remains a separate assurance claim.
 
 Responses contain compact status, actual route when known and absolute artifact

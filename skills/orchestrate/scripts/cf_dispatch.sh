@@ -41,6 +41,9 @@ Options:
   --model MODEL                Optional model passed to adapter.
   --effort EFFORT              Optional effort passed to adapter.
   --add-dir PATH               Additional agy read directory; repeatable.
+  --access-mode MODE           read_only (default) or worktree_write.
+  --worktree PATH              Git worktree root the writer owns exclusively.
+                               Required by, and only valid with, worktree_write.
   --out PATH                   Clean output path; defaults to mktemp.
   --prompt TEXT                Prompt text.
   --prompt-file PATH           Read prompt from file.
@@ -59,6 +62,9 @@ INSTALLED_OUTPUT_DIGEST=""
 INSTALLED_OUTPUT_DEVICE=""
 INSTALLED_OUTPUT_INODE=""
 AGY_ADD_DIRS=()
+ACCESS_MODE="read_only"
+WORKTREE=""
+WORKTREE_GIT_COMMON=""
 need_value() {
   [ $# -ge 2 ] || { echo "missing value for $1" >&2; exit 2; }
 }
@@ -71,6 +77,8 @@ while [ $# -gt 0 ]; do
     --model) need_value "$@"; MODEL="$2"; shift 2;;
     --effort) need_value "$@"; EFFORT="$2"; shift 2;;
     --add-dir) need_value "$@"; AGY_ADD_DIRS+=("$2"); shift 2;;
+    --access-mode) need_value "$@"; ACCESS_MODE="$2"; shift 2;;
+    --worktree) need_value "$@"; WORKTREE="$2"; shift 2;;
     --out) need_value "$@"; OUT="$2"; shift 2;;
     --prompt) need_value "$@"; PROMPT="$2"; shift 2;;
     --prompt-file) need_value "$@"; PROMPT_FILE="$2"; shift 2;;
@@ -90,6 +98,63 @@ case "$INTENT" in
   assurance|ordinary) ;;
   *) echo "invalid intent: $INTENT" >&2; exit 2;;
 esac
+
+# Access mode is the only writable route. It stays off by default, is refused for
+# assurance work, and demands a Git worktree root the caller has already given the
+# worker exclusively; the dispatch owner holds the one-writer lease over that path.
+case "$ACCESS_MODE" in
+  read_only)
+    if [ -n "$WORKTREE" ]; then
+      echo "--worktree requires --access-mode worktree_write" >&2; exit 2
+    fi
+    ;;
+  worktree_write)
+    if [ -z "$WORKTREE" ]; then
+      echo "--access-mode worktree_write requires --worktree" >&2; exit 2
+    fi
+    if [ "$INTENT" != "ordinary" ]; then
+      echo "--access-mode worktree_write requires --intent ordinary" >&2; exit 2
+    fi
+    case "$TOOL" in
+      claude|codex) ;;
+      *) echo "--access-mode worktree_write is unsupported for adapter: ${TOOL:-<chain>}" >&2; exit 2;;
+    esac
+    if ! command -v git >/dev/null 2>&1; then
+      echo "--access-mode worktree_write requires git" >&2; exit 2
+    fi
+    if ! WORKTREE="$(CDPATH= cd -- "$WORKTREE" 2>/dev/null && pwd -P)"; then
+      echo "--worktree is not a readable directory" >&2; exit 2
+    fi
+    worktree_top="$(git -C "$WORKTREE" rev-parse --path-format=absolute --show-toplevel 2>/dev/null)" || worktree_top=""
+    if [ -z "$worktree_top" ] || [ "$(CDPATH= cd -- "$worktree_top" 2>/dev/null && pwd -P)" != "$WORKTREE" ]; then
+      echo "--worktree must be the root of a Git worktree: $WORKTREE" >&2; exit 2
+    fi
+    WORKTREE_GIT_COMMON="$(git -C "$WORKTREE" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || WORKTREE_GIT_COMMON=""
+    ;;
+  *) echo "invalid access mode: $ACCESS_MODE" >&2; exit 2;;
+esac
+
+CLAUDE_MODE_FLAGS=(--permission-mode plan --tools "Read,Grep,Glob")
+CLAUDE_SYSTEM_PROMPT="You are a non-interactive independent verifier. You may use only Read, Grep, and Glob to inspect the requested workspace. Fabric MCP tools are not exposed to this direct verifier invocation. Do not mutate files, use shell commands, call Task/tool/function abstractions, or launch subagents. Return only the file-backed verification result requested by the supplied prompt; the caller owns any Fabric correlation."
+# A writer lane has to be able to run its own tests and commit its own work, so
+# the write tools are named on the permission allow-list rather than left to the
+# permission mode. `--permission-mode acceptEdits` accepts edits; `--allowedTools`
+# is what pre-approves Bash in `-p` mode, where a permission prompt is a denial.
+CLAUDE_WRITER_TOOLS="Bash,Edit,Write,MultiEdit,NotebookEdit,Read,Grep,Glob"
+if [ "$ACCESS_MODE" = "worktree_write" ]; then
+  CLAUDE_MODE_FLAGS=(--permission-mode acceptEdits --add-dir "$WORKTREE" --allowedTools "$CLAUDE_WRITER_TOOLS")
+  CLAUDE_SYSTEM_PROMPT="You are a non-interactive worker running inside the Git worktree at $WORKTREE, which you own exclusively for this run. Write, run commands and commit only inside that worktree. Do not touch any other checkout, do not push, and do not create or remove worktrees or branches outside it. Fabric MCP tools are not exposed to this direct invocation, and the caller owns any Fabric correlation. Return the file-backed result requested by the supplied prompt."
+fi
+
+# The provider inherits the writer worktree as its working directory. Only the
+# provider call moves; the dispatcher keeps its own cwd for output custody.
+claude_provider() {
+  if [ -n "$WORKTREE" ]; then
+    ( cd "$WORKTREE" && CLAUDE_CODE_DISABLE_WORKFLOWS=1 claude "$@" <"$PROMPT_TMP" >"$raw" 2>"$diag" )
+  else
+    CLAUDE_CODE_DISABLE_WORKFLOWS=1 claude "$@" <"$PROMPT_TMP" >"$raw" 2>"$diag"
+  fi
+}
 
 # When the caller does not name an alias, derive it from the role rather than
 # defaulting everything to flagship. A bare dispatch is ordinary work and must not
@@ -328,7 +393,7 @@ emit_record() {
   [ -n "$ORCH_FAMILY" ] && valid_family "$ORCH_FAMILY" && [ -n "$family" ] && [ "$ORCH_FAMILY" != "$family" ] && cross="true"
   cert="false"
   [ "$INTENT" = "assurance" ] && [ "$status" = "ok" ] && [ -n "$output_digest" ] && [ "$cross" = "true" ] && { [ "$guarantee" = "enforced" ] || [ "$guarantee" = "oauth_safe_mode" ]; } && cert="true"
-  printf '{"tool":"%s","adapter":"%s","adapter_gate":"direct-cli","execution_intent":"%s","model":"%s","requested_model":"%s","resolved_model":"%s","fallback_model":"%s","requested_effort":"%s","effort":"%s","effort_source":"%s","effort_capability_source":"%s","effort_substitution":"%s","substitution":"%s","status":"%s","reason":"%s","exit":%s,"output_path":"%s","output_digest":"%s","read_only_guarantee":"%s","orchestrator_family":"%s","provider_family":"%s","model_family":"%s","endpoint_provider":"%s","identity_source":"%s","catalog_model":"%s","model_selection":"%s","route_alias":"%s","reviewer_id":"%s","risk_tier":"%s","model_override_tier":"%s","policy_override":"%s","cross_family":%s,"certification_eligible":%s}\n' \
+  printf '{"tool":"%s","adapter":"%s","adapter_gate":"direct-cli","execution_intent":"%s","model":"%s","requested_model":"%s","resolved_model":"%s","fallback_model":"%s","requested_effort":"%s","effort":"%s","effort_source":"%s","effort_capability_source":"%s","effort_substitution":"%s","substitution":"%s","status":"%s","reason":"%s","exit":%s,"output_path":"%s","output_digest":"%s","read_only_guarantee":"%s","access_mode":"%s","worktree":"%s","orchestrator_family":"%s","provider_family":"%s","model_family":"%s","endpoint_provider":"%s","identity_source":"%s","catalog_model":"%s","model_selection":"%s","route_alias":"%s","reviewer_id":"%s","risk_tier":"%s","model_override_tier":"%s","policy_override":"%s","cross_family":%s,"certification_eligible":%s}\n' \
     "$(printf '%s' "$tool" | json_escape)" \
     "$(printf '%s' "$tool" | json_escape)" \
     "$(printf '%s' "$INTENT" | json_escape)" \
@@ -348,6 +413,8 @@ emit_record() {
     "$(printf '%s' "$path" | json_escape)" \
     "$(printf '%s' "$output_digest" | json_escape)" \
     "$(printf '%s' "$guarantee" | json_escape)" \
+    "$(printf '%s' "$ACCESS_MODE" | json_escape)" \
+    "$(printf '%s' "$WORKTREE" | json_escape)" \
     "$(printf '%s' "$ORCH_FAMILY" | json_escape)" \
     "$(printf '%s' "$family" | json_escape)" \
     "$(printf '%s' "$family" | json_escape)" \
@@ -638,17 +705,15 @@ run_one() {  # $1 tool $2 model $3 effort $4 private tempdir -> JSON, returns 0/
         case "$tool" in
         claude)
           guarantee="enforced"
-          local claude_verifier_system_prompt
-          claude_verifier_system_prompt="You are a non-interactive independent verifier. You may use only Read, Grep, and Glob to inspect the requested workspace. Fabric MCP tools are not exposed to this direct verifier invocation. Do not mutate files, use shell commands, call Task/tool/function abstractions, or launch subagents. Return only the file-backed verification result requested by the supplied prompt; the caller owns any Fabric correlation."
+          [ "$ACCESS_MODE" = "worktree_write" ] && guarantee="none"
           if ! require_cmd claude "$diag"; then
             status="tool_not_found"
             rc=127
           else
-            CLAUDE_CODE_DISABLE_WORKFLOWS=1 claude -p --bare --disable-slash-commands \
-              --no-session-persistence --permission-mode plan --tools "Read,Grep,Glob" \
-              --system-prompt "$claude_verifier_system_prompt" \
-              ${model:+--model "$model"} ${effort:+--effort "$effort"} \
-              <"$PROMPT_TMP" >"$raw" 2>"$diag"; rc=$?
+            claude_provider -p --bare --disable-slash-commands \
+              --no-session-persistence "${CLAUDE_MODE_FLAGS[@]}" \
+              --system-prompt "$CLAUDE_SYSTEM_PROMPT" \
+              ${model:+--model "$model"} ${effort:+--effort "$effort"}; rc=$?
           fi
           if [ "${status:-}" != "tool_not_found" ] && [ "$rc" -ne 0 ] && [ -n "$fallback_model" ] && cat "$raw" "$diag" | grep -Eqi "$model_fail_sig"; then
             primary_model="$model"
@@ -657,22 +722,21 @@ run_one() {  # $1 tool $2 model $3 effort $4 private tempdir -> JSON, returns 0/
             model="$fallback_model"
             identity="runtime-provider-fallback"
             substitution="${substitution:+$substitution; }$primary_model unavailable; used $fallback_model"
-            CLAUDE_CODE_DISABLE_WORKFLOWS=1 claude -p --bare --disable-slash-commands \
-              --no-session-persistence --permission-mode plan --tools "Read,Grep,Glob" \
-              --system-prompt "$claude_verifier_system_prompt" \
-              --model "$model" ${effort:+--effort "$effort"} \
-              <"$PROMPT_TMP" >"$raw" 2>"$diag"; rc=$?
+            claude_provider -p --bare --disable-slash-commands \
+              --no-session-persistence "${CLAUDE_MODE_FLAGS[@]}" \
+              --system-prompt "$CLAUDE_SYSTEM_PROMPT" \
+              --model "$model" ${effort:+--effort "$effort"}; rc=$?
           fi
           if [ "${status:-}" != "tool_not_found" ] && [ "$rc" -ne 0 ] && cat "$raw" "$diag" | grep -Eqi "$fail_sig"; then
             if CLAUDE_CODE_DISABLE_WORKFLOWS=1 claude auth status 2>/dev/null | grep -Eq '"loggedIn"[[:space:]]*:[[:space:]]*true'; then
               : >"$raw"
               : >"$diag"
               guarantee="oauth_safe_mode"
-              CLAUDE_CODE_DISABLE_WORKFLOWS=1 claude -p --safe-mode --no-session-persistence --permission-mode plan \
-                --disable-slash-commands --tools "Read,Grep,Glob" \
-                --system-prompt "$claude_verifier_system_prompt" \
-                ${model:+--model "$model"} ${effort:+--effort "$effort"} \
-              <"$PROMPT_TMP" >"$raw" 2>"$diag"; rc=$?
+              [ "$ACCESS_MODE" = "worktree_write" ] && guarantee="none"
+              claude_provider -p --safe-mode --no-session-persistence \
+                --disable-slash-commands "${CLAUDE_MODE_FLAGS[@]}" \
+                --system-prompt "$CLAUDE_SYSTEM_PROMPT" \
+                ${model:+--model "$model"} ${effort:+--effort "$effort"}; rc=$?
             fi
           fi
           if [ "${status:-}" != "tool_not_found" ] && [ "$rc" -ne 0 ] && [ -n "$fallback_model" ] && [ "$model" = "$requested_model" ] && cat "$raw" "$diag" | grep -Eqi "$model_fail_sig"; then
@@ -683,13 +747,13 @@ run_one() {  # $1 tool $2 model $3 effort $4 private tempdir -> JSON, returns 0/
             identity="runtime-provider-fallback"
             substitution="${substitution:+$substitution; }$primary_model unavailable; used $fallback_model"
             if [ "$guarantee" = "oauth_safe_mode" ]; then
-              CLAUDE_CODE_DISABLE_WORKFLOWS=1 claude -p --safe-mode --no-session-persistence --permission-mode plan \
-                --disable-slash-commands --tools "Read,Grep,Glob" --system-prompt "$claude_verifier_system_prompt" \
-                --model "$model" ${effort:+--effort "$effort"} <"$PROMPT_TMP" >"$raw" 2>"$diag"; rc=$?
+              claude_provider -p --safe-mode --no-session-persistence \
+                --disable-slash-commands "${CLAUDE_MODE_FLAGS[@]}" --system-prompt "$CLAUDE_SYSTEM_PROMPT" \
+                --model "$model" ${effort:+--effort "$effort"}; rc=$?
             else
-              CLAUDE_CODE_DISABLE_WORKFLOWS=1 claude -p --bare --disable-slash-commands \
-                --no-session-persistence --permission-mode plan --tools "Read,Grep,Glob" --system-prompt "$claude_verifier_system_prompt" \
-                --model "$model" ${effort:+--effort "$effort"} <"$PROMPT_TMP" >"$raw" 2>"$diag"; rc=$?
+              claude_provider -p --bare --disable-slash-commands \
+                --no-session-persistence "${CLAUDE_MODE_FLAGS[@]}" --system-prompt "$CLAUDE_SYSTEM_PROMPT" \
+                --model "$model" ${effort:+--effort "$effort"}; rc=$?
             fi
           fi ;;
         codex)
@@ -697,6 +761,16 @@ run_one() {  # $1 tool $2 model $3 effort $4 private tempdir -> JSON, returns 0/
           if ! require_cmd codex "$diag"; then
             status="tool_not_found"
             rc=127
+          elif [ "$ACCESS_MODE" = "worktree_write" ]; then
+            # A linked worktree keeps its Git metadata outside the worktree root,
+            # so the sandbox needs the common Git directory as a writable root or
+            # the worker cannot commit what it just wrote.
+            guarantee="none"
+            codex exec -s workspace-write --cd "$WORKTREE" --ignore-user-config --ignore-rules \
+              --ephemeral -c service_tier="default" \
+              ${WORKTREE_GIT_COMMON:+-c sandbox_workspace_write.writable_roots="[\"$WORKTREE_GIT_COMMON\"]"} \
+              ${model:+-m "$model"} ${effort:+-c model_reasoning_effort="$effort"} \
+              - <"$PROMPT_TMP" >"$raw" 2>"$diag"; rc=$?
           else
             codex exec -s read-only --ignore-user-config --ignore-rules --ephemeral -c service_tier="default" ${model:+-m "$model"} \
               ${effort:+-c model_reasoning_effort="$effort"} \
