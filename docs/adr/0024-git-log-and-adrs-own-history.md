@@ -1,4 +1,4 @@
-# ADR 0024 — Git history and ADRs own the change record
+# ADR 0024: Git history and ADRs own the change record
 
 **Status:** Accepted 2026-09-02 (issue [#765](https://github.com/mblauberg/provenant/issues/765))
 
