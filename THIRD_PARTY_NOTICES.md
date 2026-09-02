@@ -87,20 +87,6 @@ Nested Three.js, GSAP, image-generation, and other bundled source-repository
 assets were not imported and are not claimed under a parent repository's MIT
 licence.
 
-## Vercel React best practices
-
-`skills/react-performance/rules/` is adapted from
-[Vercel React Best Practices](https://github.com/vercel-labs/agent-skills/tree/dc8367e6f91c92676c468b6725c6610418cc5454/skills/react-best-practices),
-copyright Vercel, Inc. The upstream skill and repository declare the work
-MIT-licensed; the terms are in `LICENSES/vercel-react-best-practices-MIT.txt`.
-Upstream provenance is pinned through commit
-`dc8367e6f91c92676c468b6725c6610418cc5454` (14 April 2026). This repository has
-modified the packaging, naming, routing, prioritisation and selected rules. The
-entrypoint, current-platform notes and rules changed in this harness were
-checked against official React and Next.js documentation on 10 July 2026; the
-remaining upstream rules are reference material, not a representation that every
-claim has been independently revalidated. Recheck version-sensitive guidance
-when React, Next.js or their compiler/caching defaults change.
 
 ## Grill Me
 
@@ -125,21 +111,7 @@ that the root `SKILL.md` branch selector, the shared doctrine section, or
 continues the harness-original lineage of the former `skill-authoring` skill,
 which carried no third-party attribution.
 
-## Playwright
 
-`skills/playwright/` is redistributed from
-[Microsoft Playwright CLI](https://github.com/microsoft/playwright-cli/tree/main/skills/playwright-cli)
-under Apache License 2.0, copyright (c) Microsoft Corporation, adapted with an
-added wrapper script and local reference guides. Its licence text is
-`LICENSES/playwright-cli-APACHE-2.0.txt` and its §4(d) attribution notice is in
-the top-level `NOTICE`.
-
-## TypeScript clean code
-
-`skills/typescript-clean-code/` is redistributed from
-[BMAD Labs' TypeScript Clean Code](https://github.com/bmad-labs/skills/tree/main/skills/typescript-clean-code)
-under the MIT License, copyright 2025 BMAD Labs. Its terms are in
-`LICENSES/typescript-clean-code-bmad-MIT.txt`.
 
 ## Caveman
 
