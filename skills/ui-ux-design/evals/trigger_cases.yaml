@@ -3,7 +3,7 @@ target_skill: ui-ux-design
 cases:
   - {id: q710, relation: positive, prompt: "Review this running frontend read-only at desktop and mobile widths for UX, visual hierarchy, responsive, and accessibility defects.", tags: [direct], expected: {primary_skill: ui-ux-design, companion_skills: []}}
   - {id: q711, relation: positive, prompt: "Create three coherent responsive visual directions for this dashboard; do not change production source.", tags: [direct], expected: {primary_skill: ui-ux-design, companion_skills: []}}
-  - {id: q712, relation: positive, prompt: "Review this checkout flow's rendered UI read-only against WCAG 2.2 success criteria and capture Lighthouse accessibility and performance scores as browser evidence.", tags: [direct], expected: {primary_skill: ui-ux-design, companion_skills: [web-stack-conventions]}}
+  - {id: q712, relation: positive, prompt: "Review this checkout flow's rendered UI read-only against WCAG 2.2 success criteria and capture Lighthouse accessibility and performance scores as browser evidence.", tags: [direct], expected: {primary_skill: ui-ux-design, companion_skills: []}}
   - {id: q713, relation: negative, prompt: "Find the root cause of the intermittent crash behind this page's failed render.", tags: [adjacent], expected: {primary_skill: diagnose, companion_skills: []}}
   - {id: q714, relation: negative, prompt: "Review this backend API patch; it has no interface surface.", tags: [adjacent], expected: {primary_skill: code-review, companion_skills: []}}
   - {id: q715, relation: negative, prompt: "Repair this backend database migration; there is no user interface change.", tags: [adjacent], expected: {primary_skill: implement, companion_skills: []}}

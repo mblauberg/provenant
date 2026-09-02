@@ -241,9 +241,7 @@ Frontend authority is similarly split: `ui-ux-design`'s design/make branch
 supplies authorised design mutation methods inside `implement`, while its
 review branch owns read-only UX, visual, accessibility and responsive
 evidence. `scope` owns the
-design decision and `engineering-docs` owns canonical placement.
-`web-stack-conventions` provides standards evidence without taking over the
-UI finding contract. `caveman` is a presentation overlay only; it cannot narrow
+design decision and `engineering-docs` owns canonical placement. `caveman` is a presentation overlay only; it cannot narrow
 evidence, authority, high-stakes clarity or an artifact's domain-writing rules.
 
 `release` promotes one digest- or Git-revision-bound, user-accepted artifact through a separately

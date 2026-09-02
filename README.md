@@ -41,7 +41,7 @@ flowchart TB
     U(["User request"]) --> LOOP["Delivery loop<br/>scope · implement · verify · review"]
     LOOP --> OUT(["Scoped, verified,<br/>independently reviewed change"])
     H["HARNESS.md — the constitution<br/>authority · lifecycle · review pressure"] -. "sets the rules" .-> LOOP
-    SK["Skills library — 27 Agent Skills<br/>one procedure per task, loaded on match"] -. "supplies the procedure" .-> LOOP
+    SK["Skills library — 26 Agent Skills<br/>one procedure per task, loaded on match"] -. "supplies the procedure" .-> LOOP
     F["Cross-provider dispatch<br/>Claude Code and Codex review each other;<br/>Fabric coordinates and can start existing dispatch owners"] -. "runs and reviews the work" .-> LOOP
     classDef out fill:#1f6f43,stroke:#4fd08a,color:#ffffff,stroke-width:2px
     class OUT out
@@ -50,7 +50,7 @@ flowchart TB
 - **Harness:** [`HARNESS.md`](HARNESS.md) is the constitution. It sets
   authority, the delivery lifecycle, and how much review pressure each risk tier
   owes, and stays small so it can be read every session.
-- **Skills:** the <!--skills-->27<!--/skills--> Agent Skills are task-specific
+- **Skills:** the <!--skills-->26<!--/skills--> Agent Skills are task-specific
   procedures, one folder with a `SKILL.md` each. Only the one-line descriptions
   sit in permanent context; a full body loads only when the task matches it.
 - **Fabric:** messages, shared tasks and activity between agents working on one
@@ -268,11 +268,11 @@ steering; it does not provide wake, callback or completion delivery.
 
 ## Skill library
 
-The full <!--skills-->27<!--/skills-->-skill catalogue, grouped by area:
+The full <!--skills-->26<!--/skills-->-skill catalogue, grouped by area:
 
 <!-- skill-catalogue:start -->
 <details>
-<summary>All 27 skills</summary>
+<summary>All 26 skills</summary>
 
 | Area | Skills |
 |---|---|
@@ -280,7 +280,6 @@ The full <!--skills-->27<!--/skills-->-skill catalogue, grouped by area:
 | Orchestration | [`orchestrate`](skills/orchestrate/SKILL.md), [`autopilot`](skills/autopilot/SKILL.md) |
 | Writing and documentation | [`engineering-docs`](skills/engineering-docs/SKILL.md), [`engineering-writing`](skills/engineering-writing/SKILL.md), [`academic-writing`](skills/academic-writing/SKILL.md), [`legal-writing`](skills/legal-writing/SKILL.md), [`natural-writing`](skills/natural-writing/SKILL.md) |
 | Design and diagrams | [`ui-ux-design`](skills/ui-ux-design/SKILL.md), [`prototype`](skills/prototype/SKILL.md), [`d2-diagrams`](skills/d2-diagrams/SKILL.md) |
-| Web engineering | [`web-stack-conventions`](skills/web-stack-conventions/SKILL.md) |
 | Harness development | [`skill-craft`](skills/skill-craft/SKILL.md) |
 | Presentation | [`caveman`](skills/caveman/SKILL.md) |
 

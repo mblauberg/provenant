@@ -62,6 +62,7 @@ FORBIDDEN_PREFIXES = (
     "skills/tanstack-query/",  # moved to the personal ~/Repos/skills catalogue
     "skills/typescript-clean-code/",  # moved to the personal ~/Repos/skills catalogue
     "skills/uml-diagrams/",  # moved to the personal ~/Repos/skills catalogue
+    "skills/web-stack-conventions/",  # retired; deltas rot on a fixed schedule
 )
 HOME_PATH = re.compile(r"/(?:Users|home)/[A-Za-z0-9._-]+/")
 SECRET_PATTERNS = {

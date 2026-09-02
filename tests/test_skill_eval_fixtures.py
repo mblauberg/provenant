@@ -108,7 +108,7 @@ def test_generic_route_fixture_loader_consumes_ui_regressions() -> None:
         "primary_skill": "ui-ux-design",
         "companion_skills": [],
     }
-    assert by_id["r002"]["expected"]["companion_skills"] == ["web-stack-conventions"]
+    assert by_id["r002"]["expected"]["companion_skills"] == ["engineering-docs"]
     assert by_id["r003"]["expected"]["primary_skill"] == "ui-ux-design"
 
 
@@ -148,7 +148,7 @@ def test_current_portfolio_routing_plan_matches_the_live_catalogue_and_has_no_re
     summary = summary_doc["current_routing_regression"]
     holdout = load(root / "routing-holdout.yaml")
 
-    assert holdout["catalogue_owner_count"] == len(skills) == 27
+    assert holdout["catalogue_owner_count"] == len(skills) == 26
     for moved_or_retired in (
         "project-activation",
         "playwright",
@@ -156,6 +156,7 @@ def test_current_portfolio_routing_plan_matches_the_live_catalogue_and_has_no_re
         "tanstack-query",
         "typescript-clean-code",
         "uml-diagrams",
+        "web-stack-conventions",
     ):
         assert moved_or_retired not in skills
     assert summary["catalogue_owner_count"] == len(skills)
