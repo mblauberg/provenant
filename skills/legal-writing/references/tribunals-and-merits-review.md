@@ -22,7 +22,7 @@ A tribunal's name is not enough to fix its procedure. Record:
 - costs, representation and evidence rules for that division, which often differ
   from the tribunal's general position.
 
-Divisional practice notes carry much of the operative procedure. Verify them
+Divisional practice notes govern much of the operative procedure. Verify them
 against the tribunal's official pages, and record the date checked.
 
 ## What Changes Compared With A Court
@@ -32,9 +32,9 @@ against the tribunal's official pages, and record the date checked.
 | Evidence | Not bound by the rules of evidence, but must act fairly and on logically probative material | Still anchor every fact to a source; do not treat relaxed rules as permission to assert |
 | Register | Plainer, less ceremonial | Write for a member who wants the criteria addressed, not for a set-piece address |
 | Representation | Often needs leave, and many parties are self-represented | Keep language accessible and avoid tactical drafting that punishes an unrepresented party |
-| Costs | Frequently each party bears their own, with exceptions | Do not import court costs assumptions or threats |
-| Reasons | The original decision-maker may owe a statement of reasons | Use the reasons as the map of what must be answered |
-| Outcome | The decision may be affirmed, varied, set aside, substituted or remitted | Ask for a disposition the tribunal can actually make |
+| Costs | Frequently each party bears their own, though enabling Acts in areas such as planning, tenancy and retail leases often displace that default | Do not import court costs assumptions or threats |
+| Reasons | The original decision-maker may owe a statement of reasons, but the duty, its exemptions and its time limits are statute-specific | Use the reasons as the map of what must be answered |
+| Outcome | The decision may be affirmed, varied, set aside, substituted or remitted | Ask only for a disposition the tribunal has power to make |
 
 ## Merits Review Posture
 
@@ -45,13 +45,16 @@ decision-maker erred.
 - Address the statutory criteria the decision-maker had to apply, criterion by
   criterion. Use them as headings where the list permits.
 - Identify the date at which the facts are assessed, and whether material that
-  post-dates the original decision may be considered.
+  post-dates the original decision may be considered; this is scheme-specific,
+  and some statutory schemes confine the assessment to the date of the primary
+  decision.
 - Distinguish a finding of fact, an exercise of discretion and a jurisdictional
   precondition, and argue each in its own terms.
 - Do not argue judicial review grounds in a merits review, and do not argue
   merits in a judicial review application. Where a genuine legal error matters,
-  name it and get qualified review of the route before relying on it.
-- Where the tribunal cannot give the outcome the client wants, say so and
+  name it specifically and obtain qualified review of the jurisdictional route
+  before relying on it.
+- Where the tribunal has no power to give the outcome sought, say so and
   identify the forum that can.
 
 ## The Document Set
@@ -60,7 +63,7 @@ decision-maker erred.
 |---|---|
 | Application or notice of appeal | Starts the matter, fixes the decision under review and the outcome sought |
 | Agency material or decision bundle | The record the review runs on; paginate and cite it as the tribunal directs |
-| Statement of facts and contentions, or points of claim and defence | Separates the facts asserted from the contentions argued |
+| Statement of facts and contentions, or points of claim and defence | Separates the facts asserted from the contentions argued; the name varies between merits-review and civil-list streams |
 | Witness statements | Evidence in the tribunal's preferred form for that list |
 | Expert report | Only where the list permits it and the code of conduct is complied with |
 | Outline of submissions | Applies the criteria to the material and asks for a specific disposition |

@@ -25,7 +25,7 @@ A demand is a document the other side may put before a court. Verify first:
   threatened.
 
 Where a statutory notice regime applies, the notice's prescribed content and
-service method control. A general letter of demand does not substitute for a
+service method control. A general letter of demand cannot substitute for a
 prescribed notice, and a prescribed notice should not be diluted with extra
 demands.
 

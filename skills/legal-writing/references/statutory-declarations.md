@@ -21,8 +21,14 @@ instrument the filing accepts.
 
 ## Pick The Right Regime
 
-The regime follows the recipient and the law under which the declaration is
-required, not the declarant's home state. Record and verify:
+Where the declaration is required for a statutory or Commonwealth purpose, the
+regime follows the recipient and the law under which the declaration is
+required, not the declarant's home state. Where a private recipient asks for a
+declaration and names no statutory basis, follow the regime the recipient
+nominates, or otherwise the declarant's own jurisdiction: a declaration valid
+where it was made is commonly accepted, and state and territory oaths
+legislation may recognise a declaration made in another Australian
+jurisdiction. Record and verify:
 
 - which declarations or oaths Act applies, and its current form or approved
   wording;
@@ -79,8 +85,10 @@ move it, split it or add words to it.
 ## False Declaration Exposure
 
 Making a false declaration is a criminal offence under every Australian
-declarations regime, and the offence attaches to the declarant, not the drafter.
-That changes the drafting duty:
+declarations regime, and the offence attaches to the declarant. That does not
+immunise the drafter: a person who knowingly drafts or procures a false
+declaration can face accessorial liability and professional discipline. Both
+points change the drafting duty:
 
 - never draft around a fact the declarant has told you is uncertain;
 - never draft a paragraph the declarant has not confirmed in their own words;
