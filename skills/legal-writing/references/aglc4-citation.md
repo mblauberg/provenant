@@ -15,14 +15,14 @@ recalled from another document's formatting.
 | Filed submissions, affidavits, orders | The forum's own practice, which is usually not AGLC |
 | Correspondence | Plain identification: title, date, pinpoint |
 | Academic articles, theses, book chapters | AGLC |
-| Advices, research memoranda, internal notes | AGLC where the recipient expects it, otherwise plain identification |
+| Advices, research memoranda, internal notes | AGLC where the recipient expects it; otherwise plain identification |
 
 Do not convert a forum's citation practice into AGLC because AGLC is tidier, and
 do not convert AGLC into loose prose citation while condensing.
 
 ## Core Patterns
 
-AGLC citations sit in footnotes, not in the text, and a footnote ends with a
+AGLC citations sit in footnotes, not in body text. Every footnote ends with a
 full stop.
 
 - **Reported case**: case name in italics, then the year, volume, report series

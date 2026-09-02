@@ -8,8 +8,8 @@ current source before execution.
 
 ## Deed Or Agreement
 
-Choose deliberately, because the choice changes formality, enforceability and
-limitation exposure.
+Choose deliberately, because the choice changes formalities, enforceability
+and limitation exposure.
 
 | Question | Agreement | Deed |
 |---|---|---|
@@ -20,12 +20,12 @@ limitation exposure.
 
 Signal the choice in the document itself. A deed says it is a deed, uses deed
 language in the execution blocks, and is dated as a deed. An instrument that
-calls itself a deed but executes like an agreement is a live defect, not a
-labelling quirk. Do not switch an instrument between forms during a rewrite.
+calls itself a deed but executes like an agreement contains a live defect, not
+a labelling quirk. Do not switch an instrument between forms during a rewrite.
 
 ## Structure
 
-Use this order unless a template or the other side's precedent controls:
+Use this order unless a template or counterparty precedent controls:
 
 1. Title naming the instrument type and subject.
 2. Date line, or a statement that the instrument is dated as executed.
@@ -33,7 +33,7 @@ Use this order unless a template or the other side's precedent controls:
    and address; check whether the party is a company, a trustee acting in that
    capacity, a partnership, an individual or an unincorporated body.
 4. Background or recitals: verified context only, with no operative effect.
-5. Defined terms, in one place, each used consistently afterwards.
+5. Defined terms, in one section, each used consistently afterwards.
 6. Operative clauses, grouped so obligations sit near their triggers.
 7. General clauses: governing law and jurisdiction, notices, variation,
    assignment, entire agreement, severance, counterparts, costs, GST and
