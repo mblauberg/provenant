@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Behaviour tests for cf_dispatch.sh with stubbed CLIs."""
+"""Contract tests for cf_dispatch.sh, the provider adapter, with stubbed CLIs."""
 import json
 import os
 import shlex
@@ -14,14 +14,14 @@ import threading
 import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+PRODUCT_ROOT = Path(__file__).resolve().parents[1]
+SCRIPTS = PRODUCT_ROOT / "skills" / "orchestrate" / "scripts"
+SCRIPT = SCRIPTS / "cf_dispatch.sh"
+RUN_DIR_SCRIPT = SCRIPTS / "run_dir_init.sh"
+
+sys.path.insert(0, str(PRODUCT_ROOT / "skills"))
 from _shared.bounded_process import run_bounded
 
-
-HERE = Path(__file__).resolve().parent
-PRODUCT_ROOT = HERE.parents[2]
-SCRIPT = HERE.parent / "scripts" / "cf_dispatch.sh"
-RUN_DIR_SCRIPT = HERE.parent / "scripts" / "run_dir_init.sh"
 DISPATCH_SCHEMA = {
     "tool",
     "adapter",
@@ -2455,7 +2455,7 @@ def test_non_git_fallback_routes_via_product_root_model_route():
         tmp = Path(td)
         product = tmp / "product"
         shutil.copytree(
-            HERE.parent / "scripts",
+            SCRIPTS,
             product / "skills" / "orchestrate" / "scripts",
         )
         shutil.copytree(PRODUCT_ROOT / "config", product / "config")
@@ -2535,3 +2535,159 @@ if __name__ == "__main__":
     test_run_dir_init_force_flag_only_creates_final_gate()
     test_run_dir_init_force_does_not_clobber_existing_manifest()
     print("cf_dispatch behaviour tests: PASS")
+
+
+def make_worktree(root):
+    """Create a real Git worktree root a writer may own."""
+    worktree = root / "worktree"
+    worktree.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=worktree, check=True)
+    return worktree.resolve()
+
+
+def run_worktree_dispatch(tool, stub, worktree=None, extra_args=None, intent="ordinary"):
+    """Dispatch one stubbed provider, optionally on the worktree writer route."""
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td).resolve()
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        args_file = tmp / "provider.args"
+        write_executable(bin_dir / tool, stub.format(args_file=args_file))
+        out = tmp / "out.txt"
+        env = fabric_free_env()
+        env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
+        command = [
+            str(SCRIPT), "--tool", tool, "--orchestrator-family", "codex",
+            "--role", "worker", "--intent", intent, "--out", str(out),
+            "--prompt", "Reply exactly OK",
+        ]
+        if worktree == "make":
+            worktree = make_worktree(tmp)
+            command.extend(["--access-mode", "worktree_write", "--worktree", str(worktree)])
+        command.extend(extra_args or [])
+        result = run_bounded(
+            command, cwd=tmp, env=env, timeout_seconds=30, output_limit_bytes=1_048_576
+        )
+        recorded = args_file.read_text(encoding="utf-8") if args_file.exists() else ""
+        return result, recorded, worktree
+
+
+CLAUDE_ARGV_STUB = """\
+    #!/usr/bin/env bash
+    if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
+      echo '{{"loggedIn":true,"authMethod":"claude.ai"}}'
+      exit 0
+    fi
+    printf '%s\\n' "$@" >> {args_file}
+    printf 'PWD=%s\\n' "$PWD" >> {args_file}
+    cat >/dev/null
+    echo "OK"
+"""
+
+CODEX_ARGV_STUB = """\
+    #!/usr/bin/env bash
+    if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
+      printf '{{"models":[{{"slug":"gpt-5.6-luna","supported_reasoning_levels":[{{"effort":"high"}}]}}]}}'
+      exit 0
+    fi
+    printf '%s\\n' "$@" >> {args_file}
+    cat >/dev/null
+    echo "OK"
+"""
+
+
+def test_claude_worktree_writer_route_runs_inside_the_owned_worktree():
+    result, recorded, worktree = run_worktree_dispatch("claude", CLAUDE_ARGV_STUB, worktree="make")
+    assert result.returncode == 0, result.output
+    record = json.loads(result.output)
+    assert DISPATCH_SCHEMA <= set(record)
+    assert record["status"] == "ok"
+    assert record["access_mode"] == "worktree_write"
+    assert record["worktree"] == str(worktree)
+    assert record["read_only_guarantee"] == "none"
+    assert "--permission-mode\nacceptEdits" in recorded
+    assert f"--add-dir\n{worktree}" in recorded
+    # A permission prompt is a denial under -p, so the write tools have to be on
+    # the allow-list or the lane cannot run its own tests or commit its own work.
+    assert "--allowedTools\nBash,Edit,Write,MultiEdit,NotebookEdit,Read,Grep,Glob" in recorded
+    assert "--tools\nRead,Grep,Glob" not in recorded
+    assert "--permission-mode\nplan" not in recorded
+    assert f"PWD={worktree}" in recorded
+    assert "own exclusively for this run" in recorded
+    assert "run commands and commit only inside that worktree" in recorded
+
+
+def test_claude_read_only_route_remains_the_default():
+    result, recorded, _ = run_worktree_dispatch("claude", CLAUDE_ARGV_STUB)
+    assert result.returncode == 0, result.output
+    record = json.loads(result.output)
+    assert record["access_mode"] == "read_only"
+    assert record["worktree"] == ""
+    assert record["read_only_guarantee"] == "enforced"
+    assert "--permission-mode\nplan" in recorded
+    assert "--tools\nRead,Grep,Glob" in recorded
+    assert "acceptEdits" not in recorded
+    assert "--allowedTools" not in recorded
+    assert "Bash" not in recorded
+
+
+def test_codex_worktree_writer_route_uses_the_workspace_write_sandbox():
+    result, recorded, worktree = run_worktree_dispatch("codex", CODEX_ARGV_STUB, worktree="make")
+    assert result.returncode == 0, result.output
+    record = json.loads(result.output)
+    assert record["access_mode"] == "worktree_write"
+    assert record["read_only_guarantee"] == "none"
+    assert "-s\nworkspace-write" in recorded
+    assert f"--cd\n{worktree}" in recorded
+    assert "read-only" not in recorded
+    # A linked worktree keeps its Git metadata outside the worktree root.
+    assert "sandbox_workspace_write.writable_roots=" in recorded
+
+
+def test_codex_read_only_route_keeps_the_read_only_sandbox():
+    result, recorded, _ = run_worktree_dispatch("codex", CODEX_ARGV_STUB)
+    assert result.returncode == 0, result.output
+    record = json.loads(result.output)
+    assert record["access_mode"] == "read_only"
+    assert "-s\nread-only" in recorded
+    assert "workspace-write" not in recorded
+
+
+def test_worktree_writer_route_is_refused_for_assurance_intent():
+    result, recorded, _ = run_worktree_dispatch(
+        "claude", CLAUDE_ARGV_STUB, worktree="make", intent="assurance"
+    )
+    assert result.returncode == 2
+    assert "requires --intent ordinary" in result.output
+    assert recorded == ""
+
+
+def test_worktree_writer_route_is_refused_for_unsupported_adapters():
+    result, recorded, _ = run_worktree_dispatch("agy", CLAUDE_ARGV_STUB, worktree="make")
+    assert result.returncode == 2
+    assert "unsupported for adapter: agy" in result.output
+    assert recorded == ""
+
+
+def test_worktree_path_requires_the_writer_access_mode():
+    with tempfile.TemporaryDirectory() as td:
+        worktree = make_worktree(Path(td).resolve())
+    result, recorded, _ = run_worktree_dispatch(
+        "claude", CLAUDE_ARGV_STUB, extra_args=["--worktree", str(worktree)]
+    )
+    assert result.returncode == 2
+    assert "--worktree requires --access-mode worktree_write" in result.output
+    assert recorded == ""
+
+
+def test_worktree_writer_route_rejects_a_path_that_is_not_a_worktree_root():
+    with tempfile.TemporaryDirectory() as td:
+        plain = Path(td).resolve() / "plain"
+        plain.mkdir()
+        result, recorded, _ = run_worktree_dispatch(
+            "claude", CLAUDE_ARGV_STUB,
+            extra_args=["--access-mode", "worktree_write", "--worktree", str(plain)],
+        )
+    assert result.returncode == 2
+    assert "worktree" in result.output
+    assert recorded == ""

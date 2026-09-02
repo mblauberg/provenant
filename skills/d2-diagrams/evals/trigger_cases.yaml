@@ -4,7 +4,7 @@ cases:
   - {id: q046, relation: positive, prompt: "Create and render a D2 architecture diagram for this service flow.", tags: [direct], expected: {primary_skill: d2-diagrams, companion_skills: []}}
   - {id: q047, relation: positive, prompt: "Fix the layout and syntax in this D2 diagram, then validate and inspect the SVG.", tags: [direct], expected: {primary_skill: d2-diagrams, companion_skills: []}}
   - {id: q048, relation: positive, prompt: "Produce a publication-quality D2 figure and export vector PDF through SVG.", tags: [direct], expected: {primary_skill: d2-diagrams, companion_skills: []}}
-  - {id: q049, relation: negative, prompt: "Create a PlantUML use-case package diagram for this SRS.", tags: [adjacent], expected: {primary_skill: uml-diagrams, companion_skills: []}}
+  - {id: q049, relation: negative, prompt: "Write the requirements specification section this diagram belongs to and index it.", tags: [adjacent], expected: {primary_skill: engineering-docs, companion_skills: []}}
   - {id: q050, relation: negative, prompt: "Add a small Mermaid flowchart to the operations README.", tags: [adjacent], expected: {primary_skill: engineering-docs, companion_skills: []}}
   - {id: q051, relation: negative, prompt: "Draw this relationship as a Graphviz DOT graph.", tags: [no-skill], expected: {primary_skill: null, companion_skills: []}}
   - {id: q052, relation: boundary, prompt: "Create the D2 figure and add its source and rendered asset to the project documentation index.", tags: [composition], expected: {primary_skill: d2-diagrams, companion_skills: [engineering-docs]}}

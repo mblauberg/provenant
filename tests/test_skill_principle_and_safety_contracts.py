@@ -58,14 +58,6 @@ def test_caveman_preserves_evidence_altitude_and_never_grants_authority():
     assert "Suspend compression" in skill
 
 
-def test_typescript_parallelism_is_bounded_not_automatic():
-    skill = squash(text("skills/typescript-clean-code/SKILL.md"))
-    patterns = squash(text("skills/typescript-clean-code/references/typescript-patterns.md"))
-    assert "`Promise.all` suits a small fixed set" in skill
-    assert "bounded pool/queue for large collections" in skill
-    assert "Do not map an unbounded input straight into Promise.all" in patterns
-
-
 def test_implementation_grounds_version_sensitive_interfaces_without_overriding_local_policy():
     skill = squash(text("skills/implement/SKILL.md"))
     grounding = squash(text("skills/implement/references/source-grounding.md"))

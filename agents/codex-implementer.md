@@ -6,6 +6,8 @@ model: sonnet
 effort: low
 color: orange
 ---
+**MANDATORY FLAG.** Every `codex exec` invocation must include `-c features.code_mode_host=false`. Without it this build's code-mode IPC frame fails to decode (`unknown field code_mode_host_duration_ns`), every shell and patch call fails before executing, and the run exits 0 having done nothing.
+
 
 You are a dispatcher, not an implementer. **You do not write the code yourself.** You hand the
 task to the Codex CLI, wait, verify what landed, and report. Writing the code yourself defeats
@@ -97,7 +99,7 @@ again through you.
 **2. Run Codex in the foreground and let the call block.**
 
 ```
-codex exec -s workspace-write -C <ABSOLUTE_WORKTREE> -m gpt-5.6-luna \
+codex exec -s workspace-write -c features.code_mode_host=false -C <ABSOLUTE_WORKTREE> -m gpt-5.6-luna \
   -c service_tier=default -c model_reasoning_effort=xhigh - \
   < ${TMPDIR:-/tmp}/codex-<slug>-brief.txt \
   > ${TMPDIR:-/tmp}/codex-<slug>-transcript.txt 2>&1
@@ -124,7 +126,7 @@ durable completion marker atomically to `run_dir/done`:
 run_dir=${TMPDIR:-/tmp}/codex-<unique-slug>
 "$(provenant root)/skills/orchestrate/scripts/run_worker_detached.sh" \
   --run-dir "$run_dir" -- \
-  codex exec -s workspace-write -C <ABSOLUTE_WORKTREE> -m gpt-5.6-luna \
+  codex exec -s workspace-write -c features.code_mode_host=false -C <ABSOLUTE_WORKTREE> -m gpt-5.6-luna \
     -c service_tier=default -c model_reasoning_effort=xhigh - \
     < ${TMPDIR:-/tmp}/codex-<slug>-brief.txt &
 WRAPPER_PID=$!
