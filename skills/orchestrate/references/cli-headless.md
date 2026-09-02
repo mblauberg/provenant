@@ -199,8 +199,10 @@ bearing and were measured against agy 1.1.10 on 2026-08-05, not read from help:
   literal prompt, ignores stdin and answers it. The binding kernel limit is
   per-string, not total: Linux caps one argv element at 128 KiB and refuses the
   exec, while darwin has no per-string cap, so a prompt that works on a Mac can
-  fail on a Linux runner. The dispatcher refuses over 124 KiB on both; large
-  material goes in through `--add-dir`.
+  fail on a Linux runner. The dispatcher refuses over 124 KiB on both with the
+  typed status `prompt_too_large`, and applies the same ceiling to cursor, kiro
+  and copilot, which take the prompt the same way; large material goes in
+  through `--add-dir` or by reference.
 - **Model and effort are separate flags.** A bare family id exits 1 asking for
   `--effort`, and efforts are per model: `gemini-3.1-pro` offers only low and
   high. `capabilities.py agy` captures the runtime list so a route validates

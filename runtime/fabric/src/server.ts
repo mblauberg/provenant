@@ -6,6 +6,7 @@ import { z } from "zod";
 import { databasePath, identify } from "./identity.js";
 import {
   cancelActiveExecutions,
+  DISPATCH_ADAPTERS,
   dispatchConfiguredBatch,
   dispatchConfiguredProvider,
   MAX_EXECUTION_WAIT_SECONDS,
@@ -174,7 +175,10 @@ server.registerTool(
 // gets. Assurance selectors are absent rather than accepted and ignored, and the
 // schemas are strict, so a removed parameter is a typed input error.
 const routeInputSchema = {
-  adapter: z.string().min(1).optional().describe("provider adapter; defaults to the current Fabric seat"),
+  // An enum, not a free string: an adapter the dispatcher cannot execute is a
+  // typed schema error here, before any run directory exists.
+  adapter: z.enum(DISPATCH_ADAPTERS).optional()
+    .describe("provider adapter; defaults to the current Fabric seat"),
   alias: z.string().min(1).optional().describe("route alias; defaults to workhorse"),
   mode: z.enum(["read_only", "worktree_write"]).optional()
     .describe("read_only (default), or worktree_write with the worktree the worker owns"),

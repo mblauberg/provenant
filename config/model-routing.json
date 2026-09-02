@@ -72,12 +72,13 @@
     }
   },
   "adapters": {
-    "claude": {"endpoint_provider": "anthropic", "fixed_model_family": "anthropic", "effort_transport": "flag"},
-    "codex": {"endpoint_provider": "openai", "fixed_model_family": "openai", "effort_transport": "flag"},
+    "claude": {"endpoint_provider": "anthropic", "fixed_model_family": "anthropic", "effort_transport": "flag", "dispatch": "implemented"},
+    "codex": {"endpoint_provider": "openai", "fixed_model_family": "openai", "effort_transport": "flag", "dispatch": "implemented"},
     "cursor": {
       "endpoint_provider": "cursor",
       "fixed_model_family": null,
       "effort_transport": "model-id",
+      "dispatch": "implemented",
       "model_family_preferences": {
         "preferred": ["xai", "cursor-composer"],
         "fallback": {
@@ -91,15 +92,16 @@
       "endpoint_provider": "agy",
       "fixed_model_family": null,
       "effort_transport": "flag",
+      "dispatch": "implemented",
       "model_family_preferences": {
         "preferred": ["google", "anthropic"],
         "fallback": {}
       }
     },
-    "copilot": {"endpoint_provider": "github", "fixed_model_family": null, "effort_transport": "flag"},
-    "kiro": {"endpoint_provider": "aws", "fixed_model_family": null, "effort_transport": "flag"},
-    "opencode": {"endpoint_provider": "opencode", "fixed_model_family": "generic-open", "effort_transport": "flag"},
-    "pi": {"endpoint_provider": "configured", "fixed_model_family": null, "effort_transport": "none"}
+    "copilot": {"endpoint_provider": "github", "fixed_model_family": null, "effort_transport": "flag", "dispatch": "implemented"},
+    "kiro": {"endpoint_provider": "aws", "fixed_model_family": null, "effort_transport": "flag", "dispatch": "implemented"},
+    "opencode": {"endpoint_provider": "opencode", "fixed_model_family": "generic-open", "effort_transport": "flag", "dispatch": "dormant"},
+    "pi": {"endpoint_provider": "configured", "fixed_model_family": null, "effort_transport": "none", "dispatch": "unsupported"}
   },
   "endpoints": {
     "zai-glm": {
