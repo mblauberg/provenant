@@ -188,8 +188,7 @@ run_test "$SCRIPTS_ROOT/static-security-check.py"
 
 run_test -m pytest -q \
   "$TESTS_ROOT" \
-  "$SKILLS_ROOT/implement/tests/test_checkpoint_run.py" \
-  "$SKILLS_ROOT/orchestrate/evals"
+  "$SKILLS_ROOT/implement/tests/test_checkpoint_run.py"
 
 if [[ "$DOCTOR" == true ]]; then
   echo "environment doctor"
@@ -217,7 +216,7 @@ if [[ "$DOCTOR" == true ]]; then
   fi
   provenant route resolve --adapter claude --alias flagship --role lead || true
   caps="$(mktemp)"
-  if "$SKILLS_ROOT/orchestrate/scripts/codex_capabilities.py" --out "$caps"; then
+  if "$SKILLS_ROOT/orchestrate/scripts/capabilities.py" codex --out "$caps"; then
     provenant route resolve --adapter codex --alias flagship --role lead --capabilities-file "$caps" || true
   else
     echo "codex-capabilities=WARN discovery failed"

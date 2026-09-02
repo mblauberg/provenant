@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Behaviour tests for cf_dispatch.sh with stubbed CLIs."""
+"""Contract tests for cf_dispatch.sh, the provider adapter, with stubbed CLIs."""
 import json
 import os
 import shlex
@@ -14,14 +14,14 @@ import threading
 import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+PRODUCT_ROOT = Path(__file__).resolve().parents[1]
+SCRIPTS = PRODUCT_ROOT / "skills" / "orchestrate" / "scripts"
+SCRIPT = SCRIPTS / "cf_dispatch.sh"
+RUN_DIR_SCRIPT = SCRIPTS / "run_dir_init.sh"
+
+sys.path.insert(0, str(PRODUCT_ROOT / "skills"))
 from _shared.bounded_process import run_bounded
 
-
-HERE = Path(__file__).resolve().parent
-PRODUCT_ROOT = HERE.parents[2]
-SCRIPT = HERE.parent / "scripts" / "cf_dispatch.sh"
-RUN_DIR_SCRIPT = HERE.parent / "scripts" / "run_dir_init.sh"
 DISPATCH_SCHEMA = {
     "tool",
     "adapter",
@@ -2455,7 +2455,7 @@ def test_non_git_fallback_routes_via_product_root_model_route():
         tmp = Path(td)
         product = tmp / "product"
         shutil.copytree(
-            HERE.parent / "scripts",
+            SCRIPTS,
             product / "skills" / "orchestrate" / "scripts",
         )
         shutil.copytree(PRODUCT_ROOT / "config", product / "config")
