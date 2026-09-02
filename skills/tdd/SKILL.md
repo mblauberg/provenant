@@ -32,19 +32,24 @@ exception; deadline pressure is not one.
 
 Work vertically: test -> implementation -> repeat. Start with one tracer bullet
 through the full path, then add behaviours from what each cycle reveals. Never
-write an imagined horizontal test batch before implementation. Prioritise
-critical paths and complex logic.
+write an imagined horizontal test batch first. Prioritise critical paths and
+complex logic.
 
 ## Test boundaries
 
-Test what callers observe, not private methods, internal call order or data
-shape. A valid test survives an internal refactor. Verify outcomes through the
-public interface rather than querying side channels. See
-[tests.md](references/tests.md).
+Test what callers observe through the public interface, not private methods,
+internal call order, data shape or side channels. A valid test survives an
+internal refactor. See [tests.md](references/tests.md).
+
+**Prose is not a contract.** Documentation, skill and ADR wording, and
+configuration literals are not behaviour and earn no test. Name the production
+change that would make a test fail before writing it; if the only answer is
+"someone reworded the text", write none. Assert parsed structure or a script's
+effects, never the source text.
 
 Mock only system boundaries: external APIs, time/randomness and, when needed,
-filesystem/database. Never mock owned internal collaborators to make a test
-pass; inject a narrow boundary instead. See [mocking.md](references/mocking.md)
+filesystem/database. Never mock owned internal collaborators to pass a test;
+inject a narrow boundary instead. See [mocking.md](references/mocking.md)
 and [interface-design.md](references/interface-design.md).
 
 Hard-to-test code is design evidence: accept dependencies, return results
@@ -52,13 +57,19 @@ instead of hiding effects, and prefer deep modules with small interfaces. On
 green, use [deep-modules.md](references/deep-modules.md) and
 [refactoring.md](references/refactoring.md); do not smuggle redesign into green.
 
+## Where a test lives
+
+Put the test in the file that already owns the unit's behaviour, following this
+repository's layout and naming. A new test file needs a new production unit with
+no owning file; a review, audit or documentation pass never justifies one.
+
 ## Advance gate
 
 Before the next behaviour confirm: public observable contract; witnessed
 right-reason failure; minimal passing code; focused and broader checks green;
-no dirty output; and resilience to internal refactoring.
+no dirty output; resilience to internal refactoring.
 
-For a bug, first reproduce the exact failure as the regression test, watch it
-fail, then repair and watch it pass. If no correct seam reaches the bug, route
+For a bug, reproduce the exact failure as the regression test, watch it fail,
+then repair and watch it pass. If no correct seam reaches the bug, route
 to `diagnose`; do not bless a shallow test. `implement` owns independent review,
 repair loops, documentation and user acceptance.

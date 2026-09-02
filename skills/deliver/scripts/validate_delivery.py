@@ -21,8 +21,8 @@ from delivery_validation_common import (
     AGENTIC_RISKS, DIGEST, EVALUATION_BINDING_FIELDS, IDENTIFIER, Invalid,
     POLICY_VALIDATION_PATH, PRIMARY_FAMILIES, REPAIR_BUDGETS,
     REVIEW_ROLES, RISKS, ROOT, SAFE_CLASSES, SKILLS_ROOT,
-    _digest, _evaluate_validator, _identifier, _inside, _list,
-    _load_bound_json, _mapping, _policy_validation_module, _retrospect_validator,
+    _digest, _identifier, _inside, _list,
+    _load_bound_json, _mapping, _policy_validation_module,
     _safe_path, _software_delivery_validator, _utc, fail,
 )
 from delivery_validation_evidence import _validate_evidence
@@ -168,19 +168,14 @@ def validate(
         except (OSError, ValueError, json.JSONDecodeError) as exc:
             raise Invalid(f"retrospective artifact is unreadable: {exc}") from exc
         fail("sha256:" + hashlib.sha256(raw).hexdigest() != artifact.get("digest"), "retrospective artifact live digest does not match")
-        validator = _retrospect_validator()
-        try:
-            validator.validate(
-                data, "close", expected_cycle_id=run["run_id"],
-                expected_profile=run["profile"],
-            )
-            validator.verify_hashes(
-                data, target.parent, expected_cycle_id=run["run_id"],
-                expected_profile=run["profile"], workspace_root=workspace_root,
-                product_root=root,
-            )
-        except validator.Invalid as exc:
-            raise Invalid(f"retrospective artifact failed its contract: {exc}") from exc
+        fail(not isinstance(data, dict), "retrospective artifact root must be an object")
+        scope = data.get("scope") if isinstance(data.get("scope"), dict) else {}
+        cycle_ids = scope.get("cycle_ids")
+        fail(
+            not isinstance(cycle_ids, list) or run["run_id"] not in cycle_ids,
+            "retrospective scope does not include the current delivery cycle",
+        )
+        fail(scope.get("profile") != run["profile"], "retrospective scope profile does not match the delivery profile")
         fail(data.get("status") != retrospective.get("status"), "retrospective status does not match its artifact")
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)

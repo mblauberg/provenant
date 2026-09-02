@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import shutil
 import tempfile
 import sys
 from typing import Any
@@ -129,6 +130,74 @@ def _replace_link(destination: Path, source: Path) -> None:
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)
+
+
+def _migrate_directory_link(
+    source: Path,
+    target: Path,
+    managed_catalogue: dict[str, Path],
+    custom_catalogue: dict[str, Path],
+) -> dict[str, Any]:
+    """Convert a canonical whole-directory link into the per-entry layout.
+
+    A Claude installation may expose the whole product skill tree as one
+    directory-level symlink. That layout has no place to hang an
+    instance-owned custom skill, so the first install carrying any converts
+    it, once, into per-entry links plus the receipt the per-entry layout
+    already keeps. A target that is already per-entry is left alone, which
+    makes the conversion idempotent.
+    """
+    if not target.is_symlink():
+        return {
+            "schema_version": 1,
+            "action": "migrate-directory-link",
+            "layout": "per-entry",
+            "items": [],
+            "changed": [],
+        }
+    if target.resolve(strict=False) != source:
+        raise InstallError(
+            f"managed directory is a non-canonical symlink: {target}"
+        )
+    catalogue = {**managed_catalogue, **custom_catalogue}
+    staged = Path(tempfile.mkdtemp(dir=target.parent, prefix=".skills-migrate."))
+    try:
+        os.chmod(staged, 0o755)
+        for name, source_path in catalogue.items():
+            (staged / name).symlink_to(source_path)
+        # A directory cannot be renamed over a symlink, so the link is removed
+        # first and restored if publishing the staged directory fails.
+        target.unlink()
+        try:
+            os.replace(staged, target)
+        except OSError:
+            target.symlink_to(source, target_is_directory=True)
+            raise
+    except BaseException:
+        shutil.rmtree(staged, ignore_errors=True)
+        raise
+    manifest = _load_manifest(target)
+    for name, source_path in managed_catalogue.items():
+        manifest["managed"][name] = _entry(name, source_path, [])
+        manifest["custom"].pop(name, None)
+    for name, source_path in custom_catalogue.items():
+        manifest["custom"][name] = {"source_target": str(source_path)}
+        manifest["managed"].pop(name, None)
+    _write_manifest(target, manifest)
+    return {
+        "schema_version": 1,
+        "action": "migrate-directory-link",
+        "layout": "converted",
+        "items": [
+            {
+                "name": name,
+                "owner": "custom" if name in custom_catalogue else "managed",
+                "source_target": str(source_path),
+            }
+            for name, source_path in sorted(catalogue.items())
+        ],
+        "changed": sorted(catalogue),
+    }
 
 
 def _plan(
@@ -347,6 +416,7 @@ def execute(
 ) -> dict[str, Any]:
     if action not in {
         "validate-sources",
+        "migrate-directory-link",
         "plan",
         "preflight",
         "check",
@@ -379,6 +449,13 @@ def execute(
             ],
             "changed": [],
         }
+    if action == "migrate-directory-link":
+        return _migrate_directory_link(
+            source,
+            Path(target),
+            managed_catalogue,
+            custom_catalogue,
+        )
     target = Path(target).resolve()
     manifest = _load_manifest(target)
     if action in {"plan", "preflight"}:
@@ -516,6 +593,7 @@ def main(argv: list[str] | None = None) -> int:
         "action",
         choices=(
             "validate-sources",
+            "migrate-directory-link",
             "plan",
             "preflight",
             "check",
@@ -585,6 +663,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"conflicting: skill installation integrity failed: {failures}", file=sys.stderr)
         return 3
     if args.summary:
+        if args.action == "migrate-directory-link":
+            print(
+                f"skills layout={result['layout']} "
+                f"linked={len(result['changed'])} target={args.target}"
+            )
+            return 0
         if args.action == "check":
             print(f"skills checked={len(result['items'])} target={args.target}")
             return 0

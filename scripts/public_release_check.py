@@ -32,11 +32,8 @@ REQUIRED_LEGAL_FILES = frozenset({
     "LICENSES/grill-me-pocock-MIT.txt",
     "LICENSES/impeccable-APACHE-2.0.txt",
     "LICENSES/modern-screenshot-MIT.txt",
-    "LICENSES/playwright-cli-APACHE-2.0.txt",
     "LICENSES/skill-optimizer-MIT.txt",
-    "LICENSES/typescript-clean-code-bmad-MIT.txt",
     "LICENSES/ui-ux-pro-max-MIT.txt",
-    "LICENSES/vercel-react-best-practices-MIT.txt",
 })
 REQUIRED_PUBLIC_FILES = frozenset({
     "ACKNOWLEDGEMENTS.md",
@@ -57,9 +54,16 @@ FORBIDDEN_PREFIXES = (
     ".worktrees/",
     ".pytest_cache/",
     "skills/clean-writing/",  # rejected interim name; capability is natural-writing
+    "skills/academic-writing/",  # retired skill; absorbed by natural/engineering-writing
     "skills/humanise-text/",  # retired name; capability moved to natural-writing
     "skills/tanstack-query-best-practices/",  # retired local skill must not return
     "skills/vercel-react-best-practices/",  # retired vendor-branded skill name
+    "skills/playwright/",  # moved to the personal ~/Repos/skills catalogue
+    "skills/react-performance/",  # moved to the personal ~/Repos/skills catalogue
+    "skills/tanstack-query/",  # moved to the personal ~/Repos/skills catalogue
+    "skills/typescript-clean-code/",  # moved to the personal ~/Repos/skills catalogue
+    "skills/uml-diagrams/",  # moved to the personal ~/Repos/skills catalogue
+    "skills/web-stack-conventions/",  # retired; deltas rot on a fixed schedule
 )
 HOME_PATH = re.compile(r"/(?:Users|home)/[A-Za-z0-9._-]+/")
 SECRET_PATTERNS = {

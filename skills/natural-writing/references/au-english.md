@@ -2,10 +2,11 @@
 
 `natural-writing` defaults to Australian English for any prose without a
 project style guide, product, API, quoted source, or repository convention
-that requires another variant. `academic-writing`, `engineering-writing` and
-`legal-writing` inherit this default and layer only their own domain overlay
-(citation style, forum wording, LaTeX identifiers) on top; they do not restate
-it.
+that requires another variant. `engineering-writing` and `legal-writing`
+inherit this default and layer only their own domain overlay (forum wording,
+LaTeX identifiers) on top; they do not restate it. The academic exceptions
+(`per cent` in running prose, preserved citation keys, minimal capitalisation)
+are in [academic-prose.md](academic-prose.md).
 
 This file skips the basics a model already gets right by default (`-ise` not
 `-ize`, `-our` not `-or`, `-yse` not `-yze`, the `licence`/`license` and

@@ -101,6 +101,26 @@
     "opencode": {"endpoint_provider": "opencode", "fixed_model_family": "generic-open", "effort_transport": "flag"},
     "pi": {"endpoint_provider": "configured", "fixed_model_family": null, "effort_transport": "none"}
   },
+  "endpoints": {
+    "zai-glm": {
+      "base_url": "https://api.z.ai/api/anthropic",
+      "token_env": "ZAI_API_KEY",
+      "model_family": "zhipu",
+      "adapters": ["claude"]
+    },
+    "moonshot-kimi": {
+      "base_url": "https://api.moonshot.ai/anthropic",
+      "token_env": "MOONSHOT_API_KEY",
+      "model_family": "moonshot",
+      "adapters": ["claude"]
+    },
+    "deepseek": {
+      "base_url": "https://api.deepseek.com/anthropic",
+      "token_env": "DEEPSEEK_API_KEY",
+      "model_family": "deepseek",
+      "adapters": ["claude"]
+    }
+  },
   "model_patterns": [
     {"pattern": "^opencode/", "family": "generic-open"},
     {"pattern": "claude|fable|opus|sonnet|haiku", "family": "anthropic"},

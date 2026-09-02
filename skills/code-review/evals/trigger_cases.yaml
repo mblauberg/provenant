@@ -7,6 +7,6 @@ cases:
   - {id: q040, relation: negative, prompt: "This test is failing intermittently; reproduce it and identify the root cause.", tags: [adjacent], expected: {primary_skill: diagnose, companion_skills: []}}
   - {id: q041, relation: negative, prompt: "Review and fix this implementation until all checks and re-review are clean.", tags: [adjacent], expected: {primary_skill: implement, companion_skills: []}}
   - {id: q042, relation: negative, prompt: "Write the first failing public-interface test for this new behaviour.", tags: [adjacent], expected: {primary_skill: tdd, companion_skills: [implement]}}
-  - {id: q043, relation: boundary, prompt: "Review this TypeScript PR read-only, with special attention to type and async boundaries.", tags: [composition], expected: {primary_skill: code-review, companion_skills: [typescript-clean-code]}}
+  - {id: q043, relation: boundary, prompt: "Review this pull request read-only, then judge whether its structural simplification preserved behaviour.", tags: [composition], expected: {primary_skill: code-review, companion_skills: [refactor]}}
   - {id: q044, relation: boundary, prompt: "Review this frontend PR for system defects and for UX and accessibility regressions.", tags: [composition], expected: {primary_skill: code-review, companion_skills: [ui-ux-design]}}
   - {id: q045, relation: boundary, prompt: "The reviewed patch fails in production; reproduce the failure before proposing a fix.", tags: [adjacent], expected: {primary_skill: diagnose, companion_skills: []}}

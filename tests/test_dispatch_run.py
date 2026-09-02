@@ -1483,3 +1483,127 @@ def test_new_attempt_rejects_preexisting_directory_symlink(
 
     assert module.dispatch(args) == 2
     assert list(outside.iterdir()) == []
+
+
+def make_worktree(root: Path) -> Path:
+    worktree = root / "writer-worktree"
+    worktree.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=worktree, check=True)
+    return worktree.resolve()
+
+
+def run_writer_dispatch(
+    tmp_path: Path, run_dir: Path, prompt: Path, *extra: str, task_id: str = "task-1"
+) -> subprocess.CompletedProcess[str]:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    write_success_adapter(bin_dir / "cf_dispatch_stub.sh")
+    env = os.environ.copy()
+    env["PATH"] = f"{bin_dir}:{ROOT / 'scripts'}:{env['PATH']}"
+    return subprocess.run(
+        [str(SCRIPT), "--run-dir", str(run_dir), "--task-id", task_id, "--adapter", "claude",
+         "--prompt-file", str(prompt), "--orchestrator-family", "openai", "--alias", "workhorse",
+         "--role", "worker", *extra],
+        cwd=tmp_path, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+
+
+def test_worktree_writer_route_reaches_the_adapter_and_the_attempt_record(tmp_path: Path) -> None:
+    run_dir = make_run(tmp_path, "writer")
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("Reply exactly OK\n", encoding="utf-8")
+    worktree = make_worktree(tmp_path)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    write_executable(
+        bin_dir / "claude",
+        """#!/usr/bin/env bash
+        cat >/dev/null
+        printf 'PWD=%s\\n' "$PWD"
+        """,
+    )
+    env = os.environ.copy()
+    env["PATH"] = f"{bin_dir}:{ROOT / 'scripts'}:{env['PATH']}"
+    result = subprocess.run(
+        [str(SCRIPT), "--run-dir", str(run_dir), "--task-id", "task-1", "--adapter", "claude",
+         "--prompt-file", str(prompt), "--orchestrator-family", "openai", "--alias", "workhorse",
+         "--role", "worker", "--access-mode", "worktree_write", "--worktree", str(worktree)],
+        cwd=tmp_path, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    record = json.loads(
+        (run_dir / "dispatch/tasks/task-1/attempt-001/attempt.json").read_text(encoding="utf-8")
+    )
+    assert record["requested_route"]["access_mode"] == "worktree_write"
+    assert record["requested_route"]["worktree"] == str(worktree)
+    receipt = json.loads(
+        (run_dir / "dispatch/tasks/task-1/attempt-001/adapter-receipt.json").read_text(encoding="utf-8")
+    )
+    assert receipt["access_mode"] == "worktree_write"
+    assert receipt["worktree"] == str(worktree)
+    assert receipt["read_only_guarantee"] == "none"
+    result_text = (run_dir / record["result"]["path"]).read_text(encoding="utf-8")
+    assert result_text.strip() == f"PWD={worktree}"
+
+
+def test_read_only_route_is_the_default_and_refuses_a_worktree(tmp_path: Path) -> None:
+    run_dir = make_run(tmp_path, "default-read-only")
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("Reply exactly OK\n", encoding="utf-8")
+    worktree = make_worktree(tmp_path)
+
+    module = load_dispatch_module()
+    parsed = module.parser().parse_args([
+        "--run-dir", str(run_dir), "--adapter", "claude", "--prompt-file", str(prompt),
+        "--alias", "workhorse", "--role", "worker",
+    ])
+    assert parsed.access_mode == "read_only"
+    assert parsed.worktree is None
+
+    result = run_writer_dispatch(tmp_path, run_dir, prompt, "--worktree", str(worktree))
+    assert result.returncode != 0
+    assert json.loads(result.stdout)["status"] == "worktree_not_applicable"
+
+
+def test_concurrent_writer_on_one_worktree_is_rejected(tmp_path: Path) -> None:
+    run_dir = make_run(tmp_path, "one-writer")
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("Reply exactly OK\n", encoding="utf-8")
+    worktree = make_worktree(tmp_path)
+    module = load_dispatch_module()
+
+    lease = module.acquire_worktree_lease(worktree)
+    try:
+        with pytest.raises(module.WorktreeLeaseError, match="another writer"):
+            module.acquire_worktree_lease(worktree)
+        result = run_writer_dispatch(
+            tmp_path, run_dir, prompt, "--access-mode", "worktree_write", "--worktree", str(worktree)
+        )
+        assert result.returncode != 0
+        assert json.loads(result.stdout)["status"] == "worktree_busy"
+    finally:
+        module.release_worktree_lease(lease)
+
+    assert module.acquire_worktree_lease(worktree) is not None
+
+
+def test_worktree_writer_route_is_refused_for_assurance_and_unsupported_adapters(tmp_path: Path) -> None:
+    run_dir = make_run(tmp_path, "writer-rails")
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("Reply exactly OK\n", encoding="utf-8")
+    worktree = make_worktree(tmp_path)
+
+    assurance = run_writer_dispatch(
+        tmp_path, run_dir, prompt, "--intent", "assurance",
+        "--access-mode", "worktree_write", "--worktree", str(worktree),
+    )
+    assert json.loads(assurance.stdout)["status"] == "worktree_write_intent_denied"
+
+    missing = run_writer_dispatch(tmp_path, run_dir, prompt, "--access-mode", "worktree_write")
+    assert json.loads(missing.stdout)["status"] == "worktree_required"
+
+    invalid = run_writer_dispatch(
+        tmp_path, run_dir, prompt, "--access-mode", "worktree_write", "--worktree", str(tmp_path / "absent"),
+    )
+    assert json.loads(invalid.stdout)["status"] == "worktree_invalid"

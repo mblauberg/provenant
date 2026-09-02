@@ -1,6 +1,6 @@
 ---
 name: engineering-writing
-description: "Use for drafting or condensing software-engineering prose such as requirements/specs, READMEs, commits, PRs, runbooks, errors, and design notes. Not for general, academic, or Australian legal prose."
+description: "Use for drafting or condensing software-engineering and academic-artefact prose such as requirements/specs, READMEs, commits, PRs, runbooks, errors, design notes, and thesis or paper LaTeX, chapters and captions. Not for general or Australian legal prose."
 ---
 
 # Engineering writing
@@ -14,14 +14,21 @@ Australian English default, the anti-AI taxonomy and the condense pass. See
 `references/process.md`, `references/style-standard.md` and
 `references/engineer-voice.md` for where each hub link applies.
 
+It also owns the artefact side of academic writing: thesis and paper LaTeX
+invariants, chapter and section structure, research voice, and whole-chapter
+review. Academic register, citation discipline, claim wording and the thesis
+AI tells stay with the hub's academic prose reference.
+
 ## Workflow
 
 1. Name the audience, prior knowledge, required action or decision, and format
    constraint. If the reader's job is unclear, flag it before drafting.
 2. Choose one relevant pattern: [document patterns](references/document-patterns.md)
    for codebase/short-form prose, [requirements and planning](references/requirements-and-planning.md)
-   for already-decided pre-build content, or [architecture and communication](references/architecture-and-presentations.md)
-   for approved designs, ADRs, presentations and briefs. Do not load all three.
+   for already-decided pre-build content, [architecture and communication](references/architecture-and-presentations.md)
+   for approved designs, ADRs, presentations and briefs, or
+   [academic artefacts](references/academic-artefacts.md) for thesis and paper
+   LaTeX, chapters and captions. Do not load more than one.
 3. Structure before sentences: front-load the point, use decision-oriented
    headings and one idea or requirement per unit, then move wrong-home material.
 4. Lock facts, logic, stance, evidence, obligations, behaviour, identifiers,

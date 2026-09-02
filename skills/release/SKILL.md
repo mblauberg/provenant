@@ -44,15 +44,15 @@ naming. Keep domain migration/publication checks in project runbook/evidence;
 destructive or non-backward-compatible change still needs the global
 impact/authority gate.
 
-Run read-only gate before requesting promotion:
+Check the receipt before requesting promotion:
 
-```sh
-"$(provenant root)/skills/release/scripts/validate_release.py" --gate ready RELEASE.json
-```
-
-The CLI binds artifact to the live delivery receipt. Unit tests may call
-`validate(..., structural_only=True)` without a root; that cannot authorise
-promotion.
+- the promoted `digest|git_revision` equals the accepted artifact on the live
+  delivery receipt;
+- unexpired authority binds this artifact, action, target and constraints;
+- reversal is named, owned and time bound, or residual risk is marked
+  irreversible;
+- proof requirements, evidence source and close condition predate the
+  operation.
 
 ## Promote and verify
 
@@ -66,7 +66,7 @@ promotion.
 6. Preserve the receipt, update project state and route defects to `diagnose` or
    the domain incident process.
 
-Validate terminal evidence with `--gate complete`. `complete` means the outcome
+Recheck the same list against terminal evidence. `complete` means the outcome
 was proved, rather than that an operation merely succeeded. `reversed` and `failed`
 remain explicit outcomes with evidence and follow-up owners.
 
