@@ -165,7 +165,7 @@ def add_artifact(
     )
 
 
-def test_init_derives_tier_and_writes_timestamped_draft_history(tmp_path):
+def test_init_derives_tier_and_writes_a_flat_receipt(tmp_path):
     (tmp_path / "intent.md").write_text("# Intent\n")
 
     result = run_cli(tmp_path, *init_args())
@@ -173,10 +173,9 @@ def test_init_derives_tier_and_writes_timestamped_draft_history(tmp_path):
     assert result.returncode == 0, result.stderr
     receipt = json.loads((tmp_path / ".agent-run" / "DEL-TEST" / "RUN.json").read_text())
     assert receipt["risk_tier"] == "routine"
-    assert receipt["status"] == "draft"
-    assert receipt["state_history"][0]["state"] == "draft"
-    assert receipt["state_history"][0]["risk_tier"] == "routine"
-    assert receipt["state_history"][0]["at"].endswith("Z")
+    assert receipt["initial_risk_tier"] == "routine"
+    assert "status" not in receipt
+    assert "state_history" not in receipt
     assert receipt["evidence"] == []
     assert (tmp_path / ".agent-run" / "DEL-TEST" / ".RUN.lock").exists()
 
@@ -626,13 +625,13 @@ def test_evidence_remove_refuses_referenced_id_and_rebuild_updates_digest(tmp_pa
     ).returncode == 0
     receipt_path = run_dir / "RUN.json"
     receipt = json.loads(receipt_path.read_text())
-    receipt["state_history"][0]["evidence_ids"] = ["tests"]
+    receipt["measures"]["outcome"] = [{"id": "task-success", "evidence_id": "tests"}]
     receipt_path.write_text(json.dumps(receipt))
 
     refused = run_cli(
         tmp_path, "evidence", "remove", "--run-dir", str(run_dir), "--id", "tests",
     )
-    receipt["state_history"][0]["evidence_ids"] = []
+    receipt["measures"]["outcome"] = []
     receipt_path.write_text(json.dumps(receipt))
     removed = run_cli(
         tmp_path, "evidence", "remove", "--run-dir", str(run_dir), "--id", "tests",
@@ -643,7 +642,7 @@ def test_evidence_remove_refuses_referenced_id_and_rebuild_updates_digest(tmp_pa
     )
 
     assert refused.returncode == 1
-    assert "referenced by state_history" in refused.stderr
+    assert "referenced by measures" in refused.stderr
     assert removed.returncode == 0, removed.stderr
     assert rebuilt.returncode == 0, rebuilt.stderr
     receipt = json.loads(receipt_path.read_text())
@@ -804,46 +803,7 @@ def test_review_add_refuses_invalid_distinct_family_skip_lineage(
     assert expected in result.stderr
 
 
-def test_review_ladder_accepts_reasoned_distinct_family_skip():
-    module = load_producer()
-    run = {
-        "risk_tier": "crucial",
-        "chair_family": "openai",
-        "reviews": [
-            {
-                "role": "targeted", "provider_family": "openai",
-                "status": "pass", "lenses": ["correctness", "tests"], "reason": "",
-            },
-            {
-                "role": "other-primary", "provider_family": "anthropic",
-                "status": "pass", "lenses": ["architecture"], "reason": "",
-            },
-            {
-                "role": "distinct-family", "provider_family": "google",
-                "status": "skipped", "lenses": ["blind-spots"],
-                "reason": "provider quota unavailable",
-            },
-        ],
-    }
-
-    assert module.lifecycle.review_ladder_error(run) is None
-
-
-def test_lifecycle_transitions_match_checked_contract():
-    module = load_producer()
-    contract = module.lifecycle.LIFECYCLE_CONTRACT
-    expected = {
-        state: {
-            row["to_state"] for row in contract["transitions"]
-            if row["state"] == state
-        }
-        for state in contract["states"]
-    }
-
-    assert module.lifecycle.TRANSITIONS == expected
-
-
-def test_checkpoint_transition_show_and_refusals(tmp_path):
+def test_checkpoint_show_and_repair(tmp_path):
     run_dir = initialise(tmp_path)
     checkpoint = run_cli(
         tmp_path,
@@ -860,44 +820,32 @@ def test_checkpoint_transition_show_and_refusals(tmp_path):
         "--artifact",
         "intent.md",
     )
-    scoped = run_cli(
+    repaired = run_cli(
+        tmp_path, "repair", "--run-dir", str(run_dir), "--reason", "review found a defect",
+    )
+    removed_transition = run_cli(
         tmp_path, "transition", "--run-dir", str(run_dir), "--to", "scoped",
-    )
-    jump = run_cli(
-        tmp_path, "transition", "--run-dir", str(run_dir), "--to", "executing",
-    )
-    timestamp = run_cli(
-        tmp_path, "transition", "--run-dir", str(run_dir), "--to", "approved",
-        "--timestamp", "2099-01-01T00:00:00Z",
     )
     shown = run_cli(tmp_path, "show", "--run-dir", str(run_dir))
 
     assert checkpoint.returncode == 0, checkpoint.stderr
-    assert scoped.returncode == 0, scoped.stderr
-    assert jump.returncode == 1
-    assert "invalid lifecycle transition scoped -> executing" in jump.stderr
-    assert timestamp.returncode == 2
-    assert "unrecognized arguments: --timestamp" in timestamp.stderr
+    assert repaired.returncode == 0, repaired.stderr
+    assert removed_transition.returncode == 2
+    assert "invalid choice: 'transition'" in removed_transition.stderr
     assert shown.returncode == 0, shown.stderr
     receipt = json.loads(shown.stdout)
-    assert receipt["status"] == "scoped"
+    assert receipt["repair_cycles"] == 1
     assert receipt["checkpoint"]["generation"] == 2
     assert receipt["checkpoint"]["artifact_paths"] == ["RUN.json", "intent.md"]
 
 
-def test_transition_refuses_clock_regression_and_mutations_refuse_tier_change(tmp_path):
+def test_mutations_refuse_tier_change(tmp_path):
     run_dir = initialise(tmp_path)
     receipt_path = run_dir / "RUN.json"
     receipt = json.loads(receipt_path.read_text())
-    receipt["state_history"][-1]["at"] = "2999-01-01T00:00:00Z"
-    receipt_path.write_text(json.dumps(receipt))
-
-    regression = run_cli(
-        tmp_path, "transition", "--run-dir", str(run_dir), "--to", "scoped",
-    )
-    receipt["state_history"][-1]["at"] = "2026-01-01T00:00:00Z"
     receipt["risk_tier"] = "substantial"
     receipt_path.write_text(json.dumps(receipt))
+
     changed_tier = run_cli(
         tmp_path,
         "checkpoint",
@@ -905,28 +853,13 @@ def test_transition_refuses_clock_regression_and_mutations_refuse_tier_change(tm
         "--run-dir",
         str(run_dir),
         "--current-slice",
-        "draft",
+        "scope",
         "--next-action",
         "stop",
     )
 
-    assert regression.returncode == 1
-    assert "transition timestamp must strictly increase" in regression.stderr
     assert changed_tier.returncode == 1
     assert "risk tier is immutable after init" in changed_tier.stderr
-
-
-def test_transition_refuses_equal_process_timestamp(tmp_path, monkeypatch):
-    run_dir = initialise(tmp_path)
-    receipt = json.loads((run_dir / "RUN.json").read_text())
-    module = load_producer()
-    monkeypatch.setattr(module, "utc_now", lambda: receipt["state_history"][-1]["at"])
-    args = module.build_parser().parse_args([
-        "transition", "--run-dir", str(run_dir), "--to", "scoped",
-    ])
-
-    with pytest.raises(module.ReceiptError, match="must strictly increase"):
-        module.command_transition(args)
 
 
 def test_init_risk_tier_below_derived_requires_approved_override(tmp_path):
@@ -1046,19 +979,11 @@ def test_end_to_end_producer_receipt_passes_independent_validator(tmp_path):
         "--artifact", "intent.md",
     )
     assert checkpoint.returncode == 0, checkpoint.stderr
-    for state in ("scoped", "approved", "executing", "verifying"):
-        transitioned = run_cli(
-            tmp_path, "transition", "--run-dir", str(run_dir), "--to", state,
-        )
-        assert transitioned.returncode == 0, transitioned.stderr
-    transitioned = run_cli(
-        tmp_path, "transition", "--run-dir", str(run_dir), "--to", "reviewing",
-        "--evidence", "tests",
-    )
-    assert transitioned.returncode == 0, transitioned.stderr
     shown = run_cli(tmp_path, "show", "--run-dir", str(run_dir))
     assert shown.returncode == 0
-    assert json.loads(shown.stdout)["status"] == "reviewing"
+    receipt = json.loads(shown.stdout)
+    assert "status" not in receipt
+    assert "state_history" not in receipt
 
     validated = subprocess.run(
         [
@@ -1076,175 +1001,6 @@ def test_end_to_end_producer_receipt_passes_independent_validator(tmp_path):
         check=False,
     )
     assert validated.returncode == 0, validated.stderr + validated.stdout
-
-
-def test_reviewing_refuses_evidence_predating_repair(tmp_path):
-    test_end_to_end_producer_receipt_passes_independent_validator(tmp_path)
-    run_dir = tmp_path / ".agent-run" / "DEL-E2E"
-    for state in ("repairing", "verifying"):
-        transitioned = run_cli(
-            tmp_path, "transition", "--run-dir", str(run_dir), "--to", state,
-        )
-        assert transitioned.returncode == 0, transitioned.stderr
-    receipt = json.loads((run_dir / "RUN.json").read_text())
-    repair_at = receipt["state_history"][-2]["at"]
-
-    refused = run_cli(
-        tmp_path, "transition", "--run-dir", str(run_dir), "--to", "reviewing",
-        "--evidence", "tests",
-    )
-
-    assert refused.returncode == 1
-    assert (
-        f"deterministic gate tests evidence predates repairing transition at {repair_at}"
-        in refused.stderr
-    )
-
-
-def test_reviewing_accepts_evidence_after_repair(tmp_path):
-    test_end_to_end_producer_receipt_passes_independent_validator(tmp_path)
-    run_dir = tmp_path / ".agent-run" / "DEL-E2E"
-    for state in ("repairing", "verifying"):
-        transitioned = run_cli(
-            tmp_path, "transition", "--run-dir", str(run_dir), "--to", state,
-        )
-        assert transitioned.returncode == 0, transitioned.stderr
-    bundle = run_dir / "evidence-after-repair.json"
-    bundle.write_text(
-        '{"schema_version":1,"contract":"deterministic-evidence-bundle","checks":[]}\n'
-    )
-    added = add_artifact(
-        tmp_path, run_dir, "evidence-after-repair",
-        ".agent-run/DEL-E2E/evidence-after-repair.json",
-    )
-    assert added.returncode == 0, added.stderr
-    executed = run_cli(
-        tmp_path, "evidence", "run", "--run-dir", str(run_dir),
-        "--id", "tests-after-repair", "--gate", "tests",
-        "--artifact-id", "evidence-after-repair", "--source", "intent.md",
-        "--", "scripts/check-harness",
-    )
-    assert executed.returncode == 0, executed.stderr
-
-    transitioned = run_cli(
-        tmp_path, "transition", "--run-dir", str(run_dir), "--to", "reviewing",
-        "--evidence", "tests-after-repair",
-    )
-
-    assert transitioned.returncode == 0, transitioned.stderr
-
-
-def test_transition_refuses_adjacent_acceptance_gate_without_required_evidence(tmp_path):
-    test_end_to_end_producer_receipt_passes_independent_validator(tmp_path)
-    run_dir = tmp_path / ".agent-run" / "DEL-E2E"
-
-    refused = run_cli(
-        tmp_path, "transition", "--run-dir", str(run_dir),
-        "--to", "awaiting_acceptance", "--evidence", "tests",
-        "--evidence", "review-1",
-    )
-
-    assert refused.returncode == 1
-    assert "awaiting_acceptance gate is not satisfied" in refused.stderr
-
-
-def test_transition_uses_conditional_evidence_and_risk_review_ladder(tmp_path):
-    run_dir = initialise(tmp_path)
-    module = load_producer()
-    receipt_path = run_dir / "RUN.json"
-    receipt = json.loads(receipt_path.read_text())
-    receipt["profile"] = "document"
-    receipt["artifacts"].append({
-        "id": "page",
-        "path": "intent.md",
-        "media_type": "text/html",
-        "artifact_type": "html",
-        "digest": digest_bytes_for_test((tmp_path / "intent.md").read_bytes()),
-        "class": "canonical",
-        "owner": "delivery-chair",
-        "retention": "project-policy",
-    })
-    receipt["evidence"].append({
-        "id": "render",
-        "kind": "deterministic",
-        "gate": "render",
-        "status": "pass",
-    })
-
-    error = module.lifecycle.transition_gate_error(
-        receipt, "reviewing", {"render"}, vars(module),
-    )
-
-    assert error == "reviewing deterministic gate is not satisfied"
-    receipt["risk_tier"] = "substantial"
-    receipt["reviews"] = [{
-        "role": "targeted",
-        "provider_family": "openai",
-        "status": "pass",
-        "lenses": ["correctness"],
-        "reason": "",
-    }]
-    assert "targeted lenses" in module.lifecycle.review_ladder_error(receipt)
-
-
-def test_transition_refuses_wrong_kind_gate_and_invalid_measure_rows(tmp_path):
-    run_dir = initialise(tmp_path)
-    module = load_producer()
-    receipt = json.loads((run_dir / "RUN.json").read_text())
-    receipt["evidence"] = [
-        {"id": "tests", "kind": "deterministic", "gate": "tests", "status": "pass"},
-        {"id": "wrong-tests", "kind": "human", "gate": "tests", "status": "pass"},
-        {
-            "id": "review-1",
-            "kind": "judgement",
-            "gate": "code-review",
-            "status": "pass",
-        },
-    ]
-    assert module.lifecycle.transition_gate_error(
-        receipt, "reviewing", {"tests", "wrong-tests"}, vars(module),
-    ) == "reviewing deterministic gate is not satisfied"
-    receipt["reviews"] = [{
-        "role": "targeted",
-        "provider_family": "openai",
-        "status": "pass",
-        "evidence_id": "review-1",
-        "lenses": ["correctness"],
-    }]
-    receipt["measures"] = {
-        "outcome": [{
-            "id": "functional-correctness",
-            "status": "pass",
-            "evidence_id": "tests",
-            "evidence_kind": "deterministic",
-            "value": 1,
-            "target": "pass",
-            "aggregation": "single",
-        }, {
-            "id": "extra",
-            "status": "fail",
-            "evidence_id": "tests",
-            "evidence_kind": "deterministic",
-            "value": 0,
-            "target": "pass",
-            "aggregation": "single",
-        }],
-        "trajectory": [{
-            "id": "verification-completion",
-            "status": "pass",
-            "evidence_id": "tests",
-            "evidence_kind": "deterministic",
-            "value": 1,
-            "target": "pass",
-            "aggregation": "single",
-        }],
-    }
-    profile = module.lifecycle.profile_requirements(
-        receipt, module.PROFILE_PATH, module.ReceiptError,
-    )
-    assert not module.lifecycle.measures_gate_ready(
-        receipt, profile, {"tests", "review-1"},
-    )
 
 
 @pytest.mark.parametrize("value", ["nan", "inf", "-inf"])
@@ -1342,7 +1098,7 @@ def test_init_refuses_risk_override_identifier_collisions(tmp_path):
     assert "reserved intent" in artifact_collision.stderr
 
 
-def test_producer_can_reach_validator_compatible_closed_state(tmp_path):
+def test_producer_can_reach_a_validator_compatible_closed_receipt(tmp_path):
     test_end_to_end_producer_receipt_passes_independent_validator(tmp_path)
     run_dir = tmp_path / ".agent-run" / "DEL-E2E"
     measures = {
@@ -1371,24 +1127,16 @@ def test_producer_can_reach_validator_compatible_closed_state(tmp_path):
         "--from", "measures.json",
     )
     assert bound.returncode == 0, bound.stderr
-    awaiting = run_cli(
-        tmp_path, "transition", "--run-dir", str(run_dir),
-        "--to", "awaiting_acceptance", "--evidence", "tests",
-        "--evidence", "review-1",
-    )
-    assert awaiting.returncode == 0, awaiting.stderr
 
-    for evidence_id, gate in (
-        ("acceptance-approval", "human-acceptance"),
-        ("release-approval", "human-release"),
-    ):
-        added = run_cli(
-            tmp_path, "evidence", "human", "--run-dir", str(run_dir),
-            "--id", evidence_id, "--gate", gate, "--artifact-id", "approval",
-            "--approver", "human-owner", "--source", "approval.json",
-        )
-        assert added.returncode == 0, added.stderr
-    empty_observation = {
+    accepted = run_cli(
+        tmp_path, "evidence", "human", "--run-dir", str(run_dir),
+        "--id", "acceptance-approval", "--gate", "human-acceptance",
+        "--artifact-id", "approval", "--approver", "human-owner",
+        "--source", "approval.json",
+    )
+    assert accepted.returncode == 0, accepted.stderr
+    started_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    observation = {
         "status": "active",
         "window": {"kind": "event-count", "minimum": 1},
         "signals": ["task-success"],
@@ -1397,34 +1145,34 @@ def test_producer_can_reach_validator_compatible_closed_state(tmp_path):
         "containment": "revert",
         "privacy": "aggregate",
         "close_condition": "task succeeds",
-        "started_at": "",
+        "started_at": started_at,
         "ended_at": "",
         "observed_events": 0,
         "evidence_ids": [],
     }
-    (tmp_path / "observation.json").write_text(json.dumps(empty_observation))
+    (tmp_path / "observation.json").write_text(json.dumps(observation))
     assert run_cli(
         tmp_path, "bind", "--run-dir", str(run_dir),
         "--section", "observation-plan", "--from", "observation.json",
     ).returncode == 0
-    for state, evidence_id in (
-        ("accepted", "acceptance-approval"),
-        ("awaiting_release", None),
-        ("observing", "release-approval"),
-    ):
-        args = ["transition", "--run-dir", str(run_dir), "--to", state]
-        if evidence_id:
-            args.extend(["--evidence", evidence_id])
-        transitioned = run_cli(tmp_path, *args)
-        assert transitioned.returncode == 0, transitioned.stderr
-
-    receipt = json.loads((run_dir / "RUN.json").read_text())
-    observing_at = receipt["state_history"][-1]["at"]
-    empty_refused = run_cli(
-        tmp_path, "transition", "--run-dir", str(run_dir), "--to", "closed",
+    released = run_cli(
+        tmp_path, "evidence", "human", "--run-dir", str(run_dir),
+        "--id", "release-approval", "--gate", "human-release",
+        "--artifact-id", "approval", "--approver", "human-owner",
+        "--source", "approval.json",
     )
-    assert empty_refused.returncode == 1
-    assert "closed observation gate is not satisfied" in empty_refused.stderr
+    assert released.returncode == 0, released.stderr
+
+    # The plan itself is frozen once release is approved, but the observation
+    # result it records is not.
+    frozen = dict(observation, thresholds={"task-success": {"direction": "gte", "limit": 2}})
+    (tmp_path / "observation.json").write_text(json.dumps(frozen))
+    changed_plan = run_cli(
+        tmp_path, "bind", "--run-dir", str(run_dir),
+        "--section", "observation-plan", "--from", "observation.json",
+    )
+    assert changed_plan.returncode == 1
+    assert "observation gate is already closed" in changed_plan.stderr
 
     measured = run_cli(
         tmp_path, "evidence", "observation", "--run-dir", str(run_dir),
@@ -1438,52 +1186,18 @@ def test_producer_can_reach_validator_compatible_closed_state(tmp_path):
         item["observed_at"] for item in receipt["evidence"]
         if item["id"] == "observed-task-success"
     )
-    empty_observation.update({
+    observation.update({
         "status": "pass",
-        "started_at": observing_at,
         "ended_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         "observed_events": 1,
         "evidence_ids": ["observed-task-success"],
     })
-    assert empty_observation["started_at"] <= observed_at <= empty_observation["ended_at"]
-    (tmp_path / "observation.json").write_text(json.dumps(empty_observation))
+    assert observation["started_at"] <= observed_at <= observation["ended_at"]
+    (tmp_path / "observation.json").write_text(json.dumps(observation))
     assert run_cli(
         tmp_path, "bind", "--run-dir", str(run_dir),
         "--section", "observation-plan", "--from", "observation.json",
     ).returncode == 0
-    receipt = json.loads((run_dir / "RUN.json").read_text())
-    empty_observation["started_at"] = receipt["state_history"][0]["at"]
-    (tmp_path / "observation.json").write_text(json.dumps(empty_observation))
-    assert run_cli(
-        tmp_path, "bind", "--run-dir", str(run_dir),
-        "--section", "observation-plan", "--from", "observation.json",
-    ).returncode == 0
-    early_window = run_cli(
-        tmp_path, "transition", "--run-dir", str(run_dir), "--to", "closed",
-        "--evidence", "observed-task-success",
-    )
-    assert early_window.returncode == 1
-    assert "closed observation gate is not satisfied" in early_window.stderr
-    empty_observation["started_at"] = observing_at
-    empty_observation["thresholds"]["task-success"]["limit"] = float("-inf")
-    (tmp_path / "observation.json").write_text(json.dumps(empty_observation))
-    changed_plan = run_cli(
-        tmp_path, "bind", "--run-dir", str(run_dir),
-        "--section", "observation-plan", "--from", "observation.json",
-    )
-    assert changed_plan.returncode == 1
-    assert "observation lifecycle gate has passed" in changed_plan.stderr
-    empty_observation["thresholds"]["task-success"]["limit"] = 1
-    (tmp_path / "observation.json").write_text(json.dumps(empty_observation))
-    assert run_cli(
-        tmp_path, "bind", "--run-dir", str(run_dir),
-        "--section", "observation-plan", "--from", "observation.json",
-    ).returncode == 0
-    closed = run_cli(
-        tmp_path, "transition", "--run-dir", str(run_dir), "--to", "closed",
-        "--evidence", "observed-task-success",
-    )
-    assert closed.returncode == 0, closed.stderr
 
     validated = subprocess.run(
         [
@@ -1497,14 +1211,23 @@ def test_producer_can_reach_validator_compatible_closed_state(tmp_path):
         check=False,
     )
     assert validated.returncode == 0, validated.stderr + validated.stdout
+    closed = json.loads((run_dir / "RUN.json").read_text())
+    assert closed["human_gates"]["release"]["status"] == "approved"
+    assert closed["observation"]["status"] == "pass"
+    frozen_run = run_cli(
+        tmp_path, "checkpoint", "set", "--run-dir", str(run_dir),
+        "--current-slice", "closed", "--next-action", "none",
+    )
+    assert frozen_run.returncode == 1
+    assert "closed run is immutable" in frozen_run.stderr
 
 
 @pytest.mark.parametrize(
     ("mutation", "expected_error"),
     [
-        ("timestamp-order", "state history timestamps must increase"),
-        ("unknown-evidence", "references unknown evidence ids"),
-        ("state-jump", "invalid lifecycle transition"),
+        ("unknown-field", "declares unknown fields: lifecycle_state"),
+        ("missing-field", "checkpoint is required"),
+        ("wrong-type", "repair_cycles must be an integer, got str"),
         ("artifact-digest", "digest does not match live bytes"),
     ],
 )
@@ -1514,12 +1237,12 @@ def test_hand_mutated_producer_output_fails_independent_validator(
     test_end_to_end_producer_receipt_passes_independent_validator(tmp_path)
     run_path = tmp_path / ".agent-run" / "DEL-E2E" / "RUN.json"
     receipt = json.loads(run_path.read_text())
-    if mutation == "timestamp-order":
-        receipt["state_history"][1]["at"] = receipt["state_history"][0]["at"]
-    elif mutation == "unknown-evidence":
-        receipt["state_history"][-1]["evidence_ids"].append("missing-evidence")
-    elif mutation == "state-jump":
-        receipt["state_history"][1]["state"] = "executing"
+    if mutation == "unknown-field":
+        receipt["lifecycle_state"] = "reviewing"
+    elif mutation == "missing-field":
+        del receipt["checkpoint"]
+    elif mutation == "wrong-type":
+        receipt["repair_cycles"] = "two"
     else:
         receipt["artifacts"][0]["digest"] = "sha256:" + "0" * 64
     run_path.write_text(json.dumps(receipt))
