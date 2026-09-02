@@ -531,6 +531,52 @@ def test_codex_install_projects_instance_custom_skill_without_managed_ownership(
     }
 
 
+def test_claude_directory_link_layout_converts_to_project_custom_skills(tmp_path):
+    """A whole-directory link cannot carry a custom skill, so the install converts it."""
+    config = tmp_path / "claude-config"
+    config.mkdir()
+    (config / "skills").symlink_to(ROOT / "skills", target_is_directory=True)
+    custom_skill = instance_root_for(tmp_path) / "custom-skills" / "local-skill"
+    custom_skill.mkdir(parents=True)
+    (custom_skill / "SKILL.md").write_text(
+        "---\nname: local-skill\ndescription: Instance-owned test skill.\n---\n"
+    )
+
+    result = run("claude", tmp_path, CLAUDE_CONFIG_DIR=str(config))
+
+    assert result.returncode == 0, result.stderr
+    assert "warning: directory-link layout skipped" not in result.stderr
+    target = config / "skills"
+    assert not target.is_symlink()
+    installed = target / "local-skill"
+    assert installed.is_symlink()
+    assert installed.resolve() == custom_skill.resolve()
+    product = {path.parent.name for path in (ROOT / "skills").glob("*/SKILL.md")}
+    assert product <= {path.name for path in target.iterdir()}
+    for name in product:
+        assert (target / name).resolve() == (ROOT / "skills" / name).resolve()
+    manifest = json.loads((config / ".agent-harness-installation.json").read_text())
+    assert manifest["custom"]["local-skill"] == {
+        "source_target": str(custom_skill.resolve())
+    }
+    assert "local-skill" not in manifest["managed"]
+
+
+def test_claude_directory_link_layout_survives_an_install_without_custom_skills(
+    tmp_path,
+):
+    config = tmp_path / "claude-config"
+    config.mkdir()
+    (config / "skills").symlink_to(ROOT / "skills", target_is_directory=True)
+
+    result = run("claude", tmp_path, CLAUDE_CONFIG_DIR=str(config))
+
+    assert result.returncode == 0, result.stderr
+    assert (config / "skills").is_symlink()
+    assert (config / "skills").resolve() == (ROOT / "skills").resolve()
+    assert not (config / ".agent-harness-installation.json").exists()
+
+
 def test_claude_workflow_upgrade_relinks_a_previously_managed_file(tmp_path):
     config = tmp_path / "claude-config"
     first = run("claude", tmp_path, CLAUDE_CONFIG_DIR=str(config))

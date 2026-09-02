@@ -42,26 +42,28 @@ fi
 # Claude installations may intentionally expose the canonical skill tree as
 # one directory-level symlink. Preserve that layout instead of resolving the
 # target into the source tree and treating source directories as unmanaged.
+# One directory-level link has nowhere to hang an instance-owned custom skill,
+# so the first install that carries any converts the layout to per-entry links
+# and then installs normally. The conversion is idempotent: a target that is
+# already per-entry never reaches this branch.
 if [[ -L "$TARGET" ]] \
   && [[ "$(cd "$TARGET" && pwd -P)" == "$(cd "$ROOT/skills" && pwd -P)" ]]; then
+  custom_count=0
   if [[ -n "$CUSTOM_SOURCE" ]]; then
-    run_stdlib "$ROOT/scripts/manage_installation.py" validate-sources \
-      "${manager_args[@]}" >/dev/null
-    skipped_custom=()
     for skill_file in "$CUSTOM_SOURCE"/*/SKILL.md; do
       [[ -f "$skill_file" ]] || continue
-      skipped_custom+=("$(basename "$(dirname "$skill_file")")")
+      custom_count=$((custom_count + 1))
     done
-    if [[ ${#skipped_custom[@]} -gt 0 ]]; then
-      skipped_names=""
-      for name in "${skipped_custom[@]}"; do
-        skipped_names="${skipped_names}${skipped_names:+, }${name}"
-      done
-      echo "warning: directory-link layout skipped custom skills: $skipped_names" >&2
-    fi
   fi
-  echo "skills existing=directory-link target=$TARGET"
-  exit 0
+  if [[ "$custom_count" -eq 0 ]]; then
+    echo "skills existing=directory-link target=$TARGET"
+    exit 0
+  fi
+  run_stdlib "$ROOT/scripts/manage_installation.py" validate-sources \
+    "${manager_args[@]}" >/dev/null
+  run_stdlib "$ROOT/scripts/manage_installation.py" migrate-directory-link \
+    "${manager_args[@]}" --summary
+  echo "skills converted=directory-link custom=$custom_count target=$TARGET"
 fi
 
 run_stdlib "$ROOT/scripts/manage_installation.py" install \

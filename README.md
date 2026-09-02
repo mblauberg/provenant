@@ -94,7 +94,12 @@ installs. Pass `--mcp-clients all` to either one to register all six clients
 instead.
 
 With `--platform all`, installation links skills into both primary clients and
-installs the Claude subagents and workflows. A single-platform install changes
+installs the Claude subagents and workflows. Both clients also receive the
+instance-owned skills in `<instance-root>/custom-skills/`; `scripts/instance_installation.py validate`
+reports how many it will project. A custom skill whose name matches a product
+skill fails the install rather than shadowing it. If a client still exposes the
+product catalogue as one directory-level link, the first install carrying a
+custom skill converts that directory into per-entry links. A single-platform install changes
 only that primary. Every install also writes a managed copy of the thin
 `provenant` command in
 `${PROVENANT_BIN_DIR:-$HOME/.local/bin}`; it warns when that directory is not

@@ -64,8 +64,25 @@ SEEDED_FILES = (
     "config/model-routing.json",
 )
 
+#: Instance-owned third-party skill sources projected beside the product
+#: catalogue (ADR 0019). The installer links them; this module only reports
+#: what is there so an install or validate names the count it will project.
+CUSTOM_SKILLS_DIRECTORY = "custom-skills"
+
 class InstallError(ValueError):
     pass
+
+
+def custom_skill_names(instance_root: Path) -> list[str]:
+    """Name every instance-owned custom skill the installer would project."""
+    directory = Path(instance_root) / CUSTOM_SKILLS_DIRECTORY
+    if not directory.is_dir():
+        return []
+    return sorted(
+        path.parent.name
+        for path in directory.glob("*/SKILL.md")
+        if path.is_file()
+    )
 
 
 def desired_state_path(instance_root: Path) -> Path:
@@ -373,6 +390,7 @@ def validate_install(product_root: Path, instance_root: Path) -> dict[str, Any]:
         "desired_state_state": "existing" if desired is not None else "missing",
         "product_pointer": pointer,
         "seeded": seeded,
+        "custom_skills": custom_skill_names(instance_root),
         "changed": [],
     }
 
@@ -408,6 +426,7 @@ def execute(
                 }
                 for relative in SEEDED_FILES
             ],
+            "custom_skills": custom_skill_names(instance_root),
         }
     if action == "validate":
         return validate_install(product_root, instance_root)
@@ -424,6 +443,7 @@ def execute(
             else read_pointer(instance_root)
         ),
         "seeded": seed_instance_files(product_root, instance_root),
+        "custom_skills": custom_skill_names(instance_root),
     }
 
 
@@ -487,6 +507,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         if missing:
             summary += f" missing={missing}"
+        summary += f" custom-skills={len(result.get('custom_skills', []))}"
         print(f"{summary} root={instance_root}")
     else:
         print(json.dumps(result, indent=2, sort_keys=True))
