@@ -16,9 +16,22 @@ import tempfile
 from typing import Any
 
 
-PRODUCT_ROOT = Path(
-    os.environ.get("AGENT_FABRIC_PRODUCT_ROOT", Path(__file__).resolve().parents[3])
-).expanduser()
+# `scripts/lib/roots.py` is the single resolver for the product root (#754).
+# The fallback loads that one file when this script is run directly by path and
+# the product root is not on `sys.path`: it locates the resolver, it does not
+# decide the root, and it leaves import resolution untouched (#755).
+try:
+    from scripts.lib.roots import product_root
+except ModuleNotFoundError:  # pragma: no cover - direct invocation by path
+    import importlib.util as _roots_util
+    _roots_spec = _roots_util.spec_from_file_location(
+        "provenant_roots", Path(__file__).resolve().parents[3] / "scripts" / "lib" / "roots.py"
+    )
+    _roots_module = _roots_util.module_from_spec(_roots_spec)
+    _roots_spec.loader.exec_module(_roots_module)
+    product_root = _roots_module.product_root
+
+PRODUCT_ROOT = product_root()
 SKILLS_ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -104,7 +117,6 @@ def preflight(
 
 
 def main(argv: list[str] | None = None) -> int:
-    global PRODUCT_ROOT
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("receipt", type=Path)
     parser.add_argument("--workspace-root", type=Path, required=True)
@@ -113,7 +125,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--review-artifact", type=Path, action="append", required=True)
     parser.add_argument("--product-root", type=Path, default=PRODUCT_ROOT)
     args = parser.parse_args(argv)
-    PRODUCT_ROOT = args.product_root.resolve()
+    resolved_product_root = args.product_root.resolve()
     git_evidence.cache_clear()
     try:
         workspace = args.workspace_root.resolve()
@@ -130,7 +142,7 @@ def main(argv: list[str] | None = None) -> int:
         with lock_path.open("r+") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
             run = json.loads(receipt.read_text())
-            preflight(run, receipt, workspace, validator, PRODUCT_ROOT)
+            preflight(run, receipt, workspace, validator, resolved_product_root)
             fail(run.get("profile") != "software", "receipt profile must be software")
             acceptance = run.get("human_gates", {}).get("acceptance", {})
             fail(
@@ -236,7 +248,7 @@ def main(argv: list[str] | None = None) -> int:
                     if not target.exists():
                         os.replace(stage / f"{artifact_id}.json", target)
                 fsync_directory(target_dir)
-                preflight(run, receipt, workspace, validator, PRODUCT_ROOT)
+                preflight(run, receipt, workspace, validator, resolved_product_root)
                 os.replace(staged_receipt, receipt)
                 fsync_directory(receipt.parent)
         print(f"PASS: bound merged software artifact {merge_commit} to {receipt}")

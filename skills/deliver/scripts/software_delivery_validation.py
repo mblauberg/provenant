@@ -8,7 +8,6 @@ from functools import lru_cache
 import hashlib
 import importlib.util
 import json
-import os
 from pathlib import Path
 import re
 import subprocess
@@ -17,9 +16,22 @@ from typing import Any
 
 OID = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
-ROOT = Path(
-    os.environ.get("AGENT_FABRIC_PRODUCT_ROOT", Path(__file__).resolve().parents[3])
-).expanduser()
+# `scripts/lib/roots.py` is the single resolver for the product root (#754).
+# The fallback loads that one file when this script is run directly by path and
+# the product root is not on `sys.path`: it locates the resolver, it does not
+# decide the root, and it leaves import resolution untouched (#755).
+try:
+    from scripts.lib.roots import product_root
+except ModuleNotFoundError:  # pragma: no cover - direct invocation by path
+    import importlib.util as _roots_util
+    _roots_spec = _roots_util.spec_from_file_location(
+        "provenant_roots", Path(__file__).resolve().parents[3] / "scripts" / "lib" / "roots.py"
+    )
+    _roots_module = _roots_util.module_from_spec(_roots_spec)
+    _roots_spec.loader.exec_module(_roots_module)
+    product_root = _roots_module.product_root
+
+ROOT = product_root()
 GIT_ARTIFACT_FIELDS = {
     "id", "git_revision", "media_type", "artifact_type", "class", "owner", "retention",
 }

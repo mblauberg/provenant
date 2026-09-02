@@ -437,6 +437,30 @@ ORCH_FAMILY="$(normalise_family "$ORCH_FAMILY")"
 # Specific failure signatures only. Do not treat any mention of "quota" as a failure.
 fail_sig='(Authentication required|Please sign in|Please( run)? login|not logged in|not authenticated|Unauthorized|insufficient_quota|quota exceeded|rate limit exceeded|usage limit reached)'
 model_fail_sig='(model[^[:cntrl:]]*(unavailable|not available|not found|unsupported|does not exist)|unknown model|capacity|overloaded)'
+# The single product-root derivation in this script (#754). It mirrors the
+# precedence in scripts/lib/roots.py, which a shell script cannot import: an
+# explicit AGENT_FABRIC_PRODUCT_ROOT wins, because a caller who set it knows
+# better than any derivation; then the repository this script physically lives
+# in, so a linked worktree tests its own config; then the checkout layout above
+# skills/<skill>/scripts.
+resolve_product_root() {
+  local derived
+  if [ -n "${AGENT_FABRIC_PRODUCT_ROOT:-}" ]; then
+    printf '%s\n' "$AGENT_FABRIC_PRODUCT_ROOT"
+    return 0
+  fi
+  derived="$(cd "$SCRIPT_DIR" && git rev-parse --show-toplevel 2>/dev/null || true)"
+  if [ -n "$derived" ]; then
+    printf '%s\n' "$derived"
+    return 0
+  fi
+  if [ -d "$SCRIPT_DIR/../../.." ]; then
+    printf '%s\n' "$(CDPATH= cd -- "$SCRIPT_DIR/../../.." && pwd)"
+    return 0
+  fi
+  return 1
+}
+
 require_cmd() {
   local cmd="$1" diag="$2"
   if ! command -v "$cmd" >/dev/null 2>&1; then
@@ -457,13 +481,8 @@ resolve_routing() {
   # The installed `provenant` resolves config from wherever it was installed from,
   # which is not this checkout when the dispatcher runs inside a linked worktree.
   # Pin it to the tree this script actually lives in, so a worktree's config edits
-  # are the ones under test. A caller who has already set the variable knows better
-  # than this derivation, so never override an explicit value.
-  if [ -n "${AGENT_FABRIC_PRODUCT_ROOT:-}" ]; then
-    product_root="$AGENT_FABRIC_PRODUCT_ROOT"
-  else
-    product_root="$(cd "$SCRIPT_DIR" && git rev-parse --show-toplevel 2>/dev/null || true)"
-  fi
+  # are the ones under test.
+  product_root="$(resolve_product_root || true)"
 
   route_args=(--adapter "$tool" --role "$role" --lead-family "$lead_family")
   if [ -n "$task_class" ]; then
@@ -491,19 +510,8 @@ resolve_routing() {
     return $?
   fi
 
-  # Fall back to scripts/model_route.py from product root
-  # Locate product root via git if possible, else try relative to this script
-  if [ -n "$product_root" ]; then
-    if [ -f "$product_root/scripts/model_route.py" ]; then
-      cmd=(python3 "$product_root/scripts/model_route.py" "resolve" "${route_args[@]}")
-      AGENT_FABRIC_PRODUCT_ROOT="$product_root" "${cmd[@]}" 2>>"$diag_file"
-      return $?
-    fi
-  fi
-
-  # Try relative path from script directory (should resolve to product root)
-  if [ -f "$SCRIPT_DIR/../../../scripts/model_route.py" ]; then
-    product_root="$(CDPATH= cd -- "$SCRIPT_DIR/../../.." && pwd)"
+  # Fall back to scripts/model_route.py under the one resolved product root.
+  if [ -n "$product_root" ] && [ -f "$product_root/scripts/model_route.py" ]; then
     cmd=(python3 "$product_root/scripts/model_route.py" "resolve" "${route_args[@]}")
     AGENT_FABRIC_PRODUCT_ROOT="$product_root" "${cmd[@]}" 2>>"$diag_file"
     return $?
