@@ -396,7 +396,8 @@ def test_directory_symlink_to_canonical_skills_is_preserved_without_manifest(tmp
     assert not (platform_home / ".agent-harness-installation.json").exists()
 
 
-def test_directory_symlink_layout_warns_about_skipped_custom_skills(tmp_path):
+def directory_link_fixture(tmp_path: Path, custom_names=()):
+    """A Claude-shaped install: the whole product tree behind one directory link."""
     fixture_root = tmp_path / "agents"
     scripts = fixture_root / "scripts"
     scripts.mkdir(parents=True)
@@ -409,20 +410,31 @@ def test_directory_symlink_layout_warns_about_skipped_custom_skills(tmp_path):
         scripts / "managed_installation_manifest.py",
     )
     shutil.copytree(ROOT / "skills", fixture_root / "skills")
-    custom_source = custom_skill_source(fixture_root)
+    custom_source = fixture_root / "custom-skills"
+    custom_source.mkdir()
+    for name in custom_names:
+        skill = custom_source / name
+        skill.mkdir()
+        (skill / "SKILL.md").write_text(
+            f"---\nname: {name}\ndescription: Instance-owned test skill.\n---\n"
+        )
     platform_home = tmp_path / "claude"
     platform_home.mkdir()
     target = platform_home / "skills"
     target.symlink_to(fixture_root / "skills", target_is_directory=True)
+    return fixture_root, platform_home, target, custom_source
 
-    result = subprocess.run(
-        [
-            str(scripts / "install-skills"),
-            "--target",
-            str(target),
-            "--custom-source",
-            str(custom_source),
-        ],
+
+def run_fixture(fixture_root: Path, target: Path, custom_source: Path | None = None):
+    command = [
+        str(fixture_root / "scripts" / "install-skills"),
+        "--target",
+        str(target),
+    ]
+    if custom_source is not None:
+        command.extend(["--custom-source", str(custom_source)])
+    return subprocess.run(
+        command,
         cwd=fixture_root,
         env={**os.environ, "HARNESS_PYTHON": sys.executable},
         text=True,
@@ -431,11 +443,80 @@ def test_directory_symlink_layout_warns_about_skipped_custom_skills(tmp_path):
         check=False,
     )
 
-    assert result.returncode == 0, result.stderr
-    assert (
-        "warning: directory-link layout skipped custom skills: instance-skill"
-        in result.stderr
+
+def test_directory_link_layout_converts_to_per_entry_to_carry_custom_skills(tmp_path):
+    fixture_root, platform_home, target, custom_source = directory_link_fixture(
+        tmp_path, ["instance-skill"]
     )
+
+    result = run_fixture(fixture_root, target, custom_source)
+
+    assert result.returncode == 0, result.stderr
+    assert "warning" not in result.stderr
+    assert "converted=directory-link" in result.stdout
+    assert not target.is_symlink()
+    assert target.is_dir()
+    product = {path.parent.name for path in (fixture_root / "skills").glob("*/SKILL.md")}
+    assert {path.name for path in target.iterdir()} == product | {SHARED, "instance-skill"}
+    assert all((target / name).is_symlink() for name in product)
+    custom_link = target / "instance-skill"
+    assert custom_link.is_symlink()
+    assert custom_link.resolve() == (custom_source / "instance-skill").resolve()
+    manifest = json.loads(
+        (platform_home / ".agent-harness-installation.json").read_text()
+    )
+    assert "instance-skill" in manifest["custom"]
+    assert "instance-skill" not in manifest["managed"]
+    assert product <= set(manifest["managed"])
+
+
+def test_converted_layout_reinstall_is_idempotent(tmp_path):
+    fixture_root, platform_home, target, custom_source = directory_link_fixture(
+        tmp_path, ["instance-skill"]
+    )
+    assert run_fixture(fixture_root, target, custom_source).returncode == 0
+    manifest = platform_home / ".agent-harness-installation.json"
+    before_links = {
+        path.name: path.lstat().st_mtime_ns for path in target.iterdir()
+    }
+
+    second = run_fixture(fixture_root, target, custom_source)
+
+    assert second.returncode == 0, second.stderr
+    assert "converted=directory-link" not in second.stdout
+    assert "linked=0" in second.stdout
+    assert {
+        path.name: path.lstat().st_mtime_ns for path in target.iterdir()
+    } == before_links
+    assert json.loads(manifest.read_text())["custom"].keys() == {"instance-skill"}
+
+
+def test_converted_layout_prunes_a_custom_link_whose_source_disappeared(tmp_path):
+    fixture_root, platform_home, target, custom_source = directory_link_fixture(
+        tmp_path, ["instance-skill", "second-skill"]
+    )
+    assert run_fixture(fixture_root, target, custom_source).returncode == 0
+    shutil.rmtree(custom_source / "second-skill")
+
+    result = run_fixture(fixture_root, target, custom_source)
+
+    assert result.returncode == 0, result.stderr
+    assert not (target / "second-skill").exists()
+    assert not (target / "second-skill").is_symlink()
+    assert (target / "instance-skill").is_symlink()
+    manifest = json.loads(
+        (platform_home / ".agent-harness-installation.json").read_text()
+    )
+    assert manifest["custom"].keys() == {"instance-skill"}
+
+
+def test_directory_link_layout_without_custom_skills_stays_a_directory_link(tmp_path):
+    fixture_root, platform_home, target, custom_source = directory_link_fixture(tmp_path)
+
+    result = run_fixture(fixture_root, target, custom_source)
+
+    assert result.returncode == 0, result.stderr
+    assert "skills existing=directory-link" in result.stdout
     assert target.is_symlink()
     assert target.resolve() == fixture_root / "skills"
     assert not (platform_home / ".agent-harness-installation.json").exists()
