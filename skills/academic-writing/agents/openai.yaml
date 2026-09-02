@@ -1,4 +1,0 @@
-interface:
-  display_name: Academic Writing
-  short_description: Citation-safe, LaTeX-safe academic prose
-  default_prompt: Use $academic-writing to polish this academic passage while preserving claims, citations, LaTeX, numbers, and technical identifiers.

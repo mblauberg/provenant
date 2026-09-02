@@ -86,7 +86,7 @@ Documentation claims sit in three tiers, and the third is deliberate:
    explicit write envelope. `implement` owns end-to-end delivery and
    verification.
 3. Use a consistent kebab-case capability name. Related writing skills use
-   parallel names: `engineering-writing`, `academic-writing`, `legal-writing`.
+   parallel names: `engineering-writing`, `natural-writing`, `legal-writing`.
 4. Keep portable frontmatter to `name` and `description`. Put provenance in a
    notice and provider UI metadata in a validated sidecar. Metadata and tool
    lists may narrow invocation but never grant authority.
@@ -143,7 +143,7 @@ exception, because an attribution must name the file it covers.
 
 `natural-writing` is the writing hub and single owner of the shared prose
 doctrine (tiered anti-AI taxonomy, Australian-English house style, condense pass
-and claim discipline); `engineering-writing`, `academic-writing` and
+and claim discipline) plus academic prose; `engineering-writing` and
 `legal-writing` keep only their domain overlay and link back to the hub. Change
 the shared doctrine in the hub, not in a domain skill. The hub's
 `skills/natural-writing/scripts/style_lint.py` owns the shared lint vocabulary

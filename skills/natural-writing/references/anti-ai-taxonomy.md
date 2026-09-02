@@ -1,9 +1,10 @@
 # Anti-AI taxonomy (tiered)
 
 `natural-writing` owns this taxonomy for the whole writing family.
-`academic-writing`, `engineering-writing` and `legal-writing` link here for
-the base sweep and add only their own domain overlay (thesis meta-discourse,
-engineering process-language, filing-facing hard bans). Read
+`engineering-writing` and `legal-writing` link here for the base sweep and add
+only their own domain overlay (engineering process-language, filing-facing
+hard bans); the academic overlay (thesis meta-discourse, repo jargon, viva
+register) lives in [academic-prose.md](academic-prose.md). Read
 [patterns.md](patterns.md) first for the decision rule, the research basis,
 and the time-decay warning: treat every item below as a dated editing clue,
 never proof of authorship, and calibrate on clusters and repeated structure,

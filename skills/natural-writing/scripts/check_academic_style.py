@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """Scan academic prose (and LaTeX) for style hazards that are cheap to detect.
 
-Thin wrapper around the shared engine owned by `natural-writing`
-(`skills/natural-writing/scripts/style_lint.py`): this file supplies only the
-academic-specific phrase/pattern overlay (thesis meta-discourse, LaTeX
+Thin wrapper around this skill's shared engine (`style_lint.py`): this file
+supplies only the academic-specific phrase/pattern overlay (thesis meta-discourse, LaTeX
 citation placeholders, unescaped-percent detection) and turns on LaTeX-aware
 span handling so math, verbatim environments, and non-prose commands like
 \\cite/\\label are skipped rather than flagged.
@@ -16,7 +15,7 @@ import re
 import sys
 from pathlib import Path
 
-_STYLE_LINT_PATH = Path(__file__).resolve().parents[2] / "natural-writing" / "scripts" / "style_lint.py"
+_STYLE_LINT_PATH = Path(__file__).resolve().parent / "style_lint.py"
 _spec = importlib.util.spec_from_file_location("style_lint", _STYLE_LINT_PATH)
 assert _spec and _spec.loader
 style_lint = importlib.util.module_from_spec(_spec)

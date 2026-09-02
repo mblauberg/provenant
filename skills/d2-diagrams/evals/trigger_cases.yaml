@@ -9,4 +9,4 @@ cases:
   - {id: q051, relation: negative, prompt: "Draw this relationship as a Graphviz DOT graph.", tags: [no-skill], expected: {primary_skill: null, companion_skills: []}}
   - {id: q052, relation: boundary, prompt: "Create the D2 figure and add its source and rendered asset to the project documentation index.", tags: [composition], expected: {primary_skill: d2-diagrams, companion_skills: [engineering-docs]}}
   - {id: q053, relation: boundary, prompt: "Review this D2 diagram diff source-read-only for semantic and rendering defects.", tags: [composition], expected: {primary_skill: code-review, companion_skills: [d2-diagrams]}}
-  - {id: q054, relation: boundary, prompt: "Create a D2 figure for a journal paper and polish its caption without changing the claim.", tags: [composition], expected: {primary_skill: d2-diagrams, companion_skills: [academic-writing]}}
+  - {id: q054, relation: boundary, prompt: "Create a D2 figure for a journal paper and polish its caption without changing the claim.", tags: [composition], expected: {primary_skill: d2-diagrams, companion_skills: [natural-writing]}}

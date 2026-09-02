@@ -4,7 +4,7 @@
 This checker keeps its own FAIL/WARN severity model and structural checks
 (heading-blank-line, HTML-comment leak tokens, long-sentence detection,
 directory recursion) because they are legal-specific and have no equivalent
-in academic-writing or engineering-writing. It imports the shared word
+in natural-writing or engineering-writing. It imports the shared word
 vocabulary from the `natural-writing`-owned engine
 (`skills/natural-writing/scripts/style_lint.py`) for the regex content that
 used to be hand-duplicated across all three domain checkers (em dash,
