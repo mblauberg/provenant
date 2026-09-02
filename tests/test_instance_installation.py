@@ -520,7 +520,9 @@ def test_the_installer_seeds_a_scratch_instance_root(tmp_path):
     shutil.copytree(ROOT / "config", product / "config", symlinks=True)
     (product / "package.json").write_text(json.dumps({"version": "0.0.1"}) + "\n")
     (product / "AGENTS.md").write_text("# doctrine\n")
-    (product / "config" / "installation.json").unlink()
+    # The product repository does not track a desired state, but a working
+    # checkout of it may carry an untracked one; the copied tree must not.
+    (product / "config" / "installation.json").unlink(missing_ok=True)
     instance_root = tmp_path / "instance"
     instance_root.mkdir()
 
