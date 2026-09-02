@@ -558,6 +558,52 @@ try {
   }
   assert.equal(readFileSync(cancelledMarker, "utf8"), "cancelled\n");
 
+  // An MCP host killed by a signal, rather than by a client disconnect, must
+  // still leave nothing running. The owner record names the host that started
+  // the run, so the smoke can signal the real server process it spawned.
+  const signalledExecutor = await spawnAgent("codex", "signalled-execution-client", {
+    cwd: workspace,
+    productRoot: fakeProduct,
+    env: { HARNESS_PYTHON: fixturePython },
+  });
+  const signalledRun = payload(await signalledExecutor.callTool({
+    name: "fabric_dispatch",
+    arguments: {
+      prompt: "sleep with provider until cancelled",
+      task_id: "signalled-dispatch",
+      adapter: "codex",
+      wait_seconds: 0,
+    },
+  }));
+  assert.equal(signalledRun.status, "running");
+  const signalledProviderPid = resolve(signalledRun.paths.run_dir, "provider.pid");
+  await waitForFile(signalledProviderPid, 10_000);
+  const signalledProvider = Number(readFileSync(signalledProviderPid, "utf8").trim());
+  const ownerRecordPath = resolve(signalledRun.paths.run_dir, "dispatch-owner.json");
+  await waitForFile(ownerRecordPath, 10_000);
+  const ownerRecord = JSON.parse(readFileSync(ownerRecordPath, "utf8"));
+  assert.equal(ownerRecord.schema_version, 1);
+  assert.equal(ownerRecord.owner_pid, signalledRun.pid);
+  assert.equal(ownerRecord.owner_pgid, ownerRecord.owner_pid);
+  assert.equal(ownerRecord.task_id, "signalled-dispatch");
+  assert.ok(Number.isInteger(ownerRecord.host_pid) && ownerRecord.host_pid > 1);
+  const providerAlive = () => {
+    try {
+      process.kill(signalledProvider, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  assert.ok(providerAlive(), "the fixture provider never started");
+  process.kill(ownerRecord.host_pid, "SIGTERM");
+  const providerDeadline = Date.now() + 15_000;
+  while (providerAlive() && Date.now() < providerDeadline) {
+    await new Promise((resolveWait) => setTimeout(resolveWait, 25));
+  }
+  assert.ok(!providerAlive(), "a signalled MCP host left its provider running");
+  await Promise.allSettled([signalledExecutor.close()]);
+
   const batchExecutor = await spawnAgent("codex", "batch-execution-client", {
     cwd: workspace,
     productRoot: fakeProduct,
