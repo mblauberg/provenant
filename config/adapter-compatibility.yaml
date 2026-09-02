@@ -24,8 +24,15 @@ adapters:
       platforms:
         - darwin-arm64
     model_family_constraints:
+      # The families below anthropic are reachable only through an endpoint
+      # profile in `config/model-routing.json`, which points the CLI at a
+      # provider's Anthropic-compatible base URL. Without `--endpoint` the
+      # catalogue's `fixed_model_family` still pins the adapter to anthropic.
       allowed:
         - anthropic
+        - zhipu
+        - moonshot
+        - deepseek
       requires_explicit_model: true
     official_source_url: "https://github.com/anthropics/claude-agent-sdk-typescript"
 

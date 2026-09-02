@@ -3187,3 +3187,118 @@ def test_agy_effort_is_validated_against_the_runtime_model_catalogue(tmp_path):
     result, route = route_for("gemini-9-does-not-exist", "high")
     assert result.returncode != 0
     assert route["status"] == "capability_model_unavailable"
+
+
+ENDPOINT_MODELS = {
+    "zai-glm": "glm-4.7",
+    "moonshot-kimi": "kimi-k2",
+    "deepseek": "deepseek-3.2",
+}
+PRODUCT_CATALOG = str(ROOT / "config" / "model-routing.json")
+
+
+def endpoint_route(monkeypatch, name, *args, token="endpoint-token-fixture"):
+    profile = CATALOG["endpoints"][name]
+    if token is None:
+        monkeypatch.delenv(profile["token_env"], raising=False)
+    else:
+        monkeypatch.setenv(profile["token_env"], token)
+    return resolve(
+        "--adapter", "claude", "--endpoint", name,
+        "--model", ENDPOINT_MODELS[name], "--alias", "flagship", "--role", "worker",
+        "--catalog", PRODUCT_CATALOG, *args,
+    )
+
+
+@pytest.mark.parametrize("name", sorted(ENDPOINT_MODELS))
+def test_endpoint_profile_carries_base_url_and_token_variable_name(monkeypatch, name):
+    profile = CATALOG["endpoints"][name]
+    result, route = endpoint_route(monkeypatch, name)
+
+    assert result.returncode == 0, result.stdout
+    assert route["status"] == "ok"
+    assert route["endpoint_profile"] == name
+    assert route["endpoint_base_url"] == profile["base_url"]
+    assert route["endpoint_base_url"].startswith("https://")
+    assert route["endpoint_token_env"] == profile["token_env"]
+    assert route["model_family"] == profile["model_family"]
+    assert route["resolved_model"] == ENDPOINT_MODELS[name]
+    # The credential is named, never carried: no route field may hold its value.
+    assert "endpoint-token-fixture" not in result.stdout
+
+
+@pytest.mark.parametrize("name", sorted(ENDPOINT_MODELS))
+def test_endpoint_route_reports_no_effort(monkeypatch, name):
+    """These endpoints expose no effort control, so none may be claimed."""
+    result, route = endpoint_route(monkeypatch, name)
+
+    assert result.returncode == 0
+    assert route["effort"] == ""
+    assert route["effort_capability_source"] == "adapter-no-effort-control"
+
+    explicit, explicit_route = endpoint_route(monkeypatch, name, "--effort", "high")
+    assert explicit.returncode != 0
+    assert explicit_route["status"] == "effort_unsupported"
+    assert explicit_route["effort"] == ""
+
+
+def test_endpoint_route_without_its_token_dispatches_nothing(monkeypatch):
+    result, route = endpoint_route(monkeypatch, "zai-glm", token=None)
+
+    assert result.returncode == 2
+    assert route["status"] == "endpoint_token_missing"
+    assert route.get("resolved_model") is None
+    assert route.get("endpoint_base_url") is None
+
+
+@pytest.mark.parametrize(
+    ("name", "adapter", "status"),
+    (
+        ("no-such-endpoint", "claude", "unknown_endpoint"),
+        ("zai-glm", "codex", "endpoint_adapter_unsupported"),
+    ),
+)
+def test_unusable_endpoint_names_fail_closed(monkeypatch, name, adapter, status):
+    monkeypatch.setenv(CATALOG["endpoints"]["zai-glm"]["token_env"], "endpoint-token-fixture")
+    result, route = resolve(
+        "--adapter", adapter, "--endpoint", name, "--model", "glm-4.7",
+        "--alias", "flagship", "--role", "worker", "--catalog", PRODUCT_CATALOG,
+    )
+
+    assert result.returncode == 2
+    assert route["status"] == status
+    assert route.get("resolved_model") is None
+
+
+def test_claude_without_an_endpoint_stays_pinned_to_anthropic(monkeypatch):
+    """The compatibility allowlist admits endpoint families; the catalogue still pins."""
+    monkeypatch.setenv(CATALOG["endpoints"]["zai-glm"]["token_env"], "endpoint-token-fixture")
+    result, route = resolve(
+        "--adapter", "claude", "--model", "glm-4.7", "--alias", "flagship",
+        "--role", "worker", "--catalog", PRODUCT_CATALOG,
+    )
+
+    assert result.returncode == 1
+    assert route["status"] == "adapter_family_mismatch"
+    assert route.get("endpoint_base_url") is None
+
+
+@pytest.mark.parametrize(
+    "damage",
+    ({"base_url": "http://api.z.ai/api/anthropic"}, {"token_env": ""}, {"adapters": "claude"}),
+)
+def test_malformed_endpoint_profile_is_never_routed_against(monkeypatch, tmp_path, damage):
+    catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    catalog["endpoints"]["zai-glm"].update(damage)
+    catalog_path = tmp_path / "model-routing.json"
+    catalog_path.write_text(json.dumps(catalog))
+    monkeypatch.setenv(CATALOG["endpoints"]["zai-glm"]["token_env"], "endpoint-token-fixture")
+
+    result, route = resolve(
+        "--adapter", "claude", "--endpoint", "zai-glm", "--model", "glm-4.7",
+        "--alias", "flagship", "--role", "worker", "--catalog", str(catalog_path),
+    )
+
+    assert result.returncode == 2
+    assert route["status"] == "endpoint_config_invalid"
+    assert route.get("resolved_model") is None

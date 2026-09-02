@@ -409,6 +409,9 @@ resolve_routing() {
   [ -n "$effort" ] && route_args+=(--effort "$effort")
   [ -n "$model_override_tier" ] && route_args+=(--model-override-tier "$model_override_tier")
   [ -n "$capabilities_file" ] && [ -f "$capabilities_file" ] && route_args+=(--capabilities-file "$capabilities_file")
+  # Endpoint profiles are named in the routing catalogue, never configured here:
+  # the caller names one, and the router decides whether it is usable.
+  [ -n "${CF_DISPATCH_ENDPOINT:-}" ] && route_args+=(--endpoint "$CF_DISPATCH_ENDPOINT")
 
   # Try provenant first if available
   if command -v provenant >/dev/null 2>&1; then
@@ -483,6 +486,7 @@ keys = (
     "effort_capability_source", "effort_substitution", "substitution",
     "fallback_model", "catalog_model", "model_selection",
     "model_override_tier", "policy_override", "alias", "reason",
+    "endpoint_profile", "endpoint_base_url", "endpoint_token_env",
 )
 with fields_path.open("wb") as handle:
     for key in keys:
@@ -517,6 +521,9 @@ PY
       policy_override) policy_override="$value";;
       alias) route_alias="$value";;
       reason) route_reason="$value";;
+      endpoint_profile) endpoint_profile="$value";;
+      endpoint_base_url) endpoint_base_url="$value";;
+      endpoint_token_env) endpoint_token_env="$value";;
       *) return 1;;
     esac
   done <"$fields_path"
@@ -531,7 +538,7 @@ agy_has_unsafe_arg() {
 }
 
 run_one() {  # $1 tool $2 model $3 effort $4 private tempdir -> JSON, returns 0/1
-  local tool="$1" model="$2" effort="$3" route_effort_input="$3" tmpdir="$4" raw diag combined clean rc status opath guarantee family endpoint identity effort_substitution substitution requested_model requested_effort effort_source effort_capability_source route_json route_rc capabilities_file fallback_model primary_model catalog_model model_selection policy_override route_risk_tier route_model_override_tier route_alias route_reason agy_status agy_dir agy_prompt_bytes
+  local tool="$1" model="$2" effort="$3" route_effort_input="$3" tmpdir="$4" raw diag combined clean rc status opath guarantee family endpoint identity effort_substitution substitution requested_model requested_effort effort_source effort_capability_source route_json route_rc capabilities_file fallback_model primary_model catalog_model model_selection policy_override route_risk_tier route_model_override_tier route_alias route_reason endpoint_profile endpoint_base_url endpoint_token_env agy_status agy_dir agy_prompt_bytes
   model="$(resolve_model "$tool" "$model")"
   raw="$tmpdir/raw"
   diag="$tmpdir/diag"
@@ -553,6 +560,9 @@ run_one() {  # $1 tool $2 model $3 effort $4 private tempdir -> JSON, returns 0/
   route_risk_tier="$RISK_TIER"
   route_model_override_tier="$MODEL_OVERRIDE_TIER"
   route_reason=""
+  endpoint_profile=""
+  endpoint_base_url=""
+  endpoint_token_env=""
   requested_effort="$effort"
   effort_source=""
   effort_capability_source=""
@@ -639,6 +649,15 @@ run_one() {  # $1 tool $2 model $3 effort $4 private tempdir -> JSON, returns 0/
         claude)
           guarantee="enforced"
           local claude_verifier_system_prompt
+          # `run_one` is always invoked in a command-substitution subshell, so the
+          # endpoint credentials below reach the `claude` child and die with it.
+          # The token is read from the named variable here and passed in the
+          # environment, never on a command line and never into a record.
+          if [ -n "$endpoint_base_url" ] && [ -n "$endpoint_token_env" ]; then
+            export ANTHROPIC_BASE_URL="$endpoint_base_url"
+            ANTHROPIC_AUTH_TOKEN="$(printenv "$endpoint_token_env" || true)"
+            export ANTHROPIC_AUTH_TOKEN
+          fi
           claude_verifier_system_prompt="You are a non-interactive independent verifier. You may use only Read, Grep, and Glob to inspect the requested workspace. Fabric MCP tools are not exposed to this direct verifier invocation. Do not mutate files, use shell commands, call Task/tool/function abstractions, or launch subagents. Return only the file-backed verification result requested by the supplied prompt; the caller owns any Fabric correlation."
           if ! require_cmd claude "$diag"; then
             status="tool_not_found"

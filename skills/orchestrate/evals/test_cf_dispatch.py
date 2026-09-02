@@ -290,6 +290,7 @@ def run_dispatch_with_stub(
     role="reviewer",
     extra_args=None,
     provenant_stub=None,
+    extra_env=None,
 ):
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
@@ -301,6 +302,7 @@ def run_dispatch_with_stub(
         out = tmp / "out.txt"
         # PATH precedence keeps the checkout's stubs first.
         env = fabric_free_env()
+        env.update(extra_env or {})
         env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
         command = [
                 str(SCRIPT),
@@ -2535,3 +2537,36 @@ if __name__ == "__main__":
     test_run_dir_init_force_flag_only_creates_final_gate()
     test_run_dir_init_force_does_not_clobber_existing_manifest()
     print("cf_dispatch behaviour tests: PASS")
+
+
+ENDPOINT_STUB = """\
+    #!/usr/bin/env bash
+    cat >/dev/null
+    printf 'base=%s token=%s\n' "${ANTHROPIC_BASE_URL:-unset}" "${ANTHROPIC_AUTH_TOKEN:-unset}"
+"""
+
+
+def test_named_endpoint_reaches_the_claude_process_environment():
+    result, record, output = run_dispatch_with_stub(
+        ENDPOINT_STUB,
+        role="other-primary",
+        extra_args=["--model", "glm-4.7"],
+        extra_env={"CF_DISPATCH_ENDPOINT": "zai-glm", "ZAI_API_KEY": "endpoint-token-fixture"},
+    )
+
+    assert result.returncode == 0, result.output
+    assert record["status"] == "ok"
+    assert record["model_family"] == "zhipu"
+    assert record["resolved_model"] == "glm-4.7"
+    # These endpoints expose no effort control, so the dispatch carries none.
+    assert record["effort"] == ""
+    assert output.strip() == "base=https://api.z.ai/api/anthropic token=endpoint-token-fixture"
+
+
+def test_claude_without_a_named_endpoint_keeps_the_default_anthropic_environment():
+    result, record, output = run_dispatch_with_stub(ENDPOINT_STUB, role="other-primary")
+
+    assert result.returncode == 0, result.output
+    assert record["status"] == "ok"
+    assert record["model_family"] == "anthropic"
+    assert output.strip() == "base=unset token=unset"
