@@ -322,3 +322,35 @@ def test_both_call_paths_raise_the_same_refusal_class(producer, checkpoint, tmp_
     assert type(from_checkpoint.value) is type(from_producer.value)
     assert type(from_checkpoint.value) is producer.ReceiptError
     assert isinstance(from_checkpoint.value, producer.ReceiptError)
+
+
+# Regression guard, added after the fact rather than characterised up front.
+# The first relocation computed the risk policy path once at module load. That
+# is safe while the invariants live inside a script the caller reloads, and
+# unsafe once they live in a shared module that stays cached in `sys.modules`
+# for the life of the process: the first importer's product root would be
+# frozen in for every later caller. `test_product_root_single_resolver` caught
+# it. This pins the shared module directly, which that test does not reach.
+def test_the_risk_policy_is_resolved_against_the_current_product_root(
+    monkeypatch, tmp_path,
+):
+    from _shared import delivery_run_invariants as invariants
+
+    policy = json.loads((ROOT / "config" / "risk-policy.json").read_text())
+    configured = tmp_path / "config"
+    configured.mkdir()
+    (configured / "risk-policy.json").write_text(json.dumps(policy))
+
+    monkeypatch.setenv("AGENT_FABRIC_PRODUCT_ROOT", str(tmp_path))
+
+    assert invariants.risk_policy_path() == configured / "risk-policy.json"
+    assert invariants.load_risk_policy() == policy
+
+    # And a configured root with no policy must refuse, not silently fall back
+    # to the one the module was first imported under.
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    monkeypatch.setenv("AGENT_FABRIC_PRODUCT_ROOT", str(empty))
+    with pytest.raises(invariants.ReceiptError) as raised:
+        invariants.load_risk_policy()
+    assert str(raised.value).startswith("risk policy is unreadable")

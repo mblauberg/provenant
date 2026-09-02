@@ -32,8 +32,20 @@ import _shared.workspace_paths as paths
 from _shared.roots import product_root
 from _shared.run_gates import run_closed
 
-RISK_POLICY_PATH = product_root() / "config" / "risk-policy.json"
 RISKS = ("routine", "substantial", "crucial", "terminal")
+
+
+def risk_policy_path() -> Path:
+    """Resolve the risk policy against the currently configured product root.
+
+    Resolved per call rather than once at module load. This module is imported
+    by two skills and then stays cached in `sys.modules` for the life of the
+    process, so a module-level constant would freeze whichever root was
+    configured when the first importer loaded it, and a later caller under a
+    different `AGENT_FABRIC_PRODUCT_ROOT` would silently read the wrong policy.
+    Freezing it here regressed the #754 property; this is the fix (#755).
+    """
+    return product_root() / "config" / "risk-policy.json"
 
 
 class ReceiptError(ValueError):
@@ -73,7 +85,7 @@ def ensure_allowed_artifact_target(
 
 def load_risk_policy() -> dict[str, Any]:
     try:
-        policy = json.loads(RISK_POLICY_PATH.read_text())
+        policy = json.loads(risk_policy_path().read_text())
     except (OSError, json.JSONDecodeError) as exc:
         raise ReceiptError(f"risk policy is unreadable: {exc}") from exc
     if (

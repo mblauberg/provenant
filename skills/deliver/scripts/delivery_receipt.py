@@ -53,7 +53,7 @@ import _shared.delivery_run_invariants as invariants
 # `implement` checkpoint writer, and the reverse.
 ReceiptError = invariants.ReceiptError
 RISKS = invariants.RISKS
-RISK_POLICY_PATH = invariants.RISK_POLICY_PATH
+RISK_POLICY_PATH = invariants.risk_policy_path()
 digest_bytes = invariants.digest_bytes
 _utc = invariants._utc
 _reject_future_timestamp = invariants._reject_future_timestamp
