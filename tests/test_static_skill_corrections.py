@@ -39,10 +39,6 @@ def test_release_and_frontend_source_changes_keep_the_current_lifecycle_owner_pr
     }
     assert route("skills/release/evals/trigger_cases.yaml", "q207") == legal_send_route
     assert route("skills/legal-writing/evals/trigger_cases.yaml", "q142") == legal_send_route
-    assert route("skills/playwright/evals/trigger_cases.yaml", "q167") == {
-        "primary_skill": "implement",
-        "companion_skills": ["ui-ux-design"],
-    }
 
 
 def test_caveman_is_explicit_instead_of_reloading_the_global_terse_default():

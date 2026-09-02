@@ -595,6 +595,76 @@ def existing_attempt_number(task_dir: Path) -> int:
     return max(numbers, default=0) + 1
 
 
+ACCESS_MODES = ("read_only", "worktree_write")
+WORKTREE_WRITER_LOCK = "provenant-dispatch-writer.lock"
+WORKTREE_WRITE_ADAPTERS = ("claude", "codex")
+
+
+class WorktreeLeaseError(ValueError):
+    """The requested writer worktree cannot be owned exclusively."""
+
+
+def _git_path(worktree: Path, which: str) -> Path | None:
+    """Resolve one absolute Git path for a worktree, or None when it is not one."""
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(worktree), "rev-parse", "--path-format=absolute", which],
+            capture_output=True, text=True, timeout=30, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if completed.returncode != 0:
+        return None
+    value = completed.stdout.strip()
+    return Path(value) if value else None
+
+
+def resolve_writer_worktree(worktree: Path) -> Path:
+    """Return the resolved root of a Git worktree the caller may write inside."""
+    try:
+        resolved = worktree.expanduser().resolve(strict=True)
+    except OSError as exc:
+        raise WorktreeLeaseError(f"worktree is not a readable directory: {worktree}") from exc
+    if not resolved.is_dir():
+        raise WorktreeLeaseError(f"worktree is not a directory: {resolved}")
+    top = _git_path(resolved, "--show-toplevel")
+    if top is None:
+        raise WorktreeLeaseError(f"worktree is not inside a Git repository: {resolved}")
+    try:
+        if top.resolve() != resolved:
+            raise WorktreeLeaseError(f"worktree must be the root of a Git worktree: {resolved}")
+    except OSError as exc:
+        raise WorktreeLeaseError(f"worktree root could not be resolved: {resolved}") from exc
+    return resolved
+
+
+def acquire_worktree_lease(worktree: Path):
+    """Hold the one-writer lease for a worktree, or refuse a concurrent writer."""
+    git_dir = _git_path(worktree, "--git-dir")
+    if git_dir is None or not git_dir.is_dir():
+        raise WorktreeLeaseError(f"worktree has no usable Git directory: {worktree}")
+    lock_path = git_dir / WORKTREE_WRITER_LOCK
+    try:
+        handle = lock_path.open("a+")
+    except OSError as exc:
+        raise WorktreeLeaseError(f"cannot open the worktree writer lease: {exc}") from exc
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        handle.close()
+        raise WorktreeLeaseError(f"another writer already owns this worktree: {worktree}") from exc
+    return handle
+
+
+def release_worktree_lease(handle) -> None:
+    if handle is None:
+        return
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    finally:
+        handle.close()
+
+
 def build_command(
     args: argparse.Namespace, prompt_path: Path, result_path: Path,
     evidence_dir: Path | None = None,
@@ -621,6 +691,8 @@ def build_command(
         ("--reviewer-id", args.reviewer_id),
         ("--model", args.model),
         ("--effort", args.effort),
+        ("--access-mode", args.access_mode),
+        ("--worktree", str(args.worktree) if args.worktree else ""),
     ):
         if value:
             command.extend((flag, value))
@@ -865,6 +937,24 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
         git_evidence_source = args.git_evidence.expanduser()
         if not git_evidence_source.is_absolute():
             git_evidence_source = workspace / git_evidence_source
+    if args.access_mode == "worktree_write":
+        # The writable route stays an explicit, ordinary-intent request bound to
+        # one worktree. Assurance work keeps the read-only guarantee it certifies.
+        if args.worktree is None:
+            return fail(run_dir, "worktree_required", "worktree_write access requires --worktree")
+        if args.intent != "ordinary":
+            return fail(run_dir, "worktree_write_intent_denied", "worktree_write access requires ordinary intent")
+        if args.tool not in WORKTREE_WRITE_ADAPTERS:
+            return fail(
+                run_dir, "worktree_write_adapter_unsupported",
+                f"worktree_write access is unsupported for adapter: {args.tool}",
+            )
+        try:
+            args.worktree = resolve_writer_worktree(args.worktree)
+        except WorktreeLeaseError as exc:
+            return fail(run_dir, "worktree_invalid", str(exc))
+    elif args.worktree is not None:
+        return fail(run_dir, "worktree_not_applicable", "--worktree requires --access-mode worktree_write")
     if not CF_DISPATCH.is_file() or not os.access(CF_DISPATCH, os.X_OK):
         return fail(run_dir, "adapter_unavailable", f"provider adapter is missing or not executable: {CF_DISPATCH}")
 
@@ -933,8 +1023,16 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
         "risk_tier": args.risk_tier or "",
         "model_override_tier": args.model_override_tier or "",
         "reviewer_id": args.reviewer_id or "",
+        "access_mode": args.access_mode,
+        "worktree": str(args.worktree) if args.worktree else "",
     }
     workspace_observation = workspace_identity(workspace)
+    worktree_lease = None
+    if args.access_mode == "worktree_write" and args.worktree is not None:
+        try:
+            worktree_lease = acquire_worktree_lease(args.worktree)
+        except WorktreeLeaseError as exc:
+            return fail(run_dir, "worktree_busy", str(exc))
     started_at = now()
     started = time.monotonic()
     observed_exit = False
@@ -1051,6 +1149,8 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                     process_error = "cancelled"
     except OSError as exc:
         process_error = str(exc)
+    finally:
+        release_worktree_lease(worktree_lease)
 
     finished_at = now()
     adapter: dict[str, Any] = {}
@@ -1252,6 +1352,14 @@ def parser() -> argparse.ArgumentParser:
         help="explicit special-model selection; independent of lifecycle risk metadata",
     )
     root.add_argument("--reviewer-id")
+    root.add_argument(
+        "--access-mode", choices=ACCESS_MODES, default="read_only",
+        help="read_only (default) or worktree_write for a worker that owns a worktree",
+    )
+    root.add_argument(
+        "--worktree", type=Path,
+        help="Git worktree root the writer owns exclusively; requires worktree_write",
+    )
     root.add_argument("--effort")
     root.add_argument(
         "--timeout", "--timeout-seconds", dest="timeout_seconds", type=timeout_value,

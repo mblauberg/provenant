@@ -1,7 +1,7 @@
 schema_version: 1
 dataset_id: skill-portfolio-routing-holdout-20260719-v6
 split: current-catalogue-holdout
-catalogue_owner_count: 32
+catalogue_owner_count: 26
 cases:
   - id: m01
     category: requirements-before-build
@@ -50,7 +50,7 @@ cases:
     expected:
       primary_skill: code-review
       required_companion_skills: []
-      allowed_companion_skills: [typescript-clean-code]
+      allowed_companion_skills: [refactor]
   - id: m07
     category: structural-simplification
     critical: true
@@ -66,7 +66,7 @@ cases:
     expected:
       primary_skill: ui-ux-design
       required_companion_skills: []
-      allowed_companion_skills: [code-review, playwright, react-performance, web-stack-conventions]
+      allowed_companion_skills: [code-review, engineering-docs]
   - id: m09
     category: skill-quality-diagnosis
     critical: true

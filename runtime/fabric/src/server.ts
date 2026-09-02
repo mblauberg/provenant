@@ -170,20 +170,19 @@ server.registerTool(
     }, (wait_seconds ?? 0) * 1000, signal)),
 );
 
+// The whole routing surface: who runs it, which route, and how much access it
+// gets. Assurance selectors are absent rather than accepted and ignored, and the
+// schemas are strict, so a removed parameter is a typed input error.
 const routeInputSchema = {
   adapter: z.string().min(1).optional().describe("provider adapter; defaults to the current Fabric seat"),
   alias: z.string().min(1).optional().describe("route alias; defaults to workhorse"),
-  task_class: z.string().min(1).optional(),
-  model: z.string().min(1).optional(),
-  role: z.string().min(1).optional().describe("worker role; defaults to worker"),
-  effort: z.string().min(1).optional(),
-  orchestrator_family: z.string().min(1).optional(),
-  risk_tier: z.string().min(1).optional(),
-  model_override_tier: z.enum(["routine", "substantial", "crucial", "terminal"]).optional(),
-  reviewer_id: z.string().min(1).optional(),
+  mode: z.enum(["read_only", "worktree_write"]).optional()
+    .describe("read_only (default), or worktree_write with the worktree the worker owns"),
+  worktree: z.string().min(1).optional()
+    .describe("Git worktree root the worker owns exclusively; requires mode worktree_write"),
 };
 
-const batchTaskSchema = z.object({
+const batchTaskSchema = z.strictObject({
   id: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u).optional(),
   prompt: z.string().optional(),
   prompt_file: z.string().min(1).optional(),
@@ -195,17 +194,19 @@ server.registerTool(
   "fabric_dispatch",
   {
     description:
-      "Start one ordinary configured-provider task. Run custody is automatic and full prompt, " +
-      "result and diagnostics stay in named files. The response is compact; set wait_seconds to " +
-      "0 for immediate start or up to 55 for a terminal result and actual route when it finishes.",
-    inputSchema: {
+      "Start one ordinary configured-provider task: the prompt, the adapter and alias that route " +
+      "it, and the access mode it runs under. Run custody is automatic and full prompt, result and " +
+      "diagnostics stay in named files. Reads are read_only; a worker that must write takes mode " +
+      "worktree_write with a worktree it owns exclusively. The response is compact; set wait_seconds " +
+      "to 0 for immediate start or up to 55 for a terminal result and actual route when it finishes.",
+    inputSchema: z.strictObject({
       prompt: z.string().optional(),
       prompt_file: z.string().min(1).optional(),
       task_id: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u).optional(),
       timeout_seconds: z.number().positive().finite().optional(),
       wait_seconds: z.number().int().min(0).max(MAX_WAIT_SECONDS).optional(),
       ...routeInputSchema,
-    },
+    }),
   },
   async (input, { signal }) => reply(await dispatchConfiguredProvider(input, who, signal)),
 );
@@ -215,13 +216,14 @@ server.registerTool(
   {
     description:
       "Start a fixed ordinary batch of 1-64 configured-provider tasks with concurrency capped at 8. " +
-      "The existing batch owner keeps partial results and rejects shared-writer batches. Full output " +
-      "stays in named files; set wait_seconds to 0 for immediate start or up to 55 to await completion.",
-    inputSchema: {
+      "Tasks share the dispatch surface: prompt, adapter, alias and access mode. The batch owner keeps " +
+      "partial results and rejects two writer tasks naming one worktree. Full output stays in named " +
+      "files; set wait_seconds to 0 for immediate start or up to 55 to await completion.",
+    inputSchema: z.strictObject({
       tasks: z.array(batchTaskSchema).min(1).max(64),
       concurrency: z.number().int().min(1).max(8).optional(),
       wait_seconds: z.number().int().min(0).max(MAX_WAIT_SECONDS).optional(),
-    },
+    }),
   },
   async (input, { signal }) => reply(await dispatchConfiguredBatch(input, who, signal)),
 );

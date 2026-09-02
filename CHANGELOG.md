@@ -116,7 +116,7 @@ The current pre-release tree includes:
 - Raised the OpenAI worker route from `medium` to `high` effort via
   `openai.role_effort_defaults.worker.workhorse`, completing the Luna reorder.
   Moving `gpt-5.6-luna` to the front of `aliases.workhorse` on its own bought
-  Luna at `medium`, which `docs/model-preferences.md` had already identified as
+  Luna at `medium`, which `docs/model-dossier.md` had already identified as
   a downgrade rather than the intended trade, and was the stated reason the
   array had been left alone. The raise is scoped to the OpenAI family rather
   than applied to the `legwork` task class, so Anthropic and Google workhorse
@@ -264,7 +264,7 @@ The current pre-release tree includes:
   `--add-dir <primary>/.git` grant that fixes it.
 - Replaced the claim that Codex model discovery is impossible headlessly.
   `codex models` is not a subcommand, but `codex debug models` works headlessly
-  and is already what `codex_capabilities.py` shells out to.
+  and is already what the Codex row of `capabilities.py` shells out to.
 - Prevented `scripts/configure-fabric-mcp.py` from crashing under Python
   3.14 when its standard-output stream is already closed (#396).
 - Accepted a readable SQLite database plus WAL source set without SHM, while

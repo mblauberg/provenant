@@ -11,12 +11,12 @@ Detailed provider events and usage remain local run-owned evidence.
 
 | Dataset | Planned schedule | Result | Disposition |
 |---|---:|---|---|
-| [Current 32-owner holdout](routing-holdout.yaml) | 18 cases x 2 families x 3 trials | Not run | Catalogue holdout only; no current evaluation protocol has been frozen. |
+| [Current 26-owner holdout](routing-holdout.yaml) | 18 cases x 2 families x 3 trials | Not run | Catalogue holdout only; no current evaluation protocol has been frozen. |
 
 The current holdout names the live consolidated owners `ui-ux-design`,
 `skill-craft` and `autopilot`. It also tests the positive `setup-repo` trigger
 against the negative boundary for ordinary mechanics in an already-configured
-repository. Its 32-owner count is checked against `skills/*/SKILL.md` by the
+repository. Its 26-owner count is checked against `skills/*/SKILL.md` by the
 live catalogue tests; it is not a rewrite of the frozen protocol.
 
 The [frozen protocol](routing-protocol.json) remains evaluation v7's original
@@ -25,7 +25,7 @@ daemon-era route. It is retained as planned-unexecuted historical evidence.
 
 No semantic result file exists because no provider-backed model attempt started.
 The semantic holdout remains provider-dependent and not run. A deliberate
-current run must freeze a 32-owner protocol for the direct-provider batch path
+current run must freeze a 26-owner protocol for the direct-provider batch path
 and retain the actual route metadata. Do not reuse v7's retired
 bootstrap-authority or provider-action assumptions.
 
@@ -54,7 +54,7 @@ and [predecessor result](predecessor/routing-result-20260714.json) preserve the
 original binding to commit `1ddfe24858b362decb1c507b87a466df26d205eb` at
 `docs/evals/skill-portfolio-2026`. They evaluated retired owner names including
 `frontend-review`, `skill-audit`, `skill-authoring` and `autonomous-lab`; they
-do not establish current 32-owner routing behaviour.
+do not establish current 26-owner routing behaviour.
 Gemini 3.1 Pro High through `agy` and Grok 4.5 XHigh through `cursor-agent`
 each completed three no-retry trials in that predecessor run.
 

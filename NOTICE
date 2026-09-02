@@ -30,15 +30,3 @@ component ledgers at `skills/ui-ux-design/evals/provenance_components.yaml`
 Impeccable's separate `ios.md` and `android.md` platform references are not
 included in this distribution, so their upstream third-party notice is not
 reproduced as an attribution for this component.
-
-================================================================================
-Microsoft Playwright CLI (Apache License 2.0)
-================================================================================
-
-The `skills/playwright/` skill includes material derived from the Microsoft
-playwright-cli repository (path `skills/playwright-cli/SKILL.md`), adapted for
-this harness with an added wrapper script and local reference guides.
-
-  Original work:   https://github.com/microsoft/playwright-cli
-  Copyright:       Copyright (c) Microsoft Corporation.
-  Licence text:    LICENSES/playwright-cli-APACHE-2.0.txt

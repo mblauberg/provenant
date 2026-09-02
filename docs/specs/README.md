@@ -17,3 +17,4 @@ described. Fabric is now small enough to be its own documentation: see
 
 - [Adaptive agent harness lifecycle](harness/lifecycle.md)
 - [Progressive-disclosure refactor](harness/disclosure-refactor.md)
+- [Configurable multi-provider execution core](harness/provider-execution-core.md)
