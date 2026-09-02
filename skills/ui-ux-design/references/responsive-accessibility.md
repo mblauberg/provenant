@@ -24,8 +24,8 @@ scope; record each as tested, not tested, or not applicable.
 
 Test actual colour pairs, non-colour status cues, visible focus, semantic
 structure, accessible names, keyboard operation, forced colours, reduced
-motion, and equivalent alternatives. Route current WCAG and platform-version
-claims to `web-stack-conventions`; this method does not certify full WCAG
+motion, and equivalent alternatives. Check current WCAG and platform-version
+claims against the published standard; this method does not certify full WCAG
 conformance or assistive-technology coverage.
 
 Emulation is useful evidence but does not reproduce every browser chrome,

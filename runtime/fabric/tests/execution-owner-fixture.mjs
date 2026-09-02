@@ -150,7 +150,7 @@ if (owner === "run_controls.py") {
         record.route = {
           adapter: value("--adapter"),
           provider_family: value("--adapter"),
-          resolved_model: value("--model") ?? value("--alias") ?? value("--task-class"),
+          resolved_model: value("--alias"),
           execution_intent: "ordinary",
         };
       }
@@ -179,7 +179,7 @@ if (owner === "run_controls.py") {
       adapter: value("--adapter"),
       provider_family: value("--adapter"),
       model_family: "fixture",
-      resolved_model: value("--model") ?? value("--alias") ?? value("--task-class"),
+      resolved_model: value("--alias"),
       endpoint_provider: value("--adapter"),
       execution_intent: "ordinary",
     };
@@ -226,7 +226,7 @@ if (owner === "run_controls.py") {
         taskRecord.route = {
           adapter: task.adapter,
           provider_family: task.adapter,
-          resolved_model: task.model ?? task.alias ?? task.task_class,
+          resolved_model: task.alias,
           execution_intent: "ordinary",
         };
       }
@@ -323,7 +323,7 @@ if (owner === "run_controls.py") {
       route: {
         adapter: task.adapter,
         provider_family: task.adapter,
-        resolved_model: task.model ?? task.alias ?? task.task_class,
+        resolved_model: task.alias,
         execution_intent: "ordinary",
       },
     };

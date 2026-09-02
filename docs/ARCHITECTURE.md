@@ -241,10 +241,7 @@ Frontend authority is similarly split: `ui-ux-design`'s design/make branch
 supplies authorised design mutation methods inside `implement`, while its
 review branch owns read-only UX, visual, accessibility and responsive
 evidence. `scope` owns the
-design decision and `engineering-docs` owns canonical placement. `playwright`,
-`web-stack-conventions` and
-`react-performance` provide tool or standards evidence without taking over the
-UI finding contract. `caveman` is a presentation overlay only; it cannot narrow
+design decision and `engineering-docs` owns canonical placement. `caveman` is a presentation overlay only; it cannot narrow
 evidence, authority, high-stakes clarity or an artifact's domain-writing rules.
 
 `release` promotes one digest- or Git-revision-bound, user-accepted artifact through a separately
@@ -425,7 +422,13 @@ import. A per-entry layout links and receipt-tracks that library like any skill,
 so an installed target root is a sufficient import root. A whole-directory
 projection already exposes it and keeps no manifest at all.
 Instance-owned `custom-skills/` entries join the per-entry projection without
-becoming product-managed manifest entries. Their machine-local link records
+becoming product-managed manifest entries. A whole-directory link has nowhere
+to hang one, so the first install that carries any custom skill converts that
+target, once, into per-entry links for the product catalogue and the custom
+entries together, and writes the receipt the per-entry layout already keeps. A
+target with no custom skill keeps the whole-directory link. Later installs see
+a per-entry layout and reconcile it normally, so the conversion is idempotent
+and a custom link is retired when its source disappears. Their machine-local link records
 contain source paths but no content digest: installation discovers names and
 links directories without validating third-party content. Product resources
 used by a linked skill remain addressed through `AGENTS_HOME`, which must name

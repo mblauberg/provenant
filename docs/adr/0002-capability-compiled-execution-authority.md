@@ -62,7 +62,7 @@ the local pre-release state is reset — no dual parser is retained.
   effects via the existing `ExternalEffectService` model).
 - The first write pilot provider is chosen by containment evidence, not
   preference; the other stays read-only until it independently passes.
-- The [capability-compiled execution authority
-  effort](../efforts/EFFORT-capability-profiles.md) is the compact current route
-  from the standalone specifications to [issue
-  #22](https://github.com/mblauberg/provenant/issues/22).
+- [Issue #22](https://github.com/mblauberg/provenant/issues/22) is the current
+  route from the standalone specifications to this work. The former
+  `docs/efforts/EFFORT-capability-profiles.md` route map is historical and is
+  reachable at the `docs-archive-2026-09-02` tag.

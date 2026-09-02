@@ -41,7 +41,7 @@ flowchart TB
     U(["User request"]) --> LOOP["Delivery loop<br/>scope · implement · verify · review"]
     LOOP --> OUT(["Scoped, verified,<br/>independently reviewed change"])
     H["HARNESS.md — the constitution<br/>authority · lifecycle · review pressure"] -. "sets the rules" .-> LOOP
-    SK["Skills library — 32 Agent Skills<br/>one procedure per task, loaded on match"] -. "supplies the procedure" .-> LOOP
+    SK["Skills library — 26 Agent Skills<br/>one procedure per task, loaded on match"] -. "supplies the procedure" .-> LOOP
     F["Cross-provider dispatch<br/>Claude Code and Codex review each other;<br/>Fabric coordinates and can start existing dispatch owners"] -. "runs and reviews the work" .-> LOOP
     classDef out fill:#1f6f43,stroke:#4fd08a,color:#ffffff,stroke-width:2px
     class OUT out
@@ -50,7 +50,7 @@ flowchart TB
 - **Harness:** [`HARNESS.md`](HARNESS.md) is the constitution. It sets
   authority, the delivery lifecycle, and how much review pressure each risk tier
   owes, and stays small so it can be read every session.
-- **Skills:** the <!--skills-->32<!--/skills--> Agent Skills are task-specific
+- **Skills:** the <!--skills-->26<!--/skills--> Agent Skills are task-specific
   procedures, one folder with a `SKILL.md` each. Only the one-line descriptions
   sit in permanent context; a full body loads only when the task matches it.
 - **Fabric:** messages, shared tasks and activity between agents working on one
@@ -94,7 +94,12 @@ installs. Pass `--mcp-clients all` to either one to register all six clients
 instead.
 
 With `--platform all`, installation links skills into both primary clients and
-installs the Claude subagents and workflows. A single-platform install changes
+installs the Claude subagents and workflows. Both clients also receive the
+instance-owned skills in `<instance-root>/custom-skills/`; `scripts/instance_installation.py validate`
+reports how many it will project. A custom skill whose name matches a product
+skill fails the install rather than shadowing it. If a client still exposes the
+product catalogue as one directory-level link, the first install carrying a
+custom skill converts that directory into per-entry links. A single-platform install changes
 only that primary. Every install also writes a managed copy of the thin
 `provenant` command in
 `${PROVENANT_BIN_DIR:-$HOME/.local/bin}`; it warns when that directory is not
@@ -268,19 +273,18 @@ steering; it does not provide wake, callback or completion delivery.
 
 ## Skill library
 
-The full <!--skills-->32<!--/skills-->-skill catalogue, grouped by area:
+The full <!--skills-->26<!--/skills-->-skill catalogue, grouped by area:
 
 <!-- skill-catalogue:start -->
 <details>
-<summary>All 32 skills</summary>
+<summary>All 26 skills</summary>
 
 | Area | Skills |
 |---|---|
 | Delivery | [`session`](skills/session/SKILL.md), [`scope`](skills/scope/SKILL.md), [`grill-me`](skills/grill-me/SKILL.md), [`deliver`](skills/deliver/SKILL.md), [`implement`](skills/implement/SKILL.md), [`tdd`](skills/tdd/SKILL.md), [`refactor`](skills/refactor/SKILL.md), [`diagnose`](skills/diagnose/SKILL.md), [`code-review`](skills/code-review/SKILL.md), [`evaluate`](skills/evaluate/SKILL.md), [`release`](skills/release/SKILL.md), [`retrospect`](skills/retrospect/SKILL.md), [`work-map`](skills/work-map/SKILL.md), [`setup-repo`](skills/setup-repo/SKILL.md) |
 | Orchestration | [`orchestrate`](skills/orchestrate/SKILL.md), [`autopilot`](skills/autopilot/SKILL.md) |
 | Writing and documentation | [`engineering-docs`](skills/engineering-docs/SKILL.md), [`engineering-writing`](skills/engineering-writing/SKILL.md), [`academic-writing`](skills/academic-writing/SKILL.md), [`legal-writing`](skills/legal-writing/SKILL.md), [`natural-writing`](skills/natural-writing/SKILL.md) |
-| Design and diagrams | [`ui-ux-design`](skills/ui-ux-design/SKILL.md), [`prototype`](skills/prototype/SKILL.md), [`d2-diagrams`](skills/d2-diagrams/SKILL.md), [`uml-diagrams`](skills/uml-diagrams/SKILL.md) |
-| Web engineering | [`playwright`](skills/playwright/SKILL.md), [`react-performance`](skills/react-performance/SKILL.md), [`tanstack-query`](skills/tanstack-query/SKILL.md), [`typescript-clean-code`](skills/typescript-clean-code/SKILL.md), [`web-stack-conventions`](skills/web-stack-conventions/SKILL.md) |
+| Design and diagrams | [`ui-ux-design`](skills/ui-ux-design/SKILL.md), [`prototype`](skills/prototype/SKILL.md), [`d2-diagrams`](skills/d2-diagrams/SKILL.md) |
 | Harness development | [`skill-craft`](skills/skill-craft/SKILL.md) |
 | Presentation | [`caveman`](skills/caveman/SKILL.md) |
 
@@ -292,9 +296,14 @@ The full <!--skills-->32<!--/skills-->-skill catalogue, grouped by area:
 - [`Architecture`](docs/ARCHITECTURE.md): system structure and design rationale.
 - [`Specifications`](docs/specs/README.md): the component contracts.
 - [`Research`](docs/research/README.md): evidence and owners.
+- [`Skill portfolio evaluation`](docs/evals/skill-portfolio-2026/README.md): the retained routing evidence.
 - [`Maintenance`](MAINTAINING.md): how the repository is changed and governed.
 - [`Security`](SECURITY.md): private vulnerability reporting.
 - [GitHub issues](https://github.com/mblauberg/provenant/issues): normal feedback and change proposals.
+
+Historical archives, effort route maps, handoffs and superseded evaluation
+bundles were pruned from the working tree; they stay reachable at the
+`docs-archive-2026-09-02` tag.
 
 Legal: [MIT licence](LICENSE) · [Notices](NOTICE) ·
 [Third-party notices](THIRD_PARTY_NOTICES.md) ·

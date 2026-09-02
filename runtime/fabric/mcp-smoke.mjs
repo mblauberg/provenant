@@ -288,13 +288,13 @@ try {
     name: "fabric_dispatch",
     arguments: {
       prompt: "inspect the fixture",
-      model: "gpt-fixture",
+      alias: "workhorse",
       wait_seconds: 5,
     },
   }));
   assert.equal(dispatched.status, "succeeded");
   assert.equal(dispatched.route.adapter, "codex");
-  assert.equal(dispatched.route.resolved_model, "gpt-fixture");
+  assert.equal(dispatched.route.resolved_model, "workhorse");
   assert.match(readFileSync(dispatched.paths.result, "utf8"), /fixture result for: inspect the fixture/);
   assert.ok(dispatched.paths.run_dir.startsWith(resolve(realpathSync(workspace), ".agent-run")));
   assert.doesNotMatch(JSON.stringify(dispatched), /fixture result for: inspect the fixture/);
@@ -302,7 +302,26 @@ try {
     resolve(dispatched.paths.run_dir, "dispatch_run.py.invocation.json"), "utf8",
   ));
   assert.equal(invocation.cwd, realpathSync(workspace));
-  assert.ok(invocation.argv.includes("gpt-fixture"));
+  assert.ok(invocation.argv.includes("workhorse"));
+  // The reduced surface always states the access mode and defaults it to read_only.
+  assert.equal(invocation.argv[invocation.argv.indexOf("--access-mode") + 1], "read_only");
+  assert.ok(!invocation.argv.includes("--worktree"));
+
+  const writer = payload(await executor.callTool({
+    name: "fabric_dispatch",
+    arguments: {
+      prompt: "inspect the fixture",
+      mode: "worktree_write",
+      worktree: workspace,
+      wait_seconds: 5,
+    },
+  }));
+  assert.equal(writer.status, "succeeded");
+  const writerInvocation = JSON.parse(readFileSync(
+    resolve(writer.paths.run_dir, "dispatch_run.py.invocation.json"), "utf8",
+  ));
+  assert.equal(writerInvocation.argv[writerInvocation.argv.indexOf("--access-mode") + 1], "worktree_write");
+  assert.equal(writerInvocation.argv[writerInvocation.argv.indexOf("--worktree") + 1], workspace);
 
   // The Python selector may borrow the primary checkout's environment for a
   // linked worktree, but inherited Git redirects must not steer that lookup to
@@ -333,7 +352,7 @@ try {
   });
   const redirectedDispatch = payload(await redirectedExecutor.callTool({
     name: "fabric_dispatch",
-    arguments: { prompt: "ignore foreign Git redirects", model: "gpt-fixture", wait_seconds: 5 },
+    arguments: { prompt: "ignore foreign Git redirects", wait_seconds: 5 },
   }));
   assert.equal(redirectedDispatch.status, "succeeded");
   assert.equal(existsSync(foreignMarker), false);
@@ -344,8 +363,8 @@ try {
       concurrency: 2,
       wait_seconds: 5,
       tasks: [
-        { id: "luna-one", prompt: "first", adapter: "codex", model: "gpt-5.6-luna" },
-        { id: "luna-two", prompt: "second", adapter: "codex", model: "gpt-5.6-luna" },
+        { id: "luna-one", prompt: "first", adapter: "codex", alias: "scout" },
+        { id: "luna-two", prompt: "second", adapter: "codex", alias: "scout" },
       ],
     },
   }));
@@ -354,8 +373,8 @@ try {
   assert.equal(batched.concurrency, 2);
   assert.deepEqual(batched.counts, { succeeded: 2 });
   assert.deepEqual(batched.tasks.map((task) => task.route.resolved_model), [
-    "gpt-5.6-luna",
-    "gpt-5.6-luna",
+    "scout",
+    "scout",
   ]);
   assert.ok(batched.tasks.every((task) => task.message === undefined && task.stderr === undefined));
   assert.equal(JSON.parse(readFileSync(
@@ -368,9 +387,26 @@ try {
     arguments: { tasks: [{ id: "invalid", adapter: "codex" }] },
   }));
   assert.equal(readdirSync(resolve(workspace, ".agent-run")).length, runCount);
+  // Removed assurance selectors are typed input errors, not silently ignored.
+  for (const removed of [{ model: "gpt-fixture" }, { task_class: "review" }, { role: "reviewer" },
+    { effort: "high" }, { orchestrator_family: "openai" }, { risk_tier: "crucial" },
+    { model_override_tier: "crucial" }, { reviewer_id: "reviewer-1" }]) {
+    await expectToolError(executor.callTool({
+      name: "fabric_dispatch",
+      arguments: { prompt: "removed parameter", ...removed },
+    }));
+    await expectToolError(executor.callTool({
+      name: "fabric_batch",
+      arguments: { tasks: [{ id: "removed", prompt: "removed parameter", adapter: "codex", ...removed }] },
+    }));
+  }
   await expectToolError(executor.callTool({
     name: "fabric_dispatch",
-    arguments: { prompt: "invalid route", alias: "workhorse", model: "duplicate" },
+    arguments: { prompt: "writer without a worktree", mode: "worktree_write" },
+  }));
+  await expectToolError(executor.callTool({
+    name: "fabric_dispatch",
+    arguments: { prompt: "worktree without the writer mode", worktree: workspace },
   }));
   assert.equal(readdirSync(resolve(workspace, ".agent-run")).length, runCount);
 
@@ -577,7 +613,6 @@ try {
         prompt: `delayed dispatch ${kind}`,
         task_id: taskId,
         adapter: "codex",
-        model: "gpt-fixture",
         wait_seconds: 0,
       },
     }));
@@ -605,7 +640,7 @@ try {
       name: "fabric_batch",
       arguments: {
         wait_seconds: 0,
-        tasks: [{ id: taskId, prompt: `delayed batch ${kind}`, adapter: "codex", model: "gpt-fixture" }],
+        tasks: [{ id: taskId, prompt: `delayed batch ${kind}`, adapter: "codex", alias: "workhorse" }],
       },
     }));
     assert.equal(response.status, "running");
@@ -672,7 +707,6 @@ try {
     arguments: {
       prompt: "exercise the real dispatch owner",
       adapter: "unsupported-fixture",
-      model: "fixture-model",
       wait_seconds: 10,
     },
   }));
@@ -687,8 +721,8 @@ try {
       concurrency: 2,
       wait_seconds: 10,
       tasks: [
-        { id: "real-one", prompt: "first", adapter: "unsupported-fixture", model: "fixture-model" },
-        { id: "real-two", prompt: "second", adapter: "unsupported-fixture", model: "fixture-model" },
+        { id: "real-one", prompt: "first", adapter: "unsupported-fixture" },
+        { id: "real-two", prompt: "second", adapter: "unsupported-fixture" },
       ],
     },
   }));
@@ -704,7 +738,6 @@ try {
     arguments: {
       prompt: "force a timeout before result",
       adapter: "claude",
-      model: "claude-opus-4-6",
       timeout_seconds: 1,
       wait_seconds: 10,
     },
@@ -737,7 +770,6 @@ try {
       prompt: "cancel the real owner during startup",
       task_id: "real-cancel",
       adapter: "claude",
-      model: "claude-opus-4-6",
       wait_seconds: 0,
     },
   }));

@@ -155,9 +155,15 @@ fabric_batch
 ```
 
 `fabric_dispatch` accepts one inline prompt or prompt file. `fabric_batch`
-accepts 1–64 fixed tasks with concurrency capped at eight. Both default to the
-current provider seat, the `workhorse` route and the `worker` role. They create
-the run directory automatically, delegate to `dispatch_run.py` or
+accepts 1–64 fixed tasks with concurrency capped at eight. Both carry the same
+three routing parameters and nothing else: `adapter`, `alias` and `mode`, with
+`worktree` when the mode is `worktree_write`. Assurance selectors are absent
+rather than accepted and ignored, both schemas are strict, so a removed
+parameter is a typed input error, and intent is always ordinary. Both default to
+the current provider seat, the `workhorse` route, the `worker` role and
+`read_only` access. A worker that must write takes `mode: "worktree_write"` with
+a `worktree` it owns exclusively; two writer tasks may never name one worktree.
+They create the run directory automatically, delegate to `dispatch_run.py` or
 `batch_run.py`, and return compact status, route and absolute artifact paths;
 full prompts, results and diagnostics remain file-backed. `wait_seconds: 0`
 returns immediately, while values through 55 wait within one MCP call. Immediate
