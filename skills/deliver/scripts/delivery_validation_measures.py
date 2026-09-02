@@ -11,6 +11,29 @@ from delivery_validation_common import (
     _load_bound_json, _mapping, _utc, fail, Invalid,
 )
 
+
+def _verify_nested_artifacts(receipt: dict[str, Any], receipt_dir: Path, index: int) -> None:
+    """Bind an evaluation receipt's own artifacts to their live bytes."""
+    base = receipt_dir.resolve()
+    for position, raw in enumerate(_list(receipt.get("artifacts", []), f"evaluation {index}.artifacts")):
+        item = _mapping(raw, f"evaluation {index}.artifacts[{position}]")
+        name = item.get("id") or position
+        path = item.get("path")
+        if not isinstance(path, str) or not path:
+            continue
+        digest = item.get("digest")
+        _digest(digest, f"evaluation {index} artifact {name} digest")
+        try:
+            nested = (base / path).resolve(strict=True)
+            nested.relative_to(base)
+            actual = "sha256:" + hashlib.sha256(nested.read_bytes()).hexdigest()
+        except (OSError, ValueError) as exc:
+            raise Invalid(
+                f"evaluation {index} artifact {name} is unreadable or outside the receipt directory: {exc}",
+            ) from exc
+        fail(actual != digest, f"evaluation {index} artifact {name} digest mismatch")
+
+
 def _validate_measures_assurance(
     run: dict[str, Any], profile: dict[str, Any], evidence: dict[str, dict[str, Any]],
     artifacts: dict[str, dict[str, Any]], *, required: bool,
@@ -134,13 +157,17 @@ def _validate_measures_assurance(
         receipt = _load_bound_json(raw_receipt, f"evaluation {index} artifact")
         fail(
             receipt.get("evaluation_id") != evaluation_id,
-            f"evaluation {index} artifact must carry the bound evaluation_id",
+            f"evaluation {index} evaluation_id does not match expected_evaluation_id",
         )
         fail(
-            _mapping(receipt.get("plan"), f"evaluation {index}.plan").get("digest")
-            not in (None, plan_digest),
-            f"evaluation {index} artifact plan digest does not match its binding",
+            _mapping(receipt.get("decision"), f"evaluation {index}.decision").get("enclosing_delivery_run_id") != run["run_id"],
+            f"evaluation {index} decision.enclosing_delivery_run_id does not match expected_delivery_run_id",
         )
+        fail(
+            _mapping(receipt.get("plan"), f"evaluation {index}.plan").get("digest") != plan_digest,
+            f"evaluation {index} plan.digest does not match expected_plan_digest",
+        )
+        _verify_nested_artifacts(receipt, target.parent, index)
         expected_receipt_status = {
             "complete": "pass", "failed": "fail", "incomplete": "incomplete",
         }[binding_status]
