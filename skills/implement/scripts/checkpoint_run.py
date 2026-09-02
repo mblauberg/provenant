@@ -13,6 +13,13 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+# A deliberate reach across a skill boundary: the run-state invariants
+# `ensure_immutable_risk` and `ensure_run_open` belong to the delivery receipt
+# owner, and re-implementing them here would let the two drift. The `deliver`
+# catalogue entry is therefore a hard dependency of this script. Relocating
+# those invariants into `_shared` would remove the reach, but they close over
+# most of `delivery_receipt`, so that is a refactor of the receipt owner and
+# not a path change (#755).
 DELIVERY_SCRIPTS = str(Path(__file__).resolve().parents[2] / "deliver" / "scripts")
 if DELIVERY_SCRIPTS not in sys.path:
     sys.path.insert(0, DELIVERY_SCRIPTS)
