@@ -584,7 +584,7 @@ run_one() {  # $1 tool $2 model $3 effort $4 private tempdir -> JSON, returns 0/
       case "$tool:$status" in
         codex:capability_discovery_failed)
           capabilities_file="$tmpdir/codex-capabilities.json"
-          if "$SCRIPT_DIR/codex_capabilities.py" \
+          if "$SCRIPT_DIR/capabilities.py" codex \
             --out "$capabilities_file" >>"$diag" 2>&1; then
             route_json="$(resolve_routing "$tool" "$MODEL_ALIAS" "$ROUTE_ROLE" "$ORCH_FAMILY" "$diag" "$requested_model" "$route_effort_input" "$MODEL_OVERRIDE_TIER" "$capabilities_file" "$TASK_CLASS")"
             route_rc=$?
@@ -598,7 +598,7 @@ run_one() {  # $1 tool $2 model $3 effort $4 private tempdir -> JSON, returns 0/
           ;;
         agy:ok|agy:model_required_for_broker)
           capabilities_file="$tmpdir/agy-capabilities.json"
-          if "$SCRIPT_DIR/agy_capabilities.py" \
+          if "$SCRIPT_DIR/capabilities.py" agy \
             --out "$capabilities_file" >>"$diag" 2>&1; then
             route_json="$(resolve_routing "$tool" "$MODEL_ALIAS" "$ROUTE_ROLE" "$ORCH_FAMILY" "$diag" "$requested_model" "$route_effort_input" "$MODEL_OVERRIDE_TIER" "$capabilities_file" "$TASK_CLASS")"
             route_rc=$?
@@ -615,7 +615,7 @@ run_one() {  # $1 tool $2 model $3 effort $4 private tempdir -> JSON, returns 0/
         && [ "$status" = "task_class_capability_unverified" ] \
         && [ -n "$model" ] && [ -n "$requested_effort" ]; then
         capabilities_file="$tmpdir/claude-capabilities.json"
-        if "$SCRIPT_DIR/claude_capabilities.py" --out "$capabilities_file" \
+        if "$SCRIPT_DIR/capabilities.py" claude --out "$capabilities_file" \
           --alias "$model" --effort "$requested_effort" >>"$diag" 2>&1; then
           route_json="$(resolve_routing "$tool" "$MODEL_ALIAS" "$ROUTE_ROLE" "$ORCH_FAMILY" "$diag" "$requested_model" "$route_effort_input" "$MODEL_OVERRIDE_TIER" "$capabilities_file" "$TASK_CLASS")"
           route_rc=$?

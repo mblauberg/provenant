@@ -372,7 +372,7 @@ def test_checker_canonicalises_the_macos_var_alias(tmp_path):
 def test_dispatchers_use_the_stable_product_command_and_local_skill_helpers():
     dispatcher = (ROOT / "skills" / "orchestrate" / "scripts" / "cf_dispatch.sh").read_text()
     assert 'resolve_routing' in dispatcher  # tries provenant, falls back to model_route.py
-    assert '"$SCRIPT_DIR/codex_capabilities.py"' in dispatcher
+    assert '"$SCRIPT_DIR/capabilities.py" codex' in dispatcher
     assert '-c service_tier="default"' in dispatcher
     assert "AGENTS_ROOT" not in dispatcher
     assert "HARNESS_ROOT" not in dispatcher

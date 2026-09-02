@@ -264,7 +264,7 @@ The current pre-release tree includes:
   `--add-dir <primary>/.git` grant that fixes it.
 - Replaced the claim that Codex model discovery is impossible headlessly.
   `codex models` is not a subcommand, but `codex debug models` works headlessly
-  and is already what `codex_capabilities.py` shells out to.
+  and is already what the Codex row of `capabilities.py` shells out to.
 - Prevented `scripts/configure-fabric-mcp.py` from crashing under Python
   3.14 when its standard-output stream is already closed (#396).
 - Accepted a readable SQLite database plus WAL source set without SHM, while

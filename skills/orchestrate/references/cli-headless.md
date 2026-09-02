@@ -50,7 +50,7 @@ The receipt's resolved `effort` is authoritative for the adapter invocation.
 selects a model. The rare configured special-model route uses the independent
 `--model-override-tier` option and records that value separately.
 GPT-5.6 efforts are capability-gated per model. The Codex execution adapter
-captures `codex debug models` through `codex_capabilities.py` and supplies the
+captures `codex debug models` through `capabilities.py codex` and supplies the
 snapshot to the resolver. The ChatGPT-subscription Codex route resolves an
 explicit model from runtime capability evidence, uses the dated catalogue for
 candidate order and audit context, records that ID as `resolved_model` and
@@ -65,13 +65,13 @@ unsupported requests fail as
 using the declared fallback order over runtime-supported efforts at or below
 the request, or fail as `no_effort_available` when none exists.
 Claude task-class routing captures one alias-and-effort capability through
-`claude_capabilities.py`. The producer requires logged-in `claude.ai`
+`capabilities.py claude`. The producer requires logged-in `claude.ai`
 subscription auth and runs a bounded `--safe-mode`, no-tools,
 no-session-persistence canary. It retains only scrubbed auth class, requested
 alias/effort and the matching runtime model; helper-model usage and account
 identifiers are not retained. The canary has a small provider cost, so callers
 may reuse its file only inside the resolver's five-minute freshness window.
-For Agy, the dispatcher performs an initial route check, runs `agy_capabilities.py`
+For Agy, the dispatcher performs an initial route check, runs `capabilities.py agy`
 when required, then resolves the final route. Task-class selection chooses from
 the adapter's configured preferred families and fresh
 runtime list inside the resolver; a failed probe cannot be labelled as Agy
@@ -186,7 +186,7 @@ bearing and were measured against agy 1.1.10 on 2026-08-05, not read from help:
   material goes in through `--add-dir`.
 - **Model and effort are separate flags.** A bare family id exits 1 asking for
   `--effort`, and efforts are per model: `gemini-3.1-pro` offers only low and
-  high. `agy_capabilities.py` captures the runtime list so a route validates
+  high. `capabilities.py agy` captures the runtime list so a route validates
   against the installed CLI instead of a dated catalogue.
 
 Never pass `--dangerously-skip-permissions`. The CLI's own denial message
