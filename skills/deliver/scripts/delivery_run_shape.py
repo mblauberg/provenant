@@ -49,11 +49,14 @@ FIELD_TYPES: dict[str, tuple[type | None, ...]] = {
     "checkpoint": (dict,),
     "degradation": (dict, None),
     "project_policy": (dict,),
+    "software_delivery": (dict,),
 }
 
-# `fabric_relationships` predates the flat receipt and `project_policy` is only
-# present when a project binds an overlay, so both stay optional.
-OPTIONAL_FIELDS = frozenset({"fabric_relationships", "project_policy"})
+# `fabric_relationships` predates the flat receipt; `project_policy` and
+# `software_delivery` appear only for the runs that bind them.
+OPTIONAL_FIELDS = frozenset({
+    "fabric_relationships", "project_policy", "software_delivery",
+})
 REQUIRED_FIELDS = frozenset(FIELD_TYPES) - OPTIONAL_FIELDS
 KNOWN_FIELDS = frozenset(FIELD_TYPES)
 

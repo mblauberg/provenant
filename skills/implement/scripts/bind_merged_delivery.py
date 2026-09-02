@@ -132,7 +132,11 @@ def main(argv: list[str] | None = None) -> int:
             run = json.loads(receipt.read_text())
             preflight(run, receipt, workspace, validator, PRODUCT_ROOT)
             fail(run.get("profile") != "software", "receipt profile must be software")
-            fail(run.get("status") != "awaiting_acceptance", "receipt must remain awaiting_acceptance while merge evidence is bound")
+            acceptance = run.get("human_gates", {}).get("acceptance", {})
+            fail(
+                acceptance.get("status") == "approved",
+                "merge evidence must be bound before human acceptance is recorded",
+            )
             fail(run.get("software_delivery") is not None, "receipt already has a software_delivery binding")
 
             pr = github(f"repos/{args.repository}/pulls/{args.pr_number}")

@@ -494,11 +494,9 @@ def command_init(args: argparse.Namespace) -> dict[str, Any]:
         "artifact": intent_relative,
         "digest": intent_digest,
         "decision_owner": authority.get("approved_by") or "human-maintainer",
-        "approval": {
-            "status": "approved",
-            "approver": authority.get("approved_by") or "",
-            "evidence": "intent-approval",
-        },
+        # The flat receipt records approval only once the approving evidence
+        # exists, so init cannot self-certify its own intent.
+        "approval": {"status": "pending", "approver": "", "evidence": ""},
     }
     run["design"]["artifact_id"] = "intent"
     run["design"]["digest"] = intent_digest

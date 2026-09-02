@@ -41,25 +41,16 @@ def write_accepted_document_delivery(tmp_path, status="awaiting_release"):
     delivery["human_gates"]["acceptance"] = {
         "status": "approved", "approver": "human", "evidence": "acceptance-approval",
     }
-    delivery["state_history"].extend([
-        {"state": "accepted", "at": "2026-07-10T00:09:00Z", "evidence_ids": ["acceptance-approval"]},
-        {"state": "awaiting_release", "at": "2026-07-10T00:10:00Z", "evidence_ids": ["acceptance-approval"]},
-    ])
     if status == "observing":
         delivery["human_gates"]["release"] = {
             "status": "approved", "approver": "human", "evidence": "release-approval",
         }
-        delivery["state_history"].append({
-            "state": "observing", "at": "2026-07-10T00:11:00Z",
-            "evidence_ids": ["release-approval"],
-        })
         delivery["observation"]["status"] = "active"
     delivery["checkpoint"].update({
         "current_slice": "observing" if status == "observing" else "awaiting-release",
         "next_action": "observe promotion" if status == "observing" else "await release authority",
         "in_flight": [],
     })
-    delivery["status"] = status
     (tmp_path / "RUN.json").write_text(json.dumps(delivery))
     return delivery
 
@@ -299,7 +290,7 @@ def test_terminal_promotion_requires_release_gate_and_active_observation(tmp_pat
     delivery = write_accepted_document_delivery(tmp_path)
     receipt = complete_receipt()
     bind_accepted_artifact(receipt, delivery)
-    assert "terminal promotion requires canonical observing state and approved release gate" in MODULE.validate(
+    assert "terminal promotion requires an approved canonical release gate" in MODULE.validate(
         receipt, "complete", workspace_root=tmp_path,
     )
 

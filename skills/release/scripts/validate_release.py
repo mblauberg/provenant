@@ -204,18 +204,15 @@ def accepted_artifact_errors(
     if delivery.get("profile") == "software" and not delivery.get("software_delivery"):
         errors.append("software promotion requires the canonical post-merge delivery binding")
 
-    if gate == "ready" and delivery.get("status") != "awaiting_release":
-        errors.append("artifact.acceptance_receipt must be awaiting_release at the ready gate")
-    if gate == "complete" and (
-        delivery.get("status") not in ("observing", "closed")
-        or mapping(mapping(delivery.get("human_gates")).get("release")).get("status") != "approved"
-    ):
-        errors.append("terminal promotion requires canonical observing state and approved release gate")
+    gates = mapping(delivery.get("human_gates"))
+    accepted = mapping(gates.get("acceptance")).get("status") == "approved"
+    released = mapping(gates.get("release")).get("status") == "approved"
+    if gate == "ready" and (not accepted or released):
+        errors.append("artifact.acceptance_receipt must be accepted and not yet released at the ready gate")
+    if gate == "complete" and not released:
+        errors.append("terminal promotion requires an approved canonical release gate")
     observation_status = mapping(delivery.get("observation")).get("status")
-    if gate == "complete" and (
-        (delivery.get("status") == "observing" and observation_status not in ("active", "pass"))
-        or (delivery.get("status") == "closed" and observation_status != "pass")
-    ):
+    if gate == "complete" and observation_status not in ("active", "pass"):
         errors.append("terminal promotion requires active or passing canonical observation")
 
     delivered = next(

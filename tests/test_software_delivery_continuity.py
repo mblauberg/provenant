@@ -132,22 +132,18 @@ def accept_for_release(run: dict, *, observing: bool = False) -> None:
     run["human_gates"]["acceptance"] = {
         "status": "approved", "approver": "human", "evidence": "acceptance-approval",
     }
-    run["state_history"].extend([
-        {"state": "accepted", "at": "2026-07-10T00:09:00Z", "evidence_ids": ["acceptance-approval"]},
-        {"state": "awaiting_release", "at": "2026-07-10T00:10:00Z", "evidence_ids": ["acceptance-approval"]},
-    ])
-    run["status"] = "awaiting_release"
     run["checkpoint"].update({"current_slice": "awaiting-release", "next_action": "await release authority"})
     if observing:
         run["human_gates"]["release"] = {
             "status": "approved", "approver": "human", "evidence": "release-approval",
         }
-        run["state_history"].append({
-            "state": "observing", "at": "2026-07-10T00:11:00Z", "evidence_ids": ["release-approval"],
-        })
-        run["status"] = "observing"
         run["checkpoint"].update({"current_slice": "observing", "next_action": "observe release"})
         run["observation"]["status"] = "active"
+
+
+def before_acceptance(run: dict) -> None:
+    """The binder runs before human acceptance is recorded."""
+    run["human_gates"]["acceptance"] = {"status": "pending", "approver": "", "evidence": ""}
 
 
 def test_merged_software_binding_rejects_reviewed_tree_drift(tmp_path):
@@ -509,6 +505,7 @@ def test_binder_materialises_the_post_merge_chain_without_advancing_acceptance(t
         item for item in run["security"]["artifact_surfaces"] if item["artifact_id"] != "merged-source"
     ]
     del run["software_delivery"]
+    before_acceptance(run)
     for artifact_id in generated - {"merged-source"}:
         (tmp_path / "evidence" / f"{artifact_id}.json").unlink()
     receipt = tmp_path / "RUN.json"
@@ -570,7 +567,6 @@ def test_binder_materialises_the_post_merge_chain_without_advancing_acceptance(t
     results = [first.communicate(), second.communicate()]
     assert sorted((first.returncode, second.returncode)) == [0, 1], results
     bound = json.loads(receipt.read_text())
-    assert bound["status"] == "awaiting_acceptance"
     assert bound["human_gates"]["acceptance"]["status"] == "pending"
     merged_source = next(item for item in bound["artifacts"] if item["id"] == "merged-source")
     assert merged_source["media_type"] == "application/x-git-revision"
