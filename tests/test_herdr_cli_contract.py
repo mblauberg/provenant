@@ -4,7 +4,7 @@ import subprocess
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
-CHECKER = ROOT / "skills" / "orchestrate" / "evals" / "check_herdr_cli.py"
+CHECKER = ROOT / "skills" / "orchestrate" / "scripts" / "check_herdr_cli.py"
 REFERENCE = ROOT / "skills" / "orchestrate" / "references" / "herdr-panes.md"
 
 ROOT_HELP = """\
