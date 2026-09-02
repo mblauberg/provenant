@@ -9,7 +9,8 @@ ADRs 0011–0012 were ratified on 2026-07-16; ADR 0013 was ratified on
 on 2026-07-21; ADRs 0017–0018 were ratified on 2026-07-28; ADR 0019 was
 ratified on 2026-07-30 and amended on 2026-07-31; ADR 0020 was ratified on
 2026-08-02 and amended on 2026-09-01 via issue 721; ADR 0021 was ratified on
-2026-08-29; ADR 0022 was ratified on 2026-09-01 through issue 725. The user-approved 2026-08-31
+2026-08-29; ADR 0022 was ratified on 2026-09-01 through issue 725. ADR 0024 was
+ratified on 2026-09-02 through issue 765. The user-approved 2026-08-31
 issue-native amendments to ADRs 0011 and 0017 in issue 711 were noted as
 consistent with ADR 0009.
 Pre-ADR-0020 implementation
@@ -42,3 +43,4 @@ historical evidence; the current Fabric owner is
 | [0021](0021-configured-workspace-dispatch-boundaries.md) | Configured-workspace provider access and dispatch boundaries | Accepted; amended by ADR 0022 |
 | [0022](0022-thin-fabric-mcp-execution-facade.md) | Thin Fabric MCP execution façade | Accepted |
 | [0023](0023-codex-custom-providers-inline-config.md) | Codex custom providers arrive inline, not by relaxing `--ignore-user-config` | Accepted |
+| [0024](0024-git-log-and-adrs-own-history.md) | Git history and ADRs own the change record | Accepted |
