@@ -1,7 +1,7 @@
 schema_version: 1
 dataset_id: skill-portfolio-routing-holdout-20260719-v6
 split: current-catalogue-holdout
-catalogue_owner_count: 32
+catalogue_owner_count: 31
 cases:
   - id: m01
     category: requirements-before-build

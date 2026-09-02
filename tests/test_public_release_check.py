@@ -1287,6 +1287,7 @@ def test_public_scan_rejects_private_paths_secrets_and_unlicensed_skill(tmp_path
             *release_check.REQUIRED,
             "notes.md",
             "token.txt",
+            "skills/academic-writing/SKILL.md",
             "skills/clean-writing/SKILL.md",
             "skills/humanise-text/SKILL.md",
             "skills/tanstack-query-best-practices/SKILL.md",
@@ -1296,7 +1297,7 @@ def test_public_scan_rejects_private_paths_secrets_and_unlicensed_skill(tmp_path
     )
     assert any("personal absolute home path" in error for error in errors)
     assert any("possible GitHub token" in error for error in errors)
-    assert sum("forbidden tracked path" in error for error in errors) == 4
+    assert sum("forbidden tracked path" in error for error in errors) == 5
 
 
 def test_public_scan_accepts_portable_text_tree(tmp_path):

@@ -148,7 +148,7 @@ def test_current_portfolio_routing_plan_matches_the_live_catalogue_and_has_no_re
     summary = summary_doc["current_routing_regression"]
     holdout = load(root / "routing-holdout.yaml")
 
-    assert holdout["catalogue_owner_count"] == len(skills) == 32
+    assert holdout["catalogue_owner_count"] == len(skills) == 31
     assert "project-activation" not in skills
     assert summary["catalogue_owner_count"] == len(skills)
     assert summary["protocol"] == "live-catalogue"

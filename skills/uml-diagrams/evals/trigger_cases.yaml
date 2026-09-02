@@ -9,4 +9,4 @@ cases:
   - {id: q285, relation: negative, prompt: "Edit this unrelated PlantUML C4 deployment diagram.", tags: [no-skill], expected: {primary_skill: null, companion_skills: []}}
   - {id: q286, relation: boundary, prompt: "Create the requirements UML set and index its rendered assets in the SRS documentation.", tags: [composition], expected: {primary_skill: uml-diagrams, companion_skills: [engineering-docs]}}
   - {id: q287, relation: boundary, prompt: "Review this PlantUML requirements-diagram diff read-only for semantic and rendering defects.", tags: [composition], expected: {primary_skill: code-review, companion_skills: [uml-diagrams]}}
-  - {id: q288, relation: boundary, prompt: "Create a requirements UML figure for an academic paper and polish its evidence-faithful caption.", tags: [composition], expected: {primary_skill: uml-diagrams, companion_skills: [academic-writing]}}
+  - {id: q288, relation: boundary, prompt: "Create a requirements UML figure for an academic paper and polish its evidence-faithful caption.", tags: [composition], expected: {primary_skill: uml-diagrams, companion_skills: [natural-writing]}}

@@ -36,5 +36,5 @@ irreversible actions; incident procedures; ordered multi-step work; or whenever
 fragments could be misread. Use complete, explicit prose for that portion.
 
 Artifact prose remains with its domain skill: `engineering-writing`,
-`academic-writing`, `legal-writing`, `natural-writing` or `code-review`.
+`legal-writing`, `natural-writing` or `code-review`.
 Apply Caveman to the artifact only when the user explicitly asks.
