@@ -17,7 +17,6 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "instance_installation.py"
 
-sys.path.insert(0, str(ROOT / "scripts"))
 import instance_installation as instance  # noqa: E402
 
 

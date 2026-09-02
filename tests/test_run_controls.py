@@ -179,7 +179,18 @@ def write_question_adapter(path: Path) -> None:
 
 def write_dispatch_wrapper(path: Path, adapter: Path) -> None:
     path.write_text(
-        f"#!/usr/bin/env python3\nimport sys\nfrom pathlib import Path\nsys.path.insert(0, {str(ROOT / 'skills/orchestrate/scripts')!r})\nimport dispatch_run\ndispatch_run.CF_DISPATCH = Path({str(adapter)!r})\nsys.argv = [{str(ROOT / 'skills/orchestrate/scripts/dispatch_run.py')!r}, *sys.argv[1:]]\nraise SystemExit(dispatch_run.dispatch(dispatch_run.parser().parse_args()))\n",
+        "#!/usr/bin/env python3\n"
+        "import importlib.util\n"
+        "import sys\n"
+        "from pathlib import Path\n"
+        # The wrapper runs as its own process, so it loads the dispatch owner
+        # from its file rather than repairing sys.path (#755).
+        f"_spec = importlib.util.spec_from_file_location('dispatch_run', {str(ROOT / 'skills/orchestrate/scripts/dispatch_run.py')!r})\n"
+        "dispatch_run = importlib.util.module_from_spec(_spec)\n"
+        "_spec.loader.exec_module(dispatch_run)\n"
+        f"dispatch_run.CF_DISPATCH = Path({str(adapter)!r})\n"
+        f"sys.argv = [{str(ROOT / 'skills/orchestrate/scripts/dispatch_run.py')!r}, *sys.argv[1:]]\n"
+        "raise SystemExit(dispatch_run.dispatch(dispatch_run.parser().parse_args()))\n",
         encoding="utf-8",
     )
     path.chmod(path.stat().st_mode | stat.S_IXUSR)

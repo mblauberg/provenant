@@ -19,7 +19,6 @@ SCRIPTS = PRODUCT_ROOT / "skills" / "orchestrate" / "scripts"
 SCRIPT = SCRIPTS / "cf_dispatch.sh"
 RUN_DIR_SCRIPT = SCRIPTS / "run_dir_init.sh"
 
-sys.path.insert(0, str(PRODUCT_ROOT / "skills"))
 from _shared.bounded_process import run_bounded
 
 DISPATCH_SCHEMA = {
