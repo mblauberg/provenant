@@ -320,6 +320,18 @@ model/alias/adapter errors, capability discovery/trust/staleness errors,
 effort unsupported/mismatch/unresolved errors, `same_family_forbidden`, and
 `all_failed`. Consumers must tolerate a new fail-closed status as non-passing.
 
+### Deadlines
+
+`--timeout-seconds N` carries the calling owner's deadline to the arms whose CLI
+accepts one. Only agy does, as `--print-timeout Ns`. The headless `claude` and
+`codex exec` CLIs expose no timeout flag, so on those arms the calling owner's
+own deadline is the only bound and the owner enforces it by stopping the process
+group. `dispatch_run.py` passes a deadline slightly under its own, so a provider
+that accepts one reaches its limit first and exits through its normal path
+instead of being killed mid-write. A run that ends at or past that deadline
+without a clean result is reported as `timed_out`, never as a missing result or
+a corrupt receipt.
+
 The clean answer lives in `output_path`; stderr/stdout noise is diagnostic only. Do not parse one tool's
 footer with another tool's regex. A passing receipt requires a retained regular
 output file and its matching digest; directory destinations are rejected.

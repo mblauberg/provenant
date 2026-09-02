@@ -40,6 +40,11 @@ Options:
   --reviewer-id ID             Stable worker/reviewer identity for receipt binding.
   --model MODEL                Optional model passed to adapter.
   --effort EFFORT              Optional effort passed to adapter.
+  --timeout-seconds N          Provider deadline in whole seconds, where the CLI
+                               accepts one. Only agy does (--print-timeout); the
+                               claude and codex headless CLIs expose no timeout
+                               flag, so on those arms the calling owner's own
+                               deadline is the only bound.
   --add-dir PATH               Additional agy read directory; repeatable.
   --access-mode MODE           read_only (default) or worktree_write.
   --worktree PATH              Git worktree root the writer owns exclusively.
@@ -63,6 +68,7 @@ INSTALLED_OUTPUT_DEVICE=""
 INSTALLED_OUTPUT_INODE=""
 AGY_ADD_DIRS=()
 ACCESS_MODE="read_only"
+TIMEOUT_SECONDS=""
 WORKTREE=""
 WORKTREE_GIT_COMMON=""
 need_value() {
@@ -78,6 +84,7 @@ while [ $# -gt 0 ]; do
     --effort) need_value "$@"; EFFORT="$2"; shift 2;;
     --add-dir) need_value "$@"; AGY_ADD_DIRS+=("$2"); shift 2;;
     --access-mode) need_value "$@"; ACCESS_MODE="$2"; shift 2;;
+    --timeout-seconds) need_value "$@"; TIMEOUT_SECONDS="$2"; shift 2;;
     --worktree) need_value "$@"; WORKTREE="$2"; shift 2;;
     --out) need_value "$@"; OUT="$2"; shift 2;;
     --prompt) need_value "$@"; PROMPT="$2"; shift 2;;
@@ -97,6 +104,13 @@ done
 case "$INTENT" in
   assurance|ordinary) ;;
   *) echo "invalid intent: $INTENT" >&2; exit 2;;
+esac
+
+# The caller's deadline, in whole seconds. Only the arms whose CLI accepts a
+# headless timeout consume it; the rest stay bounded by the calling owner.
+case "$TIMEOUT_SECONDS" in
+  "") ;;
+  0*|*[!0-9]*) echo "invalid timeout-seconds: $TIMEOUT_SECONDS" >&2; exit 2;;
 esac
 
 # Adapters with an executing arm in run_one, and adapters the catalogue declares
@@ -862,7 +876,13 @@ run_one() {  # $1 tool $2 model $3 effort $4 private tempdir -> JSON, returns 0/
           else
             local -a agy_cmd
             agy_cmd=(agy --output-format json --disable-slash-commands --sandbox)
-            if [ -n "${CF_DISPATCH_AGY_TIMEOUT:-}" ]; then
+            # The caller's deadline wins, because it is the one the dispatch
+            # owner will enforce by killing this process group. The environment
+            # override stays as an escape hatch for a direct call that passes no
+            # --timeout-seconds.
+            if [ -n "$TIMEOUT_SECONDS" ]; then
+              agy_cmd+=(--print-timeout "${TIMEOUT_SECONDS}s")
+            elif [ -n "${CF_DISPATCH_AGY_TIMEOUT:-}" ]; then
               agy_cmd+=(--print-timeout "${CF_DISPATCH_AGY_TIMEOUT}")
             else
               agy_cmd+=(--print-timeout 900s)

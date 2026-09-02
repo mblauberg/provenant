@@ -2887,3 +2887,69 @@ def test_every_argv_prompt_adapter_arm_bounds_the_prompt():
     assert sorted(guarded) == ["agy", "copilot", "cursor", "kiro"], guarded
     for tool in guarded:
         assert "argv_prompt_too_large" in bodies[tool], tool
+
+
+def test_timeout_seconds_reaches_the_agy_print_timeout():
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        args_file = tmp / "agy.args"
+        write_executable(
+            bin_dir / "agy",
+            f"""#!/usr/bin/env bash
+            if [ "$1" = "models" ]; then
+              printf 'gemini-3.7-flash-high\ngemini-3.7-flash-medium\ngemini-3.7-flash-low\n'
+              exit 0
+            fi
+            printf '%s\n' "$@" > {args_file}
+            printf '%s\n' '{{"status":"SUCCESS","response":"AGY OK"}}'
+            """,
+        )
+        out = tmp / "out.txt"
+        env = fabric_free_env()
+        env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
+        # The environment override must lose to the caller's explicit deadline,
+        # because the caller is the one enforcing it.
+        env["CF_DISPATCH_AGY_TIMEOUT"] = "900s"
+
+        result = subprocess.run(
+            [
+                str(SCRIPT), "--intent", "ordinary", "--tool", "agy",
+                "--orchestrator-family", "openai", "--role", "worker",
+                "--model", "gemini-3.7-flash", "--effort", "medium",
+                "--timeout-seconds", "7", "--prompt", "Review", "--out", str(out),
+            ],
+            cwd=tmp, env=env, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+
+        record = json.loads(result.stdout)
+        assert result.returncode == 0, result.stderr + result.stdout
+        assert record["status"] == "ok"
+        passed = args_file.read_text(encoding="utf-8").splitlines()
+        assert "--print-timeout" in passed
+        assert passed[passed.index("--print-timeout") + 1] == "7s"
+
+
+def test_timeout_seconds_rejects_a_value_that_is_not_a_positive_integer():
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        write_executable(bin_dir / "agy", "#!/usr/bin/env bash\necho 'SHOULD NOT RUN' >&2\nexit 1\n")
+        env = fabric_free_env()
+        env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
+        for value in ("0", "-5", "3.5", "7s", "1e3"):
+            result = subprocess.run(
+                [
+                    str(SCRIPT), "--intent", "ordinary", "--tool", "agy",
+                    "--orchestrator-family", "openai", "--role", "worker",
+                    "--timeout-seconds", value, "--prompt", "Review",
+                ],
+                cwd=tmp, env=env, text=True,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+            assert result.returncode == 2, value
+            assert "invalid timeout-seconds" in result.stderr, value
+            assert "SHOULD NOT RUN" not in result.stderr, value
