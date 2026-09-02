@@ -2607,10 +2607,14 @@ def test_claude_worktree_writer_route_runs_inside_the_owned_worktree():
     assert record["read_only_guarantee"] == "none"
     assert "--permission-mode\nacceptEdits" in recorded
     assert f"--add-dir\n{worktree}" in recorded
+    # A permission prompt is a denial under -p, so the write tools have to be on
+    # the allow-list or the lane cannot run its own tests or commit its own work.
+    assert "--allowedTools\nBash,Edit,Write,MultiEdit,NotebookEdit,Read,Grep,Glob" in recorded
     assert "--tools\nRead,Grep,Glob" not in recorded
     assert "--permission-mode\nplan" not in recorded
     assert f"PWD={worktree}" in recorded
     assert "own exclusively for this run" in recorded
+    assert "run commands and commit only inside that worktree" in recorded
 
 
 def test_claude_read_only_route_remains_the_default():
@@ -2623,6 +2627,8 @@ def test_claude_read_only_route_remains_the_default():
     assert "--permission-mode\nplan" in recorded
     assert "--tools\nRead,Grep,Glob" in recorded
     assert "acceptEdits" not in recorded
+    assert "--allowedTools" not in recorded
+    assert "Bash" not in recorded
 
 
 def test_codex_worktree_writer_route_uses_the_workspace_write_sandbox():

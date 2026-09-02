@@ -136,9 +136,14 @@ esac
 
 CLAUDE_MODE_FLAGS=(--permission-mode plan --tools "Read,Grep,Glob")
 CLAUDE_SYSTEM_PROMPT="You are a non-interactive independent verifier. You may use only Read, Grep, and Glob to inspect the requested workspace. Fabric MCP tools are not exposed to this direct verifier invocation. Do not mutate files, use shell commands, call Task/tool/function abstractions, or launch subagents. Return only the file-backed verification result requested by the supplied prompt; the caller owns any Fabric correlation."
+# A writer lane has to be able to run its own tests and commit its own work, so
+# the write tools are named on the permission allow-list rather than left to the
+# permission mode. `--permission-mode acceptEdits` accepts edits; `--allowedTools`
+# is what pre-approves Bash in `-p` mode, where a permission prompt is a denial.
+CLAUDE_WRITER_TOOLS="Bash,Edit,Write,MultiEdit,NotebookEdit,Read,Grep,Glob"
 if [ "$ACCESS_MODE" = "worktree_write" ]; then
-  CLAUDE_MODE_FLAGS=(--permission-mode acceptEdits --add-dir "$WORKTREE")
-  CLAUDE_SYSTEM_PROMPT="You are a non-interactive worker running inside the Git worktree at $WORKTREE, which you own exclusively for this run. Write only inside that worktree. Do not touch any other checkout, do not push, and do not create or remove worktrees or branches outside it. Fabric MCP tools are not exposed to this direct invocation, and the caller owns any Fabric correlation. Return the file-backed result requested by the supplied prompt."
+  CLAUDE_MODE_FLAGS=(--permission-mode acceptEdits --add-dir "$WORKTREE" --allowedTools "$CLAUDE_WRITER_TOOLS")
+  CLAUDE_SYSTEM_PROMPT="You are a non-interactive worker running inside the Git worktree at $WORKTREE, which you own exclusively for this run. Write, run commands and commit only inside that worktree. Do not touch any other checkout, do not push, and do not create or remove worktrees or branches outside it. Fabric MCP tools are not exposed to this direct invocation, and the caller owns any Fabric correlation. Return the file-backed result requested by the supplied prompt."
 fi
 
 # The provider inherits the writer worktree as its working directory. Only the

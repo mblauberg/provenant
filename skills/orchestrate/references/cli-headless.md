@@ -93,9 +93,11 @@ twice. On that route `claude` runs with `--permission-mode acceptEdits`,
 `--add-dir` on the worktree and a writer system prompt, with the worktree as its
 working directory; `codex` runs `exec -s workspace-write --cd PATH` and adds the
 common Git directory as a writable root so a linked worktree can still be
-committed from inside the sandbox. `acceptEdits` accepts file edits, not
-arbitrary shell, so a lane that must run commands or commit for itself belongs
-on the `codex` arm.
+committed from inside the sandbox. On the `claude` arm the write tools are named
+on the permission allow-list, `--allowedTools
+"Bash,Edit,Write,MultiEdit,NotebookEdit,Read,Grep,Glob"`, because a permission
+prompt is a denial under `-p`: the mode accepts edits, the allow-list is what
+lets the lane run its own tests and commit its own work.
 
 On the default read-only route:
 
