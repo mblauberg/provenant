@@ -51,7 +51,7 @@ one.
    adds no parallel review path of its own — it delegates the entire
    verified-implementation loop, including receipt creation; it never
    pre-supposes a receipt is already sitting there.
-3. **STOP** at `implement`'s own user-acceptance gate (`awaiting_acceptance`
+3. **STOP** at `implement`'s own user-acceptance gate (machine gates cleared
    / PR opened for review) unless the nearest repository merge policy
    authorises agent merges, in which case merge once that policy's review
    and CI gates pass on the exact head. Where no such policy exists, do not

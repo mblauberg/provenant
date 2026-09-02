@@ -143,79 +143,32 @@ stream of micro-approvals.
 
 ## Neutral delivery kernel
 
-`deliver` is the cross-domain lifecycle front door and `delivery-run` schema v1 is
-its portable state machine. It selects one profile from
+`deliver` is the cross-domain lifecycle front door and `delivery-run` schema v1
+is its portable receipt. It selects one profile from
 `config/delivery-profiles.json`: software, research, analysis, document or
 agent product. The high-stakes overlay adds source-authority, privacy,
 qualified-review and explicit user-action controls without multiplying the
 base profiles.
 
-The state machine is enforced rather than advisory. The states, side states and
-transitions are declared once in `skills/deliver/contract/lifecycle.v1.json`,
-loaded through `skills/deliver/contract/lifecycle.py` and materialised by
-`skills/deliver/scripts/delivery_validation_common.py`;
-`skills/deliver/scripts/delivery_validation_lifecycle.py` rejects a receipt
-whose recorded history jumps a gate, so the states below are the ones a run can
-actually occupy. The diagram body between the markers is maintained alongside
-those constants; the accessibility text, palette, class lines and edge labels
-stay hand-written.
+`RUN.json` is a flat record, not a state machine. It holds what the run did:
+the approved intent and design, the authority envelope, the declared artifacts
+and their digests, the evidence, the reviews, the security and observation
+contracts, and the human gates. `skills/deliver/scripts/delivery_run_shape.py`
+declares the field set and its types, and both the producer
+(`delivery_receipt.py`) and the reader (`validate_delivery.py`) check every
+receipt against it, so a receipt cannot be written in a shape the reader
+rejects.
 
-<!-- delivery-state-machine:start -->
-```mermaid
-stateDiagram-v2
-    accTitle: The delivery-run state machine
-    accDescr: A delivery run moves through twelve normal states: draft, scoped, approved, executing, verifying, reviewing, repairing, awaiting_acceptance, accepted, awaiting_release, observing and closed. Verifying returns to executing when a deterministic check fails. Reviewing returns to repairing when a blocking finding stands, and repairing returns to verifying so that a repair is re-verified rather than trusted. Awaiting_acceptance also returns to repairing when the user sends the work back. Three side states, blocked, cancelled and degraded, sit apart from the normal lifecycle. Any normal state may be interrupted into one of them, and recovery resumes exactly the interrupted state, so they are drawn as a separate group rather than wired to every state.
-    [*] --> draft
-
-    state "normal lifecycle" as run {
-        draft --> scoped
-        scoped --> approved : user approves the spec
-        approved --> executing : authority granted
-        executing --> verifying
-        verifying --> executing : deterministic check failed
-        verifying --> reviewing : deterministic evidence passes
-        reviewing --> repairing : blocking finding
-        reviewing --> awaiting_acceptance : review clean
-        repairing --> verifying : the repair is re-verified
-        awaiting_acceptance --> repairing : user sends the work back
-        awaiting_acceptance --> accepted : user accepts
-        accepted --> awaiting_release
-        awaiting_release --> observing : external action authorised
-        observing --> closed : observation passes
-    }
-
-    closed --> [*]
-
-    state "side states: interrupt any normal state, then resume it" as aside {
-        blocked
-        cancelled
-        degraded
-    }
-
-    classDef user fill:#8a6d1f,stroke:#f0c674,color:#ffffff,stroke-width:2px
-    classDef blocking fill:#2c6e49,stroke:#8fd0aa,color:#ffffff,stroke-width:2px
-    classDef interrupt fill:#8b3a3a,stroke:#e8a0a0,color:#ffffff,stroke-width:2px
-    classDef inert fill:#57606a,stroke:#adb5bd,color:#ffffff,stroke-width:2px
-    class approved,awaiting_acceptance,accepted,awaiting_release user
-    class verifying,reviewing blocking
-    class blocked,cancelled,degraded interrupt
-    class closed inert
-```
-<!-- delivery-state-machine:end -->
-
-The three side states are drawn apart from the lifecycle on purpose. Any normal
-state may be interrupted into `blocked`, `cancelled` or `degraded`, so wiring
-each of them to the lifecycle would mean an edge from and to every state. Each
-side state records a reason, a recovery instruction and the state it
-interrupted; recovery resumes exactly that state and cannot skip a mandatory
-gate. `validate_delivery.py` enforces that rule, not the picture.
-
-Repair is the transition that people get wrong. `repairing` returns to
-`verifying`, never straight to acceptance, so a repair is re-verified rather
-than trusted, and `repair_cycles` must equal the number of `repairing`
-transitions in the recorded history. A user at `awaiting_acceptance` can send
-the work back to `repairing` as well as accept it. `closed` requires a passing
-observation.
+Ordering is not certified, because a receipt cannot certify its own history:
+the agent that writes the transitions writes the receipt in the same turn. What
+is checked is what each recorded gate demands. Human acceptance recorded as
+approved requires the profile's deterministic and judgement evidence, the
+review ladder, the security surfaces and the measures to be present and
+passing. Release approval requires acceptance. A closed run, meaning release
+approved with a settled observation, requires a passing observation inside its
+declared window and, where risk or incident policy says so, a closed
+retrospective. `repair_cycles` is a counter the producer increments, bounded by
+the risk tier.
 
 A digest-bound project policy may add a complete profile or add evidence and
 measure gates to a built-in profile. Global minima load first and cannot be

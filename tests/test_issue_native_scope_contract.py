@@ -77,7 +77,6 @@ def test_issue_native_decision_and_spec_reconciliation_are_recorded():
     adr_0011 = read("docs/adr/0011-github-owns-work-state.md")
     disclosure = read("docs/specs/harness/disclosure-refactor.md")
     lifecycle = read("docs/specs/harness/lifecycle.md")
-    contract = json.loads(read("skills/deliver/contract/lifecycle.v1.json"))
 
     assert "issue-native change scope" in adr.lower()
     assert "Git retains durable invariants" in adr
@@ -121,9 +120,6 @@ def test_issue_native_decision_and_spec_reconciliation_are_recorded():
     assert live_form == template_form
     assert "## Native sub-issues" in doctrine
     assert "requires explicit external-write authority" in doctrine
-    assert contract["source"]["state_graph"] == (
-        "docs/specs/harness/lifecycle.md#state-graph"
-    )
 
 
 def test_pre_rename_lifecycle_routing_dataset_is_explicitly_historical():

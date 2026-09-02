@@ -12,12 +12,12 @@ surfaces, and link deterministic tests and security checks before independent
 review. Stochastic or judgement-bearing product behaviour also links an
 `evaluate` receipt.
 
-State follows the delivery kernel: `draft -> scoped -> approved -> executing ->
-verifying -> reviewing -> awaiting_acceptance`. Repairs return through
-verification and review under a repair budget scaled by risk tier: `routine`
-allows 2 cycles, `substantial` 4, and `crucial` and `terminal` 5.
-`validate_delivery.py` enforces the applicable budget against the recorded
-`repairing` transitions. The budget is a guardrail against unbounded loops, not
+The receipt is flat: it records approvals, artifacts, evidence, reviews and
+gates, not a transition history. Record a repair with
+`delivery_receipt.py repair --reason ...`, under a budget scaled by risk tier:
+`routine` allows 2 cycles, `substantial` 4, and `crucial` and `terminal` 5.
+`validate_delivery.py` enforces the applicable budget against
+`repair_cycles`. The budget is a guardrail against unbounded loops, not
 a target to spend — converge as soon as checks and review pass. Exceeding the
 budget means the run is stuck: stop and return evidence to the user or `scope`,
 the same trigger `docs/runbooks/github-workflow.md` uses for the merge-gate
@@ -45,8 +45,8 @@ docs, fixtures and the PR evidence index. That curated projection is public
 evidence; it does not replace or weaken validation of the private canonical
 receipt.
 
-`awaiting_acceptance` is machine-ready, not complete. User acceptance and any
-production promotion remain separate gates.
+A receipt that clears the machine gates is machine-ready, not complete. User
+acceptance and any production promotion remain separate gates.
 
 ## Terminalisation
 
@@ -66,8 +66,8 @@ merged branch ([post-merge pruning](../../../docs/worktrees.md#post-merge-prunin
 — retention wins, so copy first, prune second), then run
 `scripts/bind_merged_delivery.py` there with the pre-existing typed exact-head
 review artifacts. The binder reads PR and `ci-status` truth through the
-authenticated GitHub API, holds an exclusive receipt lock, keeps the receipt
-at `awaiting_acceptance` and adds:
+authenticated GitHub API, holds an exclusive receipt lock, refuses to run once
+human acceptance is recorded, and adds:
 
 - a canonical `git_revision` artifact bound directly to the exact merged commit
   and its resolved tree, with no archive or per-file digest;
@@ -78,9 +78,10 @@ at `awaiting_acceptance` and adds:
 
 The merged tree must equal the reviewed PR-head tree, and `ci-status` binds the
 merge commit. Validate the updated receipt with `--verify-hashes` before asking
-for acceptance. Only explicit acceptance advances that same receipt through
-`accepted` to `awaiting_release`; release validation will not reconstruct
-missing evidence later. Frozen schema-v1 Git-archive receipts remain readable,
+for acceptance. Only explicit acceptance records the
+`human_gates.acceptance` approval on that same receipt, and release approval is
+a separate gate; release validation will not reconstruct missing evidence
+later. Frozen schema-v1 Git-archive receipts remain readable,
 but this binder only emits the digestless commit-and-tree form.
 
 Because binding reads GitHub with the CLI's stored authentication, the approved

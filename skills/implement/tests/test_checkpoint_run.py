@@ -16,7 +16,6 @@ def run_payload():
     return {
         "schema_version": 1,
         "contract": "delivery-run",
-        "status": "draft",
         "risk_tier": "routine",
         "risk_assessment": {
             "blast_radius": "local",
@@ -33,7 +32,7 @@ def run_payload():
             "evidence": "",
             "reason": "",
         },
-        "state_history": [{"state": "draft", "risk_tier": "routine"}],
+        "initial_risk_tier": "routine",
         "artifacts": [],
         "evidence": [],
         "human_corrections": [],
@@ -110,7 +109,11 @@ def test_checkpoint_rejects_live_absolute_and_parent_paths(tmp_path):
 def test_checkpoint_refuses_closed_run(tmp_path):
     run = make_run(tmp_path)
     receipt = json.loads(run.read_text())
-    receipt["status"] = "closed"
+    receipt["human_gates"] = {
+        "acceptance": {"status": "approved", "approver": "human", "evidence": "acceptance-approval"},
+        "release": {"status": "approved", "approver": "human", "evidence": "release-approval"},
+    }
+    receipt["observation"] = {"status": "pass"}
     run.write_text(json.dumps(receipt))
 
     try:

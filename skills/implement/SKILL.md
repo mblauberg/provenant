@@ -66,8 +66,8 @@ reconciliation run.
 - Objective evidence outranks reviewer confidence; adjudicate conclusions,
   never vote.
 - Substantial+ starts a fresh implementation session bound to approved digests.
-- `awaiting_acceptance` is the successful machine-gate state. Move canonical
-  receipt to `accepted` only after explicit user acceptance.
+- Clearing every machine gate is not acceptance. Record the receipt's
+  `human_gates.acceptance` approval only after explicit user acceptance.
 
 ## Adapter-absent path
 
