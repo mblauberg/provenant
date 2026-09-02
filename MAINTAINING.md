@@ -96,8 +96,15 @@ Documentation claims sit in three tiers, and the third is deliberate:
 6. Keep `SKILL.md` roughly 500 words or less. Move depth into narrowly named
    references loaded only when needed and deterministic behaviour into scripts.
 7. Add positive, negative and boundary fixtures with exact primary and companion
-   routes, plus contract tests for machine-enforceable invariants. Trigger
-   fixtures and contract tests remain mandatory for every skill change.
+   routes. Trigger fixtures are mandatory for every skill change. A contract
+   test is mandatory only where the change introduces or alters an invariant a
+   script, validator or CI gate evaluates at runtime, so that violating it fails
+   a command rather than a reviewer's reading. A change confined to wording,
+   ordering, examples or explanation adds no contract test; the fixture set and
+   the harness gates carry it. Assert parsed structure (fixture routes, JSON
+   policy values, resolved paths) or a script's output, exit code or side
+   effect. Never assert the text of a document. See `skills/tdd` for the
+   exclusion list.
 8. Under [ADR 0014](docs/adr/0014-comparative-skill-evals-on-suspicion.md),
    frozen held-out comparative evals are conditional. Run them when a routing
    regression is suspected or observed in use; a change rewrites
@@ -169,7 +176,8 @@ validator. A new domain should compose an existing base profile and a domain
 skill first. Add a base profile only when its artifacts, deterministic gates,
 judgement gates and release meaning are materially distinct.
 
-Trigger fixtures and contract tests remain mandatory. The ADR 0014 eval
+Trigger fixtures remain mandatory. Contract tests follow the
+machine-enforced-invariant test in **Change a skill** step 7. The ADR 0014 eval
 triggers under **Change a skill** apply unchanged. When they fire here, use the
 held-out portfolio and lifecycle dataset with repeated trials, recording raw
 numerator and denominator, model and harness versions.
