@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { spawn } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, join, relative } from "node:path";
 
@@ -158,6 +159,22 @@ if (owner === "run_controls.py") {
       process.stdout.write(JSON.stringify(record) + "\n");
       process.exit(0);
     });
+  } else if (prompt === "sleep with provider until cancelled") {
+    // A provider child in the owner's process group, answering only its own
+    // SIGTERM: it survives anything that signals the owner pid alone.
+    const provider = spawn(process.execPath, [
+      "-e",
+      "process.on('SIGTERM', () => process.exit(143)); setInterval(() => undefined, 1000);",
+    ], { stdio: "ignore" });
+    provider.unref();
+    process.once("SIGTERM", () => {
+      writeFileSync(join(runDir, "cancelled.marker"), "cancelled\n");
+      process.exit(143);
+    });
+    mkdirSync(join(runDir, "dispatch", "tasks", taskId, "attempt-001"), { recursive: true });
+    writeFileSync(join(runDir, "provider.pid"), `${provider.pid}\n`);
+    writeFileSync(join(runDir, "sleeping.pid"), `${process.pid}\n`);
+    setInterval(() => undefined, 1000);
   } else if (prompt === "sleep until cancelled") {
     process.once("SIGTERM", () => {
       writeFileSync(join(runDir, "cancelled.marker"), "cancelled\n");

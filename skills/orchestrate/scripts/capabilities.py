@@ -42,6 +42,8 @@ import re
 import sys
 from typing import Any, Callable
 
+# The shared library sits one level above this skill and is not reachable
+# from the script's own directory, so this entry point establishes it (#755).
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from _shared.bounded_process import run_bounded
 

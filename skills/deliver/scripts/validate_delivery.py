@@ -10,6 +10,11 @@ from pathlib import Path
 import sys
 from typing import Any
 
+# The validator is one coordinator over a dozen sibling modules in this
+# directory. A direct invocation already puts that directory on `sys.path`;
+# the repair is what makes the module load identically when it is imported by
+# file instead, which is how the suite and the installed-layout probe reach it
+# (#755).
 SCRIPT_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_ROOT))
 

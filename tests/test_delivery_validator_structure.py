@@ -33,9 +33,9 @@ def test_every_validator_module_on_disk_is_capped() -> None:
 
 @pytest.mark.parametrize("module", SUBMODULES)
 def test_submodules_take_shared_imports_through_the_common_module(module: Path) -> None:
-    """`delivery_validation_common` owns the sys.path repair that makes `_shared`
-    importable. A submodule importing `_shared` directly only works when some
-    sibling has already run, so the import order becomes load-bearing and silent."""
+    """`delivery_validation_common` owns the load of `_shared`. A submodule
+    importing `_shared` directly only works when some sibling has already
+    established it, so the import order becomes load-bearing and silent."""
     source = module.read_text()
     if module.name == "delivery_validation_common.py":
         return

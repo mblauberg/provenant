@@ -27,8 +27,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
-sys.path.insert(0, str(REPO_ROOT / "skills"))
+# The shared library sits one level above this skill. Resolving it from the
+# skill rather than from a repository root two levels further up keeps the
+# installed per-entry layout working even when the instance directory that
+# holds the linked skills is not itself named "skills" (#755).
+SKILLS_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(SKILLS_ROOT))
 CF_DISPATCH = Path(__file__).with_name("cf_dispatch.sh")
 TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 ATTEMPT_ID_RE = re.compile(r"^attempt-(?P<number>\d{3}|[1-9]\d{3,})$")
@@ -864,6 +868,38 @@ def _copy_git_evidence(
     return metadata, f"sha256:{hasher.hexdigest()}"
 
 
+def _record_provider_process(run_dir: Path, process: subprocess.Popen[Any]) -> None:
+    """Record the provider's identity so a detached run stays reachable.
+
+    The MCP front door spawns this owner detached and then lets go of it. If
+    that host dies, the only handle left on the provider is what is written
+    here: its pid, the group it leads, and a start timestamp that tells it
+    apart from a recycled pid. The run token proves the record belongs to this
+    run rather than to an earlier one in a reused directory. A failure to write
+    it costs later reaping, never the dispatch itself.
+    """
+    token = os.environ.get("PROVENANT_RUN_TOKEN")
+    if not token:
+        return
+    try:
+        started_at = subprocess.run(
+            ["/bin/ps", "-o", "lstart=", "-p", str(process.pid)],
+            capture_output=True, text=True, timeout=5, check=False,
+        ).stdout.strip()
+        record = {
+            "schema_version": 1,
+            "run_token": token,
+            "provider_pid": process.pid,
+            "provider_pgid": os.getpgid(process.pid),
+            "provider_started_at": started_at or None,
+        }
+        (run_dir / "dispatch-provider.json").write_text(
+            json.dumps(record, indent=2) + "\n", encoding="utf-8",
+        )
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return
+
+
 def _dispatch(args: argparse.Namespace, custody=None) -> int:
     run_dir = args.run_dir.resolve()
     workspace = Path.cwd().resolve()
@@ -1096,6 +1132,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                     env=provider_environment,
                     start_new_session=True,
                 )
+                _record_provider_process(run_dir, process)
 
                 # A request can arrive after the provider is spawned but
                 # before Popen returns. Reconcile it before entering the

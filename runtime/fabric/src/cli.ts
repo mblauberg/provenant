@@ -10,6 +10,9 @@
  *   fabric watch [--interval 2]
  */
 import { databasePath, identify } from "./identity.js";
+import {
+  findRecordedRun, listRecordedRuns, retentionHours, terminateRecordedRun,
+} from "./run-registry.js";
 import { inspectDatabase, Store } from "./store.js";
 
 const USAGE = `fabric <command>
@@ -35,6 +38,8 @@ const USAGE = `fabric <command>
   watch [--interval N]        tail everything agents here are doing
   status [--json]             read-only summary; absent state is healthy
   doctor [--json]             read-only schema and integrity diagnostics
+  dispatch list [--json]      configured-provider runs recorded in this workspace
+  dispatch kill <run> [--json]  stop one recorded run and the group it leads
 
 Identity comes from the working directory and AGENT_FABRIC_LABEL. Registered
 worktrees share one repository project while retaining their own cwd. There is
@@ -44,7 +49,7 @@ const argv = process.argv.slice(2);
 const command = argv[0] ?? "whoami";
 const commands = new Set([
   "whoami", "send", "inbox", "ack", "note", "tasks", "task", "claim", "done",
-  "activity", "watch", "status", "doctor",
+  "activity", "watch", "status", "doctor", "dispatch",
 ]);
 
 if (command === "--help" || command === "-h" || command === "help") {
@@ -68,6 +73,58 @@ const flag = (name: string): string | undefined => {
   return value;
 };
 const who = identify();
+/**
+ * Dispatch runs are recorded on disk, not in the store, so these read and act
+ * from a cold start: a run started by an MCP host that has since died is still
+ * listed and still killable here.
+ */
+if (command === "dispatch") {
+  const json = argv.includes("--json");
+  const rest = argv.slice(1).filter((argument) => argument !== "--json");
+  const subcommand = rest[0];
+  if (subcommand === "list") {
+    if (rest.length !== 1) {
+      console.error("fabric: usage: fabric dispatch list [--json]");
+      process.exit(2);
+    }
+    const runs = listRecordedRuns(who.cwd);
+    if (json) {
+      console.log(JSON.stringify({
+        workspace: who.cwd,
+        retention_hours: retentionHours(process.env),
+        runs,
+      }, null, 2));
+    } else if (runs.length === 0) {
+      console.log("no recorded dispatch runs");
+    } else {
+      for (const run of runs) {
+        const state = run.orphaned ? "orphaned" : run.running ? "running" : "exited";
+        console.log(`${run.run_id.padEnd(12)} ${state.padEnd(9)} pid ${String(run.owner_pid).padEnd(8)} ` +
+          `${run.kind} ${run.task_id ?? run.batch_id ?? ""}`);
+      }
+    }
+    process.exit(0);
+  }
+  if (subcommand === "kill") {
+    const reference = rest[1];
+    if (rest.length !== 2 || reference === undefined) {
+      console.error("fabric: usage: fabric dispatch kill <run-id|run-dir> [--json]");
+      process.exit(2);
+    }
+    const run = findRecordedRun(who.cwd, reference);
+    if (run === undefined) {
+      console.error(`fabric: no recorded dispatch run: ${reference}`);
+      process.exit(1);
+    }
+    const outcome = await terminateRecordedRun(run);
+    if (json) console.log(JSON.stringify(outcome, null, 2));
+    else console.log(`${run.run_id} ${outcome.signalled ? "signalled" : "not running"}` +
+      `${outcome.escalated ? " (escalated to SIGKILL)" : ""}`);
+    process.exit(outcome.signalled ? 0 : 1);
+  }
+  console.error(`fabric: usage: fabric dispatch <list|kill> ...`);
+  process.exit(2);
+}
 if (command === "status" || command === "doctor") {
   const unknown = argv.slice(1).filter((argument) => argument !== "--json");
   if (unknown.length > 0) {
