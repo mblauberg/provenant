@@ -10,14 +10,26 @@ Stricter project and forum instructions override it. This is drafting
 assistance, not legal advice: verify current law, forms and procedure against
 official sources and retain qualified or human review for filing-facing work.
 
-This skill is a specialization of the `natural-writing` hub: it owns
-jurisdiction, forum and filing-facing rules, and links to the hub for the
-Australian English default, the anti-AI taxonomy and the condense pass (see
-`references/australian-english-house-style.md`,
-`references/legal-concision-and-anti-ai.md` and
-`references/forbidden-patterns.md` for where each hub link applies). The
-Legal Function Test remains this skill's own claim-classification scheme; it
-does not map to the hub's observed/inferred evidence schema.
+This skill is a specialization of the `natural-writing` hub. The hub owns the
+Australian English default, the anti-AI taxonomy and the condense pass; this
+skill owns jurisdiction, forum, instrument and filing-facing rules. The Legal
+Function Test is this skill's own claim-classification scheme and does not map
+to the hub's observed/inferred evidence schema.
+
+## Scope
+
+Use this skill when the output is an Australian legal instrument, filing-facing
+text or legal correspondence: court and tribunal forms, affidavits, statutory
+declarations, witness statements, submissions and outlines, proposed orders,
+chronologies, annexure indexes, deeds and agreements, letters of demand and
+pre-action correspondence, registry and party correspondence, non-filing legal
+decision overviews, and AGLC4 citation.
+
+Legal subject matter alone is not the trigger. An article, chapter, summary or
+plain-language explanation about law goes to `natural-writing`; a spec, README,
+runbook or other engineering artefact goes to `engineering-writing`. This skill
+joins either as a companion where legal status, authority, forum wording or
+source altitude must survive the rewrite.
 
 ## Workflow
 
@@ -27,8 +39,7 @@ does not map to the hub's observed/inferred evidence schema.
    `decision-overview` or `final-scrub`. Load [legal concision](references/legal-concision-and-anti-ai.md)
    for all prose; the reference map in
    [validation-checklists.md](references/validation-checklists.md) gives the
-   remaining reference each mode or content type needs. For `decision-overview`,
-   load [decision overviews](references/decision-overviews.md) directly.
+   remaining reference each mode, document type or content type needs.
 3. Classify each sentence by legal function before polishing. Affidavits and
    witness statements give evidence; submissions argue; orders command;
    chronologies organise; internal notes analyse; correspondence communicates.
@@ -48,16 +59,15 @@ changing forum wording.
 Never invent or silently alter an authority, instrument, finding, rule title,
 forum term or decision-maker label. Verify canonical sources, not indexes,
 summaries, OCR, renders or agent notes. Preserve contentions as contentions and
-hold the register required by the procedural stage. Protective-order,
+hold the register the procedural stage requires. Protective-order,
 police-issued or other safety material remains a dated source with the legal
-effect its verified text supports; do not convert it into a finding. Keep
-source files, renders, OCR/transcripts, field maps and QA reports separate.
+effect its verified text supports, not a finding.
 
 For substantial condensation or relocation, run the deterministic token
 set-diff and an independent qualitative pass. Stop before losing an anchor,
 qualification, disputed status, redaction, label, amount, date, forum wording
-or authority condition. Final scrub adds no new argument, fact or authority.
-It adds no history or courtesy closer unless legally necessary.
+or authority condition. Final scrub adds no new argument, fact, authority,
+history or courtesy closer.
 
 ```sh
 python3 "$(provenant root)/skills/legal-writing/scripts/lint_legal_style.py" path/to/source
