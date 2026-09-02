@@ -1,4 +1,4 @@
-"""Lifecycle, checkpoint, and intent validation for delivery receipts."""
+"""Checkpoint, intent and design validation for the flat delivery receipt."""
 
 from __future__ import annotations
 
@@ -6,51 +6,13 @@ from pathlib import Path
 from typing import Any
 
 from delivery_validation_common import (
-    Invalid, NORMAL_STATES, SIDE_STATES, TRANSITIONS, _digest, _list,
-    _mapping, _safe_path, _utc, fail,
+    Invalid, _digest, _list, _mapping, _safe_path, _utc, fail,
 )
-
-
-def _validate_history(run: dict[str, Any]) -> None:
-    history = _list(run.get("state_history"), "state_history")
-    fail(not history, "state_history must be non-empty")
-    fail(_mapping(history[0], "state_history[0]").get("state") != "draft", "state_history must start at draft")
-    previous_state = None
-    previous_at = None
-    for index, raw in enumerate(history):
-        item = _mapping(raw, f"state_history[{index}]")
-        state = item.get("state")
-        fail(state not in set(NORMAL_STATES) | SIDE_STATES, f"unknown state at history {index}")
-        at = _utc(item.get("at"), f"state_history[{index}].at")
-        _list(item.get("evidence_ids"), f"state_history[{index}].evidence_ids")
-        fail(previous_at is not None and at <= previous_at, "state history timestamps must increase")
-        if state in SIDE_STATES:
-            for field in ("reason", "recovery", "resume_state"):
-                fail(not item.get(field), f"side state {state} requires {field}")
-            fail(item.get("resume_state") != previous_state, f"side state {state} must resume the state it interrupted")
-            fail(previous_state is None or previous_state in SIDE_STATES, f"side state {state} requires a normal from-state")
-        elif previous_state is not None:
-            if previous_state in SIDE_STATES:
-                previous_item = _mapping(history[index - 1], f"state_history[{index - 1}]")
-                fail(state != previous_item.get("resume_state"), f"invalid lifecycle recovery {previous_state} -> {state}")
-            else:
-                fail(state not in TRANSITIONS.get(previous_state, set()), f"invalid lifecycle transition {previous_state} -> {state}")
-        previous_state, previous_at = state, at
-    fail(history[-1].get("state") != run.get("status"), "status must equal the final state history entry")
-    repair_count = sum(_mapping(item, "state history item").get("state") == "repairing" for item in history)
-    fail(run.get("repair_cycles") != repair_count, "repair_cycles must equal repairing transitions in state_history")
-    if run.get("status") in SIDE_STATES:
-        degradation = _mapping(run.get("degradation"), "degradation")
-        fail(not degradation.get("reason") or not degradation.get("recovery"), "side state requires reason and recovery")
-        if run.get("status") == "degraded":
-            fail(degradation.get("kind") not in {"kernel_degraded", "runtime_degraded"}, "degraded run requires a typed degradation kind")
-            if degradation.get("kind") == "kernel_degraded":
-                fail(not degradation.get("fallback_skill"), "kernel_degraded requires the specialised fallback skill")
 
 
 def _validate_checkpoint(
     run: dict[str, Any], artifacts: dict[str, dict[str, Any]], *,
-    receipt_dir: Path | None, workspace_root: Path | None,
+    receipt_dir: Path | None, workspace_root: Path | None, closed: bool,
 ) -> None:
     checkpoint = _mapping(run.get("checkpoint"), "checkpoint")
     fail(set(checkpoint) != {"generation", "current_slice", "next_action", "in_flight", "artifact_paths"}, "checkpoint fields are invalid")
@@ -62,19 +24,7 @@ def _validate_checkpoint(
         fail(any(not isinstance(value, str) or not value for value in values), f"checkpoint.{field} values must be strings")
     for path in checkpoint["artifact_paths"]:
         _safe_path(path, "checkpoint.artifact_paths")
-    required_slices = {
-        "awaiting_acceptance": "awaiting-acceptance",
-        "accepted": "accepted",
-        "awaiting_release": "awaiting-release",
-        "observing": "observing",
-        "closed": "closed",
-    }
-    expected_slice = required_slices.get(run.get("status"))
-    fail(
-        expected_slice is not None and checkpoint.get("current_slice") != expected_slice,
-        f"checkpoint.current_slice must be {expected_slice} while status is {run.get('status')}",
-    )
-    fail(run.get("status") == "closed" and bool(checkpoint["in_flight"]),
+    fail(closed and bool(checkpoint["in_flight"]),
          "closed checkpoint must not retain in-flight work")
     declared_paths = {item.get("path") for item in artifacts.values() if item.get("path")}
     roots = [root.resolve() for root in (receipt_dir, workspace_root) if root is not None]

@@ -11,8 +11,8 @@
     "lead_agent_id": "not_applicable"
   },
   "profile": "research",
-  "status": "draft",
   "risk_tier": "substantial",
+  "initial_risk_tier": "substantial",
   "chair_family": "openai",
   "risk_assessment": {
     "blast_radius": "multi-module",
@@ -78,7 +78,6 @@
     "containment": "revert-receipt",
     "one_way_doors": []
   },
-  "state_history": [{"state": "draft", "at": "2026-07-10T00:00:00Z", "evidence_ids": []}],
   "evidence": [],
   "measures": {"outcome": [], "trajectory": []},
   "assurance": {
@@ -107,6 +106,6 @@
   "repair_cycles": 0,
   "escaped_defect": false,
   "human_corrections": [],
-  "checkpoint": {"generation": 0, "current_slice": "draft", "next_action": "complete scope and authority", "in_flight": [], "artifact_paths": ["RUN.json"]},
+  "checkpoint": {"generation": 0, "current_slice": "scope", "next_action": "complete scope and authority", "in_flight": [], "artifact_paths": ["RUN.json"]},
   "degradation": null
 }

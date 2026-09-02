@@ -13,17 +13,20 @@ from typing import Any
 SCRIPT_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_ROOT))
 
+from delivery_run_shape import (
+    acceptance_approved, check_shape, intent_approved, run_closed,
+)
 from delivery_validation_artifacts import _validate_artifacts
 from delivery_validation_common import (
     AGENTIC_RISKS, DIGEST, EVALUATION_BINDING_FIELDS, IDENTIFIER, Invalid,
-    NORMAL_STATES, POLICY_VALIDATION_PATH, PRIMARY_FAMILIES, REPAIR_BUDGETS,
-    REVIEW_ROLES, RISKS, ROOT, SAFE_CLASSES, SIDE_STATES, SKILLS_ROOT,
-    TRANSITIONS, _digest, _evaluate_validator, _identifier, _inside, _list,
+    POLICY_VALIDATION_PATH, PRIMARY_FAMILIES, REPAIR_BUDGETS,
+    REVIEW_ROLES, RISKS, ROOT, SAFE_CLASSES, SKILLS_ROOT,
+    _digest, _evaluate_validator, _identifier, _inside, _list,
     _load_bound_json, _mapping, _policy_validation_module, _retrospect_validator,
     _safe_path, _software_delivery_validator, _utc, fail,
 )
 from delivery_validation_evidence import _validate_evidence
-from delivery_validation_lifecycle import _validate_checkpoint, _validate_history, _validate_intent_design
+from delivery_validation_shape import _validate_checkpoint, _validate_intent_design
 from delivery_validation_measures import _validate_measures_assurance
 from delivery_validation_reviews import _validate_reviews
 from delivery_validation_security import _validate_gates_observation, _validate_high_stakes, _validate_security
@@ -38,9 +41,8 @@ def validate(
     verify_hashes: bool = False,
     validate_retrospective: bool = True,
 ) -> None:
-    fail(not isinstance(run, dict), "RUN root must be an object")
+    check_shape(run, Invalid)
     _software_delivery_validator().configure_product_root(root)
-    fail(run.get("schema_version") != 1 or run.get("contract") != "delivery-run", "delivery receipt must use contract delivery-run schema_version 1")
     fail(not run.get("run_id"), "run_id is required")
     policy_validation = _policy_validation_module()
     policy_validation.validate_fabric_relationships(run, invalid_type=Invalid)
@@ -56,7 +58,7 @@ def validate(
     risk_tier = run.get("risk_tier")
     fail(risk_tier not in RISKS, "risk_tier is invalid")
     fail(run.get("chair_family") not in PRIMARY_FAMILIES, "chair_family must be a primary family (openai or anthropic)")
-    fail(run.get("status") not in set(NORMAL_STATES) | SIDE_STATES, "status is invalid")
+    fail(run.get("initial_risk_tier") not in RISKS, "initial_risk_tier is invalid")
     repairs = run.get("repair_cycles")
     fail(isinstance(repairs, bool) or not isinstance(repairs, int), f"repair_cycles must be an integer, got {type(repairs).__name__}")
     fail(repairs < 0, f"repair_cycles must be non-negative, got {repairs}")
@@ -80,13 +82,16 @@ def validate(
         allowed_source_paths=allowed_source_paths,
         profile=profile, override_artifact_ids=override_artifact_ids,
     )
-    _validate_history(run)
-    _validate_checkpoint(run, artifacts, receipt_dir=receipt_dir, workspace_root=workspace_root)
-    furthest = max(NORMAL_STATES.index(item["state"]) for item in run["state_history"] if item["state"] in NORMAL_STATES)
-    approved_reached = furthest >= NORMAL_STATES.index("approved")
-    reviewing_reached = furthest >= NORMAL_STATES.index("reviewing")
-    acceptance_reached = furthest >= NORMAL_STATES.index("awaiting_acceptance")
-    required_kinds = ({"deterministic"} if reviewing_reached else set()) | ({"judgement"} if acceptance_reached else set())
+    # Flat gates replace the transition graph: the receipt records which
+    # approvals exist, and each gate demands the evidence that gate needs.
+    approved_reached = intent_approved(run)
+    acceptance_reached = acceptance_approved(run)
+    closed = run_closed(run)
+    _validate_checkpoint(
+        run, artifacts, receipt_dir=receipt_dir, workspace_root=workspace_root,
+        closed=closed,
+    )
+    required_kinds = {"deterministic", "judgement"} if acceptance_reached else set()
     evidence = _validate_evidence(
         run, profile, artifacts, required_kinds, allowed_source_paths,
         artifact_root=workspace_root or receipt_dir, verify_hashes=verify_hashes,
@@ -110,19 +115,6 @@ def validate(
         fail(not correction.get("summary"), f"human correction {index} requires a summary")
         linked = evidence.get(correction.get("evidence_id"))
         fail(not linked or linked.get("kind") != "human" or linked.get("status") != "pass" or linked.get("gate") != "human-correction", f"human correction {index} must link matching passing human evidence")
-    allowed_history_evidence = set(evidence)
-    for index, item in enumerate(run["state_history"]):
-        unknown = set(item["evidence_ids"]) - allowed_history_evidence
-        fail(bool(unknown), f"state_history[{index}] references unknown evidence ids")
-    if reviewing_reached:
-        profile_evidence = policy_validation.profile_evidence_requirements(profile, artifacts)
-        deterministic_ids = {
-            item["id"] for item in evidence.values()
-            if item.get("kind") == "deterministic" and item.get("status") == "pass"
-            and item.get("gate") in profile_evidence["deterministic"]
-        }
-        first_review = next(item for item in run["state_history"] if item["state"] == "reviewing")
-        fail(not deterministic_ids <= set(first_review["evidence_ids"]), "reviewing transition lacks deterministic gate evidence")
     _validate_reviews(
         run, evidence, required=acceptance_reached, artifacts=artifacts,
         artifact_root=workspace_root or receipt_dir, verify_hashes=verify_hashes,
@@ -132,15 +124,15 @@ def validate(
     )
     if acceptance_reached:
         profile_evidence = policy_validation.profile_evidence_requirements(profile, artifacts)
-        final_transition = next(item for item in run["state_history"] if item["state"] == "awaiting_acceptance")
-        profile_ids = {
-            item["id"] for item in evidence.values()
-            if item.get("status") == "pass" and item.get("gate") in {
-                *profile_evidence["deterministic"], *profile_evidence["judgement"]
+        for kind in ("deterministic", "judgement"):
+            covered = {
+                item.get("gate") for item in evidence.values()
+                if item.get("kind") == kind and item.get("status") == "pass"
             }
-        }
+            missing = sorted(set(profile_evidence[kind]) - covered)
+            fail(bool(missing), f"human acceptance lacks passing {kind} evidence for {missing}")
         review_ids = {item.get("evidence_id") for item in run["reviews"] if item.get("status") == "pass" and item.get("role") in REVIEW_ROLES}
-        fail(not (profile_ids | review_ids) <= set(final_transition["evidence_ids"]), "awaiting_acceptance transition lacks profile or review evidence")
+        fail(not review_ids <= set(evidence), "a passing review must cite declared evidence")
     _validate_security(run, registry, profile, artifacts, evidence, required=acceptance_reached, product_root=root)
     _validate_measures_assurance(
         run, profile, evidence, artifacts, required=acceptance_reached,
@@ -155,7 +147,7 @@ def validate(
         for field in ("release_id", "evidence_window", "containment", "diagnosis", "regression_case"):
             fail(not incident.get(field), f"incident.{field} is required")
     retrospective = run.get("retrospective")
-    if validate_retrospective and run.get("status") == "closed" and (
+    if validate_retrospective and closed and (
         run.get("risk_tier") in {"crucial", "terminal"}
         or incident is not None
         or run.get("escaped_defect") is True

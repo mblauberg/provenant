@@ -6,6 +6,7 @@ import hashlib
 from pathlib import Path
 from typing import Any
 
+from delivery_run_shape import recorded_timestamps
 from delivery_validation_common import (
     EVALUATION_BINDING_FIELDS, _digest, _evaluate_validator, _list,
     _load_bound_json, _mapping, _utc, fail, Invalid,
@@ -53,9 +54,9 @@ def _validate_measures_assurance(
         fail(not evaluations, "stochastic assurance requires evaluations")
     seen_evaluation_ids: set[str] = set()
     seen_artifact_ids: set[str] = set()
-    history_times = [
-        _utc(item.get("at"), f"state_history[{index}].at")
-        for index, item in enumerate(run["state_history"])
+    recorded_times = [
+        _utc(value, "recorded timestamp")
+        for value in recorded_timestamps(run)
     ]
     complete_count = 0
     for index, raw in enumerate(evaluations):
@@ -70,7 +71,7 @@ def _validate_measures_assurance(
             f"evaluation {index}.status must be planned, complete, failed or incomplete",
         )
         anchored_at = _utc(item.get("anchored_at"), f"evaluation {index}.anchored_at")
-        fail(anchored_at > max(history_times), f"evaluation {index}.anchored_at is after the current checkpoint")
+        fail(bool(recorded_times) and anchored_at > max(recorded_times), f"evaluation {index}.anchored_at is after the newest recorded evidence")
         evaluation_id = item.get("evaluation_id")
         fail(not isinstance(evaluation_id, str) or not evaluation_id, f"evaluation {index}.evaluation_id is required")
         fail(evaluation_id in seen_evaluation_ids, f"evaluation {index}.evaluation_id is duplicate")
@@ -162,8 +163,8 @@ def _validate_measures_assurance(
             receipt.get("updated_at"), f"evaluation {index}.updated_at",
         )
         fail(
-            receipt_updated_at > max(history_times),
-            f"evaluation {index} receipt completes after the current delivery checkpoint",
+            bool(recorded_times) and receipt_updated_at > max(recorded_times),
+            f"evaluation {index} receipt completes after the newest recorded evidence",
         )
         plan = _mapping(receipt.get("plan"), f"evaluation {index}.plan")
         frozen_at = _utc(plan.get("frozen_at"), f"evaluation {index}.plan.frozen_at")
