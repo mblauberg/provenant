@@ -27,10 +27,17 @@ from typing import Any
 SCRIPTS_DIR = str(Path(__file__).resolve().parent)
 if SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, SCRIPTS_DIR)
+# The shared library sits two levels up. This module establishes it itself
+# rather than inheriting a sibling's repair, so the import resolves the same
+# way however the producer is reached (#755).
+SKILLS_ROOT = str(Path(__file__).resolve().parents[2])
+if SKILLS_ROOT not in sys.path:
+    sys.path.insert(0, SKILLS_ROOT)
 import delivery_receipt_commands as commands
-import delivery_receipt_paths as paths
 import delivery_receipt_process as process_runner
 import delivery_run_shape as shape
+
+import _shared.workspace_paths as paths
 
 # `skills/_shared/roots.py` is the single resolver for the product root (#754).
 # The fallback loads that one file when this script is run directly by path and
