@@ -208,6 +208,11 @@ def test_live_accept_fails_closed_when_session_markers_are_ambiguous(
     assert {page: page.read_bytes() for page in pages} == before
 
 
+# Whole-second mtime, so a later utimes call can restore it to the exact
+# nanosecond and mtime cannot mask which check rejects a forged change.
+_FORGED_STAMP = 1700000000
+
+
 def _run_contained_source_probe(project: Path, body: str) -> subprocess.CompletedProcess[str]:
     module_url = (SCRIPTS / "contained-source.mjs").as_uri()
     script = (
@@ -335,6 +340,73 @@ def test_contained_source_rejects_same_inode_content_change_after_snapshot(tmp_p
     assert json.loads(result.stdout)["code"] == "source_path_changed"
     assert source.stat().st_ino == inode
     assert source.read_text() == "other"
+
+
+def test_contained_source_rejects_content_change_that_restores_size_and_mtime(
+    tmp_path: Path,
+) -> None:
+    """An attacker who forges size and mtime is still caught by the digest.
+
+    The write path cannot compare ctime across its own read-write open, because
+    that open advances ctime on Darwin. This pins the case where every other
+    stat field is forged back to the snapshot, so only the content comparison
+    remains to reject the change.
+    """
+    source = tmp_path / "page.html"
+    source.write_text("first")
+    # A whole-second stamp is the one mtime a later utimes call can reproduce
+    # exactly, so mtime cannot be what rejects the change below.
+    os.utime(source, (_FORGED_STAMP, _FORGED_STAMP))
+    inode = source.stat().st_ino
+    result = _run_contained_source_probe(
+        tmp_path,
+        "const fs=(await import('node:fs')).default;"
+        "const root=process.argv[1];"
+        f"const stamp={_FORGED_STAMP};"
+        "const snapshot=readContainedSource(root,'page.html',{relativeOnly:true});"
+        "fs.writeFileSync(snapshot.path,'other');"
+        "fs.utimesSync(snapshot.path,stamp,stamp);"
+        "try{replaceContainedSources([{snapshot,content:'replacement'}]);}"
+        "catch(error){process.stdout.write(JSON.stringify({code:error.code}));process.exit(7)}",
+    )
+
+    assert result.returncode == 7
+    assert json.loads(result.stdout)["code"] == "source_path_changed"
+    assert source.stat().st_ino == inode
+    assert source.read_text() == "other"
+
+
+def test_contained_source_rejects_identical_bytes_swapped_onto_a_new_inode(
+    tmp_path: Path,
+) -> None:
+    """A rename-over swap is rejected even when bytes, size and mtime all match.
+
+    Only the inode differs, so this pins `dev`/`ino` as the field that carries
+    swap detection once ctime leaves the write-path comparison.
+    """
+    source = tmp_path / "page.html"
+    source.write_text("original")
+    os.utime(source, (_FORGED_STAMP, _FORGED_STAMP))
+    inode = source.stat().st_ino
+    result = _run_contained_source_probe(
+        tmp_path,
+        "const fs=(await import('node:fs')).default;"
+        "const path=(await import('node:path')).default;"
+        "const root=process.argv[1];"
+        f"const stamp={_FORGED_STAMP};"
+        "const snapshot=readContainedSource(root,'page.html',{relativeOnly:true});"
+        "const decoy=path.join(root,'decoy.html');"
+        "fs.writeFileSync(decoy,'original');"
+        "fs.utimesSync(decoy,stamp,stamp);"
+        "fs.renameSync(decoy,snapshot.path);"
+        "try{replaceContainedSources([{snapshot,content:'replacement'}]);}"
+        "catch(error){process.stdout.write(JSON.stringify({code:error.code}));process.exit(7)}",
+    )
+
+    assert result.returncode == 7
+    assert json.loads(result.stdout)["code"] == "source_path_changed"
+    assert source.stat().st_ino != inode
+    assert source.read_text() == "original"
 
 
 def test_contained_source_parent_swap_after_open_never_redirects_write(tmp_path: Path) -> None:

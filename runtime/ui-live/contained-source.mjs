@@ -231,11 +231,19 @@ function encodeReplacement(content) {
 }
 
 
+// The write phase reaches this check through its own `O_RDWR | O_NOFOLLOW`
+// open, and on Darwin that open advances the inode's ctime by itself. Comparing
+// ctime here would therefore report the runtime's own open as a foreign
+// modification. Identity is still pinned by dev, ino, mode, nlink, uid and gid
+// through `sameObjectIdentity`, by size and mtime here, and by the caller's
+// byte-for-byte digest comparison against the snapshot, so a swapped, replaced,
+// truncated or relinked file is still rejected on every platform. ctime remains
+// part of `sameStableMetadata`, which only ever compares two stats taken across
+// a single already-open descriptor.
 function snapshotStillMatches(metadata, snapshot) {
   return sameObjectIdentity(metadata, snapshot)
     && metadata.size === snapshot.size
-    && metadata.mtimeNs === snapshot.mtimeNs
-    && metadata.ctimeNs === snapshot.ctimeNs;
+    && metadata.mtimeNs === snapshot.mtimeNs;
 }
 
 
