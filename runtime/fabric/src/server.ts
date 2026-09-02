@@ -10,6 +10,7 @@ import {
   dispatchConfiguredBatch,
   dispatchConfiguredProvider,
   MAX_EXECUTION_WAIT_SECONDS,
+  terminateActiveExecutionGroups,
 } from "./execution.js";
 import { isSQLiteContention, Store, type Message } from "./store.js";
 
@@ -67,11 +68,38 @@ const server = new McpServer(
       "in the returned run paths.",
   },
 );
-server.server.onclose = () => {
-  cancelActiveExecutions();
+/**
+ * Nothing this host started may outlive it. The transport closing is the
+ * ordinary path, so cancellation is awaited before the store is released:
+ * closing first let the process exit while the cancel was still in flight.
+ */
+server.server.onclose = async () => {
+  await cancelActiveExecutions();
   store?.close();
   store = undefined;
 };
+
+/**
+ * An external signal never reaches `onclose`, so the same teardown is bound to
+ * the signals a supervisor actually sends. The group signal is delivered
+ * synchronously first, because the process may not survive long enough to
+ * finish the awaited path. SIGKILL cannot be caught at all: a run orphaned that
+ * way is reaped by the next dispatch in the same workspace.
+ */
+let shuttingDown = false;
+for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"] as const) {
+  process.on(signal, () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    terminateActiveExecutionGroups();
+    void cancelActiveExecutions().finally(() => {
+      store?.close();
+      store = undefined;
+      process.exit(signal === "SIGINT" ? 130 : 143);
+    });
+  });
+}
+process.on("exit", () => { terminateActiveExecutionGroups(); });
 
 /** Errors reach the caller intact. Nothing is swallowed and relabelled. */
 function reply(payload: unknown): { content: Array<{ type: "text"; text: string }> } {

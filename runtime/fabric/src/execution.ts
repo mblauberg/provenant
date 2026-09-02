@@ -18,6 +18,18 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "nod
 import { promisify } from "node:util";
 
 import { withoutGitRedirects, type Identity } from "./identity.js";
+import {
+  processStartedAt,
+  pruneDispatchRuns,
+  reapOrphanedRuns,
+  readProviderRecord,
+  removeOwnerRecord,
+  signalRunGroup,
+  terminateRecordedRun,
+  writeOwnerRecord,
+  type OwnerRecord,
+  type RecordedRun,
+} from "./run-registry.js";
 
 const execFileAsync = promisify(execFile);
 export const MAX_EXECUTION_WAIT_SECONDS = 55;
@@ -94,6 +106,7 @@ interface StartedOwner {
   runDir: string;
   stdoutPath: string;
   stderrPath: string;
+  record?: OwnerRecord;
 }
 
 interface CancelSpec {
@@ -114,9 +127,27 @@ interface NormalisedRoute {
 
 const activeOwners = new Set<StartedOwner>();
 
-export function cancelActiveExecutions(): void {
+/**
+ * Cancel everything this host started, and resolve only once each owner has
+ * been signalled and given its bounded chance to stop. Callers that tear the
+ * process down must await this, or they race their own cleanup.
+ */
+export async function cancelActiveExecutions(): Promise<void> {
+  await Promise.allSettled([...activeOwners].map(async (started) => {
+    await requestOwnerCancellation(started);
+  }));
+}
+
+/**
+ * The last resort, for a signal handler or an exit hook that cannot await:
+ * deliver SIGTERM to every owner process group synchronously. Signal delivery
+ * is immediate, so this survives the process exiting straight afterwards.
+ */
+export function terminateActiveExecutionGroups(): void {
   for (const started of activeOwners) {
-    void requestOwnerCancellation(started);
+    const record = started.record;
+    if (record === undefined) continue;
+    signalRunGroup(record.owner_pid, record.owner_pgid, record.owner_started_at, "SIGTERM");
   }
 }
 
@@ -199,8 +230,26 @@ function createRunDirectory(identity: Identity): string {
   return mkdtempSync(join(runRoot, "mcp-"));
 }
 
+/**
+ * The dispatch path is the only scheduler this needs. Before a new run is
+ * staged, orphans from a dead host are signalled and runs past their retention
+ * are removed with the owner logs written beside them. Reaping runs first, so
+ * a run it has just ended can age out on the same pass. Neither step is ever
+ * allowed to fail a dispatch.
+ */
+function maintainRunRoot(identity: Identity, env: NodeJS.ProcessEnv): void {
+  const workspace = canonical(identity.cwd);
+  try {
+    reapOrphanedRuns(workspace);
+  } catch { /* Reaping is best effort; the run it protects still starts. */ }
+  try {
+    pruneDispatchRuns(workspace, env);
+  } catch { /* Pruning is best effort; the run it tidies still starts. */ }
+}
+
 async function initialiseRun(identity: Identity, env: NodeJS.ProcessEnv, root: string): Promise<string> {
   const owner = executableOwner(root, "skills/orchestrate/scripts/run_dir_init.sh");
+  maintainRunRoot(identity, env);
   const runDir = createRunDirectory(identity);
   try {
     await execFileAsync(owner, [runDir], {
@@ -254,6 +303,11 @@ function validatePrompt(prompt: string | undefined, promptFile: string | undefin
   }
 }
 
+interface OwnerIdentification {
+  kind: "dispatch" | "batch";
+  identifier: string;
+}
+
 function startOwner(
   owner: string,
   args: string[],
@@ -261,9 +315,17 @@ function startOwner(
   env: NodeJS.ProcessEnv,
   runDir: string,
   cancelSpec: CancelSpec,
+  identification: OwnerIdentification,
   cleanupPaths: string[] = [],
 ): StartedOwner {
-  const ownerEnv = withoutGitRedirects(env);
+  // A token the owner echoes into its provider record, so a stale file left in
+  // a reused run directory can never be mistaken for this run's provider.
+  const runToken = randomUUID();
+  const ownerEnv = {
+    ...withoutGitRedirects(env),
+    PROVENANT_RUN_TOKEN: runToken,
+    PROVENANT_RUN_DIR: runDir,
+  };
   const logPrefix = join(dirname(runDir), basename(runDir));
   const stdoutPath = `${logPrefix}-owner.stdout.jsonl`;
   const stderrPath = `${logPrefix}-owner.stderr.log`;
@@ -271,10 +333,14 @@ function startOwner(
   const stderr = openSync(stderrPath, "wx", 0o600);
   let child: ChildProcess;
   try {
+    // Detached, so the owner leads its own process group: that group is what
+    // cancellation signals, and it is what makes the recorded pid actionable
+    // from a process that never spawned it.
     child = spawn(owner, args, {
       cwd: identity.cwd,
       env: ownerEnv,
       stdio: ["ignore", stdout, stderr],
+      detached: true,
     });
   } finally {
     closeSync(stdout);
@@ -286,6 +352,7 @@ function startOwner(
     child.once("error", (error) => { spawnError = error.message; });
     child.once("close", (exitCode, signal) => {
       activeOwners.delete(started);
+      removeOwnerRecord(runDir);
       for (const path of cleanupPaths) {
         try { unlinkSync(path); } catch { /* Exact staging input may already be absent. */ }
       }
@@ -300,6 +367,33 @@ function startOwner(
     stdoutPath,
     stderrPath,
   };
+  const pid = child.pid;
+  if (pid !== undefined) {
+    const record: OwnerRecord = {
+      schema_version: 1,
+      kind: identification.kind,
+      run_dir: runDir,
+      workspace: identity.cwd,
+      run_token: runToken,
+      owner_pid: pid,
+      // A detached child leads the group it was placed in, so the leader is
+      // the child itself.
+      owner_pgid: pid,
+      owner_started_at: processStartedAt(pid),
+      host_pid: process.pid,
+      host_started_at: processStartedAt(process.pid),
+      started_at: new Date().toISOString(),
+      owner_stdout: stdoutPath,
+      owner_stderr: stderrPath,
+      ...(identification.kind === "dispatch"
+        ? { task_id: identification.identifier }
+        : { batch_id: identification.identifier }),
+    };
+    started.record = record;
+    try {
+      writeOwnerRecord(record);
+    } catch { /* An unwritable record costs reaping, never the run. */ }
+  }
   activeOwners.add(started);
   return started;
 }
@@ -311,6 +405,19 @@ function cancellationTargetReady(path: string): boolean {
   } catch {
     return false;
   }
+}
+
+/** This host's live view of a run it started, including the provider it recorded. */
+function recordedRun(started: StartedOwner): RecordedRun | undefined {
+  const record = started.record;
+  if (record === undefined) return undefined;
+  return {
+    ...record,
+    run_id: basename(record.run_dir),
+    running: true,
+    orphaned: false,
+    provider: readProviderRecord(record.run_dir, record.run_token),
+  };
 }
 
 async function requestOwnerCancellation(started: StartedOwner): Promise<void> {
@@ -334,7 +441,15 @@ async function requestOwnerCancellation(started: StartedOwner): Promise<void> {
         // The owner still receives a bounded graceful signal below.
       }
     }
-    if (started.child.exitCode === null && started.child.signalCode === null) started.child.kill("SIGTERM");
+    if (started.child.exitCode !== null || started.child.signalCode !== null) return;
+    // The owner leads a process group and may hold a provider in a session of
+    // its own. Signalling the pid alone would leave both behind.
+    const run = recordedRun(started);
+    if (run === undefined) {
+      started.child.kill("SIGTERM");
+      return;
+    }
+    await terminateRecordedRun(run);
   })();
   await started.cancellation;
 }
@@ -656,7 +771,7 @@ export async function dispatchConfiguredProvider(
     targetDirectory: join(runDir, "dispatch", "tasks", taskId, FIRST_ATTEMPT_ID),
     cwd: identity.cwd,
     env,
-  }, input.prompt === undefined ? [] : [promptPath]);
+  }, { kind: "dispatch", identifier: taskId }, input.prompt === undefined ? [] : [promptPath]);
   const completion = await observeOwner(started, input.wait_seconds, signal);
   return completion === undefined ? running(started, "dispatch", identity, taskId) : compactDispatch(started, completion);
 }
@@ -704,7 +819,7 @@ export async function dispatchConfiguredBatch(
     targetDirectory: join(runDir, "dispatch", "batches", FIRST_BATCH_ID),
     cwd: identity.cwd,
     env,
-  }, [manifestPath]);
+  }, { kind: "batch", identifier: FIRST_BATCH_ID }, [manifestPath]);
   const completion = await observeOwner(started, input.wait_seconds, signal);
   return completion === undefined ? running(started, "batch", identity, FIRST_BATCH_ID) : compactBatch(started, completion);
 }
