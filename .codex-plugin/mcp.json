@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "fabric": {
+      "command": "./runtime/fabric/bin/fabric-mcp",
+      "args": [],
+      "cwd": ".",
+      "env_vars": ["AGENT_FABRIC_STATE_DIRECTORY", "AGENT_FABRIC_INSTANCE_ROOT"],
+      "env": {
+        "AGENT_FABRIC_SEAT": "codex",
+        "AGENT_FABRIC_CLIENT_LABEL": "codex"
+      }
+    }
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "$schema": "https://code.claude.com/schemas/plugin.json",
+  "name": "provenant",
+  "displayName": "Provenant",
+  "version": "0.1.0",
+  "description": "Provenant harness: lifecycle skills, cross-family reviewer and implementer agents, portable workflows, and the Fabric MCP server.",
+  "author": {
+    "name": "Michael Blauberg"
+  },
+  "homepage": "https://github.com/mblauberg/provenant",
+  "repository": "https://github.com/mblauberg/provenant",
+  "license": "Apache-2.0",
+  "keywords": [
+    "orchestration",
+    "skills",
+    "subagents",
+    "review",
+    "fabric"
+  ],
+  "agents": [
+    "./agents/agy-reviewer.md",
+    "./agents/agy-stylist.md",
+    "./agents/codex-analyst.md",
+    "./agents/codex-implementer.md"
+  ],
+  "workflows": "./workflows/",
+  "mcpServers": "./.mcp.json"
+}

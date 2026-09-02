@@ -1,0 +1,25 @@
+{
+  "name": "provenant",
+  "version": "0.1.0",
+  "description": "Provenant harness: lifecycle skills and the Fabric MCP server. Codex has no subagent or workflow surface, so agents/ and workflows/ are Claude-only.",
+  "author": {
+    "name": "Michael Blauberg"
+  },
+  "homepage": "https://github.com/mblauberg/provenant",
+  "repository": "https://github.com/mblauberg/provenant",
+  "license": "Apache-2.0",
+  "keywords": [
+    "orchestration",
+    "skills",
+    "review",
+    "fabric"
+  ],
+  "skills": "./skills/",
+  "mcpServers": "./.codex-plugin/mcp.json",
+  "interface": {
+    "displayName": "Provenant",
+    "shortDescription": "Lifecycle skills and the Fabric agent mailbox",
+    "developerName": "Michael Blauberg",
+    "category": "Developer Tools"
+  }
+}

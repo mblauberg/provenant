@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "fabric": {
+      "type": "stdio",
+      "command": "${CLAUDE_PLUGIN_ROOT}/runtime/fabric/bin/fabric-mcp",
+      "args": [],
+      "env": {
+        "AGENT_FABRIC_PRODUCT_ROOT": "${CLAUDE_PLUGIN_ROOT}",
+        "AGENT_FABRIC_STATE_DIRECTORY": "${CLAUDE_PLUGIN_DATA}",
+        "AGENT_FABRIC_SEAT": "claude",
+        "AGENT_FABRIC_CLIENT_LABEL": "claude"
+      }
+    }
+  }
+}

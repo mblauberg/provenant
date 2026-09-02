@@ -1,0 +1,20 @@
+{
+  "name": "provenant",
+  "interface": {
+    "displayName": "Provenant"
+  },
+  "plugins": [
+    {
+      "name": "provenant",
+      "source": {
+        "source": "local",
+        "path": "."
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Developer Tools"
+    }
+  ]
+}

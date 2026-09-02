@@ -1,0 +1,27 @@
+{
+  "$schema": "https://code.claude.com/schemas/marketplace.json",
+  "name": "provenant",
+  "owner": {
+    "name": "Michael Blauberg",
+    "url": "https://github.com/mblauberg"
+  },
+  "description": "Private single-plugin marketplace for the Provenant harness.",
+  "version": "0.1.0",
+  "plugins": [
+    {
+      "name": "provenant",
+      "displayName": "Provenant",
+      "description": "Provenant harness: lifecycle skills, cross-family agents, workflows and the Fabric MCP server.",
+      "version": "0.1.0",
+      "source": {
+        "source": "github",
+        "repo": "mblauberg/provenant",
+        "ref": "main"
+      },
+      "license": "Apache-2.0",
+      "category": "productivity",
+      "strict": true,
+      "defaultEnabled": true
+    }
+  ]
+}
