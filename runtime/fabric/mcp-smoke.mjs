@@ -702,11 +702,25 @@ try {
       FABRIC_SMOKE_PROVIDER_MARKER: providerMarker,
     },
   });
+  // An adapter with no executing arm is an input error at the schema, so it
+  // never reaches the dispatch owner or pays for a run directory.
+  const unsupportedDispatch = await realExecutor.callTool({
+    name: "fabric_dispatch",
+    arguments: {
+      prompt: "exercise the schema rejection",
+      adapter: "unsupported-fixture",
+      wait_seconds: 10,
+    },
+  });
+  assert.equal(unsupportedDispatch.isError, true, JSON.stringify(unsupportedDispatch));
+  assert.match(unsupportedDispatch.content[0].text, /Invalid option.*adapter/);
+  // kiro is declared and implemented but has no binary on this PATH and is
+  // refused by adapter policy, so it exercises the real owner and fails fast.
   const realDispatch = payload(await realExecutor.callTool({
     name: "fabric_dispatch",
     arguments: {
       prompt: "exercise the real dispatch owner",
-      adapter: "unsupported-fixture",
+      adapter: "kiro",
       wait_seconds: 10,
     },
   }));
@@ -721,8 +735,8 @@ try {
       concurrency: 2,
       wait_seconds: 10,
       tasks: [
-        { id: "real-one", prompt: "first", adapter: "unsupported-fixture" },
-        { id: "real-two", prompt: "second", adapter: "unsupported-fixture" },
+        { id: "real-one", prompt: "first", adapter: "kiro" },
+        { id: "real-two", prompt: "second", adapter: "kiro" },
       ],
     },
   }));
