@@ -116,7 +116,7 @@ The current pre-release tree includes:
 - Raised the OpenAI worker route from `medium` to `high` effort via
   `openai.role_effort_defaults.worker.workhorse`, completing the Luna reorder.
   Moving `gpt-5.6-luna` to the front of `aliases.workhorse` on its own bought
-  Luna at `medium`, which `docs/model-preferences.md` had already identified as
+  Luna at `medium`, which `docs/model-dossier.md` had already identified as
   a downgrade rather than the intended trade, and was the stated reason the
   array had been left alone. The raise is scoped to the OpenAI family rather
   than applied to the `legwork` task class, so Anthropic and Google workhorse
